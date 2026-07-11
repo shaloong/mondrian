@@ -24,6 +24,7 @@ pub mod preferences_dialog;
 pub mod preferences_store;
 pub mod preview;
 pub(crate) mod preview_access_mode;
+pub(crate) mod preview_frame_store;
 pub(crate) mod preview_gpu_output_blocker;
 pub(crate) mod preview_scale;
 pub(crate) mod preview_scheduler_policy;

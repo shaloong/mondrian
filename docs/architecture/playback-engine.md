@@ -387,6 +387,27 @@ accurate seek latency, accepted delivery counts, superseded demand/seek totals,
 delivery-clock drift, and underrun recovery. Event/sample eviction is itself
 reported; a reference gate cannot silently pass after evidence overflow.
 
+`PreviewCpuFrameStore` is the app Preview Adapter's deep CPU storage Module.
+Its Interface owns decoded/media frames, final Viewer rasters, remembered
+failures, the explicitly pinned current/stale Viewer raster, and an oversize
+current-media pin. Media entries
+have both a 96-entry cap and a 384 MiB pixel-payload budget; Viewer raster
+entries have a 48-entry cap and a 192 MiB payload budget; failure memory has a
+192-key cap. A media reservation includes current linear-float pixels, encoded
+source pixels, and the possible lazy working-frame allocation, so a deferred
+color transform cannot silently grow beyond its admitted reservation. One
+payload larger than its budget remains usable for the current delivery through
+the current-media pin but is not admitted to the LRU; an oversize prefetch is
+discarded rather than pinned. Both cases produce structured rejection evidence.
+
+The non-evictable current/stale raster and oversize current-media frame are
+reported separately from their evictable caches. Project/sequence cancellation
+clears media, Viewer, failure, and pinned state through one Interface. External
+real-media gates fail when either cache exceeds its byte budget, either pin
+exceeds its corresponding budget, or an oversize payload was rejected.
+Renderer/window-owned GPU texture
+tables remain a separate Module and are not falsely counted as CPU storage.
+
 ## Required invariants
 
 1. Exactly one Clock Master is authoritative in Playing/Recovering.

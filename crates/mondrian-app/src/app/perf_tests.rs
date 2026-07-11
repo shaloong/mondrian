@@ -127,6 +127,8 @@ struct PreviewExternalPlaybackGateReport {
     delivery_clock_drift_observed_us: u64,
     audio_underrun_recoveries: u64,
     dropped_playback_evidence_events: u64,
+    cpu_frame_store_within_budget: bool,
+    cpu_frame_store_oversize_rejections: u64,
     passed: bool,
     failures: Vec<&'static str>,
 }
@@ -1323,6 +1325,7 @@ fn preview_media_external_continuous_playback_smoke() -> anyhow::Result<()> {
         &report.readiness,
         report.frames,
         &report.preview_decode_report,
+        &report.preview_diagnostics,
         &report.playback_evidence,
         playback_p95_limit_us,
         playback_queue_wait_p95_limit_us,
@@ -1376,6 +1379,7 @@ fn evaluate_external_playback_gates(
     readiness: &PreviewReadinessCounts,
     frames: usize,
     decode_report: &AppUiPreviewDecodePerformanceReport,
+    preview_diagnostics: &AppUiPreviewDiagnostics,
     playback_evidence: &PlaybackEvidenceReport,
     playback_decode_p95_limit_us: u64,
     playback_queue_wait_p95_limit_us: u64,
@@ -1412,6 +1416,23 @@ fn evaluate_external_playback_gates(
     if playback_evidence.dropped_event_count > 0 {
         failures.push("playback_evidence_overflow");
     }
+    let cpu_frame_store_within_budget = preview_diagnostics.media_cache_reserved_bytes
+        <= preview_diagnostics.media_cache_byte_budget
+        && preview_diagnostics.pinned_media_frame_bytes
+            <= preview_diagnostics.media_cache_byte_budget
+        && preview_diagnostics.viewer_frame_cache_reserved_bytes
+            <= preview_diagnostics.viewer_frame_cache_byte_budget
+        && preview_diagnostics.pinned_viewer_frame_bytes
+            <= preview_diagnostics.viewer_frame_cache_byte_budget;
+    if !cpu_frame_store_within_budget {
+        failures.push("cpu_frame_store_budget");
+    }
+    let cpu_frame_store_oversize_rejections = preview_diagnostics
+        .media_cache_oversize_rejections
+        .saturating_add(preview_diagnostics.viewer_frame_cache_oversize_rejections);
+    if cpu_frame_store_oversize_rejections > 0 {
+        failures.push("cpu_frame_store_oversize_rejection");
+    }
 
     PreviewExternalPlaybackGateReport {
         enabled: true,
@@ -1425,6 +1446,8 @@ fn evaluate_external_playback_gates(
         delivery_clock_drift_observed_us,
         audio_underrun_recoveries: playback_evidence.audio_underrun_recoveries,
         dropped_playback_evidence_events: playback_evidence.dropped_event_count,
+        cpu_frame_store_within_budget,
+        cpu_frame_store_oversize_rejections,
         passed: failures.is_empty(),
         failures,
     }
@@ -2859,8 +2882,17 @@ fn external_playback_gates_fail_on_decode_queue_or_visibility_regression() {
     let report = preview_decode_report_with_playback_p95(80_000, 12_000);
 
     let evidence = PlaybackEvidenceCollector::default().report();
-    let gates =
-        evaluate_external_playback_gates(&readiness, 20, &report, &evidence, 40_000, 10_000, 95);
+    let diagnostics = AppUiPreviewDiagnostics::default();
+    let gates = evaluate_external_playback_gates(
+        &readiness,
+        20,
+        &report,
+        &diagnostics,
+        &evidence,
+        40_000,
+        10_000,
+        95,
+    );
 
     assert!(!gates.passed);
     assert_eq!(gates.visible_frames, 14);
@@ -2881,8 +2913,17 @@ fn external_playback_gates_pass_when_real_media_thresholds_hold() {
     let report = preview_decode_report_with_playback_p95(25_000, 4_000);
 
     let evidence = PlaybackEvidenceCollector::default().report();
-    let gates =
-        evaluate_external_playback_gates(&readiness, 20, &report, &evidence, 40_000, 10_000, 95);
+    let diagnostics = AppUiPreviewDiagnostics::default();
+    let gates = evaluate_external_playback_gates(
+        &readiness,
+        20,
+        &report,
+        &diagnostics,
+        &evidence,
+        40_000,
+        10_000,
+        95,
+    );
 
     assert!(gates.passed);
     assert!(gates.failures.is_empty());
@@ -2897,8 +2938,17 @@ fn external_playback_gates_fail_on_clock_audio_or_evidence_integrity() {
     evidence.audio_underrun_recoveries = 1;
     evidence.dropped_event_count = 1;
 
-    let gates =
-        evaluate_external_playback_gates(&readiness, 20, &decode, &evidence, 40_000, 10_000, 95);
+    let diagnostics = AppUiPreviewDiagnostics::default();
+    let gates = evaluate_external_playback_gates(
+        &readiness,
+        20,
+        &decode,
+        &diagnostics,
+        &evidence,
+        40_000,
+        10_000,
+        95,
+    );
 
     assert_eq!(
         gates.failures,
@@ -2908,6 +2958,45 @@ fn external_playback_gates_fail_on_clock_audio_or_evidence_integrity() {
             "playback_evidence_overflow",
         ]
     );
+    assert!(!gates.passed);
+}
+
+#[test]
+fn external_playback_gates_fail_on_cpu_frame_store_budget_or_admission() {
+    let readiness = PreviewReadinessCounts { ready: 20, stale: 0, loading: 0, unavailable: 0 };
+    let decode = preview_decode_report_with_playback_p95(25_000, 4_000);
+    let evidence = PlaybackEvidenceCollector::default().report();
+    let diagnostics = AppUiPreviewDiagnostics {
+        media_cache_reserved_bytes: 101,
+        media_cache_byte_budget: 100,
+        pinned_media_frame_bytes: 120,
+        viewer_frame_cache_reserved_bytes: 80,
+        viewer_frame_cache_byte_budget: 100,
+        pinned_viewer_frame_bytes: 120,
+        media_cache_oversize_rejections: 1,
+        ..AppUiPreviewDiagnostics::default()
+    };
+
+    let gates = evaluate_external_playback_gates(
+        &readiness,
+        20,
+        &decode,
+        &diagnostics,
+        &evidence,
+        40_000,
+        10_000,
+        95,
+    );
+
+    assert_eq!(
+        gates.failures,
+        vec![
+            "cpu_frame_store_budget",
+            "cpu_frame_store_oversize_rejection"
+        ]
+    );
+    assert!(!gates.cpu_frame_store_within_budget);
+    assert_eq!(gates.cpu_frame_store_oversize_rejections, 1);
     assert!(!gates.passed);
 }
 

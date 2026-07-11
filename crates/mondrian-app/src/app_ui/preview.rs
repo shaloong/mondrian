@@ -5,7 +5,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -78,6 +78,9 @@ use crate::app_ui::preview_access_mode::{
     MediaPreviewKey, MediaPreviewRequestPriority, MediaPreviewRequestStatus, MediaPreviewScheduler,
     MediaPreviewSchedulerDiagnostics, MediaPreviewWorkerLane, MEDIA_PREVIEW_JOB_QUEUE_CAPACITY,
 };
+use crate::app_ui::preview_frame_store::PreviewCpuFrameStore;
+#[cfg(test)]
+use crate::app_ui::preview_frame_store::PreviewCpuFrameStoreConfig;
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 use crate::app_ui::preview_scheduler_policy::{
     media_preview_forward_prefetch_window_frames, media_preview_job_deadline_at,
@@ -85,9 +88,6 @@ use crate::app_ui::preview_scheduler_policy::{
     MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
 };
 
-const MEDIA_PREVIEW_CACHE_CAPACITY: usize = 96;
-const MEDIA_PREVIEW_FAILURE_CACHE_CAPACITY: usize = MEDIA_PREVIEW_CACHE_CAPACITY * 2;
-const VIEWER_PREVIEW_FRAME_CACHE_CAPACITY: usize = 48;
 const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 50_000;
 const MEDIA_PREVIEW_PLAYBACK_BUFFERING_STALL_TIMEOUT_US: u64 = 250_000;
 const MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD: u64 = 2;
@@ -125,11 +125,9 @@ pub struct AppUiPreviewService {
     results: RefCell<mpsc::Receiver<MediaPreviewResult>>,
     workers: RefCell<Vec<JoinHandle<()>>>,
     shutdown: Arc<AtomicBool>,
-    media_cache: RefCell<MediaPreviewCache>,
-    media_failures: RefCell<MediaPreviewFailureCache>,
+    frame_store: RefCell<PreviewCpuFrameStore>,
     requested_proxy_generations: RefCell<HashSet<PreviewProxyGenerationRequestKey>>,
     scrub_adaptation: RefCell<PreviewScrubAdaptationState>,
-    viewer_frame_cache: RefCell<ViewerPreviewFrameCache>,
     external_viewer_frame: RefCell<Option<ScopedExternalViewerFrame>>,
     next_gpu_preview_candidate_id: Cell<u64>,
     scheduler: MediaPreviewScheduler,
@@ -137,7 +135,6 @@ pub struct AppUiPreviewService {
     scratch: RefCell<TimelineCompositeScratch>,
     current_generation: Cell<u64>,
     current_frame_pending: Cell<bool>,
-    last_ready_frame: RefCell<Option<ScopedViewerFrame>>,
     last_color_rejection: RefCell<Option<AppUiPreviewColorRejection>>,
     display_snapshot: RefCell<Option<DisplayOutputSnapshot>>,
     last_generation_key: RefCell<Option<ViewerPreviewGenerationKey>>,
@@ -216,15 +213,9 @@ impl AppUiPreviewService {
             results: RefCell::new(result_rx),
             workers: RefCell::new(workers),
             shutdown,
-            media_cache: RefCell::new(MediaPreviewCache::new(MEDIA_PREVIEW_CACHE_CAPACITY)),
-            media_failures: RefCell::new(MediaPreviewFailureCache::new(
-                MEDIA_PREVIEW_FAILURE_CACHE_CAPACITY,
-            )),
+            frame_store: RefCell::new(PreviewCpuFrameStore::default()),
             requested_proxy_generations: RefCell::new(HashSet::new()),
             scrub_adaptation: RefCell::new(PreviewScrubAdaptationState::default()),
-            viewer_frame_cache: RefCell::new(ViewerPreviewFrameCache::new(
-                VIEWER_PREVIEW_FRAME_CACHE_CAPACITY,
-            )),
             external_viewer_frame: RefCell::new(None),
             next_gpu_preview_candidate_id: Cell::new(0),
             scheduler,
@@ -232,7 +223,6 @@ impl AppUiPreviewService {
             scratch: RefCell::new(TimelineCompositeScratch::default()),
             current_generation: Cell::new(0),
             current_frame_pending: Cell::new(false),
-            last_ready_frame: RefCell::new(None),
             last_color_rejection: RefCell::new(None),
             display_snapshot: RefCell::new(None),
             last_generation_key: RefCell::new(None),
@@ -417,6 +407,7 @@ impl AppUiPreviewService {
     /// Return a point-in-time snapshot of preview scheduling and cache health.
     pub fn diagnostics(&self) -> AppUiPreviewDiagnostics {
         let scheduler = self.scheduler.diagnostics();
+        let frame_store = self.frame_store.borrow().diagnostics();
         AppUiPreviewDiagnostics {
             render_requests: self.metrics.render_requests.get(),
             ready_frames: self.metrics.ready_frames.get(),
@@ -616,9 +607,20 @@ impl AppUiPreviewService {
             playback_schedule: self.playback_schedule_diagnostics(),
             viewer_frame_cache_hits: self.metrics.viewer_frame_cache_hits.get(),
             viewer_frame_cache_misses: self.metrics.viewer_frame_cache_misses.get(),
-            viewer_frame_cache_entries: self.viewer_frame_cache.borrow().len(),
-            media_cache_entries: self.media_cache.borrow().len(),
-            media_failure_entries: self.media_failures.borrow().len(),
+            viewer_frame_cache_entries: frame_store.viewer_entries,
+            media_cache_entries: frame_store.media_entries,
+            media_failure_entries: frame_store.failure_entries,
+            media_cache_reserved_bytes: frame_store.media_reserved_bytes,
+            media_cache_byte_budget: frame_store.media_byte_budget,
+            media_cache_evictions: frame_store.media_evictions,
+            media_cache_oversize_rejections: frame_store.media_oversize_rejections,
+            viewer_frame_cache_reserved_bytes: frame_store.viewer_reserved_bytes,
+            viewer_frame_cache_byte_budget: frame_store.viewer_byte_budget,
+            viewer_frame_cache_evictions: frame_store.viewer_evictions,
+            viewer_frame_cache_oversize_rejections: frame_store.viewer_oversize_rejections,
+            pinned_viewer_frame_bytes: frame_store.pinned_viewer_bytes,
+            pinned_media_frame_bytes: frame_store.pinned_media_bytes,
+            media_failure_evictions: frame_store.failure_evictions,
             color_input_transform_calls: self.metrics.color_input_transform_calls.get(),
             color_input_transform_pixels: self.metrics.color_input_transform_pixels.get(),
             color_output_transform_calls: self.metrics.color_output_transform_calls.get(),
@@ -730,11 +732,8 @@ impl AppUiPreviewService {
         self.last_generation_key.replace(None);
         self.current_generation.set(generation);
         self.current_frame_pending.set(false);
-        self.last_ready_frame.replace(None);
         self.external_viewer_frame.replace(None);
-        self.media_cache.borrow_mut().clear();
-        self.media_failures.borrow_mut().clear();
-        self.viewer_frame_cache.borrow_mut().clear();
+        self.frame_store.borrow_mut().clear_all();
     }
 
     /// Shut down preview workers for application exit.
@@ -910,12 +909,20 @@ impl AppUiPreviewService {
                         continue;
                     }
                     if completion.should_cache() {
-                        self.media_cache.borrow_mut().insert(result.key.clone(), frame);
-                        self.media_failures.borrow_mut().remove(&result.key);
+                        let mut frame_store = self.frame_store.borrow_mut();
+                        frame_store.insert_media_frame(
+                            result.key.clone(),
+                            frame,
+                            completion.is_current(),
+                        );
+                        frame_store.forget_failure(&result.key);
                     }
                     outcome.visible_change |= completion.is_current();
                 }
                 None => {
+                    if completion.is_current() {
+                        self.frame_store.borrow_mut().clear_pinned_media_frame();
+                    }
                     self.record_preview_decode_failure(result.access_mode, result.failure_reason);
                     if let Some(error) = result.error {
                         tracing::debug!(
@@ -928,7 +935,7 @@ impl AppUiPreviewService {
                         continue;
                     }
                     if completion.should_cache() {
-                        self.media_failures.borrow_mut().insert(result.key);
+                        self.frame_store.borrow_mut().remember_failure(result.key);
                     }
                     outcome.visible_change |= completion.is_current();
                 }
@@ -961,7 +968,7 @@ impl AppUiPreviewService {
         let Some(sequence) = state.sequence.as_ref() else {
             self.invalidate_preview_generation();
             self.scheduler.prune_obsolete();
-            self.last_ready_frame.replace(None);
+            self.frame_store.borrow_mut().clear_pinned_viewer_frame();
             bump(&self.metrics.unavailable_frames);
             return ViewerPreviewState::Unavailable;
         };
@@ -977,7 +984,7 @@ impl AppUiPreviewService {
             Err(blocker) => {
                 self.record_preview_gpu_output_blocker(&blocker);
                 self.scheduler.prune_obsolete();
-                self.last_ready_frame.replace(None);
+                self.frame_store.borrow_mut().clear_pinned_viewer_frame();
                 bump(&self.metrics.unavailable_frames);
                 return ViewerPreviewState::Unavailable;
             }
@@ -1028,12 +1035,12 @@ impl AppUiPreviewService {
                         app_duration_us(render_started_at.elapsed()),
                         render_stage_durations,
                     );
-                    self.last_ready_frame.replace(Some(ScopedViewerFrame {
+                    self.frame_store.borrow_mut().pin_viewer_frame(ScopedViewerFrame {
                         sequence_id: sequence.id,
                         width,
                         height,
                         frame: frame.clone(),
-                    }));
+                    });
                     ViewerPreviewState::Ready(ViewerFrameContent::Raster(frame))
                 } else if state.is_playing()
                     && preview_elements_require_deferred_composite(&resolved.elements)
@@ -1094,9 +1101,9 @@ impl AppUiPreviewService {
                     ) {
                         Some(frame) => {
                             if let Some(cache_key) = resolved.cache_key {
-                                self.viewer_frame_cache
+                                self.frame_store
                                     .borrow_mut()
-                                    .insert(cache_key, frame.clone());
+                                    .insert_viewer_frame(cache_key, frame.clone());
                             }
                             render_stage_durations.frame_packaging_us =
                                 app_duration_us(frame_packaging_started_at.elapsed());
@@ -1104,12 +1111,12 @@ impl AppUiPreviewService {
                                 app_duration_us(render_started_at.elapsed()),
                                 render_stage_durations,
                             );
-                            self.last_ready_frame.replace(Some(ScopedViewerFrame {
+                            self.frame_store.borrow_mut().pin_viewer_frame(ScopedViewerFrame {
                                 sequence_id: sequence.id,
                                 width,
                                 height,
                                 frame: frame.clone(),
-                            }));
+                            });
                             ViewerPreviewState::Ready(ViewerFrameContent::Raster(frame))
                         }
                         None => ViewerPreviewState::Unavailable,
@@ -1306,9 +1313,8 @@ impl AppUiPreviewService {
     }
 
     fn clear_cached_frames_for_display_change(&self) {
-        self.viewer_frame_cache.borrow_mut().clear();
+        self.frame_store.borrow_mut().clear_viewer_frames();
         self.external_viewer_frame.replace(None);
-        self.last_ready_frame.replace(None);
         self.invalidate_preview_generation();
         self.scheduler.prune_obsolete();
     }
@@ -1331,7 +1337,7 @@ impl AppUiPreviewService {
     }
 
     fn cached_viewer_frame(&self, key: &ViewerPreviewCacheKey) -> Option<ViewerFrameImage> {
-        let frame = self.viewer_frame_cache.borrow_mut().get(key);
+        let frame = self.frame_store.borrow_mut().viewer_frame(key);
         if frame.is_some() {
             bump(&self.metrics.viewer_frame_cache_hits);
         } else {
@@ -1923,10 +1929,7 @@ impl AppUiPreviewService {
         width: u32,
         height: u32,
     ) -> Option<ViewerFrameImage> {
-        let last = self.last_ready_frame.borrow();
-        let frame = last.as_ref()?;
-        (frame.sequence_id == sequence.id && frame.width == width && frame.height == height)
-            .then(|| frame.frame.clone())
+        self.frame_store.borrow().stale_viewer_frame(sequence.id, width, height)
     }
 
     fn render_nested_sequence_frame(
@@ -2535,6 +2538,28 @@ pub struct AppUiPreviewDiagnostics {
     pub media_cache_entries: usize,
     /// Current number of keys in the media preview failure LRU cache.
     pub media_failure_entries: usize,
+    /// CPU pixel bytes reserved by decoded/media cache entries.
+    pub media_cache_reserved_bytes: usize,
+    /// Maximum CPU pixel bytes allowed for decoded/media cache entries.
+    pub media_cache_byte_budget: usize,
+    /// Decoded/media cache entries evicted by count or byte pressure.
+    pub media_cache_evictions: u64,
+    /// Decoded/media payloads refused because one entry exceeded the byte budget.
+    pub media_cache_oversize_rejections: u64,
+    /// Encoded CPU pixel bytes reserved by final Viewer raster cache entries.
+    pub viewer_frame_cache_reserved_bytes: usize,
+    /// Maximum encoded CPU pixel bytes allowed for final Viewer raster cache entries.
+    pub viewer_frame_cache_byte_budget: usize,
+    /// Final Viewer raster entries evicted by count or byte pressure.
+    pub viewer_frame_cache_evictions: u64,
+    /// Final Viewer raster payloads refused because one entry exceeded the byte budget.
+    pub viewer_frame_cache_oversize_rejections: u64,
+    /// Encoded bytes retained by the non-evictable current/stale Viewer frame.
+    pub pinned_viewer_frame_bytes: usize,
+    /// CPU pixel bytes retained by an oversize current decoded/media frame.
+    pub pinned_media_frame_bytes: usize,
+    /// Remembered failure keys evicted by their bounded LRU policy.
+    pub media_failure_evictions: u64,
     /// Source/media color transforms into the timeline working space.
     pub color_input_transform_calls: u64,
     /// Pixels processed by source/media color transforms into the timeline working space.
@@ -6873,7 +6898,7 @@ impl Drop for AppUiPreviewService {
 }
 
 #[derive(Debug, Clone)]
-struct MediaPreviewFrame {
+pub(crate) struct MediaPreviewFrame {
     frame: Option<CpuColorFrame>,
     gpu_source: Option<MediaPreviewGpuSourceFrame>,
     native_source: Option<MediaPreviewNativeSourceFrame>,
@@ -6883,6 +6908,26 @@ struct MediaPreviewFrame {
 }
 
 impl MediaPreviewFrame {
+    pub(crate) fn reserved_cpu_bytes(&self) -> usize {
+        let linear_bytes = self
+            .frame
+            .as_ref()
+            .map(|frame| std::mem::size_of_val(frame.rgba_f32().data.as_slice()))
+            .unwrap_or(0);
+        let source_and_lazy_working_bytes = self
+            .gpu_source
+            .as_ref()
+            .map(|source| {
+                let working_reservation = (self.width as usize)
+                    .saturating_mul(self.height as usize)
+                    .saturating_mul(4)
+                    .saturating_mul(std::mem::size_of::<f32>());
+                source.source.rgba().len().saturating_add(working_reservation)
+            })
+            .unwrap_or(0);
+        linear_bytes.saturating_add(source_and_lazy_working_bytes)
+    }
+
     fn width(&self) -> u32 {
         self.width
     }
@@ -7033,11 +7078,11 @@ struct MediaPreviewWorkingFrameCacheEntry {
 }
 
 #[derive(Debug, Clone)]
-struct ScopedViewerFrame {
-    sequence_id: SequenceId,
-    width: u32,
-    height: u32,
-    frame: ViewerFrameImage,
+pub(crate) struct ScopedViewerFrame {
+    pub(crate) sequence_id: SequenceId,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) frame: ViewerFrameImage,
 }
 
 #[derive(Debug, Clone)]
@@ -7052,160 +7097,6 @@ pub(crate) struct ViewerPreviewCacheKey {
     width: u32,
     height: u32,
     plan_signature: u64,
-}
-
-struct ViewerPreviewFrameCache {
-    capacity: usize,
-    entries: HashMap<ViewerPreviewCacheKey, ViewerFrameImage>,
-    lru: VecDeque<ViewerPreviewCacheKey>,
-}
-
-impl ViewerPreviewFrameCache {
-    fn new(capacity: usize) -> Self {
-        Self {
-            capacity: capacity.max(1),
-            entries: HashMap::new(),
-            lru: VecDeque::new(),
-        }
-    }
-
-    fn get(&mut self, key: &ViewerPreviewCacheKey) -> Option<ViewerFrameImage> {
-        let frame = self.entries.get(key)?.clone();
-        self.touch(key);
-        Some(frame)
-    }
-
-    fn insert(&mut self, key: ViewerPreviewCacheKey, frame: ViewerFrameImage) {
-        self.entries.insert(key.clone(), frame);
-        self.touch(&key);
-        while self.entries.len() > self.capacity {
-            let Some(oldest) = self.lru.pop_front() else {
-                break;
-            };
-            if self.entries.remove(&oldest).is_some() {
-                break;
-            }
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    fn clear(&mut self) {
-        self.entries.clear();
-        self.lru.clear();
-    }
-
-    fn touch(&mut self, key: &ViewerPreviewCacheKey) {
-        self.lru.retain(|candidate| candidate != key);
-        self.lru.push_back(key.clone());
-    }
-}
-
-struct MediaPreviewCache {
-    capacity: usize,
-    entries: HashMap<MediaPreviewKey, MediaPreviewFrame>,
-    lru: VecDeque<MediaPreviewKey>,
-}
-
-struct MediaPreviewFailureCache {
-    capacity: usize,
-    entries: HashSet<MediaPreviewKey>,
-    lru: VecDeque<MediaPreviewKey>,
-}
-
-impl MediaPreviewFailureCache {
-    fn new(capacity: usize) -> Self {
-        Self {
-            capacity: capacity.max(1),
-            entries: HashSet::new(),
-            lru: VecDeque::new(),
-        }
-    }
-
-    fn contains(&mut self, key: &MediaPreviewKey) -> bool {
-        let contains = self.entries.contains(key);
-        if contains {
-            self.touch(key);
-        }
-        contains
-    }
-
-    fn insert(&mut self, key: MediaPreviewKey) {
-        self.entries.insert(key.clone());
-        self.touch(&key);
-        while self.entries.len() > self.capacity {
-            let Some(oldest) = self.lru.pop_front() else {
-                break;
-            };
-            if self.entries.remove(&oldest) {
-                break;
-            }
-        }
-    }
-
-    fn remove(&mut self, key: &MediaPreviewKey) {
-        self.entries.remove(key);
-        self.lru.retain(|candidate| candidate != key);
-    }
-
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    fn clear(&mut self) {
-        self.entries.clear();
-        self.lru.clear();
-    }
-
-    fn touch(&mut self, key: &MediaPreviewKey) {
-        self.lru.retain(|candidate| candidate != key);
-        self.lru.push_back(key.clone());
-    }
-}
-
-impl MediaPreviewCache {
-    fn new(capacity: usize) -> Self {
-        Self {
-            capacity: capacity.max(1),
-            entries: HashMap::new(),
-            lru: VecDeque::new(),
-        }
-    }
-
-    fn get(&mut self, key: &MediaPreviewKey) -> Option<MediaPreviewFrame> {
-        let frame = self.entries.get(key)?.clone();
-        self.touch(key);
-        Some(frame)
-    }
-
-    fn insert(&mut self, key: MediaPreviewKey, frame: MediaPreviewFrame) {
-        self.entries.insert(key.clone(), frame);
-        self.touch(&key);
-        while self.entries.len() > self.capacity {
-            let Some(oldest) = self.lru.pop_front() else {
-                break;
-            };
-            if self.entries.remove(&oldest).is_some() {
-                break;
-            }
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    fn clear(&mut self) {
-        self.entries.clear();
-        self.lru.clear();
-    }
-
-    fn touch(&mut self, key: &MediaPreviewKey) {
-        self.lru.retain(|candidate| candidate != key);
-        self.lru.push_back(key.clone());
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7603,7 +7494,7 @@ impl AppUiPreviewService {
     }
 
     fn cached_media_frame(&self, key: &MediaPreviewKey) -> Option<MediaPreviewFrame> {
-        let frame = self.media_cache.borrow_mut().get(key);
+        let frame = self.frame_store.borrow_mut().media_frame(key);
         if frame.is_some() {
             bump(&self.metrics.media_cache_hits);
         } else {
@@ -7613,7 +7504,7 @@ impl AppUiPreviewService {
     }
 
     fn failed_media_key(&self, key: &MediaPreviewKey) -> bool {
-        let failed = self.media_failures.borrow_mut().contains(key);
+        let failed = self.frame_store.borrow_mut().contains_failure(key);
         if failed {
             bump(&self.metrics.media_failure_hits);
         }
@@ -15805,7 +15696,7 @@ mod tests {
             1
         );
         assert!(
-            service.media_cache.borrow_mut().get(&key).is_none(),
+            service.frame_store.borrow_mut().media_frame(&key).is_none(),
             "late playback completion should not enter the media preview cache"
         );
         service.shutdown();
@@ -15889,7 +15780,7 @@ mod tests {
                 false,
             )
             .expect("media preview key");
-        service.media_failures.borrow_mut().insert(key);
+        service.frame_store.borrow_mut().remember_failure(key);
 
         let preview = service.viewer_preview_for_state(&state);
 
@@ -15926,10 +15817,11 @@ mod tests {
                 false,
             )
             .expect("media preview key");
-        service
-            .media_cache
-            .borrow_mut()
-            .insert(key, test_media_frame_with_size(80, width, height, 123));
+        service.frame_store.borrow_mut().insert_media_frame(
+            key,
+            test_media_frame_with_size(80, width, height, 123),
+            false,
+        );
 
         state.play();
         let playing_preview = service.viewer_preview_for_state(&state);
@@ -15967,6 +15859,20 @@ mod tests {
             engine: ColorEngine::MondrianSmart,
             ocio_generation: mondrian_core::ocio_config_generation(),
         }
+    }
+
+    fn test_cpu_frame_store(
+        media_entry_capacity: usize,
+        media_byte_budget: usize,
+        failure_entry_capacity: usize,
+    ) -> PreviewCpuFrameStore {
+        PreviewCpuFrameStore::new(PreviewCpuFrameStoreConfig {
+            media_entry_capacity,
+            media_byte_budget,
+            viewer_entry_capacity: 4,
+            viewer_byte_budget: 1_024,
+            failure_entry_capacity,
+        })
     }
 
     fn install_preview_result_channel_for_test(
@@ -16483,52 +16389,121 @@ mod tests {
     }
 
     #[test]
-    fn media_preview_cache_evicts_least_recently_used_frame() {
-        let mut cache = MediaPreviewCache::new(2);
+    fn cpu_frame_store_evicts_least_recently_used_media_frame() {
+        let mut store = PreviewCpuFrameStore::new(PreviewCpuFrameStoreConfig {
+            media_entry_capacity: 2,
+            media_byte_budget: 1_024,
+            viewer_entry_capacity: 2,
+            viewer_byte_budget: 1_024,
+            failure_entry_capacity: 2,
+        });
         let first = test_media_key(1);
         let second = test_media_key(2);
         let third = test_media_key(3);
 
-        cache.insert(first.clone(), test_media_frame(1));
-        cache.insert(second.clone(), test_media_frame(2));
-        assert!(cache.get(&first).is_some());
+        store.insert_media_frame(first.clone(), test_media_frame(1), false);
+        store.insert_media_frame(second.clone(), test_media_frame(2), false);
+        assert!(store.media_frame(&first).is_some());
 
-        cache.insert(third.clone(), test_media_frame(3));
+        store.insert_media_frame(third.clone(), test_media_frame(3), false);
 
-        assert_eq!(cache.len(), 2);
-        assert!(cache.get(&first).is_some());
-        assert!(cache.get(&second).is_none());
-        assert!(cache.get(&third).is_some());
+        assert_eq!(store.diagnostics().media_entries, 2);
+        assert!(store.media_frame(&first).is_some());
+        assert!(store.media_frame(&second).is_none());
+        assert!(store.media_frame(&third).is_some());
     }
 
     #[test]
-    fn media_preview_cache_updates_existing_frame_without_growing() {
-        let mut cache = MediaPreviewCache::new(2);
+    fn cpu_frame_store_updates_existing_media_frame_without_growing() {
+        let mut store = PreviewCpuFrameStore::new(PreviewCpuFrameStoreConfig {
+            media_entry_capacity: 2,
+            media_byte_budget: 1_024,
+            viewer_entry_capacity: 2,
+            viewer_byte_budget: 1_024,
+            failure_entry_capacity: 2,
+        });
         let key = test_media_key(1);
 
-        cache.insert(key.clone(), test_media_frame(1));
-        cache.insert(key.clone(), test_media_frame(9));
+        store.insert_media_frame(key.clone(), test_media_frame(1), false);
+        store.insert_media_frame(key.clone(), test_media_frame(9), false);
 
-        let frame = cache.get(&key).expect("updated frame");
-        assert_eq!(cache.len(), 1);
+        let frame = store.media_frame(&key).expect("updated frame");
+        assert_eq!(store.diagnostics().media_entries, 1);
         assert_eq!(test_media_frame_rgba8(&frame), vec![9, 0, 0, 255]);
     }
 
     #[test]
-    fn media_preview_cache_clear_removes_frames_and_failures() {
-        let mut cache = MediaPreviewCache::new(2);
-        let mut failures = MediaPreviewFailureCache::new(2);
+    fn cpu_frame_store_stays_within_budget_across_one_hundred_media_regions() {
+        let frame_bytes = test_media_frame(0).reserved_cpu_bytes();
+        let byte_budget = frame_bytes.saturating_mul(3);
+        let mut store = test_cpu_frame_store(100, byte_budget, 8);
+
+        for region in 0..100i64 {
+            assert!(store.insert_media_frame(
+                test_media_key(region),
+                test_media_frame(region as u8),
+                false,
+            ));
+            let diagnostics = store.diagnostics();
+            assert!(diagnostics.media_reserved_bytes <= diagnostics.media_byte_budget);
+        }
+
+        let diagnostics = store.diagnostics();
+        assert_eq!(diagnostics.media_entries, 3);
+        assert_eq!(diagnostics.media_evictions, 97);
+        assert_eq!(diagnostics.media_reserved_bytes, byte_budget);
+
+        store.clear_all();
+        let cleared = store.diagnostics();
+        assert_eq!(cleared.media_entries, 0);
+        assert_eq!(cleared.media_reserved_bytes, 0);
+    }
+
+    #[test]
+    fn cpu_frame_store_pins_only_an_oversize_current_media_frame() {
+        let current_key = test_media_key(200);
+        let current_frame = test_media_frame(7);
+        let frame_bytes = current_frame.reserved_cpu_bytes();
+        let mut store = test_cpu_frame_store(4, frame_bytes.saturating_sub(1), 4);
+
+        assert!(!store.insert_media_frame(current_key.clone(), current_frame, true));
+        assert!(store.media_frame(&current_key).is_some());
+        let current = store.diagnostics();
+        assert_eq!(current.media_entries, 0);
+        assert_eq!(current.pinned_media_bytes, frame_bytes);
+        assert_eq!(current.media_oversize_rejections, 1);
+
+        let prefetch_key = test_media_key(201);
+        assert!(!store.insert_media_frame(prefetch_key.clone(), test_media_frame(8), false));
+        assert!(store.media_frame(&prefetch_key).is_none());
+        assert!(store.media_frame(&current_key).is_some());
+
+        store.clear_pinned_media_frame();
+        assert!(store.media_frame(&current_key).is_none());
+        assert_eq!(store.diagnostics().pinned_media_bytes, 0);
+    }
+
+    #[test]
+    fn cpu_frame_store_clear_releases_frames_failures_and_reserved_bytes() {
+        let mut store = PreviewCpuFrameStore::new(PreviewCpuFrameStoreConfig {
+            media_entry_capacity: 2,
+            media_byte_budget: 1_024,
+            viewer_entry_capacity: 2,
+            viewer_byte_budget: 1_024,
+            failure_entry_capacity: 2,
+        });
         let key = test_media_key(1);
 
-        cache.insert(key.clone(), test_media_frame(1));
-        failures.insert(key.clone());
-        cache.clear();
-        failures.clear();
+        store.insert_media_frame(key.clone(), test_media_frame(1), false);
+        store.remember_failure(key.clone());
+        store.clear_all();
 
-        assert_eq!(cache.len(), 0);
-        assert_eq!(failures.len(), 0);
-        assert!(cache.get(&key).is_none());
-        assert!(!failures.contains(&key));
+        let diagnostics = store.diagnostics();
+        assert_eq!(diagnostics.media_entries, 0);
+        assert_eq!(diagnostics.media_reserved_bytes, 0);
+        assert_eq!(diagnostics.failure_entries, 0);
+        assert!(store.media_frame(&key).is_none());
+        assert!(!store.contains_failure(&key));
     }
 
     #[test]
@@ -16565,12 +16540,12 @@ mod tests {
             modified_secs: Some(10),
             modified_nanos: Some(20),
         });
-        let mut cache = MediaPreviewCache::new(2);
+        let mut store = test_cpu_frame_store(2, 1_024, 2);
 
-        cache.insert(old_key.clone(), test_media_frame(1));
+        store.insert_media_frame(old_key.clone(), test_media_frame(1), false);
 
-        assert!(cache.get(&new_key).is_none());
-        assert!(cache.get(&old_key).is_some());
+        assert!(store.media_frame(&new_key).is_none());
+        assert!(store.media_frame(&old_key).is_some());
     }
 
     #[test]
@@ -16579,47 +16554,46 @@ mod tests {
         old_key.ocio_generation = 41;
         let mut new_key = old_key.clone();
         new_key.ocio_generation = 42;
-        let mut frames = MediaPreviewCache::new(2);
-        let mut failures = MediaPreviewFailureCache::new(2);
+        let mut store = test_cpu_frame_store(2, 1_024, 2);
 
-        frames.insert(old_key.clone(), test_media_frame(1));
-        failures.insert(old_key.clone());
+        store.insert_media_frame(old_key.clone(), test_media_frame(1), false);
+        store.remember_failure(old_key.clone());
 
-        assert!(frames.get(&new_key).is_none());
-        assert!(!failures.contains(&new_key));
-        assert!(frames.get(&old_key).is_some());
-        assert!(failures.contains(&old_key));
+        assert!(store.media_frame(&new_key).is_none());
+        assert!(!store.contains_failure(&new_key));
+        assert!(store.media_frame(&old_key).is_some());
+        assert!(store.contains_failure(&old_key));
     }
 
     #[test]
     fn media_preview_failure_cache_evicts_least_recently_used_key() {
-        let mut cache = MediaPreviewFailureCache::new(2);
+        let mut store = test_cpu_frame_store(2, 1_024, 2);
         let first = test_media_key(1);
         let second = test_media_key(2);
         let third = test_media_key(3);
 
-        cache.insert(first.clone());
-        cache.insert(second.clone());
-        assert!(cache.contains(&first));
+        store.remember_failure(first.clone());
+        store.remember_failure(second.clone());
+        assert!(store.contains_failure(&first));
 
-        cache.insert(third.clone());
+        store.remember_failure(third.clone());
 
-        assert_eq!(cache.len(), 2);
-        assert!(cache.contains(&first));
-        assert!(!cache.contains(&second));
-        assert!(cache.contains(&third));
+        assert_eq!(store.diagnostics().failure_entries, 2);
+        assert!(store.contains_failure(&first));
+        assert!(!store.contains_failure(&second));
+        assert!(store.contains_failure(&third));
     }
 
     #[test]
     fn media_preview_failure_cache_updates_existing_key_without_growing() {
-        let mut cache = MediaPreviewFailureCache::new(2);
+        let mut store = test_cpu_frame_store(2, 1_024, 2);
         let key = test_media_key(1);
 
-        cache.insert(key.clone());
-        cache.insert(key.clone());
+        store.remember_failure(key.clone());
+        store.remember_failure(key.clone());
 
-        assert_eq!(cache.len(), 1);
-        assert!(cache.contains(&key));
+        assert_eq!(store.diagnostics().failure_entries, 1);
+        assert!(store.contains_failure(&key));
     }
 
     #[test]
@@ -16651,8 +16625,12 @@ mod tests {
             }),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
-        service.media_cache.borrow_mut().insert(key.clone(), test_media_frame(1));
-        service.media_failures.borrow_mut().insert(key.clone());
+        service.frame_store.borrow_mut().insert_media_frame(
+            key.clone(),
+            test_media_frame(1),
+            false,
+        );
+        service.frame_store.borrow_mut().remember_failure(key.clone());
 
         service.cancel_interactive_work();
 
@@ -16667,8 +16645,10 @@ mod tests {
         assert_eq!(diagnostics.interactive_cancel_scheduler_requests, 1);
         assert_eq!(diagnostics.interactive_cancel_queued_jobs, 1);
         assert_eq!(diagnostics.queue_canceled_jobs, 1);
-        assert_eq!(service.media_cache.borrow().len(), 0);
-        assert_eq!(service.media_failures.borrow().len(), 0);
+        let frame_store = service.frame_store.borrow().diagnostics();
+        assert_eq!(frame_store.media_entries, 0);
+        assert_eq!(frame_store.media_reserved_bytes, 0);
+        assert_eq!(frame_store.failure_entries, 0);
         service.shutdown();
     }
 

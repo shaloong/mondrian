@@ -32,6 +32,10 @@ _Avoid_: Quality flag
 Structured events and aggregates proving clock, scheduling, delivery, degradation, synchronization, and recovery behavior.
 _Avoid_: Debug log
 
+**Preview Frame Store**:
+The bounded runtime store for decoded CPU preview payloads, final Viewer rasters, failure memory, the explicitly pinned current/stale Viewer frame, and an oversize current-media exception that remains visible in evidence.
+_Avoid_: Entry-count-only cache, unbounded last frame, dropped oversize current delivery
+
 **Audio Playback**:
 The realtime path that owns output-device lifecycle, PCM preroll and consumption, render generations, underrun recovery, and consumed-media-position evidence for a Playback Session.
 _Avoid_: Audio clock, UI-owned output stream
@@ -49,6 +53,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - A **Playback Quality Policy** constrains every **Frame Demand** in its Playback Session.
 - **Playback Evidence** records state and clock transitions without owning them.
 - **Playback Evidence** uses bounded versioned events and aggregates from real Frame Demand, Frame Delivery, Clock Master, seek, and Audio Playback observations; capability probes alone cannot satisfy execution gates.
+- A **Preview Frame Store** admits and evicts CPU frames by both payload bytes and entry count; renderer-owned GPU resources remain outside this store and require their own budget evidence.
 - **Audio Playback** may offer an Audio Device Clock Master only after stream health, PCM preroll, and media phase satisfy Playback Policy.
 - **Audio Playback** records isolated underruns without changing Clock Master; sustained missing-sample evidence enters recovery through a continuous Synthetic handoff and fresh preroll.
 - Each persisted archive, document, and SQLite library has an independent version and **Project Migration** chain.
