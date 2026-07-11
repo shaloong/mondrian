@@ -261,9 +261,13 @@ Background polling must also enforce a hard escape hatch for the current
 realtime playback request. If a scheduler-accepted `Current` request for
 `PlaybackCursor` or `ScrubCursor` remains pending past the realtime stall
 budget, the app preview service expires only that realtime-current pending work,
-removes matching queued worker jobs, records
-`playback_current_stalled_expirations`, clears the current-frame pending flag,
-and emits a Late Frame Delivery through the preview-free transport path. This
+removes matching queued worker jobs, and clears the current-frame pending flag.
+The scheduler returns the expired key, access mode, and original optional Frame
+Demand identity instead of requiring the host to inspect current transport.
+Only an expired `PlaybackCursor` carrying that identity records
+`playback_current_stalled_expirations` and emits an exact Late Frame Delivery;
+an expired `ScrubCursor` releases interactive capacity without mutating the
+Playback Session or playback-pressure counters. This
 is not a renderer fallback and must not clear ready/stale frames,
 still-frame work, media caches, or external GPU viewer textures. It exists so a
 lost, wedged, or pathologically slow current decode cannot retain scheduler
@@ -271,10 +275,12 @@ capacity indefinitely.
 The same counter must appear in the preview decode performance summary/report
 even before a worker returns a canceled decode result, because the product
 symptom is already user-visible at the moment the demand expires.
-Each expired realtime-current request released this way must also count as a
-playback late-drop decision and a proxy/hardware recommendation decision so
+Each expired identity-bearing playback request released this way must also count
+as a playback late-drop decision and a proxy/hardware recommendation decision so
 clock-driven playback diagnostics do not under-report frames that were skipped
-before a worker produced a cancellation result.
+before a worker produced a cancellation result. Re-requesting the same media key
+refreshes stall age only when generation, access mode, or Frame Demand identity
+changes; duplicate redraws for one demand cannot keep stalled work alive.
 Consecutive current playback late drops form a sustained playback pressure
 state. Once the app preview service observes the pressure threshold, it must
 suppress forward playback prefetch and keep worker/queue capacity available for

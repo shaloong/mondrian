@@ -380,8 +380,9 @@ impl AppUiHost {
         }
         let media_imports_changed = self.app_state.borrow_mut().poll_media_imports();
         let thumbnails_changed = self.asset_thumbnails.poll_finished();
-        let preview_outcome = self.preview_service.poll_finished_outcome();
+        let mut preview_outcome = self.preview_service.poll_finished_outcome();
         let waveform_changed = self.waveform_cache.poll_finished();
+        preview_outcome.merge(self.preview_service.expire_stalled_realtime_current());
         let playback_delivery_changed =
             preview_outcome
                 .frame_deliveries
@@ -390,19 +391,11 @@ impl AppUiHost {
                 .fold(false, |changed, delivery| {
                     self.app_state.borrow_mut().observe_frame_delivery(delivery) || changed
                 });
-        let playback_stall_expired = self.app_state.borrow().is_playing()
-            && self.preview_service.expire_stalled_playback_current();
-        if playback_stall_expired {
-            self.app_state
-                .borrow_mut()
-                .observe_viewer_frame_delivery(mondrian_playback::FrameDeliveryKind::Late);
-        }
         let visible_model_changed = media_imports_changed
             || thumbnails_changed
             || preview_outcome.visible_change
             || waveform_changed
-            || playback_delivery_changed
-            || playback_stall_expired;
+            || playback_delivery_changed;
         if !visible_model_changed {
             return preview_outcome.needs_follow_up_poll;
         }

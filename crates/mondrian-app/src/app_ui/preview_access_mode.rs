@@ -59,6 +59,15 @@ struct MediaPreviewPendingRequest {
     priority: MediaPreviewRequestPriority,
     access_mode: PreviewDecodeAccessMode,
     requested_at: Instant,
+    demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
+}
+
+/// Scheduler-owned evidence for realtime work expired before worker completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExpiredMediaPreviewRequest {
+    pub(crate) key: MediaPreviewKey,
+    pub(crate) access_mode: PreviewDecodeAccessMode,
+    pub(crate) demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
 }
 
 /// Preview decode request priority used by scheduler admission and job queues.
@@ -754,12 +763,24 @@ impl MediaPreviewScheduler {
         state.latest_generation
     }
 
+    #[cfg(test)]
     pub(crate) fn request(
         &self,
         key: MediaPreviewKey,
         generation: u64,
         priority: MediaPreviewRequestPriority,
         access_mode: PreviewDecodeAccessMode,
+    ) -> MediaPreviewRequestStatus {
+        self.request_with_demand_identity(key, generation, priority, access_mode, None)
+    }
+
+    pub(crate) fn request_with_demand_identity(
+        &self,
+        key: MediaPreviewKey,
+        generation: u64,
+        priority: MediaPreviewRequestPriority,
+        access_mode: PreviewDecodeAccessMode,
+        demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
     ) -> MediaPreviewRequestStatus {
         let mut state = self.state.lock().expect("media preview scheduler poisoned");
         if !priority.accepts_access_mode(access_mode) {
@@ -773,11 +794,17 @@ impl MediaPreviewScheduler {
         }
         if let Some(pending) = state.pending.get_mut(&key) {
             let previous_access_mode = pending.access_mode;
+            let request_identity_changed = pending.demand_identity != demand_identity;
+            let request_generation_changed = pending.generation != generation;
             pending.access_mode =
                 promoted_access_mode(pending.priority, pending.access_mode, priority, access_mode);
             pending.generation = generation;
             pending.priority = pending.priority.promote_with(priority);
+            pending.demand_identity = demand_identity;
             let access_mode_changed = previous_access_mode != pending.access_mode;
+            if request_identity_changed || request_generation_changed || access_mode_changed {
+                pending.requested_at = Instant::now();
+            }
             Self::prune_obsolete_locked(&mut state);
             bump_value(&mut state.metrics.already_pending_requests);
             if access_mode_changed {
@@ -836,6 +863,7 @@ impl MediaPreviewScheduler {
                 priority,
                 access_mode,
                 requested_at: Instant::now(),
+                demand_identity,
             },
         );
         bump_value(&mut state.metrics.scheduled_requests);
@@ -958,7 +986,7 @@ impl MediaPreviewScheduler {
     pub(crate) fn expire_realtime_current_older_than(
         &self,
         max_age: Duration,
-    ) -> Vec<MediaPreviewKey> {
+    ) -> Vec<ExpiredMediaPreviewRequest> {
         let mut state = self.state.lock().expect("media preview scheduler poisoned");
         let now = Instant::now();
         let latest_generation = state.latest_generation;
@@ -971,7 +999,11 @@ impl MediaPreviewScheduler {
                     && pending.generation >= latest_generation;
                 let expired = now.saturating_duration_since(pending.requested_at) >= max_age;
                 if realtime_current && expired {
-                    Some(key.clone())
+                    Some(ExpiredMediaPreviewRequest {
+                        key: key.clone(),
+                        access_mode: pending.access_mode,
+                        demand_identity: pending.demand_identity,
+                    })
                 } else {
                     None
                 }
@@ -980,8 +1012,8 @@ impl MediaPreviewScheduler {
         if expired.is_empty() {
             return expired;
         }
-        for key in &expired {
-            state.pending.remove(key);
+        for request in &expired {
+            state.pending.remove(&request.key);
         }
         state.metrics.canceled_requests =
             state.metrics.canceled_requests.saturating_add(expired.len() as u64);
@@ -1454,13 +1486,59 @@ mod tests {
 
         let expired = scheduler.expire_realtime_current_older_than(Duration::ZERO);
         assert_eq!(expired.len(), 2);
-        assert!(expired.contains(&scrub));
-        assert!(expired.contains(&playback));
-        assert!(!expired.contains(&still));
+        assert!(expired.iter().any(|request| request.key == scrub));
+        assert!(expired.iter().any(|request| request.key == playback));
+        assert!(!expired.iter().any(|request| request.key == still));
         assert!(!scheduler.has_pending_key(&scrub));
         assert!(!scheduler.has_pending_key(&playback));
         assert!(scheduler.has_pending_key(&still));
         assert_eq!(scheduler.diagnostics().canceled_requests, 2);
+    }
+
+    #[test]
+    fn pending_playback_identity_tracks_latest_demand_for_same_media_key() {
+        let scheduler = MediaPreviewScheduler::with_max_pending(1);
+        let generation = scheduler.begin_generation();
+        let key = test_media_key(4);
+        let mut engine = mondrian_playback::PlaybackEngine::new(
+            mondrian_core::Rational::new(1, 25),
+            mondrian_playback::PlaybackPolicy::default(),
+        )
+        .expect("playback engine");
+        engine
+            .play(10, mondrian_playback::MonotonicTimestamp::ZERO)
+            .expect("first demand");
+        let first = engine.frame_demand().expect("first frame demand").identity();
+        engine
+            .play(10, mondrian_playback::MonotonicTimestamp::ZERO)
+            .expect("second demand");
+        let second = engine.frame_demand().expect("second frame demand").identity();
+        assert_ne!(first, second);
+
+        assert_eq!(
+            scheduler.request_with_demand_identity(
+                key.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                Some(first),
+            ),
+            scheduled_request()
+        );
+        assert_eq!(
+            scheduler.request_with_demand_identity(
+                key,
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                Some(second),
+            ),
+            MediaPreviewRequestStatus::AlreadyPending { access_mode_changed: false }
+        );
+
+        let expired = scheduler.expire_realtime_current_older_than(Duration::ZERO);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].demand_identity, Some(second));
     }
 
     #[test]

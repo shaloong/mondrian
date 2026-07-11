@@ -500,6 +500,11 @@ the Playback Engine performs the final identity check. Media generation remains
 a decode/cache cancellation mechanism and is not a substitute for Playback
 Session identity. Viewer lifecycle feedback remains the Adapter for cache hits
 and presentation-only outcomes that do not originate from worker completion.
+Scheduler pending state retains the same identity until completion or
+expiration. A stall expiration returns that stored identity and never asks the
+host to synthesize a delivery from whichever demand is current at poll time.
+Scrub expiration is capacity/cancellation evidence, not a playback Late Frame
+Delivery.
 
 Play and running seek now remain in bounded Priming. Ready or allowed Degraded
 delivery starts Synthetic Master immediately; after the 500 ms policy deadline,

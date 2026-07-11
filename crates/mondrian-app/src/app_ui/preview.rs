@@ -104,6 +104,14 @@ pub(crate) struct AppUiPreviewPollOutcome {
     pub frame_deliveries: Vec<mondrian_playback::FrameDelivery>,
 }
 
+impl AppUiPreviewPollOutcome {
+    pub(crate) fn merge(&mut self, mut other: Self) {
+        self.visible_change |= other.visible_change;
+        self.needs_follow_up_poll |= other.needs_follow_up_poll;
+        self.frame_deliveries.append(&mut other.frame_deliveries);
+    }
+}
+
 /// Host-owned preview renderer used by the app UI viewer panel.
 ///
 /// This first path renders solid-color render-plan elements through the shared
@@ -345,6 +353,19 @@ impl AppUiPreviewService {
     }
 
     #[cfg(test)]
+    fn test_frame_demand_identity() -> mondrian_playback::FrameDemandIdentity {
+        let mut engine = mondrian_playback::PlaybackEngine::new(
+            Rational::new(1, 25),
+            mondrian_playback::PlaybackPolicy::default(),
+        )
+        .expect("playback engine");
+        engine
+            .play(10, mondrian_playback::MonotonicTimestamp::ZERO)
+            .expect("playback demand");
+        engine.frame_demand().expect("frame demand").identity()
+    }
+
+    #[cfg(test)]
     fn seed_pending_preview_work_with_access_mode_for_test(
         &self,
         access_mode: PreviewDecodeAccessMode,
@@ -365,11 +386,14 @@ impl AppUiPreviewService {
             ocio_generation: mondrian_core::ocio_config_generation(),
         };
         let generation = self.scheduler.begin_generation();
-        let _ = self.scheduler.request(
+        let demand_identity = (access_mode == PreviewDecodeAccessMode::PlaybackCursor)
+            .then(Self::test_frame_demand_identity);
+        let _ = self.scheduler.request_with_demand_identity(
             key.clone(),
             generation,
             MediaPreviewRequestPriority::Current,
             access_mode,
+            demand_identity,
         );
         let _ = self.jobs.enqueue(MediaPreviewJob {
             key,
@@ -381,7 +405,7 @@ impl AppUiPreviewService {
             hardware_decode_request: self.hardware_decode_request_for_access_mode(access_mode),
             enqueued_at: Instant::now(),
             deadline_at: None,
-            demand_identity: None,
+            demand_identity,
         });
         self.current_generation.set(generation);
         self.current_frame_pending.set(true);
@@ -748,30 +772,48 @@ impl AppUiPreviewService {
         )
     }
 
-    pub(crate) fn expire_stalled_playback_current(&self) -> bool {
-        self.expire_stalled_playback_current_with_timeout(Duration::from_micros(
+    pub(crate) fn expire_stalled_realtime_current(&self) -> AppUiPreviewPollOutcome {
+        self.expire_stalled_realtime_current_with_timeout(Duration::from_micros(
             MEDIA_PREVIEW_PLAYBACK_BUFFERING_STALL_TIMEOUT_US,
         ))
     }
 
-    fn expire_stalled_playback_current_with_timeout(&self, timeout: Duration) -> bool {
+    fn expire_stalled_realtime_current_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> AppUiPreviewPollOutcome {
         let expired = self.scheduler.expire_realtime_current_older_than(timeout);
         if expired.is_empty() {
-            return false;
+            return AppUiPreviewPollOutcome::default();
         }
         let mut canceled_queued_jobs = 0u64;
-        for key in &expired {
+        for request in &expired {
             canceled_queued_jobs =
-                canceled_queued_jobs.saturating_add(self.jobs.cancel_key(key) as u64);
+                canceled_queued_jobs.saturating_add(self.jobs.cancel_key(&request.key) as u64);
         }
+        let frame_deliveries = expired
+            .iter()
+            .filter(|request| request.access_mode == PreviewDecodeAccessMode::PlaybackCursor)
+            .filter_map(|request| request.demand_identity)
+            .map(|identity| {
+                mondrian_playback::FrameDelivery::for_demand(
+                    identity,
+                    mondrian_playback::FrameDeliveryKind::Late,
+                )
+            })
+            .collect::<Vec<_>>();
         add_cell(
             &self.metrics.playback_current_stalled_expirations,
-            expired.len() as u64,
+            frame_deliveries.len() as u64,
         );
-        self.record_playback_current_late_drop(expired.len() as u64);
+        self.record_playback_current_late_drop(frame_deliveries.len() as u64);
         add_cell(&self.metrics.queue_canceled_jobs, canceled_queued_jobs);
         self.current_frame_pending.set(false);
-        true
+        AppUiPreviewPollOutcome {
+            visible_change: true,
+            needs_follow_up_poll: false,
+            frame_deliveries,
+        }
     }
 
     #[cfg(test)]
@@ -7806,11 +7848,12 @@ impl AppUiPreviewService {
             );
             return false;
         }
-        let should_enqueue_job = match self.scheduler.request(
+        let should_enqueue_job = match self.scheduler.request_with_demand_identity(
             key.clone(),
             generation,
             priority,
             access_mode,
+            demand_identity,
         ) {
             MediaPreviewRequestStatus::Scheduled { evicted_prefetch, evicted_still } => {
                 if is_current_playback {
@@ -14967,7 +15010,9 @@ mod tests {
         assert_eq!(before.worker_queue.queued_jobs, 1);
         assert!(service.current_frame_pending.get());
 
-        assert!(service.expire_stalled_playback_current_with_timeout(Duration::ZERO));
+        let outcome = service.expire_stalled_realtime_current_with_timeout(Duration::ZERO);
+        assert!(outcome.visible_change);
+        assert_eq!(outcome.frame_deliveries.len(), 1);
 
         let diagnostics = service.diagnostics();
         assert_eq!(diagnostics.playback_current_stalled_expirations, 1);
@@ -14987,13 +15032,39 @@ mod tests {
     }
 
     #[test]
+    fn stalled_scrub_releases_capacity_without_reporting_playback_delivery() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        service.seed_pending_preview_work_with_access_mode_for_test(
+            PreviewDecodeAccessMode::ScrubCursor,
+        );
+
+        let outcome = service.expire_stalled_realtime_current_with_timeout(Duration::ZERO);
+
+        assert!(outcome.visible_change);
+        assert!(outcome.frame_deliveries.is_empty());
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.scheduler.pending_requests, 0);
+        assert_eq!(diagnostics.worker_queue.queued_jobs, 0);
+        assert_eq!(diagnostics.playback_current_stalled_expirations, 0);
+        assert_eq!(diagnostics.playback_schedule.current_drop_late_decisions, 0);
+    }
+
+    #[test]
     fn repeated_late_playback_current_frames_enter_pressure_recovery() {
         let service = AppUiPreviewService::new_without_workers_for_test();
 
         service.seed_pending_playback_current_preview_work_for_test();
-        assert!(service.expire_stalled_playback_current_with_timeout(Duration::ZERO));
+        assert!(
+            service
+                .expire_stalled_realtime_current_with_timeout(Duration::ZERO)
+                .visible_change
+        );
         service.seed_pending_playback_current_preview_work_for_test();
-        assert!(service.expire_stalled_playback_current_with_timeout(Duration::ZERO));
+        assert!(
+            service
+                .expire_stalled_realtime_current_with_timeout(Duration::ZERO)
+                .visible_change
+        );
 
         let diagnostics = service.diagnostics();
         assert_eq!(diagnostics.playback_current_stalled_expirations, 2);
