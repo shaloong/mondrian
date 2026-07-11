@@ -110,6 +110,7 @@ struct PreviewMediaPlaybackPerfReport {
     render_failure_codes: Vec<&'static str>,
     preview_decode_report: AppUiPreviewDecodePerformanceReport,
     preview_render_report: AppUiPreviewRenderPerformanceReport,
+    playback_evidence: PlaybackEvidenceReport,
     cases: Vec<PerfCaseReport>,
 }
 
@@ -122,6 +123,10 @@ struct PreviewExternalPlaybackGateReport {
     playback_queue_wait_p95_observed_us: u64,
     min_visible_frames: usize,
     visible_frames: usize,
+    delivery_clock_drift_limit_us: u64,
+    delivery_clock_drift_observed_us: u64,
+    audio_underrun_recoveries: u64,
+    dropped_playback_evidence_events: u64,
     passed: bool,
     failures: Vec<&'static str>,
 }
@@ -1318,6 +1323,7 @@ fn preview_media_external_continuous_playback_smoke() -> anyhow::Result<()> {
         &report.readiness,
         report.frames,
         &report.preview_decode_report,
+        &report.playback_evidence,
         playback_p95_limit_us,
         playback_queue_wait_p95_limit_us,
         min_visible_percent,
@@ -1370,6 +1376,7 @@ fn evaluate_external_playback_gates(
     readiness: &PreviewReadinessCounts,
     frames: usize,
     decode_report: &AppUiPreviewDecodePerformanceReport,
+    playback_evidence: &PlaybackEvidenceReport,
     playback_decode_p95_limit_us: u64,
     playback_queue_wait_p95_limit_us: u64,
     min_visible_percent: usize,
@@ -1394,6 +1401,17 @@ fn evaluate_external_playback_gates(
     if visible_frames < min_visible_frames {
         failures.push("visible_frame_ratio");
     }
+    let delivery_clock_drift_limit_us = 20_000;
+    let delivery_clock_drift_observed_us = playback_evidence.delivery_clock_drift.max_us;
+    if delivery_clock_drift_observed_us > delivery_clock_drift_limit_us {
+        failures.push("delivery_clock_drift");
+    }
+    if playback_evidence.audio_underrun_recoveries > 0 {
+        failures.push("audio_underrun_recovery");
+    }
+    if playback_evidence.dropped_event_count > 0 {
+        failures.push("playback_evidence_overflow");
+    }
 
     PreviewExternalPlaybackGateReport {
         enabled: true,
@@ -1403,6 +1421,10 @@ fn evaluate_external_playback_gates(
         playback_queue_wait_p95_observed_us,
         min_visible_frames,
         visible_frames,
+        delivery_clock_drift_limit_us,
+        delivery_clock_drift_observed_us,
+        audio_underrun_recoveries: playback_evidence.audio_underrun_recoveries,
+        dropped_playback_evidence_events: playback_evidence.dropped_event_count,
         passed: failures.is_empty(),
         failures,
     }
@@ -1440,18 +1462,25 @@ fn run_preview_media_continuous_playback_probe(
     state.seek(0);
     wait_for_preview_ready(&preview_service, &state, ready_timeout)?;
     state.play();
+    state.observe_viewer_frame_delivery(FrameDeliveryKind::Ready);
     let playback_case = run_case(
         "preview_media.continuous_playback_readiness",
         1,
         playback_threshold_ms,
         || {
-            for frame in 0..frame_count {
-                state.set_playback_frame_running(frame as i64);
+            for _ in 0..frame_count {
+                state.advance_playback_clock(Duration::from_millis(frame_interval_ms));
                 let _ = preview_service.poll_finished();
-                record_preview_readiness(
-                    &mut readiness,
-                    preview_service.viewer_preview_for_state(&state),
-                );
+                let preview = preview_service.viewer_preview_for_state(&state);
+                let delivery = match &preview {
+                    ViewerPreviewState::Ready(_) => Some(FrameDeliveryKind::Ready),
+                    ViewerPreviewState::Stale(_) => Some(FrameDeliveryKind::StaleAvailable),
+                    ViewerPreviewState::Unavailable | ViewerPreviewState::Loading => None,
+                };
+                record_preview_readiness(&mut readiness, preview);
+                if let Some(kind) = delivery {
+                    state.observe_viewer_frame_delivery(kind);
+                }
                 let _ = preview_service.poll_finished();
                 thread::sleep(Duration::from_millis(frame_interval_ms));
             }
@@ -1503,6 +1532,7 @@ fn run_preview_media_continuous_playback_probe(
     );
     let decode_failure_codes = preview_playback_decode_failures(&preview_decode_report);
     let render_failure_codes = preview_render_hard_failures(&preview_render_report);
+    let playback_evidence = state.playback_evidence_report();
     Ok(PreviewMediaPlaybackPerfReport {
         scenario,
         frames: frame_count,
@@ -1516,6 +1546,7 @@ fn run_preview_media_continuous_playback_probe(
         render_failure_codes,
         preview_decode_report,
         preview_render_report,
+        playback_evidence,
         cases: vec![playback_case, gpu_candidate_case],
     })
 }
@@ -1643,6 +1674,14 @@ fn generate_preview_media_fixture(path: &Path) -> anyhow::Result<bool> {
         .arg("mpeg4")
         .arg("-q:v")
         .arg("5")
+        .arg("-color_range")
+        .arg("tv")
+        .arg("-colorspace")
+        .arg("bt709")
+        .arg("-color_primaries")
+        .arg("bt709")
+        .arg("-color_trc")
+        .arg("bt709")
         .arg(path)
         .status()?;
 
@@ -2819,7 +2858,9 @@ fn external_playback_gates_fail_on_decode_queue_or_visibility_regression() {
     let readiness = PreviewReadinessCounts { ready: 10, stale: 4, loading: 2, unavailable: 4 };
     let report = preview_decode_report_with_playback_p95(80_000, 12_000);
 
-    let gates = evaluate_external_playback_gates(&readiness, 20, &report, 40_000, 10_000, 95);
+    let evidence = PlaybackEvidenceCollector::default().report();
+    let gates =
+        evaluate_external_playback_gates(&readiness, 20, &report, &evidence, 40_000, 10_000, 95);
 
     assert!(!gates.passed);
     assert_eq!(gates.visible_frames, 14);
@@ -2839,10 +2880,35 @@ fn external_playback_gates_pass_when_real_media_thresholds_hold() {
     let readiness = PreviewReadinessCounts { ready: 18, stale: 1, loading: 1, unavailable: 0 };
     let report = preview_decode_report_with_playback_p95(25_000, 4_000);
 
-    let gates = evaluate_external_playback_gates(&readiness, 20, &report, 40_000, 10_000, 95);
+    let evidence = PlaybackEvidenceCollector::default().report();
+    let gates =
+        evaluate_external_playback_gates(&readiness, 20, &report, &evidence, 40_000, 10_000, 95);
 
     assert!(gates.passed);
     assert!(gates.failures.is_empty());
+}
+
+#[test]
+fn external_playback_gates_fail_on_clock_audio_or_evidence_integrity() {
+    let readiness = PreviewReadinessCounts { ready: 20, stale: 0, loading: 0, unavailable: 0 };
+    let decode = preview_decode_report_with_playback_p95(25_000, 4_000);
+    let mut evidence = PlaybackEvidenceCollector::default().report();
+    evidence.delivery_clock_drift.max_us = 25_000;
+    evidence.audio_underrun_recoveries = 1;
+    evidence.dropped_event_count = 1;
+
+    let gates =
+        evaluate_external_playback_gates(&readiness, 20, &decode, &evidence, 40_000, 10_000, 95);
+
+    assert_eq!(
+        gates.failures,
+        vec![
+            "delivery_clock_drift",
+            "audio_underrun_recovery",
+            "playback_evidence_overflow",
+        ]
+    );
+    assert!(!gates.passed);
 }
 
 fn preview_decode_report_with_playback_p95(

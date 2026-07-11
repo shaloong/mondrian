@@ -379,6 +379,14 @@ and stale frames, consecutive pressure, effective preview scale, Clock Master
 residency, handoff phase error, audio underruns, A/V drift, cache budgets, and
 reason-code counts. Logging alone is not evidence.
 
+`PlaybackEvidenceCollector` is the shared bounded Interface for production UI
+and headless/perf Adapters. Schema v1 retains at most 4,096 detailed events and
+4,096 samples per latency/drift metric while aggregating Clock Master and
+Transport State residency, demand issue-to-terminal p50/p95/p99, warm and
+accurate seek latency, accepted delivery counts, superseded demand/seek totals,
+delivery-clock drift, and underrun recovery. Event/sample eviction is itself
+reported; a reference gate cannot silently pass after evidence overflow.
+
 ## Required invariants
 
 1. Exactly one Clock Master is authoritative in Playing/Recovering.
@@ -565,3 +573,18 @@ position observation followed at the same monotonic timestamp by an unavailable
 observation, so Synthetic handoff includes all consumed device time. Output then
 re-enters explicit Recovering/preroll state with a new render generation; video
 lateness and Viewer state remain unrelated to this decision.
+
+The app now feeds the collector after transport, clock, demand, delivery, seek,
+and underrun observations and exposes one serializable report. The real-media
+continuous playback harness uses one Play plus monotonic Engine ticks and sends
+actual Viewer Ready/Stale outcomes back as Frame Deliveries; it no longer fakes
+continuous playback by seeking and restarting every frame. External-media gates
+consume the same report and fail on delivery-clock drift above 20 ms, any
+sustained-underrun recovery, or evidence retention overflow. Hardware-residency,
+30-minute duration, and Golden Project identity gates remain to be added before
+the professional playback acceptance claim is complete.
+
+The generated playback fixture declares limited-range BT.709 primaries,
+transfer, and matrix metadata. A fixture without a quantization range must fail
+the same closed color-contract boundary as user media; the harness must never
+obtain a passing frame from an implicit swscale range guess.

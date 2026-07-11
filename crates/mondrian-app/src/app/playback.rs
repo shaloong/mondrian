@@ -45,6 +45,21 @@ impl AppState {
         self.sequence.as_ref().map(Sequence::time_base).unwrap_or(Rational::new(1, 25))
     }
 
+    fn capture_playback_evidence(&mut self) {
+        let snapshot = self.playback_engine.snapshot();
+        let demand = self.playback_engine.frame_demand();
+        if let Err(error) =
+            self.playback_evidence.observe_snapshot(self.playback_now, snapshot, demand)
+        {
+            tracing::warn!(%error, "rejected Playback Evidence snapshot");
+        }
+    }
+
+    /// Return a stable bounded report for diagnostics and headless/perf Adapters.
+    pub fn playback_evidence_report(&self) -> PlaybackEvidenceReport {
+        self.playback_evidence.report()
+    }
+
     pub fn play(&mut self) {
         let end_frame = self.last_content_frame();
         let mut frames = self.current_frame();
@@ -63,6 +78,7 @@ impl AppState {
             return;
         }
         self.prepare_audio_playback(TimeCode::new(frames, self.playback_time_base()));
+        self.capture_playback_evidence();
     }
 
     pub fn pause(&mut self) {
@@ -72,6 +88,7 @@ impl AppState {
             tracing::error!(%error, "failed to pause Playback Session");
         }
         self.audio_playback.reprime(TimeCode::new(frames, self.playback_time_base()));
+        self.capture_playback_evidence();
     }
 
     pub fn stop(&mut self) {
@@ -80,6 +97,7 @@ impl AppState {
             tracing::error!(%error, "failed to stop Playback Session");
         }
         self.audio_playback.reprime(TimeCode::new(0, self.playback_time_base()));
+        self.capture_playback_evidence();
     }
 
     pub fn seek(&mut self, frame: i64) {
@@ -116,6 +134,18 @@ impl AppState {
         } else {
             self.audio_playback.reprime(TimeCode::new(frame, time_base));
         }
+        let seek_kind = match source {
+            TimelineSeekSource::PointerDrag => PlaybackSeekKind::Warm,
+            TimelineSeekSource::Settled => PlaybackSeekKind::Accurate,
+        };
+        if let Err(error) = self.playback_evidence.begin_seek(
+            self.playback_now,
+            self.playback_engine.snapshot().epoch,
+            seek_kind,
+        ) {
+            tracing::warn!(%error, "rejected Playback Evidence seek start");
+        }
+        self.capture_playback_evidence();
     }
 
     pub fn set_playback_frame_running(&mut self, frame: i64) {
@@ -156,6 +186,7 @@ impl AppState {
                 if let Err(error) = self.playback_engine.audio_device_lost(self.playback_now) {
                     tracing::warn!(%error, "failed to hand off lost audio stream");
                 }
+                self.capture_playback_evidence();
             }
             AudioPlaybackEvent::DeviceOpenFailed { retry_after, reason } => {
                 tracing::debug!(?retry_after, %reason, "audio output open failed; retry scheduled");
@@ -174,12 +205,22 @@ impl AppState {
                 stream_generation,
                 delta_frames,
                 interval_total_frames,
-            } => tracing::debug!(
-                stream_generation,
-                delta_frames,
-                interval_total_frames,
-                "audio output underrun observed"
-            ),
+            } => {
+                if let Err(error) = self.playback_evidence.observe_audio_underrun(
+                    self.playback_now,
+                    self.playback_engine.snapshot().epoch,
+                    delta_frames,
+                    false,
+                ) {
+                    tracing::warn!(%error, "rejected Playback Evidence underrun observation");
+                }
+                tracing::debug!(
+                    stream_generation,
+                    delta_frames,
+                    interval_total_frames,
+                    "audio output underrun observed"
+                );
+            }
             AudioPlaybackEvent::UnderrunRecoveryStarted {
                 stream_generation,
                 missing_frames,
@@ -187,6 +228,14 @@ impl AppState {
                 final_output,
                 final_media_anchor,
             } => {
+                if let Err(error) = self.playback_evidence.observe_audio_underrun(
+                    self.playback_now,
+                    self.playback_engine.snapshot().epoch,
+                    0,
+                    true,
+                ) {
+                    tracing::warn!(%error, "rejected Playback Evidence underrun recovery");
+                }
                 self.observe_final_audio_clock_before_recovery(final_output, final_media_anchor);
                 tracing::warn!(
                     stream_generation,
@@ -214,6 +263,7 @@ impl AppState {
         if let Err(error) = self.playback_engine.observe_audio_device_clock(observation) {
             tracing::warn!(%error, "rejected final audio clock before underrun recovery");
         }
+        self.capture_playback_evidence();
     }
 
     fn observe_audio_output_clock(&mut self, audio: AudioPlaybackSnapshot) {
@@ -244,6 +294,7 @@ impl AppState {
             Ok(_) => {}
             Err(error) => tracing::warn!(%error, "rejected audio-device Clock Master observation"),
         }
+        self.capture_playback_evidence();
     }
 
     fn prepare_audio_playback(&mut self, anchor: TimeCode) {
@@ -349,6 +400,7 @@ impl AppState {
                 };
             }
         };
+        self.capture_playback_evidence();
         let target_frame = snapshot.position.frame;
         if snapshot.state == TransportState::Ended {
             self.settle_preview_access_source();
@@ -427,14 +479,22 @@ impl AppState {
     /// Feed an exact terminal preview observation into the Playback Session.
     pub fn observe_frame_delivery(&mut self, delivery: FrameDelivery) -> bool {
         let before = self.playback_engine.snapshot();
-        match self.playback_engine.observe_frame_delivery(delivery) {
-            Ok(true) => self.playback_engine.snapshot() != before,
-            Ok(false) => false,
+        let accepted = match self.playback_engine.observe_frame_delivery(delivery) {
+            Ok(accepted) => accepted,
             Err(error) => {
                 tracing::warn!(%error, ?delivery, "rejected Viewer Frame Delivery");
                 false
             }
+        };
+        let after = self.playback_engine.snapshot();
+        if let Err(error) =
+            self.playback_evidence
+                .observe_delivery(self.playback_now, after, delivery, accepted)
+        {
+            tracing::warn!(%error, "rejected Playback Evidence Frame Delivery");
         }
+        self.capture_playback_evidence();
+        accepted && after != before
     }
 
     /// Feed one terminal Viewer observation into the authoritative Playback Session.
@@ -459,7 +519,10 @@ impl AppState {
             end_frame,
             self.playback_now,
         ) {
-            Ok(_) => true,
+            Ok(_) => {
+                self.capture_playback_evidence();
+                true
+            }
             Err(error) => {
                 tracing::error!(%error, "failed to reset Playback Session timeline");
                 false
@@ -668,6 +731,29 @@ mod tests {
         state.advance_playback_clock(Duration::from_millis(40));
         assert_eq!(state.current_frame(), 2);
         assert_eq!(state.playback_clock_master(), Some(ClockMaster::Synthetic));
+    }
+
+    #[test]
+    fn production_adapter_reports_warm_seek_and_delivery_latency() {
+        let mut state = state_with_sequence(40);
+        play_ready(&mut state);
+        state.advance_playback_clock(Duration::from_millis(40));
+        state.seek_with_source(10, TimelineSeekSource::PointerDrag);
+        state.advance_playback_clock(Duration::from_millis(120));
+        assert!(state.observe_viewer_frame_delivery(FrameDeliveryKind::Ready));
+
+        let report = state.playback_evidence_report();
+
+        assert!(report.snapshot_count >= 4);
+        assert!(report.demand_count >= 2);
+        assert_eq!(report.deliveries.ready, 2);
+        assert_eq!(report.warm_seek_latency.count, 1);
+        assert_eq!(report.warm_seek_latency.p95_us, 120_000);
+        assert!(report.clock_residency.synthetic_us >= 40_000);
+        assert_eq!(
+            report.schema_version,
+            mondrian_playback::PLAYBACK_EVIDENCE_SCHEMA_VERSION
+        );
     }
 
     #[test]

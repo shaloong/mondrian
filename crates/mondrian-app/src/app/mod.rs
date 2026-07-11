@@ -33,7 +33,8 @@ use mondrian_media::{
 };
 use mondrian_playback::{
     AudioClockObservationGrade, AudioDeviceClockObservation, AudioDeviceClockState, ClockMaster,
-    FrameDelivery, FrameDeliveryKind, MonotonicTimestamp, PlaybackEngine, TransportState,
+    FrameDelivery, FrameDeliveryKind, MonotonicTimestamp, PlaybackEngine,
+    PlaybackEvidenceCollector, PlaybackEvidenceReport, PlaybackSeekKind, TransportState,
 };
 use mondrian_timeline::clip::{Clip, TrimEdge};
 use mondrian_timeline::command::SequenceSnapshotCommand;
@@ -234,6 +235,8 @@ pub struct AppState {
     // 播放状态
     /// Sole authority for transport position, epoch, and Clock Master.
     playback_engine: PlaybackEngine,
+    /// Bounded production Adapter for versioned Playback Evidence.
+    playback_evidence: PlaybackEvidenceCollector,
     /// App-adapter monotonic origin advanced only by event-loop elapsed time.
     playback_now: MonotonicTimestamp,
     /// Most recent timeline seek interaction source used by preview access-mode selection.
@@ -301,6 +304,7 @@ impl AppState {
             project_settings: ProjectSettings::default(),
             cmd_history: mondrian_timeline::command::CommandHistory::new(200),
             playback_engine: PlaybackEngine::default(),
+            playback_evidence: PlaybackEvidenceCollector::default(),
             playback_now: MonotonicTimestamp::ZERO,
             last_timeline_seek_source: TimelineSeekSource::Settled,
             asset_library: None,

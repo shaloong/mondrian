@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use thiserror::Error;
 
+mod evidence;
+pub use evidence::*;
+
 /// Monotonically increasing runtime timestamp relative to an arbitrary origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MonotonicTimestamp(Duration);
@@ -59,7 +62,7 @@ impl FrameDemandSequence {
 }
 
 /// Stable identity that preview adapters carry without interpreting playback policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FrameDemandIdentity {
     /// Playback Session identity.
     pub epoch: PlaybackEpoch,
