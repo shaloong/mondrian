@@ -140,6 +140,11 @@ pub struct AudioDeviceClockObservation {
     pub sample_rate: u32,
     /// Cumulative output frames consumed by callbacks in this stream generation.
     pub consumed_frames: u64,
+    /// Exact timeline-media time queued at active callback-consumption frame zero.
+    ///
+    /// Its time base may be the output sample period; the Engine converts it to
+    /// the sequence time base without accumulating floating-point seconds.
+    pub media_anchor: TimeCode,
     /// Engine-relative monotonic observation time.
     pub observed_at: MonotonicTimestamp,
     /// Observation quality; never infer exact hardware position from this value.
@@ -254,6 +259,8 @@ pub struct PlaybackPolicy {
     pub healthy_deliveries_to_recover: usize,
     /// Maximum uncertainty accepted for callback-estimated Audio Device Master.
     pub max_audio_clock_uncertainty: Duration,
+    /// Largest absolute media phase error allowed when selecting a new audio stream.
+    pub max_audio_handoff_phase_error: Duration,
 }
 
 impl Default for PlaybackPolicy {
@@ -264,8 +271,29 @@ impl Default for PlaybackPolicy {
             pressure_threshold: 8,
             healthy_deliveries_to_recover: 60,
             max_audio_clock_uncertainty: Duration::from_millis(20),
+            max_audio_handoff_phase_error: Duration::from_millis(20),
         }
     }
+}
+
+/// Result of the latest Synthetic-to-Audio Clock Master qualification attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioClockHandoffStatus {
+    /// The stream phase was inside policy and Audio Device became authoritative.
+    Accepted,
+    /// The stream phase exceeded policy; Synthetic remains authoritative.
+    PhaseRejected,
+}
+
+/// Structured phase evidence for a new audio stream generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioClockHandoffEvidence {
+    /// Concrete stream generation being qualified.
+    pub stream_generation: u64,
+    /// Signed candidate-audio minus published-timeline phase in nanoseconds.
+    pub phase_error_ns: i64,
+    /// Qualification result.
+    pub status: AudioClockHandoffStatus,
 }
 
 /// Read-only authoritative state published to app and UI adapters.
@@ -285,6 +313,8 @@ pub struct PlaybackSnapshot {
     pub quality_revision: u64,
     /// Latest current-epoch audio observation, including quality and underrun evidence.
     pub audio_clock_observation: Option<AudioDeviceClockObservation>,
+    /// Latest new-stream phase qualification evidence.
+    pub audio_handoff: Option<AudioClockHandoffEvidence>,
 }
 
 /// Playback state-machine error. Invalid observations never mutate the Engine.
@@ -316,8 +346,7 @@ struct ClockAnchor {
 #[derive(Debug, Clone, Copy)]
 struct AudioDeviceClockAnchor {
     stream_generation: u64,
-    consumed_frames: u64,
-    timeline: TimeCode,
+    last_effective_consumed_frames: u64,
 }
 
 /// Deep, headless Module owning a Playback Session and its realtime invariants.
@@ -342,6 +371,7 @@ pub struct PlaybackEngine {
     terminal_delivery: Option<(PlaybackEpoch, u64, FrameDemandSequence)>,
     audio_device_anchor: Option<AudioDeviceClockAnchor>,
     last_audio_observation: Option<AudioDeviceClockObservation>,
+    last_audio_handoff: Option<AudioClockHandoffEvidence>,
 }
 
 impl PlaybackEngine {
@@ -354,6 +384,7 @@ impl PlaybackEngine {
             || policy.pressure_threshold > policy.pressure_window
             || policy.healthy_deliveries_to_recover == 0
             || policy.max_audio_clock_uncertainty.is_zero()
+            || policy.max_audio_handoff_phase_error.is_zero()
         {
             return Err(PlaybackError::InvalidPolicy);
         }
@@ -386,6 +417,7 @@ impl PlaybackEngine {
             terminal_delivery: None,
             audio_device_anchor: None,
             last_audio_observation: None,
+            last_audio_handoff: None,
         }
     }
 
@@ -583,7 +615,7 @@ impl PlaybackEngine {
         if observation.state == AudioDeviceClockState::Running && observation.sample_rate == 0 {
             return Err(PlaybackError::InvalidAudioSampleRate);
         }
-        self.accept_timestamp(observation.observed_at)?;
+        self.advance_position(observation.observed_at)?;
         self.last_audio_observation = Some(observation);
         if observation.state == AudioDeviceClockState::Unavailable {
             self.handoff_to_synthetic(observation.observed_at);
@@ -609,7 +641,7 @@ impl PlaybackEngine {
             .saturating_sub(observation.estimated_latency_frames as u64);
         if self.audio_device_anchor.is_some_and(|anchor| {
             anchor.stream_generation == observation.stream_generation
-                && effective_consumed < anchor.consumed_frames
+                && effective_consumed < anchor.last_effective_consumed_frames
         }) {
             self.handoff_to_synthetic(observation.observed_at);
             return Ok(self.snapshot());
@@ -618,24 +650,42 @@ impl PlaybackEngine {
             .audio_device_anchor
             .filter(|anchor| anchor.stream_generation == observation.stream_generation)
         else {
+            let candidate_ns = audio_media_position_ns(observation, effective_consumed)?;
+            let published_ns = time_code_ns(self.position)?;
+            let phase_error_ns = candidate_ns.saturating_sub(published_ns);
+            let phase_error_abs = phase_error_ns.unsigned_abs();
+            let accepted = phase_error_abs <= self.policy.max_audio_handoff_phase_error.as_nanos();
+            self.last_audio_handoff = Some(AudioClockHandoffEvidence {
+                stream_generation: observation.stream_generation,
+                phase_error_ns: phase_error_ns.clamp(i64::MIN as i128, i64::MAX as i128) as i64,
+                status: if accepted {
+                    AudioClockHandoffStatus::Accepted
+                } else {
+                    AudioClockHandoffStatus::PhaseRejected
+                },
+            });
+            if !accepted {
+                self.handoff_to_synthetic(observation.observed_at);
+                return Ok(self.snapshot());
+            }
             self.audio_device_anchor = Some(AudioDeviceClockAnchor {
                 stream_generation: observation.stream_generation,
-                consumed_frames: effective_consumed,
-                timeline: self.position,
+                last_effective_consumed_frames: effective_consumed,
             });
             self.clock_master = Some(ClockMaster::AudioDevice);
             self.reanchor(observation.observed_at);
             return Ok(self.snapshot());
         };
 
-        let sample_delta = effective_consumed.saturating_sub(anchor.consumed_frames);
-        let advanced = sample_frames_to_timeline_frames(
-            sample_delta,
-            observation.sample_rate,
+        let target = timeline_frame_at_ns(
+            audio_media_position_ns(observation, effective_consumed)?,
             self.position.time_base,
         )?;
-        let target = anchor.timeline.frame.saturating_add(advanced);
         self.position.frame = self.position.frame.max(target).min(self.end_frame).max(0);
+        self.audio_device_anchor = Some(AudioDeviceClockAnchor {
+            stream_generation: anchor.stream_generation,
+            last_effective_consumed_frames: effective_consumed,
+        });
         self.clock_master = Some(ClockMaster::AudioDevice);
         if self.active_target_frame != Some(self.position.frame) {
             self.active_target_frame = Some(self.position.frame);
@@ -751,6 +801,7 @@ impl PlaybackEngine {
             preview_scale: self.preview_scale,
             quality_revision: self.quality_revision,
             audio_clock_observation: self.last_audio_observation,
+            audio_handoff: self.last_audio_handoff,
         }
     }
 
@@ -831,6 +882,7 @@ impl PlaybackEngine {
         self.terminal_delivery = None;
         self.audio_device_anchor = None;
         self.last_audio_observation = None;
+        self.last_audio_handoff = None;
     }
 
     fn refresh_frame_demand_if_target_changed(
@@ -928,18 +980,30 @@ fn sample_frames_duration(frames: u64, sample_rate: u32) -> Duration {
     Duration::from_nanos(nanos.min(u64::MAX as u128) as u64)
 }
 
-fn sample_frames_to_timeline_frames(
-    sample_frames: u64,
-    sample_rate: u32,
-    time_base: Rational,
-) -> Result<i64, PlaybackError> {
+fn audio_media_position_ns(
+    observation: AudioDeviceClockObservation,
+    effective_consumed_frames: u64,
+) -> Result<i128, PlaybackError> {
+    let anchor_ns = time_code_ns(observation.media_anchor)?;
+    let consumed_ns = sample_frames_duration(effective_consumed_frames, observation.sample_rate)
+        .as_nanos()
+        .min(i128::MAX as u128) as i128;
+    Ok(anchor_ns.saturating_add(consumed_ns))
+}
+
+fn time_code_ns(value: TimeCode) -> Result<i128, PlaybackError> {
+    validate_time_base(value.time_base)?;
+    let numerator = (value.frame as i128)
+        .saturating_mul(value.time_base.num as i128)
+        .saturating_mul(1_000_000_000);
+    Ok(numerator / value.time_base.den as i128)
+}
+
+fn timeline_frame_at_ns(nanos: i128, time_base: Rational) -> Result<i64, PlaybackError> {
     validate_time_base(time_base)?;
-    if sample_rate == 0 {
-        return Err(PlaybackError::InvalidAudioSampleRate);
-    }
-    let numerator = (sample_frames as u128).saturating_mul(time_base.den as u128);
-    let denominator = (sample_rate as u128).saturating_mul(time_base.num as u128);
-    Ok((numerator / denominator).min(i64::MAX as u128) as i64)
+    let denominator = (time_base.num as i128).saturating_mul(1_000_000_000);
+    let frame = nanos.saturating_mul(time_base.den as i128) / denominator;
+    Ok(frame.clamp(i64::MIN as i128, i64::MAX as i128) as i64)
 }
 
 fn frame_duration(time_base: Rational) -> Result<Duration, PlaybackError> {
@@ -968,6 +1032,7 @@ mod tests {
             stream_generation: 7,
             sample_rate: 48_000,
             consumed_frames,
+            media_anchor: TimeCode::new(-1_000, Rational::new(1, 48_000)),
             observed_at,
             grade: AudioClockObservationGrade::CallbackConsumptionEstimate,
             estimated_latency_frames: 0,
@@ -1050,6 +1115,54 @@ mod tests {
 
         assert_eq!(snapshot.clock_master, Some(ClockMaster::Synthetic));
         assert_eq!(engine.tick(ts(40)).unwrap().position.frame, 1);
+    }
+
+    #[test]
+    fn out_of_phase_new_stream_is_rejected_without_reanchoring_synthetic_time() {
+        let mut engine = engine();
+        engine.play(100, ts(0)).unwrap();
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+        engine.tick(ts(80)).unwrap();
+        let mut observation = audio_observation(&engine, 1_000, ts(80));
+        observation.stream_generation = 8;
+        observation.media_anchor = TimeCode::new(0, Rational::new(1, 48_000));
+
+        let rejected = engine.observe_audio_device_clock(observation).unwrap();
+
+        assert_eq!(rejected.position.frame, 2);
+        assert_eq!(rejected.clock_master, Some(ClockMaster::Synthetic));
+        assert_eq!(
+            rejected.audio_handoff.map(|evidence| evidence.status),
+            Some(AudioClockHandoffStatus::PhaseRejected)
+        );
+        assert_eq!(engine.tick(ts(120)).unwrap().position.frame, 3);
+    }
+
+    #[test]
+    fn aligned_reprimed_stream_can_take_master_after_phase_rejection() {
+        let mut engine = engine();
+        engine.play(100, ts(0)).unwrap();
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+        engine.tick(ts(80)).unwrap();
+        let mut rejected = audio_observation(&engine, 1_000, ts(80));
+        rejected.stream_generation = 8;
+        rejected.media_anchor = TimeCode::new(0, Rational::new(1, 48_000));
+        engine.observe_audio_device_clock(rejected).unwrap();
+
+        let mut aligned = audio_observation(&engine, 1_000, ts(90));
+        aligned.stream_generation = 9;
+        aligned.media_anchor = TimeCode::new(3_320, Rational::new(1, 48_000));
+        let accepted = engine.observe_audio_device_clock(aligned).unwrap();
+
+        assert_eq!(accepted.clock_master, Some(ClockMaster::AudioDevice));
+        assert_eq!(
+            accepted.audio_handoff.map(|evidence| evidence.status),
+            Some(AudioClockHandoffStatus::Accepted)
+        );
+        assert!(accepted.audio_handoff.is_some_and(|evidence| {
+            evidence.phase_error_ns.unsigned_abs()
+                <= PlaybackPolicy::default().max_audio_handoff_phase_error.as_nanos() as u64
+        }));
     }
 
     fn engine() -> PlaybackEngine {

@@ -25,8 +25,9 @@ use mondrian_effects::{
 use mondrian_export::queue::RenderQueue;
 use mondrian_media::audio::{
     AudioBuffer, AudioMixer, AudioRenderCursor, AudioSourceCache, AudioTrackConfig, AudioTrackData,
-    RealtimeAudioOutput, RealtimeAudioOutputSnapshot,
+    RealtimeAudioOutputSnapshot,
 };
+use mondrian_media::{RealtimeAudioOutputEvent, RealtimeAudioOutputManager};
 use mondrian_playback::{
     AudioClockObservationGrade, AudioDeviceClockObservation, AudioDeviceClockState, ClockMaster,
     FrameDelivery, FrameDeliveryKind, MonotonicTimestamp, PlaybackEngine, TransportState,
@@ -264,7 +265,7 @@ pub struct AppState {
     // 音频时钟与 A/V 同步
     pub audio_sample_rate: u32,
     pub audio_render_cursor: AudioRenderCursor,
-    pub audio_output: Option<RealtimeAudioOutput>,
+    pub audio_output: RealtimeAudioOutputManager,
     pub audio_mixer: AudioMixer,
     pub audio_source_cache: Arc<AudioSourceCache>,
     pub audio_chunk_secs: f64,
@@ -274,6 +275,7 @@ pub struct AppState {
     audio_render_generation: u64,
     audio_render_in_flight: usize,
     audio_render_next_start_secs: f64,
+    audio_output_media_anchor: Option<TimeCode>,
 
     media_import_tx: mpsc::Sender<MediaImportResult>,
     media_import_rx: mpsc::Receiver<MediaImportResult>,
@@ -353,7 +355,7 @@ impl AppState {
             proxy_mode_assets: HashSet::new(),
             audio_sample_rate,
             audio_render_cursor: AudioRenderCursor::new(audio_sample_rate),
-            audio_output: RealtimeAudioOutput::try_new(audio_sample_rate, audio_channels).ok(),
+            audio_output: RealtimeAudioOutputManager::new(audio_sample_rate, audio_channels),
             audio_mixer: AudioMixer::new(audio_sample_rate, audio_channels),
             audio_source_cache,
             audio_chunk_secs: 0.08,
@@ -363,6 +365,7 @@ impl AppState {
             audio_render_generation: 1,
             audio_render_in_flight: 0,
             audio_render_next_start_secs: 0.0,
+            audio_output_media_anchor: None,
             media_import_tx,
             media_import_rx,
             next_media_import_batch_id: 1,

@@ -8,6 +8,7 @@
 //! - 代理文件生成（Proxy）
 
 pub mod audio;
+mod audio_output;
 pub mod decoder;
 mod ffmpeg_runtime;
 pub mod info;
@@ -20,6 +21,7 @@ pub use audio::{
     AudioBuffer, AudioMixer, AudioRenderCursor, AudioSourceCache, AudioTrackConfig, AudioTrackData,
     RealtimeAudioOutput, RealtimeAudioOutputSnapshot,
 };
+pub use audio_output::{RealtimeAudioOutputEvent, RealtimeAudioOutputManager};
 pub use decoder::{
     DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
     DecodedVideoMatrix, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,

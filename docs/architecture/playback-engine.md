@@ -529,6 +529,19 @@ observations while already Synthetic do not reanchor or freeze transport.
 
 The grade remains explicitly `CallbackConsumptionEstimate`, not exact hardware
 `DevicePosition`. The former misleading `AudioClock` is now explicitly named
-`AudioRenderCursor` and cannot be exposed as Clock Master evidence. Device reopen,
-phase-controlled Synthetic-to-Audio reacquisition, and backend-native hardware
-position grades remain Phase 3 work.
+`AudioRenderCursor` and cannot be exposed as Clock Master evidence.
+
+Device open/reopen now sits behind a non-blocking media Module. Because CPAL
+streams are `!Send`, a named device thread retains each concrete stream and
+publishes only its lock-free handle. Open failures retry from 250 ms to a 5 s
+ceiling while Synthetic Master continues. Every new generation invalidates old
+audio render work, clears queued PCM, remains inactive through 120 ms preroll,
+and only then offers callback evidence.
+
+Synthetic-to-Audio qualification is phase-controlled. An observation carries
+the exact media `TimeCode` at active-consumption frame zero; the Engine compares
+latency-adjusted integer consumption with the published timeline. Error beyond
+the versioned 20 ms budget records `PhaseRejected`, keeps Synthetic authoritative
+without reanchoring, and asks the app Adapter to reprime. Accepted/rejected
+generation and signed phase error are immutable snapshot evidence. Small-error
+resampling/slew and backend-native hardware position remain Phase 3 work.
