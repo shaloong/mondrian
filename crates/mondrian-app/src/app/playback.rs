@@ -462,6 +462,15 @@ impl AppState {
         self.playback_engine.snapshot().clock_master
     }
 
+    /// Runtime-only Viewer scale selected by the Playback Quality Policy.
+    pub fn playback_preview_resolution_scale(&self) -> PreviewResolutionScale {
+        if self.is_playing() {
+            self.playback_engine.snapshot().preview_scale
+        } else {
+            PreviewResolutionScale::Full
+        }
+    }
+
     /// Remaining useful lifetime of the authoritative current Frame Demand.
     pub fn playback_frame_deadline_budget_us(&self) -> Option<u64> {
         let demand = self.playback_engine.frame_demand()?;
@@ -785,6 +794,33 @@ mod tests {
         assert_eq!(advanced.status, PlaybackAdvanceStatus::Advanced);
         assert_eq!(advanced.current_frame, 2);
         assert!(state.is_playing());
+    }
+
+    #[test]
+    fn sustained_late_deliveries_expose_lower_runtime_preview_scale_to_adapters() {
+        let mut state = state_with_sequence(40);
+        play_ready(&mut state);
+
+        for _ in 0..12 {
+            state.advance_playback_clock(Duration::from_millis(40));
+            state.observe_viewer_frame_delivery(FrameDeliveryKind::Late);
+        }
+
+        assert_eq!(
+            state.playback_preview_resolution_scale(),
+            PreviewResolutionScale::Half
+        );
+        assert_eq!(
+            state.playback_engine.snapshot().state,
+            TransportState::Recovering
+        );
+
+        state.pause();
+        assert_eq!(
+            state.playback_preview_resolution_scale(),
+            PreviewResolutionScale::Full,
+            "paused still-frame work must return to the authored preview scale"
+        );
     }
 
     #[test]

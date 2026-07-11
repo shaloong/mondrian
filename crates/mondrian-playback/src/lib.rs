@@ -194,6 +194,15 @@ pub enum PreviewResolutionScale {
 }
 
 impl PreviewResolutionScale {
+    /// Integer divisor applied to each Viewer dimension by preview Adapters.
+    pub const fn dimension_divisor(self) -> u32 {
+        match self {
+            Self::Full => 1,
+            Self::Half => 2,
+            Self::Quarter => 4,
+        }
+    }
+
     fn lower(self) -> Self {
         match self {
             Self::Full => Self::Half,
@@ -740,14 +749,15 @@ impl PlaybackEngine {
 
         let pressured = matches!(
             delivery.kind,
-            FrameDeliveryKind::Late | FrameDeliveryKind::Failed
+            FrameDeliveryKind::Late | FrameDeliveryKind::Degraded | FrameDeliveryKind::Failed
         );
         self.terminal_delivery = Some(identity);
-        let healthy = matches!(
+        let presentable = matches!(
             delivery.kind,
             FrameDeliveryKind::Ready | FrameDeliveryKind::Degraded
         );
-        if self.state == TransportState::Priming && healthy {
+        let healthy = delivery.kind == FrameDeliveryKind::Ready;
+        if self.state == TransportState::Priming && presentable {
             self.state = TransportState::Playing;
             self.clock_master = Some(ClockMaster::Synthetic);
             self.reanchor(self.last_timestamp);
@@ -1021,6 +1031,13 @@ fn frame_duration(time_base: Rational) -> Result<Duration, PlaybackError> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn preview_resolution_scale_exposes_exact_adapter_divisors() {
+        assert_eq!(PreviewResolutionScale::Full.dimension_divisor(), 1);
+        assert_eq!(PreviewResolutionScale::Half.dimension_divisor(), 2);
+        assert_eq!(PreviewResolutionScale::Quarter.dimension_divisor(), 4);
+    }
+
     fn ts(ms: u64) -> MonotonicTimestamp {
         MonotonicTimestamp::from_duration(Duration::from_millis(ms))
     }
@@ -1268,6 +1285,33 @@ mod tests {
         assert_eq!(
             engine.snapshot().preview_scale,
             PreviewResolutionScale::Full
+        );
+    }
+
+    #[test]
+    fn repeated_presentable_degradation_enters_resolution_recovery() {
+        let policy = PlaybackPolicy {
+            pressure_window: 3,
+            pressure_threshold: 3,
+            ..PlaybackPolicy::default()
+        };
+        let mut engine = PlaybackEngine::new(Rational::new(1, 25), policy).unwrap();
+        engine.play(100, ts(0)).unwrap();
+
+        let priming_delivery = current_delivery(&engine, FrameDeliveryKind::Degraded);
+        engine.observe_frame_delivery(priming_delivery).unwrap();
+        assert_eq!(engine.snapshot().state, TransportState::Playing);
+
+        for index in 1..=2 {
+            engine.tick(ts(index * 40)).unwrap();
+            let delivery = current_delivery(&engine, FrameDeliveryKind::Degraded);
+            engine.observe_frame_delivery(delivery).unwrap();
+        }
+
+        assert_eq!(engine.snapshot().state, TransportState::Recovering);
+        assert_eq!(
+            engine.snapshot().preview_scale,
+            PreviewResolutionScale::Half
         );
     }
 

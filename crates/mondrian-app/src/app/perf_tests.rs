@@ -102,10 +102,17 @@ struct PreviewReadinessCounts {
     unavailable: usize,
 }
 
+#[derive(Debug, Serialize, Default, PartialEq, Eq)]
+struct HeadlessViewerGpuExtent {
+    width: u32,
+    height: u32,
+}
+
 #[derive(Debug, Serialize, Default)]
 struct HeadlessViewerGpuExecutionSummary {
     rendered_frames: usize,
     cached_frames: usize,
+    output_extents: Vec<HeadlessViewerGpuExtent>,
     duration_samples_us: Vec<u64>,
     fallback_count: usize,
     fallback_reasons: Vec<String>,
@@ -114,6 +121,13 @@ struct HeadlessViewerGpuExecutionSummary {
 
 impl HeadlessViewerGpuExecutionSummary {
     fn record(&mut self, execution: HeadlessViewerGpuExecution) {
+        let output_extent = HeadlessViewerGpuExtent {
+            width: execution.output_width,
+            height: execution.output_height,
+        };
+        if !self.output_extents.contains(&output_extent) {
+            self.output_extents.push(output_extent);
+        }
         if execution.cached {
             self.cached_frames = self.cached_frames.saturating_add(1);
         } else {
@@ -136,6 +150,29 @@ impl HeadlessViewerGpuExecutionSummary {
         let rank = samples.len().saturating_mul(95).saturating_add(99) / 100;
         samples[rank.saturating_sub(1).min(samples.len() - 1)]
     }
+}
+
+#[test]
+fn headless_gpu_summary_records_distinct_executed_extents() {
+    let mut summary = HeadlessViewerGpuExecutionSummary::default();
+    for (width, height) in [(960, 540), (960, 540), (480, 270)] {
+        summary.record(HeadlessViewerGpuExecution {
+            output_width: width,
+            output_height: height,
+            cached: false,
+            duration_us: 1,
+            stage_diagnostics: None,
+            fallback_reasons: Vec::new(),
+        });
+    }
+
+    assert_eq!(
+        summary.output_extents,
+        vec![
+            HeadlessViewerGpuExtent { width: 960, height: 540 },
+            HeadlessViewerGpuExtent { width: 480, height: 270 },
+        ]
+    );
 }
 
 #[derive(Debug, Serialize)]

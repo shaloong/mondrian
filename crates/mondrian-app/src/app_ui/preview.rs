@@ -84,6 +84,8 @@ use crate::app_ui::preview_frame_store::PreviewCpuFrameStoreConfig;
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 use crate::app_ui::preview_scheduler_policy::{
     media_preview_forward_prefetch_window_frames, media_preview_job_deadline_at,
+    playback_frame_delivery_kind, playback_hardware_decode_requested,
+    preview_hardware_decode_effective, PlaybackDecodeExecution,
     MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US, MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES,
     MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
 };
@@ -873,13 +875,12 @@ impl AppUiPreviewService {
             let completed_after_playback_deadline =
                 media_preview_completed_after_playback_deadline(&result);
             if let Some(identity) = result.demand_identity {
-                let kind = if completed_after_playback_deadline {
-                    mondrian_playback::FrameDeliveryKind::Late
-                } else if result.frame.is_some() {
-                    mondrian_playback::FrameDeliveryKind::Ready
-                } else {
-                    mondrian_playback::FrameDeliveryKind::Failed
-                };
+                let kind = playback_frame_delivery_kind(
+                    completed_after_playback_deadline,
+                    result.frame.is_some(),
+                    result.priority,
+                    result.decode_diagnostics.as_ref().map(PlaybackDecodeExecution::from),
+                );
                 outcome
                     .frame_deliveries
                     .push(mondrian_playback::FrameDelivery::for_demand(identity, kind));
@@ -973,7 +974,7 @@ impl AppUiPreviewService {
             return ViewerPreviewState::Unavailable;
         };
         let frame = state.current_frame().max(0);
-        let (width, height) = preview_dimensions_for_sequence(sequence);
+        let (width, height) = preview_dimensions_for_state(state, sequence);
         let display_snapshot = self.display_snapshot.borrow();
         let display_color_space = match preview_display_color_space(
             sequence,
@@ -1154,7 +1155,7 @@ impl AppUiPreviewService {
             return AppUiGpuPreviewFrameState::Unavailable;
         };
         let frame = state.current_frame().max(0);
-        let (width, height) = preview_dimensions_for_sequence(sequence);
+        let (width, height) = preview_dimensions_for_state(state, sequence);
         let display_snapshot = self.display_snapshot.borrow();
         let display_color_space = match preview_display_color_space(
             sequence,
@@ -1943,7 +1944,7 @@ impl AppUiPreviewService {
         if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
             return None;
         }
-        let (width, height) = preview_dimensions_for_sequence(sequence);
+        let (width, height) = preview_dimensions_for_state(state, sequence);
         let parent_working_color_space = parent_color_context.working_color_space;
         let color_context = sequence.settings.nested_render_color_context(parent_color_context);
         let resolved = self
@@ -5939,20 +5940,6 @@ fn push_decode_root_cause_with_action(
     }
 }
 
-fn playback_hardware_decode_requested(request: PreviewHardwareDecodeRequest) -> bool {
-    matches!(
-        request,
-        PreviewHardwareDecodeRequest::PreferHardwareDecode
-            | PreviewHardwareDecodeRequest::PreferGpuResident
-            | PreviewHardwareDecodeRequest::RequireGpuResident
-    )
-}
-
-fn preview_hardware_decode_effective(diagnostics: &PreviewDecodeDiagnostics) -> bool {
-    diagnostics.hardware_decode_decision == PreviewHardwareDecodeDecision::GpuResidentNative
-        || diagnostics.hardware_decode_cpu_transfer_observed
-}
-
 fn classify_preview_decode_bottleneck(
     durations: PreviewDecodeStageDurations,
     queue_wait_us: u64,
@@ -7419,7 +7406,7 @@ impl AppUiPreviewService {
                 TimelineRenderPlanElement::NestedSequence(nested) => {
                     if let Some(nested_sequence) = state.sequence_by_id(nested.sequence_id) {
                         let (nested_width, nested_height) =
-                            preview_dimensions_for_sequence(nested_sequence);
+                            preview_dimensions_for_state(state, nested_sequence);
                         let nested_context = nested_sequence
                             .settings
                             .nested_render_color_context(color_context.clone());
@@ -8330,11 +8317,30 @@ fn nested_preview_frame_signature(
     hasher.finish()
 }
 
+#[cfg(test)]
 fn preview_dimensions_for_sequence(sequence: &Sequence) -> (u32, u32) {
+    preview_dimensions_for_sequence_at_runtime_scale(
+        sequence,
+        mondrian_playback::PreviewResolutionScale::Full,
+    )
+}
+
+fn preview_dimensions_for_state(state: &AppState, sequence: &Sequence) -> (u32, u32) {
+    preview_dimensions_for_sequence_at_runtime_scale(
+        sequence,
+        state.playback_preview_resolution_scale(),
+    )
+}
+
+fn preview_dimensions_for_sequence_at_runtime_scale(
+    sequence: &Sequence,
+    runtime_scale: mondrian_playback::PreviewResolutionScale,
+) -> (u32, u32) {
     let resolution = sequence.settings.resolution;
     let scale = normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale);
-    let width = ((resolution.width as f32 * scale).round() as u32).max(1);
-    let height = ((resolution.height as f32 * scale).round() as u32).max(1);
+    let divisor = runtime_scale.dimension_divisor();
+    let width = ((resolution.width as f32 * scale).round() as u32).max(1).div_ceil(divisor);
+    let height = ((resolution.height as f32 * scale).round() as u32).max(1).div_ceil(divisor);
     (width, height)
 }
 
@@ -13557,6 +13563,33 @@ mod tests {
     }
 
     #[test]
+    fn playback_quality_scale_multiplies_user_preview_resolution() {
+        let sequence = Sequence::new("runtime scale");
+
+        assert_eq!(
+            preview_dimensions_for_sequence_at_runtime_scale(
+                &sequence,
+                mondrian_playback::PreviewResolutionScale::Full,
+            ),
+            (960, 540)
+        );
+        assert_eq!(
+            preview_dimensions_for_sequence_at_runtime_scale(
+                &sequence,
+                mondrian_playback::PreviewResolutionScale::Half,
+            ),
+            (480, 270)
+        );
+        assert_eq!(
+            preview_dimensions_for_sequence_at_runtime_scale(
+                &sequence,
+                mondrian_playback::PreviewResolutionScale::Quarter,
+            ),
+            (240, 135)
+        );
+    }
+
+    #[test]
     fn nested_solid_color_sequence_returns_preview_frame() {
         let mut state = AppState::new();
         let mut child = Sequence::new("child");
@@ -15698,6 +15731,52 @@ mod tests {
         assert!(
             service.frame_store.borrow_mut().media_frame(&key).is_none(),
             "late playback completion should not enter the media preview cache"
+        );
+        service.shutdown();
+    }
+
+    #[test]
+    fn preview_service_poll_reports_presentable_hardware_fallback_as_degraded() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+        state.play();
+        let demand_identity =
+            state.playback_frame_demand_identity().expect("playback demand identity");
+        let result_tx = install_preview_result_channel_for_test(&service);
+        let key = test_media_key(79);
+        let generation = service.scheduler.begin_generation();
+        assert_eq!(
+            service.scheduler.request(
+                key.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::PlaybackCursor,
+            ),
+            MediaPreviewRequestStatus::Scheduled { evicted_prefetch: None, evicted_still: None }
+        );
+        let mut result = test_successful_media_preview_result(key, generation, 9);
+        result.priority = MediaPreviewRequestPriority::Current;
+        result.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
+        result.demand_identity = Some(demand_identity);
+        result.decode_diagnostics = Some(test_preview_decode_diagnostics(
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewHardwareDecodeDecision::CpuRgbaHardwareUnavailable,
+            PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
+        ));
+        result_tx.send(result).expect("send degraded successful result");
+
+        let outcome = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5));
+
+        assert!(
+            outcome.visible_change,
+            "correct CPU fallback remains presentable"
+        );
+        assert_eq!(
+            outcome.frame_deliveries,
+            vec![mondrian_playback::FrameDelivery::for_demand(
+                demand_identity,
+                mondrian_playback::FrameDeliveryKind::Degraded,
+            )]
         );
         service.shutdown();
     }

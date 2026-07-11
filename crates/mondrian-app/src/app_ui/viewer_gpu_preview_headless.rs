@@ -18,6 +18,10 @@ use mondrian_ui_widgets::ViewerExternalTexturePresentation;
 /// Evidence for one real headless Viewer GPU execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HeadlessViewerGpuExecution {
+    /// Exact output width submitted to the shared Viewer GPU Runtime.
+    pub output_width: u32,
+    /// Exact output height submitted to the shared Viewer GPU Runtime.
+    pub output_height: u32,
     /// Whether the runtime already retained this exact output.
     pub cached: bool,
     /// Wall time spent recording, submitting, and waiting for the GPU.
@@ -78,6 +82,8 @@ impl HeadlessViewerGpuAdapter {
         let output_key = frame.external_texture_key();
         if self.current_output_key.as_deref() == Some(output_key.as_str()) {
             return Ok(HeadlessViewerGpuExecution {
+                output_width: frame.width,
+                output_height: frame.height,
                 cached: true,
                 duration_us: elapsed_us(started),
                 stage_diagnostics: None,
@@ -118,6 +124,8 @@ impl HeadlessViewerGpuAdapter {
             .map_err(|error| HeadlessViewerGpuError::Poll(error.to_string()))?;
         self.current_output_key = Some(output_key);
         Ok(HeadlessViewerGpuExecution {
+            output_width: frame.width,
+            output_height: frame.height,
             cached: false,
             duration_us: elapsed_us(started),
             stage_diagnostics: Some(record.stage_diagnostics),

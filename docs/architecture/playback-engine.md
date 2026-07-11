@@ -253,7 +253,8 @@ Terminal outcomes are:
 - `StaleAvailable`: at the demand deadline, policy closed the demand while a
   previously presented frame could remain visible.
 - `Degraded`: an explicitly allowed temporary resolution or HDR-to-SDR path was
-  executed and reported.
+  executed and reported, or a correct CPU frame remained presentable after an
+  explicitly requested hardware decode path did not actually engage.
 - `Blocked`: correctness/capability policy forbids presentation.
 - `Canceled`: superseded epoch, demand, or latest-wins request.
 - `Failed`: execution error not classified as a policy blocker.
@@ -269,8 +270,9 @@ Only the Playback Engine interprets a delivery:
 - During Playing, Late/Canceled video is dropped while clock time continues.
 - StaleAvailable preserves UI continuity but never counts as current readiness.
 - Blocked enters Blocked when no allowed path exists.
-- Repeated Late/Failed outcomes enter Recovering according to a sliding window,
-  not a single-frame boolean.
+- Repeated Late/Failed/Degraded outcomes enter Recovering according to a sliding
+  window, not a single-frame boolean. Degraded remains presentable and may
+  satisfy Priming, but it is not healthy evidence for resolution restoration.
 
 The Viewer's immediate `Stale` lifecycle state is not itself a Frame Delivery.
 It describes the currently visible fallback while current work is still
@@ -286,6 +288,22 @@ future deadline-classified StaleAvailable outcome.
 The Engine may automatically lower temporary preview resolution under sustained
 pressure. The scale is runtime-only, monotonic within a recovery step, bounded
 by a configured minimum, and restored only after a hysteresis window.
+
+The Preview Adapter must execute that policy rather than merely report it. It
+multiplies the sequence's user-authored preview scale by the runtime
+`Full`/`Half`/`Quarter` divisor before constructing decode, composite, nested
+sequence, prefetch, and GPU-output keys. Integer dimensions round upward and
+remain at least one pixel. Width/height are part of request identity, while the
+quality revision rejects superseded work. The same rule is consumed by Window
+and headless paths. Paused and stopped still-frame work uses the authored scale
+rather than retaining a recovery reduction. This scale changes spatial work
+only: proxy/original media, input interpretation, working/output transforms,
+tone mapping, and effect semantics remain unchanged.
+
+Hardware preference is classified from execution diagnostics, never capability
+probing. Requested hardware that produces a correct CPU fallback is
+`Degraded` and drives the same bounded recovery ladder. An observed hardware
+frame transferred to CPU, or a native GPU-resident decoded frame, is `Ready`.
 
 The Engine must never silently:
 
@@ -437,11 +455,13 @@ contract admission, renderer external-texture registration, Viewer publication,
 and telemetry projection. `HeadlessViewerGpuAdapter` is the second real Adapter:
 it creates a no-Surface high-performance device, calls `record_frame`, resolves
 the retained output texture, submits the command buffer, and waits for that
-submission. It has no UI texture registry and does not claim one; a current
-Frame Delivery becomes Ready only after this real execution succeeds. Both
-Adapters therefore share the same composite/color Implementation. Renderer and
-platform hardware-decode admission is resolved in `native_video_import`, then
-consumed by both Host and headless Adapters; it is no longer Host-local policy.
+submission. It has no UI texture registry and does not claim one. Its readiness
+and performance evidence is credited only after this real execution succeeds,
+and records every distinct output extent so gates can distinguish executed
+scaling from a state-only transition. Both Adapters therefore share the same
+composite/color Implementation. Renderer and platform hardware-decode admission
+is resolved in `native_video_import`, then consumed by both Host and headless
+Adapters; it is no longer Host-local policy.
 
 ## Required invariants
 
@@ -643,7 +663,8 @@ fewer than 90% current Ready samples even when stale frames keep 95% of samples
 visible. The headless harness now pre-rolls and executes only through the real
 GPU Adapter; it no longer invokes the CPU raster Viewer in parallel. Its report
 contains per-output GPU completion latency, cache reuse, color-stage evidence,
-and explicit fallback reasons. External gates also fail when real GPU execution
+explicit fallback reasons, and the distinct extents actually submitted to the
+shared runtime. External gates also fail when real GPU execution
 coverage is missing, playback GPU completion p95 exceeds one frame interval, a
 readback appears, or a GPU blocker is reported. Pre-roll pipeline warm-up is
 reported separately and cannot contaminate the steady-playback p95.
