@@ -9,6 +9,7 @@
 
 pub mod audio;
 mod audio_output;
+mod audio_playback;
 pub mod decoder;
 mod ffmpeg_runtime;
 pub mod info;
@@ -22,6 +23,11 @@ pub use audio::{
     RealtimeAudioOutput, RealtimeAudioOutputSnapshot,
 };
 pub use audio_output::{RealtimeAudioOutputEvent, RealtimeAudioOutputManager};
+pub use audio_playback::{
+    AudioPcmRenderRequest, AudioPcmRenderer, AudioPlayback, AudioPlaybackConfig,
+    AudioPlaybackConfigError, AudioPlaybackEvent, AudioPlaybackPoll, AudioPlaybackSnapshot,
+    AudioPlaybackState,
+};
 pub use decoder::{
     DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
     DecodedVideoMatrix, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,

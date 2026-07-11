@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
 use std::{collections::hash_map::DefaultHasher, hash::Hash, hash::Hasher};
 use std::{fs, path::Path, path::PathBuf};
-use std::{sync::mpsc, thread};
 
 use mondrian_assets::{AssetKind, AssetLibrary};
 use mondrian_core::{
@@ -24,10 +24,13 @@ use mondrian_effects::{
 };
 use mondrian_export::queue::RenderQueue;
 use mondrian_media::audio::{
-    AudioBuffer, AudioMixer, AudioRenderCursor, AudioSourceCache, AudioTrackConfig, AudioTrackData,
+    AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData,
     RealtimeAudioOutputSnapshot,
 };
-use mondrian_media::{RealtimeAudioOutputEvent, RealtimeAudioOutputManager};
+use mondrian_media::{
+    AudioPcmRenderRequest, AudioPcmRenderer, AudioPlayback, AudioPlaybackEvent,
+    AudioPlaybackSnapshot,
+};
 use mondrian_playback::{
     AudioClockObservationGrade, AudioDeviceClockObservation, AudioDeviceClockState, ClockMaster,
     FrameDelivery, FrameDeliveryKind, MonotonicTimestamp, PlaybackEngine, TransportState,
@@ -40,6 +43,8 @@ use serde::{Deserialize, Serialize};
 const PROJECT_EXTENSION: &str = "mdp";
 const DEFAULT_ADJUSTMENT_LAYER_DURATION_SECS: f64 = 5.0;
 const MAX_STATUS_LOG_ENTRIES: usize = 64;
+const AUDIO_OUTPUT_CHANNELS: u8 = 2;
+const AUDIO_IDLE_WARMUP_CHUNK_SECS: f64 = 0.08;
 
 mod action_handler;
 mod animation_state;
@@ -264,18 +269,9 @@ pub struct AppState {
 
     // 音频时钟与 A/V 同步
     pub audio_sample_rate: u32,
-    pub audio_render_cursor: AudioRenderCursor,
-    pub audio_output: RealtimeAudioOutputManager,
-    pub audio_mixer: AudioMixer,
+    audio_playback: AudioPlayback,
     pub audio_source_cache: Arc<AudioSourceCache>,
-    pub audio_chunk_secs: f64,
     audio_idle_warmup_last: Option<std::time::Instant>,
-    audio_render_tx: mpsc::Sender<AudioRenderRequest>,
-    audio_render_rx: mpsc::Receiver<AudioRenderResponse>,
-    audio_render_generation: u64,
-    audio_render_in_flight: usize,
-    audio_render_next_start_secs: f64,
-    audio_output_media_anchor: Option<TimeCode>,
 
     media_import_tx: mpsc::Sender<MediaImportResult>,
     media_import_rx: mpsc::Receiver<MediaImportResult>,
@@ -283,45 +279,12 @@ pub struct AppState {
     media_import_batches: HashMap<u64, PendingMediaImportBatch>,
 }
 
-struct AudioRenderRequest {
-    generation: u64,
-    window_start_secs: f64,
-    duration_secs: f64,
-    sequence: Sequence,
-    library: Arc<AssetLibrary>,
-}
-
-struct AudioRenderResponse {
-    generation: u64,
-    chunk: mondrian_core::Result<AudioBuffer>,
-}
-
 impl AppState {
     pub fn new() -> Self {
         let audio_sample_rate = 48_000;
-        let audio_channels = 2;
+        let audio_channels = AUDIO_OUTPUT_CHANNELS;
         let audio_source_cache = Arc::new(AudioSourceCache::new(audio_sample_rate, audio_channels));
-        let (audio_render_tx, audio_render_rx) = mpsc::channel::<AudioRenderRequest>();
-        let (audio_done_tx, audio_done_rx) = mpsc::channel::<AudioRenderResponse>();
         let (media_import_tx, media_import_rx) = mpsc::channel::<MediaImportResult>();
-
-        let worker_cache = Arc::clone(&audio_source_cache);
-        thread::spawn(move || {
-            while let Ok(req) = audio_render_rx.recv() {
-                let chunk = render_audio_chunk_with_cache(
-                    &req.sequence,
-                    req.library.as_ref(),
-                    worker_cache.as_ref(),
-                    audio_sample_rate,
-                    audio_channels,
-                    req.window_start_secs,
-                    req.duration_secs,
-                );
-
-                let _ =
-                    audio_done_tx.send(AudioRenderResponse { generation: req.generation, chunk });
-            }
-        });
 
         Self {
             event_bus: EventBus::new(),
@@ -354,18 +317,9 @@ impl AppState {
             auto_proxy_enabled: false,
             proxy_mode_assets: HashSet::new(),
             audio_sample_rate,
-            audio_render_cursor: AudioRenderCursor::new(audio_sample_rate),
-            audio_output: RealtimeAudioOutputManager::new(audio_sample_rate, audio_channels),
-            audio_mixer: AudioMixer::new(audio_sample_rate, audio_channels),
+            audio_playback: AudioPlayback::product_default(),
             audio_source_cache,
-            audio_chunk_secs: 0.08,
             audio_idle_warmup_last: None,
-            audio_render_tx,
-            audio_render_rx: audio_done_rx,
-            audio_render_generation: 1,
-            audio_render_in_flight: 0,
-            audio_render_next_start_secs: 0.0,
-            audio_output_media_anchor: None,
             media_import_tx,
             media_import_rx,
             next_media_import_batch_id: 1,
@@ -379,12 +333,6 @@ impl AppState {
             .map(|seq| seq.settings.frame_rate.to_f64())
             .unwrap_or(25.0)
             .max(1.0)
-    }
-
-    fn sync_audio_render_cursor_to_frame(&mut self, frame: i64) {
-        let video_secs = frame.max(0) as f64 / self.fps();
-        let sample_pos = (video_secs * self.audio_sample_rate as f64).round() as i64;
-        self.audio_render_cursor.seek_to_samples(sample_pos.max(0));
     }
 
     pub fn set_status_hint(&mut self, message: impl Into<String>, is_error: bool) {
@@ -544,29 +492,6 @@ fn audio_idle_warmup_enabled() -> bool {
                 matches!(value.as_str(), "1" | "true" | "yes" | "on")
             })
             .unwrap_or(true)
-    })
-}
-
-fn audio_buffer_target_high_secs_playing() -> f64 {
-    static TARGET: OnceLock<f64> = OnceLock::new();
-    *TARGET.get_or_init(|| {
-        std::env::var("MONDRIAN_AUDIO_BUFFER_HIGH_SECS")
-            .ok()
-            .and_then(|v| v.trim().parse::<f64>().ok())
-            .filter(|v| *v >= 0.20 && *v <= 2.0)
-            .unwrap_or(0.46)
-    })
-}
-
-fn audio_render_max_in_flight_playing() -> usize {
-    static MAX: OnceLock<usize> = OnceLock::new();
-    *MAX.get_or_init(|| {
-        std::env::var("MONDRIAN_AUDIO_RENDER_MAX_IN_FLIGHT")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .filter(|v| *v > 0)
-            .map(|v| v.clamp(1, 24))
-            .unwrap_or(8)
     })
 }
 

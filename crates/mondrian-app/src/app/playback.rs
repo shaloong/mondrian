@@ -2,7 +2,6 @@ use super::*;
 
 const MIN_PLAYBACK_WAKE_DELAY: Duration = Duration::from_millis(1);
 const MAX_PLAYBACK_WAKE_DELAY: Duration = Duration::from_millis(100);
-const AUDIO_DEVICE_PREROLL: Duration = Duration::from_millis(120);
 const AUDIO_CALLBACK_STALE_AFTER: Duration = Duration::from_millis(100);
 
 /// Result category for one playback clock advance.
@@ -63,10 +62,7 @@ impl AppState {
             tracing::error!(%error, "failed to start Playback Session");
             return;
         }
-        self.sync_audio_render_cursor_to_frame(frames);
-        self.reset_audio_render_pipeline(TimeCode::new(frames, self.playback_time_base()));
-        self.audio_output.set_muted(false);
-        self.audio_output.set_active(false);
+        self.prepare_audio_playback(TimeCode::new(frames, self.playback_time_base()));
     }
 
     pub fn pause(&mut self) {
@@ -75,11 +71,7 @@ impl AppState {
         if let Err(error) = self.playback_engine.pause(self.playback_now) {
             tracing::error!(%error, "failed to pause Playback Session");
         }
-        self.sync_audio_render_cursor_to_frame(frames);
-        self.reset_audio_render_pipeline(TimeCode::new(frames, self.playback_time_base()));
-        self.audio_output.set_muted(false);
-        self.audio_output.set_active(false);
-        self.audio_output.clear();
+        self.audio_playback.reprime(TimeCode::new(frames, self.playback_time_base()));
     }
 
     pub fn stop(&mut self) {
@@ -87,10 +79,7 @@ impl AppState {
         if let Err(error) = self.playback_engine.stop(self.playback_now) {
             tracing::error!(%error, "failed to stop Playback Session");
         }
-        self.reset_audio_render_pipeline(TimeCode::new(0, self.playback_time_base()));
-        self.audio_output.set_muted(false);
-        self.audio_output.set_active(false);
-        self.audio_output.clear();
+        self.audio_playback.reprime(TimeCode::new(0, self.playback_time_base()));
     }
 
     pub fn seek(&mut self, frame: i64) {
@@ -122,11 +111,11 @@ impl AppState {
                 return;
             }
         }
-        self.sync_audio_render_cursor_to_frame(frame);
-        self.reset_audio_render_pipeline(TimeCode::new(frame, time_base));
-        self.audio_output.set_muted(false);
-        self.audio_output.set_active(false);
-        self.audio_output.clear();
+        if was_running {
+            self.prepare_audio_playback(TimeCode::new(frame, time_base));
+        } else {
+            self.audio_playback.reprime(TimeCode::new(frame, time_base));
+        }
     }
 
     pub fn set_playback_frame_running(&mut self, frame: i64) {
@@ -135,93 +124,31 @@ impl AppState {
     }
 
     pub fn pump_audio_output(&mut self) {
-        if let Some(event) = self.audio_output.poll() {
-            self.handle_audio_output_event(event);
+        let playing = self.is_playing();
+        let position = self.playback_engine.snapshot().position;
+        let poll = self.audio_playback.poll(playing, position);
+        for event in poll.events {
+            self.handle_audio_playback_event(event);
         }
-        if self.audio_output.snapshot().is_none() {
-            return;
-        }
-
-        while let Ok(done) = self.audio_render_rx.try_recv() {
-            self.audio_render_in_flight = self.audio_render_in_flight.saturating_sub(1);
-            if done.generation != self.audio_render_generation {
-                continue;
-            }
-            match done.chunk {
-                Ok(chunk) => self.audio_output.enqueue(&chunk),
-                Err(err) => tracing::debug!("音频后台渲染块失败: {}", err),
-            }
-        }
-
-        if !self.is_playing() {
-            self.audio_output.set_muted(false);
-            self.audio_output.set_active(false);
-            self.audio_output.clear();
+        if !playing {
             if audio_idle_warmup_enabled() {
                 self.warm_audio_cache_when_idle();
             }
             return;
         }
-
         self.audio_idle_warmup_last = None;
-
-        let Some(seq) = self.sequence.as_ref() else {
-            return;
-        };
-        let Some(library) = self.asset_library.as_ref() else {
-            return;
-        };
-
-        let sample_rate_f64 = self.audio_sample_rate as f64;
-        let chunk_frames = ((self.audio_chunk_secs * sample_rate_f64).round() as usize).max(1);
-        let target_high_secs = audio_buffer_target_high_secs_playing();
-        let max_in_flight = audio_render_max_in_flight_playing();
-        let target_high_frames = (sample_rate_f64 * target_high_secs).round() as usize;
-
-        while self.audio_output.buffered_frames() + self.audio_render_in_flight * chunk_frames
-            < target_high_frames
-        {
-            if self.audio_render_in_flight >= max_in_flight {
-                break;
-            }
-
-            let request = AudioRenderRequest {
-                generation: self.audio_render_generation,
-                window_start_secs: self.audio_render_next_start_secs.max(0.0),
-                duration_secs: self.audio_chunk_secs,
-                sequence: seq.clone(),
-                library: Arc::clone(library),
-            };
-
-            if self.audio_render_tx.send(request).is_err() {
-                break;
-            }
-
-            self.audio_render_in_flight += 1;
-            self.audio_render_next_start_secs += self.audio_chunk_secs;
-        }
-        let preroll_frames = duration_sample_frames(AUDIO_DEVICE_PREROLL, self.audio_sample_rate);
-        if self.audio_output.snapshot().is_some_and(|snapshot| !snapshot.active)
-            && self.audio_output.buffered_frames() >= preroll_frames as usize
-        {
-            self.audio_output.set_active(true);
-        }
-        self.observe_audio_output_clock();
+        self.observe_audio_output_clock(poll.snapshot);
     }
 
-    fn handle_audio_output_event(&mut self, event: RealtimeAudioOutputEvent) {
+    fn handle_audio_playback_event(&mut self, event: AudioPlaybackEvent) {
         match event {
-            RealtimeAudioOutputEvent::Opened { stream_generation } => {
+            AudioPlaybackEvent::DeviceOpened { stream_generation } => {
                 tracing::info!(
                     stream_generation,
                     "audio output stream opened; starting preroll"
                 );
-                let position = self.playback_engine.snapshot().position;
-                self.audio_output.set_active(false);
-                self.audio_output.clear();
-                self.reset_audio_render_pipeline(position);
             }
-            RealtimeAudioOutputEvent::Lost { stream_generation } => {
+            AudioPlaybackEvent::DeviceLost { stream_generation } => {
                 tracing::warn!(
                     stream_generation,
                     "audio output stream lost; using Synthetic Clock Master"
@@ -229,16 +156,25 @@ impl AppState {
                 if let Err(error) = self.playback_engine.audio_device_lost(self.playback_now) {
                     tracing::warn!(%error, "failed to hand off lost audio stream");
                 }
-                self.audio_output_media_anchor = None;
             }
-            RealtimeAudioOutputEvent::OpenFailed { retry_after, reason } => {
+            AudioPlaybackEvent::DeviceOpenFailed { retry_after, reason } => {
                 tracing::debug!(?retry_after, %reason, "audio output open failed; retry scheduled");
             }
+            AudioPlaybackEvent::RenderSubstitutedWithSilence {
+                generation,
+                start_sample,
+                reason,
+            } => tracing::warn!(
+                generation,
+                start_sample,
+                %reason,
+                "audio render window replaced with exact-duration silence"
+            ),
         }
     }
 
-    fn observe_audio_output_clock(&mut self) {
-        let Some(snapshot) = self.audio_output.snapshot() else {
+    fn observe_audio_output_clock(&mut self, audio: AudioPlaybackSnapshot) {
+        let Some(snapshot) = audio.output else {
             return;
         };
         if !self.is_playing() {
@@ -251,7 +187,8 @@ impl AppState {
             self.playback_engine.snapshot().epoch,
             self.playback_now,
             already_audio_master,
-            self.audio_output_media_anchor,
+            audio.media_anchor,
+            audio.activation_preroll_satisfied,
         );
         match self.playback_engine.observe_audio_device_clock(observation) {
             Ok(engine_snapshot)
@@ -259,23 +196,33 @@ impl AppState {
                     && !already_audio_master
                     && engine_snapshot.clock_master != Some(ClockMaster::AudioDevice) =>
             {
-                self.audio_output.set_active(false);
-                self.audio_output.clear();
-                self.reset_audio_render_pipeline(engine_snapshot.position);
+                self.audio_playback.reprime(engine_snapshot.position);
             }
             Ok(_) => {}
             Err(error) => tracing::warn!(%error, "rejected audio-device Clock Master observation"),
         }
     }
 
-    pub(super) fn reset_audio_render_pipeline(&mut self, anchor: TimeCode) {
-        self.audio_output.set_active(false);
-        self.audio_output.clear();
-        self.audio_render_generation = self.audio_render_generation.saturating_add(1);
-        self.audio_render_in_flight = 0;
-        self.audio_render_next_start_secs = time_code_seconds(anchor).max(0.0);
-        self.audio_output_media_anchor = Some(anchor);
-        while self.audio_render_rx.try_recv().is_ok() {}
+    fn prepare_audio_playback(&mut self, anchor: TimeCode) {
+        let renderer = self
+            .sequence
+            .as_ref()
+            .filter(|sequence| sequence_has_audible_audio(sequence))
+            .zip(self.asset_library.as_ref())
+            .map(|(sequence, library)| -> Arc<dyn AudioPcmRenderer> {
+                Arc::new(TimelineAudioPcmRenderer::new(
+                    sequence.clone(),
+                    Arc::clone(library),
+                    Arc::clone(&self.audio_source_cache),
+                    self.audio_sample_rate,
+                    AUDIO_OUTPUT_CHANNELS,
+                ))
+            });
+        if let Some(renderer) = renderer {
+            self.audio_playback.prepare(anchor, renderer);
+        } else {
+            self.audio_playback.clear_source(anchor);
+        }
     }
 
     fn warm_audio_cache_when_idle(&mut self) {
@@ -294,7 +241,7 @@ impl AppState {
         };
 
         let center_secs = self.current_frame().max(0) as f64 / self.fps();
-        let chunk = self.audio_chunk_secs.max(0.08);
+        let chunk = AUDIO_IDLE_WARMUP_CHUNK_SECS;
 
         let _ = self.render_audio_chunk(seq, library.as_ref(), center_secs, chunk);
         let before = (center_secs - chunk).max(0.0);
@@ -316,19 +263,20 @@ impl AppState {
             library,
             self.audio_source_cache.as_ref(),
             self.audio_sample_rate,
-            self.audio_mixer.output_channels,
+            AUDIO_OUTPUT_CHANNELS,
             window_start_secs,
             duration_secs,
         )
     }
 
     pub fn audio_developer_metrics_summary(&self) -> String {
-        let buffered_frames = self.audio_output.buffered_frames();
+        let snapshot = self.audio_playback.snapshot(self.is_playing());
+        let buffered_frames = snapshot.output.map_or(0, |output| output.buffered_frames);
         let buffered_ms = buffered_frames as f64 / self.audio_sample_rate as f64 * 1000.0;
         let source_cache_entries = self.audio_source_cache.cache_entry_count();
         format!(
             "Aud out:{:.0}ms inflight:{} srcCache:{}",
-            buffered_ms, self.audio_render_in_flight, source_cache_entries
+            buffered_ms, snapshot.in_flight, source_cache_entries
         )
     }
 
@@ -361,11 +309,7 @@ impl AppState {
         let target_frame = snapshot.position.frame;
         if snapshot.state == TransportState::Ended {
             self.settle_preview_access_source();
-            self.sync_audio_render_cursor_to_frame(target_frame);
-            self.reset_audio_render_pipeline(snapshot.position);
-            self.audio_output.set_muted(false);
-            self.audio_output.set_active(false);
-            self.audio_output.clear();
+            self.audio_playback.reprime(snapshot.position);
             return PlaybackAdvance {
                 previous_frame,
                 current_frame: target_frame,
@@ -489,6 +433,15 @@ impl AppState {
     }
 }
 
+fn sequence_has_audible_audio(sequence: &Sequence) -> bool {
+    let has_solo = sequence.audio_tracks.iter().any(|track| track.is_solo && !track.is_muted);
+    sequence.audio_tracks.iter().any(|track| {
+        !track.is_muted
+            && (!has_solo || track.is_solo)
+            && track.clips.iter().any(|clip| !clip.is_disabled)
+    })
+}
+
 fn clamp_playback_wake_delay(delay: Duration) -> Duration {
     delay.clamp(MIN_PLAYBACK_WAKE_DELAY, MAX_PLAYBACK_WAKE_DELAY)
 }
@@ -502,26 +455,22 @@ fn duration_sample_frames(duration: Duration, sample_rate: u32) -> u64 {
         .min(u64::MAX as u128) as u64
 }
 
-fn time_code_seconds(value: TimeCode) -> f64 {
-    value.frame as f64 * value.time_base.num as f64 / value.time_base.den as f64
-}
-
 fn audio_device_clock_observation(
     snapshot: RealtimeAudioOutputSnapshot,
     epoch: mondrian_playback::PlaybackEpoch,
     observed_at: MonotonicTimestamp,
     already_audio_master: bool,
     media_anchor: Option<TimeCode>,
+    activation_preroll_satisfied: bool,
 ) -> AudioDeviceClockObservation {
     let callback_fresh =
         snapshot.last_callback_age.is_some_and(|age| age <= AUDIO_CALLBACK_STALE_AFTER);
-    let preroll_frames = duration_sample_frames(AUDIO_DEVICE_PREROLL, snapshot.sample_rate);
     let usable = snapshot.active
         && !snapshot.stream_failed
         && snapshot.active_callback_consumed_frames > 0
         && callback_fresh
         && media_anchor.is_some()
-        && (already_audio_master || snapshot.buffered_frames >= preroll_frames as usize);
+        && (already_audio_master || activation_preroll_satisfied);
     let callback_age_frames = snapshot
         .last_callback_age
         .map(|age| duration_sample_frames(age, snapshot.sample_rate))
@@ -605,6 +554,7 @@ mod tests {
             MonotonicTimestamp::ZERO,
             false,
             Some(TimeCode::new(0, Rational::new(1, 25))),
+            true,
         );
         assert_eq!(ready.state, AudioDeviceClockState::Running);
         assert_eq!(
@@ -621,6 +571,7 @@ mod tests {
                 MonotonicTimestamp::ZERO,
                 false,
                 Some(TimeCode::new(0, Rational::new(1, 25))),
+                true,
             )
             .state,
             AudioDeviceClockState::Unavailable
@@ -635,6 +586,7 @@ mod tests {
                 MonotonicTimestamp::ZERO,
                 false,
                 Some(TimeCode::new(0, Rational::new(1, 25))),
+                false,
             )
             .state,
             AudioDeviceClockState::Unavailable

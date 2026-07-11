@@ -517,7 +517,8 @@ The CPAL Audio Playback Adapter now publishes a typed
 frames, sample rate, callback age/quantum, estimated latency, uncertainty,
 underrun frames, and stream failure. The callback counters are atomic and PCM
 uses a fixed-capacity lock-free queue, so the realtime callback no longer takes
-the former contended `Mutex<VecDeque<_>>`. The app requires 120 ms PCM preroll,
+the former contended `Mutex<VecDeque<_>>`. The Audio Playback Module requires
+120 ms PCM preroll,
 a callback no older than 100 ms, and at least one active-interval callback
 before offering Audio Device Master. The Engine accepts callback estimates only
 within its versioned 20 ms uncertainty budget, anchors the first qualified
@@ -528,8 +529,9 @@ sample position hands off continuously to Synthetic Master; repeated unavailable
 observations while already Synthetic do not reanchor or freeze transport.
 
 The grade remains explicitly `CallbackConsumptionEstimate`, not exact hardware
-`DevicePosition`. The former misleading `AudioClock` is now explicitly named
-`AudioRenderCursor` and cannot be exposed as Clock Master evidence.
+`DevicePosition`. The former app-owned `AudioClock`/`AudioRenderCursor` no
+longer participates in realtime scheduling and cannot be exposed as Clock
+Master evidence.
 
 Device open/reopen now sits behind a non-blocking media Module. Because CPAL
 streams are `!Send`, a named device thread retains each concrete stream and
@@ -545,3 +547,13 @@ the versioned 20 ms budget records `PhaseRejected`, keeps Synthetic authoritativ
 without reanchoring, and asks the app Adapter to reprime. Accepted/rejected
 generation and signed phase error are immutable snapshot evidence. Small-error
 resampling/slew and backend-native hardware position remain Phase 3 work.
+
+The same Audio Playback Module now owns the PCM render worker, current
+generation, integer-sample next-window position, bounded in-flight admission,
+460 ms high watermark, and preroll activation. `AppState` supplies only an
+immutable timeline `AudioPcmRenderer` Adapter and consumes snapshots/events. A
+headless fake output plus fake PCM renderer exercise the same Interface,
+including exact window order, preroll activation, malformed-buffer silence
+substitution, synchronous cancellation of queued old work, and rejection of the
+at-most-one executing completion from an invalidated generation.
+Environment variables no longer alter realtime audio watermark semantics.

@@ -11,18 +11,25 @@ Adapter.
 - `AudioSourceCache`: caches decoded source PCM by media path.
 - `RealtimeAudioOutput`: one concrete CPAL stream with a fixed-capacity PCM queue
   and callback-only atomic telemetry.
-- `RealtimeAudioOutputManager`: non-blocking Audio Playback Module for device
-  open, stream-failure replacement, and bounded retry.
-- `AudioRenderCursor`: render-window cursor only; it is never Clock Master
-  evidence.
+- `RealtimeAudioOutputManager`: lazy, non-blocking device lifecycle
+  Implementation retained behind Audio Playback's internal output Seam.
+- `AudioPlayback`: deep Module owning device lifecycle, integer-sample PCM
+  scheduling, render worker, generation invalidation, watermarks, preroll, and
+  immutable evidence.
+- `AudioPcmRenderer`: narrow render Interface implemented by the app timeline
+  Adapter and the headless deterministic Adapter.
 
 ## Timeline interaction
 
 Audio clips live on audio tracks. Track mute/solo controls are audio semantics;
-video track visibility is separate. The app render Adapter produces ordered PCM
-windows for one render generation. Seek, stop, stream replacement, or rejected
-handoff invalidates that generation so stale worker completions cannot become
-audible.
+video track visibility is separate. The app Adapter renders exact integer-sample
+windows requested by Audio Playback; it does not own scheduling. Seek, stop,
+stream replacement, or rejected handoff increments the generation. Completion
+acceptance checks generation before changing in-flight accounting or output, so
+old work cannot become audible or corrupt the current watermark.
+The internal queue is bounded by the in-flight policy and reprime synchronously
+removes queued old-generation windows. At most one already-executing old window
+may finish, after which the generation gate discards it.
 
 ## Realtime ownership and lifecycle
 
@@ -31,15 +38,17 @@ The target clock, device-loss, preroll, and handoff semantics are specified in
 device samples as Audio Device Clock Master. When output is unavailable,
 transport continues on Synthetic Clock Master; displayed video is never master.
 
-Device discovery and stream construction never execute on the UI thread. CPAL
+Device discovery is lazy: a project without an audible audio clip remains on
+Synthetic Clock Master and does not start a meaningless output stream. Device
+discovery and stream construction never execute on the UI thread. CPAL
 streams are `!Send`, so a named device thread retains concrete stream ownership
 for its entire lifetime. It publishes only a sendable handle made of `Arc`,
 atomics, and the lock-free PCM queue. Open failure retries exponentially from
 250 ms to a 5 s ceiling. An asynchronous stream error removes the handle and
 reopens while Synthetic Master continues.
 
-A new stream remains inactive while the app Adapter invalidates old render
-work, clears queued PCM, anchors rendering to the current exact timeline
+A new stream remains inactive while Audio Playback invalidates old render work,
+clears queued PCM, anchors scheduling to the current exact timeline
 `TimeCode`, and queues at least 120 ms. Callback consumption is enabled only
 after that preroll. Each clock observation carries the exact media anchor for
 active-consumption frame zero; the Playback Engine derives candidate media
@@ -51,6 +60,14 @@ Rendered, queued, callback-requested, latency-adjusted, and consumed positions
 are distinct. Current CPAL evidence is explicitly graded
 `CallbackConsumptionEstimate`; it is not a backend device position.
 
+Render scheduling accumulates integer sample frames, not floating-point seconds.
+The production policy uses 80 ms windows, 120 ms preroll, a 460 ms high
+watermark, and at most eight admitted windows. These values are one validated
+`AudioPlaybackConfig`, not environment-variable semantics scattered through the
+app. A failed or malformed window is replaced with exact-duration silence and
+structured evidence; dropping it would shift every later sample against its
+declared media anchor and is forbidden.
+
 ## Realtime callback contract
 
 The callback may read/write only the preallocated queue and atomics. It does not
@@ -60,12 +77,12 @@ the PCM queue. Active starvation writes silence and increments underrun evidence
 
 ## Remaining depth
 
-Device lifecycle and Clock Master qualification now have narrow Interfaces, but
-render-window watermarks/generations remain app-owned. A later Audio Playback
-slice will move them behind the same Module, add a backend-position Adapter beside
-callback estimates, and implement bounded resampling/slew for small non-zero
-phase error. Current handoff accepts phase already inside budget; it does not
-claim to correct it.
+Device lifecycle, PCM scheduling, generations, watermarks, preroll, and Clock
+Master qualification now have narrow Interfaces. Remaining Audio Playback depth
+is backend-position evidence, bounded resampling/slew for small non-zero phase
+error, explicit underrun recovery policy, and reference-machine drift gates.
+Current handoff accepts phase already inside budget; it does not claim to
+correct it.
 
 UI Modules may request waveform or transport actions. They never decode audio or
 own device state. Export consumes timeline/audio data through export

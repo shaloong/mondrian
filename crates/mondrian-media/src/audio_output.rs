@@ -4,7 +4,7 @@ use crate::audio::{
     AudioBuffer, RealtimeAudioOutput, RealtimeAudioOutputHandle, RealtimeAudioOutputSnapshot,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -45,63 +45,92 @@ enum WorkerEvent {
 /// sendable lock-free control/observation handle. The caller never blocks on
 /// device discovery, stream creation, failure polling, or retry delay.
 pub struct RealtimeAudioOutputManager {
+    sample_rate: u32,
+    channels: u8,
     handle: Option<RealtimeAudioOutputHandle>,
-    event_rx: Receiver<WorkerEvent>,
+    event_rx: Option<Receiver<WorkerEvent>>,
     shutdown: Arc<AtomicBool>,
 }
 
 impl RealtimeAudioOutputManager {
-    /// Start a dedicated output-device lifecycle thread.
+    /// Create a dormant manager. The first poll starts its device lifecycle thread.
     pub fn new(sample_rate: u32, channels: u8) -> Self {
+        Self {
+            sample_rate,
+            channels: channels.max(1),
+            handle: None,
+            event_rx: None,
+            shutdown: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn ensure_worker_started(&mut self) {
+        if self.event_rx.is_some() {
+            return;
+        }
         let (event_tx, event_rx) = mpsc::channel();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let worker_shutdown = Arc::clone(&shutdown);
-        let _ = thread::Builder::new().name("mondrian-audio-device".to_owned()).spawn(move || {
-            let mut consecutive_failures = 0_u32;
-            while !worker_shutdown.load(Ordering::Acquire) {
-                match RealtimeAudioOutput::try_new(sample_rate, channels) {
-                    Ok(output) => {
-                        consecutive_failures = 0;
-                        let handle = output.handle();
-                        let stream_generation = handle.snapshot().stream_generation;
-                        if event_tx.send(WorkerEvent::Opened(handle)).is_err() {
-                            break;
+        let worker_shutdown = Arc::clone(&self.shutdown);
+        let sample_rate = self.sample_rate;
+        let channels = self.channels;
+        let spawned =
+            thread::Builder::new().name("mondrian-audio-device".to_owned()).spawn(move || {
+                let mut consecutive_failures = 0_u32;
+                while !worker_shutdown.load(Ordering::Acquire) {
+                    match RealtimeAudioOutput::try_new(sample_rate, channels) {
+                        Ok(output) => {
+                            consecutive_failures = 0;
+                            let handle = output.handle();
+                            let stream_generation = handle.snapshot().stream_generation;
+                            if event_tx.send(WorkerEvent::Opened(handle)).is_err() {
+                                break;
+                            }
+                            while !worker_shutdown.load(Ordering::Acquire)
+                                && !output.snapshot().stream_failed
+                            {
+                                thread::sleep(DEVICE_HEALTH_POLL);
+                            }
+                            if worker_shutdown.load(Ordering::Acquire) {
+                                break;
+                            }
+                            if event_tx.send(WorkerEvent::Lost { stream_generation }).is_err() {
+                                break;
+                            }
                         }
-                        while !worker_shutdown.load(Ordering::Acquire)
-                            && !output.snapshot().stream_failed
-                        {
-                            thread::sleep(DEVICE_HEALTH_POLL);
+                        Err(error) => {
+                            consecutive_failures = consecutive_failures.saturating_add(1);
+                            let retry_after = retry_delay(consecutive_failures);
+                            if event_tx
+                                .send(WorkerEvent::OpenFailed {
+                                    retry_after,
+                                    reason: error.to_string(),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                            interruptible_sleep(retry_after, &worker_shutdown);
                         }
-                        if worker_shutdown.load(Ordering::Acquire) {
-                            break;
-                        }
-                        if event_tx.send(WorkerEvent::Lost { stream_generation }).is_err() {
-                            break;
-                        }
-                    }
-                    Err(error) => {
-                        consecutive_failures = consecutive_failures.saturating_add(1);
-                        let retry_after = retry_delay(consecutive_failures);
-                        if event_tx
-                            .send(WorkerEvent::OpenFailed {
-                                retry_after,
-                                reason: error.to_string(),
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                        interruptible_sleep(retry_after, &worker_shutdown);
                     }
                 }
-            }
-        });
-        Self { handle: None, event_rx, shutdown }
+            });
+        if spawned.is_ok() {
+            self.event_rx = Some(event_rx);
+        }
     }
 
     /// Apply at most one pending lifecycle transition without blocking.
     pub fn poll(&mut self) -> Option<RealtimeAudioOutputEvent> {
-        match self.event_rx.try_recv().ok()? {
+        self.ensure_worker_started();
+        let event = match self.event_rx.as_ref()?.try_recv() {
+            Ok(event) => event,
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => {
+                self.event_rx = None;
+                self.handle = None;
+                return None;
+            }
+        };
+        match event {
             WorkerEvent::Opened(handle) => {
                 let stream_generation = handle.snapshot().stream_generation;
                 self.handle = Some(handle);

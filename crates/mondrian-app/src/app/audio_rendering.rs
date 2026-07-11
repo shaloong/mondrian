@@ -1,5 +1,47 @@
 use super::*;
 
+pub(super) struct TimelineAudioPcmRenderer {
+    sequence: Sequence,
+    library: Arc<AssetLibrary>,
+    source_cache: Arc<AudioSourceCache>,
+    sample_rate: u32,
+    channels: u8,
+}
+
+impl TimelineAudioPcmRenderer {
+    pub(super) fn new(
+        sequence: Sequence,
+        library: Arc<AssetLibrary>,
+        source_cache: Arc<AudioSourceCache>,
+        sample_rate: u32,
+        channels: u8,
+    ) -> Self {
+        Self {
+            sequence,
+            library,
+            source_cache,
+            sample_rate,
+            channels,
+        }
+    }
+}
+
+impl AudioPcmRenderer for TimelineAudioPcmRenderer {
+    fn render(&self, request: AudioPcmRenderRequest) -> mondrian_core::Result<AudioBuffer> {
+        let window_start_secs = request.start_sample.max(0) as f64 / request.sample_rate as f64;
+        let duration_secs = request.frame_count as f64 / request.sample_rate as f64;
+        render_audio_chunk_with_cache(
+            &self.sequence,
+            self.library.as_ref(),
+            self.source_cache.as_ref(),
+            self.sample_rate,
+            self.channels,
+            window_start_secs,
+            duration_secs,
+        )
+    }
+}
+
 pub(super) fn render_audio_chunk_with_cache(
     seq: &Sequence,
     library: &AssetLibrary,
@@ -89,6 +131,9 @@ pub(super) fn render_audio_chunk_with_cache(
         }
     }
 
+    if tracks.is_empty() {
+        return Ok(AudioBuffer::silent(sample_rate, channels, chunk_frames));
+    }
     let mixer = AudioMixer::new(sample_rate, channels);
     Ok(mixer.mix(&tracks))
 }
