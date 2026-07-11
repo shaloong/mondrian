@@ -38,6 +38,8 @@ pub mod startup;
 pub(crate) mod test_utils;
 pub mod title_bar;
 pub mod viewer_gpu_output_budget;
+#[cfg(test)]
+pub(crate) mod viewer_gpu_preview_headless;
 pub(crate) mod viewer_gpu_preview_runtime;
 pub mod waveform_cache;
 pub mod window;

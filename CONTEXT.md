@@ -60,6 +60,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - **Playback Evidence** uses bounded versioned events and aggregates from real Frame Demand, Frame Delivery, Clock Master, seek, and Audio Playback observations; capability probes alone cannot satisfy execution gates.
 - A **Preview Frame Store** admits and evicts CPU frames by both payload bytes and entry count; renderer-owned GPU resources remain outside this store and require their own budget evidence.
 - A **Viewer GPU Preview Runtime** owns GPU execution resources independently of a Window; production Window and headless validation must adapt the same execution lifetime and must not duplicate color or compositing interpretation.
+- Headless validation may report a current **Frame Delivery** as `Ready` only after the shared **Viewer GPU Preview Runtime** records an output and the real GPU submission completes; device capability alone is not delivery evidence.
 - **Audio Playback** may offer an Audio Device Clock Master only after stream health, PCM preroll, and media phase satisfy Playback Policy.
 - **Audio Playback** records isolated underruns without changing Clock Master; sustained missing-sample evidence enters recovery through a continuous Synthetic handoff and fresh preroll.
 - Each persisted archive, document, and SQLite library has an independent version and **Project Migration** chain.

@@ -5,7 +5,9 @@
 //! each other just to explain why preview playback is still using CPU RGBA
 //! uploads.
 
+use super::preview::AppUiPreviewHardwareDecodeAdmissionBlocker;
 use mondrian_core::{ColorMatrixCoefficients, ColorSpace};
+use mondrian_media::PreviewHardwareDecodeRequest;
 use mondrian_media::PreviewNativeDecodedFrame;
 use mondrian_media::{
     DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
@@ -400,6 +402,84 @@ pub(crate) fn platform_handle_kind_for_decoder(
     }
 }
 
+/// Shared renderer/platform admission facts for playback hardware decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AppUiPlaybackHardwareDecodeAdmission {
+    pub(crate) request: PreviewHardwareDecodeRequest,
+    pub(crate) renderer_native_import_ready: bool,
+    pub(crate) platform_native_import_ready: bool,
+    pub(crate) native_import_admission_ready: bool,
+    pub(crate) admission_blocker: Option<AppUiPreviewHardwareDecodeAdmissionBlocker>,
+    pub(crate) platform_discovery_available: bool,
+    pub(crate) platform_zero_copy_supported: bool,
+    pub(crate) platform_low_copy_fallback_supported: bool,
+    pub(crate) renderer_supported_handle_kinds: u8,
+    pub(crate) renderer_supported_source_texture_formats: u8,
+}
+
+/// Resolve one hardware-decode request from the actual renderer and platform
+/// import Adapters. Capability evidence alone does not constitute execution.
+pub(crate) fn resolve_playback_hardware_decode_admission(
+    renderer_support: &GpuNativeDecodedFrameImportSupport,
+    platform_probe: &NativeVideoTextureImportProbeResult,
+) -> AppUiPlaybackHardwareDecodeAdmission {
+    let renderer_native_import_ready = renderer_support.renderer_backend_ready;
+    let renderer_supported_handle_kinds =
+        saturated_u8_len(renderer_support.supported_handle_kinds.len());
+    let renderer_supported_source_texture_formats =
+        saturated_u8_len(renderer_support.supported_source_texture_formats.len());
+    let platform_copy_path_ready =
+        platform_probe.zero_copy_supported || platform_probe.low_copy_fallback_supported;
+    let platform_supports_renderer_handle =
+        renderer_support.supported_handle_kinds.iter().copied().any(|handle_kind| {
+            platform_probe.supports(platform_handle_kind_for_decoder(handle_kind))
+        });
+    let platform_native_import_ready = renderer_native_import_ready
+        && platform_probe.discovery_available
+        && platform_copy_path_ready
+        && platform_supports_renderer_handle;
+    let native_import_admission_ready =
+        renderer_native_import_ready && platform_native_import_ready;
+    let admission_blocker = if native_import_admission_ready {
+        None
+    } else if !renderer_support.renderer_backend_ready {
+        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::RendererImportUnavailable)
+    } else if renderer_support.supported_handle_kinds.is_empty() {
+        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::RendererHandleSupportMissing)
+    } else if renderer_support.supported_source_texture_formats.is_empty() {
+        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::RendererSourceTextureFormatSupportMissing)
+    } else if !platform_probe.discovery_available {
+        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::PlatformDiscoveryUnavailable)
+    } else if !platform_copy_path_ready {
+        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::PlatformCopyPathUnavailable)
+    } else if !platform_supports_renderer_handle {
+        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::PlatformHandleUnsupported)
+    } else {
+        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::RendererSupportUnknown)
+    };
+    let request = if native_import_admission_ready {
+        PreviewHardwareDecodeRequest::PreferGpuResident
+    } else {
+        PreviewHardwareDecodeRequest::PreferHardwareDecode
+    };
+    AppUiPlaybackHardwareDecodeAdmission {
+        request,
+        renderer_native_import_ready,
+        platform_native_import_ready,
+        native_import_admission_ready,
+        admission_blocker,
+        platform_discovery_available: platform_probe.discovery_available,
+        platform_zero_copy_supported: platform_probe.zero_copy_supported,
+        platform_low_copy_fallback_supported: platform_probe.low_copy_fallback_supported,
+        renderer_supported_handle_kinds,
+        renderer_supported_source_texture_formats,
+    }
+}
+
+fn saturated_u8_len(len: usize) -> u8 {
+    len.min(usize::from(u8::MAX)) as u8
+}
+
 /// Map a media-layer decoded surface fact to the renderer native import format contract.
 pub(crate) fn native_source_texture_format_from_decoded(
     format: DecodedVideoSurfaceFormat,
@@ -475,6 +555,97 @@ fn decoded_chroma_location_to_gpu(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playback_hardware_decode_admission_requires_renderer_and_platform_import() {
+        let renderer_support = GpuNativeDecodedFrameImportSupport::ready(
+            vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
+            vec![GpuNativeDecodedFrameTextureFormat::P010],
+        );
+        let platform_probe = NativeVideoTextureImportProbeResult::found_partial(
+            vec![NativeVideoTextureHandleKind::D3D11Texture2D],
+            false,
+            true,
+            "D3D11 low-copy import is available",
+        );
+
+        let admission =
+            resolve_playback_hardware_decode_admission(&renderer_support, &platform_probe);
+
+        assert_eq!(
+            admission.request,
+            PreviewHardwareDecodeRequest::PreferGpuResident
+        );
+        assert!(admission.renderer_native_import_ready);
+        assert!(admission.platform_native_import_ready);
+        assert!(admission.native_import_admission_ready);
+        assert_eq!(admission.admission_blocker, None);
+        assert!(admission.platform_discovery_available);
+        assert!(!admission.platform_zero_copy_supported);
+        assert!(admission.platform_low_copy_fallback_supported);
+        assert_eq!(admission.renderer_supported_handle_kinds, 1);
+        assert_eq!(admission.renderer_supported_source_texture_formats, 1);
+    }
+
+    #[test]
+    fn playback_hardware_decode_admission_uses_cpu_transfer_when_platform_import_is_missing() {
+        let renderer_support = GpuNativeDecodedFrameImportSupport::ready(
+            vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
+            vec![GpuNativeDecodedFrameTextureFormat::P010],
+        );
+        let platform_probe =
+            NativeVideoTextureImportProbeResult::missing("D3D11 import bridge missing");
+
+        let admission =
+            resolve_playback_hardware_decode_admission(&renderer_support, &platform_probe);
+
+        assert_eq!(
+            admission.request,
+            PreviewHardwareDecodeRequest::PreferHardwareDecode
+        );
+        assert!(admission.renderer_native_import_ready);
+        assert!(!admission.platform_native_import_ready);
+        assert!(!admission.native_import_admission_ready);
+        assert_eq!(
+            admission.admission_blocker,
+            Some(AppUiPreviewHardwareDecodeAdmissionBlocker::PlatformCopyPathUnavailable)
+        );
+        assert!(admission.platform_discovery_available);
+        assert_eq!(admission.renderer_supported_handle_kinds, 1);
+        assert_eq!(admission.renderer_supported_source_texture_formats, 1);
+    }
+
+    #[test]
+    fn playback_hardware_decode_admission_uses_cpu_transfer_on_handle_mismatch() {
+        let renderer_support = GpuNativeDecodedFrameImportSupport::ready(
+            vec![DecodedGpuFrameHandleKind::CVPixelBuffer],
+            vec![GpuNativeDecodedFrameTextureFormat::P010],
+        );
+        let platform_probe = NativeVideoTextureImportProbeResult::found(
+            vec![NativeVideoTextureHandleKind::D3D11Texture2D],
+            true,
+            false,
+        );
+
+        let admission =
+            resolve_playback_hardware_decode_admission(&renderer_support, &platform_probe);
+
+        assert_eq!(
+            admission.request,
+            PreviewHardwareDecodeRequest::PreferHardwareDecode
+        );
+        assert!(admission.renderer_native_import_ready);
+        assert!(!admission.platform_native_import_ready);
+        assert!(!admission.native_import_admission_ready);
+        assert_eq!(
+            admission.admission_blocker,
+            Some(AppUiPreviewHardwareDecodeAdmissionBlocker::PlatformHandleUnsupported)
+        );
+        assert!(admission.platform_discovery_available);
+        assert!(admission.platform_zero_copy_supported);
+        assert_eq!(admission.renderer_supported_handle_kinds, 1);
+        assert_eq!(admission.renderer_supported_source_texture_formats, 1);
+    }
 
     #[test]
     fn native_video_import_readiness_reports_cpu_decoded_media() {

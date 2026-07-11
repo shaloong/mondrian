@@ -10,11 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mondrian_editor_state::state::WorkspacePreset;
-use mondrian_media::PreviewHardwareDecodeRequest;
-use mondrian_platform::{
-    NativeVideoTextureImportProbe, NativeVideoTextureImportProbeResult, PlatformService,
-    SystemPlatformService,
-};
+use mondrian_platform::{NativeVideoTextureImportProbe, PlatformService, SystemPlatformService};
 use mondrian_renderer::GpuNativeDecodedFrameImportSupport;
 use mondrian_ui_core::types::{Point, Rect};
 use mondrian_ui_core::{TreeWalker, Widget};
@@ -37,14 +33,13 @@ use crate::app::{discover_crash_recovery_candidates, AppState, CrashRecoveryCand
 use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::action_queue::PendingUiActions;
 use crate::app_ui::asset_thumbnails::AssetThumbnailCache;
-use crate::app_ui::native_video_import::platform_handle_kind_for_decoder;
+use crate::app_ui::native_video_import::resolve_playback_hardware_decode_admission;
 use crate::app_ui::pending_close_dialog::PendingCloseDialogAction;
 use crate::app_ui::playback_feedback::ViewerPlaybackFeedback;
 use crate::app_ui::preferences_store::{
     app_ui_preferences_path, load_app_ui_preferences, persist_app_ui_preferences_to,
     AppUiPreferences,
 };
-use crate::app_ui::preview::AppUiPreviewHardwareDecodeAdmissionBlocker;
 use crate::app_ui::preview::{
     AppUiGpuPreviewFrame, AppUiGpuPreviewFrameState, AppUiPreviewColorRejection,
     AppUiPreviewService,
@@ -1313,81 +1308,6 @@ fn parse_asset_browser_navigation(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AppUiPlaybackHardwareDecodeAdmission {
-    request: PreviewHardwareDecodeRequest,
-    renderer_native_import_ready: bool,
-    platform_native_import_ready: bool,
-    native_import_admission_ready: bool,
-    admission_blocker: Option<AppUiPreviewHardwareDecodeAdmissionBlocker>,
-    platform_discovery_available: bool,
-    platform_zero_copy_supported: bool,
-    platform_low_copy_fallback_supported: bool,
-    renderer_supported_handle_kinds: u8,
-    renderer_supported_source_texture_formats: u8,
-}
-
-fn resolve_playback_hardware_decode_admission(
-    renderer_support: &GpuNativeDecodedFrameImportSupport,
-    platform_probe: &NativeVideoTextureImportProbeResult,
-) -> AppUiPlaybackHardwareDecodeAdmission {
-    let renderer_native_import_ready = renderer_support.renderer_backend_ready;
-    let renderer_supported_handle_kinds =
-        saturated_u8_len(renderer_support.supported_handle_kinds.len());
-    let renderer_supported_source_texture_formats =
-        saturated_u8_len(renderer_support.supported_source_texture_formats.len());
-    let platform_copy_path_ready =
-        platform_probe.zero_copy_supported || platform_probe.low_copy_fallback_supported;
-    let platform_supports_renderer_handle =
-        renderer_support.supported_handle_kinds.iter().copied().any(|handle_kind| {
-            platform_probe.supports(platform_handle_kind_for_decoder(handle_kind))
-        });
-    let platform_native_import_ready = renderer_native_import_ready
-        && platform_probe.discovery_available
-        && platform_copy_path_ready
-        && platform_supports_renderer_handle;
-    let native_import_admission_ready =
-        renderer_native_import_ready && platform_native_import_ready;
-    let admission_blocker = if native_import_admission_ready {
-        None
-    } else if !renderer_support.renderer_backend_ready {
-        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::RendererImportUnavailable)
-    } else if renderer_support.supported_handle_kinds.is_empty() {
-        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::RendererHandleSupportMissing)
-    } else if renderer_support.supported_source_texture_formats.is_empty() {
-        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::RendererSourceTextureFormatSupportMissing)
-    } else if !platform_probe.discovery_available {
-        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::PlatformDiscoveryUnavailable)
-    } else if !platform_copy_path_ready {
-        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::PlatformCopyPathUnavailable)
-    } else if !platform_supports_renderer_handle {
-        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::PlatformHandleUnsupported)
-    } else {
-        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::RendererSupportUnknown)
-    };
-    let request = if native_import_admission_ready {
-        PreviewHardwareDecodeRequest::PreferGpuResident
-    } else {
-        PreviewHardwareDecodeRequest::PreferHardwareDecode
-    };
-    AppUiPlaybackHardwareDecodeAdmission {
-        request,
-        renderer_native_import_ready,
-        platform_native_import_ready,
-        native_import_admission_ready,
-        admission_blocker,
-        platform_discovery_available: platform_probe.discovery_available,
-        platform_zero_copy_supported: platform_probe.zero_copy_supported,
-        platform_low_copy_fallback_supported: platform_probe.low_copy_fallback_supported,
-        renderer_supported_handle_kinds,
-        renderer_supported_source_texture_formats,
-    }
-}
-
-fn saturated_u8_len(len: usize) -> u8 {
-    len.min(u8::MAX as usize) as u8
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1395,9 +1315,8 @@ mod tests {
     use mondrian_core::types::{AssetId, ClipId, TrackId};
     use mondrian_editor_state::state::PanelKind;
     use mondrian_editor_state::Action;
-    use mondrian_platform::{
-        ClipboardError, FileFilter, NativeVideoTextureHandleKind, NoopPlatformService,
-    };
+    use mondrian_media::PreviewHardwareDecodeRequest;
+    use mondrian_platform::{ClipboardError, FileFilter, NoopPlatformService};
     use mondrian_timeline::Sequence;
     use mondrian_ui_core::tree::TreeWalker;
     use mondrian_ui_core::types::{Modifiers, MouseButton, Point, Rect, SplitDirection};
@@ -1444,97 +1363,6 @@ mod tests {
                 .hardware_decode_admission
                 .native_import_admission_ready
         );
-    }
-
-    #[test]
-    fn playback_hardware_decode_admission_requires_renderer_and_platform_import() {
-        let renderer_support = GpuNativeDecodedFrameImportSupport::ready(
-            vec![mondrian_media::DecodedGpuFrameHandleKind::D3D11Texture2D],
-            vec![mondrian_renderer::GpuNativeDecodedFrameTextureFormat::P010],
-        );
-        let platform_probe = NativeVideoTextureImportProbeResult::found_partial(
-            vec![NativeVideoTextureHandleKind::D3D11Texture2D],
-            false,
-            true,
-            "D3D11 low-copy import is available",
-        );
-
-        let admission =
-            resolve_playback_hardware_decode_admission(&renderer_support, &platform_probe);
-
-        assert_eq!(
-            admission.request,
-            PreviewHardwareDecodeRequest::PreferGpuResident
-        );
-        assert!(admission.renderer_native_import_ready);
-        assert!(admission.platform_native_import_ready);
-        assert!(admission.native_import_admission_ready);
-        assert_eq!(admission.admission_blocker, None);
-        assert!(admission.platform_discovery_available);
-        assert!(!admission.platform_zero_copy_supported);
-        assert!(admission.platform_low_copy_fallback_supported);
-        assert_eq!(admission.renderer_supported_handle_kinds, 1);
-        assert_eq!(admission.renderer_supported_source_texture_formats, 1);
-    }
-
-    #[test]
-    fn playback_hardware_decode_admission_uses_cpu_transfer_when_platform_import_is_missing() {
-        let renderer_support = GpuNativeDecodedFrameImportSupport::ready(
-            vec![mondrian_media::DecodedGpuFrameHandleKind::D3D11Texture2D],
-            vec![mondrian_renderer::GpuNativeDecodedFrameTextureFormat::P010],
-        );
-        let platform_probe =
-            NativeVideoTextureImportProbeResult::missing("D3D11 import bridge missing");
-
-        let admission =
-            resolve_playback_hardware_decode_admission(&renderer_support, &platform_probe);
-
-        assert_eq!(
-            admission.request,
-            PreviewHardwareDecodeRequest::PreferHardwareDecode
-        );
-        assert!(admission.renderer_native_import_ready);
-        assert!(!admission.platform_native_import_ready);
-        assert!(!admission.native_import_admission_ready);
-        assert_eq!(
-            admission.admission_blocker,
-            Some(AppUiPreviewHardwareDecodeAdmissionBlocker::PlatformCopyPathUnavailable)
-        );
-        assert!(admission.platform_discovery_available);
-        assert_eq!(admission.renderer_supported_handle_kinds, 1);
-        assert_eq!(admission.renderer_supported_source_texture_formats, 1);
-    }
-
-    #[test]
-    fn playback_hardware_decode_admission_uses_cpu_transfer_on_handle_mismatch() {
-        let renderer_support = GpuNativeDecodedFrameImportSupport::ready(
-            vec![mondrian_media::DecodedGpuFrameHandleKind::CVPixelBuffer],
-            vec![mondrian_renderer::GpuNativeDecodedFrameTextureFormat::P010],
-        );
-        let platform_probe = NativeVideoTextureImportProbeResult::found(
-            vec![NativeVideoTextureHandleKind::D3D11Texture2D],
-            true,
-            false,
-        );
-
-        let admission =
-            resolve_playback_hardware_decode_admission(&renderer_support, &platform_probe);
-
-        assert_eq!(
-            admission.request,
-            PreviewHardwareDecodeRequest::PreferHardwareDecode
-        );
-        assert!(admission.renderer_native_import_ready);
-        assert!(!admission.platform_native_import_ready);
-        assert!(!admission.native_import_admission_ready);
-        assert_eq!(
-            admission.admission_blocker,
-            Some(AppUiPreviewHardwareDecodeAdmissionBlocker::PlatformHandleUnsupported)
-        );
-        assert!(admission.platform_discovery_available);
-        assert!(admission.platform_zero_copy_supported);
-        assert_eq!(admission.renderer_supported_handle_kinds, 1);
-        assert_eq!(admission.renderer_supported_source_texture_formats, 1);
     }
 
     #[derive(Default)]

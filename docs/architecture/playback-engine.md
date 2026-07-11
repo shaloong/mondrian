@@ -434,9 +434,14 @@ It returns the retained presentation output handle plus stage, compositing,
 spatial, residency, and fallback evidence.
 `window.rs` performs only Window Adapter policy around that Interface: display
 contract admission, renderer external-texture registration, Viewer publication,
-and telemetry projection. The headless GPU Adapter must call `record_frame`
-and provide its own presentation registration; it must not implement a second
-composite/color path.
+and telemetry projection. `HeadlessViewerGpuAdapter` is the second real Adapter:
+it creates a no-Surface high-performance device, calls `record_frame`, resolves
+the retained output texture, submits the command buffer, and waits for that
+submission. It has no UI texture registry and does not claim one; a current
+Frame Delivery becomes Ready only after this real execution succeeds. Both
+Adapters therefore share the same composite/color Implementation. Renderer and
+platform hardware-decode admission is resolved in `native_video_import`, then
+consumed by both Host and headless Adapters; it is no longer Host-local policy.
 
 ## Required invariants
 
@@ -635,11 +640,16 @@ longer fakes continuous playback by seeking and restarting every frame.
 External-media gates consume the same report and fail on delivery-clock drift
 above 20 ms, any sustained-underrun recovery, evidence retention overflow, or
 fewer than 90% current Ready samples even when stale frames keep 95% of samples
-visible. The headless harness still lacks the production Window's real GPU
-output/presentation Adapter, so this Ready gate intentionally remains red for
-media that requires the deferred GPU composite path. Hardware-residency,
-30-minute duration, and Golden Project identity gates remain to be added before
-the professional playback acceptance claim is complete.
+visible. The headless harness now pre-rolls and executes only through the real
+GPU Adapter; it no longer invokes the CPU raster Viewer in parallel. Its report
+contains per-output GPU completion latency, cache reuse, color-stage evidence,
+and explicit fallback reasons. External gates also fail when real GPU execution
+coverage is missing, playback GPU completion p95 exceeds one frame interval, a
+readback appears, or a GPU blocker is reported. Pre-roll pipeline warm-up is
+reported separately and cannot contaminate the steady-playback p95.
+Hardware-decoder residency, 30-minute duration, and Golden Project identity
+gates remain to be satisfied before the professional playback acceptance claim
+is complete.
 
 The generated playback fixture declares limited-range BT.709 primaries,
 transfer, and matrix metadata. A fixture without a quantization range must fail
