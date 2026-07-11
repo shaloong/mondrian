@@ -28,8 +28,8 @@ members = [
 [workspace.package]
 version       = "0.1.0"
 edition       = "2021"
-authors       = ["Mondrian Team <team@mondrian.dev>"]
-license       = "AGPL-3.0"
+authors       = ["Shaloong <contact@shaloong.com>"]
+license       = "AGPL-3.0-or-later"
 repository    = "https://github.com/mondrian-studio/mondrian"
 rust-version  = "1.92"
 
