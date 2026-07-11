@@ -3128,7 +3128,7 @@ pub struct RenderOutputColorBoundaryFloat {
 /// u8 quantization.
 ///
 /// This is the renderer-owned CPU float/high-bit output boundary for
-/// high-bit-depth export. It applies the working -> output color transform
+/// 10-bit delivery. It applies the working -> output color transform
 /// through OCIO float processors, preserving HDR/wide-gamut precision.
 ///
 /// For export use: the caller can flatten the float frame into `[f32]` and use

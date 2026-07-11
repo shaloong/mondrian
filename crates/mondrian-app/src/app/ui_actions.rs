@@ -15,7 +15,7 @@ use mondrian_export::preset::{ExportPreset, TimelineExportRange};
 use mondrian_media::DetectedColorInterpretation;
 use mondrian_timeline::{
     sequence::{
-        ColorWorkflow, ExportBitDepth, MissingColorMetadataPolicy, NestedColorProcessing,
+        ColorWorkflow, DeliveryBitDepth, MissingColorMetadataPolicy, NestedColorProcessing,
         VideoRange,
     },
     AudioChannelLayout, AudioDisplayFormat, EditingMode, FieldOrder, PixelAspectRatio,
@@ -981,7 +981,7 @@ pub enum SequenceSettingsDraftUpdatePayload {
     /// Video range used by the sequence output.
     VideoRange(VideoRange),
     /// Export bit depth preference.
-    ExportBitDepth(ExportBitDepth),
+    DeliveryBitDepth(DeliveryBitDepth),
     /// Whether HDR metadata should be preserved for HDR output spaces.
     PreserveHdrMetadata(bool),
     /// Export delivery view transform policy used by tone-mapped exports.

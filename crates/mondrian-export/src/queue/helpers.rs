@@ -207,10 +207,9 @@ impl ExportVideoSignalContract {
                 color_space,
             };
         }
-        let pixel_format = match settings.color_management.export_bit_depth {
-            ExportBitDepth::Eight => "yuv420p",
-            ExportBitDepth::Ten => "yuv420p10le",
-            ExportBitDepth::SixteenFloat => "yuv444p10le",
+        let pixel_format = match settings.color_management.delivery_bit_depth {
+            DeliveryBitDepth::Eight => "yuv420p",
+            DeliveryBitDepth::Ten => "yuv420p10le",
         };
         let (codec_range, scale_range) = match settings.color_management.video_range {
             VideoRange::Full => ("pc", "full"),
@@ -318,11 +317,11 @@ pub(crate) fn validate_timeline_export_color_compatibility(
     let settings = &timeline.sequence.settings;
     let output = settings.color_management.output_color_space;
     let output_encoding = output.encoding();
-    let bit_depth = settings.color_management.export_bit_depth;
+    let bit_depth = settings.color_management.delivery_bit_depth;
     let preserve_hdr = settings.color_management.preserve_hdr_metadata;
 
     if output_encoding.is_camera_log() {
-        if bit_depth == ExportBitDepth::Eight {
+        if bit_depth == DeliveryBitDepth::Eight {
             return Err("Camera log 输出需要 10-bit 或更高位深".to_string());
         }
         match (&config.preset.container, &config.preset.video) {
@@ -333,13 +332,13 @@ pub(crate) fn validate_timeline_export_color_compatibility(
         }
     }
 
-    if output.is_hdr() && bit_depth == ExportBitDepth::Eight {
+    if output.is_hdr() && bit_depth == DeliveryBitDepth::Eight {
         return Err("HDR 输出不能使用 8-bit 导出位深".to_string());
     }
     if preserve_hdr && !output.is_hdr() {
         return Err("只有 HDR 输出色彩空间可以保留 HDR metadata".to_string());
     }
-    if preserve_hdr && bit_depth == ExportBitDepth::Eight {
+    if preserve_hdr && bit_depth == DeliveryBitDepth::Eight {
         return Err("保留 HDR metadata 需要 10-bit 或更高位深".to_string());
     }
     if preserve_hdr && settings.color_management.hdr_mastering_display.is_none() {
@@ -357,7 +356,7 @@ pub(crate) fn validate_timeline_export_color_compatibility(
 
     match (&config.preset.container, &config.preset.video) {
         (Container::Gif, _) | (_, VideoCodecConfig::Gif { .. }) => {
-            if output.is_hdr() || preserve_hdr || bit_depth != ExportBitDepth::Eight {
+            if output.is_hdr() || preserve_hdr || bit_depth != DeliveryBitDepth::Eight {
                 return Err("GIF 导出仅支持 8-bit SDR 输出".to_string());
             }
             if output != ColorSpace::Srgb {
@@ -372,14 +371,6 @@ pub(crate) fn validate_timeline_export_color_compatibility(
         }
         (_, VideoCodecConfig::H264 { .. }) if output.is_hdr() || preserve_hdr => {
             return Err("HDR 输出建议使用 H.265、AV1 或 ProRes，当前 H.264 配置已拒绝".to_string());
-        }
-        (_, VideoCodecConfig::H264 { .. }) if bit_depth == ExportBitDepth::SixteenFloat => {
-            return Err("H.264 不支持 16-bit float 导出位深".to_string());
-        }
-        (_, VideoCodecConfig::H265 { .. } | VideoCodecConfig::Av1 { .. })
-            if bit_depth == ExportBitDepth::SixteenFloat =>
-        {
-            return Err("H.265/AV1 应使用 8-bit 或 10-bit YUV 导出位深".to_string());
         }
         _ => {}
     }

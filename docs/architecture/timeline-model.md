@@ -19,6 +19,12 @@ encoded output identity, while nested contexts carry their parent working
 identity so render recursion cannot mistake an internal handoff for a delivery
 boundary.
 
+`SequenceColorManagement.delivery_bit_depth` is the encoded deliverable sample
+depth and currently permits only 8-bit or 10-bit output. It does not describe
+the float working space or the renderer-to-encoder pipe precision. Those are
+renderer/export implementation contracts and are not persisted as editorial
+intent.
+
 Root preview/export color contexts resolve the effective color engine from the
 sequence/project inheritance rules. When the effective engine is
 `MondrianSmart` or explicit OCIO, the context carries the loaded OCIO config's

@@ -33,7 +33,7 @@ use mondrian_renderer::{
     TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{
-    ColorContext, ExportBitDepth, InputColorResolutionSourceCounts, ResolvedInputColor,
+    ColorContext, DeliveryBitDepth, InputColorResolutionSourceCounts, ResolvedInputColor,
     SequenceSettings, VideoRange, MAX_NESTED_SEQUENCE_RENDER_DEPTH,
 };
 use parking_lot::{Condvar, Mutex};
@@ -47,7 +47,7 @@ use std::sync::{mpsc, Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 
-/// Frame contract for export output, selected based on `ExportBitDepth`.
+/// Internal pipe contract selected from the requested delivery bit depth.
 ///
 /// This determines the GPU texture format, FFmpeg input pixel format, and
 /// canvas allocation strategy for the export pipeline.
@@ -61,11 +61,11 @@ pub enum ExportFrameContract {
 }
 
 impl ExportFrameContract {
-    /// Select the appropriate frame contract from the export bit depth.
-    pub fn from_bit_depth(bit_depth: ExportBitDepth) -> Self {
+    /// Select the internal pipe contract from the delivery sample depth.
+    pub fn from_bit_depth(bit_depth: DeliveryBitDepth) -> Self {
         match bit_depth {
-            ExportBitDepth::Eight => Self::Rgba8,
-            ExportBitDepth::Ten | ExportBitDepth::SixteenFloat => Self::Rgba16Float,
+            DeliveryBitDepth::Eight => Self::Rgba8,
+            DeliveryBitDepth::Ten => Self::Rgba16Float,
         }
     }
 
@@ -132,7 +132,7 @@ impl ExportFrameContract {
 
 /// Resolve the export frame contract from sequence settings.
 fn export_frame_contract(settings: &SequenceSettings) -> ExportFrameContract {
-    ExportFrameContract::from_bit_depth(settings.color_management.export_bit_depth)
+    ExportFrameContract::from_bit_depth(settings.color_management.delivery_bit_depth)
 }
 
 /// Renderer-owned CPU float/high-bit output boundary for export.
@@ -579,38 +579,38 @@ impl ExportGpuOutputFallbackBreakdown {
 /// Structured reason for final export output precision fallback.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExportOutputPrecisionFallbackReason {
-    /// High-bit-depth export fell back to an RGBA8 CPU output boundary before pipe packing.
-    CpuRgba8BoundaryPackedToHighBitDepthPipe,
+    /// 10-bit delivery fell back to an RGBA8 CPU output boundary before pipe packing.
+    CpuRgba8BoundaryPackedToTenBitPipe,
 }
 
 /// Structured final export output precision fallback counts.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ExportOutputPrecisionFallbackBreakdown {
-    /// High-bit-depth export used an RGBA8 CPU output boundary before `rgba64le` pipe packing.
-    pub cpu_rgba8_boundary_packed_to_high_bit_depth_pipe: u64,
+    /// 10-bit delivery used an RGBA8 CPU output boundary before `rgba64le` pipe packing.
+    pub cpu_rgba8_boundary_packed_to_ten_bit_pipe: u64,
 }
 
 impl ExportOutputPrecisionFallbackBreakdown {
     /// Return total fallback count across all recorded reasons.
     pub fn total(&self) -> u64 {
-        self.cpu_rgba8_boundary_packed_to_high_bit_depth_pipe
+        self.cpu_rgba8_boundary_packed_to_ten_bit_pipe
     }
 
     /// Merge another breakdown in place.
     pub fn accumulate(self, other: Self) -> Self {
         Self {
-            cpu_rgba8_boundary_packed_to_high_bit_depth_pipe: self
-                .cpu_rgba8_boundary_packed_to_high_bit_depth_pipe
-                .saturating_add(other.cpu_rgba8_boundary_packed_to_high_bit_depth_pipe),
+            cpu_rgba8_boundary_packed_to_ten_bit_pipe: self
+                .cpu_rgba8_boundary_packed_to_ten_bit_pipe
+                .saturating_add(other.cpu_rgba8_boundary_packed_to_ten_bit_pipe),
         }
     }
 
     /// Map one reason into a mut accumulator entry.
     pub fn add_reason(mut self, reason: ExportOutputPrecisionFallbackReason) -> Self {
         match reason {
-            ExportOutputPrecisionFallbackReason::CpuRgba8BoundaryPackedToHighBitDepthPipe => {
-                self.cpu_rgba8_boundary_packed_to_high_bit_depth_pipe =
-                    self.cpu_rgba8_boundary_packed_to_high_bit_depth_pipe.saturating_add(1)
+            ExportOutputPrecisionFallbackReason::CpuRgba8BoundaryPackedToTenBitPipe => {
+                self.cpu_rgba8_boundary_packed_to_ten_bit_pipe =
+                    self.cpu_rgba8_boundary_packed_to_ten_bit_pipe.saturating_add(1)
             }
         }
         self
@@ -1096,14 +1096,14 @@ fn push_export_root_causes_and_actions(
             "export_output_precision_fallback",
             ExportColorHealthSeverity::Fail,
             format!(
-                "output_precision_fallbacks={} cpu_rgba8_boundary_packed_to_high_bit_depth_pipe={}",
+                "output_precision_fallbacks={} cpu_rgba8_boundary_packed_to_ten_bit_pipe={}",
                 summary.output_precision_fallbacks,
                 summary
                     .output_precision_fallback_reasons
-                    .cpu_rgba8_boundary_packed_to_high_bit_depth_pipe
+                    .cpu_rgba8_boundary_packed_to_ten_bit_pipe
             ),
             "replace_export_cpu_rgba8_output_boundary",
-            "Replace high-bit-depth export CPU fallback with a renderer-owned float/high-bit output boundary.",
+            "Replace the 10-bit delivery CPU fallback with a renderer-owned float output boundary.",
         );
     }
     if summary.output_transform_issues > 0 || summary.output_transform_issue_reasons.total() > 0 {
@@ -2748,7 +2748,7 @@ fn render_sequence_frame_into(
                         }
                         if let Some(diagnostics) = export_diagnostics.as_deref_mut() {
                             diagnostics.record_output_precision_fallback(
-                                ExportOutputPrecisionFallbackReason::CpuRgba8BoundaryPackedToHighBitDepthPipe,
+                                ExportOutputPrecisionFallbackReason::CpuRgba8BoundaryPackedToTenBitPipe,
                             );
                         }
                         frame_contract.pack_rgba8(&encoded.rgba)
@@ -3609,7 +3609,7 @@ mod tests {
     #[test]
     fn precision_fallback_path_still_records_fallback_when_float_helper_unavailable() {
         let mut seq = Sequence::new("precision-fallback-injected");
-        seq.settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+        seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
         let tb = seq.time_base();
         seq.video_tracks[0]
             .add_clip(Clip::new_solid_color(
@@ -3659,7 +3659,7 @@ mod tests {
         assert_eq!(
             export_diagnostics
                 .output_precision_fallback_reasons
-                .cpu_rgba8_boundary_packed_to_high_bit_depth_pipe,
+                .cpu_rgba8_boundary_packed_to_ten_bit_pipe,
             1
         );
 
@@ -3838,7 +3838,7 @@ mod tests {
     #[test]
     fn export_real_render_with_view_records_no_transform_issue() {
         let mut seq = Sequence::new("explicit-delivery-view");
-        seq.settings.color_management.export_bit_depth = ExportBitDepth::Eight;
+        seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Eight;
         let tb = seq.time_base();
         seq.video_tracks[0]
             .add_clip(Clip::new_solid_color(
@@ -3906,7 +3906,7 @@ mod tests {
     #[test]
     fn export_real_render_with_invalid_delivery_view_records_invalid_transform_issue() {
         let mut seq = Sequence::new("invalid-delivery-view");
-        seq.settings.color_management.export_bit_depth = ExportBitDepth::Eight;
+        seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Eight;
         let tb = seq.time_base();
         seq.video_tracks[0]
             .add_clip(Clip::new_solid_color(
@@ -4122,7 +4122,7 @@ mod tests {
     #[test]
     fn export_color_validation_rejects_camera_log_consumer_codecs() {
         let mut timeline = timeline_input_with_output_color(ColorSpace::AppleLog);
-        timeline.sequence.settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
         let config = dummy_config("camera-log.mp4");
 
         let err = validate_timeline_export_color_compatibility(&config, &timeline)
@@ -4134,7 +4134,7 @@ mod tests {
     #[test]
     fn export_color_validation_allows_camera_log_prores_intermediate() {
         let mut timeline = timeline_input_with_output_color(ColorSpace::AppleLog);
-        timeline.sequence.settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
 
         let mut config = dummy_config("camera-log.mov");
         config.preset.container = Container::Mov;
@@ -4147,7 +4147,7 @@ mod tests {
     #[test]
     fn export_color_validation_rejects_preserve_hdr_without_typed_metadata() {
         let mut timeline = timeline_input_with_output_color(ColorSpace::Rec2100Pq);
-        timeline.sequence.settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
         timeline.sequence.settings.color_management.preserve_hdr_metadata = true;
         let mut config = dummy_config("hdr-missing-metadata.mp4");
         config.preset.video = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
@@ -4160,7 +4160,7 @@ mod tests {
     #[test]
     fn export_color_validation_allows_preserve_hdr_with_typed_metadata() {
         let mut timeline = timeline_input_with_output_color(ColorSpace::Rec2100Pq);
-        timeline.sequence.settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
         timeline.sequence.settings.color_management.preserve_hdr_metadata = true;
         timeline.sequence.settings.color_management.hdr_mastering_display =
             Some(VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference());
@@ -4176,7 +4176,7 @@ mod tests {
     #[test]
     fn export_color_validation_rejects_unimplemented_hdr_metadata_backends() {
         let mut timeline = timeline_input_with_output_color(ColorSpace::Rec2100Pq);
-        timeline.sequence.settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
         timeline.sequence.settings.color_management.preserve_hdr_metadata = true;
         timeline.sequence.settings.color_management.hdr_mastering_display =
             Some(VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference());
@@ -4201,7 +4201,7 @@ mod tests {
     #[test]
     fn export_color_validation_requires_explicit_srgb_for_untagged_gif() {
         let mut timeline = timeline_input_with_output_color(ColorSpace::Rec709);
-        timeline.sequence.settings.color_management.export_bit_depth = ExportBitDepth::Eight;
+        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Eight;
         let mut config = dummy_config("untagged.gif");
         config.preset.container = Container::Gif;
         config.preset.video = VideoCodecConfig::Gif { colors: 256, dither: true };
@@ -4380,7 +4380,7 @@ mod tests {
     #[test]
     fn export_video_signal_args_bind_bit_depth_range_and_matrix_conversion() {
         let mut settings = mondrian_timeline::sequence::SequenceSettings::default();
-        settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+        settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
         settings.color_management.video_range = VideoRange::Legal;
         settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
         let codec = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
@@ -4421,7 +4421,7 @@ mod tests {
         ] {
             let mut settings = SequenceSettings::default();
             settings.color_management.output_color_space = color_space;
-            settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+            settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
             let mut cmd = Command::new("ffmpeg");
             apply_export_video_signal_args(&mut cmd, &settings, &codec);
 
@@ -4457,7 +4457,7 @@ mod tests {
     #[test]
     fn render_timeline_frame_into_clears_canvas_when_no_layers() {
         let mut seq = Sequence::new("empty");
-        seq.settings.color_management.export_bit_depth = ExportBitDepth::Eight;
+        seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Eight;
         seq.in_point_frame = Some(0);
         seq.out_point_frame = Some(10);
         let timeline = TimelineExportInput {
@@ -4481,9 +4481,9 @@ mod tests {
     }
 
     #[test]
-    fn render_timeline_frame_into_uses_rgba64le_canvas_for_high_bit_depth_no_layers() {
-        let mut seq = Sequence::new("empty-high-bit-depth");
-        seq.settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+    fn render_timeline_frame_into_uses_rgba64le_canvas_for_ten_bit_no_layers() {
+        let mut seq = Sequence::new("empty-ten-bit");
+        seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
         seq.in_point_frame = Some(0);
         seq.out_point_frame = Some(10);
         let timeline = TimelineExportInput {
@@ -4771,6 +4771,18 @@ mod tests {
     }
 
     #[test]
+    fn delivery_depth_selects_internal_pipe_precision_without_float_delivery_mode() {
+        assert_eq!(
+            ExportFrameContract::from_bit_depth(DeliveryBitDepth::Eight),
+            ExportFrameContract::Rgba8
+        );
+        assert_eq!(
+            ExportFrameContract::from_bit_depth(DeliveryBitDepth::Ten),
+            ExportFrameContract::Rgba16Float
+        );
+    }
+
+    #[test]
     fn export_frame_contract_rgba64le_packing_preserves_precision() {
         let f32_input = [0.0f32, 0.5, 1.0, 0.75];
         let packed = ExportFrameContract::Rgba16Float.pack_rgba_f32(&f32_input);
@@ -4795,9 +4807,9 @@ mod tests {
     }
 
     #[test]
-    fn high_bit_depth_cpu_fallback_does_not_record_precision_fallback() {
+    fn ten_bit_cpu_fallback_does_not_record_precision_fallback() {
         let mut seq = Sequence::new("high-bit-float-fallback");
-        seq.settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+        seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
         let tb = seq.time_base();
         seq.video_tracks[0]
             .add_clip(Clip::new_solid_color(
@@ -4846,9 +4858,9 @@ mod tests {
     }
 
     #[test]
-    fn high_bit_depth_cpu_fallback_produces_correct_rgba64le_canvas() {
+    fn ten_bit_cpu_fallback_produces_correct_rgba64le_canvas() {
         let mut seq = Sequence::new("high-bit-canvas-check");
-        seq.settings.color_management.export_bit_depth = ExportBitDepth::Ten;
+        seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
         let tb = seq.time_base();
         seq.video_tracks[0]
             .add_clip(Clip::new_solid_color(

@@ -390,11 +390,16 @@ pub enum VideoRange {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum ExportBitDepth {
+/// Encoded sample depth requested from the delivery codec.
+///
+/// Renderer working precision and the raw FFmpeg pipe representation are
+/// internal contracts and are deliberately not represented here.
+pub enum DeliveryBitDepth {
+    /// 8-bit encoded delivery samples.
     Eight,
-    Ten,
+    /// 10-bit encoded delivery samples.
     #[default]
-    SixteenFloat,
+    Ten,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -420,7 +425,8 @@ pub struct SequenceColorManagement {
     #[serde(default)]
     pub video_range: VideoRange,
     #[serde(default)]
-    pub export_bit_depth: ExportBitDepth,
+    /// Actual encoded sample depth of the deliverable.
+    pub delivery_bit_depth: DeliveryBitDepth,
     #[serde(default = "default_preserve_hdr_metadata")]
     pub preserve_hdr_metadata: bool,
     /// HDR mastering-display color volume (SMPTE ST 2086).
@@ -586,7 +592,7 @@ impl Default for SequenceColorManagement {
             display_management: DisplayManagementPolicy::default(),
             output_color_space: ColorSpace::Rec709,
             video_range: VideoRange::Full,
-            export_bit_depth: ExportBitDepth::SixteenFloat,
+            delivery_bit_depth: DeliveryBitDepth::Ten,
             preserve_hdr_metadata: false,
             hdr_mastering_display: None,
             hdr_content_light: None,
@@ -1471,6 +1477,16 @@ mod tests {
         timecode_to_ticks, Keyframe, PropertyHost, PropertyMutation, PropertyValue,
     };
     use mondrian_core::{DisplayToneMapPolicy, ProjectColorManagement};
+
+    #[test]
+    fn delivery_bit_depth_defaults_to_ten_bit_and_serializes_explicitly() {
+        let color = SequenceColorManagement::default();
+        assert_eq!(color.delivery_bit_depth, DeliveryBitDepth::Ten);
+
+        let json = serde_json::to_value(color).expect("serialize sequence color management");
+        assert_eq!(json["delivery_bit_depth"], "Ten");
+        assert!(json.get("export_bit_depth").is_none());
+    }
 
     #[test]
     fn missing_color_metadata_policy_reports_input_resolution_source() {

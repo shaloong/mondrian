@@ -199,20 +199,20 @@ wrappers, and render pipelines. Lower-level renderer code that already owns a va
 call the matching stage/resource recorder with renderer backend contexts.
 GPU-to-CPU output for encode, thumbnails, tests, or debug captures must use one
 of those renderer-owned paths. Export readback must be serialized through the
-export frame contract selected from sequence bit depth: 8-bit export writes
-RGBA8 raw-video bytes, while high-bit-depth export reads the renderer GPU
+export frame contract selected from delivery sample depth: 8-bit delivery writes
+RGBA8 raw-video bytes, while 10-bit delivery reads the renderer GPU
 `Rgba16Float` boundary and packs normalized channels into FFmpeg `rgba64le`
-pipe bytes. When GPU output is unavailable, high-bit-depth export CPU fallback
+pipe bytes. When GPU output is unavailable, 10-bit delivery CPU fallback
 must use the renderer-owned `execute_cpu_output_boundary_float(...)` helper,
 which applies the working -> output OCIO float transform without u8
 quantization. The caller flattens the float result into `[f32]` and uses
 `ExportFrameContract::pack_rgba_f32(...)` to produce `rgba64le` pipe bytes.
 Only when the float helper is unavailable or fails should the CPU fallback
 pack an RGBA8 boundary into that pipe contract; that path must remain
-diagnostically visible as a precision fallback (`CpuRgba8BoundaryPackedToHighBitDepthPipe`).
+diagnostically visible as a precision fallback (`CpuRgba8BoundaryPackedToTenBitPipe`).
 Health reports must distinguish GPU output fallback from output precision
 fallback: the former explains why native GPU output did not execute, while the
-latter explains why a high-bit-depth delivery contract was satisfied by bytes
+latter explains why a 10-bit delivery contract was supplied by bytes
 derived from an RGBA8 CPU output boundary.
 Tone-mapped export delivery must also be explicit. If an export color context
 requests tone mapping but the final export output boundary does not carry an
@@ -223,7 +223,7 @@ transform.
 Current CPU preview/export execution uses `execute_cpu_input_stage(...)` for
 source boundaries, `execute_cpu_output_boundary_rgba8(...)` for final display
 or export output, and `execute_cpu_output_boundary_float(...)` for
-high-bit-depth CPU fallback. The float helper delegates to
+10-bit delivery CPU fallback. The float helper delegates to
 `CpuRenderColorStageExecutor::output_transform_float(...)` and returns a
 float `CpuColorFrame` with output transform applied; app/export code should
 not instantiate the final-output executor directly or call

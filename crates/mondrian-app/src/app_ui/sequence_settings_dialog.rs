@@ -8,7 +8,7 @@ use mondrian_core::{
 };
 use mondrian_timeline::{
     sequence::{
-        ColorWorkflow, ExportBitDepth, MissingColorMetadataPolicy, NestedColorProcessing,
+        ColorWorkflow, DeliveryBitDepth, MissingColorMetadataPolicy, NestedColorProcessing,
         VideoRange,
     },
     AudioChannelLayout, AudioDisplayFormat, EditingMode, FieldOrder, PixelAspectRatio,
@@ -120,8 +120,8 @@ impl AppUiSequenceSettingsDraft {
             SequenceSettingsDraftUpdatePayload::VideoRange(range) => {
                 self.settings.color_management.video_range = range;
             }
-            SequenceSettingsDraftUpdatePayload::ExportBitDepth(bit_depth) => {
-                self.settings.color_management.export_bit_depth = bit_depth;
+            SequenceSettingsDraftUpdatePayload::DeliveryBitDepth(bit_depth) => {
+                self.settings.color_management.delivery_bit_depth = bit_depth;
             }
             SequenceSettingsDraftUpdatePayload::PreserveHdrMetadata(enabled) => {
                 self.settings.color_management.preserve_hdr_metadata = enabled;
@@ -281,11 +281,8 @@ const NESTED_COLOR_PROCESSING_OPTIONS: [NestedColorProcessing; 3] = [
 
 const VIDEO_RANGE_OPTIONS: [VideoRange; 2] = [VideoRange::Full, VideoRange::Legal];
 
-const EXPORT_BIT_DEPTH_OPTIONS: [ExportBitDepth; 3] = [
-    ExportBitDepth::Eight,
-    ExportBitDepth::Ten,
-    ExportBitDepth::SixteenFloat,
-];
+const DELIVERY_BIT_DEPTH_OPTIONS: [DeliveryBitDepth; 2] =
+    [DeliveryBitDepth::Eight, DeliveryBitDepth::Ten];
 
 impl SequenceSettingsTabPayload {
     const ALL: [Self; 3] = [Self::Format, Self::Color, Self::Preview];
@@ -440,11 +437,10 @@ fn video_range_label(value: VideoRange) -> &'static str {
     }
 }
 
-fn export_bit_depth_label(value: ExportBitDepth) -> &'static str {
+fn delivery_bit_depth_label(value: DeliveryBitDepth) -> &'static str {
     match value {
-        ExportBitDepth::Eight => "8-bit",
-        ExportBitDepth::Ten => "10-bit",
-        ExportBitDepth::SixteenFloat => "16-bit 浮点",
+        DeliveryBitDepth::Eight => "8-bit",
+        DeliveryBitDepth::Ten => "10-bit",
     }
 }
 
@@ -676,14 +672,14 @@ fn video_range_items() -> Vec<MenuItem> {
         .collect()
 }
 
-fn export_bit_depth_items() -> Vec<MenuItem> {
-    EXPORT_BIT_DEPTH_OPTIONS
+fn delivery_bit_depth_items() -> Vec<MenuItem> {
+    DELIVERY_BIT_DEPTH_OPTIONS
         .into_iter()
         .map(|bit_depth| {
             MenuItem::new(
-                export_bit_depth_label(bit_depth),
+                delivery_bit_depth_label(bit_depth),
                 app_shell_sequence_settings_draft_changed_action(
-                    SequenceSettingsDraftUpdatePayload::ExportBitDepth(bit_depth),
+                    SequenceSettingsDraftUpdatePayload::DeliveryBitDepth(bit_depth),
                 ),
             )
         })
@@ -1017,11 +1013,11 @@ fn video_range_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     )
 }
 
-fn export_bit_depth_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
+fn delivery_bit_depth_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     maybe_disable_dropdown(
         Dropdown::new(
-            export_bit_depth_label(draft.settings.color_management.export_bit_depth),
-            export_bit_depth_items(),
+            delivery_bit_depth_label(draft.settings.color_management.delivery_bit_depth),
+            delivery_bit_depth_items(),
         )
         .with_max_visible_items(3),
         draft.settings.color_management.inherit,
@@ -1179,7 +1175,7 @@ pub struct SequenceSettingsDialog {
     missing_color_metadata_dropdown: Dropdown,
     nested_color_processing_dropdown: Dropdown,
     video_range_dropdown: Dropdown,
-    export_bit_depth_dropdown: Dropdown,
+    delivery_bit_depth_dropdown: Dropdown,
     auto_tone_map_checkbox: Checkbox,
     preserve_hdr_metadata_checkbox: Checkbox,
     audio_sample_rate_dropdown: Dropdown,
@@ -1270,7 +1266,7 @@ impl SequenceSettingsDialog {
         let missing_color_metadata_dropdown = missing_color_metadata_dropdown_for(&draft);
         let nested_color_processing_dropdown = nested_color_processing_dropdown_for(&draft);
         let video_range_dropdown = video_range_dropdown_for(&draft);
-        let export_bit_depth_dropdown = export_bit_depth_dropdown_for(&draft);
+        let delivery_bit_depth_dropdown = delivery_bit_depth_dropdown_for(&draft);
         let auto_tone_map_checkbox = auto_tone_map_checkbox_for(&draft);
         let preserve_hdr_metadata_checkbox = preserve_hdr_metadata_checkbox_for(&draft);
         let audio_sample_rate_dropdown = audio_sample_rate_dropdown_for(&draft);
@@ -1321,7 +1317,7 @@ impl SequenceSettingsDialog {
             missing_color_metadata_dropdown,
             nested_color_processing_dropdown,
             video_range_dropdown,
-            export_bit_depth_dropdown,
+            delivery_bit_depth_dropdown,
             auto_tone_map_checkbox,
             preserve_hdr_metadata_checkbox,
             audio_sample_rate_dropdown,
@@ -1365,7 +1361,7 @@ impl SequenceSettingsDialog {
             self.nested_color_processing_dropdown =
                 nested_color_processing_dropdown_for(&self.draft);
             self.video_range_dropdown = video_range_dropdown_for(&self.draft);
-            self.export_bit_depth_dropdown = export_bit_depth_dropdown_for(&self.draft);
+            self.delivery_bit_depth_dropdown = delivery_bit_depth_dropdown_for(&self.draft);
             self.auto_tone_map_checkbox = auto_tone_map_checkbox_for(&self.draft);
             self.preserve_hdr_metadata_checkbox = preserve_hdr_metadata_checkbox_for(&self.draft);
             self.audio_sample_rate_dropdown = audio_sample_rate_dropdown_for(&self.draft);
@@ -1619,7 +1615,7 @@ impl Widget for SequenceSettingsDialog {
                 self.video_range_dropdown
                     .layout(Rect::new(right_x, row_y, half, DROPDOWN_HEIGHT));
                 row_y += 48.0;
-                self.export_bit_depth_dropdown.layout(Rect::new(
+                self.delivery_bit_depth_dropdown.layout(Rect::new(
                     content.x,
                     row_y,
                     half,
@@ -1754,7 +1750,7 @@ impl Widget for SequenceSettingsDialog {
                     || self.nested_color_processing_dropdown.event(event, ctx)
                         == EventResult::Handled
                     || self.video_range_dropdown.event(event, ctx) == EventResult::Handled
-                    || self.export_bit_depth_dropdown.event(event, ctx) == EventResult::Handled
+                    || self.delivery_bit_depth_dropdown.event(event, ctx) == EventResult::Handled
                     || self.auto_tone_map_checkbox.event(event, ctx) == EventResult::Handled
                     || self.preserve_hdr_metadata_checkbox.event(event, ctx) == EventResult::Handled
                 {
@@ -1815,7 +1811,7 @@ impl Widget for SequenceSettingsDialog {
                 self.missing_color_metadata_dropdown.paint(ctx);
                 self.nested_color_processing_dropdown.paint(ctx);
                 self.video_range_dropdown.paint(ctx);
-                self.export_bit_depth_dropdown.paint(ctx);
+                self.delivery_bit_depth_dropdown.paint(ctx);
                 self.auto_tone_map_checkbox.paint(ctx);
                 self.preserve_hdr_metadata_checkbox.paint(ctx);
             }
@@ -1872,7 +1868,7 @@ impl Widget for SequenceSettingsDialog {
             30 => Some(&self.missing_color_metadata_dropdown),
             31 => Some(&self.nested_color_processing_dropdown),
             32 => Some(&self.video_range_dropdown),
-            33 => Some(&self.export_bit_depth_dropdown),
+            33 => Some(&self.delivery_bit_depth_dropdown),
             34 => Some(&self.auto_tone_map_checkbox),
             35 => Some(&self.preserve_hdr_metadata_checkbox),
             36 => Some(&self.audio_sample_rate_dropdown),
@@ -1920,7 +1916,7 @@ impl Widget for SequenceSettingsDialog {
             30 => Some(&mut self.missing_color_metadata_dropdown),
             31 => Some(&mut self.nested_color_processing_dropdown),
             32 => Some(&mut self.video_range_dropdown),
-            33 => Some(&mut self.export_bit_depth_dropdown),
+            33 => Some(&mut self.delivery_bit_depth_dropdown),
             34 => Some(&mut self.auto_tone_map_checkbox),
             35 => Some(&mut self.preserve_hdr_metadata_checkbox),
             36 => Some(&mut self.audio_sample_rate_dropdown),

@@ -108,7 +108,7 @@ Important fields:
 - `nested_processing`
 - `output_color_space`
 - `video_range`
-- `export_bit_depth`
+- `delivery_bit_depth`: actual 8-bit or 10-bit encoded sample depth
 - HDR metadata preservation fields
 
 Media probing keeps automatic interpretation evidence separate from user
@@ -414,6 +414,14 @@ backend. SMPTE ST 2086 mastering-display and MaxCLL/MaxFALL values are emitted
 through one atomic `x265-params` value so neither field can override the other.
 AV1 and ProRes requests with metadata preservation fail validation until they
 have independently implemented and verified bitstream/container backends.
+
+Delivery sample depth and renderer transport precision are separate contracts.
+`DeliveryBitDepth` exposes only the 8-bit and 10-bit formats implemented by the
+current codecs. A 10-bit delivery uses the internal `Rgba16Float` export frame
+contract and `rgba64le` FFmpeg pipe so the renderer output transform is not
+quantized to 8-bit before encoding. That internal transport does not represent
+a 16-bit-float deliverable; no such user-facing option exists until a real
+float image/video backend is implemented.
 
 Derived proxy media follows the same encoding contract. The app resolves one
 `ProxyColorContract` from asset interpretation plus ingest metadata before

@@ -3,7 +3,7 @@ use mondrian_core::{ColorSpace, WorkingColorSpace};
 use mondrian_effects::EffectRenderOp;
 use mondrian_timeline::clip::{AlphaInterpretation, MediaInterpretation, Transform2D};
 use mondrian_timeline::sequence::{
-    ColorWorkflow, ExportBitDepth, FieldOrder, PixelAspectRatio, VideoRange,
+    ColorWorkflow, DeliveryBitDepth, FieldOrder, PixelAspectRatio, VideoRange,
 };
 
 fn create_state_with_sequence() -> AppState {
@@ -38,7 +38,7 @@ fn create_new_project_with_settings_preserves_sequence_color_management() {
             workflow: ColorWorkflow::SceneReferred,
             output_color_space: ColorSpace::Rec2100Pq,
             video_range: VideoRange::Legal,
-            export_bit_depth: ExportBitDepth::Ten,
+            delivery_bit_depth: DeliveryBitDepth::Ten,
             ..Default::default()
         },
         ..Default::default()
@@ -72,8 +72,8 @@ fn create_new_project_with_settings_preserves_sequence_color_management() {
         VideoRange::Legal
     );
     assert_eq!(
-        sequence.settings.color_management.export_bit_depth,
-        ExportBitDepth::Ten
+        sequence.settings.color_management.delivery_bit_depth,
+        DeliveryBitDepth::Ten
     );
 
     let _ = std::fs::remove_dir_all(root);

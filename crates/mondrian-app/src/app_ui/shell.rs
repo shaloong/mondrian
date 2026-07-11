@@ -1853,7 +1853,7 @@ mod tests {
     };
     use mondrian_platform::ClipboardError;
     use mondrian_timeline::sequence::{
-        AudioChannelLayout, AudioDisplayFormat, ColorWorkflow, EditingMode, ExportBitDepth,
+        AudioChannelLayout, AudioDisplayFormat, ColorWorkflow, DeliveryBitDepth, EditingMode,
         FieldOrder, MissingColorMetadataPolicy, NestedColorProcessing, PixelAspectRatio,
         PreviewRenderFormat, Sequence, VideoDisplayFormat, VideoRange,
     };
@@ -2970,7 +2970,7 @@ mod tests {
         );
         root.handle_shell_action(
             app_shell_sequence_settings_draft_changed_action(
-                SequenceSettingsDraftUpdatePayload::ExportBitDepth(ExportBitDepth::Ten),
+                SequenceSettingsDraftUpdatePayload::DeliveryBitDepth(DeliveryBitDepth::Ten),
             ),
             &platform,
             None,
@@ -3111,8 +3111,8 @@ mod tests {
             VideoRange::Legal
         );
         assert_eq!(
-            payload.settings.color_management.export_bit_depth,
-            ExportBitDepth::Ten
+            payload.settings.color_management.delivery_bit_depth,
+            DeliveryBitDepth::Ten
         );
         assert!(payload.settings.color_management.preserve_hdr_metadata);
         assert_eq!(
