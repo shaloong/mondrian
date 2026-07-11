@@ -2824,6 +2824,7 @@ dependencies = [
  "bytemuck",
  "criterion",
  "glam",
+ "half",
  "image",
  "lru",
  "mondrian-core",

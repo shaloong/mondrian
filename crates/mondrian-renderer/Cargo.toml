@@ -33,6 +33,7 @@ image = { workspace = true }
 serde_json = { workspace = true }
 pollster = "0.4"
 criterion = { version = "0.5", features = ["html_reports"] }
+half = "2.7"
 
 [[bench]]
 name = "compositor"

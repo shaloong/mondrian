@@ -674,6 +674,7 @@ impl ErrorAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use half::f16;
 
     const STRICT: LinearRgbaAccuracyBudget = LinearRgbaAccuracyBudget {
         rgb: LinearAccuracyBudget::finite(0.0625, 0.05, 0.0625),
@@ -846,5 +847,97 @@ mod tests {
             ),
             Err(SrgbDisplayAccuracyError::InvalidBudget { metric: "max_delta_e_2000", .. })
         ));
+    }
+
+    fn f16_round_trip(value: f32) -> f32 {
+        f16::from_f32(value).to_f32()
+    }
+
+    #[test]
+    fn f16_encoded_boundary_error_fits_one_twelve_bit_code() {
+        let mut max_absolute_error = 0.0_f32;
+        let mut sum_squared_error = 0.0_f64;
+        for code in 0..=65_535_u32 {
+            let value = code as f32 / 65_535.0;
+            let error = (f16_round_trip(value) - value).abs();
+            max_absolute_error = max_absolute_error.max(error);
+            sum_squared_error += f64::from(error).powi(2);
+        }
+        let rms = (sum_squared_error / 65_536.0).sqrt();
+        let twelve_bit_codes = max_absolute_error * 4_095.0;
+
+        eprintln!(
+            "f16 encoded boundary: max_abs={max_absolute_error:.9} rms={rms:.9} max_12bit_codes={twelve_bit_codes:.4}"
+        );
+        assert!(max_absolute_error <= 1.0 / 4_096.0);
+        assert!(twelve_bit_codes <= 1.0);
+    }
+
+    #[test]
+    fn f16_scene_linear_range_has_bounded_relative_error() {
+        let mut max_absolute_error = 0.0_f32;
+        let mut max_relative_error = 0.0_f32;
+        for index in -65_536_i32..=65_536_i32 {
+            let value = index as f32 / 4_096.0;
+            let error = (f16_round_trip(value) - value).abs();
+            max_absolute_error = max_absolute_error.max(error);
+            if value.abs() >= f32::from(f16::MIN_POSITIVE) {
+                max_relative_error = max_relative_error.max(error / value.abs());
+            }
+        }
+
+        eprintln!(
+            "f16 scene-linear [-16,16]: max_abs={max_absolute_error:.9} max_relative={max_relative_error:.9}"
+        );
+        assert!(max_absolute_error <= 1.0 / 256.0);
+        assert!(max_relative_error <= 1.0 / 2_048.0);
+    }
+
+    #[test]
+    fn hypothetical_f16_working_composite_exceeds_boundary_code_budget() {
+        let mut reference = [0.0_f32; 3];
+        let mut quantized = [0.0_f32; 3];
+        for layer in 0..256_u32 {
+            let alpha = ((layer * 17 % 79) + 1) as f32 / 100.0;
+            let color = [
+                (layer * 37 % 257) as f32 / 16.0,
+                (layer * 53 % 193) as f32 / 12.0,
+                (layer * 29 % 149) as f32 / 10.0,
+            ];
+            for channel in 0..3 {
+                reference[channel] = color[channel] * alpha + reference[channel] * (1.0 - alpha);
+                let blended = color[channel] * alpha + quantized[channel] * (1.0 - alpha);
+                quantized[channel] = f16_round_trip(blended);
+            }
+        }
+        let max_absolute_error = reference
+            .iter()
+            .zip(quantized.iter())
+            .map(|(expected, observed)| (expected - observed).abs())
+            .fold(0.0_f32, f32::max);
+
+        eprintln!(
+            "hypothetical 256-layer f16 working composite: reference={reference:?} quantized={quantized:?} max_abs={max_absolute_error:.9}"
+        );
+        assert!(max_absolute_error > 1.0 / 4_096.0);
+        assert!(max_absolute_error < 0.02);
+    }
+
+    #[test]
+    fn rgba32_working_precision_cost_is_explicit_at_4k() {
+        let pixels = 3_840_u64 * 2_160;
+        let rgba16_bytes = pixels * 8;
+        let rgba32_bytes = pixels * 16;
+
+        eprintln!(
+            "4K texture precision cost: rgba16={:.2} MiB rgba32={:.2} MiB ping_pong_rgba16={:.2} MiB ping_pong_rgba32={:.2} MiB",
+            rgba16_bytes as f64 / 1_048_576.0,
+            rgba32_bytes as f64 / 1_048_576.0,
+            (rgba16_bytes * 2) as f64 / 1_048_576.0,
+            (rgba32_bytes * 2) as f64 / 1_048_576.0,
+        );
+        assert_eq!(rgba16_bytes, 66_355_200);
+        assert_eq!(rgba32_bytes, 132_710_400);
+        assert_eq!(rgba32_bytes, rgba16_bytes * 2);
     }
 }

@@ -224,6 +224,32 @@ After encoding, `mondrian-export` runs ffprobe and validates the actual encoded
 pixel format, video range, primaries, transfer characteristic, and matrix
 against expectations derived from the same export signal contract. Encoder
 success without matching signal evidence is an export failure.
+
+## Internal Float Precision
+
+Working-space CPU frames and the GPU compositor use 32-bit float. This is a
+fixed correctness contract, not a user preference. Native normalized encoded
+sources and encoded output boundaries may use 16-bit float because their
+values are bounded and they cross into a 10/12-bit delivery or a subsequent
+32F working transform; OCIO LUT resources remain 32F.
+
+Deterministic precision tests measure the current budget:
+
+| Case | Measured worst error |
+|---|---:|
+| f16 round-trip over normalized `[0,1]` | `0.000244141` (`0.9998` 12-bit code) |
+| f16 round-trip over scene-linear `[-16,16]` | `0.000488043` relative, `0.00390625` absolute |
+| Hypothetical 256-layer HDR composite with f16 storage after every pass | `0.00274086` absolute |
+
+The accumulated composite result is why working targets remain
+`Rgba32Float`. A user-selectable 16F/32F working toggle would allow projects to
+change numerical semantics and is not offered. At 3840x2160 one RGBA16F target
+is 63.28 MiB and one RGBA32F target is 126.56 MiB; compositor ping-pong targets
+are 126.56 MiB versus 253.13 MiB. The 2x memory/bandwidth cost is accepted for
+working correctness, while bounded encoded boundaries retain 16F. A future
+float deliverable or an unbounded intermediate must use a separately validated
+32F boundary rather than relaxing this policy globally.
+
 Current CPU preview/export execution uses `execute_cpu_input_stage(...)` for
 source boundaries, `execute_cpu_output_boundary_rgba8(...)` for final display
 or export output, and `execute_cpu_output_boundary_float(...)` for
