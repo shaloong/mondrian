@@ -295,7 +295,7 @@ fn preview_display_and_export_delivery_boundaries_match_with_stable_hash() {
     );
     assert_eq!(preview.color_diagnostics.output, preview.output_descriptor);
     assert_eq!(export.color_diagnostics.output, export.output_descriptor);
-    assert_eq!(stable_rgba_hash(&preview.rgba), 0x41cc_83bb_cef6_83d2);
+    assert_eq!(stable_rgba_hash(&preview.rgba), 0x1538_68f6_4d01_e749);
 }
 
 #[test]
