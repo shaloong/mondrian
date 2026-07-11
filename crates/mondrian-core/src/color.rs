@@ -9,46 +9,6 @@ use moxcms::{
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ColorPipeline {
-    pub input: ColorSpace,
-    pub working: ColorSpace,
-    pub output: ColorSpace,
-    pub tone_map: bool,
-    pub engine: ColorEngine,
-}
-
-impl ColorPipeline {
-    pub fn new(input: ColorSpace, working: ColorSpace, output: ColorSpace, tone_map: bool) -> Self {
-        Self {
-            input,
-            working,
-            output,
-            tone_map,
-            engine: ColorEngine::default(),
-        }
-    }
-
-    pub fn with_engine(mut self, engine: ColorEngine) -> Self {
-        self.engine = engine;
-        self
-    }
-
-    pub fn is_noop(&self) -> bool {
-        self.input == self.output
-            && self.working == self.output
-            && !(self.tone_map && self.working.is_hdr() && !self.output.is_hdr())
-    }
-
-    pub fn transform_plan(self) -> ColorTransformPlan {
-        ColorTransformPlan::from_pipeline(self)
-    }
-
-    pub fn signature_hash(self) -> u64 {
-        self.transform_plan().signature_hash()
-    }
-}
-
 // ── ColorEngine: centralized dispatch ─────────────────────────────────────────
 
 impl ColorEngine {
@@ -81,128 +41,6 @@ impl ColorEngine {
         crate::ocio::apply_ocio_display_identity_float(data, src, display, view)
     }
 
-    /// Apply a color space conversion to the given rgba8 data.
-    ///
-    /// This is the single dispatch point for all color space transforms.
-    /// The engine handles the entire chain: decode → primaries → tone map → encode.
-    pub fn convert(
-        &self,
-        data: &mut [u8],
-        src: ColorSpace,
-        dst: ColorSpace,
-        tone_map: bool,
-    ) -> Result<(), String> {
-        self.convert_pipeline(data, src, src, dst, tone_map)
-    }
-
-    /// Apply a full source -> working -> output color conversion.
-    ///
-    /// Preview, export and timeline compositing should use this form whenever a
-    /// sequence working space is known. The shorter [`Self::convert`] API is for
-    /// direct source -> output conversions.
-    ///
-    /// For OCIO engines, `tone_map` is intentionally ignored here because tone
-    /// mapping is applied through the OCIO display/view transform
-    /// ([`Self::display_transform`]), not through the pipeline color-space
-    /// conversion. Callers that need tone mapping must use display/view
-    /// boundaries, not the pipeline path.
-    pub fn convert_pipeline(
-        &self,
-        data: &mut [u8],
-        src: ColorSpace,
-        working: ColorSpace,
-        dst: ColorSpace,
-        tone_map: bool,
-    ) -> Result<(), String> {
-        let _ = tone_map; // Intentionally ignored: tone mapping belongs in display/view transform.
-        match self {
-            Self::MondrianSmart => {
-                crate::ocio::ensure_mondrian_default_ocio_loaded()?;
-                crate::ocio::apply_ocio_pipeline_rgba8(data, src, working, dst)
-            }
-            Self::Ocio { .. } => {
-                self.ensure_loaded()?;
-                crate::ocio::apply_ocio_pipeline_rgba8(data, src, working, dst)
-            }
-        }
-    }
-
-    /// Apply a display transform (scene → display).
-    ///
-    /// For OCIO this uses the configured display/view pair. For MondrianSmart this
-    /// falls back to ICC-based display profiles.
-    pub fn display_transform(
-        &self,
-        data: &mut [u8],
-        src: ColorSpace,
-        display: &str,
-        view: &str,
-    ) -> Result<(), String> {
-        match self {
-            Self::MondrianSmart => {
-                crate::ocio::ensure_mondrian_default_ocio_loaded()?;
-                crate::ocio::apply_ocio_display_rgba8(data, src, display, view)
-            }
-            Self::Ocio { .. } => {
-                self.ensure_loaded()?;
-                crate::ocio::apply_ocio_display_rgba8(data, src, display, view)
-            }
-        }
-    }
-
-    /// Apply a full source -> working -> output color conversion on f32 data
-    /// without u8 quantization.
-    ///
-    /// This is the precision-preserving alternative to [`Self::convert_pipeline`].
-    /// The data must be RGBA f32 pixels (4 floats per pixel, linear light).
-    ///
-    /// For OCIO engines, `tone_map` is intentionally ignored here because tone
-    /// mapping is applied through the OCIO display/view transform
-    /// ([`Self::display_transform_float`]), not through the pipeline conversion.
-    pub fn convert_pipeline_float(
-        &self,
-        data: &mut [f32],
-        src: ColorSpace,
-        working: ColorSpace,
-        dst: ColorSpace,
-        tone_map: bool,
-    ) -> Result<(), String> {
-        let _ = tone_map; // Intentionally ignored: tone mapping belongs in display/view transform.
-        match self {
-            Self::MondrianSmart => {
-                crate::ocio::ensure_mondrian_default_ocio_loaded()?;
-                crate::ocio::apply_ocio_pipeline_float(data, src, working, dst)
-            }
-            Self::Ocio { .. } => {
-                self.ensure_loaded()?;
-                crate::ocio::apply_ocio_pipeline_float(data, src, working, dst)
-            }
-        }
-    }
-
-    /// Apply a display transform on f32 data without u8 quantization.
-    ///
-    /// This is the precision-preserving alternative to [`Self::display_transform`].
-    /// The data must be RGBA f32 pixels (4 floats per pixel, linear light).
-    pub fn display_transform_float(
-        &self,
-        data: &mut [f32],
-        src: ColorSpace,
-        display: &str,
-        view: &str,
-    ) -> Result<(), String> {
-        match self {
-            Self::MondrianSmart => {
-                crate::ocio::ensure_mondrian_default_ocio_loaded()?;
-                crate::ocio::apply_ocio_display_float(data, src, display, view)
-            }
-            Self::Ocio { .. } => {
-                self.ensure_loaded()?;
-                crate::ocio::apply_ocio_display_float(data, src, display, view)
-            }
-        }
-    }
-
     /// Whether the engine is ready to process data.
     pub fn is_available(&self) -> bool {
         match self {
@@ -224,163 +62,6 @@ impl ColorEngine {
         match self {
             Self::MondrianSmart => "Mondrian Standard",
             Self::Ocio { .. } => "OpenColorIO",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ColorTransformNode {
-    ManagementEngine(ColorEngine),
-    DecodeTransfer(ColorSpace),
-    ConvertPrimaries { from: ColorSpace, to: ColorSpace },
-    ToneMapAces,
-    DisplayProfile(DisplayColorProfile),
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ColorTransformPlan {
-    pub source: ColorSpace,
-    pub working: ColorSpace,
-    pub output: ColorSpace,
-    pub tone_map: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub nodes: Vec<ColorTransformNode>,
-}
-
-impl ColorTransformPlan {
-    pub fn from_pipeline(pipeline: ColorPipeline) -> Self {
-        let mut plan = Self::built_in(
-            pipeline.input,
-            pipeline.working,
-            pipeline.output,
-            pipeline.tone_map,
-        );
-        plan.nodes.insert(0, ColorTransformNode::ManagementEngine(pipeline.engine));
-        plan
-    }
-
-    fn built_in(
-        source: ColorSpace,
-        working: ColorSpace,
-        output: ColorSpace,
-        tone_map: bool,
-    ) -> Self {
-        let mut nodes = vec![
-            ColorTransformNode::DecodeTransfer(source),
-            ColorTransformNode::ConvertPrimaries { from: source, to: working },
-        ];
-        if tone_map && working.is_hdr() && !output.is_hdr() {
-            nodes.push(ColorTransformNode::ToneMapAces);
-        }
-        nodes.push(ColorTransformNode::ConvertPrimaries { from: working, to: output });
-
-        Self { source, working, output, tone_map, nodes }
-    }
-
-    pub fn with_display_profile(mut self, profile: DisplayColorProfile) -> Self {
-        self.nodes.push(ColorTransformNode::DisplayProfile(profile));
-        self
-    }
-
-    pub fn nodes(&self) -> &[ColorTransformNode] {
-        &self.nodes
-    }
-
-    pub fn signature_hash(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.source.hash(&mut hasher);
-        self.working.hash(&mut hasher);
-        self.output.hash(&mut hasher);
-        self.tone_map.hash(&mut hasher);
-        for node in &self.nodes {
-            node.hash_signature(&mut hasher);
-        }
-        hasher.finish()
-    }
-
-    pub fn apply_rgba8_in_place(&self, data: &mut [u8]) -> Result<(), String> {
-        if data.is_empty() {
-            return Ok(());
-        }
-
-        // If the first node declares an engine, use its centralized dispatch.
-        if let Some(ColorTransformNode::ManagementEngine(engine)) = self.nodes.first() {
-            let tone_map = self.tone_map && self.working.is_hdr() && !self.output.is_hdr();
-            return engine.convert_pipeline(data, self.source, self.working, self.output, tone_map);
-        }
-
-        let mut frame = RgbaF32Frame::from_rgba8(
-            1,
-            (data.len() / 4) as u32,
-            data,
-            self.source,
-            self.working,
-            false,
-        );
-
-        for node in &self.nodes {
-            match node {
-                ColorTransformNode::ManagementEngine(_) => {}
-                ColorTransformNode::DecodeTransfer(_) => {}
-                ColorTransformNode::ConvertPrimaries { from: _, to } => {
-                    frame.convert_to(*to, false);
-                }
-                ColorTransformNode::ToneMapAces => {
-                    if frame.color_space.is_hdr() && !self.output.is_hdr() {
-                        for px in &mut frame.data {
-                            px[0] = aces_tone_map(px[0]);
-                            px[1] = aces_tone_map(px[1]);
-                            px[2] = aces_tone_map(px[2]);
-                        }
-                    }
-                }
-                ColorTransformNode::DisplayProfile(profile) => {
-                    let mut rgba = frame.to_rgba8(frame.color_space, self.tone_map);
-                    apply_display_profile_rgba8_in_place(
-                        &mut rgba,
-                        frame.color_space,
-                        profile,
-                        self.tone_map,
-                    )?;
-                    data.copy_from_slice(&rgba[..data.len()]);
-                    return Ok(());
-                }
-            }
-        }
-
-        let converted = frame.to_rgba8(self.output, false);
-        data.copy_from_slice(&converted[..data.len()]);
-        Ok(())
-    }
-}
-
-impl ColorTransformNode {
-    pub fn hash_signature<H: std::hash::Hasher>(&self, state: &mut H) {
-        use std::hash::Hash;
-
-        match self {
-            ColorTransformNode::ManagementEngine(engine) => {
-                0u8.hash(state);
-                engine.hash(state);
-            }
-            ColorTransformNode::DecodeTransfer(space) => {
-                1u8.hash(state);
-                space.hash(state);
-            }
-            ColorTransformNode::ConvertPrimaries { from, to } => {
-                2u8.hash(state);
-                from.hash(state);
-                to.hash(state);
-            }
-            ColorTransformNode::ToneMapAces => {
-                3u8.hash(state);
-            }
-            ColorTransformNode::DisplayProfile(profile) => {
-                4u8.hash(state);
-                profile.signature_hash().hash(state);
-            }
         }
     }
 }
@@ -1070,19 +751,6 @@ fn ffmpeg_tag_eq(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right) || matches!((left, right), ("rgb", "gbr") | ("gbr", "rgb"))
 }
 
-pub fn convert_rgba8_in_place(data: &mut [u8], pipeline: ColorPipeline) -> Result<(), String> {
-    if data.is_empty() || pipeline.is_noop() {
-        return Ok(());
-    }
-    pipeline.transform_plan().apply_rgba8_in_place(data)
-}
-
-pub fn convert_rgba8(data: &[u8], pipeline: ColorPipeline) -> Result<Vec<u8>, String> {
-    let mut out = data.to_vec();
-    convert_rgba8_in_place(&mut out, pipeline)?;
-    Ok(out)
-}
-
 fn decode_transfer(space: ColorSpace, v: f32) -> f32 {
     let v = v.clamp(0.0, 1.0);
     match space {
@@ -1388,164 +1056,6 @@ mod tests {
         assert_eq!(ColorSpace::from_ffmpeg_tag_hints(None, None, None), None);
     }
 
-    #[derive(Debug, Clone, Copy)]
-    struct ColorReferenceSample {
-        name: &'static str,
-        input: ColorSpace,
-        working: ColorSpace,
-        output: ColorSpace,
-        tone_map: bool,
-        rgba: [u8; 4],
-        expected: [u8; 4],
-        tolerance: u8,
-    }
-
-    const COLOR_REFERENCE_SAMPLES: [ColorReferenceSample; 4] = [
-        ColorReferenceSample {
-            name: "rec709 identity gray",
-            input: ColorSpace::Rec709,
-            working: ColorSpace::Rec709,
-            output: ColorSpace::Rec709,
-            tone_map: false,
-            rgba: [128, 128, 128, 77],
-            expected: [128, 128, 128, 77],
-            tolerance: 1,
-        },
-        ColorReferenceSample {
-            name: "srgb identity red ramp",
-            input: ColorSpace::Srgb,
-            working: ColorSpace::Srgb,
-            output: ColorSpace::Srgb,
-            tone_map: false,
-            rgba: [204, 32, 16, 201],
-            expected: [204, 32, 16, 201],
-            tolerance: 1,
-        },
-        ColorReferenceSample {
-            name: "rec2020 green primary to rec709 clips predictably",
-            input: ColorSpace::Rec2020,
-            working: ColorSpace::Rec2020,
-            output: ColorSpace::Rec709,
-            tone_map: false,
-            rgba: [0, 255, 0, 255],
-            expected: [0, 255, 0, 255],
-            tolerance: 1,
-        },
-        ColorReferenceSample {
-            name: "pq white tone maps to sdr white without alpha change",
-            input: ColorSpace::Rec2100Pq,
-            working: ColorSpace::Rec2100Pq,
-            output: ColorSpace::Rec709,
-            tone_map: true,
-            rgba: [255, 255, 255, 33],
-            expected: [255, 255, 255, 33],
-            tolerance: 1,
-        },
-    ];
-
-    #[test]
-    fn identity_pipeline_keeps_rgba() {
-        let mut rgba = vec![12, 34, 56, 78, 200, 210, 220, 230];
-        let original = rgba.clone();
-        convert_rgba8_in_place(
-            &mut rgba,
-            ColorPipeline::new(
-                ColorSpace::Rec709,
-                ColorSpace::Rec709,
-                ColorSpace::Rec709,
-                true,
-            ),
-        )
-        .expect("identity pipeline should be no-op");
-        assert_eq!(rgba, original);
-    }
-
-    #[test]
-    fn reference_plan_honors_working_space_when_source_and_output_match() {
-        let mut rgba = vec![255, 255, 255, 77];
-
-        ColorTransformPlan::built_in(
-            ColorSpace::Rec709,
-            ColorSpace::Rec2100Pq,
-            ColorSpace::Rec709,
-            true,
-        )
-        .apply_rgba8_in_place(&mut rgba)
-        .expect("reference plan should convert");
-
-        assert!(rgba[0] < 255);
-        assert_eq!(rgba[0], rgba[1]);
-        assert_eq!(rgba[1], rgba[2]);
-        assert_eq!(rgba[3], 77);
-    }
-
-    #[test]
-    fn standard_engine_uses_embedded_default_ocio_without_fallback() {
-        let engine = ColorEngine::MondrianSmart;
-        let mut rgba = vec![12, 34, 56, 78];
-
-        engine
-            .convert_pipeline(
-                &mut rgba,
-                ColorSpace::Rec709,
-                ColorSpace::Rec709,
-                ColorSpace::Srgb,
-                false,
-            )
-            .expect("standard mode should use the embedded Mondrian default OCIO config");
-
-        assert!(engine.is_available());
-        assert_eq!(rgba[3], 78);
-    }
-
-    #[test]
-    fn explicit_ocio_engine_reports_missing_config_without_fallback() {
-        let missing_path = std::env::temp_dir().join(format!(
-            "mondrian-missing-ocio-config-{}.ocio",
-            std::process::id()
-        ));
-        let engine = ColorEngine::Ocio {
-            source: crate::types::OcioConfigSource::Path { path: missing_path },
-        };
-        let mut rgba = vec![12, 34, 56, 78];
-        let original = rgba.clone();
-
-        let err = engine
-            .convert_pipeline(
-                &mut rgba,
-                ColorSpace::Rec709,
-                ColorSpace::Rec709,
-                ColorSpace::Srgb,
-                false,
-            )
-            .expect_err("explicit OCIO source should not fall back");
-
-        assert!(err.contains("OCIO config file not found"));
-        assert_eq!(rgba, original);
-    }
-
-    #[test]
-    fn color_reference_samples_stay_within_expected_tolerance() {
-        for sample in COLOR_REFERENCE_SAMPLES {
-            let mut rgba = sample.rgba.to_vec();
-            ColorTransformPlan::built_in(
-                sample.input,
-                sample.working,
-                sample.output,
-                sample.tone_map,
-            )
-            .apply_rgba8_in_place(&mut rgba)
-            .expect("reference sample should convert");
-            for (index, (actual, expected)) in rgba.iter().zip(sample.expected).enumerate() {
-                assert!(
-                    (*actual as i16 - expected as i16).unsigned_abs() <= sample.tolerance as u16,
-                    "{} channel {index}: expected {expected}, got {actual}",
-                    sample.name
-                );
-            }
-        }
-    }
-
     #[test]
     fn log_curve_reference_values_are_stable() {
         let apple_mid = linear_to_apple_log(0.18);
@@ -1557,33 +1067,47 @@ mod tests {
     }
 
     #[test]
-    fn hdr_to_sdr_tone_map_preserves_alpha_and_clamps() {
-        let mut rgba = vec![255, 255, 255, 123];
-        ColorTransformPlan::built_in(
-            ColorSpace::Rec2100Pq,
-            ColorSpace::Rec2100Pq,
-            ColorSpace::Rec709,
-            true,
-        )
-        .apply_rgba8_in_place(&mut rgba)
-        .expect("reference plan should convert");
-        assert!(rgba[0] > 0 && rgba[1] > 0 && rgba[2] > 0);
-        assert_eq!(rgba[3], 123);
+    fn standard_engine_uses_typed_ocio_identity_without_byte_boundary() {
+        let engine = ColorEngine::MondrianSmart;
+        let mut rgba = vec![0.5_f32, 0.5, 0.5, 0.25];
+
+        engine
+            .convert_identity_float(
+                &mut rgba,
+                OcioColorSpaceIdentity::Encoded(ColorSpace::Rec709),
+                OcioColorSpaceIdentity::Working(crate::types::WorkingColorSpace::LinearRec709),
+            )
+            .expect("embedded OCIO source-to-working processor");
+
+        assert!(engine.is_available());
+        assert!(rgba[0] < 0.5);
+        assert!((rgba[0] - rgba[1]).abs() < 1.0e-6);
+        assert!((rgba[1] - rgba[2]).abs() < 1.0e-6);
+        assert!((rgba[3] - 0.25).abs() < 1.0e-6);
     }
 
     #[test]
-    fn rec2020_to_rec709_keeps_neutral_axis_close() {
-        let mut rgba = vec![128, 128, 128, 255];
-        ColorTransformPlan::built_in(
-            ColorSpace::Rec2020,
-            ColorSpace::Rec2020,
-            ColorSpace::Rec709,
-            false,
-        )
-        .apply_rgba8_in_place(&mut rgba)
-        .expect("reference plan should convert");
-        assert!((rgba[0] as i16 - rgba[1] as i16).abs() <= 2);
-        assert!((rgba[1] as i16 - rgba[2] as i16).abs() <= 2);
+    fn explicit_ocio_engine_reports_missing_config_without_mutating_pixels() {
+        let missing_path = std::env::temp_dir().join(format!(
+            "mondrian-missing-ocio-config-{}.ocio",
+            std::process::id()
+        ));
+        let engine = ColorEngine::Ocio {
+            source: crate::types::OcioConfigSource::Path { path: missing_path },
+        };
+        let mut rgba = vec![0.1_f32, 0.2, 0.3, 0.4];
+        let original = rgba.clone();
+
+        let err = engine
+            .convert_identity_float(
+                &mut rgba,
+                OcioColorSpaceIdentity::Encoded(ColorSpace::Rec709),
+                OcioColorSpaceIdentity::Working(crate::types::WorkingColorSpace::LinearRec709),
+            )
+            .expect_err("explicit missing OCIO source must fail closed");
+
+        assert!(err.contains("OCIO config file not found"));
+        assert_eq!(rgba, original);
     }
 
     #[test]

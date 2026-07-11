@@ -563,8 +563,8 @@ Export tone mapping is delivered through an explicit OCIO delivery view
 transform, not through the color-space pipeline. The three transform
 contracts are:
 
-- **Color-space transform**: `source → working → output` conversion via
-  `convert_pipeline*`. Does not carry tone mapping.
+- **Input color-space transform**: encoded `source → working` conversion via
+  `RenderInputTransform`. Does not carry tone mapping.
 - **Preview display/view transform**: viewer presentation via
   `RenderOutputColorBoundary::display_view(...)` with `target: Display`.
  受 monitor/surface/display policy 影响。
@@ -572,8 +572,8 @@ contracts are:
   `RenderOutputColorBoundary::export_view(...)` with `target: Export`.
   Carries the OCIO display/view transform (which includes tone mapping)
   into the export boundary. Uses `RenderColorTransform::delivery_view(...)`
-  internally, which dispatches to `display_transform_float` / `display_transform`
-  on the OCIO engine.
+  internally, which dispatches through the explicit working-identity OCIO
+  display processor.
 
 ### Export Delivery View Policy
 

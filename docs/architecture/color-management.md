@@ -136,9 +136,13 @@ bypass, and `Rejected` fails the media path. Missing metadata can assume
 Rec.709 with a diagnosed policy branch or reject the source; it can never
 silently reinterpret encoded samples as the sequence's linear working space.
 
-`ColorPipeline` execution is source -> working -> output. The management engine
-dispatch must preserve that full chain; it must not collapse a timeline pipeline
-to source -> output when a sequence working space is available.
+There is no public monolithic `ColorPipeline`. A source/input transform consumes
+`OcioColorSpaceIdentity::Encoded` and produces
+`OcioColorSpaceIdentity::Working`; effects and compositing accept only the
+working identity; display and export boundary transforms consume working pixels
+and produce an encoded presentation/delivery identity. This split prevents an
+encoded `ColorSpace` from being passed as a working space and prevents tone
+mapping from being attached to an interior color-space conversion.
 
 OCIO execution also follows source -> working -> output. The Standard mode UI
 can hide OCIO details from normal users, but the backend still routes through
@@ -306,7 +310,7 @@ Input transforms follow the same rule. Decode/import code wraps source pixels in
 `CpuEncodedColorFrame::source_rgba8`, builds a `RenderInputTransform`, and asks
 the renderer stage executor for a `CpuColorFrame` in timeline working space.
 App and export crates must not perform source -> working color conversion with
-local `ColorPipeline` calls or direct low-level transform executor calls.
+local processor chains or direct low-level transform executor calls.
 
 Renderer color-transform executors provide detailed diagnostics for both input
 and output boundaries: backend, direction, typed input/output descriptors,

@@ -29,15 +29,16 @@ display/view pairs for product UI and renderer integration.
 
 ## Pipeline
 
-Color conversion is represented by `ColorPipeline`:
+Color conversion uses three distinct contracts rather than one untyped
+source/working/output struct:
 
-- input
-- working
-- output
-- tone_map
-- engine
+- `RenderInputTransform`: encoded source identity to linear working identity.
+- Effects/compositing: linear pixels carrying `WorkingColorSpace` only.
+- `RenderOutputColorBoundary`: working identity to encoded display or export
+  identity, with display/view tone mapping allowed only here.
 
-`ColorTransformPlan` expands this to management engine, transfer decode, primary conversion, optional tone map, and output conversion.
+CPU and GPU OCIO processor requests use `OcioColorSpaceIdentity`, so an encoded
+`ColorSpace` cannot alias a `WorkingColorSpace` in processor caches or APIs.
 
 ## Media Interpretation
 
