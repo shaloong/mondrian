@@ -4,13 +4,50 @@ use crate::types::ColorSpace;
 use icc_profile::iccprofile::{
     Curve, Data as IccTagData, DecodedICCProfile, ICCNumber, S15Fixed16Number,
 };
+use serde::{Deserialize, Serialize};
+
+/// How an ICC profile was mapped onto Mondrian's managed color-space set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IccColorSpaceMapping {
+    /// A named standard was explicitly identified by profile metadata.
+    Mapped {
+        /// Managed color-space identity.
+        color_space: ColorSpace,
+        /// Stable mapping method used for diagnostics and telemetry.
+        method: IccColorSpaceMappingMethod,
+    },
+    /// The ICC payload parsed, but does not identify a supported managed space.
+    Unmapped {
+        /// ICC data color-space signature, such as `RGB` or `GRAY`.
+        profile_color_space: String,
+        /// Stable reason suitable for user-facing diagnostics.
+        reason: String,
+    },
+}
+
+/// Stable evidence category used to map an ICC profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IccColorSpaceMappingMethod {
+    /// The profile description explicitly named a supported standard.
+    ProfileName,
+}
+
+impl IccColorSpaceMapping {
+    /// Return the managed color space only when mapping evidence is explicit.
+    pub const fn color_space(&self) -> Option<ColorSpace> {
+        match self {
+            Self::Mapped { color_space, .. } => Some(*color_space),
+            Self::Unmapped { .. } => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ParsedIccDisplayProfile {
     pub name: String,
-    pub color_space: ColorSpace,
-    pub linear_matrix: [[f32; 3]; 3],
-    pub gamma_compensation: f32,
+    pub mapping: IccColorSpaceMapping,
+    pub linear_matrix: Option<[[f32; 3]; 3]>,
+    pub gamma_compensation: Option<f32>,
 }
 
 pub fn parse_icc_display_profile(bytes: &[u8]) -> Result<ParsedIccDisplayProfile, String> {
@@ -18,17 +55,13 @@ pub fn parse_icc_display_profile(bytes: &[u8]) -> Result<ParsedIccDisplayProfile
         .map_err(|err| format!("failed to parse ICC profile: {err}"))?;
 
     let name = icc_profile_name(&decoded).unwrap_or_else(|| "ICC Profile".to_string());
-    let color_space = infer_color_space_from_icc(&decoded, &name);
+    let mapping = infer_color_space_from_icc(&decoded, &name);
+    let color_space = mapping.color_space();
+    let linear_matrix = color_space.and_then(|space| icc_rgb_correction_matrix(&decoded, space));
+    let gamma_compensation =
+        color_space.and_then(|space| estimate_gamma_compensation(&decoded, space));
 
-    let linear_matrix = icc_rgb_correction_matrix(&decoded, color_space).unwrap_or(IDENTITY_3);
-    let gamma_compensation = estimate_gamma_compensation(&decoded, color_space).unwrap_or(1.0);
-
-    Ok(ParsedIccDisplayProfile {
-        name,
-        color_space,
-        linear_matrix,
-        gamma_compensation,
-    })
+    Ok(ParsedIccDisplayProfile { name, mapping, linear_matrix, gamma_compensation })
 }
 
 fn icc_profile_name(decoded: &DecodedICCProfile) -> Option<String> {
@@ -55,39 +88,66 @@ fn icc_profile_name(decoded: &DecodedICCProfile) -> Option<String> {
     None
 }
 
-fn infer_color_space_from_icc(decoded: &DecodedICCProfile, profile_name: &str) -> ColorSpace {
+fn infer_color_space_from_icc(
+    decoded: &DecodedICCProfile,
+    profile_name: &str,
+) -> IccColorSpaceMapping {
+    infer_color_space_from_hints(profile_name, &icc_fourcc(decoded.color_space))
+}
+
+fn infer_color_space_from_hints(
+    profile_name: &str,
+    profile_color_space: &str,
+) -> IccColorSpaceMapping {
     let mut hints = profile_name.to_ascii_lowercase();
     hints.push(' ');
-    hints.push_str(&icc_fourcc(decoded.color_space).to_ascii_lowercase());
+    hints.push_str(&profile_color_space.to_ascii_lowercase());
 
-    if hints.contains("display p3") || hints.contains("dci-p3") || hints.contains(" p3") {
-        return ColorSpace::DciP3;
-    }
-    if hints.contains("rec2020") || hints.contains("bt2020") || hints.contains("2020") {
-        return ColorSpace::Rec2020;
-    }
-    if hints.contains("srgb") {
-        return ColorSpace::Srgb;
-    }
-    if hints.contains("pq") || hints.contains("smpte2084") || hints.contains("hdr10") {
-        return ColorSpace::Rec2100Pq;
-    }
-    if hints.contains("hlg") || hints.contains("std-b67") {
-        return ColorSpace::Rec2100Hlg;
-    }
     if hints.contains("s-log3") || hints.contains("slog3") {
-        return ColorSpace::SLog3;
+        return mapped(ColorSpace::SLog3);
     }
     if hints.contains("logc4") || hints.contains("arri") {
-        return ColorSpace::ArriLogC4;
+        return mapped(ColorSpace::ArriLogC4);
     }
     if hints.contains("apple log") || hints.contains("applelog") {
-        return ColorSpace::AppleLog;
+        return mapped(ColorSpace::AppleLog);
+    }
+    if hints.contains("pq") || hints.contains("smpte2084") || hints.contains("hdr10") {
+        return mapped(ColorSpace::Rec2100Pq);
+    }
+    if hints.contains("hlg") || hints.contains("std-b67") {
+        return mapped(ColorSpace::Rec2100Hlg);
+    }
+    if hints.contains("srgb") {
+        return mapped(ColorSpace::Srgb);
+    }
+    if hints.contains("display p3") || hints.contains("dci-p3") || hints.contains(" p3") {
+        return mapped(ColorSpace::DciP3);
+    }
+    if hints.contains("rec2020") || hints.contains("bt2020") || hints.contains("2020") {
+        return mapped(ColorSpace::Rec2020);
+    }
+    if hints.contains("rec.709")
+        || hints.contains("rec709")
+        || hints.contains("bt.709")
+        || hints.contains("bt709")
+    {
+        return mapped(ColorSpace::Rec709);
     }
 
-    match icc_fourcc(decoded.color_space).as_str() {
-        "RGB" | "RGB " | "GRAY" | "GREY" => ColorSpace::Rec709,
-        _ => ColorSpace::Rec709,
+    IccColorSpaceMapping::Unmapped {
+        reason: format!(
+            "ICC profile '{}' has no explicit mapping to a supported Mondrian/OCIO color space",
+            profile_name
+        ),
+        profile_color_space: profile_color_space.to_owned(),
+    }
+}
+
+fn mapped(color_space: ColorSpace) -> IccColorSpaceMapping {
+    IccColorSpaceMapping::Mapped {
+        color_space,
+        method: IccColorSpaceMappingMethod::ProfileName,
     }
 }
 
@@ -394,8 +454,6 @@ fn is_finite_mat3(m: [[f64; 3]; 3]) -> bool {
     m.iter().all(|row| row.iter().all(|v| v.is_finite()))
 }
 
-const IDENTITY_3: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-
 const BRADFORD_D50_TO_D65: [[f64; 3]; 3] = [
     [0.955576615033105, -0.0230393447160788, 0.0631636322498013],
     [-0.0282895442435549, 1.00994161737158, 0.0210076549961903],
@@ -427,6 +485,39 @@ mod tests {
         }
         let estimated = estimate_gamma_from_curve_samples(&curve).expect("gamma");
         assert!((estimated as f64 - 2.2).abs() < 0.15);
+    }
+
+    #[test]
+    fn rgb_signature_without_named_standard_is_unmapped() {
+        let mapping = infer_color_space_from_hints("Generic Monitor Profile", "RGB");
+
+        assert!(matches!(
+            mapping,
+            IccColorSpaceMapping::Unmapped {
+                profile_color_space,
+                reason,
+            } if profile_color_space == "RGB" && reason.contains("no explicit mapping")
+        ));
+    }
+
+    #[test]
+    fn explicitly_named_standard_records_mapping_evidence() {
+        let mapping = infer_color_space_from_hints("Display P3", "RGB");
+
+        assert!(matches!(
+            mapping,
+            IccColorSpaceMapping::Mapped {
+                color_space: ColorSpace::DciP3,
+                method: IccColorSpaceMappingMethod::ProfileName,
+            }
+        ));
+    }
+
+    #[test]
+    fn transfer_specific_hdr_name_wins_over_primaries_hint() {
+        let mapping = infer_color_space_from_hints("Rec.2020 PQ HDR10", "RGB");
+
+        assert_eq!(mapping.color_space(), Some(ColorSpace::Rec2100Pq));
     }
 }
 

@@ -516,8 +516,10 @@ side-data kind, payload size, and a typed `mondrian-core` payload when FFmpeg
 exposes a stable stream-side-data ABI. ST 2086 mastering display metadata and
 CTA-861.3 MaxCLL/MaxFALL content-light metadata are parsed into shared core
 value objects that can also format x265-compatible `master-display` and
-`max-cll` strings. HDR10+, Dolby Vision configuration, and ICC profile payloads
-remain presence/diagnostic records until dedicated parsers are introduced.
+`max-cll` strings. ICC payloads are parsed into a profile name plus an explicit
+`IccColorSpaceMapping::{Mapped, Unmapped}` result. HDR10+ and Dolby Vision
+configuration remain presence/diagnostic records until dedicated parsers are
+introduced.
 Sequence/export HDR preservation stores these typed core payloads directly and
 fails closed when either ST 2086 mastering-display metadata or MaxCLL/MaxFALL
 content-light metadata is missing; export must not synthesize hidden defaults.
@@ -558,7 +560,13 @@ range from primaries, transfer, matrix, codec, or pixel format.
 automatic detection. It carries the interpreted color space, confidence,
 source/method, evidence, warnings, and whether the result is user-overridable.
 Evidence distinguishes metadata hints, exact CICP triplets, partial CICP
-matches, unsupported CICP tags, and decoder unavailability. Warnings must
+matches, unsupported CICP tags, mapped/unmapped ICC profiles, and decoder
+unavailability. An ICC `RGB`/`GRAY` signature identifies only the ICC channel
+model; it is never evidence for Rec.709 or sRGB. Only an explicitly identified
+supported standard produces a managed `ColorSpace`. An ICC-only unmapped stream
+remains `MissingMetadata`, preserves the profile as evidence, and emits
+`IccProfileUnmapped` so normal missing-input policy can reject or diagnose its
+fallback. Warnings must
 surface ambiguity such as multiple camera metadata hints, hint-vs-CICP
 conflicts, partial CICP inference, missing/unsupported tags, or decoder
 unavailability. Warning payloads must preserve the original metadata source:

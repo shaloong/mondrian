@@ -127,7 +127,7 @@ pub enum VideoColorInterpretationConfidence {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IccColorProfileHint {
-    color_space: ColorSpace,
+    mapping: mondrian_core::icc::IccColorSpaceMapping,
     profile_name: Option<String>,
 }
 
@@ -200,10 +200,10 @@ pub enum VideoColorInterpretationEvidence {
     },
     /// FFmpeg could not open the decoder, so no decoder-side color tags were available.
     DecoderUnavailable,
-    /// An ICC profile was present in the media and inferred a color space.
+    /// An ICC profile was present in the media.
     IccProfile {
-        /// Color space inferred from the ICC profile.
-        inferred_color_space: ColorSpace,
+        /// Explicitly mapped color space, if supported.
+        mapped_color_space: Option<ColorSpace>,
         /// ICC profile name, if available.
         profile_name: Option<String>,
     },
@@ -237,6 +237,13 @@ pub enum VideoColorInterpretationWarning {
     MissingOrUnsupportedCicpTags,
     /// Decoder metadata was unavailable.
     DecoderUnavailable,
+    /// ICC profile parsed but could not be mapped to a supported OCIO identity.
+    IccProfileUnmapped {
+        /// ICC profile name, if available.
+        profile_name: Option<String>,
+        /// Structured mapping failure reason.
+        reason: String,
+    },
     /// ICC profile color space conflicts with CICP-detected color space.
     IccCicpMismatch {
         /// Color space inferred from ICC profile.
@@ -386,6 +393,9 @@ pub struct VideoColorDiagnosticIssueSummary {
     /// Number of ICC-vs-CICP mismatch warnings.
     #[serde(default)]
     pub icc_cicp_mismatch: u64,
+    /// Number of parsed but unmapped ICC profile warnings.
+    #[serde(default)]
+    pub icc_profile_unmapped: u64,
     /// Whether the stream has warnings that should be shown to users.
     pub has_user_visible_warnings: bool,
 }
@@ -457,6 +467,9 @@ pub struct VideoColorDiagnosticIssueAggregate {
     /// Diagnostics with ICC-vs-CICP mismatch warnings.
     #[serde(default)]
     pub diagnostics_with_icc_cicp_mismatch: u64,
+    /// Diagnostics containing parsed but unmapped ICC profiles.
+    #[serde(default)]
+    pub diagnostics_with_icc_profile_unmapped: u64,
 }
 
 impl VideoColorTag {
@@ -572,6 +585,7 @@ impl VideoColorDiagnostic {
             has_dolby_vision_config: false,
             has_icc_profile: false,
             icc_cicp_mismatch: 0,
+            icc_profile_unmapped: 0,
             has_user_visible_warnings: !self.interpretation.warnings.is_empty(),
         };
 
@@ -599,6 +613,9 @@ impl VideoColorDiagnostic {
                 }
                 VideoColorInterpretationWarning::IccCicpMismatch { .. } => {
                     summary.icc_cicp_mismatch = summary.icc_cicp_mismatch.saturating_add(1);
+                }
+                VideoColorInterpretationWarning::IccProfileUnmapped { .. } => {
+                    summary.icc_profile_unmapped = summary.icc_profile_unmapped.saturating_add(1);
                 }
             }
         }
@@ -683,6 +700,9 @@ impl VideoColorDiagnosticIssueAggregate {
         self.diagnostics_with_icc_cicp_mismatch = self
             .diagnostics_with_icc_cicp_mismatch
             .saturating_add(summary.icc_cicp_mismatch);
+        self.diagnostics_with_icc_profile_unmapped = self
+            .diagnostics_with_icc_profile_unmapped
+            .saturating_add(summary.icc_profile_unmapped);
 
         match summary.method {
             VideoColorDetectionMethod::MetadataHint => {
@@ -781,6 +801,9 @@ impl VideoColorInterpretationWarning {
             Self::DecoderUnavailable => "decoder_unavailable".to_string(),
             Self::IccCicpMismatch { icc_color_space, cicp_color_space } => {
                 format!("icc_cicp_mismatch(icc={icc_color_space:?},cicp={cicp_color_space:?})")
+            }
+            Self::IccProfileUnmapped { profile_name, reason } => {
+                format!("icc_profile_unmapped(profile={profile_name:?},reason={reason})")
             }
         }
     }
@@ -1223,13 +1246,26 @@ fn detect_color_space_from_metadata(
     }
 
     if let Some(icc_profile) = icc_profile {
+        let Some(color_space) = icc_profile.mapping.color_space() else {
+            let mut interpretation = DetectedColorInterpretation {
+                color_space: None,
+                confidence: VideoColorInterpretationConfidence::None,
+                source: VideoColorSpaceSource::MissingMetadata,
+                method: VideoColorDetectionMethod::MissingMetadata,
+                evidence: vec![icc_profile_evidence(icc_profile)],
+                warnings: vec![VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags],
+                user_overridable: true,
+            };
+            append_unmapped_icc_warning(&mut interpretation, icc_profile);
+            return interpretation;
+        };
         return DetectedColorInterpretation {
-            color_space: Some(icc_profile.color_space),
+            color_space: Some(color_space),
             confidence: VideoColorInterpretationConfidence::Medium,
             source: VideoColorSpaceSource::Metadata,
             method: VideoColorDetectionMethod::IccProfile,
             evidence: vec![VideoColorInterpretationEvidence::IccProfile {
-                inferred_color_space: icc_profile.color_space,
+                mapped_color_space: Some(color_space),
                 profile_name: icc_profile.profile_name.clone(),
             }],
             warnings: vec![VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags],
@@ -1262,18 +1298,42 @@ fn append_icc_profile_evidence_and_warnings(
     let Some(icc_profile) = icc_profile else {
         return;
     };
-    interpretation.evidence.push(VideoColorInterpretationEvidence::IccProfile {
-        inferred_color_space: icc_profile.color_space,
-        profile_name: icc_profile.profile_name.clone(),
-    });
+    interpretation.evidence.push(icc_profile_evidence(icc_profile));
+    let Some(icc_color_space) = icc_profile.mapping.color_space() else {
+        append_unmapped_icc_warning(interpretation, icc_profile);
+        return;
+    };
     if let Some(selected_color_space) =
-        selected_color_space.filter(|color_space| *color_space != icc_profile.color_space)
+        selected_color_space.filter(|space| *space != icc_color_space)
     {
         interpretation.warnings.push(VideoColorInterpretationWarning::IccCicpMismatch {
-            icc_color_space: icc_profile.color_space,
+            icc_color_space,
             cicp_color_space: selected_color_space,
         });
     }
+}
+
+fn icc_profile_evidence(icc_profile: &IccColorProfileHint) -> VideoColorInterpretationEvidence {
+    VideoColorInterpretationEvidence::IccProfile {
+        mapped_color_space: icc_profile.mapping.color_space(),
+        profile_name: icc_profile.profile_name.clone(),
+    }
+}
+
+fn append_unmapped_icc_warning(
+    interpretation: &mut DetectedColorInterpretation,
+    icc_profile: &IccColorProfileHint,
+) {
+    let mondrian_core::icc::IccColorSpaceMapping::Unmapped { reason, .. } = &icc_profile.mapping
+    else {
+        return;
+    };
+    interpretation
+        .warnings
+        .push(VideoColorInterpretationWarning::IccProfileUnmapped {
+            profile_name: icc_profile.profile_name.clone(),
+            reason: reason.clone(),
+        });
 }
 
 impl DetectedColorInterpretation {
@@ -1375,7 +1435,7 @@ fn icc_color_profile_hint(hdr_metadata: &[VideoHdrMetadataSummary]) -> Option<Ic
             return None;
         };
         Some(IccColorProfileHint {
-            color_space: profile.color_space,
+            mapping: profile.mapping.clone(),
             profile_name: Some(profile.name.clone()),
         })
     })
@@ -1411,10 +1471,7 @@ fn parse_hdr_metadata_payload(
         }
         Type::ICC_PROFILE => parse_icc_display_profile(data)
             .ok()
-            .map(|profile| VideoIccProfileMetadata {
-                name: profile.name,
-                color_space: profile.color_space,
-            })
+            .map(|profile| VideoIccProfileMetadata { name: profile.name, mapping: profile.mapping })
             .map(VideoHdrMetadataPayload::IccProfile),
         _ => None,
     }
@@ -1708,7 +1765,10 @@ mod tests {
             Space::Unspecified,
         );
         let icc_profile = IccColorProfileHint {
-            color_space: ColorSpace::DciP3,
+            mapping: mondrian_core::icc::IccColorSpaceMapping::Mapped {
+                color_space: ColorSpace::DciP3,
+                method: mondrian_core::icc::IccColorSpaceMappingMethod::ProfileName,
+            },
             profile_name: Some("Display P3".to_owned()),
         };
 
@@ -1723,13 +1783,69 @@ mod tests {
         assert_eq!(detection.method, VideoColorDetectionMethod::IccProfile);
         assert!(
             detection.evidence.contains(&VideoColorInterpretationEvidence::IccProfile {
-                inferred_color_space: ColorSpace::DciP3,
+                mapped_color_space: Some(ColorSpace::DciP3),
                 profile_name: Some("Display P3".to_owned()),
             })
         );
         assert!(detection
             .warnings
             .contains(&VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags));
+    }
+
+    #[test]
+    fn unmapped_icc_profile_never_becomes_implicit_rec709() {
+        let metadata = capture_color_metadata(
+            Primaries::Unspecified,
+            TransferCharacteristic::Unspecified,
+            Space::Unspecified,
+        );
+        let icc_profile = IccColorProfileHint {
+            mapping: mondrian_core::icc::IccColorSpaceMapping::Unmapped {
+                profile_color_space: "RGB".to_owned(),
+                reason: "generic RGB profile has no managed mapping".to_owned(),
+            },
+            profile_name: Some("Generic Monitor Profile".to_owned()),
+        };
+
+        let detection = detect_color_space_from_metadata(&metadata, &[], Some(&icc_profile));
+
+        assert_eq!(detection.color_space, None);
+        assert_eq!(
+            detection.confidence,
+            VideoColorInterpretationConfidence::None
+        );
+        assert_eq!(detection.method, VideoColorDetectionMethod::MissingMetadata);
+        assert!(
+            detection.evidence.contains(&VideoColorInterpretationEvidence::IccProfile {
+                mapped_color_space: None,
+                profile_name: Some("Generic Monitor Profile".to_owned()),
+            })
+        );
+        assert!(detection.warnings.iter().any(|warning| matches!(
+            warning,
+            VideoColorInterpretationWarning::IccProfileUnmapped { profile_name, reason }
+                if profile_name.as_deref() == Some("Generic Monitor Profile")
+                    && reason.contains("no managed mapping")
+        )));
+
+        let diagnostic = VideoColorDiagnostic {
+            detected_color_space: detection.color_space,
+            color_range: DecodedVideoRange::Unknown,
+            source: detection.source,
+            method: detection.method,
+            interpretation: detection,
+            metadata: Some(metadata),
+            metadata_hints: Vec::new(),
+            hdr_metadata: vec![VideoHdrMetadataSummary {
+                kind: VideoHdrSideDataKind::IccProfile,
+                payload_size: 128,
+                payload: None,
+            }],
+        };
+        let summary = diagnostic.issue_summary();
+        assert_eq!(summary.icc_profile_unmapped, 1);
+        assert!(summary.has_icc_profile);
+        assert!(summary.has_user_visible_warnings);
     }
 
     #[test]
@@ -1740,7 +1856,10 @@ mod tests {
             Space::BT709,
         );
         let icc_profile = IccColorProfileHint {
-            color_space: ColorSpace::DciP3,
+            mapping: mondrian_core::icc::IccColorSpaceMapping::Mapped {
+                color_space: ColorSpace::DciP3,
+                method: mondrian_core::icc::IccColorSpaceMappingMethod::ProfileName,
+            },
             profile_name: Some("Display P3".to_owned()),
         };
 
@@ -1754,7 +1873,7 @@ mod tests {
         assert_eq!(detection.method, VideoColorDetectionMethod::CicpTags);
         assert!(
             detection.evidence.contains(&VideoColorInterpretationEvidence::IccProfile {
-                inferred_color_space: ColorSpace::DciP3,
+                mapped_color_space: Some(ColorSpace::DciP3),
                 profile_name: Some("Display P3".to_owned()),
             })
         );
@@ -1982,6 +2101,7 @@ mod tests {
                 has_dolby_vision_config: false,
                 has_icc_profile: true,
                 icc_cicp_mismatch: 0,
+                icc_profile_unmapped: 0,
                 has_user_visible_warnings: true,
             }
         );
@@ -2136,6 +2256,7 @@ mod tests {
                 diagnostics_with_dolby_vision_config: 0,
                 diagnostics_with_icc_profile: 1,
                 diagnostics_with_icc_cicp_mismatch: 0,
+                diagnostics_with_icc_profile_unmapped: 0,
             }
         );
     }

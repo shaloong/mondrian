@@ -1,6 +1,5 @@
 //! HDR metadata value objects shared by media probing, timeline policy, and export.
 
-use crate::types::ColorSpace;
 use serde::{Deserialize, Serialize};
 
 /// Parsed HDR side-data payload.
@@ -79,8 +78,8 @@ pub struct VideoContentLightMetadata {
 pub struct VideoIccProfileMetadata {
     /// Human-readable ICC profile name.
     pub name: String,
-    /// Mondrian color-space family inferred from the ICC profile.
-    pub color_space: ColorSpace,
+    /// Explicit ICC-to-Mondrian mapping, or an unmapped diagnostic.
+    pub mapping: crate::icc::IccColorSpaceMapping,
 }
 
 impl VideoHdrMetadataPayload {
@@ -185,7 +184,15 @@ impl VideoContentLightMetadata {
 impl VideoIccProfileMetadata {
     /// Compact diagnostic representation.
     pub fn summary(&self) -> String {
-        format!("icc_profile={}->{:?}", self.name, self.color_space)
+        match &self.mapping {
+            crate::icc::IccColorSpaceMapping::Mapped { color_space, method } => {
+                format!("icc_profile={}->{color_space:?} ({method:?})", self.name)
+            }
+            crate::icc::IccColorSpaceMapping::Unmapped { profile_color_space, reason } => format!(
+                "icc_profile={} unmapped({profile_color_space}): {reason}",
+                self.name
+            ),
+        }
     }
 }
 

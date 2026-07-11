@@ -338,12 +338,18 @@ impl DisplayColorProfile {
 
     pub fn from_icc_bytes(bytes: &[u8]) -> Result<Self, String> {
         let parsed = parse_icc_display_profile(bytes)?;
+        let color_space = parsed.mapping.color_space().ok_or_else(|| match &parsed.mapping {
+            crate::icc::IccColorSpaceMapping::Unmapped { reason, .. } => reason.clone(),
+            crate::icc::IccColorSpaceMapping::Mapped { .. } => {
+                "ICC profile mapping is internally inconsistent".to_owned()
+            }
+        })?;
 
         let profile = Self {
             name: parsed.name,
-            color_space: parsed.color_space,
-            linear_matrix: parsed.linear_matrix,
-            gamma: parsed.gamma_compensation,
+            color_space,
+            linear_matrix: parsed.linear_matrix.unwrap_or(IDENTITY_3),
+            gamma: parsed.gamma_compensation.unwrap_or(1.0),
             black_luminance_nits: 0.0,
             white_luminance_nits: 100.0,
             icc_bytes: Some(bytes.to_vec()),

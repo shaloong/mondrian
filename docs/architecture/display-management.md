@@ -68,6 +68,12 @@ Status of the OS monitor ICC profile. The fail-closed chain:
 | IccProfile | OS discovery works, parse OK, no OCIO match | `IccProfileUnmapped` + fail-closed blocker |
 | IccProfile | OS discovery works, parse OK, OCIO match | `ManagedColorSpace` |
 
+Parsing and mapping are separate. A valid generic RGB monitor profile is not
+implicitly Rec.709: the shared core ICC parser returns `Unmapped`, and the app
+turns that result into the fail-closed blocker above. The monitor path and media
+ingest path consume the same mapping result rather than maintaining separate
+name heuristics.
+
 ### HdrStatus
 
 Full-chain HDR diagnosis:

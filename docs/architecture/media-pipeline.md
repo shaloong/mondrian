@@ -91,6 +91,10 @@ source contract travel with the payload. Decode sessions, the playback ring,
 and the process-global RGBA cache are isolated by that source contract because
 they sit downstream of YUV-to-RGB conversion; interpretation changes may reuse
 raw/native YUV resources, but must not reuse differently converted CPU RGBA.
+Embedded ICC profiles likewise cannot manufacture that source contract. Media
+ingest records a mapped ICC identity only when the shared core parser identifies
+a supported named standard; generic RGB/GRAY profiles remain unmapped evidence
+and enter the explicit missing-metadata policy.
 App preview scheduling preserves playback cursor locality without letting idle
 workers sit beside visible current-frame work. When more than one preview decode
 worker exists, worker 0 has playback affinity and the remaining workers have

@@ -10,7 +10,6 @@ use mondrian_core::color_models::{DisplayManagementPolicy, MonitorProfileReferen
 use mondrian_core::display_contract::*;
 use mondrian_core::display_probe::{compute_display_blockers, resolve_hdr_status};
 use mondrian_core::types::ColorSpace;
-use mondrian_core::DisplayColorProfile;
 #[cfg(not(test))]
 use mondrian_platform::{DisplayHdrProbe, DisplayProfileProbe, SystemPlatformService};
 use mondrian_platform::{
@@ -224,8 +223,17 @@ fn resolve_monitor_profile_status(
                 };
             };
 
-            let profile = match DisplayColorProfile::from_icc_file(&profile_path) {
-                Ok(profile) => profile,
+            let profile_bytes = match std::fs::read(&profile_path) {
+                Ok(bytes) => bytes,
+                Err(reason) => {
+                    return MonitorProfileStatus::IccProfileReadError {
+                        profile_path: Some(profile_path.display().to_string()),
+                        reason: format!("failed to read ICC profile: {reason}"),
+                    };
+                }
+            };
+            let parsed = match mondrian_core::icc::parse_icc_display_profile(&profile_bytes) {
+                Ok(parsed) => parsed,
                 Err(reason) => {
                     return MonitorProfileStatus::IccProfileReadError {
                         profile_path: Some(profile_path.display().to_string()),
@@ -234,19 +242,20 @@ fn resolve_monitor_profile_status(
                 }
             };
 
-            match managed_color_space_from_icc_profile(&profile) {
-                Some(color_space) => MonitorProfileStatus::ManagedColorSpace {
-                    color_space,
-                    source: MonitorProfileSource::OsIccProfile,
-                },
-                None => MonitorProfileStatus::IccProfileUnmapped {
-                    profile_path: Some(profile_path.display().to_string()),
-                    parsed_color_space: Some(profile.color_space),
-                    reason: format!(
-                        "ICC profile '{}' parsed, but no explicit OCIO display/view mapping exists",
-                        profile.name
-                    ),
-                },
+            match parsed.mapping {
+                mondrian_core::icc::IccColorSpaceMapping::Mapped { color_space, .. } => {
+                    MonitorProfileStatus::ManagedColorSpace {
+                        color_space,
+                        source: MonitorProfileSource::OsIccProfile,
+                    }
+                }
+                mondrian_core::icc::IccColorSpaceMapping::Unmapped { reason, .. } => {
+                    MonitorProfileStatus::IccProfileUnmapped {
+                        profile_path: Some(profile_path.display().to_string()),
+                        parsed_color_space: None,
+                        reason,
+                    }
+                }
             }
         }
     }
@@ -270,30 +279,6 @@ fn explicit_profile_path(profile_id: &str) -> ExplicitProfilePath {
     } else {
         ExplicitProfilePath::UnresolvedId
     }
-}
-
-fn managed_color_space_from_icc_profile(profile: &DisplayColorProfile) -> Option<ColorSpace> {
-    let name = profile.name.to_ascii_lowercase();
-    let explicitly_named = [
-        "srgb",
-        "rec.709",
-        "rec709",
-        "bt.709",
-        "bt709",
-        "display p3",
-        "dci-p3",
-        "rec.2020",
-        "rec2020",
-        "bt.2020",
-        "bt2020",
-        "pq",
-        "smpte2084",
-        "hlg",
-    ]
-    .iter()
-    .any(|hint| name.contains(hint));
-
-    explicitly_named.then_some(profile.color_space)
 }
 
 /// Resolve the output color space from the display management policy.

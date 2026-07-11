@@ -6198,6 +6198,7 @@ mod tests {
                 has_dolby_vision_config: false,
                 has_icc_profile: false,
                 icc_cicp_mismatch: 0,
+                icc_profile_unmapped: 0,
                 has_user_visible_warnings: true,
             },
         });
