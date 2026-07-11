@@ -48,11 +48,11 @@ fn to_premultiplied(sample: vec4<f32>) -> vec4<f32> {
 }
 
 fn from_premultiplied(sample: vec4<f32>) -> vec4<f32> {
-    let alpha = clamp(sample.a, 0.0, 1.0);
-    if (alpha <= 0.0000001) {
+    let raw_alpha = sample.a;
+    if (raw_alpha <= 0.0000001) {
         return vec4<f32>(0.0);
     }
-    return vec4<f32>(sample.rgb / alpha, alpha);
+    return vec4<f32>(sample.rgb / raw_alpha, clamp(raw_alpha, 0.0, 1.0));
 }
 
 fn sinc(value: f32) -> f32 {
@@ -225,6 +225,14 @@ impl GpuViewerSpatialPlan {
                 actual: input.texture_format(),
             });
         }
+        let source_width = f64::from(descriptor.width) * f64::from(source_rect.width);
+        let source_height = f64::from(descriptor.height) * f64::from(source_rect.height);
+        let scale_x = f64::from(output_width) / source_width;
+        let scale_y = f64::from(output_height) / source_height;
+        let anisotropy = scale_x.max(scale_y) / scale_x.min(scale_y);
+        if !anisotropy.is_finite() || anisotropy > 2.0 {
+            return Err(GpuViewerSpatialPlanError::ExcessiveScaleAnisotropy);
+        }
         let output = GpuColorFrameHandle::new(
             ids.allocate(),
             ColorFrameDescriptor {
@@ -268,13 +276,16 @@ pub enum GpuViewerSpatialPlanError {
         /// Rejected storage format.
         actual: GpuColorFrameTextureFormat,
     },
+    /// Viewer reconstruction is intentionally aspect-preserving.
+    #[error("Viewer spatial scale anisotropy exceeds the supported 2:1 bound")]
+    ExcessiveScaleAnisotropy,
     /// Output handle creation failed.
     #[error(transparent)]
     OutputHandle(#[from] GpuColorFrameHandleError),
 }
 
 /// Cumulative runtime evidence for Viewer spatial processing.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct GpuViewerSpatialRuntimeDiagnostics {
     /// Spatial pipeline sets constructed.
     pub pipeline_builds: u64,
@@ -289,26 +300,13 @@ pub struct GpuViewerSpatialRuntimeDiagnostics {
 }
 
 /// Renderer-owned Viewer spatial pipeline and per-frame resources.
+#[derive(Default)]
 pub struct GpuViewerSpatialRuntime {
     pipeline: Option<GpuViewerSpatialPipeline>,
-    ids: GpuColorFrameIdAllocator,
     prefilters: Vec<GpuColorFrameResource<GpuColorFrameWgpuResource>>,
     horizontal: Option<GpuColorFrameResource<GpuColorFrameWgpuResource>>,
     output: Option<GpuColorFrameResource<GpuColorFrameWgpuResource>>,
     diagnostics: GpuViewerSpatialRuntimeDiagnostics,
-}
-
-impl Default for GpuViewerSpatialRuntime {
-    fn default() -> Self {
-        Self {
-            pipeline: None,
-            ids: GpuColorFrameIdAllocator::new(1),
-            prefilters: Vec::new(),
-            horizontal: None,
-            output: None,
-            diagnostics: GpuViewerSpatialRuntimeDiagnostics::default(),
-        }
-    }
 }
 
 impl GpuViewerSpatialRuntime {
@@ -317,12 +315,14 @@ impl GpuViewerSpatialRuntime {
         &mut self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
         input: GpuColorFrameHandle,
         input_view: &wgpu::TextureView,
         source_rect: ViewerSourceRect,
         output_width: u32,
         output_height: u32,
     ) -> Result<GpuColorFrameHandle, GpuViewerSpatialRuntimeError> {
+        self.clear_frame_resources();
         let limit = device.limits().max_texture_dimension_2d;
         if output_width > limit || output_height > limit {
             return Err(GpuViewerSpatialRuntimeError::OutputExceedsDeviceLimit {
@@ -331,18 +331,11 @@ impl GpuViewerSpatialRuntime {
                 limit,
             });
         }
-        let plan = GpuViewerSpatialPlan::new(
-            &mut self.ids,
-            input,
-            source_rect,
-            output_width,
-            output_height,
-        )?;
+        let plan = GpuViewerSpatialPlan::new(ids, input, source_rect, output_width, output_height)?;
         if self.pipeline.is_none() {
             self.pipeline = Some(GpuViewerSpatialPipeline::new(device));
             self.diagnostics.pipeline_builds = self.diagnostics.pipeline_builds.saturating_add(1);
         }
-        self.clear_frame_resources();
         let pipeline =
             self.pipeline
                 .as_ref()
@@ -364,7 +357,7 @@ impl GpuViewerSpatialRuntime {
             let next_height = selected_height.div_ceil(2);
             let resource = allocate_private_working_resource(
                 device,
-                &mut self.ids,
+                ids,
                 plan.input.descriptor().color_space,
                 next_width,
                 next_height,
@@ -394,7 +387,7 @@ impl GpuViewerSpatialRuntime {
 
         let horizontal = allocate_private_working_resource(
             device,
-            &mut self.ids,
+            ids,
             plan.input.descriptor().color_space,
             output_width,
             selected_height,
@@ -449,6 +442,18 @@ impl GpuViewerSpatialRuntime {
         handle: &GpuColorFrameHandle,
     ) -> Option<&GpuColorFrameResource<GpuColorFrameWgpuResource>> {
         self.output.as_ref().filter(|resource| resource.handle() == handle)
+    }
+
+    /// Transfer the exact spatial output into a downstream renderer resource table.
+    pub fn take_output(
+        &mut self,
+        handle: &GpuColorFrameHandle,
+    ) -> Option<GpuColorFrameResource<GpuColorFrameWgpuResource>> {
+        if self.output.as_ref().is_some_and(|resource| resource.handle() == handle) {
+            self.output.take()
+        } else {
+            None
+        }
     }
 
     /// Drop frame-local intermediate and output textures.
@@ -699,8 +704,7 @@ fn should_prefilter(
 ) -> bool {
     let source_width = input_width as f64 * f64::from(source_rect.width);
     let source_height = input_height as f64 * f64::from(source_rect.height);
-    source_width > f64::from(output_width) * 4.0
-        && source_height > f64::from(output_height) * 4.0
+    (source_width > f64::from(output_width) * 4.0 || source_height > f64::from(output_height) * 4.0)
         && input_width > 1
         && input_height > 1
 }
@@ -736,7 +740,10 @@ fn allocate_private_working_resource(
 mod tests {
     use super::*;
     use crate::{GpuColorFrameReadback, GpuColorFrameReadbackPlan, GpuColorFrameUploadPlan};
-    use mondrian_core::{WorkingColorSpace, WorkingRgbaF32Frame};
+    use mondrian_core::{
+        ensure_mondrian_default_ocio_loaded, ColorEngine, ColorSpace, WorkingColorSpace,
+        WorkingRgbaF32Frame,
+    };
 
     #[test]
     fn plan_rejects_encoded_and_half_float_inputs() {
@@ -764,6 +771,13 @@ mod tests {
         assert!(matches!(
             GpuViewerSpatialPlan::new(&mut ids, half, ViewerSourceRect::FULL, 2, 2),
             Err(GpuViewerSpatialPlanError::InputNotRgba32Float { .. })
+        ));
+
+        let anisotropic =
+            working_handle(&mut ids, 100, 100, GpuColorFrameTextureFormat::Rgba32Float);
+        assert!(matches!(
+            GpuViewerSpatialPlan::new(&mut ids, anisotropic, ViewerSourceRect::FULL, 1, 100,),
+            Err(GpuViewerSpatialPlanError::ExcessiveScaleAnisotropy)
         ));
     }
 
@@ -843,6 +857,102 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn transferred_spatial_output_feeds_ocio_display_boundary() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping Viewer spatial-to-OCIO test: no adapter available");
+            return;
+        };
+        let mut pixels = Vec::with_capacity(8 * 8);
+        for y in 0..8 {
+            for x in 0..8 {
+                let value = if (x + y) % 2 == 0 { 0.0 } else { 1.0 };
+                pixels.push([value, value, value, 1.0]);
+            }
+        }
+        let frame = crate::CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 8,
+            height: 8,
+            data: pixels,
+            color_space: WorkingColorSpace::LinearRec709,
+        });
+        let upload = GpuColorFrameUploadPlan::from_cpu_color_frame(
+            crate::GpuColorFrameId::from_raw(10_000),
+            &frame,
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "viewer-spatial-ocio-input",
+        )
+        .expect("upload plan");
+        let input = GpuColorFrameUploader::upload(&context.device, &context.queue, &upload);
+        let mut spatial = GpuViewerSpatialRuntime::default();
+        let mut output_runtime = crate::RenderGpuOutputBoundaryRuntime::with_first_frame_id(20_000);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("viewer-spatial-ocio-encoder"),
+        });
+        let spatial_output = spatial
+            .record(
+                &context.device,
+                &mut encoder,
+                output_runtime.frame_ids_mut(),
+                upload.handle,
+                &input.resource().texture_view,
+                ViewerSourceRect::FULL,
+                1,
+                1,
+            )
+            .expect("spatial record");
+        let spatial_resource =
+            spatial.take_output(&spatial_output).expect("spatial output transfer");
+        output_runtime
+            .frame_table_mut()
+            .insert(spatial_resource)
+            .expect("shared output table insertion");
+        let boundary = crate::RenderOutputColorBoundary::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::MondrianSmart,
+        );
+        let record = output_runtime
+            .record_wgpu_output_boundary_gpu_frame_owned_backend(
+                &boundary,
+                &spatial_output,
+                GpuColorFrameTextureFormat::Rgba8Unorm,
+                crate::RenderColorTransformGpuOptions {
+                    output_residency: ColorFrameResidency::Cpu,
+                    ..crate::RenderColorTransformGpuOptions::default()
+                },
+                crate::RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &context.device,
+                    queue: &context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                },
+            )
+            .expect("spatial output should feed OCIO boundary");
+        let readback = record.readback_buffer.expect("encoded output readback");
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let plan = GpuColorFrameReadbackPlan::encoded_rgba8(record.materialized.output)
+            .expect("encoded output readback plan");
+        let mapped = map_readback_buffer(&context.device, &readback);
+        let actual = plan.unpack_mapped_rgba8(&mapped).expect("encoded output");
+        readback.unmap();
+
+        let reference = crate::execute_cpu_output_boundary_rgba8(
+            &crate::CpuColorFrame::working(WorkingRgbaF32Frame {
+                width: 1,
+                height: 1,
+                data: vec![[0.5, 0.5, 0.5, 1.0]],
+                color_space: WorkingColorSpace::LinearRec709,
+            }),
+            &boundary,
+        )
+        .expect("CPU display reference");
+        for (observed, expected) in actual.rgba().iter().zip(reference.rgba.iter()) {
+            assert!(u8::abs_diff(*observed, *expected) <= 1);
+        }
+    }
+
     async fn run_spatial(
         width: u32,
         height: u32,
@@ -874,6 +984,7 @@ mod tests {
         .expect("upload plan");
         let input = GpuColorFrameUploader::upload(&context.device, &context.queue, &upload);
         let mut runtime = GpuViewerSpatialRuntime::default();
+        let mut spatial_ids = GpuColorFrameIdAllocator::new(20_000);
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewer-spatial-test-encoder"),
         });
@@ -881,6 +992,7 @@ mod tests {
             .record(
                 &context.device,
                 &mut encoder,
+                &mut spatial_ids,
                 upload.handle,
                 &input.resource().texture_view,
                 source_rect,
@@ -888,7 +1000,10 @@ mod tests {
                 output_height,
             )
             .expect("record Viewer spatial pass");
-        let output_resource = runtime.output(&output).expect("retained spatial output");
+        assert!(runtime.output(&output).is_some());
+        let output_resource =
+            runtime.take_output(&output).expect("transfer retained spatial output");
+        assert!(runtime.output(&output).is_none());
         let readback_plan = GpuColorFrameReadbackPlan::encoded_rgba32float(output)
             .expect("working output readback plan");
         let readback = GpuColorFrameReadback::record_copy(

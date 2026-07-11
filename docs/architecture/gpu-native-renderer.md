@@ -280,6 +280,9 @@ levels in working-linear light until the final reconstruction footprint is
 bounded, then use two separable Lanczos3 passes over the requested visible
 source region. Filtering is performed on premultiplied RGB and alpha and the
 public output is restored to the compositor's straight-alpha contract.
+Plans reject more than 2:1 scale anisotropy, and prefiltering continues while
+either axis exceeds the bounded 4x reconstruction footprint, so the shader
+never silently truncates taps for malformed non-Viewer requests.
 
 `GpuViewerSpatialRuntime` owns its pipelines, private prefilter/intermediate
 textures, typed output resource, frame IDs, and cumulative pass/pixel
@@ -641,6 +644,10 @@ The same JSONL also records preview preparation timing
 (`prepare_attempts_timed`, accumulated/max/last microseconds). These timings
 measure the window scheduling + wgpu recording boundary, not decoder latency;
 decode/cache telemetry remains in the preview/media diagnostics.
+Successful native frames also attach the cumulative
+`GpuViewerSpatialRuntimeDiagnostics` snapshot (pipeline builds, records,
+prefilter/Lanczos passes, and output pixels) to the Viewer GPU JSONL report;
+spatial execution must not be inferred only from an external texture success.
 Headless smoke tests cannot create this window/session boundary, so
 `AppUiPreviewService::diagnostics()` separately reports GPU preview candidate
 requests, ready/current/loading/unavailable outcomes, candidate pixels, and
@@ -652,13 +659,22 @@ path. `DrawCommand::ExternalTexture` carries only a stable renderer-owned key,
 bounds, UVs, and tint; widgets and panel models do not own wgpu objects.
 `ViewerFrameContent` is the widget/app-model boundary and can carry either a
 CPU `RasterImage` reference or a GPU `ViewerExternalTextureFrame` key.
-Workspace redraw treats GPU preview preparation as a pre-refresh scheduling
-step: `prepare_viewer_gpu_preview()` runs before the dirty UI tree is refreshed
-for painting. This prevents a new playback frame from first generating a CPU
-raster preview merely because the external GPU texture for that frame has not
-yet been registered. If GPU preparation fails or is unavailable, the following
-UI refresh still reaches the normal raster/stale/loading fallback in the same
-redraw.
+Workspace redraw preserves GPU preparation before the dirty model refresh so a
+native candidate does not first force the CPU Viewer adapter to composite the
+same frame. Zoom, dock, and surface-lifecycle handlers synchronously rebuild or
+lay out the active widget, so preparation can read their current physical-pixel
+geometry. The following refresh makes the registered texture visible in the
+same redraw. If another model refresh changes geometry afterward, the widget's
+strict presentation identity rejects the stale draw and the next redraw
+reschedules the spatial/display tail.
+`ViewerExternalTexturePresentation` is the stable producer/consumer identity
+for a spatially prepared frame. It includes the visible output pixel extent and
+a quantized normalized source region. Layout changes clear the advertised
+external frame before the preview service evaluates its `Current` state, and
+the widget refuses to draw a spatial texture whose identity does not exactly
+match its current geometry. The app transfers the spatial output resource into
+the OCIO runtime's shared frame table using the same frame-ID allocator; it
+does not copy the texture or create a second ID namespace.
 `AppUiFrameRenderer::register_external_texture_view` exposes the renderer
 registry to the app window/runtime layer, while `UiRenderer` owns the concrete
 bind group for the current backend lifetime. The window unregisters the

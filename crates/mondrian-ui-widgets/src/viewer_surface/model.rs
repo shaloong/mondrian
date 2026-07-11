@@ -24,12 +24,11 @@ pub(super) fn aspect_ratio(source_width: u32, source_height: u32) -> f32 {
 }
 
 pub(super) fn canvas_viewport_rect(bounds: Rect) -> Rect {
-    Rect::new(
-        bounds.x + CANVAS_PADDING,
-        bounds.y + CHROME_TOP,
-        (bounds.width - CANVAS_PADDING * 2.0).max(0.0),
-        (bounds.height - CHROME_TOP - CHROME_BOTTOM).max(0.0),
-    )
+    let left = (bounds.x + CANVAS_PADDING).ceil();
+    let top = (bounds.y + CHROME_TOP).ceil();
+    let right = (bounds.x + bounds.width - CANVAS_PADDING).floor();
+    let bottom = (bounds.y + bounds.height - CHROME_BOTTOM).floor();
+    Rect::new(left, top, (right - left).max(0.0), (bottom - top).max(0.0))
 }
 
 pub(super) fn fit_aspect(bounds: Rect, aspect: f32) -> Rect {
@@ -39,19 +38,21 @@ pub(super) fn fit_aspect(bounds: Rect, aspect: f32) -> Rect {
     }
     let available_aspect = bounds.width / bounds.height;
     if available_aspect > aspect {
-        let width = bounds.height * aspect;
+        let height = bounds.height.floor();
+        let width = (height * aspect).floor();
         Rect::new(
-            bounds.x + (bounds.width - width) * 0.5,
-            bounds.y,
+            (bounds.x + (bounds.width - width) * 0.5).round(),
+            bounds.y.round(),
             width,
-            bounds.height,
+            height,
         )
     } else {
-        let height = bounds.width / aspect;
+        let width = bounds.width.floor();
+        let height = (width / aspect).floor();
         Rect::new(
-            bounds.x,
-            bounds.y + (bounds.height - height) * 0.5,
-            bounds.width,
+            bounds.x.round(),
+            (bounds.y + (bounds.height - height) * 0.5).round(),
+            width,
             height,
         )
     }
@@ -65,11 +66,11 @@ pub(super) fn canvas_rect(
 ) -> Rect {
     let available = canvas_viewport_rect(bounds);
     if let Some(scale) = zoom_scale {
-        let width = source_width.max(1) as f32 * scale;
-        let height = source_height.max(1) as f32 * scale;
+        let width = (source_width.max(1) as f32 * scale).round();
+        let height = (source_height.max(1) as f32 * scale).round();
         return Rect::new(
-            available.x + (available.width - width) * 0.5,
-            available.y + (available.height - height) * 0.5,
+            (available.x + (available.width - width) * 0.5).round(),
+            (available.y + (available.height - height) * 0.5).round(),
             width.max(0.0),
             height.max(0.0),
         );

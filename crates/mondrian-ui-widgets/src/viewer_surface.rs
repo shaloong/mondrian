@@ -66,7 +66,7 @@ impl ViewerMetrics {
 pub type ViewerFrameImage = RasterImage;
 
 /// Renderer-registered GPU preview texture presented by [`ViewerSurface`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ViewerExternalTextureFrame {
     /// Stable key registered with the active UI renderer.
     pub key: String,
@@ -74,6 +74,9 @@ pub struct ViewerExternalTextureFrame {
     pub width: u32,
     /// Source frame height in pixels.
     pub height: u32,
+    /// Exact spatial presentation contract, when the texture was prefiltered
+    /// for the current visible Viewer region.
+    pub presentation: Option<ViewerExternalTexturePresentation>,
 }
 
 impl ViewerExternalTextureFrame {
@@ -83,8 +86,111 @@ impl ViewerExternalTextureFrame {
     /// becomes a renderer diagnostic instead of a malformed widget command.
     pub fn new(key: impl Into<String>, width: u32, height: u32) -> Option<Self> {
         let key = key.into();
-        (!key.is_empty() && width > 0 && height > 0).then_some(Self { key, width, height })
+        (!key.is_empty() && width > 0 && height > 0).then_some(Self {
+            key,
+            width,
+            height,
+            presentation: None,
+        })
     }
+
+    /// Create a prefiltered external texture for an exact Viewer presentation.
+    pub fn new_spatial(
+        key: impl Into<String>,
+        presentation: ViewerExternalTexturePresentation,
+    ) -> Option<Self> {
+        let key = key.into();
+        (!key.is_empty()).then_some(Self {
+            key,
+            width: presentation.output_width,
+            height: presentation.output_height,
+            presentation: Some(presentation),
+        })
+    }
+}
+
+const VIEWER_SOURCE_COORDINATE_SCALE: u32 = 1_000_000_000;
+
+/// Stable spatial identity shared by Viewer layout and the GPU producer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ViewerExternalTexturePresentation {
+    /// Visible output width in physical pixels.
+    pub output_width: u32,
+    /// Visible output height in physical pixels.
+    pub output_height: u32,
+    source_rect: [u32; 4],
+}
+
+impl ViewerExternalTexturePresentation {
+    /// Create a full-frame spatial presentation at an explicit output extent.
+    pub fn full_frame(output_width: u32, output_height: u32) -> Option<Self> {
+        Self::new(output_width, output_height, Rect::new(0.0, 0.0, 1.0, 1.0))
+    }
+
+    fn new(output_width: u32, output_height: u32, source_rect: Rect) -> Option<Self> {
+        if output_width == 0
+            || output_height == 0
+            || source_rect.width <= 0.0
+            || source_rect.height <= 0.0
+        {
+            return None;
+        }
+        let quantize = |value: f32| {
+            (value.clamp(0.0, 1.0) * VIEWER_SOURCE_COORDINATE_SCALE as f32)
+                .round()
+                .clamp(0.0, VIEWER_SOURCE_COORDINATE_SCALE as f32) as u32
+        };
+        let left = quantize(source_rect.x);
+        let top = quantize(source_rect.y);
+        let right = quantize(source_rect.x + source_rect.width);
+        let bottom = quantize(source_rect.y + source_rect.height);
+        let source_rect = [
+            left,
+            top,
+            right.saturating_sub(left),
+            bottom.saturating_sub(top),
+        ];
+        (source_rect[2] > 0
+            && source_rect[3] > 0
+            && source_rect[0].saturating_add(source_rect[2]) <= VIEWER_SOURCE_COORDINATE_SCALE
+            && source_rect[1].saturating_add(source_rect[3]) <= VIEWER_SOURCE_COORDINATE_SCALE)
+            .then_some(Self { output_width, output_height, source_rect })
+    }
+
+    /// Return the normalized source region represented by this texture.
+    pub fn normalized_source_rect(self) -> Rect {
+        let scale = VIEWER_SOURCE_COORDINATE_SCALE as f32;
+        Rect::new(
+            self.source_rect[0] as f32 / scale,
+            self.source_rect[1] as f32 / scale,
+            self.source_rect[2] as f32 / scale,
+            self.source_rect[3] as f32 / scale,
+        )
+    }
+
+    /// Stable suffix for external texture/cache identities.
+    pub fn key_suffix(self) -> String {
+        format!(
+            "{}x{}-{:08x}{:08x}{:08x}{:08x}",
+            self.output_width,
+            self.output_height,
+            self.source_rect[0],
+            self.source_rect[1],
+            self.source_rect[2],
+            self.source_rect[3]
+        )
+    }
+}
+
+/// Current pixel-aligned Viewer presentation geometry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewerPresentationGeometry {
+    /// Complete sequence canvas rectangle.
+    pub canvas_rect: Rect,
+    /// Visible canvas intersection receiving the prefiltered texture.
+    pub visible_rect: Rect,
+    /// Stable producer/consumer spatial identity.
+    pub presentation: ViewerExternalTexturePresentation,
 }
 
 /// Preview frame content presented by [`ViewerSurface`].
@@ -448,6 +554,26 @@ impl ViewerSurface {
             self.source_height,
             self.zoom_scale,
         )
+    }
+
+    /// Resolve the visible, pixel-aligned spatial contract for GPU presentation.
+    pub fn presentation_geometry(&self) -> Option<ViewerPresentationGeometry> {
+        let canvas_rect = self.canvas_rect();
+        let visible_rect = canvas_rect.intersection(&self.canvas_viewport_rect());
+        if visible_rect.width <= 0.0 || visible_rect.height <= 0.0 {
+            return None;
+        }
+        let source_rect = Rect::new(
+            (visible_rect.x - canvas_rect.x) / canvas_rect.width,
+            (visible_rect.y - canvas_rect.y) / canvas_rect.height,
+            visible_rect.width / canvas_rect.width,
+            visible_rect.height / canvas_rect.height,
+        );
+        let output_width = visible_rect.width.round().max(1.0) as u32;
+        let output_height = visible_rect.height.round().max(1.0) as u32;
+        let presentation =
+            ViewerExternalTexturePresentation::new(output_width, output_height, source_rect)?;
+        Some(ViewerPresentationGeometry { canvas_rect, visible_rect, presentation })
     }
 
     fn metadata_text(&self) -> String {
@@ -830,14 +956,27 @@ impl Widget for ViewerSurface {
                             Color::WHITE,
                         );
                     }
-                    ViewerFrameContent::ExternalTexture(frame) => {
-                        ctx.encoder.draw_external_texture(
+                    ViewerFrameContent::ExternalTexture(frame) => match frame.presentation {
+                        Some(presentation) => {
+                            if let Some(geometry) = self
+                                .presentation_geometry()
+                                .filter(|geometry| geometry.presentation == presentation)
+                            {
+                                ctx.encoder.draw_external_texture(
+                                    &frame.key,
+                                    geometry.visible_rect,
+                                    Rect::new(0.0, 0.0, 1.0, 1.0),
+                                    Color::WHITE,
+                                );
+                            }
+                        }
+                        None => ctx.encoder.draw_external_texture(
                             &frame.key,
                             canvas,
                             Rect::new(0.0, 0.0, 1.0, 1.0),
                             Color::WHITE,
-                        );
-                    }
+                        ),
+                    },
                 }
             }
         }
@@ -1340,7 +1479,7 @@ mod tests {
 
         let canvas = viewer.canvas_rect();
 
-        assert!((canvas.width / canvas.height - 16.0 / 9.0).abs() < 0.001);
+        assert!((canvas.width - canvas.height * 16.0 / 9.0).abs() <= 1.0);
         assert!(canvas.x >= 16.0);
         assert!(canvas.y >= 14.0);
     }
@@ -1357,6 +1496,30 @@ mod tests {
         assert!((canvas.height - 270.0).abs() < 0.001);
         assert!((canvas.center().x - viewport.center().x).abs() < 0.001);
         assert!((canvas.center().y - viewport.center().y).abs() < 0.001);
+    }
+
+    #[test]
+    fn presentation_geometry_is_pixel_aligned_and_crops_fixed_zoom() {
+        let mut viewer = ViewerSurface::new("Demo", 1920, 1080).with_zoom_scale(Some(1.0));
+        viewer.layout(Rect::new(0.25, 0.5, 500.0, 320.0));
+
+        let geometry = viewer.presentation_geometry().expect("visible presentation");
+        let source = geometry.presentation.normalized_source_rect();
+
+        assert_eq!(geometry.visible_rect.x.fract(), 0.0);
+        assert_eq!(geometry.visible_rect.y.fract(), 0.0);
+        assert_eq!(geometry.visible_rect.width.fract(), 0.0);
+        assert_eq!(geometry.visible_rect.height.fract(), 0.0);
+        assert_eq!(
+            geometry.presentation.output_width,
+            geometry.visible_rect.width as u32
+        );
+        assert_eq!(
+            geometry.presentation.output_height,
+            geometry.visible_rect.height as u32
+        );
+        assert!(source.x > 0.0 && source.y > 0.0);
+        assert!(source.width < 1.0 && source.height < 1.0);
     }
 
     #[test]
@@ -2423,6 +2586,46 @@ mod tests {
             encoder.clips.contains(&canvas),
             "external texture must also be clipped to the sequence canvas"
         );
+    }
+
+    #[test]
+    fn spatial_external_texture_requires_exact_current_geometry() {
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080).with_zoom_scale(Some(1.0));
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let geometry = viewer.presentation_geometry().expect("visible presentation");
+        let frame = ViewerExternalTextureFrame::new_spatial(
+            "viewer.preview.spatial",
+            geometry.presentation,
+        )
+        .expect("spatial frame");
+        viewer.frame_content = Some(ViewerFrameContent::ExternalTexture(frame));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 500.0, 320.0),
+        };
+
+        viewer.paint(&mut ctx);
+        assert_eq!(
+            encoder.external_textures,
+            vec![(
+                "viewer.preview.spatial".to_owned(),
+                geometry.visible_rect,
+                Rect::new(0.0, 0.0, 1.0, 1.0),
+            )]
+        );
+
+        viewer.layout(Rect::new(0.0, 0.0, 600.0, 360.0));
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 600.0, 360.0),
+        };
+        viewer.paint(&mut ctx);
+        assert!(encoder.external_textures.is_empty());
     }
 
     #[test]

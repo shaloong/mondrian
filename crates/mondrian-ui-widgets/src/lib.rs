@@ -88,6 +88,7 @@ pub use timeline_view::{
 };
 pub use vector_icon::{VectorIcon, VectorIconError};
 pub use viewer_surface::{
-    ViewerControl, ViewerControlAction, ViewerExternalTextureFrame, ViewerFrameContent,
-    ViewerFrameImage, ViewerStatusTone, ViewerSurface,
+    ViewerControl, ViewerControlAction, ViewerExternalTextureFrame,
+    ViewerExternalTexturePresentation, ViewerFrameContent, ViewerFrameImage,
+    ViewerPresentationGeometry, ViewerStatusTone, ViewerSurface,
 };

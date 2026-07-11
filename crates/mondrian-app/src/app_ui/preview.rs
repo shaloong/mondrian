@@ -59,7 +59,10 @@ use mondrian_timeline::sequence::{
     InputColorResolutionSourceCounts, MissingColorMetadataPolicy, ResolvedInputColor, Sequence,
     MAX_NESTED_SEQUENCE_RENDER_DEPTH,
 };
-use mondrian_ui_widgets::{ViewerExternalTextureFrame, ViewerFrameContent, ViewerFrameImage};
+use mondrian_ui_widgets::{
+    ViewerExternalTextureFrame, ViewerExternalTexturePresentation, ViewerFrameContent,
+    ViewerFrameImage,
+};
 
 use crate::app::proxy_generation::{request_proxy_generation, resolve_asset_proxy_color_contract};
 use crate::app::AppState;
@@ -1198,8 +1201,9 @@ impl AppUiPreviewService {
         &self,
         frame: &AppUiGpuPreviewFrame,
         texture_key: impl Into<String>,
+        presentation: ViewerExternalTexturePresentation,
     ) -> bool {
-        let Some(content) = ViewerExternalTextureFrame::new(texture_key, frame.width, frame.height)
+        let Some(content) = ViewerExternalTextureFrame::new_spatial(texture_key, presentation)
         else {
             bump(&self.metrics.gpu_preview_external_frames_rejected);
             return false;
@@ -10176,7 +10180,12 @@ mod tests {
         let key = frame.external_texture_key();
         let first_candidate_id = frame.preview_candidate_id();
 
-        assert!(service.set_external_viewer_frame(&frame, key.clone()));
+        assert!(service.set_external_viewer_frame(
+            &frame,
+            key.clone(),
+            ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
+                .expect("full-frame presentation"),
+        ));
         match service.gpu_preview_frame_for_state(&state) {
             AppUiGpuPreviewFrameState::Current => {}
             _ => panic!("expected current external GPU preview frame"),
@@ -10186,6 +10195,10 @@ mod tests {
                 assert_eq!(frame.key, key);
                 assert_eq!(frame.width, 960);
                 assert_eq!(frame.height, 540);
+                assert_eq!(
+                    frame.presentation,
+                    ViewerExternalTexturePresentation::full_frame(960, 540)
+                );
             }
             other => panic!("expected external GPU preview frame, got {other:?}"),
         }

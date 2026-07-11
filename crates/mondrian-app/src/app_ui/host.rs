@@ -191,6 +191,13 @@ impl AppUiHost {
         }
     }
 
+    /// Resolve the currently laid-out Viewer spatial presentation contract.
+    pub(crate) fn viewer_presentation_geometry(
+        &self,
+    ) -> Option<mondrian_ui_widgets::ViewerPresentationGeometry> {
+        crate::app_ui::shell::viewer_presentation_geometry(self.active_root())
+    }
+
     /// Read-only access to the current app state.
     pub fn app_state(&self) -> Ref<'_, AppState> {
         self.app_state.borrow()
@@ -258,8 +265,10 @@ impl AppUiHost {
         &self,
         frame: &AppUiGpuPreviewFrame,
         texture_key: impl Into<String>,
+        presentation: mondrian_ui_widgets::ViewerExternalTexturePresentation,
     ) -> bool {
-        let updated = self.preview_service.set_external_viewer_frame(frame, texture_key);
+        let updated =
+            self.preview_service.set_external_viewer_frame(frame, texture_key, presentation);
         if updated {
             self.mark_dirty();
         }

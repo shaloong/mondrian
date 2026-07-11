@@ -16,7 +16,7 @@ use mondrian_ui_widgets::dock_panel::DockPanel;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::{
     AssetGrid, AssetGridState, PanelList, PanelListState, ScrollView, ScrollViewState,
-    TimelineView, TimelineViewState, ViewerSurface, WaveformDisplay,
+    TimelineView, TimelineViewState, ViewerPresentationGeometry, ViewerSurface, WaveformDisplay,
 };
 use std::path::Path;
 
@@ -1486,6 +1486,20 @@ fn update_viewer_widgets(widget: &mut dyn Widget, model: &ViewerPanelModel) -> b
         }
     }
     updated
+}
+
+pub(super) fn viewer_presentation_geometry(
+    widget: &dyn Widget,
+) -> Option<ViewerPresentationGeometry> {
+    if let Some(viewer) = widget.as_any().and_then(|any| any.downcast_ref::<ViewerSurface>()) {
+        return viewer.presentation_geometry();
+    }
+    for index in 0..widget.child_count() {
+        if let Some(geometry) = widget.child(index).and_then(viewer_presentation_geometry) {
+            return Some(geometry);
+        }
+    }
+    None
 }
 
 fn collect_dock_panel_state(widget: &dyn Widget) -> Vec<DockPanelState> {

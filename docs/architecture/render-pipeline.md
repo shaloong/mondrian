@@ -628,27 +628,29 @@ the app-window `prepare_viewer_gpu_preview()` function. The call chain is:
 User scrub/play
   → RedrawRequested
   → prepare_viewer_gpu_preview(device, queue, session, host)
+    → resolve the currently laid-out ViewerExternalTexturePresentation
     → host.gpu_preview_frame_for_current_state()
       → AppUiPreviewService::gpu_preview_frame_for_state()
         → resolve_sequence_elements()  [timeline render plan]
         → returns AppUiGpuPreviewFrame { working_input, boundary }
-          where working_input is either:
-            - GpuComposite { layers } for supported simple layer stacks
-            - CpuFrame(frame) after explicit CPU composite fallback
-    → if GpuComposite:
-        RenderGpuOutputBoundaryRuntime::record_wgpu_input_stage_owned_backend()
-          for media layers with source/input contracts
-        RenderGpuOutputBoundaryRuntime::record_wgpu_working_composite()
-        RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_gpu_frame_owned_backend()
-      else CpuFrame:
-        RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_owned_backend()
-      → GPU output transform (OCIO display/view)
+          where working_input is GpuComposite { layers }
+    → RenderGpuOutputBoundaryRuntime::record_wgpu_input_stage_owned_backend()
+        for media layers with source/input contracts
+    → RenderGpuOutputBoundaryRuntime::record_wgpu_working_composite()
+    → GpuViewerSpatialRuntime::record()
+        → working-linear prefilter/crop/resize into visible Viewer pixels
+        → transfer typed output into the shared OCIO frame table
+    → RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_gpu_frame_owned_backend()
+        → GPU output transform (OCIO display/view)
+    → optional GPU ICC monitor calibration
     → frame_renderer.register_external_texture_view()
     → queue.submit()
+  → refresh newly published external Viewer frame and paint
 ```
 
-The `working_input` is either a GPU-composited working texture or a CPU
-working-space fallback frame.
+The native `working_input` is a GPU-composited working texture. CPU fallback is
+the separately diagnosed raster preview path; it is not a second interpretation
+of this native stage graph.
 The `boundary` is a `RenderOutputColorBoundary` carrying the target display/view
 for presentation. The GPU path executes the display transform on the GPU via
 `RenderGpuOutputBoundaryRuntime`.
@@ -679,6 +681,11 @@ The `ViewerPreviewCacheKey` includes:
 
 Changing display/view, OCIO config generation, or display contract
 invalidates the cache key and forces re-rendering.
+Viewer presentation geometry is deliberately not part of the timeline/render
+plan cache key. It scopes the external texture handoff instead: output extent
+or normalized visible-region changes clear `Current`, allocate a new spatial
+identity/key, and rerun only the spatial and display-boundary tail over the
+current working candidate.
 
 ## GPU Working-Space Compositing
 

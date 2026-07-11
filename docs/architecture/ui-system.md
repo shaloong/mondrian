@@ -142,6 +142,15 @@ cannot silently reuse the SDR surface path. Resize, scale-factor, and move
 events refresh that contract; any change invalidates the external GPU viewer
 frame so monitor/output changes cannot reuse a texture produced for the previous
 display target.
+Viewer layout exposes a pixel-aligned `ViewerPresentationGeometry` after the
+dirty widget tree has been refreshed. It separates the complete sequence canvas
+from its visible intersection and derives a stable
+`ViewerExternalTexturePresentation` containing output pixels plus normalized
+source crop. The app/renderer may use that contract for working-linear spatial
+processing; widgets never own a wgpu resource or choose a reconstruction
+filter. Spatial external textures render only when their presentation identity
+matches current layout exactly, so dock resize and zoom changes cannot stretch
+old display/device code values while a replacement frame is prepared.
 The startup/default window contract remains SDR sRGB unless an explicit display
 output intent asks for a different presentation contract. The surface resolver
 can choose Display P3, Rec.2100 PQ, or Rec.2100 HLG only when wgpu reports the
