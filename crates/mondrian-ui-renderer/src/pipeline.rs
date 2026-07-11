@@ -20,6 +20,7 @@ fn ui_primitive_state() -> wgpu::PrimitiveState {
 /// 2D UI 渲染管线
 pub struct UiPipeline {
     pub render_pipeline: wgpu::RenderPipeline,
+    pub encoded_code_value_pipeline: wgpu::RenderPipeline,
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub texture_bind_group_layout: wgpu::BindGroupLayout,
 }
@@ -82,34 +83,40 @@ impl UiPipeline {
             immediate_size: 0,
         });
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("ui_pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("main"),
-                buffers: &[Some(RectVertex::layout())],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &frag,
-                entry_point: Some("main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: ui_primitive_state(),
-            multisample: wgpu::MultisampleState { count: sample_count, ..Default::default() },
-            depth_stencil: None,
-            multiview_mask: None,
-            cache: None,
-        });
+        let create_pipeline = |label: &'static str, entry_point: &'static str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("main"),
+                    buffers: &[Some(RectVertex::layout())],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &frag,
+                    entry_point: Some(entry_point),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: ui_primitive_state(),
+                multisample: wgpu::MultisampleState { count: sample_count, ..Default::default() },
+                depth_stencil: None,
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let render_pipeline = create_pipeline("ui_pipeline", "main");
+        let encoded_code_value_pipeline =
+            create_pipeline("ui_encoded_code_value_pipeline", "main_encoded_code_values");
 
         Self {
             render_pipeline,
+            encoded_code_value_pipeline,
             bind_group_layout,
             texture_bind_group_layout,
         }

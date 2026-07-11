@@ -56,7 +56,7 @@ use mondrian_ui_core::shortcut::{ShortcutManager, ShortcutScope};
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::TreeWalker;
 use mondrian_ui_events::EventRouter;
-use mondrian_ui_renderer::{command::DrawEncoder, ExternalTextureKey};
+use mondrian_ui_renderer::{command::DrawEncoder, ExternalTextureKey, ExternalTextureTransfer};
 use mondrian_ui_theme::ThemePreset;
 use mondrian_ui_tooltip::TooltipManagerImpl;
 use tracing_subscriber::prelude::*;
@@ -3333,9 +3333,28 @@ fn prepare_viewer_gpu_preview(
         }
     };
 
-    session
-        .frame_renderer
-        .register_external_texture_view(device, texture_key.clone(), view);
+    if let Err(err) = session.frame_renderer.register_external_texture_view(
+        device,
+        texture_key.clone(),
+        view,
+        ExternalTextureTransfer::SrgbSurfaceCodeValuesOpaque,
+    ) {
+        session
+            .viewer_gpu_output_telemetry
+            .record_rejected_external_frame(record.stage_diagnostics);
+        host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
+            feature: "viewer_encoded_code_value_presentation".to_owned(),
+            reason: err.to_string(),
+        });
+        tracing::warn!(
+            sequence_id = %frame.sequence_id,
+            frame = frame.frame,
+            surface_format = ?session.display_output_contract.surface_color.format,
+            "viewer GPU preview external texture registration failed: {err}"
+        );
+        host.clear_external_viewer_frame();
+        finish_prepare!();
+    }
     queue.submit(std::iter::once(encoder.finish()));
     let stage_diagnostics = record.stage_diagnostics;
     if host.set_external_viewer_frame(&frame, texture_key.as_str().to_owned()) {

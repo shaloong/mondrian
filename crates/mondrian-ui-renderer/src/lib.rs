@@ -20,6 +20,9 @@ pub use atlas::TextureAtlas;
 pub use command::{
     DrawCommand, DrawEncoder, ExternalTextureKey, RetainedDrawCommandError, RetainedDrawCommands,
 };
-pub use context::{GlyphUpload, GlyphUploadStats, UiRenderFrameStats, UiRenderer};
+pub use context::{
+    ExternalTextureRegistrationError, ExternalTextureTransfer, GlyphUpload, GlyphUploadStats,
+    UiRenderFrameStats, UiRenderer,
+};
 pub use mondrian_ui_core::CornerRadii;
 pub use shape::{generate_rect_vertices, RectVertex};

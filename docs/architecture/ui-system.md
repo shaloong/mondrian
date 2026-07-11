@@ -158,6 +158,15 @@ texture compositor, the path must report a payload blocker instead of switching
 the surface prematurely. This prevents false HDR/P3 readiness: real promotion
 requires the output texture format, external texture sampling contract, UI
 compositor shader, and swapchain color space to move together.
+SDR viewer textures use an explicit `SrgbSurfaceCodeValuesOpaque` external
+texture contract. The source is an unorm texture containing encoded output or
+ICC device codes, not a linear UI image. A dedicated UI fragment pass applies
+the inverse sRGB carrier curve before writing the sRGB attachment, whose store
+conversion restores the original code values. The pass forces opaque output so
+the renderer never alpha-blends nonlinear device codes, and clips normalized
+SDR code values only at this presentation boundary. Registration fails
+closed on non-sRGB surfaces. This carrier operation preserves code values; it
+is not an implicit sRGB color-space assumption or a replacement for OCIO/ICC.
 Viewer GPU output telemetry reports display-boundary blockers by reason, not
 only as a total. It separates HDR-output-on-SDR-surface blockers from
 surface-color-space blockers and stores the last blocked output color space,

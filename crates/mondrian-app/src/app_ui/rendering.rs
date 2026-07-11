@@ -6,7 +6,10 @@
 
 #[cfg(any(not(target_os = "windows"), test))]
 use mondrian_renderer::GpuNativeDecodedFrameImportSupport;
-use mondrian_ui_renderer::{DrawCommand, ExternalTextureKey, GlyphUpload, UiRenderer};
+use mondrian_ui_renderer::{
+    DrawCommand, ExternalTextureKey, ExternalTextureRegistrationError, ExternalTextureTransfer,
+    GlyphUpload, UiRenderer,
+};
 use mondrian_ui_text::{resolve_text_commands, TextRenderer};
 use std::time::Instant;
 
@@ -335,8 +338,10 @@ impl AppUiFrameRenderer {
         device: &wgpu::Device,
         key: ExternalTextureKey,
         texture_view: &wgpu::TextureView,
-    ) {
-        self.ui_renderer.register_external_texture_view(device, key, texture_view);
+        transfer: ExternalTextureTransfer,
+    ) -> Result<(), ExternalTextureRegistrationError> {
+        self.ui_renderer
+            .register_external_texture_view(device, key, texture_view, transfer)
     }
 
     /// Remove a previously registered external GPU texture view.

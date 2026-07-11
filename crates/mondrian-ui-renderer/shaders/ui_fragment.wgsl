@@ -111,3 +111,18 @@ fn main(in: VertexOutput) -> @location(0) vec4<f32> {
     if alpha <= 0.001 { discard; }
     return vec4<f32>(in.color.rgb, in.color.a * alpha);
 }
+
+fn srgb_carrier_to_linear(value: vec3<f32>) -> vec3<f32> {
+    let low = value / vec3<f32>(12.92);
+    let high = pow((value + vec3<f32>(0.055)) / vec3<f32>(1.055), vec3<f32>(2.4));
+    return select(high, low, value <= vec3<f32>(0.04045));
+}
+
+// Preserve opaque encoded/device code values through an sRGB attachment. The
+// attachment OETF reverses this carrier decode during the final store.
+@fragment
+fn main_encoded_code_values(in: VertexOutput) -> @location(0) vec4<f32> {
+    let sampled = textureSample(glyph_texture, glyph_sampler, in.tex_coord);
+    let code_value = clamp(sampled.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    return vec4<f32>(srgb_carrier_to_linear(code_value), 1.0);
+}
