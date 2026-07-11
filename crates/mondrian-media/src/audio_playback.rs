@@ -26,6 +26,8 @@ pub struct AudioPlaybackConfig {
     pub high_watermark_frames: usize,
     /// Maximum current-generation render windows admitted at once.
     pub max_in_flight: usize,
+    /// Missing active-consumption frames required to enter underrun recovery.
+    pub underrun_recovery_threshold_frames: u64,
 }
 
 impl AudioPlaybackConfig {
@@ -38,6 +40,7 @@ impl AudioPlaybackConfig {
             preroll_frames: 5_760,
             high_watermark_frames: 22_080,
             max_in_flight: 8,
+            underrun_recovery_threshold_frames: 960,
         }
     }
 }
@@ -87,6 +90,8 @@ pub enum AudioPlaybackState {
     WaitingForSource,
     /// Current generation is filling the required preroll.
     Prerolling,
+    /// Sustained underrun forced a Synthetic handoff and fresh preroll.
+    Recovering,
     /// Callback consumption is active for a preroll-qualified generation.
     Active,
 }
@@ -108,6 +113,20 @@ pub enum AudioPlaybackEvent {
         generation: u64,
         start_sample: i64,
         reason: String,
+    },
+    /// New callback starvation was observed but may remain below recovery policy.
+    UnderrunObserved {
+        stream_generation: u64,
+        delta_frames: u64,
+        interval_total_frames: u64,
+    },
+    /// Missing frames reached policy; output was deactivated and reprime began.
+    UnderrunRecoveryStarted {
+        stream_generation: u64,
+        missing_frames: u64,
+        threshold_frames: u64,
+        final_output: RealtimeAudioOutputSnapshot,
+        final_media_anchor: TimeCode,
     },
 }
 
@@ -134,6 +153,10 @@ pub struct AudioPlaybackSnapshot {
     pub stale_completion_count: u64,
     /// Queued render windows canceled synchronously by generation invalidation.
     pub canceled_render_count: u64,
+    /// Missing frames accumulated in the current active interval.
+    pub active_interval_underrun_frames: u64,
+    /// Number of sustained-underrun reprime cycles.
+    pub underrun_recovery_count: u64,
 }
 
 /// Result of advancing Audio Playback without blocking the caller.
@@ -268,6 +291,10 @@ pub struct AudioPlayback {
     render_substitution_count: u64,
     stale_completion_count: u64,
     canceled_render_count: u64,
+    underrun_baseline_frames: u64,
+    last_underrun_frames: u64,
+    underrun_recovery_count: u64,
+    recovering_from_underrun: bool,
 }
 
 impl AudioPlayback {
@@ -323,6 +350,10 @@ impl AudioPlayback {
             render_substitution_count: 0,
             stale_completion_count: 0,
             canceled_render_count: 0,
+            underrun_baseline_frames: 0,
+            last_underrun_frames: 0,
+            underrun_recovery_count: 0,
+            recovering_from_underrun: false,
         }
     }
 
@@ -340,6 +371,10 @@ impl AudioPlayback {
 
     /// Invalidate outstanding work and restart PCM scheduling at an exact timeline anchor.
     pub fn reprime(&mut self, anchor: TimeCode) {
+        self.reprime_internal(anchor, false);
+    }
+
+    fn reprime_internal(&mut self, anchor: TimeCode, recovering_from_underrun: bool) {
         let start_sample = time_code_to_sample_frame(anchor, self.config.sample_rate);
         self.output.set_active(false);
         self.output.clear();
@@ -356,6 +391,10 @@ impl AudioPlayback {
             )
         });
         self.activation_preroll_satisfied = false;
+        let underrun_frames = self.output.snapshot().map_or(0, |output| output.underrun_frames);
+        self.underrun_baseline_frames = underrun_frames;
+        self.last_underrun_frames = underrun_frames;
+        self.recovering_from_underrun = recovering_from_underrun;
     }
 
     /// Poll lifecycle, completions, watermarks, and preroll without waiting on workers.
@@ -373,6 +412,9 @@ impl AudioPlayback {
                     RealtimeAudioOutputEvent::Lost { stream_generation } => {
                         self.media_anchor = None;
                         self.activation_preroll_satisfied = false;
+                        self.underrun_baseline_frames = 0;
+                        self.last_underrun_frames = 0;
+                        self.recovering_from_underrun = false;
                         events.push(AudioPlaybackEvent::DeviceLost { stream_generation });
                     }
                     RealtimeAudioOutputEvent::OpenFailed { retry_after, reason } => {
@@ -412,7 +454,34 @@ impl AudioPlayback {
             self.output.set_active(false);
             self.output.clear();
             self.activation_preroll_satisfied = false;
+            self.recovering_from_underrun = false;
             return AudioPlaybackPoll { snapshot: self.snapshot(false), events };
+        }
+
+        if let Some(output) = self.output.snapshot().filter(|output| output.active) {
+            if output.underrun_frames > self.last_underrun_frames {
+                let delta_frames = output.underrun_frames - self.last_underrun_frames;
+                let interval_total_frames =
+                    output.underrun_frames.saturating_sub(self.underrun_baseline_frames);
+                self.last_underrun_frames = output.underrun_frames;
+                events.push(AudioPlaybackEvent::UnderrunObserved {
+                    stream_generation: output.stream_generation,
+                    delta_frames,
+                    interval_total_frames,
+                });
+                if interval_total_frames >= self.config.underrun_recovery_threshold_frames {
+                    let final_media_anchor = self.media_anchor.unwrap_or(position);
+                    events.push(AudioPlaybackEvent::UnderrunRecoveryStarted {
+                        stream_generation: output.stream_generation,
+                        missing_frames: interval_total_frames,
+                        threshold_frames: self.config.underrun_recovery_threshold_frames,
+                        final_output: output,
+                        final_media_anchor,
+                    });
+                    self.underrun_recovery_count = self.underrun_recovery_count.saturating_add(1);
+                    self.reprime_internal(position, true);
+                }
+            }
         }
 
         if let (Some(renderer), Some(_)) = (self.renderer.as_ref(), self.output.snapshot()) {
@@ -447,6 +516,7 @@ impl AudioPlayback {
             {
                 self.output.set_active(true);
                 self.activation_preroll_satisfied = true;
+                self.recovering_from_underrun = false;
             }
         }
 
@@ -460,6 +530,7 @@ impl AudioPlayback {
             None => AudioPlaybackState::DeviceUnavailable,
             Some(_) if !playing => AudioPlaybackState::Idle,
             Some(_) if self.renderer.is_none() => AudioPlaybackState::WaitingForSource,
+            Some(_) if self.recovering_from_underrun => AudioPlaybackState::Recovering,
             Some(snapshot) if snapshot.active => AudioPlaybackState::Active,
             Some(_) => AudioPlaybackState::Prerolling,
         };
@@ -474,6 +545,10 @@ impl AudioPlayback {
             render_substitution_count: self.render_substitution_count,
             stale_completion_count: self.stale_completion_count,
             canceled_render_count: self.canceled_render_count,
+            active_interval_underrun_frames: output.map_or(0, |output| {
+                output.underrun_frames.saturating_sub(self.underrun_baseline_frames)
+            }),
+            underrun_recovery_count: self.underrun_recovery_count,
         }
     }
 }
@@ -491,6 +566,7 @@ fn validate_config(config: AudioPlaybackConfig) -> Result<(), AudioPlaybackConfi
         || config.preroll_frames == 0
         || config.high_watermark_frames == 0
         || config.max_in_flight == 0
+        || config.underrun_recovery_threshold_frames == 0
     {
         return Err(AudioPlaybackConfigError::ZeroValue);
     }
@@ -647,6 +723,7 @@ mod tests {
             preroll_frames: 20,
             high_watermark_frames: 30,
             max_in_flight: 3,
+            underrun_recovery_threshold_frames: 10,
         }
     }
 
@@ -757,6 +834,54 @@ mod tests {
             AudioPlayback::new(config).err(),
             Some(AudioPlaybackConfigError::PrerollExceedsHighWatermark)
         );
+    }
+
+    #[test]
+    fn isolated_underrun_preserves_master_but_sustained_missing_frames_reprime() {
+        let (output, state) = fake_output();
+        let mut playback = AudioPlayback::with_output(test_config(), output);
+        playback.prepare(
+            TimeCode::new(0, Rational::new(1, 25)),
+            Arc::new(RecordingRenderer {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                wrong_frame_count: false,
+            }),
+        );
+        poll_until_settled(&mut playback, TimeCode::new(0, Rational::new(1, 25)));
+
+        state.lock().snapshot.as_mut().expect("fake output").underrun_frames = 4;
+        let isolated = playback.poll(true, TimeCode::new(0, Rational::new(1, 25)));
+        assert_eq!(isolated.snapshot.state, AudioPlaybackState::Active);
+        assert_eq!(isolated.snapshot.underrun_recovery_count, 0);
+        assert!(
+            isolated.events.contains(&AudioPlaybackEvent::UnderrunObserved {
+                stream_generation: 4,
+                delta_frames: 4,
+                interval_total_frames: 4,
+            })
+        );
+
+        state.lock().snapshot.as_mut().expect("fake output").underrun_frames = 10;
+        let recovering = playback.poll(true, TimeCode::new(1, Rational::new(1, 25)));
+        assert_eq!(recovering.snapshot.state, AudioPlaybackState::Recovering);
+        assert_eq!(recovering.snapshot.underrun_recovery_count, 1);
+        assert!(recovering.events.iter().any(|event| matches!(
+            event,
+            AudioPlaybackEvent::UnderrunRecoveryStarted {
+                stream_generation: 4,
+                missing_frames: 10,
+                threshold_frames: 10,
+                final_output,
+                final_media_anchor,
+            } if final_output.active
+                && final_output.underrun_frames == 10
+                && *final_media_anchor == TimeCode::new(0, Rational::new(1, 1_000))
+        )));
+        assert!(recovering.snapshot.output.is_some_and(|output| !output.active));
+
+        poll_until_settled(&mut playback, TimeCode::new(1, Rational::new(1, 25)));
+        assert_eq!(playback.snapshot(true).state, AudioPlaybackState::Active);
+        assert_eq!(playback.snapshot(true).active_interval_underrun_frames, 0);
     }
 
     #[test]

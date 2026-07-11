@@ -557,3 +557,11 @@ including exact window order, preroll activation, malformed-buffer silence
 substitution, synchronous cancellation of queued old work, and rejection of the
 at-most-one executing completion from an invalidated generation.
 Environment variables no longer alter realtime audio watermark semantics.
+
+Underrun recovery is now sample-budgeted inside Audio Playback. An isolated
+callback shortage emits evidence and preserves Audio Device Master. Missing
+frames accumulated to 20 ms in one active interval trigger a final valid device
+position observation followed at the same monotonic timestamp by an unavailable
+observation, so Synthetic handoff includes all consumed device time. Output then
+re-enters explicit Recovering/preroll state with a new render generation; video
+lateness and Viewer state remain unrelated to this decision.

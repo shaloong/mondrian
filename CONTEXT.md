@@ -49,6 +49,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - A **Playback Quality Policy** constrains every **Frame Demand** in its Playback Session.
 - **Playback Evidence** records state and clock transitions without owning them.
 - **Audio Playback** may offer an Audio Device Clock Master only after stream health, PCM preroll, and media phase satisfy Playback Policy.
+- **Audio Playback** records isolated underruns without changing Clock Master; sustained missing-sample evidence enters recovery through a continuous Synthetic handoff and fresh preroll.
 - Each persisted archive, document, and SQLite library has an independent version and **Project Migration** chain.
 - A **Project Migration** operates on an in-memory value or runtime copy; opening never rewrites the source archive.
 

@@ -75,12 +75,28 @@ allocate, log, decode, inspect the timeline, perform file I/O, publish general
 events, or take a contended lock. Inactive output writes silence without draining
 the PCM queue. Active starvation writes silence and increments underrun evidence.
 
+## Underrun recovery
+
+Underrun policy uses missing output sample frames, never UI poll counts. The
+product threshold is 960 frames at 48 kHz (20 ms) per activation interval. New
+missing frames emit `UnderrunObserved`; totals below threshold leave Audio Device
+Clock Master active. Reaching threshold emits `UnderrunRecoveryStarted`, submits
+the final pre-deactivation callback position, then deactivates output, clears
+queued PCM, invalidates the render generation, and reprimes from current
+Synthetic time. This avoids both a one-underrun master flap and a hidden 20 ms
+freeze at handoff.
+
+Recovery remains explicit in `AudioPlaybackState`, snapshots retain current
+interval missing frames and recovery count, and reactivation again requires the
+full 120 ms preroll. Callback silence is evidence of missing audio, not a reason
+to let video presentation become authoritative.
+
 ## Remaining depth
 
 Device lifecycle, PCM scheduling, generations, watermarks, preroll, and Clock
 Master qualification now have narrow Interfaces. Remaining Audio Playback depth
 is backend-position evidence, bounded resampling/slew for small non-zero phase
-error, explicit underrun recovery policy, and reference-machine drift gates.
+error, richer long-window underrun hysteresis, and reference-machine drift gates.
 Current handoff accepts phase already inside budget; it does not claim to
 correct it.
 

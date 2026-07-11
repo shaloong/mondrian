@@ -170,6 +170,49 @@ impl AppState {
                 %reason,
                 "audio render window replaced with exact-duration silence"
             ),
+            AudioPlaybackEvent::UnderrunObserved {
+                stream_generation,
+                delta_frames,
+                interval_total_frames,
+            } => tracing::debug!(
+                stream_generation,
+                delta_frames,
+                interval_total_frames,
+                "audio output underrun observed"
+            ),
+            AudioPlaybackEvent::UnderrunRecoveryStarted {
+                stream_generation,
+                missing_frames,
+                threshold_frames,
+                final_output,
+                final_media_anchor,
+            } => {
+                self.observe_final_audio_clock_before_recovery(final_output, final_media_anchor);
+                tracing::warn!(
+                    stream_generation,
+                    missing_frames,
+                    threshold_frames,
+                    "sustained audio underrun; using Synthetic Clock Master during reprime"
+                );
+            }
+        }
+    }
+
+    fn observe_final_audio_clock_before_recovery(
+        &mut self,
+        output: RealtimeAudioOutputSnapshot,
+        media_anchor: TimeCode,
+    ) {
+        let observation = audio_device_clock_observation(
+            output,
+            self.playback_engine.snapshot().epoch,
+            self.playback_now,
+            true,
+            Some(media_anchor),
+            true,
+        );
+        if let Err(error) = self.playback_engine.observe_audio_device_clock(observation) {
+            tracing::warn!(%error, "rejected final audio clock before underrun recovery");
         }
     }
 
@@ -591,6 +634,40 @@ mod tests {
             .state,
             AudioDeviceClockState::Unavailable
         );
+    }
+
+    #[test]
+    fn underrun_recovery_consumes_final_device_position_before_synthetic_handoff() {
+        let mut state = state_with_sequence(20);
+        play_ready(&mut state);
+        let epoch = state.playback_engine.snapshot().epoch;
+        let initial = audio_device_clock_observation(
+            audio_snapshot(),
+            epoch,
+            state.playback_now,
+            false,
+            Some(TimeCode::new(0, Rational::new(1, 48_000))),
+            true,
+        );
+        state.playback_engine.observe_audio_device_clock(initial).expect("audio master");
+
+        let mut final_output = audio_snapshot();
+        final_output.callback_consumed_frames = 2_880;
+        final_output.active_callback_consumed_frames = 2_400;
+        final_output.underrun_frames = 960;
+        state.observe_final_audio_clock_before_recovery(
+            final_output,
+            TimeCode::new(0, Rational::new(1, 48_000)),
+        );
+        assert_eq!(state.current_frame(), 1);
+
+        state
+            .playback_engine
+            .audio_device_lost(state.playback_now)
+            .expect("synthetic handoff");
+        state.advance_playback_clock(Duration::from_millis(40));
+        assert_eq!(state.current_frame(), 2);
+        assert_eq!(state.playback_clock_master(), Some(ClockMaster::Synthetic));
     }
 
     #[test]
