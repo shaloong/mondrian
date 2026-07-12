@@ -1801,11 +1801,10 @@ impl AppUiPreviewService {
 
     fn playback_realtime_work_pending(&self) -> bool {
         let queue = self.jobs.diagnostics();
-        if queue.queued_current_jobs > 0 || queue.queued_playback_cursor_jobs > 0 {
-            return true;
-        }
-        let activity = self.worker_activity.snapshot();
-        activity.in_flight_current_jobs > 0 || activity.in_flight_playback_cursor_jobs > 0
+        queue.queued_current_jobs > 0
+            || queue.in_flight_current_jobs > 0
+            || queue.queued_playback_cursor_jobs > 0
+            || queue.in_flight_playback_cursor_jobs > 0
     }
 
     fn record_playback_current_success(

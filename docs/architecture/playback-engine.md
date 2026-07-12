@@ -499,10 +499,12 @@ accurate seek latency, accepted delivery counts, superseded demand/seek totals,
 delivery-clock drift, and underrun recovery. Event/sample eviction is itself
 reported; a reference gate cannot silently pass after evidence overflow.
 
-`PreviewCpuFrameStore` is the app Preview Adapter's deep CPU storage Module.
-Its Interface owns decoded/media frames, final Viewer rasters, remembered
-failures, the explicitly pinned current/stale Viewer raster, and an oversize
-current-media pin. Media entries
+`PreviewFrameStore<MK, M, VK, V, S>` is the Playback Module's payload-opaque CPU
+storage Interface. It owns decoded-media payloads, final Viewer payloads,
+remembered failures, the explicitly pinned current/stale Viewer payload, and an
+oversize current-media pin. Adapters supply stable keys, exact byte
+reservations, and an equality-comparable Viewer presentation scope; the Module
+does not import media, renderer, UI, or wall-clock types. Media entries
 have both a 96-entry cap and a 384 MiB pixel-payload budget; Viewer raster
 entries have a 48-entry cap and a 192 MiB payload budget; failure memory has a
 192-key cap. A media reservation includes current linear-float pixels, encoded
@@ -519,6 +521,12 @@ real-media gates fail when either cache exceeds its byte budget, either pin
 exceeds its corresponding budget, or an oversize payload was rejected.
 Renderer-owned GPU texture tables remain a separate Module and are not falsely
 counted as CPU storage.
+
+The App's `PreviewCpuFrameStore` is now a thin Adapter only: it computes the
+reservation for `MediaPreviewFrame`, maps `ViewerFrameImage` to its encoded byte
+size, and constructs the `(SequenceId, width, height)` presentation scope. All
+residency and failure state lives in the playback-owned Module. A headless
+Adapter must instantiate the same Interface rather than reproduce cache policy.
 
 `ViewerGpuPreviewRuntime` is the device-scoped resource-owner Module for the
 GPU side of Viewer execution. It owns native decoded-video import, the
@@ -706,6 +714,12 @@ Canceled old work cannot remove a newer same-key binding. Decode deadline
 classification uses the worker's captured completion `Instant`, not the later
 UI poll time, so main-thread load cannot turn an on-time decode into false Late
 evidence.
+
+The playback-owned `PreviewFrameStore` now also contains the CPU residency
+Implementation formerly local to App UI. Count and byte budgets, LRU eviction,
+failure retention, current/stale Viewer pinning, and the oversize-current media
+exception therefore have one test surface for both windowed and headless
+Adapters. App UI retains only payload sizing and presentation-scope mapping.
 
 The app Clock Adapter maintains a wall-`Instant` to Playback
 `MonotonicTimestamp` mapping. Worker deadlines are projected as one absolute

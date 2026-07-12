@@ -12,6 +12,8 @@ mod evidence;
 pub use evidence::*;
 mod frame_work;
 pub use frame_work::*;
+mod frame_store;
+pub use frame_store::*;
 mod work_broker;
 pub use work_broker::*;
 
