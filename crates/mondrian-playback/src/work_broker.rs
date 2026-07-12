@@ -369,24 +369,23 @@ where
                 requested_class,
             );
             let binding = binding_for(&request);
-            state.pending.insert(
-                request.key.clone(),
-                PendingBinding {
-                    binding,
-                    requested_at: if previous_binding != binding {
-                        Instant::now()
-                    } else {
-                        previous.requested_at
-                    },
-                },
-            );
-
             if let Some(index) =
                 state.queue.iter().position(|queued| queued.request.key == request.key)
             {
                 let priority_promoted = previous_binding.priority != binding.priority;
                 let work_class_changed = previous_binding.work_class != binding.work_class;
                 let generation_changed = previous_binding.generation != binding.generation;
+                state.pending.insert(
+                    request.key.clone(),
+                    PendingBinding {
+                        binding,
+                        requested_at: if previous_binding != binding {
+                            Instant::now()
+                        } else {
+                            previous.requested_at
+                        },
+                    },
+                );
                 state.queue[index] = QueuedWork { request };
                 bump(&mut state.metrics.submitted_updated_queued);
                 if work_class_changed {
@@ -401,54 +400,49 @@ where
             }
 
             if previous_binding.work_class == binding.work_class {
+                state.pending.insert(
+                    request.key.clone(),
+                    PendingBinding {
+                        binding,
+                        requested_at: if previous_binding != binding {
+                            Instant::now()
+                        } else {
+                            previous.requested_at
+                        },
+                    },
+                );
                 bump(&mut state.metrics.submitted_reused_in_flight);
                 return FrameWorkSubmission::ReusedInFlight;
             }
 
-            bump(&mut state.metrics.submitted_work_class_changes);
-
-            if !make_queue_room(&mut state, self.shared.max_queued, &request) {
-                state.pending.insert(request.key.clone(), previous);
+            let Some(eviction) = plan_queue_eviction(&state, self.shared.max_queued, &request)
+            else {
                 bump(&mut state.metrics.dropped_backpressure);
                 return FrameWorkSubmission::DroppedBackpressure;
-            }
+            };
+            let (evicted_prefetch, evicted_still) = apply_eviction(&mut state, eviction);
+            state.pending.insert(
+                request.key.clone(),
+                PendingBinding { binding, requested_at: Instant::now() },
+            );
+            bump(&mut state.metrics.submitted_work_class_changes);
             state.queue.push_back(QueuedWork { request });
             bump(&mut state.metrics.submitted_queued);
             self.shared.changed.notify_all();
-            return FrameWorkSubmission::Queued { evicted_prefetch: None, evicted_still: None };
+            return FrameWorkSubmission::Queued { evicted_prefetch, evicted_still };
         }
 
         prune_obsolete_locked(&mut state);
-        let mut evicted_prefetch = None;
-        let mut evicted_still = None;
-        if request.priority == FrameWorkPriority::Current
-            && request.work_class != FrameWorkClass::Still
-        {
-            if let Some(index) = state.queue.iter().position(|queued| {
-                queued.request.priority == FrameWorkPriority::Current
-                    && queued.request.work_class == FrameWorkClass::Still
-            }) {
-                if let Some(evicted) = state.queue.remove(index) {
-                    state.pending.remove(&evicted.request.key);
-                    evicted_still = Some(evicted.request.key);
-                    bump(&mut state.metrics.evicted_still);
-                }
-            }
-        }
-        if state.pending.len() >= self.shared.max_pending {
-            match evict_pending_for(&mut state, &request) {
-                Evicted::Prefetch(key) => evicted_prefetch = Some(key),
-                Evicted::Still(key) => evicted_still = Some(key),
-                Evicted::None => {
-                    bump(&mut state.metrics.dropped_backpressure);
-                    return FrameWorkSubmission::DroppedBackpressure;
-                }
-            }
-        }
-        if !make_queue_room(&mut state, self.shared.max_queued, &request) {
+        let Some(eviction) = plan_new_admission_eviction(
+            &state,
+            self.shared.max_pending,
+            self.shared.max_queued,
+            &request,
+        ) else {
             bump(&mut state.metrics.dropped_backpressure);
             return FrameWorkSubmission::DroppedBackpressure;
-        }
+        };
+        let (evicted_prefetch, evicted_still) = apply_eviction(&mut state, eviction);
         state.pending.insert(
             request.key.clone(),
             PendingBinding {
@@ -849,80 +843,145 @@ enum Evicted<K> {
     None,
 }
 
-fn evict_pending_for<K, D, P>(
-    state: &mut BrokerState<K, D, P>,
+fn plan_new_admission_eviction<K, D, P>(
+    state: &BrokerState<K, D, P>,
+    max_pending: usize,
+    max_queued: usize,
     request: &FrameWorkRequest<K, D, P>,
-) -> Evicted<K>
+) -> Option<Evicted<K>>
 where
     K: Clone + Eq + Hash,
 {
-    if request.priority != FrameWorkPriority::Current {
-        return Evicted::None;
+    let proactive_still = (request.priority == FrameWorkPriority::Current
+        && request.work_class != FrameWorkClass::Still)
+        .then(|| {
+            state
+                .queue
+                .iter()
+                .find(|queued| {
+                    queued.request.priority == FrameWorkPriority::Current
+                        && queued.request.work_class == FrameWorkClass::Still
+                })
+                .map(|queued| Evicted::Still(queued.request.key.clone()))
+        })
+        .flatten();
+    let pending_full = state.pending.len() >= max_pending;
+    let queue_full = state.queue.len() >= max_queued;
+    let planned = if let Some(eviction) = proactive_still {
+        eviction
+    } else if !pending_full && !queue_full {
+        Evicted::None
+    } else if request.priority != FrameWorkPriority::Current {
+        return None;
+    } else if queue_full {
+        queue_eviction_candidate(state, request)?
+    } else {
+        pending_eviction_candidate(state, request)?
+    };
+    let removes_pending = !matches!(planned, Evicted::None);
+    let removes_queued = match &planned {
+        Evicted::Prefetch(key) | Evicted::Still(key) => {
+            state.queue.iter().any(|queued| &queued.request.key == key)
+        }
+        Evicted::None => false,
+    };
+    if state.pending.len().saturating_sub(usize::from(removes_pending)) >= max_pending
+        || state.queue.len().saturating_sub(usize::from(removes_queued)) >= max_queued
+    {
+        None
+    } else {
+        Some(planned)
     }
+}
+
+fn plan_queue_eviction<K, D, P>(
+    state: &BrokerState<K, D, P>,
+    max_queued: usize,
+    request: &FrameWorkRequest<K, D, P>,
+) -> Option<Evicted<K>>
+where
+    K: Clone + Eq + Hash,
+{
+    if state.queue.len() < max_queued {
+        Some(Evicted::None)
+    } else if request.priority == FrameWorkPriority::Current {
+        queue_eviction_candidate(state, request)
+    } else {
+        None
+    }
+}
+
+fn queue_eviction_candidate<K, D, P>(
+    state: &BrokerState<K, D, P>,
+    request: &FrameWorkRequest<K, D, P>,
+) -> Option<Evicted<K>>
+where
+    K: Clone,
+{
+    if let Some(queued) = state
+        .queue
+        .iter()
+        .find(|queued| queued.request.priority == FrameWorkPriority::Prefetch)
+    {
+        return Some(Evicted::Prefetch(queued.request.key.clone()));
+    }
+    if request.work_class != FrameWorkClass::Still {
+        if let Some(queued) = state
+            .queue
+            .iter()
+            .find(|queued| queued.request.work_class == FrameWorkClass::Still)
+        {
+            return Some(Evicted::Still(queued.request.key.clone()));
+        }
+    }
+    None
+}
+
+fn pending_eviction_candidate<K, D, P>(
+    state: &BrokerState<K, D, P>,
+    request: &FrameWorkRequest<K, D, P>,
+) -> Option<Evicted<K>>
+where
+    K: Clone + Eq + Hash,
+{
     if let Some(key) = state
         .pending
         .iter()
         .find(|(_, pending)| pending.binding.priority == FrameWorkPriority::Prefetch)
         .map(|(key, _)| key.clone())
     {
-        remove_key_locked(state, &key);
-        bump(&mut state.metrics.evicted_prefetch);
-        return Evicted::Prefetch(key);
+        return Some(Evicted::Prefetch(key));
     }
     if request.work_class != FrameWorkClass::Still {
-        if let Some(key) = state
+        return state
             .pending
             .iter()
             .find(|(_, pending)| pending.binding.work_class == FrameWorkClass::Still)
-            .map(|(key, _)| key.clone())
-        {
-            remove_key_locked(state, &key);
-            bump(&mut state.metrics.evicted_still);
-            return Evicted::Still(key);
-        }
+            .map(|(key, _)| Evicted::Still(key.clone()));
     }
-    Evicted::None
+    None
 }
 
-fn make_queue_room<K, D, P>(
+fn apply_eviction<K, D, P>(
     state: &mut BrokerState<K, D, P>,
-    max_queued: usize,
-    request: &FrameWorkRequest<K, D, P>,
-) -> bool
+    eviction: Evicted<K>,
+) -> (Option<K>, Option<K>)
 where
     K: Clone + Eq + Hash,
 {
-    if state.queue.len() < max_queued {
-        return true;
-    }
-    if request.priority != FrameWorkPriority::Current {
-        return false;
-    }
-    if let Some(index) = state
-        .queue
-        .iter()
-        .position(|queued| queued.request.priority == FrameWorkPriority::Prefetch)
-    {
-        if let Some(evicted) = state.queue.remove(index) {
-            state.pending.remove(&evicted.request.key);
+    match eviction {
+        Evicted::Prefetch(key) => {
+            remove_key_locked(state, &key);
             bump(&mut state.metrics.evicted_prefetch);
+            (Some(key), None)
         }
-        return true;
-    }
-    if request.work_class != FrameWorkClass::Still {
-        if let Some(index) = state
-            .queue
-            .iter()
-            .position(|queued| queued.request.work_class == FrameWorkClass::Still)
-        {
-            if let Some(evicted) = state.queue.remove(index) {
-                state.pending.remove(&evicted.request.key);
-                bump(&mut state.metrics.evicted_still);
-            }
-            return true;
+        Evicted::Still(key) => {
+            remove_key_locked(state, &key);
+            bump(&mut state.metrics.evicted_still);
+            (None, Some(key))
         }
+        Evicted::None => (None, None),
     }
-    false
 }
 
 fn remove_key_locked<K, D, P>(state: &mut BrokerState<K, D, P>, key: &K)
@@ -1264,5 +1323,72 @@ mod tests {
         let diagnostics = broker.diagnostics(|_| false);
         assert_eq!(diagnostics.pending_requests, 0);
         assert_eq!(diagnostics.queued_work, 0);
+    }
+
+    #[test]
+    fn failed_dual_capacity_admission_preserves_every_existing_binding() {
+        let broker = FrameWorkBroker::new(2, 1);
+        let generation = broker.begin_generation();
+        let mut in_flight_prefetch = request(1, generation, FrameWorkClass::Playback);
+        in_flight_prefetch.priority = FrameWorkPriority::Prefetch;
+        broker.submit(in_flight_prefetch);
+        let prefetch_execution = match broker.receive(FrameWorkerLane::Playback, |_| false) {
+            Some(FrameWorkReceive::Ready(execution)) => execution,
+            other => panic!("unexpected receive: {other:?}"),
+        };
+        broker.submit(request(2, generation, FrameWorkClass::Playback));
+
+        assert_eq!(
+            broker.submit(request(3, generation, FrameWorkClass::Playback)),
+            FrameWorkSubmission::DroppedBackpressure
+        );
+        assert!(broker.has_pending_key(&1));
+        assert!(broker.has_pending_key(&2));
+        assert!(broker.execution_current(prefetch_execution.id));
+        let queued = match broker.receive(FrameWorkerLane::Playback, |_| false) {
+            Some(FrameWorkReceive::Ready(execution)) => execution,
+            other => panic!("unexpected receive: {other:?}"),
+        };
+        assert_eq!(queued.key, 2);
+    }
+
+    #[test]
+    fn dual_capacity_admission_prefers_one_queued_eviction_that_opens_both_windows() {
+        let broker = FrameWorkBroker::new(2, 1);
+        let generation = broker.begin_generation();
+        broker.submit(request(1, generation, FrameWorkClass::Playback));
+        let _current = match broker.receive(FrameWorkerLane::Playback, |_| false) {
+            Some(FrameWorkReceive::Ready(execution)) => execution,
+            other => panic!("unexpected receive: {other:?}"),
+        };
+        let mut queued_prefetch = request(2, generation, FrameWorkClass::Playback);
+        queued_prefetch.priority = FrameWorkPriority::Prefetch;
+        broker.submit(queued_prefetch);
+
+        assert_eq!(
+            broker.submit(request(3, generation, FrameWorkClass::Playback)),
+            FrameWorkSubmission::Queued { evicted_prefetch: Some(2), evicted_still: None }
+        );
+        assert!(!broker.has_pending_key(&2));
+        assert!(broker.has_pending_key(&3));
+    }
+
+    #[test]
+    fn failed_class_change_keeps_original_in_flight_binding_current() {
+        let broker = FrameWorkBroker::new(2, 1);
+        let generation = broker.begin_generation();
+        broker.submit(request(1, generation, FrameWorkClass::Playback));
+        let original = match broker.receive(FrameWorkerLane::Playback, |_| false) {
+            Some(FrameWorkReceive::Ready(execution)) => execution,
+            other => panic!("unexpected receive: {other:?}"),
+        };
+        broker.submit(request(2, generation, FrameWorkClass::Playback));
+
+        assert_eq!(
+            broker.submit(request(1, generation, FrameWorkClass::Interactive)),
+            FrameWorkSubmission::DroppedBackpressure
+        );
+        assert!(broker.execution_current(original.id));
+        assert_eq!(broker.diagnostics(|_| false).pending_requests, 2);
     }
 }

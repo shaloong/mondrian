@@ -291,6 +291,15 @@ schema. The Condvar queue, semantic lane selection, capacity reservation, and
 deadline dequeue now live behind the playback-owned Interface without importing
 FFmpeg types.
 
+Admission across the pending-binding window and worker queue is transactional.
+The Broker first computes one eviction that can satisfy every active capacity
+constraint—preferring a queued candidate when the same key can open both
+windows—and mutates no state until that plan is known to succeed. A rejected
+submission therefore cannot consume an in-flight binding, alter an existing
+class binding, or partially evict queued work. Realtime-current still
+preemption follows the same plan/apply rule rather than acting as a separate
+best-effort side effect.
+
 Window and headless Adapters must use this same Interface. Deterministic tests
 exercise 100 latest-wins seeks with bounded pending residency and prove equal
 admission/completion semantics for both Adapter shapes. This is a structural
