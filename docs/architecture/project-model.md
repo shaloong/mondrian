@@ -82,6 +82,17 @@ Future split-entry layouts require an archive migration and new
 migrates JSON in memory and SQLite only in the extracted runtime copy. The
 source `.mdp` is never rewritten by open.
 
+The next temporal author schema must migrate legacy frame-oriented `TimeCode`
+and `TimeTicks` with owner context. A key position is reconstructed from its
+Sequence frame duration and legacy subframe scale using checked rational
+arithmetic; it is not passed through floating-point seconds. Clip-local,
+Sequence-local, mask, transition, and source coordinates must be assigned their
+explicit Authoring Time Domains during the same transaction. Legacy floating
+temporal-handle offsets require one versioned deterministic conversion rule,
+finite/range validation, fixtures at fractional frame rates, and an explicit
+migration diagnostic if exact representation is impossible. Opening still does
+not rewrite the source archive.
+
 Checked fixtures live under `crates/mondrian-project/tests/fixtures/v1` and
 `crates/mondrian-assets/tests/fixtures/v0`. They lock the original v1 archive /
 document contract and the unversioned SQLite upgrade path.

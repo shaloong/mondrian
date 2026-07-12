@@ -59,7 +59,7 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 
 | 能力域 | 已有事实 | 仍不足以宣称完成的部分 | 当前判断 |
 | --- | --- | --- | --- |
-| 核心时间与 ID | `TimeCode`/`Rational`、强类型 ID、序列/轨道/片段模型已广泛使用 | VFR 与混合帧率的显式策略、跨版本语义 fixture 仍不足 | L1 架构基础 |
+| 核心时间与 ID | `TimeCode`/`Rational`、强类型 ID、序列/轨道/片段模型已广泛使用 | `TimeCode` 仍混合帧坐标、通用时间与显示职责，`TimeTicks = frame * 1000` 丢失 time base；需迁移到跨音视频共用的精确 Timeline Time、显式 Time Domain/Transform、稳定 ParameterId，并补齐 VFR/混合帧率 fixture | L0/L1 之间 |
 | 项目持久化 | `.mdp` v1 manifest、单一规范文档、SQLite 素材库、临时文件写入、自动保存、恢复候选和重连已接入 | 当前只接受版本 1，没有迁移链、旧版本 fixture 和升级回滚；替换目标文件前的持久化/崩溃语义仍需压力验证 | L1- |
 | Undo/Redo | UI 外的时间线命令历史可工作，主要编辑动作有回归测试 | 主要依赖完整 `Sequence` 快照，内存上限、跨序列事务和命令级不变量仍需收敛 | L1- |
 | 素材管理 | 文件夹/Bin 层级、移动/重命名/删除、缩略图、离线提示、单文件/目录重连、代理模式已接入产品 UI | tags/metadata 字段尚未形成检索产品；素材使用位置反查和批量诊断不足 | L1- |
@@ -160,6 +160,7 @@ Platform Capability Contract
 每个可编辑参数必须具备下列持久化契约，现有 property path 在迁移期间保持兼容：
 
 - 稳定 `ParameterId` 或等价稳定机器标识，不能依赖显示名或 UI 顺序。
+- 自动化位置与时间手柄使用规范化精确有理 Timeline Time，并声明 Sequence/Clip/Transition/Source 等所有者时间域；视频帧、音频 sample、UI snapping 和 SMPTE 只是在边界解析的网格/显示。
 - 类型：bool、int、float/double、enum、color、point/vector、curve、text/resource reference。
 - 单位与解释：pixel、normalized、percent、degree、frame/time、stop、nit、dB 等；无单位也必须显式。
 - default、hard range、soft range、step、非法值策略。
@@ -173,7 +174,9 @@ Platform Capability Contract
 ### 3.6 音频图
 
 - 项目/序列明确采样率和 channel layout；所有内部混音使用 float，输入统一重采样后进入图。
-- 建立 Clip → Track Bus → Master Bus 的求值顺序；gain、pan、fade、mute/solo、meter、limiter 与延迟信息属于图契约。
+- 建立 Audio Contribution → Track Mixer Channel → Mix Bus → Program Output 的类型化求值顺序；Clip/Track/Bus/Output 复用同一 Processor Rack/Instance 作者模型，gain、pan、fade、mute/solo、meter、limiter、路由和延迟信息属于图契约。
+- 作者数据归 Sequence/`mondrian-timeline`；首个最小作者→IR 纵向切片创建一个真实 `mondrian-audio` crate，负责编译、处理器协议、状态、延迟和执行协调，但不依赖 FFmpeg、CPAL、平台 UI 或 App。暂不拆更多音频/plugin crate。
+- 预览、实时播放、分析和导出消费同一不可变编译语义；旧 flat mixer 只能作为迁移桥接，不能与新图长期并存或保留隐式 `tanh`/limiter。
 - 实时 callback 禁止分配、文件 I/O、格式化日志、等待 decode worker 或锁住项目/UI 状态。
 - 播放以实际提交/消费的音频 sample position 为主时钟；视频来不及时丢帧、重复或降质。只有启动预卷、设备切换或无法维持音频时才进入明确 buffering。
 
@@ -337,7 +340,7 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 - [x] 建立 archive/document/SQLite migration registry，并提供 v1/current document fixture、v0 SQLite fixture、幂等打开、事务回滚和失败不覆盖测试；后续 schema 仍须逐版本增加真实迁移步骤。
 - [ ] 为 ProjectDocument、Sequence、Clip、Effect/Parameter、Mask、音频自动化定义稳定 ID 与 revision/invalidation 规则。
 - [ ] 审计所有高频编辑是否经 command/transaction；确定快照历史内存预算并输出淘汰诊断。
-- [ ] 明确 source time ↔ timeline time ↔ audio sample time 映射；补齐 VFR/混合帧率 policy 文档和测试矩阵。
+- [ ] 落地精确 Timeline Time、显式 Time Domain/Transform、Frame/Sample Evaluation Grid 与独立 SMPTE display contract；迁移旧 `TimeCode`/`TimeTicks` 并补齐 VFR、混合帧率、负时间、嵌套与长项目 fixture。
 
 **播放与任务**
 
@@ -348,8 +351,8 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 **帧、参数与音频**
 
 - [ ] 冻结 Frame/Color/Alpha contract，给所有 CPU/GPU/legacy boundary 分配结构化原因和能力状态。
-- [ ] 扩展参数 schema：稳定 ParameterId、单位、enum/resource 类型、hard/soft range、能力/缓存/颜色域、schema version 与 message ID。
-- [ ] 冻结 AudioBuffer/clock/bus contract，明确 callback 实时安全清单和 underrun/A/V drift 统计来源。
+- [ ] 扩展参数 schema：稳定 ParameterId、精确跨音视频曲线时间、单位、enum/resource 类型、hard/soft range、能力/缓存/颜色域、schema version 与 message ID。
+- [ ] 以 Contribution → Track → Program Output + Gain/automation 的纵向切片创建 `mondrian-audio`，贯通 migration、undo、headless compiler、reference PCM、实时 demand 与离线导出；再逐片增加 Bus/Transition/Nested，明确 callback 实时安全和 underrun/A/V drift 来源。
 
 **验证基础**
 
@@ -499,7 +502,7 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 - 落地项目 migration registry 与 v1 fixture。
 - 将可 headless 驱动的播放/任务核心从 UI 适配器中收敛出来，保留现有成熟调度逻辑。
-- 冻结参数 schema 扩展和 cache semantic revision。
+- 冻结 Timeline Time/Time Domain、稳定 ParameterId、统一曲线 schema 和 cache semantic revision，并准备旧 `TimeCode`/`TimeTicks` 的事务迁移。
 - 将 audio master、video late-frame、buffering 和 underrun 证据统一到播放报告。
 
 **阶段门槛：** M0 退出门槛全部通过；不以“大文件拆小”代替深模块接口和独立测试。

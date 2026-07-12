@@ -204,6 +204,14 @@ explicitly degrades the relevant admission rather than being ignored. The
 existing `TimeTicks = frame * 1000` helper loses time-base identity and therefore
 cannot become the audio automation persistence contract.
 
+Audio and visual automation must not fork into separate persisted curve
+systems. Both use ADR-0004 Timeline Time, stable Parameter IDs, typed values,
+interpolation constraints, and exact temporal handles. Their consumers differ:
+the renderer evaluates at frame/shutter instants, while the Audio Compiler emits
+sample-offset events. UI snapping is likewise independent: video tools normally
+snap to Sequence frames, audio tools may snap to samples or free time, and both
+write the same exact author coordinate.
+
 ### Compilation, demands, and mutable state
 
 The Audio Compiler lowers the validated aggregate into an immutable typed DAG.
@@ -296,21 +304,23 @@ the flat app Adapter.
 
 ### Module ownership
 
-The dependency boundary is fixed even before it becomes a separate physical
-crate:
+The dependency boundary is fixed. After the common time/parameter foundation is
+migrated, the first audio author-to-IR vertical slice creates one physical
+`mondrian-audio` crate:
 
 - `mondrian-timeline` owns pure Sequence audio author data, validation,
   migrations, and undoable commands. It knows processor descriptors and state
   blobs as data, but never loads a plugin or executes DSP.
-- the dedicated Audio Engine boundary owns author-to-IR compilation, Signal
+- `mondrian-audio` owns author-to-IR compilation, Signal
   Closure resolution, latency analysis, processor host contracts, mutable State
-  Domains, execution coordination, and the common PCM block contract. When
-  implementation starts, this boundary should become `mondrian-audio` rather
-  than expanding `mondrian-media` into a mixed compiler/device/plugin crate.
-- `mondrian-media` implements media decode/source-provider adapters and caches;
-  it does not interpret Timeline routing or processor order.
-- platform audio code owns physical device discovery, stream lifetime, and the
-  realtime sink adapter behind an Audio Engine interface.
+  Domains, execution coordination, and the common PCM block contract. It depends
+  on `mondrian-core`, `mondrian-timeline`, and `mondrian-playback`, but never on
+  FFmpeg, CPAL, platform UI, or `mondrian-app`.
+- `mondrian-media` depends on the Audio Engine interfaces to implement media
+  decode/source-provider adapters and caches; it does not interpret Timeline
+  routing or processor order.
+- platform/CPAL audio code implements physical device discovery, stream
+  lifetime, and the realtime sink interface owned by `mondrian-audio`.
 - `mondrian-playback` remains the sole Transport, Clock Master, continuity-epoch,
   and recovery-policy owner.
 - `mondrian-export`, analyzers, recorders, and monitor paths submit demands and
@@ -321,6 +331,53 @@ crate:
 Do not create empty per-format crates merely to mirror this diagram. VST3 and
 CLAP begin as host adapters behind the same Audio Engine contract and split
 physically only when platform dependencies or process isolation require it.
+
+The initial crate should remain internally modular rather than split further:
+
+```text
+mondrian-audio
+├── block / signal_format
+├── ir / compiler
+├── processor / parameter_events
+├── latency / state
+├── demand / coordinator
+├── execution
+└── source / sink / plugin host interfaces
+```
+
+Author entities and migrations do not move into this crate; they stay in
+`mondrian-timeline`. FFmpeg decoders, CPAL streams, and concrete plugin-format
+loading do not define the compiler core. This prevents both a circular
+Timeline↔Audio dependency and a new all-purpose media/runtime crate.
+
+### Foundation implementation order
+
+1. Introduce canonical Timeline Time, Time Domains/Transforms, stable Parameter
+   IDs, and exact curve primitives in `mondrian-core`. Keep compatibility
+   adapters while preparing one transactional project-schema migration from
+   legacy `TimeCode`/`TimeTicks`; no new persisted audio field may use the legacy
+   coordinate.
+2. In one vertical slice, add only the necessary Sequence author entities in
+   `mondrian-timeline` and create `mondrian-audio`: one Contribution → Track
+   Channel → Program Output path, one built-in Gain processor, exact automation,
+   immutable IR, reference execution, save/open migration, undo/redo, realtime
+   demand, and identical preview/export reference samples.
+3. Put the current decoder and sink behind the new interfaces, make the product
+   path consume the compiled slice, and remove hidden `tanh`. Do not keep the old
+   flat mixer as a second interpretation path.
+4. Extend author data and compiler together in independently testable slices:
+   typed Routes and Buses with latency compensation; fades and two-input
+   Transitions; nested public outputs and per-instance State Domains; Roles,
+   Semantic Projections, and Output Families. No full unused schema is built in
+   advance.
+5. Prove the processor host contract with built-ins and a controlled fake
+   external adapter before integrating real VST3 or CLAP discovery, state, UI,
+   and failure isolation.
+
+The first slice is complete only when save/open migration, undo/redo, headless
+compile, deterministic reference PCM, realtime demand, and offline export all
+exercise the same author semantics. A crate that contains only types or forwards
+the old flat mixer does not satisfy the boundary.
 
 ## Core types
 

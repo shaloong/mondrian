@@ -15,6 +15,13 @@ TimelineEvaluationRequest
   -> Display or Export Encode
 ```
 
+Timeline evaluation consumes exact Timeline Time in a declared Sequence domain
+and an explicit video Evaluation Grid. The current frame-oriented request is a
+compatibility form: the renderer must resolve and retain the corresponding
+Frame Position rather than treating the numeric frame field as universal time.
+Subframe shutter/temporal samples use the same Timeline Time representation and
+do not introduce a renderer-private tick scale.
+
 ## Current Implementation
 
 `mondrian-renderer::timeline_render_plan` evaluates one sequence frame through

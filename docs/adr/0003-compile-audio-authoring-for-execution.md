@@ -16,7 +16,8 @@ future feedback requires an explicit stateful delay construct rather than a
 general cyclic author graph.
 
 Automation addresses a stable processor instance and stable Parameter ID in its
-owner-local time domain. Compilation maps exact rational author time through
+owner-local time domain. Following ADR-0004, compilation maps shared exact
+rational Timeline Time through
 clip and nested time transforms once, then emits parameter events at exact
 sample offsets independent of execution block partitioning. The legacy
 `frame * 1000` keyframe coordinate and string-suffix parameter lookup are not an

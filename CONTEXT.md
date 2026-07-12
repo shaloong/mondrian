@@ -56,6 +56,26 @@ _Avoid_: Audio clock, UI-owned output stream
 One signed integer position on an explicitly identified sample-rate timeline, resolved once from rational timeline time using a declared rounding policy.
 _Avoid_: Floating-point seconds passed between audio render stages, sample index without rate
 
+**Timeline Time**:
+A normalized exact rational offset interpreted within its owner's declared Authoring Time Domain, independent of frame, sample, or display grids.
+_Avoid_: Frame number as universal time, floating-point seconds, fixed subframe ticks
+
+**Authoring Time Domain**:
+The coordinate origin and mapping owned by a Sequence, Audio Contribution, Transition, source, or other time-bearing author entity.
+_Avoid_: Renderer frame grid, audio block, implicit clip-local flag
+
+**Time Transform**:
+A validated exact mapping between two Authoring Time Domains created by placement, trimming, speed mapping, or nesting.
+_Avoid_: Rewriting a time base, floating-point seconds bridge, implicit cross-domain comparison
+
+**Evaluation Grid**:
+The consumer-specific frame, shutter-sample, audio-sample, or parameter-event instants at which authored semantics are evaluated.
+_Avoid_: Persisted authoring time base, UI snap setting
+
+**Display Timecode**:
+A presentation contract for formatting timeline positions with a start offset, nominal rate, and drop/non-drop-frame rules.
+_Avoid_: Timeline storage coordinate, arithmetic duration, Clock Master
+
 **Audio Contribution**:
 One independently processable PCM-bearing component placed by a Timeline Clip or nested output instance before it enters a Track Mixer Channel.
 _Avoid_: Entire audiovisual Clip treated as one audio stream, routing Bus
@@ -161,6 +181,11 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - Window presentation becomes usable after external-texture registration and ordered submission to the same GPU queue used by the subsequent Viewer draw; it does not claim fence completion. Headless validation credits readiness only after the real GPU submission completes. Both complete the same **Frame Presentation Ticket**, and device capability alone is not execution evidence.
 - **Audio Playback** may offer an Audio Device Clock Master only after stream health, PCM preroll, and media phase satisfy Playback Policy.
 - Every **Audio Sample Position** carries its sample rate. Positions at different rates cannot be compared or subtracted without an explicit resampling Adapter.
+- Persisted timeline positions, ranges, automation keys, and temporal handles use **Timeline Time** in an explicit **Authoring Time Domain**; video frames and audio samples are derived **Evaluation Grids**, not competing author time systems.
+- **Timeline Time** equality, ordering, arithmetic, and hashing use checked canonical rational semantics; serialized numerator/denominator field order can never define chronology.
+- Timeline Times from different **Authoring Time Domains** cannot be compared or combined until an explicit **Time Transform** maps one domain into the other.
+- Video automation and audio automation share the same exact curve and stable parameter-identity foundation; their Evaluation Grids, supported value types, and delivery cadence remain domain-specific.
+- **Display Timecode** formats a Timeline Time but never owns it; changing drop-frame display or start timecode cannot move authored media.
 - Each Sequence exclusively owns one **Audio Program**; ordinary PCM routes cannot cross Sequence ownership.
 - An **Audio Program** presents one typed routing graph of **Audio Routing Nodes** without forcing Track, Bus, and Output to share an untyped identity or lifecycle; a Track Mixer Channel uses its owning audio Track identity.
 - An **Audio Route** connects stable typed endpoints and can never target a **Generated Audio Stage**.

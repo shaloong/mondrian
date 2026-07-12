@@ -89,7 +89,8 @@ A session contains:
 
 - monotonically increasing `epoch`;
 - active `sequence_id` and immutable timeline revision/signature;
-- exact `TimeCode` anchor;
+- exact Timeline Time anchor (the current implementation adapts legacy
+  `TimeCode` until the temporal schema migration);
 - signed rational rate and direction;
 - Playback Quality Policy revision;
 - Clock Master and clock-handoff state;
@@ -219,9 +220,12 @@ the timeline or duplicate/drop an arbitrary video interval.
 
 ### Time representation
 
-- Timeline anchors use `TimeCode`/`Rational`.
+- Authoritative Timeline anchors use ADR-0004 exact Timeline Time in the active
+  Sequence domain. Current `TimeCode`/`Rational` inputs are compatibility
+  adapters and must preserve their source time base during conversion.
 - Monotonic duration is runtime-only and never persisted.
-- Sample positions use integer frames plus sample rate.
+- Video scheduling resolves a Frame Position/evaluation instant; audio
+  scheduling resolves an integer sample position carrying its sample rate.
 - Conversion uses checked rational arithmetic at seams. Floating point may be
   used for filters/metrics but is not the authoritative accumulated position.
 
@@ -231,7 +235,8 @@ Each demand includes:
 
 - session epoch and quality-policy revision;
 - sequence/timeline revision;
-- exact target TimeCode;
+- exact target Timeline Time plus the resolved video Frame Position and
+  evaluation-grid contract;
 - access intent (`PlaybackCursor`, `ScrubCursor`, `StillFrame`);
 - presentation deadline and demand sequence number;
 - requested output extent/temporary resolution scale;

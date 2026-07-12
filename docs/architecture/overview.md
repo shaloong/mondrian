@@ -40,10 +40,10 @@ foundation:
 - `mondrian-media`: FFmpeg probing/decoding plus media source, waveform,
   proxy, and cache adapters. Its current audio scheduling/mixing code is an
   implementation bridge, not the long-term Audio Program compiler.
-- target `mondrian-audio` boundary: typed audio compilation, processor hosting,
-  latency/state management, and execution coordination. Establish the module
-  boundary first and create the crate when implementation begins; do not create
-  empty format-specific plugin crates.
+- target `mondrian-audio`: typed audio compilation, processor hosting,
+  latency/state management, and execution coordination. Create this one real
+  crate with the first author-to-IR vertical slice after the common time
+  foundation lands; do not create empty format-specific plugin crates.
 - `mondrian-playback`: headless Playback Session state machine, Synthetic Clock
   Master, epoch/revision invalidation, frame-delivery recovery policy, and
   transport snapshots. It has no UI, codec, GPU, device, asset-library, or
@@ -65,10 +65,24 @@ Lower layers cannot depend on higher layers:
 - UI widgets dispatch `Action`; app decides what actions mean.
 - Platform services are injected into event/app layers; widgets never call OS APIs directly.
 
+The target audio dependency direction is one-way:
+
+```text
+mondrian-timeline ──depends on──> mondrian-core
+mondrian-playback ──depends on──> mondrian-core
+mondrian-audio ─────depends on──> mondrian-core + mondrian-timeline + mondrian-playback
+mondrian-media ─────depends on──> mondrian-audio interfaces for audio adapters
+platform audio ─────implements──> mondrian-audio sink interfaces
+mondrian-export/app ─submits to─> mondrian-audio; never interprets its graph
+```
+
 ## Cross-Cutting Principles
 
 - Use strong IDs (`ClipId`, `AssetId`, `EffectId`, etc.), never bare UUIDs across domain boundaries.
-- Time is frame-exact: `TimeCode { frame, time_base }` and `Rational`, not floating-point seconds for persisted timeline semantics.
+- Persisted author time is exact rational Timeline Time in an explicit owner
+  domain. Video frames, audio samples, UI snap grids, and SMPTE display timecode
+  are derived coordinates; floating-point seconds and field-derived ordering
+  are forbidden for persisted timeline semantics.
 - UI visual values must come from theme tokens, not hardcoded colors/spacing/radii.
 - Command/menu/shortcut/plugin entry points should flow through a command registry, not private per-menu business logic.
 - Preview and export should share render semantics. Different scheduling or caching is allowed; different interpretation is not.

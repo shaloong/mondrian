@@ -2,6 +2,13 @@
 
 `mondrian-timeline` owns editorial time, tracks, clips, and timeline commands.
 
+The current structs use frame-oriented `TimeCode` and `TimeTicks` as a legacy
+schema. The next author model uses exact rational Timeline Time for positions,
+ranges, automation keys, and temporal handles. Sequence frame rate remains a
+video evaluation/snap grid and display-timecode input, not the universal storage
+time base; audio edits may therefore retain sample-accurate boundaries without
+creating a second Timeline model.
+
 ## Sequence
 
 A `Sequence` contains:
@@ -61,7 +68,10 @@ Supported `ClipKind`:
 - `NestedSequence`
 - `SolidColor`
 
-Transform, speed, blend mode, solid color, masks, and effects are exposed through the shared `PropertyHost`/`PropertyBag` system.
+Transform, speed, blend mode, solid color, masks, and effects are currently
+exposed through `PropertyHost`/`PropertyBag`. Long-term visual and audio
+automation share exact curve primitives and stable Parameter IDs; string paths
+remain UI aliases and migration inputs rather than identity.
 
 ## Render Projection
 
