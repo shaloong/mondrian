@@ -381,6 +381,22 @@ consumption, render worker generation, buffer watermarks, preroll, underrun, and
 consumed-sample evidence. Its Interface accepts directives and returns immutable
 observations.
 
+The app Clock/Audio Adapter maps Transport State to one typed permission:
+
+- `Stopped`, `Paused`, `Ended`, and `Blocked` → `Idle`;
+- `Priming` → `Preroll`, which fills PCM while keeping callback consumption
+  inactive;
+- `Playing` and video-pressure `Recovering` → `Consume`.
+
+This mapping is intentionally not a `playing: bool`. Reaching the PCM preroll
+watermark during slow first-frame or seek Priming cannot start audio before the
+Engine releases the transport anchor. The later `Preroll` → `Consume`
+transition activates the same render generation and queue; it does not reprime,
+clear PCM, or create a phase correction caused by video readiness. Frame
+Delivery pressure never changes this permission while transport remains
+`Playing`/`Recovering`; only audio device/underrun evidence may initiate audio
+recovery.
+
 The realtime callback may only read/write preallocated lock-free or proven
 bounded structures and atomics. It must not allocate, log, decode, access the
 timeline, lock a contended mutex, perform filesystem I/O, or publish general
@@ -677,6 +693,12 @@ including exact window order, preroll activation, malformed-buffer silence
 substitution, synchronous cancellation of queued old work, and rejection of the
 at-most-one executing completion from an invalidated generation.
 Environment variables no longer alter realtime audio watermark semantics.
+
+Audio transport permission is now explicit. Priming renders into the bounded
+queue under `AudioPlaybackMode::Preroll` without enabling consumption;
+Playing/Recovering switches to `Consume` and activates that same generation.
+This removes the former path where a slow video first frame allowed audio to
+consume during Priming and then triggered a phase-rejected reprime/PCM clear.
 
 Underrun recovery is now sample-budgeted inside Audio Playback. An isolated
 callback shortage emits evidence and preserves Audio Device Master. Missing

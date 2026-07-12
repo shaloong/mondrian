@@ -79,6 +79,32 @@ pub trait AudioPcmRenderer: Send + Sync + 'static {
     fn render(&self, request: AudioPcmRenderRequest) -> mondrian_core::Result<AudioBuffer>;
 }
 
+/// Transport permission presented to the Audio Playback Module on each poll.
+///
+/// The variants deliberately separate filling PCM from allowing the output
+/// callback to consume it. In particular, video/startup `Priming` maps to
+/// [`Self::Preroll`], so a slow first frame cannot start audio early and then
+/// force a generation-resetting phase correction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioPlaybackMode {
+    /// Do not schedule new PCM and keep device consumption disabled.
+    Idle,
+    /// Render and queue PCM, but do not permit device consumption yet.
+    Preroll,
+    /// Render PCM and permit activation once the preroll watermark is met.
+    Consume,
+}
+
+impl AudioPlaybackMode {
+    const fn renders_pcm(self) -> bool {
+        matches!(self, Self::Preroll | Self::Consume)
+    }
+
+    const fn permits_consumption(self) -> bool {
+        matches!(self, Self::Consume)
+    }
+}
+
 /// Runtime Audio Playback condition exposed to callers and headless harnesses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioPlaybackState {
@@ -88,7 +114,7 @@ pub enum AudioPlaybackState {
     Idle,
     /// Playback has no timeline PCM Adapter configured.
     WaitingForSource,
-    /// Current generation is filling the required preroll.
+    /// Current generation is filling preroll or is ready but not yet permitted to consume.
     Prerolling,
     /// Sustained underrun forced a Synthetic handoff and fresh preroll.
     Recovering,
@@ -141,7 +167,8 @@ pub struct AudioPlaybackSnapshot {
     pub next_start_sample: i64,
     /// Exact media time corresponding to active-consumption frame zero.
     pub media_anchor: Option<TimeCode>,
-    /// Whether the active interval was enabled only after required preroll.
+    /// Whether the current generation has met the activation preroll requirement.
+    /// This does not imply that device consumption is currently permitted or active.
     pub activation_preroll_satisfied: bool,
     /// Current high-level Audio Playback condition.
     pub state: AudioPlaybackState,
@@ -398,10 +425,10 @@ impl AudioPlayback {
     }
 
     /// Poll lifecycle, completions, watermarks, and preroll without waiting on workers.
-    pub fn poll(&mut self, playing: bool, position: TimeCode) -> AudioPlaybackPoll {
+    pub fn poll(&mut self, mode: AudioPlaybackMode, position: TimeCode) -> AudioPlaybackPoll {
         let mut events = Vec::new();
         let should_poll_output =
-            self.output.snapshot().is_some() || (playing && self.renderer.is_some());
+            self.output.snapshot().is_some() || (mode.renders_pcm() && self.renderer.is_some());
         if should_poll_output {
             while let Some(event) = self.output.poll() {
                 match event {
@@ -450,15 +477,24 @@ impl AudioPlayback {
             }
         }
 
-        if !playing {
+        if mode == AudioPlaybackMode::Idle {
             self.output.set_active(false);
             self.output.clear();
             self.activation_preroll_satisfied = false;
             self.recovering_from_underrun = false;
-            return AudioPlaybackPoll { snapshot: self.snapshot(false), events };
+            return AudioPlaybackPoll { snapshot: self.snapshot(mode), events };
         }
 
-        if let Some(output) = self.output.snapshot().filter(|output| output.active) {
+        if !mode.permits_consumption() {
+            self.output.set_active(false);
+        }
+
+        let active_output = if mode.permits_consumption() {
+            self.output.snapshot().filter(|output| output.active)
+        } else {
+            None
+        };
+        if let Some(output) = active_output {
             if output.underrun_frames > self.last_underrun_frames {
                 let delta_frames = output.underrun_frames - self.last_underrun_frames;
                 let interval_total_frames =
@@ -511,24 +547,26 @@ impl AudioPlayback {
                     .next_start_sample
                     .saturating_add(self.config.chunk_frames.min(i64::MAX as usize) as i64);
             }
-            if self.output.snapshot().is_some_and(|snapshot| !snapshot.active)
-                && self.output.buffered_frames() >= self.config.preroll_frames
-            {
-                self.output.set_active(true);
+            if self.output.buffered_frames() >= self.config.preroll_frames {
                 self.activation_preroll_satisfied = true;
-                self.recovering_from_underrun = false;
+                if mode.permits_consumption()
+                    && self.output.snapshot().is_some_and(|snapshot| !snapshot.active)
+                {
+                    self.output.set_active(true);
+                    self.recovering_from_underrun = false;
+                }
             }
         }
 
-        AudioPlaybackPoll { snapshot: self.snapshot(true), events }
+        AudioPlaybackPoll { snapshot: self.snapshot(mode), events }
     }
 
     /// Return immutable state without advancing workers or lifecycle.
-    pub fn snapshot(&self, playing: bool) -> AudioPlaybackSnapshot {
+    pub fn snapshot(&self, mode: AudioPlaybackMode) -> AudioPlaybackSnapshot {
         let output = self.output.snapshot();
         let state = match output {
             None => AudioPlaybackState::DeviceUnavailable,
-            Some(_) if !playing => AudioPlaybackState::Idle,
+            Some(_) if mode == AudioPlaybackMode::Idle => AudioPlaybackState::Idle,
             Some(_) if self.renderer.is_none() => AudioPlaybackState::WaitingForSource,
             Some(_) if self.recovering_from_underrun => AudioPlaybackState::Recovering,
             Some(snapshot) if snapshot.active => AudioPlaybackState::Active,
@@ -754,10 +792,18 @@ mod tests {
         playback: &mut AudioPlayback,
         position: TimeCode,
     ) -> Vec<AudioPlaybackEvent> {
+        poll_until_settled_in_mode(playback, position, AudioPlaybackMode::Consume)
+    }
+
+    fn poll_until_settled_in_mode(
+        playback: &mut AudioPlayback,
+        position: TimeCode,
+        mode: AudioPlaybackMode,
+    ) -> Vec<AudioPlaybackEvent> {
         let mut events = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
-            let poll = playback.poll(true, position);
+            let poll = playback.poll(mode, position);
             events.extend(poll.events);
             if poll.snapshot.in_flight == 0
                 && poll.snapshot.output.is_some_and(|output| output.buffered_frames >= 30)
@@ -783,7 +829,7 @@ mod tests {
         );
 
         let events = poll_until_settled(&mut playback, TimeCode::new(1, Rational::new(1, 25)));
-        let snapshot = playback.snapshot(true);
+        let snapshot = playback.snapshot(AudioPlaybackMode::Consume);
 
         assert!(events.contains(&AudioPlaybackEvent::DeviceOpened { stream_generation: 4 }));
         assert_eq!(
@@ -796,6 +842,46 @@ mod tests {
             snapshot.media_anchor,
             Some(TimeCode::new(40, Rational::new(1, 1_000)))
         );
+    }
+
+    #[test]
+    fn preroll_fills_pcm_without_consuming_or_resetting_generation() {
+        let (output, state) = fake_output();
+        let mut playback = AudioPlayback::with_output(test_config(), output);
+        playback.prepare(
+            TimeCode::new(0, Rational::new(1, 25)),
+            Arc::new(RecordingRenderer {
+                requests: Arc::new(Mutex::new(Vec::new())),
+                wrong_frame_count: false,
+            }),
+        );
+
+        let events = poll_until_settled_in_mode(
+            &mut playback,
+            TimeCode::new(0, Rational::new(1, 25)),
+            AudioPlaybackMode::Preroll,
+        );
+        let primed = playback.snapshot(AudioPlaybackMode::Preroll);
+        let primed_generation = primed.generation;
+        let primed_frames = state.lock().queued_frames;
+
+        assert!(events.contains(&AudioPlaybackEvent::DeviceOpened { stream_generation: 4 }));
+        assert_eq!(primed.state, AudioPlaybackState::Prerolling);
+        assert!(primed.activation_preroll_satisfied);
+        assert!(primed.output.is_some_and(|output| !output.active));
+        assert_eq!(primed_frames, 30);
+
+        let activated = playback
+            .poll(
+                AudioPlaybackMode::Consume,
+                TimeCode::new(0, Rational::new(1, 25)),
+            )
+            .snapshot;
+
+        assert_eq!(activated.generation, primed_generation);
+        assert_eq!(activated.state, AudioPlaybackState::Active);
+        assert!(activated.output.is_some_and(|output| output.active));
+        assert_eq!(state.lock().queued_frames, primed_frames);
     }
 
     #[test]
@@ -813,7 +899,10 @@ mod tests {
         let events = poll_until_settled(&mut playback, TimeCode::new(0, Rational::new(1, 25)));
 
         assert_eq!(state.lock().queued_frames, 30);
-        assert_eq!(playback.snapshot(true).render_substitution_count, 3);
+        assert_eq!(
+            playback.snapshot(AudioPlaybackMode::Consume).render_substitution_count,
+            3
+        );
         assert_eq!(
             events
                 .iter()
@@ -850,7 +939,10 @@ mod tests {
         poll_until_settled(&mut playback, TimeCode::new(0, Rational::new(1, 25)));
 
         state.lock().snapshot.as_mut().expect("fake output").underrun_frames = 4;
-        let isolated = playback.poll(true, TimeCode::new(0, Rational::new(1, 25)));
+        let isolated = playback.poll(
+            AudioPlaybackMode::Consume,
+            TimeCode::new(0, Rational::new(1, 25)),
+        );
         assert_eq!(isolated.snapshot.state, AudioPlaybackState::Active);
         assert_eq!(isolated.snapshot.underrun_recovery_count, 0);
         assert!(
@@ -862,7 +954,10 @@ mod tests {
         );
 
         state.lock().snapshot.as_mut().expect("fake output").underrun_frames = 10;
-        let recovering = playback.poll(true, TimeCode::new(1, Rational::new(1, 25)));
+        let recovering = playback.poll(
+            AudioPlaybackMode::Consume,
+            TimeCode::new(1, Rational::new(1, 25)),
+        );
         assert_eq!(recovering.snapshot.state, AudioPlaybackState::Recovering);
         assert_eq!(recovering.snapshot.underrun_recovery_count, 1);
         assert!(recovering.events.iter().any(|event| matches!(
@@ -880,8 +975,14 @@ mod tests {
         assert!(recovering.snapshot.output.is_some_and(|output| !output.active));
 
         poll_until_settled(&mut playback, TimeCode::new(1, Rational::new(1, 25)));
-        assert_eq!(playback.snapshot(true).state, AudioPlaybackState::Active);
-        assert_eq!(playback.snapshot(true).active_interval_underrun_frames, 0);
+        assert_eq!(
+            playback.snapshot(AudioPlaybackMode::Consume).state,
+            AudioPlaybackState::Active
+        );
+        assert_eq!(
+            playback.snapshot(AudioPlaybackMode::Consume).active_interval_underrun_frames,
+            0
+        );
     }
 
     #[test]
@@ -899,7 +1000,10 @@ mod tests {
                 released: Arc::clone(&released),
             }),
         );
-        playback.poll(true, TimeCode::new(0, Rational::new(1, 25)));
+        playback.poll(
+            AudioPlaybackMode::Consume,
+            TimeCode::new(0, Rational::new(1, 25)),
+        );
         let entered_deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < entered_deadline {
             if entered.load(Ordering::Acquire) {
@@ -921,7 +1025,12 @@ mod tests {
 
         let settled_deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < settled_deadline {
-            let snapshot = playback.poll(true, TimeCode::new(1, Rational::new(1, 25))).snapshot;
+            let snapshot = playback
+                .poll(
+                    AudioPlaybackMode::Consume,
+                    TimeCode::new(1, Rational::new(1, 25)),
+                )
+                .snapshot;
             if snapshot.stale_completion_count == 1
                 && snapshot.in_flight == 0
                 && snapshot.output.is_some_and(|output| output.buffered_frames == 30)
@@ -931,7 +1040,7 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
 
-        let snapshot = playback.snapshot(true);
+        let snapshot = playback.snapshot(AudioPlaybackMode::Consume);
         assert_eq!(snapshot.stale_completion_count, 1);
         assert_eq!(snapshot.canceled_render_count, 2);
         assert_eq!(state.lock().queued_frames, 30);

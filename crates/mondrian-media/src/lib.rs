@@ -25,8 +25,8 @@ pub use audio::{
 pub use audio_output::{RealtimeAudioOutputEvent, RealtimeAudioOutputManager};
 pub use audio_playback::{
     AudioPcmRenderRequest, AudioPcmRenderer, AudioPlayback, AudioPlaybackConfig,
-    AudioPlaybackConfigError, AudioPlaybackEvent, AudioPlaybackPoll, AudioPlaybackSnapshot,
-    AudioPlaybackState,
+    AudioPlaybackConfigError, AudioPlaybackEvent, AudioPlaybackMode, AudioPlaybackPoll,
+    AudioPlaybackSnapshot, AudioPlaybackState,
 };
 pub use decoder::{
     DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,

@@ -160,13 +160,13 @@ impl AppState {
     }
 
     pub fn pump_audio_output(&mut self) {
-        let playing = self.is_playing();
+        let mode = self.audio_playback_mode();
         let position = self.playback_engine.snapshot().position;
-        let poll = self.audio_playback.poll(playing, position);
+        let poll = self.audio_playback.poll(mode, position);
         for event in poll.events {
             self.handle_audio_playback_event(event);
         }
-        if !playing {
+        if mode == AudioPlaybackMode::Idle {
             if audio_idle_warmup_enabled() {
                 self.warm_audio_cache_when_idle();
             }
@@ -370,7 +370,7 @@ impl AppState {
     }
 
     pub fn audio_developer_metrics_summary(&self) -> String {
-        let snapshot = self.audio_playback.snapshot(self.is_playing());
+        let snapshot = self.audio_playback.snapshot(self.audio_playback_mode());
         let buffered_frames = snapshot.output.map_or(0, |output| output.buffered_frames);
         let buffered_ms = buffered_frames as f64 / self.audio_sample_rate as f64 * 1000.0;
         let source_cache_entries = self.audio_source_cache.cache_entry_count();
@@ -462,6 +462,10 @@ impl AppState {
             self.playback_engine.snapshot().state,
             TransportState::Priming | TransportState::Playing | TransportState::Recovering
         )
+    }
+
+    fn audio_playback_mode(&self) -> AudioPlaybackMode {
+        audio_playback_mode_for_transport(self.playback_engine.snapshot().state)
     }
 
     /// Current authoritative Clock Master exposed to diagnostics/UI adapters.
@@ -626,6 +630,17 @@ fn sequence_has_audible_audio(sequence: &Sequence) -> bool {
             && (!has_solo || track.is_solo)
             && track.clips.iter().any(|clip| !clip.is_disabled)
     })
+}
+
+fn audio_playback_mode_for_transport(state: TransportState) -> AudioPlaybackMode {
+    match state {
+        TransportState::Priming => AudioPlaybackMode::Preroll,
+        TransportState::Playing | TransportState::Recovering => AudioPlaybackMode::Consume,
+        TransportState::Stopped
+        | TransportState::Paused
+        | TransportState::Ended
+        | TransportState::Blocked => AudioPlaybackMode::Idle,
+    }
 }
 
 fn clamp_playback_wake_delay(delay: Duration) -> Duration {
@@ -868,6 +883,35 @@ mod tests {
     }
 
     #[test]
+    fn priming_grants_audio_preroll_before_consumption() {
+        let mut state = state_with_sequence(20);
+        state.play();
+
+        assert_eq!(
+            state.playback_engine.snapshot().state,
+            TransportState::Priming
+        );
+        assert_eq!(state.audio_playback_mode(), AudioPlaybackMode::Preroll);
+
+        state.advance_playback_clock(Duration::from_millis(499));
+        assert_eq!(
+            state.playback_engine.snapshot().state,
+            TransportState::Priming
+        );
+        assert_eq!(state.audio_playback_mode(), AudioPlaybackMode::Preroll);
+
+        state.advance_playback_clock(Duration::from_millis(2));
+        assert_eq!(
+            state.playback_engine.snapshot().state,
+            TransportState::Playing
+        );
+        assert_eq!(state.audio_playback_mode(), AudioPlaybackMode::Consume);
+
+        state.pause();
+        assert_eq!(state.audio_playback_mode(), AudioPlaybackMode::Idle);
+    }
+
+    #[test]
     fn sustained_late_deliveries_expose_lower_runtime_preview_scale_to_adapters() {
         let mut state = state_with_sequence(40);
         play_ready(&mut state);
@@ -885,6 +929,7 @@ mod tests {
             state.playback_engine.snapshot().state,
             TransportState::Recovering
         );
+        assert_eq!(state.audio_playback_mode(), AudioPlaybackMode::Consume);
 
         state.pause();
         assert_eq!(

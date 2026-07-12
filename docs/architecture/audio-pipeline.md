@@ -16,6 +16,9 @@ Adapter.
 - `AudioPlayback`: deep Module owning device lifecycle, integer-sample PCM
   scheduling, render worker, generation invalidation, watermarks, preroll, and
   immutable evidence.
+- `AudioPlaybackMode`: the transport permission Interface with distinct `Idle`,
+  `Preroll`, and `Consume` modes. It prevents a caller from conflating PCM
+  preparation with permission for the device callback to consume it.
 - `AudioPcmRenderer`: narrow render Interface implemented by the app timeline
   Adapter and the headless deterministic Adapter.
 
@@ -50,7 +53,12 @@ reopens while Synthetic Master continues.
 A new stream remains inactive while Audio Playback invalidates old render work,
 clears queued PCM, anchors scheduling to the current exact timeline
 `TimeCode`, and queues at least 120 ms. Callback consumption is enabled only
-after that preroll. Each clock observation carries the exact media anchor for
+after that preroll **and** a `Consume` permission. Playback `Priming` supplies
+`Preroll`: render workers may fill the same generation to the high watermark,
+but the callback remains inactive and cannot run ahead of the held transport
+anchor. Transitioning to `Playing`/`Recovering` supplies `Consume` and activates
+the already-primed generation without clearing or rerendering it. Each clock
+observation carries the exact media anchor for
 active-consumption frame zero; the Playback Engine derives candidate media
 phase from that anchor and integer consumed frames. Phase error over the 20 ms
 policy budget rejects the stream and starts a fresh preroll without moving or

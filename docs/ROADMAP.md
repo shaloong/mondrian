@@ -68,7 +68,7 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 | Windows 硬解/低拷贝 | FFmpeg 硬件设备/codec 探测、D3D11 native frame 保留、D3D11→D3D12 导入、NV12/P010 GPU YUV 采样、准入与失败原因已有实现 | 必须以真实 GPU/驱动/素材证明主路径启用、同步正确和长时间稳定；不以 capability probe 或 shader 创建代替实际帧执行 | L0/L1 之间 |
 | 渲染与色彩 | working-space 合成、OCIO CPU/GPU 路径、结构化色彩/显示诊断、golden 测试、预览/导出报告对比、Windows 显示探测和 fail-closed 逻辑较深入 | 仍有 legacy/CPU/读回路径与真实显示 payload 限制；常见 Log/HDR 必须补齐参考样片端到端证明；Windows HDR 监看不能提前宣称稳定 | L1+ 架构，继续符合性收敛 |
 | 效果与动画 | 稳定 `EffectId`、属性路径、`PropertyBag`/`AnimatedProperty`、多种插值、曲线编辑器、效果 DAG、mask、缓存策略和插件式 definition/DSL 已存在 | `PropertyDescriptor` 缺独立稳定 `ParameterId`、单位和完整能力契约；只有部分声明效果生成真实 render op；文字和转场类型尚未接入时间线/渲染主路径 | L0/L1 之间 |
-| 音频 | float buffer/mixer、CPAL 实时输出、音频主时钟与同步控制、后台 chunk 渲染、mute/solo、波形生成与 UI 缓存已存在 | Clip gain/pan/fade/包络尚未成为持久化时间线语义；缺 bus、meter、limiter、明确重采样/声道策略、underrun 统计和长时间同步门禁 | L0/L1 之间 |
+| 音频 | float buffer/mixer、CPAL 实时输出、音频/单调时钟切换、后台 PCM generation、水位/预卷、underrun 恢复、mute/solo、波形生成与 UI 缓存已存在；`Priming` 只允许填充 PCM，`Playing/Recovering` 才允许设备消费 | Clip gain/pan/fade/包络尚未成为持久化时间线语义；缺 bus、meter、limiter、明确重采样/声道策略、真实设备位置和长时间同步门禁 | L0/L1 之间 |
 | 导出 | 后台队列、取消、时间线逐帧合成、音频混编、FFmpeg 编码、色彩标签/HDR 元数据约束、结果 probe/校验和诊断已存在 | 产品 UI 主要暴露 H.264 预设；Windows 硬编检测未落地主路径；HEVC Main10、专业中间格式和长项目需真实 roundtrip，不以 enum/FFmpeg 参数单测视为交付 | L1- |
 | 自研 UI | winit/wgpu 产品入口、retained widget、主题 token、事件/焦点/IME、Dock、面板和大量组件测试已建立 | 交互一致性和无障碍仍需真实工作流验证；产品字符串大量硬编码，中英文混用，尚无 message ID/pseudo-locale 基础 | L1-；i18n 为 L0 |
 | 插件 | 内部效果 definition、graph DSL、能力/缓存/失败隔离契约已有 | 尚无稳定外部 ABI、包加载/权限/隔离/兼容矩阵；当前只能称内部扩展接缝 | L0 |
@@ -81,7 +81,7 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 2. **关键复杂度的 Locality 不够。** 预览服务、调度、渲染适配、色彩诊断和缓存逻辑大量聚集在 `mondrian-app::app_ui::preview`；导出执行也集中在大型 queue 模块。UI 适配器承担过多引擎复杂度，会妨碍第二消费者和跨平台后端。
 3. **项目版本化只有“拒绝”，没有“迁移”。** 这在 Alpha 继续变更数据结构时会快速成为真实项目风险。
 4. **声明能力和视觉执行能力可能分离。** 某些效果、文字和转场已有类型或属性，却没有主路径 render op；路线图不得把它们列为已完成。
-5. **音频会被视频 buffering 牵制。** 当前实现包含视频准备期间清空/静音音频的保护策略；目标状态必须转为音频主时钟持续、视频丢帧/重复/降质，而不是常态等待视频。
+5. **音频/视频运行许可必须持续分离。** 当前 `Priming` 已可预填 PCM 但禁止设备提前消费，普通视频 Late/Recovering 也不会旋转音频 generation；仍需用真实音频设备、慢首帧/seek、持续视频压力和 30 分钟 A/V drift 门禁证明该不变量长期成立。
 
 ---
 

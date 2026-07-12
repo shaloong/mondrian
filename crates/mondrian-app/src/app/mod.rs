@@ -28,7 +28,7 @@ use mondrian_media::audio::{
     RealtimeAudioOutputSnapshot,
 };
 use mondrian_media::{
-    AudioPcmRenderRequest, AudioPcmRenderer, AudioPlayback, AudioPlaybackEvent,
+    AudioPcmRenderRequest, AudioPcmRenderer, AudioPlayback, AudioPlaybackEvent, AudioPlaybackMode,
     AudioPlaybackSnapshot,
 };
 use mondrian_playback::{
