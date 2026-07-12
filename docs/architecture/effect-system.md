@@ -2,6 +2,12 @@
 
 Effects are timeline-instance operations that transform image data through a compiled render graph.
 
+This document describes visual effects. Audio processing uses the distinct
+Sequence-owned Audio Processor model in [Audio Pipeline](audio-pipeline.md).
+Both domains reuse foundation concepts such as strong IDs, typed parameter
+descriptors, exact automation curves, migration, and compiled execution, but do
+not share `EffectNode`, RGBA capabilities, JSON parameters, or runtime graphs.
+
 ## Data vs Execution
 
 - `mondrian-core::effect_data` defines `EffectType` and `EffectNode` as pure serializable data.

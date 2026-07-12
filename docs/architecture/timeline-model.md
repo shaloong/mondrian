@@ -43,6 +43,13 @@ default display/view if one is available.
 
 Video tracks use visibility and opacity. Audio tracks use mute/solo semantics. UI must not show speaker controls for video tracks or visibility controls for audio tracks unless a future explicit domain feature is added.
 
+Long-term audio authoring keeps the Timeline Track as the editorial container
+and keys its Track Mixer Channel state by the same `TrackId` inside the
+Sequence-owned Audio Program. Clip audio components become independently
+processable Audio Contributions; the visual `Clip.effects` vector is not the
+audio processor rack. See [Audio Pipeline](audio-pipeline.md) for the target
+author/compiler boundary and current migration gaps.
+
 ## Clip
 
 `Clip` is the timeline instance, not the asset itself. It references `asset_id`, carries timeline/source ranges, transform, speed, effects, masks, linked clip, blend mode, and kind-specific data.

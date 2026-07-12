@@ -37,12 +37,20 @@ foundation:
 - `mondrian-app`: product shell, app state, command/action handling, project lifecycle, window/runtime wiring, panel adapters.
 - `mondrian-assets`: SQLite-backed project asset library and virtual asset records.
 - `mondrian-timeline`: sequence/track/clip domain model and editing commands.
-- `mondrian-media`: FFmpeg probing/decoding, audio buffers, waveform/proxy/cache support.
+- `mondrian-media`: FFmpeg probing/decoding plus media source, waveform,
+  proxy, and cache adapters. Its current audio scheduling/mixing code is an
+  implementation bridge, not the long-term Audio Program compiler.
+- target `mondrian-audio` boundary: typed audio compilation, processor hosting,
+  latency/state management, and execution coordination. Establish the module
+  boundary first and create the crate when implementation begins; do not create
+  empty format-specific plugin crates.
 - `mondrian-playback`: headless Playback Session state machine, Synthetic Clock
   Master, epoch/revision invalidation, frame-delivery recovery policy, and
   transport snapshots. It has no UI, codec, GPU, device, asset-library, or
   concrete timeline ownership.
-- `mondrian-effects`: effect registry, graph compilation, effect execution, mask rasterization, plugin effect contracts.
+- `mondrian-effects`: visual-effect registry, RGBA graph compilation/execution,
+  mask rasterization, and visual plugin-effect contracts; it is not the audio
+  processor host.
 - `mondrian-renderer`: timeline render-plan building and compositing/render helpers.
 - `mondrian-export`: export presets, queue, FFmpeg encoding, and timeline export orchestration.
 - `mondrian-ai`: AI orchestration; it must not become an implicit editor-state owner.

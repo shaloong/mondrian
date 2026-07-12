@@ -56,6 +56,86 @@ _Avoid_: Audio clock, UI-owned output stream
 One signed integer position on an explicitly identified sample-rate timeline, resolved once from rational timeline time using a declared rounding policy.
 _Avoid_: Floating-point seconds passed between audio render stages, sample index without rate
 
+**Audio Contribution**:
+One independently processable PCM-bearing component placed by a Timeline Clip or nested output instance before it enters a Track Mixer Channel.
+_Avoid_: Entire audiovisual Clip treated as one audio stream, routing Bus
+
+**Audio Program**:
+The Sequence-owned persistent authoring model for mixer channels, mix buses, typed routes, processors, automation, and exposed outputs.
+_Avoid_: Project-global PCM graph, Track as mixer and bus
+
+**Audio Routing Node**:
+A persistent user-addressable Track Mixer Channel, Mix Bus, or Program Output with type-specific identity, ports, and lifecycle in one Audio Program routing model.
+_Avoid_: Generic property node, universal untyped ID, generated Clip DSP operator
+
+**Audio Route**:
+A persistent typed connection between stable signal endpoints in one Audio Program.
+_Avoid_: Node-name connection, array-index connection, hidden fallback route
+
+**Audio Processor Instance**:
+A persistent built-in or external audio effect instance identified by a stable definition and stable parameters, with authored state independent of its loaded runtime.
+_Avoid_: Video EffectNode, plugin file path, registry index, opaque JSON effect
+
+**Audio Processor Rack**:
+An ordered collection of Audio Processor Instances at one explicit insertion point of an Audio Contribution, Track Mixer Channel, Mix Bus, or Program Output.
+_Avoid_: Unordered effect set, format-specific VST chain, hidden master effect
+
+**Audio Transition**:
+An explicit time-bounded relationship between two Audio Contributions that applies a declared pair of sample-domain gain curves after their clip-local processing.
+_Avoid_: Overlap inferred as crossfade, unary fade plugin, Track-wide dissolve
+
+**Audio Role**:
+A Sequence-owned single-valued semantic classification for a separable audio contribution, optionally parented to another local Audio Role; “role” and “subrole” describe hierarchy position rather than different entity types.
+_Avoid_: Project-global role object, routing node, display name as identity
+
+**Standard Semantic Key**:
+An optional namespaced classification value used for templates, matching, search, and presentation without replacing a Sequence-local Audio Role identity.
+_Avoid_: Global Role ID, dynamic routing selector, mutable Project authority
+
+**Sequence Semantic Catalog**:
+The Sequence-root collection that owns Audio Roles and other authoring semantics shared by its Timeline, Audio Program, and public output interface.
+_Avoid_: Project role registry, Mix Graph node collection
+
+**Strong Entity Reference**:
+A typed reference that must resolve inside the same validated authoring aggregate for a snapshot to exist.
+_Avoid_: Missing internal node treated as runtime availability
+
+**Recoverable Dependency Reference**:
+A stable cross-aggregate or external reference that retains its expected contract while current binding remains derived.
+_Avoid_: Missing internal Route endpoint, persisted resolved flag
+
+**Generated Audio Stage**:
+A non-persistent IR operation deterministically lowered from Clip, Lane, Transition, Route, or processor authoring semantics.
+_Avoid_: User-routable Clip node, anonymous diagnostic stage
+
+**Audio Render Admission**:
+A per-execution decision that requested logical audio outputs, exact artifacts, processors, decoders, state, and buffers are prepared.
+_Avoid_: Audio-device availability, deadline guarantee
+
+**Monitor Sink Admission**:
+A per-listening-path decision that a user- or workspace-scoped monitor graph is bound and prepared to feed one physical device.
+_Avoid_: Program Output compatibility, transport permission
+
+**Signal Closure**:
+The resolved typed audio dependency subgraph required to produce selected logical outputs under one processing contract.
+_Avoid_: Consumer purpose, scheduler window, hash alone
+
+**Audio State Domain**:
+The mutable DSP state scope determined by a Signal Closure, continuity epoch, processor origins, nested instance path, time mapping, direction, and processing mode.
+_Avoid_: Global plugin state, cache entry, fingerprint-equivalent graph
+
+**Sequence Output Port**:
+A stable typed audio output explicitly exposed by one Sequence for nesting, playback, analysis, or delivery.
+_Avoid_: Child track reference, output array index, implicit stereo mixdown
+
+**Delivery Mapping**:
+A Project or export-job contract that packages selected Sequence outputs into files, containers, channels, and delivery metadata.
+_Avoid_: Internal stem selection, physical device routing
+
+**Monitor Path**:
+A user-, workspace-, or session-scoped graph that maps logical program outputs to physical listening devices without changing the Audio Program.
+_Avoid_: Program master processor, project-owned device ID
+
 **Project Migration**:
 An ordered, transactional transformation of one persisted archive, document, or SQLite schema version into the next supported version.
 _Avoid_: Best-effort deserialization, ignored ALTER error
@@ -81,6 +161,29 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - Window presentation becomes usable after external-texture registration and ordered submission to the same GPU queue used by the subsequent Viewer draw; it does not claim fence completion. Headless validation credits readiness only after the real GPU submission completes. Both complete the same **Frame Presentation Ticket**, and device capability alone is not execution evidence.
 - **Audio Playback** may offer an Audio Device Clock Master only after stream health, PCM preroll, and media phase satisfy Playback Policy.
 - Every **Audio Sample Position** carries its sample rate. Positions at different rates cannot be compared or subtracted without an explicit resampling Adapter.
+- Each Sequence exclusively owns one **Audio Program**; ordinary PCM routes cannot cross Sequence ownership.
+- An **Audio Program** presents one typed routing graph of **Audio Routing Nodes** without forcing Track, Bus, and Output to share an untyped identity or lifecycle; a Track Mixer Channel uses its owning audio Track identity.
+- An **Audio Route** connects stable typed endpoints and can never target a **Generated Audio Stage**.
+- Every independently processable **Audio Contribution** and every **Audio Routing Node** may own explicitly placed **Audio Processor Racks** using the same **Audio Processor Instance** author model for built-ins, VST3, CLAP, and future host adapters.
+- An **Audio Processor Instance** addresses automation by stable instance and parameter identity; display names, property-path suffixes, plugin file paths, and parameter indexes are never authoritative.
+- Clip-local automation uses contribution-local rational time, Track/Bus/Output automation uses Sequence-local rational time, and **Audio Transition** automation uses transition-local rational time; compilation maps each domain once to exact sample offsets.
+- An **Audio Transition** names exactly two contributions and does not affect other overlapping material; overlap without a Transition remains ordinary summing.
+- Every parallel input to a sum or Transition is delay-compensated from declared processor and nested latency; internal floating-point mixing neither normalizes, soft-clips, nor limits without an explicit authored processor.
+- Each **Audio Role** belongs to exactly one **Sequence Semantic Catalog**; its optional parent is a **Strong Entity Reference** in the same catalog, and the resulting hierarchy must be acyclic.
+- Each separable audio contribution has zero or one authoritative **Audio Role**; ancestors are implied by hierarchy, while independent tags and routing duplication cannot masquerade as additional Role assignments.
+- A Track may materialize a default **Audio Role** when authoring an otherwise unclassified contribution, but moving that contribution does not silently reclassify it; a mixed Bus has no authoritative single Role.
+- A **Standard Semantic Key** may suggest matches between Audio Roles in different Sequences but never establishes a reference or changes existing authoring semantics.
+- Timeline contributions, semantic projections, and output-family selectors use local **Audio Role** identities; a Project may derive indexes and coordinate atomic edits across Sequence snapshots but owns no live role graph referenced by them.
+- Every **Strong Entity Reference** resolves before an authoring transaction commits; only a **Recoverable Dependency Reference** can produce a runtime resolution issue.
+- Every **Generated Audio Stage** retains a deterministic origin reference for diagnostics, caching, and per-instance DSP state allocation.
+- Preview, playback, audition, analysis, and export compile the same author semantics into generated operations; they may schedule differently but cannot reinterpret processor order, automation, transitions, latency, or nesting.
+- Equal **Signal Closures** may share immutable plans, but mutable processors share an **Audio State Domain** only when all continuity and evaluation identities also match; fingerprints alone never authorize state sharing.
+- An **Audio Program** exposes one or more stable **Sequence Output Ports** and never binds physical listening devices.
+- A nested Sequence is one instanced composite audio source in its parent; it consumes selected **Sequence Output Ports** and owns independent mutable DSP execution state.
+- A parent binds nested PCM through the child's stable public output identities and records any semantic assignment separately against parent-local **Audio Roles**; it never references child-internal Audio Role identities.
+- A **Delivery Mapping** packages Sequence outputs but cannot address private child tracks, buses, or routes.
+- A **Monitor Path** consumes logical Sequence outputs and cannot alter program or exported samples.
+- **Audio Render Admission** and **Monitor Sink Admission** are independent; a missing Monitor Sink never invalidates an Audio Program or stops Synthetic Clock transport.
 - During `Priming`, **Audio Playback** may render and queue PCM but must keep device consumption inactive. Only `Playing` or `Recovering` grants consumption permission; a late/missing video frame cannot revoke it or rotate the audio render generation.
 - **Audio Playback** records isolated underruns without changing Clock Master; sustained missing-sample evidence enters recovery through a continuous Synthetic handoff and fresh preroll.
 - Each persisted archive, document, and SQLite library has an independent version and **Project Migration** chain.
@@ -90,6 +193,9 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 
 > **Dev:** “The Viewer missed frame 240. Should it set playback buffering?”
 > **Domain expert:** “No. It reports a late **Frame Delivery**. The **Playback Session** decides whether its **Transport State** keeps playing, primes, or recovers according to the active **Clock Master** and quality policy.”
+
+> **Dev:** “Can Reel 1 route directly into a Project-wide dialogue bus?”
+> **Domain expert:** “No. Reel 1 exposes a **Sequence Output Port**; a parent Sequence combines it inside its own **Audio Program**, while the Project only applies a **Delivery Mapping**.”
 
 ## Flagged ambiguities
 
