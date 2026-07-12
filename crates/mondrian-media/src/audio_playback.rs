@@ -3,7 +3,7 @@
 use crate::{
     AudioBuffer, RealtimeAudioOutputEvent, RealtimeAudioOutputManager, RealtimeAudioOutputSnapshot,
 };
-use mondrian_core::{Rational, TimeCode};
+use mondrian_core::{FramePosition, Rational};
 use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
 use std::sync::{mpsc, Arc};
@@ -152,7 +152,7 @@ pub enum AudioPlaybackEvent {
         missing_frames: u64,
         threshold_frames: u64,
         final_output: RealtimeAudioOutputSnapshot,
-        final_media_anchor: TimeCode,
+        final_media_anchor: FramePosition,
     },
 }
 
@@ -166,7 +166,7 @@ pub struct AudioPlaybackSnapshot {
     /// First sample frame not yet admitted to the render worker.
     pub next_start_sample: i64,
     /// Exact media time corresponding to active-consumption frame zero.
-    pub media_anchor: Option<TimeCode>,
+    pub media_anchor: Option<FramePosition>,
     /// Whether the current generation has met the activation preroll requirement.
     /// This does not imply that device consumption is currently permitted or active.
     pub activation_preroll_satisfied: bool,
@@ -313,7 +313,7 @@ pub struct AudioPlayback {
     generation: u64,
     in_flight: usize,
     next_start_sample: i64,
-    media_anchor: Option<TimeCode>,
+    media_anchor: Option<FramePosition>,
     activation_preroll_satisfied: bool,
     render_substitution_count: u64,
     stale_completion_count: u64,
@@ -385,23 +385,23 @@ impl AudioPlayback {
     }
 
     /// Install one immutable timeline PCM Adapter and start a new generation at `anchor`.
-    pub fn prepare(&mut self, anchor: TimeCode, renderer: Arc<dyn AudioPcmRenderer>) {
+    pub fn prepare(&mut self, anchor: FramePosition, renderer: Arc<dyn AudioPcmRenderer>) {
         self.renderer = Some(renderer);
         self.reprime(anchor);
     }
 
     /// Remove timeline PCM rendering and invalidate all outstanding work.
-    pub fn clear_source(&mut self, anchor: TimeCode) {
+    pub fn clear_source(&mut self, anchor: FramePosition) {
         self.renderer = None;
         self.reprime(anchor);
     }
 
     /// Invalidate outstanding work and restart PCM scheduling at an exact timeline anchor.
-    pub fn reprime(&mut self, anchor: TimeCode) {
+    pub fn reprime(&mut self, anchor: FramePosition) {
         self.reprime_internal(anchor, false);
     }
 
-    fn reprime_internal(&mut self, anchor: TimeCode, recovering_from_underrun: bool) {
+    fn reprime_internal(&mut self, anchor: FramePosition, recovering_from_underrun: bool) {
         let start_sample = time_code_to_sample_frame(anchor, self.config.sample_rate);
         self.output.set_active(false);
         self.output.clear();
@@ -412,7 +412,7 @@ impl AudioPlayback {
         self.in_flight = 0;
         self.next_start_sample = start_sample;
         self.media_anchor = self.renderer.as_ref().map(|_| {
-            TimeCode::new(
+            FramePosition::new(
                 start_sample,
                 Rational::new(1, i64::from(self.config.sample_rate)),
             )
@@ -425,7 +425,7 @@ impl AudioPlayback {
     }
 
     /// Poll lifecycle, completions, watermarks, and preroll without waiting on workers.
-    pub fn poll(&mut self, mode: AudioPlaybackMode, position: TimeCode) -> AudioPlaybackPoll {
+    pub fn poll(&mut self, mode: AudioPlaybackMode, position: FramePosition) -> AudioPlaybackPoll {
         let mut events = Vec::new();
         let should_poll_output =
             self.output.snapshot().is_some() || (mode.renders_pcm() && self.renderer.is_some());
@@ -614,7 +614,7 @@ fn validate_config(config: AudioPlaybackConfig) -> Result<(), AudioPlaybackConfi
     Ok(())
 }
 
-fn time_code_to_sample_frame(anchor: TimeCode, sample_rate: u32) -> i64 {
+fn time_code_to_sample_frame(anchor: FramePosition, sample_rate: u32) -> i64 {
     if anchor.time_base.num <= 0 || anchor.time_base.den <= 0 {
         return 0;
     }
@@ -790,14 +790,14 @@ mod tests {
 
     fn poll_until_settled(
         playback: &mut AudioPlayback,
-        position: TimeCode,
+        position: FramePosition,
     ) -> Vec<AudioPlaybackEvent> {
         poll_until_settled_in_mode(playback, position, AudioPlaybackMode::Consume)
     }
 
     fn poll_until_settled_in_mode(
         playback: &mut AudioPlayback,
-        position: TimeCode,
+        position: FramePosition,
         mode: AudioPlaybackMode,
     ) -> Vec<AudioPlaybackEvent> {
         let mut events = Vec::new();
@@ -821,14 +821,14 @@ mod tests {
         let mut playback = AudioPlayback::with_output(test_config(), output);
         let requests = Arc::new(Mutex::new(Vec::new()));
         playback.prepare(
-            TimeCode::new(1, Rational::new(1, 25)),
+            FramePosition::new(1, Rational::new(1, 25)),
             Arc::new(RecordingRenderer {
                 requests: Arc::clone(&requests),
                 wrong_frame_count: false,
             }),
         );
 
-        let events = poll_until_settled(&mut playback, TimeCode::new(1, Rational::new(1, 25)));
+        let events = poll_until_settled(&mut playback, FramePosition::new(1, Rational::new(1, 25)));
         let snapshot = playback.snapshot(AudioPlaybackMode::Consume);
 
         assert!(events.contains(&AudioPlaybackEvent::DeviceOpened { stream_generation: 4 }));
@@ -840,7 +840,7 @@ mod tests {
         assert!(snapshot.activation_preroll_satisfied);
         assert_eq!(
             snapshot.media_anchor,
-            Some(TimeCode::new(40, Rational::new(1, 1_000)))
+            Some(FramePosition::new(40, Rational::new(1, 1_000)))
         );
     }
 
@@ -849,7 +849,7 @@ mod tests {
         let (output, state) = fake_output();
         let mut playback = AudioPlayback::with_output(test_config(), output);
         playback.prepare(
-            TimeCode::new(0, Rational::new(1, 25)),
+            FramePosition::new(0, Rational::new(1, 25)),
             Arc::new(RecordingRenderer {
                 requests: Arc::new(Mutex::new(Vec::new())),
                 wrong_frame_count: false,
@@ -858,7 +858,7 @@ mod tests {
 
         let events = poll_until_settled_in_mode(
             &mut playback,
-            TimeCode::new(0, Rational::new(1, 25)),
+            FramePosition::new(0, Rational::new(1, 25)),
             AudioPlaybackMode::Preroll,
         );
         let primed = playback.snapshot(AudioPlaybackMode::Preroll);
@@ -874,7 +874,7 @@ mod tests {
         let activated = playback
             .poll(
                 AudioPlaybackMode::Consume,
-                TimeCode::new(0, Rational::new(1, 25)),
+                FramePosition::new(0, Rational::new(1, 25)),
             )
             .snapshot;
 
@@ -889,14 +889,14 @@ mod tests {
         let (output, state) = fake_output();
         let mut playback = AudioPlayback::with_output(test_config(), output);
         playback.prepare(
-            TimeCode::new(0, Rational::new(1, 25)),
+            FramePosition::new(0, Rational::new(1, 25)),
             Arc::new(RecordingRenderer {
                 requests: Arc::new(Mutex::new(Vec::new())),
                 wrong_frame_count: true,
             }),
         );
 
-        let events = poll_until_settled(&mut playback, TimeCode::new(0, Rational::new(1, 25)));
+        let events = poll_until_settled(&mut playback, FramePosition::new(0, Rational::new(1, 25)));
 
         assert_eq!(state.lock().queued_frames, 30);
         assert_eq!(
@@ -930,18 +930,18 @@ mod tests {
         let (output, state) = fake_output();
         let mut playback = AudioPlayback::with_output(test_config(), output);
         playback.prepare(
-            TimeCode::new(0, Rational::new(1, 25)),
+            FramePosition::new(0, Rational::new(1, 25)),
             Arc::new(RecordingRenderer {
                 requests: Arc::new(Mutex::new(Vec::new())),
                 wrong_frame_count: false,
             }),
         );
-        poll_until_settled(&mut playback, TimeCode::new(0, Rational::new(1, 25)));
+        poll_until_settled(&mut playback, FramePosition::new(0, Rational::new(1, 25)));
 
         state.lock().snapshot.as_mut().expect("fake output").underrun_frames = 4;
         let isolated = playback.poll(
             AudioPlaybackMode::Consume,
-            TimeCode::new(0, Rational::new(1, 25)),
+            FramePosition::new(0, Rational::new(1, 25)),
         );
         assert_eq!(isolated.snapshot.state, AudioPlaybackState::Active);
         assert_eq!(isolated.snapshot.underrun_recovery_count, 0);
@@ -956,7 +956,7 @@ mod tests {
         state.lock().snapshot.as_mut().expect("fake output").underrun_frames = 10;
         let recovering = playback.poll(
             AudioPlaybackMode::Consume,
-            TimeCode::new(1, Rational::new(1, 25)),
+            FramePosition::new(1, Rational::new(1, 25)),
         );
         assert_eq!(recovering.snapshot.state, AudioPlaybackState::Recovering);
         assert_eq!(recovering.snapshot.underrun_recovery_count, 1);
@@ -970,11 +970,11 @@ mod tests {
                 final_media_anchor,
             } if final_output.active
                 && final_output.underrun_frames == 10
-                && *final_media_anchor == TimeCode::new(0, Rational::new(1, 1_000))
+                && *final_media_anchor == FramePosition::new(0, Rational::new(1, 1_000))
         )));
         assert!(recovering.snapshot.output.is_some_and(|output| !output.active));
 
-        poll_until_settled(&mut playback, TimeCode::new(1, Rational::new(1, 25)));
+        poll_until_settled(&mut playback, FramePosition::new(1, Rational::new(1, 25)));
         assert_eq!(
             playback.snapshot(AudioPlaybackMode::Consume).state,
             AudioPlaybackState::Active
@@ -994,7 +994,7 @@ mod tests {
         let entered = Arc::new(AtomicBool::new(false));
         let released = Arc::new(AtomicBool::new(false));
         playback.prepare(
-            TimeCode::new(0, Rational::new(1, 25)),
+            FramePosition::new(0, Rational::new(1, 25)),
             Arc::new(GateRenderer {
                 entered: Arc::clone(&entered),
                 released: Arc::clone(&released),
@@ -1002,7 +1002,7 @@ mod tests {
         );
         playback.poll(
             AudioPlaybackMode::Consume,
-            TimeCode::new(0, Rational::new(1, 25)),
+            FramePosition::new(0, Rational::new(1, 25)),
         );
         let entered_deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < entered_deadline {
@@ -1015,7 +1015,7 @@ mod tests {
 
         let current_requests = Arc::new(Mutex::new(Vec::new()));
         playback.prepare(
-            TimeCode::new(1, Rational::new(1, 25)),
+            FramePosition::new(1, Rational::new(1, 25)),
             Arc::new(RecordingRenderer {
                 requests: Arc::clone(&current_requests),
                 wrong_frame_count: false,
@@ -1028,7 +1028,7 @@ mod tests {
             let snapshot = playback
                 .poll(
                     AudioPlaybackMode::Consume,
-                    TimeCode::new(1, Rational::new(1, 25)),
+                    FramePosition::new(1, Rational::new(1, 25)),
                 )
                 .snapshot;
             if snapshot.stale_completion_count == 1

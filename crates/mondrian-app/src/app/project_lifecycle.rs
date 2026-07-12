@@ -349,7 +349,7 @@ impl AppState {
                 seq.video_tracks.push(mondrian_timeline::track::Track::new_video("V1"));
             }
             if seq.audio_tracks.is_empty() {
-                seq.audio_tracks.push(mondrian_timeline::track::Track::new_audio("A1"));
+                seq.add_audio_track();
             }
             seq.normalize_track_names();
         }
@@ -394,7 +394,7 @@ impl AppState {
 
         let mut sequence = Sequence::new(name);
         sequence.settings = settings;
-        sequence.playhead = TimeCode::new(0, sequence.time_base());
+        sequence.playhead = TimelineTime::ZERO;
 
         let runtime_root = Self::project_runtime_root(&project_file);
         if runtime_root.exists() {

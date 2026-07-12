@@ -59,8 +59,8 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 
 | 能力域 | 已有事实 | 仍不足以宣称完成的部分 | 当前判断 |
 | --- | --- | --- | --- |
-| 核心时间与 ID | `TimeCode`/`Rational`、强类型 ID、序列/轨道/片段模型已广泛使用 | `TimeCode` 仍混合帧坐标、通用时间与显示职责，`TimeTicks = frame * 1000` 丢失 time base；需迁移到跨音视频共用的精确 Timeline Time、显式 Time Domain/Transform、稳定 ParameterId，并补齐 VFR/混合帧率 fixture | L0/L1 之间 |
-| 项目持久化 | `.mdp` v1 manifest、单一规范文档、SQLite 素材库、临时文件写入、自动保存、恢复候选和重连已接入 | 当前只接受版本 1，没有迁移链、旧版本 fixture 和升级回滚；替换目标文件前的持久化/崩溃语义仍需压力验证 | L1- |
+| 核心时间与 ID | 作者位置/范围/曲线已迁移为 canonical `TimelineTime`，已有显式 Time Domain/Transform、稳定 ParameterId；`FramePosition` 仅作求值适配，SMPTE NDF/DF 已有独立 display contract | 仍需补齐 VFR/混合帧率、嵌套和长项目 corpus，并把 display mode 完整接入序列/UI 设置 | L1- |
+| 项目持久化 | `.mdp` manifest、schema v2 精确时间文档、当前 fixture、SQLite 素材库、临时文件写入、自动保存、恢复候选和重连已接入 | Alpha 明确拒绝旧 schema、不承诺兼容迁移；替换目标文件前的持久化/崩溃语义仍需压力验证 | L1- |
 | Undo/Redo | UI 外的时间线命令历史可工作，主要编辑动作有回归测试 | 主要依赖完整 `Sequence` 快照，内存上限、跨序列事务和命令级不变量仍需收敛 | L1- |
 | 素材管理 | 文件夹/Bin 层级、移动/重命名/删除、缩略图、离线提示、单文件/目录重连、代理模式已接入产品 UI | tags/metadata 字段尚未形成检索产品；素材使用位置反查和批量诊断不足 | L1- |
 | 时间线编辑 | 多轨、移动、分割、普通 Trim、Ripple Delete、Insert/Overwrite、Roll/Slip/Slide、跨轨移动、链接片段跟随、锁定、吸附、多选和嵌套序列已有实现与测试 | Lift/Extract、显式 Link/Unlink、Track Targeting、转场 handles、反向/冻结/完整 time remap、VFR/混合帧率边界和复杂 ripple 传播未形成完整验收 | L1- |
@@ -68,7 +68,7 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 | Windows 硬解/低拷贝 | FFmpeg 硬件设备/codec 探测、D3D11 native frame 保留、D3D11→D3D12 导入、NV12/P010 GPU YUV 采样、准入与失败原因已有实现 | 必须以真实 GPU/驱动/素材证明主路径启用、同步正确和长时间稳定；不以 capability probe 或 shader 创建代替实际帧执行 | L0/L1 之间 |
 | 渲染与色彩 | working-space 合成、OCIO CPU/GPU 路径、结构化色彩/显示诊断、golden 测试、预览/导出报告对比、Windows 显示探测和 fail-closed 逻辑较深入 | 仍有 legacy/CPU/读回路径与真实显示 payload 限制；常见 Log/HDR 必须补齐参考样片端到端证明；Windows HDR 监看不能提前宣称稳定 | L1+ 架构，继续符合性收敛 |
 | 效果与动画 | 稳定 `EffectId`、属性路径、`PropertyBag`/`AnimatedProperty`、多种插值、曲线编辑器、效果 DAG、mask、缓存策略和插件式 definition/DSL 已存在 | `PropertyDescriptor` 缺独立稳定 `ParameterId`、单位和完整能力契约；只有部分声明效果生成真实 render op；文字和转场类型尚未接入时间线/渲染主路径 | L0/L1 之间 |
-| 音频 | float buffer/mixer、CPAL 实时输出、音频/单调时钟切换、后台 PCM generation、水位/预卷、underrun 恢复、mute/solo、波形生成与 UI 缓存已存在；`Priming` 只允许填充 PCM，`Playing/Recovering` 才允许设备消费 | Clip gain/pan/fade/包络尚未成为持久化时间线语义；缺 bus、meter、limiter、明确重采样/声道策略、真实设备位置和长时间同步门禁 | L0/L1 之间 |
+| 音频 | 除既有输出/时钟能力外，Sequence 已持有 Contribution/Track Channel/Bus/Output/typed Route/Processor author model；`mondrian-audio` 已有统一编译、Bus 路由、sample-accurate Gain reference DSP、无隐式 clipping 与未解析插件 fail-closed 测试 | 真实 decoder/sink/export 尚未切到 compiled plan；Transition/nesting/latency/state/demand/plugin host、pan/fade/meter/limiter、重采样/声道策略和长时间同步门禁仍未完成 | L1- 地基，产品主路仍 L0/L1 |
 | 导出 | 后台队列、取消、时间线逐帧合成、音频混编、FFmpeg 编码、色彩标签/HDR 元数据约束、结果 probe/校验和诊断已存在 | 产品 UI 主要暴露 H.264 预设；Windows 硬编检测未落地主路径；HEVC Main10、专业中间格式和长项目需真实 roundtrip，不以 enum/FFmpeg 参数单测视为交付 | L1- |
 | 自研 UI | winit/wgpu 产品入口、retained widget、主题 token、事件/焦点/IME、Dock、面板和大量组件测试已建立 | 交互一致性和无障碍仍需真实工作流验证；产品字符串大量硬编码，中英文混用，尚无 message ID/pseudo-locale 基础 | L1-；i18n 为 L0 |
 | 插件 | 内部效果 definition、graph DSL、能力/缓存/失败隔离契约已有 | 尚无稳定外部 ABI、包加载/权限/隔离/兼容矩阵；当前只能称内部扩展接缝 | L0 |
@@ -337,10 +337,10 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 **项目与编辑**
 
-- [x] 建立 archive/document/SQLite migration registry，并提供 v1/current document fixture、v0 SQLite fixture、幂等打开、事务回滚和失败不覆盖测试；后续 schema 仍须逐版本增加真实迁移步骤。
+- [x] 建立 archive/document/SQLite version registry，并提供 schema v2 current document fixture、v0 SQLite fixture、幂等打开、事务回滚和失败不覆盖测试；Alpha 不保留旧 document schema 兼容。
 - [ ] 为 ProjectDocument、Sequence、Clip、Effect/Parameter、Mask、音频自动化定义稳定 ID 与 revision/invalidation 规则。
 - [ ] 审计所有高频编辑是否经 command/transaction；确定快照历史内存预算并输出淘汰诊断。
-- [ ] 落地精确 Timeline Time、显式 Time Domain/Transform、Frame/Sample Evaluation Grid 与独立 SMPTE display contract；迁移旧 `TimeCode`/`TimeTicks` 并补齐 VFR、混合帧率、负时间、嵌套与长项目 fixture。
+- [ ] 精确 Timeline Time、显式 Time Domain/Transform、Frame/Sample Evaluation Grid 和独立 SMPTE NDF/DF display contract 已落地并删除旧 `TimeCode`/`TimeTicks`；仍须完整接入显示设置，并补齐 VFR、混合帧率、负时间、嵌套与长项目 fixture。
 
 **播放与任务**
 
@@ -352,7 +352,7 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 - [ ] 冻结 Frame/Color/Alpha contract，给所有 CPU/GPU/legacy boundary 分配结构化原因和能力状态。
 - [ ] 扩展参数 schema：稳定 ParameterId、精确跨音视频曲线时间、单位、enum/resource 类型、hard/soft range、能力/缓存/颜色域、schema version 与 message ID。
-- [ ] 以 Contribution → Track → Program Output + Gain/automation 的纵向切片创建 `mondrian-audio`，贯通 migration、undo、headless compiler、reference PCM、实时 demand 与离线导出；再逐片增加 Bus/Transition/Nested，明确 callback 实时安全和 underrun/A/V drift 来源。
+- [ ] Contribution → Track/Bus → Program Output、Gain automation、headless compiler 与 reference PCM 已进入 `mondrian-audio`；仍须贯通 undo、实时 demand、decoder/sink 与离线导出，再实现 Transition/Nested、latency/state，明确 callback 实时安全和 underrun/A/V drift 来源。
 
 **验证基础**
 
@@ -362,7 +362,7 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 ### 退出门槛
 
-- 项目 v1 fixture 可升级、保存、重开；故意失败不会破坏源文件。
+- schema v2 current fixture 可保存、重开；旧/未来 schema 明确拒绝；故意失败不会破坏源文件。
 - Headless 测试可驱动 play/seek/cancel，而不构造 Widget 或 native window。
 - 一个参数从 schema → UI → animation → save/reopen → preview/export → cache invalidation 全链通过。
 - 音频时钟、video target selection 和 fallback 决策可由结构化报告关联到同一次播放。
@@ -500,9 +500,9 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 ### 第 3–5 周：迁移、所有权与音频时钟
 
-- 落地项目 migration registry 与 v1 fixture。
+- 落地项目 version registry 与 schema v2 current fixture；Alpha 旧 schema 明确拒绝。
 - 将可 headless 驱动的播放/任务核心从 UI 适配器中收敛出来，保留现有成熟调度逻辑。
-- 冻结 Timeline Time/Time Domain、稳定 ParameterId、统一曲线 schema 和 cache semantic revision，并准备旧 `TimeCode`/`TimeTicks` 的事务迁移。
+- 冻结 Timeline Time/Time Domain、稳定 ParameterId、统一曲线 schema 和 cache semantic revision；旧 `TimeCode`/`TimeTicks` 不作为兼容格式保留。
 - 将 audio master、video late-frame、buffering 和 underrun 证据统一到播放报告。
 
 **阶段门槛：** M0 退出门槛全部通过；不以“大文件拆小”代替深模块接口和独立测试。

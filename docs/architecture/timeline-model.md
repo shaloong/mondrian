@@ -2,9 +2,10 @@
 
 `mondrian-timeline` owns editorial time, tracks, clips, and timeline commands.
 
-The current structs use frame-oriented `TimeCode` and `TimeTicks` as a legacy
-schema. The next author model uses exact rational Timeline Time for positions,
-ranges, automation keys, and temporal handles. Sequence frame rate remains a
+Persisted positions, ranges, automation keys, and temporal handles use canonical
+exact rational `TimelineTime`. `FramePosition` is an evaluation/display adapter,
+not an author coordinate, and the former `TimeTicks = frame * 1000` path has
+been deleted. Sequence frame rate remains a
 video evaluation/snap grid and display-timecode input, not the universal storage
 time base; audio edits may therefore retain sample-accurate boundaries without
 creating a second Timeline model.
@@ -17,7 +18,8 @@ A `Sequence` contains:
 - `settings`
 - ordered video and audio tracks
 - playhead
-- optional in/out frame range
+- optional exact in/out range
+- a Sequence-owned `AudioProgram`
 
 Default sequences create `V1..V3` and `A1..A3`. `SequenceSettings` validates resolution, frame rate, audio sample rate/layout, preview settings, and color-management constraints.
 The persisted `working_color_space` is a `WorkingColorSpace`, distinct from
@@ -50,12 +52,13 @@ default display/view if one is available.
 
 Video tracks use visibility and opacity. Audio tracks use mute/solo semantics. UI must not show speaker controls for video tracks or visibility controls for audio tracks unless a future explicit domain feature is added.
 
-Long-term audio authoring keeps the Timeline Track as the editorial container
-and keys its Track Mixer Channel state by the same `TrackId` inside the
-Sequence-owned Audio Program. Clip audio components become independently
-processable Audio Contributions; the visual `Clip.effects` vector is not the
-audio processor rack. See [Audio Pipeline](audio-pipeline.md) for the target
-author/compiler boundary and current migration gaps.
+Audio authoring keeps the Timeline Track as the editorial container and keys
+its Track Mixer Channel state by the same `TrackId` inside the Sequence-owned
+Audio Program. Clip audio components are independently processable Audio
+Contributions; the visual `Clip.effects` vector is not the audio processor rack.
+Track creation/removal updates the keyed mixer state and default route in the
+same Sequence mutation. Validation rejects a snapshot when the two sets differ.
+See [Audio Pipeline](audio-pipeline.md) for the author/compiler boundary.
 
 ## Clip
 

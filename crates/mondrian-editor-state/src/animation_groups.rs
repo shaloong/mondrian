@@ -1,7 +1,7 @@
 //! Animation property grouping for editor UI.
 //!
 //! Categorises animated properties into logical groups (Motion, Opacity,
-//! TimeRemap, Effect, Mask, Other) so inspectors and graph editors can present
+//! Effect, Mask, Other) so inspectors and graph editors can present
 //! related properties together without hard-coding property paths in panel code.
 //!
 //! This module is UI-framework agnostic. It only depends on the automation
@@ -18,7 +18,6 @@ pub enum AnimationGroupKind {
     /// Opacity and blend mode.
     Opacity,
     /// Speed multiplier (time remapping).
-    TimeRemap,
     /// Effect-local properties (path starts with `effect.`).
     Effect,
     /// Mask-local properties (path starts with `mask.`).
@@ -95,17 +94,6 @@ pub fn property_group_meta(path: &str, property: &AnimatedProperty) -> Animation
             title: "不透明度".to_string(),
             kind: AnimationGroupKind::Opacity,
             order: 1,
-            shows_fx_badge: false,
-            allows_effect_controls: false,
-            allows_mask_controls: false,
-        };
-    }
-    if path == mondrian_timeline::clip::SpeedMap::MULTIPLIER_PATH {
-        return AnimationGroupMeta {
-            id: "builtin.time_remap".to_string(),
-            title: "时间重映射".to_string(),
-            kind: AnimationGroupKind::TimeRemap,
-            order: 2,
             shows_fx_badge: false,
             allows_effect_controls: false,
             allows_mask_controls: false,
@@ -206,7 +194,6 @@ pub fn property_order(path: &str) -> usize {
         mondrian_timeline::clip::Transform2D::ANCHOR_POINT_PATH => 3,
         mondrian_timeline::clip::Transform2D::OPACITY_PATH => 4,
         mondrian_timeline::clip::Clip::BLEND_MODE_PATH => 5,
-        mondrian_timeline::clip::SpeedMap::MULTIPLIER_PATH => 6,
         _ => 100,
     }
 }
@@ -295,20 +282,6 @@ mod tests {
         let meta = property_group_meta(mondrian_timeline::clip::Clip::BLEND_MODE_PATH, &prop);
         assert_eq!(meta.kind, AnimationGroupKind::Opacity);
         assert_eq!(meta.id, "builtin.opacity");
-    }
-
-    #[test]
-    fn speed_multiplier_path_maps_to_time_remap_group() {
-        let prop = property(
-            mondrian_timeline::clip::SpeedMap::MULTIPLIER_PATH,
-            "速度倍数",
-            None,
-        );
-        let meta = property_group_meta(mondrian_timeline::clip::SpeedMap::MULTIPLIER_PATH, &prop);
-        assert_eq!(meta.kind, AnimationGroupKind::TimeRemap);
-        assert_eq!(meta.id, "builtin.time_remap");
-        assert_eq!(meta.title, "时间重映射");
-        assert_eq!(meta.order, 2);
     }
 
     // ── Mask properties ─────────────────────────────────────────────────
@@ -478,10 +451,6 @@ mod tests {
             property_order(mondrian_timeline::clip::Clip::BLEND_MODE_PATH),
             5
         );
-        assert_eq!(
-            property_order(mondrian_timeline::clip::SpeedMap::MULTIPLIER_PATH),
-            6
-        );
     }
 
     #[test]
@@ -495,13 +464,10 @@ mod tests {
 
     #[test]
     fn builtin_group_ids_are_stable_and_predictable() {
-        let prop = property(
-            mondrian_timeline::clip::SpeedMap::MULTIPLIER_PATH,
-            "速度倍数",
-            None,
-        );
-        let meta1 = property_group_meta(mondrian_timeline::clip::SpeedMap::MULTIPLIER_PATH, &prop);
-        let meta2 = property_group_meta(mondrian_timeline::clip::SpeedMap::MULTIPLIER_PATH, &prop);
+        let path = mondrian_timeline::clip::Transform2D::POSITION_PATH;
+        let prop = property(path, "位置", None);
+        let meta1 = property_group_meta(path, &prop);
+        let meta2 = property_group_meta(path, &prop);
         assert_eq!(meta1.id, meta2.id);
         assert_eq!(meta1.kind, meta2.kind);
         assert_eq!(meta1.title, meta2.title);
@@ -547,10 +513,9 @@ mod tests {
     fn all_group_kinds_are_returned_by_some_path() {
         use std::collections::HashSet;
 
-        let cases: [(&str, Option<&str>); 7] = [
+        let cases: [(&str, Option<&str>); 6] = [
             (mondrian_timeline::clip::Transform2D::POSITION_PATH, None),
             (mondrian_timeline::clip::Transform2D::OPACITY_PATH, None),
-            (mondrian_timeline::clip::SpeedMap::MULTIPLIER_PATH, None),
             ("effect.blur.amount", Some("模糊")),
             ("mask.abc.shape", Some("蒙版 A")),
             ("random.path", Some("Custom")),
@@ -565,7 +530,6 @@ mod tests {
 
         assert!(kinds.contains(&AnimationGroupKind::Motion));
         assert!(kinds.contains(&AnimationGroupKind::Opacity));
-        assert!(kinds.contains(&AnimationGroupKind::TimeRemap));
         assert!(kinds.contains(&AnimationGroupKind::Effect));
         assert!(kinds.contains(&AnimationGroupKind::Mask));
         assert!(kinds.contains(&AnimationGroupKind::Other));

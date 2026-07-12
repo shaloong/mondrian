@@ -174,7 +174,7 @@ impl AppState {
     pub fn retain_animation_keyframe_selection_for_clip(
         &mut self,
         clip_id: ClipId,
-        valid_keys: &HashSet<(String, mondrian_core::automation::TimeTicks)>,
+        valid_keys: &HashSet<(String, mondrian_core::TimelineTime)>,
     ) {
         self.animation_selection.selected_keyframes.retain(|selection| {
             selection.clip_id != clip_id
@@ -202,7 +202,7 @@ impl AppState {
             mondrian_core::MondrianError::ClipNotFound { clip_id: selection.clip_id.to_string() }
         })?;
         let property_bag = clip.property_bag()?;
-        let anchor_time = selected.iter().map(|item| item.time).min().unwrap_or(0);
+        let anchor_time = selected.iter().map(|item| item.time).min().unwrap_or(TimelineTime::ZERO);
 
         let mut entries = Vec::new();
         for item in selected {
@@ -215,7 +215,7 @@ impl AppState {
             keyframe.id = KeyframeId::new();
             entries.push(AnimationClipboardEntry {
                 path: item.path,
-                relative_time: item.time - anchor_time,
+                relative_time: item.time.checked_sub(anchor_time)?,
                 keyframe,
             });
         }
@@ -237,7 +237,7 @@ impl AppState {
     pub fn paste_animation_keyframes(
         &mut self,
         selection: SelectedClipRef,
-        destination_time: TimeTicks,
+        destination_time: TimelineTime,
     ) -> mondrian_core::Result<bool> {
         let Some(clipboard) = self.animation_clipboard.clone() else {
             return Ok(false);
@@ -252,7 +252,8 @@ impl AppState {
         for entry in clipboard.entries {
             let mut keyframe = entry.keyframe;
             keyframe.id = KeyframeId::new();
-            keyframe.time = (destination_time + entry.relative_time).max(0);
+            keyframe.time =
+                destination_time.checked_add(entry.relative_time)?.max(TimelineTime::ZERO);
             mutations.push(PropertyMutation::SetKeyframe {
                 path: entry.path.clone(),
                 keyframe: keyframe.clone(),
@@ -365,9 +366,9 @@ impl AppState {
                     clip_id: selection.clip_id.to_string(),
                 }
             })?;
-            let old_anchor = clip.transform.get_anchor_point(TimeCode::ZERO);
-            let scale = clip.transform.get_scale(TimeCode::ZERO);
-            let old_pos = clip.transform.get_position(TimeCode::ZERO);
+            let old_anchor = clip.transform.get_anchor_point(TimelineTime::ZERO);
+            let scale = clip.transform.get_scale(TimelineTime::ZERO);
+            let old_pos = clip.transform.get_position(TimelineTime::ZERO);
             // Adjust position to keep visual position unchanged:
             // pos_new + S*(-anchor_new) = pos_old + S*(-anchor_old)
             // pos_new = pos_old + S*(anchor_new - anchor_old)

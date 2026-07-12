@@ -20,10 +20,10 @@ pub enum AppEvent {
     Pause,
     Stop,
     SeekTo {
-        timecode: TimeCode,
+        timecode: FramePosition,
     },
     PlayheadMoved {
-        timecode: TimeCode,
+        timecode: FramePosition,
     },
 
     // ── 时间线编辑 ────────────────────────────────────────────────────────────
@@ -40,7 +40,7 @@ pub enum AppEvent {
     },
     ClipMoved {
         clip_id: ClipId,
-        new_position: TimeCode,
+        new_position: FramePosition,
     },
     ClipTrimmed {
         clip_id: ClipId,

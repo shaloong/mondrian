@@ -1,5 +1,6 @@
 //! Interpolation helpers: bezier, auto-slope, tangents.
 use super::*;
+use crate::TimeScale;
 
 pub(crate) fn interpolation_defaults(
     interpolation: InterpolationType,
@@ -56,39 +57,49 @@ pub(crate) fn interpolation_defaults(
 }
 
 const fn default_out_bezier_handle() -> BezierHandle {
-    BezierHandle { time_offset: 1.0 / 3.0, value_offset: 0.0 }
+    BezierHandle {
+        time_offset: TimelineTime::ONE_THIRD,
+        value_offset: 0.0,
+    }
 }
 
 const fn default_in_bezier_handle() -> BezierHandle {
-    BezierHandle { time_offset: -1.0 / 3.0, value_offset: 0.0 }
+    BezierHandle {
+        time_offset: TimelineTime::NEGATIVE_ONE_THIRD,
+        value_offset: 0.0,
+    }
 }
 
 pub(crate) fn handle_for_out(interpolation: KeyframeInterpolation) -> BezierHandle {
     match interpolation {
         KeyframeInterpolation::Bezier(handle) => BezierHandle {
-            time_offset: handle.time_offset.clamp(0.0, 1.0),
+            time_offset: handle.time_offset.clamp(TimelineTime::ZERO, TimelineTime::ONE),
             value_offset: handle.value_offset,
         },
         KeyframeInterpolation::Linear => default_out_bezier_handle(),
-        KeyframeInterpolation::Hold => BezierHandle { time_offset: 0.0, value_offset: 0.0 },
+        KeyframeInterpolation::Hold => {
+            BezierHandle { time_offset: TimelineTime::ZERO, value_offset: 0.0 }
+        }
     }
 }
 
 pub(crate) fn handle_for_in(interpolation: KeyframeInterpolation) -> BezierHandle {
     match interpolation {
         KeyframeInterpolation::Bezier(handle) => BezierHandle {
-            time_offset: handle.time_offset.clamp(-1.0, 0.0),
+            time_offset: handle.time_offset.clamp(TimelineTime::NEGATIVE_ONE, TimelineTime::ZERO),
             value_offset: handle.value_offset,
         },
         KeyframeInterpolation::Linear => default_in_bezier_handle(),
-        KeyframeInterpolation::Hold => BezierHandle { time_offset: 0.0, value_offset: 0.0 },
+        KeyframeInterpolation::Hold => {
+            BezierHandle { time_offset: TimelineTime::ZERO, value_offset: 0.0 }
+        }
     }
 }
 
 pub(crate) fn extract_handle(interpolation: KeyframeInterpolation) -> Option<Vec2> {
     match interpolation {
         KeyframeInterpolation::Bezier(handle) => Some(Vec2::new(
-            handle.time_offset as f32,
+            handle.time_offset.to_f64() as f32,
             handle.value_offset as f32,
         )),
         _ => None,
@@ -97,9 +108,12 @@ pub(crate) fn extract_handle(interpolation: KeyframeInterpolation) -> Option<Vec
 
 pub(crate) fn solve_bezier_t(x: f32, cp_out: BezierHandle, cp_in: BezierHandle) -> f32 {
     let x = x.clamp(0.0, 1.0);
-    let p1 = Vec2::new(cp_out.time_offset as f32, cp_out.value_offset as f32);
+    let p1 = Vec2::new(
+        cp_out.time_offset.to_f64() as f32,
+        cp_out.value_offset as f32,
+    );
     let p2 = Vec2::new(
-        (1.0 + cp_in.time_offset) as f32,
+        (1.0 + cp_in.time_offset.to_f64()) as f32,
         (1.0 + cp_in.value_offset) as f32,
     );
 
@@ -164,7 +178,7 @@ pub(crate) fn compute_auto_bezier_handles(
     let mut slopes = vec![0.0; count];
     let h = keyframes
         .windows(2)
-        .map(|pair| (pair[1].time - pair[0].time).max(1) as f64)
+        .map(|pair| time_delta(pair[1].time, pair[0].time))
         .collect::<Vec<_>>();
     let delta = keyframes
         .windows(2)
@@ -192,7 +206,7 @@ pub(crate) fn compute_auto_bezier_handles(
                 KeyframeInterpolation::Linear
             } else {
                 let prev = &keyframes[index - 1];
-                let dt = (keyframe.time - prev.time).max(1) as f64;
+                let dt = time_delta(keyframe.time, prev.time);
                 let dv = keyframe.value - prev.value;
                 KeyframeInterpolation::Bezier(monotone_in_handle(slopes[index], dt, dv))
             };
@@ -200,7 +214,7 @@ pub(crate) fn compute_auto_bezier_handles(
                 KeyframeInterpolation::Linear
             } else {
                 let next = &keyframes[index + 1];
-                let dt = (next.time - keyframe.time).max(1) as f64;
+                let dt = time_delta(next.time, keyframe.time);
                 let dv = next.value - keyframe.value;
                 KeyframeInterpolation::Bezier(monotone_out_handle(slopes[index], dt, dv))
             };
@@ -278,8 +292,8 @@ pub(crate) fn tangent_slope_from_out(
     handle: BezierHandle,
 ) -> Option<f64> {
     let dv = next.value - current.value;
-    let dt = (next.time - current.time).max(1) as f64;
-    let dx = handle.time_offset.abs().clamp(0.05, 0.95);
+    let dt = time_delta(next.time, current.time);
+    let dx = normalized_handle_magnitude(handle.time_offset);
     if dv.abs() < f64::EPSILON {
         Some(0.0)
     } else {
@@ -293,8 +307,8 @@ pub(crate) fn tangent_slope_from_in(
     handle: BezierHandle,
 ) -> Option<f64> {
     let dv = current.value - previous.value;
-    let dt = (current.time - previous.time).max(1) as f64;
-    let dx = handle.time_offset.abs().clamp(0.05, 0.95);
+    let dt = time_delta(current.time, previous.time);
+    let dx = normalized_handle_magnitude(handle.time_offset);
     if dv.abs() < f64::EPSILON {
         Some(0.0)
     } else {
@@ -306,17 +320,17 @@ pub(crate) fn continuous_handle_for_out(
     current: &Keyframe<f64>,
     next: &Keyframe<f64>,
     slope: f64,
-    time_offset: f64,
+    time_offset: TimelineTime,
 ) -> BezierHandle {
-    let dt = (next.time - current.time).max(1) as f64;
+    let dt = time_delta(next.time, current.time);
     let dv = next.value - current.value;
-    let time_offset = time_offset.abs().clamp(0.05, 0.95);
+    let time_offset = normalized_positive_handle(time_offset);
     if dv.abs() < f64::EPSILON || slope.abs() < f64::EPSILON {
         BezierHandle { time_offset, value_offset: 0.0 }
     } else {
         BezierHandle {
             time_offset,
-            value_offset: (slope * time_offset * dt / dv).clamp(-2.0, 2.0),
+            value_offset: (slope * time_offset.to_f64() * dt / dv).clamp(-2.0, 2.0),
         }
     }
 }
@@ -325,17 +339,20 @@ pub(crate) fn continuous_handle_for_in(
     previous: &Keyframe<f64>,
     current: &Keyframe<f64>,
     slope: f64,
-    time_offset: f64,
+    time_offset: TimelineTime,
 ) -> BezierHandle {
-    let dt = (current.time - previous.time).max(1) as f64;
+    let dt = time_delta(current.time, previous.time);
     let dv = current.value - previous.value;
-    let time_offset = -time_offset.abs().clamp(0.05, 0.95);
+    let positive = normalized_positive_handle(time_offset);
+    let time_offset = positive
+        .checked_scale(TimeScale::NEGATIVE_ONE)
+        .unwrap_or(TimelineTime::NEGATIVE_ONE_THIRD);
     if dv.abs() < f64::EPSILON || slope.abs() < f64::EPSILON {
         BezierHandle { time_offset, value_offset: 0.0 }
     } else {
         BezierHandle {
             time_offset,
-            value_offset: (slope * time_offset * dt / dv).clamp(-2.0, 2.0),
+            value_offset: (slope * time_offset.to_f64() * dt / dv).clamp(-2.0, 2.0),
         }
     }
 }
@@ -345,7 +362,7 @@ pub(crate) fn monotone_out_handle(slope: f64, dt: f64, dv: f64) -> BezierHandle 
         return default_out_bezier_handle();
     }
     BezierHandle {
-        time_offset: 1.0 / 3.0,
+        time_offset: TimelineTime::ONE_THIRD,
         value_offset: ((slope * dt / dv) / 3.0).clamp(-1.0, 1.0),
     }
 }
@@ -355,9 +372,29 @@ pub(crate) fn monotone_in_handle(slope: f64, dt: f64, dv: f64) -> BezierHandle {
         return default_in_bezier_handle();
     }
     BezierHandle {
-        time_offset: -1.0 / 3.0,
+        time_offset: TimelineTime::NEGATIVE_ONE_THIRD,
         value_offset: (-(slope * dt / dv) / 3.0).clamp(-1.0, 1.0),
     }
+}
+
+fn time_delta(later: TimelineTime, earlier: TimelineTime) -> f64 {
+    (later.to_f64() - earlier.to_f64()).max(f64::EPSILON)
+}
+
+fn normalized_positive_handle(value: TimelineTime) -> TimelineTime {
+    let magnitude = if value.is_negative() {
+        value.checked_scale(TimeScale::NEGATIVE_ONE).unwrap_or(TimelineTime::ONE_THIRD)
+    } else {
+        value
+    };
+    magnitude.clamp(
+        TimelineTime::FIVE_PERCENT,
+        TimelineTime::NINETY_FIVE_PERCENT,
+    )
+}
+
+fn normalized_handle_magnitude(value: TimelineTime) -> f64 {
+    normalized_positive_handle(value).to_f64()
 }
 
 pub(crate) fn cubic_bezier(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {

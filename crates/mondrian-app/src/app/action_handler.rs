@@ -57,12 +57,10 @@ use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
 use mondrian_assets::library::FolderRecord;
 use mondrian_assets::{AssetKind, AssetLibrary};
-use mondrian_core::automation::{
-    timecode_to_ticks, Keyframe, PropertyHost, PropertyMutation, PropertyValue,
-};
+use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
 use mondrian_core::events::AppEvent;
-use mondrian_core::types::{ClipId, EffectId, TimeCode};
-use mondrian_core::{MondrianError, Result};
+use mondrian_core::types::{ClipId, EffectId, FramePosition, Rational};
+use mondrian_core::{FrameRounding, MondrianError, Result, TimeScale, TimelineTime};
 use mondrian_timeline::clip::{Clip, Transform2D, TrimEdge};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -113,7 +111,7 @@ impl AppState {
                 Ok(())
             }
             Action::GoToEnd => {
-                let end = self.last_content_frame();
+                let end = self.last_content_frame()?;
                 if end >= 0 {
                     self.seek(end);
                 }
@@ -151,14 +149,8 @@ impl AppState {
             Action::DeleteSelection => self.delete_selection_from_ui(false),
             Action::RippleDeleteSelection => self.delete_selection_from_ui(true),
             Action::SplitClipAtPlayhead => self.split_at_playhead().map(|_| ()),
-            Action::MarkInAtPlayhead => {
-                self.mark_in_at_current_frame();
-                Ok(())
-            }
-            Action::MarkOutAtPlayhead => {
-                self.mark_out_at_current_frame();
-                Ok(())
-            }
+            Action::MarkInAtPlayhead => self.mark_in_at_current_frame(),
+            Action::MarkOutAtPlayhead => self.mark_out_at_current_frame(),
             Action::NudgeClip { clip_id, delta_frames } => {
                 self.nudge_clip_from_action(clip_id, delta_frames)
             }
@@ -810,10 +802,7 @@ impl AppState {
         let Some(selection) = self.primary_selected_clip() else {
             return Ok(());
         };
-        let destination_time = self
-            .current_time_code()
-            .map(mondrian_core::automation::timecode_to_ticks)
-            .unwrap_or(0);
+        let destination_time = self.current_timeline_time()?.unwrap_or(TimelineTime::ZERO);
         self.paste_animation_keyframes(selection, destination_time).map(|_| ())
     }
 
@@ -845,7 +834,7 @@ impl AppState {
         &mut self,
         clip_id: ClipId,
         edge: TrimEdge,
-        source_time: TimeCode,
+        source_time: FramePosition,
     ) -> Result<()> {
         let target_frame = {
             let Some(seq) = self.sequence.as_ref() else {
@@ -871,6 +860,7 @@ impl AppState {
         let frame = find_clip(seq, clip_id)
             .ok_or_else(|| missing_clip_error(step_id, clip_id))?
             .position
+            .to_frame_position(seq.settings.frame_rate, FrameRounding::Nearest)?
             .frame;
         Ok((track_id, is_video_track, frame))
     }
@@ -1645,7 +1635,7 @@ impl AppState {
         let mut after = before.clone();
         let mut settings = after.settings.clone();
         settings.preview.resolution_scale = scale;
-        after.apply_settings_preserve_frames(settings)?;
+        after.apply_settings(settings)?;
 
         if let Some(sequence) =
             self.sequences.iter_mut().find(|sequence| sequence.id == sequence_id)
@@ -1683,7 +1673,7 @@ impl AppState {
         {
             asset.media_info.duration
         } else {
-            self.default_adjustment_layer_drag_duration()
+            self.default_adjustment_layer_drag_duration()?
         };
         let has_linked_audio = matches!(asset.kind, AssetKind::Video) && asset.media_info.has_audio;
         let lane = match asset.kind {
@@ -1807,9 +1797,13 @@ impl AppState {
         let Some(sequence) = self.sequence.as_mut() else {
             return Err(missing_sequence_error("timeline_set_in_out_point"));
         };
+        let time = TimelineTime::from_frame_position(FramePosition::new(
+            payload.frame,
+            sequence.time_base(),
+        ))?;
         match payload.point {
-            TimelineInOutPointPayloadKind::In => sequence.mark_in(payload.frame),
-            TimelineInOutPointPayloadKind::Out => sequence.mark_out(payload.frame),
+            TimelineInOutPointPayloadKind::In => sequence.mark_in(time),
+            TimelineInOutPointPayloadKind::Out => sequence.mark_out(time),
         }
         self.sync_current_sequence_into_collection();
         let _ = self.save_project_file();
@@ -1998,10 +1992,7 @@ impl AppState {
                     let current = clip
                         .transform
                         .to_property_bag()
-                        .evaluate(
-                            Transform2D::ROTATION_PATH,
-                            mondrian_core::automation::timecode_to_ticks(playhead),
-                        )
+                        .evaluate(Transform2D::ROTATION_PATH, playhead)
                         .and_then(|value| value.as_f32())
                         .unwrap_or(0.0);
                     if (current - value).abs() < f32::EPSILON {
@@ -2078,10 +2069,7 @@ impl AppState {
                 let current = clip
                     .transform
                     .to_property_bag()
-                    .evaluate(
-                        Transform2D::ROTATION_PATH,
-                        mondrian_core::automation::timecode_to_ticks(playhead),
-                    )
+                    .evaluate(Transform2D::ROTATION_PATH, playhead)
                     .and_then(|value| value.as_f32())
                     .unwrap_or(0.0);
                 if (current - rotation).abs() >= f32::EPSILON {
@@ -2123,14 +2111,18 @@ impl AppState {
             let clip = find_clip_mut(seq, payload.clip.clip_id).ok_or_else(|| {
                 missing_clip_error("inspector_set_clip_curve", payload.clip.clip_id)
             })?;
-            let start_tick = timecode_to_ticks(clip.position);
-            let end_tick = timecode_to_ticks(clip.end_position());
-            let duration_ticks = (end_tick - start_tick).max(1);
+            let start_tick = clip.position;
+            let end_tick = clip.end_position()?;
+            let duration_ticks = end_tick.checked_sub(start_tick)?;
             let mut keyframes = BTreeMap::new();
             for point in payload.points {
                 let x = point.x.clamp(0.0, 1.0);
                 let y = point.y.clamp(0.0, 1.0);
-                let time = start_tick + (duration_ticks as f32 * x).round() as i64;
+                let scale = TimeScale::try_from(TimelineTime::from_f64_quantized(
+                    f64::from(x),
+                    1_000_000,
+                )?)?;
+                let time = start_tick.checked_add(duration_ticks.checked_scale(scale)?)?;
                 keyframes.insert(time, y);
             }
             if keyframes.len() < 2 {
@@ -2242,15 +2234,21 @@ fn validate_folder_reparent(
     Ok(())
 }
 
-fn source_trim_target_frame(clip: &Clip, edge: TrimEdge, source_time: TimeCode) -> Result<i64> {
+fn source_trim_target_frame(
+    clip: &Clip,
+    edge: TrimEdge,
+    source_time: FramePosition,
+) -> Result<i64> {
+    let source_frame_rate = Rational::new(source_time.time_base.den, source_time.time_base.num);
+    let source_time = TimelineTime::from_frame_position(source_time)?;
     match edge {
-        TrimEdge::In if source_time.frame >= clip.source_out.frame => {
+        TrimEdge::In if source_time >= clip.source_out => {
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "trim_clip_source".to_string(),
                 reason: "source in must be before current source out".to_string(),
             });
         }
-        TrimEdge::Out if source_time.frame <= clip.source_in.frame => {
+        TrimEdge::Out if source_time <= clip.source_in => {
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "trim_clip_source".to_string(),
                 reason: "source out must be after current source in".to_string(),
@@ -2259,17 +2257,21 @@ fn source_trim_target_frame(clip: &Clip, edge: TrimEdge, source_time: TimeCode) 
         _ => {}
     }
 
-    let speed = clip.speed.evaluate_multiplier(TimeCode::new(0, clip.position.time_base));
-    if !speed.is_finite() || speed <= f64::EPSILON {
+    let speed = clip.speed.scale();
+    if speed.numerator() <= 0 {
         return Err(MondrianError::WorkflowStepFailed {
             step_id: "trim_clip_source".to_string(),
             reason: "source trim requires a positive finite speed multiplier".to_string(),
         });
     }
 
-    let source_delta = source_time.frame.saturating_sub(clip.source_in.frame);
-    let timeline_delta = (source_delta as f64 / speed).round() as i64;
-    Ok(clip.position.frame.saturating_add(timeline_delta).max(0))
+    let source_delta = source_time.checked_sub(clip.source_in)?;
+    let timeline_delta = source_delta.checked_scale(speed.reciprocal()?)?;
+    let target = clip.position.checked_add(timeline_delta)?.max(TimelineTime::ZERO);
+    target
+        .to_frame_position(source_frame_rate, FrameRounding::Nearest)
+        .map(|position| position.frame)
+        .map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -2419,6 +2421,11 @@ fn clip_exists(seq: &mondrian_timeline::sequence::Sequence, clip_id: ClipId) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::TimelineTime {
+        let numerator = frame.checked_mul(time_base.num).expect("test time fits i64");
+        mondrian_core::TimelineTime::new(numerator, time_base.den).expect("valid test time")
+    }
     use crate::app::ui_actions::{
         assets_create_adjustment_layer_action, assets_create_folder_action,
         assets_create_solid_color_action, assets_delete_asset_action, assets_delete_folder_action,
@@ -2465,7 +2472,7 @@ mod tests {
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
-    use mondrian_core::types::{AssetId, EffectId, MaskId, TimeCode, TrackId};
+    use mondrian_core::types::{AssetId, EffectId, FramePosition, MaskId, TrackId};
     use mondrian_core::{Color, ColorSpace};
     use mondrian_core::{ProjectSettings, Rational, Resolution};
     use mondrian_effects::EffectType;
@@ -2484,7 +2491,7 @@ mod tests {
         sequence.add_video_track();
         let tb = sequence.time_base();
         let track_id = sequence.video_tracks[0].id;
-        let clip = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+        let clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
         let clip_id = clip.id;
         sequence.video_tracks[0].add_clip(clip).expect("add clip");
         state.sequence = Some(sequence);
@@ -2720,7 +2727,7 @@ mod tests {
             crate::app::AnimationKeyframeSelection {
                 clip_id,
                 path: Transform2D::OPACITY_PATH.to_string(),
-                time: 12,
+                time: tt(12, state.sequence.as_ref().expect("sequence").time_base()),
             },
         );
 
@@ -2772,12 +2779,15 @@ mod tests {
         let mut parent = Sequence::new("parent");
         let tb = parent.time_base();
         parent.video_tracks[0]
-            .add_clip(Clip::new_nested_sequence(
-                child_id,
-                TimeCode::new(0, tb),
-                TimeCode::new(24, tb),
-                Some("child".to_owned()),
-            ))
+            .add_clip(
+                Clip::new_nested_sequence(
+                    child_id,
+                    tt(0, tb),
+                    tt(24, tb),
+                    Some("child".to_owned()),
+                )
+                .expect("valid clip"),
+            )
             .expect("add nested clip");
         state.active_sequence_id = Some(parent.id);
         state.sequence = Some(parent);
@@ -3133,6 +3143,7 @@ mod tests {
             .expect("move track");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].id, second_track_id);
         assert_eq!(sequence.video_tracks[1].id, first_track_id);
         assert!(state.can_undo_action());
@@ -3158,12 +3169,13 @@ mod tests {
             .expect("drop asset");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let tb = sequence.time_base();
         let created = sequence.video_tracks[0]
             .clips
             .iter()
             .find(|clip| clip.asset_id == asset_id)
             .expect("created clip");
-        assert_eq!(created.position.frame, 40);
+        assert_eq!(created.position, tt(40, tb));
         assert_eq!(created.label.as_deref(), Some("Slate"));
         assert!(state.dragging_asset().is_none());
         assert!(state.can_undo_action());
@@ -3226,17 +3238,20 @@ mod tests {
             .expect("add audio track");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks.len(), initial_video_tracks + 1);
         assert_eq!(sequence.audio_tracks.len(), initial_audio_tracks + 1);
         assert!(state.can_undo_action());
 
         state.undo_timeline().expect("undo audio track add");
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks.len(), initial_video_tracks + 1);
         assert_eq!(sequence.audio_tracks.len(), initial_audio_tracks);
 
         state.undo_timeline().expect("undo video track add");
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks.len(), initial_video_tracks);
         assert_eq!(sequence.audio_tracks.len(), initial_audio_tracks);
     }
@@ -3261,10 +3276,11 @@ mod tests {
             .expect("dispatch move");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let tb = sequence.time_base();
         assert!(sequence.video_tracks[0].clips.is_empty());
         let moved = &sequence.video_tracks[1].clips[0];
         assert_eq!(moved.id, clip_id);
-        assert_eq!(moved.position.frame, 42);
+        assert_eq!(moved.position, tt(42, tb));
         assert_eq!(
             state.selection.selected_clips,
             vec![SelectedClipRef {
@@ -3300,6 +3316,7 @@ mod tests {
             MondrianError::WorkflowStepFailed { step_id, .. } if step_id == "move_clip"
         ));
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].clips.len(), 1);
         assert_eq!(sequence.video_tracks[0].clips[0].id, clip_id);
         assert!(sequence.audio_tracks[0].clips.is_empty());
@@ -3327,16 +3344,17 @@ mod tests {
             .expect("dispatch trim");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let tb = sequence.time_base();
         let clip = &sequence.video_tracks[0].clips[0];
-        assert_eq!(clip.position.frame, 16);
-        assert_eq!(clip.duration.frame, 14);
+        assert_eq!(clip.position, tt(16, tb));
+        assert_eq!(clip.duration, tt(14, tb));
     }
 
     #[test]
     fn dispatch_timeline_ui_trims_multiple_clip_edges() {
         let (mut state, _, first_clip_id) = state_with_two_video_tracks();
         let tb = state.sequence.as_ref().expect("sequence").time_base();
-        let second_clip = Clip::new(AssetId::new(), TimeCode::new(12, tb), TimeCode::new(30, tb));
+        let second_clip = Clip::new(AssetId::new(), tt(12, tb), tt(30, tb)).expect("valid clip");
         let second_clip_id = second_clip.id;
         state.sequence.as_mut().expect("sequence").video_tracks[1]
             .add_clip(second_clip)
@@ -3351,19 +3369,20 @@ mod tests {
             .expect("dispatch batch trim");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let tb = sequence.time_base();
         let first = &sequence.video_tracks[0].clips[0];
         let second = &sequence.video_tracks[1].clips[0];
-        assert_eq!(first.position.frame, 16);
-        assert_eq!(first.duration.frame, 14);
-        assert_eq!(second.position.frame, 16);
-        assert_eq!(second.duration.frame, 26);
+        assert_eq!(first.position, tt(16, tb));
+        assert_eq!(first.duration, tt(14, tb));
+        assert_eq!(second.position, tt(16, tb));
+        assert_eq!(second.duration, tt(26, tb));
     }
 
     #[test]
     fn dispatch_timeline_ui_trims_current_selection_to_playhead() {
         let (mut state, first_track_id, first_clip_id) = state_with_two_video_tracks();
         let tb = state.sequence.as_ref().expect("sequence").time_base();
-        let second_clip = Clip::new(AssetId::new(), TimeCode::new(12, tb), TimeCode::new(30, tb));
+        let second_clip = Clip::new(AssetId::new(), tt(12, tb), tt(30, tb)).expect("valid clip");
         let second_clip_id = second_clip.id;
         let second_track_id = state.sequence.as_ref().expect("sequence").video_tracks[1].id;
         state.sequence.as_mut().expect("sequence").video_tracks[1]
@@ -3390,19 +3409,20 @@ mod tests {
             .expect("dispatch selected trim");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let tb = sequence.time_base();
         let first = &sequence.video_tracks[0].clips[0];
         let second = &sequence.video_tracks[1].clips[0];
-        assert_eq!(first.position.frame, 18);
-        assert_eq!(first.duration.frame, 12);
-        assert_eq!(second.position.frame, 18);
-        assert_eq!(second.duration.frame, 24);
+        assert_eq!(first.position, tt(18, tb));
+        assert_eq!(first.duration, tt(12, tb));
+        assert_eq!(second.position, tt(18, tb));
+        assert_eq!(second.duration, tt(24, tb));
     }
 
     #[test]
     fn dispatch_timeline_ui_rolls_single_selected_cut_to_playhead() {
         let (mut state, track_id, clip_a_id) = state_with_two_video_tracks();
         let tb = state.sequence.as_ref().expect("sequence").time_base();
-        let clip_b = Clip::new(AssetId::new(), TimeCode::new(30, tb), TimeCode::new(20, tb));
+        let clip_b = Clip::new(AssetId::new(), tt(30, tb), tt(20, tb)).expect("valid clip");
         let clip_b_id = clip_b.id;
         state.sequence.as_mut().expect("sequence").video_tracks[0]
             .add_clip(clip_b)
@@ -3416,6 +3436,7 @@ mod tests {
             .expect("roll selected cut");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let tb = sequence.time_base();
         let first = sequence.video_tracks[0]
             .clips
             .iter()
@@ -3426,17 +3447,17 @@ mod tests {
             .iter()
             .find(|clip| clip.id == clip_b_id)
             .expect("second clip");
-        assert_eq!(first.duration.frame, 25);
-        assert_eq!(second.position.frame, 35);
-        assert_eq!(second.duration.frame, 15);
-        assert_eq!(second.source_in.frame, 5);
+        assert_eq!(first.duration, tt(25, tb));
+        assert_eq!(second.position, tt(35, tb));
+        assert_eq!(second.duration, tt(15, tb));
+        assert_eq!(second.source_in, tt(5, tb));
     }
 
     #[test]
     fn dispatch_timeline_ui_sets_current_selection_enabled_state_atomically() {
         let (mut state, first_track_id, first_clip_id) = state_with_two_video_tracks();
         let tb = state.sequence.as_ref().expect("sequence").time_base();
-        let second_clip = Clip::new(AssetId::new(), TimeCode::new(40, tb), TimeCode::new(10, tb));
+        let second_clip = Clip::new(AssetId::new(), tt(40, tb), tt(10, tb)).expect("valid clip");
         let second_clip_id = second_clip.id;
         let second_track_id = state.sequence.as_ref().expect("sequence").video_tracks[1].id;
         state.sequence.as_mut().expect("sequence").video_tracks[1]
@@ -3462,6 +3483,7 @@ mod tests {
             .expect("disable selection");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         assert!(sequence.video_tracks[0].clips[0].is_disabled);
         assert!(sequence.video_tracks[1].clips[0].is_disabled);
 
@@ -3472,6 +3494,7 @@ mod tests {
 
         assert!(result.is_err());
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         assert!(
             sequence.video_tracks[0].clips[0].is_disabled,
             "locked-track rejection must not partially enable earlier selected clips"
@@ -3487,15 +3510,16 @@ mod tests {
         state
             .dispatch_action(mondrian_editor_state::Action::TrimClipStart {
                 clip_id,
-                new_source_in: TimeCode::new(5, tb),
+                new_source_in: FramePosition::new(5, tb),
             })
             .expect("trim source in");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let tb = sequence.time_base();
         let clip = &sequence.video_tracks[0].clips[0];
-        assert_eq!(clip.position.frame, 15);
-        assert_eq!(clip.duration.frame, 15);
-        assert_eq!(clip.source_in.frame, 5);
+        assert_eq!(clip.position, tt(15, tb));
+        assert_eq!(clip.duration, tt(15, tb));
+        assert_eq!(clip.source_in, tt(5, tb));
         assert!(state.can_undo_action());
     }
 
@@ -3507,15 +3531,16 @@ mod tests {
         state
             .dispatch_action(mondrian_editor_state::Action::TrimClipEnd {
                 clip_id,
-                new_source_out: TimeCode::new(12, tb),
+                new_source_out: FramePosition::new(12, tb),
             })
             .expect("trim source out");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let tb = sequence.time_base();
         let clip = &sequence.video_tracks[0].clips[0];
-        assert_eq!(clip.position.frame, 10);
-        assert_eq!(clip.duration.frame, 12);
-        assert_eq!(clip.source_out.frame, 12);
+        assert_eq!(clip.position, tt(10, tb));
+        assert_eq!(clip.duration, tt(12, tb));
+        assert_eq!(clip.source_out, tt(12, tb));
         assert!(state.can_undo_action());
     }
 
@@ -3527,13 +3552,14 @@ mod tests {
         let err = state
             .dispatch_action(mondrian_editor_state::Action::TrimClipEnd {
                 clip_id,
-                new_source_out: TimeCode::new(0, tb),
+                new_source_out: FramePosition::new(0, tb),
             })
             .expect_err("invalid source out should be rejected");
 
         assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
         let sequence = state.sequence.as_ref().expect("sequence");
-        assert_eq!(sequence.video_tracks[0].clips[0].duration.frame, 20);
+        let tb = sequence.time_base();
+        assert_eq!(sequence.video_tracks[0].clips[0].duration, tt(20, tb));
         assert!(!state.can_undo_action());
     }
 
@@ -4076,18 +4102,12 @@ mod tests {
         let mut sequence = Sequence::new("edit");
         let time_base = sequence.time_base();
         sequence.video_tracks[0]
-            .add_clip(Clip::new(
-                asset_id,
-                TimeCode::new(0, time_base),
-                TimeCode::new(24, time_base),
-            ))
+            .add_clip(Clip::new(asset_id, tt(0, time_base), tt(24, time_base)).expect("valid clip"))
             .expect("add deleted asset clip");
         sequence.video_tracks[0]
-            .add_clip(Clip::new(
-                keep_asset_id,
-                TimeCode::new(24, time_base),
-                TimeCode::new(24, time_base),
-            ))
+            .add_clip(
+                Clip::new(keep_asset_id, tt(24, time_base), tt(24, time_base)).expect("valid clip"),
+            )
             .expect("add keep clip");
         state.sequence = Some(sequence);
         let events = state.event_bus.subscribe();
@@ -4106,6 +4126,7 @@ mod tests {
         assert!(library.get_asset(keep_asset_id).expect("get keep").is_some());
         assert!(!library.folder_exists(&folder_id).expect("folder removed"));
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         assert!(
             !sequence.video_tracks[0].clips.iter().any(|clip| clip.asset_id == asset_id),
             "clips referencing deleted assets should be removed"
@@ -4509,6 +4530,7 @@ mod tests {
         assert_eq!(state.current_project_path.as_ref(), Some(&expected_target));
         assert!(expected_target.exists());
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         assert_eq!(sequence.name, "Full Create");
         assert_eq!(sequence.settings.resolution, sequence_settings.resolution);
         assert_eq!(sequence.settings.frame_rate, sequence_settings.frame_rate);
@@ -4558,7 +4580,7 @@ mod tests {
             crate::app::AnimationKeyframeSelection {
                 clip_id,
                 path: Transform2D::OPACITY_PATH.to_string(),
-                time: 10,
+                time: tt(10, state.sequence.as_ref().expect("sequence").time_base()),
             },
         );
 
@@ -4628,7 +4650,7 @@ mod tests {
         let sequence = state.sequence.as_mut().expect("sequence");
         let audio_track_id = sequence.add_audio_track();
         let tb = sequence.time_base();
-        let audio_clip = Clip::new(AssetId::new(), TimeCode::new(30, tb), TimeCode::new(10, tb));
+        let audio_clip = Clip::new(AssetId::new(), tt(30, tb), tt(10, tb)).expect("valid clip");
         let audio_clip_id = audio_clip.id;
         sequence
             .audio_track_mut(audio_track_id)
@@ -4682,7 +4704,7 @@ mod tests {
             crate::app::AnimationKeyframeSelection {
                 clip_id,
                 path: Transform2D::OPACITY_PATH.to_string(),
-                time: 10,
+                time: tt(10, state.sequence.as_ref().expect("sequence").time_base()),
             },
         );
 
@@ -4714,6 +4736,7 @@ mod tests {
             .expect("delete selection");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         assert!(sequence.video_tracks[0].clips.is_empty());
         assert!(state.selection.selected_clips.is_empty());
         assert!(state.selection.selected_mask.is_none());
@@ -4725,7 +4748,7 @@ mod tests {
     fn dispatch_ripple_delete_selection_closes_gap_after_selected_clip() {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
         let tb = state.sequence.as_ref().expect("sequence").time_base();
-        let trailing = Clip::new(AssetId::new(), TimeCode::new(40, tb), TimeCode::new(12, tb));
+        let trailing = Clip::new(AssetId::new(), tt(40, tb), tt(12, tb)).expect("valid clip");
         let trailing_id = trailing.id;
         state
             .sequence
@@ -4743,10 +4766,11 @@ mod tests {
             .expect("ripple delete selection");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let tb = sequence.time_base();
         let track = sequence.video_tracks.iter().find(|track| track.id == track_id).expect("track");
         assert_eq!(track.clips.len(), 1);
         assert_eq!(track.clips[0].id, trailing_id);
-        assert_eq!(track.clips[0].position.frame, 20);
+        assert_eq!(track.clips[0].position, tt(20, tb));
         assert!(state.selection.selected_clips.is_empty());
         assert!(state.can_undo_action());
     }
@@ -4764,8 +4788,9 @@ mod tests {
             .expect("mark out");
 
         let sequence = state.sequence.as_ref().expect("sequence");
-        assert_eq!(sequence.in_point_frame(), 42);
-        assert_eq!(sequence.out_point_frame(), Some(42));
+        let tb = sequence.time_base();
+        assert_eq!(sequence.in_point, Some(tt(42, tb)));
+        assert_eq!(sequence.out_point, Some(tt(42, tb)));
         assert!(!state.can_undo_action());
     }
 
@@ -4790,8 +4815,9 @@ mod tests {
             .expect("set out point");
 
         let sequence = state.sequence.as_ref().expect("sequence");
-        assert_eq!(sequence.in_point_frame(), 32);
-        assert_eq!(sequence.out_point_frame(), Some(32));
+        let tb = sequence.time_base();
+        assert_eq!(sequence.in_point, Some(tt(32, tb)));
+        assert_eq!(sequence.out_point, Some(tt(32, tb)));
     }
 
     #[test]
@@ -4799,8 +4825,9 @@ mod tests {
         let (mut state, _, _) = state_with_two_video_tracks();
         {
             let sequence = state.sequence.as_mut().expect("sequence");
-            sequence.mark_in(12);
-            sequence.mark_out(48);
+            let tb = sequence.time_base();
+            sequence.mark_in(tt(12, tb));
+            sequence.mark_out(tt(48, tb));
         }
 
         state
@@ -4808,8 +4835,8 @@ mod tests {
             .expect("clear in/out");
 
         let sequence = state.sequence.as_ref().expect("sequence");
-        assert_eq!(sequence.in_point_frame(), 0);
-        assert_eq!(sequence.out_point_frame(), None);
+        assert_eq!(sequence.in_point, None);
+        assert_eq!(sequence.out_point, None);
     }
 
     #[test]
@@ -4825,6 +4852,7 @@ mod tests {
 
         assert!(matches!(err, MondrianError::TrackLocked { .. }));
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].clips.len(), 1);
         assert_eq!(
             state.selection.selected_clips,
@@ -4841,10 +4869,8 @@ mod tests {
         let tb = sequence.time_base();
         let video_track_id = sequence.video_tracks[0].id;
 
-        let mut video_clip =
-            Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
-        let mut audio_clip =
-            Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+        let mut video_clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
+        let mut audio_clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
         let video_clip_id = video_clip.id;
         let audio_clip_id = audio_clip.id;
         video_clip.linked_clip = Some(audio_clip_id);
@@ -4868,6 +4894,7 @@ mod tests {
             .expect("delete linked selection");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         assert!(sequence.video_tracks[0].clips.is_empty());
         assert!(sequence.audio_tracks[0].clips.is_empty());
         assert!(state.selection.selected_clips.is_empty());
@@ -4884,6 +4911,7 @@ mod tests {
             .expect("delete selected track");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         assert!(!sequence.video_tracks.iter().any(|track| track.id == track_id));
         assert!(state.selection.selected_track_ids.is_empty());
         assert!(state.can_undo_action());
@@ -4907,6 +4935,7 @@ mod tests {
             .expect("delete selected tracks");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks.len(), video_count - 1);
         assert_eq!(sequence.audio_tracks.len(), audio_count - 1);
         assert!(!sequence.video_tracks.iter().any(|track| track.id == video_track_id));
@@ -4915,6 +4944,7 @@ mod tests {
 
         assert!(state.undo_timeline().expect("undo track delete"));
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks.len(), video_count);
         assert_eq!(sequence.audio_tracks.len(), audio_count);
         assert!(sequence.video_tracks.iter().any(|track| track.id == video_track_id));
@@ -4939,6 +4969,7 @@ mod tests {
             MondrianError::WorkflowStepFailed { step_id, .. } if step_id == "remove_tracks"
         ));
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks.len(), track_ids.len());
         assert_eq!(state.selection.selected_track_ids, track_ids);
         assert!(!state.can_undo_action());
@@ -4971,13 +5002,14 @@ mod tests {
             .expect("split at playhead");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let tb = sequence.time_base();
         let clips = &sequence.video_tracks[0].clips;
         assert_eq!(clips.len(), 2);
         assert_eq!(clips[0].id, clip_id);
-        assert_eq!(clips[0].position.frame, 10);
-        assert_eq!(clips[0].duration.frame, 10);
-        assert_eq!(clips[1].position.frame, 20);
-        assert_eq!(clips[1].duration.frame, 10);
+        assert_eq!(clips[0].position, tt(10, tb));
+        assert_eq!(clips[0].duration, tt(10, tb));
+        assert_eq!(clips[1].position, tt(20, tb));
+        assert_eq!(clips[1].duration, tt(10, tb));
         assert!(state.can_undo_action());
     }
 
@@ -4991,6 +5023,7 @@ mod tests {
             .expect("split at clip boundary");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].clips.len(), 1);
         assert!(!state.can_undo_action());
     }
@@ -5004,12 +5037,14 @@ mod tests {
             .expect("nudge clip");
 
         let sequence = state.sequence.as_ref().expect("sequence");
-        assert_eq!(sequence.video_tracks[0].clips[0].position.frame, 15);
+        let tb = sequence.time_base();
+        assert_eq!(sequence.video_tracks[0].clips[0].position, tt(15, tb));
         assert!(state.can_undo_action());
 
         assert!(state.undo_timeline().expect("undo nudge"));
         let sequence = state.sequence.as_ref().expect("sequence");
-        assert_eq!(sequence.video_tracks[0].clips[0].position.frame, 10);
+        let tb = sequence.time_base();
+        assert_eq!(sequence.video_tracks[0].clips[0].position, tt(10, tb));
     }
 
     #[test]
@@ -5021,7 +5056,8 @@ mod tests {
             .expect("nudge clip");
 
         let sequence = state.sequence.as_ref().expect("sequence");
-        assert_eq!(sequence.video_tracks[0].clips[0].position.frame, 10);
+        let tb = sequence.time_base();
+        assert_eq!(sequence.video_tracks[0].clips[0].position, tt(10, tb));
         assert!(!state.can_undo_action());
     }
 
@@ -5040,14 +5076,15 @@ mod tests {
             .dispatch_action(mondrian_editor_state::Action::MoveClipToTrack {
                 clip_id,
                 target_track: target_track_id,
-                position: TimeCode::new(42, tb),
+                position: FramePosition::new(42, tb),
             })
             .expect("move clip to track");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let tb = sequence.time_base();
         assert!(sequence.video_tracks[0].clips.is_empty());
         assert_eq!(sequence.video_tracks[1].clips[0].id, clip_id);
-        assert_eq!(sequence.video_tracks[1].clips[0].position.frame, 42);
+        assert_eq!(sequence.video_tracks[1].clips[0].position, tt(42, tb));
         assert_eq!(
             state.selection.selected_clips,
             vec![SelectedClipRef {
@@ -5068,7 +5105,7 @@ mod tests {
         sequence.add_audio_track();
         let tb = sequence.time_base();
 
-        let audio_clip = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+        let audio_clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
         let audio_clip_id = audio_clip.id;
         sequence.audio_tracks[0].add_clip(audio_clip).expect("add audio");
         sequence.video_tracks[0].clips[0].linked_clip = Some(audio_clip_id);
@@ -5090,11 +5127,12 @@ mod tests {
             .dispatch_action(mondrian_editor_state::Action::MoveClipToTrack {
                 clip_id: video_clip_id,
                 target_track: target_video_track_id,
-                position: TimeCode::new(24, tb),
+                position: FramePosition::new(24, tb),
             })
             .expect("move linked clip to track");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         assert!(!sequence.audio_tracks[0].clips.iter().any(|clip| clip.id == audio_clip_id));
         let target_audio_track_id = sequence
             .audio_tracks
@@ -5152,6 +5190,7 @@ mod tests {
             .expect("dispatch opacity");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         let clip = &sequence.video_tracks[0].clips[0];
         assert!((clip.transform.evaluate_opacity(sequence.playhead) - 0.42).abs() < 1.0e-6);
         assert!(state.can_undo_action());
@@ -5195,6 +5234,7 @@ mod tests {
         }
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         let clip = &sequence.video_tracks[0].clips[0];
         assert_eq!(
             clip.transform.get_position(sequence.playhead),
@@ -5207,10 +5247,7 @@ mod tests {
         let rotation = clip
             .transform
             .to_property_bag()
-            .evaluate(
-                Transform2D::ROTATION_PATH,
-                mondrian_core::automation::timecode_to_ticks(sequence.playhead),
-            )
+            .evaluate(Transform2D::ROTATION_PATH, sequence.playhead)
             .and_then(|value| value.as_f32())
             .expect("rotation value");
         assert!((rotation + 12.5).abs() < f32::EPSILON);
@@ -5234,6 +5271,7 @@ mod tests {
             .expect("dispatch viewer transform");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         let clip = &sequence.video_tracks[0].clips[0];
         assert_eq!(
             clip.transform.get_position(sequence.playhead),
@@ -5246,10 +5284,7 @@ mod tests {
         let rotation = clip
             .transform
             .to_property_bag()
-            .evaluate(
-                Transform2D::ROTATION_PATH,
-                mondrian_core::automation::timecode_to_ticks(sequence.playhead),
-            )
+            .evaluate(Transform2D::ROTATION_PATH, sequence.playhead)
             .and_then(|value| value.as_f32())
             .expect("rotation value");
         assert!((rotation - 8.5).abs() < f32::EPSILON);
@@ -5283,11 +5318,12 @@ mod tests {
             .expect("dispatch curve");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         let clip = &sequence.video_tracks[0].clips[0];
         let tb = sequence.time_base();
-        assert!((clip.transform.evaluate_opacity(TimeCode::new(10, tb)) - 0.0).abs() < 1.0e-6);
-        assert!((clip.transform.evaluate_opacity(TimeCode::new(20, tb)) - 0.72).abs() < 1.0e-6);
-        assert!((clip.transform.evaluate_opacity(TimeCode::new(30, tb)) - 1.0).abs() < 1.0e-6);
+        assert!((clip.transform.evaluate_opacity(tt(10, tb)) - 0.0).abs() < 1.0e-6);
+        assert!((clip.transform.evaluate_opacity(tt(20, tb)) - 0.72).abs() < 1.0e-6);
+        assert!((clip.transform.evaluate_opacity(tt(30, tb)) - 1.0).abs() < 1.0e-6);
         assert!(state.can_undo_action());
     }
 
@@ -5336,6 +5372,7 @@ mod tests {
         }
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         let clip = &sequence.video_tracks[0].clips[0];
         assert!(!clip.is_disabled);
         assert_eq!(clip.solid_color, None);
@@ -5746,8 +5783,8 @@ mod tests {
         let selection = SelectedClipRef { track_id, is_video_track: true, clip_id };
         state.selection.selected_clips = vec![selection];
         let tb = state.sequence.as_ref().expect("sequence").time_base();
-        let source_time = mondrian_core::automation::timecode_to_ticks(TimeCode::new(4, tb));
-        let destination_time = mondrian_core::automation::timecode_to_ticks(TimeCode::new(18, tb));
+        let source_time = tt(4, tb);
+        let destination_time = tt(18, tb);
         state
             .mutate_clip_property(
                 selection,
@@ -5823,12 +5860,13 @@ mod tests {
         state.dispatch_action(mondrian_editor_state::Action::Paste).expect("paste clip");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let tb = sequence.time_base();
         let clips = &sequence.video_tracks[0].clips;
         assert_eq!(clips.len(), 2);
-        assert!(clips.iter().any(|clip| clip.id == clip_id && clip.position.frame == 10));
+        assert!(clips.iter().any(|clip| clip.id == clip_id && clip.position == tt(10, tb)));
         let pasted = clips.iter().find(|clip| clip.id != clip_id).expect("pasted clip");
-        assert_eq!(pasted.position.frame, 50);
-        assert_eq!(pasted.duration.frame, 20);
+        assert_eq!(pasted.position, tt(50, tb));
+        assert_eq!(pasted.duration, tt(20, tb));
         assert_eq!(state.active_clipboard_kind, Some(AppClipboardKind::Clips));
         assert_eq!(
             state.selection.selected_clips,
@@ -5853,6 +5891,7 @@ mod tests {
         state.dispatch_action(mondrian_editor_state::Action::Cut).expect("cut clip");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         assert!(sequence.video_tracks[0].clips.is_empty());
         assert!(state.selection.selected_clips.is_empty());
         assert!(state.selection.selected_mask.is_none());
@@ -5875,6 +5914,7 @@ mod tests {
 
         assert!(matches!(err, MondrianError::TrackLocked { .. }));
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].clips.len(), 1);
         assert!(!state.has_clip_clipboard());
         assert_eq!(state.active_clipboard_kind, None);
@@ -5898,11 +5938,12 @@ mod tests {
             .expect("duplicate clip");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let tb = sequence.time_base();
         let clips = &sequence.video_tracks[0].clips;
         assert_eq!(clips.len(), 2);
         let duplicated = clips.iter().find(|clip| clip.id != clip_id).expect("duplicate");
-        assert_eq!(duplicated.position.frame, 30);
-        assert_eq!(duplicated.duration.frame, 20);
+        assert_eq!(duplicated.position, tt(30, tb));
+        assert_eq!(duplicated.duration, tt(20, tb));
         assert_eq!(state.current_frame(), 30);
         assert_eq!(
             state.selection.selected_clips,
@@ -5927,6 +5968,7 @@ mod tests {
             .expect("duplicate without selection");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].clips.len(), 1);
         assert!(!state.can_undo_action());
     }
@@ -5939,13 +5981,9 @@ mod tests {
         let video_track_id = sequence.video_tracks[0].id;
         let audio_track_id = sequence.audio_tracks[0].id;
 
-        let mut video_clip =
-            Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
-        let mut audio_clip = Clip::new(
-            video_clip.asset_id,
-            TimeCode::new(10, tb),
-            TimeCode::new(20, tb),
-        );
+        let mut video_clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
+        let mut audio_clip =
+            Clip::new(video_clip.asset_id, tt(10, tb), tt(20, tb)).expect("valid clip");
         let video_clip_id = video_clip.id;
         let audio_clip_id = audio_clip.id;
         video_clip.linked_clip = Some(audio_clip_id);
@@ -5968,6 +6006,7 @@ mod tests {
             .expect("paste linked clip");
 
         let sequence = state.sequence.as_ref().expect("sequence");
+        let tb = sequence.time_base();
         let pasted_video = sequence.video_tracks[0]
             .clips
             .iter()
@@ -5978,8 +6017,8 @@ mod tests {
             .iter()
             .find(|clip| clip.id != audio_clip_id)
             .expect("pasted audio");
-        assert_eq!(pasted_video.position.frame, 40);
-        assert_eq!(pasted_audio.position.frame, 40);
+        assert_eq!(pasted_video.position, tt(40, tb));
+        assert_eq!(pasted_audio.position, tt(40, tb));
         assert_eq!(pasted_video.linked_clip, Some(pasted_audio.id));
         assert_eq!(pasted_audio.linked_clip, Some(pasted_video.id));
         assert_eq!(

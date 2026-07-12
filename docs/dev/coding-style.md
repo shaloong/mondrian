@@ -11,7 +11,8 @@
 ## Rust
 
 - Use `thiserror`/structured errors for recoverable domain errors.
-- Keep time frame-exact with `TimeCode` and `Rational`.
+- Persist author time as canonical `TimelineTime`; resolve to `FramePosition` or
+  audio samples once at an explicit evaluation boundary with a named rounding policy.
 - Use `PropertyHost`/`PropertyMutation` for editable properties.
 - Keep tests close to the behavior they protect.
 

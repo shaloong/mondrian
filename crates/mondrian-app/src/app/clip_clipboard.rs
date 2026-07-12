@@ -142,7 +142,17 @@ impl AppState {
         let Some(clipboard) = self.clip_clipboard.clone() else {
             return Ok(0);
         };
-        self.paste_clip_entries_at_frame(clipboard.entries, timeline_frame, "粘贴片段")
+        let sequence = self.sequence.as_ref().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "paste_clip_clipboard".to_string(),
+                reason: "当前无序列".to_string(),
+            }
+        })?;
+        let destination = TimelineTime::from_frame_position(FramePosition::new(
+            timeline_frame.max(0),
+            sequence.time_base(),
+        ))?;
+        self.paste_clip_entries_at_time(clipboard.entries, destination, "粘贴片段")
     }
 
     pub fn duplicate_selected_clips_after_selection(&mut self) -> mondrian_core::Result<usize> {
@@ -162,16 +172,18 @@ impl AppState {
         validate_clip_clipboard_targets(seq, &entries)?;
         let destination = entries
             .iter()
-            .map(|entry| entry.clip.position.frame.saturating_add(entry.clip.duration.frame.max(0)))
+            .map(|entry| entry.clip.end_position())
+            .collect::<mondrian_core::Result<Vec<_>>>()?
+            .into_iter()
             .max()
-            .unwrap_or_else(|| self.current_frame().max(0));
-        self.paste_clip_entries_at_frame(entries, destination, "复制片段")
+            .unwrap_or(seq.playhead);
+        self.paste_clip_entries_at_time(entries, destination, "复制片段")
     }
 
-    fn paste_clip_entries_at_frame(
+    fn paste_clip_entries_at_time(
         &mut self,
         entries: Vec<ClipClipboardEntry>,
-        timeline_frame: i64,
+        destination: TimelineTime,
         description: &'static str,
     ) -> mondrian_core::Result<usize> {
         if entries.is_empty() {
@@ -189,7 +201,7 @@ impl AppState {
 
             validate_clip_clipboard_targets(seq, &entries)?;
             let before = seq.clone();
-            let destination = timeline_frame.max(0);
+            let destination = destination.max(TimelineTime::ZERO);
             let mut id_map = HashMap::<ClipId, ClipId>::new();
             for entry in &entries {
                 id_map.insert(entry.original_clip_id, ClipId::new());
@@ -203,10 +215,8 @@ impl AppState {
                     .expect("new id should be assigned for every clipboard entry");
                 let mut clip = entry.clip;
                 clip.id = new_id;
-                clip.position = TimeCode::new(
-                    destination.saturating_add(entry.relative_start_frame).max(0),
-                    clip.position.time_base,
-                );
+                clip.position =
+                    destination.checked_add(entry.relative_start)?.max(TimelineTime::ZERO);
                 clip.linked_clip = clip.linked_clip.and_then(|linked| id_map.get(&linked).copied());
 
                 if entry.is_video_track {
@@ -244,7 +254,11 @@ impl AppState {
                 .ok_or_else(|| mondrian_core::MondrianError::TrackNotFound {
                     track_id: track_id.to_string(),
                 })?;
-                apply_track_conflicts_for_focus_group(track, focus_ids, ClipOverlapMode::Overwrite);
+                apply_track_conflicts_for_focus_group(
+                    track,
+                    focus_ids,
+                    ClipOverlapMode::Overwrite,
+                )?;
             }
             clear_broken_links(seq);
             let sequence_id = seq.id;
@@ -254,10 +268,14 @@ impl AppState {
         };
 
         if pasted_count > 0 {
+            let seek_frame = destination
+                .to_frame_position(after.settings.frame_rate, FrameRounding::Nearest)?
+                .frame
+                .max(0);
             self.record_sequence_snapshot_command(description, before, after);
             self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
             self.replace_clip_selection(pasted_selection);
-            self.seek(timeline_frame.max(0));
+            self.seek(seek_frame);
             let _ = self.save_project_file();
         }
         Ok(pasted_count)
@@ -285,11 +303,11 @@ fn collect_clip_clipboard_entries(
         }
     }
 
-    let anchor_frame = ids
+    let anchor = ids
         .iter()
-        .filter_map(|clip_id| find_clip(seq, *clip_id).map(|clip| clip.position.frame))
+        .filter_map(|clip_id| find_clip(seq, *clip_id).map(|clip| clip.position))
         .min()
-        .unwrap_or(0);
+        .unwrap_or(TimelineTime::ZERO);
     let mut entries = Vec::with_capacity(ids.len());
     for clip_id in ids {
         let (track_id, is_video_track, _) =
@@ -305,14 +323,14 @@ fn collect_clip_clipboard_entries(
             original_clip_id: clip_id,
             track_id,
             is_video_track,
-            relative_start_frame: clip.position.frame - anchor_frame,
+            relative_start: clip.position.checked_sub(anchor)?,
             clip,
         });
     }
 
     entries.sort_by_key(|entry| {
         (
-            entry.relative_start_frame,
+            entry.relative_start,
             !entry.is_video_track,
             entry.track_id.to_string(),
             entry.original_clip_id.to_string(),

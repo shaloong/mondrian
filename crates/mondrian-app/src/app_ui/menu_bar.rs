@@ -502,11 +502,16 @@ impl Widget for MenuBar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::TimelineTime {
+        let numerator = frame.checked_mul(time_base.num).expect("test time fits i64");
+        mondrian_core::TimelineTime::new(numerator, time_base.den).expect("valid test time")
+    }
     use crate::app::ui_actions::{APP_SHELL_ABOUT, APP_SHELL_NAMESPACE};
     use crate::app::SelectedClipRef;
     use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
-    use mondrian_core::automation::{timecode_to_ticks, Keyframe, PropertyMutation, PropertyValue};
-    use mondrian_core::types::{AssetId, TimeCode, TrackId};
+    use mondrian_core::automation::{Keyframe, PropertyMutation, PropertyValue};
+    use mondrian_core::types::{AssetId, TrackId};
     use mondrian_timeline::clip::{Clip, Transform2D};
     use mondrian_timeline::sequence::Sequence;
     use mondrian_ui_core::EventRequests;
@@ -636,7 +641,7 @@ mod tests {
         let mut sequence = Sequence::new("编辑");
         let tb = sequence.time_base();
         let track_id = sequence.video_tracks[0].id;
-        let clip = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+        let clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
         let clip_id = clip.id;
         sequence.video_tracks[0].add_clip(clip).expect("add clip");
         state.sequence = Some(sequence);
@@ -1177,7 +1182,7 @@ mod tests {
         let mut state = state_with_selected_clip();
         let selection = state.primary_selected_clip().expect("selected clip");
         let tb = state.sequence.as_ref().expect("sequence").time_base();
-        let key_time = timecode_to_ticks(TimeCode::new(12, tb));
+        let key_time = tt(12, tb);
         state
             .mutate_clip_property(
                 selection,

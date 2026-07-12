@@ -1,0 +1,13 @@
+[package]
+name = "mondrian-audio"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mondrian-core.workspace = true
+mondrian-timeline.workspace = true
+thiserror.workspace = true

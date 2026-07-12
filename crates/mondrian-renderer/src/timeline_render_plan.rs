@@ -3,8 +3,8 @@ use mondrian_core::{
         AlphaInterpretation, ClipKind, FieldOrder, NestedColorProcessing, PixelAspectRatio,
         RenderPlanSource,
     },
-    types::{AssetId, BlendMode, Color, ColorSpace, Rational, SequenceId, TimeCode},
-    ColorEncodingSpec, WorkingColorSpace,
+    types::{AssetId, BlendMode, Color, ColorSpace, FramePosition, Rational, SequenceId},
+    ColorEncodingSpec, FrameRounding, Result, TimelineTime, WorkingColorSpace,
 };
 use mondrian_effects::CompiledEffectGraph;
 use std::sync::Arc;
@@ -212,7 +212,7 @@ pub struct TimelineSolidColorPlan {
 pub struct TimelineNestedSequencePlan {
     pub sequence_id: SequenceId,
     pub source_frame: i64,
-    pub source_secs: f64,
+    pub source_time: TimelineTime,
     pub nested_processing: NestedColorProcessing,
     pub opacity: f32,
     pub blend_mode: BlendMode,
@@ -254,7 +254,7 @@ pub fn collect_timeline_color_diagnostics(
     timeline_frame: i64,
     working_color_space: WorkingColorSpace,
     output_color_space: ColorSpace,
-) -> Vec<TimelineColorDiagnostic> {
+) -> Result<Vec<TimelineColorDiagnostic>> {
     collect_timeline_color_diagnostics_with_display_view(
         source,
         timeline_frame,
@@ -273,41 +273,44 @@ pub fn collect_timeline_color_diagnostics_with_display_view(
     output_color_space: ColorSpace,
     ocio_display: Option<&str>,
     ocio_view: Option<&str>,
-) -> Vec<TimelineColorDiagnostic> {
-    evaluate_timeline_render_plan(source, TimelineEvaluationRequest::analysis(timeline_frame))
-        .elements
-        .into_iter()
-        .filter_map(|element| match element {
-            TimelineRenderPlanElement::Media(media) => Some(TimelineColorDiagnostic {
-                asset_id: media.asset_id,
-                input_color_space_override: media.color_space_override,
-                input_encoding_override: media.color_space_override.map(ColorSpace::encoding),
-                working_color_space,
-                output_color_space,
-                output_encoding: output_color_space.encoding(),
-                ocio_display: ocio_display.map(str::to_owned),
-                ocio_view: ocio_view.map(str::to_owned),
-                tone_map: media.auto_tone_map,
-                pixel_aspect_ratio_override: media.pixel_aspect_ratio_override,
-                field_order_override: media.field_order_override,
-                alpha_interpretation: media.alpha_interpretation,
-                source_frame: media.source_frame,
-                source_secs: media.source_secs,
-            }),
-            _ => None,
-        })
-        .collect()
+) -> Result<Vec<TimelineColorDiagnostic>> {
+    Ok(
+        evaluate_timeline_render_plan(source, TimelineEvaluationRequest::analysis(timeline_frame))?
+            .elements
+            .into_iter()
+            .filter_map(|element| match element {
+                TimelineRenderPlanElement::Media(media) => Some(TimelineColorDiagnostic {
+                    asset_id: media.asset_id,
+                    input_color_space_override: media.color_space_override,
+                    input_encoding_override: media.color_space_override.map(ColorSpace::encoding),
+                    working_color_space,
+                    output_color_space,
+                    output_encoding: output_color_space.encoding(),
+                    ocio_display: ocio_display.map(str::to_owned),
+                    ocio_view: ocio_view.map(str::to_owned),
+                    tone_map: media.auto_tone_map,
+                    pixel_aspect_ratio_override: media.pixel_aspect_ratio_override,
+                    field_order_override: media.field_order_override,
+                    alpha_interpretation: media.alpha_interpretation,
+                    source_frame: media.source_frame,
+                    source_secs: media.source_secs,
+                }),
+                _ => None,
+            })
+            .collect(),
+    )
 }
 
 /// Evaluate one timeline frame into a typed render plan and diagnostics.
 pub fn evaluate_timeline_render_plan(
     source: &dyn RenderPlanSource,
     request: TimelineEvaluationRequest,
-) -> TimelineRenderPlan {
+) -> Result<TimelineRenderPlan> {
     let time_base = source.source_time_base();
     let timeline_frame = request.timeline_frame.max(0);
-    let current = TimeCode::new(timeline_frame, time_base);
-    let active = source.flat_active_clips_at(current);
+    let current = FramePosition::new(timeline_frame, time_base);
+    let current_time = TimelineTime::from_frame_position(current)?;
+    let active = source.flat_active_clips_at(current_time)?;
     let mut diagnostics =
         TimelineEvaluationDiagnostics { active_clips: active.len(), ..Default::default() };
     let mut elements = Vec::with_capacity(active.len());
@@ -320,7 +323,7 @@ pub fn evaluate_timeline_render_plan(
         }
 
         let effect_graph =
-            mondrian_effects::compile_clip_effect_graph(&ac.effects, &ac.masks, current);
+            mondrian_effects::compile_clip_effect_graph(&ac.effects, &ac.masks, current_time);
 
         match ac.kind {
             ClipKind::NestedSequence => {
@@ -335,8 +338,15 @@ pub fn evaluate_timeline_render_plan(
                 elements.push(TimelineRenderPlanElement::NestedSequence(
                     TimelineNestedSequencePlan {
                         sequence_id,
-                        source_frame: ac.source_time.frame.max(0),
-                        source_secs: ac.source_time.to_secs().max(0.0),
+                        source_frame: ac
+                            .source_time
+                            .to_frame_position(
+                                Rational::new(time_base.den, time_base.num),
+                                FrameRounding::Floor,
+                            )?
+                            .frame
+                            .max(0),
+                        source_time: ac.source_time.max(TimelineTime::ZERO),
                         nested_processing: source.nested_color_processing(),
                         opacity,
                         blend_mode: ac.blend_mode,
@@ -382,12 +392,14 @@ pub fn evaluate_timeline_render_plan(
                     diagnostics.skipped_unrenderable += 1;
                     continue;
                 };
-                let source_frame = ac.source_time.frame.max(0);
-                let source_time_base = ac
+                let source_frame_rate = ac
                     .interpretation
                     .frame_rate_override
-                    .map(|fps| Rational::new(fps.den, fps.num))
-                    .unwrap_or(ac.source_time.time_base);
+                    .unwrap_or(Rational::new(time_base.den, time_base.num));
+                let source_position =
+                    ac.source_time.to_frame_position(source_frame_rate, FrameRounding::Floor)?;
+                let source_frame = source_position.frame.max(0);
+                let source_time_base = source_position.time_base;
                 let transform = apply_pixel_aspect_to_affine(
                     ac.transform_matrix,
                     ac.interpretation.pixel_aspect_ratio_override,
@@ -399,7 +411,7 @@ pub fn evaluate_timeline_render_plan(
                     field_order_override: ac.interpretation.field_order_override,
                     alpha_interpretation: ac.interpretation.alpha,
                     source_frame,
-                    source_secs: TimeCode::new(source_frame, source_time_base).to_secs().max(0.0),
+                    source_secs: (source_frame as f64 * source_time_base.to_f64()).max(0.0),
                     source_time_base,
                     opacity,
                     blend_mode: ac.blend_mode,
@@ -414,14 +426,14 @@ pub fn evaluate_timeline_render_plan(
 
     diagnostics.emitted_elements = elements.len();
 
-    TimelineRenderPlan {
+    Ok(TimelineRenderPlan {
         timeline_frame,
         time_base,
         intent: request.intent,
         settings: request.settings,
         elements,
         diagnostics,
-    }
+    })
 }
 
 pub fn mat3_to_affine(cols: [f32; 9]) -> [f32; 6] {
@@ -459,11 +471,17 @@ mod tests {
     use mondrian_timeline::sequence::Sequence;
     use mondrian_timeline::track::Track;
 
+    fn tt(frame: i64, time_base: Rational) -> TimelineTime {
+        TimelineTime::from_frame_position(FramePosition::new(frame, time_base))
+            .expect("valid test time")
+    }
+
     fn analysis_elements(
         source: &dyn RenderPlanSource,
         timeline_frame: i64,
     ) -> Vec<TimelineRenderPlanElement> {
         evaluate_timeline_render_plan(source, TimelineEvaluationRequest::analysis(timeline_frame))
+            .expect("evaluate timeline")
             .elements
     }
 
@@ -504,9 +522,9 @@ mod tests {
         seq.video_tracks[0].blend_mode = BlendMode::Screen;
         seq.video_tracks[1].blend_mode = BlendMode::Multiply;
 
-        let media = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
-        let adjustment =
-            Clip::new_adjustment_layer(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        let media = Clip::new(AssetId::new(), tt(0, tb), tt(20, tb)).expect("valid clip");
+        let adjustment = Clip::new_adjustment_layer(AssetId::new(), tt(0, tb), tt(20, tb))
+            .expect("valid adjustment clip");
         seq.video_tracks[0].add_clip(media).expect("add media");
         seq.video_tracks[1].add_clip(adjustment).expect("add adjustment");
 
@@ -534,7 +552,7 @@ mod tests {
         let tb = seq.time_base();
         seq.video_tracks[0].blend_mode = BlendMode::Screen;
 
-        let mut media = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        let mut media = Clip::new(AssetId::new(), tt(0, tb), tt(20, tb)).expect("valid clip");
         media.blend_mode = Some(BlendMode::HardLight);
         seq.video_tracks[0].add_clip(media).expect("add media");
 
@@ -552,7 +570,7 @@ mod tests {
     fn render_plan_carries_clip_media_interpretation() {
         let mut seq = Sequence::new("render-plan-interpretation");
         let tb = seq.time_base();
-        let mut clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        let mut clip = Clip::new(AssetId::new(), tt(0, tb), tt(20, tb)).expect("valid clip");
         clip.interpretation.color_space_override = Some(mondrian_core::types::ColorSpace::Srgb);
         clip.interpretation.pixel_aspect_ratio_override = Some(PixelAspectRatio::Anamorphic2x);
         clip.interpretation.field_order_override = Some(FieldOrder::UpperFirst);
@@ -580,10 +598,10 @@ mod tests {
     }
 
     #[test]
-    fn render_plan_uses_frame_rate_override_for_decode_seconds() {
+    fn render_plan_resolves_exact_source_time_on_overridden_frame_grid() {
         let mut seq = Sequence::new("render-plan-frame-rate-override");
         let tb = seq.time_base();
-        let mut clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+        let mut clip = Clip::new(AssetId::new(), tt(0, tb), tt(30, tb)).expect("valid clip");
         clip.interpretation.frame_rate_override = Some(Rational::FPS_30);
         seq.video_tracks[0].add_clip(clip).expect("add clip");
 
@@ -591,9 +609,9 @@ mod tests {
         let TimelineRenderPlanElement::Media(media) = &plan[0] else {
             panic!("expected media plan");
         };
-        assert_eq!(media.source_frame, 15);
+        assert_eq!(media.source_frame, 18);
         assert_eq!(media.source_time_base, Rational::new(1, 30));
-        assert!((media.source_secs - 0.5).abs() < 1.0e-9);
+        assert!((media.source_secs - 0.6).abs() < 1.0e-9);
     }
 
     #[test]
@@ -602,7 +620,7 @@ mod tests {
         let tb = seq.time_base();
         seq.settings.working_color_space = mondrian_core::WorkingColorSpace::LinearRec2020;
         seq.settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
-        let mut clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        let mut clip = Clip::new(AssetId::new(), tt(0, tb), tt(20, tb)).expect("valid clip");
         let asset_id = clip.asset_id;
         clip.interpretation.color_space_override = Some(ColorSpace::AppleLog);
         clip.interpretation.pixel_aspect_ratio_override = Some(PixelAspectRatio::DvcproHd);
@@ -615,7 +633,8 @@ mod tests {
             4,
             seq.settings.working_color_space,
             seq.settings.color_management.output_color_space,
-        );
+        )
+        .expect("collect diagnostics");
         assert_eq!(diagnostics.len(), 1);
         let diagnostic = &diagnostics[0];
         assert_eq!(diagnostic.asset_id, asset_id);
@@ -654,7 +673,7 @@ mod tests {
     fn color_diagnostics_can_carry_display_view_context() {
         let mut seq = Sequence::new("display-view-diagnostics");
         let tb = seq.time_base();
-        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        let clip = Clip::new(AssetId::new(), tt(0, tb), tt(20, tb)).expect("valid clip");
         seq.video_tracks[0].add_clip(clip).expect("add clip");
 
         let diagnostics = collect_timeline_color_diagnostics_with_display_view(
@@ -664,7 +683,8 @@ mod tests {
             ColorSpace::Srgb,
             Some("sRGB - Display"),
             Some("ACES 2.0 - SDR 100 nits (Rec.709)"),
-        );
+        )
+        .expect("collect diagnostics");
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(
@@ -687,12 +707,15 @@ mod tests {
         let child_id = child.id;
 
         seq.video_tracks[0]
-            .add_clip(Clip::new_nested_sequence(
-                child_id,
-                TimeCode::new(0, tb),
-                TimeCode::new(20, tb),
-                Some("child".to_string()),
-            ))
+            .add_clip(
+                Clip::new_nested_sequence(
+                    child_id,
+                    tt(0, tb),
+                    tt(20, tb),
+                    Some("child".to_string()),
+                )
+                .expect("valid nested clip"),
+            )
             .expect("add nested sequence");
 
         let plan = analysis_elements(&seq, 0);
@@ -721,9 +744,9 @@ mod tests {
         let tb = seq.time_base();
 
         let media_asset = AssetId::new();
-        let mut media = Clip::new(media_asset, TimeCode::new(0, tb), TimeCode::new(30, tb));
-        media.source_in = TimeCode::new(3, tb);
-        media.source_out = TimeCode::new(33, tb);
+        let mut media = Clip::new(media_asset, tt(0, tb), tt(30, tb)).expect("valid clip");
+        media.source_in = tt(3, tb);
+        media.source_out = tt(33, tb);
         media.interpretation.color_space_override = Some(ColorSpace::Srgb);
         media.interpretation.pixel_aspect_ratio_override = Some(PixelAspectRatio::Anamorphic2x);
         media.interpretation.field_order_override = Some(FieldOrder::UpperFirst);
@@ -734,29 +757,29 @@ mod tests {
         let solid = Clip::new_solid_color(
             AssetId::new(),
             Color::from_rgba8(16, 48, 128, 255),
-            TimeCode::new(0, tb),
-            TimeCode::new(30, tb),
-        );
+            tt(0, tb),
+            tt(30, tb),
+        )
+        .expect("valid solid clip");
         seq.video_tracks[1].add_clip(solid).expect("add solid");
 
         let child_id = SequenceId::new();
-        let mut nested = Clip::new_nested_sequence(
-            child_id,
-            TimeCode::new(5, tb),
-            TimeCode::new(30, tb),
-            Some("child".to_owned()),
-        );
-        nested.source_in = TimeCode::new(20, tb);
-        nested.source_out = TimeCode::new(50, tb);
+        let mut nested =
+            Clip::new_nested_sequence(child_id, tt(5, tb), tt(30, tb), Some("child".to_owned()))
+                .expect("valid nested clip");
+        nested.source_in = tt(20, tb);
+        nested.source_out = tt(50, tb);
         seq.video_tracks[2].add_clip(nested).expect("add nested");
 
-        let adjustment =
-            Clip::new_adjustment_layer(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+        let adjustment = Clip::new_adjustment_layer(AssetId::new(), tt(0, tb), tt(30, tb))
+            .expect("valid adjustment clip");
         seq.video_tracks[3].add_clip(adjustment).expect("add adjustment");
 
         let preview =
-            evaluate_timeline_render_plan(&seq, TimelineEvaluationRequest::preview(12, 0.25));
-        let export = evaluate_timeline_render_plan(&seq, TimelineEvaluationRequest::export(12));
+            evaluate_timeline_render_plan(&seq, TimelineEvaluationRequest::preview(12, 0.25))
+                .expect("preview plan");
+        let export = evaluate_timeline_render_plan(&seq, TimelineEvaluationRequest::export(12))
+            .expect("export plan");
 
         assert_eq!(preview.timeline_frame, export.timeline_frame);
         assert_eq!(preview.time_base, export.time_base);
@@ -774,7 +797,7 @@ mod tests {
     fn evaluate_timeline_render_plan_reports_filtering_diagnostics() {
         let mut seq = Sequence::new("render-plan-diagnostics");
         let tb = seq.time_base();
-        let mut hidden = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        let mut hidden = Clip::new(AssetId::new(), tt(0, tb), tt(20, tb)).expect("valid clip");
         hidden
             .transform
             .apply_property_mutation(PropertyMutation::SetStaticValue {
@@ -787,12 +810,14 @@ mod tests {
         let visible = Clip::new_solid_color(
             AssetId::new(),
             Color::from_rgba8(255, 0, 0, 255),
-            TimeCode::new(0, tb),
-            TimeCode::new(20, tb),
-        );
+            tt(0, tb),
+            tt(20, tb),
+        )
+        .expect("valid solid clip");
         seq.video_tracks[1].add_clip(visible).expect("add visible");
 
-        let plan = evaluate_timeline_render_plan(&seq, TimelineEvaluationRequest::preview(4, 0.5));
+        let plan = evaluate_timeline_render_plan(&seq, TimelineEvaluationRequest::preview(4, 0.5))
+            .expect("preview plan");
 
         assert_eq!(plan.timeline_frame, 4);
         assert_eq!(plan.intent, TimelineRenderIntent::Preview);
@@ -882,7 +907,7 @@ mod tests {
                     RenderPlanSemanticElement::NestedSequence {
                         sequence_id: nested.sequence_id,
                         source_frame: nested.source_frame,
-                        source_micros: micros(nested.source_secs),
+                        source_micros: micros(nested.source_time.to_f64()),
                         nested_processing: nested.nested_processing,
                         opacity: nested.opacity,
                         blend_mode: nested.blend_mode,

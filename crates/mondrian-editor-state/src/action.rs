@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use mondrian_core::{ClipId, EffectId, TimeCode, TrackId};
+use mondrian_core::{ClipId, EffectId, FramePosition, TrackId};
 use serde::{Deserialize, Serialize};
 
 use crate::state::{PanelKind, WorkspacePreset};
@@ -75,15 +75,15 @@ pub enum Action {
     MoveClipToTrack {
         clip_id: ClipId,
         target_track: TrackId,
-        position: TimeCode,
+        position: FramePosition,
     },
     TrimClipStart {
         clip_id: ClipId,
-        new_source_in: TimeCode,
+        new_source_in: FramePosition,
     },
     TrimClipEnd {
         clip_id: ClipId,
-        new_source_out: TimeCode,
+        new_source_out: FramePosition,
     },
 
     // ═══════════════════════════════════════════════════════════════════
@@ -92,7 +92,7 @@ pub enum Action {
     Play,
     Pause,
     TogglePlay,
-    Seek(TimeCode),
+    Seek(FramePosition),
     StepForward,
     StepBack,
     GoToStart,
@@ -159,7 +159,7 @@ pub enum Action {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_core::{ClipId, EffectId, Rational, TimeCode, TrackId};
+    use mondrian_core::{ClipId, EffectId, FramePosition, Rational, TrackId};
     use serde_json;
     use uuid::Uuid;
 
@@ -183,8 +183,8 @@ mod tests {
         EffectId(Uuid::new_v4())
     }
 
-    fn test_timecode() -> TimeCode {
-        TimeCode { frame: 42, time_base: Rational::new(30000, 1001) }
+    fn test_timecode() -> FramePosition {
+        FramePosition { frame: 42, time_base: Rational::new(30000, 1001) }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -512,7 +512,7 @@ mod tests {
     fn json_format_seek_has_frame_key() {
         let a = Action::Seek(test_timecode());
         let json = serde_json::to_string(&a).unwrap();
-        // TimeCode serializes as {"frame":42,"time_base":{"num":30000,"den":1001}}
+        // FramePosition serializes as {"frame":42,"time_base":{"num":30000,"den":1001}}
         assert!(json.contains("\"frame\""));
         assert!(json.contains("\"time_base\""));
     }

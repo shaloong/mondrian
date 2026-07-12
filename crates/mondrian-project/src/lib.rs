@@ -22,7 +22,7 @@ use migration::JsonMigrationRegistry;
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 1;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 2;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 1;
 
@@ -48,10 +48,6 @@ const DOCUMENT_MIGRATIONS: JsonMigrationRegistry = JsonMigrationRegistry::new(
     &[],
 );
 
-const fn initial_library_schema_version() -> u32 {
-    PROJECT_LIBRARY_SCHEMA_VERSION
-}
-
 /// `.mdp` archive manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectManifest {
@@ -66,7 +62,6 @@ pub struct ProjectManifest {
     /// Archive entry containing the project asset-library SQLite database.
     pub library_entry: String,
     /// Expected SQLite schema version after runtime-copy migration.
-    #[serde(default = "initial_library_schema_version")]
     pub library_schema_version: u32,
 }
 
@@ -479,17 +474,17 @@ mod tests {
         );
     }
 
-    fn write_v1_fixture_archive(path: &Path, library: &[u8]) {
+    fn write_current_fixture_archive(path: &Path, library: &[u8]) {
         let file = fs::File::create(path).expect("create fixture archive");
         let mut writer = zip::ZipWriter::new(file);
         let options = zip::write::FileOptions::default();
         writer.start_file(MANIFEST_ENTRY, options).expect("manifest entry");
         writer
-            .write_all(include_bytes!("../tests/fixtures/v1/manifest.json"))
+            .write_all(include_bytes!("../tests/fixtures/current/manifest.json"))
             .expect("manifest fixture");
         writer.start_file(PROJECT_ENTRY, options).expect("project entry");
         writer
-            .write_all(include_bytes!("../tests/fixtures/v1/project.json"))
+            .write_all(include_bytes!("../tests/fixtures/current/project.json"))
             .expect("project fixture");
         writer.start_file(LIBRARY_ENTRY, options).expect("library entry");
         writer.write_all(library).expect("library fixture");
@@ -497,10 +492,10 @@ mod tests {
     }
 
     #[test]
-    fn v1_fixture_open_is_idempotent_and_save_reopen_preserves_semantics() {
-        let root = unique_temp_dir("v1-fixture");
-        let source = root.join("v1.mdp");
-        write_v1_fixture_archive(&source, b"sqlite-v1-fixture");
+    fn current_fixture_open_is_idempotent_and_save_reopen_preserves_semantics() {
+        let root = unique_temp_dir("current-fixture");
+        let source = root.join("current.mdp");
+        write_current_fixture_archive(&source, b"sqlite-current-fixture");
 
         let first = read_project_document_from_archive(&source).expect("first open");
         let second = read_project_document_from_archive(&source).expect("second open");
@@ -552,11 +547,11 @@ mod tests {
         let options = zip::write::FileOptions::default();
         writer.start_file(MANIFEST_ENTRY, options).expect("manifest");
         writer
-            .write_all(include_bytes!("../tests/fixtures/v1/manifest.json"))
+            .write_all(include_bytes!("../tests/fixtures/current/manifest.json"))
             .expect("manifest fixture");
         writer.start_file(PROJECT_ENTRY, options).expect("project");
         writer
-            .write_all(include_bytes!("../tests/fixtures/v1/project.json"))
+            .write_all(include_bytes!("../tests/fixtures/current/project.json"))
             .expect("project fixture");
         writer.finish().expect("finish invalid archive");
         let source_before = fs::read(&source).expect("source before");

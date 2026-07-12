@@ -5,7 +5,8 @@
 
 use crate::{
     error::{MondrianError, Result},
-    types::{AnimationTrackId, Color, KeyframeId, TimeCode},
+    types::{AnimationTrackId, Color, KeyframeId},
+    TimelineTime,
 };
 use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
@@ -27,13 +28,6 @@ pub enum InterpolationType {
     EaseOut,
 }
 
-pub type TimeTicks = i64;
-pub const SUBFRAME_TICKS_PER_FRAME: TimeTicks = 1000;
-
-pub fn timecode_to_ticks(time: TimeCode) -> TimeTicks {
-    time.frame.saturating_mul(SUBFRAME_TICKS_PER_FRAME)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum KeyframeInterpolation {
     Hold,
@@ -43,7 +37,7 @@ pub enum KeyframeInterpolation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct BezierHandle {
-    pub time_offset: f64,
+    pub time_offset: TimelineTime,
     pub value_offset: f64,
 }
 
@@ -324,7 +318,7 @@ impl Interpolatable for PropertyValue {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Keyframe<T> {
     pub id: KeyframeId,
-    pub time: TimeTicks,
+    pub time: TimelineTime,
     pub value: T,
     pub interp_in: KeyframeInterpolation,
     pub interp_out: KeyframeInterpolation,
@@ -332,11 +326,11 @@ pub struct Keyframe<T> {
 }
 
 impl<T> Keyframe<T> {
-    pub fn linear(time: TimeTicks, value: T) -> Self {
+    pub fn linear(time: TimelineTime, value: T) -> Self {
         Self::from_preset(time, value, InterpolationType::Linear)
     }
 
-    pub fn from_preset(time: TimeTicks, value: T, interpolation: InterpolationType) -> Self {
+    pub fn from_preset(time: TimelineTime, value: T, interpolation: InterpolationType) -> Self {
         let (interp_in, interp_out, temporal_flags) = interpolation_defaults(interpolation);
         Self {
             id: KeyframeId::new(),
@@ -446,12 +440,7 @@ impl<T: Interpolatable + Serialize + for<'de> Deserialize<'de>> KeyframeTrack<T>
         ))
     }
 
-    pub fn evaluate(&self, time: TimeCode) -> T {
-        let time = timecode_to_ticks(time);
-        self.evaluate_ticks(time)
-    }
-
-    pub fn evaluate_ticks(&self, time: TimeTicks) -> T {
+    pub fn evaluate(&self, time: TimelineTime) -> T {
         if self.keyframes.is_empty() || !self.enabled {
             return self.static_value.clone();
         }
@@ -470,7 +459,7 @@ impl<T: Interpolatable + Serialize + for<'de> Deserialize<'de>> KeyframeTrack<T>
         let keyframe_a = &self.keyframes[idx];
         let keyframe_b = &self.keyframes[idx + 1];
         match segment_progress(
-            normalize_ticks(time, keyframe_a.time, keyframe_b.time),
+            normalize_time(time, keyframe_a.time, keyframe_b.time),
             keyframe_a.interp_out,
             keyframe_b.interp_in,
         ) {
@@ -489,7 +478,7 @@ impl<T: Interpolatable + Serialize + for<'de> Deserialize<'de>> KeyframeTrack<T>
         }
     }
 
-    pub fn remove_keyframe(&mut self, time: TimeTicks) -> Option<Keyframe<T>> {
+    pub fn remove_keyframe(&mut self, time: TimelineTime) -> Option<Keyframe<T>> {
         if let Some(pos) = self.keyframes.iter().position(|keyframe| keyframe.time == time) {
             Some(self.keyframes.remove(pos))
         } else {
@@ -559,7 +548,7 @@ impl AnimationChannel {
         &self.keyframes
     }
 
-    pub fn keyframe_at(&self, time: TimeTicks) -> Option<&Keyframe<f64>> {
+    pub fn keyframe_at(&self, time: TimelineTime) -> Option<&Keyframe<f64>> {
         self.keyframes.iter().find(|keyframe| keyframe.time == time)
     }
 
@@ -573,7 +562,7 @@ impl AnimationChannel {
         self.normalize_keyframes();
     }
 
-    pub fn remove_keyframe(&mut self, time: TimeTicks) -> Option<Keyframe<f64>> {
+    pub fn remove_keyframe(&mut self, time: TimelineTime) -> Option<Keyframe<f64>> {
         if let Some(pos) = self.keyframes.iter().position(|keyframe| keyframe.time == time) {
             let removed = self.keyframes.remove(pos);
             self.normalize_keyframes();
@@ -583,7 +572,7 @@ impl AnimationChannel {
         }
     }
 
-    pub fn evaluate(&self, time: TimeTicks, fallback: f64) -> f64 {
+    pub fn evaluate(&self, time: TimelineTime, fallback: f64) -> f64 {
         evaluate_numeric_channel(self, time, fallback)
     }
 
@@ -717,7 +706,7 @@ impl AnimatedProperty {
         self.channels.get(index)
     }
 
-    pub fn keyframe_times(&self) -> Vec<TimeTicks> {
+    pub fn keyframe_times(&self) -> Vec<TimelineTime> {
         let mut times = self
             .channels
             .iter()
@@ -728,7 +717,7 @@ impl AnimatedProperty {
         times
     }
 
-    pub fn keyframe_at(&self, time: TimeTicks) -> Option<Keyframe<PropertyValue>> {
+    pub fn keyframe_at(&self, time: TimelineTime) -> Option<Keyframe<PropertyValue>> {
         let mut found = false;
         let mut id = None;
         let mut interp_in = KeyframeInterpolation::Linear;
@@ -768,7 +757,7 @@ impl AnimatedProperty {
         self.animation_enabled = enabled;
     }
 
-    pub fn evaluate(&self, time: TimeTicks) -> PropertyValue {
+    pub fn evaluate(&self, time: TimelineTime) -> PropertyValue {
         if !self.animation_enabled || !self.is_animated() || self.channels.is_empty() {
             return self.static_value.clone();
         }
@@ -785,7 +774,7 @@ impl AnimatedProperty {
         PropertyValue::from_channel_values(self.value_type(), &channels, &self.static_value)
     }
 
-    pub fn enable_animation(&mut self, time: TimeTicks) -> Result<()> {
+    pub fn enable_animation(&mut self, time: TimelineTime) -> Result<()> {
         if !self.descriptor.is_animatable || !self.value_type().supports_animation() {
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "property_enable_animation".to_string(),
@@ -808,7 +797,7 @@ impl AnimatedProperty {
         Ok(())
     }
 
-    pub fn disable_animation(&mut self, time: TimeTicks) -> Result<()> {
+    pub fn disable_animation(&mut self, time: TimelineTime) -> Result<()> {
         if !self.descriptor.is_animatable || !self.value_type().supports_animation() {
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "property_disable_animation".to_string(),
@@ -820,7 +809,7 @@ impl AnimatedProperty {
         Ok(())
     }
 
-    pub fn clear_animation(&mut self, time: TimeTicks) -> Result<()> {
+    pub fn clear_animation(&mut self, time: TimelineTime) -> Result<()> {
         self.disable_animation(time)?;
         for channel in &mut self.channels {
             channel.keyframes.clear();
@@ -830,7 +819,7 @@ impl AnimatedProperty {
 
     pub fn write_value(
         &mut self,
-        time: TimeTicks,
+        time: TimelineTime,
         value: PropertyValue,
         interpolation: InterpolationType,
         handles: Option<(Option<Vec2>, Option<Vec2>)>,
@@ -879,7 +868,7 @@ impl AnimatedProperty {
 
     pub fn write_channels(
         &mut self,
-        time: TimeTicks,
+        time: TimelineTime,
         channel_values: &[(usize, f64)],
         interpolation: InterpolationType,
         handles: Option<(Option<Vec2>, Option<Vec2>)>,
@@ -905,7 +894,7 @@ impl AnimatedProperty {
                 let (default_in, default_out, default_flags) = interpolation_defaults(normalized);
                 let interp_in = if let Some(handle) = control_in {
                     KeyframeInterpolation::Bezier(BezierHandle {
-                        time_offset: handle.x.clamp(-1.0, 0.0) as f64,
+                        time_offset: quantize_handle_time(handle.x.clamp(-1.0, 0.0))?,
                         value_offset: handle.y as f64,
                     })
                 } else {
@@ -913,7 +902,7 @@ impl AnimatedProperty {
                 };
                 let interp_out = if let Some(handle) = control_out {
                     KeyframeInterpolation::Bezier(BezierHandle {
-                        time_offset: handle.x.clamp(0.0, 1.0) as f64,
+                        time_offset: quantize_handle_time(handle.x.clamp(0.0, 1.0))?,
                         value_offset: handle.y as f64,
                     })
                 } else {
@@ -948,14 +937,14 @@ impl AnimatedProperty {
         }
     }
 
-    pub fn remove_keyframe(&mut self, time: TimeTicks) {
+    pub fn remove_keyframe(&mut self, time: TimelineTime) {
         for channel in &mut self.channels {
             let _ = channel.remove_keyframe(time);
         }
         self.normalize_channels();
     }
 
-    pub fn move_keyframe(&mut self, from_time: TimeTicks, to_time: TimeTicks) -> Result<()> {
+    pub fn move_keyframe(&mut self, from_time: TimelineTime, to_time: TimelineTime) -> Result<()> {
         if from_time == to_time {
             return Ok(());
         }
@@ -1009,7 +998,7 @@ impl AnimatedProperty {
 
     pub fn update_keyframe_interpolation(
         &mut self,
-        time: TimeTicks,
+        time: TimelineTime,
         interpolation: InterpolationType,
     ) -> Result<()> {
         if !self.descriptor.is_animatable || !self.value_type().supports_animation() {
@@ -1076,7 +1065,7 @@ impl AnimatedProperty {
 
     pub fn update_channel_keyframe_handles(
         &mut self,
-        time: TimeTicks,
+        time: TimelineTime,
         channel_index: usize,
         interp_in: KeyframeInterpolation,
         interp_out: KeyframeInterpolation,
@@ -1117,7 +1106,7 @@ impl AnimatedProperty {
 
     pub fn update_channel_keyframe_value(
         &mut self,
-        time: TimeTicks,
+        time: TimelineTime,
         channel_index: usize,
         value: f64,
     ) -> Result<()> {
@@ -1146,7 +1135,7 @@ impl AnimatedProperty {
 
     pub fn update_keyframe_temporal_flags(
         &mut self,
-        time: TimeTicks,
+        time: TimelineTime,
         temporal_flags: KeyframeTemporalFlags,
     ) -> Result<()> {
         let mut updated_any = false;
@@ -1308,7 +1297,7 @@ impl PropertyBag {
         self.properties.get(path)
     }
 
-    pub fn evaluate(&self, path: &str, time: TimeTicks) -> Option<PropertyValue> {
+    pub fn evaluate(&self, path: &str, time: TimelineTime) -> Option<PropertyValue> {
         self.properties.get(path).map(|property| property.evaluate(time))
     }
 
@@ -1337,17 +1326,17 @@ impl PropertyBag {
         Ok(())
     }
 
-    pub fn enable_animation(&mut self, path: &str, time: TimeTicks) -> Result<()> {
+    pub fn enable_animation(&mut self, path: &str, time: TimelineTime) -> Result<()> {
         let property = self.require_property_mut(path)?;
         property.enable_animation(time)
     }
 
-    pub fn disable_animation(&mut self, path: &str, time: TimeTicks) -> Result<()> {
+    pub fn disable_animation(&mut self, path: &str, time: TimelineTime) -> Result<()> {
         let property = self.require_property_mut(path)?;
         property.disable_animation(time)
     }
 
-    pub fn clear_animation(&mut self, path: &str, time: TimeTicks) -> Result<()> {
+    pub fn clear_animation(&mut self, path: &str, time: TimelineTime) -> Result<()> {
         let property = self.require_property_mut(path)?;
         property.clear_animation(time)
     }
@@ -1355,7 +1344,7 @@ impl PropertyBag {
     pub fn write_value(
         &mut self,
         path: &str,
-        time: TimeTicks,
+        time: TimelineTime,
         value: PropertyValue,
         interpolation: InterpolationType,
     ) -> Result<()> {
@@ -1367,7 +1356,7 @@ impl PropertyBag {
     pub fn write_channels(
         &mut self,
         path: &str,
-        time: TimeTicks,
+        time: TimelineTime,
         channel_values: &[(usize, f64)],
         interpolation: InterpolationType,
     ) -> Result<()> {
@@ -1375,7 +1364,7 @@ impl PropertyBag {
         property.write_channels(time, channel_values, interpolation, None)
     }
 
-    pub fn remove_keyframe(&mut self, path: &str, time: TimeTicks) -> Result<()> {
+    pub fn remove_keyframe(&mut self, path: &str, time: TimelineTime) -> Result<()> {
         let property = self.require_property_mut(path)?;
         property.remove_keyframe(time);
         Ok(())
@@ -1384,8 +1373,8 @@ impl PropertyBag {
     pub fn move_keyframe(
         &mut self,
         path: &str,
-        from_time: TimeTicks,
-        to_time: TimeTicks,
+        from_time: TimelineTime,
+        to_time: TimelineTime,
     ) -> Result<()> {
         let property = self.require_property_mut(path)?;
         property.move_keyframe(from_time, to_time)
@@ -1394,7 +1383,7 @@ impl PropertyBag {
     pub fn update_keyframe_interpolation(
         &mut self,
         path: &str,
-        time: TimeTicks,
+        time: TimelineTime,
         interpolation: InterpolationType,
     ) -> Result<()> {
         let property = self.require_property_mut(path)?;
@@ -1404,7 +1393,7 @@ impl PropertyBag {
     pub fn update_channel_keyframe_handles(
         &mut self,
         path: &str,
-        time: TimeTicks,
+        time: TimelineTime,
         channel_index: usize,
         interp_in: KeyframeInterpolation,
         interp_out: KeyframeInterpolation,
@@ -1416,7 +1405,7 @@ impl PropertyBag {
     pub fn update_channel_keyframe_value(
         &mut self,
         path: &str,
-        time: TimeTicks,
+        time: TimelineTime,
         channel_index: usize,
         value: f64,
     ) -> Result<()> {
@@ -1427,7 +1416,7 @@ impl PropertyBag {
     pub fn update_keyframe_temporal_flags(
         &mut self,
         path: &str,
-        time: TimeTicks,
+        time: TimelineTime,
         temporal_flags: KeyframeTemporalFlags,
     ) -> Result<()> {
         let property = self.require_property_mut(path)?;
@@ -1511,57 +1500,57 @@ pub enum PropertyMutation {
     },
     RemoveKeyframe {
         path: String,
-        time: TimeTicks,
+        time: TimelineTime,
     },
     MoveKeyframe {
         path: String,
-        from_time: TimeTicks,
-        to_time: TimeTicks,
+        from_time: TimelineTime,
+        to_time: TimelineTime,
     },
     UpdateKeyframeInterpolation {
         path: String,
-        time: TimeTicks,
+        time: TimelineTime,
         interpolation: InterpolationType,
     },
     UpdateChannelKeyframeHandles {
         path: String,
-        time: TimeTicks,
+        time: TimelineTime,
         channel_index: usize,
         interp_in: KeyframeInterpolation,
         interp_out: KeyframeInterpolation,
     },
     UpdateChannelKeyframeValue {
         path: String,
-        time: TimeTicks,
+        time: TimelineTime,
         channel_index: usize,
         value: f64,
     },
     UpdateKeyframeTemporalFlags {
         path: String,
-        time: TimeTicks,
+        time: TimelineTime,
         temporal_flags: KeyframeTemporalFlags,
     },
     EnableAnimation {
         path: String,
-        time: TimeTicks,
+        time: TimelineTime,
     },
     DisableAnimation {
         path: String,
-        time: TimeTicks,
+        time: TimelineTime,
     },
     ClearAnimation {
         path: String,
-        time: TimeTicks,
+        time: TimelineTime,
     },
     WriteValue {
         path: String,
-        time: TimeTicks,
+        time: TimelineTime,
         value: PropertyValue,
         interpolation: InterpolationType,
     },
     WriteChannels {
         path: String,
-        time: TimeTicks,
+        time: TimelineTime,
         channel_values: Vec<(usize, f64)>,
         interpolation: InterpolationType,
     },
@@ -1688,7 +1677,7 @@ fn validate_channel_updates(
     Ok(())
 }
 
-fn evaluate_numeric_channel(channel: &AnimationChannel, time: TimeTicks, fallback: f64) -> f64 {
+fn evaluate_numeric_channel(channel: &AnimationChannel, time: TimelineTime, fallback: f64) -> f64 {
     if channel.keyframes.is_empty() {
         return fallback;
     }
@@ -1706,7 +1695,7 @@ fn evaluate_numeric_channel(channel: &AnimationChannel, time: TimeTicks, fallbac
     let keyframe_a = &channel.keyframes[idx];
     let keyframe_b = &channel.keyframes[idx + 1];
     match segment_progress(
-        normalize_ticks(time, keyframe_a.time, keyframe_b.time),
+        normalize_time(time, keyframe_a.time, keyframe_b.time),
         keyframe_a.interp_out,
         keyframe_b.interp_in,
     ) {
@@ -1715,12 +1704,21 @@ fn evaluate_numeric_channel(channel: &AnimationChannel, time: TimeTicks, fallbac
     }
 }
 
-fn normalize_ticks(t: TimeTicks, start: TimeTicks, end: TimeTicks) -> f32 {
-    let total = (end - start) as f32;
+fn normalize_time(t: TimelineTime, start: TimelineTime, end: TimelineTime) -> f32 {
+    let total = end.to_f64() - start.to_f64();
     if total <= 0.0 {
         return 0.0;
     }
-    (t - start) as f32 / total
+    ((t.to_f64() - start.to_f64()) / total) as f32
+}
+
+fn quantize_handle_time(value: f32) -> Result<TimelineTime> {
+    TimelineTime::from_f64_quantized(f64::from(value), 1_000_000).map_err(|error| {
+        MondrianError::WorkflowStepFailed {
+            step_id: "automation_handle_time".to_string(),
+            reason: error.to_string(),
+        }
+    })
 }
 
 enum SegmentProgress {
@@ -1754,19 +1752,22 @@ pub use interp::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Rational;
 
-    fn tc(frame: i64) -> TimeCode {
-        TimeCode::new(frame, Rational::new(1, 25))
+    fn tt(frame: i64) -> TimelineTime {
+        TimelineTime::new(frame, 25).expect("test timeline time")
+    }
+
+    fn ht(value: f64) -> TimelineTime {
+        TimelineTime::from_f64_quantized(value, 1_000_000).expect("test handle time")
     }
 
     #[test]
     fn linear_interpolation() {
         let mut track = KeyframeTrack::<f32>::constant(0.0);
-        track.set_keyframe(Keyframe::linear(timecode_to_ticks(tc(0)), 0.0));
-        track.set_keyframe(Keyframe::linear(timecode_to_ticks(tc(100)), 100.0));
+        track.set_keyframe(Keyframe::linear(tt(0), 0.0));
+        track.set_keyframe(Keyframe::linear(tt(100), 100.0));
 
-        let mid = track.evaluate(tc(50));
+        let mid = track.evaluate(tt(50));
         assert!((mid - 50.0).abs() < 0.01, "Expected 50.0, got {mid}");
     }
 
@@ -1780,17 +1781,17 @@ mod tests {
         ));
         bag.apply_mutation(PropertyMutation::SetKeyframe {
             path: "effect.gaussian_blur.radius".to_string(),
-            keyframe: Keyframe::linear(timecode_to_ticks(tc(0)), PropertyValue::Float(8.0)),
+            keyframe: Keyframe::linear(tt(0), PropertyValue::Float(8.0)),
         })
         .expect("set start keyframe");
         bag.apply_mutation(PropertyMutation::SetKeyframe {
             path: "effect.gaussian_blur.radius".to_string(),
-            keyframe: Keyframe::linear(timecode_to_ticks(tc(20)), PropertyValue::Float(28.0)),
+            keyframe: Keyframe::linear(tt(20), PropertyValue::Float(28.0)),
         })
         .expect("set end keyframe");
 
         let value = bag
-            .evaluate("effect.gaussian_blur.radius", timecode_to_ticks(tc(10)))
+            .evaluate("effect.gaussian_blur.radius", tt(10))
             .and_then(|value| value.as_f32())
             .expect("evaluate interpolated value");
         assert!((value - 18.0).abs() < 0.01);
@@ -1816,28 +1817,28 @@ mod tests {
         let mut track = KeyframeTrack::<f32>::constant(0.0);
         track.set_keyframe(Keyframe {
             id: KeyframeId::new(),
-            time: timecode_to_ticks(tc(0)),
+            time: tt(0),
             value: 0.0,
             interp_in: KeyframeInterpolation::Linear,
             interp_out: KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: 0.0,
+                time_offset: TimelineTime::ZERO,
                 value_offset: 0.0,
             }),
             temporal_flags: KeyframeTemporalFlags::default(),
         });
         track.set_keyframe(Keyframe {
             id: KeyframeId::new(),
-            time: timecode_to_ticks(tc(100)),
+            time: tt(100),
             value: 100.0,
             interp_in: KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: 0.0,
+                time_offset: TimelineTime::ZERO,
                 value_offset: 0.0,
             }),
             interp_out: KeyframeInterpolation::Linear,
             temporal_flags: KeyframeTemporalFlags::default(),
         });
 
-        let mid = track.evaluate(tc(50));
+        let mid = track.evaluate(tt(50));
         assert!(
             (mid - 50.0).abs() < 0.05,
             "Expected midpoint to remain stable, got {mid}"
@@ -1855,13 +1856,13 @@ mod tests {
 
         bag.apply_mutation(PropertyMutation::EnableAnimation {
             path: "transform.opacity".to_string(),
-            time: timecode_to_ticks(tc(12)),
+            time: tt(12),
         })
         .expect("enable animation");
 
         let property = bag.property("transform.opacity").expect("opacity property should exist");
         assert!(property.is_enabled());
-        assert_eq!(property.keyframe_times(), vec![timecode_to_ticks(tc(12))]);
+        assert_eq!(property.keyframe_times(), vec![tt(12)]);
         assert_eq!(
             property.channel(0).expect("opacity channel").keyframes()[0].value,
             0.75
@@ -1879,7 +1880,7 @@ mod tests {
 
         bag.apply_mutation(PropertyMutation::WriteValue {
             path: "effect.gaussian_blur.radius".to_string(),
-            time: timecode_to_ticks(tc(10)),
+            time: tt(10),
             value: PropertyValue::Float(18.0),
             interpolation: InterpolationType::Linear,
         })
@@ -1902,20 +1903,20 @@ mod tests {
         ));
         bag.apply_mutation(PropertyMutation::EnableAnimation {
             path: "transform.rotation".to_string(),
-            time: timecode_to_ticks(tc(0)),
+            time: tt(0),
         })
         .expect("enable animation");
 
         bag.apply_mutation(PropertyMutation::WriteValue {
             path: "transform.rotation".to_string(),
-            time: timecode_to_ticks(tc(8)),
+            time: tt(8),
             value: PropertyValue::Float(15.0),
             interpolation: InterpolationType::Linear,
         })
         .expect("create keyframe");
         bag.apply_mutation(PropertyMutation::WriteValue {
             path: "transform.rotation".to_string(),
-            time: timecode_to_ticks(tc(8)),
+            time: tt(8),
             value: PropertyValue::Float(22.0),
             interpolation: InterpolationType::Hold,
         })
@@ -1929,7 +1930,7 @@ mod tests {
             .expect("rotation channel")
             .keyframes()
             .iter()
-            .find(|keyframe| keyframe.time == timecode_to_ticks(tc(8)))
+            .find(|keyframe| keyframe.time == tt(8))
             .expect("keyframe at t=8");
         assert_eq!(keyframe.value, 22.0);
         assert_eq!(keyframe.interp_out, KeyframeInterpolation::Linear);
@@ -1945,12 +1946,12 @@ mod tests {
         ));
         bag.apply_mutation(PropertyMutation::EnableAnimation {
             path: "transform.position".to_string(),
-            time: timecode_to_ticks(tc(0)),
+            time: tt(0),
         })
         .expect("enable animation");
         bag.apply_mutation(PropertyMutation::WriteValue {
             path: "transform.position".to_string(),
-            time: timecode_to_ticks(tc(20)),
+            time: tt(20),
             value: PropertyValue::Float(20.0),
             interpolation: InterpolationType::Linear,
         })
@@ -1958,17 +1959,14 @@ mod tests {
 
         bag.apply_mutation(PropertyMutation::DisableAnimation {
             path: "transform.position".to_string(),
-            time: timecode_to_ticks(tc(10)),
+            time: tt(10),
         })
         .expect("disable animation");
 
         let property = bag.property("transform.position").expect("position property should exist");
         assert!(!property.is_enabled());
         assert_eq!(property.keyframe_times().len(), 2);
-        assert_eq!(
-            property.evaluate(timecode_to_ticks(tc(10))),
-            PropertyValue::Float(10.0)
-        );
+        assert_eq!(property.evaluate(tt(10)), PropertyValue::Float(10.0));
         assert_eq!(*property.static_value(), PropertyValue::Float(10.0));
     }
 
@@ -1983,7 +1981,7 @@ mod tests {
 
         bag.apply_mutation(PropertyMutation::WriteChannels {
             path: "transform.position".to_string(),
-            time: timecode_to_ticks(tc(3)),
+            time: tt(3),
             channel_values: vec![(0, 9.0)],
             interpolation: InterpolationType::Linear,
         })
@@ -1991,7 +1989,7 @@ mod tests {
 
         let property = bag.property("transform.position").expect("position property should exist");
         assert_eq!(
-            property.evaluate(timecode_to_ticks(tc(3))),
+            property.evaluate(tt(3)),
             PropertyValue::Vec2(Vec2::new(9.0, 5.0))
         );
     }
@@ -2006,13 +2004,13 @@ mod tests {
         ));
         bag.apply_mutation(PropertyMutation::EnableAnimation {
             path: "transform.position".to_string(),
-            time: timecode_to_ticks(tc(0)),
+            time: tt(0),
         })
         .expect("enable animation");
 
         bag.apply_mutation(PropertyMutation::WriteChannels {
             path: "transform.position".to_string(),
-            time: timecode_to_ticks(tc(10)),
+            time: tt(10),
             channel_values: vec![(0, 20.0)],
             interpolation: InterpolationType::Linear,
         })
@@ -2020,17 +2018,17 @@ mod tests {
 
         let property = bag.property("transform.position").expect("position property should exist");
         assert_eq!(
-            property.evaluate(timecode_to_ticks(tc(10))),
+            property.evaluate(tt(10)),
             PropertyValue::Vec2(Vec2::new(20.0, 0.0))
         );
         assert_eq!(
-            property.evaluate(timecode_to_ticks(tc(5))),
+            property.evaluate(tt(5)),
             PropertyValue::Vec2(Vec2::new(10.0, 0.0))
         );
     }
 
     #[test]
-    fn subframe_ticks_interpolate_between_frames() {
+    fn exact_subframe_time_interpolates_between_frames() {
         let mut bag = PropertyBag::default();
         bag.define(PropertyDescriptor::new(
             "transform.opacity",
@@ -2038,9 +2036,9 @@ mod tests {
             PropertyValue::Float(0.0),
         ));
 
-        let start = timecode_to_ticks(tc(0));
-        let end = timecode_to_ticks(tc(1));
-        let midpoint = start + (end - start) / 2;
+        let start = tt(0);
+        let end = tt(1);
+        let midpoint = TimelineTime::new(1, 50).expect("valid exact midpoint");
 
         bag.apply_mutation(PropertyMutation::SetKeyframe {
             path: "transform.opacity".to_string(),
@@ -2068,7 +2066,7 @@ mod tests {
             "旋转",
             PropertyValue::Float(0.0),
         ));
-        let time = timecode_to_ticks(tc(8));
+        let time = tt(8);
 
         bag.apply_mutation(PropertyMutation::EnableAnimation {
             path: "transform.rotation".to_string(),
@@ -2115,9 +2113,9 @@ mod tests {
             "Opacity",
             PropertyValue::Float(1.0),
         ));
-        let previous_time = timecode_to_ticks(tc(8));
-        let time = timecode_to_ticks(tc(12));
-        let next_time = timecode_to_ticks(tc(18));
+        let previous_time = tt(8);
+        let time = tt(12);
+        let next_time = tt(18);
 
         bag.apply_mutation(PropertyMutation::SetKeyframe {
             path: "transform.opacity".to_string(),
@@ -2135,11 +2133,11 @@ mod tests {
             time,
             value: PropertyValue::Float(0.75),
             interp_in: KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: -0.25,
+                time_offset: ht(-0.25),
                 value_offset: -0.1,
             }),
             interp_out: KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: 0.3,
+                time_offset: ht(0.3),
                 value_offset: 0.15,
             }),
             temporal_flags: KeyframeTemporalFlags {
@@ -2173,8 +2171,8 @@ mod tests {
             "Opacity",
             PropertyValue::Float(0.0),
         ));
-        let start = timecode_to_ticks(tc(5));
-        let target = timecode_to_ticks(tc(9));
+        let start = tt(5);
+        let target = tt(9);
 
         bag.apply_mutation(PropertyMutation::SetKeyframe {
             path: "transform.opacity".to_string(),
@@ -2215,8 +2213,8 @@ mod tests {
             "Opacity",
             PropertyValue::Float(0.0),
         ));
-        let first = timecode_to_ticks(tc(5));
-        let second = timecode_to_ticks(tc(9));
+        let first = tt(5);
+        let second = tt(9);
 
         bag.apply_mutation(PropertyMutation::SetKeyframe {
             path: "transform.opacity".to_string(),
@@ -2247,9 +2245,9 @@ mod tests {
             "Opacity",
             PropertyValue::Float(0.0),
         ));
-        let start = timecode_to_ticks(tc(0));
-        let time = timecode_to_ticks(tc(5));
-        let end = timecode_to_ticks(tc(10));
+        let start = tt(0);
+        let time = tt(5);
+        let end = tt(10);
 
         bag.apply_mutation(PropertyMutation::SetKeyframe {
             path: "transform.opacity".to_string(),
@@ -2290,9 +2288,9 @@ mod tests {
             "Opacity",
             PropertyValue::Float(0.0),
         ));
-        let start = timecode_to_ticks(tc(0));
-        let time = timecode_to_ticks(tc(5));
-        let end = timecode_to_ticks(tc(10));
+        let start = tt(0);
+        let time = tt(5);
+        let end = tt(10);
 
         bag.apply_mutation(PropertyMutation::SetKeyframe {
             path: "transform.opacity".to_string(),
@@ -2306,11 +2304,11 @@ mod tests {
                 time,
                 value: PropertyValue::Float(0.5),
                 interp_in: KeyframeInterpolation::Bezier(BezierHandle {
-                    time_offset: -0.2,
+                    time_offset: ht(-0.2),
                     value_offset: -0.15,
                 }),
                 interp_out: KeyframeInterpolation::Bezier(BezierHandle {
-                    time_offset: 0.45,
+                    time_offset: ht(0.45),
                     value_offset: 0.25,
                 }),
                 temporal_flags: KeyframeTemporalFlags::default(),
@@ -2341,8 +2339,8 @@ mod tests {
         let KeyframeInterpolation::Bezier(out_handle) = stored.interp_out else {
             panic!("expected bezier out");
         };
-        assert!((in_handle.time_offset.abs() - 0.2).abs() < 1e-6);
-        assert!((out_handle.time_offset - 0.45).abs() < 1e-6);
+        assert!((in_handle.time_offset.to_f64().abs() - 0.2).abs() < 1e-6);
+        assert!((out_handle.time_offset.to_f64() - 0.45).abs() < 1e-6);
         assert!(stored.temporal_flags.continuous);
         assert!(!stored.temporal_flags.broken_handles);
     }
@@ -2356,9 +2354,9 @@ mod tests {
             PropertyValue::Float(0.0),
         ));
 
-        let start = timecode_to_ticks(tc(0));
-        let end = timecode_to_ticks(tc(10));
-        let mid = timecode_to_ticks(tc(5));
+        let start = tt(0);
+        let end = tt(10);
+        let mid = tt(5);
 
         bag.apply_mutation(PropertyMutation::SetKeyframe {
             path: "transform.opacity".to_string(),
@@ -2382,7 +2380,7 @@ mod tests {
         let property = bag.property("transform.opacity").expect("property remains");
         assert!(!property.is_enabled());
         assert!(!property.is_animated());
-        assert_eq!(property.keyframe_times(), Vec::<TimeTicks>::new());
+        assert_eq!(property.keyframe_times(), Vec::<TimelineTime>::new());
         assert_eq!(property.static_value(), &before_clear);
     }
 
@@ -2394,8 +2392,8 @@ mod tests {
             "Opacity",
             PropertyValue::Float(0.0),
         ));
-        let start = timecode_to_ticks(tc(0));
-        let end = timecode_to_ticks(tc(8));
+        let start = tt(0);
+        let end = tt(8);
 
         bag.apply_mutation(PropertyMutation::SetKeyframe {
             path: "transform.opacity".to_string(),
@@ -2430,7 +2428,7 @@ mod tests {
         assert_eq!(
             ease_in.interp_out,
             KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: 1.0 / 3.0,
+                time_offset: TimelineTime::ONE_THIRD,
                 value_offset: 0.0,
             })
         );
@@ -2450,7 +2448,7 @@ mod tests {
         assert_eq!(
             ease_out.interp_in,
             KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: -1.0 / 3.0,
+                time_offset: TimelineTime::NEGATIVE_ONE_THIRD,
                 value_offset: 0.0,
             })
         );
@@ -2465,7 +2463,7 @@ mod tests {
             "Opacity",
             PropertyValue::Float(0.0),
         ));
-        let time = timecode_to_ticks(tc(5));
+        let time = tt(5);
 
         bag.apply_mutation(PropertyMutation::SetKeyframe {
             path: "transform.opacity".to_string(),
@@ -2503,7 +2501,7 @@ mod tests {
             "位置",
             PropertyValue::Vec2(Vec2::ZERO),
         ));
-        let time = timecode_to_ticks(tc(5));
+        let time = tt(5);
         bag.apply_mutation(PropertyMutation::SetKeyframe {
             path: "transform.position".to_string(),
             keyframe: Keyframe::from_preset(
@@ -2519,11 +2517,11 @@ mod tests {
             time,
             channel_index: 0,
             interp_in: KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: -0.3,
+                time_offset: ht(-0.3),
                 value_offset: -0.1,
             }),
             interp_out: KeyframeInterpolation::Bezier(BezierHandle {
-                time_offset: 0.3,
+                time_offset: ht(0.3),
                 value_offset: 0.1,
             }),
         })
@@ -2547,9 +2545,9 @@ mod tests {
             "Opacity",
             PropertyValue::Float(0.0),
         ));
-        let start = timecode_to_ticks(tc(0));
-        let mid = timecode_to_ticks(tc(5));
-        let end = timecode_to_ticks(tc(10));
+        let start = tt(0);
+        let mid = tt(5);
+        let end = tt(10);
 
         bag.apply_mutation(PropertyMutation::SetKeyframe {
             path: "transform.opacity".to_string(),
@@ -2563,11 +2561,11 @@ mod tests {
                 time: mid,
                 value: PropertyValue::Float(0.5),
                 interp_in: KeyframeInterpolation::Bezier(BezierHandle {
-                    time_offset: -0.25,
+                    time_offset: ht(-0.25),
                     value_offset: -0.1,
                 }),
                 interp_out: KeyframeInterpolation::Bezier(BezierHandle {
-                    time_offset: 0.25,
+                    time_offset: ht(0.25),
                     value_offset: 0.1,
                 }),
                 temporal_flags: KeyframeTemporalFlags {
@@ -2614,9 +2612,9 @@ mod tests {
             "Opacity",
             PropertyValue::Float(0.0),
         ));
-        let start = timecode_to_ticks(tc(0));
-        let mid = timecode_to_ticks(tc(5));
-        let end = timecode_to_ticks(tc(12));
+        let start = tt(0);
+        let mid = tt(5);
+        let end = tt(12);
 
         bag.apply_mutation(PropertyMutation::SetKeyframe {
             path: "transform.opacity".to_string(),
@@ -2630,11 +2628,11 @@ mod tests {
                 time: mid,
                 value: PropertyValue::Float(1.0),
                 interp_in: KeyframeInterpolation::Bezier(BezierHandle {
-                    time_offset: -0.2,
+                    time_offset: ht(-0.2),
                     value_offset: -0.3,
                 }),
                 interp_out: KeyframeInterpolation::Bezier(BezierHandle {
-                    time_offset: 0.4,
+                    time_offset: ht(0.4),
                     value_offset: 0.4,
                 }),
                 temporal_flags: KeyframeTemporalFlags {
@@ -2687,9 +2685,9 @@ mod tests {
             "Opacity",
             PropertyValue::Float(0.0),
         ));
-        let time = timecode_to_ticks(tc(5));
-        let before = timecode_to_ticks(tc(1));
-        let after = timecode_to_ticks(tc(9));
+        let time = tt(5);
+        let before = tt(1);
+        let after = tt(9);
 
         bag.apply_mutation(PropertyMutation::SetKeyframe {
             path: "transform.opacity".to_string(),
@@ -2721,8 +2719,8 @@ mod tests {
             "Opacity",
             PropertyValue::Float(0.0),
         ));
-        let start = timecode_to_ticks(tc(0));
-        let end = timecode_to_ticks(tc(10));
+        let start = tt(0);
+        let end = tt(10);
 
         bag.apply_mutation(PropertyMutation::SetKeyframe {
             path: "transform.opacity".to_string(),
@@ -2754,12 +2752,15 @@ mod tests {
         let before_start = bag
             .evaluate(
                 "transform.opacity",
-                start.saturating_sub(SUBFRAME_TICKS_PER_FRAME),
+                start.checked_sub(tt(1)).expect("test time remains in range"),
             )
             .and_then(|value| value.as_f32())
             .expect("evaluate before start");
         let after_end = bag
-            .evaluate("transform.opacity", end + SUBFRAME_TICKS_PER_FRAME)
+            .evaluate(
+                "transform.opacity",
+                end.checked_add(tt(1)).expect("test time remains in range"),
+            )
             .and_then(|value| value.as_f32())
             .expect("evaluate after end");
         assert!((before_start - 0.0).abs() < 0.001);
@@ -2774,9 +2775,9 @@ mod tests {
             "Opacity",
             PropertyValue::Float(0.0),
         ));
-        let start = timecode_to_ticks(tc(0));
-        let mid = timecode_to_ticks(tc(8));
-        let end = timecode_to_ticks(tc(16));
+        let start = tt(0);
+        let mid = tt(8);
+        let end = tt(16);
 
         bag.apply_mutation(PropertyMutation::SetKeyframe {
             path: "transform.opacity".to_string(),
@@ -2812,8 +2813,8 @@ mod tests {
         let KeyframeInterpolation::Bezier(out_handle) = stored.interp_out else {
             panic!("expected auto out handle");
         };
-        assert!(in_handle.time_offset < 0.0);
-        assert!(out_handle.time_offset > 0.0);
+        assert!(in_handle.time_offset < TimelineTime::ZERO);
+        assert!(out_handle.time_offset > TimelineTime::ZERO);
         assert!((1.0 + in_handle.value_offset).clamp(0.0, 1.0) >= 0.0);
         assert!(out_handle.value_offset.clamp(0.0, 1.0) >= 0.0);
     }
@@ -2826,9 +2827,9 @@ mod tests {
             "Opacity",
             PropertyValue::Float(0.0),
         ));
-        let start = timecode_to_ticks(tc(0));
-        let mid = timecode_to_ticks(tc(8));
-        let end = timecode_to_ticks(tc(16));
+        let start = tt(0);
+        let mid = tt(8);
+        let end = tt(16);
 
         bag.apply_mutation(PropertyMutation::SetKeyframe {
             path: "transform.opacity".to_string(),

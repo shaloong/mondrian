@@ -10,7 +10,8 @@ use crate::plugin_contract::{
 };
 use mondrian_core::{
     automation::{AnimatablePropertyUiMetadata, PropertyBag, PropertyDescriptor, PropertyValue},
-    types::{Color, EffectId, TimeCode},
+    types::{Color, EffectId},
+    TimelineTime,
 };
 // Re-export effect data types from mondrian-core.
 pub use mondrian_core::effect_data::{namespaced_effect_path, EffectNode, EffectType};
@@ -25,7 +26,7 @@ use std::{
 
 #[derive(Debug, Clone, Copy)]
 pub struct EffectEvalContext {
-    pub time: TimeCode,
+    pub time: TimelineTime,
 }
 
 pub type EffectGraphBuilder =
@@ -509,7 +510,7 @@ fn sort_category_tree(nodes: &mut [EffectCategoryNode]) {
     }
 }
 
-pub fn build_effect_render_graph(effects: &[EffectNode], time: TimeCode) -> EffectRenderGraph {
+pub fn build_effect_render_graph(effects: &[EffectNode], time: TimelineTime) -> EffectRenderGraph {
     let mut builder = EffectGraphBuilderState::new();
     let context = EffectEvalContext { time };
     for effect in effects.iter().filter(|effect| effect.is_enabled) {
@@ -526,11 +527,10 @@ pub fn build_effect_render_graph(effects: &[EffectNode], time: TimeCode) -> Effe
 pub fn compile_clip_effect_graph(
     effects: &[EffectNode],
     masks: &[MaskComponent],
-    time: TimeCode,
+    time: TimelineTime,
 ) -> Option<Arc<CompiledEffectGraph>> {
     use crate::graph::{get_or_compile_scheduled_render_graph, identity_compiled_effect_graph};
     use crate::graph::{EffectGraphNode, EffectGraphNodeId, EffectGraphNodeKind};
-    use mondrian_core::automation::timecode_to_ticks;
     if effects.iter().all(|effect| !effect.is_enabled) && masks.iter().all(|mask| !mask.enabled) {
         return identity_compiled_effect_graph();
     }
@@ -540,13 +540,11 @@ pub fn compile_clip_effect_graph(
     // Inject mask nodes after effects for each enabled mask.
     let mut current_output = graph.output;
     let mut next_id = graph.nodes.len() as u32;
-    let ticks = timecode_to_ticks(time);
-
     for mask in masks {
         if !mask.enabled {
             continue;
         }
-        let params = mask.evaluate_at(ticks);
+        let params = mask.evaluate_at(time);
 
         // MaskSource — rasterizes the shape into an alpha buffer.
         let src_id = EffectGraphNodeId(next_id);
@@ -1159,18 +1157,18 @@ mod tests {
     use crate::graph::EffectGraphNodeKind;
     use crate::LutCache;
     use mondrian_core::{
-        automation::{timecode_to_ticks, Keyframe, PropertyHost, PropertyMutation, PropertyValue},
-        types::Rational,
+        automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue},
+        TimelineTime,
     };
 
-    fn tc(frame: i64) -> TimeCode {
-        TimeCode::new(frame, Rational::new(1, 25))
+    fn tt(frame: i64) -> TimelineTime {
+        TimelineTime::new(frame, 25).expect("valid test time")
     }
 
     #[test]
     fn compile_clip_effect_graph_reuses_static_identity_for_empty_clip() {
-        let first = compile_clip_effect_graph(&[], &[], tc(0)).expect("identity graph");
-        let second = compile_clip_effect_graph(&[], &[], tc(100)).expect("identity graph");
+        let first = compile_clip_effect_graph(&[], &[], tt(0)).expect("identity graph");
+        let second = compile_clip_effect_graph(&[], &[], tt(100)).expect("identity graph");
 
         assert!(Arc::ptr_eq(&first, &second));
         assert!(first.graph.is_identity());
@@ -1181,8 +1179,8 @@ mod tests {
         let mut effect = EffectNode::with_defaults(EffectType::GaussianBlur);
         effect.is_enabled = false;
 
-        let first = compile_clip_effect_graph(&[effect], &[], tc(0)).expect("identity graph");
-        let second = compile_clip_effect_graph(&[], &[], tc(0)).expect("identity graph");
+        let first = compile_clip_effect_graph(&[effect], &[], tt(0)).expect("identity graph");
+        let second = compile_clip_effect_graph(&[], &[], tt(0)).expect("identity graph");
 
         assert!(Arc::ptr_eq(&first, &second));
         assert!(first.graph.is_identity());
@@ -1195,18 +1193,18 @@ mod tests {
         effect
             .apply_property_mutation(PropertyMutation::SetKeyframe {
                 path: radius_path.clone(),
-                keyframe: Keyframe::linear(timecode_to_ticks(tc(0)), PropertyValue::Float(8.0)),
+                keyframe: Keyframe::linear(tt(0), PropertyValue::Float(8.0)),
             })
             .expect("set start keyframe");
         effect
             .apply_property_mutation(PropertyMutation::SetKeyframe {
                 path: radius_path.clone(),
-                keyframe: Keyframe::linear(timecode_to_ticks(tc(10)), PropertyValue::Float(28.0)),
+                keyframe: Keyframe::linear(tt(10), PropertyValue::Float(28.0)),
             })
             .expect("set end keyframe");
 
         let value = effect
-            .evaluate_property(&radius_path, tc(5))
+            .evaluate_property(&radius_path, tt(5))
             .and_then(|value| value.as_f32())
             .expect("evaluate blur");
         assert!((value - 18.0).abs() < 0.01);
@@ -1271,7 +1269,7 @@ mod tests {
             )
             .expect("set intensity");
 
-        let graph = build_effect_render_graph(&[effect], tc(0));
+        let graph = build_effect_render_graph(&[effect], tt(0));
         assert!(graph.nodes.iter().any(|n| matches!(
             &n.kind,
             EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Lut3D { .. }, .. }
@@ -1317,13 +1315,13 @@ mod tests {
             .expect("set plugin property");
 
         let value = effect
-            .evaluate_property(&exposure_path, tc(0))
+            .evaluate_property(&exposure_path, tt(0))
             .and_then(|value| value.as_f32())
             .expect("read plugin property");
         assert!((value - 0.85).abs() < 0.001);
 
         // Verify the effect produces a graph node
-        let graph = build_effect_render_graph(&[effect], tc(0));
+        let graph = build_effect_render_graph(&[effect], tt(0));
         assert!(!graph.nodes.is_empty());
         assert_eq!(effect_display_name(&plugin_type), "AI 自动曝光".to_string());
     }
@@ -1357,7 +1355,7 @@ mod tests {
         );
 
         let effect = EffectNode::with_defaults(plugin_type);
-        let graph = build_effect_render_graph(&[effect], tc(0));
+        let graph = build_effect_render_graph(&[effect], tt(0));
         let custom_node = graph.nodes.iter().find(|n| {
             matches!(
                 &n.kind,
@@ -1419,7 +1417,7 @@ mod tests {
         );
 
         let effect = EffectNode::with_defaults(plugin_type.clone());
-        let graph = build_effect_render_graph(&[effect], tc(0));
+        let graph = build_effect_render_graph(&[effect], tt(0));
         assert_eq!(graph.nodes.len(), 3);
         assert!(matches!(
             graph.node(crate::graph::EffectGraphNodeId(1)).map(|node| &node.kind),
@@ -1473,7 +1471,7 @@ mod tests {
         );
 
         let effect = EffectNode::with_defaults(plugin_type.clone());
-        let graph = build_effect_render_graph(&[effect], tc(0));
+        let graph = build_effect_render_graph(&[effect], tt(0));
         let custom_node = graph.nodes.iter().find_map(|n| match &n.kind {
             EffectGraphNodeKind::UnaryEffect {
                 op: EffectRenderOp::Custom { cache_key, cache_policy, .. },
@@ -1510,7 +1508,7 @@ mod tests {
         );
 
         let effect = EffectNode::new(plugin_type.clone());
-        let graph = build_effect_render_graph(&[effect], tc(0));
+        let graph = build_effect_render_graph(&[effect], tt(0));
         assert!(graph.is_identity());
 
         let status =

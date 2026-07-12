@@ -194,11 +194,11 @@ mod tests {
     };
     use mondrian_core::{
         automation::{PropertyDescriptor, PropertyValue},
-        types::{Rational, TimeCode},
+        TimelineTime,
     };
 
-    fn tc(frame: i64) -> TimeCode {
-        TimeCode::new(frame, Rational::new(1, 25))
+    fn tt(frame: i64) -> TimelineTime {
+        TimelineTime::new(frame, 25).expect("valid test time")
     }
 
     #[test]
@@ -234,7 +234,7 @@ mod tests {
         register_effect_definition(definition);
 
         let effect = crate::EffectNode::with_defaults(plugin_type.clone());
-        let graph = build_effect_render_graph(&[effect], tc(0));
+        let graph = build_effect_render_graph(&[effect], tt(0));
         assert_eq!(graph.nodes.len(), 3);
 
         let caps = effect_definition(&plugin_type).expect("effect definition").capabilities();

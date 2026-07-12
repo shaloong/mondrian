@@ -10,11 +10,8 @@ fn create_state_with_video_clips(count: usize) -> (AppState, TrackId, Vec<ClipId
     let track_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
     let mut clip_ids = Vec::new();
     for index in 0..count {
-        let clip = Clip::new(
-            AssetId::new(),
-            TimeCode::new((index as i64) * 30, tb),
-            TimeCode::new(20, tb),
-        );
+        let clip =
+            Clip::new(AssetId::new(), tt((index as i64) * 30, tb), tt(20, tb)).expect("valid clip");
         clip_ids.push(clip.id);
         state.sequence.as_mut().expect("sequence should exist").video_tracks[0]
             .add_clip(clip)
@@ -33,7 +30,7 @@ fn switching_active_animation_clip_clears_selection_and_bubble_host() {
     let selected = AnimationKeyframeSelection {
         clip_id: clip_ids[0],
         path: Transform2D::OPACITY_PATH.to_string(),
-        time: 0,
+        time: TimelineTime::ZERO,
     };
     state.select_animation_keyframe_only(selected);
     state.set_animation_bubble_host(AnimationBubbleHost::Graph);
@@ -58,7 +55,7 @@ fn switching_active_animation_property_within_clip_preserves_selection_and_bubbl
     let selected = AnimationKeyframeSelection {
         clip_id: clip_ids[0],
         path: Transform2D::OPACITY_PATH.to_string(),
-        time: 0,
+        time: TimelineTime::ZERO,
     };
     state.select_animation_keyframe_only(selected.clone());
     state.set_animation_bubble_host(AnimationBubbleHost::Timeline);
@@ -95,8 +92,8 @@ fn clearing_animation_selection_preserves_last_active_property_per_clip() {
 fn selected_animation_interpolation_mode_returns_none_for_mixed_modes() {
     let (mut state, track_id, clip_ids, tb) = create_state_with_video_clips(1);
     let selection = clip_ref(track_id, clip_ids[0]);
-    let start = mondrian_core::automation::timecode_to_ticks(TimeCode::new(0, tb));
-    let end = mondrian_core::automation::timecode_to_ticks(TimeCode::new(10, tb));
+    let start = tt(0, tb);
+    let end = tt(10, tb);
 
     state
         .mutate_clip_property(
@@ -142,9 +139,9 @@ fn selected_animation_interpolation_mode_returns_none_for_mixed_modes() {
 fn copy_paste_animation_keyframes_reassigns_ids_and_updates_selection() {
     let (mut state, track_id, clip_ids, tb) = create_state_with_video_clips(1);
     let selection = clip_ref(track_id, clip_ids[0]);
-    let first = mondrian_core::automation::timecode_to_ticks(TimeCode::new(5, tb));
-    let second = mondrian_core::automation::timecode_to_ticks(TimeCode::new(10, tb));
-    let destination = mondrian_core::automation::timecode_to_ticks(TimeCode::new(20, tb));
+    let first = tt(5, tb);
+    let second = tt(10, tb);
+    let destination = tt(20, tb);
 
     for (time, value) in [(first, 0.2), (second, 0.8)] {
         state
@@ -186,7 +183,11 @@ fn copy_paste_animation_keyframes_reassigns_ids_and_updates_selection() {
     assert!(state.copy_selected_animation_keyframes(selection).expect("copy"));
     assert!(state.paste_animation_keyframes(selection, destination).expect("paste"));
 
-    let pasted_times = vec![destination, destination + (second - first)];
+    let offset = second.checked_sub(first).expect("valid keyframe offset");
+    let pasted_times = vec![
+        destination,
+        destination.checked_add(offset).expect("valid pasted time"),
+    ];
     let property = state
         .clip_snapshot(selection)
         .and_then(|clip| clip.property_bag().ok())

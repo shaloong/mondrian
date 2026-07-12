@@ -10,13 +10,14 @@ use std::rc::Rc;
 
 use mondrian_assets::library::FolderRecord;
 use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
-use mondrian_core::automation::timecode_to_ticks;
 use mondrian_core::automation::PropertyValue;
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::types::{
-    AssetId, ClipId, ColorSpace, EffectId, JobId, Rational, SequenceId, TimeCode, TrackId,
+    AssetId, ClipId, ColorSpace, EffectId, FramePosition, JobId, Rational, SequenceId, TrackId,
 };
-use mondrian_core::{Color, WorkingColorSpace};
+use mondrian_core::{
+    Color, FrameRounding, SmpteCountingMode, SmpteDisplayTimecode, TimelineTime, WorkingColorSpace,
+};
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
 use mondrian_effects::{effect_display_name, effect_library_types};
@@ -372,7 +373,7 @@ impl AppUiPanelModels {
 pub fn demo_app_state() -> AppState {
     let mut state = AppState::new();
     let mut sequence = demo_sequence();
-    sequence.playhead = TimeCode::new(76, sequence.time_base());
+    sequence.playhead = crate::app::tt(76, sequence.time_base());
 
     if let Some(selection) = demo_selection(&sequence) {
         state.replace_clip_selection(vec![selection]);
@@ -690,11 +691,19 @@ impl ViewerPanelModel {
         };
         let resolution = sequence.settings.resolution;
         let current_frame = state.current_frame().max(0);
-        let timecode_label = state
-            .current_time_code()
-            .map(|timecode| timecode.to_smpte())
-            .unwrap_or_else(|| TimeCode::new(current_frame, sequence.time_base()).to_smpte());
-        let duration_frame = sequence.total_duration().frame.max(0);
+        let timecode_label = SmpteDisplayTimecode::from_frame_position(
+            FramePosition::new(current_frame, sequence.time_base()),
+            SmpteCountingMode::NonDropFrame,
+        )
+        .map(SmpteDisplayTimecode::label)
+        .unwrap_or_else(|_| "--:--:--:--".to_owned());
+        let Ok(duration_frame) = sequence.total_duration().and_then(|time| {
+            time.to_frame_position(sequence.settings.frame_rate, FrameRounding::Ceil)
+                .map_err(Into::into)
+        }) else {
+            return Self::empty();
+        };
+        let duration_frame = duration_frame.frame.max(0);
         let fps = sequence.settings.frame_rate.to_f64();
         let preview_state = preview
             .map(|preview| preview.viewer_preview_for_state(state))
@@ -991,6 +1000,7 @@ impl TimelinePanelModel {
             let mut view_track = timeline_track_from_sequence_track(
                 track,
                 true,
+                sequence.settings.frame_rate,
                 selected_clips,
                 selected_tracks,
                 library,
@@ -1007,6 +1017,7 @@ impl TimelinePanelModel {
             let mut view_track = timeline_track_from_sequence_track(
                 track,
                 false,
+                sequence.settings.frame_rate,
                 selected_clips,
                 selected_tracks,
                 library,
@@ -1035,9 +1046,21 @@ impl TimelinePanelModel {
             .then(|| "当前序列没有轨道\n添加视频轨道或音频轨道后开始编辑".to_owned());
         Self {
             tracks,
-            playhead_frame: sequence.playhead.frame.max(0),
-            in_point_frame: sequence.in_point_frame(),
-            out_point_frame: sequence.out_point_frame(),
+            playhead_frame: sequence
+                .playhead
+                .to_frame_position(sequence.settings.frame_rate, FrameRounding::Nearest)
+                .map(|position| position.frame.max(0))
+                .unwrap_or(0),
+            in_point_frame: sequence
+                .in_point()
+                .to_frame_position(sequence.settings.frame_rate, FrameRounding::Floor)
+                .map(|position| position.frame.max(0))
+                .unwrap_or(0),
+            out_point_frame: sequence.out_point().and_then(|time| {
+                time.to_frame_position(sequence.settings.frame_rate, FrameRounding::Floor)
+                    .ok()
+                    .map(|position| position.frame.max(0))
+            }),
             frame_rate: sequence.settings.frame_rate,
             enabled: true,
             empty_message,
@@ -1286,7 +1309,7 @@ impl InspectorPanelModel {
             return Self::empty();
         };
 
-        let time = state.current_time_code().unwrap_or(sequence.playhead);
+        let time = state.current_timeline_time().ok().flatten().unwrap_or(sequence.playhead);
         let opacity = (clip.transform.evaluate_opacity(time) * 100.0).clamp(0.0, 100.0);
         let position = clip.transform.get_position(time);
         let scale = clip.transform.get_scale(time);
@@ -1310,16 +1333,34 @@ impl InspectorPanelModel {
             position_y: position.y,
             scale_percent: scale.x * 100.0,
             rotation_degrees: clip_rotation_degrees(clip, time),
-            in_frame: clip.position.frame as f32,
-            out_frame: clip.end_position().frame as f32,
-            max_frame: sequence.total_duration().frame.max(1) as f32,
+            in_frame: clip
+                .position
+                .to_frame_position(sequence.settings.frame_rate, FrameRounding::Nearest)
+                .map(|position| position.frame as f32)
+                .unwrap_or(0.0),
+            out_frame: clip
+                .end_position()
+                .and_then(|time| {
+                    time.to_frame_position(sequence.settings.frame_rate, FrameRounding::Nearest)
+                        .map_err(Into::into)
+                })
+                .map(|position| position.frame as f32)
+                .unwrap_or(0.0),
+            max_frame: sequence
+                .total_duration()
+                .and_then(|time| {
+                    time.to_frame_position(sequence.settings.frame_rate, FrameRounding::Ceil)
+                        .map_err(Into::into)
+                })
+                .map(|position| position.frame.max(1) as f32)
+                .unwrap_or(1.0),
             tint_area_mode: ColorPickerAreaMode::Wheel,
             curve_points: opacity_curve_points_for_clip(clip, time),
             effects: clip
                 .effects
                 .iter()
                 .map(|effect| {
-                    let time_ticks = timecode_to_ticks(time);
+                    let time_ticks = time;
                     InspectorEffectModel {
                         effect_id: effect.id,
                         label: effect_display_name(&effect.effect_type),
@@ -2035,6 +2076,7 @@ fn viewer_control_action(control: ViewerControl) -> Action {
 fn timeline_track_from_sequence_track(
     track: &Track,
     is_video_track: bool,
+    frame_rate: Rational,
     selected_clips: &[SelectedClipRef],
     selected_tracks: &[TrackId],
     library: Option<&AssetLibrary>,
@@ -2046,7 +2088,15 @@ fn timeline_track_from_sequence_track(
     let clips = track
         .clips
         .iter()
-        .map(|clip| timeline_clip_from_sequence_clip(is_video_track, clip, selected_clips, library))
+        .filter_map(|clip| {
+            timeline_clip_from_sequence_clip(
+                is_video_track,
+                clip,
+                frame_rate,
+                selected_clips,
+                library,
+            )
+        })
         .collect();
 
     let track = if is_video_track {
@@ -2060,9 +2110,10 @@ fn timeline_track_from_sequence_track(
 fn timeline_clip_from_sequence_clip(
     is_video_track: bool,
     clip: &Clip,
+    frame_rate: Rational,
     selected_clips: &[SelectedClipRef],
     library: Option<&AssetLibrary>,
-) -> TimelineClip {
+) -> Option<TimelineClip> {
     let selected = selected_clips.iter().any(|selection| selection.clip_id == clip.id);
     let label = clip.label.clone().unwrap_or_else(|| default_clip_label(clip));
     let is_video = is_video_track;
@@ -2077,15 +2128,23 @@ fn timeline_clip_from_sequence_clip(
     } else {
         TimelineClipKind::Audio
     };
-    let mut view = TimelineClip::new(
-        label,
-        clip.position.frame.max(0),
-        clip.duration.frame.max(1),
-    )
-    .kind(kind)
-    .selected(selected)
-    .disabled(clip.is_disabled)
-    .nested(clip.is_nested_sequence());
+    let start = clip
+        .position
+        .to_frame_position(frame_rate, FrameRounding::Nearest)
+        .ok()?
+        .frame
+        .max(0);
+    let duration = clip
+        .duration
+        .to_frame_position(frame_rate, FrameRounding::Ceil)
+        .ok()?
+        .frame
+        .max(1);
+    let mut view = TimelineClip::new(label, start, duration)
+        .kind(kind)
+        .selected(selected)
+        .disabled(clip.is_disabled)
+        .nested(clip.is_nested_sequence());
     if let Some(color) = timeline_clip_color(clip, is_video) {
         view = view.with_color(color);
     }
@@ -2094,13 +2153,13 @@ fn timeline_clip_from_sequence_clip(
             if let Ok(Some(record)) = lib.get_asset(clip.asset_id) {
                 view = view.with_source_identity(
                     record.id,
-                    clip.source_in.to_secs(),
-                    clip.source_out.to_secs(),
+                    clip.source_in.to_f64(),
+                    clip.source_out.to_f64(),
                 );
             }
         }
     }
-    view
+    Some(view)
 }
 
 fn default_clip_label(clip: &Clip) -> String {
@@ -2131,22 +2190,26 @@ fn timeline_clip_color(clip: &Clip, is_video_track: bool) -> Option<Color> {
     }
 }
 
-fn clip_rotation_degrees(clip: &Clip, time: TimeCode) -> f32 {
+fn clip_rotation_degrees(clip: &Clip, time: TimelineTime) -> f32 {
     clip.transform
         .to_property_bag()
-        .evaluate(Transform2D::ROTATION_PATH, timecode_to_ticks(time))
+        .evaluate(Transform2D::ROTATION_PATH, time)
         .and_then(|value| value.as_f32())
         .unwrap_or(0.0)
 }
 
-fn opacity_curve_points_for_clip(clip: &Clip, time: TimeCode) -> Vec<CurvePoint> {
+fn opacity_curve_points_for_clip(clip: &Clip, time: TimelineTime) -> Vec<CurvePoint> {
     let bag = clip.transform.to_property_bag();
     let Some(opacity) = bag.property(Transform2D::OPACITY_PATH) else {
         return default_opacity_curve(clip.transform.evaluate_opacity(time));
     };
-    let start_tick = timecode_to_ticks(clip.position);
-    let end_tick = timecode_to_ticks(clip.end_position());
-    let duration_ticks = (end_tick - start_tick).max(1);
+    let start_tick = clip.position;
+    let Ok(end_tick) = clip.end_position() else {
+        return default_opacity_curve(clip.transform.evaluate_opacity(time));
+    };
+    let Ok(duration_ticks) = end_tick.checked_sub(start_tick) else {
+        return default_opacity_curve(clip.transform.evaluate_opacity(time));
+    };
 
     let mut points = vec![CurvePoint::new(
         0.0,
@@ -2159,13 +2222,14 @@ fn opacity_curve_points_for_clip(clip: &Clip, time: TimeCode) -> Vec<CurvePoint>
             }
             let keyframe = opacity.keyframe_at(keyframe_time)?;
             let y = keyframe.value.as_f32()?.clamp(0.0, 1.0);
-            let x = ((keyframe_time - start_tick) as f32 / duration_ticks as f32).clamp(0.0, 1.0);
+            let elapsed = keyframe_time.checked_sub(start_tick).ok()?.to_f64();
+            let x = (elapsed / duration_ticks.to_f64()).clamp(0.0, 1.0) as f32;
             Some(CurvePoint::new(x, y))
         }),
     );
     points.push(CurvePoint::new(
         1.0,
-        clip.transform.evaluate_opacity(clip.end_position()),
+        clip.transform.evaluate_opacity(end_tick),
     ));
     points.sort_by(|a, b| a.x.total_cmp(&b.x));
     points.dedup_by(|a, b| (a.x - b.x).abs() < f32::EPSILON);
@@ -2845,21 +2909,31 @@ fn demo_sequence() -> Sequence {
     let tb = sequence.time_base();
     let nested_id = SequenceId::new();
 
-    let mut adjustment =
-        Clip::new_adjustment_layer(AssetId::new(), TimeCode::new(36, tb), TimeCode::new(84, tb));
+    let mut adjustment = Clip::new_adjustment_layer(
+        AssetId::new(),
+        crate::app::tt(36, tb),
+        crate::app::tt(84, tb),
+    )
+    .expect("valid clip");
     adjustment.label = Some("Adjustment".to_string());
     sequence.video_tracks[2].add_clip(adjustment).expect("add adjustment");
 
     let mut title = Clip::new_nested_sequence(
         nested_id,
-        TimeCode::new(132, tb),
-        TimeCode::new(48, tb),
+        crate::app::tt(132, tb),
+        crate::app::tt(48, tb),
         Some("Title".to_string()),
-    );
+    )
+    .expect("valid clip");
     title.solid_color = Some(Color::from_hex(0x4B7BE5));
     sequence.video_tracks[2].add_clip(title).expect("add title");
 
-    let mut b_roll = Clip::new(AssetId::new(), TimeCode::new(18, tb), TimeCode::new(72, tb));
+    let mut b_roll = Clip::new(
+        AssetId::new(),
+        crate::app::tt(18, tb),
+        crate::app::tt(72, tb),
+    )
+    .expect("valid clip");
     b_roll.label = Some("B-roll".to_string());
     b_roll.solid_color = Some(Color::from_hex(0x2C7A7B));
     sequence.video_tracks[1].add_clip(b_roll).expect("add b-roll");
@@ -2867,43 +2941,57 @@ fn demo_sequence() -> Sequence {
     let mut overlay = Clip::new_solid_color(
         AssetId::new(),
         Color::from_hex(0x805AD5),
-        TimeCode::new(112, tb),
-        TimeCode::new(56, tb),
-    );
+        crate::app::tt(112, tb),
+        crate::app::tt(56, tb),
+    )
+    .expect("valid clip");
     overlay.label = Some("Overlay".to_string());
     sequence.video_tracks[1].add_clip(overlay).expect("add overlay");
 
-    let mut interview = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(96, tb));
+    let mut interview = Clip::new(
+        AssetId::new(),
+        crate::app::tt(0, tb),
+        crate::app::tt(96, tb),
+    )
+    .expect("valid clip");
     interview.label = Some("Interview".to_string());
     sequence.video_tracks[0].add_clip(interview).expect("add interview");
 
     let mut cutaway = Clip::new(
         AssetId::new(),
-        TimeCode::new(104, tb),
-        TimeCode::new(72, tb),
-    );
+        crate::app::tt(104, tb),
+        crate::app::tt(72, tb),
+    )
+    .expect("valid clip");
     cutaway.label = Some("Cutaway".to_string());
     cutaway.solid_color = Some(Color::from_hex(0x2F855A));
     sequence.video_tracks[0].add_clip(cutaway).expect("add cutaway");
 
     let mut outro = Clip::new(
         AssetId::new(),
-        TimeCode::new(190, tb),
-        TimeCode::new(44, tb),
-    );
+        crate::app::tt(190, tb),
+        crate::app::tt(44, tb),
+    )
+    .expect("valid clip");
     outro.label = Some("Outro".to_string());
     outro.solid_color = Some(Color::from_hex(0x744210));
     sequence.video_tracks[0].add_clip(outro).expect("add outro");
 
-    let mut dialogue = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(176, tb));
+    let mut dialogue = Clip::new(
+        AssetId::new(),
+        crate::app::tt(0, tb),
+        crate::app::tt(176, tb),
+    )
+    .expect("valid clip");
     dialogue.label = Some("Dialogue".to_string());
     sequence.audio_tracks[0].add_clip(dialogue).expect("add dialogue");
 
     let mut music = Clip::new(
         AssetId::new(),
-        TimeCode::new(24, tb),
-        TimeCode::new(210, tb),
-    );
+        crate::app::tt(24, tb),
+        crate::app::tt(210, tb),
+    )
+    .expect("valid clip");
     music.label = Some("Music Bed".to_string());
     music.solid_color = Some(Color::from_hex(0x2B6CB0));
     sequence.audio_tracks[1].add_clip(music).expect("add music");
@@ -4348,6 +4436,11 @@ fn inspector_effect_property_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::TimelineTime {
+        let numerator = frame.checked_mul(time_base.num).expect("test time fits i64");
+        mondrian_core::TimelineTime::new(numerator, time_base.den).expect("valid test time")
+    }
     use crate::app::ui_actions::{
         AppShellInterpretAssetDialogPayload, AppShellRelinkAssetDialogPayload,
         AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
@@ -4368,7 +4461,7 @@ mod tests {
     };
     use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
-    use mondrian_core::types::{AssetId, TimeCode};
+    use mondrian_core::types::AssetId;
     use mondrian_effects::EffectNodeExt;
     use mondrian_ui_core::tree::WidgetTreeView;
     use mondrian_ui_core::types::{
@@ -4684,6 +4777,7 @@ mod tests {
         let mut sequence = Sequence::new("empty edit");
         sequence.video_tracks.clear();
         sequence.audio_tracks.clear();
+        sequence.audio_program = mondrian_timeline::AudioProgram::for_tracks([]);
 
         let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
 
@@ -5915,17 +6009,17 @@ mod tests {
     fn timeline_model_maps_sequence_tracks_clips_and_selection() {
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
-        sequence.playhead = TimeCode::new(42, tb);
-        sequence.mark_in(12);
-        sequence.mark_out(64);
+        sequence.playhead = tt(42, tb);
+        sequence.mark_in(tt(12, tb));
+        sequence.mark_out(tt(64, tb));
 
-        let mut video = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+        let mut video = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
         video.label = Some("Interview".to_string());
         let video_id = video.id;
         let video_track_id = sequence.video_tracks[0].id;
         sequence.video_tracks[0].add_clip(video).expect("add video clip");
 
-        let mut audio = Clip::new(AssetId::new(), TimeCode::new(12, tb), TimeCode::new(48, tb));
+        let mut audio = Clip::new(AssetId::new(), tt(12, tb), tt(48, tb)).expect("valid clip");
         audio.label = Some("Dialogue".to_string());
         audio.is_disabled = true;
         sequence.audio_tracks[0].add_clip(audio).expect("add audio clip");
@@ -6197,7 +6291,7 @@ mod tests {
     fn timeline_panel_disabled_clip_still_selects_for_inspection() {
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
-        let mut clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(24, tb));
+        let mut clip = Clip::new(AssetId::new(), tt(0, tb), tt(24, tb)).expect("valid clip");
         clip.is_disabled = true;
         let clip_id = clip.id;
         let track_id = sequence.video_tracks[0].id;
@@ -6739,12 +6833,15 @@ mod tests {
         let mut sequence = Sequence::new("parent");
         let tb = sequence.time_base();
         sequence.video_tracks[0]
-            .add_clip(Clip::new_nested_sequence(
-                nested_id,
-                TimeCode::new(0, tb),
-                TimeCode::new(24, tb),
-                Some("Nested".to_owned()),
-            ))
+            .add_clip(
+                Clip::new_nested_sequence(
+                    nested_id,
+                    tt(0, tb),
+                    tt(24, tb),
+                    Some("Nested".to_owned()),
+                )
+                .expect("valid clip"),
+            )
             .expect("add nested clip");
         let display_track_index = video_display_index(&sequence, 0);
         let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);
@@ -6775,7 +6872,7 @@ mod tests {
         let tb = sequence.time_base();
         let actual_track_id = sequence.video_tracks[0].id;
         let stale_track_id = sequence.video_tracks[1].id;
-        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(24, tb));
+        let clip = Clip::new(AssetId::new(), tt(0, tb), tt(24, tb)).expect("valid clip");
         let clip_id = clip.id;
         sequence.video_tracks[0].add_clip(clip).expect("add clip");
         let display_track_index = video_display_index(&sequence, 0);
@@ -6810,12 +6907,8 @@ mod tests {
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
         let color = Color::from_rgba8(20, 90, 160, 180);
-        let mut clip = Clip::new_solid_color(
-            AssetId::new(),
-            color,
-            TimeCode::new(4, tb),
-            TimeCode::new(18, tb),
-        );
+        let mut clip = Clip::new_solid_color(AssetId::new(), color, tt(4, tb), tt(18, tb))
+            .expect("valid clip");
         clip.is_disabled = true;
         clip.transform.set_position(glam::Vec2::new(192.0, 108.0));
         clip.transform.set_scale(glam::Vec2::splat(1.25));
@@ -7178,32 +7271,23 @@ mod tests {
         let mut state = AppState::new();
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
-        let mut clip = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+        let mut clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
         let clip_id = clip.id;
         let track_id = sequence.video_tracks[0].id;
 
         clip.apply_property_mutation(PropertyMutation::SetKeyframe {
             path: Transform2D::OPACITY_PATH.to_string(),
-            keyframe: Keyframe::linear(
-                timecode_to_ticks(TimeCode::new(10, tb)),
-                PropertyValue::Float(0.0),
-            ),
+            keyframe: Keyframe::linear(tt(10, tb), PropertyValue::Float(0.0)),
         })
         .expect("set start opacity");
         clip.apply_property_mutation(PropertyMutation::SetKeyframe {
             path: Transform2D::OPACITY_PATH.to_string(),
-            keyframe: Keyframe::linear(
-                timecode_to_ticks(TimeCode::new(20, tb)),
-                PropertyValue::Float(0.5),
-            ),
+            keyframe: Keyframe::linear(tt(20, tb), PropertyValue::Float(0.5)),
         })
         .expect("set mid opacity");
         clip.apply_property_mutation(PropertyMutation::SetKeyframe {
             path: Transform2D::OPACITY_PATH.to_string(),
-            keyframe: Keyframe::linear(
-                timecode_to_ticks(TimeCode::new(30, tb)),
-                PropertyValue::Float(1.0),
-            ),
+            keyframe: Keyframe::linear(tt(30, tb), PropertyValue::Float(1.0)),
         })
         .expect("set end opacity");
 
@@ -7232,16 +7316,13 @@ mod tests {
         let mut state = AppState::new();
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
-        let mut clip = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+        let mut clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
         let clip_id = clip.id;
         let track_id = sequence.video_tracks[0].id;
 
         clip.apply_property_mutation(PropertyMutation::SetKeyframe {
             path: Transform2D::OPACITY_PATH.to_string(),
-            keyframe: Keyframe::linear(
-                timecode_to_ticks(TimeCode::new(20, tb)),
-                PropertyValue::Float(0.5),
-            ),
+            keyframe: Keyframe::linear(tt(20, tb), PropertyValue::Float(0.5)),
         })
         .expect("set midpoint opacity");
 
@@ -7598,7 +7679,7 @@ mod tests {
     fn effect_panel_model_adds_effect_actions_for_selected_video_clip() {
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
-        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+        let clip = Clip::new(AssetId::new(), tt(0, tb), tt(30, tb)).expect("valid clip");
         let clip_id = clip.id;
         let track_id = sequence.video_tracks[0].id;
         sequence.video_tracks[0].add_clip(clip).expect("add video clip");
@@ -7671,7 +7752,7 @@ mod tests {
         let mut state = AppState::new();
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
-        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+        let clip = Clip::new(AssetId::new(), tt(0, tb), tt(30, tb)).expect("valid clip");
         let clip_id = clip.id;
         let track_id = sequence.video_tracks[0].id;
         sequence.video_tracks[0].add_clip(clip).expect("add video clip");
@@ -7718,7 +7799,7 @@ mod tests {
         let mut state = AppState::new();
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
-        let mut clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+        let mut clip = Clip::new(AssetId::new(), tt(0, tb), tt(30, tb)).expect("valid clip");
         let remove_effect = mondrian_effects::EffectNode::with_defaults(EffectType::GaussianBlur);
         let keep_effect = mondrian_effects::EffectNode::with_defaults(EffectType::Sharpen);
         let remove_id = remove_effect.id;
@@ -7770,7 +7851,7 @@ mod tests {
         let mut state = AppState::new();
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
-        let mut clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+        let mut clip = Clip::new(AssetId::new(), tt(0, tb), tt(30, tb)).expect("valid clip");
         let first = mondrian_effects::EffectNode::with_defaults(EffectType::GaussianBlur);
         let second = mondrian_effects::EffectNode::with_defaults(EffectType::Sharpen);
         let third = mondrian_effects::EffectNode::with_defaults(EffectType::BasicCorrection);
@@ -8366,7 +8447,7 @@ mod tests {
         let mut state = AppState::new();
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
-        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+        let clip = Clip::new(AssetId::new(), tt(0, tb), tt(30, tb)).expect("valid clip");
         let clip_id = clip.id;
         let track_id = sequence.video_tracks[0].id;
         sequence.video_tracks[0].add_clip(clip).expect("add video clip");
@@ -8394,7 +8475,7 @@ mod tests {
         let mut state = AppState::new();
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
-        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+        let clip = Clip::new(AssetId::new(), tt(0, tb), tt(30, tb)).expect("valid clip");
         let clip_id = clip.id;
         let track_id = sequence.video_tracks[0].id;
         sequence.video_tracks[0].add_clip(clip).expect("add video clip");
@@ -8431,7 +8512,7 @@ mod tests {
         let mut state = AppState::new();
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
-        let clip = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+        let clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
         let clip_id = clip.id;
         let track_id = sequence.video_tracks[0].id;
         sequence.video_tracks[0].add_clip(clip).expect("add video clip");
@@ -8464,7 +8545,7 @@ mod tests {
         let mut state = AppState::new();
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
-        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+        let clip = Clip::new(AssetId::new(), tt(0, tb), tt(30, tb)).expect("valid clip");
         let clip_id = clip.id;
         let track_id = sequence.video_tracks[0].id;
         sequence.video_tracks[0].add_clip(clip).expect("add video clip");
@@ -8517,12 +8598,8 @@ mod tests {
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
         let color = Color::from_rgba8(12, 34, 56, 200);
-        let solid = Clip::new_solid_color(
-            AssetId::new(),
-            color,
-            TimeCode::new(0, tb),
-            TimeCode::new(30, tb),
-        );
+        let solid = Clip::new_solid_color(AssetId::new(), color, tt(0, tb), tt(30, tb))
+            .expect("valid clip");
         sequence.video_tracks[0].add_clip(solid).expect("add solid clip");
         let display_track_index = video_display_index(&sequence, 0);
 
@@ -8542,25 +8619,16 @@ mod tests {
         let mut sequence = Sequence::new("edit");
         let tb = sequence.time_base();
         sequence.video_tracks[0]
-            .add_clip(Clip::new(
-                AssetId::new(),
-                TimeCode::new(0, tb),
-                TimeCode::new(30, tb),
-            ))
+            .add_clip(Clip::new(AssetId::new(), tt(0, tb), tt(30, tb)).expect("valid clip"))
             .expect("add video clip");
         sequence.video_tracks[0]
-            .add_clip(Clip::new_adjustment_layer(
-                AssetId::new(),
-                TimeCode::new(40, tb),
-                TimeCode::new(30, tb),
-            ))
+            .add_clip(
+                Clip::new_adjustment_layer(AssetId::new(), tt(40, tb), tt(30, tb))
+                    .expect("valid clip"),
+            )
             .expect("add adjustment clip");
         sequence.audio_tracks[0]
-            .add_clip(Clip::new(
-                AssetId::new(),
-                TimeCode::new(0, tb),
-                TimeCode::new(30, tb),
-            ))
+            .add_clip(Clip::new(AssetId::new(), tt(0, tb), tt(30, tb)).expect("valid clip"))
             .expect("add audio clip");
 
         let model = TimelinePanelModel::from_sequence(&sequence, &[], &[]);

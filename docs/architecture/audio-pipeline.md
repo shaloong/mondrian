@@ -1,8 +1,12 @@
 # Audio Pipeline
 
-Audio decode/mix and realtime output live in `mondrian-media`; the Playback
-Engine owns Clock Master qualification and `mondrian-app` is the timeline/render
-Adapter.
+Audio decode/mix and realtime output still live in `mondrian-media`; the
+Playback Engine owns Clock Master qualification and `mondrian-app` remains the
+legacy timeline/render Adapter. Persistent authoring now lives in
+`mondrian-timeline::audio`, while `mondrian-audio` validates, resolves a typed
+Signal Closure, compiles built-in Gain, and executes deterministic reference
+PCM without hidden clipping. Product decode/sink/export integration remains a
+migration task and the legacy Adapter is not an alternate semantic contract.
 
 ## Target authoring and execution boundary
 
@@ -284,10 +288,13 @@ dependency manifest, and hashes never authorize mutable state sharing.
 
 ### Current implementation gaps
 
-The repository does not yet implement this author or compiler model:
+The repository now implements the foundational author/compiler slice, but not
+the full product path:
 
-- `Sequence` currently stores only Timeline Tracks and has no Audio Program,
-  Semantic Catalog, public audio interface, Buses, or typed Routes.
+- `Sequence` owns Audio Contributions, keyed Track Mixer Channels, Buses,
+  Program Outputs, typed main routes, common processor racks, and explicit
+  Transition author entities. Roles, Semantic Catalog/Projection, sends, and
+  sidechains remain to be implemented.
 - `Clip.effects` stores video `EffectNode` values and must not be generalized by
   merely adding audio enum variants.
 - `TimelineAudioPcmRenderer` directly decodes active Clips into a flat list and
@@ -295,8 +302,8 @@ The repository does not yet implement this author or compiler model:
   automation, latency compensation, and plugin state.
 - `AudioMixer` is an interim flat mixer and currently applies hidden `tanh`
   soft-clipping; the compiled mix core must replace that behavior.
-- current automation property paths and `frame * 1000` time coordinates are not
-  stable audio Parameter IDs or exact audio time.
+- visual automation still carries legacy string property paths in part of its
+  schema; audio authoring already requires stable Parameter IDs and exact time.
 
 These are migration facts, not alternate supported semantics. New audio work
 must move through the author snapshot and compiler boundary rather than deepen
@@ -353,10 +360,9 @@ Timeline↔Audio dependency and a new all-purpose media/runtime crate.
 ### Foundation implementation order
 
 1. Introduce canonical Timeline Time, Time Domains/Transforms, stable Parameter
-   IDs, and exact curve primitives in `mondrian-core`. Keep compatibility
-   adapters while preparing one transactional project-schema migration from
-   legacy `TimeCode`/`TimeTicks`; no new persisted audio field may use the legacy
-   coordinate.
+   IDs, and exact curve primitives in `mondrian-core`. Alpha schema v2 replaces
+   legacy `TimeCode`/`TimeTicks` directly; no compatibility author coordinate is
+   retained.
 2. In one vertical slice, add only the necessary Sequence author entities in
    `mondrian-timeline` and create `mondrian-audio`: one Contribution → Track
    Channel → Program Output path, one built-in Gain processor, exact automation,
@@ -366,7 +372,8 @@ Timeline↔Audio dependency and a new all-purpose media/runtime crate.
    path consume the compiled slice, and remove hidden `tanh`. Do not keep the old
    flat mixer as a second interpretation path.
 4. Extend author data and compiler together in independently testable slices:
-   typed Routes and Buses with latency compensation; fades and two-input
+   typed Routes and Buses (the basic route/processing path exists; latency
+   compensation remains); fades and two-input
    Transitions; nested public outputs and per-instance State Domains; Roles,
    Semantic Projections, and Output Families. No full unused schema is built in
    advance.
@@ -430,8 +437,8 @@ atomics, and the lock-free PCM queue. Open failure retries exponentially from
 reopens while Synthetic Master continues.
 
 A new stream remains inactive while Audio Playback invalidates old render work,
-clears queued PCM, anchors scheduling to the current exact timeline
-`TimeCode`, and queues at least 120 ms. Callback consumption is enabled only
+clears queued PCM, anchors scheduling to the current exact `TimelineTime`, and
+queues at least 120 ms. Callback consumption is enabled only
 after that preroll **and** a `Consume` permission. Playback `Priming` supplies
 `Preroll`: render workers may fill the same generation to the high watermark,
 but the callback remains inactive and cannot run ahead of the held transport

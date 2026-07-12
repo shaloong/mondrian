@@ -10,7 +10,8 @@
 
 use crate::effect_data::EffectNode;
 use crate::mask_data::MaskComponent;
-use crate::types::{AssetId, BlendMode, ClipId, Color, ColorSpace, Rational, SequenceId, TimeCode};
+use crate::types::{AssetId, BlendMode, ClipId, Color, ColorSpace, Rational, SequenceId};
+use crate::{Result, TimelineTime};
 use serde::{Deserialize, Serialize};
 
 // ── Pure data enums (moved from mondrian-timeline) ────────────────────
@@ -185,7 +186,7 @@ pub struct FlatActiveClip {
     pub masks: Vec<MaskComponent>,
     pub solid_color: Option<Color>,
     pub interpretation: MediaInterpretation,
-    pub source_time: TimeCode,
+    pub source_time: TimelineTime,
     /// Affine transform matrix as 6-element array [a, c, tx, b, d, ty].
     pub transform_matrix: [f32; 6],
     pub opacity: f32,
@@ -201,7 +202,7 @@ pub struct FlatActiveClip {
 /// knows about this trait, never about `Sequence` itself.
 pub trait RenderPlanSource {
     /// Return all active clips at a given time, flattened.
-    fn flat_active_clips_at(&self, time: TimeCode) -> Vec<FlatActiveClip>;
+    fn flat_active_clips_at(&self, time: TimelineTime) -> Result<Vec<FlatActiveClip>>;
 
     /// Time base of the sequence.
     fn source_time_base(&self) -> Rational;

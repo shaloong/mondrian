@@ -692,7 +692,7 @@ fn residency_total(value: PlaybackClockResidency) -> u64 {
 mod tests {
     use super::*;
     use crate::{AudioDeviceClockObservation, FrameDemandSequence, PlaybackSnapshot};
-    use mondrian_core::{Rational, TimeCode};
+    use mondrian_core::{FramePosition, Rational};
     use std::time::Duration;
 
     fn at(ms: u64) -> MonotonicTimestamp {
@@ -708,7 +708,7 @@ mod tests {
         PlaybackSnapshot {
             epoch,
             state,
-            position: TimeCode::new(frame, Rational::new(1, 25)),
+            position: FramePosition::new(frame, Rational::new(1, 25)),
             clock_master: master,
             preview_scale: PreviewResolutionScale::Full,
             quality_revision: 1,
@@ -724,7 +724,7 @@ mod tests {
             sequence: FrameDemandSequence(sequence),
             sequence_id: None,
             timeline_revision: 1,
-            target: TimeCode::new(target_frame, Rational::new(1, 25)),
+            target: FramePosition::new(target_frame, Rational::new(1, 25)),
             deadline: at(500),
             preview_scale: PreviewResolutionScale::Full,
         }

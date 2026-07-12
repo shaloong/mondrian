@@ -85,7 +85,7 @@ fn set_clip_media_interpretation_is_undoable() {
     let seq = state.sequence.as_ref().expect("sequence");
     let tb = seq.time_base();
     let track_id = seq.video_tracks[0].id;
-    let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
     let clip_id = clip.id;
     state.sequence.as_mut().expect("sequence").video_tracks[0]
         .add_clip(clip)
@@ -120,7 +120,7 @@ fn set_clip_media_interpretation_rejects_locked_tracks() {
     let seq = state.sequence.as_ref().expect("sequence");
     let tb = seq.time_base();
     let track_id = seq.video_tracks[0].id;
-    let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
     let clip_id = clip.id;
     {
         let seq = state.sequence.as_mut().expect("sequence");
@@ -154,11 +154,7 @@ fn switching_sequences_preserves_independent_timelines() {
 
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
     state.sequence.as_mut().expect("sequence should exist").video_tracks[0]
-        .add_clip(Clip::new(
-            AssetId::new(),
-            TimeCode::new(0, tb),
-            TimeCode::new(10, tb),
-        ))
+        .add_clip(Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip"))
         .expect("add clip");
     state.sync_current_sequence_into_collection();
 
@@ -166,22 +162,18 @@ fn switching_sequences_preserves_independent_timelines() {
     let second = state.sequence.as_ref().expect("sequence should exist").id;
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
     state.sequence.as_mut().expect("sequence should exist").video_tracks[0]
-        .add_clip(Clip::new(
-            AssetId::new(),
-            TimeCode::new(20, tb),
-            TimeCode::new(10, tb),
-        ))
+        .add_clip(Clip::new(AssetId::new(), tt(20, tb), tt(10, tb)).expect("valid clip"))
         .expect("add second clip");
 
     state.switch_active_sequence(first).expect("switch to first");
     let seq = state.sequence.as_ref().expect("first sequence should be active");
     assert_eq!(seq.id, first);
-    assert_eq!(seq.video_tracks[0].clips[0].position.frame, 0);
+    assert_eq!(seq.video_tracks[0].clips[0].position, tt(0, tb));
 
     state.switch_active_sequence(second).expect("switch to second");
     let seq = state.sequence.as_ref().expect("second sequence should be active");
     assert_eq!(seq.id, second);
-    assert_eq!(seq.video_tracks[0].clips[0].position.frame, 20);
+    assert_eq!(seq.video_tracks[0].clips[0].position, tt(20, tb));
 }
 
 #[test]
@@ -217,12 +209,10 @@ fn delete_sequence_rejects_nested_references() {
     state.switch_active_sequence(parent_id).expect("switch parent");
     let tb = state.sequence.as_ref().expect("parent").time_base();
     state.sequence.as_mut().expect("parent").video_tracks[0]
-        .add_clip(Clip::new_nested_sequence(
-            child_id,
-            TimeCode::new(0, tb),
-            TimeCode::new(10, tb),
-            Some("child".to_string()),
-        ))
+        .add_clip(
+            Clip::new_nested_sequence(child_id, tt(0, tb), tt(10, tb), Some("child".to_string()))
+                .expect("valid clip"),
+        )
         .expect("add nested");
 
     let err = state.delete_sequence(child_id).expect_err("nested delete rejected");
@@ -234,7 +224,7 @@ fn precompose_clips_creates_nested_sequence_and_replacement_clip() {
     let mut state = create_state_with_sequence();
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
     let track_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
-    let clip = Clip::new(AssetId::new(), TimeCode::new(12, tb), TimeCode::new(30, tb));
+    let clip = Clip::new(AssetId::new(), tt(12, tb), tt(30, tb)).expect("valid clip");
     let clip_id = clip.id;
     state.sequence.as_mut().expect("sequence should exist").video_tracks[0]
         .add_clip(clip)
@@ -251,8 +241,8 @@ fn precompose_clips_creates_nested_sequence_and_replacement_clip() {
         .find(|clip| clip.id == nested_clip_id)
         .expect("replacement nested clip");
     assert!(replacement.is_nested_sequence());
-    assert_eq!(replacement.position.frame, 12);
-    assert_eq!(replacement.duration.frame, 30);
+    assert_eq!(replacement.position, tt(12, tb));
+    assert_eq!(replacement.duration, tt(30, tb));
 
     let nested_sequence_id = replacement.nested_sequence_id.expect("nested sequence id");
     let nested = state.sequence_by_id(nested_sequence_id).expect("nested sequence");
@@ -261,7 +251,7 @@ fn precompose_clips_creates_nested_sequence_and_replacement_clip() {
         mondrian_timeline::sequence::SequenceRole::NestedComposition
     );
     assert_eq!(nested.video_tracks[0].clips.len(), 1);
-    assert_eq!(nested.video_tracks[0].clips[0].position.frame, 0);
+    assert_eq!(nested.video_tracks[0].clips[0].position, tt(0, tb));
 }
 
 fn video_clip_is_disabled(state: &AppState, clip_id: ClipId) -> bool {
@@ -273,7 +263,7 @@ fn video_clip_is_disabled(state: &AppState, clip_id: ClipId) -> bool {
         .unwrap_or(false)
 }
 
-fn exposure_from_clip(clip: &Clip, time: TimeCode) -> f32 {
+fn exposure_from_clip(clip: &Clip, time: TimelineTime) -> f32 {
     let graph = mondrian_effects::build_effect_render_graph(&clip.effects, time);
     graph
         .nodes
@@ -293,8 +283,8 @@ fn split_at_playhead_records_single_undo_step() {
     let mut state = create_state_with_sequence();
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
 
-    let video_clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(40, tb));
-    let audio_clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(40, tb));
+    let video_clip = Clip::new(AssetId::new(), tt(0, tb), tt(40, tb)).expect("valid clip");
+    let audio_clip = Clip::new(AssetId::new(), tt(0, tb), tt(40, tb)).expect("valid clip");
 
     state.sequence.as_mut().expect("sequence should exist").video_tracks[0]
         .add_clip(video_clip)
@@ -344,7 +334,7 @@ fn set_clip_disabled_is_undoable() {
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
     let track_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
 
-    let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
+    let clip = Clip::new(AssetId::new(), tt(0, tb), tt(30, tb)).expect("valid clip");
     let clip_id = clip.id;
     state.sequence.as_mut().expect("sequence should exist").video_tracks[0]
         .add_clip(clip)
@@ -369,8 +359,8 @@ fn move_clip_conflict_respects_insert_mode() {
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
     let track_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
 
-    let clip_a = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
-    let clip_b = Clip::new(AssetId::new(), TimeCode::new(20, tb), TimeCode::new(10, tb));
+    let clip_a = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
+    let clip_b = Clip::new(AssetId::new(), tt(20, tb), tt(10, tb)).expect("valid clip");
     let clip_b_id = clip_b.id;
 
     {
@@ -385,9 +375,9 @@ fn move_clip_conflict_respects_insert_mode() {
 
     let clips = &state.sequence.as_ref().expect("sequence should exist").video_tracks[0].clips;
     assert_eq!(clips.len(), 2);
-    assert_eq!(clips[0].position.frame, 0);
+    assert_eq!(clips[0].position, tt(0, tb));
     assert_eq!(clips[1].id, clip_b_id);
-    assert_eq!(clips[1].position.frame, 10);
+    assert_eq!(clips[1].position, tt(10, tb));
 }
 
 #[test]
@@ -396,9 +386,9 @@ fn move_clip_conflict_respects_overwrite_mode() {
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
     let track_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
 
-    let clip_a = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_a = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
     let clip_a_id = clip_a.id;
-    let clip_b = Clip::new(AssetId::new(), TimeCode::new(20, tb), TimeCode::new(10, tb));
+    let clip_b = Clip::new(AssetId::new(), tt(20, tb), tt(10, tb)).expect("valid clip");
     let clip_b_id = clip_b.id;
 
     {
@@ -415,9 +405,9 @@ fn move_clip_conflict_respects_overwrite_mode() {
     assert_eq!(clips.len(), 2);
     let kept_a = clips.iter().find(|clip| clip.id == clip_a_id).expect("clip a should exist");
     let moved_b = clips.iter().find(|clip| clip.id == clip_b_id).expect("clip b should exist");
-    assert_eq!(kept_a.position.frame, 0);
-    assert_eq!(kept_a.duration.frame, 5);
-    assert_eq!(moved_b.position.frame, 5);
+    assert_eq!(kept_a.position, tt(0, tb));
+    assert_eq!(kept_a.duration, tt(5, tb));
+    assert_eq!(moved_b.position, tt(5, tb));
 }
 
 #[test]
@@ -426,9 +416,9 @@ fn overwrite_only_removes_intersection_and_keeps_both_sides() {
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
     let track_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
 
-    let clip_a = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+    let clip_a = Clip::new(AssetId::new(), tt(0, tb), tt(20, tb)).expect("valid clip");
     let clip_a_id = clip_a.id;
-    let clip_b = Clip::new(AssetId::new(), TimeCode::new(40, tb), TimeCode::new(4, tb));
+    let clip_b = Clip::new(AssetId::new(), tt(40, tb), tt(4, tb)).expect("valid clip");
     let clip_b_id = clip_b.id;
 
     {
@@ -451,18 +441,18 @@ fn overwrite_only_removes_intersection_and_keeps_both_sides() {
         .find(|clip| clip.id != clip_a_id && clip.id != clip_b_id)
         .expect("right part should exist");
 
-    assert_eq!(left.position.frame, 0);
-    assert_eq!(left.duration.frame, 8);
-    assert_eq!(left.source_in.frame, 0);
-    assert_eq!(left.source_out.frame, 8);
+    assert_eq!(left.position, tt(0, tb));
+    assert_eq!(left.duration, tt(8, tb));
+    assert_eq!(left.source_in, tt(0, tb));
+    assert_eq!(left.source_out, tt(8, tb));
 
-    assert_eq!(moved.position.frame, 8);
-    assert_eq!(moved.duration.frame, 4);
+    assert_eq!(moved.position, tt(8, tb));
+    assert_eq!(moved.duration, tt(4, tb));
 
-    assert_eq!(right.position.frame, 12);
-    assert_eq!(right.duration.frame, 8);
-    assert_eq!(right.source_in.frame, 12);
-    assert_eq!(right.source_out.frame, 20);
+    assert_eq!(right.position, tt(12, tb));
+    assert_eq!(right.duration, tt(8, tb));
+    assert_eq!(right.source_in, tt(12, tb));
+    assert_eq!(right.source_out, tt(20, tb));
 }
 
 #[test]
@@ -470,11 +460,11 @@ fn move_clip_group_overwrite_keeps_all_selected_clips() {
     let mut state = create_state_with_sequence();
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
 
-    let clip_a = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_a = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
     let clip_a_id = clip_a.id;
-    let clip_b = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(10, tb));
+    let clip_b = Clip::new(AssetId::new(), tt(10, tb), tt(10, tb)).expect("valid clip");
     let clip_b_id = clip_b.id;
-    let clip_c = Clip::new(AssetId::new(), TimeCode::new(40, tb), TimeCode::new(10, tb));
+    let clip_c = Clip::new(AssetId::new(), tt(40, tb), tt(10, tb)).expect("valid clip");
     let clip_c_id = clip_c.id;
 
     {
@@ -497,16 +487,16 @@ fn move_clip_group_overwrite_keeps_all_selected_clips() {
     let moved_a = clips.iter().find(|clip| clip.id == clip_a_id).expect("clip a should exist");
     let moved_b = clips.iter().find(|clip| clip.id == clip_b_id).expect("clip b should exist");
     let untouched_c = clips.iter().find(|clip| clip.id == clip_c_id).expect("clip c should exist");
-    assert_eq!(moved_a.position.frame, 5);
-    assert_eq!(moved_b.position.frame, 15);
-    assert_eq!(untouched_c.position.frame, 40);
+    assert_eq!(moved_a.position, tt(5, tb));
+    assert_eq!(moved_b.position, tt(15, tb));
+    assert_eq!(untouched_c.position, tt(40, tb));
 }
 
 #[test]
 fn trim_in_is_undoable() {
     let mut state = create_state_with_sequence();
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
-    let clip = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+    let clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
     let clip_id = clip.id;
 
     state.sequence.as_mut().expect("sequence should exist").video_tracks[0]
@@ -523,9 +513,9 @@ fn trim_in_is_undoable() {
         .iter()
         .find(|clip| clip.id == clip_id)
         .expect("clip should exist");
-    assert_eq!(trimmed.position.frame, 15);
-    assert_eq!(trimmed.duration.frame, 15);
-    assert_eq!(trimmed.source_in.frame, 5);
+    assert_eq!(trimmed.position, tt(15, tb));
+    assert_eq!(trimmed.duration, tt(15, tb));
+    assert_eq!(trimmed.source_in, tt(5, tb));
     assert_eq!(state.cmd_history.undo_description(), Some("修剪入点"));
 
     assert!(state.undo_timeline().expect("undo should succeed"));
@@ -534,9 +524,9 @@ fn trim_in_is_undoable() {
         .iter()
         .find(|clip| clip.id == clip_id)
         .expect("clip should exist after undo");
-    assert_eq!(restored.position.frame, 10);
-    assert_eq!(restored.duration.frame, 20);
-    assert_eq!(restored.source_in.frame, 0);
+    assert_eq!(restored.position, tt(10, tb));
+    assert_eq!(restored.duration, tt(20, tb));
+    assert_eq!(restored.source_in, tt(0, tb));
 }
 
 #[test]
@@ -544,8 +534,8 @@ fn trim_out_updates_linked_clip() {
     let mut state = create_state_with_sequence();
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
 
-    let mut video = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
-    let mut audio = Clip::new(video.asset_id, TimeCode::new(0, tb), TimeCode::new(30, tb));
+    let mut video = Clip::new(AssetId::new(), tt(0, tb), tt(30, tb)).expect("valid clip");
+    let mut audio = Clip::new(video.asset_id, tt(0, tb), tt(30, tb)).expect("valid clip");
     let video_id = video.id;
     let audio_id = audio.id;
     video.linked_clip = Some(audio_id);
@@ -574,10 +564,10 @@ fn trim_out_updates_linked_clip() {
         .find(|clip| clip.id == audio_id)
         .expect("audio should exist");
 
-    assert_eq!(video_after.duration.frame, 21);
-    assert_eq!(audio_after.duration.frame, 21);
-    assert_eq!(video_after.source_out.frame, 21);
-    assert_eq!(audio_after.source_out.frame, 21);
+    assert_eq!(video_after.duration, tt(21, tb));
+    assert_eq!(audio_after.duration, tt(21, tb));
+    assert_eq!(video_after.source_out, tt(21, tb));
+    assert_eq!(audio_after.source_out, tt(21, tb));
 }
 
 #[test]
@@ -585,8 +575,8 @@ fn removing_track_renumbers_tracks_and_clears_broken_links() {
     let mut state = create_state_with_sequence();
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
 
-    let mut video = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
-    let mut audio = Clip::new(video.asset_id, TimeCode::new(0, tb), TimeCode::new(20, tb));
+    let mut video = Clip::new(AssetId::new(), tt(0, tb), tt(20, tb)).expect("valid clip");
+    let mut audio = Clip::new(video.asset_id, tt(0, tb), tt(20, tb)).expect("valid clip");
     let video_id = video.id;
     let audio_id = audio.id;
     video.linked_clip = Some(audio_id);
@@ -624,9 +614,9 @@ fn removing_track_prunes_stale_app_selection() {
     let retained_track_id =
         state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
 
-    let removed_clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+    let removed_clip = Clip::new(AssetId::new(), tt(0, tb), tt(20, tb)).expect("valid clip");
     let removed_clip_id = removed_clip.id;
-    let retained_clip = Clip::new(AssetId::new(), TimeCode::new(4, tb), TimeCode::new(12, tb));
+    let retained_clip = Clip::new(AssetId::new(), tt(4, tb), tt(12, tb)).expect("valid clip");
     let retained_clip_id = retained_clip.id;
     {
         let seq = state.sequence.as_mut().expect("sequence should exist");
@@ -655,7 +645,7 @@ fn removing_track_prunes_stale_app_selection() {
     state.animation_selection.selected_keyframes.insert(AnimationKeyframeSelection {
         clip_id: removed_clip_id,
         path: Transform2D::OPACITY_PATH.to_string(),
-        time: 0,
+        time: TimelineTime::ZERO,
     });
 
     state.remove_track(removed_track_id, true).expect("remove track");
@@ -679,7 +669,7 @@ fn moving_track_is_undoable_and_preserves_clips() {
     let mut state = create_state_with_sequence();
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
     let moved_track_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[2].id;
-    let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
     let clip_id = clip.id;
     state.sequence.as_mut().expect("sequence should exist").video_tracks[2]
         .add_clip(clip)
@@ -777,8 +767,8 @@ fn moving_video_track_keeps_existing_linked_audio_on_its_audio_track() {
     let mut state = create_state_with_sequence();
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
 
-    let mut video = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(15, tb));
-    let mut audio = Clip::new(video.asset_id, TimeCode::new(0, tb), TimeCode::new(15, tb));
+    let mut video = Clip::new(AssetId::new(), tt(0, tb), tt(15, tb)).expect("valid clip");
+    let mut audio = Clip::new(video.asset_id, tt(0, tb), tt(15, tb)).expect("valid clip");
     let video_id = video.id;
     let audio_id = audio.id;
     video.linked_clip = Some(audio_id);
@@ -815,8 +805,9 @@ fn creating_adjustment_layer_on_track_also_creates_library_asset() {
             .as_nanos()
     ));
     state.asset_library = Some(AssetLibrary::open(temp_root.clone()).expect("open library"));
-    state.sequence.as_mut().expect("sequence should exist").in_point_frame = Some(10);
-    state.sequence.as_mut().expect("sequence should exist").out_point_frame = Some(40);
+    let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
+    state.sequence.as_mut().expect("sequence should exist").in_point = Some(tt(10, tb));
+    state.sequence.as_mut().expect("sequence should exist").out_point = Some(tt(40, tb));
 
     let target_track_id =
         state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
@@ -837,8 +828,8 @@ fn creating_adjustment_layer_on_track_also_creates_library_asset() {
         .expect("adjustment clip should exist");
     assert!(clip.is_adjustment_layer());
     assert_eq!(clip.asset_id, assets[0].id);
-    assert_eq!(clip.position.frame, 10);
-    assert_eq!(clip.duration.frame, 30);
+    assert_eq!(clip.position, tt(10, tb));
+    assert_eq!(clip.duration, tt(30, tb));
 
     let _ = std::fs::remove_dir_all(temp_root);
 }
@@ -849,7 +840,7 @@ fn splitting_adjustment_layer_keeps_instance_state_isolated() {
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
 
     let mut clip =
-        Clip::new_adjustment_layer(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(40, tb));
+        Clip::new_adjustment_layer(AssetId::new(), tt(0, tb), tt(40, tb)).expect("valid clip");
     let effect = mondrian_effects::EffectNodeExt::with_defaults(EffectType::BasicCorrection);
     clip.add_effect_node(effect);
     let exposure_path = clip
@@ -878,12 +869,12 @@ fn splitting_adjustment_layer_keeps_instance_state_isolated() {
 
     let seq = state.sequence.as_ref().expect("sequence should exist");
     let mut split_clips = seq.video_tracks[0].clips.clone();
-    split_clips.sort_by_key(|clip| clip.position.frame);
+    split_clips.sort_by_key(|clip| clip.position);
     assert_eq!(split_clips.len(), 2);
     assert!(split_clips.iter().all(|clip| clip.is_adjustment_layer()));
     assert!(split_clips
         .iter()
-        .all(|clip| { (exposure_from_clip(clip, TimeCode::new(20, tb)) - 0.75).abs() < 1.0e-4 }));
+        .all(|clip| { (exposure_from_clip(clip, tt(20, tb)) - 0.75).abs() < 1.0e-4 }));
 
     let right_id = split_clips[1].id;
     let seq_mut = state.sequence.as_mut().expect("sequence should exist");
@@ -915,8 +906,8 @@ fn splitting_adjustment_layer_keeps_instance_state_isolated() {
         .iter()
         .find(|clip| clip.id == right_id)
         .expect("right split clip should exist");
-    assert!((exposure_from_clip(left_clip, TimeCode::new(10, tb)) - 0.75).abs() < 1.0e-4);
-    assert!((exposure_from_clip(right_clip, TimeCode::new(30, tb)) - 1.5).abs() < 1.0e-4);
+    assert!((exposure_from_clip(left_clip, tt(10, tb)) - 0.75).abs() < 1.0e-4);
+    assert!((exposure_from_clip(right_clip, tt(30, tb)) - 1.5).abs() < 1.0e-4);
 }
 
 #[test]
@@ -924,9 +915,9 @@ fn roll_cut_to_frame_is_undoable() {
     let mut state = create_state_with_sequence();
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
 
-    let clip_a = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+    let clip_a = Clip::new(AssetId::new(), tt(0, tb), tt(20, tb)).expect("valid clip");
     let clip_a_id = clip_a.id;
-    let clip_b = Clip::new(AssetId::new(), TimeCode::new(20, tb), TimeCode::new(20, tb));
+    let clip_b = Clip::new(AssetId::new(), tt(20, tb), tt(20, tb)).expect("valid clip");
     let clip_b_id = clip_b.id;
 
     {
@@ -951,10 +942,10 @@ fn roll_cut_to_frame_is_undoable() {
         .find(|clip| clip.id == clip_b_id)
         .expect("clip b should exist");
 
-    assert_eq!(clip_a_after.duration.frame, 25);
-    assert_eq!(clip_b_after.position.frame, 25);
-    assert_eq!(clip_b_after.duration.frame, 15);
-    assert_eq!(clip_b_after.source_in.frame, 5);
+    assert_eq!(clip_a_after.duration, tt(25, tb));
+    assert_eq!(clip_b_after.position, tt(25, tb));
+    assert_eq!(clip_b_after.duration, tt(15, tb));
+    assert_eq!(clip_b_after.source_in, tt(5, tb));
 
     assert!(state.undo_timeline().expect("undo should succeed"));
     let seq_undo = state.sequence.as_ref().expect("sequence should exist");
@@ -968,9 +959,9 @@ fn roll_cut_to_frame_is_undoable() {
         .iter()
         .find(|clip| clip.id == clip_b_id)
         .expect("clip b should exist after undo");
-    assert_eq!(clip_a_undo.duration.frame, 20);
-    assert_eq!(clip_b_undo.position.frame, 20);
-    assert_eq!(clip_b_undo.source_in.frame, 0);
+    assert_eq!(clip_a_undo.duration, tt(20, tb));
+    assert_eq!(clip_b_undo.position, tt(20, tb));
+    assert_eq!(clip_b_undo.source_in, tt(0, tb));
 }
 
 #[test]
@@ -985,9 +976,9 @@ fn slip_clip_negative_delta_is_clamped_and_undoable() {
     std::fs::create_dir_all(&library_root).expect("create temp library root");
     state.asset_library = Some(AssetLibrary::open(library_root.clone()).expect("open library"));
 
-    let mut clip = Clip::new(AssetId::new(), TimeCode::new(8, tb), TimeCode::new(20, tb));
-    clip.source_in = TimeCode::new(10, tb);
-    clip.source_out = TimeCode::new(30, tb);
+    let mut clip = Clip::new(AssetId::new(), tt(8, tb), tt(20, tb)).expect("valid clip");
+    clip.source_in = tt(10, tb);
+    clip.source_out = tt(30, tb);
     let clip_id = clip.id;
     state.sequence.as_mut().expect("sequence should exist").video_tracks[0]
         .add_clip(clip)
@@ -1003,10 +994,10 @@ fn slip_clip_negative_delta_is_clamped_and_undoable() {
         .iter()
         .find(|clip| clip.id == clip_id)
         .expect("clip should exist");
-    assert_eq!(slipped.position.frame, 8);
-    assert_eq!(slipped.duration.frame, 20);
-    assert_eq!(slipped.source_in.frame, 0);
-    assert_eq!(slipped.source_out.frame, 20);
+    assert_eq!(slipped.position, tt(8, tb));
+    assert_eq!(slipped.duration, tt(20, tb));
+    assert_eq!(slipped.source_in, tt(0, tb));
+    assert_eq!(slipped.source_out, tt(20, tb));
 
     assert!(state.undo_timeline().expect("undo should succeed"));
     let restored = state.sequence.as_ref().expect("sequence should exist").video_tracks[0]
@@ -1014,8 +1005,8 @@ fn slip_clip_negative_delta_is_clamped_and_undoable() {
         .iter()
         .find(|clip| clip.id == clip_id)
         .expect("clip should exist after undo");
-    assert_eq!(restored.source_in.frame, 10);
-    assert_eq!(restored.source_out.frame, 30);
+    assert_eq!(restored.source_in, tt(10, tb));
+    assert_eq!(restored.source_out, tt(30, tb));
 
     state.asset_library = None;
     let _ = std::fs::remove_dir_all(&library_root);
@@ -1033,7 +1024,7 @@ fn adjustment_layer_rejects_slip() {
     std::fs::create_dir_all(&library_root).expect("create temp library root");
     state.asset_library = Some(AssetLibrary::open(library_root.clone()).expect("open library"));
     let clip =
-        Clip::new_adjustment_layer(AssetId::new(), TimeCode::new(8, tb), TimeCode::new(20, tb));
+        Clip::new_adjustment_layer(AssetId::new(), tt(8, tb), tt(20, tb)).expect("valid clip");
     let clip_id = clip.id;
     state.sequence.as_mut().expect("sequence should exist").video_tracks[0]
         .add_clip(clip)
@@ -1053,10 +1044,10 @@ fn slide_clip_updates_neighbors_and_is_undoable() {
     let mut state = create_state_with_sequence();
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
 
-    let left = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
-    let center = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(10, tb));
+    let left = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
+    let center = Clip::new(AssetId::new(), tt(10, tb), tt(10, tb)).expect("valid clip");
     let center_id = center.id;
-    let right = Clip::new(AssetId::new(), TimeCode::new(20, tb), TimeCode::new(10, tb));
+    let right = Clip::new(AssetId::new(), tt(20, tb), tt(10, tb)).expect("valid clip");
 
     {
         let seq = state.sequence.as_mut().expect("sequence should exist");
@@ -1072,22 +1063,22 @@ fn slide_clip_updates_neighbors_and_is_undoable() {
     let seq = state.sequence.as_ref().expect("sequence should exist");
     let clips = &seq.video_tracks[0].clips;
     assert_eq!(clips.len(), 3);
-    assert_eq!(clips[0].position.frame, 0);
-    assert_eq!(clips[0].duration.frame, 13);
+    assert_eq!(clips[0].position, tt(0, tb));
+    assert_eq!(clips[0].duration, tt(13, tb));
     assert_eq!(clips[1].id, center_id);
-    assert_eq!(clips[1].position.frame, 13);
-    assert_eq!(clips[1].duration.frame, 10);
-    assert_eq!(clips[2].position.frame, 23);
-    assert_eq!(clips[2].duration.frame, 7);
-    assert_eq!(clips[2].source_in.frame, 3);
+    assert_eq!(clips[1].position, tt(13, tb));
+    assert_eq!(clips[1].duration, tt(10, tb));
+    assert_eq!(clips[2].position, tt(23, tb));
+    assert_eq!(clips[2].duration, tt(7, tb));
+    assert_eq!(clips[2].source_in, tt(3, tb));
 
     assert!(state.undo_timeline().expect("undo should succeed"));
     let seq_undo = state.sequence.as_ref().expect("sequence should exist");
     let clips_undo = &seq_undo.video_tracks[0].clips;
-    assert_eq!(clips_undo[0].duration.frame, 10);
-    assert_eq!(clips_undo[1].position.frame, 10);
-    assert_eq!(clips_undo[2].position.frame, 20);
-    assert_eq!(clips_undo[2].source_in.frame, 0);
+    assert_eq!(clips_undo[0].duration, tt(10, tb));
+    assert_eq!(clips_undo[1].position, tt(10, tb));
+    assert_eq!(clips_undo[2].position, tt(20, tb));
+    assert_eq!(clips_undo[2].source_in, tt(0, tb));
 }
 
 // ── Cross-track clip movement ──
@@ -1099,7 +1090,7 @@ fn cross_track_move_to_different_track() {
     let target_track_id =
         state.sequence.as_ref().expect("sequence should exist").video_tracks[1].id;
 
-    let clip = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+    let clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
     let clip_id = clip.id;
 
     {
@@ -1121,7 +1112,7 @@ fn cross_track_move_to_different_track() {
     assert!(seq.video_tracks[0].clips.is_empty());
     assert_eq!(seq.video_tracks[1].clips.len(), 1);
     assert_eq!(seq.video_tracks[1].clips[0].id, clip_id);
-    assert_eq!(seq.video_tracks[1].clips[0].position.frame, 5);
+    assert_eq!(seq.video_tracks[1].clips[0].position, tt(5, tb));
 }
 
 #[test]
@@ -1131,9 +1122,9 @@ fn cross_track_move_batch_preserves_relative_positions() {
     let target_track_id =
         state.sequence.as_ref().expect("sequence should exist").video_tracks[1].id;
 
-    let clip_a = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_a = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
     let clip_a_id = clip_a.id;
-    let clip_b = Clip::new(AssetId::new(), TimeCode::new(20, tb), TimeCode::new(10, tb));
+    let clip_b = Clip::new(AssetId::new(), tt(20, tb), tt(10, tb)).expect("valid clip");
     let clip_b_id = clip_b.id;
 
     {
@@ -1166,9 +1157,9 @@ fn cross_track_move_batch_preserves_relative_positions() {
     assert!(seq.video_tracks[0].clips.is_empty());
     assert_eq!(seq.video_tracks[1].clips.len(), 2);
     assert_eq!(seq.video_tracks[1].clips[0].id, clip_a_id);
-    assert_eq!(seq.video_tracks[1].clips[0].position.frame, 5);
+    assert_eq!(seq.video_tracks[1].clips[0].position, tt(5, tb));
     assert_eq!(seq.video_tracks[1].clips[1].id, clip_b_id);
-    assert_eq!(seq.video_tracks[1].clips[1].position.frame, 25);
+    assert_eq!(seq.video_tracks[1].clips[1].position, tt(25, tb));
 }
 
 #[test]
@@ -1178,8 +1169,8 @@ fn cross_track_move_linked_clip_follows() {
     let video_track_1_id =
         state.sequence.as_ref().expect("sequence should exist").video_tracks[1].id;
 
-    let mut video = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
-    let mut audio = Clip::new(video.asset_id, TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let mut video = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
+    let mut audio = Clip::new(video.asset_id, tt(0, tb), tt(10, tb)).expect("valid clip");
     let video_id = video.id;
     let audio_id = audio.id;
     video.linked_clip = Some(audio_id);
@@ -1205,11 +1196,11 @@ fn cross_track_move_linked_clip_follows() {
     // Video moved to track 1.
     assert!(seq.video_tracks[0].clips.is_empty());
     assert_eq!(seq.video_tracks[1].clips[0].id, video_id);
-    assert_eq!(seq.video_tracks[1].clips[0].position.frame, 5);
+    assert_eq!(seq.video_tracks[1].clips[0].position, tt(5, tb));
     // Linked audio follows to audio track 1.
     assert!(seq.audio_tracks[0].clips.is_empty());
     assert_eq!(seq.audio_tracks[1].clips[0].id, audio_id);
-    assert_eq!(seq.audio_tracks[1].clips[0].position.frame, 5);
+    assert_eq!(seq.audio_tracks[1].clips[0].position, tt(5, tb));
 }
 
 #[test]
@@ -1219,7 +1210,7 @@ fn cross_track_move_locked_track_rejects() {
     let locked_track_id =
         state.sequence.as_ref().expect("sequence should exist").video_tracks[1].id;
 
-    let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
     let clip_id = clip.id;
 
     {
@@ -1251,9 +1242,9 @@ fn cross_track_move_insert_mode_pushes_existing() {
     let target_track_id =
         state.sequence.as_ref().expect("sequence should exist").video_tracks[1].id;
 
-    let existing = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+    let existing = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
     let existing_id = existing.id;
-    let mover = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let mover = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
     let mover_id = mover.id;
 
     {
@@ -1269,9 +1260,9 @@ fn cross_track_move_insert_mode_pushes_existing() {
     let seq = state.sequence.as_ref().expect("sequence should exist");
     assert_eq!(seq.video_tracks[1].clips.len(), 2);
     assert_eq!(seq.video_tracks[1].clips[0].id, mover_id);
-    assert_eq!(seq.video_tracks[1].clips[0].position.frame, 5);
+    assert_eq!(seq.video_tracks[1].clips[0].position, tt(5, tb));
     assert_eq!(seq.video_tracks[1].clips[1].id, existing_id);
-    assert_eq!(seq.video_tracks[1].clips[1].position.frame, 15);
+    assert_eq!(seq.video_tracks[1].clips[1].position, tt(15, tb));
 }
 
 #[test]
@@ -1281,9 +1272,9 @@ fn cross_track_move_overwrite_mode_trims_existing() {
     let target_track_id =
         state.sequence.as_ref().expect("sequence should exist").video_tracks[1].id;
 
-    let existing = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+    let existing = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
     let existing_id = existing.id;
-    let mover = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let mover = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
     let mover_id = mover.id;
 
     {
@@ -1305,10 +1296,10 @@ fn cross_track_move_overwrite_mode_trims_existing() {
     let seq = state.sequence.as_ref().expect("sequence should exist");
     // Overwrite: existing clip at [10, 30) intersected by mover at [5, 15) → existing trimmed to [15, 30)
     assert_eq!(seq.video_tracks[1].clips[0].id, mover_id);
-    assert_eq!(seq.video_tracks[1].clips[0].position.frame, 5);
+    assert_eq!(seq.video_tracks[1].clips[0].position, tt(5, tb));
     assert_eq!(seq.video_tracks[1].clips[1].id, existing_id);
-    assert_eq!(seq.video_tracks[1].clips[1].position.frame, 15);
-    assert_eq!(seq.video_tracks[1].clips[1].duration.frame, 15);
+    assert_eq!(seq.video_tracks[1].clips[1].position, tt(15, tb));
+    assert_eq!(seq.video_tracks[1].clips[1].duration, tt(15, tb));
 }
 
 #[test]
@@ -1318,7 +1309,7 @@ fn cross_track_move_same_track_behavior_preserved() {
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
     let track_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
 
-    let clip = Clip::new(AssetId::new(), TimeCode::new(20, tb), TimeCode::new(10, tb));
+    let clip = Clip::new(AssetId::new(), tt(20, tb), tt(10, tb)).expect("valid clip");
     let clip_id = clip.id;
 
     {
@@ -1333,7 +1324,7 @@ fn cross_track_move_same_track_behavior_preserved() {
     let seq = state.sequence.as_ref().expect("sequence should exist");
     assert_eq!(seq.video_tracks[0].clips.len(), 1);
     assert_eq!(seq.video_tracks[0].clips[0].id, clip_id);
-    assert_eq!(seq.video_tracks[0].clips[0].position.frame, 5);
+    assert_eq!(seq.video_tracks[0].clips[0].position, tt(5, tb));
 }
 
 #[test]
@@ -1345,7 +1336,7 @@ fn cross_track_move_with_undo_snapshot_restores_original() {
     let target_track_id =
         state.sequence.as_ref().expect("sequence should exist").video_tracks[1].id;
 
-    let clip = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+    let clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
     let clip_id = clip.id;
 
     {
@@ -1378,7 +1369,7 @@ fn cross_track_move_with_undo_snapshot_restores_original() {
     let seq = state.sequence.as_ref().expect("sequence should exist");
     assert_eq!(seq.video_tracks[0].clips.len(), 1);
     assert_eq!(seq.video_tracks[0].clips[0].id, clip_id);
-    assert_eq!(seq.video_tracks[0].clips[0].position.frame, 10);
+    assert_eq!(seq.video_tracks[0].clips[0].position, tt(10, tb));
     assert!(seq.video_tracks[1].clips.is_empty());
 }
 
@@ -1389,9 +1380,9 @@ fn cross_track_move_relative_offset_across_different_source_tracks() {
     let mut state = create_state_with_sequence();
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
 
-    let clip_v1 = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_v1 = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
     let clip_v1_id = clip_v1.id;
-    let clip_v2 = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_v2 = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
     let clip_v2_id = clip_v2.id;
 
     {
@@ -1430,10 +1421,10 @@ fn cross_track_move_relative_offset_across_different_source_tracks() {
     assert!(seq.video_tracks[0].clips.is_empty());
     assert_eq!(seq.video_tracks[1].clips.len(), 1);
     assert_eq!(seq.video_tracks[1].clips[0].id, clip_v1_id);
-    assert_eq!(seq.video_tracks[1].clips[0].position.frame, 5);
+    assert_eq!(seq.video_tracks[1].clips[0].position, tt(5, tb));
     assert_eq!(seq.video_tracks[2].clips.len(), 1);
     assert_eq!(seq.video_tracks[2].clips[0].id, clip_v2_id);
-    assert_eq!(seq.video_tracks[2].clips[0].position.frame, 5);
+    assert_eq!(seq.video_tracks[2].clips[0].position, tt(5, tb));
 }
 
 #[test]
@@ -1443,9 +1434,9 @@ fn cross_track_move_negative_delta_clips_out_of_bounds_are_skipped() {
     let mut state = create_state_with_sequence();
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
 
-    let clip_v1 = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_v1 = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
     let clip_v1_id = clip_v1.id;
-    let clip_v2 = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_v2 = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
     let clip_v2_id = clip_v2.id;
 
     {
@@ -1486,9 +1477,9 @@ fn cross_track_move_constrained_delta_prevents_out_of_bounds() {
     let mut state = create_state_with_sequence();
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
 
-    let clip_v2 = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_v2 = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
     let clip_v2_id = clip_v2.id;
-    let clip_v3 = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_v3 = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
     let clip_v3_id = clip_v3.id;
 
     {
@@ -1526,11 +1517,11 @@ fn cross_track_move_constrained_delta_prevents_out_of_bounds() {
     // V2 clip at V1.
     assert_eq!(seq.video_tracks[0].clips.len(), 1);
     assert_eq!(seq.video_tracks[0].clips[0].id, clip_v2_id);
-    assert_eq!(seq.video_tracks[0].clips[0].position.frame, 5);
+    assert_eq!(seq.video_tracks[0].clips[0].position, tt(5, tb));
     // V3 clip at V2.
     assert_eq!(seq.video_tracks[1].clips.len(), 1);
     assert_eq!(seq.video_tracks[1].clips[0].id, clip_v3_id);
-    assert_eq!(seq.video_tracks[1].clips[0].position.frame, 5);
+    assert_eq!(seq.video_tracks[1].clips[0].position, tt(5, tb));
     // V3 is empty.
     assert!(seq.video_tracks[2].clips.is_empty());
 }
@@ -1544,9 +1535,9 @@ fn cross_track_move_overlapping_clips_preserves_integrity() {
     let mut state = create_state_with_sequence();
     let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
 
-    let clip_a = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_a = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
     let clip_a_id = clip_a.id;
-    let clip_b = Clip::new(AssetId::new(), TimeCode::new(5, tb), TimeCode::new(10, tb));
+    let clip_b = Clip::new(AssetId::new(), tt(5, tb), tt(10, tb)).expect("valid clip");
     let clip_b_id = clip_b.id;
 
     {
@@ -1574,13 +1565,13 @@ fn cross_track_move_overlapping_clips_preserves_integrity() {
     // A on V2, intact.
     assert_eq!(seq.video_tracks[1].clips.len(), 1);
     assert_eq!(seq.video_tracks[1].clips[0].id, clip_a_id);
-    assert_eq!(seq.video_tracks[1].clips[0].position.frame, 0);
-    assert_eq!(seq.video_tracks[1].clips[0].duration.frame, 10);
+    assert_eq!(seq.video_tracks[1].clips[0].position, tt(0, tb));
+    assert_eq!(seq.video_tracks[1].clips[0].duration, tt(10, tb));
     // B on V3, intact.
     assert_eq!(seq.video_tracks[2].clips.len(), 1);
     assert_eq!(seq.video_tracks[2].clips[0].id, clip_b_id);
-    assert_eq!(seq.video_tracks[2].clips[0].position.frame, 5);
-    assert_eq!(seq.video_tracks[2].clips[0].duration.frame, 10);
+    assert_eq!(seq.video_tracks[2].clips[0].position, tt(5, tb));
+    assert_eq!(seq.video_tracks[2].clips[0].duration, tt(10, tb));
 }
 
 #[test]
@@ -1592,9 +1583,9 @@ fn same_track_move_does_not_trim_before_release() {
     let _track_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
 
     // Clip A at [0, 10), clip B at [20, 10) — separated, no overlap.
-    let clip_a = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+    let clip_a = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
     let clip_a_id = clip_a.id;
-    let clip_b = Clip::new(AssetId::new(), TimeCode::new(20, tb), TimeCode::new(10, tb));
+    let clip_b = Clip::new(AssetId::new(), tt(20, tb), tt(10, tb)).expect("valid clip");
     let clip_b_id = clip_b.id;
 
     {
@@ -1613,11 +1604,11 @@ fn same_track_move_does_not_trim_before_release() {
         let clips = &seq.video_tracks[0].clips;
         assert_eq!(clips.len(), 2);
         assert_eq!(clips[0].id, clip_a_id);
-        assert_eq!(clips[0].position.frame, 0);
-        assert_eq!(clips[0].duration.frame, 10);
+        assert_eq!(clips[0].position, tt(0, tb));
+        assert_eq!(clips[0].duration, tt(10, tb));
         assert_eq!(clips[1].id, clip_b_id);
-        assert_eq!(clips[1].position.frame, 20);
-        assert_eq!(clips[1].duration.frame, 10);
+        assert_eq!(clips[1].position, tt(20, tb));
+        assert_eq!(clips[1].duration, tt(10, tb));
     }
 
     // "On release": apply the actual move (A to frame 5, B to frame 25).
@@ -1630,14 +1621,14 @@ fn same_track_move_does_not_trim_before_release() {
     let clips = &seq.video_tracks[0].clips;
     assert_eq!(clips.len(), 2);
     assert_eq!(clips[0].id, clip_a_id);
-    assert_eq!(clips[0].position.frame, 5);
+    assert_eq!(clips[0].position, tt(5, tb));
     assert_eq!(clips[1].id, clip_b_id);
-    assert_eq!(clips[1].position.frame, 25);
+    assert_eq!(clips[1].position, tt(25, tb));
 
     // Verify undo snapshot semantics: restoring before-snapshot brings clips back.
     state.sequence = before;
     let seq = state.sequence.as_ref().expect("sequence should exist");
     let clips = &seq.video_tracks[0].clips;
-    assert_eq!(clips[0].position.frame, 0);
-    assert_eq!(clips[1].position.frame, 20);
+    assert_eq!(clips[0].position, tt(0, tb));
+    assert_eq!(clips[1].position, tt(20, tb));
 }

@@ -1,5 +1,16 @@
 use super::*;
 
+fn author_time_from_frame(frame: i64, time_base: Rational) -> mondrian_core::Result<TimelineTime> {
+    Ok(TimelineTime::from_frame_position(FramePosition::new(
+        frame, time_base,
+    ))?)
+}
+
+fn author_frame_from_time(time: TimelineTime, time_base: Rational) -> mondrian_core::Result<i64> {
+    let frame_rate = Rational::new(time_base.den, time_base.num);
+    Ok(time.to_frame_position(frame_rate, FrameRounding::Nearest)?.frame)
+}
+
 pub(super) fn find_clip_track_index(
     seq: &Sequence,
     is_video_track: bool,
@@ -45,8 +56,8 @@ pub(super) fn split_clip_in_track(
 ) -> Option<ClipSplitResult> {
     let index = track.clips.iter().position(|c| c.id == clip_id)?;
     let clip = track.clips.get(index)?.clone();
-    let start = clip.position.frame;
-    let end = clip.end_position().frame;
+    let start = author_frame_from_time(clip.position, time_base).ok()?;
+    let end = author_frame_from_time(clip.end_position().ok()?, time_base).ok()?;
     if split_frame <= start || split_frame >= end {
         return None;
     }
@@ -57,17 +68,17 @@ pub(super) fn split_clip_in_track(
         return None;
     }
 
-    let split_tc = TimeCode::new(split_frame, time_base);
-    let new_source_in = clip.timeline_to_source_time(split_tc);
+    let split_time = author_time_from_frame(split_frame, time_base).ok()?;
+    let new_source_in = clip.timeline_to_source_time(split_time).ok()?;
 
     let mut left = clip.clone();
-    left.duration = TimeCode::new(left_duration, left.duration.time_base);
+    left.duration = author_time_from_frame(left_duration, time_base).ok()?;
     left.source_out = new_source_in;
 
     let mut right = clip;
     right.id = ClipId::new();
-    right.position = TimeCode::new(split_frame, right.position.time_base);
-    right.duration = TimeCode::new(right_duration, right.duration.time_base);
+    right.position = split_time;
+    right.duration = author_time_from_frame(right_duration, time_base).ok()?;
     right.source_in = new_source_in;
     right.linked_clip = None;
 
@@ -95,6 +106,7 @@ pub(super) fn roll_cut_for_clip_internal(
     clip_id: ClipId,
     target_frame: i64,
 ) -> mondrian_core::Result<bool> {
+    let time_base = seq.time_base();
     for track in &mut seq.video_tracks {
         if let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) {
             if track.is_locked {
@@ -102,7 +114,7 @@ pub(super) fn roll_cut_for_clip_internal(
                     track_id: track.id.to_string(),
                 });
             }
-            return roll_cut_in_track(track, index, target_frame);
+            return roll_cut_in_track(track, index, target_frame, time_base);
         }
     }
 
@@ -113,7 +125,7 @@ pub(super) fn roll_cut_for_clip_internal(
                     track_id: track.id.to_string(),
                 });
             }
-            return roll_cut_in_track(track, index, target_frame);
+            return roll_cut_in_track(track, index, target_frame, time_base);
         }
     }
 
@@ -124,6 +136,7 @@ pub(super) fn roll_cut_in_track(
     track: &mut mondrian_timeline::track::Track,
     clip_index: usize,
     target_frame: i64,
+    time_base: Rational,
 ) -> mondrian_core::Result<bool> {
     let Some(current_clip) = track.clips.get(clip_index).cloned() else {
         return Ok(false);
@@ -134,16 +147,19 @@ pub(super) fn roll_cut_in_track(
     if clip_index > 0 {
         let left = &track.clips[clip_index - 1];
         let right = &current_clip;
-        if left.end_position().frame == right.position.frame {
-            let min_frame_from_source_in =
-                right.position.frame.saturating_sub(right.source_in.frame);
-            let min_frame = (left.position.frame + 1).max(min_frame_from_source_in);
-            let max_frame = right.end_position().frame - 1;
+        let left_end = author_frame_from_time(left.end_position()?, time_base)?;
+        let right_start = author_frame_from_time(right.position, time_base)?;
+        if left_end == right_start {
+            let right_source_in = author_frame_from_time(right.source_in, time_base)?;
+            let min_frame_from_source_in = right_start.saturating_sub(right_source_in);
+            let min_frame = (author_frame_from_time(left.position, time_base)? + 1)
+                .max(min_frame_from_source_in);
+            let max_frame = author_frame_from_time(right.end_position()?, time_base)? - 1;
             if min_frame <= max_frame {
                 boundaries.push(RollBoundary {
                     left_index: clip_index - 1,
                     right_index: clip_index,
-                    current_cut_frame: right.position.frame,
+                    current_cut_frame: right_start,
                     min_frame,
                     max_frame,
                 });
@@ -154,16 +170,19 @@ pub(super) fn roll_cut_in_track(
     if clip_index + 1 < track.clips.len() {
         let left = &current_clip;
         let right = &track.clips[clip_index + 1];
-        if left.end_position().frame == right.position.frame {
-            let min_frame_from_source_in =
-                right.position.frame.saturating_sub(right.source_in.frame);
-            let min_frame = (left.position.frame + 1).max(min_frame_from_source_in);
-            let max_frame = right.end_position().frame - 1;
+        let left_end = author_frame_from_time(left.end_position()?, time_base)?;
+        let right_start = author_frame_from_time(right.position, time_base)?;
+        if left_end == right_start {
+            let right_source_in = author_frame_from_time(right.source_in, time_base)?;
+            let min_frame_from_source_in = right_start.saturating_sub(right_source_in);
+            let min_frame = (author_frame_from_time(left.position, time_base)? + 1)
+                .max(min_frame_from_source_in);
+            let max_frame = author_frame_from_time(right.end_position()?, time_base)? - 1;
             if min_frame <= max_frame {
                 boundaries.push(RollBoundary {
                     left_index: clip_index,
                     right_index: clip_index + 1,
-                    current_cut_frame: left.end_position().frame,
+                    current_cut_frame: left_end,
                     min_frame,
                     max_frame,
                 });
@@ -186,8 +205,10 @@ pub(super) fn roll_cut_in_track(
     let left_original = track.clips[boundary.left_index].clone();
     let right_original = track.clips[boundary.right_index].clone();
 
-    let new_left_duration = new_cut_frame - left_original.position.frame;
-    let new_right_duration = right_original.end_position().frame - new_cut_frame;
+    let new_left_duration =
+        new_cut_frame - author_frame_from_time(left_original.position, time_base)?;
+    let new_right_duration =
+        author_frame_from_time(right_original.end_position()?, time_base)? - new_cut_frame;
     if new_left_duration <= 0 || new_right_duration <= 0 {
         return Err(mondrian_core::MondrianError::WorkflowStepFailed {
             step_id: "roll_cut".to_string(),
@@ -195,27 +216,22 @@ pub(super) fn roll_cut_in_track(
         });
     }
 
-    let new_left_source_out = left_original.timeline_to_source_time(TimeCode::new(
-        new_cut_frame,
-        left_original.position.time_base,
-    ));
-    let new_right_source_in = right_original.timeline_to_source_time(TimeCode::new(
-        new_cut_frame,
-        right_original.position.time_base,
-    ));
+    let new_cut_time = author_time_from_frame(new_cut_frame, time_base)?;
+    let new_left_source_out = left_original.timeline_to_source_time(new_cut_time)?;
+    let new_right_source_in = right_original.timeline_to_source_time(new_cut_time)?;
 
     let mut left_updated = left_original;
-    left_updated.duration = TimeCode::new(new_left_duration, left_updated.duration.time_base);
+    left_updated.duration = author_time_from_frame(new_left_duration, time_base)?;
     left_updated.source_out = new_left_source_out;
 
     let mut right_updated = right_original;
-    right_updated.position = TimeCode::new(new_cut_frame, right_updated.position.time_base);
-    right_updated.duration = TimeCode::new(new_right_duration, right_updated.duration.time_base);
+    right_updated.position = new_cut_time;
+    right_updated.duration = author_time_from_frame(new_right_duration, time_base)?;
     right_updated.source_in = new_right_source_in;
 
     track.clips[boundary.left_index] = left_updated;
     track.clips[boundary.right_index] = right_updated;
-    track.clips.sort_by_key(|clip| clip.position.frame);
+    track.clips.sort_by_key(|clip| clip.position);
     Ok(true)
 }
 
@@ -225,6 +241,7 @@ pub(super) fn slip_clip_internal(
     clip_id: ClipId,
     delta_frames: i64,
 ) -> mondrian_core::Result<bool> {
+    let time_base = seq.time_base();
     for track in &mut seq.video_tracks {
         if let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) {
             if track.is_locked {
@@ -233,8 +250,14 @@ pub(super) fn slip_clip_internal(
                 });
             }
             let estimated_total_source_frames =
-                estimate_asset_total_source_frames(library, &track.clips[index]);
-            return slip_clip_in_track(track, index, delta_frames, estimated_total_source_frames);
+                estimate_asset_total_source_frames(library, &track.clips[index], time_base);
+            return slip_clip_in_track(
+                track,
+                index,
+                delta_frames,
+                estimated_total_source_frames,
+                time_base,
+            );
         }
     }
 
@@ -246,8 +269,14 @@ pub(super) fn slip_clip_internal(
                 });
             }
             let estimated_total_source_frames =
-                estimate_asset_total_source_frames(library, &track.clips[index]);
-            return slip_clip_in_track(track, index, delta_frames, estimated_total_source_frames);
+                estimate_asset_total_source_frames(library, &track.clips[index], time_base);
+            return slip_clip_in_track(
+                track,
+                index,
+                delta_frames,
+                estimated_total_source_frames,
+                time_base,
+            );
         }
     }
 
@@ -259,6 +288,7 @@ pub(super) fn slip_clip_in_track(
     clip_index: usize,
     delta_frames: i64,
     estimated_total_source_frames: Option<i64>,
+    time_base: Rational,
 ) -> mondrian_core::Result<bool> {
     let Some(original) = track.clips.get(clip_index).cloned() else {
         return Ok(false);
@@ -270,7 +300,8 @@ pub(super) fn slip_clip_in_track(
         });
     }
 
-    let source_span = original.source_out.frame - original.source_in.frame;
+    let source_span = author_frame_from_time(original.source_out, time_base)?
+        - author_frame_from_time(original.source_in, time_base)?;
     if source_span <= 0 {
         return Err(mondrian_core::MondrianError::WorkflowStepFailed {
             step_id: "slip_clip".to_string(),
@@ -284,7 +315,7 @@ pub(super) fn slip_clip_in_track(
         i64::MAX.saturating_sub(source_span)
     };
 
-    let old_source_in = original.source_in.frame;
+    let old_source_in = author_frame_from_time(original.source_in, time_base)?;
     let proposed = old_source_in.saturating_add(delta_frames);
     let new_source_in = proposed.clamp(0, max_source_in);
     if new_source_in == old_source_in {
@@ -293,8 +324,8 @@ pub(super) fn slip_clip_in_track(
 
     let new_source_out = new_source_in.saturating_add(source_span);
     let mut updated = original;
-    updated.source_in = TimeCode::new(new_source_in, updated.source_in.time_base);
-    updated.source_out = TimeCode::new(new_source_out, updated.source_out.time_base);
+    updated.source_in = author_time_from_frame(new_source_in, time_base)?;
+    updated.source_out = author_time_from_frame(new_source_out, time_base)?;
     track.clips[clip_index] = updated;
     Ok(true)
 }
@@ -302,6 +333,7 @@ pub(super) fn slip_clip_in_track(
 pub(super) fn estimate_asset_total_source_frames(
     library: &AssetLibrary,
     clip: &Clip,
+    time_base: Rational,
 ) -> Option<i64> {
     if clip.is_adjustment_layer() {
         return None;
@@ -327,7 +359,7 @@ pub(super) fn estimate_asset_total_source_frames(
         return None;
     }
 
-    let frame_duration_secs = clip.position.time_base.to_f64();
+    let frame_duration_secs = time_base.to_f64();
     if frame_duration_secs <= f64::EPSILON {
         return None;
     }
@@ -340,6 +372,7 @@ pub(super) fn slide_clip_internal(
     clip_id: ClipId,
     delta_frames: i64,
 ) -> mondrian_core::Result<bool> {
+    let time_base = seq.time_base();
     for track in &mut seq.video_tracks {
         if let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) {
             if track.is_locked {
@@ -347,7 +380,7 @@ pub(super) fn slide_clip_internal(
                     track_id: track.id.to_string(),
                 });
             }
-            return slide_clip_in_track(track, index, delta_frames);
+            return slide_clip_in_track(track, index, delta_frames, time_base);
         }
     }
 
@@ -358,7 +391,7 @@ pub(super) fn slide_clip_internal(
                     track_id: track.id.to_string(),
                 });
             }
-            return slide_clip_in_track(track, index, delta_frames);
+            return slide_clip_in_track(track, index, delta_frames, time_base);
         }
     }
 
@@ -369,6 +402,7 @@ pub(super) fn slide_clip_in_track(
     track: &mut mondrian_timeline::track::Track,
     clip_index: usize,
     delta_frames: i64,
+    time_base: Rational,
 ) -> mondrian_core::Result<bool> {
     if clip_index == 0 || clip_index + 1 >= track.clips.len() {
         return Ok(false);
@@ -378,23 +412,23 @@ pub(super) fn slide_clip_in_track(
     let center_original = track.clips[clip_index].clone();
     let right_original = track.clips[clip_index + 1].clone();
 
-    let center_start = center_original.position.frame;
-    let center_end = center_original.end_position().frame;
-    let left_end = left_original.end_position().frame;
-    let right_start = right_original.position.frame;
+    let center_start = author_frame_from_time(center_original.position, time_base)?;
+    let center_end = author_frame_from_time(center_original.end_position()?, time_base)?;
+    let left_end = author_frame_from_time(left_original.end_position()?, time_base)?;
+    let right_start = author_frame_from_time(right_original.position, time_base)?;
 
     if left_end != center_start || center_end != right_start {
         return Ok(false);
     }
 
-    let min_start_from_left = left_original.position.frame + 1;
-    let min_start_from_right_source = right_original
-        .position
-        .frame
-        .saturating_sub(center_original.duration.frame)
-        .saturating_sub(right_original.source_in.frame);
+    let min_start_from_left = author_frame_from_time(left_original.position, time_base)? + 1;
+    let center_duration = author_frame_from_time(center_original.duration, time_base)?;
+    let min_start_from_right_source = right_start
+        .saturating_sub(center_duration)
+        .saturating_sub(author_frame_from_time(right_original.source_in, time_base)?);
     let min_start = min_start_from_left.max(min_start_from_right_source);
-    let max_start = right_original.end_position().frame - center_original.duration.frame - 1;
+    let max_start =
+        author_frame_from_time(right_original.end_position()?, time_base)? - center_duration - 1;
     if min_start > max_start {
         return Ok(false);
     }
@@ -405,9 +439,11 @@ pub(super) fn slide_clip_in_track(
         return Ok(false);
     }
 
-    let new_center_end = new_center_start + center_original.duration.frame;
-    let new_left_duration = new_center_start - left_original.position.frame;
-    let new_right_duration = right_original.end_position().frame - new_center_end;
+    let new_center_end = new_center_start + center_duration;
+    let new_left_duration =
+        new_center_start - author_frame_from_time(left_original.position, time_base)?;
+    let new_right_duration =
+        author_frame_from_time(right_original.end_position()?, time_base)? - new_center_end;
     if new_left_duration <= 0 || new_right_duration <= 0 {
         return Err(mondrian_core::MondrianError::WorkflowStepFailed {
             step_id: "slide_clip".to_string(),
@@ -415,31 +451,27 @@ pub(super) fn slide_clip_in_track(
         });
     }
 
-    let new_left_source_out = left_original.timeline_to_source_time(TimeCode::new(
-        new_center_start,
-        left_original.position.time_base,
-    ));
-    let new_right_source_in = right_original.timeline_to_source_time(TimeCode::new(
-        new_center_end,
-        right_original.position.time_base,
-    ));
+    let new_left_source_out = left_original
+        .timeline_to_source_time(author_time_from_frame(new_center_start, time_base)?)?;
+    let new_right_source_in = right_original
+        .timeline_to_source_time(author_time_from_frame(new_center_end, time_base)?)?;
 
     let mut left_updated = left_original;
-    left_updated.duration = TimeCode::new(new_left_duration, left_updated.duration.time_base);
+    left_updated.duration = author_time_from_frame(new_left_duration, time_base)?;
     left_updated.source_out = new_left_source_out;
 
     let mut center_updated = center_original;
-    center_updated.position = TimeCode::new(new_center_start, center_updated.position.time_base);
+    center_updated.position = author_time_from_frame(new_center_start, time_base)?;
 
     let mut right_updated = right_original;
-    right_updated.position = TimeCode::new(new_center_end, right_updated.position.time_base);
-    right_updated.duration = TimeCode::new(new_right_duration, right_updated.duration.time_base);
+    right_updated.position = author_time_from_frame(new_center_end, time_base)?;
+    right_updated.duration = author_time_from_frame(new_right_duration, time_base)?;
     right_updated.source_in = new_right_source_in;
 
     track.clips[clip_index - 1] = left_updated;
     track.clips[clip_index] = center_updated;
     track.clips[clip_index + 1] = right_updated;
-    track.clips.sort_by_key(|clip| clip.position.frame);
+    track.clips.sort_by_key(|clip| clip.position);
     Ok(true)
 }
 
@@ -449,6 +481,7 @@ pub(super) fn trim_clip_edge_internal(
     edge: TrimEdge,
     target_frame: i64,
 ) -> mondrian_core::Result<bool> {
+    let time_base = seq.time_base();
     for track in &mut seq.video_tracks {
         if let Some(index) = track.clips.iter().position(|clip| clip.id == clip_id) {
             if track.is_locked {
@@ -456,7 +489,7 @@ pub(super) fn trim_clip_edge_internal(
                     track_id: track.id.to_string(),
                 });
             }
-            return trim_clip_in_track(track, index, edge, target_frame);
+            return trim_clip_in_track(track, index, edge, target_frame, time_base);
         }
     }
 
@@ -467,7 +500,7 @@ pub(super) fn trim_clip_edge_internal(
                     track_id: track.id.to_string(),
                 });
             }
-            return trim_clip_in_track(track, index, edge, target_frame);
+            return trim_clip_in_track(track, index, edge, target_frame, time_base);
         }
     }
 
@@ -479,12 +512,13 @@ pub(super) fn trim_clip_in_track(
     index: usize,
     edge: TrimEdge,
     target_frame: i64,
+    time_base: Rational,
 ) -> mondrian_core::Result<bool> {
     let Some(original) = track.clips.get(index).cloned() else {
         return Ok(false);
     };
-    let start = original.position.frame;
-    let end = original.end_position().frame;
+    let start = author_frame_from_time(original.position, time_base)?;
+    let end = author_frame_from_time(original.end_position()?, time_base)?;
     if end <= start {
         return Ok(false);
     }
@@ -496,10 +530,10 @@ pub(super) fn trim_clip_in_track(
             if new_start == start {
                 return Ok(false);
             }
-            let new_in = original
-                .timeline_to_source_time(TimeCode::new(new_start, original.position.time_base));
-            updated.position = TimeCode::new(new_start, original.position.time_base);
-            updated.duration = TimeCode::new(end - new_start, original.duration.time_base);
+            let new_in =
+                original.timeline_to_source_time(author_time_from_frame(new_start, time_base)?)?;
+            updated.position = author_time_from_frame(new_start, time_base)?;
+            updated.duration = author_time_from_frame(end - new_start, time_base)?;
             updated.source_in = new_in;
         }
         TrimEdge::Out => {
@@ -507,14 +541,14 @@ pub(super) fn trim_clip_in_track(
             if new_end == end {
                 return Ok(false);
             }
-            let new_out = original
-                .timeline_to_source_time(TimeCode::new(new_end, original.position.time_base));
-            updated.duration = TimeCode::new(new_end - start, original.duration.time_base);
+            let new_out =
+                original.timeline_to_source_time(author_time_from_frame(new_end, time_base)?)?;
+            updated.duration = author_time_from_frame(new_end - start, time_base)?;
             updated.source_out = new_out;
         }
     }
 
-    if updated.duration.frame <= 0 {
+    if updated.duration <= TimelineTime::ZERO {
         return Err(mondrian_core::MondrianError::WorkflowStepFailed {
             step_id: "trim_clip".to_string(),
             reason: "修剪后片段时长无效".to_string(),
@@ -522,7 +556,7 @@ pub(super) fn trim_clip_in_track(
     }
 
     track.clips[index] = updated;
-    track.clips.sort_by_key(|clip| clip.position.frame);
+    track.clips.sort_by_key(|clip| clip.position);
     Ok(true)
 }
 
@@ -553,7 +587,10 @@ pub(super) fn move_existing_clip_to_track_index(
             if let Some(clip) =
                 seq.video_tracks[source_track_index].clips.iter_mut().find(|c| c.id == clip_id)
             {
-                clip.position = TimeCode::new(new_start, time_base);
+                let Ok(position) = author_time_from_frame(new_start, time_base) else {
+                    return false;
+                };
+                clip.position = position;
                 return true;
             }
             return false;
@@ -566,7 +603,10 @@ pub(super) fn move_existing_clip_to_track_index(
         };
 
         let mut clip = seq.video_tracks[source_track_index].clips.remove(clip_index);
-        clip.position = TimeCode::new(new_start, time_base);
+        let Ok(position) = author_time_from_frame(new_start, time_base) else {
+            return false;
+        };
+        clip.position = position;
         seq.video_tracks[target_track_index].clips.push(clip);
         true
     } else {
@@ -582,7 +622,10 @@ pub(super) fn move_existing_clip_to_track_index(
             if let Some(clip) =
                 seq.audio_tracks[source_track_index].clips.iter_mut().find(|c| c.id == clip_id)
             {
-                clip.position = TimeCode::new(new_start, time_base);
+                let Ok(position) = author_time_from_frame(new_start, time_base) else {
+                    return false;
+                };
+                clip.position = position;
                 return true;
             }
             return false;
@@ -595,7 +638,10 @@ pub(super) fn move_existing_clip_to_track_index(
         };
 
         let mut clip = seq.audio_tracks[source_track_index].clips.remove(clip_index);
-        clip.position = TimeCode::new(new_start, time_base);
+        let Ok(position) = author_time_from_frame(new_start, time_base) else {
+            return false;
+        };
+        clip.position = position;
         seq.audio_tracks[target_track_index].clips.push(clip);
         true
     }
@@ -619,46 +665,40 @@ pub(super) fn remove_clip_from_sequence_with_ripple(
     seq: &mut Sequence,
     clip_id: ClipId,
     ripple: bool,
-) -> bool {
+) -> mondrian_core::Result<bool> {
     for track in &mut seq.video_tracks {
         if let Some(index) = track.clips.iter().position(|c| c.id == clip_id) {
             let removed = track.clips.remove(index);
             if ripple {
-                let start = removed.position.frame;
-                let end = start + removed.duration.frame.max(0);
+                let end = removed.end_position()?;
                 for clip in &mut track.clips {
-                    if clip.position.frame >= end {
-                        clip.position = TimeCode::new(
-                            (clip.position.frame - removed.duration.frame.max(0)).max(0),
-                            clip.position.time_base,
-                        );
+                    if clip.position >= end {
+                        clip.position =
+                            clip.position.checked_sub(removed.duration)?.max(TimelineTime::ZERO);
                     }
                 }
             }
-            resolve_track_overlaps(track);
-            return true;
+            resolve_track_overlaps(track)?;
+            return Ok(true);
         }
     }
     for track in &mut seq.audio_tracks {
         if let Some(index) = track.clips.iter().position(|c| c.id == clip_id) {
             let removed = track.clips.remove(index);
             if ripple {
-                let start = removed.position.frame;
-                let end = start + removed.duration.frame.max(0);
+                let end = removed.end_position()?;
                 for clip in &mut track.clips {
-                    if clip.position.frame >= end {
-                        clip.position = TimeCode::new(
-                            (clip.position.frame - removed.duration.frame.max(0)).max(0),
-                            clip.position.time_base,
-                        );
+                    if clip.position >= end {
+                        clip.position =
+                            clip.position.checked_sub(removed.duration)?.max(TimelineTime::ZERO);
                     }
                 }
             }
-            resolve_track_overlaps(track);
-            return true;
+            resolve_track_overlaps(track)?;
+            return Ok(true);
         }
     }
-    false
+    Ok(false)
 }
 
 pub(super) fn clear_broken_links(seq: &mut Sequence) {
@@ -692,35 +732,36 @@ pub(super) fn clear_broken_links(seq: &mut Sequence) {
 pub(super) fn remove_asset_clips_from_tracks(
     tracks: &mut [mondrian_timeline::track::Track],
     asset_id: AssetId,
-) -> usize {
+) -> mondrian_core::Result<usize> {
     let mut removed = 0usize;
     for track in tracks {
         let before = track.clips.len();
         track.clips.retain(|clip| clip.asset_id != asset_id);
         removed += before.saturating_sub(track.clips.len());
-        resolve_track_overlaps(track);
+        resolve_track_overlaps(track)?;
     }
-    removed
+    Ok(removed)
 }
 
-pub(super) fn resolve_track_overlaps(track: &mut mondrian_timeline::track::Track) {
-    track.clips.sort_by_key(|c| c.position.frame);
-    let mut cursor = 0i64;
+pub(super) fn resolve_track_overlaps(
+    track: &mut mondrian_timeline::track::Track,
+) -> mondrian_core::Result<()> {
+    track.clips.sort_by_key(|c| c.position);
+    let mut cursor = TimelineTime::ZERO;
     for clip in &mut track.clips {
-        if clip.position.frame < cursor {
-            clip.position = TimeCode::new(cursor, clip.position.time_base);
+        if clip.position < cursor {
+            clip.position = cursor;
         }
-        cursor = clip.end_position().frame;
+        cursor = clip.end_position()?;
     }
+    Ok(())
 }
 
-pub(super) fn merge_ranges(mut ranges: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
+fn merge_time_ranges(
+    mut ranges: Vec<(TimelineTime, TimelineTime)>,
+) -> Vec<(TimelineTime, TimelineTime)> {
     ranges.retain(|(start, end)| end > start);
-    if ranges.is_empty() {
-        return ranges;
-    }
     ranges.sort_by_key(|(start, _)| *start);
-
     let mut merged = Vec::with_capacity(ranges.len());
     for (start, end) in ranges {
         if let Some((_, last_end)) = merged.last_mut() {
@@ -736,92 +777,85 @@ pub(super) fn merge_ranges(mut ranges: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
 
 pub(super) fn subtract_overwrite_range_from_clip(
     clip: Clip,
-    overlap_start: i64,
-    overlap_end: i64,
-) -> Vec<Clip> {
+    overlap_start: TimelineTime,
+    overlap_end: TimelineTime,
+) -> mondrian_core::Result<Vec<Clip>> {
     if overlap_end <= overlap_start {
-        return vec![clip];
+        return Ok(vec![clip]);
     }
 
-    let clip_start = clip.position.frame;
-    let clip_end = clip.end_position().frame;
+    let clip_start = clip.position;
+    let clip_end = clip.end_position()?;
     let cut_start = overlap_start.max(clip_start);
     let cut_end = overlap_end.min(clip_end);
     if cut_end <= cut_start {
-        return vec![clip];
+        return Ok(vec![clip]);
     }
     if cut_start <= clip_start && cut_end >= clip_end {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     if cut_start <= clip_start {
         let mut right = clip;
         let new_start = cut_end.max(clip_start);
-        let new_source_in =
-            right.timeline_to_source_time(TimeCode::new(new_start, right.position.time_base));
-        right.position = TimeCode::new(new_start, right.position.time_base);
-        right.duration = TimeCode::new((clip_end - new_start).max(0), right.duration.time_base);
+        let new_source_in = right.timeline_to_source_time(new_start)?;
+        right.position = new_start;
+        right.duration = clip_end.checked_sub(new_start)?.max(TimelineTime::ZERO);
         right.source_in = new_source_in;
-        return if right.duration.frame > 0 {
+        return Ok(if right.duration > TimelineTime::ZERO {
             vec![right]
         } else {
             Vec::new()
-        };
+        });
     }
 
     if cut_end >= clip_end {
         let mut left = clip;
         let new_end = cut_start.min(clip_end);
-        let new_source_out =
-            left.timeline_to_source_time(TimeCode::new(new_end, left.position.time_base));
-        left.duration = TimeCode::new((new_end - clip_start).max(0), left.duration.time_base);
+        let new_source_out = left.timeline_to_source_time(new_end)?;
+        left.duration = new_end.checked_sub(clip_start)?.max(TimelineTime::ZERO);
         left.source_out = new_source_out;
-        return if left.duration.frame > 0 {
+        return Ok(if left.duration > TimelineTime::ZERO {
             vec![left]
         } else {
             Vec::new()
-        };
+        });
     }
 
     let mut left = clip.clone();
     let left_new_end = cut_start;
-    let left_new_source_out =
-        left.timeline_to_source_time(TimeCode::new(left_new_end, left.position.time_base));
-    left.duration = TimeCode::new((left_new_end - clip_start).max(0), left.duration.time_base);
+    let left_new_source_out = left.timeline_to_source_time(left_new_end)?;
+    left.duration = left_new_end.checked_sub(clip_start)?.max(TimelineTime::ZERO);
     left.source_out = left_new_source_out;
 
     let mut right = clip;
     let right_new_start = cut_end;
-    let right_new_source_in =
-        right.timeline_to_source_time(TimeCode::new(right_new_start, right.position.time_base));
+    let right_new_source_in = right.timeline_to_source_time(right_new_start)?;
     right.id = ClipId::new();
-    right.position = TimeCode::new(right_new_start, right.position.time_base);
-    right.duration = TimeCode::new(
-        (clip_end - right_new_start).max(0),
-        right.duration.time_base,
-    );
+    right.position = right_new_start;
+    right.duration = clip_end.checked_sub(right_new_start)?.max(TimelineTime::ZERO);
     right.source_in = right_new_source_in;
     right.linked_clip = None;
 
     let mut result = Vec::with_capacity(2);
-    if left.duration.frame > 0 {
+    if left.duration > TimelineTime::ZERO {
         result.push(left);
     }
-    if right.duration.frame > 0 {
+    if right.duration > TimelineTime::ZERO {
         result.push(right);
     }
-    result
+    Ok(result)
 }
 
 pub(super) fn apply_overwrite_conflicts(
     track: &mut mondrian_timeline::track::Track,
     focus_ids: &HashSet<ClipId>,
-    focus_ranges: Vec<(i64, i64)>,
-) {
-    let merged_ranges = merge_ranges(focus_ranges);
+    focus_ranges: Vec<(TimelineTime, TimelineTime)>,
+) -> mondrian_core::Result<()> {
+    let merged_ranges = merge_time_ranges(focus_ranges);
     if merged_ranges.is_empty() {
-        track.clips.sort_by_key(|c| c.position.frame);
-        return;
+        track.clips.sort_by_key(|c| c.position);
+        return Ok(());
     }
 
     let mut resolved = Vec::<Clip>::with_capacity(track.clips.len());
@@ -842,7 +876,7 @@ pub(super) fn apply_overwrite_conflicts(
                     segment,
                     *range_start,
                     *range_end,
-                ));
+                )?);
             }
             segments = next_segments;
         }
@@ -850,74 +884,78 @@ pub(super) fn apply_overwrite_conflicts(
     }
 
     track.clips = resolved;
-    track.clips.sort_by_key(|c| c.position.frame);
+    track.clips.sort_by_key(|c| c.position);
+    Ok(())
 }
 
 pub(super) fn resolve_track_conflicts(
     track: &mut mondrian_timeline::track::Track,
     focus_clip_id: ClipId,
     mode: ClipOverlapMode,
-) {
+) -> mondrian_core::Result<()> {
     match mode {
-        ClipOverlapMode::Insert => resolve_track_overlaps(track),
+        ClipOverlapMode::Insert => resolve_track_overlaps(track)?,
         ClipOverlapMode::Overwrite => {
             let Some(focus) = track.clips.iter().find(|c| c.id == focus_clip_id).cloned() else {
-                track.clips.sort_by_key(|c| c.position.frame);
-                return;
+                track.clips.sort_by_key(|c| c.position);
+                return Ok(());
             };
             let focus_ids = HashSet::from([focus_clip_id]);
             apply_overwrite_conflicts(
                 track,
                 &focus_ids,
-                vec![(focus.position.frame, focus.end_position().frame)],
-            );
+                vec![(focus.position, focus.end_position()?)],
+            )?;
         }
     }
+    Ok(())
 }
 
 pub(super) fn apply_track_conflicts_for_focus_group(
     track: &mut mondrian_timeline::track::Track,
     focus_ids: &HashSet<ClipId>,
     mode: ClipOverlapMode,
-) {
+) -> mondrian_core::Result<()> {
     if focus_ids.is_empty() {
-        return;
+        return Ok(());
     }
     match mode {
-        ClipOverlapMode::Insert => resolve_track_overlaps(track),
+        ClipOverlapMode::Insert => resolve_track_overlaps(track)?,
         ClipOverlapMode::Overwrite => {
-            let focus_ranges: Vec<(i64, i64)> = track
+            let focus_ranges = track
                 .clips
                 .iter()
                 .filter(|clip| focus_ids.contains(&clip.id))
-                .map(|clip| (clip.position.frame, clip.end_position().frame))
-                .collect();
+                .map(|clip| Ok((clip.position, clip.end_position()?)))
+                .collect::<mondrian_core::Result<Vec<_>>>()?;
             if focus_ranges.is_empty() {
-                track.clips.sort_by_key(|c| c.position.frame);
-                return;
+                track.clips.sort_by_key(|c| c.position);
+                return Ok(());
             }
-            apply_overwrite_conflicts(track, focus_ids, focus_ranges);
+            apply_overwrite_conflicts(track, focus_ids, focus_ranges)?;
         }
     }
+    Ok(())
 }
 
 pub(super) fn apply_conflict_policy_for_existing_clip(
     seq: &mut Sequence,
     clip_id: ClipId,
     mode: ClipOverlapMode,
-) {
+) -> mondrian_core::Result<()> {
     for track in &mut seq.video_tracks {
         if track.clips.iter().any(|c| c.id == clip_id) {
-            resolve_track_conflicts(track, clip_id, mode);
-            return;
+            resolve_track_conflicts(track, clip_id, mode)?;
+            return Ok(());
         }
     }
     for track in &mut seq.audio_tracks {
         if track.clips.iter().any(|c| c.id == clip_id) {
-            resolve_track_conflicts(track, clip_id, mode);
-            return;
+            resolve_track_conflicts(track, clip_id, mode)?;
+            return Ok(());
         }
     }
+    Ok(())
 }
 
 pub(super) fn find_clip(seq: &Sequence, clip_id: ClipId) -> Option<&Clip> {
@@ -978,12 +1016,14 @@ pub(super) fn set_clip_disabled(seq: &mut Sequence, clip_id: ClipId, disabled: b
 }
 
 pub(super) fn set_clip_position(seq: &mut Sequence, clip_id: ClipId, frame: i64) -> bool {
+    let Ok(position) = author_time_from_frame(frame.max(0), seq.time_base()) else {
+        return false;
+    };
     if let Some(clip) = find_clip_mut(seq, clip_id) {
-        let frame = frame.max(0);
-        if clip.position.frame == frame {
+        if clip.position == position {
             return false;
         }
-        clip.position = TimeCode::new(frame, clip.position.time_base);
+        clip.position = position;
         return true;
     }
     false

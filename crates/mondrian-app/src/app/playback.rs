@@ -65,7 +65,10 @@ impl AppState {
     }
 
     pub fn play(&mut self) {
-        let end_frame = self.last_content_frame();
+        let Ok(end_frame) = self.last_content_frame() else {
+            tracing::error!("failed to resolve exact Sequence duration onto playback frame grid");
+            return;
+        };
         let mut frames = self.current_frame();
         let prior_state = self.playback_engine.snapshot().state;
         if prior_state == TransportState::Stopped {
@@ -82,7 +85,7 @@ impl AppState {
             return;
         }
         self.reanchor_playback_presentation_clock(Instant::now());
-        self.prepare_audio_playback(TimeCode::new(frames, self.playback_time_base()));
+        self.prepare_audio_playback(FramePosition::new(frames, self.playback_time_base()));
         self.capture_playback_evidence();
     }
 
@@ -92,7 +95,8 @@ impl AppState {
         if let Err(error) = self.playback_engine.pause(self.playback_now) {
             tracing::error!(%error, "failed to pause Playback Session");
         }
-        self.audio_playback.reprime(TimeCode::new(frames, self.playback_time_base()));
+        self.audio_playback
+            .reprime(FramePosition::new(frames, self.playback_time_base()));
         self.capture_playback_evidence();
     }
 
@@ -101,7 +105,7 @@ impl AppState {
         if let Err(error) = self.playback_engine.stop(self.playback_now) {
             tracing::error!(%error, "failed to stop Playback Session");
         }
-        self.audio_playback.reprime(TimeCode::new(0, self.playback_time_base()));
+        self.audio_playback.reprime(FramePosition::new(0, self.playback_time_base()));
         self.capture_playback_evidence();
     }
 
@@ -116,14 +120,18 @@ impl AppState {
     pub fn seek_with_source(&mut self, frame: i64, source: TimelineSeekSource) {
         let was_running = self.is_playing();
         self.last_timeline_seek_source = source;
-        let end_frame = self.last_content_frame();
+        let Ok(end_frame) = self.last_content_frame() else {
+            tracing::error!("failed to resolve exact Sequence duration onto playback frame grid");
+            return;
+        };
         if !self.reset_playback_timeline(frame, end_frame) {
             return;
         }
         let time_base =
             self.sequence.as_ref().map(Sequence::time_base).unwrap_or(Rational::new(1, 25));
-        if let Err(error) =
-            self.playback_engine.seek(TimeCode::new(frame, time_base), self.playback_now)
+        if let Err(error) = self
+            .playback_engine
+            .seek(FramePosition::new(frame, time_base), self.playback_now)
         {
             tracing::error!(%error, "failed to seek Playback Session");
             return;
@@ -136,9 +144,9 @@ impl AppState {
         }
         self.reanchor_playback_presentation_clock(Instant::now());
         if was_running {
-            self.prepare_audio_playback(TimeCode::new(frame, time_base));
+            self.prepare_audio_playback(FramePosition::new(frame, time_base));
         } else {
-            self.audio_playback.reprime(TimeCode::new(frame, time_base));
+            self.audio_playback.reprime(FramePosition::new(frame, time_base));
         }
         let seek_kind = match source {
             TimelineSeekSource::PointerDrag => PlaybackSeekKind::Warm,
@@ -155,8 +163,14 @@ impl AppState {
     }
 
     pub fn set_playback_frame_running(&mut self, frame: i64) {
-        self.seek(frame.max(0));
-        self.play();
+        let frame = frame.max(0);
+        let end_frame = self.last_content_frame().map_or(frame, |end| end.max(frame));
+        if !self.reset_playback_timeline(frame, end_frame) {
+            return;
+        }
+        if let Err(error) = self.playback_engine.play(end_frame, self.playback_now) {
+            tracing::error!(%error, "failed to start simulated Playback Session");
+        }
     }
 
     pub fn pump_audio_output(&mut self) {
@@ -256,7 +270,7 @@ impl AppState {
     fn observe_final_audio_clock_before_recovery(
         &mut self,
         output: RealtimeAudioOutputSnapshot,
-        media_anchor: TimeCode,
+        media_anchor: FramePosition,
     ) {
         let observation = audio_device_clock_observation(
             output,
@@ -303,7 +317,7 @@ impl AppState {
         self.capture_playback_evidence();
     }
 
-    fn prepare_audio_playback(&mut self, anchor: TimeCode) {
+    fn prepare_audio_playback(&mut self, anchor: FramePosition) {
         let renderer = self
             .sequence
             .as_ref()
@@ -343,8 +357,14 @@ impl AppState {
         let Ok(rate) = AudioSampleRate::new(self.audio_sample_rate) else {
             return;
         };
-        let Ok(center) = AudioSamplePosition::from_timecode(
-            TimeCode::new(self.current_frame().max(0), seq.time_base()),
+        let Ok(center_time) = TimelineTime::from_frame_position(FramePosition::new(
+            self.current_frame().max(0),
+            seq.time_base(),
+        )) else {
+            return;
+        };
+        let Ok(center) = AudioSamplePosition::from_timeline_time(
+            center_time,
             rate,
             AudioSampleRounding::Nearest,
         ) else {
@@ -470,9 +490,13 @@ impl AppState {
         self.playback_engine.snapshot().position.frame
     }
 
-    pub fn current_time_code(&self) -> Option<TimeCode> {
-        let seq = self.sequence.as_ref()?;
-        Some(TimeCode::new(self.current_frame().max(0), seq.time_base()))
+    pub fn current_timeline_time(&self) -> mondrian_core::Result<Option<TimelineTime>> {
+        let Some(sequence) = self.sequence.as_ref() else {
+            return Ok(None);
+        };
+        Ok(Some(TimelineTime::from_frame_position(
+            FramePosition::new(self.current_frame().max(0), sequence.time_base()),
+        )?))
     }
 
     pub fn is_playing(&self) -> bool {
@@ -617,7 +641,7 @@ impl AppState {
         match self.playback_engine.reset_timeline(
             sequence_id,
             self.project_document_revision,
-            TimeCode::new(frame, time_base),
+            FramePosition::new(frame, time_base),
             end_frame,
             self.playback_now,
         ) {
@@ -632,12 +656,28 @@ impl AppState {
         }
     }
 
-    pub fn in_point_frame(&self) -> i64 {
-        self.sequence.as_ref().map(|sequence| sequence.in_point_frame()).unwrap_or(0)
+    pub fn in_point_frame(&self) -> mondrian_core::Result<i64> {
+        let Some(sequence) = self.sequence.as_ref() else {
+            return Ok(0);
+        };
+        Ok(sequence
+            .in_point()
+            .to_frame_position(sequence.settings.frame_rate, FrameRounding::Floor)?
+            .frame)
     }
 
-    pub fn out_point_frame(&self) -> Option<i64> {
-        self.sequence.as_ref().and_then(|sequence| sequence.out_point_frame())
+    pub fn out_point_frame(&self) -> mondrian_core::Result<Option<i64>> {
+        let Some(sequence) = self.sequence.as_ref() else {
+            return Ok(None);
+        };
+        sequence
+            .out_point()
+            .map(|time| {
+                time.to_frame_position(sequence.settings.frame_rate, FrameRounding::Floor)
+                    .map(|position| position.frame)
+            })
+            .transpose()
+            .map_err(Into::into)
     }
 }
 
@@ -679,7 +719,7 @@ fn audio_device_clock_observation(
     epoch: mondrian_playback::PlaybackEpoch,
     observed_at: MonotonicTimestamp,
     already_audio_master: bool,
-    media_anchor: Option<TimeCode>,
+    media_anchor: Option<FramePosition>,
     activation_preroll_satisfied: bool,
 ) -> AudioDeviceClockObservation {
     let callback_fresh =
@@ -703,7 +743,7 @@ fn audio_device_clock_observation(
         sample_rate: snapshot.sample_rate,
         consumed_frames: snapshot.active_callback_consumed_frames,
         media_anchor: media_anchor.unwrap_or_else(|| {
-            TimeCode::new(0, Rational::new(1, i64::from(snapshot.sample_rate.max(1))))
+            FramePosition::new(0, Rational::new(1, i64::from(snapshot.sample_rate.max(1))))
         }),
         observed_at,
         grade: AudioClockObservationGrade::CallbackConsumptionEstimate,
@@ -722,6 +762,11 @@ fn audio_device_clock_observation(
 mod tests {
     use super::*;
 
+    fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::TimelineTime {
+        let numerator = frame.checked_mul(time_base.num).expect("test time fits i64");
+        mondrian_core::TimelineTime::new(numerator, time_base.den).expect("valid test time")
+    }
+
     fn state_with_sequence(duration_frames: i64) -> AppState {
         let mut state = AppState::new();
         let mut sequence = Sequence::new("playback");
@@ -729,9 +774,10 @@ mod tests {
         let clip = Clip::new_solid_color(
             AssetId::new(),
             Color::from_rgba8(255, 0, 0, 255),
-            TimeCode::new(0, tb),
-            TimeCode::new(duration_frames, tb),
-        );
+            tt(0, tb),
+            tt(duration_frames, tb),
+        )
+        .expect("valid clip");
         sequence.video_tracks[0].add_clip(clip).expect("add clip");
         state.active_sequence_id = Some(sequence.id);
         state.default_sequence_id = Some(sequence.id);
@@ -772,7 +818,7 @@ mod tests {
             epoch,
             MonotonicTimestamp::ZERO,
             false,
-            Some(TimeCode::new(0, Rational::new(1, 25))),
+            Some(FramePosition::new(0, Rational::new(1, 25))),
             true,
         );
         assert_eq!(ready.state, AudioDeviceClockState::Running);
@@ -789,7 +835,7 @@ mod tests {
                 epoch,
                 MonotonicTimestamp::ZERO,
                 false,
-                Some(TimeCode::new(0, Rational::new(1, 25))),
+                Some(FramePosition::new(0, Rational::new(1, 25))),
                 true,
             )
             .state,
@@ -804,7 +850,7 @@ mod tests {
                 epoch,
                 MonotonicTimestamp::ZERO,
                 false,
-                Some(TimeCode::new(0, Rational::new(1, 25))),
+                Some(FramePosition::new(0, Rational::new(1, 25))),
                 false,
             )
             .state,
@@ -822,7 +868,7 @@ mod tests {
             epoch,
             state.playback_now,
             false,
-            Some(TimeCode::new(0, Rational::new(1, 48_000))),
+            Some(FramePosition::new(0, Rational::new(1, 48_000))),
             true,
         );
         state.playback_engine.observe_audio_device_clock(initial).expect("audio master");
@@ -833,7 +879,7 @@ mod tests {
         final_output.underrun_frames = 960;
         state.observe_final_audio_clock_before_recovery(
             final_output,
-            TimeCode::new(0, Rational::new(1, 48_000)),
+            FramePosition::new(0, Rational::new(1, 48_000)),
         );
         assert_eq!(state.current_frame(), 1);
 

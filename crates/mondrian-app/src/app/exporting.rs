@@ -250,9 +250,14 @@ fn export_error(step_id: &'static str, reason: String) -> MondrianError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::TimelineTime {
+        let numerator = frame.checked_mul(time_base.num).expect("test time fits i64");
+        mondrian_core::TimelineTime::new(numerator, time_base.den).expect("valid test time")
+    }
     use mondrian_assets::AssetLibrary;
     use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
-    use mondrian_core::types::{ColorSpace, TimeCode};
+    use mondrian_core::types::ColorSpace;
     use mondrian_timeline::{clip::Clip, sequence::Sequence};
 
     fn write_minimal_wav(path: &std::path::Path) {
@@ -305,11 +310,10 @@ mod tests {
             let seq = state.sequence.as_mut().expect("sequence should exist");
             let tb = seq.time_base();
             seq.video_tracks[0]
-                .add_clip(Clip::new_adjustment_layer(
-                    asset_id,
-                    TimeCode::new(0, tb),
-                    TimeCode::new(20, tb),
-                ))
+                .add_clip(
+                    Clip::new_adjustment_layer(asset_id, tt(0, tb), tt(20, tb))
+                        .expect("valid clip"),
+                )
                 .expect("add adjustment clip");
         }
 
@@ -355,11 +359,7 @@ mod tests {
             let seq = state.sequence.as_mut().expect("sequence should exist");
             let tb = seq.time_base();
             seq.audio_tracks[0]
-                .add_clip(Clip::new(
-                    asset_id,
-                    TimeCode::new(0, tb),
-                    TimeCode::new(20, tb),
-                ))
+                .add_clip(Clip::new(asset_id, tt(0, tb), tt(20, tb)).expect("valid clip"))
                 .expect("add audio clip");
         }
 
@@ -381,19 +381,18 @@ mod tests {
         let asset_id = mondrian_core::types::AssetId::new();
 
         child.video_tracks[0]
-            .add_clip(Clip::new(
-                asset_id,
-                TimeCode::new(0, tb),
-                TimeCode::new(12, tb),
-            ))
+            .add_clip(Clip::new(asset_id, tt(0, tb), tt(12, tb)).expect("valid clip"))
             .expect("add media");
         parent.video_tracks[0]
-            .add_clip(Clip::new_nested_sequence(
-                child.id,
-                TimeCode::new(0, tb),
-                TimeCode::new(12, tb),
-                Some("child".to_string()),
-            ))
+            .add_clip(
+                Clip::new_nested_sequence(
+                    child.id,
+                    tt(0, tb),
+                    tt(12, tb),
+                    Some("child".to_string()),
+                )
+                .expect("valid clip"),
+            )
             .expect("add nested");
 
         let sequences = vec![parent.clone(), child];

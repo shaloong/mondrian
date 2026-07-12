@@ -3,11 +3,11 @@
 use crate::clip::Clip;
 use mondrian_core::{
     automation::{
-        timecode_to_ticks, AnimatedProperty, PropertyBag, PropertyDescriptor, PropertyHost,
-        PropertyMutation, PropertyValue,
+        AnimatedProperty, PropertyBag, PropertyDescriptor, PropertyHost, PropertyMutation,
+        PropertyValue,
     },
     types::*,
-    MondrianError, Result,
+    MondrianError, Result, TimelineTime,
 };
 use serde::{Deserialize, Serialize};
 
@@ -102,17 +102,26 @@ impl Track {
     }
 
     /// 获取指定时间码处所有活跃 Clip
-    pub fn active_clips_at(&self, time: TimeCode) -> impl Iterator<Item = &Clip> {
-        self.clips.iter().filter(move |c| !c.is_disabled && c.contains(time))
+    pub fn active_clips_at(&self, time: TimelineTime) -> Result<Vec<&Clip>> {
+        let mut active = Vec::new();
+        for clip in &self.clips {
+            if !clip.is_disabled && clip.contains(time)? {
+                active.push(clip);
+            }
+        }
+        Ok(active)
     }
 
     /// 吸附点列表（所有 Clip 的 in/out 点 + 每个 Clip 的关键帧时间）
-    pub fn snap_points(&self) -> Vec<TimeCode> {
-        let mut pts: Vec<TimeCode> =
-            self.clips.iter().flat_map(|c| [c.position, c.end_position()]).collect();
+    pub fn snap_points(&self) -> Result<Vec<TimelineTime>> {
+        let mut pts = Vec::with_capacity(self.clips.len().saturating_mul(2));
+        for clip in &self.clips {
+            pts.push(clip.position);
+            pts.push(clip.end_position()?);
+        }
         pts.sort_unstable();
         pts.dedup();
-        pts
+        Ok(pts)
     }
 
     pub fn to_property_bag(&self) -> PropertyBag {
@@ -148,7 +157,7 @@ impl PropertyHost for Track {
 }
 
 impl Track {
-    pub fn evaluate_opacity(&self, time: TimeCode) -> f32 {
-        self.opacity.evaluate(timecode_to_ticks(time)).as_f32().unwrap_or(1.0)
+    pub fn evaluate_opacity(&self, time: TimelineTime) -> f32 {
+        self.opacity.evaluate(time).as_f32().unwrap_or(1.0)
     }
 }

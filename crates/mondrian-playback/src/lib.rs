@@ -3,7 +3,7 @@
 //! This crate owns transport semantics but deliberately knows nothing about UI,
 //! codecs, GPU resources, audio devices, or concrete timeline models.
 
-use mondrian_core::{Rational, SequenceId, TimeCode};
+use mondrian_core::{FramePosition, Rational, SequenceId};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use thiserror::Error;
@@ -88,7 +88,7 @@ pub struct FrameDemand {
     /// Timeline semantic revision.
     pub timeline_revision: u64,
     /// Exact target timeline position.
-    pub target: TimeCode,
+    pub target: FramePosition,
     /// Latest useful presentation time for this demand.
     pub deadline: MonotonicTimestamp,
     /// Runtime-only spatial quality selected by recovery policy.
@@ -202,7 +202,7 @@ pub struct AudioDeviceClockObservation {
     ///
     /// Its time base may be the output sample period; the Engine converts it to
     /// the sequence time base without accumulating floating-point seconds.
-    pub media_anchor: TimeCode,
+    pub media_anchor: FramePosition,
     /// Engine-relative monotonic observation time.
     pub observed_at: MonotonicTimestamp,
     /// Observation quality; never infer exact hardware position from this value.
@@ -381,7 +381,7 @@ pub struct PlaybackSnapshot {
     /// Current transport condition.
     pub state: TransportState,
     /// Current exact timeline position.
-    pub position: TimeCode,
+    pub position: FramePosition,
     /// Current Clock Master, if a clock is running or being primed.
     pub clock_master: Option<ClockMaster>,
     /// Runtime-only Viewer resolution scale.
@@ -416,7 +416,7 @@ pub enum PlaybackError {
 
 #[derive(Debug, Clone, Copy)]
 struct ClockAnchor {
-    timeline: TimeCode,
+    timeline: FramePosition,
     monotonic: MonotonicTimestamp,
 }
 
@@ -433,7 +433,7 @@ pub struct PlaybackEngine {
     timeline_revision: u64,
     epoch: PlaybackEpoch,
     state: TransportState,
-    position: TimeCode,
+    position: FramePosition,
     end_frame: i64,
     clock_master: Option<ClockMaster>,
     clock_anchor: ClockAnchor,
@@ -469,7 +469,7 @@ impl PlaybackEngine {
     }
 
     fn from_validated_time_base(time_base: Rational, policy: PlaybackPolicy) -> Self {
-        let position = TimeCode::new(0, time_base);
+        let position = FramePosition::new(0, time_base);
         Self {
             policy,
             sequence_id: None,
@@ -503,7 +503,7 @@ impl PlaybackEngine {
         &mut self,
         sequence_id: Option<SequenceId>,
         timeline_revision: u64,
-        position: TimeCode,
+        position: FramePosition,
         end_frame: i64,
         now: MonotonicTimestamp,
     ) -> Result<PlaybackSnapshot, PlaybackError> {
@@ -583,7 +583,7 @@ impl PlaybackEngine {
     /// Seek exactly and invalidate all prior epoch work.
     pub fn seek(
         &mut self,
-        position: TimeCode,
+        position: FramePosition,
         now: MonotonicTimestamp,
     ) -> Result<PlaybackSnapshot, PlaybackError> {
         self.accept_timestamp(now)?;
@@ -1034,7 +1034,7 @@ fn validate_time_base(value: Rational) -> Result<(), PlaybackError> {
     }
 }
 
-fn nonnegative_frame(mut value: TimeCode) -> TimeCode {
+fn nonnegative_frame(mut value: FramePosition) -> FramePosition {
     value.frame = value.frame.max(0);
     value
 }
@@ -1069,7 +1069,7 @@ fn audio_media_position_ns(
     Ok(anchor_ns.saturating_add(consumed_ns))
 }
 
-fn time_code_ns(value: TimeCode) -> Result<i128, PlaybackError> {
+fn time_code_ns(value: FramePosition) -> Result<i128, PlaybackError> {
     validate_time_base(value.time_base)?;
     let numerator = (value.frame as i128)
         .saturating_mul(value.time_base.num as i128)
@@ -1124,7 +1124,7 @@ mod tests {
             sequence: FrameDemandSequence(11),
             sequence_id: None,
             timeline_revision: 9,
-            target: TimeCode::new(42, Rational::new(1, 25)),
+            target: FramePosition::new(42, Rational::new(1, 25)),
             deadline: ts(40),
             preview_scale: PreviewResolutionScale::Full,
         };
@@ -1155,7 +1155,7 @@ mod tests {
             stream_generation: 7,
             sample_rate: 48_000,
             consumed_frames,
-            media_anchor: TimeCode::new(-1_000, Rational::new(1, 48_000)),
+            media_anchor: FramePosition::new(-1_000, Rational::new(1, 48_000)),
             observed_at,
             grade: AudioClockObservationGrade::CallbackConsumptionEstimate,
             estimated_latency_frames: 0,
@@ -1248,7 +1248,7 @@ mod tests {
         engine.tick(ts(80)).unwrap();
         let mut observation = audio_observation(&engine, 1_000, ts(80));
         observation.stream_generation = 8;
-        observation.media_anchor = TimeCode::new(0, Rational::new(1, 48_000));
+        observation.media_anchor = FramePosition::new(0, Rational::new(1, 48_000));
 
         let rejected = engine.observe_audio_device_clock(observation).unwrap();
 
@@ -1269,12 +1269,12 @@ mod tests {
         engine.tick(ts(80)).unwrap();
         let mut rejected = audio_observation(&engine, 1_000, ts(80));
         rejected.stream_generation = 8;
-        rejected.media_anchor = TimeCode::new(0, Rational::new(1, 48_000));
+        rejected.media_anchor = FramePosition::new(0, Rational::new(1, 48_000));
         engine.observe_audio_device_clock(rejected).unwrap();
 
         let mut aligned = audio_observation(&engine, 1_000, ts(90));
         aligned.stream_generation = 9;
-        aligned.media_anchor = TimeCode::new(3_320, Rational::new(1, 48_000));
+        aligned.media_anchor = FramePosition::new(3_320, Rational::new(1, 48_000));
         let accepted = engine.observe_audio_device_clock(aligned).unwrap();
 
         assert_eq!(accepted.clock_master, Some(ClockMaster::AudioDevice));
@@ -1333,7 +1333,7 @@ mod tests {
         let mut engine = engine();
         let first = engine.play(100, ts(0)).unwrap();
         engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
-        let current = engine.seek(TimeCode::new(50, Rational::new(1, 25)), ts(10)).unwrap();
+        let current = engine.seek(FramePosition::new(50, Rational::new(1, 25)), ts(10)).unwrap();
 
         let accepted = engine
             .observe_frame_delivery(FrameDelivery {
@@ -1484,9 +1484,15 @@ mod tests {
     fn paused_playhead_may_seek_beyond_current_content_end() {
         let mut engine = engine();
         engine
-            .reset_timeline(None, 1, TimeCode::new(120, Rational::new(1, 25)), 20, ts(0))
+            .reset_timeline(
+                None,
+                1,
+                FramePosition::new(120, Rational::new(1, 25)),
+                20,
+                ts(0),
+            )
             .unwrap();
-        let snapshot = engine.seek(TimeCode::new(200, Rational::new(1, 25)), ts(0)).unwrap();
+        let snapshot = engine.seek(FramePosition::new(200, Rational::new(1, 25)), ts(0)).unwrap();
         assert_eq!(snapshot.state, TransportState::Paused);
         assert_eq!(snapshot.position.frame, 200);
     }

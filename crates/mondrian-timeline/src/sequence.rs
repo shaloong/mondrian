@@ -3,7 +3,7 @@
 use crate::{clip::ActiveClip, track::Track};
 use mondrian_core::{
     types::*, DisplayManagementPolicy, ExportDeliveryViewPolicy, ExportDeliveryViewSource,
-    VideoContentLightMetadata, VideoMasteringDisplayMetadata,
+    TimelineTime, VideoContentLightMetadata, VideoMasteringDisplayMetadata,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -1044,22 +1044,29 @@ impl SequencePreset {
 pub struct Sequence {
     pub id: SequenceId,
     pub name: String,
-    #[serde(default)]
     pub role: SequenceRole,
     pub settings: SequenceSettings,
     pub video_tracks: Vec<Track>,
     pub audio_tracks: Vec<Track>,
-    pub playhead: TimeCode,
-    #[serde(default)]
-    pub in_point_frame: Option<i64>,
-    #[serde(default)]
-    pub out_point_frame: Option<i64>,
+    /// Sequence semantic catalog for audio classification and output projection.
+    pub audio_roles: Vec<crate::audio::AudioRole>,
+    /// Sequence-owned audio contributions, processing, routing, and public outputs.
+    pub audio_program: crate::audio::AudioProgram,
+    pub playhead: TimelineTime,
+    pub in_point: Option<TimelineTime>,
+    pub out_point: Option<TimelineTime>,
 }
 
 impl Sequence {
     pub fn new(name: impl Into<String>) -> Self {
         let settings = SequenceSettings::default();
-        let tb = Rational::new(settings.frame_rate.den, settings.frame_rate.num);
+        let audio_tracks = vec![
+            Track::new_audio("A1"),
+            Track::new_audio("A2"),
+            Track::new_audio("A3"),
+        ];
+        let audio_program =
+            crate::audio::AudioProgram::for_tracks(audio_tracks.iter().map(|track| track.id));
         Self {
             id: SequenceId::new(),
             name: name.into(),
@@ -1069,14 +1076,12 @@ impl Sequence {
                 Track::new_video("V2"),
                 Track::new_video("V3"),
             ],
-            audio_tracks: vec![
-                Track::new_audio("A1"),
-                Track::new_audio("A2"),
-                Track::new_audio("A3"),
-            ],
-            playhead: TimeCode::new(0, tb),
-            in_point_frame: None,
-            out_point_frame: None,
+            audio_tracks,
+            audio_roles: Vec::new(),
+            audio_program,
+            playhead: TimelineTime::ZERO,
+            in_point: None,
+            out_point: None,
             settings,
         }
     }
@@ -1092,74 +1097,54 @@ impl Sequence {
         settings.validate()?;
         let mut sequence = Self::new(name);
         sequence.settings = settings;
-        sequence.playhead = TimeCode::new(0, sequence.time_base());
         Ok(sequence)
     }
 
-    pub fn apply_settings_preserve_frames(
-        &mut self,
-        settings: SequenceSettings,
-    ) -> mondrian_core::Result<()> {
+    pub fn apply_settings(&mut self, settings: SequenceSettings) -> mondrian_core::Result<()> {
         settings.validate()?;
         self.settings = settings;
-        let tb = self.time_base();
-        self.playhead.time_base = tb;
-        self.in_point_frame = self.in_point_frame.map(|frame| frame.max(0));
-        self.out_point_frame = self
-            .out_point_frame
-            .map(|frame| frame.max(0))
-            .filter(|frame| *frame >= self.in_point_frame.unwrap_or(0));
-        for track in self.video_tracks.iter_mut().chain(self.audio_tracks.iter_mut()) {
-            for clip in &mut track.clips {
-                clip.position.time_base = tb;
-                clip.duration.time_base = tb;
-                clip.source_in.time_base = tb;
-                clip.source_out.time_base = tb;
-            }
-        }
         Ok(())
     }
 
-    pub fn in_point_frame(&self) -> i64 {
-        self.in_point_frame.unwrap_or(0).max(0)
+    pub fn in_point(&self) -> TimelineTime {
+        self.in_point.unwrap_or(TimelineTime::ZERO).max(TimelineTime::ZERO)
     }
 
-    pub fn out_point_frame(&self) -> Option<i64> {
-        self.out_point_frame
-            .map(|frame| frame.max(0))
-            .filter(|frame| *frame >= self.in_point_frame())
+    pub fn out_point(&self) -> Option<TimelineTime> {
+        self.out_point
+            .map(|time| time.max(TimelineTime::ZERO))
+            .filter(|time| *time >= self.in_point())
     }
 
-    pub fn mark_in(&mut self, frame: i64) {
-        let frame = frame.max(0);
-        self.in_point_frame = Some(frame);
-        if self.out_point_frame.is_some_and(|out| out < frame) {
-            self.out_point_frame = Some(frame);
+    pub fn mark_in(&mut self, time: TimelineTime) {
+        let time = time.max(TimelineTime::ZERO);
+        self.in_point = Some(time);
+        if self.out_point.is_some_and(|out| out < time) {
+            self.out_point = Some(time);
         }
     }
 
-    pub fn mark_out(&mut self, frame: i64) {
-        self.out_point_frame = Some(frame.max(self.in_point_frame()));
+    pub fn mark_out(&mut self, time: TimelineTime) {
+        self.out_point = Some(time.max(self.in_point()));
     }
 
     pub fn clear_in_out(&mut self) {
-        self.in_point_frame = None;
-        self.out_point_frame = None;
+        self.in_point = None;
+        self.out_point = None;
     }
 
-    pub fn total_duration(&self) -> TimeCode {
-        let tb = self.time_base();
-        let mut max_frame = 0i64;
+    pub fn total_duration(&self) -> mondrian_core::Result<TimelineTime> {
+        let mut end = TimelineTime::ZERO;
 
         for track in self.video_tracks.iter().chain(self.audio_tracks.iter()) {
             if let Some(last) = track.clips.last() {
-                max_frame = max_frame.max(last.end_position().frame);
+                end = end.max(last.end_position()?);
             }
         }
-        TimeCode::new(max_frame, tb)
+        Ok(end)
     }
 
-    pub fn active_clips_at(&self, time: TimeCode) -> Vec<ActiveClip> {
+    pub fn active_clips_at(&self, time: TimelineTime) -> mondrian_core::Result<Vec<ActiveClip>> {
         let mut result = Vec::new();
 
         for (i, track) in self.video_tracks.iter().enumerate() {
@@ -1168,8 +1153,8 @@ impl Sequence {
             }
 
             let track_opacity = track.evaluate_opacity(time).clamp(0.0, 1.0);
-            for clip in track.active_clips_at(time) {
-                let source_time = clip.timeline_to_source_time(time);
+            for clip in track.active_clips_at(time)? {
+                let source_time = clip.timeline_to_source_time(time)?;
                 let transform_mat = clip.transform.evaluate_matrix(time);
                 let opacity =
                     (clip.transform.evaluate_opacity(time) * track_opacity).clamp(0.0, 1.0);
@@ -1183,21 +1168,19 @@ impl Sequence {
                 });
             }
         }
-        result
+        Ok(result)
     }
 
-    pub fn snap_points(&self) -> Vec<TimeCode> {
-        let mut pts: Vec<TimeCode> = self
-            .video_tracks
-            .iter()
-            .chain(self.audio_tracks.iter())
-            .flat_map(|track| track.snap_points())
-            .collect();
+    pub fn snap_points(&self) -> mondrian_core::Result<Vec<TimelineTime>> {
+        let mut pts = Vec::new();
+        for track in self.video_tracks.iter().chain(self.audio_tracks.iter()) {
+            pts.extend(track.snap_points()?);
+        }
         pts.push(self.playhead);
-        pts.push(TimeCode::new(0, self.time_base()));
+        pts.push(TimelineTime::ZERO);
         pts.sort_unstable();
         pts.dedup();
-        pts
+        Ok(pts)
     }
 
     pub fn video_track_mut(&mut self, id: TrackId) -> Option<&mut Track> {
@@ -1220,6 +1203,7 @@ impl Sequence {
         let track = Track::new_audio("");
         let id = track.id;
         self.audio_tracks.push(track);
+        self.audio_program.add_track(id);
         self.normalize_track_names();
         id
     }
@@ -1251,6 +1235,7 @@ impl Sequence {
 
         if let Some(index) = self.audio_tracks.iter().position(|track| track.id == id) {
             self.audio_tracks.remove(index);
+            self.audio_program.remove_track(id);
             self.normalize_track_names();
             Ok(())
         } else {
@@ -1279,10 +1264,11 @@ impl Sequence {
 impl mondrian_core::timeline_data::RenderPlanSource for Sequence {
     fn flat_active_clips_at(
         &self,
-        time: TimeCode,
-    ) -> Vec<mondrian_core::timeline_data::FlatActiveClip> {
+        time: TimelineTime,
+    ) -> mondrian_core::Result<Vec<mondrian_core::timeline_data::FlatActiveClip>> {
         use mondrian_core::timeline_data::FlatActiveClip;
-        self.active_clips_at(time)
+        Ok(self
+            .active_clips_at(time)?
             .into_iter()
             .map(|ac| {
                 let matrix = ac.transform_matrix;
@@ -1310,7 +1296,7 @@ impl mondrian_core::timeline_data::RenderPlanSource for Sequence {
                     track_index: ac.track_index,
                 }
             })
-            .collect()
+            .collect())
     }
 
     fn source_time_base(&self) -> mondrian_core::types::Rational {
@@ -1384,6 +1370,40 @@ impl SequenceCollection {
 
     pub fn validate_nested_sequences(&self) -> mondrian_core::Result<()> {
         let sequence_ids: HashSet<SequenceId> = self.sequences.iter().map(|seq| seq.id).collect();
+        for sequence in &self.sequences {
+            let audio_track_ids =
+                sequence.audio_tracks.iter().map(|track| track.id).collect::<Vec<_>>();
+            sequence
+                .audio_program
+                .validate(&audio_track_ids, &sequence.audio_roles)
+                .map_err(|error| mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "validate_audio_program".to_owned(),
+                    reason: format!(
+                        "Sequence {} has invalid audio authoring: {error}",
+                        sequence.id
+                    ),
+                })?;
+            for contribution in &sequence.audio_program.contributions {
+                if let crate::audio::AudioContributionSource::NestedOutput {
+                    sequence_id,
+                    output_id,
+                } = contribution.source
+                {
+                    let Some(child) = self.sequence(sequence_id) else {
+                        return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                            step_id: "validate_audio_program".to_owned(),
+                            reason: format!("nested audio Sequence does not exist: {sequence_id}"),
+                        });
+                    };
+                    if !child.audio_program.outputs.iter().any(|output| output.id == output_id) {
+                        return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                            step_id: "validate_audio_program".to_owned(),
+                            reason: format!("nested audio output does not exist: {output_id}"),
+                        });
+                    }
+                }
+            }
+        }
         let graph = self.nested_sequence_graph();
         for nested_id in graph.values().flatten() {
             if !sequence_ids.contains(nested_id) {
@@ -1475,10 +1495,13 @@ fn renumber_tracks(tracks: &mut [Track], prefix: &str) {
 mod tests {
     use super::*;
     use crate::clip::Clip;
-    use mondrian_core::automation::{
-        timecode_to_ticks, Keyframe, PropertyHost, PropertyMutation, PropertyValue,
-    };
+    use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::{DisplayToneMapPolicy, ProjectColorManagement};
+
+    fn tt(frame: i64, time_base: Rational) -> TimelineTime {
+        TimelineTime::from_frame_position(FramePosition::new(frame, time_base))
+            .expect("valid test time")
+    }
 
     #[test]
     fn delivery_bit_depth_defaults_to_ten_bit_and_serializes_explicitly() {
@@ -1640,13 +1663,13 @@ mod tests {
         let asset_id = AssetId::new();
         let tb = seq.time_base();
 
-        let clip = Clip::new(asset_id, TimeCode::new(0, tb), TimeCode::new(50, tb));
+        let clip = Clip::new(asset_id, tt(0, tb), tt(50, tb)).expect("valid clip");
         seq.video_tracks[0].add_clip(clip).unwrap();
 
-        let active = seq.active_clips_at(TimeCode::new(25, tb));
+        let active = seq.active_clips_at(tt(25, tb)).expect("evaluate timeline");
         assert_eq!(active.len(), 1);
 
-        let outside = seq.active_clips_at(TimeCode::new(100, tb));
+        let outside = seq.active_clips_at(tt(100, tb)).expect("evaluate timeline");
         assert_eq!(outside.len(), 0);
     }
 
@@ -1654,28 +1677,22 @@ mod tests {
     fn track_opacity_automation_affects_active_clip_opacity() {
         let mut seq = Sequence::new("Opacity Test");
         let tb = seq.time_base();
-        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        let clip = Clip::new(AssetId::new(), tt(0, tb), tt(20, tb)).expect("valid clip");
         seq.video_tracks[0].add_clip(clip).expect("add clip");
         seq.video_tracks[0]
             .apply_property_mutation(PropertyMutation::SetKeyframe {
                 path: Track::OPACITY_PATH.to_string(),
-                keyframe: Keyframe::linear(
-                    timecode_to_ticks(TimeCode::new(0, tb)),
-                    PropertyValue::Float(1.0),
-                ),
+                keyframe: Keyframe::linear(tt(0, tb), PropertyValue::Float(1.0)),
             })
             .expect("set start opacity");
         seq.video_tracks[0]
             .apply_property_mutation(PropertyMutation::SetKeyframe {
                 path: Track::OPACITY_PATH.to_string(),
-                keyframe: Keyframe::linear(
-                    timecode_to_ticks(TimeCode::new(20, tb)),
-                    PropertyValue::Float(0.4),
-                ),
+                keyframe: Keyframe::linear(tt(20, tb), PropertyValue::Float(0.4)),
             })
             .expect("set end opacity");
 
-        let active = seq.active_clips_at(TimeCode::new(10, tb));
+        let active = seq.active_clips_at(tt(10, tb)).expect("evaluate timeline");
         assert_eq!(active.len(), 1);
         assert!((active[0].opacity - 0.7).abs() < 0.01);
     }
@@ -1684,12 +1701,12 @@ mod tests {
     fn active_clips_follow_bottom_to_top_track_order() {
         let mut seq = Sequence::new("Track Order");
         let tb = seq.time_base();
-        let bottom = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
-        let top = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        let bottom = Clip::new(AssetId::new(), tt(0, tb), tt(20, tb)).expect("valid clip");
+        let top = Clip::new(AssetId::new(), tt(0, tb), tt(20, tb)).expect("valid clip");
         seq.video_tracks[0].add_clip(bottom).expect("add bottom clip");
         seq.video_tracks[2].add_clip(top).expect("add top clip");
 
-        let active = seq.active_clips_at(TimeCode::new(5, tb));
+        let active = seq.active_clips_at(tt(5, tb)).expect("evaluate timeline");
         assert_eq!(active.len(), 2);
         assert_eq!(active[0].track_index, 0);
         assert_eq!(active[1].track_index, 2);
@@ -1700,10 +1717,10 @@ mod tests {
         let mut seq = Sequence::new("Track Blend Inheritance");
         let tb = seq.time_base();
         seq.video_tracks[0].blend_mode = BlendMode::Screen;
-        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        let clip = Clip::new(AssetId::new(), tt(0, tb), tt(20, tb)).expect("valid clip");
         seq.video_tracks[0].add_clip(clip).expect("add clip");
 
-        let active = seq.active_clips_at(TimeCode::new(5, tb));
+        let active = seq.active_clips_at(tt(5, tb)).expect("evaluate timeline");
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].blend_mode, BlendMode::Screen);
     }
@@ -1713,11 +1730,11 @@ mod tests {
         let mut seq = Sequence::new("Clip Blend Override");
         let tb = seq.time_base();
         seq.video_tracks[0].blend_mode = BlendMode::Screen;
-        let mut clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(20, tb));
+        let mut clip = Clip::new(AssetId::new(), tt(0, tb), tt(20, tb)).expect("valid clip");
         clip.blend_mode = Some(BlendMode::Multiply);
         seq.video_tracks[0].add_clip(clip).expect("add clip");
 
-        let active = seq.active_clips_at(TimeCode::new(5, tb));
+        let active = seq.active_clips_at(tt(5, tb)).expect("evaluate timeline");
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].blend_mode, BlendMode::Multiply);
     }
@@ -1863,28 +1880,25 @@ mod tests {
     }
 
     #[test]
-    fn applying_sequence_settings_updates_existing_time_bases() {
+    fn applying_sequence_settings_preserves_exact_author_time() {
         let mut seq = Sequence::new("Settings");
         let old_tb = seq.time_base();
         seq.video_tracks[0]
-            .add_clip(Clip::new(
-                AssetId::new(),
-                TimeCode::new(10, old_tb),
-                TimeCode::new(20, old_tb),
-            ))
+            .add_clip(
+                Clip::new(AssetId::new(), tt(10, old_tb), tt(20, old_tb)).expect("valid clip"),
+            )
             .expect("add clip");
 
         let settings = SequenceSettings {
             frame_rate: Rational::FPS_2997,
             ..seq.settings.clone()
         };
-        seq.apply_settings_preserve_frames(settings).expect("apply settings");
+        seq.apply_settings(settings).expect("apply settings");
 
         let new_tb = seq.time_base();
         assert_eq!(new_tb, Rational::new(1001, 30000));
-        assert_eq!(seq.video_tracks[0].clips[0].position.frame, 10);
-        assert_eq!(seq.video_tracks[0].clips[0].position.time_base, new_tb);
-        assert_eq!(seq.video_tracks[0].clips[0].duration.time_base, new_tb);
+        assert_eq!(seq.video_tracks[0].clips[0].position, tt(10, old_tb));
+        assert_eq!(seq.video_tracks[0].clips[0].duration, tt(20, old_tb));
     }
 
     #[test]
@@ -1896,20 +1910,26 @@ mod tests {
         let tb = parent.time_base();
 
         parent.video_tracks[0]
-            .add_clip(Clip::new_nested_sequence(
-                child_id,
-                TimeCode::new(0, tb),
-                TimeCode::new(20, tb),
-                Some("Child".to_string()),
-            ))
+            .add_clip(
+                Clip::new_nested_sequence(
+                    child_id,
+                    tt(0, tb),
+                    tt(20, tb),
+                    Some("Child".to_string()),
+                )
+                .expect("valid nested clip"),
+            )
             .expect("add child nest");
         child.video_tracks[0]
-            .add_clip(Clip::new_nested_sequence(
-                parent_id,
-                TimeCode::new(0, tb),
-                TimeCode::new(20, tb),
-                Some("Parent".to_string()),
-            ))
+            .add_clip(
+                Clip::new_nested_sequence(
+                    parent_id,
+                    tt(0, tb),
+                    tt(20, tb),
+                    Some("Parent".to_string()),
+                )
+                .expect("valid nested clip"),
+            )
             .expect("add parent nest");
 
         let mut collection = SequenceCollection::new(parent);
@@ -1922,21 +1942,21 @@ mod tests {
     fn adjustment_layer_is_active_only_within_its_time_range() {
         let mut seq = Sequence::new("Adjustment Range");
         let tb = seq.time_base();
-        let media = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(30, tb));
-        let adjustment =
-            Clip::new_adjustment_layer(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(5, tb));
+        let media = Clip::new(AssetId::new(), tt(0, tb), tt(30, tb)).expect("valid clip");
+        let adjustment = Clip::new_adjustment_layer(AssetId::new(), tt(10, tb), tt(5, tb))
+            .expect("valid adjustment clip");
         seq.video_tracks[0].add_clip(media).expect("add media clip");
         seq.video_tracks[1].add_clip(adjustment).expect("add adjustment clip");
 
-        let before = seq.active_clips_at(TimeCode::new(9, tb));
+        let before = seq.active_clips_at(tt(9, tb)).expect("evaluate timeline");
         assert_eq!(before.len(), 1);
         assert!(!before.iter().any(|clip| clip.clip.is_adjustment_layer()));
 
-        let overlapping = seq.active_clips_at(TimeCode::new(12, tb));
+        let overlapping = seq.active_clips_at(tt(12, tb)).expect("evaluate timeline");
         assert_eq!(overlapping.len(), 2);
         assert!(overlapping.iter().any(|clip| clip.clip.is_adjustment_layer()));
 
-        let after = seq.active_clips_at(TimeCode::new(15, tb));
+        let after = seq.active_clips_at(tt(15, tb)).expect("evaluate timeline");
         assert_eq!(after.len(), 1);
         assert!(!after.iter().any(|clip| clip.clip.is_adjustment_layer()));
     }
@@ -1960,7 +1980,7 @@ mod tests {
         let mut seq = Sequence::new("Track Move");
         let tb = seq.time_base();
         let moved_id = seq.video_tracks[2].id;
-        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(10, tb));
+        let clip = Clip::new(AssetId::new(), tt(0, tb), tt(10, tb)).expect("valid clip");
         let clip_id = clip.id;
         seq.video_tracks[2].add_clip(clip).expect("add clip to track");
 

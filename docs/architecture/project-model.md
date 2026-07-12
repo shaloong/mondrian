@@ -64,13 +64,13 @@ library/index.db
 Archive `format_version`, document `schema_version`, and embedded library
 `PRAGMA user_version` are independent contracts. `manifest.json` records the
 expected library schema version in addition to archive layout. A v1 manifest
-without that newer field defaults explicitly to library schema v1.
+is written with that field explicitly.
 
-Archive and document JSON pass through separate ordered Migration Registries
-before typed deserialization. Every registered step must be contiguous (`n` to
-`n + 1`), must publish its resulting version, and runs at most once. Current
-documents therefore open idempotently; future or gapped versions fail with a
-versioned error instead of being guessed.
+Archive and document JSON pass through separate version registries before typed
+deserialization. During Alpha there are deliberately no legacy document steps:
+schema v2 is the sole accepted exact-time author schema, and older/future
+versions fail instead of being guessed. The registry remains the explicit seam
+for adding a real migration policy when compatibility becomes a product promise.
 
 SQLite schema ownership remains in `mondrian-assets`. Its ordered Registry uses
 `PRAGMA user_version`, applies each step in a transaction, validates the current
@@ -78,21 +78,13 @@ tables/columns, and rolls back both DDL and version on failure. The former
 best-effort `ALTER TABLE` calls that discarded errors have been removed.
 
 Future split-entry layouts require an archive migration and new
-`format_version`; persisted editing fields require a document migration. Open
-migrates JSON in memory and SQLite only in the extracted runtime copy. The
-source `.mdp` is never rewritten by open.
+`format_version`; persisted editing fields require an explicit schema decision.
+SQLite migrates only in the extracted runtime copy. The source `.mdp` is never
+rewritten by open.
 
-The next temporal author schema must migrate legacy frame-oriented `TimeCode`
-and `TimeTicks` with owner context. A key position is reconstructed from its
-Sequence frame duration and legacy subframe scale using checked rational
-arithmetic; it is not passed through floating-point seconds. Clip-local,
-Sequence-local, mask, transition, and source coordinates must be assigned their
-explicit Authoring Time Domains during the same transaction. Legacy floating
-temporal-handle offsets require one versioned deterministic conversion rule,
-finite/range validation, fixtures at fractional frame rates, and an explicit
-migration diagnostic if exact representation is impossible. Opening still does
-not rewrite the source archive.
+Schema v2 persists canonical rational `TimelineTime` values directly. It does
+not contain frame-oriented `TimeCode`, `TimeTicks`, or compatibility aliases.
 
-Checked fixtures live under `crates/mondrian-project/tests/fixtures/v1` and
-`crates/mondrian-assets/tests/fixtures/v0`. They lock the original v1 archive /
-document contract and the unversioned SQLite upgrade path.
+The checked current document fixture lives under
+`crates/mondrian-project/tests/fixtures/current`; the SQLite upgrade fixture
+remains under `crates/mondrian-assets/tests/fixtures/v0`.

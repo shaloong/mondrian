@@ -9,12 +9,14 @@
 //! - Command 模式撤销/重做
 //! - 时间线查询（活跃 Clip、吸附点）
 
+pub mod audio;
 pub mod clip;
 pub mod command;
 pub mod keyframe;
 pub mod sequence;
 pub mod track;
 
+pub use audio::*;
 pub use clip::{ActiveClip, Clip, ClipKind};
 pub use command::{Command, CommandHistory};
 pub use keyframe::{InterpolationType, Keyframe, KeyframeTrack};

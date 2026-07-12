@@ -2149,6 +2149,7 @@ mod tests {
         let autosave_file = autosave_state
             .write_autosave_snapshot(2, 7)
             .expect("autosave snapshot should write");
+        drop(autosave_state);
         let preferences_path = temp_preferences_path("recover-host-preferences");
         let mut host = AppUiHost::new_with_preferences_path(
             AppState::new(),
@@ -2170,7 +2171,12 @@ mod tests {
         );
 
         assert_eq!(commands, AppUiShellCommands::default());
-        assert_eq!(host.mode(), AppUiMode::Workspace);
+        assert_eq!(
+            host.mode(),
+            AppUiMode::Workspace,
+            "recovery status: {:?}",
+            host.app_state().status_hint
+        );
         assert_eq!(
             host.app_state().current_project_path.as_deref(),
             Some(project_file.as_path())

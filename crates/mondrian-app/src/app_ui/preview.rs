@@ -2057,7 +2057,8 @@ impl AppUiPreviewService {
                 frame,
                 normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale),
             ),
-        );
+        )
+        .ok()?;
         if evaluation.is_empty() {
             return None;
         }
@@ -7474,6 +7475,9 @@ impl AppUiPreviewService {
                 normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale),
             ),
         );
+        let Ok(evaluation) = evaluation else {
+            return;
+        };
 
         for element in evaluation.elements {
             if *remaining_prefetch_jobs == 0 {
@@ -8080,7 +8084,8 @@ fn preview_sequence_input_color_resolution_counts(
             frame,
             normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale),
         ),
-    );
+    )
+    .map_err(|error| error.to_string())?;
     let mut counts = InputColorResolutionSourceCounts::default();
     for element in render_plan.elements {
         match element {
@@ -9482,8 +9487,13 @@ fn decode_media_preview_for_access_mode(
 mod tests {
     use super::*;
 
+    fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::TimelineTime {
+        let numerator = frame.checked_mul(time_base.num).expect("test time fits i64");
+        mondrian_core::TimelineTime::new(numerator, time_base.den).expect("valid test time")
+    }
+
     use mondrian_assets::AssetLibrary;
-    use mondrian_core::types::{AssetId, Rational, TimeCode};
+    use mondrian_core::types::{AssetId, Rational};
     use mondrian_core::{ensure_mondrian_default_ocio_loaded, Color, ProjectColorManagement};
     use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
     use mondrian_media::info::{PixelFormat, VideoCodec};
@@ -9506,12 +9516,10 @@ mod tests {
         let mut sequence = Sequence::new("preview");
         let tb = sequence.time_base();
         sequence.video_tracks[0]
-            .add_clip(Clip::new_solid_color(
-                AssetId::new(),
-                color,
-                TimeCode::new(0, tb),
-                TimeCode::new(24, tb),
-            ))
+            .add_clip(
+                Clip::new_solid_color(AssetId::new(), color, tt(0, tb), tt(24, tb))
+                    .expect("valid clip"),
+            )
             .expect("solid clip should be insertable");
         state.sequence = Some(sequence);
         state.seek(4);
@@ -9591,11 +9599,7 @@ mod tests {
         let mut sequence = Sequence::new("media");
         let tb = sequence.time_base();
         sequence.video_tracks[0]
-            .add_clip(Clip::new(
-                asset_id,
-                TimeCode::new(0, tb),
-                TimeCode::new(50, tb),
-            ))
+            .add_clip(Clip::new(asset_id, tt(0, tb), tt(50, tb)).expect("valid clip"))
             .expect("media clip should be insertable");
         state.sequence = Some(sequence);
         state.seek(0);
@@ -9627,11 +9631,7 @@ mod tests {
         let tb = sequence.time_base();
         for (track_index, asset_id) in asset_ids.into_iter().enumerate() {
             sequence.video_tracks[track_index]
-                .add_clip(Clip::new(
-                    asset_id,
-                    TimeCode::new(0, tb),
-                    TimeCode::new(50, tb),
-                ))
+                .add_clip(Clip::new(asset_id, tt(0, tb), tt(50, tb)).expect("valid clip"))
                 .expect("media clip should be insertable");
         }
         state.sequence = Some(sequence);
@@ -13787,23 +13787,29 @@ mod tests {
         let child_id = child.id;
         let child_tb = child.time_base();
         child.video_tracks[0]
-            .add_clip(Clip::new_solid_color(
-                AssetId::new(),
-                Color::from_rgba8(48, 120, 220, 255),
-                TimeCode::new(0, child_tb),
-                TimeCode::new(24, child_tb),
-            ))
+            .add_clip(
+                Clip::new_solid_color(
+                    AssetId::new(),
+                    Color::from_rgba8(48, 120, 220, 255),
+                    tt(0, child_tb),
+                    tt(24, child_tb),
+                )
+                .expect("valid clip"),
+            )
             .expect("child solid clip");
 
         let mut parent = Sequence::new("parent");
         let parent_tb = parent.time_base();
         parent.video_tracks[0]
-            .add_clip(Clip::new_nested_sequence(
-                child_id,
-                TimeCode::new(0, parent_tb),
-                TimeCode::new(24, parent_tb),
-                Some("child".to_owned()),
-            ))
+            .add_clip(
+                Clip::new_nested_sequence(
+                    child_id,
+                    tt(0, parent_tb),
+                    tt(24, parent_tb),
+                    Some("child".to_owned()),
+                )
+                .expect("valid clip"),
+            )
             .expect("parent nested clip");
 
         state.sequences.push(child);
@@ -13825,11 +13831,7 @@ mod tests {
         let mut sequence = Sequence::new("media");
         let tb = sequence.time_base();
         sequence.video_tracks[0]
-            .add_clip(Clip::new(
-                AssetId::new(),
-                TimeCode::new(0, tb),
-                TimeCode::new(24, tb),
-            ))
+            .add_clip(Clip::new(AssetId::new(), tt(0, tb), tt(24, tb)).expect("valid clip"))
             .expect("media clip should be insertable");
         state.sequence = Some(sequence);
 
@@ -13847,11 +13849,7 @@ mod tests {
         let mut sequence = Sequence::new("media");
         let tb = sequence.time_base();
         sequence.video_tracks[0]
-            .add_clip(Clip::new(
-                AssetId::new(),
-                TimeCode::new(0, tb),
-                TimeCode::new(24, tb),
-            ))
+            .add_clip(Clip::new(AssetId::new(), tt(0, tb), tt(24, tb)).expect("valid clip"))
             .expect("media clip should be insertable");
         state.sequence = Some(sequence);
         state.seek(3);
@@ -14344,11 +14342,7 @@ mod tests {
         let data_id = AssetId::new();
 
         sequence.video_tracks[0]
-            .add_clip(Clip::new(
-                detected_id,
-                TimeCode::new(0, tb),
-                TimeCode::new(10, tb),
-            ))
+            .add_clip(Clip::new(detected_id, tt(0, tb), tt(10, tb)).expect("valid clip"))
             .expect("add detected clip");
         for (name, asset_id) in [
             ("override", override_id),
@@ -14357,11 +14351,7 @@ mod tests {
         ] {
             let mut track = Track::new_video(name);
             track
-                .add_clip(Clip::new(
-                    asset_id,
-                    TimeCode::new(0, tb),
-                    TimeCode::new(10, tb),
-                ))
+                .add_clip(Clip::new(asset_id, tt(0, tb), tt(10, tb)).expect("valid clip"))
                 .expect("add clip");
             sequence.video_tracks.push(track);
         }
@@ -14455,38 +14445,37 @@ mod tests {
         let nested_missing_id = AssetId::new();
 
         parent.video_tracks[0]
-            .add_clip(Clip::new(
-                parent_override_id,
-                TimeCode::new(0, parent_tb),
-                TimeCode::new(10, parent_tb),
-            ))
+            .add_clip(
+                Clip::new(parent_override_id, tt(0, parent_tb), tt(10, parent_tb))
+                    .expect("valid clip"),
+            )
             .expect("add parent media clip");
         let mut nested_track = Track::new_video("nested");
         nested_track
-            .add_clip(Clip::new_nested_sequence(
-                nested.id,
-                TimeCode::new(0, parent_tb),
-                TimeCode::new(10, parent_tb),
-                Some("Nested".to_owned()),
-            ))
+            .add_clip(
+                Clip::new_nested_sequence(
+                    nested.id,
+                    tt(0, parent_tb),
+                    tt(10, parent_tb),
+                    Some("Nested".to_owned()),
+                )
+                .expect("valid clip"),
+            )
             .expect("add nested sequence clip");
         parent.video_tracks.push(nested_track);
 
         nested.video_tracks[0]
-            .add_clip(Clip::new(
-                nested_detected_id,
-                TimeCode::new(0, nested_tb),
-                TimeCode::new(10, nested_tb),
-            ))
+            .add_clip(
+                Clip::new(nested_detected_id, tt(0, nested_tb), tt(10, nested_tb))
+                    .expect("valid clip"),
+            )
             .expect("add nested detected clip");
         for (name, asset_id) in [("data", nested_data_id), ("missing", nested_missing_id)] {
             let mut track = Track::new_video(name);
             track
-                .add_clip(Clip::new(
-                    asset_id,
-                    TimeCode::new(0, nested_tb),
-                    TimeCode::new(10, nested_tb),
-                ))
+                .add_clip(
+                    Clip::new(asset_id, tt(0, nested_tb), tt(10, nested_tb)).expect("valid clip"),
+                )
                 .expect("add nested media clip");
             nested.video_tracks.push(track);
         }
@@ -14574,29 +14563,29 @@ mod tests {
         let unused_id = AssetId::new();
 
         parent.video_tracks[0]
-            .add_clip(Clip::new(
-                direct_id,
-                TimeCode::new(0, parent_tb),
-                TimeCode::new(10, parent_tb),
-            ))
+            .add_clip(
+                Clip::new(direct_id, tt(0, parent_tb), tt(10, parent_tb)).expect("valid clip"),
+            )
             .expect("add direct media clip");
         let mut nested_track = Track::new_video("nested");
         nested_track
-            .add_clip(Clip::new_nested_sequence(
-                nested_id,
-                TimeCode::new(0, parent_tb),
-                TimeCode::new(10, parent_tb),
-                Some("Nested".to_owned()),
-            ))
+            .add_clip(
+                Clip::new_nested_sequence(
+                    nested_id,
+                    tt(0, parent_tb),
+                    tt(10, parent_tb),
+                    Some("Nested".to_owned()),
+                )
+                .expect("valid clip"),
+            )
             .expect("add nested sequence clip");
         parent.video_tracks.push(nested_track);
 
         nested.video_tracks[0]
-            .add_clip(Clip::new(
-                nested_asset_id,
-                TimeCode::new(0, nested_tb),
-                TimeCode::new(10, nested_tb),
-            ))
+            .add_clip(
+                Clip::new(nested_asset_id, tt(0, nested_tb), tt(10, nested_tb))
+                    .expect("valid clip"),
+            )
             .expect("add nested media clip");
 
         let mut asset_color_diagnostics = HashMap::new();
@@ -14718,9 +14707,10 @@ mod tests {
         let mut solid = Clip::new_solid_color(
             AssetId::new(),
             Color::from_rgba8(64, 96, 220, 255),
-            TimeCode::new(0, tb),
-            TimeCode::new(10, tb),
-        );
+            tt(0, tb),
+            tt(10, tb),
+        )
+        .expect("valid clip");
         solid.transform.set_scale(glam::Vec2::new(0.75, 0.75));
         let mut blur: mondrian_effects::EffectNode = mondrian_effects::EffectNodeExt::with_defaults(
             mondrian_effects::EffectType::GaussianBlur,

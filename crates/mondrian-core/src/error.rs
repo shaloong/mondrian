@@ -50,6 +50,9 @@ pub enum MondrianError {
     #[error("时间码超出范围: {timecode}")]
     TimecodeOutOfRange { timecode: String },
 
+    #[error("invalid exact timeline time: {0}")]
+    InvalidTimelineTime(#[from] crate::timeline_time::TimelineTimeError),
+
     #[error("轨道锁定，无法修改: {track_id}")]
     TrackLocked { track_id: String },
 

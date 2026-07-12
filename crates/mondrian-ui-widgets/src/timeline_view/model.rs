@@ -1,4 +1,5 @@
-use mondrian_core::types::{Rational, TimeCode};
+use mondrian_core::types::{FramePosition, Rational};
+use mondrian_core::{SmpteCountingMode, SmpteDisplayTimecode};
 use mondrian_ui_core::types::{KeyCode, Modifiers, Point, Rect};
 
 use super::{
@@ -719,7 +720,12 @@ pub(super) fn major_tick_step_frames(
 pub(super) fn ruler_label_for_frame(frame: i64, major_step: i64, frame_rate: Rational) -> String {
     let frame = frame.max(0);
     let fps = ruler_fps(frame_rate).max(1);
-    let smpte = TimeCode::new(frame, frame_time_base(frame_rate)).to_smpte();
+    let smpte = SmpteDisplayTimecode::from_frame_position(
+        FramePosition::new(frame, frame_time_base(frame_rate)),
+        SmpteCountingMode::NonDropFrame,
+    )
+    .map(SmpteDisplayTimecode::label)
+    .unwrap_or_else(|_| "--:--:--:--".to_owned());
     let total_seconds = (frame as f64 / frame_rate.to_f64()).floor().max(0.0) as i64;
     let hours = total_seconds / 3600;
     let parts = smpte.split(':').collect::<Vec<_>>();

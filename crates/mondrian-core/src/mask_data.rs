@@ -3,8 +3,9 @@
 //! These are pure data types with no rendering logic. Mask rasterization lives
 //! in `mondrian-effects::mask_raster`.
 
-use crate::automation::{PropertyBag, PropertyValue, TimeTicks};
+use crate::automation::{PropertyBag, PropertyValue};
 use crate::types::MaskId;
+use crate::TimelineTime;
 use glam::Vec2;
 use serde::{Deserialize, Serialize};
 
@@ -136,10 +137,7 @@ pub struct MaskComponent {
     pub name: String,
     /// Shape keyframes. When `shape_animation_enabled` is false, only the first
     /// entry is used (static shape). When enabled, shapes are interpolated by time.
-    pub shape_keyframes: Vec<(TimeTicks, MaskShape)>,
-    /// Legacy combined keyframes — preserved for deserialization of old project files.
-    #[serde(default)]
-    pub keyframes: Vec<(TimeTicks, MaskKeyframe)>,
+    pub shape_keyframes: Vec<(TimelineTime, MaskShape)>,
     /// Scalar animatable properties (feather, opacity, expansion, invert, mask_op).
     #[serde(skip)]
     pub properties: PropertyBag,
@@ -153,7 +151,6 @@ impl PartialEq for MaskComponent {
         self.id == other.id
             && self.name == other.name
             && self.shape_keyframes == other.shape_keyframes
-            && self.keyframes == other.keyframes
             && self.enabled == other.enabled
             && self.locked == other.locked
             && self.shape_animation_enabled == other.shape_animation_enabled
@@ -210,8 +207,7 @@ impl MaskComponent {
         Self {
             id,
             name,
-            shape_keyframes: vec![(0, initial.shape)],
-            keyframes: Vec::new(),
+            shape_keyframes: vec![(TimelineTime::ZERO, initial.shape)],
             properties,
             enabled: true,
             locked: false,
@@ -219,11 +215,11 @@ impl MaskComponent {
         }
     }
 
-    pub fn shape_keyframes(&self) -> &[(TimeTicks, MaskShape)] {
+    pub fn shape_keyframes(&self) -> &[(TimelineTime, MaskShape)] {
         &self.shape_keyframes
     }
 
-    pub fn shape_keyframes_mut(&mut self) -> &mut Vec<(TimeTicks, MaskShape)> {
+    pub fn shape_keyframes_mut(&mut self) -> &mut Vec<(TimelineTime, MaskShape)> {
         &mut self.shape_keyframes
     }
 
@@ -236,7 +232,7 @@ impl MaskComponent {
     }
 
     /// Evaluate the mask properties at a given time.
-    pub fn evaluate_at(&self, time: TimeTicks) -> MaskKeyframe {
+    pub fn evaluate_at(&self, time: TimelineTime) -> MaskKeyframe {
         let shape = if self.shape_keyframes.is_empty() {
             MaskShape::default()
         } else if !self.shape_animation_enabled
@@ -244,7 +240,13 @@ impl MaskComponent {
             || time <= self.shape_keyframes[0].0
         {
             self.shape_keyframes[0].1.clone()
-        } else if time >= self.shape_keyframes.last().map(|(t, _)| *t).unwrap_or(0) {
+        } else if time
+            >= self
+                .shape_keyframes
+                .last()
+                .map(|(key_time, _)| *key_time)
+                .unwrap_or(TimelineTime::ZERO)
+        {
             self.shape_keyframes.last().map(|(_, s)| s.clone()).unwrap_or_default()
         } else {
             let mut result = self.shape_keyframes[0].1.clone();
@@ -252,9 +254,14 @@ impl MaskComponent {
                 let (t0, ref s0) = pair[0];
                 let (t1, ref s1) = pair[1];
                 if time >= t0 && time <= t1 {
-                    let range = (t1 - t0).max(1);
-                    let t = (time - t0) as f32 / range as f32;
-                    result = interpolate_shape(s0, s1, t);
+                    let duration = t1.checked_sub(t0).map(TimelineTime::to_f64).unwrap_or(0.0);
+                    let elapsed = time.checked_sub(t0).map(TimelineTime::to_f64).unwrap_or(0.0);
+                    let fraction = if duration > 0.0 {
+                        (elapsed / duration) as f32
+                    } else {
+                        0.0
+                    };
+                    result = interpolate_shape(s0, s1, fraction);
                     break;
                 }
             }
@@ -306,47 +313,6 @@ impl MaskComponent {
             expansion,
             invert,
             mask_op: MaskOp::parse(&mask_op_str),
-        }
-    }
-
-    /// Migrate legacy keyframes to shape_keyframes + PropertyBag (for old project files).
-    pub fn ensure_migrated(&mut self) {
-        if !self.keyframes.is_empty() && self.shape_keyframes.is_empty() {
-            use crate::automation::InterpolationType;
-            for (t, kf) in &self.keyframes {
-                self.shape_keyframes.push((*t, kf.shape.clone()));
-                let _ = self.properties.write_value(
-                    MASK_PROP_FEATHER,
-                    *t,
-                    PropertyValue::Float(kf.feather),
-                    InterpolationType::Linear,
-                );
-                let _ = self.properties.write_value(
-                    MASK_PROP_OPACITY,
-                    *t,
-                    PropertyValue::Float(kf.opacity),
-                    InterpolationType::Linear,
-                );
-                let _ = self.properties.write_value(
-                    MASK_PROP_EXPANSION,
-                    *t,
-                    PropertyValue::Float(kf.expansion),
-                    InterpolationType::Linear,
-                );
-                let _ = self.properties.write_value(
-                    MASK_PROP_INVERT,
-                    *t,
-                    PropertyValue::Bool(kf.invert),
-                    InterpolationType::Hold,
-                );
-                let _ = self.properties.write_value(
-                    MASK_PROP_MASK_OP,
-                    *t,
-                    PropertyValue::Text(kf.mask_op.as_str().to_string()),
-                    InterpolationType::Hold,
-                );
-            }
-            self.keyframes.clear();
         }
     }
 }
@@ -413,13 +379,17 @@ mod tests {
     use super::*;
     use crate::automation::{InterpolationType, PropertyValue};
 
+    fn tt(hundredths: i64) -> TimelineTime {
+        TimelineTime::new(hundredths, 100).expect("valid test time")
+    }
+
     #[test]
     fn mask_component_evaluates_single_keyframe() {
         let kf = MaskKeyframe { feather: 5.0, ..Default::default() };
         let mc = MaskComponent::new("M1".into(), kf);
-        let result = mc.evaluate_at(0);
+        let result = mc.evaluate_at(tt(0));
         assert_eq!(result.feather, 5.0);
-        let result2 = mc.evaluate_at(100);
+        let result2 = mc.evaluate_at(tt(100));
         assert_eq!(result2.feather, 5.0);
     }
 
@@ -427,11 +397,11 @@ mod tests {
     fn mask_component_interpolates_between_two_keyframes() {
         let kf0 = MaskKeyframe { feather: 0.0, opacity: 1.0, ..Default::default() };
         let mut mc = MaskComponent::new("M1".into(), kf0);
-        mc.properties.enable_animation(MASK_PROP_FEATHER, 0).unwrap();
+        mc.properties.enable_animation(MASK_PROP_FEATHER, tt(0)).unwrap();
         mc.properties
             .write_value(
                 MASK_PROP_FEATHER,
-                0,
+                tt(0),
                 PropertyValue::Float(0.0),
                 InterpolationType::Linear,
             )
@@ -439,16 +409,16 @@ mod tests {
         mc.properties
             .write_value(
                 MASK_PROP_FEATHER,
-                100,
+                tt(100),
                 PropertyValue::Float(10.0),
                 InterpolationType::Linear,
             )
             .unwrap();
-        mc.properties.enable_animation(MASK_PROP_OPACITY, 0).unwrap();
+        mc.properties.enable_animation(MASK_PROP_OPACITY, tt(0)).unwrap();
         mc.properties
             .write_value(
                 MASK_PROP_OPACITY,
-                0,
+                tt(0),
                 PropertyValue::Float(1.0),
                 InterpolationType::Linear,
             )
@@ -456,13 +426,13 @@ mod tests {
         mc.properties
             .write_value(
                 MASK_PROP_OPACITY,
-                100,
+                tt(100),
                 PropertyValue::Float(0.0),
                 InterpolationType::Linear,
             )
             .unwrap();
 
-        let mid = mc.evaluate_at(50);
+        let mid = mc.evaluate_at(tt(50));
         assert!((mid.feather - 5.0).abs() < 1e-5);
         assert!((mid.opacity - 0.5).abs() < 1e-5);
     }
@@ -496,10 +466,10 @@ mod tests {
         };
         let a = MaskKeyframe { shape: shape_a, ..Default::default() };
         let mut mc = MaskComponent::new("M1".into(), a);
-        mc.shape_keyframes.push((100, shape_b));
+        mc.shape_keyframes.push((tt(100), shape_b));
         mc.shape_animation_enabled = true;
 
-        let mid = mc.evaluate_at(50);
+        let mid = mc.evaluate_at(tt(50));
         if let MaskShape::Rectangle { x, y, width, height, corner_radius } = mid.shape {
             assert!((x - 25.0).abs() < 1e-4);
             assert!((y - 25.0).abs() < 1e-4);

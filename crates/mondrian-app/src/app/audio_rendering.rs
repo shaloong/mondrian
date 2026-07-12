@@ -83,15 +83,15 @@ pub(super) fn render_audio_chunk_with_cache(
                 continue;
             }
 
-            let clip_start_sample = AudioSamplePosition::from_timecode(
+            let clip_start_sample = AudioSamplePosition::from_timeline_time(
                 clip.position,
                 sample_rate,
                 AudioSampleRounding::Nearest,
             )
             .map_err(audio_time_error)?
             .sample();
-            let clip_end_sample = AudioSamplePosition::from_timecode(
-                clip.end_position(),
+            let clip_end_sample = AudioSamplePosition::from_timeline_time(
+                clip.end_position()?,
                 sample_rate,
                 AudioSampleRounding::Nearest,
             )
@@ -115,27 +115,15 @@ pub(super) fn render_audio_chunk_with_cache(
                 }
             };
 
-            let source_start_frame = if !clip.speed.property().is_animated()
-                && (clip.speed.evaluate_multiplier(TimeCode::new(0, clip.position.time_base)) - 1.0)
-                    .abs()
-                    <= f64::EPSILON
-            {
-                let source_in = AudioSamplePosition::from_timecode(
-                    clip.source_in,
-                    sample_rate,
-                    AudioSampleRounding::Nearest,
-                )
-                .map_err(audio_time_error)?
-                .sample();
-                source_in.saturating_add(overlap_start.saturating_sub(clip_start_sample))
-            } else {
-                // SpeedMap is still frame-domain. Keep that legacy path isolated
-                // until time remap gains an exact sample-domain integration Interface.
-                let overlap_secs = overlap_start as f64 / sample_rate.hz() as f64;
-                let overlap_tc = TimeCode::from_secs(overlap_secs, seq.settings.frame_rate);
-                let source_start_secs = clip.timeline_to_source_time(overlap_tc).to_secs().max(0.0);
-                (source_start_secs * sample_rate.hz() as f64).floor() as i64
-            };
+            let overlap_time = TimelineTime::new(overlap_start, i64::from(sample_rate.hz()))?;
+            let source_time = clip.timeline_to_source_time(overlap_time)?;
+            let source_start_frame = AudioSamplePosition::from_timeline_time(
+                source_time,
+                sample_rate,
+                AudioSampleRounding::Floor,
+            )
+            .map_err(audio_time_error)?
+            .sample();
             let source_start_frame = usize::try_from(source_start_frame.max(0))
                 .map_err(|_| audio_sample_range_error())?;
             let segment_frames = usize::try_from(overlap_end - overlap_start)

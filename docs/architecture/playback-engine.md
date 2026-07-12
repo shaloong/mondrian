@@ -89,8 +89,7 @@ A session contains:
 
 - monotonically increasing `epoch`;
 - active `sequence_id` and immutable timeline revision/signature;
-- exact Timeline Time anchor (the current implementation adapts legacy
-  `TimeCode` until the temporal schema migration);
+- exact `TimelineTime` anchor in the active Sequence domain;
 - signed rational rate and direction;
 - Playback Quality Policy revision;
 - Clock Master and clock-handoff state;
@@ -221,8 +220,7 @@ the timeline or duplicate/drop an arbitrary video interval.
 ### Time representation
 
 - Authoritative Timeline anchors use ADR-0004 exact Timeline Time in the active
-  Sequence domain. Current `TimeCode`/`Rational` inputs are compatibility
-  adapters and must preserve their source time base during conversion.
+  Sequence domain. Frame and sample positions are explicit evaluation adapters.
 - Monotonic duration is runtime-only and never persisted.
 - Video scheduling resolves a Frame Position/evaluation instant; audio
   scheduling resolves an integer sample position carrying its sample rate.
@@ -682,7 +680,7 @@ audio render work, clears queued PCM, remains inactive through 120 ms preroll,
 and only then offers callback evidence.
 
 Synthetic-to-Audio qualification is phase-controlled. An observation carries
-the exact media `TimeCode` at active-consumption frame zero; the Engine compares
+the exact media `TimelineTime` at active-consumption frame zero; the Engine compares
 latency-adjusted integer consumption with the published timeline. Error beyond
 the versioned 20 ms budget records `PhaseRejected`, keeps Synthetic authoritative
 without reanchoring, and asks the app Adapter to reprime. Accepted/rejected

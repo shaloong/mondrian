@@ -5,7 +5,7 @@
 //! floating-point seconds at every chunk boundary can duplicate or omit samples
 //! for fractional video rates and long timelines.
 
-use crate::types::TimeCode;
+use crate::TimelineTime;
 
 /// Policy used when a timeline position falls between two audio samples.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,23 +50,16 @@ impl AudioSamplePosition {
         Self { sample, rate }
     }
 
-    /// Resolve a frame-based timeline position without floating-point seconds.
-    pub fn from_timecode(
-        time: TimeCode,
+    /// Resolve exact author time onto this sample grid.
+    pub fn from_timeline_time(
+        time: TimelineTime,
         rate: AudioSampleRate,
         rounding: AudioSampleRounding,
     ) -> Result<Self, AudioTimeError> {
-        let numerator = i128::from(time.frame)
-            .checked_mul(i128::from(time.time_base.num))
-            .and_then(|value| value.checked_mul(i128::from(rate.hz())))
+        let numerator = i128::from(time.numerator())
+            .checked_mul(i128::from(rate.hz()))
             .ok_or(AudioTimeError::PositionOverflow)?;
-        let denominator = i128::from(time.time_base.den);
-        if time.time_base.num <= 0 || denominator <= 0 {
-            return Err(AudioTimeError::InvalidTimeBase {
-                numerator: time.time_base.num,
-                denominator: time.time_base.den,
-            });
-        }
+        let denominator = i128::from(time.denominator());
         let resolved = round_ratio(numerator, denominator, rounding)?;
         let sample = i64::try_from(resolved).map_err(|_| AudioTimeError::PositionOverflow)?;
         Ok(Self { sample, rate })
@@ -100,9 +93,6 @@ pub enum AudioTimeError {
     /// A sample timeline cannot have a zero rate.
     #[error("audio sample rate must be positive")]
     ZeroSampleRate,
-    /// Timeline time bases must represent a positive number of seconds per frame.
-    #[error("invalid timeline time base {numerator}/{denominator}")]
-    InvalidTimeBase { numerator: i64, denominator: i64 },
     /// The exact conversion did not fit the supported signed sample range.
     #[error("audio sample position is outside the supported i64 range")]
     PositionOverflow,
@@ -145,27 +135,25 @@ fn round_ratio(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Rational;
-
     #[test]
     fn fractional_video_rate_resolves_to_one_stable_sample_boundary() {
         let rate = AudioSampleRate::new(48_000).expect("rate");
-        let time = TimeCode::new(1, Rational::new(1001, 30_000));
+        let time = TimelineTime::new(1001, 30_000).expect("time");
 
         assert_eq!(
-            AudioSamplePosition::from_timecode(time, rate, AudioSampleRounding::Floor)
+            AudioSamplePosition::from_timeline_time(time, rate, AudioSampleRounding::Floor)
                 .expect("floor")
                 .sample(),
             1_601
         );
         assert_eq!(
-            AudioSamplePosition::from_timecode(time, rate, AudioSampleRounding::Nearest)
+            AudioSamplePosition::from_timeline_time(time, rate, AudioSampleRounding::Nearest)
                 .expect("nearest")
                 .sample(),
             1_602
         );
         assert_eq!(
-            AudioSamplePosition::from_timecode(time, rate, AudioSampleRounding::Ceil)
+            AudioSamplePosition::from_timeline_time(time, rate, AudioSampleRounding::Ceil)
                 .expect("ceil")
                 .sample(),
             1_602
@@ -175,21 +163,20 @@ mod tests {
     #[test]
     fn long_fractional_timeline_conversion_does_not_accumulate_chunk_error() {
         let rate = AudioSampleRate::new(48_000).expect("rate");
-        let time_base = Rational::new(1001, 30_000);
-        let start = AudioSamplePosition::from_timecode(
-            TimeCode::new(0, time_base),
+        let start = AudioSamplePosition::from_timeline_time(
+            TimelineTime::ZERO,
             rate,
             AudioSampleRounding::Nearest,
         )
         .expect("start");
-        let middle = AudioSamplePosition::from_timecode(
-            TimeCode::new(100_000, time_base),
+        let middle = AudioSamplePosition::from_timeline_time(
+            TimelineTime::new(100_100_000, 30_000).expect("middle time"),
             rate,
             AudioSampleRounding::Nearest,
         )
         .expect("middle");
-        let end = AudioSamplePosition::from_timecode(
-            TimeCode::new(200_000, time_base),
+        let end = AudioSamplePosition::from_timeline_time(
+            TimelineTime::new(200_200_000, 30_000).expect("end time"),
             rate,
             AudioSampleRounding::Nearest,
         )
@@ -205,10 +192,10 @@ mod tests {
     #[test]
     fn negative_half_sample_ties_round_away_from_zero() {
         let rate = AudioSampleRate::new(1).expect("rate");
-        let time = TimeCode::new(-1, Rational::new(1, 2));
+        let time = TimelineTime::new(-1, 2).expect("time");
 
         assert_eq!(
-            AudioSamplePosition::from_timecode(time, rate, AudioSampleRounding::Nearest)
+            AudioSamplePosition::from_timeline_time(time, rate, AudioSampleRounding::Nearest)
                 .expect("nearest")
                 .sample(),
             -1

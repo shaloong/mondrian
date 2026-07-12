@@ -10,15 +10,15 @@ use mondrian_assets::{AssetKind, AssetLibrary};
 use mondrian_core::{
     automation::{
         interpolation_mode_from_keyframe, InterpolationType, Keyframe, PropertyHost,
-        PropertyMutation, PropertyValue, TimeTicks,
+        PropertyMutation, PropertyValue,
     },
     events::{AppEvent, EventBus},
     types::{
-        AssetId, ClipId, Color, EffectId, KeyframeId, Rational, Resolution, SequenceId, TimeCode,
-        TrackId,
+        AssetId, ClipId, Color, EffectId, FramePosition, KeyframeId, Rational, Resolution,
+        SequenceId, TrackId,
     },
-    AudioSamplePosition, AudioSampleRate, AudioSampleRounding, ProjectId, ProjectMeta,
-    ProjectSettings,
+    AudioSamplePosition, AudioSampleRate, AudioSampleRounding, FrameRounding, ProjectId,
+    ProjectMeta, ProjectSettings, TimelineTime,
 };
 use mondrian_effects::{
     EffectNode, EffectNodeExt, EffectType, MaskComponent, MaskId, MaskKeyframe, MaskShape,
@@ -48,6 +48,12 @@ const DEFAULT_ADJUSTMENT_LAYER_DURATION_SECS: f64 = 5.0;
 const MAX_STATUS_LOG_ENTRIES: usize = 64;
 const AUDIO_OUTPUT_CHANNELS: u8 = 2;
 const AUDIO_IDLE_WARMUP_CHUNK_MILLIS: u32 = 80;
+
+#[cfg(test)]
+pub(crate) fn tt(frame: i64, time_base: Rational) -> TimelineTime {
+    let numerator = frame.checked_mul(time_base.num).expect("test time fits i64");
+    TimelineTime::new(numerator, time_base.den).expect("valid test time")
+}
 
 mod action_handler;
 mod animation_state;
@@ -91,7 +97,7 @@ pub struct AnimationPropertySelection {
 pub struct AnimationKeyframeSelection {
     pub clip_id: ClipId,
     pub path: String,
-    pub time: mondrian_core::automation::TimeTicks,
+    pub time: TimelineTime,
 }
 
 /// Unified timeline, clip, mask, and effect selection — single source of truth.
@@ -127,7 +133,7 @@ pub enum AnimationBubbleHost {
 #[derive(Debug, Clone)]
 pub struct AnimationClipboardEntry {
     pub path: String,
-    pub relative_time: TimeTicks,
+    pub relative_time: TimelineTime,
     pub keyframe: Keyframe<PropertyValue>,
 }
 
@@ -148,7 +154,7 @@ struct ClipClipboardEntry {
     original_clip_id: ClipId,
     track_id: TrackId,
     is_video_track: bool,
-    relative_start_frame: i64,
+    relative_start: TimelineTime,
     clip: Clip,
 }
 

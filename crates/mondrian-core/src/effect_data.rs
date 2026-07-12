@@ -5,7 +5,8 @@
 //! effect data types without depending on the full effect evaluation engine.
 
 use crate::automation::{PropertyBag, PropertyDescriptor, PropertyValue};
-use crate::types::{EffectId, TimeCode};
+use crate::types::EffectId;
+use crate::TimelineTime;
 use serde::{Deserialize, Serialize};
 
 /// Supported effect types.
@@ -160,16 +161,15 @@ impl EffectNode {
         }
     }
 
-    pub fn evaluate_property(&self, path: &str, time: TimeCode) -> Option<PropertyValue> {
-        use crate::automation::timecode_to_ticks;
-        self.properties.evaluate(path, timecode_to_ticks(time))
+    pub fn evaluate_property(&self, path: &str, time: TimelineTime) -> Option<PropertyValue> {
+        self.properties.evaluate(path, time)
     }
 
     pub fn define_property(&mut self, descriptor: PropertyDescriptor) {
         self.properties.define(descriptor);
     }
 
-    pub fn evaluate_f32_by_suffix(&self, suffix: &str, time: TimeCode, fallback: f32) -> f32 {
+    pub fn evaluate_f32_by_suffix(&self, suffix: &str, time: TimelineTime, fallback: f32) -> f32 {
         self.properties
             .iter()
             .find(|(path, _)| path.ends_with(suffix))
@@ -194,7 +194,7 @@ impl EffectNode {
         self.properties = namespaced;
     }
 
-    pub fn evaluate_text_by_suffix(&self, suffix: &str, time: TimeCode) -> Option<String> {
+    pub fn evaluate_text_by_suffix(&self, suffix: &str, time: TimelineTime) -> Option<String> {
         self.properties
             .iter()
             .find(|(path, _)| path.ends_with(suffix))

@@ -2045,6 +2045,9 @@ fn build_app_ui_perf_state(
     for index in 0..audio_track_count {
         sequence.audio_tracks.push(Track::new_audio(format!("A{}", index + 1)));
     }
+    sequence.audio_program = mondrian_timeline::AudioProgram::for_tracks(
+        sequence.audio_tracks.iter().map(|track| track.id),
+    );
 
     let tb = sequence.time_base();
     let effect_types = [
@@ -2062,14 +2065,14 @@ fn build_app_ui_perf_state(
     for index in 0..clip_count {
         let track_index = index % video_track_count;
         let lane_index = index / video_track_count;
-        let position = TimeCode::new((lane_index as i64) * 96, tb);
-        let duration = TimeCode::new(72 + (index % 5) as i64 * 6, tb);
+        let position = tt((lane_index as i64) * 96, tb);
+        let duration = tt(72 + (index % 5) as i64 * 6, tb);
         let asset_id = asset_ids[index % asset_ids.len()];
         let mut clip = if index % 5 == 0 {
-            Clip::new_adjustment_layer(asset_id, position, duration)
+            Clip::new_adjustment_layer(asset_id, position, duration).expect("valid clip")
         } else {
             let color = Color::from_hex(0x244C7A + ((index as u32 * 997) & 0x003F3F));
-            Clip::new_solid_color(asset_id, color, position, duration)
+            Clip::new_solid_color(asset_id, color, position, duration).expect("valid clip")
         };
         clip.label = Some(format!("Clip {index:04}"));
 
@@ -2088,15 +2091,16 @@ fn build_app_ui_perf_state(
     for index in 0..(clip_count / 3).max(audio_track_count) {
         let track_index = index % audio_track_count;
         let lane_index = index / audio_track_count;
-        let position = TimeCode::new((lane_index as i64) * 120, tb);
-        let duration = TimeCode::new(96, tb);
-        let mut clip = Clip::new(asset_ids[index % asset_ids.len()], position, duration);
+        let position = tt((lane_index as i64) * 120, tb);
+        let duration = tt(96, tb);
+        let mut clip =
+            Clip::new(asset_ids[index % asset_ids.len()], position, duration).expect("valid clip");
         clip.label = Some(format!("Audio {index:04}"));
         sequence.audio_tracks[track_index].add_clip(clip)?;
     }
 
-    sequence.playhead = TimeCode::new(0, tb);
-    sequence.mark_out(sequence.total_duration().frame.max(1));
+    sequence.playhead = tt(0, tb);
+    sequence.mark_out(sequence.total_duration().expect("valid duration"));
     let sequence_id = sequence.id;
 
     let mut state = AppState::new();
@@ -2183,10 +2187,11 @@ fn build_preview_media_perf_state_with_media_info(
     let mut sequence = Sequence::new("Preview media perf");
     sequence.settings.frame_rate = probed_frame_rate.unwrap_or(Rational::FPS_30);
     let tb = sequence.time_base();
-    let duration = TimeCode::new(frame_count as i64, tb);
-    sequence.video_tracks[0].add_clip(Clip::new(asset_id, TimeCode::new(0, tb), duration))?;
-    sequence.playhead = TimeCode::new(0, tb);
-    sequence.mark_out(frame_count as i64);
+    let duration = tt(frame_count as i64, tb);
+    sequence.video_tracks[0]
+        .add_clip(Clip::new(asset_id, tt(0, tb), duration).expect("valid clip"))?;
+    sequence.playhead = tt(0, tb);
+    sequence.mark_out(duration);
     let sequence_id = sequence.id;
 
     let mut state = AppState::new();

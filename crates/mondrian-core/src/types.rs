@@ -12,7 +12,9 @@ use uuid::Uuid;
 macro_rules! define_id {
     ($name:ident, $doc:expr) => {
         #[doc = $doc]
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[derive(
+            Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+        )]
         pub struct $name(pub Uuid);
 
         impl $name {
@@ -45,6 +47,14 @@ define_id!(SceneId, "场景 ID");
 define_id!(EffectId, "效果节点 ID");
 define_id!(AnimationTrackId, "动画轨道 ID");
 define_id!(KeyframeId, "关键帧 ID");
+define_id!(AudioContributionId, "音频贡献 ID");
+define_id!(AudioSourceComponentId, "音频源组件 ID");
+define_id!(AudioTransitionId, "音频转场 ID");
+define_id!(AudioRouteId, "音频路由 ID");
+define_id!(AudioProcessorInstanceId, "音频处理器实例 ID");
+define_id!(MixBusId, "混音总线 ID");
+define_id!(ProgramOutputId, "节目输出 ID");
+define_id!(AudioRoleId, "音频角色 ID");
 define_id!(JobId, "渲染任务 ID");
 define_id!(MaskId, "蒙版 ID");
 
@@ -127,97 +137,18 @@ impl fmt::Display for Rational {
 /// 内部以帧数 + 时间基（帧率的倒数）表示：
 /// `seconds = frame * time_base = frame * (1 / fps)`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct TimeCode {
+pub struct FramePosition {
     /// 帧编号（可为负数，用于 offset）
     pub frame: i64,
     /// 时间基 = 1/fps，例如 25fps → Rational{1, 25}
     pub time_base: Rational,
 }
 
-impl TimeCode {
+impl FramePosition {
     pub const ZERO: Self = Self { frame: 0, time_base: Rational::FPS_25 };
 
     pub fn new(frame: i64, time_base: Rational) -> Self {
         Self { frame, time_base }
-    }
-
-    /// 从秒数构造（四舍五入到最近帧）
-    pub fn from_secs(secs: f64, fps: Rational) -> Self {
-        let frame = (secs * fps.to_f64()).round() as i64;
-        Self { frame, time_base: Rational::new(fps.den, fps.num) }
-    }
-
-    /// 转换为秒（浮点）
-    pub fn to_secs(self) -> f64 {
-        self.frame as f64 * self.time_base.to_f64()
-    }
-
-    /// 转换为毫秒
-    pub fn to_millis(self) -> f64 {
-        self.to_secs() * 1000.0
-    }
-
-    /// 格式化为 SMPTE 时间码字符串 HH:MM:SS:FF
-    pub fn to_smpte(self) -> String {
-        let fps = (1.0 / self.time_base.to_f64()).round() as i64;
-        let total_secs = self.frame / fps;
-        let ff = self.frame % fps;
-        let ss = total_secs % 60;
-        let mm = (total_secs / 60) % 60;
-        let hh = total_secs / 3600;
-        format!("{hh:02}:{mm:02}:{ss:02}:{ff:02}")
-    }
-}
-
-impl std::ops::Add for TimeCode {
-    type Output = Self;
-    fn add(self, rhs: Self) -> Self {
-        // 假设相同时间基
-        Self {
-            frame: self.frame + rhs.frame,
-            time_base: self.time_base,
-        }
-    }
-}
-
-impl std::ops::Sub for TimeCode {
-    type Output = Self;
-    fn sub(self, rhs: Self) -> Self {
-        Self {
-            frame: self.frame - rhs.frame,
-            time_base: self.time_base,
-        }
-    }
-}
-
-impl fmt::Display for TimeCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_smpte())
-    }
-}
-
-/// 时间范围 [start, end)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TimeRange {
-    pub start: TimeCode,
-    pub end: TimeCode,
-}
-
-impl TimeRange {
-    pub fn new(start: TimeCode, end: TimeCode) -> Self {
-        Self { start, end }
-    }
-
-    pub fn duration(self) -> TimeCode {
-        self.end - self.start
-    }
-
-    pub fn contains(self, t: TimeCode) -> bool {
-        t >= self.start && t < self.end
-    }
-
-    pub fn overlaps(self, other: Self) -> bool {
-        self.start < other.end && other.start < self.end
     }
 }
 
@@ -498,19 +429,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn timecode_smpte_format() {
-        let tc = TimeCode::new(75, Rational::new(1, 25)); // 3 seconds = 00:00:03:00
-        assert_eq!(tc.to_smpte(), "00:00:03:00");
-    }
-
-    #[test]
-    fn timecode_to_secs() {
-        let tc = TimeCode::from_secs(1.5, Rational::FPS_25);
-        let half_frame_secs = 1.0 / (2.0 * Rational::FPS_25.to_f64());
-        assert!((tc.to_secs() - 1.5).abs() <= half_frame_secs + 1e-9);
-    }
-
-    #[test]
     fn working_color_space_conversion_separates_gamut_from_transfer() {
         assert_eq!(
             WorkingColorSpace::try_from(ColorSpace::Rec2100Pq),
@@ -532,16 +450,6 @@ mod tests {
             OcioColorSpaceIdentity::Encoded(ColorSpace::Rec709),
             OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709)
         );
-    }
-
-    #[test]
-    fn time_range_contains() {
-        let range = TimeRange::new(
-            TimeCode::new(10, Rational::new(1, 25)),
-            TimeCode::new(20, Rational::new(1, 25)),
-        );
-        assert!(range.contains(TimeCode::new(15, Rational::new(1, 25))));
-        assert!(!range.contains(TimeCode::new(5, Rational::new(1, 25))));
     }
 
     // ── OCIO config source / color engine serde ────────────────────────────

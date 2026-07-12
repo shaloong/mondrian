@@ -94,7 +94,7 @@ pub enum ExportInput {
     /// 直接转码单文件输入（兼容旧流程）
     File {
         input_path: PathBuf,
-        in_point: Option<String>, // TODO: TimeCode
+        in_point: Option<String>, // TODO: FramePosition
         out_point: Option<String>,
     },
     /// 从时间线逐帧渲染后再编码输出

@@ -3,7 +3,8 @@
 //! Menus, focused shortcuts, and panel adapters use this module to keep their
 //! disabled states aligned before actions reach `AppState`.
 
-use mondrian_core::types::TrackId;
+use mondrian_core::types::{FramePosition, Rational, TrackId};
+use mondrian_core::TimelineTime;
 use mondrian_editor_state::Action;
 
 use crate::app::ui_actions::{
@@ -287,7 +288,8 @@ fn timeline_trim_targets_are_available(
     };
     payload.clip_ids.iter().all(|clip_id| {
         clip_with_track(sequence, *clip_id).is_some_and(|(track, clip)| {
-            !track.is_locked && clip_can_trim_to_frame(clip, payload.edge, payload.frame)
+            !track.is_locked
+                && clip_can_trim_to_frame(clip, payload.edge, payload.frame, sequence.time_base())
         })
     })
 }
@@ -309,11 +311,9 @@ fn selected_clip_trim_to_playhead_is_available(
     state.selection.selected_clips.iter().all(|selection| {
         track_for_ref(sequence, selection.track_id, selection.is_video_track).is_some_and(|track| {
             !track.is_locked
-                && track
-                    .clips
-                    .iter()
-                    .find(|clip| clip.id == selection.clip_id)
-                    .is_some_and(|clip| clip_can_trim_to_frame(clip, edge, target_frame))
+                && track.clips.iter().find(|clip| clip.id == selection.clip_id).is_some_and(
+                    |clip| clip_can_trim_to_frame(clip, edge, target_frame, sequence.time_base()),
+                )
         })
     })
 }
@@ -336,12 +336,22 @@ fn clip_with_track(sequence: &Sequence, clip_id: ClipId) -> Option<(&Track, &Cli
         })
 }
 
-fn clip_can_trim_to_frame(clip: &Clip, edge: TimelineTrimPayloadEdge, target_frame: i64) -> bool {
-    let start = clip.position.frame;
-    let end = clip.end_position().frame;
+fn clip_can_trim_to_frame(
+    clip: &Clip,
+    edge: TimelineTrimPayloadEdge,
+    target_frame: i64,
+    time_base: Rational,
+) -> bool {
+    let Ok(target) = TimelineTime::from_frame_position(FramePosition::new(target_frame, time_base))
+    else {
+        return false;
+    };
+    let Ok(end) = clip.end_position() else {
+        return false;
+    };
     match edge {
-        TimelineTrimPayloadEdge::In => target_frame > start && target_frame < end,
-        TimelineTrimPayloadEdge::Out => target_frame > start && target_frame < end,
+        TimelineTrimPayloadEdge::In => target > clip.position && target < end,
+        TimelineTrimPayloadEdge::Out => target > clip.position && target < end,
     }
 }
 
@@ -384,9 +394,10 @@ fn has_any_app_selection(state: &AppState) -> bool {
 }
 
 fn sequence_has_in_out_points(state: &AppState) -> bool {
-    state.sequence.as_ref().is_some_and(|sequence| {
-        sequence.in_point_frame.is_some() || sequence.out_point_frame().is_some()
-    })
+    state
+        .sequence
+        .as_ref()
+        .is_some_and(|sequence| sequence.in_point.is_some() || sequence.out_point.is_some())
 }
 
 fn sequence_has_selectable_clips(state: &AppState) -> bool {
@@ -400,21 +411,31 @@ fn sequence_has_selectable_clips(state: &AppState) -> bool {
 }
 
 fn can_split_at_playhead(state: &AppState) -> bool {
-    let frame = state.current_frame();
     state.sequence.as_ref().is_some_and(|sequence| {
+        let Ok(time) = TimelineTime::from_frame_position(FramePosition::new(
+            state.current_frame(),
+            sequence.time_base(),
+        )) else {
+            return false;
+        };
         sequence
             .video_tracks
             .iter()
             .filter(|track| !track.is_locked)
             .chain(sequence.audio_tracks.iter().filter(|track| !track.is_locked))
             .flat_map(|track| track.clips.iter())
-            .any(|clip| frame > clip.position.frame && frame < clip.end_position().frame)
+            .any(|clip| clip.end_position().is_ok_and(|end| time > clip.position && time < end))
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::TimelineTime {
+        let numerator = frame.checked_mul(time_base.num).expect("test time fits i64");
+        mondrian_core::TimelineTime::new(numerator, time_base.den).expect("valid test time")
+    }
     use crate::app::ui_actions::{
         timeline_add_track_action, timeline_clear_in_out_points_action, timeline_move_clip_action,
         timeline_move_track_action, timeline_roll_selected_cut_to_playhead_action,
@@ -428,7 +449,7 @@ mod tests {
         TimelineTrimPayloadEdge,
     };
     use crate::app::SelectedClipRef;
-    use mondrian_core::types::{AssetId, ClipId, TimeCode, TrackId};
+    use mondrian_core::types::{AssetId, ClipId, TrackId};
     use mondrian_timeline::clip::Clip;
     use mondrian_timeline::sequence::Sequence;
 
@@ -437,7 +458,7 @@ mod tests {
         let mut sequence = Sequence::new("Edit");
         let tb = sequence.time_base();
         let track_id = sequence.video_tracks[0].id;
-        let clip = Clip::new(AssetId::new(), TimeCode::new(10, tb), TimeCode::new(20, tb));
+        let clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
         let clip_id = clip.id;
         sequence.video_tracks[0].add_clip(clip).expect("add clip");
         state.sequence = Some(sequence);

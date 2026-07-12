@@ -3,13 +3,13 @@
 use glam::Vec2;
 use mondrian_core::{
     automation::{
-        timecode_to_ticks, AnimatedProperty, PropertyBag, PropertyDescriptor, PropertyHost,
-        PropertyMutation, PropertyValue,
+        AnimatedProperty, PropertyBag, PropertyDescriptor, PropertyHost, PropertyMutation,
+        PropertyValue,
     },
     effect_data::{EffectNode, EffectType},
     mask_data::MaskComponent,
     types::*,
-    MondrianError, Result,
+    MondrianError, Result, TimeScale, TimelineTime,
 };
 use serde::{Deserialize, Serialize};
 
@@ -69,7 +69,7 @@ impl Transform2D {
     ///
     /// T(position) · R(rotation) · S(scale) · T(-anchor)
     /// 锚点定义缩放旋转中心，位置定义锚点在父空间中的坐标。
-    pub fn evaluate_matrix(&self, time: TimeCode) -> glam::Mat3 {
+    pub fn evaluate_matrix(&self, time: TimelineTime) -> glam::Mat3 {
         let pos = self.evaluate_vec2(Self::POSITION_PATH, time);
         let scale = self.evaluate_vec2(Self::SCALE_PATH, time);
         let rot = self.evaluate_f32(Self::ROTATION_PATH, time).to_radians();
@@ -89,7 +89,7 @@ impl Transform2D {
         )
     }
 
-    pub fn evaluate_opacity(&self, time: TimeCode) -> f32 {
+    pub fn evaluate_opacity(&self, time: TimelineTime) -> f32 {
         self.evaluate_f32(Self::OPACITY_PATH, time)
     }
 
@@ -122,7 +122,7 @@ impl Transform2D {
     }
 
     /// Read current position value.
-    pub fn get_position(&self, time: TimeCode) -> glam::Vec2 {
+    pub fn get_position(&self, time: TimelineTime) -> glam::Vec2 {
         self.evaluate_vec2(Self::POSITION_PATH, time)
     }
 
@@ -132,7 +132,7 @@ impl Transform2D {
     }
 
     /// Read current scale value.
-    pub fn get_scale(&self, time: TimeCode) -> glam::Vec2 {
+    pub fn get_scale(&self, time: TimelineTime) -> glam::Vec2 {
         self.evaluate_vec2(Self::SCALE_PATH, time)
     }
 
@@ -144,20 +144,20 @@ impl Transform2D {
     }
 
     /// Read current anchor value.
-    pub fn get_anchor_point(&self, time: TimeCode) -> glam::Vec2 {
+    pub fn get_anchor_point(&self, time: TimelineTime) -> glam::Vec2 {
         self.evaluate_vec2(Self::ANCHOR_POINT_PATH, time)
     }
 
-    fn evaluate_vec2(&self, path: &str, time: TimeCode) -> Vec2 {
+    fn evaluate_vec2(&self, path: &str, time: TimelineTime) -> Vec2 {
         self.properties
-            .evaluate(path, timecode_to_ticks(time))
+            .evaluate(path, time)
             .and_then(|value| value.as_vec2())
             .unwrap_or(Vec2::ZERO)
     }
 
-    fn evaluate_f32(&self, path: &str, time: TimeCode) -> f32 {
+    fn evaluate_f32(&self, path: &str, time: TimelineTime) -> f32 {
         self.properties
-            .evaluate(path, timecode_to_ticks(time))
+            .evaluate(path, time)
             .and_then(|value| value.as_f32())
             .unwrap_or(0.0)
     }
@@ -235,59 +235,39 @@ fn blend_mode_from_text(value: &str) -> Result<Option<BlendMode>> {
     })
 }
 
-/// 变速曲线（当前以速度倍数属性驱动，可扩展到更复杂时间重映射）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Exact constant source-time scale for a clip placement.
+///
+/// Variable retiming requires a validated piecewise time transform; it must not
+/// be approximated by sampling ordinary parameter automation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpeedMap {
-    multiplier: AnimatedProperty,
+    scale: TimeScale,
 }
 
 impl SpeedMap {
-    pub const MULTIPLIER_PATH: &'static str = "speed.multiplier";
-
+    /// Construct an identity time mapping.
     pub fn new() -> Self {
-        Self {
-            multiplier: AnimatedProperty::from_descriptor(PropertyDescriptor::new(
-                Self::MULTIPLIER_PATH,
-                "速度倍数",
-                PropertyValue::Double(1.0),
-            )),
-        }
+        Self { scale: TimeScale::ONE }
     }
 
-    pub fn property(&self) -> &AnimatedProperty {
-        &self.multiplier
+    /// Exact source-time delta per clip-local time delta.
+    pub const fn scale(self) -> TimeScale {
+        self.scale
     }
 
-    pub fn evaluate_multiplier(&self, local_time: TimeCode) -> f64 {
-        self.multiplier.evaluate(timecode_to_ticks(local_time)).as_f64().unwrap_or(1.0)
+    /// Replace the constant exact scale.
+    pub fn set_scale(&mut self, scale: TimeScale) {
+        self.scale = scale;
     }
 
-    /// 给定时间线本地时间 → 素材源时间（帧偏移）
-    pub fn map_time(&self, local_time: TimeCode) -> TimeCode {
-        let speed = self.evaluate_multiplier(local_time);
-        TimeCode::new(
-            (local_time.frame as f64 * speed) as i64,
-            local_time.time_base,
-        )
-    }
-
-    fn apply_property_mutation(&mut self, mutation: PropertyMutation) -> Result<()> {
-        let path = property_mutation_path(&mutation);
-        if path != Self::MULTIPLIER_PATH {
-            return Err(MondrianError::WorkflowStepFailed {
-                step_id: "speed_apply_property_mutation".to_string(),
-                reason: format!("SpeedMap 不支持属性路径: {path}"),
-            });
-        }
-
-        if matches!(mutation, PropertyMutation::RemoveProperty { .. }) {
-            return Err(MondrianError::WorkflowStepFailed {
-                step_id: "speed_apply_property_mutation".to_string(),
-                reason: "内建 speed.multiplier 属性不可移除".to_string(),
-            });
-        }
-
-        self.multiplier.apply_mutation(mutation)
+    /// Map one clip-local duration into an exact source-time duration.
+    pub fn map_time(self, local_time: TimelineTime) -> Result<TimelineTime> {
+        local_time
+            .checked_scale(self.scale)
+            .map_err(|error| MondrianError::WorkflowStepFailed {
+                step_id: "clip_speed_map".to_string(),
+                reason: error.to_string(),
+            })
     }
 }
 
@@ -315,13 +295,13 @@ pub struct Clip {
     #[serde(default)]
     pub interpretation: MediaInterpretation,
     /// 在时间线上的起始位置
-    pub position: TimeCode,
+    pub position: TimelineTime,
     /// 在时间线上的持续时长
-    pub duration: TimeCode,
+    pub duration: TimelineTime,
     /// 素材内入点
-    pub source_in: TimeCode,
+    pub source_in: TimelineTime,
     /// 素材内出点（= source_in + duration / speed）
-    pub source_out: TimeCode,
+    pub source_out: TimelineTime,
     /// 2D 变换（关键帧）
     pub transform: Transform2D,
     /// 变速模式
@@ -349,9 +329,11 @@ impl Clip {
     pub const BLEND_MODE_PATH: &'static str = "clip.blend_mode";
     pub const SOLID_COLOR_PATH: &'static str = "clip.solid_color";
 
-    pub fn new(asset_id: AssetId, position: TimeCode, duration: TimeCode) -> Self {
-        let tb = position.time_base;
-        Self {
+    pub fn new(asset_id: AssetId, position: TimelineTime, duration: TimelineTime) -> Result<Self> {
+        if duration.is_negative() {
+            return Err(mondrian_core::TimelineTimeError::NegativeDuration.into());
+        }
+        Ok(Self {
             id: ClipId::new(),
             kind: ClipKind::Media,
             asset_id,
@@ -359,7 +341,7 @@ impl Clip {
             interpretation: MediaInterpretation::default(),
             position,
             duration,
-            source_in: TimeCode::new(0, tb),
+            source_in: TimelineTime::ZERO,
             source_out: duration,
             transform: Transform2D::identity(),
             speed: SpeedMap::new(),
@@ -370,46 +352,50 @@ impl Clip {
             blend_mode: None,
             label: None,
             solid_color: None,
-        }
+        })
     }
 
     pub fn new_solid_color(
         asset_id: AssetId,
         color: Color,
-        position: TimeCode,
-        duration: TimeCode,
-    ) -> Self {
-        let mut clip = Self::new(asset_id, position, duration);
+        position: TimelineTime,
+        duration: TimelineTime,
+    ) -> Result<Self> {
+        let mut clip = Self::new(asset_id, position, duration)?;
         clip.kind = ClipKind::SolidColor;
         clip.solid_color = Some(color);
-        clip.source_in = TimeCode::new(0, position.time_base);
+        clip.source_in = TimelineTime::ZERO;
         clip.source_out = duration;
         clip.label = Some("纯色层".to_string());
-        clip
+        Ok(clip)
     }
 
-    pub fn new_adjustment_layer(asset_id: AssetId, position: TimeCode, duration: TimeCode) -> Self {
-        let mut clip = Self::new(asset_id, position, duration);
+    pub fn new_adjustment_layer(
+        asset_id: AssetId,
+        position: TimelineTime,
+        duration: TimelineTime,
+    ) -> Result<Self> {
+        let mut clip = Self::new(asset_id, position, duration)?;
         clip.kind = ClipKind::AdjustmentLayer;
-        clip.source_in = TimeCode::new(0, position.time_base);
+        clip.source_in = TimelineTime::ZERO;
         clip.source_out = duration;
         clip.label = Some("调整图层".to_string());
-        clip
+        Ok(clip)
     }
 
     pub fn new_nested_sequence(
         sequence_id: SequenceId,
-        position: TimeCode,
-        duration: TimeCode,
+        position: TimelineTime,
+        duration: TimelineTime,
         label: Option<String>,
-    ) -> Self {
-        let mut clip = Self::new(AssetId::new(), position, duration);
+    ) -> Result<Self> {
+        let mut clip = Self::new(AssetId::new(), position, duration)?;
         clip.kind = ClipKind::NestedSequence;
         clip.nested_sequence_id = Some(sequence_id);
-        clip.source_in = TimeCode::new(0, position.time_base);
+        clip.source_in = TimelineTime::ZERO;
         clip.source_out = duration;
         clip.label = label.or_else(|| Some("嵌套序列".to_string()));
-        clip
+        Ok(clip)
     }
 
     pub fn is_adjustment_layer(&self) -> bool {
@@ -425,20 +411,20 @@ impl Clip {
     }
 
     /// Clip 在时间线上的结束位置
-    pub fn end_position(&self) -> TimeCode {
-        self.position + self.duration
+    pub fn end_position(&self) -> Result<TimelineTime> {
+        Ok(self.position.checked_add(self.duration)?)
     }
 
     /// 判断给定时间码是否在此 Clip 范围内
-    pub fn contains(&self, time: TimeCode) -> bool {
-        time >= self.position && time < self.end_position()
+    pub fn contains(&self, time: TimelineTime) -> Result<bool> {
+        Ok(time >= self.position && time < self.end_position()?)
     }
 
     /// 将时间线时间 → Clip 内本地时间 → 素材源时间
-    pub fn timeline_to_source_time(&self, timeline_time: TimeCode) -> TimeCode {
-        let local = timeline_time - self.position;
-        let source_local = self.speed.map_time(local);
-        self.source_in + source_local
+    pub fn timeline_to_source_time(&self, timeline_time: TimelineTime) -> Result<TimelineTime> {
+        let local = timeline_time.checked_sub(self.position)?;
+        let source_local = self.speed.map_time(local)?;
+        Ok(self.source_in.checked_add(source_local)?)
     }
 
     pub fn add_effect(&mut self, effect_type: EffectType) -> EffectId {
@@ -530,8 +516,7 @@ impl PropertyHost for Clip {
         }
         // Aggregate mask properties with "mask.<uuid>." prefix.
         for mask in &self.masks {
-            let mut mask_component = mask.clone();
-            mask_component.ensure_migrated();
+            let mask_component = mask.clone();
             for (short_path, property) in mask_component.properties.iter() {
                 let mut prop = property.clone();
                 prop.descriptor.path = format!("mask.{}.{}", mask.id.0, short_path);
@@ -560,9 +545,6 @@ impl PropertyHost for Clip {
                 AnimatedProperty::from_descriptor(solid_color_descriptor);
             solid_color_property.set_static_value(PropertyValue::Color(solid_color));
             properties.upsert(solid_color_property);
-        }
-        if !self.is_adjustment_layer() && !self.is_nested_sequence() {
-            properties.upsert(self.speed.property().clone());
         }
         Ok(properties)
     }
@@ -621,11 +603,6 @@ impl PropertyHost for Clip {
             };
             self.solid_color = Some(color);
             Ok(())
-        } else if !self.is_adjustment_layer()
-            && !self.is_nested_sequence()
-            && path == SpeedMap::MULTIPLIER_PATH
-        {
-            self.speed.apply_property_mutation(mutation)
         } else if path.starts_with("mask.") {
             // Path format: "mask.<uuid>.<short_prop>"
             let parts: Vec<&str> = path.splitn(3, '.').collect();
@@ -695,7 +672,7 @@ pub struct ActiveClip {
     pub clip: Clip,
     pub track_index: usize,
     /// 此时刻对应的素材源时间（用于解码）
-    pub source_time: TimeCode,
+    pub source_time: TimelineTime,
     /// Transform 矩阵（已在此时刻求值）
     pub transform_matrix: glam::Mat3,
     /// 不透明度（已在此时刻求值）
@@ -711,17 +688,14 @@ fn property_mutation_path(mutation: &PropertyMutation) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_core::{
-        automation::{timecode_to_ticks, Keyframe, PropertyMutation, PropertyValue},
-        types::Rational,
-    };
+    use mondrian_core::automation::{Keyframe, PropertyMutation, PropertyValue};
     use mondrian_effects::EffectRenderOp;
 
-    fn tc(frame: i64) -> TimeCode {
-        TimeCode::new(frame, Rational::new(1, 25))
+    fn tt(frame: i64) -> TimelineTime {
+        TimelineTime::new(frame, 25).expect("valid test time")
     }
 
-    fn exposure_from_graph(effects: &[EffectNode], time: TimeCode) -> f32 {
+    fn exposure_from_graph(effects: &[EffectNode], time: TimelineTime) -> f32 {
         // Build graph and extract ColorAdjust exposure from UnaryEffect nodes.
         let graph = mondrian_effects::build_effect_render_graph(effects, time);
         graph
@@ -738,54 +712,47 @@ mod tests {
     }
 
     #[test]
-    fn clip_property_mutation_updates_transform_and_speed() {
-        let mut clip = Clip::new(AssetId::new(), tc(0), tc(40));
+    fn clip_property_mutation_updates_transform_and_exact_speed_scale() {
+        let mut clip = Clip::new(AssetId::new(), tt(0), tt(40)).expect("valid clip");
         clip.apply_property_mutation(PropertyMutation::SetKeyframe {
             path: Transform2D::POSITION_PATH.to_string(),
-            keyframe: Keyframe::linear(timecode_to_ticks(tc(0)), PropertyValue::Vec2(Vec2::ZERO)),
+            keyframe: Keyframe::linear(tt(0), PropertyValue::Vec2(Vec2::ZERO)),
         })
         .expect("set start position");
         clip.apply_property_mutation(PropertyMutation::SetKeyframe {
             path: Transform2D::POSITION_PATH.to_string(),
-            keyframe: Keyframe::linear(
-                timecode_to_ticks(tc(20)),
-                PropertyValue::Vec2(Vec2::new(20.0, 10.0)),
-            ),
+            keyframe: Keyframe::linear(tt(20), PropertyValue::Vec2(Vec2::new(20.0, 10.0))),
         })
         .expect("set end position");
-        clip.apply_property_mutation(PropertyMutation::SetStaticValue {
-            path: SpeedMap::MULTIPLIER_PATH.to_string(),
-            value: PropertyValue::Double(1.5),
-        })
-        .expect("set speed multiplier");
+        clip.speed.set_scale(TimeScale::new(3, 2).expect("valid exact scale"));
 
         let position = clip
             .transform
             .to_property_bag()
-            .evaluate(Transform2D::POSITION_PATH, timecode_to_ticks(tc(10)))
+            .evaluate(Transform2D::POSITION_PATH, tt(10))
             .and_then(|value| value.as_vec2())
             .expect("evaluate position");
         assert_eq!(position, Vec2::new(10.0, 5.0));
-        assert!((clip.speed.evaluate_multiplier(tc(10)) - 1.5).abs() < f64::EPSILON);
+        assert_eq!(clip.speed.map_time(tt(10)).expect("map time"), tt(15));
     }
 
     #[test]
     fn clip_property_bag_exposes_blend_mode_as_static_property() {
-        let clip = Clip::new(AssetId::new(), tc(0), tc(40));
+        let clip = Clip::new(AssetId::new(), tt(0), tt(40)).expect("valid clip");
         let bag = clip.property_bag().expect("property bag should build");
         let property =
             bag.property(Clip::BLEND_MODE_PATH).expect("blend mode property should exist");
 
         assert!(!property.descriptor.is_animatable);
         assert_eq!(
-            property.evaluate(timecode_to_ticks(tc(0))),
+            property.evaluate(tt(0)),
             PropertyValue::Text("inherit".to_string())
         );
     }
 
     #[test]
     fn clip_property_mutation_updates_blend_mode_without_keyframes() {
-        let mut clip = Clip::new(AssetId::new(), tc(0), tc(40));
+        let mut clip = Clip::new(AssetId::new(), tt(0), tt(40)).expect("valid clip");
 
         clip.apply_property_mutation(PropertyMutation::SetStaticValue {
             path: Clip::BLEND_MODE_PATH.to_string(),
@@ -799,23 +766,21 @@ mod tests {
     #[test]
     fn clip_property_bag_exposes_solid_color_as_static_property() {
         let color = Color::from_rgba8(12, 34, 56, 200);
-        let clip = Clip::new_solid_color(AssetId::new(), color, tc(0), tc(40));
+        let clip = Clip::new_solid_color(AssetId::new(), color, tt(0), tt(40)).expect("valid clip");
 
         let bag = clip.property_bag().expect("property bag should build");
         let property =
             bag.property(Clip::SOLID_COLOR_PATH).expect("solid color property should exist");
 
         assert!(!property.descriptor.is_animatable);
-        assert_eq!(
-            property.evaluate(timecode_to_ticks(tc(0))),
-            PropertyValue::Color(color)
-        );
+        assert_eq!(property.evaluate(tt(0)), PropertyValue::Color(color));
     }
 
     #[test]
     fn clip_property_mutation_updates_solid_color_without_keyframes() {
         let mut clip =
-            Clip::new_solid_color(AssetId::new(), Color::from_hex(0x112233), tc(0), tc(40));
+            Clip::new_solid_color(AssetId::new(), Color::from_hex(0x112233), tt(0), tt(40))
+                .expect("valid clip");
         let color = Color::from_rgba8(200, 120, 40, 180);
 
         clip.apply_property_mutation(PropertyMutation::SetStaticValue {
@@ -829,12 +794,12 @@ mod tests {
 
     #[test]
     fn adjustment_layer_constructor_marks_clip_kind() {
-        let clip = Clip::new_adjustment_layer(AssetId::new(), tc(12), tc(30));
+        let clip = Clip::new_adjustment_layer(AssetId::new(), tt(12), tt(30)).expect("valid clip");
 
         assert!(clip.is_adjustment_layer());
         assert_eq!(clip.kind, ClipKind::AdjustmentLayer);
-        assert_eq!(clip.position, tc(12));
-        assert_eq!(clip.duration, tc(30));
+        assert_eq!(clip.position, tt(12));
+        assert_eq!(clip.duration, tt(30));
         assert!(clip.effects.is_empty());
     }
 
@@ -842,7 +807,8 @@ mod tests {
     fn nested_sequence_constructor_marks_clip_kind() {
         let nested_id = SequenceId::new();
         let clip =
-            Clip::new_nested_sequence(nested_id, tc(12), tc(30), Some("Scene 02".to_string()));
+            Clip::new_nested_sequence(nested_id, tt(12), tt(30), Some("Scene 02".to_string()))
+                .expect("valid clip");
 
         assert!(clip.is_nested_sequence());
         assert_eq!(clip.kind, ClipKind::NestedSequence);
@@ -851,20 +817,20 @@ mod tests {
         assert!(clip
             .property_bag()
             .expect("property bag")
-            .property(SpeedMap::MULTIPLIER_PATH)
-            .is_none());
+            .property(Transform2D::OPACITY_PATH)
+            .is_some());
     }
 
     #[test]
     fn media_interpretation_defaults_to_source_metadata() {
-        let clip = Clip::new(AssetId::new(), tc(0), tc(10));
+        let clip = Clip::new(AssetId::new(), tt(0), tt(10)).expect("valid clip");
         assert_eq!(clip.interpretation.color_space_override, None);
         assert_eq!(clip.interpretation.alpha, AlphaInterpretation::Straight);
     }
 
     #[test]
     fn media_interpretation_can_override_color_space() {
-        let mut clip = Clip::new(AssetId::new(), tc(0), tc(10));
+        let mut clip = Clip::new(AssetId::new(), tt(0), tt(10)).expect("valid clip");
         clip.interpretation.color_space_override = Some(ColorSpace::Rec2100Hlg);
         assert_eq!(
             clip.interpretation.color_space_override,
@@ -875,8 +841,10 @@ mod tests {
     #[test]
     fn adjustment_layer_instances_from_same_asset_do_not_share_state() {
         let shared_asset_id = AssetId::new();
-        let mut first = Clip::new_adjustment_layer(shared_asset_id, tc(0), tc(30));
-        let mut second = Clip::new_adjustment_layer(shared_asset_id, tc(40), tc(30));
+        let mut first =
+            Clip::new_adjustment_layer(shared_asset_id, tt(0), tt(30)).expect("valid clip");
+        let mut second =
+            Clip::new_adjustment_layer(shared_asset_id, tt(40), tt(30)).expect("valid clip");
         first.add_effect_node(mondrian_effects::EffectNodeExt::with_defaults(
             EffectType::BasicCorrection,
         ));
@@ -894,8 +862,8 @@ mod tests {
             })
             .expect("set first exposure");
 
-        let first_exposure = exposure_from_graph(&first.effects, tc(10));
-        let second_exposure = exposure_from_graph(&second.effects, tc(50));
+        let first_exposure = exposure_from_graph(&first.effects, tt(10));
+        let second_exposure = exposure_from_graph(&second.effects, tt(50));
 
         assert!((first_exposure - 1.25).abs() < 1.0e-4);
         assert!(second_exposure.abs() < 1.0e-4);
@@ -907,7 +875,7 @@ mod tests {
     fn anchor_zero_is_backward_compatible() {
         let mut t = Transform2D::identity();
         t.set_position(glam::Vec2::new(100.0, 200.0));
-        let m = t.evaluate_matrix(tc(0));
+        let m = t.evaluate_matrix(tt(0));
         assert!((m.col(2).x - 100.0).abs() < 0.01, "tx={}", m.col(2).x);
         assert!((m.col(2).y - 200.0).abs() < 0.01, "ty={}", m.col(2).y);
     }
@@ -923,7 +891,7 @@ mod tests {
                 PropertyValue::Vec2(glam::Vec2::new(1920.0, 1080.0)),
             )
             .unwrap();
-        let m = t.evaluate_matrix(tc(0));
+        let m = t.evaluate_matrix(tt(0));
         assert!((m.col(2).x - 0.0).abs() < 0.01, "tx={}", m.col(2).x);
         assert!((m.col(2).y - 0.0).abs() < 0.01, "ty={}", m.col(2).y);
         assert!((m.col(0).x - 0.5).abs() < 0.01);
@@ -940,7 +908,7 @@ mod tests {
             )
             .unwrap();
         t.set_position(glam::Vec2::new(1060.0, 640.0));
-        let m = t.evaluate_matrix(tc(0));
+        let m = t.evaluate_matrix(tt(0));
         assert!((m.col(2).x - 100.0).abs() < 0.01, "tx={}", m.col(2).x);
         assert!((m.col(2).y - 100.0).abs() < 0.01, "ty={}", m.col(2).y);
     }

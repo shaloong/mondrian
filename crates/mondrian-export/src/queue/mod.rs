@@ -9,8 +9,8 @@ use crate::validator::{
     ExportValidationExpectations,
 };
 use chrono::{DateTime, Utc};
-use mondrian_core::types::{AssetId, ColorEngine, ColorSpace, JobId, Rational, TimeCode};
-use mondrian_core::{WorkingColorSpace, WorkingRgbaF32Frame};
+use mondrian_core::types::{AssetId, ColorEngine, ColorSpace, FramePosition, JobId, Rational};
+use mondrian_core::{FrameRounding, TimelineTime, WorkingColorSpace, WorkingRgbaF32Frame};
 use mondrian_media::audio::{
     AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData,
 };
@@ -1473,7 +1473,10 @@ fn execute_timeline_export(
             return JobExecutionResult::Failed(err);
         }
 
-        let range = compute_timeline_render_range(timeline);
+        let range = match compute_timeline_render_range(timeline) {
+            Ok(range) => range,
+            Err(error) => return JobExecutionResult::Failed(error),
+        };
         if range.total_frames == 0 {
             return JobExecutionResult::Failed("时间线导出范围为空".to_string());
         }
@@ -1664,7 +1667,7 @@ fn prepare_timeline_audio_input(
 
     let sample_rate = timeline.sequence.settings.audio_sample_rate.max(8_000);
     let channels = timeline.sequence.settings.audio_channel_layout.channels().max(1);
-    if !timeline_has_audio_content(timeline, range) {
+    if !timeline_has_audio_content(timeline, range).map_err(JobExecutionResult::Failed)? {
         return Ok(TimelineAudioInput::Silent { sample_rate, channels });
     }
 
@@ -1691,25 +1694,30 @@ fn prepare_timeline_audio_input(
     }
 }
 
-fn timeline_has_audio_content(timeline: &TimelineExportInput, range: TimelineRenderRange) -> bool {
-    sequence_has_audio_content(
-        timeline,
-        &timeline.sequence,
-        range.start_frame,
+fn timeline_has_audio_content(
+    timeline: &TimelineExportInput,
+    range: TimelineRenderRange,
+) -> Result<bool, String> {
+    let time_base = timeline.sequence.time_base();
+    let start = TimelineTime::from_frame_position(FramePosition::new(range.start_frame, time_base))
+        .map_err(|error| error.to_string())?;
+    let end = TimelineTime::from_frame_position(FramePosition::new(
         range.start_frame.saturating_add(range.total_frames as i64),
-        0,
-    )
+        time_base,
+    ))
+    .map_err(|error| error.to_string())?;
+    sequence_has_audio_content(timeline, &timeline.sequence, start, end, 0)
 }
 
 fn sequence_has_audio_content(
     timeline: &TimelineExportInput,
     seq: &mondrian_timeline::sequence::Sequence,
-    start: i64,
-    end_exclusive: i64,
+    start: TimelineTime,
+    end_exclusive: TimelineTime,
     depth: usize,
-) -> bool {
+) -> Result<bool, String> {
     if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
-        return false;
+        return Ok(false);
     }
 
     let has_solo = seq.audio_tracks.iter().any(|t| t.is_solo && !t.is_muted);
@@ -1725,10 +1733,10 @@ fn sequence_has_audio_content(
                 continue;
             }
 
-            let clip_start = clip.position.frame;
-            let clip_end = clip.end_position().frame;
+            let clip_start = clip.position;
+            let clip_end = clip.end_position().map_err(|error| error.to_string())?;
             if clip_end > start && clip_start < end_exclusive {
-                return true;
+                return Ok(true);
             }
         }
     }
@@ -1738,8 +1746,8 @@ fn sequence_has_audio_content(
             if clip.is_disabled || !clip.is_nested_sequence() {
                 continue;
             }
-            let clip_start = clip.position.frame;
-            let clip_end = clip.end_position().frame;
+            let clip_start = clip.position;
+            let clip_end = clip.end_position().map_err(|error| error.to_string())?;
             if clip_end <= start || clip_start >= end_exclusive {
                 continue;
             }
@@ -1751,20 +1759,26 @@ fn sequence_has_audio_content(
             else {
                 continue;
             };
-            let nested_start = start.saturating_sub(clip_start).max(0);
-            let nested_end = end_exclusive.saturating_sub(clip_start).max(nested_start);
+            let nested_start = start
+                .checked_sub(clip_start)
+                .map_err(|error| error.to_string())?
+                .max(TimelineTime::ZERO);
+            let nested_end = end_exclusive
+                .checked_sub(clip_start)
+                .map_err(|error| error.to_string())?
+                .max(nested_start);
             if sequence_has_audio_content(
                 timeline,
                 nested_sequence,
                 nested_start,
                 nested_end,
                 depth + 1,
-            ) {
-                return true;
+            )? {
+                return Ok(true);
             }
         }
     }
-    false
+    Ok(false)
 }
 
 fn render_timeline_audio_to_pcm_f32(
@@ -1907,8 +1921,8 @@ fn render_sequence_audio_chunk(
             let Some(path) = timeline.asset_paths.get(&clip.asset_id) else {
                 continue;
             };
-            let clip_start_secs = clip.position.to_secs();
-            let clip_end_secs = clip.end_position().to_secs();
+            let clip_start_secs = clip.position.to_f64();
+            let clip_end_secs = clip.end_position().map_err(|error| error.to_string())?.to_f64();
             let overlap_start = window_start_secs.max(clip_start_secs);
             let overlap_end = window_end_secs.min(clip_end_secs);
             if overlap_end <= overlap_start {
@@ -1924,8 +1938,13 @@ fn render_sequence_audio_chunk(
                 )
             })?;
 
-            let overlap_tc = TimeCode::from_secs(overlap_start, seq.settings.frame_rate);
-            let source_start_secs = clip.timeline_to_source_time(overlap_tc).to_secs().max(0.0);
+            let overlap_time = TimelineTime::from_f64_quantized(overlap_start, sample_rate)
+                .map_err(|error| error.to_string())?;
+            let source_start_secs = clip
+                .timeline_to_source_time(overlap_time)
+                .map_err(|error| error.to_string())?
+                .to_f64()
+                .max(0.0);
             let source_start_frame = (source_start_secs * sample_rate as f64).floor() as usize;
             let segment_frames =
                 ((overlap_end - overlap_start) * sample_rate as f64).ceil().max(1.0) as usize;
@@ -1980,8 +1999,8 @@ fn render_sequence_audio_chunk(
                 continue;
             };
 
-            let clip_start_secs = clip.position.to_secs();
-            let clip_end_secs = clip.end_position().to_secs();
+            let clip_start_secs = clip.position.to_f64();
+            let clip_end_secs = clip.end_position().map_err(|error| error.to_string())?.to_f64();
             let overlap_start = window_start_secs.max(clip_start_secs);
             let overlap_end = window_end_secs.min(clip_end_secs);
             if overlap_end <= overlap_start {
@@ -1989,11 +2008,12 @@ fn render_sequence_audio_chunk(
             }
 
             let nested_start_secs = clip
-                .timeline_to_source_time(TimeCode::from_secs(
-                    overlap_start,
-                    seq.settings.frame_rate,
-                ))
-                .to_secs()
+                .timeline_to_source_time(
+                    TimelineTime::from_f64_quantized(overlap_start, sample_rate)
+                        .map_err(|error| error.to_string())?,
+                )
+                .map_err(|error| error.to_string())?
+                .to_f64()
                 .max(0.0);
             let nested_frames =
                 ((overlap_end - overlap_start) * sample_rate as f64).ceil().max(1.0) as usize;
@@ -2365,7 +2385,8 @@ fn export_sequence_input_color_resolution_counts(
     }
 
     let render_plan =
-        evaluate_timeline_render_plan(sequence, TimelineEvaluationRequest::export(timeline_frame));
+        evaluate_timeline_render_plan(sequence, TimelineEvaluationRequest::export(timeline_frame))
+            .map_err(|error| error.to_string())?;
     let mut counts = InputColorResolutionSourceCounts::default();
     for element in &render_plan.elements {
         match element {
@@ -2392,10 +2413,12 @@ fn export_sequence_input_color_resolution_counts(
                 else {
                     return Err(format!("嵌套序列不存在: {}", nested.sequence_id));
                 };
-                let nested_frame =
-                    TimeCode::from_secs(nested.source_secs, nested_sequence.settings.frame_rate)
-                        .frame
-                        .max(0);
+                let nested_frame = nested
+                    .source_time
+                    .to_frame_position(nested_sequence.settings.frame_rate, FrameRounding::Floor)
+                    .map_err(|error| error.to_string())?
+                    .frame
+                    .max(0);
                 let nested_context =
                     nested_sequence.settings.nested_render_color_context(color_context.clone());
                 let nested_counts = export_sequence_input_color_resolution_counts(
@@ -2441,7 +2464,8 @@ fn render_sequence_frame_into(
     }
 
     let render_plan =
-        evaluate_timeline_render_plan(sequence, TimelineEvaluationRequest::export(timeline_frame));
+        evaluate_timeline_render_plan(sequence, TimelineEvaluationRequest::export(timeline_frame))
+            .map_err(|error| error.to_string())?;
     if render_plan.is_empty() {
         finish_empty_sequence_target(
             &mut target,
@@ -2571,10 +2595,12 @@ fn render_sequence_frame_into(
         };
         let nested_width = normalize_output_dimension(nested_sequence.settings.resolution.width);
         let nested_height = normalize_output_dimension(nested_sequence.settings.resolution.height);
-        let nested_frame =
-            TimeCode::from_secs(nested.source_secs, nested_sequence.settings.frame_rate)
-                .frame
-                .max(0);
+        let nested_frame = nested
+            .source_time
+            .to_frame_position(nested_sequence.settings.frame_rate, FrameRounding::Floor)
+            .map_err(|error| error.to_string())?
+            .frame
+            .max(0);
         let mut nested_frame_output = None;
         let nested_context =
             nested_sequence.settings.nested_render_color_context(color_context.clone());
@@ -2872,18 +2898,36 @@ fn decode_video_layer_scaled(
     }))
 }
 
-fn compute_timeline_render_range(timeline: &TimelineExportInput) -> TimelineRenderRange {
+fn compute_timeline_render_range(
+    timeline: &TimelineExportInput,
+) -> Result<TimelineRenderRange, String> {
     let sequence = &timeline.sequence;
-    let sequence_end_exclusive = sequence.total_duration().frame.max(1);
+    let frame_rate = sequence.settings.frame_rate;
+    let sequence_end_exclusive = sequence
+        .total_duration()
+        .map_err(|error| error.to_string())?
+        .to_frame_position(frame_rate, FrameRounding::Ceil)
+        .map_err(|error| error.to_string())?
+        .frame
+        .max(1);
     let (start, requested_end_exclusive) = match timeline.range {
         TimelineExportRange::EntireSequence => (0, sequence_end_exclusive),
         TimelineExportRange::SequenceInOut => {
-            let start = sequence.in_point_frame();
+            let start = sequence
+                .in_point()
+                .to_frame_position(frame_rate, FrameRounding::Floor)
+                .map_err(|error| error.to_string())?
+                .frame;
             (
                 start,
                 sequence
-                    .out_point_frame()
-                    .map(|frame| frame.saturating_add(1))
+                    .out_point()
+                    .map(|time| {
+                        time.to_frame_position(frame_rate, FrameRounding::Floor)
+                            .map(|frame| frame.frame.saturating_add(1))
+                    })
+                    .transpose()
+                    .map_err(|error| error.to_string())?
                     .unwrap_or(sequence_end_exclusive),
             )
         }
@@ -2897,7 +2941,7 @@ fn compute_timeline_render_range(timeline: &TimelineExportInput) -> TimelineRend
 
     let fps_num = sequence.settings.frame_rate.num.max(1);
     let fps_den = sequence.settings.frame_rate.den.max(1);
-    TimelineRenderRange { start_frame: start, total_frames, fps_num, fps_den }
+    Ok(TimelineRenderRange { start_frame: start, total_frames, fps_num, fps_den })
 }
 
 fn timeline_output_resolution(job: &RenderJob, timeline: &TimelineExportInput) -> (u32, u32) {
@@ -3140,7 +3184,7 @@ mod tests {
     use mondrian_core::timeline_data::{
         AssetColorPayload, AssetMediaInterpretation, MediaColorInterpretation,
     };
-    use mondrian_core::types::{AssetId, BlendMode, TimeCode};
+    use mondrian_core::types::{AssetId, BlendMode, FramePosition};
     use mondrian_core::{VideoContentLightMetadata, VideoMasteringDisplayMetadata};
     use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
     use mondrian_renderer::RenderOutputColorBoundaryTarget;
@@ -3151,6 +3195,11 @@ mod tests {
     use mondrian_timeline::track::Track;
     use std::path::PathBuf;
     use std::sync::atomic::AtomicUsize;
+
+    fn tt(frame: i64, time_base: Rational) -> TimelineTime {
+        TimelineTime::from_frame_position(FramePosition::new(frame, time_base))
+            .expect("valid test time")
+    }
 
     fn test_working_frame(
         rgba: &[u8],
@@ -3617,12 +3666,15 @@ mod tests {
         seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
         let tb = seq.time_base();
         seq.video_tracks[0]
-            .add_clip(Clip::new_solid_color(
-                AssetId::new(),
-                mondrian_core::Color::from_rgba8(200, 100, 50, 255),
-                TimeCode::new(0, tb),
-                TimeCode::new(1, tb),
-            ))
+            .add_clip(
+                Clip::new_solid_color(
+                    AssetId::new(),
+                    mondrian_core::Color::from_rgba8(200, 100, 50, 255),
+                    tt(0, tb),
+                    tt(1, tb),
+                )
+                .expect("valid clip"),
+            )
             .expect("add solid clip");
         let timeline = TimelineExportInput {
             sequence: seq,
@@ -3846,12 +3898,15 @@ mod tests {
         seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Eight;
         let tb = seq.time_base();
         seq.video_tracks[0]
-            .add_clip(Clip::new_solid_color(
-                AssetId::new(),
-                mondrian_core::Color::from_rgba8(128, 128, 128, 255),
-                TimeCode::new(0, tb),
-                TimeCode::new(1, tb),
-            ))
+            .add_clip(
+                Clip::new_solid_color(
+                    AssetId::new(),
+                    mondrian_core::Color::from_rgba8(128, 128, 128, 255),
+                    tt(0, tb),
+                    tt(1, tb),
+                )
+                .expect("valid clip"),
+            )
             .expect("add solid clip");
         let timeline = TimelineExportInput {
             sequence: seq,
@@ -3914,12 +3969,15 @@ mod tests {
         seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Eight;
         let tb = seq.time_base();
         seq.video_tracks[0]
-            .add_clip(Clip::new_solid_color(
-                AssetId::new(),
-                mondrian_core::Color::from_rgba8(128, 128, 128, 255),
-                TimeCode::new(0, tb),
-                TimeCode::new(1, tb),
-            ))
+            .add_clip(
+                Clip::new_solid_color(
+                    AssetId::new(),
+                    mondrian_core::Color::from_rgba8(128, 128, 128, 255),
+                    tt(0, tb),
+                    tt(1, tb),
+                )
+                .expect("valid clip"),
+            )
             .expect("add solid clip");
         let timeline = TimelineExportInput {
             sequence: seq,
@@ -4039,20 +4097,19 @@ mod tests {
         let nested_sequence_id = mondrian_core::types::SequenceId::new();
 
         sequence.video_tracks[0]
-            .add_clip(Clip::new(
-                direct_id,
-                TimeCode::new(0, tb),
-                TimeCode::new(10, tb),
-            ))
+            .add_clip(Clip::new(direct_id, tt(0, tb), tt(10, tb)).expect("valid clip"))
             .expect("add direct clip");
         let mut nested_track = Track::new_video("nested");
         nested_track
-            .add_clip(Clip::new_nested_sequence(
-                nested_sequence_id,
-                TimeCode::new(0, tb),
-                TimeCode::new(10, tb),
-                Some("Nested".to_owned()),
-            ))
+            .add_clip(
+                Clip::new_nested_sequence(
+                    nested_sequence_id,
+                    tt(0, tb),
+                    tt(10, tb),
+                    Some("Nested".to_owned()),
+                )
+                .expect("valid clip"),
+            )
             .expect("add nested clip");
         sequence.video_tracks.push(nested_track);
 
@@ -4060,11 +4117,9 @@ mod tests {
         nested.id = nested_sequence_id;
         let nested_tb = nested.time_base();
         nested.video_tracks[0]
-            .add_clip(Clip::new(
-                nested_id,
-                TimeCode::new(0, nested_tb),
-                TimeCode::new(10, nested_tb),
-            ))
+            .add_clip(
+                Clip::new(nested_id, tt(0, nested_tb), tt(10, nested_tb)).expect("valid clip"),
+            )
             .expect("add nested media clip");
 
         let mut asset_color_diagnostics = HashMap::new();
@@ -4240,10 +4295,10 @@ mod tests {
     fn timeline_render_range_respects_marked_in_out() {
         let mut seq = Sequence::new("range-test");
         let tb = seq.time_base();
-        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(200, tb));
+        let clip = Clip::new(AssetId::new(), tt(0, tb), tt(200, tb)).expect("valid clip");
         seq.video_tracks[0].add_clip(clip).expect("add clip");
-        seq.in_point_frame = Some(40);
-        seq.out_point_frame = Some(99);
+        seq.in_point = Some(tt(40, tb));
+        seq.out_point = Some(tt(99, tb));
 
         let timeline = TimelineExportInput {
             sequence: seq,
@@ -4256,7 +4311,7 @@ mod tests {
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
 
-        let range = compute_timeline_render_range(&timeline);
+        let range = compute_timeline_render_range(&timeline).expect("valid render range");
         assert_eq!(range.start_frame, 40);
         assert_eq!(range.total_frames, 60);
     }
@@ -4265,10 +4320,10 @@ mod tests {
     fn timeline_render_range_can_export_entire_sequence() {
         let mut seq = Sequence::new("range-entire-test");
         let tb = seq.time_base();
-        let clip = Clip::new(AssetId::new(), TimeCode::new(0, tb), TimeCode::new(200, tb));
+        let clip = Clip::new(AssetId::new(), tt(0, tb), tt(200, tb)).expect("valid clip");
         seq.video_tracks[0].add_clip(clip).expect("add clip");
-        seq.in_point_frame = Some(40);
-        seq.out_point_frame = Some(99);
+        seq.in_point = Some(tt(40, tb));
+        seq.out_point = Some(tt(99, tb));
 
         let timeline = TimelineExportInput {
             sequence: seq,
@@ -4281,7 +4336,7 @@ mod tests {
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
 
-        let range = compute_timeline_render_range(&timeline);
+        let range = compute_timeline_render_range(&timeline).expect("valid render range");
         assert_eq!(range.start_frame, 0);
         assert_eq!(range.total_frames, 200);
     }
@@ -4299,11 +4354,7 @@ mod tests {
         let data_id = AssetId::new();
 
         seq.video_tracks[0]
-            .add_clip(Clip::new(
-                detected_id,
-                TimeCode::new(0, tb),
-                TimeCode::new(10, tb),
-            ))
+            .add_clip(Clip::new(detected_id, tt(0, tb), tt(10, tb)).expect("valid clip"))
             .expect("add detected clip");
         for (name, asset_id) in [
             ("override", override_id),
@@ -4312,11 +4363,7 @@ mod tests {
         ] {
             let mut track = Track::new_video(name);
             track
-                .add_clip(Clip::new(
-                    asset_id,
-                    TimeCode::new(0, tb),
-                    TimeCode::new(10, tb),
-                ))
+                .add_clip(Clip::new(asset_id, tt(0, tb), tt(10, tb)).expect("valid clip"))
                 .expect("add clip");
             seq.video_tracks.push(track);
         }
@@ -4368,10 +4415,10 @@ mod tests {
         let mut seq = Sequence::new("audio-range-test");
         let tb = seq.time_base();
         let asset_id = AssetId::new();
-        let clip = Clip::new(asset_id, TimeCode::new(25, tb), TimeCode::new(20, tb));
+        let clip = Clip::new(asset_id, tt(25, tb), tt(20, tb)).expect("valid clip");
         seq.audio_tracks[0].add_clip(clip).expect("add audio clip");
-        seq.in_point_frame = Some(30);
-        seq.out_point_frame = Some(40);
+        seq.in_point = Some(tt(30, tb));
+        seq.out_point = Some(tt(40, tb));
 
         let mut asset_paths = HashMap::new();
         asset_paths.insert(asset_id, PathBuf::from("dummy-audio.wav"));
@@ -4386,8 +4433,8 @@ mod tests {
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
 
-        let range = compute_timeline_render_range(&timeline);
-        assert!(timeline_has_audio_content(&timeline, range));
+        let range = compute_timeline_render_range(&timeline).expect("valid render range");
+        assert!(timeline_has_audio_content(&timeline, range).expect("audio presence"));
     }
 
     #[test]
@@ -4507,8 +4554,9 @@ mod tests {
     fn render_timeline_frame_into_clears_canvas_when_no_layers() {
         let mut seq = Sequence::new("empty");
         seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Eight;
-        seq.in_point_frame = Some(0);
-        seq.out_point_frame = Some(10);
+        let tb = seq.time_base();
+        seq.in_point = Some(tt(0, tb));
+        seq.out_point = Some(tt(10, tb));
         let timeline = TimelineExportInput {
             sequence: seq,
             sequences: Vec::new(),
@@ -4533,8 +4581,9 @@ mod tests {
     fn render_timeline_frame_into_uses_rgba64le_canvas_for_ten_bit_no_layers() {
         let mut seq = Sequence::new("empty-ten-bit");
         seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
-        seq.in_point_frame = Some(0);
-        seq.out_point_frame = Some(10);
+        let tb = seq.time_base();
+        seq.in_point = Some(tt(0, tb));
+        seq.out_point = Some(tt(10, tb));
         let timeline = TimelineExportInput {
             sequence: seq,
             sequences: Vec::new(),
@@ -4580,12 +4629,15 @@ mod tests {
         let mut seq = Sequence::new("export-stage-diagnostics");
         let tb = seq.time_base();
         seq.video_tracks[0]
-            .add_clip(Clip::new_solid_color(
-                AssetId::new(),
-                mondrian_core::Color::from_rgba8(32, 96, 160, 255),
-                TimeCode::new(0, tb),
-                TimeCode::new(10, tb),
-            ))
+            .add_clip(
+                Clip::new_solid_color(
+                    AssetId::new(),
+                    mondrian_core::Color::from_rgba8(32, 96, 160, 255),
+                    tt(0, tb),
+                    tt(10, tb),
+                )
+                .expect("valid clip"),
+            )
             .expect("add solid clip");
         let timeline = TimelineExportInput {
             sequence: seq,
@@ -4620,11 +4672,7 @@ mod tests {
         let tb = seq.time_base();
         let asset_id = AssetId::new();
         seq.video_tracks[0]
-            .add_clip(Clip::new(
-                asset_id,
-                TimeCode::new(0, tb),
-                TimeCode::new(1, tb),
-            ))
+            .add_clip(Clip::new(asset_id, tt(0, tb), tt(1, tb)).expect("valid clip"))
             .expect("add clip");
 
         let temp_path = std::env::temp_dir().join(format!(
@@ -4865,12 +4913,15 @@ mod tests {
         seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
         let tb = seq.time_base();
         seq.video_tracks[0]
-            .add_clip(Clip::new_solid_color(
-                AssetId::new(),
-                mondrian_core::Color::from_rgba8(128, 128, 128, 255),
-                TimeCode::new(0, tb),
-                TimeCode::new(1, tb),
-            ))
+            .add_clip(
+                Clip::new_solid_color(
+                    AssetId::new(),
+                    mondrian_core::Color::from_rgba8(128, 128, 128, 255),
+                    tt(0, tb),
+                    tt(1, tb),
+                )
+                .expect("valid clip"),
+            )
             .expect("add solid clip");
         let timeline = TimelineExportInput {
             sequence: seq,
@@ -4916,12 +4967,15 @@ mod tests {
         seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
         let tb = seq.time_base();
         seq.video_tracks[0]
-            .add_clip(Clip::new_solid_color(
-                AssetId::new(),
-                mondrian_core::Color::from_rgba8(200, 100, 50, 255),
-                TimeCode::new(0, tb),
-                TimeCode::new(1, tb),
-            ))
+            .add_clip(
+                Clip::new_solid_color(
+                    AssetId::new(),
+                    mondrian_core::Color::from_rgba8(200, 100, 50, 255),
+                    tt(0, tb),
+                    tt(1, tb),
+                )
+                .expect("valid clip"),
+            )
             .expect("add solid clip");
         let timeline = TimelineExportInput {
             sequence: seq,
