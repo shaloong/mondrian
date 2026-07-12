@@ -97,28 +97,55 @@ impl FrameRequestCompletion {
 
 /// One realtime current request canceled after exceeding its residency limit.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExpiredFrameRequest<K> {
+pub struct ExpiredFrameRequest<K, D> {
     /// Opaque Adapter request key.
     pub key: K,
     /// Semantic class originally admitted for the request.
     pub work_class: FrameWorkClass,
     /// Playback demand identity, when this work was demand-backed.
     pub demand_identity: Option<FrameDemandIdentity>,
+    /// Adapter-owned deadline in the same clock domain supplied at admission.
+    pub deadline: Option<D>,
+}
+
+/// Latest semantic binding attached to one admitted request key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameRequestBinding<D> {
+    /// Latest-wins generation that owns this binding.
+    pub generation: u64,
+    /// Current or speculative admission priority.
+    pub priority: FrameWorkPriority,
+    /// Semantic work class used for worker eligibility.
+    pub work_class: FrameWorkClass,
+    /// Playback demand identity, when the request is demand-backed.
+    pub demand_identity: Option<FrameDemandIdentity>,
+    /// Adapter-owned deadline; the Playback Module carries but never compares it.
+    pub deadline: Option<D>,
+}
+
+/// Atomic completion decision plus the binding it is allowed to satisfy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameRequestResolution<D> {
+    /// Visibility/cache freshness classification.
+    pub completion: FrameRequestCompletion,
+    /// Exact latest binding satisfied by a current reusable completion.
+    pub binding: Option<FrameRequestBinding<D>>,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct PendingFrameRequest {
+struct PendingFrameRequest<D> {
     generation: u64,
     priority: FrameWorkPriority,
     work_class: FrameWorkClass,
     requested_at: Instant,
     demand_identity: Option<FrameDemandIdentity>,
+    deadline: Option<D>,
 }
 
 #[derive(Debug, Default)]
-struct FrameRequestSchedulerState<K> {
+struct FrameRequestSchedulerState<K, D> {
     latest_generation: u64,
-    pending: HashMap<K, PendingFrameRequest>,
+    pending: HashMap<K, PendingFrameRequest<D>>,
     metrics: FrameRequestSchedulerMetrics,
 }
 
@@ -207,12 +234,12 @@ pub struct FrameRequestSchedulerDiagnostics {
 /// Thread-safe bounded scheduler shared by presentation and decode Adapters.
 ///
 /// `K` is owned by the Adapter and is intentionally opaque to playback policy.
-pub struct FrameRequestScheduler<K> {
-    state: Arc<Mutex<FrameRequestSchedulerState<K>>>,
+pub struct FrameRequestScheduler<K, D = ()> {
+    state: Arc<Mutex<FrameRequestSchedulerState<K, D>>>,
     max_pending: usize,
 }
 
-impl<K> Clone for FrameRequestScheduler<K> {
+impl<K, D> Clone for FrameRequestScheduler<K, D> {
     fn clone(&self) -> Self {
         Self {
             state: Arc::clone(&self.state),
@@ -221,9 +248,10 @@ impl<K> Clone for FrameRequestScheduler<K> {
     }
 }
 
-impl<K> FrameRequestScheduler<K>
+impl<K, D> FrameRequestScheduler<K, D>
 where
     K: Clone + Eq + Hash,
+    D: Copy + PartialEq,
 {
     /// Construct a scheduler with a strict nonzero pending-work budget.
     pub fn with_max_pending(max_pending: usize) -> Self {
@@ -252,6 +280,7 @@ where
         priority: FrameWorkPriority,
         work_class: FrameWorkClass,
         demand_identity: Option<FrameDemandIdentity>,
+        deadline: Option<D>,
     ) -> FrameRequestAdmission<K> {
         let mut state = lock_state(&self.state);
         if !priority.accepts(work_class) {
@@ -269,11 +298,13 @@ where
                 promoted_work_class(pending.priority, pending.work_class, priority, work_class);
             let changed = pending.generation != generation
                 || previous_class != promoted_class
-                || pending.demand_identity != demand_identity;
+                || pending.demand_identity != demand_identity
+                || pending.deadline != deadline;
             pending.work_class = promoted_class;
             pending.generation = generation;
             pending.priority = pending.priority.promoted_with(priority);
             pending.demand_identity = demand_identity;
+            pending.deadline = deadline;
             if changed {
                 pending.requested_at = Instant::now();
             }
@@ -327,6 +358,7 @@ where
                 work_class,
                 requested_at: Instant::now(),
                 demand_identity,
+                deadline,
             },
         );
         bump(&mut state.metrics.scheduled_requests);
@@ -381,43 +413,83 @@ where
         })
     }
 
-    /// Classify one completion without allowing stale work to become visible.
-    pub fn complete(
+    /// Atomically resolve one completion against the latest binding.
+    ///
+    /// A reusable result (decoded frame or deterministic failure for the same
+    /// opaque key) may satisfy a newer binding. A canceled execution cannot:
+    /// it leaves the newer request pending instead of consuming its ownership.
+    pub fn resolve_completion(
         &self,
         key: &K,
         result_generation: u64,
         work_class: FrameWorkClass,
-    ) -> FrameRequestCompletion {
+        result_demand_identity: Option<FrameDemandIdentity>,
+        reusable: bool,
+    ) -> FrameRequestResolution<D> {
         let mut state = lock_state(&self.state);
         let result_is_latest = result_generation >= state.latest_generation;
         let Some(pending) = state.pending.get(key).copied() else {
             if result_is_latest {
                 bump(&mut state.metrics.completed_cache_only);
                 bump(&mut state.metrics.completed_cache_only_missing_pending);
-                return FrameRequestCompletion::CacheOnly;
+                return FrameRequestResolution {
+                    completion: FrameRequestCompletion::CacheOnly,
+                    binding: None,
+                };
             }
             bump(&mut state.metrics.completed_stale);
             bump(&mut state.metrics.completed_stale_missing_pending);
-            return FrameRequestCompletion::Stale;
+            return FrameRequestResolution {
+                completion: FrameRequestCompletion::Stale,
+                binding: None,
+            };
         };
         if pending.work_class != work_class {
             if result_is_latest {
                 bump(&mut state.metrics.completed_cache_only);
                 bump(&mut state.metrics.completed_cache_only_class_mismatch);
-                return FrameRequestCompletion::CacheOnly;
+                return FrameRequestResolution {
+                    completion: FrameRequestCompletion::CacheOnly,
+                    binding: None,
+                };
             }
             bump(&mut state.metrics.completed_stale);
             bump(&mut state.metrics.completed_stale_class_mismatch);
-            return FrameRequestCompletion::Stale;
+            return FrameRequestResolution {
+                completion: FrameRequestCompletion::Stale,
+                binding: None,
+            };
+        }
+        let binding_changed = pending.generation != result_generation
+            || pending.demand_identity != result_demand_identity;
+        if binding_changed && !reusable {
+            bump(&mut state.metrics.completed_stale);
+            bump(&mut state.metrics.completed_stale_obsolete_generation);
+            return FrameRequestResolution {
+                completion: FrameRequestCompletion::Stale,
+                binding: None,
+            };
         }
         state.pending.remove(key);
         if pending.generation >= state.latest_generation || result_is_latest {
             bump(&mut state.metrics.completed_current);
-            FrameRequestCompletion::Current
+            FrameRequestResolution {
+                completion: FrameRequestCompletion::Current,
+                binding: Some(FrameRequestBinding {
+                    generation: pending.generation,
+                    priority: pending.priority,
+                    work_class: pending.work_class,
+                    demand_identity: pending.demand_identity,
+                    deadline: pending.deadline,
+                }),
+            }
         } else {
             bump(&mut state.metrics.completed_stale);
             bump(&mut state.metrics.completed_stale_obsolete_generation);
-            FrameRequestCompletion::Stale
+            FrameRequestResolution {
+                completion: FrameRequestCompletion::Stale,
+                binding: None,
+            }
         }
     }
 
@@ -433,7 +505,7 @@ where
     pub fn expire_realtime_current_older_than(
         &self,
         max_age: Duration,
-    ) -> Vec<ExpiredFrameRequest<K>> {
+    ) -> Vec<ExpiredFrameRequest<K, D>> {
         let mut state = lock_state(&self.state);
         let now = Instant::now();
         let latest = state.latest_generation;
@@ -450,6 +522,7 @@ where
                 key: key.clone(),
                 work_class: pending.work_class,
                 demand_identity: pending.demand_identity,
+                deadline: pending.deadline,
             })
             .collect::<Vec<_>>();
         for request in &expired {
@@ -566,9 +639,9 @@ fn promoted_work_class(
     }
 }
 
-fn find_key<K>(
-    pending: &HashMap<K, PendingFrameRequest>,
-    predicate: impl Fn(&PendingFrameRequest) -> bool,
+fn find_key<K, D>(
+    pending: &HashMap<K, PendingFrameRequest<D>>,
+    predicate: impl Fn(&PendingFrameRequest<D>) -> bool,
 ) -> Option<K>
 where
     K: Clone + Eq + Hash,
@@ -576,7 +649,7 @@ where
     pending.iter().find(|(_, value)| predicate(value)).map(|(key, _)| key.clone())
 }
 
-fn prune_obsolete_locked<K>(state: &mut FrameRequestSchedulerState<K>) {
+fn prune_obsolete_locked<K, D>(state: &mut FrameRequestSchedulerState<K, D>) {
     let latest = state.latest_generation;
     let before = state.pending.len();
     state.pending.retain(|_, pending| pending.generation >= latest);
@@ -595,9 +668,9 @@ fn bump(value: &mut u64) {
     *value = value.saturating_add(1);
 }
 
-fn lock_state<K>(
-    state: &Mutex<FrameRequestSchedulerState<K>>,
-) -> MutexGuard<'_, FrameRequestSchedulerState<K>> {
+fn lock_state<K, D>(
+    state: &Mutex<FrameRequestSchedulerState<K, D>>,
+) -> MutexGuard<'_, FrameRequestSchedulerState<K, D>> {
     state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
@@ -607,7 +680,7 @@ mod tests {
 
     #[test]
     fn latest_wins_is_bounded_across_one_hundred_headless_seeks() {
-        let scheduler = FrameRequestScheduler::with_max_pending(4);
+        let scheduler = FrameRequestScheduler::<u64, ()>::with_max_pending(4);
         let mut completions = Vec::new();
 
         for key in 0_u64..100 {
@@ -619,21 +692,26 @@ mod tests {
                     FrameWorkPriority::Current,
                     FrameWorkClass::Interactive,
                     None,
+                    None,
                 ),
                 FrameRequestAdmission::Scheduled { .. }
             ));
             scheduler.prune_obsolete();
             assert!(scheduler.pending_len() <= 1);
             if key > 0 {
-                completions.push(scheduler.complete(
+                completions.push(scheduler.resolve_completion(
                     &(key - 1),
                     generation - 1,
                     FrameWorkClass::Interactive,
+                    None,
+                    true,
                 ));
             }
         }
 
-        assert!(completions.iter().all(|result| *result == FrameRequestCompletion::Stale));
+        assert!(completions
+            .iter()
+            .all(|result| result.completion == FrameRequestCompletion::Stale));
         assert_eq!(scheduler.pending_len(), 1);
         assert!(scheduler.has_pending_key(&99));
     }
@@ -641,7 +719,7 @@ mod tests {
     #[test]
     fn headless_and_window_adapters_share_identical_admission_semantics() {
         fn drive(adapter_key: &str) -> (FrameRequestAdmission<String>, FrameRequestCompletion) {
-            let scheduler = FrameRequestScheduler::with_max_pending(1);
+            let scheduler = FrameRequestScheduler::<String, ()>::with_max_pending(1);
             let generation = scheduler.begin_generation();
             let key = adapter_key.to_owned();
             let admission = scheduler.request(
@@ -650,8 +728,11 @@ mod tests {
                 FrameWorkPriority::Current,
                 FrameWorkClass::Playback,
                 None,
+                None,
             );
-            let completion = scheduler.complete(&key, generation, FrameWorkClass::Playback);
+            let completion = scheduler
+                .resolve_completion(&key, generation, FrameWorkClass::Playback, None, true)
+                .completion;
             (admission, completion)
         }
 
@@ -667,7 +748,7 @@ mod tests {
 
     #[test]
     fn realtime_current_preempts_still_but_still_never_preempts_realtime() {
-        let scheduler = FrameRequestScheduler::with_max_pending(1);
+        let scheduler = FrameRequestScheduler::<i32, ()>::with_max_pending(1);
         let generation = scheduler.begin_generation();
         assert!(matches!(
             scheduler.request(
@@ -675,6 +756,7 @@ mod tests {
                 generation,
                 FrameWorkPriority::Current,
                 FrameWorkClass::Still,
+                None,
                 None,
             ),
             FrameRequestAdmission::Scheduled { .. }
@@ -686,6 +768,7 @@ mod tests {
                 FrameWorkPriority::Current,
                 FrameWorkClass::Interactive,
                 None,
+                None,
             ),
             FrameRequestAdmission::Scheduled { evicted_prefetch: None, evicted_still: Some(1) }
         );
@@ -696,6 +779,7 @@ mod tests {
                 FrameWorkPriority::Current,
                 FrameWorkClass::Still,
                 None,
+                None,
             ),
             FrameRequestAdmission::DroppedBackpressure
         );
@@ -703,7 +787,7 @@ mod tests {
 
     #[test]
     fn prefetch_is_playback_only_and_yields_to_current_work() {
-        let scheduler = FrameRequestScheduler::with_max_pending(1);
+        let scheduler = FrameRequestScheduler::<i32, ()>::with_max_pending(1);
         let generation = scheduler.begin_generation();
         assert_eq!(
             scheduler.request(
@@ -711,6 +795,7 @@ mod tests {
                 generation,
                 FrameWorkPriority::Prefetch,
                 FrameWorkClass::Still,
+                None,
                 None,
             ),
             FrameRequestAdmission::DroppedInvalidClass
@@ -722,6 +807,7 @@ mod tests {
                 FrameWorkPriority::Prefetch,
                 FrameWorkClass::Playback,
                 None,
+                None,
             ),
             FrameRequestAdmission::Scheduled { .. }
         ));
@@ -732,8 +818,105 @@ mod tests {
                 FrameWorkPriority::Current,
                 FrameWorkClass::Playback,
                 None,
+                None,
             ),
             FrameRequestAdmission::Scheduled { evicted_prefetch: Some(2), evicted_still: None }
         );
+    }
+
+    #[test]
+    fn reusable_same_key_completion_rebinds_to_latest_demand_atomically() {
+        let scheduler = FrameRequestScheduler::<u64, u64>::with_max_pending(1);
+        let generation = scheduler.begin_generation();
+        let old_identity = FrameDemandIdentity {
+            epoch: crate::PlaybackEpoch(1),
+            quality_revision: 0,
+            sequence: crate::FrameDemandSequence(1),
+            target_frame: 42,
+        };
+        let latest_identity = FrameDemandIdentity {
+            epoch: crate::PlaybackEpoch(2),
+            quality_revision: 0,
+            sequence: crate::FrameDemandSequence(2),
+            target_frame: 42,
+        };
+        scheduler.request(
+            7,
+            generation,
+            FrameWorkPriority::Current,
+            FrameWorkClass::Playback,
+            Some(old_identity),
+            Some(100),
+        );
+        let latest_generation = scheduler.begin_generation();
+        scheduler.request(
+            7,
+            latest_generation,
+            FrameWorkPriority::Current,
+            FrameWorkClass::Playback,
+            Some(latest_identity),
+            Some(200),
+        );
+
+        let resolution = scheduler.resolve_completion(
+            &7,
+            generation,
+            FrameWorkClass::Playback,
+            Some(old_identity),
+            true,
+        );
+
+        assert_eq!(resolution.completion, FrameRequestCompletion::Current);
+        let binding = resolution.binding.expect("latest binding");
+        assert_eq!(binding.generation, latest_generation);
+        assert_eq!(binding.demand_identity, Some(latest_identity));
+        assert_eq!(binding.deadline, Some(200));
+        assert!(!scheduler.has_pending_key(&7));
+    }
+
+    #[test]
+    fn canceled_old_execution_cannot_consume_newer_same_key_binding() {
+        let scheduler = FrameRequestScheduler::<u64, u64>::with_max_pending(1);
+        let generation = scheduler.begin_generation();
+        let old_identity = FrameDemandIdentity {
+            epoch: crate::PlaybackEpoch(1),
+            quality_revision: 0,
+            sequence: crate::FrameDemandSequence(1),
+            target_frame: 42,
+        };
+        let latest_identity = FrameDemandIdentity {
+            epoch: crate::PlaybackEpoch(2),
+            quality_revision: 0,
+            sequence: crate::FrameDemandSequence(2),
+            target_frame: 42,
+        };
+        scheduler.request(
+            7,
+            generation,
+            FrameWorkPriority::Current,
+            FrameWorkClass::Playback,
+            Some(old_identity),
+            Some(100),
+        );
+        scheduler.request(
+            7,
+            generation,
+            FrameWorkPriority::Current,
+            FrameWorkClass::Playback,
+            Some(latest_identity),
+            Some(200),
+        );
+
+        let resolution = scheduler.resolve_completion(
+            &7,
+            generation,
+            FrameWorkClass::Playback,
+            Some(old_identity),
+            false,
+        );
+
+        assert_eq!(resolution.completion, FrameRequestCompletion::Stale);
+        assert!(resolution.binding.is_none());
+        assert!(scheduler.has_pending_key(&7));
     }
 }

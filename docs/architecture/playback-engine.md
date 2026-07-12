@@ -261,6 +261,12 @@ interprets only:
 - an optional opaque `FrameDemandIdentity` carried for terminal reporting;
 - a strict nonzero pending-request budget.
 
+The concrete Interface is `FrameRequestScheduler<K, D>`. `D` is an opaque,
+copyable Adapter deadline type: the Module stores and returns it but never
+compares clock domains. Each pending entry therefore owns one atomic
+`FrameRequestBinding<D>` containing generation, priority, semantic class,
+Frame Demand identity, and deadline.
+
 Only playback-class work may prefetch. Current work may evict prefetch; realtime
 current work may additionally evict deterministic still work; still work cannot
 evict realtime current work. Starting a newer generation makes older work
@@ -268,6 +274,14 @@ ineligible, but late results are still classified explicitly as `CacheOnly` or
 `Stale` rather than being allowed to mutate visible state. Cancellation and
 expiration remove pending ownership synchronously; an already executing Adapter
 must still recheck `is_execution_current` before publication.
+
+Completion resolves against the latest binding in the same lock operation that
+removes pending ownership. A reusable result for the same opaque key may adopt
+a newer demand identity/deadline; this is required when a seek or refreshed
+demand reuses an already decoding frame. A canceled execution is not reusable:
+if its generation or demand identity is older, it returns Stale and leaves the
+newer binding pending. This prevents the old worker-result identity from being
+rejected after it has already consumed the new request.
 
 The scheduler does not own worker threads, decode sessions, `Instant` to
 `MonotonicTimestamp` projection, or media access modes. The current App media
@@ -682,6 +696,14 @@ cancellation/expiration, and stable diagnostics. App UI retains only the media
 key plus the explicit media-access Adapter mapping. Worker-lane transport,
 deadline dequeue, and media decode execution remain in the Adapter and are the
 next ownership seam; no second scheduler authority remains in UI code.
+
+Frame completion now resolves an atomic Frame Request Binding. The App Adapter
+stores its absolute wall deadline as the opaque deadline value and replaces a
+worker-captured demand identity only when the Playback Module authorizes reuse.
+Canceled old work cannot remove a newer same-key binding. Decode deadline
+classification uses the worker's captured completion `Instant`, not the later
+UI poll time, so main-thread load cannot turn an on-time decode into false Late
+evidence.
 
 The app Clock Adapter maintains a wall-`Instant` to Playback
 `MonotonicTimestamp` mapping. Worker deadlines are projected as one absolute

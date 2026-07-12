@@ -42,7 +42,7 @@ pub(crate) struct MediaPreviewKey {
 /// Media Adapter over the Playback Module's semantic latest-wins scheduler.
 #[derive(Clone)]
 pub(crate) struct MediaPreviewScheduler {
-    scheduler: mondrian_playback::FrameRequestScheduler<MediaPreviewKey>,
+    scheduler: mondrian_playback::FrameRequestScheduler<MediaPreviewKey, Instant>,
 }
 
 /// Scheduler-owned evidence for realtime work expired before worker completion.
@@ -111,6 +111,13 @@ pub(crate) enum MediaPreviewCompletionStatus {
     Current,
     CacheOnly,
     Stale,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MediaPreviewCompletionResolution {
+    pub(crate) status: MediaPreviewCompletionStatus,
+    pub(crate) demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
+    pub(crate) deadline_at: Option<Instant>,
 }
 
 impl MediaPreviewCompletionStatus {
@@ -727,6 +734,7 @@ impl MediaPreviewScheduler {
         self.request_with_demand_identity(key, generation, priority, access_mode, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn request_with_demand_identity(
         &self,
         key: MediaPreviewKey,
@@ -735,12 +743,32 @@ impl MediaPreviewScheduler {
         access_mode: PreviewDecodeAccessMode,
         demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
     ) -> MediaPreviewRequestStatus {
+        self.request_with_binding(
+            key,
+            generation,
+            priority,
+            access_mode,
+            demand_identity,
+            None,
+        )
+    }
+
+    pub(crate) fn request_with_binding(
+        &self,
+        key: MediaPreviewKey,
+        generation: u64,
+        priority: MediaPreviewRequestPriority,
+        access_mode: PreviewDecodeAccessMode,
+        demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
+        deadline_at: Option<Instant>,
+    ) -> MediaPreviewRequestStatus {
         match self.scheduler.request(
             key,
             generation,
             frame_work_priority(priority),
             frame_work_class(access_mode),
             demand_identity,
+            deadline_at,
         ) {
             mondrian_playback::FrameRequestAdmission::Scheduled {
                 evicted_prefetch,
@@ -792,20 +820,45 @@ impl MediaPreviewScheduler {
         self.scheduler.has_other_current(key, true)
     }
 
+    #[cfg(test)]
     pub(crate) fn complete(
         &self,
         key: &MediaPreviewKey,
         result_generation: u64,
         access_mode: PreviewDecodeAccessMode,
     ) -> MediaPreviewCompletionStatus {
-        match self.scheduler.complete(key, result_generation, frame_work_class(access_mode)) {
-            mondrian_playback::FrameRequestCompletion::Current => {
-                MediaPreviewCompletionStatus::Current
-            }
-            mondrian_playback::FrameRequestCompletion::CacheOnly => {
-                MediaPreviewCompletionStatus::CacheOnly
-            }
-            mondrian_playback::FrameRequestCompletion::Stale => MediaPreviewCompletionStatus::Stale,
+        self.resolve_completion(key, result_generation, access_mode, None, true).status
+    }
+
+    pub(crate) fn resolve_completion(
+        &self,
+        key: &MediaPreviewKey,
+        result_generation: u64,
+        access_mode: PreviewDecodeAccessMode,
+        result_demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
+        reusable: bool,
+    ) -> MediaPreviewCompletionResolution {
+        let resolution = self.scheduler.resolve_completion(
+            key,
+            result_generation,
+            frame_work_class(access_mode),
+            result_demand_identity,
+            reusable,
+        );
+        MediaPreviewCompletionResolution {
+            status: match resolution.completion {
+                mondrian_playback::FrameRequestCompletion::Current => {
+                    MediaPreviewCompletionStatus::Current
+                }
+                mondrian_playback::FrameRequestCompletion::CacheOnly => {
+                    MediaPreviewCompletionStatus::CacheOnly
+                }
+                mondrian_playback::FrameRequestCompletion::Stale => {
+                    MediaPreviewCompletionStatus::Stale
+                }
+            },
+            demand_identity: resolution.binding.and_then(|binding| binding.demand_identity),
+            deadline_at: resolution.binding.and_then(|binding| binding.deadline),
         }
     }
 
@@ -1289,31 +1342,43 @@ mod tests {
             .expect("second demand");
         let second = engine.frame_demand().expect("second frame demand").identity();
         assert_ne!(first, second);
+        let first_deadline = Instant::now() + Duration::from_secs(1);
+        let second_deadline = Instant::now() + Duration::from_secs(2);
 
         assert_eq!(
-            scheduler.request_with_demand_identity(
+            scheduler.request_with_binding(
                 key.clone(),
                 generation,
                 MediaPreviewRequestPriority::Current,
                 PreviewDecodeAccessMode::PlaybackCursor,
                 Some(first),
+                Some(first_deadline),
             ),
             scheduled_request()
         );
         assert_eq!(
-            scheduler.request_with_demand_identity(
-                key,
+            scheduler.request_with_binding(
+                key.clone(),
                 generation,
                 MediaPreviewRequestPriority::Current,
                 PreviewDecodeAccessMode::PlaybackCursor,
                 Some(second),
+                Some(second_deadline),
             ),
             MediaPreviewRequestStatus::AlreadyPending { access_mode_changed: false }
         );
 
-        let expired = scheduler.expire_realtime_current_older_than(Duration::ZERO);
-        assert_eq!(expired.len(), 1);
-        assert_eq!(expired[0].demand_identity, Some(second));
+        let resolution = scheduler.resolve_completion(
+            &key,
+            generation,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            Some(first),
+            true,
+        );
+        assert_eq!(resolution.status, MediaPreviewCompletionStatus::Current);
+        assert_eq!(resolution.demand_identity, Some(second));
+        assert_eq!(resolution.deadline_at, Some(second_deadline));
+        assert_eq!(scheduler.pending_len(), 0);
     }
 
     #[test]

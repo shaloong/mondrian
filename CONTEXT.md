@@ -28,6 +28,10 @@ _Avoid_: Preview result
 Opaque authority binding one Frame Demand identity, its final presentation deadline, and the only allowed on-time quality outcome for a CPU or GPU Presentation Adapter.
 _Avoid_: Preclassified ready result, UI-ready flag
 
+**Frame Request Binding**:
+The latest Frame Demand identity and Adapter deadline atomically attached to one opaque frame-work key; a reusable completion may satisfy this binding, while an obsolete cancellation cannot consume it.
+_Avoid_: Worker-captured demand identity as final authority, separate pending and completion ownership
+
 **Playback Quality Policy**:
 The allowed temporary preview resolution and user-selected proxy/original policy for a Playback Session.
 _Avoid_: Quality flag
@@ -166,6 +170,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - A **Playback Session** has exactly one **Transport State** at a time.
 - A **Playback Session** produces zero or more **Frame Demands**.
 - Each **Frame Demand** produces at most one terminal **Frame Delivery**.
+- A **Frame Request Binding** is resolved atomically at completion. If the same semantic frame key is rebound while work is in flight, a reusable result adopts the latest binding; a canceled or incompatible old execution leaves the newer binding pending.
 - Successful decode/cache completion is nonterminal readiness. A CPU or GPU **Presentation Adapter** must complete the exact **Frame Presentation Ticket** only after it has produced a usable Viewer output; the Playback Module compares the real completion timestamp with the ticket deadline and emits `Ready`, `Degraded`, or `Late`. Cancellation/failure paths may terminate earlier without presentation.
 - A Viewer stale lifecycle state does not terminate a **Frame Demand**; only a deadline/policy decision may emit `StaleAvailable`, while an in-flight worker retains the chance to deliver `Ready`.
 - A **Playback Quality Policy** constrains every **Frame Demand** in its Playback Session.

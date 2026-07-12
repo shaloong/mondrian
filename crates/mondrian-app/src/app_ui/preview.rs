@@ -856,8 +856,17 @@ impl AppUiPreviewService {
                 Err(mpsc::TryRecvError::Disconnected) => break,
             };
             drained += 1;
-            let completion =
-                self.scheduler.complete(&result.key, result.generation, result.access_mode);
+            let completion_resolution = self.scheduler.resolve_completion(
+                &result.key,
+                result.generation,
+                result.access_mode,
+                result.demand_identity,
+                !result.canceled,
+            );
+            let completion = completion_resolution.status;
+            let completion_demand_identity =
+                completion_resolution.demand_identity.or(result.demand_identity);
+            let completion_deadline_at = completion_resolution.deadline_at.or(result.deadline_at);
             self.record_preview_decode_queue_wait(
                 result.priority,
                 result.access_mode,
@@ -870,7 +879,7 @@ impl AppUiPreviewService {
                     result.decode_elapsed_us,
                     result.cancel_observed_elapsed_us,
                 );
-                if let Some(identity) = result.demand_identity {
+                if let Some(identity) = completion_demand_identity {
                     outcome.frame_deliveries.push(mondrian_playback::FrameDelivery::for_demand(
                         identity,
                         mondrian_playback::FrameDeliveryKind::Canceled,
@@ -879,8 +888,8 @@ impl AppUiPreviewService {
                 continue;
             }
             let completed_after_playback_deadline =
-                media_preview_completed_after_playback_deadline(&result);
-            if let Some(identity) = result.demand_identity {
+                media_preview_completed_after_playback_deadline(&result, completion_deadline_at);
+            if let Some(identity) = completion_demand_identity {
                 let kind = playback_frame_delivery_kind(
                     completed_after_playback_deadline,
                     result.frame.is_some(),
@@ -7223,6 +7232,7 @@ struct MediaPreviewResult {
     access_mode: PreviewDecodeAccessMode,
     queue_wait_us: u64,
     decode_elapsed_us: u64,
+    completed_at: Instant,
     deadline_at: Option<Instant>,
     cancel_observed_elapsed_us: Option<u64>,
     canceled: bool,
@@ -7841,12 +7851,17 @@ impl AppUiPreviewService {
             );
             return false;
         }
-        let should_enqueue_job = match self.scheduler.request_with_demand_identity(
+        let should_enqueue_job = match self.scheduler.request_with_binding(
             key.clone(),
             generation,
             priority,
             access_mode,
             demand_identity,
+            if is_current_playback {
+                playback_current_deadline_at
+            } else {
+                None
+            },
         ) {
             MediaPreviewRequestStatus::Scheduled { evicted_prefetch, evicted_still } => {
                 if is_current_playback {
@@ -9104,10 +9119,13 @@ fn playback_deadline_remaining_us(deadline_at: Option<Instant>) -> Option<u64> {
     })
 }
 
-fn media_preview_completed_after_playback_deadline(result: &MediaPreviewResult) -> bool {
+fn media_preview_completed_after_playback_deadline(
+    result: &MediaPreviewResult,
+    deadline_at: Option<Instant>,
+) -> bool {
     result.priority == MediaPreviewRequestPriority::Current
         && result.access_mode == PreviewDecodeAccessMode::PlaybackCursor
-        && media_preview_deadline_expired(result.deadline_at)
+        && deadline_at.is_some_and(|deadline| result.completed_at >= deadline)
 }
 
 fn media_preview_worker(
@@ -9271,6 +9289,7 @@ fn media_preview_canceled_result(
         access_mode: job.access_mode,
         queue_wait_us,
         decode_elapsed_us,
+        completed_at: Instant::now(),
         deadline_at: job.deadline_at,
         cancel_observed_elapsed_us,
         canceled: true,
@@ -9306,6 +9325,7 @@ fn decode_media_preview(
         should_cancel,
     );
     let decode_elapsed_us = app_duration_us(decode_started_at.elapsed());
+    let completed_at = Instant::now();
     match decode_outcome {
         Ok(PreviewDecodeOutcome::Frame(frame)) => {
             let decode_diagnostics = frame.diagnostics;
@@ -9350,6 +9370,7 @@ fn decode_media_preview(
                 access_mode,
                 queue_wait_us,
                 decode_elapsed_us,
+                completed_at,
                 deadline_at,
                 cancel_observed_elapsed_us: None,
                 canceled: false,
@@ -9397,6 +9418,7 @@ fn decode_media_preview(
                 access_mode,
                 queue_wait_us,
                 decode_elapsed_us,
+                completed_at,
                 deadline_at,
                 cancel_observed_elapsed_us: None,
                 canceled: false,
@@ -9417,6 +9439,7 @@ fn decode_media_preview(
             access_mode,
             queue_wait_us,
             decode_elapsed_us,
+            completed_at,
             deadline_at,
             cancel_observed_elapsed_us: None,
             canceled: true,
@@ -9438,6 +9461,7 @@ fn decode_media_preview(
                 access_mode,
                 queue_wait_us,
                 decode_elapsed_us,
+                completed_at,
                 deadline_at,
                 cancel_observed_elapsed_us: None,
                 canceled: false,
@@ -15921,6 +15945,48 @@ mod tests {
     }
 
     #[test]
+    fn preview_service_deadline_uses_worker_completion_not_later_poll_time() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+        state.play();
+        let demand_identity =
+            state.playback_frame_demand_identity().expect("playback demand identity");
+        let result_tx = install_preview_result_channel_for_test(&service);
+        let key = test_media_key(781);
+        let generation = service.scheduler.begin_generation();
+        let deadline = Instant::now() - Duration::from_millis(10);
+        assert_eq!(
+            service.scheduler.request_with_binding(
+                key.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                Some(demand_identity),
+                Some(deadline),
+            ),
+            MediaPreviewRequestStatus::Scheduled { evicted_prefetch: None, evicted_still: None }
+        );
+        let mut result = test_successful_media_preview_result(key.clone(), generation, 9);
+        result.priority = MediaPreviewRequestPriority::Current;
+        result.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
+        result.demand_identity = Some(demand_identity);
+        result.deadline_at = Some(deadline);
+        result.completed_at = deadline - Duration::from_millis(1);
+        result_tx.send(result).expect("send on-time worker result");
+
+        let outcome = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5));
+
+        assert!(outcome.visible_change);
+        assert!(outcome.frame_deliveries.is_empty());
+        assert!(service.frame_store.borrow_mut().media_frame(&key).is_some());
+        assert_eq!(
+            service.diagnostics().playback_schedule.current_drop_late_decisions,
+            0
+        );
+        service.shutdown();
+    }
+
+    #[test]
     fn preview_service_stages_presentable_hardware_fallback_until_presentation() {
         let service = AppUiPreviewService::new_without_workers_for_test();
         let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
@@ -16184,6 +16250,7 @@ mod tests {
             access_mode: PreviewDecodeAccessMode::ScrubCursor,
             queue_wait_us: 0,
             decode_elapsed_us: 0,
+            completed_at: Instant::now(),
             deadline_at: None,
             cancel_observed_elapsed_us: None,
             canceled: false,
