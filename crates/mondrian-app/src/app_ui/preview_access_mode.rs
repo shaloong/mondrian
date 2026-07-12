@@ -4,9 +4,7 @@
 //! random-access preview work. It deliberately does not decode media, evaluate
 //! render plans, interpret color, or convert frames.
 
-use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::app::ui_actions::TimelineSeekSource;
@@ -42,7 +40,7 @@ pub(crate) struct MediaPreviewKey {
 /// Media Adapter over the Playback Module's semantic latest-wins scheduler.
 #[derive(Clone)]
 pub(crate) struct MediaPreviewScheduler {
-    scheduler: mondrian_playback::FrameRequestScheduler<MediaPreviewKey, Instant>,
+    broker: MediaPreviewWorkBroker,
 }
 
 /// Scheduler-owned evidence for realtime work expired before worker completion.
@@ -60,37 +58,6 @@ pub(crate) enum MediaPreviewRequestPriority {
     Current,
 }
 
-impl MediaPreviewRequestPriority {
-    pub(crate) fn promote_with(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Current, _) | (_, Self::Current) => Self::Current,
-            (Self::Prefetch, Self::Prefetch) => Self::Prefetch,
-        }
-    }
-
-    fn accepts_access_mode(self, access_mode: PreviewDecodeAccessMode) -> bool {
-        match self {
-            Self::Current => true,
-            Self::Prefetch => access_mode == PreviewDecodeAccessMode::PlaybackCursor,
-        }
-    }
-}
-
-pub(crate) fn promoted_access_mode(
-    existing_priority: MediaPreviewRequestPriority,
-    existing_access_mode: PreviewDecodeAccessMode,
-    requested_priority: MediaPreviewRequestPriority,
-    requested_access_mode: PreviewDecodeAccessMode,
-) -> PreviewDecodeAccessMode {
-    if requested_priority == MediaPreviewRequestPriority::Current {
-        requested_access_mode
-    } else if existing_priority == MediaPreviewRequestPriority::Current {
-        existing_access_mode
-    } else {
-        requested_access_mode
-    }
-}
-
 /// Result of admitting a preview decode request into the scheduler.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MediaPreviewRequestStatus {
@@ -98,11 +65,19 @@ pub(crate) enum MediaPreviewRequestStatus {
         evicted_prefetch: Option<Box<MediaPreviewKey>>,
         evicted_still: Option<Box<MediaPreviewKey>>,
     },
+    #[cfg(test)]
     AlreadyPending {
         access_mode_changed: bool,
     },
+    UpdatedQueued {
+        priority_promoted: bool,
+        access_mode_changed: bool,
+        generation_changed: bool,
+    },
+    ReusedInFlight,
     DroppedBackpressure,
     DroppedInvalidAccessMode,
+    Closed,
 }
 
 /// Freshness classification for a completed decode result.
@@ -200,67 +175,68 @@ pub(crate) struct MediaPreviewJob {
     pub(crate) deadline_at: Option<Instant>,
     /// Opaque Playback Session identity; media workers only carry it.
     pub(crate) demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
+    /// Broker execution lease, assigned only when a worker dequeues the job.
+    pub(crate) execution_id: Option<mondrian_playback::FrameExecutionId>,
 }
 
+type MediaPreviewWorkBroker =
+    mondrian_playback::FrameWorkBroker<MediaPreviewKey, Instant, MediaPreviewJob>;
+
 pub(crate) struct MediaPreviewJobQueueSender {
-    shared: Arc<MediaPreviewJobQueueShared>,
+    broker: MediaPreviewWorkBroker,
 }
 
 #[derive(Clone)]
 pub(crate) struct MediaPreviewJobQueueReceiver {
-    shared: Arc<MediaPreviewJobQueueShared>,
-}
-
-struct MediaPreviewJobQueueShared {
-    state: Mutex<MediaPreviewJobQueueState>,
-    changed: Condvar,
-    capacity: usize,
-}
-
-struct MediaPreviewJobQueueState {
-    queue: VecDeque<QueuedMediaPreviewJob>,
-    closed: bool,
-    dropped_expired_playback_current_jobs: u64,
+    broker: MediaPreviewWorkBroker,
 }
 
 /// Point-in-time worker transport queue depth grouped by scheduling contract.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct MediaPreviewJobQueueDiagnostics {
-    /// Total jobs waiting in the worker transport queue.
+    /// Total jobs waiting for a worker lease.
     pub queued_jobs: usize,
-    /// Current-frame jobs waiting in the worker transport queue.
+    /// Total jobs currently owned by worker execution leases.
+    pub in_flight_jobs: usize,
+    /// Current-priority jobs waiting for a worker lease.
     pub queued_current_jobs: usize,
-    /// Prefetch jobs waiting in the worker transport queue.
+    /// Current-priority worker execution leases.
+    pub in_flight_current_jobs: usize,
+    /// Speculative jobs waiting for a worker lease.
     pub queued_prefetch_jobs: usize,
-    /// Playback cursor jobs waiting in the worker transport queue.
+    /// Speculative worker execution leases.
+    pub in_flight_prefetch_jobs: usize,
+    /// Playback-class jobs waiting for a worker lease.
     pub queued_playback_cursor_jobs: usize,
-    /// Current playback jobs whose display deadline expired while queued.
+    /// Playback-class worker execution leases.
+    pub in_flight_playback_cursor_jobs: usize,
+    /// Current playback jobs whose Adapter deadline has expired while queued.
     pub queued_expired_playback_current_jobs: usize,
-    /// Current playback jobs dropped at dequeue because their display deadline expired.
+    /// Current playback jobs rejected at dequeue after their Adapter deadline.
     pub dropped_expired_playback_current_jobs: u64,
-    /// Scrub cursor jobs waiting in the worker transport queue.
+    /// Interactive scrub jobs waiting for a worker lease.
     pub queued_scrub_cursor_jobs: usize,
-    /// Random-access still-frame jobs waiting in the worker transport queue.
+    /// Interactive scrub worker execution leases.
+    pub in_flight_scrub_cursor_jobs: usize,
+    /// Deterministic still jobs waiting for a worker lease.
     pub queued_random_access_still_jobs: usize,
-    /// Jobs currently eligible for any-lane workers.
+    /// Deterministic still worker execution leases.
+    pub in_flight_random_access_still_jobs: usize,
+    /// Jobs eligible for an unrestricted worker lane.
     pub queued_any_lane_eligible_jobs: usize,
-    /// Jobs currently eligible for playback-lane workers.
+    /// Jobs directly eligible for a playback worker lane.
     pub queued_playback_lane_eligible_jobs: usize,
-    /// Jobs currently eligible for scrub-lane workers.
+    /// Jobs directly eligible for an interactive scrub worker lane.
     pub queued_scrub_lane_eligible_jobs: usize,
-    /// Jobs currently eligible for still-lane workers.
+    /// Jobs directly eligible for a deterministic still worker lane.
     pub queued_still_lane_eligible_jobs: usize,
-    /// Jobs currently eligible for shared interactive-lane workers.
+    /// Jobs eligible for a shared non-playback worker lane.
     pub queued_interactive_lane_eligible_jobs: usize,
-    /// Whether the worker transport queue has been closed.
+    /// Whether the broker has closed worker transport.
     pub closed: bool,
 }
 
-struct QueuedMediaPreviewJob {
-    job: MediaPreviewJob,
-    priority: MediaPreviewRequestPriority,
-}
-
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MediaPreviewJobEnqueueStatus {
     Enqueued {
@@ -272,6 +248,7 @@ pub(crate) enum MediaPreviewJobEnqueueStatus {
     Closed,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct MediaPreviewJobPromoteStatus {
     pub(crate) updated: bool,
@@ -286,117 +263,49 @@ pub(crate) enum MediaPreviewJobQueueReceive {
     DroppedExpiredPlaybackCurrent(MediaPreviewJob),
 }
 
+#[cfg(test)]
 pub(crate) fn media_preview_job_queue(
     capacity: usize,
 ) -> (MediaPreviewJobQueueSender, MediaPreviewJobQueueReceiver) {
-    let shared = Arc::new(MediaPreviewJobQueueShared {
-        state: Mutex::new(MediaPreviewJobQueueState {
-            queue: VecDeque::new(),
-            closed: false,
-            dropped_expired_playback_current_jobs: 0,
-        }),
-        changed: Condvar::new(),
-        capacity: capacity.max(1),
-    });
+    let broker = MediaPreviewWorkBroker::new(capacity, capacity);
     (
-        MediaPreviewJobQueueSender { shared: Arc::clone(&shared) },
-        MediaPreviewJobQueueReceiver { shared },
+        MediaPreviewJobQueueSender { broker: broker.clone() },
+        MediaPreviewJobQueueReceiver { broker },
     )
 }
 
 impl MediaPreviewJobQueueSender {
+    #[cfg(test)]
     pub(crate) fn clear(&self) -> usize {
-        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
-        let cleared = state.queue.len();
-        state.queue.clear();
-        if cleared > 0 {
-            self.shared.changed.notify_all();
-        }
-        cleared
+        self.broker.cancel_all().1
     }
 
     pub(crate) fn close(&self) {
-        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
-        state.queue.clear();
-        state.closed = true;
-        self.shared.changed.notify_all();
+        self.broker.close();
     }
 
+    #[cfg(test)]
     pub(crate) fn prune_obsolete_jobs(&self, generation: u64) -> usize {
-        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
-        let before = state.queue.len();
-        state.queue.retain(|queued| queued.job.generation >= generation);
-        let pruned = before.saturating_sub(state.queue.len());
-        if pruned > 0 {
-            self.shared.changed.notify_all();
-        }
-        pruned
+        self.broker.prune_before(generation)
     }
 
+    #[cfg(test)]
     pub(crate) fn cancel_key(&self, key: &MediaPreviewKey) -> usize {
-        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
-        let before = state.queue.len();
-        state.queue.retain(|queued| &queued.job.key != key);
-        let canceled = before.saturating_sub(state.queue.len());
-        if canceled > 0 {
-            self.shared.changed.notify_all();
-        }
-        canceled
+        self.broker.cancel_key(key)
     }
 
     pub(crate) fn diagnostics(&self) -> MediaPreviewJobQueueDiagnostics {
-        let state = lock_media_preview_job_queue_state(&self.shared.state);
-        media_preview_job_queue_diagnostics_locked(&state)
+        media_preview_job_queue_diagnostics(&self.broker)
     }
 
-    pub(crate) fn enqueue(&self, job: MediaPreviewJob) -> MediaPreviewJobEnqueueStatus {
-        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
-        if state.closed {
-            return MediaPreviewJobEnqueueStatus::Closed;
-        }
-        let priority = job.priority;
-        if !priority.accepts_access_mode(job.access_mode) {
-            return MediaPreviewJobEnqueueStatus::DroppedInvalidAccessMode;
-        }
-
-        let mut evicted_prefetch = None;
-        let mut evicted_still = None;
-        if state.queue.len() >= self.shared.capacity {
-            if priority == MediaPreviewRequestPriority::Current {
-                if let Some(index) = state
-                    .queue
-                    .iter()
-                    .position(|queued| queued.priority == MediaPreviewRequestPriority::Prefetch)
-                {
-                    let evicted = state.queue.remove(index);
-                    evicted_prefetch = evicted.map(|queued| Box::new(queued.job.key));
-                } else if job.access_mode != PreviewDecodeAccessMode::RandomAccessStillFrame {
-                    if let Some(index) = state.queue.iter().position(|queued| {
-                        queued.priority == MediaPreviewRequestPriority::Current
-                            && queued.job.access_mode
-                                == PreviewDecodeAccessMode::RandomAccessStillFrame
-                    }) {
-                        let evicted = state.queue.remove(index);
-                        evicted_still = evicted.map(|queued| Box::new(queued.job.key));
-                    } else {
-                        return MediaPreviewJobEnqueueStatus::DroppedFull;
-                    }
-                } else {
-                    return MediaPreviewJobEnqueueStatus::DroppedFull;
-                }
-            } else {
-                return MediaPreviewJobEnqueueStatus::DroppedFull;
-            }
-        }
-
-        state.queue.push_back(QueuedMediaPreviewJob { job, priority });
-        // Workers have lane-specific eligibility. Wake all workers so a queued
-        // item for one lane cannot remain asleep behind workers that are
-        // waiting on a different lane.
-        self.shared.changed.notify_all();
-        MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch, evicted_still }
+    #[cfg(test)]
+    pub(crate) fn enqueue(&self, mut job: MediaPreviewJob) -> MediaPreviewJobEnqueueStatus {
+        job.execution_id = None;
+        map_enqueue_submission(self.broker.submit(frame_work_request(job)))
     }
 
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn promote(
         &self,
         key: &MediaPreviewKey,
@@ -413,36 +322,39 @@ impl MediaPreviewJobQueueSender {
         if priority != MediaPreviewRequestPriority::Current {
             return MediaPreviewJobPromoteStatus::default();
         }
-        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
-        let Some(queued) = state.queue.iter_mut().find(|queued| &queued.job.key == key) else {
+        if !self.broker.has_pending_key(key) {
             return MediaPreviewJobPromoteStatus::default();
-        };
-        let previous = queued.priority;
-        let previous_access_mode = queued.job.access_mode;
-        let previous_generation = queued.job.generation;
-        queued.job.access_mode =
-            promoted_access_mode(previous, previous_access_mode, priority, access_mode);
-        queued.priority = queued.priority.promote_with(priority);
-        queued.job.priority = queued.priority;
-        queued.job.generation = generation;
-        queued.job.source_secs = source_secs;
-        queued.job.adaptive_hints = adaptive_hints;
-        queued.job.hardware_decode_request = hardware_decode_request;
-        queued.job.enqueued_at = enqueued_at;
-        queued.job.deadline_at = deadline_at;
-        queued.job.demand_identity = demand_identity;
-        let priority_promoted = previous != queued.priority;
-        let access_mode_changed = previous_access_mode != queued.job.access_mode;
-        let generation_changed = previous_generation != queued.job.generation;
-        let updated = priority_promoted || access_mode_changed || generation_changed;
-        if updated {
-            self.shared.changed.notify_all();
         }
-        MediaPreviewJobPromoteStatus {
-            updated,
-            priority_promoted,
-            access_mode_changed,
-            generation_changed,
+        match self.broker.submit(frame_work_request(MediaPreviewJob {
+            key: key.clone(),
+            source_secs,
+            generation,
+            priority,
+            access_mode,
+            adaptive_hints,
+            hardware_decode_request,
+            enqueued_at,
+            deadline_at,
+            demand_identity,
+            execution_id: None,
+        })) {
+            mondrian_playback::FrameWorkSubmission::UpdatedQueued {
+                priority_promoted,
+                work_class_changed,
+                generation_changed,
+            } => MediaPreviewJobPromoteStatus {
+                updated: priority_promoted || work_class_changed || generation_changed,
+                priority_promoted,
+                access_mode_changed: work_class_changed,
+                generation_changed,
+            },
+            mondrian_playback::FrameWorkSubmission::Queued { .. } => MediaPreviewJobPromoteStatus {
+                updated: true,
+                priority_promoted: true,
+                access_mode_changed: true,
+                generation_changed: true,
+            },
+            _ => MediaPreviewJobPromoteStatus::default(),
         }
     }
 }
@@ -471,153 +383,125 @@ impl MediaPreviewJobQueueReceiver {
         &self,
         lane: MediaPreviewWorkerLane,
     ) -> Option<MediaPreviewJobQueueReceive> {
-        let mut state = lock_media_preview_job_queue_state(&self.shared.state);
-        loop {
-            if let Some(index) = next_media_preview_job_index(&state.queue, lane) {
-                let Some(queued) = state.queue.remove(index) else {
-                    continue;
-                };
-                if media_preview_job_is_expired_playback_current(&queued, Instant::now()) {
-                    state.dropped_expired_playback_current_jobs =
-                        state.dropped_expired_playback_current_jobs.saturating_add(1);
-                    return Some(MediaPreviewJobQueueReceive::DroppedExpiredPlaybackCurrent(
-                        queued.job,
-                    ));
-                }
-                return Some(MediaPreviewJobQueueReceive::Job(queued.job));
+        match self.broker.receive(frame_worker_lane(lane), media_preview_deadline_expired) {
+            Some(mondrian_playback::FrameWorkReceive::Ready(execution)) => Some(
+                MediaPreviewJobQueueReceive::Job(media_preview_job_from_execution(execution)),
+            ),
+            Some(mondrian_playback::FrameWorkReceive::Expired(execution)) => {
+                Some(MediaPreviewJobQueueReceive::DroppedExpiredPlaybackCurrent(
+                    media_preview_job_from_execution(execution),
+                ))
             }
-            if state.closed {
-                return None;
-            }
-            state = match self.shared.changed.wait(state) {
-                Ok(state) => state,
-                Err(poisoned) => poisoned.into_inner(),
-            };
+            None => None,
         }
     }
 }
 
-fn media_preview_job_queue_diagnostics_locked(
-    state: &MediaPreviewJobQueueState,
+fn frame_work_request(
+    job: MediaPreviewJob,
+) -> mondrian_playback::FrameWorkRequest<MediaPreviewKey, Instant, MediaPreviewJob> {
+    mondrian_playback::FrameWorkRequest {
+        key: job.key.clone(),
+        generation: job.generation,
+        priority: frame_work_priority(job.priority),
+        work_class: frame_work_class(job.access_mode),
+        demand_identity: job.demand_identity,
+        deadline: job.deadline_at,
+        payload: job,
+    }
+}
+
+fn media_preview_job_from_execution(
+    execution: mondrian_playback::FrameWorkExecution<MediaPreviewKey, Instant, MediaPreviewJob>,
+) -> MediaPreviewJob {
+    let mut job = execution.payload;
+    job.key = execution.key;
+    job.generation = execution.generation;
+    job.priority = media_preview_priority(execution.priority);
+    job.access_mode = preview_access_mode(execution.work_class);
+    job.deadline_at = execution.deadline;
+    job.demand_identity = execution.demand_identity;
+    job.execution_id = Some(execution.id);
+    job
+}
+
+#[cfg(test)]
+fn map_enqueue_submission(
+    submission: mondrian_playback::FrameWorkSubmission<MediaPreviewKey>,
+) -> MediaPreviewJobEnqueueStatus {
+    match submission {
+        mondrian_playback::FrameWorkSubmission::Queued { evicted_prefetch, evicted_still } => {
+            MediaPreviewJobEnqueueStatus::Enqueued {
+                evicted_prefetch: evicted_prefetch.map(Box::new),
+                evicted_still: evicted_still.map(Box::new),
+            }
+        }
+        mondrian_playback::FrameWorkSubmission::UpdatedQueued { .. }
+        | mondrian_playback::FrameWorkSubmission::ReusedInFlight => {
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
+        }
+        mondrian_playback::FrameWorkSubmission::DroppedBackpressure => {
+            MediaPreviewJobEnqueueStatus::DroppedFull
+        }
+        mondrian_playback::FrameWorkSubmission::DroppedInvalidClass => {
+            MediaPreviewJobEnqueueStatus::DroppedInvalidAccessMode
+        }
+        mondrian_playback::FrameWorkSubmission::Closed => MediaPreviewJobEnqueueStatus::Closed,
+    }
+}
+
+fn media_preview_job_queue_diagnostics(
+    broker: &MediaPreviewWorkBroker,
 ) -> MediaPreviewJobQueueDiagnostics {
-    let mut diagnostics = MediaPreviewJobQueueDiagnostics {
-        queued_jobs: state.queue.len(),
-        dropped_expired_playback_current_jobs: state.dropped_expired_playback_current_jobs,
+    let state = broker.diagnostics(media_preview_deadline_expired);
+    MediaPreviewJobQueueDiagnostics {
+        queued_jobs: state.queued_work,
+        in_flight_jobs: state.in_flight_work,
+        queued_current_jobs: state.queued_current,
+        in_flight_current_jobs: state.in_flight_current,
+        queued_prefetch_jobs: state.queued_prefetch,
+        in_flight_prefetch_jobs: state.in_flight_prefetch,
+        queued_playback_cursor_jobs: state.queued_playback,
+        in_flight_playback_cursor_jobs: state.in_flight_playback,
+        queued_expired_playback_current_jobs: state.queued_expired_playback_current,
+        dropped_expired_playback_current_jobs: state.dropped_expired_playback_current,
+        queued_scrub_cursor_jobs: state.queued_interactive,
+        in_flight_scrub_cursor_jobs: state.in_flight_interactive,
+        queued_random_access_still_jobs: state.queued_still,
+        in_flight_random_access_still_jobs: state.in_flight_still,
+        queued_any_lane_eligible_jobs: state.queued_work,
+        queued_playback_lane_eligible_jobs: state.queued_playback,
+        queued_scrub_lane_eligible_jobs: state.queued_interactive,
+        queued_still_lane_eligible_jobs: state.queued_still,
+        queued_interactive_lane_eligible_jobs: state
+            .queued_interactive
+            .saturating_add(state.queued_still),
         closed: state.closed,
-        ..MediaPreviewJobQueueDiagnostics::default()
-    };
-    let now = Instant::now();
-    for queued in &state.queue {
-        if MediaPreviewWorkerLane::Any.accepts(queued.job.access_mode) {
-            diagnostics.queued_any_lane_eligible_jobs =
-                diagnostics.queued_any_lane_eligible_jobs.saturating_add(1);
-        }
-        if MediaPreviewWorkerLane::Playback.accepts(queued.job.access_mode) {
-            diagnostics.queued_playback_lane_eligible_jobs =
-                diagnostics.queued_playback_lane_eligible_jobs.saturating_add(1);
-        }
-        if MediaPreviewWorkerLane::Scrub.accepts(queued.job.access_mode) {
-            diagnostics.queued_scrub_lane_eligible_jobs =
-                diagnostics.queued_scrub_lane_eligible_jobs.saturating_add(1);
-        }
-        if MediaPreviewWorkerLane::Still.accepts(queued.job.access_mode) {
-            diagnostics.queued_still_lane_eligible_jobs =
-                diagnostics.queued_still_lane_eligible_jobs.saturating_add(1);
-        }
-        if MediaPreviewWorkerLane::Interactive.accepts(queued.job.access_mode) {
-            diagnostics.queued_interactive_lane_eligible_jobs =
-                diagnostics.queued_interactive_lane_eligible_jobs.saturating_add(1);
-        }
-        match queued.priority {
-            MediaPreviewRequestPriority::Current => {
-                diagnostics.queued_current_jobs = diagnostics.queued_current_jobs.saturating_add(1);
-                if media_preview_job_is_expired_playback_current(queued, now) {
-                    diagnostics.queued_expired_playback_current_jobs =
-                        diagnostics.queued_expired_playback_current_jobs.saturating_add(1);
-                }
-            }
-            MediaPreviewRequestPriority::Prefetch => {
-                diagnostics.queued_prefetch_jobs =
-                    diagnostics.queued_prefetch_jobs.saturating_add(1);
-            }
-        }
-        match queued.job.access_mode {
-            PreviewDecodeAccessMode::PlaybackCursor => {
-                diagnostics.queued_playback_cursor_jobs =
-                    diagnostics.queued_playback_cursor_jobs.saturating_add(1);
-            }
-            PreviewDecodeAccessMode::ScrubCursor => {
-                diagnostics.queued_scrub_cursor_jobs =
-                    diagnostics.queued_scrub_cursor_jobs.saturating_add(1);
-            }
-            PreviewDecodeAccessMode::RandomAccessStillFrame => {
-                diagnostics.queued_random_access_still_jobs =
-                    diagnostics.queued_random_access_still_jobs.saturating_add(1);
-            }
-        }
-    }
-    diagnostics
-}
-
-fn next_media_preview_job_index(
-    queue: &VecDeque<QueuedMediaPreviewJob>,
-    lane: MediaPreviewWorkerLane,
-) -> Option<usize> {
-    let now = Instant::now();
-    let eligible = |queued: &QueuedMediaPreviewJob| lane.accepts(queued.job.access_mode);
-    let current_job =
-        |queued: &QueuedMediaPreviewJob| queued.priority == MediaPreviewRequestPriority::Current;
-    queue
-        .iter()
-        .enumerate()
-        .filter(|(_, queued)| current_job(queued))
-        .min_by_key(|(_, queued)| media_preview_current_job_selection_key(queued, lane, now))
-        .map(|(index, _)| index)
-        .or_else(|| queue.iter().position(eligible))
-}
-
-fn media_preview_current_job_selection_key(
-    queued: &QueuedMediaPreviewJob,
-    lane: MediaPreviewWorkerLane,
-    now: Instant,
-) -> (bool, bool, u8) {
-    (
-        media_preview_job_deadline_expired_at(queued.job.deadline_at, now),
-        !lane.accepts(queued.job.access_mode),
-        media_preview_current_job_rank(queued.job.access_mode),
-    )
-}
-
-fn media_preview_job_deadline_expired_at(deadline_at: Option<Instant>, now: Instant) -> bool {
-    deadline_at.is_some_and(|deadline| now >= deadline)
-}
-
-fn media_preview_job_is_expired_playback_current(
-    queued: &QueuedMediaPreviewJob,
-    now: Instant,
-) -> bool {
-    queued.priority == MediaPreviewRequestPriority::Current
-        && queued.job.access_mode == PreviewDecodeAccessMode::PlaybackCursor
-        && media_preview_job_deadline_expired_at(queued.job.deadline_at, now)
-}
-
-fn media_preview_current_job_rank(access_mode: PreviewDecodeAccessMode) -> u8 {
-    match access_mode {
-        PreviewDecodeAccessMode::ScrubCursor => 0,
-        PreviewDecodeAccessMode::PlaybackCursor => 1,
-        PreviewDecodeAccessMode::RandomAccessStillFrame => 2,
     }
 }
 
-fn lock_media_preview_job_queue_state(
-    state: &Mutex<MediaPreviewJobQueueState>,
-) -> std::sync::MutexGuard<'_, MediaPreviewJobQueueState> {
-    match state.lock() {
-        Ok(state) => state,
-        Err(poisoned) => poisoned.into_inner(),
+fn media_preview_priority(
+    priority: mondrian_playback::FrameWorkPriority,
+) -> MediaPreviewRequestPriority {
+    match priority {
+        mondrian_playback::FrameWorkPriority::Prefetch => MediaPreviewRequestPriority::Prefetch,
+        mondrian_playback::FrameWorkPriority::Current => MediaPreviewRequestPriority::Current,
     }
 }
 
+fn frame_worker_lane(lane: MediaPreviewWorkerLane) -> mondrian_playback::FrameWorkerLane {
+    match lane {
+        MediaPreviewWorkerLane::Any => mondrian_playback::FrameWorkerLane::Any,
+        MediaPreviewWorkerLane::Playback => mondrian_playback::FrameWorkerLane::Playback,
+        MediaPreviewWorkerLane::Scrub => mondrian_playback::FrameWorkerLane::Interactive,
+        MediaPreviewWorkerLane::Still => mondrian_playback::FrameWorkerLane::Still,
+        MediaPreviewWorkerLane::Interactive => mondrian_playback::FrameWorkerLane::NonPlayback,
+    }
+}
+
+fn media_preview_deadline_expired(deadline_at: Option<Instant>) -> bool {
+    deadline_at.is_some_and(|deadline| Instant::now() >= deadline)
+}
 /// App-layer preview workload intent before it is lowered to a media access mode.
 ///
 /// This keeps UI state interpretation out of the media crate. Callers should
@@ -715,12 +599,50 @@ impl Default for MediaPreviewScheduler {
 impl MediaPreviewScheduler {
     pub(crate) fn with_max_pending(max_pending: usize) -> Self {
         Self {
-            scheduler: mondrian_playback::FrameRequestScheduler::with_max_pending(max_pending),
+            broker: MediaPreviewWorkBroker::new(max_pending, MEDIA_PREVIEW_JOB_QUEUE_CAPACITY),
         }
     }
 
+    pub(crate) fn job_queue(&self) -> (MediaPreviewJobQueueSender, MediaPreviewJobQueueReceiver) {
+        (
+            MediaPreviewJobQueueSender { broker: self.broker.clone() },
+            MediaPreviewJobQueueReceiver { broker: self.broker.clone() },
+        )
+    }
+
     pub(crate) fn begin_generation(&self) -> u64 {
-        self.scheduler.begin_generation()
+        self.broker.begin_generation()
+    }
+
+    pub(crate) fn submit_job(&self, mut job: MediaPreviewJob) -> MediaPreviewRequestStatus {
+        job.execution_id = None;
+        match self.broker.submit(frame_work_request(job)) {
+            mondrian_playback::FrameWorkSubmission::Queued { evicted_prefetch, evicted_still } => {
+                MediaPreviewRequestStatus::Scheduled {
+                    evicted_prefetch: evicted_prefetch.map(Box::new),
+                    evicted_still: evicted_still.map(Box::new),
+                }
+            }
+            mondrian_playback::FrameWorkSubmission::UpdatedQueued {
+                priority_promoted,
+                work_class_changed,
+                generation_changed,
+            } => MediaPreviewRequestStatus::UpdatedQueued {
+                priority_promoted,
+                access_mode_changed: work_class_changed,
+                generation_changed,
+            },
+            mondrian_playback::FrameWorkSubmission::ReusedInFlight => {
+                MediaPreviewRequestStatus::ReusedInFlight
+            }
+            mondrian_playback::FrameWorkSubmission::DroppedBackpressure => {
+                MediaPreviewRequestStatus::DroppedBackpressure
+            }
+            mondrian_playback::FrameWorkSubmission::DroppedInvalidClass => {
+                MediaPreviewRequestStatus::DroppedInvalidAccessMode
+            }
+            mondrian_playback::FrameWorkSubmission::Closed => MediaPreviewRequestStatus::Closed,
+        }
     }
 
     #[cfg(test)]
@@ -731,7 +653,7 @@ impl MediaPreviewScheduler {
         priority: MediaPreviewRequestPriority,
         access_mode: PreviewDecodeAccessMode,
     ) -> MediaPreviewRequestStatus {
-        self.request_with_demand_identity(key, generation, priority, access_mode, None)
+        self.request_with_binding(key, generation, priority, access_mode, None, None)
     }
 
     #[cfg(test)]
@@ -753,6 +675,7 @@ impl MediaPreviewScheduler {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn request_with_binding(
         &self,
         key: MediaPreviewKey,
@@ -762,62 +685,76 @@ impl MediaPreviewScheduler {
         demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
         deadline_at: Option<Instant>,
     ) -> MediaPreviewRequestStatus {
-        match self.scheduler.request(
+        let status = self.submit_job(MediaPreviewJob {
+            source_secs: key.source_micros as f64 / 1_000_000.0,
             key,
             generation,
-            frame_work_priority(priority),
-            frame_work_class(access_mode),
-            demand_identity,
+            priority,
+            access_mode,
+            adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+            hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+            enqueued_at: Instant::now(),
             deadline_at,
-        ) {
-            mondrian_playback::FrameRequestAdmission::Scheduled {
-                evicted_prefetch,
-                evicted_still,
-            } => MediaPreviewRequestStatus::Scheduled {
-                evicted_prefetch: evicted_prefetch.map(Box::new),
-                evicted_still: evicted_still.map(Box::new),
-            },
-            mondrian_playback::FrameRequestAdmission::AlreadyPending { work_class_changed } => {
-                MediaPreviewRequestStatus::AlreadyPending {
-                    access_mode_changed: work_class_changed,
-                }
+            demand_identity,
+            execution_id: None,
+        });
+        match status {
+            MediaPreviewRequestStatus::UpdatedQueued { access_mode_changed, .. } => {
+                MediaPreviewRequestStatus::AlreadyPending { access_mode_changed }
             }
-            mondrian_playback::FrameRequestAdmission::DroppedBackpressure => {
-                MediaPreviewRequestStatus::DroppedBackpressure
+            MediaPreviewRequestStatus::ReusedInFlight => {
+                MediaPreviewRequestStatus::AlreadyPending { access_mode_changed: false }
             }
-            mondrian_playback::FrameRequestAdmission::DroppedInvalidClass => {
-                MediaPreviewRequestStatus::DroppedInvalidAccessMode
-            }
+            status => status,
         }
     }
 
+    pub(crate) fn execution_current(&self, id: mondrian_playback::FrameExecutionId) -> bool {
+        self.broker.execution_current(id)
+    }
+
+    pub(crate) fn has_other_current_execution(
+        &self,
+        id: mondrian_playback::FrameExecutionId,
+        realtime_only: bool,
+    ) -> bool {
+        self.broker.has_other_current(id, realtime_only)
+    }
+
+    #[cfg(test)]
     pub(crate) fn should_decode(
         &self,
         key: &MediaPreviewKey,
         access_mode: PreviewDecodeAccessMode,
     ) -> bool {
-        self.scheduler.should_execute(key, frame_work_class(access_mode))
+        self.broker.key_current(
+            key,
+            self.diagnostics().latest_generation,
+            frame_work_class(access_mode),
+        )
     }
 
+    #[cfg(test)]
     pub(crate) fn is_decode_current(
         &self,
         key: &MediaPreviewKey,
         generation: u64,
         access_mode: PreviewDecodeAccessMode,
     ) -> bool {
-        self.scheduler
-            .is_execution_current(key, generation, frame_work_class(access_mode))
+        self.broker.key_current(key, generation, frame_work_class(access_mode))
     }
 
+    #[cfg(test)]
     pub(crate) fn has_pending_current_request_other_than(&self, key: &MediaPreviewKey) -> bool {
-        self.scheduler.has_other_current(key, false)
+        self.broker.has_other_current_key(key, false)
     }
 
+    #[cfg(test)]
     pub(crate) fn has_pending_realtime_current_request_other_than(
         &self,
         key: &MediaPreviewKey,
     ) -> bool {
-        self.scheduler.has_other_current(key, true)
+        self.broker.has_other_current_key(key, true)
     }
 
     #[cfg(test)]
@@ -827,121 +764,172 @@ impl MediaPreviewScheduler {
         result_generation: u64,
         access_mode: PreviewDecodeAccessMode,
     ) -> MediaPreviewCompletionStatus {
-        self.resolve_completion(key, result_generation, access_mode, None, true).status
+        map_completion(
+            self.broker
+                .resolve_unleased(
+                    key.clone(),
+                    result_generation,
+                    frame_work_class(access_mode),
+                    None,
+                    true,
+                )
+                .completion,
+        )
     }
 
-    pub(crate) fn resolve_completion(
+    pub(crate) fn resolve_execution(
         &self,
-        key: &MediaPreviewKey,
-        result_generation: u64,
-        access_mode: PreviewDecodeAccessMode,
-        result_demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
+        id: mondrian_playback::FrameExecutionId,
         reusable: bool,
     ) -> MediaPreviewCompletionResolution {
-        let resolution = self.scheduler.resolve_completion(
-            key,
-            result_generation,
-            frame_work_class(access_mode),
-            result_demand_identity,
-            reusable,
-        );
+        let resolution = self.broker.resolve_execution(id, reusable);
         MediaPreviewCompletionResolution {
-            status: match resolution.completion {
-                mondrian_playback::FrameRequestCompletion::Current => {
-                    MediaPreviewCompletionStatus::Current
-                }
-                mondrian_playback::FrameRequestCompletion::CacheOnly => {
-                    MediaPreviewCompletionStatus::CacheOnly
-                }
-                mondrian_playback::FrameRequestCompletion::Stale => {
-                    MediaPreviewCompletionStatus::Stale
-                }
-            },
+            status: map_completion(resolution.completion),
             demand_identity: resolution.binding.and_then(|binding| binding.demand_identity),
             deadline_at: resolution.binding.and_then(|binding| binding.deadline),
         }
     }
 
+    pub(crate) fn resolve_unleased(
+        &self,
+        key: &MediaPreviewKey,
+        generation: u64,
+        access_mode: PreviewDecodeAccessMode,
+        demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
+        reusable: bool,
+    ) -> MediaPreviewCompletionResolution {
+        let resolution = self.broker.resolve_unleased(
+            key.clone(),
+            generation,
+            frame_work_class(access_mode),
+            demand_identity,
+            reusable,
+        );
+        MediaPreviewCompletionResolution {
+            status: map_completion(resolution.completion),
+            demand_identity: resolution.binding.and_then(|binding| binding.demand_identity),
+            deadline_at: resolution.binding.and_then(|binding| binding.deadline),
+        }
+    }
+
+    pub(crate) fn abandon_execution(&self, id: mondrian_playback::FrameExecutionId) {
+        self.broker.abandon_execution(id);
+    }
+
+    #[cfg(test)]
     pub(crate) fn cancel(&self, key: &MediaPreviewKey) {
-        self.scheduler.cancel(key);
+        self.broker.cancel_key(key);
     }
 
     pub(crate) fn expire_realtime_current_older_than(
         &self,
         max_age: Duration,
     ) -> Vec<ExpiredMediaPreviewRequest> {
-        self.scheduler
+        self.broker
             .expire_realtime_current_older_than(max_age)
             .into_iter()
             .map(|request| ExpiredMediaPreviewRequest {
                 key: request.key,
-                access_mode: preview_access_mode(request.work_class),
-                demand_identity: request.demand_identity,
+                access_mode: preview_access_mode(request.binding.work_class),
+                demand_identity: request.binding.demand_identity,
             })
             .collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn pending_still_for_realtime_current(
         &self,
         protected_key: &MediaPreviewKey,
     ) -> Vec<MediaPreviewKey> {
-        self.scheduler.pending_still_except(protected_key)
+        self.broker.pending_still_except(protected_key)
     }
 
+    #[cfg(test)]
     pub(crate) fn cancel_preempted_still_for_realtime_current(
         &self,
         key: &MediaPreviewKey,
     ) -> bool {
-        self.scheduler.cancel_preempted_still(key)
+        self.broker.cancel_preempted_still(key)
     }
 
-    pub(crate) fn cancel_all(&self) -> u64 {
-        self.scheduler.cancel_all()
+    pub(crate) fn cancel_all(&self) -> (u64, usize) {
+        self.broker.cancel_all()
     }
 
-    pub(crate) fn prune_obsolete(&self) {
-        self.scheduler.prune_obsolete();
+    pub(crate) fn prune_obsolete(&self) -> usize {
+        self.broker.prune_obsolete()
     }
 
     pub(crate) fn diagnostics(&self) -> MediaPreviewSchedulerDiagnostics {
-        let state = self.scheduler.diagnostics();
+        let state = self.broker.diagnostics(media_preview_deadline_expired);
         MediaPreviewSchedulerDiagnostics {
             latest_generation: state.latest_generation,
             pending_requests: state.pending_requests,
-            scheduled_requests: state.scheduled_requests,
-            already_pending_requests: state.already_pending_requests,
-            already_pending_access_mode_changes: state.already_pending_class_changes,
-            dropped_backpressure_requests: state.dropped_backpressure_requests,
-            dropped_invalid_access_mode_requests: state.dropped_invalid_class_requests,
-            dropped_obsolete_generation_requests: state.dropped_obsolete_generation_requests,
-            dropped_pending_window_requests: state.dropped_pending_window_requests,
-            skipped_decode_jobs: state.skipped_work,
-            skipped_decode_missing_pending: state.skipped_missing_pending,
+            scheduled_requests: state.submitted_queued,
+            already_pending_requests: state
+                .submitted_updated_queued
+                .saturating_add(state.submitted_reused_in_flight),
+            already_pending_access_mode_changes: state.submitted_work_class_changes,
+            dropped_backpressure_requests: state.dropped_backpressure,
+            dropped_invalid_access_mode_requests: state.dropped_invalid_class,
+            dropped_obsolete_generation_requests: state.dropped_obsolete_generation,
+            dropped_pending_window_requests: state
+                .dropped_backpressure
+                .saturating_sub(state.dropped_obsolete_generation),
+            skipped_decode_jobs: state
+                .skipped_missing
+                .saturating_add(state.skipped_class_mismatch)
+                .saturating_add(state.skipped_obsolete),
+            skipped_decode_missing_pending: state.skipped_missing,
             skipped_decode_access_mode_mismatch: state.skipped_class_mismatch,
-            skipped_decode_obsolete_generation: state.skipped_obsolete_generation,
+            skipped_decode_obsolete_generation: state.skipped_obsolete,
             completed_current_results: state.completed_current,
             completed_cache_only_results: state.completed_cache_only,
-            completed_cache_only_missing_pending: state.completed_cache_only_missing_pending,
+            completed_cache_only_missing_pending: state.completed_cache_only_missing,
             completed_cache_only_access_mode_mismatch: state.completed_cache_only_class_mismatch,
             completed_stale_results: state.completed_stale,
-            completed_stale_missing_pending: state.completed_stale_missing_pending,
+            completed_stale_missing_pending: state.completed_stale_missing,
             completed_stale_access_mode_mismatch: state.completed_stale_class_mismatch,
-            completed_stale_obsolete_generation: state.completed_stale_obsolete_generation,
+            completed_stale_obsolete_generation: state.completed_stale_obsolete,
             canceled_requests: state.canceled_requests,
-            pruned_obsolete_requests: state.pruned_obsolete_requests,
-            evicted_prefetch_requests: state.evicted_prefetch_requests,
-            evicted_still_requests: state.evicted_still_requests,
+            pruned_obsolete_requests: state.pruned_queued,
+            evicted_prefetch_requests: state.evicted_prefetch,
+            evicted_still_requests: state.evicted_still,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn pending_len(&self) -> usize {
-        self.scheduler.pending_len()
+        self.diagnostics().pending_requests
     }
 
     #[cfg(test)]
     pub(crate) fn has_pending_key(&self, key: &MediaPreviewKey) -> bool {
-        self.scheduler.has_pending_key(key)
+        self.broker.has_pending_key(key)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_test_execution(
+        &self,
+        lane: MediaPreviewWorkerLane,
+    ) -> Option<mondrian_playback::FrameExecutionId> {
+        let receive = self.broker.receive(frame_worker_lane(lane), |_| false)?;
+        Some(match receive {
+            mondrian_playback::FrameWorkReceive::Ready(execution)
+            | mondrian_playback::FrameWorkReceive::Expired(execution) => execution.id,
+        })
+    }
+}
+
+fn map_completion(
+    completion: mondrian_playback::FrameRequestCompletion,
+) -> MediaPreviewCompletionStatus {
+    match completion {
+        mondrian_playback::FrameRequestCompletion::Current => MediaPreviewCompletionStatus::Current,
+        mondrian_playback::FrameRequestCompletion::CacheOnly => {
+            MediaPreviewCompletionStatus::CacheOnly
+        }
+        mondrian_playback::FrameRequestCompletion::Stale => MediaPreviewCompletionStatus::Stale,
     }
 }
 
@@ -1020,6 +1008,7 @@ mod tests {
             enqueued_at: Instant::now(),
             deadline_at: None,
             demand_identity: None,
+            execution_id: None,
         }
     }
 
@@ -1266,7 +1255,10 @@ mod tests {
                 MediaPreviewRequestPriority::Current,
                 PreviewDecodeAccessMode::ScrubCursor,
             ),
-            scheduled_request()
+            MediaPreviewRequestStatus::Scheduled {
+                evicted_prefetch: None,
+                evicted_still: Some(Box::new(still.clone())),
+            }
         );
 
         assert!(scheduler.has_pending_realtime_current_request_other_than(&still));
@@ -1368,7 +1360,7 @@ mod tests {
             MediaPreviewRequestStatus::AlreadyPending { access_mode_changed: false }
         );
 
-        let resolution = scheduler.resolve_completion(
+        let resolution = scheduler.resolve_unleased(
             &key,
             generation,
             PreviewDecodeAccessMode::PlaybackCursor,
@@ -1655,7 +1647,7 @@ mod tests {
             MediaPreviewRequestPriority::Current
         ));
 
-        let canceled_generation = scheduler.cancel_all();
+        let (canceled_generation, _) = scheduler.cancel_all();
 
         assert!(!test_scheduler_is_decode_current(
             &scheduler,
@@ -1891,14 +1883,14 @@ mod tests {
                 MediaPreviewRequestPriority::Current,
                 PreviewDecodeAccessMode::ScrubCursor,
             ),
-            scheduled_request()
+            MediaPreviewRequestStatus::Scheduled {
+                evicted_prefetch: None,
+                evicted_still: Some(Box::new(still.clone())),
+            }
         );
 
-        assert_eq!(
-            scheduler.pending_still_for_realtime_current(&scrub),
-            vec![still.clone()]
-        );
-        assert!(scheduler.cancel_preempted_still_for_realtime_current(&still));
+        assert!(scheduler.pending_still_for_realtime_current(&scrub).is_empty());
+        assert!(!scheduler.cancel_preempted_still_for_realtime_current(&still));
         assert_eq!(scheduler.pending_len(), 1);
         assert!(!scheduler.should_decode(&still, PreviewDecodeAccessMode::RandomAccessStillFrame));
         assert!(scheduler.should_decode(&scrub, PreviewDecodeAccessMode::ScrubCursor));
@@ -2008,11 +2000,11 @@ mod tests {
         scrub_job.access_mode = PreviewDecodeAccessMode::ScrubCursor;
 
         assert_eq!(
-            sender.enqueue(still_job),
+            sender.enqueue(scrub_job),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
         assert_eq!(
-            sender.enqueue(scrub_job),
+            sender.enqueue(still_job),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
 
@@ -2253,11 +2245,11 @@ mod tests {
         scrub_job.access_mode = PreviewDecodeAccessMode::ScrubCursor;
 
         assert_eq!(
-            sender.enqueue(still_job),
+            sender.enqueue(scrub_job),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
         assert_eq!(
-            sender.enqueue(scrub_job),
+            sender.enqueue(still_job),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
 
@@ -2483,7 +2475,11 @@ mod tests {
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
 
-        assert_eq!(sender.cancel_key(&canceled), 2);
+        assert_eq!(
+            sender.cancel_key(&canceled),
+            1,
+            "one semantic key owns at most one queued payload after atomic promotion"
+        );
         assert_eq!(receiver.recv().expect("retained job").key, retained);
         sender.close();
         assert!(receiver.recv().is_none());
@@ -2553,6 +2549,7 @@ mod tests {
                 enqueued_at: Instant::now(),
                 deadline_at: None,
                 demand_identity: None,
+                execution_id: None,
             }),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
@@ -2561,13 +2558,19 @@ mod tests {
             sender.diagnostics(),
             MediaPreviewJobQueueDiagnostics {
                 queued_jobs: 3,
+                in_flight_jobs: 0,
                 queued_current_jobs: 2,
+                in_flight_current_jobs: 0,
                 queued_prefetch_jobs: 1,
+                in_flight_prefetch_jobs: 0,
                 queued_playback_cursor_jobs: 1,
+                in_flight_playback_cursor_jobs: 0,
                 queued_expired_playback_current_jobs: 0,
                 dropped_expired_playback_current_jobs: 0,
                 queued_scrub_cursor_jobs: 1,
+                in_flight_scrub_cursor_jobs: 0,
                 queued_random_access_still_jobs: 1,
+                in_flight_random_access_still_jobs: 0,
                 queued_any_lane_eligible_jobs: 3,
                 queued_playback_lane_eligible_jobs: 1,
                 queued_scrub_lane_eligible_jobs: 1,

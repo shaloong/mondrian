@@ -65,6 +65,8 @@ use mondrian_ui_widgets::{
     ViewerFrameImage,
 };
 
+#[cfg(test)]
+use super::preview_access_mode::MediaPreviewJobEnqueueStatus;
 use crate::app::proxy_generation::{request_proxy_generation, resolve_asset_proxy_color_contract};
 use crate::app::AppState;
 use crate::app_ui::panels::{
@@ -72,12 +74,12 @@ use crate::app_ui::panels::{
     ViewerPreviewState,
 };
 use crate::app_ui::preview_access_mode::{
-    media_preview_access_mode_for_intent, media_preview_job_queue,
-    media_preview_viewer_access_intent, media_preview_worker_count, media_preview_worker_lane,
-    MediaPreviewJob, MediaPreviewJobEnqueueStatus, MediaPreviewJobQueueDiagnostics,
-    MediaPreviewJobQueueReceive, MediaPreviewJobQueueReceiver, MediaPreviewJobQueueSender,
-    MediaPreviewKey, MediaPreviewRequestPriority, MediaPreviewRequestStatus, MediaPreviewScheduler,
-    MediaPreviewSchedulerDiagnostics, MediaPreviewWorkerLane, MEDIA_PREVIEW_JOB_QUEUE_CAPACITY,
+    media_preview_access_mode_for_intent, media_preview_viewer_access_intent,
+    media_preview_worker_count, media_preview_worker_lane, MediaPreviewJob,
+    MediaPreviewJobQueueDiagnostics, MediaPreviewJobQueueReceive, MediaPreviewJobQueueReceiver,
+    MediaPreviewJobQueueSender, MediaPreviewKey, MediaPreviewRequestPriority,
+    MediaPreviewRequestStatus, MediaPreviewScheduler, MediaPreviewSchedulerDiagnostics,
+    MediaPreviewWorkerLane,
 };
 use crate::app_ui::preview_frame_store::PreviewCpuFrameStore;
 #[cfg(test)]
@@ -174,9 +176,9 @@ impl AppUiPreviewService {
     }
 
     fn with_worker_count(decode_cpu_budget: PreviewDecodeCpuBudget, worker_count: usize) -> Self {
-        let (job_tx, job_rx) = media_preview_job_queue(MEDIA_PREVIEW_JOB_QUEUE_CAPACITY);
-        let (result_tx, result_rx) = mpsc::channel::<MediaPreviewResult>();
         let scheduler = MediaPreviewScheduler::default();
+        let (job_tx, job_rx) = scheduler.job_queue();
+        let (result_tx, result_rx) = mpsc::channel::<MediaPreviewResult>();
         let worker_activity = Arc::new(PreviewWorkerActivity::default());
         let shutdown = Arc::new(AtomicBool::new(false));
         let mut decode_worker_count = 0;
@@ -407,6 +409,7 @@ impl AppUiPreviewService {
             enqueued_at: Instant::now(),
             deadline_at: None,
             demand_identity,
+            execution_id: None,
         });
         self.current_generation.set(generation);
         self.current_frame_pending.set(true);
@@ -728,8 +731,8 @@ impl AppUiPreviewService {
     /// media.
     pub fn cancel_interactive_work(&self) {
         let pending_requests = self.scheduler.diagnostics().pending_requests as u64;
-        let generation = self.scheduler.cancel_all();
-        let queued_jobs = self.jobs.clear() as u64;
+        let (generation, queued_jobs) = self.scheduler.cancel_all();
+        let queued_jobs = queued_jobs as u64;
         bump(&self.metrics.interactive_cancel_requests);
         add_cell(
             &self.metrics.interactive_cancel_scheduler_requests,
@@ -796,11 +799,7 @@ impl AppUiPreviewService {
         if expired.is_empty() {
             return AppUiPreviewPollOutcome::default();
         }
-        let mut canceled_queued_jobs = 0u64;
-        for request in &expired {
-            canceled_queued_jobs =
-                canceled_queued_jobs.saturating_add(self.jobs.cancel_key(&request.key) as u64);
-        }
+        let canceled_queued_jobs = expired.len() as u64;
         let frame_deliveries = expired
             .iter()
             .filter(|request| request.access_mode == PreviewDecodeAccessMode::PlaybackCursor)
@@ -856,13 +855,17 @@ impl AppUiPreviewService {
                 Err(mpsc::TryRecvError::Disconnected) => break,
             };
             drained += 1;
-            let completion_resolution = self.scheduler.resolve_completion(
-                &result.key,
-                result.generation,
-                result.access_mode,
-                result.demand_identity,
-                !result.canceled,
-            );
+            let completion_resolution = if let Some(execution_id) = result.execution_id {
+                self.scheduler.resolve_execution(execution_id, !result.canceled)
+            } else {
+                self.scheduler.resolve_unleased(
+                    &result.key,
+                    result.generation,
+                    result.access_mode,
+                    result.demand_identity,
+                    !result.canceled,
+                )
+            };
             let completion = completion_resolution.status;
             let completion_demand_identity =
                 completion_resolution.demand_identity.or(result.demand_identity);
@@ -7241,6 +7244,7 @@ struct MediaPreviewResult {
     color_diagnostics: Option<RenderColorTransformDiagnostics>,
     color_stage_diagnostics: Option<RenderColorStageDiagnostics>,
     demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
+    execution_id: Option<mondrian_playback::FrameExecutionId>,
 }
 
 #[derive(Default)]
@@ -7851,91 +7855,13 @@ impl AppUiPreviewService {
             );
             return false;
         }
-        let should_enqueue_job = match self.scheduler.request_with_binding(
-            key.clone(),
-            generation,
-            priority,
-            access_mode,
-            demand_identity,
-            if is_current_playback {
-                playback_current_deadline_at
-            } else {
-                None
-            },
-        ) {
-            MediaPreviewRequestStatus::Scheduled { evicted_prefetch, evicted_still } => {
-                if is_current_playback {
-                    self.record_playback_current_deadline_budget(playback_deadline_remaining_us(
-                        playback_current_deadline_at,
-                    ));
-                }
-                if let Some(evicted_key) = evicted_prefetch {
-                    let canceled = self.jobs.cancel_key(&evicted_key) as u64;
-                    add_cell(&self.metrics.queue_canceled_jobs, canceled);
-                }
-                if let Some(evicted_key) = evicted_still {
-                    let canceled = self.jobs.cancel_key(&evicted_key) as u64;
-                    add_cell(&self.metrics.queue_canceled_jobs, canceled);
-                }
-                self.cancel_queued_still_for_realtime_current(&key, priority, access_mode);
-                true
-            }
-            MediaPreviewRequestStatus::AlreadyPending { access_mode_changed } => {
-                let enqueued_at = Instant::now();
-                let hardware_decode_request =
-                    self.hardware_decode_request_for_access_mode(access_mode);
-                let queued_update = self.jobs.promote(
-                    &key,
-                    priority,
-                    access_mode,
-                    generation,
-                    source_secs,
-                    enqueued_at,
-                    if is_current_playback {
-                        playback_current_deadline_at
-                    } else {
-                        None
-                    },
-                    demand_identity,
-                    adaptive_hints,
-                    hardware_decode_request,
-                );
-                if queued_update.priority_promoted {
-                    bump(&self.metrics.queue_promoted_current_jobs);
-                }
-                if is_current_playback {
-                    self.record_playback_current_deadline_budget(playback_deadline_remaining_us(
-                        playback_current_deadline_at,
-                    ));
-                }
-                self.cancel_queued_still_for_realtime_current(&key, priority, access_mode);
-                access_mode_changed && !queued_update.updated
-            }
-            MediaPreviewRequestStatus::DroppedBackpressure => {
-                tracing::trace!(
-                    asset_id = %key.asset_id,
-                    source_frame = key.source_frame,
-                    "viewer preview request dropped by backpressure"
-                );
-                return false;
-            }
-            MediaPreviewRequestStatus::DroppedInvalidAccessMode => {
-                tracing::warn!(
-                    asset_id = %key.asset_id,
-                    source_frame = key.source_frame,
-                    priority = ?priority,
-                    access_mode = access_mode.as_str(),
-                    "viewer preview request dropped because priority/access-mode pair is invalid"
-                );
-                return false;
-            }
-        };
-        if !should_enqueue_job {
-            return false;
+        if is_current_playback {
+            self.record_playback_current_deadline_budget(playback_deadline_remaining_us(
+                playback_current_deadline_at,
+            ));
         }
-        let enqueued_at = Instant::now();
         let hardware_decode_request = self.hardware_decode_request_for_access_mode(access_mode);
-        let job = MediaPreviewJob {
+        let submission = self.scheduler.submit_job(MediaPreviewJob {
             key: key.clone(),
             source_secs,
             generation,
@@ -7943,93 +7869,67 @@ impl AppUiPreviewService {
             access_mode,
             adaptive_hints,
             hardware_decode_request,
-            enqueued_at,
+            enqueued_at: Instant::now(),
             deadline_at: if is_current_playback {
                 playback_current_deadline_at
             } else {
                 None
             },
             demand_identity,
-        };
-        if priority == MediaPreviewRequestPriority::Current {
-            let pruned = self.jobs.prune_obsolete_jobs(generation) as u64;
-            add_cell(&self.metrics.queue_pruned_obsolete_jobs, pruned);
-        }
-        match self.jobs.enqueue(job) {
-            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch, evicted_still } => {
+            execution_id: None,
+        });
+        match submission {
+            MediaPreviewRequestStatus::Scheduled { evicted_prefetch, evicted_still } => {
                 bump(&self.metrics.enqueued_jobs);
-                if let Some(evicted_key) = evicted_prefetch {
+                if evicted_prefetch.is_some() {
                     bump(&self.metrics.queue_evicted_prefetch_jobs);
-                    let canceled = self.jobs.cancel_key(&evicted_key) as u64;
-                    add_cell(&self.metrics.queue_canceled_jobs, canceled);
-                    self.scheduler.cancel(&evicted_key);
+                    bump(&self.metrics.queue_canceled_jobs);
                 }
-                if let Some(evicted_key) = evicted_still {
+                if evicted_still.is_some() {
                     bump(&self.metrics.queue_evicted_still_jobs);
-                    let canceled = self.jobs.cancel_key(&evicted_key) as u64;
-                    add_cell(&self.metrics.queue_canceled_jobs, canceled);
-                    self.scheduler.cancel(&evicted_key);
+                    bump(&self.metrics.queue_canceled_jobs);
                 }
                 true
             }
-            MediaPreviewJobEnqueueStatus::DroppedFull => {
+            MediaPreviewRequestStatus::UpdatedQueued {
+                priority_promoted,
+                access_mode_changed: _,
+                generation_changed: _,
+            } => {
+                if priority_promoted {
+                    bump(&self.metrics.queue_promoted_current_jobs);
+                }
+                false
+            }
+            MediaPreviewRequestStatus::ReusedInFlight => false,
+            #[cfg(test)]
+            MediaPreviewRequestStatus::AlreadyPending { .. } => false,
+            MediaPreviewRequestStatus::DroppedBackpressure => {
                 bump(&self.metrics.queue_full_drops);
-                let canceled = self.jobs.cancel_key(&key) as u64;
-                add_cell(&self.metrics.queue_canceled_jobs, canceled);
-                self.scheduler.cancel(&key);
                 tracing::trace!(
                     asset_id = %key.asset_id,
                     source_frame = key.source_frame,
-                    "viewer preview queue full; dropping media preview request"
+                    "viewer preview request dropped by backpressure"
                 );
                 false
             }
-            MediaPreviewJobEnqueueStatus::DroppedInvalidAccessMode => {
+            MediaPreviewRequestStatus::DroppedInvalidAccessMode => {
                 bump(&self.metrics.queue_invalid_access_mode_drops);
-                self.scheduler.cancel(&key);
                 tracing::warn!(
                     asset_id = %key.asset_id,
                     source_frame = key.source_frame,
                     priority = ?priority,
                     access_mode = access_mode.as_str(),
-                    "viewer preview queue rejected invalid priority/access-mode pair"
+                    "viewer preview request dropped because priority/access-mode pair is invalid"
                 );
                 false
             }
-            MediaPreviewJobEnqueueStatus::Closed => {
+            MediaPreviewRequestStatus::Closed => {
                 bump(&self.metrics.worker_disconnected_drops);
-                let canceled = self.jobs.cancel_key(&key) as u64;
-                add_cell(&self.metrics.queue_canceled_jobs, canceled);
-                self.scheduler.cancel(&key);
                 tracing::debug!("viewer preview worker unavailable");
                 false
             }
         }
-    }
-
-    fn cancel_queued_still_for_realtime_current(
-        &self,
-        key: &MediaPreviewKey,
-        priority: MediaPreviewRequestPriority,
-        access_mode: PreviewDecodeAccessMode,
-    ) {
-        if priority != MediaPreviewRequestPriority::Current
-            || access_mode == PreviewDecodeAccessMode::RandomAccessStillFrame
-        {
-            return;
-        }
-        let evicted = self.scheduler.pending_still_for_realtime_current(key);
-        let mut canceled = 0u64;
-        for evicted_key in evicted {
-            let queued_canceled = self.jobs.cancel_key(&evicted_key) as u64;
-            if queued_canceled == 0 {
-                continue;
-            }
-            if self.scheduler.cancel_preempted_still_for_realtime_current(&evicted_key) {
-                canceled = canceled.saturating_add(queued_canceled);
-            }
-        }
-        add_cell(&self.metrics.queue_canceled_jobs, canceled);
     }
 
     fn record_color_rejection(&self, rejection: AppUiPreviewColorRejection) {
@@ -9144,7 +9044,11 @@ fn media_preview_worker(
                     break;
                 }
                 let queue_wait_us = app_duration_us(job.enqueued_at.elapsed());
-                if !scheduler.should_decode(&job.key, job.access_mode) {
+                let Some(execution_id) = job.execution_id else {
+                    continue;
+                };
+                if !scheduler.execution_current(execution_id) {
+                    scheduler.abandon_execution(execution_id);
                     continue;
                 }
                 let result = media_preview_canceled_result(
@@ -9161,10 +9065,17 @@ fn media_preview_worker(
             }
         };
         if shutdown.load(Ordering::Acquire) {
+            if let Some(execution_id) = job.execution_id {
+                scheduler.abandon_execution(execution_id);
+            }
             break;
         }
         let queue_wait_us = app_duration_us(job.enqueued_at.elapsed());
-        if !scheduler.should_decode(&job.key, job.access_mode) {
+        let Some(execution_id) = job.execution_id else {
+            continue;
+        };
+        if !scheduler.execution_current(execution_id) {
+            scheduler.abandon_execution(execution_id);
             continue;
         }
         if media_preview_deadline_expired(job.deadline_at) {
@@ -9181,8 +9092,6 @@ fn media_preview_worker(
             continue;
         }
         let _activity_lease = worker_activity.begin(lane, job.priority, job.access_mode);
-        let cancel_key = job.key.clone();
-        let cancel_generation = job.generation;
         let cancel_priority = job.priority;
         let cancel_access_mode = job.access_mode;
         let cancel_deadline_at = job.deadline_at;
@@ -9193,13 +9102,9 @@ fn media_preview_worker(
         let mut result = decode_media_preview(job, queue_wait_us, || {
             let reason = media_preview_cancel_reason(
                 shutdown.load(Ordering::Acquire),
-                cancel_scheduler.is_decode_current(
-                    &cancel_key,
-                    cancel_generation,
-                    cancel_access_mode,
-                ),
-                cancel_scheduler.has_pending_current_request_other_than(&cancel_key),
-                cancel_scheduler.has_pending_realtime_current_request_other_than(&cancel_key),
+                cancel_scheduler.execution_current(execution_id),
+                cancel_scheduler.has_other_current_execution(execution_id, false),
+                cancel_scheduler.has_other_current_execution(execution_id, true),
                 cancel_priority,
                 cancel_access_mode,
                 decode_started_at.elapsed(),
@@ -9279,6 +9184,7 @@ fn media_preview_canceled_result(
     cancel_observed_elapsed_us: Option<u64>,
 ) -> MediaPreviewResult {
     let demand_identity = job.demand_identity;
+    let execution_id = job.execution_id;
     MediaPreviewResult {
         key: job.key,
         frame: None,
@@ -9298,6 +9204,7 @@ fn media_preview_canceled_result(
         color_diagnostics: None,
         color_stage_diagnostics: None,
         demand_identity,
+        execution_id,
     }
 }
 
@@ -9312,6 +9219,7 @@ fn decode_media_preview(
     let access_mode = job.access_mode;
     let deadline_at = job.deadline_at;
     let demand_identity = job.demand_identity;
+    let execution_id = job.execution_id;
     let decode_outcome = decode_media_preview_for_access_mode(
         job.key.path.as_path(),
         job.source_secs,
@@ -9379,6 +9287,7 @@ fn decode_media_preview(
                 color_diagnostics: None,
                 color_stage_diagnostics: None,
                 demand_identity,
+                execution_id,
             }
         }
         Ok(PreviewDecodeOutcome::NativeGpuFrame(frame)) => {
@@ -9427,6 +9336,7 @@ fn decode_media_preview(
                 color_diagnostics: None,
                 color_stage_diagnostics: None,
                 demand_identity,
+                execution_id,
             }
         }
         Ok(PreviewDecodeOutcome::Canceled) => MediaPreviewResult {
@@ -9448,6 +9358,7 @@ fn decode_media_preview(
             color_diagnostics: None,
             color_stage_diagnostics: None,
             demand_identity,
+            execution_id,
         },
         Err(err) => {
             let failure_reason = media_preview_failure_reason(&err);
@@ -9470,6 +9381,7 @@ fn decode_media_preview(
                 color_diagnostics: None,
                 color_stage_diagnostics: None,
                 demand_identity,
+                execution_id,
             }
         }
     }
@@ -12065,13 +11977,19 @@ mod tests {
             queue_promoted_current_jobs: 1,
             worker_queue: MediaPreviewJobQueueDiagnostics {
                 queued_jobs: 3,
+                in_flight_jobs: 0,
                 queued_current_jobs: 2,
+                in_flight_current_jobs: 0,
                 queued_prefetch_jobs: 1,
+                in_flight_prefetch_jobs: 0,
                 queued_playback_cursor_jobs: 1,
+                in_flight_playback_cursor_jobs: 0,
                 queued_expired_playback_current_jobs: 1,
                 dropped_expired_playback_current_jobs: 0,
                 queued_scrub_cursor_jobs: 1,
+                in_flight_scrub_cursor_jobs: 0,
                 queued_random_access_still_jobs: 1,
+                in_flight_random_access_still_jobs: 0,
                 queued_any_lane_eligible_jobs: 3,
                 queued_playback_lane_eligible_jobs: 1,
                 queued_scrub_lane_eligible_jobs: 1,
@@ -15233,6 +15151,7 @@ mod tests {
                 enqueued_at: Instant::now(),
                 deadline_at: None,
                 demand_identity: None,
+                execution_id: None,
             }),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
@@ -15341,6 +15260,10 @@ mod tests {
             ),
             MediaPreviewRequestStatus::Scheduled { evicted_prefetch: None, evicted_still: None }
         );
+        let _still_execution = service
+            .scheduler
+            .begin_test_execution(MediaPreviewWorkerLane::Still)
+            .expect("still work should be in flight before realtime admission");
         assert!(service.request_media_preview(
             scrub_key.clone(),
             1.0,
@@ -15435,6 +15358,7 @@ mod tests {
                 enqueued_at: Instant::now(),
                 deadline_at: None,
                 demand_identity: None,
+                execution_id: None,
             }),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
@@ -15497,6 +15421,7 @@ mod tests {
                     enqueued_at: Instant::now(),
                     deadline_at: None,
                     demand_identity: None,
+                    execution_id: None,
                 }),
                 MediaPreviewJobEnqueueStatus::Enqueued {
                     evicted_prefetch: None,
@@ -15575,6 +15500,7 @@ mod tests {
                 enqueued_at: Instant::now(),
                 deadline_at: None,
                 demand_identity: None,
+                execution_id: None,
             }),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
@@ -15648,6 +15574,7 @@ mod tests {
                 enqueued_at: Instant::now(),
                 deadline_at: None,
                 demand_identity: None,
+                execution_id: None,
             }),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
@@ -15698,6 +15625,7 @@ mod tests {
                 enqueued_at: Instant::now(),
                 deadline_at: None,
                 demand_identity: None,
+                execution_id: None,
             },
             123,
             || false,
@@ -15745,6 +15673,7 @@ mod tests {
                 enqueued_at: Instant::now(),
                 deadline_at: None,
                 demand_identity: None,
+                execution_id: None,
             },
             456,
             || true,
@@ -15763,22 +15692,13 @@ mod tests {
 
     #[test]
     fn media_preview_worker_reports_queue_dropped_expired_playback_current() {
-        let (job_tx, job_rx) = media_preview_job_queue(2);
         let (result_tx, result_rx) = mpsc::channel();
         let scheduler = MediaPreviewScheduler::default();
+        let (job_tx, job_rx) = scheduler.job_queue();
         let worker_activity = Arc::new(PreviewWorkerActivity::default());
         let shutdown = Arc::new(AtomicBool::new(false));
         let key = test_media_key(42);
         let generation = scheduler.begin_generation();
-        assert_eq!(
-            scheduler.request(
-                key.clone(),
-                generation,
-                MediaPreviewRequestPriority::Current,
-                PreviewDecodeAccessMode::PlaybackCursor,
-            ),
-            MediaPreviewRequestStatus::Scheduled { evicted_prefetch: None, evicted_still: None }
-        );
         assert_eq!(
             job_tx.enqueue(MediaPreviewJob {
                 key: key.clone(),
@@ -15791,6 +15711,7 @@ mod tests {
                 enqueued_at: Instant::now(),
                 deadline_at: Some(Instant::now() - Duration::from_millis(1)),
                 demand_identity: None,
+                execution_id: None,
             }),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
@@ -15860,6 +15781,7 @@ mod tests {
                 enqueued_at: Instant::now(),
                 deadline_at: Some(Instant::now() - Duration::from_millis(1)),
                 demand_identity: None,
+                execution_id: None,
             },
             12_000,
             MediaPreviewCancelReason::PlaybackDeadline,
@@ -16087,6 +16009,7 @@ mod tests {
                         enqueued_at: Instant::now(),
                         deadline_at: Some(Instant::now() - Duration::from_millis(1)),
                         demand_identity: None,
+                        execution_id: None,
                     },
                     1_000,
                     MediaPreviewCancelReason::PlaybackDeadline,
@@ -16259,6 +16182,7 @@ mod tests {
             color_diagnostics: None,
             color_stage_diagnostics: None,
             demand_identity: None,
+            execution_id: None,
         }
     }
 
@@ -16983,6 +16907,7 @@ mod tests {
                 enqueued_at: Instant::now(),
                 deadline_at: None,
                 demand_identity: None,
+                execution_id: None,
             }),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );

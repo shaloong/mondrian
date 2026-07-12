@@ -39,7 +39,7 @@ the new seams.
 | --- | --- | --- |
 | Playback Engine | session epoch, transport state, timeline anchor, rate/direction, Clock Master selection, priming/recovery, deadlines, drop decisions | decode sessions, GPU resources, audio callback buffers, UI state |
 | Audio Playback Engine | device/stream lifecycle, rendered PCM queue, consumed-sample observation, preroll, underrun/device evidence | timeline transport decisions |
-| Preview Scheduler | bounded semantic admission, latest generation, current/prefetch priority, still preemption, cancellation, completion freshness | codec access details, worker transport, Clock Master or transport state |
+| Frame Work Broker | bounded semantic admission, queued transport, execution leases, latest generation, current/prefetch priority, still preemption, deadline dequeue, cancellation, completion freshness | codec payload interpretation, Clock Master or transport state |
 | Preview Frame Store | ready/stale/in-flight identity, source revision, color contract, memory budgets | deadline policy or proxy selection |
 | Presentation Adapter | GPU import/composite/display, Viewer handoff, presentation evidence | timeline advancement |
 | Playback Evidence | immutable events, aggregates, reports | policy decisions |
@@ -67,13 +67,13 @@ keys remain opaque generic Adapter values.
 
 ```text
 TransportCommand ─┐
-MonotonicTick ─────┼──> Playback Engine ──> FrameDemand ──> Preview Scheduler
+MonotonicTick ─────┼──> Playback Engine ──> FrameDemand ──> Frame Work Broker
 AudioObservation ──┤          │                                  │
 FrameDelivery ─────┘          ├──> AudioDirective ──> Audio Engine
                               ├──> PlaybackSnapshot ──> UI
                               └──> PlaybackEvent ──> Evidence
 
-Preview Scheduler ──> media decode ──> render/presentation ──> FrameDelivery
+Frame Work Broker ──> media decode ──> render/presentation ──> FrameDelivery
 Audio Engine ──> device callback / synthetic availability ──> AudioObservation
 ```
 
@@ -251,8 +251,9 @@ current-frame work.
 
 ## Frame request scheduling
 
-`FrameRequestScheduler<K>` is the Playback Module's codec- and UI-independent
-semantic admission Interface. `K` is an opaque Adapter key; the scheduler
+`FrameWorkBroker<K, D, P>` is the Playback Module's codec- and UI-independent
+request-lifecycle Interface. `K` is an opaque Adapter key, `D` an opaque
+deadline value, and `P` an opaque execution payload; the Broker
 interprets only:
 
 - `FrameWorkClass::{Playback, Interactive, Still}`;
@@ -261,9 +262,8 @@ interprets only:
 - an optional opaque `FrameDemandIdentity` carried for terminal reporting;
 - a strict nonzero pending-request budget.
 
-The concrete Interface is `FrameRequestScheduler<K, D>`. `D` is an opaque,
-copyable Adapter deadline type: the Module stores and returns it but never
-compares clock domains. Each pending entry therefore owns one atomic
+The Module stores and returns `D` but never compares clock domains except
+through an Adapter-supplied predicate at dequeue/diagnostics. Each pending entry owns one atomic
 `FrameRequestBinding<D>` containing generation, priority, semantic class,
 Frame Demand identity, and deadline.
 
@@ -283,13 +283,13 @@ if its generation or demand identity is older, it returns Stale and leaves the
 newer binding pending. This prevents the old worker-result identity from being
 rejected after it has already consumed the new request.
 
-The scheduler does not own worker threads, decode sessions, `Instant` to
-`MonotonicTimestamp` projection, or media access modes. The current App media
+The Broker owns the blocking queue and execution-lease registry, but not worker
+threads, decode sessions, `Instant` to `MonotonicTimestamp` projection, or media access modes. The current App media
 Adapter maps `PlaybackCursor`, `ScrubCursor`, and `RandomAccessStillFrame` onto
 the three semantic classes and projects generic diagnostics into its report
-schema. Its Condvar worker queue remains an Adapter transport Implementation
-until deadline ordering and capacity reservations can move behind a
-playback-owned Interface without importing FFmpeg types.
+schema. The Condvar queue, semantic lane selection, capacity reservation, and
+deadline dequeue now live behind the playback-owned Interface without importing
+FFmpeg types.
 
 Window and headless Adapters must use this same Interface. Deterministic tests
 exercise 100 latest-wins seeks with bounded pending residency and prove equal
@@ -625,8 +625,9 @@ controlled handoff.
 
 ### Phase 4 — Preview deepening
 
-Extract Preview Scheduler, Frame Store, and Evidence from `app_ui::preview` by
-behavioral ownership, not file size. Retain one public request seam into media.
+Consolidate frame-work scheduling in the Frame Work Broker; extract Frame Store
+and Evidence from `app_ui::preview` by behavioral ownership, not file size.
+Retain one public request seam into media.
 
 ### Phase 5 — Realtime policy
 
@@ -638,8 +639,9 @@ machine. Preserve explicit proxy recommendation and fail-closed color policy.
 Only after forward `1x` gates pass, implement signed rational rate, reverse/J-K-L,
 loop playback, variable-rate audio, and corresponding cache/decode policies.
 
-Each phase must leave the product runnable, preserve report compatibility or
-version it, and delete superseded state rather than maintaining two authorities.
+Each phase must leave the product runnable, update or explicitly version evidence
+schemas when semantics change, and delete superseded state rather than maintaining
+compatibility authorities during Alpha.
 
 ## Current integration status
 
@@ -688,14 +690,14 @@ host to synthesize a delivery from whichever demand is current at poll time.
 Scrub expiration is capacity/cancellation evidence, not a playback Late Frame
 Delivery.
 
-The first Phase 4 slice moved the bounded latest-wins pending scheduler out of
-`app_ui::preview_access_mode` into `mondrian-playback`. The Playback Module now
-owns semantic class validation, generation invalidation, current-over-prefetch
-and realtime-over-still preemption, completion freshness, synchronous
+Phase 4 now uses one `FrameWorkBroker` in `mondrian-playback`. It atomically owns
+semantic class validation, pending and queued capacity, generation invalidation,
+current-over-prefetch and realtime-over-still preemption, worker-lane dequeue,
+in-flight execution leases, deadline dequeue, completion freshness,
 cancellation/expiration, and stable diagnostics. App UI retains only the media
-key plus the explicit media-access Adapter mapping. Worker-lane transport,
-deadline dequeue, and media decode execution remain in the Adapter and are the
-next ownership seam; no second scheduler authority remains in UI code.
+key/payload plus explicit media-access and wall-deadline Adapter mappings. The
+former `FrameRequestScheduler` and App-local Condvar queue authorities were
+deleted rather than retained as compatibility paths.
 
 Frame completion now resolves an atomic Frame Request Binding. The App Adapter
 stores its absolute wall deadline as the opaque deadline value and replaces a
