@@ -35,9 +35,6 @@ use crate::app_ui::runtime::{
 };
 use crate::app_ui::shortcuts::{register_shortcuts, AppUiShortcutOverride};
 use crate::app_ui::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
-use crate::app_ui::viewer_gpu_preview_runtime::{
-    ViewerGpuPreviewNativeVideoFacts, ViewerGpuPreviewResidencyFacts, ViewerGpuPreviewRuntime,
-};
 use mondrian_core::types::ColorSpace;
 use mondrian_platform::{NativeVideoTextureImportProbe, SystemPlatformService};
 use mondrian_renderer::{
@@ -45,7 +42,9 @@ use mondrian_renderer::{
     RenderColorStageDiagnostics, RenderGpuOutputBoundaryRuntimeDiagnostics,
     RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputRuntimeDiagnosticsReport,
     RenderGpuOutputStageDiagnosticsReport, RenderGpuOutputStageResourcePlanError,
-    RenderOutputColorBoundary, RenderOutputColorBoundaryTarget, ViewerGpuExecutionLayer,
+    RenderOutputColorBoundary, RenderOutputColorBoundaryTarget, ViewerGpuExecutionError,
+    ViewerGpuExecutionLayer, ViewerGpuExecutionRequest, ViewerGpuExecutionResidency,
+    ViewerGpuExecutionRuntime, ViewerGpuNativeVideoFacts, ViewerSourceRect,
 };
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutManager, ShortcutScope};
@@ -1296,7 +1295,8 @@ struct AppUiWindowSession {
     display_management_policy: mondrian_core::color_models::DisplayManagementPolicy,
     frame_renderer: AppUiFrameRenderer,
     renderer_queue: wgpu::Queue,
-    viewer_gpu_preview_runtime: ViewerGpuPreviewRuntime,
+    viewer_gpu_execution: ViewerGpuExecutionRuntime,
+    viewer_gpu_presentation: WindowViewerGpuPresentationState,
     viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry,
     render_diagnostic_reporter: AppUiRenderDiagnosticReporter,
     router: EventRouter,
@@ -1308,6 +1308,40 @@ struct AppUiWindowSession {
     pending_initial_redraw: bool,
     last_playback_tick: Instant,
     event_loop_telemetry: AppUiEventLoopTelemetry,
+}
+
+/// Window-only ownership of the texture registration currently published by the Viewer.
+#[derive(Default)]
+struct WindowViewerGpuPresentationState {
+    registered_texture_key: Option<ExternalTextureKey>,
+    presentation: Option<ViewerExternalTexturePresentation>,
+}
+
+impl WindowViewerGpuPresentationState {
+    fn take_registration(&mut self) -> Option<ExternalTextureKey> {
+        self.registered_texture_key.take()
+    }
+
+    fn register(&mut self, key: ExternalTextureKey) {
+        self.registered_texture_key = Some(key);
+    }
+
+    fn presentation(&self) -> Option<ViewerExternalTexturePresentation> {
+        self.presentation
+    }
+
+    fn set_presentation(&mut self, presentation: ViewerExternalTexturePresentation) {
+        self.presentation = Some(presentation);
+    }
+
+    fn take_presentation(&mut self) -> bool {
+        self.presentation.take().is_some()
+    }
+
+    fn clear(&mut self) -> Option<ExternalTextureKey> {
+        self.presentation = None;
+        self.registered_texture_key.take()
+    }
 }
 
 /// Run the app UI Mondrian editor window.
@@ -1567,14 +1601,14 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             log_frame_pressure(pressure);
                         }
                         trace_color_output_runtime(
-                            session.viewer_gpu_preview_runtime.color_output_diagnostics(),
+                            session.viewer_gpu_execution.color_output_diagnostics(),
                             &session.display_output_contract,
                         );
                         trace_viewer_gpu_output_telemetry(
                             &host,
                             &session.viewer_gpu_output_telemetry,
                             &session.display_output_contract.display_target,
-                            session.viewer_gpu_preview_runtime.color_output_diagnostics().into(),
+                            session.viewer_gpu_execution.color_output_diagnostics().into(),
                             session.display_snapshot.as_ref(),
                         );
                         if frame_result.needs_follow_up_redraw() {
@@ -3182,10 +3216,10 @@ fn prepare_viewer_gpu_preview(
         finish_prepare!();
     }
 
-    if let Some(previous) = session.viewer_gpu_preview_runtime.take_registered_texture_key() {
+    if let Some(previous) = session.viewer_gpu_presentation.take_registration() {
         session.frame_renderer.unregister_external_texture(&previous);
     }
-    session.viewer_gpu_preview_runtime.clear_frame_resources();
+    session.viewer_gpu_execution.clear_frame_resources();
 
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("app_ui_viewer_gpu_preview_output_encoder"),
@@ -3216,21 +3250,34 @@ fn prepare_viewer_gpu_preview(
         }
         None => None,
     };
-    let record = match session.viewer_gpu_preview_runtime.record_frame(
+    let source_rect = presentation_geometry.presentation.normalized_source_rect();
+    let record = match session.viewer_gpu_execution.record(
         device,
         queue,
         &mut encoder,
-        &frame,
-        layers,
-        presentation_geometry.presentation,
-        display_calibration,
+        ViewerGpuExecutionRequest {
+            sequence_id: frame.sequence_id,
+            timeline_frame: frame.frame,
+            width: frame.width,
+            height: frame.height,
+            working_color_space: frame.working_color_space,
+            layers,
+            output_boundary: &frame.boundary,
+            source_rect: ViewerSourceRect {
+                x: source_rect.x,
+                y: source_rect.y,
+                width: source_rect.width,
+                height: source_rect.height,
+            },
+            output_width: presentation_geometry.presentation.output_width,
+            output_height: presentation_geometry.presentation.output_height,
+            display_calibration,
+        },
     ) {
         Ok(record) => record,
         Err(error) => {
-            use crate::app_ui::viewer_gpu_preview_runtime::ViewerGpuPreviewRecordError;
-
             match &error {
-                ViewerGpuPreviewRecordError::WorkingComposite(composite_error) => {
+                ViewerGpuExecutionError::WorkingComposite(composite_error) => {
                     host.record_preview_gpu_compositing(
                         mondrian_renderer::GpuCompositingDiagnostics {
                             cpu_fallback_composites: 1,
@@ -3248,7 +3295,7 @@ fn prepare_viewer_gpu_preview(
                         },
                     );
                 }
-                ViewerGpuPreviewRecordError::OutputBoundary(boundary_error) => {
+                ViewerGpuExecutionError::OutputBoundary(boundary_error) => {
                     session.viewer_gpu_output_telemetry.record_record_failure();
                     host.record_preview_cpu_output_fallback(frame.width, frame.height);
                     if let RenderGpuOutputBoundaryRuntimeRecordError::ResourcePlan(
@@ -3295,7 +3342,7 @@ fn prepare_viewer_gpu_preview(
     session.viewer_gpu_output_telemetry.record_actual_frame_residency(
         preview_gpu_composite_frame_residency(
             record.residency,
-            session.viewer_gpu_preview_runtime.native_import_support(),
+            session.viewer_gpu_execution.native_import_support(),
         ),
     );
     for reason in &record.fallback_reasons {
@@ -3303,7 +3350,7 @@ fn prepare_viewer_gpu_preview(
             reason: reason.clone(),
         });
     }
-    let output_resource = match session.viewer_gpu_preview_runtime.output_texture_view(&record) {
+    let output_resource = match session.viewer_gpu_execution.output_texture_view(&record) {
         Ok(resource) => resource,
         Err(error) => {
             session.viewer_gpu_output_telemetry.record_missing_output_texture();
@@ -3351,7 +3398,7 @@ fn prepare_viewer_gpu_preview(
         presentation_geometry.presentation,
     ) {
         session.viewer_gpu_output_telemetry.record_registered_frame(stage_diagnostics);
-        session.viewer_gpu_preview_runtime.set_registered_texture_key(texture_key);
+        session.viewer_gpu_presentation.register(texture_key);
     } else {
         session
             .viewer_gpu_output_telemetry
@@ -3368,19 +3415,19 @@ fn synchronize_viewer_spatial_presentation(
     host: &AppUiHost,
     presentation: ViewerExternalTexturePresentation,
 ) {
-    if session.viewer_gpu_preview_runtime.presentation() == Some(presentation) {
+    if session.viewer_gpu_presentation.presentation() == Some(presentation) {
         return;
     }
     clear_viewer_spatial_presentation(session, host);
-    session.viewer_gpu_preview_runtime.set_presentation(presentation);
+    session.viewer_gpu_presentation.set_presentation(presentation);
 }
 
 fn clear_viewer_spatial_presentation(session: &mut AppUiWindowSession, host: &AppUiHost) {
-    let had_presentation = session.viewer_gpu_preview_runtime.take_presentation();
-    if let Some(previous) = session.viewer_gpu_preview_runtime.take_registered_texture_key() {
+    let had_presentation = session.viewer_gpu_presentation.take_presentation();
+    if let Some(previous) = session.viewer_gpu_presentation.take_registration() {
         session.frame_renderer.unregister_external_texture(&previous);
     }
-    session.viewer_gpu_preview_runtime.clear_frame_resources();
+    session.viewer_gpu_execution.clear_frame_resources();
     if had_presentation {
         host.clear_external_viewer_frame();
     }
@@ -3409,7 +3456,7 @@ fn validate_display_calibration_proof(
 }
 
 fn preview_gpu_composite_frame_residency(
-    summary: ViewerGpuPreviewResidencyFacts,
+    summary: ViewerGpuExecutionResidency,
     renderer_support: GpuNativeDecodedFrameImportSupport,
 ) -> AppUiViewerGpuOutputFrameResidency {
     let has_media = summary.media_layers > 0;
@@ -3459,7 +3506,7 @@ fn preview_gpu_composite_frame_residency(
 }
 fn preview_gpu_composite_native_video_import_readiness(
     has_media: bool,
-    facts: Option<ViewerGpuPreviewNativeVideoFacts>,
+    facts: Option<ViewerGpuNativeVideoFacts>,
     renderer_support: GpuNativeDecodedFrameImportSupport,
 ) -> Option<AppUiNativeVideoImportReadiness> {
     let facts = facts.unwrap_or_default();
@@ -3476,7 +3523,7 @@ fn preview_gpu_composite_native_video_import_readiness(
 }
 
 fn preview_gpu_composite_input_transform_path(
-    summary: ViewerGpuPreviewResidencyFacts,
+    summary: ViewerGpuExecutionResidency,
 ) -> AppUiViewerGpuOutputInputTransformPath {
     let has_native_video = summary.native_decoder_gpu_layers > 0;
     match (
@@ -3507,7 +3554,7 @@ fn preview_gpu_composite_input_transform_path(
     }
 }
 
-fn preview_gpu_composite_residency_reason(summary: ViewerGpuPreviewResidencyFacts) -> String {
+fn preview_gpu_composite_residency_reason(summary: ViewerGpuExecutionResidency) -> String {
     if summary.media_layers == 0 {
         return "Procedural layers are generated and composited on the GPU without media uploads"
             .to_owned();
@@ -3775,7 +3822,7 @@ fn refresh_display_output_contract(
         session.surface.configure(device, &session.config);
         session.frame_renderer = AppUiFrameRenderer::new(device, session.config.format);
         host.set_native_decoded_frame_import_support(
-            session.viewer_gpu_preview_runtime.native_import_support(),
+            session.viewer_gpu_execution.native_import_support(),
         );
     }
 
@@ -3800,10 +3847,10 @@ fn refresh_display_output_contract(
 }
 
 fn invalidate_display_dependent_gpu_preview(session: &mut AppUiWindowSession, host: &AppUiHost) {
-    if let Some(previous) = session.viewer_gpu_preview_runtime.take_registered_texture_key() {
+    if let Some(previous) = session.viewer_gpu_presentation.clear() {
         session.frame_renderer.unregister_external_texture(&previous);
     }
-    session.viewer_gpu_preview_runtime.reset();
+    session.viewer_gpu_execution.reset();
     host.clear_external_viewer_frame();
     host.mark_dirty();
 }
@@ -3867,10 +3914,8 @@ impl AppUiWindowSession {
         host.set_display_output_snapshot(Some(&initial_snapshot));
 
         let frame_renderer = AppUiFrameRenderer::new(device, config.format);
-        let viewer_gpu_preview_runtime = ViewerGpuPreviewRuntime::new(adapter, device, queue);
-        host.set_native_decoded_frame_import_support(
-            viewer_gpu_preview_runtime.native_import_support(),
-        );
+        let viewer_gpu_execution = ViewerGpuExecutionRuntime::new(adapter, device, queue);
+        host.set_native_decoded_frame_import_support(viewer_gpu_execution.native_import_support());
 
         Ok(Self {
             role,
@@ -3883,7 +3928,8 @@ impl AppUiWindowSession {
             display_management_policy,
             frame_renderer,
             renderer_queue: queue.clone(),
-            viewer_gpu_preview_runtime,
+            viewer_gpu_execution,
+            viewer_gpu_presentation: WindowViewerGpuPresentationState::default(),
             viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry::default(),
             render_diagnostic_reporter: AppUiRenderDiagnosticReporter::default(),
             router: build_event_router(
@@ -5560,10 +5606,10 @@ mod tests {
     #[test]
     fn preview_gpu_composite_residency_reports_gpu_ocio_input_for_media_layers() {
         let residency = preview_gpu_composite_frame_residency(
-            ViewerGpuPreviewResidencyFacts {
+            ViewerGpuExecutionResidency {
                 media_layers: 2,
                 gpu_input_layers: 2,
-                ..ViewerGpuPreviewResidencyFacts::default()
+                ..ViewerGpuExecutionResidency::default()
             },
             native_import_support_unavailable(),
         );
@@ -5597,17 +5643,17 @@ mod tests {
     #[test]
     fn preview_gpu_composite_residency_preserves_native_decoder_facts() {
         let residency = preview_gpu_composite_frame_residency(
-            ViewerGpuPreviewResidencyFacts {
+            ViewerGpuExecutionResidency {
                 media_layers: 1,
                 native_decoder_gpu_layers: 1,
                 gpu_input_layers: 1,
-                native_video_import: Some(ViewerGpuPreviewNativeVideoFacts {
+                native_video_import: Some(ViewerGpuNativeVideoFacts {
                     decoder_residency: DecodedFrameResidency::GpuTexture,
                     decoder_handle_kind: Some(DecodedGpuFrameHandleKind::D3D11Texture2D),
                     source_texture_format: Some(GpuNativeDecodedFrameTextureFormat::Nv12),
                     source_video_sampling: Some(native_video_sampling()),
                 }),
-                ..ViewerGpuPreviewResidencyFacts::default()
+                ..ViewerGpuExecutionResidency::default()
             },
             native_import_support_unavailable(),
         );
@@ -5636,16 +5682,16 @@ mod tests {
     #[test]
     fn preview_gpu_composite_residency_reports_native_video_import_path() {
         let residency = preview_gpu_composite_frame_residency(
-            ViewerGpuPreviewResidencyFacts {
+            ViewerGpuExecutionResidency {
                 media_layers: 1,
                 native_decoder_gpu_layers: 1,
-                native_video_import: Some(ViewerGpuPreviewNativeVideoFacts {
+                native_video_import: Some(ViewerGpuNativeVideoFacts {
                     decoder_residency: DecodedFrameResidency::GpuTexture,
                     decoder_handle_kind: Some(DecodedGpuFrameHandleKind::D3D11Texture2D),
                     source_texture_format: Some(GpuNativeDecodedFrameTextureFormat::Nv12),
                     source_video_sampling: Some(native_video_sampling()),
                 }),
-                ..ViewerGpuPreviewResidencyFacts::default()
+                ..ViewerGpuExecutionResidency::default()
             },
             native_import_support_unavailable(),
         );
@@ -5674,16 +5720,16 @@ mod tests {
     #[test]
     fn preview_gpu_composite_residency_treats_cpu_transfer_as_cpu_decoded() {
         let residency = preview_gpu_composite_frame_residency(
-            ViewerGpuPreviewResidencyFacts {
+            ViewerGpuExecutionResidency {
                 media_layers: 1,
                 gpu_input_layers: 1,
-                native_video_import: Some(ViewerGpuPreviewNativeVideoFacts {
+                native_video_import: Some(ViewerGpuNativeVideoFacts {
                     decoder_residency: DecodedFrameResidency::CpuRgba,
                     decoder_handle_kind: Some(DecodedGpuFrameHandleKind::D3D11Texture2D),
                     source_texture_format: Some(GpuNativeDecodedFrameTextureFormat::Nv12),
                     source_video_sampling: Some(native_video_sampling()),
                 }),
-                ..ViewerGpuPreviewResidencyFacts::default()
+                ..ViewerGpuExecutionResidency::default()
             },
             GpuNativeDecodedFrameImportSupport::ready(
                 vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
@@ -5710,12 +5756,12 @@ mod tests {
     #[test]
     fn preview_gpu_composite_residency_reports_mixed_gpu_input_fallback() {
         let residency = preview_gpu_composite_frame_residency(
-            ViewerGpuPreviewResidencyFacts {
+            ViewerGpuExecutionResidency {
                 media_layers: 2,
                 gpu_input_layers: 1,
                 cpu_upload_layers: 1,
                 gpu_input_failures: 1,
-                ..ViewerGpuPreviewResidencyFacts::default()
+                ..ViewerGpuExecutionResidency::default()
             },
             native_import_support_unavailable(),
         );
@@ -5732,9 +5778,9 @@ mod tests {
     #[test]
     fn preview_gpu_composite_residency_omits_native_video_report_for_procedural_layers() {
         let residency = preview_gpu_composite_frame_residency(
-            ViewerGpuPreviewResidencyFacts {
+            ViewerGpuExecutionResidency {
                 procedural_layers: 1,
-                ..ViewerGpuPreviewResidencyFacts::default()
+                ..ViewerGpuExecutionResidency::default()
             },
             native_import_support_unavailable(),
         );

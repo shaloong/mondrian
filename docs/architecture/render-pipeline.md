@@ -702,7 +702,7 @@ through `gpu_compositor.rs`. For supported layer stacks, the app window records:
 ```
 Resolved preview layers
   -> for each retained Windows D3D11 NV12/P010 media layer:
-       AppUiNativeVideoImportRuntime
+       ViewerNativeVideoImportRuntime
        -> bounded D3D11/DX12 shared-texture bridge entry
        -> native YUV shader into encoded-float Rgba16Float source texture
        -> OCIO GPU input transform into Rgba32Float working texture

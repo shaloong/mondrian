@@ -537,47 +537,24 @@ size, and constructs the `(SequenceId, width, height)` presentation scope. All
 residency and failure state lives in the playback-owned Module. A headless
 Adapter must instantiate the same Interface rather than reproduce cache policy.
 
-`ViewerGpuPreviewRuntime` is the device-scoped resource-owner Module for the
-GPU side of Viewer execution. It owns native decoded-video import, the
-working-linear compositor, spatial processing, the display output runtime,
-display calibration resources, and the active external-texture presentation
-identity. `AppUiWindowSession` retains surface/event-loop state and adapts this
-runtime to `AppUiFrameRenderer`; it no longer independently owns each GPU stage.
-Frame-scoped resources clear through one Interface, while pipelines and device
-capability state remain resident. A device/display invalidation must first
-unregister the runtime's external texture key, then reset the runtime as one
-unit. Its `record_frame` Interface now hides native import with explicit CPU
-fallback evidence, GPU input transforms, working-linear compositing, spatial
-processing, display-output recording, and optional proven display calibration.
-It returns the retained presentation output handle plus stage, compositing,
-spatial, residency, and fallback evidence.
-`window.rs` performs only Window Adapter policy around that Interface: display
-contract admission, renderer external-texture registration, Viewer publication,
-and telemetry projection. Its completion point means the external texture is
-registered and its producing commands are submitted to the same ordered queue
-used by the subsequent Viewer draw; it deliberately does not claim GPU-fence or
-surface-present completion and never blocks the main thread waiting for either.
-`HeadlessViewerGpuAdapter` is the second real Adapter:
-it creates a no-Surface high-performance device, calls `record_frame`, resolves
-the retained output texture, submits the command buffer, and waits for that
-submission. It has no UI texture registry and does not claim one. Its readiness
-and performance evidence is credited only after this real execution succeeds,
-and records every distinct output extent so gates can distinguish executed
-scaling from a state-only transition. Both Adapters therefore share the same
-composite/color Implementation. Renderer and platform hardware-decode admission
-is resolved in `native_video_import`, then consumed by both Host and headless
-Adapters; it is no longer Host-local policy.
-
-The first renderer-ownership extraction makes the execution payload boundary
-and native import backend renderer-owned. App preview planning produces
-`ViewerGpuExecutionLayer` directly, and `ViewerNativeVideoImportRuntime` owns
-backend lifetime plus fail-closed decoded-format/sampling resolution. There are
-no App-named compatibility aliases. The remaining App-local
-`ViewerGpuPreviewRuntime` is a transitional composition root for compositor,
-spatial, output, and UI registration; it is not the final shared execution
-Interface. The next extraction moves its renderer-only recording core into
-`mondrian-renderer`, after which Window registration/presentation and headless
-submission/completion are independent thin Adapters over that same core.
+Viewer execution now has one renderer-owned Interface and Implementation.
+`ViewerGpuExecutionRequest` supplies working-space layers, the exact output
+boundary, crop, output extent, and optional proven calibration;
+`ViewerGpuExecutionRuntime` owns native import, input transforms, compositing,
+spatial processing, output transformation, calibration, and renderer resource
+lifetime. App preview planning produces `ViewerGpuExecutionLayer` directly.
+There are no App-named compatibility aliases or App-local execution wrapper.
+The Window Adapter separately owns only UI texture registration and published
+presentation identity; the headless Adapter separately owns submission and GPU
+completion waiting. Both call the renderer Interface directly.
+Frame-scoped renderer resources clear through one Interface while pipelines and
+device capability state remain resident. On device/display invalidation, the
+Window Adapter first unregisters its external texture and then resets renderer
+execution resources. Window completion means registration plus ordered queue
+submission, not a GPU fence or surface present; headless completion waits for
+the submitted GPU work and claims no UI publication. Renderer/platform native
+decode admission is consumed by both Adapters and remains separate from media
+decode capability probes.
 
 ## Required invariants
 

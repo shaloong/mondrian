@@ -6,23 +6,49 @@
 
 use std::sync::Arc;
 
-use super::preview::AppUiGpuPreviewFrame;
-use mondrian_core::types::{BlendMode, Color};
-use mondrian_media::{DecodedFrameResidency, DecodedGpuFrameHandleKind};
-use mondrian_renderer::{
+use crate::{
     native_source_texture_format_from_decoded, native_video_sampling_from_decoded, CpuColorFrame,
     GpuColorFrameHandle, GpuColorFrameTextureFormat, GpuCompositeLayer, GpuCompositeLayerSource,
     GpuCompositeRequest, GpuCompositingDiagnostics, GpuDisplayCalibrationRuntime,
     GpuFrameCompositor, GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
     GpuNativeDecodedFrameVideoSampling, GpuViewerSpatialRuntime,
     GpuViewerSpatialRuntimeDiagnostics, RenderColorStageDiagnostics,
-    RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
+    RenderColorTransformGpuOptions, RenderGpuInputStageRecord,
+    RenderGpuInputStageRuntimeRecordError, RenderGpuOutputBoundaryRuntime,
     RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderGpuOutputBoundaryRuntimeRecordError,
-    ViewerGpuExecutionLayer, ViewerGpuMediaSource, ViewerGpuNativeSource,
-    ViewerNativeVideoImportRuntime, ViewerSourceRect,
+    RenderOutputColorBoundary, ViewerGpuExecutionLayer, ViewerGpuMediaSource,
+    ViewerGpuNativeSource, ViewerNativeVideoImportRuntime, ViewerSourceRect,
 };
-use mondrian_ui_renderer::ExternalTextureKey;
-use mondrian_ui_widgets::ViewerExternalTexturePresentation;
+use mondrian_core::display_calibration::DisplayCalibrationLut3d;
+use mondrian_core::types::{BlendMode, Color, SequenceId};
+use mondrian_core::WorkingColorSpace;
+use mondrian_media::{DecodedFrameResidency, DecodedGpuFrameHandleKind};
+
+/// Immutable renderer input for one Viewer GPU execution.
+pub struct ViewerGpuExecutionRequest<'a> {
+    /// Sequence identity used only to correlate renderer diagnostics.
+    pub sequence_id: SequenceId,
+    /// Timeline frame used only to correlate renderer diagnostics.
+    pub timeline_frame: i64,
+    /// Working-frame width before Viewer crop and resize.
+    pub width: u32,
+    /// Working-frame height before Viewer crop and resize.
+    pub height: u32,
+    /// Timeline working color space represented by all input layers.
+    pub working_color_space: WorkingColorSpace,
+    /// Bottom-to-top layer stack entering working-linear compositing.
+    pub layers: &'a [ViewerGpuExecutionLayer],
+    /// Exact display/output transform to execute after spatial processing.
+    pub output_boundary: &'a RenderOutputColorBoundary,
+    /// Normalized crop in the working composite.
+    pub source_rect: ViewerSourceRect,
+    /// Output width after Viewer spatial processing.
+    pub output_width: u32,
+    /// Output height after Viewer spatial processing.
+    pub output_height: u32,
+    /// Optional proven display calibration applied after the output boundary.
+    pub display_calibration: Option<Arc<DisplayCalibrationLut3d>>,
+}
 
 /// Long-lived GPU state for a single Viewer preview execution context.
 ///
@@ -30,44 +56,38 @@ use mondrian_ui_widgets::ViewerExternalTexturePresentation;
 /// capabilities remain resident for the lifetime of this object. Fields are
 /// temporarily visible to the sibling Window Adapter while execution is moved
 /// behind this module's stable interface.
-pub(crate) struct ViewerGpuPreviewRuntime {
+pub struct ViewerGpuExecutionRuntime {
     native_video_import: ViewerNativeVideoImportRuntime,
     color_output: RenderGpuOutputBoundaryRuntime,
     spatial: GpuViewerSpatialRuntime,
     display_calibration: GpuDisplayCalibrationRuntime,
     working_compositor: GpuFrameCompositor,
-    registered_texture_key: Option<ExternalTextureKey>,
-    presentation: Option<ViewerExternalTexturePresentation>,
 }
 
-impl ViewerGpuPreviewRuntime {
+impl ViewerGpuExecutionRuntime {
     /// Create one execution context for a renderer device.
-    pub(crate) fn new(adapter: &wgpu::Adapter, device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+    pub fn new(adapter: &wgpu::Adapter, device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         Self {
             native_video_import: ViewerNativeVideoImportRuntime::new(adapter, device, queue),
             color_output: RenderGpuOutputBoundaryRuntime::default(),
             spatial: GpuViewerSpatialRuntime::default(),
             display_calibration: GpuDisplayCalibrationRuntime::default(),
             working_compositor: GpuFrameCompositor::new(device),
-            registered_texture_key: None,
-            presentation: None,
         }
     }
 
     /// Native decoder import capability exposed to preview scheduling.
-    pub(crate) fn native_import_support(&self) -> GpuNativeDecodedFrameImportSupport {
+    pub fn native_import_support(&self) -> GpuNativeDecodedFrameImportSupport {
         self.native_video_import.support()
     }
 
     /// Aggregate output-stage diagnostics without exposing the resource table.
-    pub(crate) fn color_output_diagnostics(
-        &self,
-    ) -> mondrian_renderer::RenderGpuOutputBoundaryRuntimeDiagnostics {
+    pub fn color_output_diagnostics(&self) -> crate::RenderGpuOutputBoundaryRuntimeDiagnostics {
         self.color_output.diagnostics()
     }
 
     /// Release resources scoped to the current candidate, retaining pipelines.
-    pub(crate) fn clear_frame_resources(&mut self) {
+    pub fn clear_frame_resources(&mut self) {
         self.color_output.clear_frame_resources();
         self.spatial.clear_frame_resources();
         self.display_calibration.clear_frame_resources();
@@ -77,19 +97,15 @@ impl ViewerGpuPreviewRuntime {
     ///
     /// The returned handle remains owned by this runtime until the next frame
     /// clear/reset. Presentation registration and publication are Adapter work.
-    pub(super) fn record_frame(
+    pub fn record(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        frame: &AppUiGpuPreviewFrame,
-        layers: &[ViewerGpuExecutionLayer],
-        presentation: ViewerExternalTexturePresentation,
-        calibration: Option<Arc<mondrian_core::display_calibration::DisplayCalibrationLut3d>>,
-    ) -> Result<ViewerGpuPreviewRecord, ViewerGpuPreviewRecordError> {
+        request: ViewerGpuExecutionRequest<'_>,
+    ) -> Result<ViewerGpuExecutionRecord, ViewerGpuExecutionError> {
         let prepared = prepare_composite(
-            frame,
-            layers,
+            &request,
             &mut self.color_output,
             &mut self.native_video_import,
             device,
@@ -108,24 +124,21 @@ impl ViewerGpuPreviewRuntime {
                 queue,
                 encoder,
                 GpuCompositeRequest {
-                    width: frame.width,
-                    height: frame.height,
-                    working_color_space: frame.working_color_space,
+                    width: request.width,
+                    height: request.height,
+                    working_color_space: request.working_color_space,
                     layers: &gpu_layers,
                 },
             )
-            .map_err(ViewerGpuPreviewRecordError::WorkingComposite)?;
+            .map_err(ViewerGpuExecutionError::WorkingComposite)?;
         let working_view = self
             .color_output
             .frame_table()
             .get(&composite.output)
-            .map_err(|error| {
-                ViewerGpuPreviewRecordError::WorkingOutputMissing(format!("{error:?}"))
-            })?
+            .map_err(|error| ViewerGpuExecutionError::WorkingOutputMissing(format!("{error:?}")))?
             .resource()
             .texture_view
             .clone();
-        let source_rect = presentation.normalized_source_rect();
         let spatial_output = self
             .spatial
             .record(
@@ -134,31 +147,26 @@ impl ViewerGpuPreviewRuntime {
                 self.color_output.frame_ids_mut(),
                 composite.output,
                 &working_view,
-                ViewerSourceRect {
-                    x: source_rect.x,
-                    y: source_rect.y,
-                    width: source_rect.width,
-                    height: source_rect.height,
-                },
-                presentation.output_width,
-                presentation.output_height,
+                request.source_rect,
+                request.output_width,
+                request.output_height,
             )
-            .map_err(|error| ViewerGpuPreviewRecordError::Spatial(error.to_string()))?;
+            .map_err(|error| ViewerGpuExecutionError::Spatial(error.to_string()))?;
         let spatial_diagnostics = self.spatial.diagnostics();
         let spatial_resource = self
             .spatial
             .take_output(&spatial_output)
-            .ok_or(ViewerGpuPreviewRecordError::SpatialOutputMissing)?;
+            .ok_or(ViewerGpuExecutionError::SpatialOutputMissing)?;
         self.color_output
             .frame_table_mut()
             .insert(spatial_resource)
-            .map_err(|error| ViewerGpuPreviewRecordError::SpatialTransfer(format!("{error:?}")))?;
+            .map_err(|error| ViewerGpuExecutionError::SpatialTransfer(format!("{error:?}")))?;
         let mut output_record = self
             .color_output
             .record_wgpu_output_boundary_gpu_frame_owned_backend(
-                &frame.boundary,
+                request.output_boundary,
                 &spatial_output,
-                if calibration.is_some() {
+                if request.display_calibration.is_some() {
                     GpuColorFrameTextureFormat::Rgba16Float
                 } else {
                     GpuColorFrameTextureFormat::Rgba8Unorm
@@ -171,17 +179,17 @@ impl ViewerGpuPreviewRuntime {
                     load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                 },
             )
-            .map_err(ViewerGpuPreviewRecordError::OutputBoundary)?;
+            .map_err(ViewerGpuExecutionError::OutputBoundary)?;
         stage_diagnostics.accumulate(output_record.stage_diagnostics);
         output_record.stage_diagnostics = stage_diagnostics;
         let output = output_record.materialized.output;
-        let (output, output_owner) = if let Some(calibration) = calibration {
+        let (output, output_owner) = if let Some(calibration) = request.display_calibration {
             let output_view = self
                 .color_output
                 .frame_table()
                 .get(&output)
                 .map_err(|error| {
-                    ViewerGpuPreviewRecordError::DisplayOutputMissing(format!("{error:?}"))
+                    ViewerGpuExecutionError::DisplayOutputMissing(format!("{error:?}"))
                 })?
                 .resource()
                 .texture_view
@@ -197,12 +205,15 @@ impl ViewerGpuPreviewRuntime {
                     calibration,
                     GpuColorFrameTextureFormat::Rgba16Float,
                 )
-                .map_err(|error| ViewerGpuPreviewRecordError::Calibration(error.to_string()))?;
-            (calibrated, ViewerGpuPreviewOutputOwner::DisplayCalibration)
+                .map_err(|error| ViewerGpuExecutionError::Calibration(error.to_string()))?;
+            (
+                calibrated,
+                ViewerGpuExecutionOutputOwner::DisplayCalibration,
+            )
         } else {
-            (output, ViewerGpuPreviewOutputOwner::ColorOutput)
+            (output, ViewerGpuExecutionOutputOwner::ColorOutput)
         };
-        Ok(ViewerGpuPreviewRecord {
+        Ok(ViewerGpuExecutionRecord {
             output,
             output_owner,
             stage_diagnostics: output_record.stage_diagnostics,
@@ -214,97 +225,69 @@ impl ViewerGpuPreviewRuntime {
     }
 
     /// Resolve the recorded presentation texture without exposing resource tables.
-    pub(super) fn output_texture_view(
+    pub fn output_texture_view(
         &self,
-        record: &ViewerGpuPreviewRecord,
-    ) -> Result<wgpu::TextureView, ViewerGpuPreviewRecordError> {
+        record: &ViewerGpuExecutionRecord,
+    ) -> Result<wgpu::TextureView, ViewerGpuExecutionError> {
         match record.output_owner {
-            ViewerGpuPreviewOutputOwner::ColorOutput => self
+            ViewerGpuExecutionOutputOwner::ColorOutput => self
                 .color_output
                 .frame_table()
                 .get(&record.output)
                 .map(|resource| resource.resource().texture_view.clone())
                 .map_err(|error| {
-                    ViewerGpuPreviewRecordError::DisplayOutputMissing(format!("{error:?}"))
+                    ViewerGpuExecutionError::DisplayOutputMissing(format!("{error:?}"))
                 }),
-            ViewerGpuPreviewOutputOwner::DisplayCalibration => self
+            ViewerGpuExecutionOutputOwner::DisplayCalibration => self
                 .display_calibration
                 .output(&record.output)
                 .map(|resource| resource.resource().texture_view.clone())
                 .ok_or_else(|| {
-                    ViewerGpuPreviewRecordError::DisplayOutputMissing(
+                    ViewerGpuExecutionError::DisplayOutputMissing(
                         "calibrated output disappeared before presentation".to_owned(),
                     )
                 }),
         }
     }
 
-    /// Remove and return the texture registration owned by this context.
-    ///
-    /// The Adapter must unregister the returned key from its renderer before
-    /// discarding or replacing the associated frame resources.
-    pub(crate) fn take_registered_texture_key(&mut self) -> Option<ExternalTextureKey> {
-        self.registered_texture_key.take()
-    }
-
-    /// Record the renderer registration owned by this execution context.
-    pub(crate) fn set_registered_texture_key(&mut self, key: ExternalTextureKey) {
-        self.registered_texture_key = Some(key);
-    }
-
-    /// Current spatial presentation identity, if one is active.
-    pub(crate) fn presentation(&self) -> Option<ViewerExternalTexturePresentation> {
-        self.presentation
-    }
-
-    /// Replace the active spatial presentation identity.
-    pub(crate) fn set_presentation(&mut self, presentation: ViewerExternalTexturePresentation) {
-        self.presentation = Some(presentation);
-    }
-
-    /// Clear and report whether a spatial presentation was active.
-    pub(crate) fn take_presentation(&mut self) -> bool {
-        self.presentation.take().is_some()
-    }
-
     /// Reset all retained execution resources after a device/surface transition.
-    pub(crate) fn reset(&mut self) {
-        debug_assert!(
-            self.registered_texture_key.is_none(),
-            "renderer registration must be released before resetting Viewer GPU resources"
-        );
+    pub fn reset(&mut self) {
         self.color_output.clear_frame_resources();
         self.spatial.clear();
         self.display_calibration.clear();
-        self.registered_texture_key = None;
-        self.presentation = None;
     }
 }
 
 /// Successful GPU recording evidence consumed by presentation Adapters.
-pub(super) struct ViewerGpuPreviewRecord {
-    pub(super) output: GpuColorFrameHandle,
-    output_owner: ViewerGpuPreviewOutputOwner,
-    pub(super) stage_diagnostics: RenderColorStageDiagnostics,
-    pub(super) compositing_diagnostics: GpuCompositingDiagnostics,
-    pub(super) spatial_diagnostics: GpuViewerSpatialRuntimeDiagnostics,
-    pub(super) residency: ViewerGpuPreviewResidencyFacts,
-    pub(super) fallback_reasons: Vec<String>,
+pub struct ViewerGpuExecutionRecord {
+    /// Renderer-owned output handle retained until frame resources clear.
+    pub output: GpuColorFrameHandle,
+    output_owner: ViewerGpuExecutionOutputOwner,
+    /// Accumulated input and output color-stage diagnostics.
+    pub stage_diagnostics: RenderColorStageDiagnostics,
+    /// Working compositor execution diagnostics.
+    pub compositing_diagnostics: GpuCompositingDiagnostics,
+    /// Viewer crop/resize execution diagnostics.
+    pub spatial_diagnostics: GpuViewerSpatialRuntimeDiagnostics,
+    /// Exact media residency used for this execution.
+    pub residency: ViewerGpuExecutionResidency,
+    /// Explicit reasons for native/GPU-input correctness fallbacks.
+    pub fallback_reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ViewerGpuPreviewOutputOwner {
+enum ViewerGpuExecutionOutputOwner {
     ColorOutput,
     DisplayCalibration,
 }
 
 /// Stage-specific failures from the shared Viewer GPU execution Interface.
 #[derive(Debug, thiserror::Error)]
-pub(super) enum ViewerGpuPreviewRecordError {
+pub enum ViewerGpuExecutionError {
     #[error("Viewer GPU input preparation failed: {0}")]
     InputPreparation(String),
     #[error("Viewer GPU working composite failed: {0:?}")]
-    WorkingComposite(mondrian_renderer::GpuCompositeError),
+    WorkingComposite(crate::GpuCompositeError),
     #[error("Viewer GPU working output is missing: {0}")]
     WorkingOutputMissing(String),
     #[error("Viewer GPU spatial processing failed: {0}")]
@@ -322,25 +305,36 @@ pub(super) enum ViewerGpuPreviewRecordError {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct ViewerGpuPreviewResidencyFacts {
-    pub(super) media_layers: u32,
-    pub(super) procedural_layers: u32,
-    pub(super) native_decoder_gpu_layers: u32,
-    pub(super) gpu_input_layers: u32,
-    pub(super) cpu_upload_layers: u32,
-    pub(super) gpu_input_failures: u32,
-    pub(super) native_video_import: Option<ViewerGpuPreviewNativeVideoFacts>,
+pub struct ViewerGpuExecutionResidency {
+    /// Media layer count.
+    pub media_layers: u32,
+    /// Procedural layer count.
+    pub procedural_layers: u32,
+    /// Media layers backed by native decoder GPU surfaces.
+    pub native_decoder_gpu_layers: u32,
+    /// Media layers transformed through the GPU input path.
+    pub gpu_input_layers: u32,
+    /// Media layers uploaded from CPU working frames.
+    pub cpu_upload_layers: u32,
+    /// Native/GPU-input attempts that fell back.
+    pub gpu_input_failures: u32,
+    /// Sampling and residency facts for native-video admission evidence.
+    pub native_video_import: Option<ViewerGpuNativeVideoFacts>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ViewerGpuPreviewNativeVideoFacts {
-    pub(super) decoder_residency: DecodedFrameResidency,
-    pub(super) decoder_handle_kind: Option<DecodedGpuFrameHandleKind>,
-    pub(super) source_texture_format: Option<GpuNativeDecodedFrameTextureFormat>,
-    pub(super) source_video_sampling: Option<GpuNativeDecodedFrameVideoSampling>,
+pub struct ViewerGpuNativeVideoFacts {
+    /// Actual decoder output residency.
+    pub decoder_residency: DecodedFrameResidency,
+    /// Native handle family if retained by media.
+    pub decoder_handle_kind: Option<DecodedGpuFrameHandleKind>,
+    /// Renderer import texture format derived from media facts.
+    pub source_texture_format: Option<GpuNativeDecodedFrameTextureFormat>,
+    /// Fail-closed renderer sampling contract derived from media facts.
+    pub source_video_sampling: Option<GpuNativeDecodedFrameVideoSampling>,
 }
 
-impl Default for ViewerGpuPreviewNativeVideoFacts {
+impl Default for ViewerGpuNativeVideoFacts {
     fn default() -> Self {
         Self {
             decoder_residency: DecodedFrameResidency::CpuRgba,
@@ -354,7 +348,7 @@ impl Default for ViewerGpuPreviewNativeVideoFacts {
 struct PreparedComposite<'a> {
     gpu_input_handles: Vec<GpuColorFrameHandle>,
     layers: Vec<PreparedCompositeLayer<'a>>,
-    residency: ViewerGpuPreviewResidencyFacts,
+    residency: ViewerGpuExecutionResidency,
     input_stage_diagnostics: RenderColorStageDiagnostics,
     fallback_reasons: Vec<String>,
 }
@@ -376,23 +370,22 @@ enum PreparedCompositeLayerSource<'a> {
 }
 
 fn prepare_composite<'a>(
-    preview_frame: &AppUiGpuPreviewFrame,
-    layers: &'a [ViewerGpuExecutionLayer],
+    request: &ViewerGpuExecutionRequest<'a>,
     runtime: &mut RenderGpuOutputBoundaryRuntime,
     native_runtime: &mut ViewerNativeVideoImportRuntime,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
-) -> Result<PreparedComposite<'a>, ViewerGpuPreviewRecordError> {
+) -> Result<PreparedComposite<'a>, ViewerGpuExecutionError> {
     let mut prepared = PreparedComposite {
         gpu_input_handles: Vec::new(),
-        layers: Vec::with_capacity(layers.len()),
-        residency: ViewerGpuPreviewResidencyFacts::default(),
+        layers: Vec::with_capacity(request.layers.len()),
+        residency: ViewerGpuExecutionResidency::default(),
         input_stage_diagnostics: RenderColorStageDiagnostics::default(),
         fallback_reasons: Vec::new(),
     };
 
-    for layer in layers {
+    for layer in request.layers {
         match layer {
             ViewerGpuExecutionLayer::Media {
                 frame,
@@ -416,10 +409,10 @@ fn prepare_composite<'a>(
                                     .fallback_reasons
                                     .push(format!("viewer native video import failed: {error}"));
                                 tracing::warn!(
-                                    sequence_id = %preview_frame.sequence_id,
-                                    frame = preview_frame.frame,
-                                    width = preview_frame.width,
-                                    height = preview_frame.height,
+                                    sequence_id = %request.sequence_id,
+                                    frame = request.timeline_frame,
+                                    width = request.width,
+                                    height = request.height,
                                     "viewer native video import failed: {error}"
                                 );
                                 None
@@ -456,15 +449,15 @@ fn prepare_composite<'a>(
                                         prepared.residency.cpu_upload_layers =
                                             prepared.residency.cpu_upload_layers.saturating_add(1);
                                         tracing::warn!(
-                                            sequence_id = %preview_frame.sequence_id,
-                                            frame = preview_frame.frame,
-                                            width = preview_frame.width,
-                                            height = preview_frame.height,
+                                            sequence_id = %request.sequence_id,
+                                            frame = request.timeline_frame,
+                                            width = request.width,
+                                            height = request.height,
                                             "viewer GPU input transform failed; using CPU working layer upload: {error:?}"
                                         );
                                         PreparedCompositeLayerSource::CpuFrame(frame)
                                     } else {
-                                        return Err(ViewerGpuPreviewRecordError::InputPreparation(
+                                        return Err(ViewerGpuExecutionError::InputPreparation(
                                         format!(
                                             "GPU input transform failed without a CPU working fallback: {error:?}"
                                         ),
@@ -483,7 +476,7 @@ fn prepare_composite<'a>(
                                         source.native_frame.surface_format
                                     ),
                                 );
-                                return Err(ViewerGpuPreviewRecordError::InputPreparation(reason));
+                                return Err(ViewerGpuExecutionError::InputPreparation(reason));
                             };
                             prepared.residency.cpu_upload_layers =
                                 prepared.residency.cpu_upload_layers.saturating_add(1);
@@ -560,10 +553,7 @@ fn record_gpu_input_layer(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
-) -> Result<
-    mondrian_renderer::RenderGpuInputStageRecord,
-    mondrian_renderer::RenderGpuInputStageRuntimeRecordError,
-> {
+) -> Result<RenderGpuInputStageRecord, RenderGpuInputStageRuntimeRecordError> {
     runtime.record_wgpu_input_stage_owned_backend(
         &source.input_transform,
         &source.source,
@@ -605,15 +595,15 @@ fn composite_layers<'a>(
         .collect()
 }
 
-impl ViewerGpuPreviewResidencyFacts {
+impl ViewerGpuExecutionResidency {
     fn record_source(
         &mut self,
         media_source: Option<&ViewerGpuMediaSource>,
         native_source: Option<&ViewerGpuNativeSource>,
     ) {
         let facts = native_source
-            .map(ViewerGpuPreviewNativeVideoFacts::from_native_source)
-            .or_else(|| media_source.map(ViewerGpuPreviewNativeVideoFacts::from_media_source))
+            .map(ViewerGpuNativeVideoFacts::from_native_source)
+            .or_else(|| media_source.map(ViewerGpuNativeVideoFacts::from_media_source))
             .unwrap_or_default();
         if facts.decoder_residency == DecodedFrameResidency::GpuTexture {
             self.native_decoder_gpu_layers = self.native_decoder_gpu_layers.saturating_add(1);
@@ -631,7 +621,7 @@ impl ViewerGpuPreviewResidencyFacts {
     }
 }
 
-impl ViewerGpuPreviewNativeVideoFacts {
+impl ViewerGpuNativeVideoFacts {
     fn from_media_source(source: &ViewerGpuMediaSource) -> Self {
         let source_texture_format = (source.decoder_residency == DecodedFrameResidency::GpuTexture)
             .then(|| native_source_texture_format_from_decoded(source.decoded_surface_format))

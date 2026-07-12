@@ -288,6 +288,16 @@ product admission explanations remain App Adapter responsibilities: they may
 combine media, platform, and renderer evidence, but cannot reproduce import
 format policy or construct renderer resources.
 
+`viewer_runtime.rs` owns the complete device-scoped Viewer execution lifetime.
+Its immutable `ViewerGpuExecutionRequest` is independent of Window widgets,
+texture registries, playback tickets, cache identities, and headless gate
+policy. One `record` call executes native/CPU input preparation, working-linear
+effects and compositing, Viewer crop/resize, the display boundary, and optional
+proven calibration; `ViewerGpuExecutionRecord` returns the retained output plus
+stage, compositor, spatial, residency, and fallback evidence. Window and
+headless Adapters resolve the texture view from this same runtime, then perform
+their distinct registration or completion obligations themselves.
+
 `viewer_spatial.rs` owns Viewer-only crop and resize processing. Its typed plan
 accepts and produces only GPU-resident `Working + LinearFloat + Rgba32Float`
 frames, so it cannot be scheduled after an OCIO display/output transform or an

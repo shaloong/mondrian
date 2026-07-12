@@ -1,7 +1,7 @@
 //! Headless Viewer GPU presentation Adapter used by execution/performance gates.
 //!
 //! This Adapter owns a real wgpu device and calls the production
-//! [`ViewerGpuPreviewRuntime`] Interface. It deliberately has no UI texture
+//! [`ViewerGpuExecutionRuntime`] Interface. It deliberately has no UI texture
 //! registry; successful completion means commands were submitted and the GPU
 //! queue reached the recorded presentation output.
 
@@ -10,10 +10,10 @@ use std::time::Instant;
 use super::preview::{
     AppUiGpuPreviewFrame, AppUiGpuPreviewWorkingInput, AppUiPreviewDecodeExecutionSummary,
 };
-use super::viewer_gpu_preview_runtime::ViewerGpuPreviewRuntime;
 use mondrian_renderer::{
     native_video_texture_device_features, GpuNativeDecodedFrameImportSupport,
-    RenderColorStageDiagnostics,
+    RenderColorStageDiagnostics, ViewerGpuExecutionRequest, ViewerGpuExecutionRuntime,
+    ViewerSourceRect,
 };
 use mondrian_ui_widgets::ViewerExternalTexturePresentation;
 
@@ -40,7 +40,7 @@ pub(crate) struct HeadlessViewerGpuExecution {
 pub(crate) struct HeadlessViewerGpuAdapter {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    runtime: ViewerGpuPreviewRuntime,
+    runtime: ViewerGpuExecutionRuntime,
     current_output_key: Option<String>,
 }
 
@@ -63,7 +63,7 @@ impl HeadlessViewerGpuAdapter {
         };
         let (device, queue) = pollster::block_on(adapter.request_device(&descriptor))
             .map_err(|error| HeadlessViewerGpuError::Device(error.to_string()))?;
-        let runtime = ViewerGpuPreviewRuntime::new(&adapter, &device, &queue);
+        let runtime = ViewerGpuExecutionRuntime::new(&adapter, &device, &queue);
         Ok(Self { device, queue, runtime, current_output_key: None })
     }
 
@@ -107,16 +107,31 @@ impl HeadlessViewerGpuAdapter {
         let layers = match &frame.working_input {
             AppUiGpuPreviewWorkingInput::GpuComposite { layers } => layers,
         };
+        let source_rect = presentation.normalized_source_rect();
         let record = self
             .runtime
-            .record_frame(
+            .record(
                 &self.device,
                 &self.queue,
                 &mut encoder,
-                frame,
-                layers,
-                presentation,
-                None,
+                ViewerGpuExecutionRequest {
+                    sequence_id: frame.sequence_id,
+                    timeline_frame: frame.frame,
+                    width: frame.width,
+                    height: frame.height,
+                    working_color_space: frame.working_color_space,
+                    layers,
+                    output_boundary: &frame.boundary,
+                    source_rect: ViewerSourceRect {
+                        x: source_rect.x,
+                        y: source_rect.y,
+                        width: source_rect.width,
+                        height: source_rect.height,
+                    },
+                    output_width: presentation.output_width,
+                    output_height: presentation.output_height,
+                    display_calibration: None,
+                },
             )
             .map_err(|error| HeadlessViewerGpuError::Record(error.to_string()))?;
         let _output_texture = self
