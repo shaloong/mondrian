@@ -39,7 +39,7 @@ the new seams.
 | --- | --- | --- |
 | Playback Engine | session epoch, transport state, timeline anchor, rate/direction, Clock Master selection, priming/recovery, deadlines, drop decisions | decode sessions, GPU resources, audio callback buffers, UI state |
 | Audio Playback Engine | device/stream lifecycle, rendered PCM queue, consumed-sample observation, preroll, underrun/device evidence | timeline transport decisions |
-| Preview Scheduler | Frame Demand admission, priority, deadline, cancellation, prefetch, worker capacity | Clock Master or transport state |
+| Preview Scheduler | bounded semantic admission, latest generation, current/prefetch priority, still preemption, cancellation, completion freshness | codec access details, worker transport, Clock Master or transport state |
 | Preview Frame Store | ready/stale/in-flight identity, source revision, color contract, memory budgets | deadline policy or proxy selection |
 | Presentation Adapter | GPU import/composite/display, Viewer handoff, presentation evidence | timeline advancement |
 | Playback Evidence | immutable events, aggregates, reports | policy decisions |
@@ -59,7 +59,9 @@ Media/audio/render implementations remain in their owner crates and enter as
 app-level adapters. This direction prevents `mondrian-media` from becoming a
 second editor-state owner and prevents the pure Engine from accumulating codec
 or UI conditionals. Its public Interface remains limited to transport commands,
-observations, snapshots, Frame Demands, and Frame Deliveries.
+observations, snapshots, Frame Demands/Deliveries, presentation tickets,
+semantic scheduling classes, and bounded scheduling evidence. Concrete media
+keys remain opaque generic Adapter values.
 
 ## Runtime flow
 
@@ -246,6 +248,40 @@ Each demand includes:
 The Engine emits demands based on clock position plus a bounded lookahead.
 Prefetch is advisory, playback-only, slack-only, and cannot displace visible
 current-frame work.
+
+## Frame request scheduling
+
+`FrameRequestScheduler<K>` is the Playback Module's codec- and UI-independent
+semantic admission Interface. `K` is an opaque Adapter key; the scheduler
+interprets only:
+
+- `FrameWorkClass::{Playback, Interactive, Still}`;
+- `FrameWorkPriority::{Current, Prefetch}`;
+- a monotonically increasing latest-wins generation;
+- an optional opaque `FrameDemandIdentity` carried for terminal reporting;
+- a strict nonzero pending-request budget.
+
+Only playback-class work may prefetch. Current work may evict prefetch; realtime
+current work may additionally evict deterministic still work; still work cannot
+evict realtime current work. Starting a newer generation makes older work
+ineligible, but late results are still classified explicitly as `CacheOnly` or
+`Stale` rather than being allowed to mutate visible state. Cancellation and
+expiration remove pending ownership synchronously; an already executing Adapter
+must still recheck `is_execution_current` before publication.
+
+The scheduler does not own worker threads, decode sessions, `Instant` to
+`MonotonicTimestamp` projection, or media access modes. The current App media
+Adapter maps `PlaybackCursor`, `ScrubCursor`, and `RandomAccessStillFrame` onto
+the three semantic classes and projects generic diagnostics into its report
+schema. Its Condvar worker queue remains an Adapter transport Implementation
+until deadline ordering and capacity reservations can move behind a
+playback-owned Interface without importing FFmpeg types.
+
+Window and headless Adapters must use this same Interface. Deterministic tests
+exercise 100 latest-wins seeks with bounded pending residency and prove equal
+admission/completion semantics for both Adapter shapes. This is a structural
+test seam, not evidence that licensed 4K Main10 or 30-minute reference-machine
+gates have passed.
 
 ## Frame Delivery
 
@@ -593,8 +629,8 @@ version it, and delete superseded state rather than maintaining two authorities.
 
 ## Current integration status
 
-Phase 1 is complete, Phase 2 is active, and the first Phase 3 Clock Master slice
-is integrated through the `mondrian-playback` crate. The pure Engine now owns
+Phase 1 is complete; Phase 2 and Phase 4 are active; and the first Phase 3 Clock
+Master slice is integrated through the `mondrian-playback` crate. The pure Engine now owns
 the app's transport position/state, Synthetic Clock Master, epoch invalidation,
 exact rational clock advancement, stale-delivery rejection, and bounded
 temporary-resolution recovery policy. `AppState` projects current frame and
@@ -637,6 +673,15 @@ expiration. A stall expiration returns that stored identity and never asks the
 host to synthesize a delivery from whichever demand is current at poll time.
 Scrub expiration is capacity/cancellation evidence, not a playback Late Frame
 Delivery.
+
+The first Phase 4 slice moved the bounded latest-wins pending scheduler out of
+`app_ui::preview_access_mode` into `mondrian-playback`. The Playback Module now
+owns semantic class validation, generation invalidation, current-over-prefetch
+and realtime-over-still preemption, completion freshness, synchronous
+cancellation/expiration, and stable diagnostics. App UI retains only the media
+key plus the explicit media-access Adapter mapping. Worker-lane transport,
+deadline dequeue, and media decode execution remain in the Adapter and are the
+next ownership seam; no second scheduler authority remains in UI code.
 
 The app Clock Adapter maintains a wall-`Instant` to Playback
 `MonotonicTimestamp` mapping. Worker deadlines are projected as one absolute

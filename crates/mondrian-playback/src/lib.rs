@@ -10,6 +10,8 @@ use thiserror::Error;
 
 mod evidence;
 pub use evidence::*;
+mod scheduling;
+pub use scheduling::*;
 
 /// Monotonically increasing runtime timestamp relative to an arbitrary origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

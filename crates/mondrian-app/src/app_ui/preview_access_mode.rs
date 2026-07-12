@@ -4,7 +4,7 @@
 //! random-access preview work. It deliberately does not decode media, evaluate
 //! render plans, interpret color, or convert frames.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -39,27 +39,10 @@ pub(crate) struct MediaPreviewKey {
     pub(crate) ocio_generation: u64,
 }
 
-/// Latest-wins scheduler for access-mode-aware preview decode work.
+/// Media Adapter over the Playback Module's semantic latest-wins scheduler.
 #[derive(Clone)]
 pub(crate) struct MediaPreviewScheduler {
-    state: Arc<Mutex<MediaPreviewSchedulerState>>,
-    max_pending: usize,
-}
-
-#[derive(Default)]
-struct MediaPreviewSchedulerState {
-    latest_generation: u64,
-    pending: HashMap<MediaPreviewKey, MediaPreviewPendingRequest>,
-    metrics: MediaPreviewSchedulerMetrics,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MediaPreviewPendingRequest {
-    generation: u64,
-    priority: MediaPreviewRequestPriority,
-    access_mode: PreviewDecodeAccessMode,
-    requested_at: Instant,
-    demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
+    scheduler: mondrian_playback::FrameRequestScheduler<MediaPreviewKey>,
 }
 
 /// Scheduler-owned evidence for realtime work expired before worker completion.
@@ -138,33 +121,6 @@ impl MediaPreviewCompletionStatus {
     pub(crate) fn should_cache(self) -> bool {
         matches!(self, Self::Current | Self::CacheOnly)
     }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct MediaPreviewSchedulerMetrics {
-    scheduled_requests: u64,
-    already_pending_requests: u64,
-    already_pending_access_mode_changes: u64,
-    dropped_backpressure_requests: u64,
-    dropped_invalid_access_mode_requests: u64,
-    dropped_obsolete_generation_requests: u64,
-    dropped_pending_window_requests: u64,
-    skipped_decode_jobs: u64,
-    skipped_decode_missing_pending: u64,
-    skipped_decode_access_mode_mismatch: u64,
-    skipped_decode_obsolete_generation: u64,
-    completed_current_results: u64,
-    completed_cache_only_results: u64,
-    completed_cache_only_missing_pending: u64,
-    completed_cache_only_access_mode_mismatch: u64,
-    completed_stale_results: u64,
-    completed_stale_missing_pending: u64,
-    completed_stale_access_mode_mismatch: u64,
-    completed_stale_obsolete_generation: u64,
-    canceled_requests: u64,
-    pruned_obsolete_requests: u64,
-    evicted_prefetch_requests: u64,
-    evicted_still_requests: u64,
 }
 
 /// Scheduler-side preview media request counters.
@@ -752,15 +708,12 @@ impl Default for MediaPreviewScheduler {
 impl MediaPreviewScheduler {
     pub(crate) fn with_max_pending(max_pending: usize) -> Self {
         Self {
-            state: Arc::new(Mutex::new(MediaPreviewSchedulerState::default())),
-            max_pending: max_pending.max(1),
+            scheduler: mondrian_playback::FrameRequestScheduler::with_max_pending(max_pending),
         }
     }
 
     pub(crate) fn begin_generation(&self) -> u64 {
-        let mut state = self.state.lock().expect("media preview scheduler poisoned");
-        state.latest_generation = state.latest_generation.saturating_add(1);
-        state.latest_generation
+        self.scheduler.begin_generation()
     }
 
     #[cfg(test)]
@@ -782,92 +735,32 @@ impl MediaPreviewScheduler {
         access_mode: PreviewDecodeAccessMode,
         demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
     ) -> MediaPreviewRequestStatus {
-        let mut state = self.state.lock().expect("media preview scheduler poisoned");
-        if !priority.accepts_access_mode(access_mode) {
-            bump_value(&mut state.metrics.dropped_invalid_access_mode_requests);
-            return MediaPreviewRequestStatus::DroppedInvalidAccessMode;
-        }
-        if generation < state.latest_generation {
-            bump_value(&mut state.metrics.dropped_backpressure_requests);
-            bump_value(&mut state.metrics.dropped_obsolete_generation_requests);
-            return MediaPreviewRequestStatus::DroppedBackpressure;
-        }
-        if let Some(pending) = state.pending.get_mut(&key) {
-            let previous_access_mode = pending.access_mode;
-            let request_identity_changed = pending.demand_identity != demand_identity;
-            let request_generation_changed = pending.generation != generation;
-            pending.access_mode =
-                promoted_access_mode(pending.priority, pending.access_mode, priority, access_mode);
-            pending.generation = generation;
-            pending.priority = pending.priority.promote_with(priority);
-            pending.demand_identity = demand_identity;
-            let access_mode_changed = previous_access_mode != pending.access_mode;
-            if request_identity_changed || request_generation_changed || access_mode_changed {
-                pending.requested_at = Instant::now();
-            }
-            Self::prune_obsolete_locked(&mut state);
-            bump_value(&mut state.metrics.already_pending_requests);
-            if access_mode_changed {
-                bump_value(&mut state.metrics.already_pending_access_mode_changes);
-            }
-            return MediaPreviewRequestStatus::AlreadyPending { access_mode_changed };
-        }
-        Self::prune_obsolete_locked(&mut state);
-        let mut evicted_prefetch = None;
-        let mut evicted_still = None;
-        if state.pending.len() >= self.max_pending {
-            if priority == MediaPreviewRequestPriority::Current {
-                if let Some(evicted) = state
-                    .pending
-                    .iter()
-                    .find(|(_, pending)| pending.priority == MediaPreviewRequestPriority::Prefetch)
-                    .map(|(key, _)| key.clone())
-                {
-                    state.pending.remove(&evicted);
-                    evicted_prefetch = Some(Box::new(evicted));
-                    bump_value(&mut state.metrics.evicted_prefetch_requests);
-                } else if access_mode != PreviewDecodeAccessMode::RandomAccessStillFrame {
-                    if let Some(evicted) = state
-                        .pending
-                        .iter()
-                        .find(|(_, pending)| {
-                            pending.priority == MediaPreviewRequestPriority::Current
-                                && pending.access_mode
-                                    == PreviewDecodeAccessMode::RandomAccessStillFrame
-                        })
-                        .map(|(key, _)| key.clone())
-                    {
-                        state.pending.remove(&evicted);
-                        evicted_still = Some(Box::new(evicted));
-                        bump_value(&mut state.metrics.evicted_still_requests);
-                    } else {
-                        bump_value(&mut state.metrics.dropped_backpressure_requests);
-                        bump_value(&mut state.metrics.dropped_pending_window_requests);
-                        return MediaPreviewRequestStatus::DroppedBackpressure;
-                    }
-                } else {
-                    bump_value(&mut state.metrics.dropped_backpressure_requests);
-                    bump_value(&mut state.metrics.dropped_pending_window_requests);
-                    return MediaPreviewRequestStatus::DroppedBackpressure;
-                }
-            } else {
-                bump_value(&mut state.metrics.dropped_backpressure_requests);
-                bump_value(&mut state.metrics.dropped_pending_window_requests);
-                return MediaPreviewRequestStatus::DroppedBackpressure;
-            }
-        }
-        state.pending.insert(
+        match self.scheduler.request(
             key,
-            MediaPreviewPendingRequest {
-                generation,
-                priority,
-                access_mode,
-                requested_at: Instant::now(),
-                demand_identity,
+            generation,
+            frame_work_priority(priority),
+            frame_work_class(access_mode),
+            demand_identity,
+        ) {
+            mondrian_playback::FrameRequestAdmission::Scheduled {
+                evicted_prefetch,
+                evicted_still,
+            } => MediaPreviewRequestStatus::Scheduled {
+                evicted_prefetch: evicted_prefetch.map(Box::new),
+                evicted_still: evicted_still.map(Box::new),
             },
-        );
-        bump_value(&mut state.metrics.scheduled_requests);
-        MediaPreviewRequestStatus::Scheduled { evicted_prefetch, evicted_still }
+            mondrian_playback::FrameRequestAdmission::AlreadyPending { work_class_changed } => {
+                MediaPreviewRequestStatus::AlreadyPending {
+                    access_mode_changed: work_class_changed,
+                }
+            }
+            mondrian_playback::FrameRequestAdmission::DroppedBackpressure => {
+                MediaPreviewRequestStatus::DroppedBackpressure
+            }
+            mondrian_playback::FrameRequestAdmission::DroppedInvalidClass => {
+                MediaPreviewRequestStatus::DroppedInvalidAccessMode
+            }
+        }
     }
 
     pub(crate) fn should_decode(
@@ -875,24 +768,7 @@ impl MediaPreviewScheduler {
         key: &MediaPreviewKey,
         access_mode: PreviewDecodeAccessMode,
     ) -> bool {
-        let mut state = self.state.lock().expect("media preview scheduler poisoned");
-        let Some(pending) = state.pending.get(key).copied() else {
-            bump_value(&mut state.metrics.skipped_decode_jobs);
-            bump_value(&mut state.metrics.skipped_decode_missing_pending);
-            return false;
-        };
-        if pending.access_mode != access_mode {
-            bump_value(&mut state.metrics.skipped_decode_jobs);
-            bump_value(&mut state.metrics.skipped_decode_access_mode_mismatch);
-            return false;
-        }
-        if pending.generation >= state.latest_generation {
-            return true;
-        }
-        state.pending.remove(key);
-        bump_value(&mut state.metrics.skipped_decode_jobs);
-        bump_value(&mut state.metrics.skipped_decode_obsolete_generation);
-        false
+        self.scheduler.should_execute(key, frame_work_class(access_mode))
     }
 
     pub(crate) fn is_decode_current(
@@ -901,38 +777,19 @@ impl MediaPreviewScheduler {
         generation: u64,
         access_mode: PreviewDecodeAccessMode,
     ) -> bool {
-        let state = self.state.lock().expect("media preview scheduler poisoned");
-        state
-            .pending
-            .get(key)
-            .map(|pending| {
-                pending.access_mode == access_mode
-                    && pending.generation >= generation
-                    && pending.generation >= state.latest_generation
-            })
-            .unwrap_or(false)
+        self.scheduler
+            .is_execution_current(key, generation, frame_work_class(access_mode))
     }
 
     pub(crate) fn has_pending_current_request_other_than(&self, key: &MediaPreviewKey) -> bool {
-        let state = self.state.lock().expect("media preview scheduler poisoned");
-        state.pending.iter().any(|(pending_key, pending)| {
-            pending_key != key
-                && pending.priority == MediaPreviewRequestPriority::Current
-                && pending.generation >= state.latest_generation
-        })
+        self.scheduler.has_other_current(key, false)
     }
 
     pub(crate) fn has_pending_realtime_current_request_other_than(
         &self,
         key: &MediaPreviewKey,
     ) -> bool {
-        let state = self.state.lock().expect("media preview scheduler poisoned");
-        state.pending.iter().any(|(pending_key, pending)| {
-            pending_key != key
-                && pending.priority == MediaPreviewRequestPriority::Current
-                && pending.access_mode != PreviewDecodeAccessMode::RandomAccessStillFrame
-                && pending.generation >= state.latest_generation
-        })
+        self.scheduler.has_other_current(key, true)
     }
 
     pub(crate) fn complete(
@@ -941,206 +798,124 @@ impl MediaPreviewScheduler {
         result_generation: u64,
         access_mode: PreviewDecodeAccessMode,
     ) -> MediaPreviewCompletionStatus {
-        let mut state = self.state.lock().expect("media preview scheduler poisoned");
-        let result_is_latest = result_generation >= state.latest_generation;
-        let Some(pending) = state.pending.get(key).copied() else {
-            if result_is_latest {
-                bump_value(&mut state.metrics.completed_cache_only_results);
-                bump_value(&mut state.metrics.completed_cache_only_missing_pending);
-                return MediaPreviewCompletionStatus::CacheOnly;
+        match self.scheduler.complete(key, result_generation, frame_work_class(access_mode)) {
+            mondrian_playback::FrameRequestCompletion::Current => {
+                MediaPreviewCompletionStatus::Current
             }
-            bump_value(&mut state.metrics.completed_stale_results);
-            bump_value(&mut state.metrics.completed_stale_missing_pending);
-            return MediaPreviewCompletionStatus::Stale;
-        };
-        if pending.access_mode != access_mode {
-            if result_is_latest {
-                bump_value(&mut state.metrics.completed_cache_only_results);
-                bump_value(&mut state.metrics.completed_cache_only_access_mode_mismatch);
-                return MediaPreviewCompletionStatus::CacheOnly;
+            mondrian_playback::FrameRequestCompletion::CacheOnly => {
+                MediaPreviewCompletionStatus::CacheOnly
             }
-            bump_value(&mut state.metrics.completed_stale_results);
-            bump_value(&mut state.metrics.completed_stale_access_mode_mismatch);
-            return MediaPreviewCompletionStatus::Stale;
-        }
-        state.pending.remove(key);
-        let pending_generation = pending.generation;
-        let is_current = pending_generation >= state.latest_generation || result_is_latest;
-        if is_current {
-            bump_value(&mut state.metrics.completed_current_results);
-            MediaPreviewCompletionStatus::Current
-        } else {
-            bump_value(&mut state.metrics.completed_stale_results);
-            bump_value(&mut state.metrics.completed_stale_obsolete_generation);
-            MediaPreviewCompletionStatus::Stale
+            mondrian_playback::FrameRequestCompletion::Stale => MediaPreviewCompletionStatus::Stale,
         }
     }
 
     pub(crate) fn cancel(&self, key: &MediaPreviewKey) {
-        let mut state = self.state.lock().expect("media preview scheduler poisoned");
-        if state.pending.remove(key).is_some() {
-            bump_value(&mut state.metrics.canceled_requests);
-        }
+        self.scheduler.cancel(key);
     }
 
     pub(crate) fn expire_realtime_current_older_than(
         &self,
         max_age: Duration,
     ) -> Vec<ExpiredMediaPreviewRequest> {
-        let mut state = self.state.lock().expect("media preview scheduler poisoned");
-        let now = Instant::now();
-        let latest_generation = state.latest_generation;
-        let expired = state
-            .pending
-            .iter()
-            .filter_map(|(key, pending)| {
-                let realtime_current = pending.priority == MediaPreviewRequestPriority::Current
-                    && pending.access_mode != PreviewDecodeAccessMode::RandomAccessStillFrame
-                    && pending.generation >= latest_generation;
-                let expired = now.saturating_duration_since(pending.requested_at) >= max_age;
-                if realtime_current && expired {
-                    Some(ExpiredMediaPreviewRequest {
-                        key: key.clone(),
-                        access_mode: pending.access_mode,
-                        demand_identity: pending.demand_identity,
-                    })
-                } else {
-                    None
-                }
+        self.scheduler
+            .expire_realtime_current_older_than(max_age)
+            .into_iter()
+            .map(|request| ExpiredMediaPreviewRequest {
+                key: request.key,
+                access_mode: preview_access_mode(request.work_class),
+                demand_identity: request.demand_identity,
             })
-            .collect::<Vec<_>>();
-        if expired.is_empty() {
-            return expired;
-        }
-        for request in &expired {
-            state.pending.remove(&request.key);
-        }
-        state.metrics.canceled_requests =
-            state.metrics.canceled_requests.saturating_add(expired.len() as u64);
-        expired
+            .collect()
     }
 
     pub(crate) fn pending_still_for_realtime_current(
         &self,
         protected_key: &MediaPreviewKey,
     ) -> Vec<MediaPreviewKey> {
-        let state = self.state.lock().expect("media preview scheduler poisoned");
-        let latest_generation = state.latest_generation;
-        state
-            .pending
-            .iter()
-            .filter_map(|(key, pending)| {
-                let still_current = pending.priority == MediaPreviewRequestPriority::Current
-                    && pending.access_mode == PreviewDecodeAccessMode::RandomAccessStillFrame
-                    && pending.generation >= latest_generation;
-                (still_current && key != protected_key).then(|| key.clone())
-            })
-            .collect()
+        self.scheduler.pending_still_except(protected_key)
     }
 
     pub(crate) fn cancel_preempted_still_for_realtime_current(
         &self,
         key: &MediaPreviewKey,
     ) -> bool {
-        let mut state = self.state.lock().expect("media preview scheduler poisoned");
-        let latest_generation = state.latest_generation;
-        let Some(pending) = state.pending.get(key).copied() else {
-            return false;
-        };
-        let still_current = pending.priority == MediaPreviewRequestPriority::Current
-            && pending.access_mode == PreviewDecodeAccessMode::RandomAccessStillFrame
-            && pending.generation >= latest_generation;
-        if !still_current {
-            return false;
-        }
-        state.pending.remove(key);
-        bump_value(&mut state.metrics.evicted_still_requests);
-        true
+        self.scheduler.cancel_preempted_still(key)
     }
 
     pub(crate) fn cancel_all(&self) -> u64 {
-        let mut state = self.state.lock().expect("media preview scheduler poisoned");
-        let canceled = state.pending.len() as u64;
-        state.pending.clear();
-        state.latest_generation = state.latest_generation.saturating_add(1);
-        state.metrics.canceled_requests = state.metrics.canceled_requests.saturating_add(canceled);
-        state.latest_generation
+        self.scheduler.cancel_all()
     }
 
     pub(crate) fn prune_obsolete(&self) {
-        let mut state = self.state.lock().expect("media preview scheduler poisoned");
-        Self::prune_obsolete_locked(&mut state);
-    }
-
-    fn prune_obsolete_locked(state: &mut MediaPreviewSchedulerState) {
-        let latest_generation = state.latest_generation;
-        let before = state.pending.len();
-        state.pending.retain(|_, pending| pending.generation >= latest_generation);
-        let pruned = before.saturating_sub(state.pending.len()) as u64;
-        state.metrics.pruned_obsolete_requests =
-            state.metrics.pruned_obsolete_requests.saturating_add(pruned);
+        self.scheduler.prune_obsolete();
     }
 
     pub(crate) fn diagnostics(&self) -> MediaPreviewSchedulerDiagnostics {
-        let state = self.state.lock().expect("media preview scheduler poisoned");
+        let state = self.scheduler.diagnostics();
         MediaPreviewSchedulerDiagnostics {
             latest_generation: state.latest_generation,
-            pending_requests: state.pending.len(),
-            scheduled_requests: state.metrics.scheduled_requests,
-            already_pending_requests: state.metrics.already_pending_requests,
-            already_pending_access_mode_changes: state.metrics.already_pending_access_mode_changes,
-            dropped_backpressure_requests: state.metrics.dropped_backpressure_requests,
-            dropped_invalid_access_mode_requests: state
-                .metrics
-                .dropped_invalid_access_mode_requests,
-            dropped_obsolete_generation_requests: state
-                .metrics
-                .dropped_obsolete_generation_requests,
-            dropped_pending_window_requests: state.metrics.dropped_pending_window_requests,
-            skipped_decode_jobs: state.metrics.skipped_decode_jobs,
-            skipped_decode_missing_pending: state.metrics.skipped_decode_missing_pending,
-            skipped_decode_access_mode_mismatch: state.metrics.skipped_decode_access_mode_mismatch,
-            skipped_decode_obsolete_generation: state.metrics.skipped_decode_obsolete_generation,
-            completed_current_results: state.metrics.completed_current_results,
-            completed_cache_only_results: state.metrics.completed_cache_only_results,
-            completed_cache_only_missing_pending: state
-                .metrics
-                .completed_cache_only_missing_pending,
-            completed_cache_only_access_mode_mismatch: state
-                .metrics
-                .completed_cache_only_access_mode_mismatch,
-            completed_stale_results: state.metrics.completed_stale_results,
-            completed_stale_missing_pending: state.metrics.completed_stale_missing_pending,
-            completed_stale_access_mode_mismatch: state
-                .metrics
-                .completed_stale_access_mode_mismatch,
-            completed_stale_obsolete_generation: state.metrics.completed_stale_obsolete_generation,
-            canceled_requests: state.metrics.canceled_requests,
-            pruned_obsolete_requests: state.metrics.pruned_obsolete_requests,
-            evicted_prefetch_requests: state.metrics.evicted_prefetch_requests,
-            evicted_still_requests: state.metrics.evicted_still_requests,
+            pending_requests: state.pending_requests,
+            scheduled_requests: state.scheduled_requests,
+            already_pending_requests: state.already_pending_requests,
+            already_pending_access_mode_changes: state.already_pending_class_changes,
+            dropped_backpressure_requests: state.dropped_backpressure_requests,
+            dropped_invalid_access_mode_requests: state.dropped_invalid_class_requests,
+            dropped_obsolete_generation_requests: state.dropped_obsolete_generation_requests,
+            dropped_pending_window_requests: state.dropped_pending_window_requests,
+            skipped_decode_jobs: state.skipped_work,
+            skipped_decode_missing_pending: state.skipped_missing_pending,
+            skipped_decode_access_mode_mismatch: state.skipped_class_mismatch,
+            skipped_decode_obsolete_generation: state.skipped_obsolete_generation,
+            completed_current_results: state.completed_current,
+            completed_cache_only_results: state.completed_cache_only,
+            completed_cache_only_missing_pending: state.completed_cache_only_missing_pending,
+            completed_cache_only_access_mode_mismatch: state.completed_cache_only_class_mismatch,
+            completed_stale_results: state.completed_stale,
+            completed_stale_missing_pending: state.completed_stale_missing_pending,
+            completed_stale_access_mode_mismatch: state.completed_stale_class_mismatch,
+            completed_stale_obsolete_generation: state.completed_stale_obsolete_generation,
+            canceled_requests: state.canceled_requests,
+            pruned_obsolete_requests: state.pruned_obsolete_requests,
+            evicted_prefetch_requests: state.evicted_prefetch_requests,
+            evicted_still_requests: state.evicted_still_requests,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn pending_len(&self) -> usize {
-        self.state.lock().expect("media preview scheduler poisoned").pending.len()
+        self.scheduler.pending_len()
     }
 
     #[cfg(test)]
     pub(crate) fn has_pending_key(&self, key: &MediaPreviewKey) -> bool {
-        self.state
-            .lock()
-            .expect("media preview scheduler poisoned")
-            .pending
-            .contains_key(key)
+        self.scheduler.has_pending_key(key)
     }
 }
 
-fn bump_value(counter: &mut u64) {
-    *counter = counter.saturating_add(1);
+fn frame_work_priority(
+    priority: MediaPreviewRequestPriority,
+) -> mondrian_playback::FrameWorkPriority {
+    match priority {
+        MediaPreviewRequestPriority::Prefetch => mondrian_playback::FrameWorkPriority::Prefetch,
+        MediaPreviewRequestPriority::Current => mondrian_playback::FrameWorkPriority::Current,
+    }
 }
 
+fn frame_work_class(access_mode: PreviewDecodeAccessMode) -> mondrian_playback::FrameWorkClass {
+    match access_mode {
+        PreviewDecodeAccessMode::PlaybackCursor => mondrian_playback::FrameWorkClass::Playback,
+        PreviewDecodeAccessMode::ScrubCursor => mondrian_playback::FrameWorkClass::Interactive,
+        PreviewDecodeAccessMode::RandomAccessStillFrame => mondrian_playback::FrameWorkClass::Still,
+    }
+}
+
+fn preview_access_mode(work_class: mondrian_playback::FrameWorkClass) -> PreviewDecodeAccessMode {
+    match work_class {
+        mondrian_playback::FrameWorkClass::Playback => PreviewDecodeAccessMode::PlaybackCursor,
+        mondrian_playback::FrameWorkClass::Interactive => PreviewDecodeAccessMode::ScrubCursor,
+        mondrian_playback::FrameWorkClass::Still => PreviewDecodeAccessMode::RandomAccessStillFrame,
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
