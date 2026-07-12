@@ -64,6 +64,19 @@ impl AppState {
         self.playback_evidence.report()
     }
 
+    /// Start one isolated headless/performance evidence run with explicit
+    /// retention sized for its real execution workload.
+    #[cfg(test)]
+    pub(crate) fn begin_playback_evidence_run(
+        &mut self,
+        config: mondrian_playback::PlaybackEvidenceConfig,
+    ) -> Result<(), mondrian_playback::PlaybackEvidenceError> {
+        self.playback_evidence = PlaybackEvidenceCollector::new(config)?;
+        self.playback_evidence_now = self.playback_now;
+        self.capture_playback_evidence();
+        Ok(())
+    }
+
     pub fn play(&mut self) {
         let Ok(end_frame) = self.last_content_frame() else {
             tracing::error!("failed to resolve exact Sequence duration onto playback frame grid");

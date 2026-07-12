@@ -1,6 +1,8 @@
 use super::playback_acceptance::{
     evaluate_professional_playback, PreviewPlaybackMediaProbeReport,
     PreviewProfessionalPlaybackGateReport, ProfessionalPlaybackObservation,
+    PROFESSIONAL_MIN_ACCURATE_SEEKS, PROFESSIONAL_MIN_OBSERVED_DURATION_US,
+    PROFESSIONAL_MIN_SUPERSEDED_SEEKS, PROFESSIONAL_MIN_WARM_SEEKS,
 };
 use super::*;
 use crate::app::ui_actions::TimelineSeekSource;
@@ -176,6 +178,14 @@ fn headless_gpu_summary_records_distinct_executed_extents() {
             HeadlessViewerGpuExtent { width: 960, height: 540 },
             HeadlessViewerGpuExtent { width: 480, height: 270 },
         ]
+    );
+}
+
+#[test]
+fn professional_frame_count_covers_full_duration_after_initial_observation() {
+    assert_eq!(
+        professional_min_frame_count_for_interval(40_000_000).expect("25 fps interval"),
+        45_001
     );
 }
 
@@ -1308,6 +1318,7 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
         playback_threshold_ms,
         gpu_candidate_threshold_ms,
         ready_timeout,
+        0,
     );
 
     let _ = fs::remove_dir_all(&root_dir);
@@ -1385,12 +1396,25 @@ fn run_external_continuous_playback_gate(
 
     let media_info = probe_external_preview_media_info(&video_path)?;
     let media_probe = PreviewPlaybackMediaProbeReport::from_media_info(&media_info)?;
-    let default_frame_count = if professional { 300 } else { 60 };
+    let professional_min_frames = professional
+        .then(|| professional_min_frame_count(&media_probe))
+        .transpose()?
+        .unwrap_or(8);
+    let default_frame_count = if professional {
+        professional_min_frames
+    } else {
+        60
+    };
+    let max_frame_count = if professional {
+        professional_min_frames.saturating_mul(2).max(professional_min_frames)
+    } else {
+        1_800
+    };
     let frame_count = env_usize_clamped(
         "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_FRAMES",
         default_frame_count,
-        8,
-        1_800,
+        professional_min_frames,
+        max_frame_count,
     );
     let frame_interval_ns = std::env::var("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_FRAME_MS")
         .ok()
@@ -1405,9 +1429,14 @@ fn run_external_continuous_playback_gate(
         "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_READY_TIMEOUT_MS",
         30_000,
     ) as u64);
+    let default_overall_timeout_ms = if professional {
+        40 * 60 * 1_000
+    } else {
+        180_000
+    };
     let overall_timeout = Duration::from_millis(env_u128(
         "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_TOTAL_TIMEOUT_MS",
-        180_000,
+        default_overall_timeout_ms,
     ) as u64);
     let playback_p95_limit_us = env_u64("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_P95_US", 40_000);
     let playback_queue_wait_p95_limit_us = env_u64(
@@ -1447,6 +1476,11 @@ fn run_external_continuous_playback_gate(
         playback_threshold_ms,
         gpu_candidate_threshold_ms,
         ready_timeout,
+        if professional {
+            PROFESSIONAL_MIN_WARM_SEEKS.saturating_add(PROFESSIONAL_MIN_ACCURATE_SEEKS) as usize
+        } else {
+            0
+        },
     );
     let _ = fs::remove_dir_all(&root_dir);
 
@@ -1484,6 +1518,8 @@ fn run_external_continuous_playback_gate(
                 viewer_fallback_count: report.headless_gpu.fallback_count,
                 viewer_fallback_reasons: &report.headless_gpu.fallback_reasons,
                 playback_decode,
+                playback_evidence: &report.playback_evidence,
+                preview_diagnostics: &report.preview_diagnostics,
                 frames: report.frames,
                 frame_interval_ns: report.frame_interval_ns,
             },
@@ -1673,6 +1709,7 @@ fn run_preview_media_continuous_playback_probe(
     playback_threshold_ms: u128,
     gpu_candidate_threshold_ms: u128,
     ready_timeout: Duration,
+    seek_probe_count: usize,
 ) -> anyhow::Result<PreviewMediaPlaybackPerfReport> {
     let media_info = match media_info {
         Some(media_info) => media_info,
@@ -1686,6 +1723,13 @@ fn run_preview_media_continuous_playback_probe(
         Some(media_info),
         frame_count,
     )?;
+    state.begin_playback_evidence_run(mondrian_playback::PlaybackEvidenceConfig {
+        event_capacity: frame_count
+            .saturating_mul(6)
+            .saturating_add(seek_probe_count.saturating_mul(8))
+            .saturating_add(1_024),
+        sample_capacity: frame_count.saturating_add(seek_probe_count).saturating_add(1_024),
+    })?;
     let preview_service = AppUiPreviewService::new();
     let mut gpu_adapter =
         HeadlessViewerGpuAdapter::new().context("create real headless Viewer GPU Adapter")?;
@@ -1732,6 +1776,26 @@ fn run_preview_media_continuous_playback_probe(
             Ok(())
         },
     )?;
+    let seek_case = (seek_probe_count > 0)
+        .then(|| {
+            run_case(
+                "preview_media.cross_region_seek_readiness",
+                1,
+                u128::from(seek_probe_count as u64).saturating_mul(1_000),
+                || {
+                    run_headless_cross_region_seeks(
+                        &preview_service,
+                        &mut state,
+                        &mut gpu_adapter,
+                        &mut headless_gpu,
+                        frame_count,
+                        seek_probe_count,
+                        ready_timeout,
+                    )
+                },
+            )
+        })
+        .transpose()?;
     state.pause();
 
     let gpu_candidate_case = run_case(
@@ -1815,10 +1879,123 @@ fn run_preview_media_continuous_playback_probe(
         preview_decode_report,
         preview_render_report,
         playback_evidence,
-        cases: vec![playback_case, gpu_candidate_case],
+        cases: std::iter::once(playback_case)
+            .chain(seek_case)
+            .chain(std::iter::once(gpu_candidate_case))
+            .collect(),
     };
     validate_executed_adaptive_scaling(&report)?;
     Ok(report)
+}
+
+fn professional_min_frame_count(media: &PreviewPlaybackMediaProbeReport) -> anyhow::Result<usize> {
+    professional_min_frame_count_for_interval(media.frame_interval_ns()?)
+}
+
+fn professional_min_frame_count_for_interval(interval_ns: u64) -> anyhow::Result<usize> {
+    anyhow::ensure!(
+        interval_ns > 0,
+        "professional playback interval must be positive"
+    );
+    let required_ns = u128::from(PROFESSIONAL_MIN_OBSERVED_DURATION_US).saturating_mul(1_000);
+    let frames = required_ns
+        .saturating_add(u128::from(interval_ns).saturating_sub(1))
+        .checked_div(u128::from(interval_ns))
+        .unwrap_or(u128::MAX)
+        .saturating_add(1);
+    usize::try_from(frames).context("professional playback frame count exceeds usize")
+}
+
+fn run_headless_cross_region_seeks(
+    preview_service: &AppUiPreviewService,
+    state: &mut AppState,
+    gpu_adapter: &mut HeadlessViewerGpuAdapter,
+    gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
+    frame_count: usize,
+    seek_count: usize,
+    timeout_per_seek: Duration,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        frame_count > seek_count,
+        "seek fixture has too few distinct regions"
+    );
+    let target_span = frame_count.saturating_sub(1);
+    for index in 0..seek_count {
+        let target = index
+            .saturating_add(1)
+            .saturating_mul(target_span)
+            .checked_div(seek_count.saturating_add(1))
+            .unwrap_or(0);
+        let source = if index % 2 == 0 {
+            TimelineSeekSource::PointerDrag
+        } else {
+            TimelineSeekSource::Settled
+        };
+        state.seek_with_source(target as i64, source);
+        wait_for_headless_gpu_ready(
+            preview_service,
+            state,
+            gpu_adapter,
+            gpu_summary,
+            timeout_per_seek,
+        )?;
+    }
+
+    let supersession_count = usize::try_from(PROFESSIONAL_MIN_SUPERSEDED_SEEKS)
+        .unwrap_or(usize::MAX)
+        .saturating_add(1);
+    anyhow::ensure!(
+        frame_count > supersession_count,
+        "seek fixture has too few latest-wins regions"
+    );
+    for index in 0..supersession_count {
+        let target = supersession_count
+            .saturating_sub(index)
+            .saturating_mul(target_span)
+            .checked_div(supersession_count.saturating_add(1))
+            .unwrap_or(0);
+        let source = if index % 2 == 0 {
+            TimelineSeekSource::PointerDrag
+        } else {
+            TimelineSeekSource::Settled
+        };
+        state.seek_with_source(target as i64, source);
+        let _ = preview_service.gpu_preview_frame_for_state(state);
+        thread::yield_now();
+    }
+    wait_for_headless_gpu_ready(
+        preview_service,
+        state,
+        gpu_adapter,
+        gpu_summary,
+        timeout_per_seek,
+    )?;
+    wait_for_preview_work_quiescence(preview_service, state, timeout_per_seek)?;
+    Ok(())
+}
+
+fn wait_for_preview_work_quiescence(
+    preview_service: &AppUiPreviewService,
+    state: &mut AppState,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        apply_headless_preview_outcome(preview_service, state);
+        let diagnostics = preview_service.diagnostics();
+        if diagnostics.scheduler.pending_requests == 0
+            && diagnostics.worker_queue.queued_jobs == 0
+            && diagnostics.worker_queue.in_flight_jobs == 0
+        {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "preview work did not return to zero residency after latest-wins seek burst: {:?}",
+            diagnostics
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
 }
 
 fn validate_executed_adaptive_scaling(

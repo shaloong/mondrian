@@ -817,14 +817,22 @@ The professional 4K HEVC Main10 gate now has a fail-closed input and execution
 contract. It uses real FFmpeg decoder profile/format/rate evidence, the probed
 rational cadence, frame-local decode provenance carried through caches and
 prefetch, the exact Viewer candidate, and a completed headless GPU submission.
+Its Adapter derives a non-overridable minimum frame count from 30 minutes and
+the probed rational cadence, sizes Playback Evidence retention for the complete
+run, completes 50 warm plus 50 accurate cross-region seeks through the same GPU
+presentation path, and then schedules a 100-seek latest-wins burst. The gate
+requires warm p95 at or below 200 ms, accurate p95 at or below 500 ms, at least
+99 superseded-seek observations, no rejected old terminal delivery, no evidence
+overflow, and zero Broker pending/queued/in-flight residency after the burst.
 The deterministic rules and versioned structured failure codes live in the
 deep `app::playback_acceptance` Module; the perf harness is an Adapter that only
 collects real probe, playback, and completed-presentation observations.
 It cannot pass from filename labels, hardware candidates/device contexts, or
 PlaybackCursor aggregates containing speculative prefetch. The repository does
-not contain the licensed/reference 4K Main10 fixture, so a reference-machine run
-of this gate, 30-minute duration, and Golden Project identity still remain to be
-satisfied before the professional playback acceptance claim is complete.
+not contain the licensed/reference 4K Main10 fixture, so a successful
+reference-machine execution of this enforced 30-minute contract and the Golden
+Project identity still remain to be supplied before professional playback
+acceptance can be claimed.
 
 The generated-media gate additionally requires execution—not merely policy
 state—when at least two pressure thresholds of requested-but-unengaged hardware
