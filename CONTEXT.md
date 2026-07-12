@@ -24,6 +24,10 @@ _Avoid_: Render request, preview refresh
 The observed outcome of a Frame Demand, including readiness, timing, execution path, degradation, and blocker evidence.
 _Avoid_: Preview result
 
+**Frame Presentation Ticket**:
+Opaque authority binding one Frame Demand identity, its final presentation deadline, and the only allowed on-time quality outcome for a CPU or GPU Presentation Adapter.
+_Avoid_: Preclassified ready result, UI-ready flag
+
 **Playback Quality Policy**:
 The allowed temporary preview resolution and user-selected proxy/original policy for a Playback Session.
 _Avoid_: Quality flag
@@ -54,16 +58,17 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - A **Playback Session** has exactly one **Transport State** at a time.
 - A **Playback Session** produces zero or more **Frame Demands**.
 - Each **Frame Demand** produces at most one terminal **Frame Delivery**.
-- Successful decode/cache completion is nonterminal readiness. A CPU or GPU **Presentation Adapter** must carry the exact demand identity and emit `Ready`/`Degraded` only after it has produced a usable Viewer output; deadline/cancellation/failure paths may terminate earlier without presentation.
+- Successful decode/cache completion is nonterminal readiness. A CPU or GPU **Presentation Adapter** must complete the exact **Frame Presentation Ticket** only after it has produced a usable Viewer output; the Playback Module compares the real completion timestamp with the ticket deadline and emits `Ready`, `Degraded`, or `Late`. Cancellation/failure paths may terminate earlier without presentation.
 - A Viewer stale lifecycle state does not terminate a **Frame Demand**; only a deadline/policy decision may emit `StaleAvailable`, while an in-flight worker retains the chance to deliver `Ready`.
 - A **Playback Quality Policy** constrains every **Frame Demand** in its Playback Session.
 - An active Playback Quality Policy's temporary `Full`/`Half`/`Quarter` scale multiplies the user-authored preview scale at every Preview Adapter boundary; paused/stopped still-frame work returns to the authored scale. It changes output extent only and never changes proxy/original selection or color interpretation.
 - A correct CPU frame produced after hardware decode was explicitly requested but did not execute is a presentable `Degraded` **Frame Delivery**. It contributes recovery pressure; observed hardware decode with CPU transfer and native GPU-resident decode remain `Ready` paths.
+- Executed decode quality is stored on the decoded frame itself and survives prefetch and Preview Frame Store reuse; it is aggregated across the final composition before creating a **Frame Presentation Ticket**. Job identity is not a substitute for execution quality.
 - **Playback Evidence** records state and clock transitions without owning them.
 - **Playback Evidence** uses bounded versioned events and aggregates from real Frame Demand, Frame Delivery, Clock Master, seek, and Audio Playback observations; capability probes alone cannot satisfy execution gates.
 - A **Preview Frame Store** admits and evicts CPU frames by both payload bytes and entry count; renderer-owned GPU resources remain outside this store and require their own budget evidence.
 - A **Viewer GPU Preview Runtime** owns GPU execution resources independently of a Window; production Window and headless validation must adapt the same execution lifetime and must not duplicate color or compositing interpretation.
-- Headless validation credits Viewer GPU readiness only after the shared **Viewer GPU Preview Runtime** records an output and the real GPU submission completes; device capability alone is not execution evidence, and the report records exact executed output extents.
+- Window presentation becomes usable after external-texture registration and ordered submission to the same GPU queue used by the subsequent Viewer draw; it does not claim fence completion. Headless validation credits readiness only after the real GPU submission completes. Both complete the same **Frame Presentation Ticket**, and device capability alone is not execution evidence.
 - **Audio Playback** may offer an Audio Device Clock Master only after stream health, PCM preroll, and media phase satisfy Playback Policy.
 - **Audio Playback** records isolated underruns without changing Clock Master; sustained missing-sample evidence enters recovery through a continuous Synthetic handoff and fresh preroll.
 - Each persisted archive, document, and SQLite library has an independent version and **Project Migration** chain.

@@ -83,8 +83,8 @@ use crate::app_ui::preview_frame_store::PreviewCpuFrameStore;
 use crate::app_ui::preview_frame_store::PreviewCpuFrameStoreConfig;
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 use crate::app_ui::preview_scheduler_policy::{
-    media_preview_forward_prefetch_window_frames, media_preview_job_deadline_at,
-    playback_frame_delivery_kind, playback_hardware_decode_requested,
+    media_preview_forward_prefetch_window_frames, playback_frame_delivery_kind,
+    playback_hardware_decode_requested, preview_decode_presentation_quality,
     preview_hardware_decode_effective, PlaybackDecodeExecution,
     MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US, MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES,
     MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
@@ -132,7 +132,7 @@ pub struct AppUiPreviewService {
     requested_proxy_generations: RefCell<HashSet<PreviewProxyGenerationRequestKey>>,
     scrub_adaptation: RefCell<PreviewScrubAdaptationState>,
     external_viewer_frame: RefCell<Option<ScopedExternalViewerFrame>>,
-    degraded_playback_demands: RefCell<HashSet<mondrian_playback::FrameDemandIdentity>>,
+    current_presentation_quality: Cell<mondrian_playback::FramePresentationQuality>,
     next_gpu_preview_candidate_id: Cell<u64>,
     scheduler: MediaPreviewScheduler,
     worker_activity: Arc<PreviewWorkerActivity>,
@@ -221,7 +221,9 @@ impl AppUiPreviewService {
             requested_proxy_generations: RefCell::new(HashSet::new()),
             scrub_adaptation: RefCell::new(PreviewScrubAdaptationState::default()),
             external_viewer_frame: RefCell::new(None),
-            degraded_playback_demands: RefCell::new(HashSet::new()),
+            current_presentation_quality: Cell::new(
+                mondrian_playback::FramePresentationQuality::Ready,
+            ),
             next_gpu_preview_candidate_id: Cell::new(0),
             scheduler,
             worker_activity,
@@ -889,11 +891,7 @@ impl AppUiPreviewService {
                         // Successful decode is non-terminal: the Presentation Adapter
                         // finishes the demand after its output is actually usable.
                     }
-                    mondrian_playback::FrameDeliveryKind::Degraded => {
-                        if completion.is_current() {
-                            self.degraded_playback_demands.borrow_mut().insert(identity);
-                        }
-                    }
+                    mondrian_playback::FrameDeliveryKind::Degraded => {}
                     _ => outcome
                         .frame_deliveries
                         .push(mondrian_playback::FrameDelivery::for_demand(identity, kind)),
@@ -1026,6 +1024,8 @@ impl AppUiPreviewService {
         };
         let preview_state = match resolved {
             Some(resolved) => {
+                self.current_presentation_quality
+                    .set(resolved_preview_presentation_quality(&resolved.elements));
                 let final_cache_lookup_started_at = Instant::now();
                 if let Some(frame) = resolved
                     .cache_key
@@ -1220,6 +1220,8 @@ impl AppUiPreviewService {
                 return AppUiGpuPreviewFrameState::Unavailable;
             }
         };
+        self.current_presentation_quality
+            .set(resolved_preview_presentation_quality(&resolved.elements));
         let Some(cache_key) = resolved.cache_key.clone() else {
             self.scheduler.prune_obsolete();
             self.external_viewer_frame.replace(None);
@@ -1282,37 +1284,17 @@ impl AppUiPreviewService {
             working_input,
             boundary,
             preview_candidate_id: candidate_id,
-            presentation_delivery: self.playback_presentation_delivery(state),
+            presentation_ticket: self.playback_presentation_ticket(state),
         }))
     }
 
-    /// Build the exact terminal delivery that a Presentation Adapter may emit
-    /// only after it makes the current output usable.
-    pub(crate) fn playback_presentation_delivery(
+    /// Build the exact ticket that a Presentation Adapter may complete only
+    /// after it makes the current output usable.
+    pub(crate) fn playback_presentation_ticket(
         &self,
         state: &AppState,
-    ) -> Option<mondrian_playback::FrameDelivery> {
-        if !state.is_playing() {
-            return None;
-        }
-        let identity = state.playback_frame_demand_identity()?;
-        let mut degraded = self.degraded_playback_demands.borrow_mut();
-        degraded.retain(|candidate| *candidate == identity);
-        let kind = if degraded.contains(&identity) {
-            mondrian_playback::FrameDeliveryKind::Degraded
-        } else {
-            mondrian_playback::FrameDeliveryKind::Ready
-        };
-        Some(mondrian_playback::FrameDelivery::for_demand(identity, kind))
-    }
-
-    /// Release per-demand decode classification after a Presentation Adapter
-    /// has attempted the exact terminal delivery.
-    pub(crate) fn acknowledge_playback_presentation(
-        &self,
-        delivery: mondrian_playback::FrameDelivery,
-    ) {
-        self.degraded_playback_demands.borrow_mut().remove(&delivery.identity());
+    ) -> Option<mondrian_playback::FramePresentationTicket> {
+        state.playback_frame_presentation_ticket(self.current_presentation_quality.get())
     }
 
     /// Mark a GPU preview output texture as the current viewer frame for its resolved plan.
@@ -1370,7 +1352,6 @@ impl AppUiPreviewService {
             return self.current_generation.get();
         }
         *last_key = Some(key);
-        self.degraded_playback_demands.borrow_mut().clear();
         let generation = self.scheduler.begin_generation();
         self.current_generation.set(generation);
         generation
@@ -1378,7 +1359,8 @@ impl AppUiPreviewService {
 
     fn invalidate_preview_generation(&self) {
         self.last_generation_key.replace(None);
-        self.degraded_playback_demands.borrow_mut().clear();
+        self.current_presentation_quality
+            .set(mondrian_playback::FramePresentationQuality::Ready);
         let generation = self.scheduler.begin_generation();
         self.current_generation.set(generation);
     }
@@ -2004,6 +1986,7 @@ impl AppUiPreviewService {
                 color_context.clone(),
             )?
             .elements;
+        let presentation_quality = resolved_preview_presentation_quality(&resolved);
         let mut scratch = TimelineCompositeScratch::default();
         let output = composite_resolved_preview_working(
             width,
@@ -2049,6 +2032,7 @@ impl AppUiPreviewService {
             gpu_source: None,
             native_source: None,
             signature,
+            presentation_quality,
         })
     }
 
@@ -2234,7 +2218,7 @@ impl AppUiPreviewRenderStageDurations {
 /// Playback-clock scheduling contract observed by the app preview service.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct AppUiPreviewPlaybackScheduleDiagnostics {
-    /// Most recent current-frame playback deadline budget derived from sequence frame rate.
+    /// Remaining budget sampled from the absolute current Frame Demand deadline.
     pub last_current_deadline_budget_us: Option<u64>,
     /// Current playback requests that received a display deadline.
     pub current_deadline_assignments: u64,
@@ -6760,7 +6744,7 @@ pub(crate) struct AppUiGpuPreviewFrame {
     /// Monotonic identifier for this working-frame candidate.
     preview_candidate_id: u64,
     /// Exact terminal delivery to emit only after presentation succeeds.
-    presentation_delivery: Option<mondrian_playback::FrameDelivery>,
+    presentation_ticket: Option<mondrian_playback::FramePresentationTicket>,
 }
 
 /// Working-space input for the app-window GPU output path.
@@ -6855,8 +6839,10 @@ impl AppUiGpuPreviewFrame {
     }
 
     /// Exact playback delivery authorized for successful presentation.
-    pub(crate) const fn presentation_delivery(&self) -> Option<mondrian_playback::FrameDelivery> {
-        self.presentation_delivery
+    pub(crate) const fn presentation_ticket(
+        &self,
+    ) -> Option<mondrian_playback::FramePresentationTicket> {
+        self.presentation_ticket
     }
 }
 
@@ -6945,6 +6931,7 @@ pub(crate) struct MediaPreviewFrame {
     width: u32,
     height: u32,
     signature: u64,
+    presentation_quality: mondrian_playback::FramePresentationQuality,
 }
 
 impl MediaPreviewFrame {
@@ -6974,6 +6961,10 @@ impl MediaPreviewFrame {
 
     fn height(&self) -> u32 {
         self.height
+    }
+
+    fn presentation_quality(&self) -> mondrian_playback::FramePresentationQuality {
+        self.presentation_quality
     }
 
     fn gpu_source(&self) -> Option<AppUiGpuPreviewMediaSource> {
@@ -7523,7 +7514,7 @@ impl AppUiPreviewService {
             MediaPreviewRequestPriority::Current,
             access_mode,
             (access_mode == PreviewDecodeAccessMode::PlaybackCursor)
-                .then(|| state.playback_frame_deadline_budget_us())
+                .then(|| state.playback_frame_deadline_at(Instant::now()))
                 .flatten(),
             (access_mode == PreviewDecodeAccessMode::PlaybackCursor)
                 .then(|| state.playback_frame_demand_identity())
@@ -7764,7 +7755,7 @@ impl AppUiPreviewService {
         source_secs: f64,
         priority: MediaPreviewRequestPriority,
         access_mode: PreviewDecodeAccessMode,
-        playback_current_deadline_budget_us: Option<u64>,
+        playback_current_deadline_at: Option<Instant>,
         demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
         adaptive_hints: PreviewDecodeAdaptiveHints,
     ) -> bool {
@@ -7792,9 +7783,9 @@ impl AppUiPreviewService {
         ) {
             MediaPreviewRequestStatus::Scheduled { evicted_prefetch, evicted_still } => {
                 if is_current_playback {
-                    self.record_playback_current_deadline_budget(
-                        playback_current_deadline_budget_us,
-                    );
+                    self.record_playback_current_deadline_budget(playback_deadline_remaining_us(
+                        playback_current_deadline_at,
+                    ));
                 }
                 if let Some(evicted_key) = evicted_prefetch {
                     let canceled = self.jobs.cancel_key(&evicted_key) as u64;
@@ -7818,12 +7809,11 @@ impl AppUiPreviewService {
                     generation,
                     source_secs,
                     enqueued_at,
-                    media_preview_job_deadline_at(
-                        priority,
-                        access_mode,
-                        enqueued_at,
-                        playback_current_deadline_budget_us,
-                    ),
+                    if is_current_playback {
+                        playback_current_deadline_at
+                    } else {
+                        None
+                    },
                     demand_identity,
                     adaptive_hints,
                     hardware_decode_request,
@@ -7832,9 +7822,9 @@ impl AppUiPreviewService {
                     bump(&self.metrics.queue_promoted_current_jobs);
                 }
                 if is_current_playback {
-                    self.record_playback_current_deadline_budget(
-                        playback_current_deadline_budget_us,
-                    );
+                    self.record_playback_current_deadline_budget(playback_deadline_remaining_us(
+                        playback_current_deadline_at,
+                    ));
                 }
                 self.cancel_queued_still_for_realtime_current(&key, priority, access_mode);
                 access_mode_changed && !queued_update.updated
@@ -7872,12 +7862,11 @@ impl AppUiPreviewService {
             adaptive_hints,
             hardware_decode_request,
             enqueued_at,
-            deadline_at: media_preview_job_deadline_at(
-                priority,
-                access_mode,
-                enqueued_at,
-                playback_current_deadline_budget_us,
-            ),
+            deadline_at: if is_current_playback {
+                playback_current_deadline_at
+            } else {
+                None
+            },
             demand_identity,
         };
         if priority == MediaPreviewRequestPriority::Current {
@@ -8757,6 +8746,23 @@ fn preview_elements_require_deferred_composite(resolved: &[ResolvedPreviewElemen
         .any(|element| matches!(element, ResolvedPreviewElement::Media { .. }))
 }
 
+fn resolved_preview_presentation_quality(
+    resolved: &[ResolvedPreviewElement],
+) -> mondrian_playback::FramePresentationQuality {
+    if resolved.iter().any(|element| {
+        matches!(
+            element,
+            ResolvedPreviewElement::Media { frame, .. }
+                if frame.presentation_quality()
+                    == mondrian_playback::FramePresentationQuality::Degraded
+        )
+    }) {
+        mondrian_playback::FramePresentationQuality::Degraded
+    } else {
+        mondrian_playback::FramePresentationQuality::Ready
+    }
+}
+
 fn is_preview_identity_transform(transform: [f32; 6]) -> bool {
     const EPSILON: f32 = 1.0e-6;
     (transform[0] - 1.0).abs() <= EPSILON
@@ -9009,6 +9015,15 @@ fn media_preview_deadline_expired(deadline_at: Option<Instant>) -> bool {
     deadline_at.is_some_and(|deadline| Instant::now() >= deadline)
 }
 
+fn playback_deadline_remaining_us(deadline_at: Option<Instant>) -> Option<u64> {
+    deadline_at.map(|deadline| {
+        deadline
+            .saturating_duration_since(Instant::now())
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64
+    })
+}
+
 fn media_preview_completed_after_playback_deadline(result: &MediaPreviewResult) -> bool {
     result.priority == MediaPreviewRequestPriority::Current
         && result.access_mode == PreviewDecodeAccessMode::PlaybackCursor
@@ -9214,6 +9229,7 @@ fn decode_media_preview(
     match decode_outcome {
         Ok(PreviewDecodeOutcome::Frame(frame)) => {
             let decode_diagnostics = frame.diagnostics;
+            let presentation_quality = preview_decode_presentation_quality(&decode_diagnostics);
             let width = frame.width;
             let height = frame.height;
             let source = CpuEncodedColorFrame::source_rgba8_shared(
@@ -9241,6 +9257,7 @@ fn decode_media_preview(
                     gpu_source: Some(gpu_source),
                     native_source: None,
                     signature,
+                    presentation_quality,
                 }),
                 error: None,
                 failure_reason: None,
@@ -9261,6 +9278,7 @@ fn decode_media_preview(
         }
         Ok(PreviewDecodeOutcome::NativeGpuFrame(frame)) => {
             let decode_diagnostics = frame.diagnostics;
+            let presentation_quality = preview_decode_presentation_quality(&decode_diagnostics);
             let width = frame.width;
             let height = frame.height;
             let input_transform = RenderInputTransform::to_working_gpu(
@@ -9282,6 +9300,7 @@ fn decode_media_preview(
                     gpu_source: None,
                     native_source: Some(native_source),
                     signature,
+                    presentation_quality,
                 }),
                 error: None,
                 failure_reason: None,
@@ -9808,7 +9827,7 @@ mod tests {
         assert!(frame.external_texture_key().starts_with("app-ui.viewer.gpu:"));
         assert_eq!(frame.preview_candidate_id(), 1);
         assert_eq!(
-            frame.presentation_delivery(),
+            frame.presentation_ticket(),
             None,
             "paused still-frame candidates must not carry playback authority"
         );
@@ -9823,7 +9842,7 @@ mod tests {
     }
 
     #[test]
-    fn playing_gpu_candidate_carries_exact_presentation_delivery() {
+    fn playing_gpu_candidate_carries_exact_presentation_ticket() {
         let service = AppUiPreviewService::new();
         let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
         state.play();
@@ -9834,16 +9853,10 @@ mod tests {
             _ => panic!("expected ready GPU preview candidate"),
         };
 
-        let delivery = frame.presentation_delivery().expect("presentation delivery");
-        assert_eq!(
-            delivery,
-            mondrian_playback::FrameDelivery::for_demand(
-                identity,
-                mondrian_playback::FrameDeliveryKind::Ready,
-            )
-        );
+        let ticket = frame.presentation_ticket().expect("presentation ticket");
+        assert_eq!(ticket.identity(), identity);
         assert!(
-            state.observe_frame_delivery(delivery),
+            state.complete_frame_presentation(ticket, Instant::now()),
             "candidate construction alone must not terminate the demand"
         );
     }
@@ -10036,6 +10049,7 @@ mod tests {
             gpu_source: Some(MediaPreviewGpuSourceFrame::new(source, input_transform)),
             native_source: None,
             signature: 44,
+            presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
         };
         let effect_graph = mondrian_effects::get_or_compile_scheduled_effect_graph(
             &mondrian_effects::EffectRenderPlan::default(),
@@ -10076,6 +10090,7 @@ mod tests {
             gpu_source: None,
             native_source: Some(test_native_source_frame(320, 180)),
             signature: 45,
+            presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
         };
         let effect_graph = mondrian_effects::get_or_compile_scheduled_effect_graph(
             &mondrian_effects::EffectRenderPlan::default(),
@@ -10150,6 +10165,7 @@ mod tests {
             gpu_source: None,
             native_source: Some(test_native_source_frame(320, 180)),
             signature: 46,
+            presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
         };
 
         let err = match frame.working_frame() {
@@ -14811,6 +14827,7 @@ mod tests {
             gpu_source: None,
             native_source: None,
             signature: 2_020,
+            presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
         };
         let solid = TimelineSolidColorLayer {
             color: Color::from_rgba8(32, 180, 220, 255),
@@ -15120,7 +15137,7 @@ mod tests {
             1.0,
             MediaPreviewRequestPriority::Current,
             PreviewDecodeAccessMode::PlaybackCursor,
-            Some(33_333),
+            Some(Instant::now() + Duration::from_millis(33)),
             None,
             PreviewDecodeAdaptiveHints::default(),
         ));
@@ -15150,7 +15167,7 @@ mod tests {
             1.0,
             MediaPreviewRequestPriority::Current,
             PreviewDecodeAccessMode::PlaybackCursor,
-            Some(33_333),
+            Some(Instant::now() + Duration::from_millis(33)),
             None,
             PreviewDecodeAdaptiveHints::default(),
         ));
@@ -15184,7 +15201,7 @@ mod tests {
             1.0,
             MediaPreviewRequestPriority::Current,
             PreviewDecodeAccessMode::ScrubCursor,
-            Some(33_333),
+            Some(Instant::now() + Duration::from_millis(33)),
             None,
             PreviewDecodeAdaptiveHints::default(),
         ));
@@ -15221,7 +15238,7 @@ mod tests {
             1.0,
             MediaPreviewRequestPriority::Current,
             PreviewDecodeAccessMode::ScrubCursor,
-            Some(33_333),
+            Some(Instant::now() + Duration::from_millis(33)),
             None,
             PreviewDecodeAdaptiveHints::default(),
         ));
@@ -15838,15 +15855,18 @@ mod tests {
             ),
             MediaPreviewRequestStatus::Scheduled { evicted_prefetch: None, evicted_still: None }
         );
-        let mut result = test_successful_media_preview_result(key, generation, 9);
+        let mut result = test_successful_media_preview_result(key.clone(), generation, 9);
         result.priority = MediaPreviewRequestPriority::Current;
         result.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
         result.demand_identity = Some(demand_identity);
-        result.decode_diagnostics = Some(test_preview_decode_diagnostics(
+        let decode_diagnostics = test_preview_decode_diagnostics(
             PreviewDecodeAccessMode::PlaybackCursor,
             PreviewHardwareDecodeDecision::CpuRgbaHardwareUnavailable,
             PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
-        ));
+        );
+        result.frame.as_mut().expect("decoded frame").presentation_quality =
+            preview_decode_presentation_quality(&decode_diagnostics);
+        result.decode_diagnostics = Some(decode_diagnostics);
         result_tx.send(result).expect("send degraded successful result");
 
         let outcome = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5));
@@ -15859,8 +15879,20 @@ mod tests {
             outcome.frame_deliveries.is_empty(),
             "decode readiness must not terminate the demand before presentation"
         );
-        let delivery =
-            service.playback_presentation_delivery(&state).expect("presentation delivery");
+        let cached_quality = service
+            .frame_store
+            .borrow_mut()
+            .media_frame(&key)
+            .expect("cached decoded frame")
+            .presentation_quality();
+        assert_eq!(
+            cached_quality,
+            mondrian_playback::FramePresentationQuality::Degraded,
+            "cache admission must preserve executed hardware-fallback quality"
+        );
+        service.current_presentation_quality.set(cached_quality);
+        let ticket = service.playback_presentation_ticket(&state).expect("presentation ticket");
+        let delivery = ticket.complete_at(mondrian_playback::MonotonicTimestamp::ZERO);
         assert_eq!(
             delivery,
             mondrian_playback::FrameDelivery::for_demand(
@@ -15869,7 +15901,6 @@ mod tests {
             )
         );
         assert!(state.observe_frame_delivery(delivery));
-        service.acknowledge_playback_presentation(delivery);
         service.shutdown();
     }
 
@@ -16122,6 +16153,7 @@ mod tests {
             gpu_source: Some(MediaPreviewGpuSourceFrame::new(source, input_transform)),
             native_source: None,
             signature,
+            presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
         }
     }
 
@@ -16219,6 +16251,7 @@ mod tests {
             gpu_source: Some(MediaPreviewGpuSourceFrame::new(source, input_transform)),
             native_source: None,
             signature: 42,
+            presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
         };
 
         let first = frame.working_frame().expect("first lazy working transform");
@@ -16965,55 +16998,6 @@ mod tests {
         assert_eq!(
             activity.snapshot(),
             PreviewWorkerActivityDiagnostics::default()
-        );
-    }
-
-    #[test]
-    fn media_preview_job_deadline_is_only_for_current_playback() {
-        let now = Instant::now();
-
-        assert!(media_preview_job_deadline_at(
-            MediaPreviewRequestPriority::Current,
-            PreviewDecodeAccessMode::PlaybackCursor,
-            now,
-            Some(33_333),
-        )
-        .is_some());
-        assert_eq!(
-            media_preview_job_deadline_at(
-                MediaPreviewRequestPriority::Prefetch,
-                PreviewDecodeAccessMode::PlaybackCursor,
-                now,
-                Some(33_333),
-            ),
-            None
-        );
-        assert_eq!(
-            media_preview_job_deadline_at(
-                MediaPreviewRequestPriority::Current,
-                PreviewDecodeAccessMode::ScrubCursor,
-                now,
-                Some(33_333),
-            ),
-            None
-        );
-        assert_eq!(
-            media_preview_job_deadline_at(
-                MediaPreviewRequestPriority::Current,
-                PreviewDecodeAccessMode::RandomAccessStillFrame,
-                now,
-                Some(33_333),
-            ),
-            None
-        );
-        assert_eq!(
-            media_preview_job_deadline_at(
-                MediaPreviewRequestPriority::Current,
-                PreviewDecodeAccessMode::PlaybackCursor,
-                now,
-                None,
-            ),
-            None
         );
     }
 

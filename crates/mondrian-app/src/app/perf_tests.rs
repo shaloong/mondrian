@@ -1723,7 +1723,7 @@ fn run_preview_media_continuous_playback_probe(
         .map(preview_render_hard_failures)
         .unwrap_or_default();
     let playback_evidence = state.playback_evidence_report();
-    Ok(PreviewMediaPlaybackPerfReport {
+    let report = PreviewMediaPlaybackPerfReport {
         scenario,
         frames: frame_count,
         frame_interval_ms,
@@ -1740,7 +1740,58 @@ fn run_preview_media_continuous_playback_probe(
         preview_render_report,
         playback_evidence,
         cases: vec![playback_case, gpu_candidate_case],
-    })
+    };
+    validate_executed_adaptive_scaling(&report)?;
+    Ok(report)
+}
+
+fn validate_executed_adaptive_scaling(
+    report: &PreviewMediaPlaybackPerfReport,
+) -> anyhow::Result<()> {
+    let Some(summary) = report.preview_decode_report.summary.as_ref() else {
+        return Ok(());
+    };
+    let profile = summary.access_mode_profiles.playback_cursor;
+    let requested = profile
+        .hardware_decode_prefer_hardware_requested_frames
+        .saturating_add(profile.hardware_decode_prefer_gpu_requested_frames)
+        .saturating_add(profile.hardware_decode_require_gpu_requested_frames);
+    let effective = profile
+        .hardware_decode_cpu_transfer_observed_frames
+        .saturating_add(profile.hardware_decode_gpu_resident_native_frames);
+    let not_engaged = requested.saturating_sub(effective);
+    let pressure_threshold = mondrian_playback::PlaybackPolicy::default().pressure_threshold as u64;
+    let quarter_evidence_threshold = pressure_threshold.saturating_mul(2);
+    if not_engaged < quarter_evidence_threshold {
+        return Ok(());
+    }
+
+    anyhow::ensure!(
+        report.playback_evidence.deliveries.degraded >= quarter_evidence_threshold,
+        "hardware fallback execution did not reach Playback Quality Policy: requested={requested}, effective={effective}, degraded={}",
+        report.playback_evidence.deliveries.degraded
+    );
+    let full = report
+        .headless_gpu
+        .output_extents
+        .iter()
+        .max_by_key(|extent| u64::from(extent.width).saturating_mul(u64::from(extent.height)))
+        .context("adaptive playback report contains no executed GPU extent")?;
+    let expected_half = HeadlessViewerGpuExtent {
+        width: full.width.div_ceil(2),
+        height: full.height.div_ceil(2),
+    };
+    let expected_quarter = HeadlessViewerGpuExtent {
+        width: full.width.div_ceil(4),
+        height: full.height.div_ceil(4),
+    };
+    anyhow::ensure!(
+        report.headless_gpu.output_extents.contains(&expected_half)
+            && report.headless_gpu.output_extents.contains(&expected_quarter),
+        "hardware fallback changed policy state without executing Half/Quarter GPU extents: {:?}",
+        report.headless_gpu.output_extents
+    );
+    Ok(())
 }
 
 fn configure_headless_gpu_decode_admission(
@@ -1843,16 +1894,14 @@ fn execute_headless_gpu_candidate(
                 .execute(&frame)
                 .context("execute current Viewer frame on the real headless GPU Adapter")?;
             gpu_summary.record(execution);
-            if let Some(delivery) = frame.presentation_delivery() {
-                state.observe_frame_delivery(delivery);
-                preview_service.acknowledge_playback_presentation(delivery);
+            if let Some(ticket) = frame.presentation_ticket() {
+                state.complete_frame_presentation(ticket, Instant::now());
             }
             Ok(HeadlessGpuCandidateStatus::Ready)
         }
         crate::app_ui::preview::AppUiGpuPreviewFrameState::Current => {
-            if let Some(delivery) = preview_service.playback_presentation_delivery(state) {
-                state.observe_frame_delivery(delivery);
-                preview_service.acknowledge_playback_presentation(delivery);
+            if let Some(ticket) = preview_service.playback_presentation_ticket(state) {
+                state.complete_frame_presentation(ticket, Instant::now());
             }
             Ok(HeadlessGpuCandidateStatus::Ready)
         }

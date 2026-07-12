@@ -6,8 +6,7 @@ use mondrian_media::{
     PreviewDecodeAccessMode, PreviewDecodeDiagnostics, PreviewHardwareDecodeDecision,
     PreviewHardwareDecodeRequest,
 };
-use mondrian_playback::FrameDeliveryKind;
-use std::time::{Duration, Instant};
+use mondrian_playback::{FrameDeliveryKind, FramePresentationQuality};
 
 /// Wall-clock lookahead used to derive playback prefetch depth.
 pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US: u64 = 80_000;
@@ -15,22 +14,6 @@ pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US: u64 = 80_000;
 pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES: usize = 1;
 /// Maximum playback prefetch depth regardless of frame rate.
 pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES: usize = 6;
-
-/// Convert an authoritative Frame Demand budget into a worker deadline.
-pub(crate) fn media_preview_job_deadline_at(
-    priority: MediaPreviewRequestPriority,
-    access_mode: PreviewDecodeAccessMode,
-    enqueued_at: Instant,
-    playback_current_deadline_budget_us: Option<u64>,
-) -> Option<Instant> {
-    if priority != MediaPreviewRequestPriority::Current
-        || access_mode != PreviewDecodeAccessMode::PlaybackCursor
-    {
-        return None;
-    }
-    let budget_us = playback_current_deadline_budget_us?;
-    enqueued_at.checked_add(Duration::from_micros(budget_us))
-}
 
 /// Derive bounded prefetch depth from a wall-clock horizon and exact frame rate.
 pub(crate) fn media_preview_forward_prefetch_window_frames(frame_rate: Rational) -> Option<usize> {
@@ -62,6 +45,20 @@ pub(crate) fn playback_hardware_decode_requested(request: PreviewHardwareDecodeR
 pub(crate) fn preview_hardware_decode_effective(diagnostics: &PreviewDecodeDiagnostics) -> bool {
     diagnostics.hardware_decode_decision == PreviewHardwareDecodeDecision::GpuResidentNative
         || diagnostics.hardware_decode_cpu_transfer_observed
+}
+
+/// Preserve executed decode quality on the produced frame so prefetch/cache
+/// reuse cannot lose hardware-fallback evidence.
+pub(crate) fn preview_decode_presentation_quality(
+    diagnostics: &PreviewDecodeDiagnostics,
+) -> FramePresentationQuality {
+    if playback_hardware_decode_requested(diagnostics.hardware_decode_request)
+        && !preview_hardware_decode_effective(diagnostics)
+    {
+        FramePresentationQuality::Degraded
+    } else {
+        FramePresentationQuality::Ready
+    }
 }
 
 /// Minimal executed decode facts consumed by playback delivery policy.
@@ -121,27 +118,6 @@ mod tests {
             hardware_decode_request: PreviewHardwareDecodeRequest::PreferHardwareDecode,
             hardware_decode_effective: false,
         }
-    }
-
-    #[test]
-    fn deadline_exists_only_for_current_playback() {
-        let now = Instant::now();
-        assert!(media_preview_job_deadline_at(
-            MediaPreviewRequestPriority::Current,
-            PreviewDecodeAccessMode::PlaybackCursor,
-            now,
-            Some(40_000),
-        )
-        .is_some());
-        assert_eq!(
-            media_preview_job_deadline_at(
-                MediaPreviewRequestPriority::Prefetch,
-                PreviewDecodeAccessMode::PlaybackCursor,
-                now,
-                Some(40_000),
-            ),
-            None
-        );
     }
 
     #[test]

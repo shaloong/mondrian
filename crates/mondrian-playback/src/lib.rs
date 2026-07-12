@@ -107,6 +107,61 @@ impl FrameDemand {
     }
 }
 
+/// Allowed on-time presentation result carried by a Frame Presentation Ticket.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FramePresentationQuality {
+    /// Exact requested quality was presented.
+    #[default]
+    Ready,
+    /// An explicitly allowed degraded path was presented.
+    Degraded,
+}
+
+/// Opaque authority for one Presentation Adapter to finish a Frame Demand.
+///
+/// The ticket keeps identity, deadline, and allowed quality together so Window,
+/// CPU, and headless Adapters cannot independently reinterpret timing policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FramePresentationTicket {
+    identity: FrameDemandIdentity,
+    deadline: MonotonicTimestamp,
+    quality: FramePresentationQuality,
+}
+
+impl FramePresentationTicket {
+    /// Create the presentation authority carried by an active demand.
+    pub const fn for_demand(demand: FrameDemand, quality: FramePresentationQuality) -> Self {
+        Self {
+            identity: demand.identity(),
+            deadline: demand.deadline,
+            quality,
+        }
+    }
+
+    /// Return the exact demand identity protected by this ticket.
+    pub const fn identity(self) -> FrameDemandIdentity {
+        self.identity
+    }
+
+    /// Return the authoritative presentation deadline.
+    pub const fn deadline(self) -> MonotonicTimestamp {
+        self.deadline
+    }
+
+    /// Classify real presentation completion against the demand deadline.
+    pub fn complete_at(self, completed_at: MonotonicTimestamp) -> FrameDelivery {
+        let kind = if completed_at >= self.deadline {
+            FrameDeliveryKind::Late
+        } else {
+            match self.quality {
+                FramePresentationQuality::Ready => FrameDeliveryKind::Ready,
+                FramePresentationQuality::Degraded => FrameDeliveryKind::Degraded,
+            }
+        };
+        FrameDelivery::for_demand(self.identity, kind)
+    }
+}
+
 /// Authoritative elapsed-media-time source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClockMaster {
@@ -1059,6 +1114,31 @@ mod tests {
         let delivery = FrameDelivery::for_demand(identity, FrameDeliveryKind::Ready);
 
         assert_eq!(delivery.identity(), identity);
+    }
+
+    #[test]
+    fn presentation_ticket_classifies_completion_at_the_final_deadline() {
+        let demand = FrameDemand {
+            epoch: PlaybackEpoch(7),
+            quality_revision: 3,
+            sequence: FrameDemandSequence(11),
+            sequence_id: None,
+            timeline_revision: 9,
+            target: TimeCode::new(42, Rational::new(1, 25)),
+            deadline: ts(40),
+            preview_scale: PreviewResolutionScale::Full,
+        };
+        let ready = FramePresentationTicket::for_demand(demand, FramePresentationQuality::Ready);
+        let degraded =
+            FramePresentationTicket::for_demand(demand, FramePresentationQuality::Degraded);
+
+        assert_eq!(ready.complete_at(ts(39)).kind, FrameDeliveryKind::Ready);
+        assert_eq!(
+            degraded.complete_at(ts(39)).kind,
+            FrameDeliveryKind::Degraded
+        );
+        assert_eq!(ready.complete_at(ts(40)).kind, FrameDeliveryKind::Late);
+        assert_eq!(degraded.complete_at(ts(41)).kind, FrameDeliveryKind::Late);
     }
 
     fn ts(ms: u64) -> MonotonicTimestamp {

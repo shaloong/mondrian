@@ -46,11 +46,15 @@ impl AppState {
     }
 
     fn capture_playback_evidence(&mut self) {
+        let observed_at = self.playback_now.max(self.playback_evidence_now);
+        self.capture_playback_evidence_at(observed_at);
+    }
+
+    fn capture_playback_evidence_at(&mut self, observed_at: MonotonicTimestamp) {
+        self.playback_evidence_now = self.playback_evidence_now.max(observed_at);
         let snapshot = self.playback_engine.snapshot();
         let demand = self.playback_engine.frame_demand();
-        if let Err(error) =
-            self.playback_evidence.observe_snapshot(self.playback_now, snapshot, demand)
-        {
+        if let Err(error) = self.playback_evidence.observe_snapshot(observed_at, snapshot, demand) {
             tracing::warn!(%error, "rejected Playback Evidence snapshot");
         }
     }
@@ -77,6 +81,7 @@ impl AppState {
             tracing::error!(%error, "failed to start Playback Session");
             return;
         }
+        self.reanchor_playback_presentation_clock(Instant::now());
         self.prepare_audio_playback(TimeCode::new(frames, self.playback_time_base()));
         self.capture_playback_evidence();
     }
@@ -129,6 +134,7 @@ impl AppState {
                 return;
             }
         }
+        self.reanchor_playback_presentation_clock(Instant::now());
         if was_running {
             self.prepare_audio_playback(TimeCode::new(frame, time_base));
         } else {
@@ -139,7 +145,7 @@ impl AppState {
             TimelineSeekSource::Settled => PlaybackSeekKind::Accurate,
         };
         if let Err(error) = self.playback_evidence.begin_seek(
-            self.playback_now,
+            self.playback_now.max(self.playback_evidence_now),
             self.playback_engine.snapshot().epoch,
             seek_kind,
         ) {
@@ -207,7 +213,7 @@ impl AppState {
                 interval_total_frames,
             } => {
                 if let Err(error) = self.playback_evidence.observe_audio_underrun(
-                    self.playback_now,
+                    self.playback_now.max(self.playback_evidence_now),
                     self.playback_engine.snapshot().epoch,
                     delta_frames,
                     false,
@@ -229,7 +235,7 @@ impl AppState {
                 final_media_anchor,
             } => {
                 if let Err(error) = self.playback_evidence.observe_audio_underrun(
-                    self.playback_now,
+                    self.playback_now.max(self.playback_evidence_now),
                     self.playback_engine.snapshot().epoch,
                     0,
                     true,
@@ -388,6 +394,7 @@ impl AppState {
         self.playback_now = MonotonicTimestamp::from_duration(
             self.playback_now.duration_since_origin().saturating_add(elapsed),
         );
+        self.reanchor_playback_presentation_clock(Instant::now());
         let snapshot = match self.playback_engine.tick(self.playback_now) {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -471,13 +478,18 @@ impl AppState {
         }
     }
 
-    /// Remaining useful lifetime of the authoritative current Frame Demand.
-    pub fn playback_frame_deadline_budget_us(&self) -> Option<u64> {
+    /// Project the current Frame Demand deadline into the production wall-clock
+    /// domain at the exact sampling instant used by a Preview Adapter.
+    pub fn playback_frame_deadline_at(&self, sampled_at: Instant) -> Option<Instant> {
         let demand = self.playback_engine.frame_demand()?;
-        let deadline = demand.deadline.duration_since_origin();
-        let now = self.playback_now.duration_since_origin();
-        let remaining = deadline.saturating_sub(now);
-        Some(remaining.as_micros().min(u64::MAX as u128) as u64)
+        let sampled_timestamp = self
+            .playback_presentation_timestamp_at(sampled_at)
+            .max(self.playback_evidence_now);
+        let remaining = demand
+            .deadline
+            .duration_since_origin()
+            .saturating_sub(sampled_timestamp.duration_since_origin());
+        sampled_at.checked_add(remaining)
     }
 
     /// Identity preview adapters must return with terminal current-frame work.
@@ -485,8 +497,46 @@ impl AppState {
         self.playback_engine.frame_demand().map(|demand| demand.identity())
     }
 
+    /// Create exact authority for a Presentation Adapter to finish the current demand.
+    pub fn playback_frame_presentation_ticket(
+        &self,
+        quality: FramePresentationQuality,
+    ) -> Option<FramePresentationTicket> {
+        if !self.is_playing() {
+            return None;
+        }
+        self.playback_engine
+            .frame_demand()
+            .map(|demand| FramePresentationTicket::for_demand(demand, quality))
+    }
+
+    /// Complete a presentation against the demand's final deadline using the
+    /// wall-clock/Playback timestamp mapping owned by the app Adapter.
+    pub fn complete_frame_presentation(
+        &mut self,
+        ticket: FramePresentationTicket,
+        completed_at: Instant,
+    ) -> bool {
+        let completion_timestamp = self
+            .playback_presentation_timestamp_at(completed_at)
+            .max(self.playback_evidence_now);
+        let delivery = ticket.complete_at(completion_timestamp);
+        self.observe_frame_delivery_at_wall(delivery, completed_at)
+    }
+
     /// Feed an exact terminal preview observation into the Playback Session.
     pub fn observe_frame_delivery(&mut self, delivery: FrameDelivery) -> bool {
+        self.observe_frame_delivery_at_wall(delivery, Instant::now())
+    }
+
+    fn observe_frame_delivery_at_wall(
+        &mut self,
+        delivery: FrameDelivery,
+        observed_at: Instant,
+    ) -> bool {
+        let observed_timestamp = self
+            .playback_presentation_timestamp_at(observed_at)
+            .max(self.playback_evidence_now);
         let before = self.playback_engine.snapshot();
         let accepted = match self.playback_engine.observe_frame_delivery(delivery) {
             Ok(accepted) => accepted,
@@ -498,12 +548,33 @@ impl AppState {
         let after = self.playback_engine.snapshot();
         if let Err(error) =
             self.playback_evidence
-                .observe_delivery(self.playback_now, after, delivery, accepted)
+                .observe_delivery(observed_timestamp, after, delivery, accepted)
         {
             tracing::warn!(%error, "rejected Playback Evidence Frame Delivery");
         }
-        self.capture_playback_evidence();
+        self.playback_evidence_now = self.playback_evidence_now.max(observed_timestamp);
+        self.capture_playback_evidence_at(observed_timestamp);
+        self.reanchor_playback_presentation_clock_at(observed_at, observed_timestamp);
         accepted && after != before
+    }
+
+    fn reanchor_playback_presentation_clock(&mut self, wall_time: Instant) {
+        self.reanchor_playback_presentation_clock_at(wall_time, self.playback_now);
+    }
+
+    fn reanchor_playback_presentation_clock_at(
+        &mut self,
+        wall_time: Instant,
+        timestamp: MonotonicTimestamp,
+    ) {
+        self.playback_presentation_wall_anchor = wall_time;
+        self.playback_presentation_time_anchor = timestamp;
+    }
+
+    fn playback_presentation_timestamp_at(&self, wall_time: Instant) -> MonotonicTimestamp {
+        self.playback_presentation_time_anchor.saturating_add(
+            wall_time.saturating_duration_since(self.playback_presentation_wall_anchor),
+        )
     }
 
     /// Feed one terminal Viewer observation into the authoritative Playback Session.
@@ -820,6 +891,43 @@ mod tests {
             state.playback_preview_resolution_scale(),
             PreviewResolutionScale::Full,
             "paused still-frame work must return to the authored preview scale"
+        );
+    }
+
+    #[test]
+    fn presentation_completion_crossing_deadline_is_late_in_policy_and_evidence() {
+        let mut state = state_with_sequence(40);
+        play_ready(&mut state);
+        state.advance_playback_clock(Duration::from_millis(40));
+        let ticket = state
+            .playback_frame_presentation_ticket(FramePresentationQuality::Ready)
+            .expect("playing presentation ticket");
+        let completed_at = state.playback_presentation_wall_anchor + Duration::from_millis(41);
+
+        state.complete_frame_presentation(ticket, completed_at);
+
+        let report = state.playback_evidence_report();
+        assert_eq!(report.deliveries.ready, 1);
+        assert_eq!(report.deliveries.late, 1);
+        assert_eq!(report.demand_latency.count, 2);
+        assert!(report.demand_latency.p95_us >= 41_000);
+    }
+
+    #[test]
+    fn worker_deadline_projection_does_not_regrant_time_spent_before_enqueue() {
+        let mut state = state_with_sequence(40);
+        play_ready(&mut state);
+        state.advance_playback_clock(Duration::from_millis(40));
+        let demand_anchor = state.playback_presentation_wall_anchor;
+        let sampled_at = demand_anchor + Duration::from_millis(10);
+
+        let deadline_at =
+            state.playback_frame_deadline_at(sampled_at).expect("projected worker deadline");
+
+        assert_eq!(deadline_at, demand_anchor + Duration::from_millis(40));
+        assert_eq!(
+            deadline_at.duration_since(sampled_at),
+            Duration::from_millis(30)
         );
     }
 

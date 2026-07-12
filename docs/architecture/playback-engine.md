@@ -264,6 +264,13 @@ Every outcome carries epoch, target position, actual source time, finish time,
 decode/import/render/presentation path, source fingerprint, color contract,
 quality revision, reason code, and stage durations.
 
+`FramePresentationTicket` is the Playback Module's opaque Interface for final
+presentation. It binds the exact demand identity, authoritative
+`MonotonicTimestamp` deadline, and an allowed on-time quality of Ready or
+Degraded. CPU, Window GPU, and headless GPU Adapters call `complete_at` with
+their actual completion timestamp; only this Module classifies Ready/Degraded
+versus Late. Adapters never compare or reconstruct deadlines themselves.
+
 Only the Playback Engine interprets a delivery:
 
 - During Priming, one current Ready/allowed Degraded frame plus required audio
@@ -307,6 +314,11 @@ Hardware preference is classified from execution diagnostics, never capability
 probing. Requested hardware that produces a correct CPU fallback is
 `Degraded` and drives the same bounded recovery ladder. An observed hardware
 frame transferred to CPU, or a native GPU-resident decoded frame, is `Ready`.
+This executed quality is stored on `MediaPreviewFrame`, preserved through
+prefetch and Preview Frame Store reuse, and aggregated across every media layer
+before the final Frame Presentation Ticket is created. It is not attached only
+to a scheduler job or demand identity: an already-running prefetch decode must
+not lose its fallback evidence when it later satisfies a current demand.
 
 The Engine must never silently:
 
@@ -455,7 +467,11 @@ It returns the retained presentation output handle plus stage, compositing,
 spatial, residency, and fallback evidence.
 `window.rs` performs only Window Adapter policy around that Interface: display
 contract admission, renderer external-texture registration, Viewer publication,
-and telemetry projection. `HeadlessViewerGpuAdapter` is the second real Adapter:
+and telemetry projection. Its completion point means the external texture is
+registered and its producing commands are submitted to the same ordered queue
+used by the subsequent Viewer draw; it deliberately does not claim GPU-fence or
+surface-present completion and never blocks the main thread waiting for either.
+`HeadlessViewerGpuAdapter` is the second real Adapter:
 it creates a no-Surface high-performance device, calls `record_frame`, resolves
 the retained output texture, submits the command buffer, and waits for that
 submission. It has no UI texture registry and does not claim one. Its readiness
@@ -567,26 +583,32 @@ running state from the Engine; the former app-local `PlaybackState`, frame
 accumulator, reached-end flag, and misleading audio/video-master diagnostic have
 been removed.
 
-`app_ui::playback_feedback` now adapts Viewer lifecycle into typed terminal Frame
-Deliveries. Loading remains non-terminal, Stale and Blocked remain distinct, and
-duplicate terminal delivery identities cannot mutate recovery twice. The former
+`app_ui::playback_feedback` now keeps payload-free Viewer lifecycle separate
+from exact Frame Presentation Tickets. Loading and Stale remain non-terminal,
+Blocked remains a distinct correctness terminal, and a Ready lifecycle has no
+transport authority without a ticket. Duplicate terminal delivery identities
+cannot mutate recovery twice. The former
 Viewer-owned `playback_buffering` state and its audio mute/clock hold have been
 removed. Window redraw may still defer duplicate GPU candidate preparation while
 Loading, but that presentation guard has no transport authority.
 
-The Engine now emits a Frame Demand identity containing epoch, quality revision,
-demand sequence, sequence/timeline revision, exact target, preview scale, and
-monotonic deadline. Preview worker deadline budgets consume that demand instead
-of independently reconstructing frame duration. Same-epoch completions for a
-superseded demand are rejected before target validation.
+The Engine now emits a Frame Demand containing epoch, quality revision, demand
+sequence, sequence/timeline revision, exact target, preview scale, and monotonic
+deadline. Its opaque Adapter identity projects epoch, quality revision, demand
+sequence, and target frame. Preview workers consume an absolute wall projection
+of the demand deadline instead of independently reconstructing frame duration.
+Same-epoch completions for a superseded demand are rejected before target
+validation.
 
 Playback-current preview jobs carry the opaque identity projection (`epoch`,
 quality revision, demand sequence, target frame) through queue, worker, result,
 and app polling. Media workers do not interpret playback policy. Polling returns
 exact terminal deliveries only for Late, Failed, or Canceled work. A successful
 Ready/Degraded decode is staged as nonterminal readiness; its classification is
-attached to the exact GPU candidate or CPU presentation and terminates the
-demand only after that Adapter produces a usable output. The Playback Engine
+attached as a Frame Presentation Ticket to the exact GPU candidate or CPU
+presentation and terminates the demand only after that Adapter produces a usable
+output. The ticket's final completion timestamp, not decode completion, decides
+whether the result is Ready/Degraded or Late. The Playback Engine
 performs the final identity check, so an old candidate cannot terminate a newer
 demand. Media generation remains a decode/cache cancellation mechanism and is
 not a substitute for Playback Session identity. Payload-free Viewer lifecycle
@@ -596,6 +618,14 @@ expiration. A stall expiration returns that stored identity and never asks the
 host to synthesize a delivery from whichever demand is current at poll time.
 Scrub expiration is capacity/cancellation evidence, not a playback Late Frame
 Delivery.
+
+The app Clock Adapter maintains a wall-`Instant` to Playback
+`MonotonicTimestamp` mapping. Worker deadlines are projected as one absolute
+wall deadline at the actual sampling instant; queueing no longer adds a stale
+remaining budget to a later enqueue time. Presentation completion uses the same
+mapping, and Playback Evidence records that completion timestamp behind a
+monotonic high-water mark. Demand latency therefore includes final CPU/GPU
+presentation work rather than stopping at decode readiness.
 
 Play and running seek now remain in bounded Priming. Ready or allowed Degraded
 delivery starts Synthetic Master immediately; after the 500 ms policy deadline,
@@ -678,6 +708,13 @@ reported separately and cannot contaminate the steady-playback p95.
 Hardware-decoder residency, 30-minute duration, and Golden Project identity
 gates remain to be satisfied before the professional playback acceptance claim
 is complete.
+
+The generated-media gate additionally requires execution—not merely policy
+state—when at least two pressure thresholds of requested-but-unengaged hardware
+decode are observed: Playback Evidence must contain the corresponding Degraded
+deliveries, and the headless GPU report must contain exact Full, Half, and
+Quarter extents. This prevents a recovery state transition from passing while
+decode/composite work remains at the original size.
 
 The generated playback fixture declares limited-range BT.709 primaries,
 transfer, and matrix metadata. A fixture without a quantization range must fail

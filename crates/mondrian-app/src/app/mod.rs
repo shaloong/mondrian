@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{collections::hash_map::DefaultHasher, hash::Hash, hash::Hasher};
 use std::{fs, path::Path, path::PathBuf};
 
@@ -33,9 +33,9 @@ use mondrian_media::{
 };
 use mondrian_playback::{
     AudioClockObservationGrade, AudioDeviceClockObservation, AudioDeviceClockState, ClockMaster,
-    FrameDelivery, FrameDeliveryKind, MonotonicTimestamp, PlaybackEngine,
-    PlaybackEvidenceCollector, PlaybackEvidenceReport, PlaybackSeekKind, PreviewResolutionScale,
-    TransportState,
+    FrameDelivery, FrameDeliveryKind, FramePresentationQuality, FramePresentationTicket,
+    MonotonicTimestamp, PlaybackEngine, PlaybackEvidenceCollector, PlaybackEvidenceReport,
+    PlaybackSeekKind, PreviewResolutionScale, TransportState,
 };
 use mondrian_timeline::clip::{Clip, TrimEdge};
 use mondrian_timeline::command::SequenceSnapshotCommand;
@@ -238,8 +238,14 @@ pub struct AppState {
     playback_engine: PlaybackEngine,
     /// Bounded production Adapter for versioned Playback Evidence.
     playback_evidence: PlaybackEvidenceCollector,
+    /// High-water mark preventing evidence from regressing between event-loop ticks.
+    playback_evidence_now: MonotonicTimestamp,
     /// App-adapter monotonic origin advanced only by event-loop elapsed time.
     playback_now: MonotonicTimestamp,
+    /// Wall-clock anchor corresponding exactly to `playback_presentation_time_anchor`.
+    playback_presentation_wall_anchor: Instant,
+    /// Playback timestamp paired with the presentation wall-clock anchor.
+    playback_presentation_time_anchor: MonotonicTimestamp,
     /// Most recent timeline seek interaction source used by preview access-mode selection.
     pub last_timeline_seek_source: TimelineSeekSource,
 
@@ -289,6 +295,7 @@ impl AppState {
         let audio_channels = AUDIO_OUTPUT_CHANNELS;
         let audio_source_cache = Arc::new(AudioSourceCache::new(audio_sample_rate, audio_channels));
         let (media_import_tx, media_import_rx) = mpsc::channel::<MediaImportResult>();
+        let playback_presentation_wall_anchor = Instant::now();
 
         Self {
             event_bus: EventBus::new(),
@@ -306,7 +313,10 @@ impl AppState {
             cmd_history: mondrian_timeline::command::CommandHistory::new(200),
             playback_engine: PlaybackEngine::default(),
             playback_evidence: PlaybackEvidenceCollector::default(),
+            playback_evidence_now: MonotonicTimestamp::ZERO,
             playback_now: MonotonicTimestamp::ZERO,
+            playback_presentation_wall_anchor,
+            playback_presentation_time_anchor: MonotonicTimestamp::ZERO,
             last_timeline_seek_source: TimelineSeekSource::Settled,
             asset_library: None,
             dragging_asset: None,
