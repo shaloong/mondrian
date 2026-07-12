@@ -55,6 +55,8 @@ mod clip_clipboard;
 pub(crate) mod exporting;
 mod media_import;
 mod playback;
+#[cfg(test)]
+mod playback_acceptance;
 mod project_lifecycle;
 pub(crate) mod proxy_generation;
 mod selection;

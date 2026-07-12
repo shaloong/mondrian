@@ -7,7 +7,9 @@
 
 use std::time::Instant;
 
-use super::preview::{AppUiGpuPreviewFrame, AppUiGpuPreviewWorkingInput};
+use super::preview::{
+    AppUiGpuPreviewFrame, AppUiGpuPreviewWorkingInput, AppUiPreviewDecodeExecutionSummary,
+};
 use super::viewer_gpu_preview_runtime::ViewerGpuPreviewRuntime;
 use mondrian_renderer::{
     native_video_texture_device_features, GpuNativeDecodedFrameImportSupport,
@@ -30,6 +32,8 @@ pub(crate) struct HeadlessViewerGpuExecution {
     pub stage_diagnostics: Option<RenderColorStageDiagnostics>,
     /// Explicit native/GPU-input fallback reasons for a newly rendered output.
     pub fallback_reasons: Vec<String>,
+    /// Frame-local decode provenance bound to this exact Viewer candidate.
+    pub decode_execution: AppUiPreviewDecodeExecutionSummary,
 }
 
 /// Real no-Surface Adapter over the shared Viewer GPU Preview Runtime.
@@ -88,6 +92,7 @@ impl HeadlessViewerGpuAdapter {
                 duration_us: elapsed_us(started),
                 stage_diagnostics: None,
                 fallback_reasons: Vec::new(),
+                decode_execution: frame.decode_execution(),
             });
         }
         let presentation = ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
@@ -130,6 +135,7 @@ impl HeadlessViewerGpuAdapter {
             duration_us: elapsed_us(started),
             stage_diagnostics: Some(record.stage_diagnostics),
             fallback_reasons: record.fallback_reasons,
+            decode_execution: frame.decode_execution(),
         })
     }
 }

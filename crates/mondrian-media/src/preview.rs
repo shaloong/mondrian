@@ -868,6 +868,29 @@ pub struct PreviewDecodeDiagnostics {
     pub decoded_video_sampling: DecodedVideoSampling,
 }
 
+/// Actual decode execution that produced a reusable frame payload.
+///
+/// This is frame-local provenance, not a request or capability decision. It is
+/// retained across playback-ring and preview-cache reuse so acceptance gates
+/// can bind the frame ultimately presented for a Frame Demand to the decode
+/// work that originally produced it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PreviewDecodeExecutionPath {
+    #[default]
+    SoftwareCpu,
+    HardwareCpuTransfer {
+        backend: HwAccelBackend,
+        surface: DecodedVideoSurfaceFormat,
+        sampling: DecodedVideoSampling,
+    },
+    HardwareNative {
+        backend: HwAccelBackend,
+        handle_kind: DecodedGpuFrameHandleKind,
+        surface: DecodedVideoSurfaceFormat,
+        sampling: DecodedVideoSampling,
+    },
+}
+
 impl PreviewDecodeDiagnostics {
     fn new(path: PreviewDecodePath) -> Self {
         Self {
@@ -923,6 +946,32 @@ impl PreviewDecodeDiagnostics {
             decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,
             decoded_video_sampling: DecodedVideoSampling::default(),
         }
+    }
+
+    /// Return only execution facts that prove actual hardware frame work.
+    pub fn execution_path(&self) -> PreviewDecodeExecutionPath {
+        let native_handle = self.gpu_frame_handle_kind.filter(|_| {
+            self.hardware_decode_decision == PreviewHardwareDecodeDecision::GpuResidentNative
+                && self.hardware_decode_active
+                && self.zero_copy_active
+                && self.decoded_frame_residency == DecodedFrameResidency::GpuTexture
+        });
+        if let Some(handle_kind) = native_handle {
+            return PreviewDecodeExecutionPath::HardwareNative {
+                backend: self.hw_accel_backend,
+                handle_kind,
+                surface: self.decoded_surface_format,
+                sampling: self.decoded_video_sampling,
+            };
+        }
+        if self.hardware_decode_cpu_transfer_observed && self.hardware_decode_active {
+            return PreviewDecodeExecutionPath::HardwareCpuTransfer {
+                backend: self.hw_accel_backend,
+                surface: self.decoded_surface_format,
+                sampling: self.decoded_video_sampling,
+            };
+        }
+        PreviewDecodeExecutionPath::SoftwareCpu
     }
 
     fn with_elapsed(mut self, elapsed: Duration) -> Self {
@@ -1033,6 +1082,8 @@ pub struct RgbaFrame {
     pub color_contract: DecodedRgbaFrameContract,
     /// Decode/cache diagnostics for this frame.
     pub diagnostics: PreviewDecodeDiagnostics,
+    /// Frame-local execution provenance retained across every cache layer.
+    pub decode_execution: PreviewDecodeExecutionPath,
 }
 
 /// Encoding represented by a decoded CPU RGBA payload.
@@ -1476,6 +1527,7 @@ impl RgbaFrame {
             data: Arc::new(data),
             color_contract,
             diagnostics: PreviewDecodeDiagnostics::new(path),
+            decode_execution: PreviewDecodeExecutionPath::SoftwareCpu,
         }
     }
 
@@ -1569,6 +1621,11 @@ impl RgbaFrame {
 
     fn with_stage_durations(mut self, durations: PreviewDecodeStageDurations) -> Self {
         self.diagnostics.stage_durations.accumulate(durations);
+        self
+    }
+
+    fn with_decode_execution(mut self) -> Self {
+        self.decode_execution = self.diagnostics.execution_path();
         self
     }
 
@@ -2052,7 +2109,7 @@ impl PreviewDecodedFramePayload {
                 width,
                 height,
                 pts,
-                frame.clone(),
+                frame.clone().with_decode_execution(),
             );
         }
     }
@@ -2774,11 +2831,6 @@ impl PreviewDecodeSession {
         if let Some(frame) = result.frame {
             match frame {
                 PreviewDecodedFramePayload::CpuRgba(frame) => {
-                    if policy.use_playback_ring {
-                        if let Some(selected_pts) = result.selected_pts {
-                            self.playback_ring.put(selected_pts, frame.clone());
-                        }
-                    }
                     let conversion_us = frame
                         .diagnostics
                         .stage_durations
@@ -2787,26 +2839,28 @@ impl PreviewDecodeSession {
                         .saturating_add(frame.diagnostics.stage_durations.rgba_copy_us);
                     let packet_decode_us =
                         duration_us(decode_started_at.elapsed()).saturating_sub(conversion_us);
-                    return Ok(PreviewDecodeOutcome::Frame(
-                        frame
-                            .with_access_mode(access_mode)
-                            .with_stage_durations(PreviewDecodeStageDurations {
-                                cache_lookup_us,
-                                seek_us,
-                                packet_decode_us,
-                                ..PreviewDecodeStageDurations::default()
-                            })
-                            .with_decode_work(seek_performed, result.decoded_frame_count)
-                            .with_access_policy(policy)
-                            .with_forward_reused(should_continue_forward)
-                            .with_seek_index_diagnostics(
-                                self.seek_index.diagnostics(),
-                                seek_resolution,
-                            )
-                            .with_threading(self.threading_kind, self.threading_count)
-                            .with_hardware_decode_plan(&self.hardware_decode_plan)
-                            .with_decoded_surface_format(self.decoded_surface_format),
-                    ));
+                    let frame = frame
+                        .with_access_mode(access_mode)
+                        .with_stage_durations(PreviewDecodeStageDurations {
+                            cache_lookup_us,
+                            seek_us,
+                            packet_decode_us,
+                            ..PreviewDecodeStageDurations::default()
+                        })
+                        .with_decode_work(seek_performed, result.decoded_frame_count)
+                        .with_access_policy(policy)
+                        .with_forward_reused(should_continue_forward)
+                        .with_seek_index_diagnostics(self.seek_index.diagnostics(), seek_resolution)
+                        .with_threading(self.threading_kind, self.threading_count)
+                        .with_hardware_decode_plan(&self.hardware_decode_plan)
+                        .with_decoded_surface_format(self.decoded_surface_format)
+                        .with_decode_execution();
+                    if policy.use_playback_ring {
+                        if let Some(selected_pts) = result.selected_pts {
+                            self.playback_ring.put(selected_pts, frame.clone());
+                        }
+                    }
+                    return Ok(PreviewDecodeOutcome::Frame(frame));
                 }
                 PreviewDecodedFramePayload::NativeGpu(mut frame) => {
                     let mut diagnostics = frame.diagnostics.with_access_mode(access_mode);
@@ -4244,15 +4298,16 @@ mod tests {
         preview_seek_index_cache_put, resolve_cpu_rgba_contract, DecodedRgbaFrameContract,
         FfmpegNativeDecodedFrameResource, FfmpegNativeDecodedFrameResourceError,
         PreviewDecodeAccessMode, PreviewDecodeAccessPolicy, PreviewDecodeAdaptiveHints,
-        PreviewDecodeBackend, PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath,
-        PreviewDecodeRequest, PreviewDecodeSeekStrategy, PreviewDecodeStageDurations,
-        PreviewDecodeThreadingKind, PreviewDecodedFramePayload, PreviewFileFingerprint,
-        PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
-        PreviewHardwareDecodeDecision, PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest,
-        PreviewNativeDecodeFallback, PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError,
-        PreviewNativeDecodedFrameHandle, PreviewNativeDecodedFrameResource, PreviewPlaybackRing,
-        PreviewScrubAdaptiveClass, PreviewSeekIndex, PreviewSeekIndexDiagnostics,
-        PreviewSeekIndexSource, PreviewSeekResolution, PreviewSourceColorContract, RgbaFrame,
+        PreviewDecodeBackend, PreviewDecodeDiagnostics, PreviewDecodeExecutionPath,
+        PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
+        PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewDecodedFramePayload,
+        PreviewFileFingerprint, PreviewHardwareDecodeBlocker,
+        PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
+        PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest, PreviewNativeDecodeFallback,
+        PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
+        PreviewNativeDecodedFrameResource, PreviewPlaybackRing, PreviewScrubAdaptiveClass,
+        PreviewSeekIndex, PreviewSeekIndexDiagnostics, PreviewSeekIndexSource,
+        PreviewSeekResolution, PreviewSourceColorContract, RgbaFrame,
         PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
         PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
         PREVIEW_SCRUB_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS,
@@ -5374,6 +5429,40 @@ mod tests {
             PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES as u32
         );
         assert_eq!(ring_hit.diagnostics.any_seek_window_ms, 0);
+    }
+
+    #[test]
+    fn hardware_execution_provenance_survives_cache_and_playback_ring_reuse() {
+        let mut frame = RgbaFrame::new(
+            2,
+            1,
+            vec![0; 8],
+            test_rgba_contract(),
+            PreviewDecodePath::InProcessFfmpegCpuRgba,
+        );
+        frame.diagnostics.hardware_decode_active = true;
+        frame.diagnostics.hardware_decode_cpu_transfer_observed = true;
+        frame.diagnostics.hw_accel_backend = HwAccelBackend::D3D11VA;
+        frame.diagnostics.decoded_surface_format = DecodedVideoSurfaceFormat::P010;
+        frame.diagnostics.decoded_video_sampling.bit_depth = 10;
+        let frame = frame.with_decode_execution();
+        let expected = PreviewDecodeExecutionPath::HardwareCpuTransfer {
+            backend: HwAccelBackend::D3D11VA,
+            surface: DecodedVideoSurfaceFormat::P010,
+            sampling: frame.diagnostics.decoded_video_sampling,
+        };
+        assert_eq!(frame.decode_execution, expected);
+
+        let cached = frame.into_cache_hit(
+            std::time::Duration::from_micros(3),
+            PreviewDecodeAccessMode::PlaybackCursor,
+        );
+        assert_eq!(cached.decode_execution, expected);
+        assert!(!cached.diagnostics.hardware_decode_cpu_transfer_observed);
+
+        let ring_hit = cached.into_playback_ring_hit(std::time::Duration::from_micros(2));
+        assert_eq!(ring_hit.decode_execution, expected);
+        assert!(!ring_hit.diagnostics.hardware_decode_cpu_transfer_observed);
     }
 
     #[test]

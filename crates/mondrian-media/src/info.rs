@@ -34,6 +34,21 @@ pub enum VideoCodec {
     Other(String),
 }
 
+/// Codec profile proven by the opened FFmpeg decoder context.
+///
+/// `Unknown` is an explicit absence of evidence. Callers must not infer a
+/// profile from codec, bit depth, filename, or container extension.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VideoCodecProfile {
+    #[default]
+    Unknown,
+    HevcMain,
+    HevcMain10,
+    HevcMainStillPicture,
+    HevcRangeExtensions,
+    Other,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProResVariant {
     Proxy,
@@ -841,10 +856,19 @@ pub enum ChannelLayout {
 pub struct VideoStreamInfo {
     pub index: u32,
     pub codec: VideoCodec,
+    /// Decoder-proven codec profile, or explicit `Unknown`.
+    #[serde(default)]
+    pub codec_profile: VideoCodecProfile,
     pub width: u32,
     pub height: u32,
     pub frame_rate: Rational,
+    /// Whether `frame_rate` came from a positive FFmpeg stream rational.
+    #[serde(default)]
+    pub frame_rate_proven: bool,
     pub pixel_format: PixelFormat,
+    /// Whether FFmpeg reported this exact pixel format rather than a storage fallback.
+    #[serde(default)]
+    pub pixel_format_proven: bool,
     /// Encoded quantization range reported by FFmpeg for the primary decoder.
     #[serde(default)]
     pub color_range: DecodedVideoRange,
@@ -976,6 +1000,7 @@ impl MediaInfo {
                     let mut width = 0;
                     let mut height = 0;
                     let mut pixel_format = PixelFormat::Yuv420p;
+                    let mut pixel_format_proven = false;
                     let mut bit_depth = 8;
                     let mut has_alpha = false;
 
@@ -985,7 +1010,10 @@ impl MediaInfo {
                         if let Ok(decoder) = context.decoder().video() {
                             width = decoder.width();
                             height = decoder.height();
-                            pixel_format = map_pixel_format(decoder.format());
+                            if let Some(probed_pixel_format) = map_pixel_format(decoder.format()) {
+                                pixel_format = probed_pixel_format;
+                                pixel_format_proven = true;
+                            }
                             let color_range =
                                 decoded_video_range_from_ffmpeg(decoder.color_range());
                             bit_depth = pixel_format.bit_depth();
@@ -1003,13 +1031,18 @@ impl MediaInfo {
                             let detected_color_space = color_interpretation.color_space;
                             let color_space_source = color_interpretation.source;
                             let color_detection_method = color_interpretation.method;
+                            let (frame_rate, frame_rate_proven) =
+                                map_rational(stream.avg_frame_rate());
                             video_streams.push(VideoStreamInfo {
                                 index: stream.index() as u32,
                                 codec: map_video_codec(params.id()),
+                                codec_profile: map_video_codec_profile(decoder.profile()),
                                 width,
                                 height,
-                                frame_rate: map_rational(stream.avg_frame_rate()),
+                                frame_rate,
+                                frame_rate_proven,
                                 pixel_format,
+                                pixel_format_proven,
                                 color_range,
                                 detected_color_space,
                                 color_interpretation,
@@ -1031,7 +1064,7 @@ impl MediaInfo {
                         }
                     }
 
-                    let frame_rate = map_rational(stream.avg_frame_rate());
+                    let (frame_rate, frame_rate_proven) = map_rational(stream.avg_frame_rate());
                     let total_frames = if stream.frames() > 0 {
                         Some(stream.frames() as u64)
                     } else {
@@ -1041,10 +1074,13 @@ impl MediaInfo {
                     video_streams.push(VideoStreamInfo {
                         index: stream.index() as u32,
                         codec: map_video_codec(params.id()),
+                        codec_profile: VideoCodecProfile::Unknown,
                         width,
                         height,
                         frame_rate,
+                        frame_rate_proven,
                         pixel_format,
+                        pixel_format_proven,
                         color_range: DecodedVideoRange::Unknown,
                         detected_color_space: None,
                         color_interpretation: DetectedColorInterpretation::decoder_unavailable(),
@@ -1582,31 +1618,45 @@ fn matrix_tag(value: ffmpeg::util::color::Space) -> VideoColorTag {
     }
 }
 
-fn map_rational(value: ffmpeg::Rational) -> Rational {
+fn map_rational(value: ffmpeg::Rational) -> (Rational, bool) {
     let num = value.numerator();
     let den = value.denominator();
-    if den == 0 {
-        Rational::FPS_25
+    if num <= 0 || den <= 0 {
+        (Rational::new(0, 1), false)
     } else {
-        Rational::new(num as i64, den as i64)
+        (Rational::new(num as i64, den as i64), true)
     }
 }
 
-fn map_pixel_format(pixel: ffmpeg::util::format::pixel::Pixel) -> PixelFormat {
+fn map_pixel_format(pixel: ffmpeg::util::format::pixel::Pixel) -> Option<PixelFormat> {
     use ffmpeg::util::format::pixel::Pixel;
 
     match pixel {
-        Pixel::YUV420P => PixelFormat::Yuv420p,
-        Pixel::YUV422P => PixelFormat::Yuv422p,
-        Pixel::YUV444P => PixelFormat::Yuv444p,
-        Pixel::YUV420P10LE => PixelFormat::Yuv420p10le,
-        Pixel::YUV422P10LE => PixelFormat::Yuv422p10le,
-        Pixel::YUV444P10LE => PixelFormat::Yuv444p10le,
-        Pixel::RGB24 => PixelFormat::Rgb24,
-        Pixel::RGBA => PixelFormat::Rgba,
-        Pixel::NV12 => PixelFormat::Nv12,
-        Pixel::P010LE => PixelFormat::P010,
-        _ => PixelFormat::Yuv420p,
+        Pixel::YUV420P => Some(PixelFormat::Yuv420p),
+        Pixel::YUV422P => Some(PixelFormat::Yuv422p),
+        Pixel::YUV444P => Some(PixelFormat::Yuv444p),
+        Pixel::YUV420P10LE => Some(PixelFormat::Yuv420p10le),
+        Pixel::YUV422P10LE => Some(PixelFormat::Yuv422p10le),
+        Pixel::YUV444P10LE => Some(PixelFormat::Yuv444p10le),
+        Pixel::RGB24 => Some(PixelFormat::Rgb24),
+        Pixel::RGBA => Some(PixelFormat::Rgba),
+        Pixel::NV12 => Some(PixelFormat::Nv12),
+        Pixel::P010LE => Some(PixelFormat::P010),
+        _ => None,
+    }
+}
+
+fn map_video_codec_profile(profile: ffmpeg::codec::Profile) -> VideoCodecProfile {
+    use ffmpeg::codec::profile::HEVC;
+    use ffmpeg::codec::Profile;
+
+    match profile {
+        Profile::Unknown | Profile::Reserved => VideoCodecProfile::Unknown,
+        Profile::HEVC(HEVC::Main) => VideoCodecProfile::HevcMain,
+        Profile::HEVC(HEVC::Main10) => VideoCodecProfile::HevcMain10,
+        Profile::HEVC(HEVC::MainStillPicture) => VideoCodecProfile::HevcMainStillPicture,
+        Profile::HEVC(HEVC::Rext) => VideoCodecProfile::HevcRangeExtensions,
+        _ => VideoCodecProfile::Other,
     }
 }
 
@@ -1667,6 +1717,32 @@ fn map_audio_codec(id: ffmpeg::codec::Id) -> AudioCodec {
 mod tests {
     use super::*;
     use ffmpeg::util::color::{Primaries, Space, TransferCharacteristic};
+
+    #[test]
+    fn probe_mapping_keeps_unknown_frame_rate_and_pixel_format_unproven() {
+        assert_eq!(
+            map_rational(ffmpeg::Rational(0, 0)),
+            (Rational::new(0, 1), false)
+        );
+        assert_eq!(
+            map_pixel_format(ffmpeg::util::format::pixel::Pixel::None),
+            None
+        );
+    }
+
+    #[test]
+    fn probe_mapping_preserves_exact_hevc_main10_profile() {
+        assert_eq!(
+            map_video_codec_profile(ffmpeg::codec::Profile::HEVC(
+                ffmpeg::codec::profile::HEVC::Main10
+            )),
+            VideoCodecProfile::HevcMain10
+        );
+        assert_eq!(
+            map_video_codec_profile(ffmpeg::codec::Profile::Unknown),
+            VideoCodecProfile::Unknown
+        );
+    }
 
     #[test]
     fn detect_color_space_marks_hdr_transfer_metadata() {

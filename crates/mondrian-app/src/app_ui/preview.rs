@@ -28,12 +28,13 @@ use mondrian_media::{
     decode_preview_frame_cancellable, preview_decode_cpu_budget, DecodedFrameResidency,
     DecodedGpuFrameHandleKind, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
     HwAccelBackend, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeCpuBudget,
-    PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest,
-    PreviewDecodeSeekStrategy, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
-    PreviewFileFingerprint, PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
-    PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest, PreviewNativeDecodedFrame,
-    PreviewScrubAdaptiveClass, PreviewSeekIndexSource, PreviewSourceColorContract,
-    VideoColorDiagnostic, VideoColorDiagnosticIssueSummary,
+    PreviewDecodeDiagnostics, PreviewDecodeExecutionPath, PreviewDecodeOutcome, PreviewDecodePath,
+    PreviewDecodeRequest, PreviewDecodeSeekStrategy, PreviewDecodeStageDurations,
+    PreviewDecodeThreadingKind, PreviewFileFingerprint, PreviewHardwareDecodeBlocker,
+    PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
+    PreviewHardwareDecodeRequest, PreviewNativeDecodedFrame, PreviewScrubAdaptiveClass,
+    PreviewSeekIndexSource, PreviewSourceColorContract, VideoColorDiagnostic,
+    VideoColorDiagnosticIssueSummary,
 };
 #[cfg(test)]
 use mondrian_media::{DecodedVideoChromaLocation, PreviewNativeDecodedFrameHandle};
@@ -1240,6 +1241,7 @@ impl AppUiPreviewService {
             bump(&self.metrics.gpu_preview_candidate_unavailable);
             return AppUiGpuPreviewFrameState::Unavailable;
         };
+        let decode_execution = resolved_preview_decode_execution(&resolved.elements);
         let working_input = match gpu_composite_layers_for_resolved(
             width,
             height,
@@ -1285,6 +1287,7 @@ impl AppUiPreviewService {
             boundary,
             preview_candidate_id: candidate_id,
             presentation_ticket: self.playback_presentation_ticket(state),
+            decode_execution,
         }))
     }
 
@@ -1987,6 +1990,7 @@ impl AppUiPreviewService {
             )?
             .elements;
         let presentation_quality = resolved_preview_presentation_quality(&resolved);
+        let decode_execution = resolved_preview_decode_execution(&resolved);
         let mut scratch = TimelineCompositeScratch::default();
         let output = composite_resolved_preview_working(
             width,
@@ -2033,6 +2037,7 @@ impl AppUiPreviewService {
             native_source: None,
             signature,
             presentation_quality,
+            decode_execution,
         })
     }
 
@@ -2203,7 +2208,7 @@ pub struct AppUiPreviewRenderStageDurations {
 }
 
 impl AppUiPreviewRenderStageDurations {
-    fn accumulate(&mut self, other: Self) {
+    pub(crate) fn accumulate(&mut self, other: Self) {
         self.resolve_us = self.resolve_us.saturating_add(other.resolve_us);
         self.final_cache_lookup_us =
             self.final_cache_lookup_us.saturating_add(other.final_cache_lookup_us);
@@ -6745,6 +6750,9 @@ pub(crate) struct AppUiGpuPreviewFrame {
     preview_candidate_id: u64,
     /// Exact terminal delivery to emit only after presentation succeeds.
     presentation_ticket: Option<mondrian_playback::FramePresentationTicket>,
+    /// Decode provenance of the exact media layers entering this candidate.
+    #[cfg_attr(not(test), allow(dead_code))]
+    decode_execution: AppUiPreviewDecodeExecutionSummary,
 }
 
 /// Working-space input for the app-window GPU output path.
@@ -6844,6 +6852,11 @@ impl AppUiGpuPreviewFrame {
     ) -> Option<mondrian_playback::FramePresentationTicket> {
         self.presentation_ticket
     }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) const fn decode_execution(&self) -> AppUiPreviewDecodeExecutionSummary {
+        self.decode_execution
+    }
 }
 
 enum ResolvedPreviewElement {
@@ -6932,6 +6945,52 @@ pub(crate) struct MediaPreviewFrame {
     height: u32,
     signature: u64,
     presentation_quality: mondrian_playback::FramePresentationQuality,
+    decode_execution: AppUiPreviewDecodeExecutionSummary,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct AppUiPreviewDecodeExecutionSummary {
+    pub media_layers: u32,
+    pub software_cpu_layers: u32,
+    pub hardware_cpu_transfer_layers: u32,
+    pub hardware_native_layers: u32,
+    pub p010_10_bit_hardware_layers: u32,
+}
+
+impl AppUiPreviewDecodeExecutionSummary {
+    fn from_path(path: PreviewDecodeExecutionPath) -> Self {
+        let mut summary = Self { media_layers: 1, ..Self::default() };
+        match path {
+            PreviewDecodeExecutionPath::SoftwareCpu => summary.software_cpu_layers = 1,
+            PreviewDecodeExecutionPath::HardwareCpuTransfer { surface, sampling, .. } => {
+                summary.hardware_cpu_transfer_layers = 1;
+                if surface == DecodedVideoSurfaceFormat::P010 && sampling.bit_depth == 10 {
+                    summary.p010_10_bit_hardware_layers = 1;
+                }
+            }
+            PreviewDecodeExecutionPath::HardwareNative { surface, sampling, .. } => {
+                summary.hardware_native_layers = 1;
+                if surface == DecodedVideoSurfaceFormat::P010 && sampling.bit_depth == 10 {
+                    summary.p010_10_bit_hardware_layers = 1;
+                }
+            }
+        }
+        summary
+    }
+
+    pub(crate) fn accumulate(&mut self, other: Self) {
+        self.media_layers = self.media_layers.saturating_add(other.media_layers);
+        self.software_cpu_layers =
+            self.software_cpu_layers.saturating_add(other.software_cpu_layers);
+        self.hardware_cpu_transfer_layers = self
+            .hardware_cpu_transfer_layers
+            .saturating_add(other.hardware_cpu_transfer_layers);
+        self.hardware_native_layers =
+            self.hardware_native_layers.saturating_add(other.hardware_native_layers);
+        self.p010_10_bit_hardware_layers = self
+            .p010_10_bit_hardware_layers
+            .saturating_add(other.p010_10_bit_hardware_layers);
+    }
 }
 
 impl MediaPreviewFrame {
@@ -6965,6 +7024,10 @@ impl MediaPreviewFrame {
 
     fn presentation_quality(&self) -> mondrian_playback::FramePresentationQuality {
         self.presentation_quality
+    }
+
+    fn decode_execution(&self) -> AppUiPreviewDecodeExecutionSummary {
+        self.decode_execution
     }
 
     fn gpu_source(&self) -> Option<AppUiGpuPreviewMediaSource> {
@@ -8763,6 +8826,18 @@ fn resolved_preview_presentation_quality(
     }
 }
 
+fn resolved_preview_decode_execution(
+    resolved: &[ResolvedPreviewElement],
+) -> AppUiPreviewDecodeExecutionSummary {
+    let mut summary = AppUiPreviewDecodeExecutionSummary::default();
+    for element in resolved {
+        if let ResolvedPreviewElement::Media { frame, .. } = element {
+            summary.accumulate(frame.decode_execution());
+        }
+    }
+    summary
+}
+
 fn is_preview_identity_transform(transform: [f32; 6]) -> bool {
     const EPSILON: f32 = 1.0e-6;
     (transform[0] - 1.0).abs() <= EPSILON
@@ -9229,6 +9304,7 @@ fn decode_media_preview(
     match decode_outcome {
         Ok(PreviewDecodeOutcome::Frame(frame)) => {
             let decode_diagnostics = frame.diagnostics;
+            let decode_execution = frame.decode_execution;
             let presentation_quality = preview_decode_presentation_quality(&decode_diagnostics);
             let width = frame.width;
             let height = frame.height;
@@ -9258,6 +9334,9 @@ fn decode_media_preview(
                     native_source: None,
                     signature,
                     presentation_quality,
+                    decode_execution: AppUiPreviewDecodeExecutionSummary::from_path(
+                        decode_execution,
+                    ),
                 }),
                 error: None,
                 failure_reason: None,
@@ -9278,6 +9357,7 @@ fn decode_media_preview(
         }
         Ok(PreviewDecodeOutcome::NativeGpuFrame(frame)) => {
             let decode_diagnostics = frame.diagnostics;
+            let decode_execution = decode_diagnostics.execution_path();
             let presentation_quality = preview_decode_presentation_quality(&decode_diagnostics);
             let width = frame.width;
             let height = frame.height;
@@ -9301,6 +9381,9 @@ fn decode_media_preview(
                     native_source: Some(native_source),
                     signature,
                     presentation_quality,
+                    decode_execution: AppUiPreviewDecodeExecutionSummary::from_path(
+                        decode_execution,
+                    ),
                 }),
                 error: None,
                 failure_reason: None,
@@ -9454,10 +9537,13 @@ mod tests {
             video_streams: vec![VideoStreamInfo {
                 index: 0,
                 codec: VideoCodec::H265,
+                codec_profile: mondrian_media::VideoCodecProfile::HevcMain10,
                 width: 3840,
                 height: 2160,
                 frame_rate: Rational::new(25, 1),
+                frame_rate_proven: true,
                 pixel_format: PixelFormat::Yuv420p10le,
+                pixel_format_proven: true,
                 color_range: DecodedVideoRange::Limited,
                 detected_color_space: Some(ColorSpace::Rec709),
                 color_interpretation: DetectedColorInterpretation {
@@ -10050,6 +10136,9 @@ mod tests {
             native_source: None,
             signature: 44,
             presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
+            decode_execution: AppUiPreviewDecodeExecutionSummary::from_path(
+                PreviewDecodeExecutionPath::SoftwareCpu,
+            ),
         };
         let effect_graph = mondrian_effects::get_or_compile_scheduled_effect_graph(
             &mondrian_effects::EffectRenderPlan::default(),
@@ -10091,6 +10180,7 @@ mod tests {
             native_source: Some(test_native_source_frame(320, 180)),
             signature: 45,
             presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
+            decode_execution: AppUiPreviewDecodeExecutionSummary::default(),
         };
         let effect_graph = mondrian_effects::get_or_compile_scheduled_effect_graph(
             &mondrian_effects::EffectRenderPlan::default(),
@@ -10166,6 +10256,7 @@ mod tests {
             native_source: Some(test_native_source_frame(320, 180)),
             signature: 46,
             presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
+            decode_execution: AppUiPreviewDecodeExecutionSummary::default(),
         };
 
         let err = match frame.working_frame() {
@@ -14828,6 +14919,9 @@ mod tests {
             native_source: None,
             signature: 2_020,
             presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
+            decode_execution: AppUiPreviewDecodeExecutionSummary::from_path(
+                PreviewDecodeExecutionPath::SoftwareCpu,
+            ),
         };
         let solid = TimelineSolidColorLayer {
             color: Color::from_rgba8(32, 180, 220, 255),
@@ -16154,6 +16248,9 @@ mod tests {
             native_source: None,
             signature,
             presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
+            decode_execution: AppUiPreviewDecodeExecutionSummary::from_path(
+                PreviewDecodeExecutionPath::SoftwareCpu,
+            ),
         }
     }
 
@@ -16252,6 +16349,9 @@ mod tests {
             native_source: None,
             signature: 42,
             presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
+            decode_execution: AppUiPreviewDecodeExecutionSummary::from_path(
+                PreviewDecodeExecutionPath::SoftwareCpu,
+            ),
         };
 
         let first = frame.working_frame().expect("first lazy working transform");

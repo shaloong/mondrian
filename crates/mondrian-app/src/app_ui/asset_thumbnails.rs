@@ -621,10 +621,13 @@ mod tests {
             media_info.video_streams.push(VideoStreamInfo {
                 index: 0,
                 codec: VideoCodec::H264,
+                codec_profile: mondrian_media::VideoCodecProfile::Unknown,
                 width: 1920,
                 height: 1080,
                 frame_rate: Rational::FPS_24,
+                frame_rate_proven: true,
                 pixel_format: PixelFormat::Yuv420p,
+                pixel_format_proven: true,
                 color_range: DecodedVideoRange::Limited,
                 detected_color_space: Some(ColorSpace::Rec709),
                 color_interpretation: DetectedColorInterpretation {

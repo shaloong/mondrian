@@ -727,9 +727,18 @@ shared runtime. External gates also fail when real GPU execution
 coverage is missing, playback GPU completion p95 exceeds one frame interval, a
 readback appears, or a GPU blocker is reported. Pre-roll pipeline warm-up is
 reported separately and cannot contaminate the steady-playback p95.
-Hardware-decoder residency, 30-minute duration, and Golden Project identity
-gates remain to be satisfied before the professional playback acceptance claim
-is complete.
+The professional 4K HEVC Main10 gate now has a fail-closed input and execution
+contract. It uses real FFmpeg decoder profile/format/rate evidence, the probed
+rational cadence, frame-local decode provenance carried through caches and
+prefetch, the exact Viewer candidate, and a completed headless GPU submission.
+The deterministic rules and versioned structured failure codes live in the
+deep `app::playback_acceptance` Module; the perf harness is an Adapter that only
+collects real probe, playback, and completed-presentation observations.
+It cannot pass from filename labels, hardware candidates/device contexts, or
+PlaybackCursor aggregates containing speculative prefetch. The repository does
+not contain the licensed/reference 4K Main10 fixture, so a reference-machine run
+of this gate, 30-minute duration, and Golden Project identity still remain to be
+satisfied before the professional playback acceptance claim is complete.
 
 The generated-media gate additionally requires execution—not merely policy
 state—when at least two pressure thresholds of requested-but-unengaged hardware

@@ -30,10 +30,18 @@ decode requests and reports facts; it does not pause or advance transport.
 
 - container and duration
 - file size
-- video streams: codec, dimensions, frame rate, pixel format, bit depth, alpha, detected color space, structured color interpretation, frame count
+- video streams: codec, decoder-proven codec profile, dimensions, frame rate, pixel format, bit depth, alpha, detected color space, structured color interpretation, frame count
 - audio streams: codec, sample rate, channels, layout, bit depth
 
 The probe runs off the UI thread.
+
+Probe absence is explicit. Invalid/zero FFmpeg frame-rate rationals are stored
+as unproven rather than silently replaced with 25 fps. Unsupported or unknown
+pixel formats retain an unproven marker rather than becoming YUV420P/8-bit.
+`VideoCodecProfile::Unknown` is not equivalent to a profile inferred from codec,
+bit depth, filename, or extension. A professional Main10 gate requires the
+opened decoder context to report `HevcMain10`; persisted records written before
+these proof fields default to unproven and must be re-probed before acceptance.
 
 Asset registration is separate from metadata probing. `AssetLibrary` can import
 a path by calling `MediaInfo::probe`, but callers that already own a bounded
@@ -321,6 +329,20 @@ The external real-media variant also emits `real_media_gates` and fails on
 `PlaybackCursor` decode p95, queue-wait p95, or visible-frame-ratio regression;
 those gates must remain separate from broad timeout windows so slow-but-eventual
 4K playback is not mistaken for production readiness.
+
+External smoke media is always registered from one real `MediaInfo::probe`;
+the harness does not synthesize codec, profile, resolution, bit depth, duration,
+frame count, or color facts from a filename. It builds the sequence at the
+probed rational frame rate and advances 1× using a nanosecond frame interval.
+The dedicated ignored
+`preview_media_4k_hevc_main10_hardware_playback_gate` requires
+`MONDRIAN_PREVIEW_4K_HEVC_MAIN10_MEDIA_PATH` and never reports a skip when that
+fixture is absent. Its `professional_media_gates` require decoder-proven UHD
+HEVC Main10 identity, sufficient duration, 25/29.97/30 fps, and at least 90%
+actual P010/10-bit hardware provenance on media layers attached to completed
+headless Viewer GPU candidates. CPU-transfer hardware decode and retained
+native hardware decode are reported separately; both are actual hardware
+execution, while candidate/config/device probes are not.
 When background preview completion changes Viewer lifecycle, the app host may
 perform one preview-aware model refresh, then adapt its payload-free feedback
 without requesting preview again. A feedback transition must not trigger a
@@ -1070,6 +1092,13 @@ contract.
 adjust per-request diagnostics without deep-copying a 4K frame. Callers that
 need ownership must request it explicitly through the frame consumption API;
 renderer color-frame boundaries should prefer the shared payload constructor.
+Execution truth is separate from per-request cache diagnostics.
+`PreviewDecodeExecutionPath` is assigned only from an observed FFmpeg hardware
+CPU transfer or a validated native GPU payload and remains unchanged when the
+request becomes `PreviewCacheHit` or `PlaybackSessionRingHit`. App prefetch and
+the Preview Frame Store retain this provenance, aggregate it across nested/media
+layers, and bind it to the exact GPU candidate. A cache hit therefore describes
+the current request without pretending another hardware decode occurred.
 `PreviewNativeDecodedFrame` is the separate GPU-resident payload contract and
 must flow toward renderer native decoded-frame import rather than the RGBA cache.
 Preview decode session reuse is isolated by `PreviewDecodeAccessMode`, and each

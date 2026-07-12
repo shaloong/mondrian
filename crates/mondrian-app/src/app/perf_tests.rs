@@ -1,3 +1,7 @@
+use super::playback_acceptance::{
+    evaluate_professional_playback, PreviewPlaybackMediaProbeReport,
+    PreviewProfessionalPlaybackGateReport, ProfessionalPlaybackObservation,
+};
 use super::*;
 use crate::app::ui_actions::TimelineSeekSource;
 use crate::app_ui::native_video_import::resolve_playback_hardware_decode_admission;
@@ -8,12 +12,12 @@ use crate::app_ui::preview::{
     build_preview_render_performance_report, AppUiPreviewColorHealthReport,
     AppUiPreviewColorHealthSummary, AppUiPreviewColorHealthVerdict,
     AppUiPreviewDecodeAccessModeProfile, AppUiPreviewDecodeAccessModeProfiles,
-    AppUiPreviewDecodePerformanceArea, AppUiPreviewDecodePerformanceCheck,
-    AppUiPreviewDecodePerformanceReport, AppUiPreviewDecodePerformanceSeverity,
-    AppUiPreviewDecodePerformanceVerdict, AppUiPreviewDiagnostics,
-    AppUiPreviewRenderPerformanceReport, AppUiPreviewRenderPerformanceSeverity,
-    AppUiPreviewRenderPerformanceVerdict, AppUiPreviewService,
-    APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
+    AppUiPreviewDecodeExecutionSummary, AppUiPreviewDecodePerformanceArea,
+    AppUiPreviewDecodePerformanceCheck, AppUiPreviewDecodePerformanceReport,
+    AppUiPreviewDecodePerformanceSeverity, AppUiPreviewDecodePerformanceVerdict,
+    AppUiPreviewDiagnostics, AppUiPreviewRenderPerformanceReport,
+    AppUiPreviewRenderPerformanceSeverity, AppUiPreviewRenderPerformanceVerdict,
+    AppUiPreviewService, APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
     APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
 };
 use crate::app_ui::shell::AppUiAppRoot;
@@ -36,12 +40,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mondrian_core::types::Rational;
 use mondrian_effects::{EffectNode, EffectNodeExt};
-use mondrian_media::info::{PixelFormat, VideoCodec};
 use mondrian_media::{
-    DetectedColorInterpretation, MediaInfo, PreviewDecodeAccessMode, PreviewDecodeStageDurations,
-    VideoColorDetectionMethod, VideoColorDiagnostic, VideoColorDiagnosticIssueAggregate,
-    VideoColorInterpretationConfidence, VideoColorInterpretationWarning, VideoColorSpaceSource,
-    VideoStreamInfo,
+    MediaInfo, PreviewDecodeAccessMode, PreviewDecodeStageDurations, VideoColorDiagnostic,
+    VideoColorDiagnosticIssueAggregate,
 };
 use mondrian_platform::{NativeVideoTextureImportProbe, SystemPlatformService};
 use mondrian_renderer::RenderColorStageDiagnostics;
@@ -117,6 +118,7 @@ struct HeadlessViewerGpuExecutionSummary {
     fallback_count: usize,
     fallback_reasons: Vec<String>,
     stage_diagnostics: RenderColorStageDiagnostics,
+    rendered_decode_execution: AppUiPreviewDecodeExecutionSummary,
 }
 
 impl HeadlessViewerGpuExecutionSummary {
@@ -132,6 +134,7 @@ impl HeadlessViewerGpuExecutionSummary {
             self.cached_frames = self.cached_frames.saturating_add(1);
         } else {
             self.rendered_frames = self.rendered_frames.saturating_add(1);
+            self.rendered_decode_execution.accumulate(execution.decode_execution);
         }
         self.duration_samples_us.push(execution.duration_us);
         self.fallback_count = self.fallback_count.saturating_add(execution.fallback_reasons.len());
@@ -163,6 +166,7 @@ fn headless_gpu_summary_records_distinct_executed_extents() {
             duration_us: 1,
             stage_diagnostics: None,
             fallback_reasons: Vec::new(),
+            decode_execution: AppUiPreviewDecodeExecutionSummary::default(),
         });
     }
 
@@ -179,11 +183,13 @@ fn headless_gpu_summary_records_distinct_executed_extents() {
 struct PreviewMediaPlaybackPerfReport {
     scenario: &'static str,
     frames: usize,
-    frame_interval_ms: u64,
+    frame_interval_ns: u64,
+    media_probe: PreviewPlaybackMediaProbeReport,
     readiness: PreviewReadinessCounts,
     headless_gpu_preroll: HeadlessViewerGpuExecutionSummary,
     headless_gpu: HeadlessViewerGpuExecutionSummary,
     real_media_gates: Option<PreviewExternalPlaybackGateReport>,
+    professional_media_gates: Option<PreviewProfessionalPlaybackGateReport>,
     media_color_issues: VideoColorDiagnosticIssueAggregate,
     preview_diagnostics: AppUiPreviewDiagnostics,
     preview_color_report: AppUiPreviewColorHealthReport,
@@ -1235,7 +1241,7 @@ fn preview_media_external_access_mode_smoke() -> anyhow::Result<()> {
     fs::create_dir_all(&root_dir)?;
 
     let overall_deadline = Instant::now() + overall_timeout;
-    let media_info = preview_external_access_mode_media_info(&video_path, frame_count)?;
+    let media_info = probe_external_preview_media_info(&video_path)?;
 
     let result = run_preview_media_access_mode_probe_with_media_info(
         &root_dir,
@@ -1269,8 +1275,9 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
     let _guard = perf_lock().lock().expect("perf lock poisoned");
 
     let frame_count = env_usize_clamped("MONDRIAN_PREVIEW_PLAYBACK_FRAMES", 60, 8, 60);
-    let frame_interval_ms =
-        env_usize_clamped("MONDRIAN_PREVIEW_PLAYBACK_FRAME_MS", 33, 1, 250) as u64;
+    let frame_interval_ns = (env_usize_clamped("MONDRIAN_PREVIEW_PLAYBACK_FRAME_MS", 33, 1, 250)
+        as u64)
+        .saturating_mul(1_000_000);
     let playback_threshold_ms = env_u128("MONDRIAN_PREVIEW_PLAYBACK_WINDOW_MS", 8_000);
     let gpu_candidate_threshold_ms = env_u128("MONDRIAN_PREVIEW_PLAYBACK_GPU_CANDIDATE_MS", 1_000);
     let ready_timeout = Duration::from_millis(env_u128(
@@ -1297,7 +1304,7 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
         None,
         "preview_media_continuous_playback",
         frame_count,
-        frame_interval_ms,
+        frame_interval_ns,
         playback_threshold_ms,
         gpu_candidate_threshold_ms,
         ready_timeout,
@@ -1344,7 +1351,6 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
 #[ignore = "development preview media continuous playback smoke for a real external media file; run manually"]
 fn preview_media_external_continuous_playback_smoke() -> anyhow::Result<()> {
     let _guard = perf_lock().lock().expect("perf lock poisoned");
-
     let Some(video_path) = std::env::var_os("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_MEDIA_PATH")
         .or_else(|| std::env::var_os("MONDRIAN_PREVIEW_EXTERNAL_MEDIA_PATH"))
         .map(std::path::PathBuf::from)
@@ -1354,15 +1360,44 @@ fn preview_media_external_continuous_playback_smoke() -> anyhow::Result<()> {
         );
         return Ok(());
     };
+    run_external_continuous_playback_gate(video_path, false)
+}
+
+#[test]
+#[ignore = "professional 4K25/30 HEVC Main10 hardware playback gate; requires real media and GPU"]
+fn preview_media_4k_hevc_main10_hardware_playback_gate() -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("perf lock poisoned");
+    let video_path = std::env::var_os("MONDRIAN_PREVIEW_4K_HEVC_MAIN10_MEDIA_PATH")
+        .map(std::path::PathBuf::from)
+        .context("MONDRIAN_PREVIEW_4K_HEVC_MAIN10_MEDIA_PATH is required; this gate never skips")?;
+    run_external_continuous_playback_gate(video_path, true)
+}
+
+fn run_external_continuous_playback_gate(
+    video_path: PathBuf,
+    professional: bool,
+) -> anyhow::Result<()> {
     anyhow::ensure!(
         video_path.exists(),
         "external playback media path does not exist: {}",
         video_path.display()
     );
 
-    let frame_count = env_usize_clamped("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_FRAMES", 60, 8, 300);
-    let frame_interval_ms =
-        env_usize_clamped("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_FRAME_MS", 33, 1, 250) as u64;
+    let media_info = probe_external_preview_media_info(&video_path)?;
+    let media_probe = PreviewPlaybackMediaProbeReport::from_media_info(&media_info)?;
+    let default_frame_count = if professional { 300 } else { 60 };
+    let frame_count = env_usize_clamped(
+        "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_FRAMES",
+        default_frame_count,
+        8,
+        1_800,
+    );
+    let frame_interval_ns = std::env::var("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_FRAME_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(|milliseconds| milliseconds.saturating_mul(1_000_000))
+        .unwrap_or(media_probe.frame_interval_ns()?);
     let playback_threshold_ms = env_u128("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_WINDOW_MS", 8_000);
     let gpu_candidate_threshold_ms =
         env_u128("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_GPU_CANDIDATE_MS", 2_000);
@@ -1395,16 +1430,20 @@ fn preview_media_external_continuous_playback_smoke() -> anyhow::Result<()> {
     let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let root_dir = std::env::temp_dir().join(format!("mondrian_preview_external_playback_{uniq}"));
     fs::create_dir_all(&root_dir)?;
-    let media_info = preview_external_access_mode_media_info(&video_path, frame_count)?;
 
     let deadline = Instant::now() + overall_timeout;
+    let scenario = if professional {
+        "preview_media_4k_hevc_main10_hardware_playback"
+    } else {
+        "preview_media_external_continuous_playback"
+    };
     let result = run_preview_media_continuous_playback_probe(
         &root_dir,
         &video_path,
         Some(media_info),
-        "preview_media_external_continuous_playback",
+        scenario,
         frame_count,
-        frame_interval_ms,
+        frame_interval_ns,
         playback_threshold_ms,
         gpu_candidate_threshold_ms,
         ready_timeout,
@@ -1421,7 +1460,7 @@ fn preview_media_external_continuous_playback_smoke() -> anyhow::Result<()> {
         &report.readiness,
         &report.headless_gpu,
         report.frames,
-        report.frame_interval_ms.saturating_mul(1_000),
+        report.frame_interval_ns.saturating_add(999) / 1_000,
         &report.preview_decode_report,
         &report.preview_diagnostics,
         &report.playback_evidence,
@@ -1431,6 +1470,26 @@ fn preview_media_external_continuous_playback_smoke() -> anyhow::Result<()> {
         min_ready_percent,
     );
     report.real_media_gates = Some(real_media_gates);
+    if professional {
+        let playback_decode = report
+            .preview_decode_report
+            .summary
+            .as_ref()
+            .map(|summary| summary.access_mode_profiles.playback_cursor)
+            .unwrap_or_default();
+        report.professional_media_gates = Some(evaluate_professional_playback(
+            ProfessionalPlaybackObservation {
+                media: &report.media_probe,
+                rendered_decode_execution: report.headless_gpu.rendered_decode_execution,
+                viewer_fallback_count: report.headless_gpu.fallback_count,
+                viewer_fallback_reasons: &report.headless_gpu.fallback_reasons,
+                playback_decode,
+                frames: report.frames,
+                frame_interval_ns: report.frame_interval_ns,
+            },
+            90,
+        ));
+    }
     let report_json = serde_json::to_string(&report)?;
     eprintln!("MONDRIAN_PERF_JSON={report_json}");
     write_report_if_needed(&report_json);
@@ -1465,6 +1524,15 @@ fn preview_media_external_continuous_playback_smoke() -> anyhow::Result<()> {
         if !gates.passed {
             anyhow::bail!(
                 "preview media external continuous playback real-media gates failed: {:?}; report: {}",
+                gates.failures,
+                report_json
+            );
+        }
+    }
+    if let Some(gates) = &report.professional_media_gates {
+        if !gates.passed {
+            anyhow::bail!(
+                "professional 4K HEVC Main10 hardware playback gates failed: {:?}; report: {}",
                 gates.failures,
                 report_json
             );
@@ -1601,15 +1669,21 @@ fn run_preview_media_continuous_playback_probe(
     media_info: Option<MediaInfo>,
     scenario: &'static str,
     frame_count: usize,
-    frame_interval_ms: u64,
+    frame_interval_ns: u64,
     playback_threshold_ms: u128,
     gpu_candidate_threshold_ms: u128,
     ready_timeout: Duration,
 ) -> anyhow::Result<PreviewMediaPlaybackPerfReport> {
+    let media_info = match media_info {
+        Some(media_info) => media_info,
+        None => MediaInfo::probe(video_path)
+            .with_context(|| format!("probe playback media {}", video_path.display()))?,
+    };
+    let media_probe = PreviewPlaybackMediaProbeReport::from_media_info(&media_info)?;
     let mut state = build_preview_media_perf_state_with_media_info(
         root_dir,
         video_path,
-        media_info,
+        Some(media_info),
         frame_count,
     )?;
     let preview_service = AppUiPreviewService::new();
@@ -1644,13 +1718,13 @@ fn run_preview_media_continuous_playback_probe(
         playback_threshold_ms,
         || {
             for _ in 0..frame_count {
-                state.advance_playback_clock(Duration::from_millis(frame_interval_ms));
+                state.advance_playback_clock(Duration::from_nanos(frame_interval_ns));
                 let sample = run_headless_preview_interval(
                     &preview_service,
                     &mut state,
                     &mut gpu_adapter,
                     &mut headless_gpu,
-                    Duration::from_millis(frame_interval_ms),
+                    Duration::from_nanos(frame_interval_ns),
                 )?;
                 record_headless_preview_readiness(&mut readiness, sample);
             }
@@ -1726,11 +1800,13 @@ fn run_preview_media_continuous_playback_probe(
     let report = PreviewMediaPlaybackPerfReport {
         scenario,
         frames: frame_count,
-        frame_interval_ms,
+        frame_interval_ns,
+        media_probe,
         readiness,
         headless_gpu_preroll,
         headless_gpu,
         real_media_gates: None,
+        professional_media_gates: None,
         media_color_issues,
         preview_diagnostics,
         preview_color_report,
@@ -2092,13 +2168,20 @@ fn build_preview_media_perf_state_with_media_info(
     frame_count: usize,
 ) -> anyhow::Result<AppState> {
     let library = AssetLibrary::open(root_dir.join("library"))?;
+    let probed_frame_rate = media_info
+        .as_ref()
+        .and_then(MediaInfo::primary_video)
+        .filter(|video| {
+            video.frame_rate_proven && video.frame_rate.num > 0 && video.frame_rate.den > 0
+        })
+        .map(|video| video.frame_rate.reduce());
     let asset_id = match media_info {
         Some(info) => library.upsert_media_file_with_info(video_path, info)?,
         None => library.import_media_file(video_path)?,
     };
 
     let mut sequence = Sequence::new("Preview media perf");
-    sequence.settings.frame_rate = Rational::FPS_30;
+    sequence.settings.frame_rate = probed_frame_rate.unwrap_or(Rational::FPS_30);
     let tb = sequence.time_base();
     let duration = TimeCode::new(frame_count as i64, tb);
     sequence.video_tracks[0].add_clip(Clip::new(asset_id, TimeCode::new(0, tb), duration))?;
@@ -2115,106 +2198,9 @@ fn build_preview_media_perf_state_with_media_info(
     Ok(state)
 }
 
-fn preview_external_access_mode_media_info(
-    video_path: &Path,
-    frame_count: usize,
-) -> anyhow::Result<MediaInfo> {
-    let canonical_path = video_path.canonicalize().with_context(|| {
-        format!(
-            "canonicalize external preview media path {}",
-            video_path.display()
-        )
-    })?;
-    let file_size = std::fs::metadata(&canonical_path).map(|metadata| metadata.len()).unwrap_or(0);
-    let container = canonical_path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_else(|| "external".to_string());
-    let frame_count = frame_count.max(1);
-    let bit_depth = external_preview_media_bit_depth(video_path);
-    let pixel_format = if bit_depth > 8 {
-        PixelFormat::Yuv420p10le
-    } else {
-        PixelFormat::Yuv420p
-    };
-
-    Ok(MediaInfo {
-        path: canonical_path,
-        duration: Duration::from_secs_f64(frame_count as f64 / 30.0),
-        file_size,
-        container,
-        video_streams: vec![VideoStreamInfo {
-            index: 0,
-            codec: external_preview_media_codec(video_path),
-            width: 0,
-            height: 0,
-            frame_rate: Rational::FPS_30,
-            pixel_format,
-            color_range: mondrian_media::DecodedVideoRange::Unknown,
-            detected_color_space: None,
-            color_interpretation: DetectedColorInterpretation {
-                color_space: None,
-                confidence: VideoColorInterpretationConfidence::None,
-                source: VideoColorSpaceSource::MissingMetadata,
-                method: VideoColorDetectionMethod::MissingMetadata,
-                evidence: Vec::new(),
-                warnings: vec![VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags],
-                user_overridable: true,
-            },
-            color_space_source: VideoColorSpaceSource::MissingMetadata,
-            color_detection_method: VideoColorDetectionMethod::MissingMetadata,
-            color_metadata: None,
-            color_metadata_hints: Vec::new(),
-            hdr_metadata: Vec::new(),
-            bit_depth,
-            has_alpha: false,
-            avg_bitrate: 0,
-            total_frames: Some(frame_count as u64),
-        }],
-        audio_streams: Vec::new(),
-        has_video: true,
-        has_audio: false,
-    })
-}
-
-fn external_preview_media_codec(video_path: &Path) -> VideoCodec {
-    let name = video_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
-    let extension = video_path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
-    if name.contains("hevc") || name.contains("h265") {
-        return VideoCodec::H265;
-    }
-    if name.contains("h264") || name.contains("avc") {
-        return VideoCodec::H264;
-    }
-    match extension.as_str() {
-        "hevc" | "h265" => VideoCodec::H265,
-        "h264" | "avc" => VideoCodec::H264,
-        "av1" => VideoCodec::Av1,
-        "vp9" => VideoCodec::Vp9,
-        _ => VideoCodec::Other(extension),
-    }
-}
-
-fn external_preview_media_bit_depth(video_path: &Path) -> u8 {
-    let name = video_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
-    if name.contains("main10") || name.contains("10bit") || name.contains("p010") {
-        10
-    } else {
-        8
-    }
+fn probe_external_preview_media_info(video_path: &Path) -> anyhow::Result<MediaInfo> {
+    MediaInfo::probe(video_path)
+        .with_context(|| format!("probe external preview media {}", video_path.display()))
 }
 
 fn summarize_active_sequence_media_color_issues(

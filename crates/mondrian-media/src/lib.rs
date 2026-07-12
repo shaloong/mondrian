@@ -35,12 +35,12 @@ pub use decoder::{
     HwAccelPixelFormat, HwAccelProbe,
 };
 pub use info::{
-    AudioStreamInfo, DetectedColorInterpretation, MediaInfo, VideoColorDetectionMethod,
-    VideoColorDiagnostic, VideoColorDiagnosticIssueAggregate, VideoColorDiagnosticIssueSummary,
-    VideoColorInterpretationConfidence, VideoColorInterpretationEvidence,
-    VideoColorInterpretationWarning, VideoColorMetadata, VideoColorMetadataHint,
-    VideoColorMetadataHintScope, VideoColorSpaceSource, VideoColorTag, VideoHdrMetadataSummary,
-    VideoHdrSideDataKind, VideoStreamInfo,
+    AudioStreamInfo, DetectedColorInterpretation, MediaInfo, VideoCodecProfile,
+    VideoColorDetectionMethod, VideoColorDiagnostic, VideoColorDiagnosticIssueAggregate,
+    VideoColorDiagnosticIssueSummary, VideoColorInterpretationConfidence,
+    VideoColorInterpretationEvidence, VideoColorInterpretationWarning, VideoColorMetadata,
+    VideoColorMetadataHint, VideoColorMetadataHintScope, VideoColorSpaceSource, VideoColorTag,
+    VideoHdrMetadataSummary, VideoHdrSideDataKind, VideoStreamInfo,
 };
 pub use multilevel_cache::{CacheTier, MultiLevelCache, ResolvedMediaPath};
 pub use preview::{
@@ -49,10 +49,10 @@ pub use preview::{
     set_preview_decode_backend, DecodedRgbaAlphaMode, DecodedRgbaEncoding,
     DecodedRgbaFrameContract, FfmpegD3D11TextureView, FfmpegNativeDecodedFrameResource,
     FfmpegNativeDecodedFrameResourceError, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
-    PreviewDecodeBackend, PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodeOutcome,
-    PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
-    PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
-    PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
+    PreviewDecodeBackend, PreviewDecodeCpuBudget, PreviewDecodeDiagnostics,
+    PreviewDecodeExecutionPath, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest,
+    PreviewDecodeSeekStrategy, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
+    PreviewFileFingerprint, PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
     PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest, PreviewNativeDecodeFallback,
     PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
     PreviewNativeDecodedFrameResource, PreviewScrubAdaptiveClass, PreviewSeekIndexSource,

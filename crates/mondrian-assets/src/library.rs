@@ -832,10 +832,13 @@ mod tests {
             video_streams: vec![VideoStreamInfo {
                 index: 0,
                 codec: VideoCodec::H264,
+                codec_profile: mondrian_media::VideoCodecProfile::Unknown,
                 width: 1920,
                 height: 1080,
                 frame_rate: mondrian_core::types::Rational::FPS_30,
+                frame_rate_proven: true,
                 pixel_format: PixelFormat::Yuv420p,
+                pixel_format_proven: true,
                 color_range: mondrian_media::DecodedVideoRange::Unknown,
                 detected_color_space: None,
                 color_interpretation: DetectedColorInterpretation {
