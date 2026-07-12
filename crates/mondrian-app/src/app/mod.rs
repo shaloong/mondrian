@@ -17,7 +17,8 @@ use mondrian_core::{
         AssetId, ClipId, Color, EffectId, KeyframeId, Rational, Resolution, SequenceId, TimeCode,
         TrackId,
     },
-    ProjectId, ProjectMeta, ProjectSettings,
+    AudioSamplePosition, AudioSampleRate, AudioSampleRounding, ProjectId, ProjectMeta,
+    ProjectSettings,
 };
 use mondrian_effects::{
     EffectNode, EffectNodeExt, EffectType, MaskComponent, MaskId, MaskKeyframe, MaskShape,
@@ -46,7 +47,7 @@ const PROJECT_EXTENSION: &str = "mdp";
 const DEFAULT_ADJUSTMENT_LAYER_DURATION_SECS: f64 = 5.0;
 const MAX_STATUS_LOG_ENTRIES: usize = 64;
 const AUDIO_OUTPUT_CHANNELS: u8 = 2;
-const AUDIO_IDLE_WARMUP_CHUNK_SECS: f64 = 0.08;
+const AUDIO_IDLE_WARMUP_CHUNK_MILLIS: u32 = 80;
 
 mod action_handler;
 mod animation_state;
@@ -342,14 +343,6 @@ impl AppState {
             next_media_import_batch_id: 1,
             media_import_batches: HashMap::new(),
         }
-    }
-
-    fn fps(&self) -> f64 {
-        self.sequence
-            .as_ref()
-            .map(|seq| seq.settings.frame_rate.to_f64())
-            .unwrap_or(25.0)
-            .max(1.0)
     }
 
     pub fn set_status_hint(&mut self, message: impl Into<String>, is_error: bool) {

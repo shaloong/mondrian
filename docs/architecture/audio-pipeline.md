@@ -7,6 +7,9 @@ Adapter.
 ## Core types
 
 - `AudioBuffer`: interleaved `f32` PCM with explicit sample rate and channels.
+- `AudioSamplePosition`: signed integer sample position paired with its sample
+  rate. Rational timeline time is resolved through an explicit floor, ceil, or
+  nearest policy without an intermediate floating-point-seconds value.
 - `AudioMixer`: applies timeline track mute/solo, volume, pan, and bounded mix.
 - `AudioSourceCache`: caches decoded source PCM by media path.
 - `RealtimeAudioOutput`: one concrete CPAL stream with a fixed-capacity PCM queue
@@ -69,6 +72,16 @@ are distinct. Current CPAL evidence is explicitly graded
 `CallbackConsumptionEstimate`; it is not a backend device position.
 
 Render scheduling accumulates integer sample frames, not floating-point seconds.
+Timeline/edit boundaries must be converted once with
+`AudioSamplePosition::from_timecode`; playback, decode placement, buses, meters,
+and export then carry integer positions. Positions at different rates fail
+closed until an explicit resampling Adapter maps them. This prevents 29.97/59.94
+and long-project chunk boundaries from independently rounding the same edit.
+The realtime timeline Adapter now uses this contract for window, clip, and
+identity-speed source boundaries. Animated/non-1x `SpeedMap` evaluation remains
+frame-domain and is isolated as a legacy branch; export and time-remapped audio
+must migrate to the same sample-domain Interface before the exact audio mapping
+roadmap item can be closed.
 The production policy uses 80 ms windows, 120 ms preroll, a 460 ms high
 watermark, and at most eight admitted windows. These values are one validated
 `AudioPlaybackConfig`, not environment-variable semantics scattered through the

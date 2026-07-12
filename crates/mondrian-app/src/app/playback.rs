@@ -340,13 +340,31 @@ impl AppState {
             return;
         };
 
-        let center_secs = self.current_frame().max(0) as f64 / self.fps();
-        let chunk = AUDIO_IDLE_WARMUP_CHUNK_SECS;
+        let Ok(rate) = AudioSampleRate::new(self.audio_sample_rate) else {
+            return;
+        };
+        let Ok(center) = AudioSamplePosition::from_timecode(
+            TimeCode::new(self.current_frame().max(0), seq.time_base()),
+            rate,
+            AudioSampleRounding::Nearest,
+        ) else {
+            return;
+        };
+        let chunk_frames = u64::from(self.audio_sample_rate)
+            .saturating_mul(u64::from(AUDIO_IDLE_WARMUP_CHUNK_MILLIS))
+            .saturating_add(500)
+            / 1_000;
+        let chunk_frames = (chunk_frames as usize).max(1);
+        let before = center.sample().saturating_sub(chunk_frames as i64).max(0);
 
-        let _ = self.render_audio_chunk(seq, library.as_ref(), center_secs, chunk);
-        let before = (center_secs - chunk).max(0.0);
-        let _ = self.render_audio_chunk(seq, library.as_ref(), before, chunk);
-        let _ = self.render_audio_chunk(seq, library.as_ref(), center_secs + chunk, chunk);
+        let _ = self.render_audio_chunk(seq, library.as_ref(), center.sample(), chunk_frames);
+        let _ = self.render_audio_chunk(seq, library.as_ref(), before, chunk_frames);
+        let _ = self.render_audio_chunk(
+            seq,
+            library.as_ref(),
+            center.sample().saturating_add(chunk_frames as i64),
+            chunk_frames,
+        );
 
         self.audio_idle_warmup_last = Some(now);
     }
@@ -355,8 +373,8 @@ impl AppState {
         &self,
         seq: &Sequence,
         library: &AssetLibrary,
-        window_start_secs: f64,
-        duration_secs: f64,
+        window_start_sample: i64,
+        frame_count: usize,
     ) -> mondrian_core::Result<AudioBuffer> {
         render_audio_chunk_with_cache(
             seq,
@@ -364,8 +382,8 @@ impl AppState {
             self.audio_source_cache.as_ref(),
             self.audio_sample_rate,
             AUDIO_OUTPUT_CHANNELS,
-            window_start_secs,
-            duration_secs,
+            window_start_sample,
+            frame_count,
         )
     }
 

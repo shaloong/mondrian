@@ -334,7 +334,7 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 **项目与编辑**
 
-- [ ] 建立 archive/document/SQLite migration registry，并至少提供 v1 → current fixture、幂等打开和失败不覆盖测试。
+- [x] 建立 archive/document/SQLite migration registry，并提供 v1/current document fixture、v0 SQLite fixture、幂等打开、事务回滚和失败不覆盖测试；后续 schema 仍须逐版本增加真实迁移步骤。
 - [ ] 为 ProjectDocument、Sequence、Clip、Effect/Parameter、Mask、音频自动化定义稳定 ID 与 revision/invalidation 规则。
 - [ ] 审计所有高频编辑是否经 command/transaction；确定快照历史内存预算并输出淘汰诊断。
 - [ ] 明确 source time ↔ timeline time ↔ audio sample time 映射；补齐 VFR/混合帧率 policy 文档和测试矩阵。

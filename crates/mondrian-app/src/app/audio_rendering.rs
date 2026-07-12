@@ -28,16 +28,23 @@ impl TimelineAudioPcmRenderer {
 
 impl AudioPcmRenderer for TimelineAudioPcmRenderer {
     fn render(&self, request: AudioPcmRenderRequest) -> mondrian_core::Result<AudioBuffer> {
-        let window_start_secs = request.start_sample.max(0) as f64 / request.sample_rate as f64;
-        let duration_secs = request.frame_count as f64 / request.sample_rate as f64;
+        if request.sample_rate != self.sample_rate || request.channels != self.channels {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "timeline_audio_render_contract".to_string(),
+                reason: format!(
+                    "requested {} Hz/{} ch but Adapter is configured for {} Hz/{} ch",
+                    request.sample_rate, request.channels, self.sample_rate, self.channels
+                ),
+            });
+        }
         render_audio_chunk_with_cache(
             &self.sequence,
             self.library.as_ref(),
             self.source_cache.as_ref(),
             self.sample_rate,
             self.channels,
-            window_start_secs,
-            duration_secs,
+            request.start_sample,
+            request.frame_count,
         )
     }
 }
@@ -48,11 +55,20 @@ pub(super) fn render_audio_chunk_with_cache(
     audio_source_cache: &AudioSourceCache,
     sample_rate: u32,
     channels: u8,
-    window_start_secs: f64,
-    duration_secs: f64,
+    window_start_sample: i64,
+    chunk_frames: usize,
 ) -> mondrian_core::Result<AudioBuffer> {
-    let chunk_frames = ((duration_secs * sample_rate as f64).round() as usize).max(1);
-    let window_end_secs = window_start_secs + duration_secs;
+    let chunk_frames = chunk_frames.max(1);
+    let sample_rate = AudioSampleRate::new(sample_rate).map_err(|error| {
+        mondrian_core::MondrianError::WorkflowStepFailed {
+            step_id: "timeline_audio_sample_rate".to_string(),
+            reason: error.to_string(),
+        }
+    })?;
+    let chunk_frames_i64 = i64::try_from(chunk_frames).map_err(|_| audio_sample_range_error())?;
+    let window_end_sample = window_start_sample
+        .checked_add(chunk_frames_i64)
+        .ok_or_else(audio_sample_range_error)?;
 
     let has_solo = seq.audio_tracks.iter().any(|t| t.is_solo && !t.is_muted);
     let mut tracks = Vec::new();
@@ -67,10 +83,22 @@ pub(super) fn render_audio_chunk_with_cache(
                 continue;
             }
 
-            let clip_start_secs = clip.position.to_secs();
-            let clip_end_secs = clip.end_position().to_secs();
-            let overlap_start = window_start_secs.max(clip_start_secs);
-            let overlap_end = window_end_secs.min(clip_end_secs);
+            let clip_start_sample = AudioSamplePosition::from_timecode(
+                clip.position,
+                sample_rate,
+                AudioSampleRounding::Nearest,
+            )
+            .map_err(audio_time_error)?
+            .sample();
+            let clip_end_sample = AudioSamplePosition::from_timecode(
+                clip.end_position(),
+                sample_rate,
+                AudioSampleRounding::Nearest,
+            )
+            .map_err(audio_time_error)?
+            .sample();
+            let overlap_start = window_start_sample.max(clip_start_sample);
+            let overlap_end = window_end_sample.min(clip_end_sample);
             if overlap_end <= overlap_start {
                 continue;
             }
@@ -87,20 +115,39 @@ pub(super) fn render_audio_chunk_with_cache(
                 }
             };
 
-            let overlap_tc = TimeCode::from_secs(overlap_start, seq.settings.frame_rate);
-            let source_start_secs = clip.timeline_to_source_time(overlap_tc).to_secs().max(0.0);
-            let source_start_frame = (source_start_secs * sample_rate as f64).floor() as usize;
-            let segment_frames =
-                ((overlap_end - overlap_start) * sample_rate as f64).ceil() as usize;
+            let source_start_frame = if !clip.speed.property().is_animated()
+                && (clip.speed.evaluate_multiplier(TimeCode::new(0, clip.position.time_base)) - 1.0)
+                    .abs()
+                    <= f64::EPSILON
+            {
+                let source_in = AudioSamplePosition::from_timecode(
+                    clip.source_in,
+                    sample_rate,
+                    AudioSampleRounding::Nearest,
+                )
+                .map_err(audio_time_error)?
+                .sample();
+                source_in.saturating_add(overlap_start.saturating_sub(clip_start_sample))
+            } else {
+                // SpeedMap is still frame-domain. Keep that legacy path isolated
+                // until time remap gains an exact sample-domain integration Interface.
+                let overlap_secs = overlap_start as f64 / sample_rate.hz() as f64;
+                let overlap_tc = TimeCode::from_secs(overlap_secs, seq.settings.frame_rate);
+                let source_start_secs = clip.timeline_to_source_time(overlap_tc).to_secs().max(0.0);
+                (source_start_secs * sample_rate.hz() as f64).floor() as i64
+            };
+            let source_start_frame = usize::try_from(source_start_frame.max(0))
+                .map_err(|_| audio_sample_range_error())?;
+            let segment_frames = usize::try_from(overlap_end - overlap_start)
+                .map_err(|_| audio_sample_range_error())?;
             let segment = source.slice_frames(source_start_frame, segment_frames.max(1));
             if segment.samples.is_empty() {
                 continue;
             }
 
-            let place_offset = ((overlap_start - window_start_secs) * sample_rate as f64)
-                .round()
-                .max(0.0) as usize;
-            let mut placed = AudioBuffer::silent(sample_rate, channels, chunk_frames);
+            let place_offset = usize::try_from(overlap_start - window_start_sample)
+                .map_err(|_| audio_sample_range_error())?;
+            let mut placed = AudioBuffer::silent(sample_rate.hz(), channels, chunk_frames);
             let max_place_frames = chunk_frames.saturating_sub(place_offset);
             let copy_frames = segment.frame_count().min(max_place_frames);
 
@@ -132,8 +179,26 @@ pub(super) fn render_audio_chunk_with_cache(
     }
 
     if tracks.is_empty() {
-        return Ok(AudioBuffer::silent(sample_rate, channels, chunk_frames));
+        return Ok(AudioBuffer::silent(
+            sample_rate.hz(),
+            channels,
+            chunk_frames,
+        ));
     }
-    let mixer = AudioMixer::new(sample_rate, channels);
+    let mixer = AudioMixer::new(sample_rate.hz(), channels);
     Ok(mixer.mix(&tracks))
+}
+
+fn audio_time_error(error: mondrian_core::AudioTimeError) -> mondrian_core::MondrianError {
+    mondrian_core::MondrianError::WorkflowStepFailed {
+        step_id: "timeline_audio_time_mapping".to_string(),
+        reason: error.to_string(),
+    }
+}
+
+fn audio_sample_range_error() -> mondrian_core::MondrianError {
+    mondrian_core::MondrianError::WorkflowStepFailed {
+        step_id: "timeline_audio_sample_range".to_string(),
+        reason: "audio sample window is outside the supported platform range".to_string(),
+    }
 }
