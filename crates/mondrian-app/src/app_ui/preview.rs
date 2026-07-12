@@ -21,8 +21,7 @@ use mondrian_core::types::ColorEngine;
 use mondrian_core::types::{AssetId, BlendMode, ColorSpace, Rational, SequenceId};
 use mondrian_core::{MondrianError, WorkingColorSpace};
 use mondrian_effects::{
-    get_or_lower_effect_graph_to_gpu_plan, CompiledEffectGpuPlan, CompiledEffectGraph,
-    EffectCachePolicy,
+    get_or_lower_effect_graph_to_gpu_plan, CompiledEffectGraph, EffectCachePolicy,
 };
 use mondrian_media::{
     decode_preview_frame_cancellable, preview_decode_cpu_budget, DecodedFrameResidency,
@@ -53,7 +52,7 @@ use mondrian_renderer::{
 #[cfg(test)]
 use mondrian_renderer::{
     GpuNativeDecodedFrameImportSource, GpuNativeDecodedFrameTextureFormat,
-    TimelineCompositeColorPath,
+    TimelineCompositeColorPath, ViewerGpuExecutionLayer,
 };
 use mondrian_timeline::sequence::{
     ColorContext, InputColorResolution, InputColorResolutionSource,
@@ -6772,76 +6771,8 @@ pub(crate) enum AppUiGpuPreviewWorkingInput {
     /// Layer stack to composite directly on GPU before the GPU output transform.
     GpuComposite {
         /// Layers in bottom-to-top order.
-        layers: Vec<AppUiGpuPreviewCompositeLayer>,
+        layers: Vec<mondrian_renderer::ViewerGpuExecutionLayer>,
     },
-}
-
-/// One app-owned layer for GPU working-space preview compositing.
-pub(crate) enum AppUiGpuPreviewCompositeLayer {
-    /// Working-space media frame.
-    Media {
-        /// CPU working frame used as a correctness fallback when GPU input
-        /// transform cannot be scheduled for this layer.
-        frame: Option<CpuColorFrame>,
-        /// Source/input contract for the preferred GPU color path.
-        gpu_source: Option<AppUiGpuPreviewMediaSource>,
-        /// Native decoder surface contract for renderer low-copy import.
-        native_source: Option<AppUiGpuPreviewNativeSource>,
-        /// Layer opacity.
-        opacity: f32,
-        /// Timeline affine transform.
-        transform: [f32; 6],
-        /// Renderer-neutral working-space GPU effect plan.
-        effect_plan: Arc<CompiledEffectGpuPlan>,
-        /// Timeline frame seed for temporal effects.
-        frame_seed: i64,
-    },
-    /// Full-frame solid color.
-    SolidColor {
-        /// Solid layer.
-        layer: TimelineSolidColorLayer,
-        /// Renderer-neutral working-space GPU effect plan.
-        effect_plan: Arc<CompiledEffectGpuPlan>,
-    },
-    /// Full-frame adjustment over the current working composite.
-    Adjustment {
-        /// Renderer-neutral working-space GPU effect plan.
-        effect_plan: Arc<CompiledEffectGpuPlan>,
-        /// Adjustment opacity.
-        opacity: f32,
-        /// Adjustment blend mode. The GPU path currently accepts Normal.
-        blend_mode: BlendMode,
-        /// Timeline frame seed for temporal effects.
-        frame_seed: i64,
-    },
-}
-
-/// App-window media source contract for GPU input color transforms.
-#[derive(Debug, Clone)]
-pub(crate) struct AppUiGpuPreviewMediaSource {
-    /// CPU decoded encoded RGBA8 source frame.
-    pub source: CpuEncodedColorFrame,
-    /// Source/import -> timeline working-space transform.
-    pub input_transform: RenderInputTransform,
-    /// Residency reported by the media decode boundary.
-    pub decoder_residency: DecodedFrameResidency,
-    /// Native decoder handle family, when the media boundary produced a GPU surface.
-    pub decoder_handle_kind: Option<DecodedGpuFrameHandleKind>,
-    /// Decoder output surface format before any CPU RGBA conversion.
-    pub decoded_surface_format: DecodedVideoSurfaceFormat,
-    /// Decoder-reported sampling facts before any CPU RGBA conversion.
-    pub decoded_video_sampling: DecodedVideoSampling,
-}
-
-/// App-window native decoder source contract for renderer import.
-#[derive(Debug, Clone)]
-pub(crate) struct AppUiGpuPreviewNativeSource {
-    /// Resolved source color space represented by the decoded surface.
-    pub source_color_space: ColorSpace,
-    /// Complete source-to-working OCIO input transform.
-    pub input_transform: RenderInputTransform,
-    /// Complete media-owned native frame payload consumed by renderer import.
-    pub native_frame: Arc<PreviewNativeDecodedFrame>,
 }
 
 impl AppUiGpuPreviewFrame {
@@ -7042,8 +6973,8 @@ impl MediaPreviewFrame {
         self.decode_execution
     }
 
-    fn gpu_source(&self) -> Option<AppUiGpuPreviewMediaSource> {
-        self.gpu_source.as_ref().map(|source| AppUiGpuPreviewMediaSource {
+    fn gpu_source(&self) -> Option<mondrian_renderer::ViewerGpuMediaSource> {
+        self.gpu_source.as_ref().map(|source| mondrian_renderer::ViewerGpuMediaSource {
             source: source.source.clone(),
             input_transform: source.input_transform.clone(),
             decoder_residency: source.decoder_residency,
@@ -7053,12 +6984,14 @@ impl MediaPreviewFrame {
         })
     }
 
-    fn native_source(&self) -> Option<AppUiGpuPreviewNativeSource> {
-        self.native_source.as_ref().map(|source| AppUiGpuPreviewNativeSource {
-            source_color_space: source.source_color_space,
-            input_transform: source.input_transform.clone(),
-            native_frame: source.native_frame.clone(),
-        })
+    fn native_source(&self) -> Option<mondrian_renderer::ViewerGpuNativeSource> {
+        self.native_source
+            .as_ref()
+            .map(|source| mondrian_renderer::ViewerGpuNativeSource {
+                source_color_space: source.source_color_space,
+                input_transform: source.input_transform.clone(),
+                native_frame: source.native_frame.clone(),
+            })
     }
 
     fn working_frame(&self) -> Result<MediaPreviewWorkingFrame, String> {
@@ -8627,7 +8560,7 @@ fn gpu_composite_layers_for_resolved(
     _height: u32,
     resolved: &[ResolvedPreviewElement],
     working_color_space: WorkingColorSpace,
-) -> Result<Vec<AppUiGpuPreviewCompositeLayer>, GpuCompositingBlockerReason> {
+) -> Result<Vec<mondrian_renderer::ViewerGpuExecutionLayer>, GpuCompositingBlockerReason> {
     let mut layers = Vec::with_capacity(resolved.len());
     let mut has_composited_layer = false;
     for element in resolved {
@@ -8668,7 +8601,7 @@ fn gpu_composite_layers_for_resolved(
                 if !is_preview_gpu_media_transform_supported(*transform) {
                     return Err(GpuCompositingBlockerReason::UnsupportedTransform);
                 }
-                layers.push(AppUiGpuPreviewCompositeLayer::Media {
+                layers.push(mondrian_renderer::ViewerGpuExecutionLayer::Media {
                     frame: frame.frame.clone(),
                     gpu_source: frame.gpu_source(),
                     native_source: frame.native_source(),
@@ -8688,7 +8621,7 @@ fn gpu_composite_layers_for_resolved(
                 if !is_preview_identity_transform(layer.transform) {
                     return Err(GpuCompositingBlockerReason::UnsupportedTransform);
                 }
-                layers.push(AppUiGpuPreviewCompositeLayer::SolidColor {
+                layers.push(mondrian_renderer::ViewerGpuExecutionLayer::SolidColor {
                     layer: layer.clone(),
                     effect_plan,
                 });
@@ -8707,7 +8640,7 @@ fn gpu_composite_layers_for_resolved(
                 }
                 let effect_plan = get_or_lower_effect_graph_to_gpu_plan(&layer.effect_graph)
                     .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
-                layers.push(AppUiGpuPreviewCompositeLayer::Adjustment {
+                layers.push(mondrian_renderer::ViewerGpuExecutionLayer::Adjustment {
                     effect_plan,
                     opacity: layer.opacity,
                     blend_mode,
@@ -9841,7 +9774,7 @@ mod tests {
                 assert_eq!(layers.len(), 1);
                 assert!(matches!(
                     layers[0],
-                    AppUiGpuPreviewCompositeLayer::SolidColor { .. }
+                    ViewerGpuExecutionLayer::SolidColor { .. }
                 ));
             }
         }
@@ -9905,14 +9838,12 @@ mod tests {
 
         assert_eq!(layers.len(), 1);
         match &layers[0] {
-            AppUiGpuPreviewCompositeLayer::Media {
-                opacity, transform: actual_transform, ..
-            } => {
+            ViewerGpuExecutionLayer::Media { opacity, transform: actual_transform, .. } => {
                 assert_eq!(*opacity, 0.85);
                 assert_eq!(*actual_transform, transform);
             }
-            AppUiGpuPreviewCompositeLayer::SolidColor { .. }
-            | AppUiGpuPreviewCompositeLayer::Adjustment { .. } => {
+            ViewerGpuExecutionLayer::SolidColor { .. }
+            | ViewerGpuExecutionLayer::Adjustment { .. } => {
                 panic!("expected media layer")
             }
         }
@@ -9946,12 +9877,12 @@ mod tests {
                 .expect("supported effects should stay on GPU composite path");
 
         match &layers[0] {
-            AppUiGpuPreviewCompositeLayer::Media { effect_plan, frame_seed, .. } => {
+            ViewerGpuExecutionLayer::Media { effect_plan, frame_seed, .. } => {
                 assert_eq!(effect_plan.operations().len(), 2);
                 assert_eq!(*frame_seed, 19);
             }
-            AppUiGpuPreviewCompositeLayer::SolidColor { .. }
-            | AppUiGpuPreviewCompositeLayer::Adjustment { .. } => {
+            ViewerGpuExecutionLayer::SolidColor { .. }
+            | ViewerGpuExecutionLayer::Adjustment { .. } => {
                 panic!("expected media layer")
             }
         }
@@ -9990,13 +9921,13 @@ mod tests {
 
         assert_eq!(layers.len(), 2);
         match &layers[0] {
-            AppUiGpuPreviewCompositeLayer::SolidColor { effect_plan, .. } => {
+            ViewerGpuExecutionLayer::SolidColor { effect_plan, .. } => {
                 assert_eq!(effect_plan.operations().len(), 1);
             }
             _ => panic!("expected solid layer"),
         }
         match &layers[1] {
-            AppUiGpuPreviewCompositeLayer::Adjustment {
+            ViewerGpuExecutionLayer::Adjustment {
                 effect_plan,
                 opacity,
                 blend_mode,
@@ -10046,7 +9977,7 @@ mod tests {
         assert_eq!(layers.len(), 1);
         assert!(matches!(
             layers[0],
-            AppUiGpuPreviewCompositeLayer::SolidColor { .. }
+            ViewerGpuExecutionLayer::SolidColor { .. }
         ));
     }
 
@@ -10093,13 +10024,13 @@ mod tests {
                 .expect("source-only media should stay on GPU input/composite path");
 
         match &layers[0] {
-            AppUiGpuPreviewCompositeLayer::Media { frame, gpu_source, native_source, .. } => {
+            ViewerGpuExecutionLayer::Media { frame, gpu_source, native_source, .. } => {
                 assert!(frame.is_none());
                 assert!(gpu_source.is_some());
                 assert!(native_source.is_none());
             }
-            AppUiGpuPreviewCompositeLayer::SolidColor { .. }
-            | AppUiGpuPreviewCompositeLayer::Adjustment { .. } => {
+            ViewerGpuExecutionLayer::SolidColor { .. }
+            | ViewerGpuExecutionLayer::Adjustment { .. } => {
                 panic!("expected media layer")
             }
         }
@@ -10135,7 +10066,7 @@ mod tests {
                 .expect("native source-only media should reach GPU composite admission");
 
         match &layers[0] {
-            AppUiGpuPreviewCompositeLayer::Media { frame, gpu_source, native_source, .. } => {
+            ViewerGpuExecutionLayer::Media { frame, gpu_source, native_source, .. } => {
                 assert!(frame.is_none());
                 assert!(gpu_source.is_none());
                 let native_source = native_source.as_ref().expect("native source");
@@ -10174,8 +10105,8 @@ mod tests {
                     GpuNativeDecodedFrameTextureFormat::P010
                 );
             }
-            AppUiGpuPreviewCompositeLayer::SolidColor { .. }
-            | AppUiGpuPreviewCompositeLayer::Adjustment { .. } => {
+            ViewerGpuExecutionLayer::SolidColor { .. }
+            | ViewerGpuExecutionLayer::Adjustment { .. } => {
                 panic!("expected media layer")
             }
         }

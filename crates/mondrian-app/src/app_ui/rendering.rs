@@ -4,8 +4,6 @@
 //! upload and surface-present path so renderer behavior does not drift between
 //! test windows and the real app shell.
 
-#[cfg(any(not(target_os = "windows"), test))]
-use mondrian_renderer::GpuNativeDecodedFrameImportSupport;
 use mondrian_ui_renderer::{
     DrawCommand, ExternalTextureKey, ExternalTextureRegistrationError, ExternalTextureTransfer,
     GlyphUpload, UiRenderer,
@@ -436,52 +434,6 @@ impl AppUiFrameRenderer {
     }
 }
 
-#[cfg(any(not(target_os = "windows"), test))]
-pub(crate) fn native_decoded_frame_import_support_from_adapter(
-    adapter_info: &wgpu::AdapterInfo,
-    device_features: wgpu::Features,
-) -> GpuNativeDecodedFrameImportSupport {
-    let backend_label = format!("{:?}", adapter_info.backend);
-    let reason = match adapter_info.backend {
-        wgpu::Backend::Dx12
-            if !device_features.intersects(
-                wgpu::Features::TEXTURE_FORMAT_NV12 | wgpu::Features::TEXTURE_FORMAT_P010,
-            ) =>
-        {
-            "wgpu Dx12 device has neither TEXTURE_FORMAT_NV12 nor TEXTURE_FORMAT_P010 enabled"
-                .to_owned()
-        }
-        wgpu::Backend::Dx12 => format!(
-            "wgpu Dx12 device enabled native video texture formats {}, but the native video backend was not constructed for this renderer session",
-            enabled_native_video_texture_formats(device_features)
-        ),
-        wgpu::Backend::Vulkan =>
-            "wgpu Vulkan renderer has no external-memory native video import bridge connected"
-                .to_owned(),
-        wgpu::Backend::Metal =>
-            "wgpu Metal renderer has no CVPixelBuffer/IOSurface native video import bridge connected"
-                .to_owned(),
-        wgpu::Backend::Gl =>
-            "wgpu GL renderer has no native video texture import bridge connected".to_owned(),
-        wgpu::Backend::BrowserWebGpu =>
-            "browser WebGPU renderer cannot import desktop native decoder surfaces".to_owned(),
-        wgpu::Backend::Noop => "noop renderer cannot import native decoder surfaces".to_owned(),
-    };
-    GpuNativeDecodedFrameImportSupport::unavailable_with_reason(backend_label, reason)
-}
-
-#[cfg(any(not(target_os = "windows"), test))]
-fn enabled_native_video_texture_formats(device_features: wgpu::Features) -> String {
-    let mut formats = Vec::with_capacity(2);
-    if device_features.contains(wgpu::Features::TEXTURE_FORMAT_NV12) {
-        formats.push("NV12");
-    }
-    if device_features.contains(wgpu::Features::TEXTURE_FORMAT_P010) {
-        formats.push("P010");
-    }
-    formats.join("+")
-}
-
 fn presented_result(
     frame_started: Instant,
     glyph_upload_bytes: u64,
@@ -636,41 +588,6 @@ mod tests {
             reporter.changed_backend_event(timeout),
             Some(AppUiBackendEvent::SurfaceTimeout)
         );
-    }
-
-    #[test]
-    fn native_decoded_frame_import_support_reports_wgpu_backend_blocker() {
-        let adapter_info =
-            wgpu::AdapterInfo::new(wgpu::DeviceType::DiscreteGpu, wgpu::Backend::Dx12);
-        let support = native_decoded_frame_import_support_from_adapter(
-            &adapter_info,
-            wgpu::Features::TEXTURE_FORMAT_NV12 | wgpu::Features::TEXTURE_FORMAT_P010,
-        );
-
-        assert!(!support.renderer_backend_ready);
-        assert_eq!(support.renderer_backend_label.as_deref(), Some("Dx12"));
-        assert!(support
-            .unavailable_reason
-            .as_deref()
-            .unwrap_or_default()
-            .contains("backend was not constructed"));
-    }
-
-    #[test]
-    fn native_decoded_frame_import_support_reports_missing_device_features() {
-        let adapter_info =
-            wgpu::AdapterInfo::new(wgpu::DeviceType::DiscreteGpu, wgpu::Backend::Dx12);
-        let support = native_decoded_frame_import_support_from_adapter(
-            &adapter_info,
-            wgpu::Features::empty(),
-        );
-
-        assert!(!support.renderer_backend_ready);
-        assert!(support
-            .unavailable_reason
-            .as_deref()
-            .unwrap_or_default()
-            .contains("neither TEXTURE_FORMAT_NV12 nor TEXTURE_FORMAT_P010"));
     }
 
     #[test]

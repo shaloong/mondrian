@@ -6,25 +6,20 @@
 
 use std::sync::Arc;
 
-use super::native_video_import::{
-    native_source_texture_format_from_decoded, native_video_sampling_from_decoded,
-    AppUiNativeVideoImportRuntime,
-};
-use super::preview::{
-    AppUiGpuPreviewCompositeLayer, AppUiGpuPreviewFrame, AppUiGpuPreviewMediaSource,
-    AppUiGpuPreviewNativeSource,
-};
+use super::preview::AppUiGpuPreviewFrame;
 use mondrian_core::types::{BlendMode, Color};
 use mondrian_media::{DecodedFrameResidency, DecodedGpuFrameHandleKind};
 use mondrian_renderer::{
-    CpuColorFrame, GpuColorFrameHandle, GpuColorFrameTextureFormat, GpuCompositeLayer,
-    GpuCompositeLayerSource, GpuCompositeRequest, GpuCompositingDiagnostics,
-    GpuDisplayCalibrationRuntime, GpuFrameCompositor, GpuNativeDecodedFrameImportSupport,
-    GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling,
-    GpuViewerSpatialRuntime, GpuViewerSpatialRuntimeDiagnostics, RenderColorStageDiagnostics,
+    native_source_texture_format_from_decoded, native_video_sampling_from_decoded, CpuColorFrame,
+    GpuColorFrameHandle, GpuColorFrameTextureFormat, GpuCompositeLayer, GpuCompositeLayerSource,
+    GpuCompositeRequest, GpuCompositingDiagnostics, GpuDisplayCalibrationRuntime,
+    GpuFrameCompositor, GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
+    GpuNativeDecodedFrameVideoSampling, GpuViewerSpatialRuntime,
+    GpuViewerSpatialRuntimeDiagnostics, RenderColorStageDiagnostics,
     RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
     RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderGpuOutputBoundaryRuntimeRecordError,
-    ViewerSourceRect,
+    ViewerGpuExecutionLayer, ViewerGpuMediaSource, ViewerGpuNativeSource,
+    ViewerNativeVideoImportRuntime, ViewerSourceRect,
 };
 use mondrian_ui_renderer::ExternalTextureKey;
 use mondrian_ui_widgets::ViewerExternalTexturePresentation;
@@ -36,7 +31,7 @@ use mondrian_ui_widgets::ViewerExternalTexturePresentation;
 /// temporarily visible to the sibling Window Adapter while execution is moved
 /// behind this module's stable interface.
 pub(crate) struct ViewerGpuPreviewRuntime {
-    native_video_import: AppUiNativeVideoImportRuntime,
+    native_video_import: ViewerNativeVideoImportRuntime,
     color_output: RenderGpuOutputBoundaryRuntime,
     spatial: GpuViewerSpatialRuntime,
     display_calibration: GpuDisplayCalibrationRuntime,
@@ -49,7 +44,7 @@ impl ViewerGpuPreviewRuntime {
     /// Create one execution context for a renderer device.
     pub(crate) fn new(adapter: &wgpu::Adapter, device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         Self {
-            native_video_import: AppUiNativeVideoImportRuntime::new(adapter, device, queue),
+            native_video_import: ViewerNativeVideoImportRuntime::new(adapter, device, queue),
             color_output: RenderGpuOutputBoundaryRuntime::default(),
             spatial: GpuViewerSpatialRuntime::default(),
             display_calibration: GpuDisplayCalibrationRuntime::default(),
@@ -88,7 +83,7 @@ impl ViewerGpuPreviewRuntime {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         frame: &AppUiGpuPreviewFrame,
-        layers: &[AppUiGpuPreviewCompositeLayer],
+        layers: &[ViewerGpuExecutionLayer],
         presentation: ViewerExternalTexturePresentation,
         calibration: Option<Arc<mondrian_core::display_calibration::DisplayCalibrationLut3d>>,
     ) -> Result<ViewerGpuPreviewRecord, ViewerGpuPreviewRecordError> {
@@ -382,9 +377,9 @@ enum PreparedCompositeLayerSource<'a> {
 
 fn prepare_composite<'a>(
     preview_frame: &AppUiGpuPreviewFrame,
-    layers: &'a [AppUiGpuPreviewCompositeLayer],
+    layers: &'a [ViewerGpuExecutionLayer],
     runtime: &mut RenderGpuOutputBoundaryRuntime,
-    native_runtime: &mut AppUiNativeVideoImportRuntime,
+    native_runtime: &mut ViewerNativeVideoImportRuntime,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
@@ -399,7 +394,7 @@ fn prepare_composite<'a>(
 
     for layer in layers {
         match layer {
-            AppUiGpuPreviewCompositeLayer::Media {
+            ViewerGpuExecutionLayer::Media {
                 frame,
                 gpu_source,
                 native_source,
@@ -505,7 +500,7 @@ fn prepare_composite<'a>(
                     frame_seed: *frame_seed,
                 });
             }
-            AppUiGpuPreviewCompositeLayer::SolidColor { layer, effect_plan } => {
+            ViewerGpuExecutionLayer::SolidColor { layer, effect_plan } => {
                 prepared.residency.procedural_layers =
                     prepared.residency.procedural_layers.saturating_add(1);
                 prepared.layers.push(PreparedCompositeLayer {
@@ -517,7 +512,7 @@ fn prepare_composite<'a>(
                     frame_seed: layer.frame_seed,
                 });
             }
-            AppUiGpuPreviewCompositeLayer::Adjustment {
+            ViewerGpuExecutionLayer::Adjustment {
                 effect_plan,
                 opacity,
                 blend_mode,
@@ -537,8 +532,8 @@ fn prepare_composite<'a>(
 }
 
 fn record_native_video_layer(
-    source: &AppUiGpuPreviewNativeSource,
-    native_runtime: &mut AppUiNativeVideoImportRuntime,
+    source: &ViewerGpuNativeSource,
+    native_runtime: &mut ViewerNativeVideoImportRuntime,
     color_runtime: &mut RenderGpuOutputBoundaryRuntime,
 ) -> Result<GpuColorFrameHandle, String> {
     let resource = native_runtime.import(
@@ -560,7 +555,7 @@ fn record_native_video_layer(
 }
 
 fn record_gpu_input_layer(
-    source: &AppUiGpuPreviewMediaSource,
+    source: &ViewerGpuMediaSource,
     runtime: &mut RenderGpuOutputBoundaryRuntime,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -613,8 +608,8 @@ fn composite_layers<'a>(
 impl ViewerGpuPreviewResidencyFacts {
     fn record_source(
         &mut self,
-        media_source: Option<&AppUiGpuPreviewMediaSource>,
-        native_source: Option<&AppUiGpuPreviewNativeSource>,
+        media_source: Option<&ViewerGpuMediaSource>,
+        native_source: Option<&ViewerGpuNativeSource>,
     ) {
         let facts = native_source
             .map(ViewerGpuPreviewNativeVideoFacts::from_native_source)
@@ -637,7 +632,7 @@ impl ViewerGpuPreviewResidencyFacts {
 }
 
 impl ViewerGpuPreviewNativeVideoFacts {
-    fn from_media_source(source: &AppUiGpuPreviewMediaSource) -> Self {
+    fn from_media_source(source: &ViewerGpuMediaSource) -> Self {
         let source_texture_format = (source.decoder_residency == DecodedFrameResidency::GpuTexture)
             .then(|| native_source_texture_format_from_decoded(source.decoded_surface_format))
             .flatten();
@@ -654,7 +649,7 @@ impl ViewerGpuPreviewNativeVideoFacts {
         }
     }
 
-    fn from_native_source(source: &AppUiGpuPreviewNativeSource) -> Self {
+    fn from_native_source(source: &ViewerGpuNativeSource) -> Self {
         let source_texture_format =
             native_source_texture_format_from_decoded(source.native_frame.surface_format);
         let source_video_sampling = source_texture_format.and_then(|format| {

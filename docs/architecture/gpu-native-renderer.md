@@ -182,9 +182,9 @@ CPU RGBA, but the compositor still receives CPU-uploaded RGBA rather than a
 native decoder surface.
 
 Viewer GPU output telemetry now preserves decoder residency and payload
-sampling facts through both preview source contracts. `AppUiGpuPreviewMediaSource`
+sampling facts through both renderer-owned source contracts. `ViewerGpuMediaSource`
 carries CPU RGBA source pixels plus decoder diagnostics for the GPU OCIO upload
-path; `AppUiGpuPreviewNativeSource` carries a native decoder surface contract
+path; `ViewerGpuNativeSource` carries a native decoder surface contract
 without CPU pixels. It retains the complete media-owned
 `PreviewNativeDecodedFrame`, including the opaque process-local handle token,
 instead of flattening the payload into diagnostic facts; this preserves the
@@ -202,8 +202,8 @@ distinguish CPU-decoded media, native GPU-decoded media, native media blocked
 by missing sampling facts, mixed CPU/native stacks, and procedural GPU-native
 content across the concrete Windows backend and still-unimplemented
 VideoToolbox/VA-API import adapters.
-The app window owns `AppUiNativeVideoImportRuntime` alongside, but independently
-from, the swapchain UI renderer. On Windows it constructs the concrete renderer
+The renderer owns `ViewerNativeVideoImportRuntime` independently from the
+swapchain UI renderer. On Windows it constructs the concrete renderer
 backend from the active adapter/device/queue and publishes that backend's support
 contract; construction failure remains unavailable with its exact reason. The
 runtime survives surface-format/UI-renderer rebuilds so display changes do not
@@ -271,6 +271,22 @@ numerical contract for extending the GPU subset; shader parsing or successful
 command recording alone is not sufficient evidence of effect correctness.
 
 ## Viewer Working-Linear Spatial Processing
+
+`viewer_execution.rs` is the renderer-neutral entry boundary for Viewer GPU
+inputs. `ViewerGpuExecutionLayer`, `ViewerGpuMediaSource`, and
+`ViewerGpuNativeSource` contain only media payloads, color transforms, effect
+plans, compositing parameters, and native-resource lifetime. They contain no
+Window registration key, playback ticket, cache key, or headless completion
+policy. App code consumes these contracts directly; it must not re-export them
+under App-owned aliases.
+
+Native decoded-frame format and sampling resolution is renderer policy and
+therefore lives beside `ViewerNativeVideoImportRuntime`. Unknown range,
+bit-depth mismatch, unsupported chroma location, or an RGB/YUV matrix mismatch
+fails closed before backend execution. Platform capability discovery and
+product admission explanations remain App Adapter responsibilities: they may
+combine media, platform, and renderer evidence, but cannot reproduce import
+format policy or construct renderer resources.
 
 `viewer_spatial.rs` owns Viewer-only crop and resize processing. Its typed plan
 accepts and produces only GPU-resident `Working + LinearFloat + Rgba32Float`

@@ -921,11 +921,12 @@ decision should be `HardwareDecodeCpuTransfer`; this should improve decode CPU
 pressure but is not the final residency model. Only after an adapter produces
 native GPU residency should later readiness failures move to renderer or
 platform import diagnostics.
-The app-window GPU preview path must preserve those media facts in its frame
-residency telemetry. Media decode diagnostics feed the
-`AppUiGpuPreviewMediaSource` contract, and window-side native video import
-readiness combines decoder residency/handle/format with the platform import
-probe and renderer import support. This does not make CPU RGBA preview hardware
+Every Viewer GPU Adapter must preserve those media facts in its frame-residency
+telemetry. Media decode diagnostics feed the renderer-owned
+`ViewerGpuMediaSource` contract, while a retained native payload feeds
+`ViewerGpuNativeSource`. App product admission combines decoder
+residency/handle/format with the platform import probe and renderer import
+support. This does not make CPU RGBA preview hardware
 decoded; it prevents the future hardware decoder adapter from being hidden
 behind a generic "GPU input upload" label once it starts producing NV12/P010
 native surfaces.

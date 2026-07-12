@@ -20,8 +20,8 @@ use crate::app_ui::native_video_import::{
     AppUiNativeVideoImportReadinessInput,
 };
 use crate::app_ui::preview::{
-    AppUiGpuPreviewCompositeLayer, AppUiGpuPreviewFrame, AppUiGpuPreviewFrameState,
-    AppUiGpuPreviewWorkingInput, AppUiPreviewColorRejection,
+    AppUiGpuPreviewFrame, AppUiGpuPreviewFrameState, AppUiGpuPreviewWorkingInput,
+    AppUiPreviewColorRejection,
 };
 use crate::app_ui::preview_gpu_output_blocker::{
     PreviewGpuOutputBlocker, PreviewGpuOutputBlockerBreakdown,
@@ -45,7 +45,7 @@ use mondrian_renderer::{
     RenderColorStageDiagnostics, RenderGpuOutputBoundaryRuntimeDiagnostics,
     RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputRuntimeDiagnosticsReport,
     RenderGpuOutputStageDiagnosticsReport, RenderGpuOutputStageResourcePlanError,
-    RenderOutputColorBoundary, RenderOutputColorBoundaryTarget,
+    RenderOutputColorBoundary, RenderOutputColorBoundaryTarget, ViewerGpuExecutionLayer,
 };
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutManager, ShortcutScope};
@@ -800,14 +800,14 @@ impl AppUiViewerGpuOutputFrameResidency {
             AppUiGpuPreviewWorkingInput::GpuComposite { layers } => {
                 let media_layers = layers
                     .iter()
-                    .filter(|layer| matches!(layer, AppUiGpuPreviewCompositeLayer::Media { .. }))
+                    .filter(|layer| matches!(layer, ViewerGpuExecutionLayer::Media { .. }))
                     .count() as u32;
                 let gpu_input_eligible_layers = layers
                     .iter()
                     .filter(|layer| {
                         matches!(
                             layer,
-                            AppUiGpuPreviewCompositeLayer::Media { gpu_source: Some(_), .. }
+                            ViewerGpuExecutionLayer::Media { gpu_source: Some(_), .. }
                         )
                     })
                     .count() as u32;
@@ -816,7 +816,7 @@ impl AppUiViewerGpuOutputFrameResidency {
                     .filter(|layer| {
                         matches!(
                             layer,
-                            AppUiGpuPreviewCompositeLayer::Media { native_source: Some(_), .. }
+                            ViewerGpuExecutionLayer::Media { native_source: Some(_), .. }
                         )
                     })
                     .count() as u32;

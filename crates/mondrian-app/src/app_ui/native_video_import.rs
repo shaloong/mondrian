@@ -6,25 +6,23 @@
 //! uploads.
 
 use super::preview::AppUiPreviewHardwareDecodeAdmissionBlocker;
-use mondrian_core::{ColorMatrixCoefficients, ColorSpace};
 use mondrian_media::PreviewHardwareDecodeRequest;
-use mondrian_media::PreviewNativeDecodedFrame;
+use mondrian_media::{DecodedFrameResidency, DecodedGpuFrameHandleKind};
+#[cfg(test)]
 use mondrian_media::{
-    DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
-    DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
+    DecodedVideoChromaLocation, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
 };
 use mondrian_platform::{NativeVideoTextureHandleKind, NativeVideoTextureImportProbeResult};
-#[cfg(target_os = "windows")]
+#[cfg(test)]
 use mondrian_renderer::{
-    execute_native_decoded_frame_import, D3D11Dx12NativeVideoImportBackend,
-    GpuNativeDecodedFrameImportBackend,
+    native_source_texture_format_from_decoded, native_video_sampling_from_decoded,
 };
 use mondrian_renderer::{
-    GpuColorFrameIdAllocator, GpuColorFrameResource, GpuColorFrameWgpuResource,
-    GpuNativeDecodedFrameImportContract, GpuNativeDecodedFrameImportSupport,
-    GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation,
-    GpuVideoRange, RenderInputTransform,
+    GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
+    GpuNativeDecodedFrameVideoSampling,
 };
+#[cfg(test)]
+use mondrian_renderer::{GpuVideoChromaLocation, GpuVideoRange};
 
 /// Stable readiness category for native decoded-frame import.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -54,109 +52,6 @@ pub(crate) enum AppUiNativeVideoImportReadinessStatus {
     ReadyZeroCopy,
     /// The path cannot stay zero-copy but can use a declared low-copy fallback.
     ReadyLowCopy,
-}
-
-/// App-owned native video backend lifetime and renderer support contract.
-///
-/// This runtime is independent of swapchain/UI renderer rebuilds. Imported
-/// working resources use frame ids allocated by the destination color runtime
-/// before entering its shared frame table.
-pub(crate) struct AppUiNativeVideoImportRuntime {
-    support: GpuNativeDecodedFrameImportSupport,
-    #[cfg(target_os = "windows")]
-    backend: Option<D3D11Dx12NativeVideoImportBackend>,
-}
-
-impl AppUiNativeVideoImportRuntime {
-    pub fn new(adapter: &wgpu::Adapter, device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
-        #[cfg(target_os = "windows")]
-        {
-            match D3D11Dx12NativeVideoImportBackend::new(adapter, device, queue) {
-                Ok(backend) => Self {
-                    support: backend.support().clone(),
-                    backend: Some(backend),
-                },
-                Err(error) => Self {
-                    support: GpuNativeDecodedFrameImportSupport::unavailable_with_reason(
-                        format!("{:?}", adapter.get_info().backend),
-                        format!("native D3D11/DX12 YUV + OCIO backend unavailable: {error}"),
-                    ),
-                    backend: None,
-                },
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = (device, queue);
-            Self {
-                support: super::rendering::native_decoded_frame_import_support_from_adapter(
-                    &adapter.get_info(),
-                    device.features(),
-                ),
-            }
-        }
-    }
-
-    pub fn support(&self) -> GpuNativeDecodedFrameImportSupport {
-        self.support.clone()
-    }
-
-    pub fn import(
-        &mut self,
-        ids: &mut GpuColorFrameIdAllocator,
-        source_color_space: ColorSpace,
-        input_transform: &RenderInputTransform,
-        native_frame: &PreviewNativeDecodedFrame,
-    ) -> Result<GpuColorFrameResource<GpuColorFrameWgpuResource>, String> {
-        let source_texture_format = native_source_texture_format_from_decoded(
-            native_frame.surface_format,
-        )
-        .ok_or_else(|| {
-            format!(
-                "decoded native surface format {:?} has no renderer import contract",
-                native_frame.surface_format
-            )
-        })?;
-        let video_sampling = native_video_sampling_from_decoded(
-            source_color_space,
-            source_texture_format,
-            native_frame.diagnostics.decoded_video_sampling,
-        )
-        .ok_or_else(|| {
-            "decoded native surface has incomplete video sampling metadata".to_owned()
-        })?;
-        let contract = GpuNativeDecodedFrameImportContract {
-            width: native_frame.width,
-            height: native_frame.height,
-            source_color_space,
-            input_transform: input_transform.clone(),
-            handle_kind: native_frame.handle_kind(),
-            source_texture_format,
-            video_sampling,
-            label: format!("viewer-native-working-{}", native_frame.handle.id().get()),
-        };
-        #[cfg(target_os = "windows")]
-        {
-            let backend = self.backend.as_mut().ok_or_else(|| {
-                self.support
-                    .unavailable_reason
-                    .clone()
-                    .unwrap_or_else(|| "native video backend is unavailable".to_owned())
-            })?;
-            execute_native_decoded_frame_import(backend, ids, contract, native_frame)
-                .map(|execution| execution.resource)
-                .map_err(|error| error.to_string())
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = (ids, contract, native_frame);
-            Err(self
-                .support
-                .unavailable_reason
-                .clone()
-                .unwrap_or_else(|| "native video backend is unavailable".to_owned()))
-        }
-    }
 }
 
 /// Input facts for native decoded-frame import readiness evaluation.
@@ -478,78 +373,6 @@ pub(crate) fn resolve_playback_hardware_decode_admission(
 
 fn saturated_u8_len(len: usize) -> u8 {
     len.min(usize::from(u8::MAX)) as u8
-}
-
-/// Map a media-layer decoded surface fact to the renderer native import format contract.
-pub(crate) fn native_source_texture_format_from_decoded(
-    format: DecodedVideoSurfaceFormat,
-) -> Option<GpuNativeDecodedFrameTextureFormat> {
-    GpuNativeDecodedFrameTextureFormat::try_from(format).ok()
-}
-
-/// Combine media decoder sampling facts with the resolved source color space.
-///
-/// This is app-layer admission logic: media does not depend on renderer types,
-/// and renderer backends do not guess platform defaults. Unknown or unsupported
-/// payload facts fail closed so viewer diagnostics can explain why native video
-/// import stayed on the CPU/low-copy path.
-pub(crate) fn native_video_sampling_from_decoded(
-    source_color_space: ColorSpace,
-    source_texture_format: GpuNativeDecodedFrameTextureFormat,
-    decoded: DecodedVideoSampling,
-) -> Option<GpuNativeDecodedFrameVideoSampling> {
-    let range = match decoded.range {
-        DecodedVideoRange::Limited => GpuVideoRange::Limited,
-        DecodedVideoRange::Full => GpuVideoRange::Full,
-        DecodedVideoRange::Unknown => return None,
-    };
-    let expected_bit_depth = expected_native_source_bit_depth(source_texture_format);
-    if decoded.bit_depth != expected_bit_depth {
-        return None;
-    }
-
-    let chroma_location = match source_texture_format {
-        GpuNativeDecodedFrameTextureFormat::Nv12 | GpuNativeDecodedFrameTextureFormat::P010 => {
-            decoded_chroma_location_to_gpu(decoded.chroma_location)?
-        }
-        GpuNativeDecodedFrameTextureFormat::Rgba8Unorm
-        | GpuNativeDecodedFrameTextureFormat::Bgra8Unorm => {
-            if source_color_space.encoding().matrix != ColorMatrixCoefficients::Rgb {
-                return None;
-            }
-            GpuVideoChromaLocation::Unspecified
-        }
-    };
-
-    Some(GpuNativeDecodedFrameVideoSampling::from_source_color_space(
-        source_color_space,
-        range,
-        decoded.bit_depth,
-        chroma_location,
-    ))
-}
-
-fn expected_native_source_bit_depth(format: GpuNativeDecodedFrameTextureFormat) -> u8 {
-    match format {
-        GpuNativeDecodedFrameTextureFormat::Nv12
-        | GpuNativeDecodedFrameTextureFormat::Rgba8Unorm
-        | GpuNativeDecodedFrameTextureFormat::Bgra8Unorm => 8,
-        GpuNativeDecodedFrameTextureFormat::P010 => 10,
-    }
-}
-
-fn decoded_chroma_location_to_gpu(
-    location: DecodedVideoChromaLocation,
-) -> Option<GpuVideoChromaLocation> {
-    match location {
-        DecodedVideoChromaLocation::Left => Some(GpuVideoChromaLocation::Left),
-        DecodedVideoChromaLocation::Center => Some(GpuVideoChromaLocation::Center),
-        DecodedVideoChromaLocation::TopLeft => Some(GpuVideoChromaLocation::TopLeft),
-        DecodedVideoChromaLocation::Unknown
-        | DecodedVideoChromaLocation::Top
-        | DecodedVideoChromaLocation::BottomLeft
-        | DecodedVideoChromaLocation::Bottom => None,
-    }
 }
 
 #[cfg(test)]

@@ -26,6 +26,7 @@ pub mod shaders;
 pub mod texture_pool;
 pub mod timeline_composite;
 pub mod timeline_render_plan;
+pub mod viewer_execution;
 pub mod viewer_spatial;
 
 pub use color_accuracy::{
@@ -185,6 +186,11 @@ pub use timeline_render_plan::{
     TimelineNestedSequencePlan, TimelineRenderColorTarget, TimelineRenderIntent,
     TimelineRenderPlan, TimelineRenderPlanElement, TimelineRenderQuality, TimelineRenderSettings,
     TimelineSolidColorPlan,
+};
+pub use viewer_execution::{
+    native_source_texture_format_from_decoded, native_video_sampling_from_decoded,
+    ViewerGpuExecutionLayer, ViewerGpuMediaSource, ViewerGpuNativeSource,
+    ViewerNativeVideoImportRuntime,
 };
 pub use viewer_spatial::{
     GpuViewerSpatialPlan, GpuViewerSpatialPlanError, GpuViewerSpatialRuntime,

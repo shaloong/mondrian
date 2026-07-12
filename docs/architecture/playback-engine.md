@@ -568,6 +568,17 @@ composite/color Implementation. Renderer and platform hardware-decode admission
 is resolved in `native_video_import`, then consumed by both Host and headless
 Adapters; it is no longer Host-local policy.
 
+The first renderer-ownership extraction makes the execution payload boundary
+and native import backend renderer-owned. App preview planning produces
+`ViewerGpuExecutionLayer` directly, and `ViewerNativeVideoImportRuntime` owns
+backend lifetime plus fail-closed decoded-format/sampling resolution. There are
+no App-named compatibility aliases. The remaining App-local
+`ViewerGpuPreviewRuntime` is a transitional composition root for compositor,
+spatial, output, and UI registration; it is not the final shared execution
+Interface. The next extraction moves its renderer-only recording core into
+`mondrian-renderer`, after which Window registration/presentation and headless
+submission/completion are independent thin Adapters over that same core.
+
 ## Required invariants
 
 1. Exactly one Clock Master is authoritative in Playing/Recovering.
