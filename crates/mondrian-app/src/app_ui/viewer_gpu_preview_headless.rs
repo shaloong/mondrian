@@ -11,11 +11,15 @@ use super::preview::{
     AppUiGpuPreviewFrame, AppUiGpuPreviewWorkingInput, AppUiPreviewDecodeExecutionSummary,
 };
 use mondrian_renderer::{
-    native_video_texture_device_features, profile::gpu_timestamp_query_device_features,
-    profile::GpuTimestampQueryRing, request_adapter_with_native_video_preference,
-    GpuCompositingDiagnostics, GpuNativeDecodedFrameImportSupport,
-    GpuViewerSpatialRuntimeDiagnostics, RenderColorStageDiagnostics,
-    ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionRequest, ViewerGpuExecutionRuntime,
+    native_video_texture_device_features,
+    profile::gpu_timestamp_query_device_features,
+    profile::{
+        GpuTimestampQueryRing, GpuTimestampSample, GpuTimestampStageMarker, GpuTimestampToken,
+    },
+    request_adapter_with_native_video_preference, GpuCompositingDiagnostics,
+    GpuNativeDecodedFrameImportSupport, GpuViewerSpatialRuntimeDiagnostics,
+    RenderColorStageDiagnostics, ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionGpuStage,
+    ViewerGpuExecutionRequest, ViewerGpuExecutionRuntime, ViewerGpuExecutionStageMarker,
     ViewerSourceRect,
 };
 use mondrian_ui_widgets::ViewerExternalTexturePresentation;
@@ -73,6 +77,32 @@ pub(crate) struct HeadlessViewerGpuAdapter {
     timestamp_ring: Option<GpuTimestampQueryRing>,
     adapter_info: HeadlessViewerGpuAdapterInfo,
     current_output_key: Option<String>,
+}
+
+struct HeadlessGpuStageMarker<'a> {
+    ring: &'a mut GpuTimestampQueryRing,
+    token: GpuTimestampToken,
+}
+
+impl ViewerGpuExecutionStageMarker for HeadlessGpuStageMarker<'_> {
+    fn mark(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        stage: ViewerGpuExecutionGpuStage,
+    ) -> Result<(), String> {
+        let marker = match stage {
+            ViewerGpuExecutionGpuStage::WorkingComposite => {
+                GpuTimestampStageMarker::AfterWorkingComposite
+            }
+            ViewerGpuExecutionGpuStage::Spatial => GpuTimestampStageMarker::AfterSpatial,
+            ViewerGpuExecutionGpuStage::OutputBoundary => {
+                GpuTimestampStageMarker::AfterOutputBoundary
+            }
+        };
+        self.ring
+            .mark_stage(encoder, self.token, marker)
+            .map_err(|error| error.to_string())
+    }
 }
 
 impl HeadlessViewerGpuAdapter {
@@ -138,17 +168,13 @@ impl HeadlessViewerGpuAdapter {
     }
 
     /// Finish deferred timestamp maps after the measured playback interval.
-    pub(crate) fn finish_gpu_timings(&mut self) -> Result<Vec<(u64, u64)>, HeadlessViewerGpuError> {
+    pub(crate) fn finish_gpu_timings(
+        &mut self,
+    ) -> Result<Vec<GpuTimestampSample>, HeadlessViewerGpuError> {
         let Some(ring) = &mut self.timestamp_ring else {
             return Ok(Vec::new());
         };
         ring.finish_all(&self.device)
-            .map(|samples| {
-                samples
-                    .into_iter()
-                    .map(|sample| (sample.token.id(), sample.elapsed_us))
-                    .collect()
-            })
             .map_err(|error| HeadlessViewerGpuError::Timestamp(error.to_string()))
     }
 
@@ -201,32 +227,45 @@ impl HeadlessViewerGpuAdapter {
             AppUiGpuPreviewWorkingInput::GpuComposite { layers } => layers,
         };
         let source_rect = presentation.normalized_source_rect();
-        let record = self
-            .runtime
-            .record(
-                &self.device,
-                &self.queue,
-                &mut encoder,
-                ViewerGpuExecutionRequest {
-                    sequence_id: frame.sequence_id,
-                    timeline_frame: frame.frame,
-                    width: frame.width,
-                    height: frame.height,
-                    working_color_space: frame.working_color_space,
-                    layers,
-                    output_boundary: &frame.boundary,
-                    source_rect: ViewerSourceRect {
-                        x: source_rect.x,
-                        y: source_rect.y,
-                        width: source_rect.width,
-                        height: source_rect.height,
-                    },
-                    output_width: presentation.output_width,
-                    output_height: presentation.output_height,
-                    display_calibration: None,
-                },
-            )
-            .map_err(|error| HeadlessViewerGpuError::Record(error.to_string()))?;
+        let request = ViewerGpuExecutionRequest {
+            sequence_id: frame.sequence_id,
+            timeline_frame: frame.frame,
+            width: frame.width,
+            height: frame.height,
+            working_color_space: frame.working_color_space,
+            layers,
+            output_boundary: &frame.boundary,
+            source_rect: ViewerSourceRect {
+                x: source_rect.x,
+                y: source_rect.y,
+                width: source_rect.width,
+                height: source_rect.height,
+            },
+            output_width: presentation.output_width,
+            output_height: presentation.output_height,
+            display_calibration: None,
+        };
+        let record_result =
+            if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token) {
+                let mut stage_marker = HeadlessGpuStageMarker { ring, token };
+                self.runtime.record_with_stage_marker(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    request,
+                    Some(&mut stage_marker),
+                )
+            } else {
+                self.runtime.record(&self.device, &self.queue, &mut encoder, request)
+            };
+        if record_result.is_err() {
+            if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token) {
+                ring.abandon_frame(token)
+                    .map_err(|error| HeadlessViewerGpuError::Timestamp(error.to_string()))?;
+            }
+        }
+        let record =
+            record_result.map_err(|error| HeadlessViewerGpuError::Record(error.to_string()))?;
         let _output_texture = self
             .runtime
             .output_texture_view(&record)

@@ -321,6 +321,11 @@ completion-wait, and total wall p95 independently. The headless adapter's
 16-slot timestamp ring submits and maps queries without a per-frame wait; the
 offline gate drains once after playback. Ring saturation discards telemetry and
 fails timestamp coverage instead of back-pressuring the measured scheduler.
+The same report attributes hardware duration across working composite, spatial,
+output-boundary, and optional display-calibration stages using ordered encoder
+timestamps. This attribution is distinct from CPU stage preparation timings and
+lets the gate localize a GPU regression without inserting a per-stage queue
+submission or CPU/GPU synchronization point.
 Continuous-playback decode failure extraction is scoped to PlaybackCursor plus
 global fatal scheduler/worker failures. Random-access still and scrub latency
 remain visible in the full diagnostic report but cannot fail a playback-only

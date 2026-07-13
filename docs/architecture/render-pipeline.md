@@ -788,6 +788,14 @@ means commands bracketed on the hardware timeline, not record/submit/wait wall
 time. Gate reports also identify the adapter and retain compositor and spatial
 pass diagnostics so regressions remain attributable to a concrete execution
 path.
+Each ring slot resolves five ordered hardware counters: frame begin, after
+working compositing, after Viewer spatial processing, after the output color
+boundary, and frame finish after optional display calibration. The four
+adjacent deltas are reported alongside total GPU duration. Marker ordering is
+validated before submission; a recording failure abandons and immediately
+releases its slot without polling or waiting. Missing, duplicated, or
+out-of-order markers fail the telemetry sample instead of producing misleading
+attribution.
 Successful Viewer records also expose CPU preparation attribution for native
 input/import, working composite, spatial, output-boundary, and optional display
 calibration stages. These timings end at command preparation and never claim to

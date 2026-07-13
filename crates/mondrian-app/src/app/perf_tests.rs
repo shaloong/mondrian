@@ -47,6 +47,7 @@ use mondrian_media::{
     VideoColorDiagnosticIssueAggregate,
 };
 use mondrian_platform::{NativeVideoTextureImportProbe, SystemPlatformService};
+use mondrian_renderer::profile::{GpuTimestampSample, GpuTimestampStageDurations};
 use mondrian_renderer::{
     GpuCompositingDiagnostics, GpuViewerSpatialRuntimeDiagnostics, NativeVideoImportCpuTimings,
     RenderColorStageDiagnostics, ViewerGpuExecutionCpuStageTimings,
@@ -137,6 +138,8 @@ struct HeadlessViewerGpuExecutionSummary {
     display_calibration_samples_us: Vec<u64>,
     gpu_duration_samples_us: Vec<u64>,
     #[serde(skip)]
+    gpu_stage_samples: Vec<GpuTimestampStageDurations>,
+    #[serde(skip)]
     gpu_timestamp_tokens: Vec<u64>,
     missing_gpu_timestamp_frames: usize,
     discarded_gpu_timestamp_frames: u64,
@@ -193,17 +196,38 @@ impl HeadlessViewerGpuExecutionSummary {
         }
     }
 
-    fn record_gpu_timings(&mut self, timings: &[(u64, u64)]) {
-        self.gpu_duration_samples_us.extend(
-            timings
-                .iter()
-                .filter(|(token, _)| self.gpu_timestamp_tokens.contains(token))
-                .map(|(_, duration_us)| *duration_us),
-        );
+    fn record_gpu_timings(&mut self, timings: &[GpuTimestampSample]) {
+        for sample in timings
+            .iter()
+            .filter(|sample| self.gpu_timestamp_tokens.contains(&sample.token.id()))
+        {
+            self.gpu_duration_samples_us.push(sample.elapsed_us);
+            self.gpu_stage_samples.push(sample.stages);
+        }
     }
 
     fn p95_duration_us(&self) -> u64 {
         p95_sample_us(&self.gpu_duration_samples_us)
+    }
+
+    fn p95_gpu_stages(&self) -> GpuTimestampStageDurations {
+        fn field(
+            samples: &[GpuTimestampStageDurations],
+            read: impl Fn(&GpuTimestampStageDurations) -> u64,
+        ) -> u64 {
+            p95_sample_us(&samples.iter().map(read).collect::<Vec<_>>())
+        }
+
+        GpuTimestampStageDurations {
+            through_working_composite_us: field(&self.gpu_stage_samples, |sample| {
+                sample.through_working_composite_us
+            }),
+            spatial_us: field(&self.gpu_stage_samples, |sample| sample.spatial_us),
+            output_boundary_us: field(&self.gpu_stage_samples, |sample| sample.output_boundary_us),
+            display_calibration_us: field(&self.gpu_stage_samples, |sample| {
+                sample.display_calibration_us
+            }),
+        }
     }
 
     fn p95_record_submit_us(&self) -> u64 {
@@ -340,6 +364,7 @@ struct PreviewExternalPlaybackGateReport {
     gpu_discarded_timestamp_frames: u64,
     gpu_execution_p95_limit_us: u64,
     gpu_execution_p95_observed_us: u64,
+    gpu_stage_p95_us: GpuTimestampStageDurations,
     gpu_record_submit_p95_us: u64,
     gpu_completion_wait_p95_us: u64,
     gpu_wall_duration_p95_us: u64,
@@ -1834,6 +1859,7 @@ fn evaluate_external_playback_gates(
         gpu_discarded_timestamp_frames: headless_gpu.discarded_gpu_timestamp_frames,
         gpu_execution_p95_limit_us,
         gpu_execution_p95_observed_us,
+        gpu_stage_p95_us: headless_gpu.p95_gpu_stages(),
         gpu_record_submit_p95_us: headless_gpu.p95_record_submit_us(),
         gpu_completion_wait_p95_us: headless_gpu.p95_completion_wait_us(),
         gpu_wall_duration_p95_us: headless_gpu.p95_wall_duration_us(),

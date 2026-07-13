@@ -51,6 +51,27 @@ pub struct ViewerGpuExecutionRequest<'a> {
     pub display_calibration: Option<Arc<DisplayCalibrationLut3d>>,
 }
 
+/// Ordered GPU command boundary exposed to an optional profiling Adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewerGpuExecutionGpuStage {
+    /// Working composite commands are complete.
+    WorkingComposite,
+    /// Viewer spatial commands are complete.
+    Spatial,
+    /// Display/output boundary commands are complete.
+    OutputBoundary,
+}
+
+/// Adapter hook for writing GPU markers without coupling execution to a profiler.
+pub trait ViewerGpuExecutionStageMarker {
+    /// Write one ordered marker into the active Viewer command encoder.
+    fn mark(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        stage: ViewerGpuExecutionGpuStage,
+    ) -> Result<(), String>;
+}
+
 /// Long-lived GPU state for a single Viewer preview execution context.
 ///
 /// Frame resources are cleared between candidates; pipelines and backend
@@ -111,6 +132,18 @@ impl ViewerGpuExecutionRuntime {
         encoder: &mut wgpu::CommandEncoder,
         request: ViewerGpuExecutionRequest<'_>,
     ) -> Result<ViewerGpuExecutionRecord, ViewerGpuExecutionError> {
+        self.record_with_stage_marker(device, queue, encoder, request, None)
+    }
+
+    /// Record one Viewer frame with optional ordered hardware profiling markers.
+    pub fn record_with_stage_marker(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        request: ViewerGpuExecutionRequest<'_>,
+        mut stage_marker: Option<&mut dyn ViewerGpuExecutionStageMarker>,
+    ) -> Result<ViewerGpuExecutionRecord, ViewerGpuExecutionError> {
         self.native_video_import.reset_frame_cpu_timings();
         let input_prepare_started = Instant::now();
         let prepared = prepare_composite(
@@ -143,6 +176,11 @@ impl ViewerGpuExecutionRuntime {
             )
             .map_err(ViewerGpuExecutionError::WorkingComposite)?;
         let working_composite_us = elapsed_us(working_composite_started);
+        mark_gpu_stage(
+            &mut stage_marker,
+            encoder,
+            ViewerGpuExecutionGpuStage::WorkingComposite,
+        )?;
         let working_view = self
             .color_output
             .frame_table()
@@ -178,6 +216,11 @@ impl ViewerGpuExecutionRuntime {
                 .map_err(|error| ViewerGpuExecutionError::SpatialTransfer(format!("{error:?}")))?;
         }
         let spatial_us = elapsed_us(spatial_started);
+        mark_gpu_stage(
+            &mut stage_marker,
+            encoder,
+            ViewerGpuExecutionGpuStage::Spatial,
+        )?;
         let output_boundary_started = Instant::now();
         let mut output_record = self
             .color_output
@@ -199,6 +242,11 @@ impl ViewerGpuExecutionRuntime {
             )
             .map_err(ViewerGpuExecutionError::OutputBoundary)?;
         let output_boundary_us = elapsed_us(output_boundary_started);
+        mark_gpu_stage(
+            &mut stage_marker,
+            encoder,
+            ViewerGpuExecutionGpuStage::OutputBoundary,
+        )?;
         stage_diagnostics.accumulate(output_record.stage_diagnostics);
         output_record.stage_diagnostics = stage_diagnostics;
         let output = output_record.materialized.output;
@@ -288,6 +336,17 @@ impl ViewerGpuExecutionRuntime {
     }
 }
 
+fn mark_gpu_stage(
+    marker: &mut Option<&mut dyn ViewerGpuExecutionStageMarker>,
+    encoder: &mut wgpu::CommandEncoder,
+    stage: ViewerGpuExecutionGpuStage,
+) -> Result<(), ViewerGpuExecutionError> {
+    if let Some(marker) = marker.as_deref_mut() {
+        marker.mark(encoder, stage).map_err(ViewerGpuExecutionError::StageMarker)?;
+    }
+    Ok(())
+}
+
 /// Successful GPU recording evidence consumed by presentation Adapters.
 pub struct ViewerGpuExecutionRecord {
     /// Renderer-owned output handle retained until frame resources clear.
@@ -355,6 +414,8 @@ pub enum ViewerGpuExecutionError {
     DisplayOutputMissing(String),
     #[error("Viewer GPU display calibration failed: {0}")]
     Calibration(String),
+    #[error("Viewer GPU profiling stage marker failed: {0}")]
+    StageMarker(String),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
