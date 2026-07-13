@@ -205,34 +205,8 @@ impl GpuViewerSpatialPlan {
         output_width: u32,
         output_height: u32,
     ) -> Result<Self, GpuViewerSpatialPlanError> {
-        source_rect.validate()?;
-        if output_width == 0 || output_height == 0 {
-            return Err(GpuViewerSpatialPlanError::EmptyOutputExtent {
-                width: output_width,
-                height: output_height,
-            });
-        }
-        let descriptor = input.descriptor();
-        if descriptor.domain != ColorFrameDomain::Working
-            || descriptor.encoding != ColorFrameEncoding::LinearFloat
-            || descriptor.residency != ColorFrameResidency::Gpu
-            || !matches!(descriptor.color_space, ColorFrameSpace::Working(_))
-        {
-            return Err(GpuViewerSpatialPlanError::InputNotWorkingLinear { actual: descriptor });
-        }
-        if input.texture_format() != GpuColorFrameTextureFormat::Rgba32Float {
-            return Err(GpuViewerSpatialPlanError::InputNotRgba32Float {
-                actual: input.texture_format(),
-            });
-        }
-        let source_width = f64::from(descriptor.width) * f64::from(source_rect.width);
-        let source_height = f64::from(descriptor.height) * f64::from(source_rect.height);
-        let scale_x = f64::from(output_width) / source_width;
-        let scale_y = f64::from(output_height) / source_height;
-        let anisotropy = scale_x.max(scale_y) / scale_x.min(scale_y);
-        if !anisotropy.is_finite() || anisotropy > 2.0 {
-            return Err(GpuViewerSpatialPlanError::ExcessiveScaleAnisotropy);
-        }
+        let descriptor =
+            validate_spatial_request(&input, source_rect, output_width, output_height)?;
         let output = GpuColorFrameHandle::new(
             ids.allocate(),
             ColorFrameDescriptor {
@@ -245,6 +219,43 @@ impl GpuViewerSpatialPlan {
         )?;
         Ok(Self { input, output, source_rect })
     }
+}
+
+fn validate_spatial_request(
+    input: &GpuColorFrameHandle,
+    source_rect: ViewerSourceRect,
+    output_width: u32,
+    output_height: u32,
+) -> Result<ColorFrameDescriptor, GpuViewerSpatialPlanError> {
+    source_rect.validate()?;
+    if output_width == 0 || output_height == 0 {
+        return Err(GpuViewerSpatialPlanError::EmptyOutputExtent {
+            width: output_width,
+            height: output_height,
+        });
+    }
+    let descriptor = input.descriptor();
+    if descriptor.domain != ColorFrameDomain::Working
+        || descriptor.encoding != ColorFrameEncoding::LinearFloat
+        || descriptor.residency != ColorFrameResidency::Gpu
+        || !matches!(descriptor.color_space, ColorFrameSpace::Working(_))
+    {
+        return Err(GpuViewerSpatialPlanError::InputNotWorkingLinear { actual: descriptor });
+    }
+    if input.texture_format() != GpuColorFrameTextureFormat::Rgba32Float {
+        return Err(GpuViewerSpatialPlanError::InputNotRgba32Float {
+            actual: input.texture_format(),
+        });
+    }
+    let source_width = f64::from(descriptor.width) * f64::from(source_rect.width);
+    let source_height = f64::from(descriptor.height) * f64::from(source_rect.height);
+    let scale_x = f64::from(output_width) / source_width;
+    let scale_y = f64::from(output_height) / source_height;
+    let anisotropy = scale_x.max(scale_y) / scale_x.min(scale_y);
+    if !anisotropy.is_finite() || anisotropy > 2.0 {
+        return Err(GpuViewerSpatialPlanError::ExcessiveScaleAnisotropy);
+    }
+    Ok(descriptor)
 }
 
 /// Viewer spatial planning failure.
@@ -291,6 +302,8 @@ pub struct GpuViewerSpatialRuntimeDiagnostics {
     pub pipeline_builds: u64,
     /// Frames spatially processed.
     pub records: u64,
+    /// Full-frame identity requests that reused their input working texture.
+    pub passthrough_frames: u64,
     /// Box-prefilter passes recorded across frames.
     pub prefilter_passes: u64,
     /// Lanczos passes recorded across frames.
@@ -310,6 +323,46 @@ pub struct GpuViewerSpatialRuntime {
 }
 
 impl GpuViewerSpatialRuntime {
+    /// Reuse an identity input or record the required crop/resize passes.
+    ///
+    /// A reused output remains owned by the caller's resource table. A
+    /// materialized output remains owned by this runtime until `take_output`.
+    pub fn record_for_presentation(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        input: GpuColorFrameHandle,
+        input_view: &wgpu::TextureView,
+        source_rect: ViewerSourceRect,
+        output_width: u32,
+        output_height: u32,
+    ) -> Result<GpuViewerSpatialRecord, GpuViewerSpatialRuntimeError> {
+        if spatial_request_is_identity(&input, source_rect, output_width, output_height) {
+            self.clear_frame_resources();
+            validate_spatial_request(&input, source_rect, output_width, output_height)?;
+            self.diagnostics.records = self.diagnostics.records.saturating_add(1);
+            self.diagnostics.passthrough_frames =
+                self.diagnostics.passthrough_frames.saturating_add(1);
+            self.diagnostics.output_pixels = self
+                .diagnostics
+                .output_pixels
+                .saturating_add(u64::from(output_width).saturating_mul(u64::from(output_height)));
+            return Ok(GpuViewerSpatialRecord::Reused(input));
+        }
+        self.record(
+            device,
+            encoder,
+            ids,
+            input,
+            input_view,
+            source_rect,
+            output_width,
+            output_height,
+        )
+        .map(GpuViewerSpatialRecord::Materialized)
+    }
+
     /// Record working-linear crop and resize passes and retain the output resource.
     pub fn record(
         &mut self,
@@ -473,6 +526,35 @@ impl GpuViewerSpatialRuntime {
     pub const fn diagnostics(&self) -> GpuViewerSpatialRuntimeDiagnostics {
         self.diagnostics
     }
+}
+
+/// Ownership result for one Viewer presentation spatial request.
+pub enum GpuViewerSpatialRecord {
+    /// The input handle already has the exact presentation geometry.
+    Reused(GpuColorFrameHandle),
+    /// The spatial runtime owns a newly materialized output.
+    Materialized(GpuColorFrameHandle),
+}
+
+impl GpuViewerSpatialRecord {
+    /// Borrow the working handle entering the display boundary.
+    pub const fn output(&self) -> &GpuColorFrameHandle {
+        match self {
+            Self::Reused(output) | Self::Materialized(output) => output,
+        }
+    }
+}
+
+fn spatial_request_is_identity(
+    input: &GpuColorFrameHandle,
+    source_rect: ViewerSourceRect,
+    output_width: u32,
+    output_height: u32,
+) -> bool {
+    let descriptor = input.descriptor();
+    source_rect == ViewerSourceRect::FULL
+        && descriptor.width == output_width
+        && descriptor.height == output_height
 }
 
 /// Viewer spatial runtime failure.
@@ -787,6 +869,31 @@ mod tests {
         assert!(should_prefilter(7680, 4320, rect, 480, 270));
         assert!(!should_prefilter(1920, 1080, rect, 480, 270));
         assert!(!should_prefilter(960, 540, rect, 480, 270));
+    }
+
+    #[test]
+    fn presentation_identity_requires_full_rect_and_matching_extent() {
+        let mut ids = GpuColorFrameIdAllocator::new(1);
+        let input = working_handle(&mut ids, 960, 540, GpuColorFrameTextureFormat::Rgba32Float);
+
+        assert!(spatial_request_is_identity(
+            &input,
+            ViewerSourceRect::FULL,
+            960,
+            540
+        ));
+        assert!(!spatial_request_is_identity(
+            &input,
+            ViewerSourceRect::FULL,
+            480,
+            270
+        ));
+        assert!(!spatial_request_is_identity(
+            &input,
+            ViewerSourceRect { x: 0.0, y: 0.0, width: 0.5, height: 1.0 },
+            960,
+            540,
+        ));
     }
 
     #[tokio::test]

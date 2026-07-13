@@ -5649,6 +5649,7 @@ mod tests {
         let spatial = mondrian_renderer::GpuViewerSpatialRuntimeDiagnostics {
             pipeline_builds: 1,
             records: 2,
+            passthrough_frames: 0,
             prefilter_passes: 3,
             lanczos_passes: 4,
             output_pixels: 5,

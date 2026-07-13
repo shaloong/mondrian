@@ -238,6 +238,8 @@ impl GpuCompositingBlockerReason {
 /// Structured diagnostics for GPU vs CPU compositing path selection.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GpuCompositingDiagnostics {
+    /// Single GPU working layers reused without recording a composite pass.
+    pub gpu_passthrough_frames: u64,
     /// Number of compositing operations that used the GPU-native path.
     pub gpu_native_composites: u64,
     /// Number of compositing operations that uploaded CPU layers for GPU compositing.
@@ -255,6 +257,8 @@ pub struct GpuCompositingDiagnostics {
 impl GpuCompositingDiagnostics {
     /// Accumulate another diagnostics snapshot.
     pub fn accumulate(&mut self, other: Self) {
+        self.gpu_passthrough_frames =
+            self.gpu_passthrough_frames.saturating_add(other.gpu_passthrough_frames);
         self.gpu_native_composites =
             self.gpu_native_composites.saturating_add(other.gpu_native_composites);
         self.gpu_with_upload_composites =
@@ -272,7 +276,7 @@ impl GpuCompositingDiagnostics {
 
     /// Whether any compositing used the GPU-native path.
     pub fn has_gpu_native(&self) -> bool {
-        self.gpu_native_composites > 0
+        self.gpu_passthrough_frames > 0 || self.gpu_native_composites > 0
     }
 
     /// Whether any compositing fell back to CPU.
@@ -525,6 +529,15 @@ impl GpuFrameCompositor {
         request: GpuCompositeRequest<'_>,
     ) -> Result<GpuCompositeRecord, GpuCompositeError> {
         validate_request(&request)?;
+        if let Some(output) = single_layer_gpu_passthrough(&request) {
+            return Ok(GpuCompositeRecord {
+                output: output.clone(),
+                diagnostics: GpuCompositingDiagnostics {
+                    gpu_passthrough_frames: 1,
+                    ..GpuCompositingDiagnostics::default()
+                },
+            });
+        }
         let width = request.width;
         let height = request.height;
         let output_descriptor = ColorFrameDescriptor {
@@ -712,6 +725,24 @@ impl GpuFrameCompositor {
         pass.set_bind_group(1, &uniform_bind_group, &[]);
         pass.draw(0..4, 0..1);
     }
+}
+
+fn single_layer_gpu_passthrough<'a>(
+    request: &'a GpuCompositeRequest<'a>,
+) -> Option<&'a GpuColorFrameHandle> {
+    let [layer] = request.layers else { return None };
+    let GpuCompositeLayerSource::GpuFrame(handle) = layer.source else {
+        return None;
+    };
+    let descriptor = handle.descriptor();
+    let preserves_pixels = layer.opacity.clamp(0.0, 1.0) == 1.0
+        && layer.blend_mode == BlendMode::Normal
+        && is_identity_transform(layer.transform)
+        && layer.effect_plan.is_none_or(CompiledEffectGpuPlan::is_identity)
+        && descriptor.width == request.width
+        && descriptor.height == request.height
+        && handle.texture_format() == GpuColorFrameTextureFormat::Rgba32Float;
+    preserves_pixels.then_some(handle)
 }
 
 fn effect_uniforms(
@@ -953,17 +984,20 @@ mod tests {
     #[test]
     fn gpu_compositing_diagnostics_accumulate() {
         let mut a = GpuCompositingDiagnostics {
+            gpu_passthrough_frames: 2,
             gpu_native_composites: 3,
             gpu_composited_pixels: 1000,
             ..GpuCompositingDiagnostics::default()
         };
         let b = GpuCompositingDiagnostics {
+            gpu_passthrough_frames: 1,
             cpu_fallback_composites: 1,
             cpu_composited_pixels: 500,
             first_blocker: Some(GpuCompositingBlockerReason::EffectRequiresCpu),
             ..GpuCompositingDiagnostics::default()
         };
         a.accumulate(b);
+        assert_eq!(a.gpu_passthrough_frames, 3);
         assert_eq!(a.gpu_native_composites, 3);
         assert_eq!(a.cpu_fallback_composites, 1);
         assert_eq!(a.gpu_composited_pixels, 1000);
@@ -972,6 +1006,52 @@ mod tests {
             a.first_blocker,
             Some(GpuCompositingBlockerReason::EffectRequiresCpu)
         );
+    }
+
+    #[test]
+    fn single_gpu_working_layer_passthrough_requires_pixel_identity() {
+        let handle = GpuColorFrameHandle::new(
+            crate::GpuColorFrameId::from_raw(99),
+            ColorFrameDescriptor {
+                width: 8,
+                height: 8,
+                color_space: WorkingColorSpace::LinearRec709.into(),
+                domain: ColorFrameDomain::Working,
+                encoding: ColorFrameEncoding::LinearFloat,
+                residency: ColorFrameResidency::Gpu,
+            },
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "passthrough-test",
+        )
+        .expect("valid passthrough handle");
+        let mut layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::GpuFrame(&handle),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: None,
+            frame_seed: 0,
+        };
+
+        let layers = [layer];
+        let request = GpuCompositeRequest {
+            width: 8,
+            height: 8,
+            working_color_space: WorkingColorSpace::LinearRec709,
+            layers: &layers,
+        };
+        assert_eq!(single_layer_gpu_passthrough(&request), Some(&handle));
+
+        layer.opacity = 0.5;
+        let layers = [layer];
+        let request = GpuCompositeRequest { layers: &layers, ..request };
+        assert_eq!(single_layer_gpu_passthrough(&request), None);
+
+        layer.opacity = 1.0;
+        layer.transform[2] = 1.0;
+        let layers = [layer];
+        let request = GpuCompositeRequest { layers: &layers, ..request };
+        assert_eq!(single_layer_gpu_passthrough(&request), None);
     }
 
     #[test]

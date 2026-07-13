@@ -11,7 +11,7 @@ use crate::{
     GpuColorFrameHandle, GpuColorFrameTextureFormat, GpuCompositeLayer, GpuCompositeLayerSource,
     GpuCompositeRequest, GpuCompositingDiagnostics, GpuDisplayCalibrationRuntime,
     GpuFrameCompositor, GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
-    GpuNativeDecodedFrameVideoSampling, GpuViewerSpatialRuntime,
+    GpuNativeDecodedFrameVideoSampling, GpuViewerSpatialRecord, GpuViewerSpatialRuntime,
     GpuViewerSpatialRuntimeDiagnostics, RenderColorStageDiagnostics,
     RenderColorTransformGpuOptions, RenderGpuInputStageRecord,
     RenderGpuInputStageRuntimeRecordError, RenderGpuOutputBoundaryRuntime,
@@ -139,9 +139,9 @@ impl ViewerGpuExecutionRuntime {
             .resource()
             .texture_view
             .clone();
-        let spatial_output = self
+        let spatial_record = self
             .spatial
-            .record(
+            .record_for_presentation(
                 device,
                 encoder,
                 self.color_output.frame_ids_mut(),
@@ -153,14 +153,17 @@ impl ViewerGpuExecutionRuntime {
             )
             .map_err(|error| ViewerGpuExecutionError::Spatial(error.to_string()))?;
         let spatial_diagnostics = self.spatial.diagnostics();
-        let spatial_resource = self
-            .spatial
-            .take_output(&spatial_output)
-            .ok_or(ViewerGpuExecutionError::SpatialOutputMissing)?;
-        self.color_output
-            .frame_table_mut()
-            .insert(spatial_resource)
-            .map_err(|error| ViewerGpuExecutionError::SpatialTransfer(format!("{error:?}")))?;
+        let spatial_output = spatial_record.output().clone();
+        if matches!(spatial_record, GpuViewerSpatialRecord::Materialized(_)) {
+            let spatial_resource = self
+                .spatial
+                .take_output(&spatial_output)
+                .ok_or(ViewerGpuExecutionError::SpatialOutputMissing)?;
+            self.color_output
+                .frame_table_mut()
+                .insert(spatial_resource)
+                .map_err(|error| ViewerGpuExecutionError::SpatialTransfer(format!("{error:?}")))?;
+        }
         let mut output_record = self
             .color_output
             .record_wgpu_output_boundary_gpu_frame_owned_backend(

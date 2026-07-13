@@ -200,6 +200,7 @@ pub use viewer_runtime::{
     ViewerGpuExecutionResidency, ViewerGpuExecutionRuntime, ViewerGpuNativeVideoFacts,
 };
 pub use viewer_spatial::{
-    GpuViewerSpatialPlan, GpuViewerSpatialPlanError, GpuViewerSpatialRuntime,
-    GpuViewerSpatialRuntimeDiagnostics, GpuViewerSpatialRuntimeError, ViewerSourceRect,
+    GpuViewerSpatialPlan, GpuViewerSpatialPlanError, GpuViewerSpatialRecord,
+    GpuViewerSpatialRuntime, GpuViewerSpatialRuntimeDiagnostics, GpuViewerSpatialRuntimeError,
+    ViewerSourceRect,
 };

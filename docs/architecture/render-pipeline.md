@@ -722,6 +722,7 @@ Resolved preview layers
        -> upload CPU decoded source RGBA8 once as Rgba8Unorm
        -> run OCIO GPU input transform into Rgba32Float working texture
   -> GpuFrameCompositor::record()
+     -> reuse one full-frame, opaque, identity GPU working layer directly
      -> sample GPU-resident media layers directly
      -> upload only media layers that already have a materialized CPU working fallback
      -> composite media/solid layers into an Rgba32Float working texture
@@ -791,6 +792,11 @@ path.
 
 The production preview path uses GPU compositing for supported media, solid,
 and adjustment elements:
+
+- a single full-frame GPU working layer with Normal blend, full opacity,
+  identity transform, and no non-identity effect bypasses the composite pass;
+  the typed working handle is reused without allocating two 4K RGBA32F
+  accumulators, while any semantic difference returns to the normal compositor;
 
 - media frames must either already be in the sequence working color space or
   carry a source/input contract whose target working color space matches the
