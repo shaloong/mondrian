@@ -123,7 +123,10 @@ struct HeadlessViewerGpuExecutionSummary {
     record_submit_samples_us: Vec<u64>,
     completion_wait_samples_us: Vec<u64>,
     gpu_duration_samples_us: Vec<u64>,
+    #[serde(skip)]
+    gpu_timestamp_tokens: Vec<u64>,
     missing_gpu_timestamp_frames: usize,
+    discarded_gpu_timestamp_frames: u64,
     fallback_count: usize,
     fallback_reasons: Vec<String>,
     stage_diagnostics: RenderColorStageDiagnostics,
@@ -149,8 +152,8 @@ impl HeadlessViewerGpuExecutionSummary {
             self.wall_duration_samples_us.push(execution.duration_us);
             self.record_submit_samples_us.push(execution.record_submit_us);
             self.completion_wait_samples_us.push(execution.completion_wait_us);
-            if let Some(duration_us) = execution.gpu_duration_us {
-                self.gpu_duration_samples_us.push(duration_us);
+            if let Some(token) = execution.gpu_timestamp_token {
+                self.gpu_timestamp_tokens.push(token);
             } else {
                 self.missing_gpu_timestamp_frames =
                     self.missing_gpu_timestamp_frames.saturating_add(1);
@@ -167,6 +170,15 @@ impl HeadlessViewerGpuExecutionSummary {
         if let Some(diagnostics) = execution.spatial_diagnostics {
             self.spatial_diagnostics = Some(diagnostics);
         }
+    }
+
+    fn record_gpu_timings(&mut self, timings: &[(u64, u64)]) {
+        self.gpu_duration_samples_us.extend(
+            timings
+                .iter()
+                .filter(|(token, _)| self.gpu_timestamp_tokens.contains(token))
+                .map(|(_, duration_us)| *duration_us),
+        );
     }
 
     fn p95_duration_us(&self) -> u64 {
@@ -207,7 +219,7 @@ fn headless_gpu_summary_records_distinct_executed_extents() {
             duration_us: 1,
             record_submit_us: 1,
             completion_wait_us: 1,
-            gpu_duration_us: Some(1),
+            gpu_timestamp_token: Some(u64::from(width) << 32 | u64::from(height)),
             compositing_diagnostics: None,
             spatial_diagnostics: None,
             stage_diagnostics: None,
@@ -272,6 +284,7 @@ struct PreviewExternalPlaybackGateReport {
     gpu_cached_frames: usize,
     gpu_timestamped_frames: usize,
     gpu_missing_timestamp_frames: usize,
+    gpu_discarded_timestamp_frames: u64,
     gpu_execution_p95_limit_us: u64,
     gpu_execution_p95_observed_us: u64,
     gpu_record_submit_p95_us: u64,
@@ -484,8 +497,27 @@ fn preview_decode_access_mode_queue_wait_failure_code(
 fn preview_playback_decode_failures(
     report: &AppUiPreviewDecodePerformanceReport,
 ) -> Vec<&'static str> {
-    let mut failures = preview_decode_hard_failures(report);
-    failures.extend(preview_decode_required_access_mode_failures(report));
+    let mut failures = preview_decode_required_access_mode_failures(report);
+    let mut scoped_fail_check = !failures.is_empty();
+    for check in &report.checks {
+        if check.severity != AppUiPreviewDecodePerformanceSeverity::Fail {
+            continue;
+        }
+        let playback_scoped = check.code.starts_with("preview_decode_playback_")
+            || matches!(
+                check.code,
+                "preview_decode_timeout_failures"
+                    | "preview_decode_forward_budget_exhausted_failures"
+                    | "preview_decode_worker_queue_full_drops"
+                    | "preview_decode_worker_disconnected_drops"
+                    | "preview_decode_queue_invalid_access_mode_drops"
+                    | "preview_decode_invalid_access_mode_requests"
+            );
+        if playback_scoped {
+            failures.push(check.code);
+            scoped_fail_check = true;
+        }
+    }
     failures.extend(preview_decode_access_mode_queue_wait_failures(
         report,
         &[PreviewDecodeAccessMode::PlaybackCursor],
@@ -497,6 +529,9 @@ fn preview_playback_decode_failures(
             | "preview_decode_playback_sustained_pressure" => failures.push(root.code),
             _ => {}
         }
+    }
+    if scoped_fail_check && report.verdict == AppUiPreviewDecodePerformanceVerdict::Fail {
+        failures.push("preview_decode_report_failed");
     }
     failures.sort_unstable();
     failures.dedup();
@@ -1742,6 +1777,7 @@ fn evaluate_external_playback_gates(
         gpu_cached_frames: headless_gpu.cached_frames,
         gpu_timestamped_frames: headless_gpu.gpu_duration_samples_us.len(),
         gpu_missing_timestamp_frames: headless_gpu.missing_gpu_timestamp_frames,
+        gpu_discarded_timestamp_frames: headless_gpu.discarded_gpu_timestamp_frames,
         gpu_execution_p95_limit_us,
         gpu_execution_p95_observed_us,
         gpu_record_submit_p95_us: headless_gpu.p95_record_submit_us(),
@@ -1882,6 +1918,12 @@ fn run_preview_media_continuous_playback_probe(
             Ok(())
         },
     )?;
+    let gpu_timings = gpu_adapter
+        .finish_gpu_timings()
+        .context("finish deferred headless Viewer GPU timestamp maps")?;
+    headless_gpu_preroll.record_gpu_timings(&gpu_timings);
+    headless_gpu.record_gpu_timings(&gpu_timings);
+    headless_gpu.discarded_gpu_timestamp_frames = gpu_adapter.discarded_gpu_timings();
 
     anyhow::ensure!(
         readiness.unavailable == 0,
@@ -3053,6 +3095,49 @@ fn preview_playback_decode_failures_allow_non_playback_warnings() {
 }
 
 #[test]
+fn preview_playback_decode_failures_ignore_slow_random_still_startup() {
+    let diagnostics = AppUiPreviewDiagnostics {
+        decode_successes: 2,
+        decode_in_process_cpu_rgba_frames: 2,
+        decode_total_duration_us: 130_000,
+        decode_max_duration_us: 120_000,
+        decode_last_duration_us: 10_000,
+        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+            playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+                frames: 1,
+                in_process_cpu_rgba_frames: 1,
+                total_duration_us: 10_000,
+                max_duration_us: 10_000,
+                last_duration_us: 10_000,
+                session_reused_frames: 1,
+                forward_reused_frames: 1,
+                ..AppUiPreviewDecodeAccessModeProfile::default()
+            },
+            random_access_still: AppUiPreviewDecodeAccessModeProfile {
+                frames: 1,
+                in_process_cpu_rgba_frames: 1,
+                total_duration_us: 120_000,
+                max_duration_us: 120_000,
+                last_duration_us: 120_000,
+                session_opened_frames: 1,
+                ..AppUiPreviewDecodeAccessModeProfile::default()
+            },
+            ..AppUiPreviewDecodeAccessModeProfiles::default()
+        },
+        ..AppUiPreviewDiagnostics::default()
+    };
+    let report = build_preview_decode_performance_report_with_required_access_modes(
+        diagnostics.decode_performance_summary(50_000),
+        "preview-playback-scenario-scope-test",
+        50_000,
+        &[PreviewDecodeAccessMode::PlaybackCursor],
+    );
+
+    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+    assert!(preview_playback_decode_failures(&report).is_empty());
+}
+
+#[test]
 fn preview_perf_report_serializes_color_report() {
     let diagnostics = AppUiPreviewDiagnostics {
         decode_successes: 1,
@@ -3726,6 +3811,7 @@ fn passing_headless_gpu_summary(frames: usize) -> HeadlessViewerGpuExecutionSumm
         record_submit_samples_us: vec![400; frames],
         completion_wait_samples_us: vec![600; frames],
         gpu_duration_samples_us: vec![500; frames],
+        gpu_timestamp_tokens: (0..frames as u64).collect(),
         stage_diagnostics: RenderColorStageDiagnostics {
             total_stages: frames as u64,
             gpu_color_stages: frames as u64,

@@ -318,8 +318,13 @@ The external-media variant treats current-frame readiness as a basis-point
 contract (99.50% by default), requires complete hardware timestamp coverage for
 every newly rendered frame, and reports hardware GPU, CPU record/submit,
 completion-wait, and total wall p95 independently. The headless adapter's
-explicit completion wait is test-only; the production window submits without a
-per-frame wait.
+16-slot timestamp ring submits and maps queries without a per-frame wait; the
+offline gate drains once after playback. Ring saturation discards telemetry and
+fails timestamp coverage instead of back-pressuring the measured scheduler.
+Continuous-playback decode failure extraction is scoped to PlaybackCursor plus
+global fatal scheduler/worker failures. Random-access still and scrub latency
+remain visible in the full diagnostic report but cannot fail a playback-only
+gate; their dedicated probes own those budgets.
 
 Viewer models consume an explicit preview readiness state. `Ready` frames are
 current, `Loading` means the requested frame is queued/in flight, and `Stale`

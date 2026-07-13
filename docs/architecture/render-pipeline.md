@@ -779,10 +779,11 @@ Renderer performance evidence separates four boundaries: CPU command recording
 and queue submission, hardware GPU timestamp duration, CPU completion wait, and
 end-to-end wall time. `GpuTimestampFrameTimer` owns the renderer-side timestamp
 query contract and enables it only when both encoder timestamp features are
-available. Real-media execution gates may synchronously read one completed
-query because they are offline acceptance probes; the production presentation
-loop must never introduce that wait and must use a bounded asynchronous query
-ring when continuous telemetry is enabled. A reported GPU duration therefore
+available. `GpuTimestampQueryRing` gives execution gates and continuous
+telemetry a bounded asynchronous path: non-blocking polls recycle completed
+slots, a full ring discards telemetry instead of back-pressuring presentation,
+and offline gates perform one final wait only after the measured interval. The
+production presentation loop must never introduce a per-frame query wait. A reported GPU duration therefore
 means commands bracketed on the hardware timeline, not record/submit/wait wall
 time. Gate reports also identify the adapter and retain compositor and spatial
 pass diagnostics so regressions remain attributable to a concrete execution
