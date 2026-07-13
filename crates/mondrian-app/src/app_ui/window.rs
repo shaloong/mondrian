@@ -38,13 +38,14 @@ use crate::app_ui::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
 use mondrian_core::types::ColorSpace;
 use mondrian_platform::{NativeVideoTextureImportProbe, SystemPlatformService};
 use mondrian_renderer::{
-    native_video_texture_device_features, GpuNativeDecodedFrameImportSupport,
-    RenderColorStageDiagnostics, RenderGpuOutputBoundaryRuntimeDiagnostics,
-    RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputRuntimeDiagnosticsReport,
-    RenderGpuOutputStageDiagnosticsReport, RenderGpuOutputStageResourcePlanError,
-    RenderOutputColorBoundary, RenderOutputColorBoundaryTarget, ViewerGpuExecutionError,
-    ViewerGpuExecutionLayer, ViewerGpuExecutionRequest, ViewerGpuExecutionResidency,
-    ViewerGpuExecutionRuntime, ViewerGpuNativeVideoFacts, ViewerSourceRect,
+    native_video_texture_device_features, request_adapter_with_native_video_preference,
+    GpuNativeDecodedFrameImportSupport, RenderColorStageDiagnostics,
+    RenderGpuOutputBoundaryRuntimeDiagnostics, RenderGpuOutputBoundaryRuntimeRecordError,
+    RenderGpuOutputRuntimeDiagnosticsReport, RenderGpuOutputStageDiagnosticsReport,
+    RenderGpuOutputStageResourcePlanError, RenderOutputColorBoundary,
+    RenderOutputColorBoundaryTarget, ViewerGpuExecutionError, ViewerGpuExecutionLayer,
+    ViewerGpuExecutionRequest, ViewerGpuExecutionResidency, ViewerGpuExecutionRuntime,
+    ViewerGpuNativeVideoFacts, ViewerSourceRect,
 };
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutManager, ShortcutScope};
@@ -1362,11 +1363,14 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
     let instance = wgpu::Instance::new(instance_desc);
     let startup_surface = instance.create_surface(startup_window.clone())?;
 
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        compatible_surface: Some(&startup_surface),
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        ..Default::default()
-    }))
+    let adapter = pollster::block_on(request_adapter_with_native_video_preference(
+        &instance,
+        &wgpu::RequestAdapterOptions {
+            compatible_surface: Some(&startup_surface),
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            ..Default::default()
+        },
+    ))
     .map_err(|_| "No suitable GPU adapter")?;
 
     // Populate system info for the About dialog.

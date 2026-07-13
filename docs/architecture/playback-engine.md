@@ -536,7 +536,8 @@ remembered failures, the explicitly pinned current/stale Viewer payload, and an
 oversize current-media pin. Adapters supply stable keys, exact byte
 reservations, and an equality-comparable Viewer presentation scope; the Module
 does not import media, renderer, UI, or wall-clock types. Media entries
-have both a 96-entry cap and a 384 MiB pixel-payload budget; Viewer raster
+have a 96-entry cap, a 384 MiB pixel-payload budget, and an independent
+four-unit decoder/GPU resource-lease budget; Viewer raster
 entries have a 48-entry cap and a 192 MiB payload budget; failure memory has a
 192-key cap. A media reservation includes current linear-float pixels, encoded
 source pixels, and the possible lazy working-frame allocation, so a deferred
@@ -552,6 +553,12 @@ real-media gates fail when either cache exceeds its byte budget, either pin
 exceeds its corresponding budget, or an oversize payload was rejected.
 Renderer-owned GPU texture tables remain a separate Module and are not falsely
 counted as CPU storage.
+The resource-unit budget is intentionally independent of CPU bytes: an FFmpeg
+native decoder surface can reserve zero host pixel bytes while still exhausting
+the decoder pool. App payload adapters charge one unit for each retained native
+surface and zero for CPU frames. LRU eviction enforces count, byte, and resource
+budgets together, and diagnostics expose both current resource units and the
+configured limit.
 
 The App's `PreviewCpuFrameStore` is now a thin Adapter only: it computes the
 reservation for `MediaPreviewFrame`, maps `ViewerFrameImage` to its encoded byte

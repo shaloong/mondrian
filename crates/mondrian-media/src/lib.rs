@@ -32,7 +32,7 @@ pub use decoder::{
     DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
     DecodedVideoMatrix, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
     HwAccelBackend, HwAccelCodecConfigMethods, HwAccelCodecConfigProbe, HwAccelDeviceContextProbe,
-    HwAccelPixelFormat, HwAccelProbe,
+    HwAccelDeviceSelector, HwAccelPixelFormat, HwAccelProbe,
 };
 pub use ffmpeg_runtime::verify_ffmpeg_runtime;
 pub use info::{

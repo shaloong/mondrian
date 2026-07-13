@@ -11,9 +11,9 @@ use super::preview::{
     AppUiGpuPreviewFrame, AppUiGpuPreviewWorkingInput, AppUiPreviewDecodeExecutionSummary,
 };
 use mondrian_renderer::{
-    native_video_texture_device_features, GpuNativeDecodedFrameImportSupport,
-    RenderColorStageDiagnostics, ViewerGpuExecutionRequest, ViewerGpuExecutionRuntime,
-    ViewerSourceRect,
+    native_video_texture_device_features, request_adapter_with_native_video_preference,
+    GpuNativeDecodedFrameImportSupport, RenderColorStageDiagnostics, ViewerGpuExecutionRequest,
+    ViewerGpuExecutionRuntime, ViewerSourceRect,
 };
 use mondrian_ui_widgets::ViewerExternalTexturePresentation;
 
@@ -50,12 +50,15 @@ impl HeadlessViewerGpuAdapter {
     pub(crate) fn new() -> Result<Self, HeadlessViewerGpuError> {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            compatible_surface: None,
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            ..wgpu::RequestAdapterOptions::default()
-        }))
+        let adapter = pollster::block_on(request_adapter_with_native_video_preference(
+            &instance,
+            &wgpu::RequestAdapterOptions {
+                compatible_surface: None,
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                ..wgpu::RequestAdapterOptions::default()
+            },
+        ))
         .map_err(|error| HeadlessViewerGpuError::Adapter(error.to_string()))?;
         let descriptor = wgpu::DeviceDescriptor {
             required_features: native_video_texture_device_features(adapter.features()),

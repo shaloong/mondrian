@@ -234,6 +234,7 @@ struct PreviewExternalPlaybackGateReport {
     audio_underrun_recoveries: u64,
     dropped_playback_evidence_events: u64,
     cpu_frame_store_within_budget: bool,
+    decoder_resource_store_within_budget: bool,
     cpu_frame_store_oversize_rejections: u64,
     passed: bool,
     failures: Vec<&'static str>,
@@ -1655,6 +1656,11 @@ fn evaluate_external_playback_gates(
     if !cpu_frame_store_within_budget {
         failures.push("cpu_frame_store_budget");
     }
+    let decoder_resource_store_within_budget = preview_diagnostics.media_cache_resource_units
+        <= preview_diagnostics.media_cache_resource_unit_budget;
+    if !decoder_resource_store_within_budget {
+        failures.push("decoder_resource_store_budget");
+    }
     let cpu_frame_store_oversize_rejections = preview_diagnostics
         .media_cache_oversize_rejections
         .saturating_add(preview_diagnostics.viewer_frame_cache_oversize_rejections);
@@ -1684,6 +1690,7 @@ fn evaluate_external_playback_gates(
         audio_underrun_recoveries: playback_evidence.audio_underrun_recoveries,
         dropped_playback_evidence_events: playback_evidence.dropped_event_count,
         cpu_frame_store_within_budget,
+        decoder_resource_store_within_budget,
         cpu_frame_store_oversize_rejections,
         passed: failures.is_empty(),
         failures,
@@ -2057,6 +2064,7 @@ fn configure_headless_gpu_decode_admission(
     );
     preview_service.set_playback_hardware_decode_admission(
         admission.request,
+        admission.hardware_decode_device_selector,
         admission.renderer_native_import_ready,
         admission.platform_native_import_ready,
         admission.native_import_admission_ready,

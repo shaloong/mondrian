@@ -138,12 +138,21 @@ to the next backend. Windows support becomes ready only after
 unimplemented platform backends remain unavailable.
 Renderer and product-window device creation request the adapter-supported subset
 of wgpu `TEXTURE_FORMAT_NV12` and `TEXTURE_FORMAT_P010` through the shared
-`native_video_texture_device_features` contract. Enabling those features is only
-a texture-format prerequisite: it does not prove that a decoder resource can be
+`native_video_texture_device_features` contract. P010 is admitted only when
+`TEXTURE_FORMAT_16BIT_NORM` is also available and enabled because its luma and
+chroma plane views are `R16Unorm` and `Rg16Unorm`. Enabling those features is
+only a texture-format prerequisite: it does not prove that a decoder resource can be
 shared, synchronized, adopted by the active wgpu device, sampled, or transformed.
 Readiness therefore remains fail-closed until backend construction validates
 the complete platform import bridge. Diagnostics distinguish missing device
 format features, non-DX12 adapters, and backend construction failures.
+Adapter selection enumerates the backends enabled on the wgpu instance. On
+Windows it prefers a DX12 adapter exposing native NV12/P010 formats, so the
+D3D11/DX12 bridge is not accidentally disabled by selecting a Vulkan
+representation of the same GPU. An explicit `WGPU_BACKEND` restriction remains
+authoritative because excluded backends are absent from instance enumeration;
+if enumeration yields no usable adapter, selection falls back to wgpu's normal
+request path.
 The Windows renderer backend owns D3D11 source admission. Before any resource
 sharing, it verifies the retained FFmpeg texture ABI, actual DXGI NV12/P010
 format, visible-versus-storage extent, array-slice bounds, single mip/sample
@@ -151,6 +160,12 @@ layout, and exact adapter LUID equality with the active wgpu DX12 adapter.
 Codec-aligned storage dimensions may exceed the visible frame; smaller storage
 is invalid. App, core, and generic platform probes must not duplicate or weaken
 these renderer resource invariants.
+Backend construction also resolves the active DX12 adapter LUID to the same
+DXGI enumeration index consumed by FFmpeg's D3D11VA device creator. That typed
+selector travels through renderer support, app playback admission, and media
+session creation. It keeps decode surfaces on the renderer's physical adapter
+on hybrid-GPU systems; the per-frame LUID check remains the final fail-closed
+guard against stale, ignored, or incorrectly enumerated device selection.
 Validated D3D11 sources can enter a reusable low-copy bridge entry. Each entry
 owns a single-slice NV12/P010 texture created with the Windows NT-handle sharing
 contract, a D3D11/D3D12 shared timeline fence, two reusable DX12 barrier command

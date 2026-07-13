@@ -9,7 +9,89 @@ use std::sync::Arc;
 /// can add the result to `DeviceDescriptor::required_features` without turning
 /// an unsupported native-video format into device creation failure.
 pub fn native_video_texture_device_features(adapter_features: wgpu::Features) -> wgpu::Features {
-    adapter_features & (wgpu::Features::TEXTURE_FORMAT_NV12 | wgpu::Features::TEXTURE_FORMAT_P010)
+    let mut required = adapter_features & wgpu::Features::TEXTURE_FORMAT_NV12;
+    let p010_requirements =
+        wgpu::Features::TEXTURE_FORMAT_P010 | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
+    if adapter_features.contains(p010_requirements) {
+        required |= p010_requirements;
+    }
+    required
+}
+
+/// Request an adapter while preserving native-video import on platforms where
+/// the renderer has a backend-specific bridge.
+///
+/// The [`wgpu::Instance`] already reflects any `WGPU_BACKEND` restriction, so
+/// an explicit environment override remains authoritative. On Windows, when
+/// more than one backend represents the same physical GPU, a DX12 adapter with
+/// native NV12/P010 support is preferred over a Vulkan representation that
+/// cannot participate in the D3D11/DX12 shared-texture bridge. If enumeration
+/// produces no admissible adapter, wgpu's normal request path remains the
+/// fallback.
+pub async fn request_adapter_with_native_video_preference(
+    instance: &wgpu::Instance,
+    options: &wgpu::RequestAdapterOptions<'_, '_>,
+) -> Result<wgpu::Adapter, wgpu::RequestAdapterError> {
+    if !options.force_fallback_adapter {
+        let adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
+        if let Some(adapter) = adapters
+            .into_iter()
+            .filter(|adapter| {
+                options
+                    .compatible_surface
+                    .is_none_or(|surface| adapter.is_surface_supported(surface))
+            })
+            .max_by_key(|adapter| {
+                let info = adapter.get_info();
+                native_video_adapter_priority(
+                    info.backend,
+                    adapter.features(),
+                    info.device_type,
+                    options.power_preference,
+                )
+            })
+        {
+            return Ok(adapter);
+        }
+    }
+
+    instance.request_adapter(options).await
+}
+
+fn native_video_adapter_priority(
+    backend: wgpu::Backend,
+    features: wgpu::Features,
+    device_type: wgpu::DeviceType,
+    power_preference: wgpu::PowerPreference,
+) -> (u8, u8) {
+    #[cfg(target_os = "windows")]
+    let native_backend = match backend {
+        wgpu::Backend::Dx12
+            if native_video_texture_device_features(features).intersects(
+                wgpu::Features::TEXTURE_FORMAT_NV12 | wgpu::Features::TEXTURE_FORMAT_P010,
+            ) =>
+        {
+            2
+        }
+        wgpu::Backend::Dx12 => 1,
+        _ => 0,
+    };
+    #[cfg(not(target_os = "windows"))]
+    let native_backend = {
+        let _ = (backend, features);
+        0
+    };
+
+    let power = match (power_preference, device_type) {
+        (wgpu::PowerPreference::HighPerformance, wgpu::DeviceType::DiscreteGpu)
+        | (wgpu::PowerPreference::LowPower, wgpu::DeviceType::IntegratedGpu) => 4,
+        (wgpu::PowerPreference::HighPerformance, wgpu::DeviceType::IntegratedGpu)
+        | (wgpu::PowerPreference::LowPower, wgpu::DeviceType::DiscreteGpu) => 3,
+        (_, wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu) => 2,
+        (_, wgpu::DeviceType::Other | wgpu::DeviceType::VirtualGpu) => 1,
+        (_, wgpu::DeviceType::Cpu) => 0,
+    };
+    (native_backend, power)
 }
 use wgpu;
 
@@ -33,25 +115,22 @@ impl GpuContext {
     /// Creates a new independent GPU context (standalone device).
     /// Used when no external device is available (e.g., tests, export).
     pub async fn new() -> Result<Arc<Self>> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            flags: wgpu::InstanceFlags::default(),
-            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-            backend_options: wgpu::BackendOptions::default(),
-            display: None,
-        });
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
 
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
+        let adapter = request_adapter_with_native_video_preference(
+            &instance,
+            &wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: false,
                 apply_limit_buckets: false,
-            })
-            .await
-            .map_err(|e| mondrian_core::MondrianError::GpuInitFailed {
-                reason: format!("找不到合适的 GPU 适配器: {e}"),
-            })?;
+            },
+        )
+        .await
+        .map_err(|e| mondrian_core::MondrianError::GpuInitFailed {
+            reason: format!("找不到合适的 GPU 适配器: {e}"),
+        })?;
 
         tracing::info!("GPU Adapter: {:?}", adapter.get_info());
 
@@ -74,7 +153,7 @@ impl GpuContext {
 
 #[cfg(test)]
 mod tests {
-    use super::native_video_texture_device_features;
+    use super::{native_video_adapter_priority, native_video_texture_device_features};
 
     #[test]
     fn native_video_device_features_request_only_supported_formats() {
@@ -87,9 +166,91 @@ mod tests {
             native_video_texture_device_features(
                 unrelated
                     | wgpu::Features::TEXTURE_FORMAT_NV12
-                    | wgpu::Features::TEXTURE_FORMAT_P010,
+                    | wgpu::Features::TEXTURE_FORMAT_P010
+                    | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM,
             ),
-            wgpu::Features::TEXTURE_FORMAT_NV12 | wgpu::Features::TEXTURE_FORMAT_P010
+            wgpu::Features::TEXTURE_FORMAT_NV12
+                | wgpu::Features::TEXTURE_FORMAT_P010
+                | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
         );
+    }
+
+    #[test]
+    fn p010_is_not_enabled_without_required_16_bit_plane_view_feature() {
+        assert_eq!(
+            native_video_texture_device_features(wgpu::Features::TEXTURE_FORMAT_P010),
+            wgpu::Features::empty()
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_dx12_native_video_adapter_outranks_other_backend_representations() {
+        let native_dx12 = native_video_adapter_priority(
+            wgpu::Backend::Dx12,
+            wgpu::Features::TEXTURE_FORMAT_P010 | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM,
+            wgpu::DeviceType::IntegratedGpu,
+            wgpu::PowerPreference::HighPerformance,
+        );
+        let discrete_vulkan = native_video_adapter_priority(
+            wgpu::Backend::Vulkan,
+            wgpu::Features::empty(),
+            wgpu::DeviceType::DiscreteGpu,
+            wgpu::PowerPreference::HighPerformance,
+        );
+        assert!(native_dx12 > discrete_vulkan);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_native_video_formats_outrank_dx12_without_import_support() {
+        let native_dx12 = native_video_adapter_priority(
+            wgpu::Backend::Dx12,
+            wgpu::Features::TEXTURE_FORMAT_NV12,
+            wgpu::DeviceType::IntegratedGpu,
+            wgpu::PowerPreference::HighPerformance,
+        );
+        let plain_dx12 = native_video_adapter_priority(
+            wgpu::Backend::Dx12,
+            wgpu::Features::empty(),
+            wgpu::DeviceType::DiscreteGpu,
+            wgpu::PowerPreference::HighPerformance,
+        );
+        assert!(native_dx12 > plain_dx12);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn real_adapter_selection_uses_dx12_when_native_video_formats_are_available() {
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let has_native_dx12 = instance
+            .enumerate_adapters(wgpu::Backends::all())
+            .await
+            .into_iter()
+            .any(|adapter| {
+                adapter.get_info().backend == wgpu::Backend::Dx12
+                    && adapter.features().intersects(
+                        wgpu::Features::TEXTURE_FORMAT_NV12 | wgpu::Features::TEXTURE_FORMAT_P010,
+                    )
+            });
+        let adapter = super::request_adapter_with_native_video_preference(
+            &instance,
+            &wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+                apply_limit_buckets: false,
+            },
+        )
+        .await
+        .expect("real GPU adapter");
+
+        if has_native_dx12 {
+            assert_eq!(adapter.get_info().backend, wgpu::Backend::Dx12);
+            assert!(adapter.features().intersects(
+                wgpu::Features::TEXTURE_FORMAT_NV12 | wgpu::Features::TEXTURE_FORMAT_P010
+            ));
+        }
     }
 }

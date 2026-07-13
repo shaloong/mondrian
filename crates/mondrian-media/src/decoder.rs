@@ -4,13 +4,17 @@
 //! `preview.rs` plus the app preview worker. This module intentionally does not
 //! expose a second preview decode pool.
 
+use std::collections::HashMap;
+use std::ffi::CString;
 use std::ptr;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use ffmpeg_next as ffmpeg;
 
 /// GPU hardware acceleration backend family.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
 pub enum HwAccelBackend {
     /// CPU software decode.
     #[default]
@@ -30,6 +34,31 @@ pub enum HwAccelBackend {
     /// Legacy Linux VDPAU.
     Vdpau,
 }
+
+/// Backend-specific device selection supplied by the renderer admission path.
+///
+/// The selector is an explicit cross-layer contract, not a claim that the
+/// selected decoder can be imported. Renderer admission still validates the
+/// resulting native frame's physical adapter identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum HwAccelDeviceSelector {
+    /// DXGI adapter index passed to FFmpeg's D3D11VA device creator.
+    D3D11VaAdapterIndex(u32),
+}
+
+impl HwAccelDeviceSelector {
+    fn device_name_for(self, backend: HwAccelBackend) -> Option<CString> {
+        match (self, backend) {
+            (Self::D3D11VaAdapterIndex(index), HwAccelBackend::D3D11VA) => {
+                CString::new(index.to_string()).ok()
+            }
+            _ => None,
+        }
+    }
+}
+
+type HwAccelDeviceProbeKey = (HwAccelBackend, Option<HwAccelDeviceSelector>);
+type HwAccelDeviceProbeCache = Mutex<HashMap<HwAccelDeviceProbeKey, HwAccelDeviceContextProbe>>;
 
 /// Residency of frames produced by the media decode boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -540,32 +569,38 @@ impl HwAccelBackend {
     /// Mondrian's playback lifetime, so preview planning uses this cached
     /// variant instead of probing on every session open.
     pub fn cached_ffmpeg_device_context_probe(self) -> HwAccelDeviceContextProbe {
-        static CUDA: OnceLock<HwAccelDeviceContextProbe> = OnceLock::new();
-        static D3D12VA: OnceLock<HwAccelDeviceContextProbe> = OnceLock::new();
-        static D3D11VA: OnceLock<HwAccelDeviceContextProbe> = OnceLock::new();
-        static DXVA2: OnceLock<HwAccelDeviceContextProbe> = OnceLock::new();
-        static VIDEOTOOLBOX: OnceLock<HwAccelDeviceContextProbe> = OnceLock::new();
-        static VAAPI: OnceLock<HwAccelDeviceContextProbe> = OnceLock::new();
-        static VDPAU: OnceLock<HwAccelDeviceContextProbe> = OnceLock::new();
+        self.cached_ffmpeg_device_context_probe_for(None)
+    }
 
-        match self {
-            Self::None => self.probe_ffmpeg_device_context(),
-            Self::Cuda => CUDA.get_or_init(|| self.probe_ffmpeg_device_context()).clone(),
-            Self::D3D12VA => D3D12VA.get_or_init(|| self.probe_ffmpeg_device_context()).clone(),
-            Self::D3D11VA => D3D11VA.get_or_init(|| self.probe_ffmpeg_device_context()).clone(),
-            Self::Dxva2 => DXVA2.get_or_init(|| self.probe_ffmpeg_device_context()).clone(),
-            Self::VideoToolbox => {
-                VIDEOTOOLBOX.get_or_init(|| self.probe_ffmpeg_device_context()).clone()
+    pub(crate) fn cached_ffmpeg_device_context_probe_for(
+        self,
+        selector: Option<HwAccelDeviceSelector>,
+    ) -> HwAccelDeviceContextProbe {
+        static PROBES: OnceLock<HwAccelDeviceProbeCache> = OnceLock::new();
+        let probes = PROBES.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Ok(guard) = probes.lock() {
+            if let Some(probe) = guard.get(&(self, selector)) {
+                return probe.clone();
             }
-            Self::Vaapi => VAAPI.get_or_init(|| self.probe_ffmpeg_device_context()).clone(),
-            Self::Vdpau => VDPAU.get_or_init(|| self.probe_ffmpeg_device_context()).clone(),
         }
+        let probe = self.probe_ffmpeg_device_context_for(selector);
+        if let Ok(mut guard) = probes.lock() {
+            guard.insert((self, selector), probe.clone());
+        }
+        probe
     }
 
     /// Probe whether FFmpeg can create a hardware device context for this
     /// backend. This creates and immediately releases an `AVHWDeviceContext`;
     /// it does not modify decoder negotiation or allocate hardware frames.
     pub fn probe_ffmpeg_device_context(self) -> HwAccelDeviceContextProbe {
+        self.probe_ffmpeg_device_context_for(None)
+    }
+
+    fn probe_ffmpeg_device_context_for(
+        self,
+        selector: Option<HwAccelDeviceSelector>,
+    ) -> HwAccelDeviceContextProbe {
         let Some(device_type) = self.to_ffmpeg_device_type() else {
             return HwAccelDeviceContextProbe::unavailable(
                 self,
@@ -593,11 +628,12 @@ impl HwAccelBackend {
         }
 
         let mut device_context: *mut ffmpeg::ffi::AVBufferRef = ptr::null_mut();
+        let device_name = selector.and_then(|selector| selector.device_name_for(self));
         let result = unsafe {
             ffmpeg::ffi::av_hwdevice_ctx_create(
                 &mut device_context,
                 device_type,
-                ptr::null(),
+                device_name.as_ref().map_or(ptr::null(), |name| name.as_ptr()),
                 ptr::null_mut(),
                 0,
             )
@@ -645,6 +681,7 @@ impl HwAccelBackend {
 
     pub(crate) fn create_ffmpeg_device_context(
         self,
+        selector: Option<HwAccelDeviceSelector>,
     ) -> std::result::Result<HwAccelDeviceContext, HwAccelDeviceContextProbe> {
         let Some(device_type) = self.to_ffmpeg_device_type() else {
             return Err(HwAccelDeviceContextProbe::unavailable(
@@ -673,11 +710,12 @@ impl HwAccelBackend {
         }
 
         let mut device_context: *mut ffmpeg::ffi::AVBufferRef = ptr::null_mut();
+        let device_name = selector.and_then(|selector| selector.device_name_for(self));
         let result = unsafe {
             ffmpeg::ffi::av_hwdevice_ctx_create(
                 &mut device_context,
                 device_type,
-                ptr::null(),
+                device_name.as_ref().map_or(ptr::null(), |name| name.as_ptr()),
                 ptr::null_mut(),
                 0,
             )
@@ -994,6 +1032,18 @@ mod tests {
             HwAccelBackend::Cuda.to_ffmpeg_device_type(),
             Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA)
         );
+    }
+
+    #[test]
+    fn d3d11va_device_selector_maps_only_to_its_ffmpeg_device_name() {
+        let selector = HwAccelDeviceSelector::D3D11VaAdapterIndex(7);
+
+        assert_eq!(
+            selector.device_name_for(HwAccelBackend::D3D11VA).as_deref(),
+            Some(c"7")
+        );
+        assert_eq!(selector.device_name_for(HwAccelBackend::D3D12VA), None);
+        assert_eq!(selector.device_name_for(HwAccelBackend::Cuda), None);
     }
 
     #[test]

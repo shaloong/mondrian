@@ -904,6 +904,18 @@ reinterpreted as two-plane GPU textures. A GPU-preferred CPU fallback records
 `ResourceAdapterUnavailable`, `SurfaceFormatUnavailable`,
 `SamplingMetadataIncomplete`, or `ResourceRetentionFailed`. A required-GPU
 request returns a decode error for the same condition instead.
+On multi-adapter Windows systems, a native-import admission may attach a typed
+`D3D11VaAdapterIndex` selector derived from the renderer's physical DXGI
+adapter. The app carries that selector only on playback decode work; media
+includes it in decoder-session identity and passes its decimal index to
+FFmpeg's D3D11VA `av_hwdevice_ctx_create` device argument. Device probes are
+cached by backend plus selector. The renderer still validates every decoded
+surface's LUID, so this selection prevents accidental cross-adapter creation
+without weakening the native resource boundary.
+GPU-resident decoder setup reserves eight FFmpeg `extra_hw_frames` before
+`avcodec_open2` because native frames remain leased after the receive call.
+This is decoder-pool headroom, not application cache capacity; CPU-transfer
+decode leaves the setting at zero because it exports no hardware surfaces.
 GPU-resident requests bypass the process-global CPU RGBA cache and the
 session-local RGBA playback ring. Native decoder surfaces are not inserted into
 either cache because retaining them there can exhaust the decoder surface pool;

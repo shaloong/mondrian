@@ -91,8 +91,10 @@ pub use color_transform::{
     RenderOutputTransformFloatResult, RenderOutputTransformResult,
 };
 pub use compositor::{CompositorConfig, FrameCompositor};
-pub use context::native_video_texture_device_features;
 pub use context::GpuContext;
+pub use context::{
+    native_video_texture_device_features, request_adapter_with_native_video_preference,
+};
 pub use display_calibration::{
     GpuDisplayCalibrationLut, GpuDisplayCalibrationPipeline, GpuDisplayCalibrationPipelineError,
     GpuDisplayCalibrationPlan, GpuDisplayCalibrationPlanError, GpuDisplayCalibrationPrepareError,

@@ -6,8 +6,10 @@
 //! uploads.
 
 use super::preview::AppUiPreviewHardwareDecodeAdmissionBlocker;
-use mondrian_media::PreviewHardwareDecodeRequest;
-use mondrian_media::{DecodedFrameResidency, DecodedGpuFrameHandleKind};
+use mondrian_media::{
+    DecodedFrameResidency, DecodedGpuFrameHandleKind, HwAccelDeviceSelector,
+    PreviewHardwareDecodeRequest,
+};
 #[cfg(test)]
 use mondrian_media::{
     DecodedVideoChromaLocation, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
@@ -301,6 +303,7 @@ pub(crate) fn platform_handle_kind_for_decoder(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AppUiPlaybackHardwareDecodeAdmission {
     pub(crate) request: PreviewHardwareDecodeRequest,
+    pub(crate) hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
     pub(crate) renderer_native_import_ready: bool,
     pub(crate) platform_native_import_ready: bool,
     pub(crate) native_import_admission_ready: bool,
@@ -359,6 +362,7 @@ pub(crate) fn resolve_playback_hardware_decode_admission(
     };
     AppUiPlaybackHardwareDecodeAdmission {
         request,
+        hardware_decode_device_selector: renderer_support.hardware_decode_device_selector,
         renderer_native_import_ready,
         platform_native_import_ready,
         native_import_admission_ready,
@@ -381,10 +385,12 @@ mod tests {
 
     #[test]
     fn playback_hardware_decode_admission_requires_renderer_and_platform_import() {
+        let selector = HwAccelDeviceSelector::D3D11VaAdapterIndex(2);
         let renderer_support = GpuNativeDecodedFrameImportSupport::ready(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             vec![GpuNativeDecodedFrameTextureFormat::P010],
-        );
+        )
+        .with_hardware_decode_device_selector(selector);
         let platform_probe = NativeVideoTextureImportProbeResult::found_partial(
             vec![NativeVideoTextureHandleKind::D3D11Texture2D],
             false,
@@ -403,6 +409,7 @@ mod tests {
         assert!(admission.platform_native_import_ready);
         assert!(admission.native_import_admission_ready);
         assert_eq!(admission.admission_blocker, None);
+        assert_eq!(admission.hardware_decode_device_selector, Some(selector));
         assert!(admission.platform_discovery_available);
         assert!(!admission.platform_zero_copy_supported);
         assert!(admission.platform_low_copy_fallback_supported);

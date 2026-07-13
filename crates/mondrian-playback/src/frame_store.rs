@@ -17,6 +17,8 @@ pub struct PreviewFrameStoreConfig {
     pub media_entry_capacity: usize,
     /// Maximum reserved CPU bytes for decoded-media payloads.
     pub media_byte_budget: usize,
+    /// Maximum opaque decoder/GPU resource units retained by media payloads.
+    pub media_resource_unit_budget: usize,
     /// Maximum final Viewer raster entries independent of byte size.
     pub viewer_entry_capacity: usize,
     /// Maximum reserved CPU bytes for final Viewer rasters.
@@ -30,6 +32,7 @@ impl Default for PreviewFrameStoreConfig {
         Self {
             media_entry_capacity: 96,
             media_byte_budget: 384 * MIB,
+            media_resource_unit_budget: 4,
             viewer_entry_capacity: 48,
             viewer_byte_budget: 192 * MIB,
             failure_entry_capacity: 192,
@@ -64,6 +67,10 @@ pub struct PreviewFrameStoreDiagnostics {
     pub media_reserved_bytes: usize,
     /// Maximum decoded-media CPU bytes.
     pub media_byte_budget: usize,
+    /// Opaque decoder/GPU resource units currently retained by media entries.
+    pub media_resource_units: usize,
+    /// Maximum opaque decoder/GPU resource units retained by media entries.
+    pub media_resource_unit_budget: usize,
     /// Decoded-media entries evicted by count or byte pressure.
     pub media_evictions: u64,
     /// Decoded-media payloads too large for ordinary admission.
@@ -124,8 +131,16 @@ where
     /// remains total while diagnostics expose the effective policy.
     pub fn new(config: PreviewFrameStoreConfig) -> Self {
         Self {
-            media: WeightedLruCache::new(config.media_entry_capacity, config.media_byte_budget),
-            viewer: WeightedLruCache::new(config.viewer_entry_capacity, config.viewer_byte_budget),
+            media: WeightedLruCache::new(
+                config.media_entry_capacity,
+                config.media_byte_budget,
+                config.media_resource_unit_budget,
+            ),
+            viewer: WeightedLruCache::new(
+                config.viewer_entry_capacity,
+                config.viewer_byte_budget,
+                usize::MAX,
+            ),
             failures: BoundedLruSet::new(config.failure_entry_capacity),
             pinned_media: None,
             pinned_viewer: None,
@@ -148,6 +163,7 @@ where
         key: MK,
         payload: M,
         reserved_bytes: usize,
+        resource_units: usize,
         pin_if_oversize_current: bool,
     ) -> FrameStoreAdmission {
         let pinned = pin_if_oversize_current.then(|| PinnedMedia {
@@ -155,7 +171,7 @@ where
             payload: payload.clone(),
             reserved_bytes,
         });
-        if self.media.insert(key, payload, reserved_bytes) {
+        if self.media.insert(key, payload, reserved_bytes, resource_units) {
             if pin_if_oversize_current {
                 self.pinned_media = None;
             }
@@ -180,7 +196,7 @@ where
         payload: V,
         reserved_bytes: usize,
     ) -> FrameStoreAdmission {
-        if self.viewer.insert(key, payload, reserved_bytes) {
+        if self.viewer.insert(key, payload, reserved_bytes, 0) {
             FrameStoreAdmission::Resident
         } else {
             FrameStoreAdmission::RejectedOversize
@@ -246,6 +262,8 @@ where
             media_entries: self.media.len(),
             media_reserved_bytes: self.media.reserved_bytes,
             media_byte_budget: self.media.byte_budget,
+            media_resource_units: self.media.resource_units,
+            media_resource_unit_budget: self.media.resource_unit_budget,
             media_evictions: self.media.evictions,
             media_oversize_rejections: self.media.oversize_rejections,
             viewer_entries: self.viewer.len(),
@@ -284,12 +302,15 @@ struct PinnedViewer<S, V> {
 struct WeightedEntry<V> {
     payload: V,
     reserved_bytes: usize,
+    resource_units: usize,
 }
 
 struct WeightedLruCache<K, V> {
     entry_capacity: usize,
     byte_budget: usize,
     reserved_bytes: usize,
+    resource_unit_budget: usize,
+    resource_units: usize,
     entries: HashMap<K, WeightedEntry<V>>,
     lru: VecDeque<K>,
     evictions: u64,
@@ -301,11 +322,13 @@ where
     K: Clone + Eq + Hash,
     V: Clone,
 {
-    fn new(entry_capacity: usize, byte_budget: usize) -> Self {
+    fn new(entry_capacity: usize, byte_budget: usize, resource_unit_budget: usize) -> Self {
         Self {
             entry_capacity: entry_capacity.max(1),
             byte_budget: byte_budget.max(1),
             reserved_bytes: 0,
+            resource_unit_budget: resource_unit_budget.max(1),
+            resource_units: 0,
             entries: HashMap::new(),
             lru: VecDeque::new(),
             evictions: 0,
@@ -319,14 +342,18 @@ where
         Some(payload)
     }
 
-    fn insert(&mut self, key: K, payload: V, reserved_bytes: usize) -> bool {
+    fn insert(&mut self, key: K, payload: V, reserved_bytes: usize, resource_units: usize) -> bool {
         self.remove(&key);
-        if reserved_bytes > self.byte_budget {
+        if reserved_bytes > self.byte_budget || resource_units > self.resource_unit_budget {
             self.oversize_rejections = self.oversize_rejections.saturating_add(1);
             return false;
         }
         self.reserved_bytes = self.reserved_bytes.saturating_add(reserved_bytes);
-        self.entries.insert(key.clone(), WeightedEntry { payload, reserved_bytes });
+        self.resource_units = self.resource_units.saturating_add(resource_units);
+        self.entries.insert(
+            key.clone(),
+            WeightedEntry { payload, reserved_bytes, resource_units },
+        );
         self.touch(&key);
         self.enforce_budget();
         self.entries.contains_key(&key)
@@ -335,12 +362,16 @@ where
     fn remove(&mut self, key: &K) {
         if let Some(entry) = self.entries.remove(key) {
             self.reserved_bytes = self.reserved_bytes.saturating_sub(entry.reserved_bytes);
+            self.resource_units = self.resource_units.saturating_sub(entry.resource_units);
         }
         self.lru.retain(|candidate| candidate != key);
     }
 
     fn enforce_budget(&mut self) {
-        while self.entries.len() > self.entry_capacity || self.reserved_bytes > self.byte_budget {
+        while self.entries.len() > self.entry_capacity
+            || self.reserved_bytes > self.byte_budget
+            || self.resource_units > self.resource_unit_budget
+        {
             let Some(oldest) = self.lru.pop_front() else {
                 break;
             };
@@ -348,6 +379,7 @@ where
                 continue;
             };
             self.reserved_bytes = self.reserved_bytes.saturating_sub(entry.reserved_bytes);
+            self.resource_units = self.resource_units.saturating_sub(entry.resource_units);
             self.evictions = self.evictions.saturating_add(1);
         }
     }
@@ -360,6 +392,7 @@ where
         self.entries.clear();
         self.lru.clear();
         self.reserved_bytes = 0;
+        self.resource_units = 0;
     }
 
     fn touch(&mut self, key: &K) {
@@ -439,6 +472,7 @@ mod tests {
         PreviewFrameStoreConfig {
             media_entry_capacity: 100,
             media_byte_budget: media_bytes,
+            media_resource_unit_budget: 4,
             viewer_entry_capacity: 4,
             viewer_byte_budget: 32,
             failure_entry_capacity: 2,
@@ -450,7 +484,7 @@ mod tests {
         let mut store = TestStore::new(config(24));
         for region in 0..100u64 {
             assert_eq!(
-                store.admit_media_frame(region, vec![region as u8; 8], 8, false),
+                store.admit_media_frame(region, vec![region as u8; 8], 8, 0, false),
                 FrameStoreAdmission::Resident
             );
             assert!(store.diagnostics().media_reserved_bytes <= 24);
@@ -465,17 +499,46 @@ mod tests {
     fn oversize_current_media_is_explicitly_pinned_without_evicting_residents() {
         let mut store = TestStore::new(config(16));
         assert_eq!(
-            store.admit_media_frame(1, vec![1; 8], 8, false),
+            store.admit_media_frame(1, vec![1; 8], 8, 0, false),
             FrameStoreAdmission::Resident
         );
         assert_eq!(
-            store.admit_media_frame(2, vec![2; 32], 32, true),
+            store.admit_media_frame(2, vec![2; 32], 32, 0, true),
             FrameStoreAdmission::PinnedCurrent
         );
         assert_eq!(store.diagnostics().media_entries, 1);
         assert_eq!(store.diagnostics().pinned_media_bytes, 32);
         assert_eq!(store.media_frame(&2), Some(vec![2; 32]));
         assert_eq!(store.media_frame(&1), Some(vec![1; 8]));
+    }
+
+    #[test]
+    fn decoder_resource_budget_evicts_oldest_native_payload_before_pool_exhaustion() {
+        let mut config = config(64);
+        config.media_resource_unit_budget = 2;
+        let mut store = TestStore::new(config);
+
+        assert_eq!(
+            store.admit_media_frame(1, vec![1], 0, 1, false),
+            FrameStoreAdmission::Resident
+        );
+        assert_eq!(
+            store.admit_media_frame(2, vec![2], 0, 1, false),
+            FrameStoreAdmission::Resident
+        );
+        assert_eq!(
+            store.admit_media_frame(3, vec![3], 0, 1, false),
+            FrameStoreAdmission::Resident
+        );
+
+        let diagnostics = store.diagnostics();
+        assert_eq!(diagnostics.media_entries, 2);
+        assert_eq!(diagnostics.media_resource_units, 2);
+        assert_eq!(diagnostics.media_resource_unit_budget, 2);
+        assert_eq!(diagnostics.media_evictions, 1);
+        assert!(store.media_frame(&1).is_none());
+        assert_eq!(store.media_frame(&2), Some(vec![2]));
+        assert_eq!(store.media_frame(&3), Some(vec![3]));
     }
 
     #[test]
@@ -490,8 +553,8 @@ mod tests {
     #[test]
     fn clear_releases_payloads_failures_and_both_pins() {
         let mut store = TestStore::new(config(16));
-        store.admit_media_frame(1, vec![1; 8], 8, false);
-        store.admit_media_frame(2, vec![2; 32], 32, true);
+        store.admit_media_frame(1, vec![1; 8], 8, 0, false);
+        store.admit_media_frame(2, vec![2; 32], 32, 0, true);
         store.admit_viewer_frame(1, vec![3; 8], 8);
         store.pin_viewer_frame((7, 1, 1), vec![4; 4], 4);
         store.remember_failure(3);
@@ -502,6 +565,7 @@ mod tests {
             store.diagnostics(),
             PreviewFrameStoreDiagnostics {
                 media_byte_budget: 16,
+                media_resource_unit_budget: 4,
                 viewer_byte_budget: 32,
                 media_oversize_rejections: 1,
                 ..PreviewFrameStoreDiagnostics::default()

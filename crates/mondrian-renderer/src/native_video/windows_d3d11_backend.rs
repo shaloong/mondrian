@@ -1,9 +1,9 @@
 //! Complete D3D11 decoder-surface to OCIO working-frame backend.
 
 use super::windows_d3d11::{
-    renderer_adapter_luid, validated_d3d11_native_decoded_frame_for_luid,
-    D3D11NativeDecodedFrameInspectionError, NativeVideoAdapterLuid,
-    ValidatedD3D11NativeDecodedFrame,
+    renderer_adapter_dxgi_index, renderer_adapter_luid,
+    validated_d3d11_native_decoded_frame_for_luid, D3D11NativeDecodedFrameInspectionError,
+    NativeVideoAdapterLuid, ValidatedD3D11NativeDecodedFrame,
 };
 use super::windows_d3d11_bridge::{
     D3D11Dx12PreparedVideoFrame, D3D11Dx12SharedVideoTexture, D3D11Dx12SharedVideoTextureError,
@@ -95,6 +95,7 @@ impl D3D11Dx12NativeVideoImportBackend {
             return Err(D3D11Dx12NativeVideoImportBackendCreateError::ZeroBridgePoolLimit);
         }
         let renderer_adapter_luid = renderer_adapter_luid(adapter)?;
+        let decoder_adapter_index = renderer_adapter_dxgi_index(adapter)?;
         let mut formats = Vec::with_capacity(2);
         if device.features().contains(wgpu::Features::TEXTURE_FORMAT_NV12) {
             formats.push(GpuNativeDecodedFrameTextureFormat::Nv12);
@@ -108,6 +109,9 @@ impl D3D11Dx12NativeVideoImportBackend {
         let support = GpuNativeDecodedFrameImportSupport::ready(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             formats,
+        )
+        .with_hardware_decode_device_selector(
+            mondrian_media::HwAccelDeviceSelector::D3D11VaAdapterIndex(decoder_adapter_index),
         )
         .with_renderer_backend_label("wgpu Dx12 D3D11 shared YUV + OCIO");
         Ok(Self {

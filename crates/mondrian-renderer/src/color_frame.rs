@@ -861,6 +861,8 @@ pub struct GpuNativeDecodedFrameImportSupport {
     pub supported_handle_kinds: Vec<DecodedGpuFrameHandleKind>,
     /// Decoder source texture formats accepted by the backend.
     pub supported_source_texture_formats: Vec<GpuNativeDecodedFrameTextureFormat>,
+    /// Decoder device that produces resources on the renderer's physical adapter.
+    pub hardware_decode_device_selector: Option<mondrian_media::HwAccelDeviceSelector>,
 }
 
 impl GpuNativeDecodedFrameImportSupport {
@@ -874,6 +876,7 @@ impl GpuNativeDecodedFrameImportSupport {
             ),
             supported_handle_kinds: Vec::new(),
             supported_source_texture_formats: Vec::new(),
+            hardware_decode_device_selector: None,
         }
     }
 
@@ -888,6 +891,7 @@ impl GpuNativeDecodedFrameImportSupport {
             unavailable_reason: Some(reason.into()),
             supported_handle_kinds: Vec::new(),
             supported_source_texture_formats: Vec::new(),
+            hardware_decode_device_selector: None,
         }
     }
 
@@ -902,6 +906,7 @@ impl GpuNativeDecodedFrameImportSupport {
             unavailable_reason: None,
             supported_handle_kinds,
             supported_source_texture_formats,
+            hardware_decode_device_selector: None,
         }
     }
 
@@ -911,6 +916,15 @@ impl GpuNativeDecodedFrameImportSupport {
         renderer_backend_label: impl Into<String>,
     ) -> Self {
         self.renderer_backend_label = Some(renderer_backend_label.into());
+        self
+    }
+
+    /// Attach the decoder device that matches the renderer adapter.
+    pub fn with_hardware_decode_device_selector(
+        mut self,
+        selector: mondrian_media::HwAccelDeviceSelector,
+    ) -> Self {
+        self.hardware_decode_device_selector = Some(selector);
         self
     }
 

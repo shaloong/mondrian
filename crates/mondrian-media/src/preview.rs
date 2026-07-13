@@ -7,7 +7,7 @@ use crate::decoder::{
     decoded_video_range_from_ffmpeg, DecodedFrameResidency, DecodedGpuFrameHandleKind,
     DecodedVideoChromaLocation, DecodedVideoMatrix, DecodedVideoRange, DecodedVideoSampling,
     DecodedVideoSurfaceFormat, HwAccelBackend, HwAccelCodecConfigProbe, HwAccelDeviceContext,
-    HwAccelDeviceContextProbe, HwAccelPixelFormat, HwAccelProbe,
+    HwAccelDeviceContextProbe, HwAccelDeviceSelector, HwAccelPixelFormat, HwAccelProbe,
 };
 use ffmpeg_next as ffmpeg;
 use mondrian_core::types::ColorSpace;
@@ -50,6 +50,7 @@ const PREVIEW_SCRUB_RECOVERY_ANY_SEEK_WINDOW_MS: u64 = 180;
 const PREVIEW_FRAME_CACHE_CAPACITY: usize = 256;
 const PREVIEW_SEEK_INDEX_CACHE_CAPACITY: usize = 32;
 const PREVIEW_PLAYBACK_SESSION_RING_CAPACITY: usize = 8;
+const PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES: i32 = 8;
 const PREVIEW_HIT_TOLERANCE_SECS: f64 = 0.025;
 const PREVIEW_MAX_SELECT_DISTANCE_SECS: f64 = 0.100;
 const PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES: i64 = 48;
@@ -169,6 +170,14 @@ impl PreviewHardwareDecodeRequest {
 
     fn requires_gpu_residency(self) -> bool {
         self == Self::RequireGpuResident
+    }
+}
+
+fn preview_hardware_extra_frames(request: PreviewHardwareDecodeRequest) -> i32 {
+    if request.prefers_gpu_residency() {
+        PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES
+    } else {
+        0
     }
 }
 
@@ -304,6 +313,8 @@ pub struct PreviewDecodeRequest<'a> {
     pub adaptive_hints: PreviewDecodeAdaptiveHints,
     /// Hardware decode/native-residency preference selected by the caller.
     pub hardware_decode_request: PreviewHardwareDecodeRequest,
+    /// Renderer-selected hardware decoder device for native frame residency.
+    pub hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
     /// Resolved source color and range contract required by CPU YUV conversion.
     pub source_color: PreviewSourceColorContract,
 }
@@ -341,6 +352,7 @@ impl<'a> PreviewDecodeRequest<'a> {
             fingerprint: None,
             adaptive_hints: PreviewDecodeAdaptiveHints::default(),
             hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+            hardware_decode_device_selector: None,
             source_color,
         }
     }
@@ -370,6 +382,15 @@ impl<'a> PreviewDecodeRequest<'a> {
         hardware_decode_request: PreviewHardwareDecodeRequest,
     ) -> Self {
         self.hardware_decode_request = hardware_decode_request;
+        self
+    }
+
+    /// Attach the renderer-selected hardware decoder device.
+    pub fn with_hardware_decode_device_selector(
+        mut self,
+        selector: Option<HwAccelDeviceSelector>,
+    ) -> Self {
+        self.hardware_decode_device_selector = selector;
         self
     }
 }
@@ -1670,6 +1691,7 @@ pub fn decode_preview_frame_cancellable(
         request.fingerprint,
         request.adaptive_hints,
         request.hardware_decode_request,
+        request.hardware_decode_device_selector,
         request.source_color,
         should_cancel,
     )
@@ -1741,6 +1763,7 @@ struct PreviewHardwareDecodePlan {
     probe: HwAccelProbe,
     ffmpeg_codec_config: HwAccelCodecConfigProbe,
     ffmpeg_device_context: HwAccelDeviceContextProbe,
+    device_selector: Option<HwAccelDeviceSelector>,
     hardware_cpu_transfer_configured: bool,
     hardware_cpu_transfer_observed: bool,
     hardware_cpu_transfer_status: PreviewHardwareDecodeCpuTransferStatus,
@@ -1753,10 +1776,17 @@ impl PreviewHardwareDecodePlan {
         access_mode: PreviewDecodeAccessMode,
         backend: PreviewDecodeBackend,
         codec_id: ffmpeg::codec::Id,
+        device_selector: Option<HwAccelDeviceSelector>,
     ) -> Self {
         let probe = HwAccelBackend::probe();
-        let (probe, ffmpeg_codec_config, ffmpeg_device_context) =
-            Self::resolve_backend_probes(request, access_mode, backend, codec_id, probe);
+        let (probe, ffmpeg_codec_config, ffmpeg_device_context) = Self::resolve_backend_probes(
+            request,
+            access_mode,
+            backend,
+            codec_id,
+            device_selector,
+            probe,
+        );
         let decision = Self::decision_for(
             request,
             access_mode,
@@ -1771,6 +1801,7 @@ impl PreviewHardwareDecodePlan {
             probe,
             ffmpeg_codec_config,
             ffmpeg_device_context,
+            device_selector,
             hardware_cpu_transfer_configured: false,
             hardware_cpu_transfer_observed: false,
             hardware_cpu_transfer_status: PreviewHardwareDecodeCpuTransferStatus::NotAttempted,
@@ -1783,6 +1814,7 @@ impl PreviewHardwareDecodePlan {
         access_mode: PreviewDecodeAccessMode,
         backend: PreviewDecodeBackend,
         codec_id: ffmpeg::codec::Id,
+        device_selector: Option<HwAccelDeviceSelector>,
         mut probe: HwAccelProbe,
     ) -> (
         HwAccelProbe,
@@ -1798,6 +1830,7 @@ impl PreviewHardwareDecodePlan {
                 backend,
                 candidate,
                 &codec_config,
+                device_selector,
             );
             fallback
                 .get_or_insert_with(|| (candidate, codec_config.clone(), device_context.clone()));
@@ -1942,6 +1975,7 @@ impl PreviewHardwareDecodePlan {
         backend: PreviewDecodeBackend,
         selected_backend: HwAccelBackend,
         ffmpeg_codec_config: &HwAccelCodecConfigProbe,
+        device_selector: Option<HwAccelDeviceSelector>,
     ) -> HwAccelDeviceContextProbe {
         if !Self::plan_requires_device_context(request, access_mode, backend)
             || !ffmpeg_codec_config.ffmpeg_codec_config_available
@@ -1951,7 +1985,7 @@ impl PreviewHardwareDecodePlan {
                 "hardware device context creation was not required for this preview plan",
             );
         }
-        selected_backend.cached_ffmpeg_device_context_probe()
+        selected_backend.cached_ffmpeg_device_context_probe_for(device_selector)
     }
 
     fn decision_for(
@@ -2060,6 +2094,7 @@ struct PreviewDecodeSession {
     max_height: Option<u32>,
     backend: PreviewDecodeBackend,
     hardware_decode_request: PreviewHardwareDecodeRequest,
+    hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
     source_color: PreviewSourceColorContract,
     codec_id: ffmpeg::codec::Id,
     input: ffmpeg::format::context::Input,
@@ -2467,12 +2502,15 @@ fn configure_preview_hardware_decode_context(
         .ok_or_else(|| {
             "FFmpeg codec config did not expose a usable hardware pixel format".to_owned()
         })?;
-    let device_context = backend.create_ffmpeg_device_context().map_err(|probe| probe.reason)?;
+    let device_context = backend
+        .create_ffmpeg_device_context(plan.device_selector)
+        .map_err(|probe| probe.reason)?;
     device_context.attach_to_codec_context(context)?;
 
     let mut state =
         Box::new(PreviewHardwareDecodeContextState { preferred_hw_pixel_format: hw_pixel_format });
     unsafe {
+        (*context.as_mut_ptr()).extra_hw_frames = preview_hardware_extra_frames(plan.request);
         (*context.as_mut_ptr()).opaque = (&mut *state) as *mut _ as *mut c_void;
         (*context.as_mut_ptr()).get_format = Some(preview_hardware_decode_get_format);
     }
@@ -2511,6 +2549,7 @@ impl PreviewDecodeSession {
         access_mode: PreviewDecodeAccessMode,
         backend: PreviewDecodeBackend,
         hardware_decode_request: PreviewHardwareDecodeRequest,
+        hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
         source_color: PreviewSourceColorContract,
     ) -> Result<Self> {
         let input = ffmpeg::format::input(path).map_err(|e| MondrianError::MediaOpen {
@@ -2526,6 +2565,7 @@ impl PreviewDecodeSession {
             access_mode,
             backend,
             hardware_decode_request,
+            hardware_decode_device_selector,
             source_color,
         )
     }
@@ -2539,6 +2579,7 @@ impl PreviewDecodeSession {
         access_mode: PreviewDecodeAccessMode,
         backend: PreviewDecodeBackend,
         hardware_decode_request: PreviewHardwareDecodeRequest,
+        hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
         source_color: PreviewSourceColorContract,
     ) -> Result<Self> {
         let (stream_index, parameters, stream_tb, stream_rate, seek_index) = {
@@ -2574,6 +2615,7 @@ impl PreviewDecodeSession {
             access_mode,
             backend,
             codec_id,
+            hardware_decode_device_selector,
         );
         let requested_threading = preview_decode_threading_config();
         let ffmpeg_threading = ffmpeg::codec::threading::Config {
@@ -2680,6 +2722,7 @@ impl PreviewDecodeSession {
             max_height,
             backend,
             hardware_decode_request,
+            hardware_decode_device_selector,
             source_color,
             codec_id,
             input,
@@ -2712,6 +2755,7 @@ impl PreviewDecodeSession {
         max_height: Option<u32>,
         backend: PreviewDecodeBackend,
         hardware_decode_request: PreviewHardwareDecodeRequest,
+        hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
         source_color: PreviewSourceColorContract,
     ) -> bool {
         self.path == path
@@ -2720,6 +2764,7 @@ impl PreviewDecodeSession {
             && self.max_height == max_height
             && self.backend == backend
             && self.hardware_decode_request == hardware_decode_request
+            && self.hardware_decode_device_selector == hardware_decode_device_selector
             && self.source_color == source_color
     }
 
@@ -3350,6 +3395,7 @@ fn decode_preview_frame_outcome(
     fingerprint: Option<PreviewFileFingerprint>,
     adaptive_hints: PreviewDecodeAdaptiveHints,
     hardware_decode_request: PreviewHardwareDecodeRequest,
+    hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
     source_color: PreviewSourceColorContract,
     should_cancel: impl Fn() -> bool,
 ) -> Result<PreviewDecodeOutcome> {
@@ -3378,6 +3424,7 @@ fn decode_preview_frame_outcome(
                     max_height,
                     backend,
                     hardware_decode_request,
+                    hardware_decode_device_selector,
                     source_color,
                 )
             })
@@ -3393,6 +3440,7 @@ fn decode_preview_frame_outcome(
                 access_mode,
                 backend,
                 hardware_decode_request,
+                hardware_decode_device_selector,
                 source_color,
             )?);
             session_open_us = duration_us(open_started_at.elapsed());
@@ -3405,6 +3453,7 @@ fn decode_preview_frame_outcome(
             access_mode,
             PreviewDecodeBackend::ExternalFfmpegCpuRgba,
             session.codec_id,
+            hardware_decode_device_selector,
         );
 
         if preview_external_ffmpeg_cpu_rgba_enabled(access_mode) {
@@ -4411,25 +4460,25 @@ mod tests {
         decoded_native_surface_format_from_software_format, decoded_surface_format_from_pixel,
         decoded_video_sampling_from_frame, duration_us, materialize_decoded_frame,
         preview_cache_get, preview_cache_put_with_fingerprint, preview_create_rgba_scaler,
-        preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_seek_index_cache_get,
-        preview_seek_index_cache_put, resolve_cpu_rgba_contract, DecodedRgbaFrameContract,
-        FfmpegNativeDecodedFrameResource, FfmpegNativeDecodedFrameResourceError,
-        PreviewDecodeAccessMode, PreviewDecodeAccessPolicy, PreviewDecodeAdaptiveHints,
-        PreviewDecodeBackend, PreviewDecodeDiagnostics, PreviewDecodeExecutionPath,
-        PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
-        PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewDecodedFramePayload,
-        PreviewFileFingerprint, PreviewHardwareDecodeBlocker,
+        preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_hardware_extra_frames,
+        preview_seek_index_cache_get, preview_seek_index_cache_put, resolve_cpu_rgba_contract,
+        DecodedRgbaFrameContract, FfmpegNativeDecodedFrameResource,
+        FfmpegNativeDecodedFrameResourceError, PreviewDecodeAccessMode, PreviewDecodeAccessPolicy,
+        PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeDiagnostics,
+        PreviewDecodeExecutionPath, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest,
+        PreviewDecodeSeekStrategy, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
+        PreviewDecodedFramePayload, PreviewFileFingerprint, PreviewHardwareDecodeBlocker,
         PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
         PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest, PreviewNativeDecodeFallback,
         PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
         PreviewNativeDecodedFrameResource, PreviewPlaybackRing, PreviewScrubAdaptiveClass,
         PreviewSeekIndex, PreviewSeekIndexDiagnostics, PreviewSeekIndexSource,
         PreviewSeekResolution, PreviewSourceColorContract, RgbaFrame,
-        PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
-        PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
-        PREVIEW_SCRUB_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS,
-        PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_SLOW_ANY_SEEK_WINDOW_MS,
-        PREVIEW_SCRUB_SLOW_FORWARD_DECODE_BUDGET_FRAMES,
+        PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES,
+        PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS,
+        PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
+        PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES,
+        PREVIEW_SCRUB_SLOW_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_SLOW_FORWARD_DECODE_BUDGET_FRAMES,
         PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES,
     };
     use crate::decoder::{
@@ -4446,6 +4495,26 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn gpu_resident_decode_reserves_external_hardware_frame_leases() {
+        assert_eq!(
+            preview_hardware_extra_frames(PreviewHardwareDecodeRequest::PreferGpuResident),
+            PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES
+        );
+        assert_eq!(
+            preview_hardware_extra_frames(PreviewHardwareDecodeRequest::RequireGpuResident),
+            PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES
+        );
+        assert_eq!(
+            preview_hardware_extra_frames(PreviewHardwareDecodeRequest::PreferHardwareDecode),
+            0
+        );
+        assert_eq!(
+            preview_hardware_extra_frames(PreviewHardwareDecodeRequest::Auto),
+            0
+        );
+    }
 
     fn test_source_color() -> PreviewSourceColorContract {
         PreviewSourceColorContract::new(ColorSpace::Rec709, DecodedVideoRange::Limited)
@@ -4608,6 +4677,7 @@ mod tests {
             PreviewDecodeAccessMode::PlaybackCursor,
             PreviewDecodeBackend::Auto,
             ffmpeg::codec::Id::H264,
+            None,
         );
 
         assert_eq!(
@@ -4635,6 +4705,7 @@ mod tests {
             PreviewDecodeAccessMode::PlaybackCursor,
             PreviewDecodeBackend::Auto,
             ffmpeg::codec::Id::H264,
+            None,
         );
 
         assert_eq!(
@@ -4656,6 +4727,7 @@ mod tests {
             PreviewDecodeAccessMode::PlaybackCursor,
             PreviewDecodeBackend::Auto,
             ffmpeg::codec::Id::H264,
+            None,
         );
 
         assert_eq!(
@@ -4678,6 +4750,7 @@ mod tests {
             PreviewDecodeAccessMode::ScrubCursor,
             PreviewDecodeBackend::Auto,
             ffmpeg::codec::Id::H264,
+            None,
         );
 
         assert_eq!(
@@ -4693,6 +4766,7 @@ mod tests {
             PreviewDecodeAccessMode::PlaybackCursor,
             PreviewDecodeBackend::ExternalFfmpegCpuRgba,
             ffmpeg::codec::Id::H264,
+            None,
         );
 
         assert_eq!(
@@ -4708,6 +4782,7 @@ mod tests {
             PreviewDecodeAccessMode::PlaybackCursor,
             PreviewDecodeBackend::Auto,
             ffmpeg::codec::Id::H264,
+            None,
         );
 
         plan.mark_hardware_cpu_transfer_configured(HwAccelBackend::D3D11VA);
@@ -4750,6 +4825,7 @@ mod tests {
             PreviewDecodeAccessMode::PlaybackCursor,
             PreviewDecodeBackend::Auto,
             ffmpeg::codec::Id::H264,
+            None,
         );
         setup_failed.mark_hardware_cpu_transfer_setup_failed();
         assert_eq!(
@@ -4764,6 +4840,7 @@ mod tests {
             PreviewDecodeAccessMode::PlaybackCursor,
             PreviewDecodeBackend::Auto,
             ffmpeg::codec::Id::H264,
+            None,
         );
         open_failed.mark_hardware_cpu_transfer_configured(HwAccelBackend::D3D11VA);
         open_failed.mark_hardware_cpu_transfer_decoder_open_failed();
@@ -5864,6 +5941,7 @@ mod tests {
             PreviewDecodeAccessMode::PlaybackCursor,
             PreviewDecodeBackend::Software,
             ffmpeg::codec::Id::H264,
+            None,
         );
         plan.request = PreviewHardwareDecodeRequest::PreferGpuResident;
         let mut scaler = None;
@@ -5896,6 +5974,7 @@ mod tests {
             PreviewDecodeAccessMode::PlaybackCursor,
             PreviewDecodeBackend::Software,
             ffmpeg::codec::Id::H264,
+            None,
         );
         plan.request = PreviewHardwareDecodeRequest::RequireGpuResident;
         let error = materialize_decoded_frame(
@@ -5922,6 +6001,7 @@ mod tests {
             PreviewDecodeAccessMode::PlaybackCursor,
             PreviewDecodeBackend::Software,
             ffmpeg::codec::Id::H264,
+            None,
         );
         plan.request = PreviewHardwareDecodeRequest::PreferGpuResident;
         let payload = materialize_decoded_frame(

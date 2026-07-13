@@ -11,7 +11,7 @@ use crate::app::ui_actions::TimelineSeekSource;
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
 use mondrian_core::WorkingColorSpace;
 use mondrian_media::{
-    preview_decode_cpu_budget, DecodedVideoRange, PreviewDecodeAccessMode,
+    preview_decode_cpu_budget, DecodedVideoRange, HwAccelDeviceSelector, PreviewDecodeAccessMode,
     PreviewDecodeAdaptiveHints, PreviewFileFingerprint, PreviewHardwareDecodeRequest,
 };
 
@@ -171,6 +171,7 @@ pub(crate) struct MediaPreviewJob {
     pub(crate) access_mode: PreviewDecodeAccessMode,
     pub(crate) adaptive_hints: PreviewDecodeAdaptiveHints,
     pub(crate) hardware_decode_request: PreviewHardwareDecodeRequest,
+    pub(crate) hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
     pub(crate) enqueued_at: Instant,
     pub(crate) deadline_at: Option<Instant>,
     /// Opaque Playback Session identity; media workers only carry it.
@@ -318,6 +319,7 @@ impl MediaPreviewJobQueueSender {
         demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
         adaptive_hints: PreviewDecodeAdaptiveHints,
         hardware_decode_request: PreviewHardwareDecodeRequest,
+        hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
     ) -> MediaPreviewJobPromoteStatus {
         if priority != MediaPreviewRequestPriority::Current {
             return MediaPreviewJobPromoteStatus::default();
@@ -333,6 +335,7 @@ impl MediaPreviewJobQueueSender {
             access_mode,
             adaptive_hints,
             hardware_decode_request,
+            hardware_decode_device_selector,
             enqueued_at,
             deadline_at,
             demand_identity,
@@ -693,6 +696,7 @@ impl MediaPreviewScheduler {
             access_mode,
             adaptive_hints: PreviewDecodeAdaptiveHints::default(),
             hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+            hardware_decode_device_selector: None,
             enqueued_at: Instant::now(),
             deadline_at,
             demand_identity,
@@ -1005,6 +1009,7 @@ mod tests {
             access_mode: test_access_mode_for_priority(priority),
             adaptive_hints: PreviewDecodeAdaptiveHints::default(),
             hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+            hardware_decode_device_selector: None,
             enqueued_at: Instant::now(),
             deadline_at: None,
             demand_identity: None,
@@ -2313,6 +2318,7 @@ mod tests {
             Some(demand_identity),
             PreviewDecodeAdaptiveHints::default(),
             PreviewHardwareDecodeRequest::PreferGpuResident,
+            None,
         );
         assert_eq!(
             status,
@@ -2373,6 +2379,7 @@ mod tests {
             None,
             PreviewDecodeAdaptiveHints::default(),
             PreviewHardwareDecodeRequest::Auto,
+            None,
         );
 
         assert_eq!(
@@ -2546,6 +2553,7 @@ mod tests {
                 access_mode: PreviewDecodeAccessMode::RandomAccessStillFrame,
                 adaptive_hints: PreviewDecodeAdaptiveHints::default(),
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                hardware_decode_device_selector: None,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
                 demand_identity: None,
@@ -2607,6 +2615,7 @@ mod tests {
                 None,
                 PreviewDecodeAdaptiveHints::default(),
                 PreviewHardwareDecodeRequest::Auto,
+                None,
             ),
             MediaPreviewJobPromoteStatus::default()
         );
@@ -2622,6 +2631,7 @@ mod tests {
                 None,
                 PreviewDecodeAdaptiveHints::default(),
                 PreviewHardwareDecodeRequest::Auto,
+                None,
             ),
             MediaPreviewJobPromoteStatus::default()
         );

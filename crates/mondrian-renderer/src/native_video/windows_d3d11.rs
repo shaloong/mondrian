@@ -8,7 +8,9 @@ use windows::core::Interface;
 use windows::Win32::Foundation::{E_POINTER, LUID};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D, D3D11_TEXTURE2D_DESC};
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_NV12, DXGI_FORMAT_P010};
-use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+use windows::Win32::Graphics::Dxgi::{
+    CreateDXGIFactory1, IDXGIDevice, IDXGIFactory1, DXGI_ERROR_NOT_FOUND,
+};
 
 /// Stable adapter identity used to reject cross-adapter native video imports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -148,6 +150,9 @@ pub enum D3D11NativeDecodedFrameInspectionError {
     /// The active wgpu adapter is not backed by DX12.
     #[error("active wgpu adapter is not backed by DX12")]
     WgpuAdapterIsNotDx12,
+    /// The active DX12 adapter was not found in the DXGI enumeration used by FFmpeg.
+    #[error("wgpu DX12 adapter LUID 0x{luid:016x} was not found in DXGI adapter enumeration")]
+    RendererAdapterIndexNotFound { luid: u64 },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -373,6 +378,37 @@ pub(super) fn renderer_adapter_luid(
     let descriptor = unsafe { hal_adapter.raw_adapter().GetDesc2() }
         .map_err(|error| windows_error("IDXGIAdapter2::GetDesc2", error.code()))?;
     Ok(NativeVideoAdapterLuid::from_windows(descriptor.AdapterLuid))
+}
+
+pub(super) fn renderer_adapter_dxgi_index(
+    adapter: &wgpu::Adapter,
+) -> Result<u32, D3D11NativeDecodedFrameInspectionError> {
+    let target_luid = renderer_adapter_luid(adapter)?;
+    // SAFETY: CreateDXGIFactory1 returns an owned COM factory on success.
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }
+        .map_err(|error| windows_error("CreateDXGIFactory1", error.code()))?;
+    for index in 0..u32::MAX {
+        // SAFETY: the factory remains alive for enumeration and returns an
+        // owned adapter reference on success.
+        let enumerated = match unsafe { factory.EnumAdapters1(index) } {
+            Ok(adapter) => adapter,
+            Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
+            Err(error) => {
+                return Err(windows_error("IDXGIFactory1::EnumAdapters1", error.code()));
+            }
+        };
+        // SAFETY: the enumerated adapter is live for this descriptor query.
+        let descriptor = unsafe { enumerated.GetDesc1() }
+            .map_err(|error| windows_error("IDXGIAdapter1::GetDesc1", error.code()))?;
+        if NativeVideoAdapterLuid::from_windows(descriptor.AdapterLuid) == target_luid {
+            return Ok(index);
+        }
+    }
+    Err(
+        D3D11NativeDecodedFrameInspectionError::RendererAdapterIndexNotFound {
+            luid: target_luid.as_u64(),
+        },
+    )
 }
 
 fn windows_error(

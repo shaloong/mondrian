@@ -398,6 +398,7 @@ fn prepare_composite<'a>(
             } => {
                 prepared.residency.media_layers = prepared.residency.media_layers.saturating_add(1);
                 prepared.residency.record_source(gpu_source.as_ref(), native_source.as_ref());
+                let mut native_import_error = None;
                 let native_handle = match native_source.as_ref() {
                     Some(source) => {
                         match record_native_video_layer(source, native_runtime, runtime) {
@@ -415,6 +416,7 @@ fn prepare_composite<'a>(
                                     height = request.height,
                                     "viewer native video import failed: {error}"
                                 );
+                                native_import_error = Some(error);
                                 None
                             }
                         }
@@ -469,12 +471,17 @@ fn prepare_composite<'a>(
                         None => {
                             let Some(frame) = frame.as_ref() else {
                                 let reason = native_source.as_ref().map_or_else(
-                                    || "media layer has no GPU source or CPU working fallback".to_owned(),
-                                    |source| format!(
-                                        "native GPU import failed for {} {:?} without a CPU working fallback",
-                                        source.native_frame.handle_kind().as_str(),
-                                        source.native_frame.surface_format
-                                    ),
+                                    || {
+                                        "media layer has no GPU source or CPU working fallback"
+                                            .to_owned()
+                                    },
+                                    |source| {
+                                        native_import_failure_without_cpu_fallback(
+                                            source.native_frame.handle_kind(),
+                                            source.native_frame.surface_format,
+                                            native_import_error.as_deref(),
+                                        )
+                                    },
                                 );
                                 return Err(ViewerGpuExecutionError::InputPreparation(reason));
                             };
@@ -522,6 +529,18 @@ fn prepare_composite<'a>(
     }
 
     Ok(prepared)
+}
+
+fn native_import_failure_without_cpu_fallback(
+    handle_kind: mondrian_media::DecodedGpuFrameHandleKind,
+    surface_format: mondrian_media::DecodedVideoSurfaceFormat,
+    error: Option<&str>,
+) -> String {
+    format!(
+        "native GPU import failed for {} {surface_format:?} without a CPU working fallback: {}",
+        handle_kind.as_str(),
+        error.unwrap_or("native import returned no error detail")
+    )
 }
 
 fn record_native_video_layer(
@@ -655,5 +674,23 @@ impl ViewerGpuNativeVideoFacts {
             source_texture_format,
             source_video_sampling,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::native_import_failure_without_cpu_fallback;
+    use mondrian_media::{DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat};
+
+    #[test]
+    fn terminal_native_import_failure_preserves_backend_error_detail() {
+        let message = native_import_failure_without_cpu_fallback(
+            DecodedGpuFrameHandleKind::D3D11Texture2D,
+            DecodedVideoSurfaceFormat::P010,
+            Some("adapter LUID mismatch"),
+        );
+
+        assert!(message.contains("D3D11Texture2D P010"));
+        assert!(message.contains("adapter LUID mismatch"));
     }
 }

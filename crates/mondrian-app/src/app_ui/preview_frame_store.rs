@@ -55,8 +55,9 @@ impl PreviewCpuFrameStore {
         pin_if_oversize: bool,
     ) -> bool {
         let reserved_bytes = frame.reserved_cpu_bytes();
+        let resource_units = frame.decoder_resource_units();
         self.store
-            .admit_media_frame(key, frame, reserved_bytes, pin_if_oversize)
+            .admit_media_frame(key, frame, reserved_bytes, resource_units, pin_if_oversize)
             .is_resident()
     }
 

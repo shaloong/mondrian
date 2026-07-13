@@ -26,14 +26,14 @@ use mondrian_effects::{
 use mondrian_media::{
     decode_preview_frame_cancellable, preview_decode_cpu_budget, DecodedFrameResidency,
     DecodedGpuFrameHandleKind, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
-    HwAccelBackend, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeCpuBudget,
-    PreviewDecodeDiagnostics, PreviewDecodeExecutionPath, PreviewDecodeOutcome, PreviewDecodePath,
-    PreviewDecodeRequest, PreviewDecodeSeekStrategy, PreviewDecodeStageDurations,
-    PreviewDecodeThreadingKind, PreviewFileFingerprint, PreviewHardwareDecodeBlocker,
-    PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
-    PreviewHardwareDecodeRequest, PreviewNativeDecodedFrame, PreviewScrubAdaptiveClass,
-    PreviewSeekIndexSource, PreviewSourceColorContract, VideoColorDiagnostic,
-    VideoColorDiagnosticIssueSummary,
+    HwAccelBackend, HwAccelDeviceSelector, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
+    PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodeExecutionPath,
+    PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
+    PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
+    PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
+    PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest, PreviewNativeDecodedFrame,
+    PreviewScrubAdaptiveClass, PreviewSeekIndexSource, PreviewSourceColorContract,
+    VideoColorDiagnostic, VideoColorDiagnosticIssueSummary,
 };
 #[cfg(test)]
 use mondrian_media::{DecodedVideoChromaLocation, PreviewNativeDecodedFrameHandle};
@@ -145,6 +145,7 @@ pub struct AppUiPreviewService {
     display_snapshot: RefCell<Option<DisplayOutputSnapshot>>,
     last_generation_key: RefCell<Option<ViewerPreviewGenerationKey>>,
     playback_hardware_decode_request: Cell<PreviewHardwareDecodeRequest>,
+    playback_hardware_decode_device_selector: Cell<Option<HwAccelDeviceSelector>>,
     playback_hardware_decode_renderer_import_known: Cell<bool>,
     playback_hardware_decode_renderer_import_ready: Cell<bool>,
     playback_hardware_decode_platform_import_ready: Cell<bool>,
@@ -236,6 +237,7 @@ impl AppUiPreviewService {
             display_snapshot: RefCell::new(None),
             last_generation_key: RefCell::new(None),
             playback_hardware_decode_request: Cell::new(PreviewHardwareDecodeRequest::Auto),
+            playback_hardware_decode_device_selector: Cell::new(None),
             playback_hardware_decode_renderer_import_known: Cell::new(false),
             playback_hardware_decode_renderer_import_ready: Cell::new(false),
             playback_hardware_decode_platform_import_ready: Cell::new(false),
@@ -261,6 +263,7 @@ impl AppUiPreviewService {
     pub(crate) fn set_playback_hardware_decode_admission(
         &self,
         request: PreviewHardwareDecodeRequest,
+        device_selector: Option<HwAccelDeviceSelector>,
         renderer_native_import_ready: bool,
         platform_native_import_ready: bool,
         native_import_admission_ready: bool,
@@ -272,6 +275,7 @@ impl AppUiPreviewService {
         renderer_supported_source_texture_formats: u8,
     ) {
         self.playback_hardware_decode_request.set(request);
+        self.playback_hardware_decode_device_selector.set(device_selector);
         self.playback_hardware_decode_renderer_import_known.set(true);
         self.playback_hardware_decode_renderer_import_ready
             .set(renderer_native_import_ready);
@@ -340,6 +344,19 @@ impl AppUiPreviewService {
         }
     }
 
+    fn hardware_decode_device_selector_for_access_mode(
+        &self,
+        access_mode: PreviewDecodeAccessMode,
+    ) -> Option<HwAccelDeviceSelector> {
+        match access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor => {
+                self.playback_hardware_decode_device_selector.get()
+            }
+            PreviewDecodeAccessMode::ScrubCursor
+            | PreviewDecodeAccessMode::RandomAccessStillFrame => None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn seed_pending_preview_work_for_test(&self) {
         self.seed_pending_preview_work_with_access_mode_for_test(
@@ -405,6 +422,8 @@ impl AppUiPreviewService {
             access_mode,
             adaptive_hints: PreviewDecodeAdaptiveHints::default(),
             hardware_decode_request: self.hardware_decode_request_for_access_mode(access_mode),
+            hardware_decode_device_selector: self
+                .hardware_decode_device_selector_for_access_mode(access_mode),
             enqueued_at: Instant::now(),
             deadline_at: None,
             demand_identity,
@@ -622,6 +641,8 @@ impl AppUiPreviewService {
             media_failure_entries: frame_store.failure_entries,
             media_cache_reserved_bytes: frame_store.media_reserved_bytes,
             media_cache_byte_budget: frame_store.media_byte_budget,
+            media_cache_resource_units: frame_store.media_resource_units,
+            media_cache_resource_unit_budget: frame_store.media_resource_unit_budget,
             media_cache_evictions: frame_store.media_evictions,
             media_cache_oversize_rejections: frame_store.media_oversize_rejections,
             viewer_frame_cache_reserved_bytes: frame_store.viewer_reserved_bytes,
@@ -2601,6 +2622,10 @@ pub struct AppUiPreviewDiagnostics {
     pub media_cache_reserved_bytes: usize,
     /// Maximum CPU pixel bytes allowed for decoded/media cache entries.
     pub media_cache_byte_budget: usize,
+    /// Decoder/GPU resource leases retained by decoded-media cache entries.
+    pub media_cache_resource_units: usize,
+    /// Maximum decoder/GPU resource leases retained by decoded-media entries.
+    pub media_cache_resource_unit_budget: usize,
     /// Decoded/media cache entries evicted by count or byte pressure.
     pub media_cache_evictions: u64,
     /// Decoded/media payloads refused because one entry exceeded the byte budget.
@@ -6969,6 +6994,10 @@ impl MediaPreviewFrame {
         linear_bytes.saturating_add(source_and_lazy_working_bytes)
     }
 
+    pub(super) fn decoder_resource_units(&self) -> usize {
+        usize::from(self.native_source.is_some())
+    }
+
     fn width(&self) -> u32 {
         self.width
     }
@@ -7805,6 +7834,8 @@ impl AppUiPreviewService {
             ));
         }
         let hardware_decode_request = self.hardware_decode_request_for_access_mode(access_mode);
+        let hardware_decode_device_selector =
+            self.hardware_decode_device_selector_for_access_mode(access_mode);
         let submission = self.scheduler.submit_job(MediaPreviewJob {
             key: key.clone(),
             source_secs,
@@ -7813,6 +7844,7 @@ impl AppUiPreviewService {
             access_mode,
             adaptive_hints,
             hardware_decode_request,
+            hardware_decode_device_selector,
             enqueued_at: Instant::now(),
             deadline_at: if is_current_playback {
                 playback_current_deadline_at
@@ -9173,6 +9205,7 @@ fn decode_media_preview(
         job.key.fingerprint,
         job.adaptive_hints,
         job.hardware_decode_request,
+        job.hardware_decode_device_selector,
         PreviewSourceColorContract::new(job.key.input_color_space, job.key.input_video_range),
         should_cancel,
     );
@@ -9350,13 +9383,15 @@ fn decode_media_preview_for_access_mode(
     fingerprint: Option<PreviewFileFingerprint>,
     adaptive_hints: PreviewDecodeAdaptiveHints,
     hardware_decode_request: PreviewHardwareDecodeRequest,
+    hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
     source_color: PreviewSourceColorContract,
     should_cancel: impl Fn() -> bool,
 ) -> mondrian_core::Result<PreviewDecodeOutcome> {
     let mut request = PreviewDecodeRequest::new(path, source_secs, access_mode, source_color)
         .with_max_size(max_width, max_height)
         .with_adaptive_hints(adaptive_hints)
-        .with_hardware_decode_request(hardware_decode_request);
+        .with_hardware_decode_request(hardware_decode_request)
+        .with_hardware_decode_device_selector(hardware_decode_device_selector);
     if let Some(fingerprint) = fingerprint {
         request = request.with_fingerprint(fingerprint);
     }
@@ -11209,6 +11244,7 @@ mod tests {
         let service = AppUiPreviewService::new();
         service.set_playback_hardware_decode_admission(
             PreviewHardwareDecodeRequest::PreferHardwareDecode,
+            None,
             false,
             false,
             false,
@@ -15091,6 +15127,7 @@ mod tests {
                 access_mode: PreviewDecodeAccessMode::PlaybackCursor,
                 adaptive_hints: PreviewDecodeAdaptiveHints::default(),
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                hardware_decode_device_selector: None,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
                 demand_identity: None,
@@ -15298,6 +15335,7 @@ mod tests {
                 access_mode: PreviewDecodeAccessMode::ScrubCursor,
                 adaptive_hints: PreviewDecodeAdaptiveHints::default(),
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                hardware_decode_device_selector: None,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
                 demand_identity: None,
@@ -15361,6 +15399,7 @@ mod tests {
                     access_mode: PreviewDecodeAccessMode::PlaybackCursor,
                     adaptive_hints: PreviewDecodeAdaptiveHints::default(),
                     hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                    hardware_decode_device_selector: None,
                     enqueued_at: Instant::now(),
                     deadline_at: None,
                     demand_identity: None,
@@ -15440,6 +15479,7 @@ mod tests {
                 access_mode: PreviewDecodeAccessMode::PlaybackCursor,
                 adaptive_hints: PreviewDecodeAdaptiveHints::default(),
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                hardware_decode_device_selector: None,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
                 demand_identity: None,
@@ -15514,6 +15554,7 @@ mod tests {
                 access_mode: PreviewDecodeAccessMode::PlaybackCursor,
                 adaptive_hints: PreviewDecodeAdaptiveHints::default(),
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                hardware_decode_device_selector: None,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
                 demand_identity: None,
@@ -15565,6 +15606,7 @@ mod tests {
                 access_mode: PreviewDecodeAccessMode::ScrubCursor,
                 adaptive_hints: PreviewDecodeAdaptiveHints::default(),
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                hardware_decode_device_selector: None,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
                 demand_identity: None,
@@ -15613,6 +15655,7 @@ mod tests {
                 access_mode: PreviewDecodeAccessMode::PlaybackCursor,
                 adaptive_hints: PreviewDecodeAdaptiveHints::default(),
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                hardware_decode_device_selector: None,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
                 demand_identity: None,
@@ -15651,6 +15694,7 @@ mod tests {
                 access_mode: PreviewDecodeAccessMode::PlaybackCursor,
                 adaptive_hints: PreviewDecodeAdaptiveHints::default(),
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                hardware_decode_device_selector: None,
                 enqueued_at: Instant::now(),
                 deadline_at: Some(Instant::now() - Duration::from_millis(1)),
                 demand_identity: None,
@@ -15721,6 +15765,7 @@ mod tests {
                 access_mode: PreviewDecodeAccessMode::PlaybackCursor,
                 adaptive_hints: PreviewDecodeAdaptiveHints::default(),
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                hardware_decode_device_selector: None,
                 enqueued_at: Instant::now(),
                 deadline_at: Some(Instant::now() - Duration::from_millis(1)),
                 demand_identity: None,
@@ -15949,6 +15994,7 @@ mod tests {
                         access_mode: PreviewDecodeAccessMode::PlaybackCursor,
                         adaptive_hints: PreviewDecodeAdaptiveHints::default(),
                         hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                        hardware_decode_device_selector: None,
                         enqueued_at: Instant::now(),
                         deadline_at: Some(Instant::now() - Duration::from_millis(1)),
                         demand_identity: None,
@@ -15999,6 +16045,7 @@ mod tests {
                     access_mode: PreviewDecodeAccessMode::ScrubCursor,
                     adaptive_hints: PreviewDecodeAdaptiveHints::default(),
                     hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                    hardware_decode_device_selector: None,
                     enqueued_at: Instant::now(),
                     deadline_at: None,
                     demand_identity: None,
@@ -16133,6 +16180,7 @@ mod tests {
         PreviewCpuFrameStore::new(PreviewCpuFrameStoreConfig {
             media_entry_capacity,
             media_byte_budget,
+            media_resource_unit_budget: 4,
             viewer_entry_capacity: 4,
             viewer_byte_budget: 1_024,
             failure_entry_capacity,
@@ -16557,6 +16605,7 @@ mod tests {
         );
         service.set_playback_hardware_decode_admission(
             PreviewHardwareDecodeRequest::PreferGpuResident,
+            Some(HwAccelDeviceSelector::D3D11VaAdapterIndex(1)),
             true,
             true,
             true,
@@ -16573,8 +16622,20 @@ mod tests {
             PreviewHardwareDecodeRequest::PreferGpuResident
         );
         assert_eq!(
+            service.hardware_decode_device_selector_for_access_mode(
+                PreviewDecodeAccessMode::PlaybackCursor
+            ),
+            Some(HwAccelDeviceSelector::D3D11VaAdapterIndex(1))
+        );
+        assert_eq!(
             service.hardware_decode_request_for_access_mode(PreviewDecodeAccessMode::ScrubCursor),
             PreviewHardwareDecodeRequest::Auto
+        );
+        assert_eq!(
+            service.hardware_decode_device_selector_for_access_mode(
+                PreviewDecodeAccessMode::ScrubCursor
+            ),
+            None
         );
         assert_eq!(
             service.hardware_decode_request_for_access_mode(
@@ -16668,6 +16729,7 @@ mod tests {
         let mut store = PreviewCpuFrameStore::new(PreviewCpuFrameStoreConfig {
             media_entry_capacity: 2,
             media_byte_budget: 1_024,
+            media_resource_unit_budget: 4,
             viewer_entry_capacity: 2,
             viewer_byte_budget: 1_024,
             failure_entry_capacity: 2,
@@ -16693,6 +16755,7 @@ mod tests {
         let mut store = PreviewCpuFrameStore::new(PreviewCpuFrameStoreConfig {
             media_entry_capacity: 2,
             media_byte_budget: 1_024,
+            media_resource_unit_budget: 4,
             viewer_entry_capacity: 2,
             viewer_byte_budget: 1_024,
             failure_entry_capacity: 2,
@@ -16763,6 +16826,7 @@ mod tests {
         let mut store = PreviewCpuFrameStore::new(PreviewCpuFrameStoreConfig {
             media_entry_capacity: 2,
             media_byte_budget: 1_024,
+            media_resource_unit_budget: 4,
             viewer_entry_capacity: 2,
             viewer_byte_budget: 1_024,
             failure_entry_capacity: 2,
@@ -16894,6 +16958,7 @@ mod tests {
                 access_mode: PreviewDecodeAccessMode::ScrubCursor,
                 adaptive_hints: PreviewDecodeAdaptiveHints::default(),
                 hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                hardware_decode_device_selector: None,
                 enqueued_at: Instant::now(),
                 deadline_at: None,
                 demand_identity: None,

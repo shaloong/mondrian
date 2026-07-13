@@ -247,6 +247,7 @@ impl AppUiHost {
         );
         self.preview_service.set_playback_hardware_decode_admission(
             admission.request,
+            admission.hardware_decode_device_selector,
             admission.renderer_native_import_ready,
             admission.platform_native_import_ready,
             admission.native_import_admission_ready,
