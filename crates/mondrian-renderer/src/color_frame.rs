@@ -762,15 +762,6 @@ impl GpuNativeDecodedFrameVideoSampling {
         source_color_space: ColorSpace,
     ) -> Result<(), GpuNativeDecodedFrameImportPlanError> {
         let source_encoding = source_color_space.encoding();
-        if self.matrix != source_encoding.matrix {
-            return Err(GpuNativeDecodedFrameImportPlanError::InvalidVideoSampling {
-                source_texture_format,
-                reason: format!(
-                    "sampling matrix {:?} does not match source color space {:?} matrix {:?}",
-                    self.matrix, source_color_space, source_encoding.matrix
-                ),
-            });
-        }
         if self.transfer != source_encoding.transfer {
             return Err(GpuNativeDecodedFrameImportPlanError::InvalidVideoSampling {
                 source_texture_format,
@@ -2250,7 +2241,7 @@ mod tests {
     }
 
     #[test]
-    fn native_decoded_frame_import_rejects_sampling_matrix_color_space_mismatch() {
+    fn native_decoded_frame_import_preserves_decoder_matrix_independent_of_rgb_space() {
         let mut ids = GpuColorFrameIdAllocator::new(500);
         let support = GpuNativeDecodedFrameImportSupport::ready(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
@@ -2259,18 +2250,11 @@ mod tests {
         let mut contract = native_import_contract();
         contract.video_sampling.matrix = ColorMatrixCoefficients::Bt709;
 
-        let err = GpuNativeDecodedFrameImportPlan::from_contract(&mut ids, contract, &support)
-            .expect_err("native sampling matrix must match the source color space");
+        let plan = GpuNativeDecodedFrameImportPlan::from_contract(&mut ids, contract, &support)
+            .expect("decoder matrix describes YCbCr sampling, not encoded RGB primaries");
 
-        match err {
-            GpuNativeDecodedFrameImportPlanError::InvalidVideoSampling { reason, .. } => {
-                assert!(reason.contains("sampling matrix"));
-                assert!(reason.contains("Rec2100Pq"));
-                assert!(reason.contains("Bt2020NonConstant"));
-            }
-            other => panic!("expected invalid video sampling, got {other:?}"),
-        }
-        assert_eq!(ids.next_raw(), 500);
+        assert_eq!(plan.video_sampling.matrix, ColorMatrixCoefficients::Bt709);
+        assert_eq!(ids.next_raw(), 502);
     }
 
     #[test]

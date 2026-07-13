@@ -246,6 +246,12 @@ verification. Platform/window/app code must not fabricate
 `GpuColorFrameResource` entries directly from decoder handles; a real D3D12,
 D3D11, VideoToolbox, VA-API, or CUDA adapter must return the exact planned float
 working frame or fail with a structured backend error.
+Native NV12/P010 sampling carries the decoder matrix independently from the
+encoded RGB source color-space identity. The GPU YCbCr pass supports BT.709,
+FCC, BT.470BG/625-line BT.601, SMPTE 170M/525-line BT.601, SMPTE 240M, and
+BT.2020 non-constant-luminance coefficients. Matrix identity is never rebuilt
+from RGB primaries; explicit unsupported matrices must be rejected before GPU
+resource import.
 
 ## Effect Integration
 
@@ -257,6 +263,9 @@ effect math or own wgpu resources. `GpuFrameCompositor` consumes the plan in its
 straight-alpha source composition; adjustment plans apply to the lower
 accumulator and blend the processed result back. The retired RGBA8 global
 executor/upload/readback path must not be reintroduced.
+Media affine transforms (translate, scale, rotate, and non-singular shear) are
+inverse-sampled in that same GPU pass for both uploaded and native-decoder GPU
+working frames, so ordinary clip transforms do not introduce a readback.
 
 The first native subset is a bounded single-source chain of ColorAdjust,
 WhiteBalance, Vignette, and deterministic Grain. Unsupported topology, spatial

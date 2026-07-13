@@ -109,6 +109,14 @@ pub enum ColorTransferCharacteristic {
 pub enum ColorMatrixCoefficients {
     /// BT.709 non-constant luminance matrix.
     Bt709,
+    /// FCC legacy television matrix.
+    Fcc,
+    /// BT.470BG / 625-line BT.601 matrix.
+    Bt470Bg,
+    /// SMPTE 170M / 525-line BT.601 matrix.
+    Smpte170M,
+    /// SMPTE 240M matrix.
+    Smpte240M,
     /// BT.2020 non-constant luminance matrix.
     Bt2020NonConstant,
     /// RGB signal with no YUV matrix.
@@ -181,6 +189,10 @@ impl ColorMatrixCoefficients {
     fn ffmpeg_name(self) -> Option<&'static str> {
         match self {
             Self::Bt709 => Some("bt709"),
+            Self::Fcc => Some("fcc"),
+            Self::Bt470Bg => Some("bt470bg"),
+            Self::Smpte170M => Some("smpte170m"),
+            Self::Smpte240M => Some("smpte240m"),
             Self::Bt2020NonConstant => Some("bt2020nc"),
             Self::Rgb => Some("rgb"),
             Self::Unspecified => None,

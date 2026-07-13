@@ -10098,6 +10098,7 @@ mod tests {
                 assert_eq!(
                     native_source.native_frame.diagnostics.decoded_video_sampling,
                     DecodedVideoSampling {
+                        matrix: mondrian_media::DecodedVideoMatrix::Bt709,
                         range: DecodedVideoRange::Limited,
                         chroma_location: DecodedVideoChromaLocation::Left,
                         bit_depth: 10,
@@ -16254,6 +16255,7 @@ mod tests {
             handle,
             DecodedVideoSurfaceFormat::P010,
             DecodedVideoSampling {
+                matrix: mondrian_media::DecodedVideoMatrix::Bt709,
                 range: DecodedVideoRange::Limited,
                 chroma_location: DecodedVideoChromaLocation::Left,
                 bit_depth: 10,

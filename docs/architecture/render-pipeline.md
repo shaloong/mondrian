@@ -121,6 +121,12 @@ fallbacks, and export scheduling can clone the typed frame contract without
 deep-copying a full 16-byte-per-pixel working frame. Copies that need owned
 mutable float data must happen explicitly at execution boundaries.
 
+The GPU compositor accepts renderer-owned working frames produced by native
+decoder import and applies non-singular media affine transforms plus supported
+fused point effects in one working-space render pass. These operations must not
+materialize a CPU frame or schedule GPU readback; readback is reserved for an
+explicit presentation, debug, or encoder boundary.
+
 The float transform path (`CpuColorTransformExecutor::input_to_working_float`
 and `transform_float`) operates directly on f32 data without u8 quantization,
 preserving HDR/log/10-bit precision. The `RenderColorTransformBackend::CpuOcioFloat`

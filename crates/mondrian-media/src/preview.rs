@@ -3739,6 +3739,7 @@ fn try_decode_with_external_ffmpeg_cpu_rgba(
         DecodedVideoMatrix::Smpte170M => "smpte170m",
         DecodedVideoMatrix::Smpte240M => "smpte240m",
         DecodedVideoMatrix::Rgb => return None,
+        DecodedVideoMatrix::Unknown | DecodedVideoMatrix::Unsupported => return None,
     };
     let range_name = match color_contract.applied_range {
         DecodedVideoRange::Limited => "tv",
@@ -3849,7 +3850,19 @@ fn decoded_video_sampling_from_frame(
     frame: &ffmpeg::util::frame::video::Video,
 ) -> DecodedVideoSampling {
     let surface_format = decoded_surface_format_from_pixel(frame.format());
+    decoded_video_sampling_from_frame_and_surface(frame, surface_format)
+}
+
+fn decoded_video_sampling_from_frame_and_surface(
+    frame: &ffmpeg::util::frame::video::Video,
+    surface_format: DecodedVideoSurfaceFormat,
+) -> DecodedVideoSampling {
     DecodedVideoSampling {
+        matrix: match decoded_video_matrix_from_ffmpeg(frame.color_space()) {
+            Ok(Some(matrix)) => matrix,
+            Ok(None) => DecodedVideoMatrix::Unknown,
+            Err(_) => DecodedVideoMatrix::Unsupported,
+        },
         range: decoded_video_range_from_ffmpeg(frame.color_range()),
         chroma_location: decoded_chroma_location_from_ffmpeg(frame.chroma_location()),
         bit_depth: surface_format.fixed_bit_depth().unwrap_or(0),
@@ -3900,6 +3913,10 @@ fn decoded_video_matrix_from_ffmpeg(
 fn source_video_matrix(source: PreviewSourceColorContract) -> Option<DecodedVideoMatrix> {
     match source.color_space.encoding().matrix {
         ColorMatrixCoefficients::Bt709 => Some(DecodedVideoMatrix::Bt709),
+        ColorMatrixCoefficients::Fcc => Some(DecodedVideoMatrix::Fcc),
+        ColorMatrixCoefficients::Bt470Bg => Some(DecodedVideoMatrix::Bt470Bg),
+        ColorMatrixCoefficients::Smpte170M => Some(DecodedVideoMatrix::Smpte170M),
+        ColorMatrixCoefficients::Smpte240M => Some(DecodedVideoMatrix::Smpte240M),
         ColorMatrixCoefficients::Bt2020NonConstant => Some(DecodedVideoMatrix::Bt2020NonConstant),
         ColorMatrixCoefficients::Rgb => Some(DecodedVideoMatrix::Rgb),
         ColorMatrixCoefficients::Unspecified => None,
@@ -3998,6 +4015,15 @@ fn configure_preview_rgba_scaler(
         }
         DecodedVideoMatrix::Smpte240M => Some(ffmpeg::ffi::SWS_CS_SMPTE240M),
         DecodedVideoMatrix::Rgb => None,
+        DecodedVideoMatrix::Unknown | DecodedVideoMatrix::Unsupported => {
+            return Err(MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason: format!(
+                    "resolved CPU color contract contains invalid matrix {:?}",
+                    contract.applied_matrix
+                ),
+            });
+        }
     };
     let Some(coefficient_id) = coefficient_id else {
         return Ok(());
@@ -4237,11 +4263,10 @@ fn materialize_native_decoded_frame(
         );
     }
     let surface_format = decoded_native_surface_format(decoded)?;
-    let sampling = DecodedVideoSampling {
-        range: decoded_video_range_from_ffmpeg(decoded.color_range()),
-        chroma_location: decoded_chroma_location_from_ffmpeg(decoded.chroma_location()),
-        bit_depth: surface_format.fixed_bit_depth().unwrap_or(0),
-    };
+    // Hardware AVFrames expose a hardware pixel format (for example D3D11),
+    // while `surface_format` is the retained texture's software layout. Use
+    // the latter for coded depth instead of re-inferring it from AVFrame::format.
+    let sampling = decoded_video_sampling_from_frame_and_surface(decoded, surface_format);
     let resource = FfmpegNativeDecodedFrameResource::retain(decoded)?;
     resource.d3d11_texture()?;
     let handle = PreviewNativeDecodedFrameHandle::new(resource);
@@ -5255,6 +5280,7 @@ mod tests {
             16,
         );
         frame.set_color_range(ffmpeg::util::color::Range::MPEG);
+        frame.set_color_space(ffmpeg::util::color::Space::SMPTE170M);
         unsafe {
             (*frame.as_mut_ptr()).chroma_location = ffmpeg::util::chroma::Location::Left.into();
         }
@@ -5262,10 +5288,30 @@ mod tests {
         assert_eq!(
             decoded_video_sampling_from_frame(&frame),
             DecodedVideoSampling {
+                matrix: DecodedVideoMatrix::Smpte170M,
                 range: DecodedVideoRange::Limited,
                 chroma_location: DecodedVideoChromaLocation::Left,
                 bit_depth: 10,
             }
+        );
+    }
+
+    #[test]
+    fn decoded_video_sampling_distinguishes_missing_and_unsupported_matrices() {
+        let mut frame = ffmpeg::util::frame::video::Video::new(
+            ffmpeg::util::format::pixel::Pixel::P010LE,
+            16,
+            16,
+        );
+        assert_eq!(
+            decoded_video_sampling_from_frame(&frame).matrix,
+            DecodedVideoMatrix::Unknown
+        );
+
+        frame.set_color_space(ffmpeg::util::color::Space::BT2020CL);
+        assert_eq!(
+            decoded_video_sampling_from_frame(&frame).matrix,
+            DecodedVideoMatrix::Unsupported
         );
     }
 
@@ -5944,6 +5990,7 @@ mod tests {
             handle,
             DecodedVideoSurfaceFormat::Yuv420p,
             DecodedVideoSampling {
+                matrix: DecodedVideoMatrix::Bt709,
                 range: DecodedVideoRange::Limited,
                 chroma_location: DecodedVideoChromaLocation::Left,
                 bit_depth: 8,
@@ -5969,6 +6016,7 @@ mod tests {
             handle.clone(),
             DecodedVideoSurfaceFormat::P010,
             DecodedVideoSampling {
+                matrix: DecodedVideoMatrix::Bt2020NonConstant,
                 range: DecodedVideoRange::Unknown,
                 chroma_location: DecodedVideoChromaLocation::Left,
                 bit_depth: 10,
@@ -5989,6 +6037,7 @@ mod tests {
             handle.clone(),
             DecodedVideoSurfaceFormat::P010,
             DecodedVideoSampling {
+                matrix: DecodedVideoMatrix::Bt2020NonConstant,
                 range: DecodedVideoRange::Limited,
                 chroma_location: DecodedVideoChromaLocation::Unknown,
                 bit_depth: 10,
@@ -6009,6 +6058,7 @@ mod tests {
             handle,
             DecodedVideoSurfaceFormat::P010,
             DecodedVideoSampling {
+                matrix: DecodedVideoMatrix::Bt2020NonConstant,
                 range: DecodedVideoRange::Limited,
                 chroma_location: DecodedVideoChromaLocation::Left,
                 bit_depth: 8,
@@ -6028,6 +6078,7 @@ mod tests {
 
     fn p010_native_sampling() -> DecodedVideoSampling {
         DecodedVideoSampling {
+            matrix: DecodedVideoMatrix::Bt2020NonConstant,
             range: DecodedVideoRange::Limited,
             chroma_location: DecodedVideoChromaLocation::TopLeft,
             bit_depth: 10,

@@ -233,6 +233,10 @@ impl ExportVideoSignalContract {
                 ExportYuvMatrix::Bt2020NonConstant
             }
             mondrian_core::ColorMatrixCoefficients::Bt709
+            | mondrian_core::ColorMatrixCoefficients::Fcc
+            | mondrian_core::ColorMatrixCoefficients::Bt470Bg
+            | mondrian_core::ColorMatrixCoefficients::Smpte170M
+            | mondrian_core::ColorMatrixCoefficients::Smpte240M
             | mondrian_core::ColorMatrixCoefficients::Rgb
             | mondrian_core::ColorMatrixCoefficients::Unspecified => ExportYuvMatrix::Bt709,
         };

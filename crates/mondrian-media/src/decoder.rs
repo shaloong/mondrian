@@ -117,6 +117,8 @@ pub enum DecodedVideoChromaLocation {
 /// to import a native video surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub struct DecodedVideoSampling {
+    /// Decoder-reported YCbCr-to-RGB matrix.
+    pub matrix: DecodedVideoMatrix,
     /// Encoded quantization range.
     pub range: DecodedVideoRange,
     /// Chroma sample location.
@@ -126,8 +128,17 @@ pub struct DecodedVideoSampling {
 }
 
 /// YUV matrix applied while converting a decoded CPU frame to source-encoded RGB.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
 pub enum DecodedVideoMatrix {
+    /// No reliable matrix was reported.
+    #[default]
+    Unknown,
+    /// The decoder reported a matrix that requires a conversion not implemented
+    /// by Mondrian. This is distinct from absent metadata so callers fail closed
+    /// instead of substituting the project color-space matrix.
+    Unsupported,
     /// BT.709 non-constant luminance coefficients.
     Bt709,
     /// BT.2020 non-constant luminance coefficients.

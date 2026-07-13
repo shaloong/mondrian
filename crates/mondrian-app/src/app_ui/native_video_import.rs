@@ -628,6 +628,7 @@ mod tests {
             mondrian_core::ColorSpace::Rec709,
             GpuNativeDecodedFrameTextureFormat::Nv12,
             DecodedVideoSampling {
+                matrix: mondrian_media::DecodedVideoMatrix::Bt709,
                 range: DecodedVideoRange::Limited,
                 chroma_location: DecodedVideoChromaLocation::Left,
                 bit_depth: 8,
@@ -646,6 +647,7 @@ mod tests {
             mondrian_core::ColorSpace::Rec2100Pq,
             GpuNativeDecodedFrameTextureFormat::P010,
             DecodedVideoSampling {
+                matrix: mondrian_media::DecodedVideoMatrix::Bt2020NonConstant,
                 range: DecodedVideoRange::Limited,
                 chroma_location: DecodedVideoChromaLocation::TopLeft,
                 bit_depth: 10,
@@ -665,6 +667,7 @@ mod tests {
                 mondrian_core::ColorSpace::Rec709,
                 GpuNativeDecodedFrameTextureFormat::Nv12,
                 DecodedVideoSampling {
+                    matrix: mondrian_media::DecodedVideoMatrix::Bt709,
                     range: DecodedVideoRange::Unknown,
                     chroma_location: DecodedVideoChromaLocation::Left,
                     bit_depth: 8,
@@ -681,6 +684,7 @@ mod tests {
                 mondrian_core::ColorSpace::Rec709,
                 GpuNativeDecodedFrameTextureFormat::Nv12,
                 DecodedVideoSampling {
+                    matrix: mondrian_media::DecodedVideoMatrix::Bt709,
                     range: DecodedVideoRange::Limited,
                     chroma_location: DecodedVideoChromaLocation::Bottom,
                     bit_depth: 8,
@@ -697,6 +701,7 @@ mod tests {
                 mondrian_core::ColorSpace::Rec709,
                 GpuNativeDecodedFrameTextureFormat::P010,
                 DecodedVideoSampling {
+                    matrix: mondrian_media::DecodedVideoMatrix::Bt709,
                     range: DecodedVideoRange::Limited,
                     chroma_location: DecodedVideoChromaLocation::Left,
                     bit_depth: 8,
@@ -713,6 +718,7 @@ mod tests {
                 mondrian_core::ColorSpace::Rec709,
                 GpuNativeDecodedFrameTextureFormat::Bgra8Unorm,
                 DecodedVideoSampling {
+                    matrix: mondrian_media::DecodedVideoMatrix::Rgb,
                     range: DecodedVideoRange::Full,
                     chroma_location: DecodedVideoChromaLocation::Unknown,
                     bit_depth: 8,

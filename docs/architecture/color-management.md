@@ -150,11 +150,15 @@ the Mondrian default OCIO source and fails closed when that source is missing.
 
 GPU-native decoded video follows the same source -> working contract. Native
 NV12/P010 sampling expands range and converts YCbCr into the resolved encoded
-source RGB signal; it does not choose independent color science. The renderer
+source RGB signal; it does not choose independent color science. Decoder matrix
+coefficients describe that sampling operation independently from RGB primaries
+and are therefore carried without being overwritten by the product color-space
+identity. The renderer
 import plan then carries the complete `RenderInputTransform` (engine, tone-map
 policy, working space, and GPU backend) into OCIO execution. Sampling
-matrix/transfer facts that conflict with the resolved source color space, or a
-CPU transform backend on the native path, fail closed before frame allocation.
+transfer facts that conflict with the resolved source color space, an explicitly
+unsupported decoder matrix, or a CPU transform backend on the native path fail
+closed before frame allocation.
 
 CPU-decoded video follows the identical boundary ordering. Media first expands
 YUV range and applies the resolved matrix into source-encoded RGBA; it does not

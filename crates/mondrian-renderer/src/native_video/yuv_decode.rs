@@ -155,7 +155,12 @@ impl GpuNativeYuvDecodePlan {
         }
         if !matches!(
             video_sampling.matrix,
-            ColorMatrixCoefficients::Bt709 | ColorMatrixCoefficients::Bt2020NonConstant
+            ColorMatrixCoefficients::Bt709
+                | ColorMatrixCoefficients::Fcc
+                | ColorMatrixCoefficients::Bt470Bg
+                | ColorMatrixCoefficients::Smpte170M
+                | ColorMatrixCoefficients::Smpte240M
+                | ColorMatrixCoefficients::Bt2020NonConstant
         ) {
             return Err(GpuNativeYuvDecodePlanError::UnsupportedMatrix {
                 matrix: video_sampling.matrix,
@@ -182,12 +187,9 @@ impl GpuNativeYuvDecodePlan {
             });
         };
         let source_encoding = source_color_space.encoding();
-        if video_sampling.matrix != source_encoding.matrix
-            || video_sampling.transfer != source_encoding.transfer
-        {
-            return Err(GpuNativeYuvDecodePlanError::SamplingColorSpaceMismatch {
+        if video_sampling.transfer != source_encoding.transfer {
+            return Err(GpuNativeYuvDecodePlanError::TransferColorSpaceMismatch {
                 source_color_space,
-                sampling_matrix: video_sampling.matrix,
                 sampling_transfer: video_sampling.transfer,
             });
         }
@@ -261,15 +263,13 @@ pub enum GpuNativeYuvDecodePlanError {
         /// Actual output contract.
         actual: GpuColorFrameContract,
     },
-    /// Sampling matrix/transfer conflicts with the encoded source color space.
+    /// Sampling transfer conflicts with the encoded RGB source color space.
     #[error(
-        "native YUV sampling matrix {sampling_matrix:?} / transfer {sampling_transfer:?} does not match source color space {source_color_space:?}"
+        "native YUV sampling transfer {sampling_transfer:?} does not match source color space {source_color_space:?}"
     )]
-    SamplingColorSpaceMismatch {
+    TransferColorSpaceMismatch {
         /// Encoded RGB source color space.
         source_color_space: mondrian_core::types::ColorSpace,
-        /// Matrix carried by the native sampling contract.
-        sampling_matrix: ColorMatrixCoefficients,
         /// Transfer carried by the native sampling contract.
         sampling_transfer: mondrian_core::ColorTransferCharacteristic,
     },
@@ -320,6 +320,9 @@ impl GpuNativeYuvDecodeUniforms {
         };
         let (kr, kb) = match plan.video_sampling.matrix {
             ColorMatrixCoefficients::Bt709 => (0.2126, 0.0722),
+            ColorMatrixCoefficients::Fcc => (0.30, 0.11),
+            ColorMatrixCoefficients::Bt470Bg | ColorMatrixCoefficients::Smpte170M => (0.299, 0.114),
+            ColorMatrixCoefficients::Smpte240M => (0.212, 0.087),
             ColorMatrixCoefficients::Bt2020NonConstant => (0.2627, 0.0593),
             _ => unreachable!("plan validation restricts native YUV matrices"),
         };
@@ -595,24 +598,31 @@ mod tests {
     }
 
     #[test]
-    fn matrix_coefficients_match_bt709_reference_red() {
-        let plan = decode_plan(
-            GpuNativeDecodedFrameTextureFormat::Nv12,
-            GpuVideoRange::Full,
-            ColorMatrixCoefficients::Bt709,
-            8,
-            GpuVideoChromaLocation::Center,
-        );
-        let uniforms = GpuNativeYuvDecodeUniforms::from_plan(&plan);
-        let kr = 0.2126_f32;
-        let kb = 0.0722_f32;
-        let y = kr * 255.0;
-        let cb = (128.0 - 0.5 * kr / (1.0 - kb) * 255.0).round();
-        let cr = (128.0_f32 + 0.5 * 255.0).round();
-        let decoded = uniforms.decode_code_values(y, cb, cr);
-        assert!((decoded[0] - 1.0).abs() < 0.01);
-        assert!(decoded[1].abs() < 0.01);
-        assert!(decoded[2].abs() < 0.01);
+    fn common_matrix_coefficients_match_reference_red() {
+        for (matrix, kr, kb) in [
+            (ColorMatrixCoefficients::Bt709, 0.2126_f32, 0.0722_f32),
+            (ColorMatrixCoefficients::Fcc, 0.30, 0.11),
+            (ColorMatrixCoefficients::Bt470Bg, 0.299, 0.114),
+            (ColorMatrixCoefficients::Smpte170M, 0.299, 0.114),
+            (ColorMatrixCoefficients::Smpte240M, 0.212, 0.087),
+            (ColorMatrixCoefficients::Bt2020NonConstant, 0.2627, 0.0593),
+        ] {
+            let plan = decode_plan(
+                GpuNativeDecodedFrameTextureFormat::Nv12,
+                GpuVideoRange::Full,
+                matrix,
+                8,
+                GpuVideoChromaLocation::Center,
+            );
+            let uniforms = GpuNativeYuvDecodeUniforms::from_plan(&plan);
+            let y = kr * 255.0;
+            let cb = (128.0 - 0.5 * kr / (1.0 - kb) * 255.0).round();
+            let cr = (128.0_f32 + 0.5 * 255.0).round();
+            let decoded = uniforms.decode_code_values(y, cb, cr);
+            assert!((decoded[0] - 1.0).abs() < 0.01, "{matrix:?} red");
+            assert!(decoded[1].abs() < 0.01, "{matrix:?} green");
+            assert!(decoded[2].abs() < 0.01, "{matrix:?} blue");
+        }
     }
 
     #[test]
@@ -913,6 +923,12 @@ mod tests {
     ) -> GpuNativeYuvDecodePlan {
         let (color_space, transfer) = match matrix {
             ColorMatrixCoefficients::Bt709 => {
+                (ColorSpace::Rec709, ColorTransferCharacteristic::Bt709)
+            }
+            ColorMatrixCoefficients::Fcc
+            | ColorMatrixCoefficients::Bt470Bg
+            | ColorMatrixCoefficients::Smpte170M
+            | ColorMatrixCoefficients::Smpte240M => {
                 (ColorSpace::Rec709, ColorTransferCharacteristic::Bt709)
             }
             ColorMatrixCoefficients::Bt2020NonConstant => {

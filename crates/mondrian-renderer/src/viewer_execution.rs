@@ -10,7 +10,8 @@ use mondrian_core::{types::BlendMode, ColorMatrixCoefficients, ColorSpace};
 use mondrian_effects::CompiledEffectGpuPlan;
 use mondrian_media::{
     DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
-    DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat, PreviewNativeDecodedFrame,
+    DecodedVideoMatrix, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
+    PreviewNativeDecodedFrame,
 };
 
 #[cfg(target_os = "windows")]
@@ -213,24 +214,42 @@ pub fn native_video_sampling_from_decoded(
     if decoded.bit_depth != expected_native_source_bit_depth(source_texture_format) {
         return None;
     }
-    let chroma_location = match source_texture_format {
+    let (matrix, chroma_location) = match source_texture_format {
         GpuNativeDecodedFrameTextureFormat::Nv12 | GpuNativeDecodedFrameTextureFormat::P010 => {
-            decoded_chroma_location_to_gpu(decoded.chroma_location)?
+            let matrix = match decoded.matrix {
+                DecodedVideoMatrix::Unknown => source_color_space.encoding().matrix,
+                DecodedVideoMatrix::Unsupported => return None,
+                DecodedVideoMatrix::Bt709 => ColorMatrixCoefficients::Bt709,
+                DecodedVideoMatrix::Bt2020NonConstant => ColorMatrixCoefficients::Bt2020NonConstant,
+                DecodedVideoMatrix::Fcc => ColorMatrixCoefficients::Fcc,
+                DecodedVideoMatrix::Bt470Bg => ColorMatrixCoefficients::Bt470Bg,
+                DecodedVideoMatrix::Smpte170M => ColorMatrixCoefficients::Smpte170M,
+                DecodedVideoMatrix::Smpte240M => ColorMatrixCoefficients::Smpte240M,
+                DecodedVideoMatrix::Rgb => return None,
+            };
+            (
+                matrix,
+                decoded_chroma_location_to_gpu(decoded.chroma_location)?,
+            )
         }
         GpuNativeDecodedFrameTextureFormat::Rgba8Unorm
         | GpuNativeDecodedFrameTextureFormat::Bgra8Unorm => {
             if source_color_space.encoding().matrix != ColorMatrixCoefficients::Rgb {
                 return None;
             }
-            GpuVideoChromaLocation::Unspecified
+            (
+                ColorMatrixCoefficients::Rgb,
+                GpuVideoChromaLocation::Unspecified,
+            )
         }
     };
-    Some(GpuNativeDecodedFrameVideoSampling::from_source_color_space(
-        source_color_space,
+    Some(GpuNativeDecodedFrameVideoSampling {
         range,
-        decoded.bit_depth,
+        matrix,
+        transfer: source_color_space.encoding().transfer,
+        bit_depth: decoded.bit_depth,
         chroma_location,
-    ))
+    })
 }
 
 fn expected_native_source_bit_depth(format: GpuNativeDecodedFrameTextureFormat) -> u8 {
@@ -318,6 +337,7 @@ mod tests {
             ColorSpace::Rec2100Pq,
             GpuNativeDecodedFrameTextureFormat::P010,
             DecodedVideoSampling {
+                matrix: DecodedVideoMatrix::Bt2020NonConstant,
                 range: DecodedVideoRange::Limited,
                 chroma_location: DecodedVideoChromaLocation::Left,
                 bit_depth: 10,
@@ -331,6 +351,7 @@ mod tests {
             ColorSpace::Rec2100Pq,
             GpuNativeDecodedFrameTextureFormat::P010,
             DecodedVideoSampling {
+                matrix: DecodedVideoMatrix::Bt2020NonConstant,
                 range: DecodedVideoRange::Unknown,
                 chroma_location: DecodedVideoChromaLocation::Left,
                 bit_depth: 10,
@@ -341,9 +362,39 @@ mod tests {
             ColorSpace::Rec2100Pq,
             GpuNativeDecodedFrameTextureFormat::P010,
             DecodedVideoSampling {
+                matrix: DecodedVideoMatrix::Bt2020NonConstant,
                 range: DecodedVideoRange::Limited,
                 chroma_location: DecodedVideoChromaLocation::Left,
                 bit_depth: 8,
+            },
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn native_sampling_preserves_explicit_bt601_and_rejects_unsupported_matrix() {
+        let decoded = DecodedVideoSampling {
+            matrix: DecodedVideoMatrix::Smpte170M,
+            range: DecodedVideoRange::Limited,
+            chroma_location: DecodedVideoChromaLocation::Left,
+            bit_depth: 8,
+        };
+        let sampling = native_video_sampling_from_decoded(
+            ColorSpace::Rec709,
+            GpuNativeDecodedFrameTextureFormat::Nv12,
+            decoded,
+        )
+        .expect("BT.601 matrix can enter the native GPU conversion path");
+        assert_eq!(sampling.matrix, ColorMatrixCoefficients::Smpte170M);
+
+        assert!(native_video_sampling_from_decoded(
+            ColorSpace::Rec2100Pq,
+            GpuNativeDecodedFrameTextureFormat::P010,
+            DecodedVideoSampling {
+                matrix: DecodedVideoMatrix::Unsupported,
+                range: DecodedVideoRange::Limited,
+                chroma_location: DecodedVideoChromaLocation::Left,
+                bit_depth: 10,
             },
         )
         .is_none());
