@@ -11,7 +11,7 @@ use super::preview::{
     AppUiGpuPreviewFrame, AppUiGpuPreviewWorkingInput, AppUiPreviewDecodeExecutionSummary,
 };
 use mondrian_renderer::{
-    native_video_texture_device_features,
+    native_video_texture_device_features, ocio_lut_filtering_device_features,
     profile::gpu_timestamp_query_device_features,
     profile::{
         GpuTimestampQueryRing, GpuTimestampSample, GpuTimestampStageMarker, GpuTimestampToken,
@@ -125,6 +125,7 @@ impl HeadlessViewerGpuAdapter {
         let raw_adapter_info = adapter.get_info();
         let descriptor = wgpu::DeviceDescriptor {
             required_features: native_video_texture_device_features(supported_features)
+                | ocio_lut_filtering_device_features(supported_features)
                 | gpu_timestamp_query_device_features(supported_features),
             ..wgpu::DeviceDescriptor::default()
         };

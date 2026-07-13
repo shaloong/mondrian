@@ -94,7 +94,8 @@ pub use color_transform::{
 pub use compositor::{CompositorConfig, FrameCompositor};
 pub use context::GpuContext;
 pub use context::{
-    native_video_texture_device_features, request_adapter_with_native_video_preference,
+    native_video_texture_device_features, ocio_lut_filtering_device_features,
+    request_adapter_with_native_video_preference,
 };
 pub use display_calibration::{
     GpuDisplayCalibrationLut, GpuDisplayCalibrationPipeline, GpuDisplayCalibrationPipelineError,

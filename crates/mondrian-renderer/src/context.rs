@@ -18,6 +18,16 @@ pub fn native_video_texture_device_features(adapter_features: wgpu::Features) ->
     required
 }
 
+/// Optional wgpu feature required for OCIO LUTs that request hardware filtering.
+///
+/// OCIO supplies LUT payloads as 32-bit float textures. Nearest-only LUTs do
+/// not need this feature; linear/default/best interpolation does. Requesting it
+/// whenever the adapter advertises support keeps one device compatible with
+/// every cached color transform without weakening sampler correctness.
+pub fn ocio_lut_filtering_device_features(adapter_features: wgpu::Features) -> wgpu::Features {
+    adapter_features & wgpu::Features::FLOAT32_FILTERABLE
+}
+
 /// Request an adapter while preserving native-video import on platforms where
 /// the renderer has a backend-specific bridge.
 ///
@@ -135,7 +145,8 @@ impl GpuContext {
         tracing::info!("GPU Adapter: {:?}", adapter.get_info());
 
         let device_descriptor = wgpu::DeviceDescriptor {
-            required_features: native_video_texture_device_features(adapter.features()),
+            required_features: native_video_texture_device_features(adapter.features())
+                | ocio_lut_filtering_device_features(adapter.features()),
             ..wgpu::DeviceDescriptor::default()
         };
         let (device, queue) = adapter
@@ -153,7 +164,21 @@ impl GpuContext {
 
 #[cfg(test)]
 mod tests {
-    use super::{native_video_adapter_priority, native_video_texture_device_features};
+    use super::{
+        native_video_adapter_priority, native_video_texture_device_features,
+        ocio_lut_filtering_device_features,
+    };
+
+    #[test]
+    fn ocio_lut_filtering_feature_is_requested_only_when_supported() {
+        assert!(ocio_lut_filtering_device_features(wgpu::Features::empty()).is_empty());
+        assert_eq!(
+            ocio_lut_filtering_device_features(
+                wgpu::Features::FLOAT32_FILTERABLE | wgpu::Features::TIMESTAMP_QUERY,
+            ),
+            wgpu::Features::FLOAT32_FILTERABLE
+        );
+    }
 
     #[test]
     fn native_video_device_features_request_only_supported_formats() {

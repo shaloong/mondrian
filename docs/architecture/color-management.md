@@ -292,6 +292,15 @@ OCIO legacy combined LUT samplers such as `uniform sampler1D` into explicit
 wgpu texture/sampler declarations using the OCIO descriptor binding contract.
 Logical 1D LUT sampling is represented as a 2D texture sample with a fixed
 second coordinate, matching the existing LUT upload contract.
+The backend preserves the interpolation policy reported for every OCIO LUT:
+`Nearest` creates non-filtering texture/sampler bindings, while every other
+OCIO host interpolation mode creates filtering bindings and linear hardware
+sampling, matching OCIO's reference OpenGL host contract. Because LUT payloads
+remain 32-bit float, renderer-created devices request `FLOAT32_FILTERABLE` when
+the adapter advertises it. A filtering plan on a device without that feature
+fails as a typed backend-object error before bind-group creation rather than
+silently changing the LUT to nearest sampling. Real-wgpu coverage builds a
+filtering Apple Log -> Rec.709 OCIO pipeline on the selected production device.
 
 Preview and export final transforms are renderer execution concerns. App and
 export crates build a `RenderOutputColorBoundary` from their `ColorContext` and

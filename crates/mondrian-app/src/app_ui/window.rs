@@ -38,14 +38,14 @@ use crate::app_ui::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
 use mondrian_core::types::ColorSpace;
 use mondrian_platform::{NativeVideoTextureImportProbe, SystemPlatformService};
 use mondrian_renderer::{
-    native_video_texture_device_features, request_adapter_with_native_video_preference,
-    GpuNativeDecodedFrameImportSupport, RenderColorStageDiagnostics,
-    RenderGpuOutputBoundaryRuntimeDiagnostics, RenderGpuOutputBoundaryRuntimeRecordError,
-    RenderGpuOutputRuntimeDiagnosticsReport, RenderGpuOutputStageDiagnosticsReport,
-    RenderGpuOutputStageResourcePlanError, RenderOutputColorBoundary,
-    RenderOutputColorBoundaryTarget, ViewerGpuExecutionError, ViewerGpuExecutionLayer,
-    ViewerGpuExecutionRequest, ViewerGpuExecutionResidency, ViewerGpuExecutionRuntime,
-    ViewerGpuNativeVideoFacts, ViewerSourceRect,
+    native_video_texture_device_features, ocio_lut_filtering_device_features,
+    request_adapter_with_native_video_preference, GpuNativeDecodedFrameImportSupport,
+    RenderColorStageDiagnostics, RenderGpuOutputBoundaryRuntimeDiagnostics,
+    RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputRuntimeDiagnosticsReport,
+    RenderGpuOutputStageDiagnosticsReport, RenderGpuOutputStageResourcePlanError,
+    RenderOutputColorBoundary, RenderOutputColorBoundaryTarget, ViewerGpuExecutionError,
+    ViewerGpuExecutionLayer, ViewerGpuExecutionRequest, ViewerGpuExecutionResidency,
+    ViewerGpuExecutionRuntime, ViewerGpuNativeVideoFacts, ViewerSourceRect,
 };
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutManager, ShortcutScope};
@@ -1393,7 +1393,8 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
         .ok();
 
     let device_descriptor = wgpu::DeviceDescriptor {
-        required_features: native_video_texture_device_features(adapter.features()),
+        required_features: native_video_texture_device_features(adapter.features())
+            | ocio_lut_filtering_device_features(adapter.features()),
         ..wgpu::DeviceDescriptor::default()
     };
     let (device, queue) = pollster::block_on(adapter.request_device(&device_descriptor))?;

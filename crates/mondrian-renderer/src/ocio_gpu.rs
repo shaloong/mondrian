@@ -1424,13 +1424,16 @@ impl OcioGpuWgpuBindingLayoutPlan {
             entries.push(OcioGpuWgpuBindingPlan {
                 binding: plan.binding_contract.uniform_buffer_binding,
                 resource: OcioGpuWgpuBindingResource::OcioUniformBuffer { index: 0 },
+                filtering: OcioGpuWgpuSamplerFiltering::NonFiltering,
             });
         }
 
         for texture in &plan.binding_contract.textures_2d {
+            let filtering = sampler_filtering_for_interpolation(texture.interpolation);
             entries.push(OcioGpuWgpuBindingPlan {
                 binding: texture.binding_index,
                 resource: OcioGpuWgpuBindingResource::OcioLutTexture2d { index: texture.index },
+                filtering,
             });
             entries.push(OcioGpuWgpuBindingPlan {
                 binding: sampler_policy.sampler_binding_for_texture(
@@ -1438,13 +1441,16 @@ impl OcioGpuWgpuBindingLayoutPlan {
                     texture.index,
                 )?,
                 resource: OcioGpuWgpuBindingResource::OcioLutSampler2d { index: texture.index },
+                filtering,
             });
         }
 
         for texture in &plan.binding_contract.textures_3d {
+            let filtering = sampler_filtering_for_interpolation(texture.interpolation);
             entries.push(OcioGpuWgpuBindingPlan {
                 binding: texture.binding_index,
                 resource: OcioGpuWgpuBindingResource::OcioLutTexture3d { index: texture.index },
+                filtering,
             });
             entries.push(OcioGpuWgpuBindingPlan {
                 binding: sampler_policy.sampler_binding_for_texture(
@@ -1452,6 +1458,7 @@ impl OcioGpuWgpuBindingLayoutPlan {
                     texture.index,
                 )?,
                 resource: OcioGpuWgpuBindingResource::OcioLutSampler3d { index: texture.index },
+                filtering,
             });
         }
 
@@ -1597,6 +1604,7 @@ impl OcioGpuWgpuBindGroupLayoutDescriptorPlan {
                 visibility: OcioGpuWgpuShaderVisibility::Fragment,
                 resource: OcioGpuWgpuLayoutBindingResource::from_ocio_binding_resource(
                     entry.resource,
+                    entry.filtering,
                 ),
             })
             .collect::<Vec<_>>();
@@ -1695,26 +1703,31 @@ pub enum OcioGpuWgpuLayoutBindingResource {
 }
 
 impl OcioGpuWgpuLayoutBindingResource {
-    fn from_ocio_binding_resource(resource: OcioGpuWgpuBindingResource) -> Self {
+    fn from_ocio_binding_resource(
+        resource: OcioGpuWgpuBindingResource,
+        filtering: OcioGpuWgpuSamplerFiltering,
+    ) -> Self {
         match resource {
             OcioGpuWgpuBindingResource::OcioUniformBuffer { .. } => {
                 Self::UniformBuffer { min_binding_size: None }
             }
             OcioGpuWgpuBindingResource::OcioLutTexture2d { .. } => Self::SampledTexture {
                 dimension: OcioGpuWgpuLutTextureDimension::D2,
-                sample_type: OcioGpuWgpuTextureSampleType::Float32,
+                sample_type: OcioGpuWgpuTextureSampleType::Float32 {
+                    filterable: filtering == OcioGpuWgpuSamplerFiltering::Filtering,
+                },
             },
             OcioGpuWgpuBindingResource::OcioLutTexture3d { .. } => Self::SampledTexture {
                 dimension: OcioGpuWgpuLutTextureDimension::D3,
-                sample_type: OcioGpuWgpuTextureSampleType::Float32,
+                sample_type: OcioGpuWgpuTextureSampleType::Float32 {
+                    filterable: filtering == OcioGpuWgpuSamplerFiltering::Filtering,
+                },
             },
             OcioGpuWgpuBindingResource::OcioLutSampler2d { .. }
-            | OcioGpuWgpuBindingResource::OcioLutSampler3d { .. } => Self::Sampler {
-                filtering: OcioGpuWgpuSamplerFiltering::NonFiltering,
-            },
+            | OcioGpuWgpuBindingResource::OcioLutSampler3d { .. } => Self::Sampler { filtering },
             OcioGpuWgpuBindingResource::InputFrameTexture { .. } => Self::SampledTexture {
                 dimension: OcioGpuWgpuLutTextureDimension::D2,
-                sample_type: OcioGpuWgpuTextureSampleType::Float32,
+                sample_type: OcioGpuWgpuTextureSampleType::Float32 { filterable: false },
             },
             OcioGpuWgpuBindingResource::FilteringSampler => {
                 Self::Sampler { filtering: OcioGpuWgpuSamplerFiltering::Filtering }
@@ -1726,7 +1739,7 @@ impl OcioGpuWgpuLayoutBindingResource {
         match resource {
             OcioGpuWgpuWrapperBindingResource::InputFrameTexture => Self::SampledTexture {
                 dimension: OcioGpuWgpuLutTextureDimension::D2,
-                sample_type: OcioGpuWgpuTextureSampleType::Float32,
+                sample_type: OcioGpuWgpuTextureSampleType::Float32 { filterable: false },
             },
             OcioGpuWgpuWrapperBindingResource::InputFrameSampler => Self::Sampler {
                 filtering: OcioGpuWgpuSamplerFiltering::NonFiltering,
@@ -1755,13 +1768,16 @@ impl OcioGpuWgpuLayoutBindingResource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OcioGpuWgpuTextureSampleType {
     /// 32-bit float sampled texture. This is non-filterable without device features.
-    Float32,
+    Float32 {
+        /// Whether the bind-group layout permits hardware filtering.
+        filterable: bool,
+    },
 }
 
 impl OcioGpuWgpuTextureSampleType {
     fn to_wgpu(self) -> wgpu::TextureSampleType {
         match self {
-            Self::Float32 => wgpu::TextureSampleType::Float { filterable: false },
+            Self::Float32 { filterable } => wgpu::TextureSampleType::Float { filterable },
         }
     }
 }
@@ -1893,7 +1909,7 @@ impl OcioGpuWgpuBindResourcePlan {
                     index: texture.index,
                     sampler_name: texture.sampler_name.clone(),
                     interpolation: texture.interpolation,
-                    filtering: OcioGpuWgpuSamplerFiltering::NonFiltering,
+                    filtering: sampler_filtering_for_interpolation(texture.interpolation),
                 },
             });
         }
@@ -1928,7 +1944,7 @@ impl OcioGpuWgpuBindResourcePlan {
                     index: texture.index,
                     sampler_name: texture.sampler_name.clone(),
                     interpolation: texture.interpolation,
-                    filtering: OcioGpuWgpuSamplerFiltering::NonFiltering,
+                    filtering: sampler_filtering_for_interpolation(texture.interpolation),
                 },
             });
         }
@@ -2669,6 +2685,8 @@ pub struct OcioGpuWgpuBindingPlan {
     pub binding: u32,
     /// Resource bound at this index.
     pub resource: OcioGpuWgpuBindingResource,
+    /// Filtering contract for LUT texture/sampler pairs; ignored for uniforms.
+    pub filtering: OcioGpuWgpuSamplerFiltering,
 }
 
 /// Resource class for an OCIO GPU color binding.
@@ -3678,6 +3696,9 @@ pub struct OcioGpuWgpuPreparedBackendObjects {
 /// Error returned while preparing concrete OCIO GPU backend objects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OcioGpuWgpuBackendObjectError {
+    /// A filtering 32-bit float LUT was planned on a device lacking the
+    /// corresponding optional wgpu feature.
+    Float32FilteringUnsupported,
     /// LUT payloads could not be packed or uploaded.
     LutUpload(OcioGpuWgpuLutUploadError),
     /// Uniform payloads could not be packed or uploaded.
@@ -3733,6 +3754,20 @@ impl OcioGpuWgpuBackendObjectRuntime {
         shader_plan: &OcioGpuShaderPlan,
         static_pipeline: &OcioGpuWgpuPreparedStaticPipeline,
     ) -> Result<Arc<OcioGpuWgpuPreparedBackendObjects>, OcioGpuWgpuBackendObjectError> {
+        let needs_float32_filtering =
+            static_pipeline.resources.binding_layout.entries.iter().any(|entry| {
+                entry.filtering == OcioGpuWgpuSamplerFiltering::Filtering
+                    && matches!(
+                        entry.resource,
+                        OcioGpuWgpuBindingResource::OcioLutTexture2d { .. }
+                            | OcioGpuWgpuBindingResource::OcioLutTexture3d { .. }
+                    )
+            });
+        if needs_float32_filtering
+            && !device.features().contains(wgpu::Features::FLOAT32_FILTERABLE)
+        {
+            return Err(OcioGpuWgpuBackendObjectError::Float32FilteringUnsupported);
+        }
         let cache_key = backend_object_cache_key(static_pipeline);
         if let Some(hit) = self.objects.get(&cache_key) {
             self.hits = self.hits.saturating_add(1);
@@ -6158,18 +6193,32 @@ fn upload_lut_texture(
 }
 
 fn sampler_descriptor_for_interpolation(
-    _interpolation: OcioGpuTextureInterpolation,
+    interpolation: OcioGpuTextureInterpolation,
     label: &str,
 ) -> wgpu::SamplerDescriptor<'_> {
+    let filter = match sampler_filtering_for_interpolation(interpolation) {
+        OcioGpuWgpuSamplerFiltering::Filtering => wgpu::FilterMode::Linear,
+        OcioGpuWgpuSamplerFiltering::NonFiltering => wgpu::FilterMode::Nearest,
+    };
     wgpu::SamplerDescriptor {
         label: Some(label),
         address_mode_u: wgpu::AddressMode::ClampToEdge,
         address_mode_v: wgpu::AddressMode::ClampToEdge,
         address_mode_w: wgpu::AddressMode::ClampToEdge,
-        mag_filter: wgpu::FilterMode::Nearest,
-        min_filter: wgpu::FilterMode::Nearest,
+        mag_filter: filter,
+        min_filter: filter,
         mipmap_filter: wgpu::MipmapFilterMode::Nearest,
         ..Default::default()
+    }
+}
+
+fn sampler_filtering_for_interpolation(
+    interpolation: OcioGpuTextureInterpolation,
+) -> OcioGpuWgpuSamplerFiltering {
+    if interpolation == OcioGpuTextureInterpolation::Nearest {
+        OcioGpuWgpuSamplerFiltering::NonFiltering
+    } else {
+        OcioGpuWgpuSamplerFiltering::Filtering
     }
 }
 
@@ -6396,6 +6445,29 @@ mod tests {
             values_hash: hash_f32_values(&values),
             values,
         }
+    }
+
+    #[test]
+    fn lut_sampler_descriptor_matches_ocio_host_interpolation_contract() {
+        for interpolation in [
+            OcioGpuTextureInterpolation::Unknown,
+            OcioGpuTextureInterpolation::Linear,
+            OcioGpuTextureInterpolation::Tetrahedral,
+            OcioGpuTextureInterpolation::Cubic,
+            OcioGpuTextureInterpolation::Default,
+            OcioGpuTextureInterpolation::Best,
+        ] {
+            let descriptor = sampler_descriptor_for_interpolation(interpolation, "linear-lut");
+            assert_eq!(descriptor.mag_filter, wgpu::FilterMode::Linear);
+            assert_eq!(descriptor.min_filter, wgpu::FilterMode::Linear);
+        }
+
+        let descriptor = sampler_descriptor_for_interpolation(
+            OcioGpuTextureInterpolation::Nearest,
+            "nearest-lut",
+        );
+        assert_eq!(descriptor.mag_filter, wgpu::FilterMode::Nearest);
+        assert_eq!(descriptor.min_filter, wgpu::FilterMode::Nearest);
     }
 
     fn f32_uniform(index: u32, offset: usize, values: Vec<f32>) -> OcioGpuWgpuUniformUpload {
@@ -6868,17 +6940,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backend_object_runtime_creates_naga_wrapper_modules_on_real_wgpu_device() {
+    async fn backend_object_runtime_creates_filtering_lut_pipeline_on_real_wgpu_device() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let Ok(context) = GpuContext::new().await else {
             eprintln!("skipping real wgpu OCIO backend object test: no GPU adapter available");
             return;
         };
+        if !context.device.features().contains(wgpu::Features::FLOAT32_FILTERABLE) {
+            eprintln!("skipping filtering OCIO backend test: float32 filtering unavailable");
+            return;
+        }
         let mut shader_cache = OcioGpuShaderCache::default();
         let shader_plan = shader_cache
             .get_or_extract(OcioGpuShaderRequest::ColorSpace {
-                src: ColorSpace::Rec709.into(),
-                dst: ColorSpace::Srgb.into(),
+                src: ColorSpace::AppleLog.into(),
+                dst: ColorSpace::Rec709.into(),
                 language: GpuLanguage::Glsl4_0,
             })
             .expect("extract default OCIO shader");
@@ -6887,6 +6963,12 @@ mod tests {
             .prepare_static_pipeline(&shader_plan, OcioGpuWgpuColorTargetFormat::Rgba16Float)
             .expect("prepare static OCIO GPU pipeline");
         let mut object_runtime = OcioGpuWgpuBackendObjectRuntime::default();
+        assert!(static_pipeline
+            .resources
+            .binding_layout
+            .entries
+            .iter()
+            .any(|entry| entry.filtering == OcioGpuWgpuSamplerFiltering::Filtering));
 
         let first = object_runtime
             .prepare_backend_objects(
@@ -6945,6 +7027,26 @@ mod tests {
         assert_eq!(diagnostics.render_pipelines.entries, 1);
         assert_eq!(diagnostics.render_pipelines.misses, 1);
         assert_eq!(diagnostics.render_pipelines.hits, 0);
+
+        let (device_without_filtering, queue_without_filtering) = context
+            .adapter
+            .request_device(&wgpu::DeviceDescriptor::default())
+            .await
+            .expect("request device without optional float32 filtering");
+        let mut unsupported_runtime = OcioGpuWgpuBackendObjectRuntime::default();
+        let error = match unsupported_runtime.prepare_backend_objects(
+            &device_without_filtering,
+            &queue_without_filtering,
+            &shader_plan,
+            &static_pipeline,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("filtering LUT must fail before wgpu object creation"),
+        };
+        assert_eq!(
+            error,
+            OcioGpuWgpuBackendObjectError::Float32FilteringUnsupported
+        );
     }
 
     #[test]
@@ -7199,7 +7301,7 @@ mod tests {
                     OcioGpuWgpuBindResource::LutSampler {
                         index: 7,
                         interpolation: OcioGpuTextureInterpolation::Linear,
-                        filtering: OcioGpuWgpuSamplerFiltering::NonFiltering,
+                        filtering: OcioGpuWgpuSamplerFiltering::Filtering,
                         ..
                     }
                 )
@@ -7211,7 +7313,7 @@ mod tests {
                     OcioGpuWgpuBindResource::LutSampler {
                         index: 9,
                         interpolation: OcioGpuTextureInterpolation::Tetrahedral,
-                        filtering: OcioGpuWgpuSamplerFiltering::NonFiltering,
+                        filtering: OcioGpuWgpuSamplerFiltering::Filtering,
                         ..
                     }
                 )
@@ -7249,14 +7351,14 @@ mod tests {
                 && entry.resource
                     == OcioGpuWgpuLayoutBindingResource::SampledTexture {
                         dimension: OcioGpuWgpuLutTextureDimension::D2,
-                        sample_type: OcioGpuWgpuTextureSampleType::Float32,
+                        sample_type: OcioGpuWgpuTextureSampleType::Float32 { filterable: true },
                     }
         }));
         assert!(ocio_descriptor.entries.iter().any(|entry| {
             entry.binding == 5
                 && entry.resource
                     == OcioGpuWgpuLayoutBindingResource::Sampler {
-                        filtering: OcioGpuWgpuSamplerFiltering::NonFiltering,
+                        filtering: OcioGpuWgpuSamplerFiltering::Filtering,
                     }
         }));
         assert_eq!(wrapper_descriptor.bind_group, 1);
@@ -7265,7 +7367,7 @@ mod tests {
                 && entry.resource
                     == OcioGpuWgpuLayoutBindingResource::SampledTexture {
                         dimension: OcioGpuWgpuLutTextureDimension::D2,
-                        sample_type: OcioGpuWgpuTextureSampleType::Float32,
+                        sample_type: OcioGpuWgpuTextureSampleType::Float32 { filterable: false },
                     }
         }));
         assert!(wrapper_descriptor.entries.iter().any(|entry| {
