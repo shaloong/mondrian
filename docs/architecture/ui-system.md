@@ -143,6 +143,13 @@ diagnostics continue to
 report native import as unavailable until the platform resource-sharing,
 synchronization, adoption, sampling, and input-transform bridge is connected.
 Device feature enablement alone must never promote hardware decode admission.
+During playback startup, the Preview Adapter schedules future media payloads
+under the active priming deadline and recursively checks the next timeline
+frame, including nested sequences. The Host forwards ready/available media
+lookahead to the Playback Engine after background completions; it does not
+advance the clock itself. Current presentation remains a separate one-shot
+ticket, and pause/stop/seek continue to invalidate the Playback Epoch
+immediately.
 The preview service resolves the requested display color space from the active
 display-management policy, but the app window owns real surface/display
 validation. The window records the final GPU output boundary only after checking

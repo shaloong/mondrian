@@ -1763,6 +1763,7 @@ fn run_preview_media_continuous_playback_probe(
         )? == HeadlessGpuCandidateStatus::Ready,
         "headless GPU pre-roll did not satisfy the initial playback Frame Demand"
     );
+    wait_for_headless_playback_preroll(&preview_service, &mut state, ready_timeout)?;
     let playback_case = run_case(
         "preview_media.continuous_playback_readiness",
         1,
@@ -2113,6 +2114,28 @@ fn wait_for_headless_gpu_ready(
     }
 }
 
+fn wait_for_headless_playback_preroll(
+    preview_service: &AppUiPreviewService,
+    state: &mut AppState,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + timeout;
+    let mut last_tick = Instant::now();
+    while state.is_playback_priming() {
+        apply_headless_preview_outcome(preview_service, state);
+        let now = Instant::now();
+        state.advance_playback_clock(now.saturating_duration_since(last_tick));
+        last_tick = now;
+        anyhow::ensure!(
+            now < deadline,
+            "timed out waiting for bounded playback video preroll; diagnostics: {:?}",
+            preview_service.diagnostics()
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    Ok(())
+}
+
 fn run_headless_preview_interval(
     preview_service: &AppUiPreviewService,
     state: &mut AppState,
@@ -2158,12 +2181,14 @@ fn execute_headless_gpu_candidate(
             if let Some(ticket) = frame.presentation_ticket() {
                 state.complete_frame_presentation(ticket, Instant::now());
             }
+            observe_headless_video_preroll(preview_service, state);
             Ok(HeadlessGpuCandidateStatus::Ready)
         }
         crate::app_ui::preview::AppUiGpuPreviewFrameState::Current => {
             if let Some(ticket) = preview_service.playback_presentation_ticket(state) {
                 state.complete_frame_presentation(ticket, Instant::now());
             }
+            observe_headless_video_preroll(preview_service, state);
             Ok(HeadlessGpuCandidateStatus::Ready)
         }
         crate::app_ui::preview::AppUiGpuPreviewFrameState::Loading => {
@@ -2198,7 +2223,22 @@ fn apply_headless_preview_outcome(
     for delivery in outcome.frame_deliveries.iter().copied() {
         state.observe_frame_delivery(delivery);
     }
+    observe_headless_video_preroll(preview_service, state);
     outcome.visible_change
+}
+
+fn observe_headless_video_preroll(
+    preview_service: &AppUiPreviewService,
+    state: &mut AppState,
+) -> bool {
+    preview_service
+        .playback_video_preroll_readiness(state)
+        .is_some_and(|readiness| {
+            state.observe_video_preroll(
+                readiness.ready_media_frames,
+                readiness.available_media_frames,
+            )
+        })
 }
 
 fn build_app_ui_perf_state(

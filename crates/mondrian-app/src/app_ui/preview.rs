@@ -111,6 +111,13 @@ pub(crate) struct AppUiPreviewPollOutcome {
     pub frame_deliveries: Vec<mondrian_playback::FrameDelivery>,
 }
 
+/// Immediate media lookahead reported to the Playback Engine during Priming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AppUiVideoPrerollReadiness {
+    pub(crate) ready_media_frames: usize,
+    pub(crate) available_media_frames: usize,
+}
+
 impl AppUiPreviewPollOutcome {
     pub(crate) fn merge(&mut self, mut other: Self) {
         self.visible_change |= other.visible_change;
@@ -508,6 +515,23 @@ impl AppUiPreviewService {
             decode_worker_count: self.decode_worker_count,
             hardware_decode_admission: self.hardware_decode_admission_diagnostics(),
             decode_successes: self.metrics.decode_successes.get(),
+            decode_startup_preroll_frames: self.metrics.decode_startup_preroll_frames.get(),
+            decode_startup_preroll_total_duration_us: self
+                .metrics
+                .decode_startup_preroll_total_duration_us
+                .get(),
+            decode_startup_preroll_max_duration_us: self
+                .metrics
+                .decode_startup_preroll_max_duration_us
+                .get(),
+            decode_startup_preroll_queue_wait_total_us: self
+                .metrics
+                .decode_startup_preroll_queue_wait_total_us
+                .get(),
+            decode_startup_preroll_queue_wait_max_us: self
+                .metrics
+                .decode_startup_preroll_queue_wait_max_us
+                .get(),
             decode_failures: self.metrics.decode_failures.get(),
             decode_timeout_failures: self.metrics.decode_timeout_failures.get(),
             decode_budget_exhausted_failures: self.metrics.decode_budget_exhausted_failures.get(),
@@ -890,11 +914,14 @@ impl AppUiPreviewService {
             let completion_demand_identity =
                 completion_resolution.demand_identity.or(result.demand_identity);
             let completion_deadline_at = completion_resolution.deadline_at.or(result.deadline_at);
-            self.record_preview_decode_queue_wait(
-                result.priority,
-                result.access_mode,
-                result.queue_wait_us,
-            );
+            let startup_preroll = media_preview_result_is_startup_preroll(&result);
+            if !startup_preroll {
+                self.record_preview_decode_queue_wait(
+                    result.priority,
+                    result.access_mode,
+                    result.queue_wait_us,
+                );
+            }
             if result.canceled {
                 self.record_preview_decode_cancel(
                     result.access_mode,
@@ -942,12 +969,16 @@ impl AppUiPreviewService {
             }
             if let Some(diagnostics) = result.decode_diagnostics {
                 self.scrub_adaptation.borrow_mut().observe_decode(diagnostics);
-                self.record_preview_decode(
-                    diagnostics,
-                    result.priority,
-                    result.queue_wait_us,
-                    !completed_after_playback_deadline,
-                );
+                if startup_preroll {
+                    self.record_startup_preroll_decode(diagnostics, result.queue_wait_us);
+                } else {
+                    self.record_preview_decode(
+                        diagnostics,
+                        result.priority,
+                        result.queue_wait_us,
+                        !completed_after_playback_deadline,
+                    );
+                }
             }
             if completed_after_playback_deadline {
                 self.record_playback_current_late_drop(1);
@@ -1625,6 +1656,31 @@ impl AppUiPreviewService {
         self.metrics.decode_access_mode_profiles.set(access_mode_profiles);
     }
 
+    fn record_startup_preroll_decode(
+        &self,
+        diagnostics: PreviewDecodeDiagnostics,
+        queue_wait_us: u64,
+    ) {
+        bump(&self.metrics.decode_startup_preroll_frames);
+        add_cell(
+            &self.metrics.decode_startup_preroll_total_duration_us,
+            diagnostics.elapsed_us,
+        );
+        self.metrics.decode_startup_preroll_max_duration_us.set(
+            self.metrics
+                .decode_startup_preroll_max_duration_us
+                .get()
+                .max(diagnostics.elapsed_us),
+        );
+        add_cell(
+            &self.metrics.decode_startup_preroll_queue_wait_total_us,
+            queue_wait_us,
+        );
+        self.metrics
+            .decode_startup_preroll_queue_wait_max_us
+            .set(self.metrics.decode_startup_preroll_queue_wait_max_us.get().max(queue_wait_us));
+    }
+
     fn record_preview_decode_cancel(
         &self,
         access_mode: PreviewDecodeAccessMode,
@@ -2203,6 +2259,31 @@ struct ResolvedPreviewPlan {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MediaPrerollFrameReadiness {
+    has_media: bool,
+    ready: bool,
+}
+
+impl MediaPrerollFrameReadiness {
+    const fn required_not_ready() -> Self {
+        Self { has_media: true, ready: false }
+    }
+
+    fn merge(&mut self, other: Self) {
+        if other.has_media {
+            self.has_media = true;
+            self.ready &= other.ready;
+        }
+    }
+}
+
+impl Default for MediaPrerollFrameReadiness {
+    fn default() -> Self {
+        Self { has_media: false, ready: true }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ViewerPreviewGenerationKey {
     sequence_id: SequenceId,
     frame: i64,
@@ -2444,6 +2525,16 @@ pub struct AppUiPreviewDiagnostics {
     pub hardware_decode_admission: AppUiPreviewHardwareDecodeAdmissionDiagnostics,
     /// Successful background media decodes received by the UI service.
     pub decode_successes: u64,
+    /// Successful startup-preroll media decodes excluded from steady-state latency budgets.
+    pub decode_startup_preroll_frames: u64,
+    /// Total startup-preroll decode execution time.
+    pub decode_startup_preroll_total_duration_us: u64,
+    /// Slowest startup-preroll decode execution time.
+    pub decode_startup_preroll_max_duration_us: u64,
+    /// Total queue wait for startup-preroll decode work.
+    pub decode_startup_preroll_queue_wait_total_us: u64,
+    /// Slowest queue wait for startup-preroll decode work.
+    pub decode_startup_preroll_queue_wait_max_us: u64,
     /// Failed background media decodes received by the UI service.
     pub decode_failures: u64,
     /// Failed background media decodes caused by a structured decode timeout.
@@ -3522,6 +3613,16 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub hardware_decode_admission: AppUiPreviewHardwareDecodeAdmissionDiagnostics,
     /// Successful preview decode/cache results.
     pub decode_successes: u64,
+    /// Successful bounded startup-preroll decodes, outside steady-state budgets.
+    pub startup_preroll_frames: u64,
+    /// Total bounded startup-preroll decode execution time.
+    pub startup_preroll_total_duration_us: u64,
+    /// Slowest bounded startup-preroll decode execution time.
+    pub startup_preroll_max_duration_us: u64,
+    /// Total bounded startup-preroll queue wait.
+    pub startup_preroll_queue_wait_total_us: u64,
+    /// Slowest bounded startup-preroll queue wait.
+    pub startup_preroll_queue_wait_max_us: u64,
     /// Failed preview decode results.
     pub decode_failures: u64,
     /// Failed preview decode results caused by structured decode timeouts.
@@ -6574,6 +6675,11 @@ impl AppUiPreviewDiagnostics {
             cpu_budget: self.decode_cpu_budget,
             hardware_decode_admission: self.hardware_decode_admission,
             decode_successes,
+            startup_preroll_frames: self.decode_startup_preroll_frames,
+            startup_preroll_total_duration_us: self.decode_startup_preroll_total_duration_us,
+            startup_preroll_max_duration_us: self.decode_startup_preroll_max_duration_us,
+            startup_preroll_queue_wait_total_us: self.decode_startup_preroll_queue_wait_total_us,
+            startup_preroll_queue_wait_max_us: self.decode_startup_preroll_queue_wait_max_us,
             decode_failures: self.decode_failures,
             decode_timeout_failures: self.decode_timeout_failures,
             decode_budget_exhausted_failures: self.decode_budget_exhausted_failures,
@@ -7423,6 +7529,10 @@ impl AppUiPreviewService {
             &state.project_settings.color_management,
             display_color_space,
         );
+        let preroll_deadline_at = state
+            .is_playback_priming()
+            .then(|| state.playback_frame_deadline_at(Instant::now()))
+            .flatten();
         let mut remaining_prefetch_jobs = prefetch_slots_available;
         for offset in 1..=prefetch_window_frames as i64 {
             if remaining_prefetch_jobs == 0 {
@@ -7437,6 +7547,7 @@ impl AppUiPreviewService {
                 0,
                 color_context.clone(),
                 &mut remaining_prefetch_jobs,
+                preroll_deadline_at,
             );
         }
     }
@@ -7451,6 +7562,7 @@ impl AppUiPreviewService {
         depth: usize,
         color_context: ColorContext,
         remaining_prefetch_jobs: &mut usize,
+        preroll_deadline_at: Option<Instant>,
     ) {
         if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH || *remaining_prefetch_jobs == 0 {
             return;
@@ -7492,7 +7604,7 @@ impl AppUiPreviewService {
                             source_secs,
                             MediaPreviewRequestPriority::Prefetch,
                             PreviewDecodeAccessMode::PlaybackCursor,
-                            None,
+                            preroll_deadline_at,
                             None,
                             PreviewDecodeAdaptiveHints::default(),
                         );
@@ -7517,6 +7629,7 @@ impl AppUiPreviewService {
                             depth + 1,
                             nested_context,
                             remaining_prefetch_jobs,
+                            preroll_deadline_at,
                         );
                     }
                 }
@@ -7524,6 +7637,132 @@ impl AppUiPreviewService {
                 | TimelineRenderPlanElement::Adjustment(_) => {}
             }
         }
+    }
+
+    /// Inspect the same next-frame media keys used by playback prefetch.
+    ///
+    /// This does not claim that a Viewer output is presented. It reports only
+    /// whether the immediate future frame has media payloads and whether all of
+    /// them are resident; the Playback Engine separately requires current-frame
+    /// presentation before releasing its clock anchor.
+    pub(crate) fn playback_video_preroll_readiness(
+        &self,
+        state: &AppState,
+    ) -> Option<AppUiVideoPrerollReadiness> {
+        if !state.is_playback_priming() {
+            return None;
+        }
+        let sequence = state.sequence.as_ref()?;
+        let current_frame = state.current_frame().max(0);
+        let end_frame = state.last_content_frame().ok()?.max(0);
+        if current_frame >= end_frame {
+            return Some(AppUiVideoPrerollReadiness {
+                ready_media_frames: 0,
+                available_media_frames: 0,
+            });
+        }
+        let (width, height) = preview_dimensions_for_state(state, sequence);
+        let display_snapshot = self.display_snapshot.borrow();
+        let display_color_space = preview_display_color_space(
+            sequence,
+            &state.project_settings.color_management,
+            display_snapshot.as_ref(),
+        )
+        .ok()?;
+        let color_context = sequence.settings.root_preview_color_context(
+            &state.project_settings.color_management,
+            display_color_space,
+        );
+        let readiness = self.media_preroll_frame_readiness(
+            state,
+            sequence,
+            current_frame.saturating_add(1),
+            width,
+            height,
+            0,
+            color_context,
+        );
+        if !readiness.has_media {
+            return Some(AppUiVideoPrerollReadiness {
+                ready_media_frames: 0,
+                available_media_frames: 0,
+            });
+        }
+        Some(AppUiVideoPrerollReadiness {
+            ready_media_frames: usize::from(readiness.ready),
+            available_media_frames: 1,
+        })
+    }
+
+    fn media_preroll_frame_readiness(
+        &self,
+        state: &AppState,
+        sequence: &Sequence,
+        frame: i64,
+        target_width: u32,
+        target_height: u32,
+        depth: usize,
+        color_context: ColorContext,
+    ) -> MediaPrerollFrameReadiness {
+        if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
+            return MediaPrerollFrameReadiness::required_not_ready();
+        }
+        let Ok(evaluation) = evaluate_timeline_render_plan(
+            sequence,
+            TimelineEvaluationRequest::preview(
+                frame.max(0),
+                normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale),
+            ),
+        ) else {
+            return MediaPrerollFrameReadiness::required_not_ready();
+        };
+
+        let mut readiness = MediaPrerollFrameReadiness::default();
+        for element in evaluation.elements {
+            match element {
+                TimelineRenderPlanElement::Media(media) => {
+                    readiness.has_media = true;
+                    let cached = self
+                        .media_preview_key_for_asset(
+                            state,
+                            &media.asset_id,
+                            media.color_space_override,
+                            media.source_frame,
+                            media.source_secs,
+                            target_width,
+                            target_height,
+                            &color_context,
+                            false,
+                            false,
+                        )
+                        .is_some_and(|(key, _)| {
+                            self.frame_store.borrow_mut().media_frame(&key).is_some()
+                        });
+                    readiness.ready &= cached;
+                }
+                TimelineRenderPlanElement::NestedSequence(nested) => {
+                    let Some(nested_sequence) = state.sequence_by_id(nested.sequence_id) else {
+                        return MediaPrerollFrameReadiness::required_not_ready();
+                    };
+                    let (nested_width, nested_height) =
+                        preview_dimensions_for_state(state, nested_sequence);
+                    let nested_context =
+                        nested_sequence.settings.nested_render_color_context(color_context.clone());
+                    readiness.merge(self.media_preroll_frame_readiness(
+                        state,
+                        nested_sequence,
+                        nested.source_frame,
+                        nested_width,
+                        nested_height,
+                        depth + 1,
+                        nested_context,
+                    ));
+                }
+                TimelineRenderPlanElement::SolidColor(_)
+                | TimelineRenderPlanElement::Adjustment(_) => {}
+            }
+        }
+        readiness
     }
 
     fn media_frame_for_plan(
@@ -7846,7 +8085,7 @@ impl AppUiPreviewService {
             hardware_decode_request,
             hardware_decode_device_selector,
             enqueued_at: Instant::now(),
-            deadline_at: if is_current_playback {
+            deadline_at: if access_mode == PreviewDecodeAccessMode::PlaybackCursor {
                 playback_current_deadline_at
             } else {
                 None
@@ -8056,6 +8295,11 @@ struct AppUiPreviewMetrics {
     media_cache_misses: Cell<u64>,
     media_failure_hits: Cell<u64>,
     decode_successes: Cell<u64>,
+    decode_startup_preroll_frames: Cell<u64>,
+    decode_startup_preroll_total_duration_us: Cell<u64>,
+    decode_startup_preroll_max_duration_us: Cell<u64>,
+    decode_startup_preroll_queue_wait_total_us: Cell<u64>,
+    decode_startup_preroll_queue_wait_max_us: Cell<u64>,
     decode_failures: Cell<u64>,
     decode_timeout_failures: Cell<u64>,
     decode_budget_exhausted_failures: Cell<u64>,
@@ -9004,6 +9248,12 @@ fn media_preview_completed_after_playback_deadline(
         && deadline_at.is_some_and(|deadline| result.completed_at >= deadline)
 }
 
+fn media_preview_result_is_startup_preroll(result: &MediaPreviewResult) -> bool {
+    result.priority == MediaPreviewRequestPriority::Prefetch
+        && result.access_mode == PreviewDecodeAccessMode::PlaybackCursor
+        && result.deadline_at.is_some()
+}
+
 fn media_preview_worker(
     lane: MediaPreviewWorkerLane,
     jobs: MediaPreviewJobQueueReceiver,
@@ -9055,13 +9305,12 @@ fn media_preview_worker(
             continue;
         }
         if media_preview_deadline_expired(job.deadline_at) {
-            let result = media_preview_canceled_result(
-                job,
-                queue_wait_us,
-                MediaPreviewCancelReason::PlaybackDeadline,
-                0,
-                Some(0),
-            );
+            let reason = if job.priority == MediaPreviewRequestPriority::Prefetch {
+                MediaPreviewCancelReason::PrefetchDeadline
+            } else {
+                MediaPreviewCancelReason::PlaybackDeadline
+            };
+            let result = media_preview_canceled_result(job, queue_wait_us, reason, 0, Some(0));
             if results.send(result).is_err() {
                 break;
             }
@@ -9076,7 +9325,7 @@ fn media_preview_worker(
         let observed_cancel_reason = Cell::new(None);
         let observed_cancel_elapsed_us = Cell::new(None);
         let mut result = decode_media_preview(job, queue_wait_us, || {
-            let reason = media_preview_cancel_reason(
+            let reason = media_preview_cancel_reason_with_deadline(
                 shutdown.load(Ordering::Acquire),
                 cancel_scheduler.execution_current(execution_id),
                 cancel_scheduler.has_other_current_execution(execution_id, false),
@@ -9084,7 +9333,7 @@ fn media_preview_worker(
                 cancel_priority,
                 cancel_access_mode,
                 decode_started_at.elapsed(),
-                media_preview_deadline_expired(cancel_deadline_at),
+                cancel_deadline_at,
             );
             if reason.is_some() {
                 if observed_cancel_elapsed_us.get().is_none() {
@@ -9107,6 +9356,44 @@ fn media_preview_worker(
         }
     }
     mondrian_media::clear_thread_local_preview_decode_session();
+}
+
+fn media_preview_cancel_reason_with_deadline(
+    shutdown: bool,
+    scheduler_current: bool,
+    other_current_pending: bool,
+    other_realtime_current_pending: bool,
+    priority: MediaPreviewRequestPriority,
+    access_mode: PreviewDecodeAccessMode,
+    elapsed: Duration,
+    deadline_at: Option<Instant>,
+) -> Option<MediaPreviewCancelReason> {
+    let deadline_expired = media_preview_deadline_expired(deadline_at);
+    if priority == MediaPreviewRequestPriority::Prefetch && deadline_at.is_some() {
+        if deadline_expired {
+            return Some(MediaPreviewCancelReason::PrefetchDeadline);
+        }
+        return media_preview_cancel_reason(
+            shutdown,
+            scheduler_current,
+            other_current_pending,
+            other_realtime_current_pending,
+            priority,
+            access_mode,
+            Duration::ZERO,
+            false,
+        );
+    }
+    media_preview_cancel_reason(
+        shutdown,
+        scheduler_current,
+        other_current_pending,
+        other_realtime_current_pending,
+        priority,
+        access_mode,
+        elapsed,
+        deadline_expired,
+    )
 }
 
 fn media_preview_cancel_reason(
@@ -9857,8 +10144,12 @@ mod tests {
         let ticket = frame.presentation_ticket().expect("presentation ticket");
         assert_eq!(ticket.identity(), identity);
         assert!(
-            state.complete_frame_presentation(ticket, Instant::now()),
-            "candidate construction alone must not terminate the demand"
+            !state.complete_frame_presentation(ticket, Instant::now()),
+            "presenting the current frame must hold priming until lookahead is observed"
+        );
+        assert!(
+            state.observe_video_preroll(0, 0),
+            "procedural playback has no future media payload to preroll"
         );
     }
 
@@ -11236,6 +11527,125 @@ mod tests {
         );
         assert_eq!(diagnostics.forward_prefetch_window_evaluations, 1);
         assert_eq!(diagnostics.forward_prefetch_invalid_frame_rate, 0);
+        service.shutdown();
+    }
+
+    #[test]
+    fn startup_preroll_decode_evidence_is_separate_from_steady_state_latency() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let mut decode = test_preview_decode_diagnostics(
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewHardwareDecodeDecision::GpuResidentNative,
+            PreviewHardwareDecodeBlocker::None,
+        );
+        decode.elapsed_us = 280_000;
+
+        service.record_startup_preroll_decode(decode, 210_000);
+
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.decode_startup_preroll_frames, 1);
+        assert_eq!(
+            diagnostics.decode_startup_preroll_total_duration_us,
+            280_000
+        );
+        assert_eq!(diagnostics.decode_startup_preroll_max_duration_us, 280_000);
+        assert_eq!(
+            diagnostics.decode_startup_preroll_queue_wait_total_us,
+            210_000
+        );
+        assert_eq!(
+            diagnostics.decode_startup_preroll_queue_wait_max_us,
+            210_000
+        );
+        assert_eq!(diagnostics.decode_total_duration_us, 0);
+        assert_eq!(diagnostics.decode_queue_wait_total_us, 0);
+        assert_eq!(
+            diagnostics.decode_access_mode_profiles.playback_cursor.frames,
+            0
+        );
+
+        service.shutdown();
+    }
+
+    #[test]
+    fn playback_video_preroll_requires_next_media_payload_and_observes_cache_residency() {
+        let (mut state, asset_id, root) = state_with_invalid_video_asset();
+        state.play();
+        let service = AppUiPreviewService::new_without_workers_for_test();
+
+        assert_eq!(
+            service.playback_video_preroll_readiness(&state),
+            Some(AppUiVideoPrerollReadiness { ready_media_frames: 0, available_media_frames: 1 })
+        );
+
+        let sequence = state.sequence.as_ref().expect("media sequence");
+        let frame = state.current_frame().saturating_add(1);
+        let evaluation = evaluate_timeline_render_plan(
+            sequence,
+            TimelineEvaluationRequest::preview(
+                frame,
+                normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale),
+            ),
+        )
+        .expect("next frame render plan");
+        let media = evaluation
+            .elements
+            .into_iter()
+            .find_map(|element| match element {
+                TimelineRenderPlanElement::Media(media) => Some(media),
+                _ => None,
+            })
+            .expect("next frame media");
+        assert_eq!(media.asset_id, asset_id);
+        let (width, height) = preview_dimensions_for_state(&state, sequence);
+        let display_color_space =
+            preview_display_color_space(sequence, &state.project_settings.color_management, None)
+                .expect("default display contract");
+        let color_context = sequence.settings.root_preview_color_context(
+            &state.project_settings.color_management,
+            display_color_space,
+        );
+        let (key, _) = service
+            .media_preview_key_for_asset(
+                &state,
+                &media.asset_id,
+                media.color_space_override,
+                media.source_frame,
+                media.source_secs,
+                width,
+                height,
+                &color_context,
+                false,
+                false,
+            )
+            .expect("next media cache key");
+        service
+            .frame_store
+            .borrow_mut()
+            .insert_media_frame(key, test_media_frame(7), false);
+
+        assert_eq!(
+            service.playback_video_preroll_readiness(&state),
+            Some(AppUiVideoPrerollReadiness { ready_media_frames: 1, available_media_frames: 1 })
+        );
+
+        service.shutdown();
+        drop(state);
+        std::fs::remove_dir_all(root).expect("remove preview test root");
+    }
+
+    #[test]
+    fn playback_video_preroll_does_not_delay_procedural_future_frames() {
+        let mut state = state_with_solid_color_clip(Color::WHITE);
+        state.seek(0);
+        state.play();
+        let service = AppUiPreviewService::new_without_workers_for_test();
+
+        assert_eq!(
+            service.playback_video_preroll_readiness(&state),
+            Some(AppUiVideoPrerollReadiness { ready_media_frames: 0, available_media_frames: 0 })
+        );
+
         service.shutdown();
     }
 
@@ -15960,7 +16370,11 @@ mod tests {
                 mondrian_playback::FrameDeliveryKind::Degraded,
             )
         );
-        assert!(state.observe_frame_delivery(delivery));
+        assert!(
+            !state.observe_frame_delivery(delivery),
+            "presentable fallback must still wait for bounded media lookahead"
+        );
+        assert!(state.observe_video_preroll(1, 1));
         service.shutdown();
     }
 
@@ -17267,6 +17681,37 @@ mod tests {
                 false,
             ),
             None,
+        );
+    }
+
+    #[test]
+    fn startup_preroll_prefetch_uses_session_deadline_instead_of_steady_state_budget() {
+        let future_deadline = Instant::now() + Duration::from_millis(500);
+        assert_eq!(
+            media_preview_cancel_reason_with_deadline(
+                false,
+                true,
+                false,
+                false,
+                MediaPreviewRequestPriority::Prefetch,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US * 4),
+                Some(future_deadline),
+            ),
+            None,
+        );
+        assert_eq!(
+            media_preview_cancel_reason_with_deadline(
+                false,
+                true,
+                false,
+                false,
+                MediaPreviewRequestPriority::Prefetch,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                Duration::ZERO,
+                Some(Instant::now() - Duration::from_millis(1)),
+            ),
+            Some(MediaPreviewCancelReason::PrefetchDeadline),
         );
     }
 

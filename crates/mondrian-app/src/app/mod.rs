@@ -36,7 +36,7 @@ use mondrian_playback::{
     AudioClockObservationGrade, AudioDeviceClockObservation, AudioDeviceClockState, ClockMaster,
     FrameDelivery, FrameDeliveryKind, FramePresentationQuality, FramePresentationTicket,
     MonotonicTimestamp, PlaybackEngine, PlaybackEvidenceCollector, PlaybackEvidenceReport,
-    PlaybackSeekKind, PreviewResolutionScale, TransportState,
+    PlaybackSeekKind, PreviewResolutionScale, TransportState, VideoPrerollObservation,
 };
 use mondrian_timeline::clip::{Clip, TrimEdge};
 use mondrian_timeline::command::SequenceSnapshotCommand;

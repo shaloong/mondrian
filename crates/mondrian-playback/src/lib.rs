@@ -306,6 +306,23 @@ pub struct FrameDelivery {
     pub kind: FrameDeliveryKind,
 }
 
+/// Media-frame lookahead observed by the preview Adapter during startup.
+///
+/// `available_media_frames` is the number of immediate future timeline frames
+/// that require media decode and can therefore contribute to startup preroll.
+/// `ready_media_frames` is the prefix of those frames whose required media
+/// payloads are already resident. The Engine combines this observation with
+/// actual current-frame presentation; neither signal can start the clock alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoPrerollObservation {
+    /// Playback Session identity that produced this lookahead observation.
+    pub epoch: PlaybackEpoch,
+    /// Consecutive future media frames ready for presentation preparation.
+    pub ready_media_frames: usize,
+    /// Consecutive future frames that require media decode in the observed window.
+    pub available_media_frames: usize,
+}
+
 impl FrameDelivery {
     /// Build a terminal observation for an exact demand identity.
     pub const fn for_demand(identity: FrameDemandIdentity, kind: FrameDeliveryKind) -> Self {
@@ -334,6 +351,8 @@ impl FrameDelivery {
 pub struct PlaybackPolicy {
     /// Maximum startup/seek wait before Synthetic Clock Master continues.
     pub priming_limit: Duration,
+    /// Future media frames required before a presented current frame releases startup priming.
+    pub minimum_video_preroll_frames: usize,
     /// Maximum number of recent current deliveries considered for pressure.
     pub pressure_window: usize,
     /// Late/failed deliveries in the window required to enter recovery.
@@ -350,6 +369,7 @@ impl Default for PlaybackPolicy {
     fn default() -> Self {
         Self {
             priming_limit: Duration::from_millis(500),
+            minimum_video_preroll_frames: 1,
             pressure_window: 12,
             pressure_threshold: 8,
             healthy_deliveries_to_recover: 60,
@@ -418,6 +438,9 @@ pub enum PlaybackError {
     /// Audio observation did not carry a usable sample rate.
     #[error("audio clock observation sample rate must be positive")]
     InvalidAudioSampleRate,
+    /// Preview Adapter reported more ready media frames than exist in its lookahead window.
+    #[error("video preroll ready frames cannot exceed available media frames")]
+    InvalidVideoPrerollObservation,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -453,6 +476,8 @@ pub struct PlaybackEngine {
     next_demand_sequence: u64,
     active_demand: Option<FrameDemand>,
     terminal_delivery: Option<(PlaybackEpoch, u64, FrameDemandSequence)>,
+    priming_current_presentable: bool,
+    video_preroll_observation: Option<VideoPrerollObservation>,
     audio_device_anchor: Option<AudioDeviceClockAnchor>,
     last_audio_observation: Option<AudioDeviceClockObservation>,
     last_audio_handoff: Option<AudioClockHandoffEvidence>,
@@ -499,6 +524,8 @@ impl PlaybackEngine {
             next_demand_sequence: 1,
             active_demand: None,
             terminal_delivery: None,
+            priming_current_presentable: false,
+            video_preroll_observation: None,
             audio_device_anchor: None,
             last_audio_observation: None,
             last_audio_handoff: None,
@@ -833,9 +860,8 @@ impl PlaybackEngine {
         );
         let healthy = delivery.kind == FrameDeliveryKind::Ready;
         if self.state == TransportState::Priming && presentable {
-            self.state = TransportState::Playing;
-            self.clock_master = Some(ClockMaster::Synthetic);
-            self.reanchor(self.last_timestamp);
+            self.priming_current_presentable = true;
+            self.try_complete_observed_priming();
         }
         self.push_pressure(pressured);
         if healthy {
@@ -879,6 +905,29 @@ impl PlaybackEngine {
         Ok(true)
     }
 
+    /// Record bounded startup media lookahead from the preview Adapter.
+    ///
+    /// Old Playback Sessions are ignored. A valid observation can release
+    /// `Priming` only after the current Frame Demand has also been presented.
+    pub fn observe_video_preroll(
+        &mut self,
+        observation: VideoPrerollObservation,
+    ) -> Result<bool, PlaybackError> {
+        if observation.epoch != self.epoch {
+            return Ok(false);
+        }
+        if observation.ready_media_frames > observation.available_media_frames {
+            return Err(PlaybackError::InvalidVideoPrerollObservation);
+        }
+        if self.state != TransportState::Priming
+            || self.video_preroll_observation == Some(observation)
+        {
+            return Ok(false);
+        }
+        self.video_preroll_observation = Some(observation);
+        Ok(self.try_complete_observed_priming())
+    }
+
     /// Return the authoritative read-only snapshot.
     pub const fn snapshot(&self) -> PlaybackSnapshot {
         PlaybackSnapshot {
@@ -896,6 +945,16 @@ impl PlaybackEngine {
     /// Return the current demand that preview adapters must carry end-to-end.
     pub const fn frame_demand(&self) -> Option<FrameDemand> {
         self.active_demand
+    }
+
+    /// Return the active demand only while no terminal presentation/decode
+    /// observation has consumed it.
+    pub const fn pending_frame_demand(&self) -> Option<FrameDemand> {
+        if self.terminal_delivery.is_none() {
+            self.active_demand
+        } else {
+            None
+        }
     }
 
     /// Timeline revision currently associated with the session.
@@ -968,9 +1027,35 @@ impl PlaybackEngine {
         self.active_target_frame = Some(self.position.frame);
         self.active_demand = None;
         self.terminal_delivery = None;
+        self.priming_current_presentable = false;
+        self.video_preroll_observation = None;
         self.audio_device_anchor = None;
         self.last_audio_observation = None;
         self.last_audio_handoff = None;
+    }
+
+    fn try_complete_observed_priming(&mut self) -> bool {
+        if self.state != TransportState::Priming || !self.priming_current_presentable {
+            return false;
+        }
+        let preroll_satisfied = if self.policy.minimum_video_preroll_frames == 0 {
+            true
+        } else {
+            self.video_preroll_observation.is_some_and(|observation| {
+                let required = self
+                    .policy
+                    .minimum_video_preroll_frames
+                    .min(observation.available_media_frames);
+                observation.ready_media_frames >= required
+            })
+        };
+        if !preroll_satisfied {
+            return false;
+        }
+        self.state = TransportState::Playing;
+        self.clock_master = Some(ClockMaster::Synthetic);
+        self.reanchor(self.last_timestamp);
+        true
     }
 
     fn refresh_frame_demand_if_target_changed(
@@ -1331,6 +1416,18 @@ mod tests {
         }
     }
 
+    fn video_preroll(
+        engine: &PlaybackEngine,
+        ready_media_frames: usize,
+        available_media_frames: usize,
+    ) -> VideoPrerollObservation {
+        VideoPrerollObservation {
+            epoch: engine.snapshot().epoch,
+            ready_media_frames,
+            available_media_frames,
+        }
+    }
+
     #[test]
     fn priming_holds_then_synthetic_clock_advances_exact_frames() {
         let mut engine = engine();
@@ -1340,6 +1437,69 @@ mod tests {
         engine.complete_priming(ClockMaster::Synthetic, ts(400)).unwrap();
         assert_eq!(engine.tick(ts(440)).unwrap().position.frame, 1);
         assert_eq!(engine.tick(ts(800)).unwrap().position.frame, 10);
+    }
+
+    #[test]
+    fn presented_current_frame_waits_for_bounded_video_preroll() {
+        let mut engine = engine();
+        engine.play(100, ts(0)).unwrap();
+
+        let delivery = current_delivery(&engine, FrameDeliveryKind::Ready);
+        assert!(engine.observe_frame_delivery(delivery).unwrap());
+        assert_eq!(engine.snapshot().state, TransportState::Priming);
+        assert!(engine.frame_demand().is_some());
+        assert!(engine.pending_frame_demand().is_none());
+
+        assert!(engine.observe_video_preroll(video_preroll(&engine, 1, 1)).unwrap());
+        assert_eq!(engine.snapshot().state, TransportState::Playing);
+        assert_eq!(engine.snapshot().clock_master, Some(ClockMaster::Synthetic));
+    }
+
+    #[test]
+    fn video_preroll_cannot_start_before_current_frame_is_presented() {
+        let mut engine = engine();
+        engine.play(100, ts(0)).unwrap();
+
+        assert!(!engine.observe_video_preroll(video_preroll(&engine, 1, 1)).unwrap());
+        assert_eq!(engine.snapshot().state, TransportState::Priming);
+
+        let delivery = current_delivery(&engine, FrameDeliveryKind::Ready);
+        assert!(engine.observe_frame_delivery(delivery).unwrap());
+        assert_eq!(engine.snapshot().state, TransportState::Playing);
+    }
+
+    #[test]
+    fn no_available_future_media_releases_presented_current_frame() {
+        let mut engine = engine();
+        engine.play(0, ts(0)).unwrap();
+        let delivery = current_delivery(&engine, FrameDeliveryKind::Ready);
+        engine.observe_frame_delivery(delivery).unwrap();
+
+        assert!(engine.observe_video_preroll(video_preroll(&engine, 0, 0)).unwrap());
+        assert_eq!(engine.snapshot().state, TransportState::Playing);
+    }
+
+    #[test]
+    fn invalid_or_stale_video_preroll_cannot_mutate_session() {
+        let mut engine = engine();
+        let first = engine.play(100, ts(0)).unwrap();
+        engine.stop(ts(1)).unwrap();
+        engine.play(100, ts(1)).unwrap();
+        let before = engine.snapshot();
+
+        assert!(!engine
+            .observe_video_preroll(VideoPrerollObservation {
+                epoch: first.epoch,
+                ready_media_frames: 1,
+                available_media_frames: 1,
+            })
+            .unwrap());
+        assert_eq!(engine.snapshot(), before);
+        assert_eq!(
+            engine.observe_video_preroll(video_preroll(&engine, 2, 1)),
+            Err(PlaybackError::InvalidVideoPrerollObservation)
+        );
+        assert_eq!(engine.snapshot(), before);
     }
 
     #[test]
@@ -1431,6 +1591,7 @@ mod tests {
 
         let priming_delivery = current_delivery(&engine, FrameDeliveryKind::Degraded);
         engine.observe_frame_delivery(priming_delivery).unwrap();
+        engine.observe_video_preroll(video_preroll(&engine, 1, 1)).unwrap();
         assert_eq!(engine.snapshot().state, TransportState::Playing);
 
         for index in 1..=2 {

@@ -519,6 +519,37 @@ impl AppState {
         )
     }
 
+    /// Whether transport is holding its clock anchor for bounded startup preroll.
+    pub fn is_playback_priming(&self) -> bool {
+        self.playback_engine.snapshot().state == TransportState::Priming
+    }
+
+    /// Feed current-session video lookahead into the authoritative Playback Engine.
+    pub fn observe_video_preroll(
+        &mut self,
+        ready_media_frames: usize,
+        available_media_frames: usize,
+    ) -> bool {
+        let before = self.playback_engine.snapshot();
+        let observation = VideoPrerollObservation {
+            epoch: before.epoch,
+            ready_media_frames,
+            available_media_frames,
+        };
+        let changed = match self.playback_engine.observe_video_preroll(observation) {
+            Ok(changed) => changed,
+            Err(error) => {
+                tracing::warn!(%error, ?observation, "rejected video preroll observation");
+                false
+            }
+        };
+        if changed {
+            self.reanchor_playback_presentation_clock(Instant::now());
+        }
+        self.capture_playback_evidence();
+        changed
+    }
+
     fn audio_playback_mode(&self) -> AudioPlaybackMode {
         audio_playback_mode_for_transport(self.playback_engine.snapshot().state)
     }
@@ -565,7 +596,7 @@ impl AppState {
             return None;
         }
         self.playback_engine
-            .frame_demand()
+            .pending_frame_demand()
             .map(|demand| FramePresentationTicket::for_demand(demand, quality))
     }
 
@@ -810,7 +841,8 @@ mod tests {
 
     fn play_ready(state: &mut AppState) {
         state.play();
-        assert!(state.observe_viewer_frame_delivery(FrameDeliveryKind::Ready));
+        assert!(!state.observe_viewer_frame_delivery(FrameDeliveryKind::Ready));
+        assert!(state.observe_video_preroll(0, 0));
     }
 
     fn audio_snapshot() -> RealtimeAudioOutputSnapshot {
@@ -938,7 +970,8 @@ mod tests {
         state.advance_playback_clock(Duration::from_millis(40));
         state.seek_with_source(10, TimelineSeekSource::PointerDrag);
         state.advance_playback_clock(Duration::from_millis(120));
-        assert!(state.observe_viewer_frame_delivery(FrameDeliveryKind::Ready));
+        assert!(!state.observe_viewer_frame_delivery(FrameDeliveryKind::Ready));
+        assert!(state.observe_video_preroll(0, 0));
 
         let report = state.playback_evidence_report();
 

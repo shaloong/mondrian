@@ -276,9 +276,23 @@ impl AppUiHost {
                     .borrow_mut()
                     .complete_frame_presentation(ticket, std::time::Instant::now());
             }
+            let _ = self.observe_playback_video_preroll();
             self.mark_dirty();
         }
         updated
+    }
+
+    fn observe_playback_video_preroll(&self) -> bool {
+        let readiness = {
+            let state = self.app_state.borrow();
+            self.preview_service.playback_video_preroll_readiness(&state)
+        };
+        readiness.is_some_and(|readiness| {
+            self.app_state.borrow_mut().observe_video_preroll(
+                readiness.ready_media_frames,
+                readiness.available_media_frames,
+            )
+        })
     }
 
     /// Clear any advertised GPU viewer frame.
@@ -393,7 +407,9 @@ impl AppUiHost {
                 .fold(false, |changed, delivery| {
                     self.app_state.borrow_mut().observe_frame_delivery(delivery) || changed
                 });
-        let transport_model_changed = preview_outcome.transport_change || playback_delivery_changed;
+        let video_preroll_changed = self.observe_playback_video_preroll();
+        let transport_model_changed =
+            preview_outcome.transport_change || playback_delivery_changed || video_preroll_changed;
         if transport_model_changed {
             self.refresh_transport_state_without_preview();
         }
@@ -465,7 +481,7 @@ impl AppUiHost {
         } else {
             None
         };
-        let transport_changed = if let Some(ticket) = presentation_ticket {
+        let presentation_changed = if let Some(ticket) = presentation_ticket {
             let changed = self
                 .app_state
                 .borrow_mut()
@@ -476,6 +492,7 @@ impl AppUiHost {
                 .terminal_delivery()
                 .is_some_and(|kind| self.app_state.borrow_mut().observe_viewer_frame_delivery(kind))
         };
+        let transport_changed = presentation_changed || self.observe_playback_video_preroll();
         if transport_changed {
             self.refresh_transport_state_without_preview();
         }

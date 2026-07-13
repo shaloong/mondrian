@@ -424,7 +424,7 @@ magic constants embedded in UI code:
 | Policy | Initial value | Rule |
 | --- | ---: | --- |
 | audio preroll target | 120 ms | measured at output sample rate |
-| minimum video priming | one current frame | stale does not satisfy it |
+| minimum video priming | one presented current frame plus one available future media frame | stale does not satisfy current presentation; pure audio/procedural/end-of-sequence playback has no media lookahead requirement |
 | normal play priming limit | 500 ms | then start the clock if no correctness blocker; late video may be absent/stale |
 | seek priming limit | 750 ms | exact current frame remains highest priority |
 | interactive control wake while priming | ≤100 ms | pause/seek/close remain responsive |
@@ -432,6 +432,16 @@ magic constants embedded in UI code:
 | resolution ladder | `1`, `1/2`, `1/4` | spatial scale only, working/color semantics unchanged |
 | healthy recovery exit | 2 continuous seconds with ≥95% on-time current deliveries | ascend one ladder step at a time |
 | audio observation invalidity | 100 ms or explicit device error | hand off to Synthetic Master |
+
+Current-frame presentation and media lookahead are independent observations.
+The Engine records the terminal current Frame Delivery exactly once, while the
+Preview Adapter reports a bounded `VideoPrerollObservation` containing ready
+and available future media-frame counts for the same Playback Epoch. Neither
+signal can release `Priming` alone. The required lookahead is
+`min(policy.minimum_video_preroll_frames, available_media_frames)`, so a frame
+at the end of a sequence, a pure-audio sequence, or an immediate procedural
+frame does not acquire an artificial delay. A consumed current demand remains
+visible to Playback Evidence but cannot issue another Presentation Ticket.
 
 If the priming limit expires with no correctness blocker, the session enters
 Playing rather than freezing transport indefinitely. Audio Device Master starts
@@ -480,6 +490,14 @@ clear PCM, or create a phase correction caused by video readiness. Frame
 Delivery pressure never changes this permission while transport remains
 `Playing`/`Recovering`; only audio device/underrun evidence may initiate audio
 recovery.
+
+Playback prefetch normally keeps its 50 ms cooperative decode budget so
+speculative work cannot monopolize the playback worker. During `Priming`, only
+prefetch work carrying the active Frame Demand's absolute deadline may use the
+remaining startup window, never more than the 500 ms session limit. Its decode
+and queue timings are reported as startup-preroll evidence and excluded from
+steady-state access-mode latency budgets; this preserves cold device/session
+startup cost without misclassifying it as a continuous-playback regression.
 
 The realtime callback may only read/write preallocated lock-free or proven
 bounded structures and atomics. It must not allocate, log, decode, access the
