@@ -56,6 +56,44 @@ reference calculation and PQ absolute-luminance endpoints are regression tests.
 Out-of-gamut negative display-linear values are retained through ITP conversion
 rather than silently clamped.
 
+## Mondrian Display Rendering Transform
+
+`mondrian-core::mondrian_display` owns the high-precision CPU reference and
+versioned target contract for Mondrian Display Rendering Transform v1 (MDRT
+v1). It is independent from ACES rendering transforms, ACEScct, and custom OCIO
+display/view selection. The reference consumes RGB after an exact working-to-
+target-linear primary conversion; output transfer encoding remains a separate
+stage after MDRT.
+
+`MondrianOutputTarget` identifies the encoded output space, peak luminance, and
+reference white with deterministic integer cd/m² values. Acquisition/log
+encodings are rejected as output targets. Target-linear `1.0` means reference
+white and peak headroom is `peak_nits / reference_white_nits`.
+
+MDRT v1 uses two analytic, deterministic stages:
+
+- a neutral-axis luminance scale that is exactly linear through 75% of target
+  headroom, then uses a value- and slope-continuous rational shoulder that
+  approaches target peak without a clip;
+- target-gamut compression that leaves the inner 90% gamut unchanged, then
+  compresses chroma along the target-neutral ray with a value- and slope-
+  continuous rational function that asymptotically reaches the boundary.
+
+The reference contains no 3D LUT, logarithm, exponent, per-frame analysis, or
+content-adaptive state. Tests cover SDR preservation, neutral-axis monotonicity,
+HDR headroom, finite/bounded output over an extreme RGB grid, hue-ray
+preservation, knee continuity, invalid targets, and non-finite input rejection.
+These design constraints are consistent with the mid-tone preservation and
+highlight/hue goals described by ITU-R BT.2446, but the formulas are
+Mondrian-owned and are not presented as an implementation of a BT.2446 method.
+
+The CPU reference is currently an oracle, not yet the production output
+backend. `OutputTransformIntent::MondrianStandard` must not switch pixel
+execution to MDRT until a renderer-native implementation passes CPU/GPU
+conformance and image-corpus review. Until then the existing execution payload
+remains unchanged, so introducing the contract cannot silently alter project
+appearance.
+
 ## Engines
 
 - `ColorEngine::MondrianSmart`: productized Standard/Simple policy over the
