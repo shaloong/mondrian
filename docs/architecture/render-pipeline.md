@@ -812,6 +812,9 @@ CPU upload plans use the same pool before `queue.write_texture`; synchronous
 export readback returns its completed input/output resources before releasing
 the runtime lock, so later frames reuse storage without retaining per-frame
 table entries.
+The working compositor acquires both ping-pong accumulation targets from this
+same pool. Multi-layer/effect semantics and pass ordering remain unchanged; the
+pool only replaces repeated exact-contract allocation after an ordered submit.
 
 ### Integration Status
 

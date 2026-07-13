@@ -11,6 +11,7 @@ use crate::{
     GpuColorFrameAllocationPlan, GpuColorFrameHandle, GpuColorFrameIdAllocator,
     GpuColorFrameResource, GpuColorFrameResourceTable, GpuColorFrameTextureFormat,
     GpuColorFrameUploadPlan, GpuColorFrameUploader, GpuColorFrameWgpuResource,
+    GpuColorFrameWgpuResourcePool,
 };
 use bytemuck::{Pod, Zeroable};
 use mondrian_core::types::{BlendMode, Color};
@@ -526,6 +527,7 @@ impl GpuFrameCompositor {
         encoder: &mut wgpu::CommandEncoder,
         ids: &mut GpuColorFrameIdAllocator,
         table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
         request: GpuCompositeRequest<'_>,
     ) -> Result<GpuCompositeRecord, GpuCompositeError> {
         validate_request(&request)?;
@@ -548,10 +550,20 @@ impl GpuFrameCompositor {
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
         };
-        let target_a =
-            create_working_resource(device, ids, output_descriptor, "gpu-composite-accum-a")?;
-        let target_b =
-            create_working_resource(device, ids, output_descriptor, "gpu-composite-accum-b")?;
+        let target_a = create_working_resource(
+            device,
+            ids,
+            output_descriptor,
+            "gpu-composite-accum-a",
+            resource_pool,
+        )?;
+        let target_b = create_working_resource(
+            device,
+            ids,
+            output_descriptor,
+            "gpu-composite-accum-b",
+            resource_pool,
+        )?;
         clear_working_texture(
             encoder,
             &target_a.resource().texture_view,
@@ -890,6 +902,7 @@ fn create_working_resource(
     ids: &mut GpuColorFrameIdAllocator,
     descriptor: ColorFrameDescriptor,
     label: &'static str,
+    resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
 ) -> Result<GpuColorFrameResource<GpuColorFrameWgpuResource>, GpuCompositeError> {
     let handle = GpuColorFrameHandle::new(
         ids.allocate(),
@@ -898,7 +911,10 @@ fn create_working_resource(
         label,
     )?;
     let allocation = GpuColorFrameAllocationPlan::for_handle(handle);
-    Ok(GpuColorFrameUploader::allocate(device, &allocation))
+    Ok(resource_pool.map_or_else(
+        || GpuColorFrameUploader::allocate(device, &allocation),
+        |pool| pool.acquire(device, &allocation),
+    ))
 }
 
 fn clear_working_texture(
@@ -1241,6 +1257,7 @@ mod tests {
                 &mut encoder,
                 &mut ids,
                 &mut table,
+                None,
                 GpuCompositeRequest {
                     width: 4,
                     height: 4,

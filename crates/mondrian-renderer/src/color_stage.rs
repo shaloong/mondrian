@@ -710,8 +710,16 @@ impl RenderGpuOutputBoundaryRuntime {
         encoder: &mut wgpu::CommandEncoder,
         request: GpuCompositeRequest<'_>,
     ) -> Result<GpuCompositeRecord, GpuCompositeError> {
-        let Self { frame_ids, frame_table, .. } = self;
-        compositor.record(device, queue, encoder, frame_ids, frame_table, request)
+        let Self { frame_ids, frame_table, resource_pool, .. } = self;
+        compositor.record(
+            device,
+            queue,
+            encoder,
+            frame_ids,
+            frame_table,
+            Some(resource_pool),
+            request,
+        )
     }
 
     /// Plan, prepare runtime-owned backend objects, and record a native GPU
@@ -4527,6 +4535,59 @@ mod tests {
             ColorFrameResidency::Gpu
         );
         assert_eq!(runtime.diagnostics().frame_table_entries, 4);
+    }
+
+    #[tokio::test]
+    async fn gpu_compositor_reuses_both_accumulation_targets_after_ordered_submit() {
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping real wgpu compositor-pool test: no GPU adapter available");
+            return;
+        };
+        let compositor = GpuFrameCompositor::new(&context.device);
+        let effect_graph = mondrian_effects::EffectGraphBuilderState::new();
+        let compiled_effect_graph =
+            mondrian_effects::get_or_compile_scheduled_render_graph(effect_graph.finish())
+                .expect("valid identity GPU effect graph");
+        let effect_plan = mondrian_effects::lower_effect_graph_to_gpu_plan(&compiled_effect_graph)
+            .expect("supported identity GPU effect graph");
+        let layer = crate::GpuCompositeLayer {
+            source: crate::GpuCompositeLayerSource::SolidColor(mondrian_core::types::Color::WHITE),
+            opacity: 1.0,
+            blend_mode: mondrian_core::types::BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&effect_plan),
+            frame_seed: 0,
+        };
+        let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_450);
+
+        for _ in 0..2 {
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian-test-gpu-compositor-resource-pool"),
+                });
+            runtime
+                .record_wgpu_working_composite(
+                    &compositor,
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    GpuCompositeRequest {
+                        width: 4,
+                        height: 4,
+                        working_color_space: WorkingColorSpace::LinearRec709,
+                        layers: std::slice::from_ref(&layer),
+                    },
+                )
+                .expect("GPU solid composite should record");
+            context.queue.submit(std::iter::once(encoder.finish()));
+            runtime.clear_frame_resources();
+        }
+
+        let diagnostics = runtime.diagnostics().resource_pool;
+        assert_eq!(diagnostics.hits, 2);
+        assert_eq!(diagnostics.misses, 2);
+        assert_eq!(diagnostics.releases, 4);
+        assert_eq!(diagnostics.retained_resources, 2);
     }
 
     #[tokio::test]
