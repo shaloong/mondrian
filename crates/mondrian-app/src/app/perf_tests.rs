@@ -49,6 +49,7 @@ use mondrian_media::{
 use mondrian_platform::{NativeVideoTextureImportProbe, SystemPlatformService};
 use mondrian_renderer::{
     GpuCompositingDiagnostics, GpuViewerSpatialRuntimeDiagnostics, RenderColorStageDiagnostics,
+    ViewerGpuExecutionCpuStageTimings,
 };
 use mondrian_timeline::track::Track;
 use mondrian_ui_core::tree::TreeWalker;
@@ -122,6 +123,16 @@ struct HeadlessViewerGpuExecutionSummary {
     wall_duration_samples_us: Vec<u64>,
     record_submit_samples_us: Vec<u64>,
     completion_wait_samples_us: Vec<u64>,
+    #[serde(skip)]
+    input_prepare_samples_us: Vec<u64>,
+    #[serde(skip)]
+    working_composite_samples_us: Vec<u64>,
+    #[serde(skip)]
+    spatial_samples_us: Vec<u64>,
+    #[serde(skip)]
+    output_boundary_samples_us: Vec<u64>,
+    #[serde(skip)]
+    display_calibration_samples_us: Vec<u64>,
     gpu_duration_samples_us: Vec<u64>,
     #[serde(skip)]
     gpu_timestamp_tokens: Vec<u64>,
@@ -152,6 +163,13 @@ impl HeadlessViewerGpuExecutionSummary {
             self.wall_duration_samples_us.push(execution.duration_us);
             self.record_submit_samples_us.push(execution.record_submit_us);
             self.completion_wait_samples_us.push(execution.completion_wait_us);
+            if let Some(timings) = execution.cpu_stage_timings {
+                self.input_prepare_samples_us.push(timings.input_prepare_us);
+                self.working_composite_samples_us.push(timings.working_composite_us);
+                self.spatial_samples_us.push(timings.spatial_us);
+                self.output_boundary_samples_us.push(timings.output_boundary_us);
+                self.display_calibration_samples_us.push(timings.display_calibration_us);
+            }
             if let Some(token) = execution.gpu_timestamp_token {
                 self.gpu_timestamp_tokens.push(token);
             } else {
@@ -196,6 +214,16 @@ impl HeadlessViewerGpuExecutionSummary {
     fn p95_wall_duration_us(&self) -> u64 {
         p95_sample_us(&self.wall_duration_samples_us)
     }
+
+    fn p95_cpu_stages(&self) -> ViewerGpuExecutionCpuStageTimings {
+        ViewerGpuExecutionCpuStageTimings {
+            input_prepare_us: p95_sample_us(&self.input_prepare_samples_us),
+            working_composite_us: p95_sample_us(&self.working_composite_samples_us),
+            spatial_us: p95_sample_us(&self.spatial_samples_us),
+            output_boundary_us: p95_sample_us(&self.output_boundary_samples_us),
+            display_calibration_us: p95_sample_us(&self.display_calibration_samples_us),
+        }
+    }
 }
 
 fn p95_sample_us(samples: &[u64]) -> u64 {
@@ -220,6 +248,7 @@ fn headless_gpu_summary_records_distinct_executed_extents() {
             record_submit_us: 1,
             completion_wait_us: 1,
             gpu_timestamp_token: Some(u64::from(width) << 32 | u64::from(height)),
+            cpu_stage_timings: Some(ViewerGpuExecutionCpuStageTimings::default()),
             compositing_diagnostics: None,
             spatial_diagnostics: None,
             stage_diagnostics: None,
@@ -290,6 +319,7 @@ struct PreviewExternalPlaybackGateReport {
     gpu_record_submit_p95_us: u64,
     gpu_completion_wait_p95_us: u64,
     gpu_wall_duration_p95_us: u64,
+    gpu_cpu_stage_p95_us: ViewerGpuExecutionCpuStageTimings,
     gpu_readback_stages: u64,
     gpu_blockers: u64,
     gpu_fallback_count: usize,
@@ -1783,6 +1813,7 @@ fn evaluate_external_playback_gates(
         gpu_record_submit_p95_us: headless_gpu.p95_record_submit_us(),
         gpu_completion_wait_p95_us: headless_gpu.p95_completion_wait_us(),
         gpu_wall_duration_p95_us: headless_gpu.p95_wall_duration_us(),
+        gpu_cpu_stage_p95_us: headless_gpu.p95_cpu_stages(),
         gpu_readback_stages: headless_gpu.stage_diagnostics.readback_stages,
         gpu_blockers: headless_gpu.stage_diagnostics.gpu_blockers,
         gpu_fallback_count: headless_gpu.fallback_count,

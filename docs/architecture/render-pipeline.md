@@ -788,6 +788,11 @@ means commands bracketed on the hardware timeline, not record/submit/wait wall
 time. Gate reports also identify the adapter and retain compositor and spatial
 pass diagnostics so regressions remain attributable to a concrete execution
 path.
+Successful Viewer records also expose CPU preparation attribution for native
+input/import, working composite, spatial, output-boundary, and optional display
+calibration stages. These timings end at command preparation and never claim to
+be GPU execution time; they identify CPU-side bridge waits or per-frame object
+construction before adding lower-level GPU pass timestamps.
 
 ### Integration Status
 

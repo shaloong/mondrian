@@ -5,6 +5,7 @@
 //! headless Adapter that executes the same preview path.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::{
     native_source_texture_format_from_decoded, native_video_sampling_from_decoded, CpuColorFrame,
@@ -104,6 +105,7 @@ impl ViewerGpuExecutionRuntime {
         encoder: &mut wgpu::CommandEncoder,
         request: ViewerGpuExecutionRequest<'_>,
     ) -> Result<ViewerGpuExecutionRecord, ViewerGpuExecutionError> {
+        let input_prepare_started = Instant::now();
         let prepared = prepare_composite(
             &request,
             &mut self.color_output,
@@ -112,10 +114,12 @@ impl ViewerGpuExecutionRuntime {
             queue,
             encoder,
         )?;
+        let input_prepare_us = elapsed_us(input_prepare_started);
         let residency = prepared.residency;
         let fallback_reasons = prepared.fallback_reasons;
         let mut stage_diagnostics = prepared.input_stage_diagnostics;
         let gpu_layers = composite_layers(&prepared.layers, &prepared.gpu_input_handles);
+        let working_composite_started = Instant::now();
         let composite = self
             .color_output
             .record_wgpu_working_composite(
@@ -131,6 +135,7 @@ impl ViewerGpuExecutionRuntime {
                 },
             )
             .map_err(ViewerGpuExecutionError::WorkingComposite)?;
+        let working_composite_us = elapsed_us(working_composite_started);
         let working_view = self
             .color_output
             .frame_table()
@@ -139,6 +144,7 @@ impl ViewerGpuExecutionRuntime {
             .resource()
             .texture_view
             .clone();
+        let spatial_started = Instant::now();
         let spatial_record = self
             .spatial
             .record_for_presentation(
@@ -164,6 +170,8 @@ impl ViewerGpuExecutionRuntime {
                 .insert(spatial_resource)
                 .map_err(|error| ViewerGpuExecutionError::SpatialTransfer(format!("{error:?}")))?;
         }
+        let spatial_us = elapsed_us(spatial_started);
+        let output_boundary_started = Instant::now();
         let mut output_record = self
             .color_output
             .record_wgpu_output_boundary_gpu_frame_owned_backend(
@@ -183,9 +191,11 @@ impl ViewerGpuExecutionRuntime {
                 },
             )
             .map_err(ViewerGpuExecutionError::OutputBoundary)?;
+        let output_boundary_us = elapsed_us(output_boundary_started);
         stage_diagnostics.accumulate(output_record.stage_diagnostics);
         output_record.stage_diagnostics = stage_diagnostics;
         let output = output_record.materialized.output;
+        let calibration_started = Instant::now();
         let (output, output_owner) = if let Some(calibration) = request.display_calibration {
             let output_view = self
                 .color_output
@@ -216,6 +226,7 @@ impl ViewerGpuExecutionRuntime {
         } else {
             (output, ViewerGpuExecutionOutputOwner::ColorOutput)
         };
+        let display_calibration_us = elapsed_us(calibration_started);
         Ok(ViewerGpuExecutionRecord {
             output,
             output_owner,
@@ -224,6 +235,13 @@ impl ViewerGpuExecutionRuntime {
             spatial_diagnostics,
             residency,
             fallback_reasons,
+            cpu_stage_timings: ViewerGpuExecutionCpuStageTimings {
+                input_prepare_us,
+                working_composite_us,
+                spatial_us,
+                output_boundary_us,
+                display_calibration_us,
+            },
         })
     }
 
@@ -276,6 +294,27 @@ pub struct ViewerGpuExecutionRecord {
     pub residency: ViewerGpuExecutionResidency,
     /// Explicit reasons for native/GPU-input correctness fallbacks.
     pub fallback_reasons: Vec<String>,
+    /// CPU wall time spent recording each renderer stage before queue submission.
+    pub cpu_stage_timings: ViewerGpuExecutionCpuStageTimings,
+}
+
+/// CPU command-recording attribution for one successful Viewer frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ViewerGpuExecutionCpuStageTimings {
+    /// Input source import and input-color transform command preparation.
+    pub input_prepare_us: u64,
+    /// Working-linear layer composite command preparation.
+    pub working_composite_us: u64,
+    /// Viewer crop/resize command preparation.
+    pub spatial_us: u64,
+    /// Display/output color-boundary command preparation.
+    pub output_boundary_us: u64,
+    /// Optional display-calibration command preparation.
+    pub display_calibration_us: u64,
+}
+
+fn elapsed_us(started: Instant) -> u64 {
+    started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

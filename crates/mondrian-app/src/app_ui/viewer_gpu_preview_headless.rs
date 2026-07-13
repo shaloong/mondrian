@@ -14,8 +14,9 @@ use mondrian_renderer::{
     native_video_texture_device_features, profile::gpu_timestamp_query_device_features,
     profile::GpuTimestampQueryRing, request_adapter_with_native_video_preference,
     GpuCompositingDiagnostics, GpuNativeDecodedFrameImportSupport,
-    GpuViewerSpatialRuntimeDiagnostics, RenderColorStageDiagnostics, ViewerGpuExecutionRequest,
-    ViewerGpuExecutionRuntime, ViewerSourceRect,
+    GpuViewerSpatialRuntimeDiagnostics, RenderColorStageDiagnostics,
+    ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionRequest, ViewerGpuExecutionRuntime,
+    ViewerSourceRect,
 };
 use mondrian_ui_widgets::ViewerExternalTexturePresentation;
 
@@ -38,6 +39,8 @@ pub(crate) struct HeadlessViewerGpuExecution {
     pub completion_wait_us: u64,
     /// Deferred timestamp token, absent if unsupported or the bounded ring discarded it.
     pub gpu_timestamp_token: Option<u64>,
+    /// CPU attribution inside the renderer record call.
+    pub cpu_stage_timings: Option<ViewerGpuExecutionCpuStageTimings>,
     /// Frame-local working-space compositing evidence.
     pub compositing_diagnostics: Option<GpuCompositingDiagnostics>,
     /// Cumulative spatial-runtime evidence after this frame.
@@ -170,6 +173,7 @@ impl HeadlessViewerGpuAdapter {
                 record_submit_us: elapsed_us(started),
                 completion_wait_us: 0,
                 gpu_timestamp_token: None,
+                cpu_stage_timings: None,
                 compositing_diagnostics: None,
                 spatial_diagnostics: None,
                 stage_diagnostics: None,
@@ -246,6 +250,7 @@ impl HeadlessViewerGpuAdapter {
             record_submit_us,
             completion_wait_us: 0,
             gpu_timestamp_token: timestamp_token.map(|token| token.id()),
+            cpu_stage_timings: Some(record.cpu_stage_timings),
             compositing_diagnostics: Some(record.compositing_diagnostics),
             spatial_diagnostics: Some(record.spatial_diagnostics),
             stage_diagnostics: Some(record.stage_diagnostics),

@@ -196,8 +196,9 @@ pub use viewer_execution::{
     ViewerNativeVideoImportRuntime,
 };
 pub use viewer_runtime::{
-    ViewerGpuExecutionError, ViewerGpuExecutionRecord, ViewerGpuExecutionRequest,
-    ViewerGpuExecutionResidency, ViewerGpuExecutionRuntime, ViewerGpuNativeVideoFacts,
+    ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionError, ViewerGpuExecutionRecord,
+    ViewerGpuExecutionRequest, ViewerGpuExecutionResidency, ViewerGpuExecutionRuntime,
+    ViewerGpuNativeVideoFacts,
 };
 pub use viewer_spatial::{
     GpuViewerSpatialPlan, GpuViewerSpatialPlanError, GpuViewerSpatialRecord,
