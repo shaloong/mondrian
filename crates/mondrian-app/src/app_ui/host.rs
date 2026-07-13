@@ -434,6 +434,11 @@ impl AppUiHost {
         self.app_state.borrow().playback_next_frame_delay()
     }
 
+    /// Whether the transport clock is currently advancing.
+    pub(crate) fn is_playback_running(&self) -> bool {
+        self.app_state.borrow().is_playing()
+    }
+
     /// Whether current-frame work is pending in the Viewer Adapter.
     pub(crate) fn is_playback_frame_pending(&self) -> bool {
         self.app_state.borrow().is_playing()

@@ -1307,6 +1307,7 @@ struct AppUiWindowSession {
     modifiers_state: Modifiers,
     pending_initial_redraw: bool,
     last_playback_tick: Instant,
+    playback_was_running: bool,
     event_loop_telemetry: AppUiEventLoopTelemetry,
 }
 
@@ -1870,12 +1871,18 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                     elwt.set_control_flow(ControlFlow::Poll);
                 }
                 let playback_now = Instant::now();
-                let playback_elapsed =
-                    playback_now.saturating_duration_since(session.last_playback_tick);
+                let playback_is_running = host.is_playback_running();
+                let playback_elapsed = continuous_playback_elapsed(
+                    session.last_playback_tick,
+                    playback_now,
+                    session.playback_was_running,
+                    playback_is_running,
+                );
                 session.last_playback_tick = playback_now;
                 let playback_clock_started = Instant::now();
                 let playback_changed =
                     host.advance_playback_clock(playback_elapsed, session.current_bounds.get());
+                session.playback_was_running = host.is_playback_running();
                 session.event_loop_telemetry.record_stage_duration(
                     AppUiEventLoopStage::AdvancePlaybackClock,
                     playback_clock_started.elapsed(),
@@ -3037,6 +3044,19 @@ fn app_ui_interactive_playback_wake_delay(host: &AppUiHost, delay: Duration) -> 
     }
 }
 
+fn continuous_playback_elapsed(
+    previous_tick: Instant,
+    current_tick: Instant,
+    was_running: bool,
+    is_running: bool,
+) -> Duration {
+    if was_running && is_running {
+        current_tick.saturating_duration_since(previous_tick)
+    } else {
+        Duration::ZERO
+    }
+}
+
 fn prepare_viewer_gpu_preview(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -3943,6 +3963,7 @@ impl AppUiWindowSession {
             modifiers_state: Modifiers::none(),
             pending_initial_redraw: true,
             last_playback_tick: Instant::now(),
+            playback_was_running: false,
             event_loop_telemetry: AppUiEventLoopTelemetry::default(),
         })
     }
@@ -4311,6 +4332,25 @@ mod tests {
     };
     use mondrian_ui_core::widget::{EventContext, PaintContext};
     use mondrian_ui_core::Widget;
+
+    #[test]
+    fn playback_clock_discards_idle_time_when_transport_starts_or_resumes() {
+        let previous_tick = Instant::now();
+        let current_tick = previous_tick + Duration::from_secs(30);
+
+        assert_eq!(
+            continuous_playback_elapsed(previous_tick, current_tick, false, true),
+            Duration::ZERO
+        );
+        assert_eq!(
+            continuous_playback_elapsed(previous_tick, current_tick, true, true),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            continuous_playback_elapsed(previous_tick, current_tick, true, false),
+            Duration::ZERO
+        );
+    }
 
     #[test]
     fn display_calibration_proof_requires_exact_source_and_full_fingerprint() {

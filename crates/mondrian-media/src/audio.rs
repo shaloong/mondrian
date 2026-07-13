@@ -87,6 +87,7 @@ pub struct RealtimeAudioOutput {
     muted: Arc<AtomicBool>,
     active: Arc<AtomicBool>,
     activation_consumed_frames: Arc<AtomicU64>,
+    activation_elapsed_ns: Arc<AtomicU64>,
     telemetry: Arc<RealtimeAudioOutputTelemetry>,
     _stream: cpal::Stream,
 }
@@ -100,6 +101,7 @@ pub(crate) struct RealtimeAudioOutputHandle {
     muted: Arc<AtomicBool>,
     active: Arc<AtomicBool>,
     activation_consumed_frames: Arc<AtomicU64>,
+    activation_elapsed_ns: Arc<AtomicU64>,
     telemetry: Arc<RealtimeAudioOutputTelemetry>,
 }
 
@@ -116,6 +118,8 @@ pub struct RealtimeAudioOutputSnapshot {
     pub callback_consumed_frames: u64,
     /// Callback-consumed frames since the output was most recently activated.
     pub active_callback_consumed_frames: u64,
+    /// Monotonic wall time since the current consumption interval began.
+    pub active_duration: Option<Duration>,
     /// Number of output callbacks observed.
     pub callback_count: u64,
     /// Active callback frames filled with silence because PCM was unavailable.
@@ -421,6 +425,7 @@ impl RealtimeAudioOutput {
             muted,
             active,
             activation_consumed_frames: Arc::new(AtomicU64::new(0)),
+            activation_elapsed_ns: Arc::new(AtomicU64::new(0)),
             telemetry,
             _stream: stream,
         })
@@ -434,6 +439,7 @@ impl RealtimeAudioOutput {
             muted: Arc::clone(&self.muted),
             active: Arc::clone(&self.active),
             activation_consumed_frames: Arc::clone(&self.activation_consumed_frames),
+            activation_elapsed_ns: Arc::clone(&self.activation_elapsed_ns),
             telemetry: Arc::clone(&self.telemetry),
         }
     }
@@ -468,10 +474,13 @@ impl RealtimeAudioOutput {
     pub fn set_active(&self, active: bool) {
         let was_active = self.active.swap(active, Ordering::AcqRel);
         if active && !was_active {
+            let elapsed_ns =
+                self.telemetry.origin.elapsed().as_nanos().min(u64::MAX as u128) as u64;
             self.activation_consumed_frames.store(
                 self.telemetry.callback_consumed_frames.load(Ordering::Acquire),
                 Ordering::Release,
             );
+            self.activation_elapsed_ns.store(elapsed_ns, Ordering::Release);
         }
     }
 
@@ -485,6 +494,7 @@ impl RealtimeAudioOutput {
         let now_ns = self.telemetry.origin.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         let callback_consumed_frames =
             self.telemetry.callback_consumed_frames.load(Ordering::Acquire);
+        let active = self.active.load(Ordering::Acquire);
         RealtimeAudioOutputSnapshot {
             stream_generation: self.telemetry.stream_generation,
             sample_rate: self.sample_rate,
@@ -492,6 +502,11 @@ impl RealtimeAudioOutput {
             callback_consumed_frames,
             active_callback_consumed_frames: callback_consumed_frames
                 .saturating_sub(self.activation_consumed_frames.load(Ordering::Acquire)),
+            active_duration: active.then(|| {
+                Duration::from_nanos(
+                    now_ns.saturating_sub(self.activation_elapsed_ns.load(Ordering::Acquire)),
+                )
+            }),
             callback_count: self.telemetry.callback_count.load(Ordering::Relaxed),
             underrun_frames: self.telemetry.underrun_frames.load(Ordering::Relaxed),
             last_callback_frames: self
@@ -503,7 +518,7 @@ impl RealtimeAudioOutput {
                 .then(|| Duration::from_nanos(now_ns.saturating_sub(last_elapsed_ns))),
             buffered_frames: self.buffered_frames(),
             stream_failed: self.telemetry.stream_failed.load(Ordering::Acquire),
-            active: self.active.load(Ordering::Acquire),
+            active,
         }
     }
 }
@@ -535,10 +550,13 @@ impl RealtimeAudioOutputHandle {
     pub(crate) fn set_active(&self, active: bool) {
         let was_active = self.active.swap(active, Ordering::AcqRel);
         if active && !was_active {
+            let elapsed_ns =
+                self.telemetry.origin.elapsed().as_nanos().min(u64::MAX as u128) as u64;
             self.activation_consumed_frames.store(
                 self.telemetry.callback_consumed_frames.load(Ordering::Acquire),
                 Ordering::Release,
             );
+            self.activation_elapsed_ns.store(elapsed_ns, Ordering::Release);
         }
     }
 
@@ -551,6 +569,7 @@ impl RealtimeAudioOutputHandle {
         let now_ns = self.telemetry.origin.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         let callback_consumed_frames =
             self.telemetry.callback_consumed_frames.load(Ordering::Acquire);
+        let active = self.active.load(Ordering::Acquire);
         RealtimeAudioOutputSnapshot {
             stream_generation: self.telemetry.stream_generation,
             sample_rate: self.sample_rate,
@@ -558,6 +577,11 @@ impl RealtimeAudioOutputHandle {
             callback_consumed_frames,
             active_callback_consumed_frames: callback_consumed_frames
                 .saturating_sub(self.activation_consumed_frames.load(Ordering::Acquire)),
+            active_duration: active.then(|| {
+                Duration::from_nanos(
+                    now_ns.saturating_sub(self.activation_elapsed_ns.load(Ordering::Acquire)),
+                )
+            }),
             callback_count: self.telemetry.callback_count.load(Ordering::Relaxed),
             underrun_frames: self.telemetry.underrun_frames.load(Ordering::Relaxed),
             last_callback_frames: self
@@ -569,7 +593,7 @@ impl RealtimeAudioOutputHandle {
                 .then(|| Duration::from_nanos(now_ns.saturating_sub(last_elapsed_ns))),
             buffered_frames: self.buffered_frames(),
             stream_failed: self.telemetry.stream_failed.load(Ordering::Acquire),
-            active: self.active.load(Ordering::Acquire),
+            active,
         }
     }
 }

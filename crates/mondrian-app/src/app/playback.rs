@@ -737,10 +737,19 @@ fn audio_device_clock_observation(
 ) -> AudioDeviceClockObservation {
     let callback_fresh =
         snapshot.last_callback_age.is_some_and(|age| age <= AUDIO_CALLBACK_STALE_AFTER);
+    let callback_position_plausible = snapshot.active_duration.is_some_and(|active_duration| {
+        let maximum_consumed_frames = duration_sample_frames(
+            active_duration.saturating_add(AUDIO_CALLBACK_STALE_AFTER),
+            snapshot.sample_rate,
+        )
+        .saturating_add(u64::from(snapshot.last_callback_frames));
+        snapshot.active_callback_consumed_frames <= maximum_consumed_frames
+    });
     let usable = snapshot.active
         && !snapshot.stream_failed
         && snapshot.active_callback_consumed_frames > 0
         && callback_fresh
+        && callback_position_plausible
         && media_anchor.is_some()
         && (already_audio_master || activation_preroll_satisfied);
     let callback_age_frames = snapshot
@@ -811,6 +820,7 @@ mod tests {
             channels: 2,
             callback_consumed_frames: 960,
             active_callback_consumed_frames: 480,
+            active_duration: Some(Duration::from_millis(10)),
             callback_count: 2,
             underrun_frames: 0,
             last_callback_frames: 480,
@@ -865,6 +875,22 @@ mod tests {
                 false,
                 Some(FramePosition::new(0, Rational::new(1, 25))),
                 false,
+            )
+            .state,
+            AudioDeviceClockState::Unavailable
+        );
+
+        let mut implausibly_fast = audio_snapshot();
+        implausibly_fast.active_callback_consumed_frames = 480_000;
+        implausibly_fast.active_duration = Some(Duration::from_millis(100));
+        assert_eq!(
+            audio_device_clock_observation(
+                implausibly_fast,
+                epoch,
+                MonotonicTimestamp::ZERO,
+                false,
+                Some(FramePosition::new(0, Rational::new(1, 25))),
+                true,
             )
             .state,
             AudioDeviceClockState::Unavailable

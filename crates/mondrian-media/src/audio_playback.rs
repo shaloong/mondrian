@@ -772,6 +772,7 @@ mod tests {
             channels: 2,
             callback_consumed_frames: 0,
             active_callback_consumed_frames: 0,
+            active_duration: None,
             callback_count: 0,
             underrun_frames: 0,
             last_callback_frames: 10,

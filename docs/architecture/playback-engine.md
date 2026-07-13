@@ -190,6 +190,17 @@ playback only when its uncertainty remains inside the configured A/V budget; it
 must never be reported as an exact hardware position. `Unavailable` selects
 Synthetic Clock Master.
 
+Callback consumption is also bounded against monotonic time since the current
+output activation. A backend or APO report that advances farther than elapsed
+activation time plus the stale-callback and one-buffer tolerance is rejected as
+`Unavailable`; it cannot jump timeline position and the Engine remains on the
+Synthetic Clock Master until plausible device evidence returns.
+Once Audio Device Master is active, its media anchor is immutable for that
+consumption interval. A changed anchor or decreasing consumed-sample position
+hands off continuously to Synthetic Master before the new observation can move
+the timeline. A reprime must therefore pass the normal phase-aligned handoff
+gate instead of reusing callback consumption accumulated against an old anchor.
+
 ### Master selection
 
 - A healthy audio stream with reliable consumed-sample evidence selects Audio
@@ -218,6 +229,17 @@ Synthetic → Audio requires:
 Small phase error is removed by bounded audio resampling/slew. Error outside the
 hard budget keeps Synthetic Master active and reprimes audio; it must not jump
 the timeline or duplicate/drop an arbitrary video interval.
+
+### Event-loop clock boundary
+
+The winit adapter samples its wall clock on every `AboutToWait`, including while
+transport is stopped or paused. An elapsed interval is forwarded to the
+Playback Engine only when transport was running at both ends of that interval.
+The first tick after Play or Resume therefore carries zero elapsed time; idle
+wall time before the command is never charged to the new playback session.
+Audio-device observations remain authoritative after handoff, while this rule
+also keeps the Synthetic Clock Master continuous during device absence,
+preroll, and recovery.
 
 ### Time representation
 

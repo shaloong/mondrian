@@ -429,6 +429,7 @@ struct ClockAnchor {
 #[derive(Debug, Clone, Copy)]
 struct AudioDeviceClockAnchor {
     stream_generation: u64,
+    media_anchor: FramePosition,
     last_effective_consumed_frames: u64,
 }
 
@@ -724,7 +725,8 @@ impl PlaybackEngine {
             .saturating_sub(observation.estimated_latency_frames as u64);
         if self.audio_device_anchor.is_some_and(|anchor| {
             anchor.stream_generation == observation.stream_generation
-                && effective_consumed < anchor.last_effective_consumed_frames
+                && (effective_consumed < anchor.last_effective_consumed_frames
+                    || observation.media_anchor != anchor.media_anchor)
         }) {
             self.handoff_to_synthetic(observation.observed_at);
             return Ok(self.snapshot());
@@ -753,6 +755,7 @@ impl PlaybackEngine {
             }
             self.audio_device_anchor = Some(AudioDeviceClockAnchor {
                 stream_generation: observation.stream_generation,
+                media_anchor: observation.media_anchor,
                 last_effective_consumed_frames: effective_consumed,
             });
             self.clock_master = Some(ClockMaster::AudioDevice);
@@ -767,6 +770,7 @@ impl PlaybackEngine {
         self.position.frame = self.position.frame.max(target).min(self.end_frame).max(0);
         self.audio_device_anchor = Some(AudioDeviceClockAnchor {
             stream_generation: anchor.stream_generation,
+            media_anchor: anchor.media_anchor,
             last_effective_consumed_frames: effective_consumed,
         });
         self.clock_master = Some(ClockMaster::AudioDevice);
@@ -1230,6 +1234,24 @@ mod tests {
         assert_eq!(fallback.position.frame, 1);
         assert_eq!(fallback.clock_master, Some(ClockMaster::Synthetic));
         assert_eq!(engine.tick(ts(90)).unwrap().position.frame, 2);
+    }
+
+    #[test]
+    fn changed_media_anchor_cannot_reuse_active_callback_consumption() {
+        let mut engine = engine();
+        engine.play(100, ts(0)).unwrap();
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+        engine
+            .observe_audio_device_clock(audio_observation(&engine, 1_000, ts(0)))
+            .unwrap();
+
+        let mut reanchored = audio_observation(&engine, 2_920, ts(40));
+        reanchored.media_anchor = FramePosition::new(48_000, Rational::new(1, 48_000));
+        let fallback = engine.observe_audio_device_clock(reanchored).unwrap();
+
+        assert_eq!(fallback.position.frame, 0);
+        assert_eq!(fallback.clock_master, Some(ClockMaster::Synthetic));
+        assert_eq!(engine.tick(ts(80)).unwrap().position.frame, 1);
     }
 
     #[test]
