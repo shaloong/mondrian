@@ -10,17 +10,20 @@ use super::windows_d3d11_bridge::{
 };
 use crate::{
     ColorFrameResidency, GpuColorFrameResource, GpuColorFrameTextureFormat,
-    GpuColorFrameWgpuResource, GpuNativeDecodedFrameImportBackend,
+    GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool, GpuNativeDecodedFrameImportBackend,
     GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportPlan,
     GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
     GpuNativeDecodedFrameVideoSampling, GpuNativeVideoExtent, GpuNativeYuvDecodePlan,
     GpuNativeYuvDecoder, GpuNativeYuvPlaneViews, GpuNativeYuvPreparedPass,
-    RenderColorTransformGpuOptions, RenderGpuInputStageRuntimeRecordError,
-    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
+    NativeVideoImportCpuTimings, RenderColorTransformGpuOptions,
+    RenderGpuInputStageRuntimeRecordError, RenderGpuOutputBoundaryRuntime,
+    RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
 };
 use mondrian_core::types::ColorSpace;
 use mondrian_media::{DecodedGpuFrameHandleKind, PreviewNativeDecodedFrame};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
 use windows::core::Interface;
 
 /// Error creating the complete Windows native decoded-frame renderer backend.
@@ -67,6 +70,7 @@ pub struct D3D11Dx12NativeVideoImportBackend {
     color_runtime: RenderGpuOutputBoundaryRuntime,
     pools: HashMap<D3D11BridgePoolKey, Vec<D3D11NativeVideoPipelineEntry>>,
     options: D3D11Dx12NativeVideoImportBackendOptions,
+    frame_cpu_timings: NativeVideoImportCpuTimings,
 }
 
 impl D3D11Dx12NativeVideoImportBackend {
@@ -90,6 +94,39 @@ impl D3D11Dx12NativeVideoImportBackend {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         options: D3D11Dx12NativeVideoImportBackendOptions,
+    ) -> Result<Self, D3D11Dx12NativeVideoImportBackendCreateError> {
+        Self::new_with_options_and_resource_pool(
+            adapter,
+            device,
+            queue,
+            options,
+            Arc::new(GpuColorFrameWgpuResourcePool::default()),
+        )
+    }
+
+    /// Create a backend that shares renderer color-frame resources across stages.
+    pub fn new_with_resource_pool(
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
+    ) -> Result<Self, D3D11Dx12NativeVideoImportBackendCreateError> {
+        Self::new_with_options_and_resource_pool(
+            adapter,
+            device,
+            queue,
+            D3D11Dx12NativeVideoImportBackendOptions::default(),
+            resource_pool,
+        )
+    }
+
+    /// Create a backend with explicit bridge and shared-resource policies.
+    pub fn new_with_options_and_resource_pool(
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        options: D3D11Dx12NativeVideoImportBackendOptions,
+        resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
     ) -> Result<Self, D3D11Dx12NativeVideoImportBackendCreateError> {
         if options.max_frames_in_flight_per_contract == 0 {
             return Err(D3D11Dx12NativeVideoImportBackendCreateError::ZeroBridgePoolLimit);
@@ -120,9 +157,10 @@ impl D3D11Dx12NativeVideoImportBackend {
             queue: queue.clone(),
             support,
             yuv_decoder: GpuNativeYuvDecoder::new(device),
-            color_runtime: RenderGpuOutputBoundaryRuntime::new(),
+            color_runtime: RenderGpuOutputBoundaryRuntime::with_resource_pool(resource_pool),
             pools: HashMap::new(),
             options,
+            frame_cpu_timings: NativeVideoImportCpuTimings::default(),
         })
     }
 
@@ -136,15 +174,28 @@ impl D3D11Dx12NativeVideoImportBackend {
         &self.color_runtime
     }
 
+    /// Reset CPU attribution before recording one Viewer candidate.
+    pub fn reset_frame_cpu_timings(&mut self) {
+        self.frame_cpu_timings = NativeVideoImportCpuTimings::default();
+    }
+
+    /// Return accumulated native-import CPU attribution for the current candidate.
+    pub fn frame_cpu_timings(&self) -> NativeVideoImportCpuTimings {
+        self.frame_cpu_timings
+    }
+
     fn import_frame(
         &mut self,
         plan: &GpuNativeDecodedFrameImportPlan,
         native_frame: &PreviewNativeDecodedFrame,
     ) -> Result<GpuColorFrameResource<GpuColorFrameWgpuResource>, String> {
+        let total_started = Instant::now();
+        let source_validation_started = Instant::now();
         let source =
             validated_d3d11_native_decoded_frame_for_luid(self.renderer_adapter_luid, native_frame)
                 .map_err(|error| error.to_string())?;
         let key = D3D11BridgePoolKey::new(&source, plan);
+        let source_validation_us = elapsed_us(source_validation_started);
         let Self {
             device,
             queue,
@@ -152,9 +203,11 @@ impl D3D11Dx12NativeVideoImportBackend {
             color_runtime,
             pools,
             options,
+            frame_cpu_timings,
             ..
         } = self;
         let pool = pools.entry(key).or_default();
+        let bridge_acquire_started = Instant::now();
         let (entry_index, prepared_native) = acquire_or_grow_entry(
             pool,
             options.max_frames_in_flight_per_contract,
@@ -163,7 +216,9 @@ impl D3D11Dx12NativeVideoImportBackend {
             &source,
         )
         .map_err(|error| error.to_string())?;
+        let bridge_acquire_us = elapsed_us(bridge_acquire_started);
         let entry = &mut pool[entry_index];
+        let pipeline_prepare_started = Instant::now();
         let yuv_plan = match GpuNativeYuvDecodePlan::from_import_plan(
             plan,
             GpuNativeVideoExtent {
@@ -212,8 +267,10 @@ impl D3D11Dx12NativeVideoImportBackend {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian.native-video.d3d11-import"),
         });
+        let pipeline_prepare_us = elapsed_us(pipeline_prepare_started);
 
         let record_result = (|| {
+            let yuv_record_started = Instant::now();
             yuv_decoder
                 .record(
                     &mut encoder,
@@ -225,6 +282,8 @@ impl D3D11Dx12NativeVideoImportBackend {
                     &encoded_resource,
                 )
                 .map_err(|error| error.to_string())?;
+            let yuv_record_us = elapsed_us(yuv_record_started);
+            let color_stage_started = Instant::now();
             if color_runtime
                 .frame_table_mut()
                 .insert(encoded_resource)
@@ -252,6 +311,8 @@ impl D3D11Dx12NativeVideoImportBackend {
                     },
                 )
                 .map_err(format_input_stage_error)?;
+            let color_stage_us = elapsed_us(color_stage_started);
+            let resource_extract_started = Instant::now();
             let working = color_runtime
                 .frame_table_mut()
                 .remove(plan.working_frame.id())
@@ -260,23 +321,47 @@ impl D3D11Dx12NativeVideoImportBackend {
                 .frame_table_mut()
                 .remove(plan.encoded_source_frame.id())
                 .ok_or_else(|| "OCIO input stage lost its encoded source resource".to_owned())?;
-            Ok((working, encoded.into_parts().1))
+            let resource_extract_us = elapsed_us(resource_extract_started);
+            Ok((
+                working,
+                encoded.into_parts().1,
+                yuv_record_us,
+                color_stage_us,
+                resource_extract_us,
+            ))
         })();
 
-        let (working, encoded_payload) = match record_result {
-            Ok(result) => result,
-            Err(reason) => {
-                restore_encoded_source(color_runtime, entry, plan);
-                return Err(discard_with_reason(entry, prepared_native, reason));
-            }
-        };
+        let (working, encoded_payload, yuv_record_us, color_stage_us, resource_extract_us) =
+            match record_result {
+                Ok(result) => result,
+                Err(reason) => {
+                    restore_encoded_source(color_runtime, entry, plan);
+                    return Err(discard_with_reason(entry, prepared_native, reason));
+                }
+            };
         entry.encoded_source = Some(encoded_payload);
+        let submit_started = Instant::now();
         entry
             .bridge
             .submit_renderer_commands(prepared_native, std::iter::once(encoder.finish()))
             .map_err(|error| error.to_string())?;
+        let submit_us = elapsed_us(submit_started);
+        frame_cpu_timings.accumulate(NativeVideoImportCpuTimings {
+            source_validation_us,
+            bridge_acquire_us,
+            pipeline_prepare_us,
+            yuv_record_us,
+            color_stage_us,
+            resource_extract_us,
+            submit_us,
+            total_us: elapsed_us(total_started),
+        });
         Ok(working)
     }
+}
+
+fn elapsed_us(started: Instant) -> u64 {
+    started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
 }
 
 impl GpuNativeDecodedFrameImportBackend for D3D11Dx12NativeVideoImportBackend {

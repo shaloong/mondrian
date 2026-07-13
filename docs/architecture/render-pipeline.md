@@ -793,6 +793,25 @@ input/import, working composite, spatial, output-boundary, and optional display
 calibration stages. These timings end at command preparation and never claim to
 be GPU execution time; they identify CPU-side bridge waits or per-frame object
 construction before adding lower-level GPU pass timestamps.
+Native import attribution further separates source validation, non-blocking
+bridge acquisition, cached pipeline/intermediate preparation, YUV recording,
+source-to-working color-stage preparation, resource extraction, and internal
+bridge submission. Multi-layer candidates accumulate those costs before the
+performance gate calculates each field's percentile.
+
+Renderer-owned color stages share a device-scoped exact-contract texture pool
+across native import and Viewer output runtimes. A candidate returns its typed
+resources only after its prior commands were submitted to the same ordered GPU
+queue, or after recording was abandoned before submit. The next frame can then
+reuse matching extent/format/usage storage without a CPU completion wait. Idle
+resources use global LRU eviction, a three-resource per-contract cap, and a
+384 MiB retained-byte cap; device reset clears the pool. Pool hits, misses,
+releases, evictions, retained resources, and retained bytes remain observable in
+runtime diagnostics.
+CPU upload plans use the same pool before `queue.write_texture`; synchronous
+export readback returns its completed input/output resources before releasing
+the runtime lock, so later frames reuse storage without retaining per-frame
+table entries.
 
 ### Integration Status
 

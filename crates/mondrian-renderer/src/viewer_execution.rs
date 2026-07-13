@@ -21,10 +21,10 @@ use crate::{
 };
 use crate::{
     CpuColorFrame, CpuEncodedColorFrame, GpuColorFrameIdAllocator, GpuColorFrameResource,
-    GpuColorFrameWgpuResource, GpuNativeDecodedFrameImportContract,
+    GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool, GpuNativeDecodedFrameImportContract,
     GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
     GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation, GpuVideoRange,
-    RenderInputTransform, TimelineSolidColorLayer,
+    NativeVideoImportCpuTimings, RenderInputTransform, TimelineSolidColorLayer,
 };
 
 /// One renderer-neutral layer entering Viewer GPU execution.
@@ -104,9 +104,29 @@ pub struct ViewerNativeVideoImportRuntime {
 impl ViewerNativeVideoImportRuntime {
     /// Create the backend implementation selected for one renderer device.
     pub fn new(adapter: &wgpu::Adapter, device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        Self::new_with_resource_pool(
+            adapter,
+            device,
+            queue,
+            Arc::new(GpuColorFrameWgpuResourcePool::default()),
+        )
+    }
+
+    /// Create a backend that shares a device-scoped color-frame resource pool.
+    pub fn new_with_resource_pool(
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
+    ) -> Self {
         #[cfg(target_os = "windows")]
         {
-            match D3D11Dx12NativeVideoImportBackend::new(adapter, device, queue) {
+            match D3D11Dx12NativeVideoImportBackend::new_with_resource_pool(
+                adapter,
+                device,
+                queue,
+                resource_pool,
+            ) {
                 Ok(backend) => Self {
                     support: backend.support().clone(),
                     backend: Some(backend),
@@ -122,7 +142,7 @@ impl ViewerNativeVideoImportRuntime {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            let _ = (device, queue);
+            let _ = (device, queue, resource_pool);
             Self {
                 support: unavailable_native_import_support(adapter, device.features()),
             }
@@ -132,6 +152,23 @@ impl ViewerNativeVideoImportRuntime {
     /// Return immutable native import capabilities and blocker evidence.
     pub fn support(&self) -> GpuNativeDecodedFrameImportSupport {
         self.support.clone()
+    }
+
+    /// Reset native-import CPU attribution before one Viewer candidate.
+    pub fn reset_frame_cpu_timings(&mut self) {
+        #[cfg(target_os = "windows")]
+        if let Some(backend) = self.backend.as_mut() {
+            backend.reset_frame_cpu_timings();
+        }
+    }
+
+    /// Return accumulated native-import CPU attribution for the current candidate.
+    pub fn frame_cpu_timings(&self) -> NativeVideoImportCpuTimings {
+        #[cfg(target_os = "windows")]
+        if let Some(backend) = self.backend.as_ref() {
+            return backend.frame_cpu_timings();
+        }
+        NativeVideoImportCpuTimings::default()
     }
 
     /// Import one native decoder payload into a renderer-owned working resource.

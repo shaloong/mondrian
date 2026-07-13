@@ -9,12 +9,12 @@ use std::time::Instant;
 
 use crate::{
     native_source_texture_format_from_decoded, native_video_sampling_from_decoded, CpuColorFrame,
-    GpuColorFrameHandle, GpuColorFrameTextureFormat, GpuCompositeLayer, GpuCompositeLayerSource,
-    GpuCompositeRequest, GpuCompositingDiagnostics, GpuDisplayCalibrationRuntime,
-    GpuFrameCompositor, GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
-    GpuNativeDecodedFrameVideoSampling, GpuViewerSpatialRecord, GpuViewerSpatialRuntime,
-    GpuViewerSpatialRuntimeDiagnostics, RenderColorStageDiagnostics,
-    RenderColorTransformGpuOptions, RenderGpuInputStageRecord,
+    GpuColorFrameHandle, GpuColorFrameTextureFormat, GpuColorFrameWgpuResourcePool,
+    GpuCompositeLayer, GpuCompositeLayerSource, GpuCompositeRequest, GpuCompositingDiagnostics,
+    GpuDisplayCalibrationRuntime, GpuFrameCompositor, GpuNativeDecodedFrameImportSupport,
+    GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuViewerSpatialRecord,
+    GpuViewerSpatialRuntime, GpuViewerSpatialRuntimeDiagnostics, NativeVideoImportCpuTimings,
+    RenderColorStageDiagnostics, RenderColorTransformGpuOptions, RenderGpuInputStageRecord,
     RenderGpuInputStageRuntimeRecordError, RenderGpuOutputBoundaryRuntime,
     RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderGpuOutputBoundaryRuntimeRecordError,
     RenderOutputColorBoundary, ViewerGpuExecutionLayer, ViewerGpuMediaSource,
@@ -68,9 +68,15 @@ pub struct ViewerGpuExecutionRuntime {
 impl ViewerGpuExecutionRuntime {
     /// Create one execution context for a renderer device.
     pub fn new(adapter: &wgpu::Adapter, device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        let resource_pool = Arc::new(GpuColorFrameWgpuResourcePool::default());
         Self {
-            native_video_import: ViewerNativeVideoImportRuntime::new(adapter, device, queue),
-            color_output: RenderGpuOutputBoundaryRuntime::default(),
+            native_video_import: ViewerNativeVideoImportRuntime::new_with_resource_pool(
+                adapter,
+                device,
+                queue,
+                Arc::clone(&resource_pool),
+            ),
+            color_output: RenderGpuOutputBoundaryRuntime::with_resource_pool(resource_pool),
             spatial: GpuViewerSpatialRuntime::default(),
             display_calibration: GpuDisplayCalibrationRuntime::default(),
             working_compositor: GpuFrameCompositor::new(device),
@@ -105,6 +111,7 @@ impl ViewerGpuExecutionRuntime {
         encoder: &mut wgpu::CommandEncoder,
         request: ViewerGpuExecutionRequest<'_>,
     ) -> Result<ViewerGpuExecutionRecord, ViewerGpuExecutionError> {
+        self.native_video_import.reset_frame_cpu_timings();
         let input_prepare_started = Instant::now();
         let prepared = prepare_composite(
             &request,
@@ -237,6 +244,7 @@ impl ViewerGpuExecutionRuntime {
             fallback_reasons,
             cpu_stage_timings: ViewerGpuExecutionCpuStageTimings {
                 input_prepare_us,
+                native_video_import: self.native_video_import.frame_cpu_timings(),
                 working_composite_us,
                 spatial_us,
                 output_boundary_us,
@@ -274,6 +282,7 @@ impl ViewerGpuExecutionRuntime {
     /// Reset all retained execution resources after a device/surface transition.
     pub fn reset(&mut self) {
         self.color_output.clear_frame_resources();
+        self.color_output.resource_pool().clear();
         self.spatial.clear();
         self.display_calibration.clear();
     }
@@ -303,6 +312,8 @@ pub struct ViewerGpuExecutionRecord {
 pub struct ViewerGpuExecutionCpuStageTimings {
     /// Input source import and input-color transform command preparation.
     pub input_prepare_us: u64,
+    /// Native-video detail nested within `input_prepare_us` when hardware import ran.
+    pub native_video_import: NativeVideoImportCpuTimings,
     /// Working-linear layer composite command preparation.
     pub working_composite_us: u64,
     /// Viewer crop/resize command preparation.

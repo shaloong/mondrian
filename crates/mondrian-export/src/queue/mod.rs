@@ -396,6 +396,7 @@ fn execute_export_gpu_output_boundary(
         }
     };
     readback_buffer.unmap();
+    runtime.clear_frame_resources();
 
     Ok(ExportGpuOutputAttemptOutcome { rgba, stage_diagnostics: record.stage_diagnostics })
 }

@@ -6,7 +6,8 @@ use mondrian_core::{
 use mondrian_media::{
     DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, PreviewNativeDecodedFrame,
 };
-use std::collections::HashMap;
+use parking_lot::Mutex;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 /// Semantic role of a frame in the color-managed render graph.
@@ -389,6 +390,11 @@ impl<R> GpuColorFrameResourceTable<R> {
         self.entries.clear();
     }
 
+    /// Drain every resource entry while retaining the table allocation.
+    pub fn drain(&mut self) -> impl Iterator<Item = GpuColorFrameResource<R>> + '_ {
+        self.entries.drain().map(|(_, resource)| resource)
+    }
+
     /// Return the number of entries in the table.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -414,6 +420,201 @@ pub struct GpuColorFrameWgpuResource {
     pub texture_view: wgpu::TextureView,
     /// Default sampler used when this frame is sampled by a fullscreen pass.
     pub sampler: wgpu::Sampler,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct GpuColorFrameWgpuResourcePoolKey {
+    width: u32,
+    height: u32,
+    texture_format: GpuColorFrameTextureFormat,
+    usage_bits: u32,
+}
+
+impl GpuColorFrameWgpuResourcePoolKey {
+    fn from_plan(plan: &GpuColorFrameAllocationPlan) -> Self {
+        Self {
+            width: plan.extent.width,
+            height: plan.extent.height,
+            texture_format: plan.texture_format,
+            usage_bits: plan.usage.bits(),
+        }
+    }
+
+    fn from_resource(resource: &GpuColorFrameResource<GpuColorFrameWgpuResource>) -> Self {
+        let texture = &resource.resource().texture;
+        Self {
+            width: texture.width(),
+            height: texture.height(),
+            texture_format: resource.handle().texture_format(),
+            usage_bits: texture.usage().bits(),
+        }
+    }
+
+    fn byte_len(self) -> u64 {
+        u64::from(self.width)
+            .saturating_mul(u64::from(self.height))
+            .saturating_mul(u64::from(self.texture_format.bytes_per_pixel()))
+    }
+}
+
+/// Bounded reuse policy for renderer-owned color-frame textures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuColorFrameWgpuResourcePoolOptions {
+    /// Maximum idle textures retained for one exact extent/format/usage contract.
+    pub max_per_contract: usize,
+    /// Maximum approximate idle texture bytes retained across all contracts.
+    pub max_retained_bytes: u64,
+}
+
+impl Default for GpuColorFrameWgpuResourcePoolOptions {
+    fn default() -> Self {
+        Self {
+            max_per_contract: 3,
+            max_retained_bytes: 384 * 1024 * 1024,
+        }
+    }
+}
+
+/// Point-in-time evidence for renderer color-frame texture reuse.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct GpuColorFrameWgpuResourcePoolDiagnostics {
+    /// Exact-contract acquisitions served from retained resources.
+    pub hits: u64,
+    /// Acquisitions that required a new GPU texture allocation.
+    pub misses: u64,
+    /// Resources returned after a submitted or abandoned frame candidate.
+    pub releases: u64,
+    /// Resources dropped to enforce per-contract or byte limits.
+    pub evictions: u64,
+    /// Current number of idle retained resources.
+    pub retained_resources: usize,
+    /// Approximate bytes occupied by idle retained resources.
+    pub retained_bytes: u64,
+}
+
+struct PooledGpuColorFrameWgpuResource {
+    key: GpuColorFrameWgpuResourcePoolKey,
+    payload: GpuColorFrameWgpuResource,
+}
+
+#[derive(Default)]
+struct GpuColorFrameWgpuResourcePoolState {
+    idle: VecDeque<PooledGpuColorFrameWgpuResource>,
+    retained_bytes: u64,
+    hits: u64,
+    misses: u64,
+    releases: u64,
+    evictions: u64,
+}
+
+/// Device-scoped, byte-bounded LRU pool for typed color-frame textures.
+///
+/// Resources may be released only after their previous work was submitted to
+/// the same ordered GPU queue or the candidate was abandoned before submit.
+/// Reuse therefore adds no CPU completion wait and preserves queue ordering.
+pub struct GpuColorFrameWgpuResourcePool {
+    options: GpuColorFrameWgpuResourcePoolOptions,
+    state: Mutex<GpuColorFrameWgpuResourcePoolState>,
+}
+
+impl GpuColorFrameWgpuResourcePool {
+    /// Create a pool with an explicit per-contract and retained-byte policy.
+    pub fn new(options: GpuColorFrameWgpuResourcePoolOptions) -> Self {
+        Self {
+            options,
+            state: Mutex::new(GpuColorFrameWgpuResourcePoolState::default()),
+        }
+    }
+
+    /// Acquire an exact-contract texture or allocate one on a pool miss.
+    pub fn acquire(
+        &self,
+        device: &wgpu::Device,
+        plan: &GpuColorFrameAllocationPlan,
+    ) -> GpuColorFrameResource<GpuColorFrameWgpuResource> {
+        let key = GpuColorFrameWgpuResourcePoolKey::from_plan(plan);
+        let reused = {
+            let mut state = self.state.lock();
+            let position = state.idle.iter().position(|entry| entry.key == key);
+            if let Some(position) = position {
+                if let Some(entry) = state.idle.remove(position) {
+                    state.retained_bytes = state.retained_bytes.saturating_sub(key.byte_len());
+                    state.hits = state.hits.saturating_add(1);
+                    Some(entry.payload)
+                } else {
+                    state.misses = state.misses.saturating_add(1);
+                    None
+                }
+            } else {
+                state.misses = state.misses.saturating_add(1);
+                None
+            }
+        };
+        match reused {
+            Some(payload) => GpuColorFrameResource::new(plan.handle.clone(), payload),
+            None => GpuColorFrameUploader::allocate(device, plan),
+        }
+    }
+
+    /// Return one renderer-owned texture after its previous queue use was ordered.
+    pub fn release(&self, resource: GpuColorFrameResource<GpuColorFrameWgpuResource>) {
+        let key = GpuColorFrameWgpuResourcePoolKey::from_resource(&resource);
+        let byte_len = key.byte_len();
+        let (_, payload) = resource.into_parts();
+        let mut state = self.state.lock();
+        state.releases = state.releases.saturating_add(1);
+        if self.options.max_per_contract == 0 || byte_len > self.options.max_retained_bytes {
+            state.evictions = state.evictions.saturating_add(1);
+            return;
+        }
+        while state.idle.iter().filter(|entry| entry.key == key).count()
+            >= self.options.max_per_contract
+        {
+            let Some(position) = state.idle.iter().position(|entry| entry.key == key) else {
+                break;
+            };
+            if let Some(evicted) = state.idle.remove(position) {
+                state.retained_bytes = state.retained_bytes.saturating_sub(evicted.key.byte_len());
+                state.evictions = state.evictions.saturating_add(1);
+            }
+        }
+        state.idle.push_back(PooledGpuColorFrameWgpuResource { key, payload });
+        state.retained_bytes = state.retained_bytes.saturating_add(byte_len);
+        while state.retained_bytes > self.options.max_retained_bytes {
+            let Some(evicted) = state.idle.pop_front() else {
+                break;
+            };
+            state.retained_bytes = state.retained_bytes.saturating_sub(evicted.key.byte_len());
+            state.evictions = state.evictions.saturating_add(1);
+        }
+    }
+
+    /// Return point-in-time pool reuse and memory-retention evidence.
+    pub fn diagnostics(&self) -> GpuColorFrameWgpuResourcePoolDiagnostics {
+        let state = self.state.lock();
+        GpuColorFrameWgpuResourcePoolDiagnostics {
+            hits: state.hits,
+            misses: state.misses,
+            releases: state.releases,
+            evictions: state.evictions,
+            retained_resources: state.idle.len(),
+            retained_bytes: state.retained_bytes,
+        }
+    }
+
+    /// Drop all idle retained resources while preserving cumulative evidence.
+    pub fn clear(&self) {
+        let mut state = self.state.lock();
+        state.evictions = state.evictions.saturating_add(state.idle.len() as u64);
+        state.idle.clear();
+        state.retained_bytes = 0;
+    }
+}
+
+impl Default for GpuColorFrameWgpuResourcePool {
+    fn default() -> Self {
+        Self::new(GpuColorFrameWgpuResourcePoolOptions::default())
+    }
 }
 
 /// GPU texture allocation plan for a color frame resource.
@@ -592,6 +793,33 @@ impl GpuColorFrameUploader {
             plan.handle.clone(),
             GpuColorFrameWgpuResource { texture, texture_view, sampler },
         )
+    }
+
+    /// Upload into an exact-contract pooled resource when one is available.
+    pub fn upload_with_pool(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        plan: &GpuColorFrameUploadPlan,
+        pool: &GpuColorFrameWgpuResourcePool,
+    ) -> GpuColorFrameResource<GpuColorFrameWgpuResource> {
+        let allocation = GpuColorFrameAllocationPlan::for_handle(plan.handle.clone());
+        let resource = pool.acquire(device, &allocation);
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &resource.resource().texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            plan.bytes.as_slice(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(plan.bytes_per_row),
+                rows_per_image: Some(plan.rows_per_image),
+            },
+            plan.extent,
+        );
+        resource
     }
 }
 

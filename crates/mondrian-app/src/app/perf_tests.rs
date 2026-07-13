@@ -48,8 +48,8 @@ use mondrian_media::{
 };
 use mondrian_platform::{NativeVideoTextureImportProbe, SystemPlatformService};
 use mondrian_renderer::{
-    GpuCompositingDiagnostics, GpuViewerSpatialRuntimeDiagnostics, RenderColorStageDiagnostics,
-    ViewerGpuExecutionCpuStageTimings,
+    GpuCompositingDiagnostics, GpuViewerSpatialRuntimeDiagnostics, NativeVideoImportCpuTimings,
+    RenderColorStageDiagnostics, ViewerGpuExecutionCpuStageTimings,
 };
 use mondrian_timeline::track::Track;
 use mondrian_ui_core::tree::TreeWalker;
@@ -126,6 +126,8 @@ struct HeadlessViewerGpuExecutionSummary {
     #[serde(skip)]
     input_prepare_samples_us: Vec<u64>,
     #[serde(skip)]
+    native_video_import_samples: Vec<NativeVideoImportCpuTimings>,
+    #[serde(skip)]
     working_composite_samples_us: Vec<u64>,
     #[serde(skip)]
     spatial_samples_us: Vec<u64>,
@@ -165,6 +167,7 @@ impl HeadlessViewerGpuExecutionSummary {
             self.completion_wait_samples_us.push(execution.completion_wait_us);
             if let Some(timings) = execution.cpu_stage_timings {
                 self.input_prepare_samples_us.push(timings.input_prepare_us);
+                self.native_video_import_samples.push(timings.native_video_import);
                 self.working_composite_samples_us.push(timings.working_composite_us);
                 self.spatial_samples_us.push(timings.spatial_us);
                 self.output_boundary_samples_us.push(timings.output_boundary_us);
@@ -218,11 +221,32 @@ impl HeadlessViewerGpuExecutionSummary {
     fn p95_cpu_stages(&self) -> ViewerGpuExecutionCpuStageTimings {
         ViewerGpuExecutionCpuStageTimings {
             input_prepare_us: p95_sample_us(&self.input_prepare_samples_us),
+            native_video_import: p95_native_video_import(&self.native_video_import_samples),
             working_composite_us: p95_sample_us(&self.working_composite_samples_us),
             spatial_us: p95_sample_us(&self.spatial_samples_us),
             output_boundary_us: p95_sample_us(&self.output_boundary_samples_us),
             display_calibration_us: p95_sample_us(&self.display_calibration_samples_us),
         }
+    }
+}
+
+fn p95_native_video_import(samples: &[NativeVideoImportCpuTimings]) -> NativeVideoImportCpuTimings {
+    fn field(
+        samples: &[NativeVideoImportCpuTimings],
+        read: impl Fn(&NativeVideoImportCpuTimings) -> u64,
+    ) -> u64 {
+        p95_sample_us(&samples.iter().map(read).collect::<Vec<_>>())
+    }
+
+    NativeVideoImportCpuTimings {
+        source_validation_us: field(samples, |sample| sample.source_validation_us),
+        bridge_acquire_us: field(samples, |sample| sample.bridge_acquire_us),
+        pipeline_prepare_us: field(samples, |sample| sample.pipeline_prepare_us),
+        yuv_record_us: field(samples, |sample| sample.yuv_record_us),
+        color_stage_us: field(samples, |sample| sample.color_stage_us),
+        resource_extract_us: field(samples, |sample| sample.resource_extract_us),
+        submit_us: field(samples, |sample| sample.submit_us),
+        total_us: field(samples, |sample| sample.total_us),
     }
 }
 

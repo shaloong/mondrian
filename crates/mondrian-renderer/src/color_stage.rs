@@ -5,9 +5,10 @@ use crate::{
     GpuColorFrameReadbackError, GpuColorFrameReadbackPlan, GpuColorFrameResource,
     GpuColorFrameResourceTable, GpuColorFrameResourceTableError, GpuColorFrameTextureFormat,
     GpuColorFrameUploadError, GpuColorFrameUploadPlan, GpuColorFrameUploader,
-    GpuColorFrameWgpuResource, GpuCompositeError, GpuCompositeRecord, GpuCompositeRequest,
-    GpuFrameCompositor, LinearFloatSource, OcioGpuShaderCache, OcioGpuShaderCacheDiagnostics,
-    OcioGpuWgpuBackendObjectError, OcioGpuWgpuBackendObjectRuntime,
+    GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool,
+    GpuColorFrameWgpuResourcePoolDiagnostics, GpuCompositeError, GpuCompositeRecord,
+    GpuCompositeRequest, GpuFrameCompositor, LinearFloatSource, OcioGpuShaderCache,
+    OcioGpuShaderCacheDiagnostics, OcioGpuWgpuBackendObjectError, OcioGpuWgpuBackendObjectRuntime,
     OcioGpuWgpuBackendObjectRuntimeDiagnostics, OcioGpuWgpuBackendPrepError,
     OcioGpuWgpuBackendPrepRuntime, OcioGpuWgpuBackendPrepRuntimeDiagnostics,
     OcioGpuWgpuBindGroupLayoutDescriptorPlan, OcioGpuWgpuBindGroupPreparer, OcioGpuWgpuBlocker,
@@ -22,6 +23,7 @@ use crate::{
 use mondrian_core::types::{ColorEngine, ColorSpace};
 use mondrian_core::WorkingColorSpace;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Preferred execution mode for a renderer color transform stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -584,6 +586,7 @@ pub struct RenderGpuOutputBoundaryRuntime {
     backend_objects: OcioGpuWgpuBackendObjectRuntime,
     frame_ids: GpuColorFrameIdAllocator,
     frame_table: GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+    resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
 }
 
 impl RenderGpuOutputBoundaryRuntime {
@@ -594,12 +597,29 @@ impl RenderGpuOutputBoundaryRuntime {
 
     /// Create a runtime with default cache capacity and a custom first frame id.
     pub fn with_first_frame_id(first_frame_id: u64) -> Self {
+        Self::with_first_frame_id_and_resource_pool(
+            first_frame_id,
+            Arc::new(GpuColorFrameWgpuResourcePool::default()),
+        )
+    }
+
+    /// Create a runtime that shares a device-scoped texture pool.
+    pub fn with_resource_pool(resource_pool: Arc<GpuColorFrameWgpuResourcePool>) -> Self {
+        Self::with_first_frame_id_and_resource_pool(1, resource_pool)
+    }
+
+    /// Create a runtime with explicit frame ids and a shared device-scoped texture pool.
+    pub fn with_first_frame_id_and_resource_pool(
+        first_frame_id: u64,
+        resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
+    ) -> Self {
         Self {
             shader_cache: OcioGpuShaderCache::default(),
             backend_prep: OcioGpuWgpuBackendPrepRuntime::default(),
             backend_objects: OcioGpuWgpuBackendObjectRuntime::default(),
             frame_ids: GpuColorFrameIdAllocator::new(first_frame_id),
             frame_table: GpuColorFrameResourceTable::new(),
+            resource_pool,
         }
     }
 
@@ -611,12 +631,20 @@ impl RenderGpuOutputBoundaryRuntime {
             backend_objects: self.backend_objects.diagnostics(),
             next_frame_id: self.frame_ids.next_raw(),
             frame_table_entries: self.frame_table.len(),
+            resource_pool: self.resource_pool.diagnostics(),
         }
     }
 
     /// Remove all materialized frame resources owned by this runtime.
     pub fn clear_frame_resources(&mut self) {
-        self.frame_table.clear();
+        for resource in self.frame_table.drain() {
+            self.resource_pool.release(resource);
+        }
+    }
+
+    /// Clone the device-scoped texture pool shared by compatible renderer stages.
+    pub fn resource_pool(&self) -> Arc<GpuColorFrameWgpuResourcePool> {
+        Arc::clone(&self.resource_pool)
     }
 
     /// Borrow the runtime-owned GPU frame resource table.
@@ -701,6 +729,7 @@ impl RenderGpuOutputBoundaryRuntime {
             backend_objects,
             frame_ids,
             frame_table,
+            resource_pool,
         } = self;
         let mut planner = RenderColorStagePlanner::prefer_gpu(shader_cache, gpu_options);
         let stage_plan = planner
@@ -735,6 +764,7 @@ impl RenderGpuOutputBoundaryRuntime {
                     ocio_bind_group: &prepared_backend.ocio_bind_group,
                     pass_node: prepared_backend.pass_node,
                     table: frame_table,
+                    resource_pool: Some(resource_pool),
                     load_op: backend.load_op,
                 },
             })
@@ -760,6 +790,7 @@ impl RenderGpuOutputBoundaryRuntime {
             backend_prep,
             backend_objects,
             frame_table,
+            resource_pool,
             ..
         } = self;
         let mut planner = RenderColorStagePlanner::prefer_gpu(shader_cache, gpu_options);
@@ -795,6 +826,7 @@ impl RenderGpuOutputBoundaryRuntime {
                     ocio_bind_group: &prepared_backend.ocio_bind_group,
                     pass_node: prepared_backend.pass_node,
                     table: frame_table,
+                    resource_pool: Some(resource_pool),
                     load_op: backend.load_op,
                 },
             })
@@ -816,6 +848,7 @@ impl RenderGpuOutputBoundaryRuntime {
             backend_objects,
             frame_ids,
             frame_table,
+            resource_pool,
         } = self;
         let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(shader_cache, gpu_options);
         let plan = planner
@@ -847,6 +880,7 @@ impl RenderGpuOutputBoundaryRuntime {
                     ocio_bind_group: &prepared_backend.ocio_bind_group,
                     pass_node: prepared_backend.pass_node,
                     table: frame_table,
+                    resource_pool: Some(resource_pool),
                     load_op: backend.load_op,
                 },
             })
@@ -869,6 +903,7 @@ impl RenderGpuOutputBoundaryRuntime {
             backend_objects,
             frame_ids,
             frame_table,
+            resource_pool,
         } = self;
         let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(shader_cache, gpu_options);
         let plan = planner
@@ -904,6 +939,7 @@ impl RenderGpuOutputBoundaryRuntime {
                     ocio_bind_group: &prepared_backend.ocio_bind_group,
                     pass_node: prepared_backend.pass_node,
                     table: frame_table,
+                    resource_pool: Some(resource_pool),
                     load_op: backend.load_op,
                 },
             })
@@ -930,6 +966,8 @@ pub struct RenderGpuOutputBoundaryRuntimeDiagnostics {
     pub next_frame_id: u64,
     /// Number of materialized frame resources currently retained.
     pub frame_table_entries: usize,
+    /// Device-scoped color-frame texture reuse evidence.
+    pub resource_pool: GpuColorFrameWgpuResourcePoolDiagnostics,
 }
 
 /// Schema version for renderer GPU output health reports.
@@ -1824,6 +1862,8 @@ pub struct RenderGpuOutputStageBackendContext<'a> {
     pub pass_node: OcioGpuWgpuRenderPassNodePlan,
     /// Shared GPU color frame resource table.
     pub table: &'a mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+    /// Optional device-scoped exact-contract resource pool.
+    pub resource_pool: Option<&'a GpuColorFrameWgpuResourcePool>,
     /// Load operation for the output color attachment.
     pub load_op: wgpu::LoadOp<wgpu::Color>,
 }
@@ -1846,6 +1886,7 @@ impl<'a> From<RenderGpuOutputBoundaryBackendContext<'a>>
             ocio_bind_group: context.ocio_bind_group,
             pass_node: context.pass_node,
             table: context.table,
+            resource_pool: None,
             load_op: context.load_op,
         }
     }
@@ -2049,11 +2090,28 @@ impl RenderGpuOutputStageResourcePlan {
         table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
     ) -> Result<RenderGpuOutputStageMaterializedResources, RenderGpuOutputStageMaterializeError>
     {
+        self.materialize_wgpu_with_pool(device, queue, table, None)
+    }
+
+    fn materialize_wgpu_with_pool(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+    ) -> Result<RenderGpuOutputStageMaterializedResources, RenderGpuOutputStageMaterializeError>
+    {
         validate_materialization_table_slot(table, &self.input)?;
         validate_materialization_table_slot(table, &self.output)?;
-        let output = GpuColorFrameUploader::allocate(device, &self.output_allocation);
+        let output = resource_pool.map_or_else(
+            || GpuColorFrameUploader::allocate(device, &self.output_allocation),
+            |pool| pool.acquire(device, &self.output_allocation),
+        );
         if let Some(input_upload) = &self.input_upload {
-            let input = GpuColorFrameUploader::upload(device, queue, input_upload);
+            let input = resource_pool.map_or_else(
+                || GpuColorFrameUploader::upload(device, queue, input_upload),
+                |pool| GpuColorFrameUploader::upload_with_pool(device, queue, input_upload, pool),
+            );
             self.insert_resources(table, input, output)
         } else {
             table
@@ -2092,7 +2150,12 @@ impl RenderGpuOutputStageResourcePlan {
             .schedule_pass(backend.pass_node)
             .map_err(RenderGpuOutputStageRecordError::Schedule)?;
         let materialized = self
-            .materialize_wgpu(backend.device, backend.queue, backend.table)
+            .materialize_wgpu_with_pool(
+                backend.device,
+                backend.queue,
+                backend.table,
+                backend.resource_pool,
+            )
             .map_err(RenderGpuOutputStageRecordError::Materialize)?;
         schedule
             .record_wgpu_from_resources(
@@ -2342,11 +2405,28 @@ impl RenderGpuInputStageResourcePlan {
         table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
     ) -> Result<RenderGpuOutputStageMaterializedResources, RenderGpuOutputStageMaterializeError>
     {
+        self.materialize_wgpu_with_pool(device, queue, table, None)
+    }
+
+    fn materialize_wgpu_with_pool(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+    ) -> Result<RenderGpuOutputStageMaterializedResources, RenderGpuOutputStageMaterializeError>
+    {
         validate_materialization_table_slot(table, &self.input)?;
         validate_materialization_table_slot(table, &self.output)?;
-        let output = GpuColorFrameUploader::allocate(device, &self.output_allocation);
+        let output = resource_pool.map_or_else(
+            || GpuColorFrameUploader::allocate(device, &self.output_allocation),
+            |pool| pool.acquire(device, &self.output_allocation),
+        );
         if let Some(input_upload) = &self.input_upload {
-            let input = GpuColorFrameUploader::upload(device, queue, input_upload);
+            let input = resource_pool.map_or_else(
+                || GpuColorFrameUploader::upload(device, queue, input_upload),
+                |pool| GpuColorFrameUploader::upload_with_pool(device, queue, input_upload, pool),
+            );
             self.insert_resources(table, input, output)
         } else {
             table
@@ -2423,7 +2503,12 @@ impl RenderGpuInputStageResourcePlan {
             .schedule_pass(backend.pass_node)
             .map_err(RenderGpuOutputStageRecordError::Schedule)?;
         let materialized = self
-            .materialize_wgpu(backend.device, backend.queue, backend.table)
+            .materialize_wgpu_with_pool(
+                backend.device,
+                backend.queue,
+                backend.table,
+                backend.resource_pool,
+            )
             .map_err(RenderGpuOutputStageRecordError::Materialize)?;
         schedule
             .record_wgpu_from_resources(
@@ -4130,7 +4215,8 @@ mod tests {
                 backend_prep: OcioGpuWgpuBackendPrepRuntime::default().diagnostics(),
                 backend_objects: OcioGpuWgpuBackendObjectRuntime::default().diagnostics(),
                 next_frame_id: 900,
-                frame_table_entries: 0
+                frame_table_entries: 0,
+                resource_pool: GpuColorFrameWgpuResourcePoolDiagnostics::default(),
             }
         );
 
@@ -4312,6 +4398,51 @@ mod tests {
         assert_eq!(diagnostics.shader_cache.entries, 1);
         assert_eq!(diagnostics.backend_prep.resources.entries, 1);
         assert_eq!(diagnostics.backend_objects.entries, 1);
+    }
+
+    #[tokio::test]
+    async fn gpu_input_stage_reuses_exact_working_texture_after_ordered_submit() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping real wgpu resource-pool test: no GPU adapter available");
+            return;
+        };
+        let source = cpu_source_frame();
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::MondrianSmart,
+        );
+        let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_350);
+
+        for _ in 0..2 {
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian-test-gpu-input-resource-pool"),
+                });
+            runtime
+                .record_wgpu_input_stage_owned_backend(
+                    &transform,
+                    &source,
+                    RenderColorTransformGpuOptions::default(),
+                    RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                        device: &context.device,
+                        queue: &context.queue,
+                        encoder: &mut encoder,
+                        load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    },
+                )
+                .expect("runtime-owned GPU input stage should record");
+            context.queue.submit(std::iter::once(encoder.finish()));
+            runtime.clear_frame_resources();
+        }
+
+        let diagnostics = runtime.diagnostics().resource_pool;
+        assert_eq!(diagnostics.hits, 2);
+        assert_eq!(diagnostics.misses, 2);
+        assert_eq!(diagnostics.releases, 4);
+        assert_eq!(diagnostics.evictions, 0);
+        assert_eq!(diagnostics.retained_resources, 2);
     }
 
     #[tokio::test]

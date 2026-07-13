@@ -47,13 +47,14 @@ pub use color_frame::{
     GpuColorFrameReadbackPlan, GpuColorFrameResource, GpuColorFrameResourceTable,
     GpuColorFrameResourceTableError, GpuColorFrameTextureFormat, GpuColorFrameUploadError,
     GpuColorFrameUploadPlan, GpuColorFrameUploader, GpuColorFrameWgpuResource,
-    GpuNativeDecodedFrameImportBackend, GpuNativeDecodedFrameImportContract,
-    GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportExecution,
-    GpuNativeDecodedFrameImportPlan, GpuNativeDecodedFrameImportPlanError,
-    GpuNativeDecodedFrameImportSource, GpuNativeDecodedFrameImportSupport,
-    GpuNativeDecodedFrameSourceDescriptor, GpuNativeDecodedFrameSourceFormatError,
-    GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation,
-    GpuVideoRange, LinearFloatSource,
+    GpuColorFrameWgpuResourcePool, GpuColorFrameWgpuResourcePoolDiagnostics,
+    GpuColorFrameWgpuResourcePoolOptions, GpuNativeDecodedFrameImportBackend,
+    GpuNativeDecodedFrameImportContract, GpuNativeDecodedFrameImportError,
+    GpuNativeDecodedFrameImportExecution, GpuNativeDecodedFrameImportPlan,
+    GpuNativeDecodedFrameImportPlanError, GpuNativeDecodedFrameImportSource,
+    GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameSourceDescriptor,
+    GpuNativeDecodedFrameSourceFormatError, GpuNativeDecodedFrameTextureFormat,
+    GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation, GpuVideoRange, LinearFloatSource,
 };
 pub use color_stage::{
     execute_cpu_input_stage, execute_cpu_input_stage_float, execute_cpu_output_boundary,
@@ -118,7 +119,7 @@ pub use native_video::{
 pub use native_video::{
     GpuNativeVideoExtent, GpuNativeYuvDecodePlan, GpuNativeYuvDecodePlanError,
     GpuNativeYuvDecodeRecordError, GpuNativeYuvDecoder, GpuNativeYuvPlaneViews,
-    GpuNativeYuvPreparedPass,
+    GpuNativeYuvPreparedPass, NativeVideoImportCpuTimings,
 };
 pub use ocio_gpu::{
     OcioGpuBindingContract, OcioGpuBindingContractValidationError,
