@@ -1132,6 +1132,40 @@ colorspaces:
         - !<ExponentWithLinearTransform> {gamma: 2.22222222222222, offset: 0.099, direction: inverse}
 
   - !<ColorSpace>
+    name: Camera Rec.601 PAL
+    aliases: [camera_rec601_pal, rec601_pal_camera]
+    family: Utility/ITU
+    equalitygroup: ""
+    bitdepth: 32f
+    description: Convert ACES2065-1 to BT.470BG primaries with the 625-line Rec.601 PAL gamma 2.8 transfer
+    isdata: false
+    categories: [file-io]
+    encoding: sdr-video
+    allocation: uniform
+    from_scene_reference: !<GroupTransform>
+      name: AP0 to Camera Rec.601 PAL
+      children:
+        - !<MatrixTransform> {matrix: [2.40364489046045, -1.02837892711461, -0.375265963345844, 0, -0.276479914229922, 1.37271908766825, -0.0962391734383339, 0, -0.0122620436691163, -0.171183159097027, 1.18344520276614, 0, 0, 0, 0, 1]}
+        - !<ExponentTransform> {value: 2.8, style: pass_thru, direction: inverse}
+
+  - !<ColorSpace>
+    name: Camera Rec.601 NTSC
+    aliases: [camera_rec601_ntsc, rec601_ntsc_camera]
+    family: Utility/ITU
+    equalitygroup: ""
+    bitdepth: 32f
+    description: Convert ACES2065-1 to SMPTE-C primaries with the 525-line Rec.601 SMPTE 170M camera transfer
+    isdata: false
+    categories: [file-io]
+    encoding: sdr-video
+    allocation: uniform
+    from_scene_reference: !<GroupTransform>
+      name: AP0 to Camera Rec.601 NTSC
+      children:
+        - !<MatrixTransform> {matrix: [2.70202226647829, -1.28280279949714, -0.419219466981148, 0, -0.335783425922422, 1.44746064556785, -0.111677219645427, 0, -0.0123895253456363, -0.147844698872845, 1.16023422421848, 0, 0, 0, 0, 1]}
+        - !<ExponentWithLinearTransform> {gamma: 2.22222222222222, offset: 0.099, direction: inverse}
+
+  - !<ColorSpace>
     name: sRGB Encoded P3-D65
     aliases: [srgb_encoded_p3d65, srgb_p3d65, srgb_displayp3, srgb_p3d65_scene, sRGB Encoded P3-D65 - Texture, srgb_encoded_p3d65_tx]
     interop_id: srgb_p3d65_scene

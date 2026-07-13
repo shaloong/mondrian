@@ -194,10 +194,18 @@ impl std::fmt::Display for MondrianDefaultOcioValidationError {
 
 impl std::error::Error for MondrianDefaultOcioValidationError {}
 
-const MONDRIAN_DEFAULT_OCIO_COLOR_SPACES: [MondrianDefaultOcioColorSpace; 9] = [
+const MONDRIAN_DEFAULT_OCIO_COLOR_SPACES: [MondrianDefaultOcioColorSpace; 11] = [
     MondrianDefaultOcioColorSpace {
         color_space: ColorSpace::Rec709,
         ocio_name: "Camera Rec.709",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::Rec601Pal,
+        ocio_name: "Camera Rec.601 PAL",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::Rec601Ntsc,
+        ocio_name: "Camera Rec.601 NTSC",
     },
     MondrianDefaultOcioColorSpace {
         color_space: ColorSpace::Rec2100Hlg,
@@ -776,6 +784,8 @@ pub fn ocio_color_space_name(cs: ColorSpace) -> &'static str {
     match cs {
         ColorSpace::Srgb => "sRGB Encoded Rec.709 (sRGB)",
         ColorSpace::Rec709 => "Camera Rec.709",
+        ColorSpace::Rec601Pal => "Camera Rec.601 PAL",
+        ColorSpace::Rec601Ntsc => "Camera Rec.601 NTSC",
         ColorSpace::Rec2020 => "Linear Rec.2020",
         ColorSpace::Rec2100Pq => "Rec.2100-PQ - Display",
         ColorSpace::Rec2100Hlg => "Rec.2100-HLG - Display",

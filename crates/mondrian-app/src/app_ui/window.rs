@@ -2669,7 +2669,12 @@ fn app_ui_surface_color_space_for_intent(
             Some(wgpu::SurfaceColorSpace::Bt2100Hlg)
         }
         AppUiSurfacePresentationIntent::DisplayOutput(
-            ColorSpace::Rec2020 | ColorSpace::AppleLog | ColorSpace::SLog3 | ColorSpace::ArriLogC4,
+            ColorSpace::Rec601Pal
+            | ColorSpace::Rec601Ntsc
+            | ColorSpace::Rec2020
+            | ColorSpace::AppleLog
+            | ColorSpace::SLog3
+            | ColorSpace::ArriLogC4,
         ) => None,
     }
 }
@@ -4499,6 +4504,22 @@ mod tests {
                     wgpu::TextureFormat::Rgba8Unorm,
                 ],
             })
+        );
+    }
+
+    #[test]
+    fn rec601_output_requires_display_transform_before_surface_presentation() {
+        assert_eq!(
+            app_ui_surface_color_space_for_intent(AppUiSurfacePresentationIntent::DisplayOutput(
+                ColorSpace::Rec601Pal
+            )),
+            None
+        );
+        assert_eq!(
+            app_ui_surface_color_space_for_intent(AppUiSurfacePresentationIntent::DisplayOutput(
+                ColorSpace::Rec601Ntsc
+            )),
+            None
         );
     }
 

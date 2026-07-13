@@ -118,6 +118,14 @@ warnings; ICC-only streams may resolve to an inferred input color family, while
 ICC-vs-CICP conflicts must be surfaced as warnings rather than silently changing
 an explicit user override.
 
+Standardized SD video has two explicit encoded product identities:
+`Rec601Pal` uses BT.470BG primaries, the BT.470BG gamma 2.8 transfer, and the
+625-line BT.601 matrix; `Rec601Ntsc` uses SMPTE-C/SMPTE 170M primaries,
+transfer, and the 525-line BT.601 matrix. Exact FFmpeg CICP triplets resolve to
+these identities instead of being approximated as Rec.709. The embedded OCIO
+config owns their source-to-working primary and transfer conversion, and its
+full CPU/GPU processor-matrix validation includes both identities.
+
 ## Working Space
 
 `WorkingColorSpace` is the linear-light identity used by rendering, effects, and

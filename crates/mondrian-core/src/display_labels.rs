@@ -115,6 +115,8 @@ pub fn mask_op_display_label(value: &str) -> String {
 pub fn color_space_label(value: ColorSpace) -> &'static str {
     match value {
         ColorSpace::Rec709 => "Rec. 709",
+        ColorSpace::Rec601Pal => "Rec. 601 PAL",
+        ColorSpace::Rec601Ntsc => "Rec. 601 NTSC",
         ColorSpace::Rec2100Hlg => "Rec. 2100 HLG",
         ColorSpace::Rec2100Pq => "Rec. 2100 PQ",
         ColorSpace::Srgb => "sRGB",

@@ -303,6 +303,10 @@ Absent matrix metadata is distinct from an explicitly unsupported matrix.
 Only the absent case may use the resolved source contract's matrix; explicit
 BT.2020 constant-luminance, derived, YCgCo, and ICtCp-style matrices remain
 fail-closed until their conversion math is implemented.
+Exact BT.470BG and SMPTE 170M CICP triplets resolve to the PAL and NTSC Rec.601
+product color spaces respectively. Partial matrix-only metadata remains
+diagnosed as partial evidence but may still select the matching Rec.601 family;
+it must not be relabeled as Rec.709.
 App preview decode execution must run synchronous FFmpeg preview decode on
 dedicated preview worker threads, not on the UI/event thread. Current-frame and
 prefetch workers pass a cooperative cancellation predicate into

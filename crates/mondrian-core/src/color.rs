@@ -79,6 +79,10 @@ pub enum ColorEncodingKind {
 pub enum ColorPrimaries {
     /// ITU-R BT.709 / sRGB primaries.
     Bt709,
+    /// BT.470 System B/G primaries used by 625-line Rec.601/PAL material.
+    Bt470Bg,
+    /// SMPTE 170M/SMPTE-C primaries used by 525-line Rec.601/NTSC material.
+    Smpte170M,
     /// ITU-R BT.2020 primaries.
     Bt2020,
     /// DCI-P3 / Display P3 D65 primaries as represented by FFmpeg `smpte432`.
@@ -90,6 +94,10 @@ pub enum ColorPrimaries {
 pub enum ColorTransferCharacteristic {
     /// BT.709-style SDR transfer.
     Bt709,
+    /// BT.470 System B/G nominal gamma 2.8 transfer.
+    Gamma28,
+    /// SMPTE 170M camera transfer (mathematically aligned with BT.709 here).
+    Smpte170M,
     /// IEC 61966-2-1 sRGB transfer.
     Srgb,
     /// Hybrid Log-Gamma transfer.
@@ -167,6 +175,8 @@ impl ColorPrimaries {
     fn ffmpeg_name(self) -> &'static str {
         match self {
             Self::Bt709 => "bt709",
+            Self::Bt470Bg => "bt470bg",
+            Self::Smpte170M => "smpte170m",
             Self::Bt2020 => "bt2020",
             Self::P3D65 => "smpte432",
         }
@@ -177,6 +187,8 @@ impl ColorTransferCharacteristic {
     fn ffmpeg_name(self) -> Option<&'static str> {
         match self {
             Self::Bt709 => Some("bt709"),
+            Self::Gamma28 => Some("bt470bg"),
+            Self::Smpte170M => Some("smpte170m"),
             Self::Srgb => Some("iec61966-2-1"),
             Self::Hlg => Some("arib-std-b67"),
             Self::Pq => Some("smpte2084"),
@@ -600,8 +612,10 @@ pub fn compute_color_scopes(
 
 impl ColorSpace {
     /// All product-supported Mondrian color spaces.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::Rec709,
+        Self::Rec601Pal,
+        Self::Rec601Ntsc,
         Self::Rec2100Hlg,
         Self::Rec2100Pq,
         Self::Srgb,
@@ -619,6 +633,18 @@ impl ColorSpace {
                 primaries: ColorPrimaries::Bt709,
                 transfer: ColorTransferCharacteristic::Bt709,
                 matrix: ColorMatrixCoefficients::Bt709,
+                kind: ColorEncodingKind::DisplaySdr,
+            },
+            Self::Rec601Pal => ColorEncodingSpec {
+                primaries: ColorPrimaries::Bt470Bg,
+                transfer: ColorTransferCharacteristic::Gamma28,
+                matrix: ColorMatrixCoefficients::Bt470Bg,
+                kind: ColorEncodingKind::DisplaySdr,
+            },
+            Self::Rec601Ntsc => ColorEncodingSpec {
+                primaries: ColorPrimaries::Smpte170M,
+                transfer: ColorTransferCharacteristic::Smpte170M,
+                matrix: ColorMatrixCoefficients::Smpte170M,
                 kind: ColorEncodingKind::DisplaySdr,
             },
             Self::Rec2100Hlg => ColorEncodingSpec {
@@ -725,6 +751,8 @@ impl ColorSpace {
             Some("smpte2084") => Some(Self::Rec2100Pq),
             Some("arib-std-b67") => Some(Self::Rec2100Hlg),
             Some("iec61966-2-1") => Some(Self::Srgb),
+            Some("bt470bg") | Some("gamma28") => Some(Self::Rec601Pal),
+            Some("smpte170m") => Some(Self::Rec601Ntsc),
             _ => match color_primaries {
                 Some("bt2020") => Some(Self::Rec2020),
                 Some("smpte431") | Some("smpte432") => Some(Self::DciP3),
@@ -735,8 +763,12 @@ impl ColorSpace {
                         Some(Self::Rec709)
                     }
                 }
+                Some("bt470bg") => Some(Self::Rec601Pal),
+                Some("smpte170m") => Some(Self::Rec601Ntsc),
                 _ => match colorspace {
                     Some("bt709") => Some(Self::Rec709),
+                    Some("bt470bg") => Some(Self::Rec601Pal),
+                    Some("smpte170m") => Some(Self::Rec601Ntsc),
                     Some("bt2020nc") | Some("bt2020c") => Some(Self::Rec2020),
                     Some(tag) if ffmpeg_tag_eq(tag, "rgb") => Some(Self::Srgb),
                     _ => None,
@@ -759,7 +791,10 @@ fn decode_transfer(space: ColorSpace, v: f32) -> f32 {
         ColorSpace::AppleLog => apple_log_to_linear(v),
         ColorSpace::SLog3 => slog3_to_linear(v),
         ColorSpace::ArriLogC4 => logc4_to_linear(v),
-        ColorSpace::Rec709 | ColorSpace::Rec2020 | ColorSpace::DciP3 => rec709_to_linear(v),
+        ColorSpace::Rec601Pal => v.powf(2.8),
+        ColorSpace::Rec601Ntsc | ColorSpace::Rec709 | ColorSpace::Rec2020 | ColorSpace::DciP3 => {
+            rec709_to_linear(v)
+        }
     }
 }
 
@@ -772,7 +807,10 @@ fn encode_transfer(space: ColorSpace, v: f32) -> f32 {
         ColorSpace::AppleLog => linear_to_apple_log(v),
         ColorSpace::SLog3 => linear_to_slog3(v),
         ColorSpace::ArriLogC4 => linear_to_logc4(v),
-        ColorSpace::Rec709 | ColorSpace::Rec2020 | ColorSpace::DciP3 => linear_to_rec709(v),
+        ColorSpace::Rec601Pal => v.powf(1.0 / 2.8),
+        ColorSpace::Rec601Ntsc | ColorSpace::Rec709 | ColorSpace::Rec2020 | ColorSpace::DciP3 => {
+            linear_to_rec709(v)
+        }
     }
 }
 
@@ -894,31 +932,54 @@ fn convert_primaries(rgb: [f32; 3], from: ColorSpace, to: ColorSpace) -> [f32; 3
     if from == to {
         return rgb;
     }
-
-    match (from, to) {
-        (PrimaryFamily::Rec709, PrimaryFamily::Rec2020) => mul3(M_REC709_TO_REC2020, rgb),
-        (PrimaryFamily::Rec2020, PrimaryFamily::Rec709) => mul3(M_REC2020_TO_REC709, rgb),
-        (PrimaryFamily::Rec709, PrimaryFamily::P3) => mul3(M_REC709_TO_P3, rgb),
-        (PrimaryFamily::P3, PrimaryFamily::Rec709) => mul3(M_P3_TO_REC709, rgb),
+    let rec709 = match from {
+        PrimaryFamily::Rec601Pal => mul3(M_REC601_PAL_TO_REC709, rgb),
+        PrimaryFamily::Rec601Ntsc => mul3(M_REC601_NTSC_TO_REC709, rgb),
+        _ => rgb,
+    };
+    let from = match from {
+        PrimaryFamily::Rec601Pal | PrimaryFamily::Rec601Ntsc => PrimaryFamily::Rec709,
+        other => other,
+    };
+    let converted = match (from, to) {
+        (PrimaryFamily::Rec709, PrimaryFamily::Rec2020) => mul3(M_REC709_TO_REC2020, rec709),
+        (PrimaryFamily::Rec2020, PrimaryFamily::Rec709) => mul3(M_REC2020_TO_REC709, rec709),
+        (PrimaryFamily::Rec709, PrimaryFamily::P3) => mul3(M_REC709_TO_P3, rec709),
+        (PrimaryFamily::P3, PrimaryFamily::Rec709) => mul3(M_P3_TO_REC709, rec709),
         (PrimaryFamily::P3, PrimaryFamily::Rec2020) => {
-            mul3(M_REC709_TO_REC2020, mul3(M_P3_TO_REC709, rgb))
+            mul3(M_REC709_TO_REC2020, mul3(M_P3_TO_REC709, rec709))
         }
         (PrimaryFamily::Rec2020, PrimaryFamily::P3) => {
-            mul3(M_REC709_TO_P3, mul3(M_REC2020_TO_REC709, rgb))
+            mul3(M_REC709_TO_P3, mul3(M_REC2020_TO_REC709, rec709))
         }
-        _ => rgb,
+        (_, PrimaryFamily::Rec601Pal | PrimaryFamily::Rec601Ntsc) => match from {
+            PrimaryFamily::Rec709 => rec709,
+            PrimaryFamily::Rec2020 => mul3(M_REC2020_TO_REC709, rec709),
+            PrimaryFamily::P3 => mul3(M_P3_TO_REC709, rec709),
+            PrimaryFamily::Rec601Pal | PrimaryFamily::Rec601Ntsc => rec709,
+        },
+        _ => rec709,
+    };
+    match to {
+        PrimaryFamily::Rec601Pal => mul3(M_REC709_TO_REC601_PAL, converted),
+        PrimaryFamily::Rec601Ntsc => mul3(M_REC709_TO_REC601_NTSC, converted),
+        _ => converted,
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PrimaryFamily {
     Rec709,
+    Rec601Pal,
+    Rec601Ntsc,
     Rec2020,
     P3,
 }
 
 fn primary_family(space: ColorSpace) -> PrimaryFamily {
     match space {
+        ColorSpace::Rec601Pal => PrimaryFamily::Rec601Pal,
+        ColorSpace::Rec601Ntsc => PrimaryFamily::Rec601Ntsc,
         ColorSpace::Rec2100Hlg
         | ColorSpace::Rec2100Pq
         | ColorSpace::Rec2020
@@ -932,6 +993,26 @@ const M_REC709_TO_REC2020: [[f32; 3]; 3] = [
     [0.627_404, 0.329_283, 0.043_313],
     [0.069_097, 0.919_540, 0.011_362],
     [0.016_391, 0.088_013, 0.895_596],
+];
+const M_REC601_PAL_TO_REC709: [[f32; 3]; 3] = [
+    [1.044_043_2, -0.044_043_21, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.011_793_378, 0.988_206_6],
+];
+const M_REC709_TO_REC601_PAL: [[f32; 3]; 3] = [
+    [0.957_814_75, 0.042_185_236, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, -0.011_934_122, 1.011_934_2],
+];
+const M_REC601_NTSC_TO_REC709: [[f32; 3]; 3] = [
+    [0.939_542_06, 0.050_181_36, 0.010_276_579],
+    [0.017_772_224, 0.965_792_83, 0.016_434_914],
+    [-0.001_621_6, -0.004_369_75, 1.005_991_3],
+];
+const M_REC709_TO_REC601_NTSC: [[f32; 3]; 3] = [
+    [1.065_379, -0.055_400_874, -0.009_978_161],
+    [-0.019_632_55, 1.036_363_1, -0.016_730_545],
+    [0.001_632_051, 0.004_412_373, 0.993_955_55],
 ];
 const M_REC2020_TO_REC709: [[f32; 3]; 3] = [
     [1.660_491, -0.587_641, -0.072_850],
@@ -1016,6 +1097,16 @@ mod tests {
         assert_eq!(srgb.color_trc, "iec61966-2-1");
         assert_eq!(srgb.colorspace, "rgb");
 
+        let pal = ColorSpace::Rec601Pal.ffmpeg_tags().expect("PAL has CICP tags");
+        assert_eq!(pal.color_primaries, "bt470bg");
+        assert_eq!(pal.color_trc, "bt470bg");
+        assert_eq!(pal.colorspace, "bt470bg");
+
+        let ntsc = ColorSpace::Rec601Ntsc.ffmpeg_tags().expect("NTSC has CICP tags");
+        assert_eq!(ntsc.color_primaries, "smpte170m");
+        assert_eq!(ntsc.color_trc, "smpte170m");
+        assert_eq!(ntsc.colorspace, "smpte170m");
+
         assert_eq!(ColorSpace::AppleLog.ffmpeg_tags(), None);
         assert_eq!(ColorSpace::SLog3.ffmpeg_tags(), None);
         assert_eq!(ColorSpace::ArriLogC4.ffmpeg_tags(), None);
@@ -1036,6 +1127,14 @@ mod tests {
             Some(ColorSpace::Srgb)
         );
         assert_eq!(ColorSpace::from_ffmpeg_tags("bt709", "bt709", "rgb"), None);
+        assert_eq!(
+            ColorSpace::from_ffmpeg_tags("bt470bg", "bt470bg", "bt470bg"),
+            Some(ColorSpace::Rec601Pal)
+        );
+        assert_eq!(
+            ColorSpace::from_ffmpeg_tags("smpte170m", "smpte170m", "smpte170m"),
+            Some(ColorSpace::Rec601Ntsc)
+        );
     }
 
     #[test]
@@ -1052,7 +1151,27 @@ mod tests {
             ColorSpace::from_ffmpeg_tag_hints(None, None, Some("bt709")),
             Some(ColorSpace::Rec709)
         );
+        assert_eq!(
+            ColorSpace::from_ffmpeg_tag_hints(None, None, Some("bt470bg")),
+            Some(ColorSpace::Rec601Pal)
+        );
+        assert_eq!(
+            ColorSpace::from_ffmpeg_tag_hints(None, None, Some("smpte170m")),
+            Some(ColorSpace::Rec601Ntsc)
+        );
         assert_eq!(ColorSpace::from_ffmpeg_tag_hints(None, None, None), None);
+    }
+
+    #[test]
+    fn rec601_primary_conversions_round_trip_through_rec709() {
+        let sample = [0.21, 0.47, 0.83];
+        for source in [ColorSpace::Rec601Pal, ColorSpace::Rec601Ntsc] {
+            let rec709 = convert_primaries(sample, source, ColorSpace::Rec709);
+            let round_trip = convert_primaries(rec709, ColorSpace::Rec709, source);
+            for (actual, expected) in round_trip.into_iter().zip(sample) {
+                assert!((actual - expected).abs() < 2.0e-6, "{source:?}");
+            }
+        }
     }
 
     #[test]

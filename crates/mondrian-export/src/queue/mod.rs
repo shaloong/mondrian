@@ -4551,6 +4551,35 @@ mod tests {
     }
 
     #[test]
+    fn rec601_delivery_preserves_pal_and_ntsc_signal_tags() {
+        let codec = VideoCodecConfig::H264 { crf: 20, bitrate_kbps: None };
+        for (color_space, primaries, transfer, matrix) in [
+            (ColorSpace::Rec601Pal, "bt470bg", "bt470bg", "bt470bg"),
+            (
+                ColorSpace::Rec601Ntsc,
+                "smpte170m",
+                "smpte170m",
+                "smpte170m",
+            ),
+        ] {
+            let mut settings = SequenceSettings::default();
+            settings.color_management.output_color_space = color_space;
+            let expected = expected_export_video_signal(&settings, &codec);
+            assert_eq!(expected.color_primaries.as_deref(), Some(primaries));
+            assert_eq!(expected.color_transfer.as_deref(), Some(transfer));
+            assert_eq!(expected.color_matrix.as_deref(), Some(matrix));
+
+            let mut cmd = Command::new("ffmpeg");
+            apply_export_video_signal_args(&mut cmd, &settings, &codec);
+            let args =
+                cmd.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+            assert!(args.windows(2).any(|pair| {
+                pair[0] == "-vf" && pair[1].contains(&format!("out_color_matrix={matrix}"))
+            }));
+        }
+    }
+
+    #[test]
     fn render_timeline_frame_into_clears_canvas_when_no_layers() {
         let mut seq = Sequence::new("empty");
         seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Eight;

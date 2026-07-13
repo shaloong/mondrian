@@ -2,6 +2,11 @@
 
 Mondrian's UI is self-hosted: winit/platform integration, retained widgets, wgpu rendering, theme tokens, event routing, dock/layout, and app panel adapters.
 
+Color-space selectors expose Rec.601 PAL and Rec.601 NTSC as distinct encoded
+identities. They are not native window surface color spaces; viewer
+presentation still passes through the configured display/view transform before
+targeting an sRGB, Display P3, PQ, or HLG surface.
+
 ## Crate Split
 
 - `mondrian-ui-core`: widget trait, event types, accessibility, focus/shortcut/tooltip traits, tree traversal.

@@ -790,7 +790,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_yuv_output_feeds_ocio_input_stage_on_real_wgpu_device() {
+    async fn native_rec601_output_feeds_ocio_input_stage_on_real_wgpu_device() {
         mondrian_core::ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let Ok(context) = crate::GpuContext::new().await else {
             eprintln!("skipping native YUV + OCIO test: no GPU adapter available");
@@ -824,7 +824,7 @@ mod tests {
             GpuNativeDecodedFrameImportContract {
                 width: 2,
                 height: 2,
-                source_color_space: ColorSpace::Rec709,
+                source_color_space: ColorSpace::Rec601Ntsc,
                 input_transform: crate::RenderInputTransform::to_working_gpu(
                     WorkingColorSpace::LinearRec709,
                     false,
@@ -833,7 +833,7 @@ mod tests {
                 handle_kind: DecodedGpuFrameHandleKind::D3D11Texture2D,
                 source_texture_format: GpuNativeDecodedFrameTextureFormat::Nv12,
                 video_sampling: GpuNativeDecodedFrameVideoSampling::from_source_color_space(
-                    ColorSpace::Rec709,
+                    ColorSpace::Rec601Ntsc,
                     GpuVideoRange::Limited,
                     8,
                     GpuVideoChromaLocation::Left,

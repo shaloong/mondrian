@@ -295,7 +295,11 @@ pub(crate) fn cms_profile_for_color_space(color_space: ColorSpace) -> Option<Col
         ColorSpace::Rec2100Pq => Some(ColorProfile::new_bt2020_pq()),
         ColorSpace::Rec2100Hlg => Some(ColorProfile::new_bt2020_hlg()),
         ColorSpace::DciP3 => Some(ColorProfile::new_dci_p3()),
-        ColorSpace::AppleLog | ColorSpace::SLog3 | ColorSpace::ArriLogC4 => None,
+        ColorSpace::Rec601Pal
+        | ColorSpace::Rec601Ntsc
+        | ColorSpace::AppleLog
+        | ColorSpace::SLog3
+        | ColorSpace::ArriLogC4 => None,
     }
 }
 

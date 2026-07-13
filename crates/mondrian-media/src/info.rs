@@ -1797,6 +1797,25 @@ mod tests {
     }
 
     #[test]
+    fn detect_color_space_recognizes_exact_pal_and_ntsc_rec601_tags() {
+        let pal = detect_color_space(
+            Primaries::BT470BG,
+            TransferCharacteristic::GAMMA28,
+            Space::BT470BG,
+        );
+        assert_eq!(pal.color_space, Some(ColorSpace::Rec601Pal));
+        assert_eq!(pal.confidence, VideoColorInterpretationConfidence::High);
+
+        let ntsc = detect_color_space(
+            Primaries::SMPTE170M,
+            TransferCharacteristic::SMPTE170M,
+            Space::SMPTE170M,
+        );
+        assert_eq!(ntsc.color_space, Some(ColorSpace::Rec601Ntsc));
+        assert_eq!(ntsc.confidence, VideoColorInterpretationConfidence::High);
+    }
+
+    #[test]
     fn detect_color_space_uses_matrix_metadata_when_primaries_are_missing() {
         let detection = detect_color_space(
             Primaries::Unspecified,

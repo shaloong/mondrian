@@ -127,6 +127,10 @@ fused point effects in one working-space render pass. These operations must not
 materialize a CPU frame or schedule GPU readback; readback is reserved for an
 explicit presentation, debug, or encoder boundary.
 
+Rec.601 PAL/NTSC delivery keeps its distinct primaries, transfer, and matrix
+tags through the export signal contract; swscale matrix selection and
+post-encode validation are derived from that same contract.
+
 The float transform path (`CpuColorTransformExecutor::input_to_working_float`
 and `transform_float`) operates directly on f32 data without u8 quantization,
 preserving HDR/log/10-bit precision. The `RenderColorTransformBackend::CpuOcioFloat`

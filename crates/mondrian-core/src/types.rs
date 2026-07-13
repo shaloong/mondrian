@@ -269,6 +269,10 @@ pub enum BlendMode {
 pub enum ColorSpace {
     #[default]
     Rec709,
+    /// 625-line Rec.601 / PAL-family SDR using BT.470BG primaries.
+    Rec601Pal,
+    /// 525-line Rec.601 / NTSC-family SDR using SMPTE 170M primaries.
+    Rec601Ntsc,
     Rec2100Hlg,
     Rec2100Pq,
     Srgb,
@@ -311,7 +315,10 @@ impl TryFrom<ColorSpace> for WorkingColorSpace {
 
     fn try_from(color_space: ColorSpace) -> Result<Self, Self::Error> {
         match color_space {
-            ColorSpace::Rec709 | ColorSpace::Srgb => Ok(Self::LinearRec709),
+            ColorSpace::Rec709
+            | ColorSpace::Rec601Pal
+            | ColorSpace::Rec601Ntsc
+            | ColorSpace::Srgb => Ok(Self::LinearRec709),
             ColorSpace::Rec2020 | ColorSpace::Rec2100Hlg | ColorSpace::Rec2100Pq => {
                 Ok(Self::LinearRec2020)
             }

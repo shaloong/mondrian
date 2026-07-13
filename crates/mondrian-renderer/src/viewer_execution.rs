@@ -380,12 +380,16 @@ mod tests {
             bit_depth: 8,
         };
         let sampling = native_video_sampling_from_decoded(
-            ColorSpace::Rec709,
+            ColorSpace::Rec601Ntsc,
             GpuNativeDecodedFrameTextureFormat::Nv12,
             decoded,
         )
         .expect("BT.601 matrix can enter the native GPU conversion path");
         assert_eq!(sampling.matrix, ColorMatrixCoefficients::Smpte170M);
+        assert_eq!(
+            sampling.transfer,
+            mondrian_core::ColorTransferCharacteristic::Smpte170M
+        );
 
         assert!(native_video_sampling_from_decoded(
             ColorSpace::Rec2100Pq,

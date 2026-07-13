@@ -243,8 +243,10 @@ const PREVIEW_RENDER_FORMAT_OPTIONS: [PreviewRenderFormat; 4] = [
     PreviewRenderFormat::LosslessRgba,
 ];
 
-const COLOR_SPACE_OPTIONS: [ColorSpace; 9] = [
+const COLOR_SPACE_OPTIONS: [ColorSpace; 11] = [
     ColorSpace::Rec709,
+    ColorSpace::Rec601Pal,
+    ColorSpace::Rec601Ntsc,
     ColorSpace::Rec2100Hlg,
     ColorSpace::Rec2100Pq,
     ColorSpace::Srgb,
@@ -390,6 +392,8 @@ fn preview_render_format_label(value: PreviewRenderFormat) -> &'static str {
 fn color_space_label(value: ColorSpace) -> &'static str {
     match value {
         ColorSpace::Rec709 => "Rec. 709",
+        ColorSpace::Rec601Pal => "Rec. 601 PAL",
+        ColorSpace::Rec601Ntsc => "Rec. 601 NTSC",
         ColorSpace::Rec2100Hlg => "Rec. 2100 HLG",
         ColorSpace::Rec2100Pq => "Rec. 2100 PQ",
         ColorSpace::Srgb => "sRGB",

@@ -167,6 +167,10 @@ pub(crate) fn apply_video_codec_args(cmd: &mut Command, codec: &VideoCodecConfig
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExportYuvMatrix {
     Bt709,
+    Fcc,
+    Bt470Bg,
+    Smpte170M,
+    Smpte240M,
     Bt2020NonConstant,
 }
 
@@ -174,6 +178,10 @@ impl ExportYuvMatrix {
     const fn scale_name(self) -> &'static str {
         match self {
             Self::Bt709 => "bt709",
+            Self::Fcc => "fcc",
+            Self::Bt470Bg => "bt470bg",
+            Self::Smpte170M => "smpte170m",
+            Self::Smpte240M => "smpte240m",
             Self::Bt2020NonConstant => "bt2020",
         }
     }
@@ -181,6 +189,10 @@ impl ExportYuvMatrix {
     const fn tag_name(self) -> &'static str {
         match self {
             Self::Bt709 => "bt709",
+            Self::Fcc => "fcc",
+            Self::Bt470Bg => "bt470bg",
+            Self::Smpte170M => "smpte170m",
+            Self::Smpte240M => "smpte240m",
             Self::Bt2020NonConstant => "bt2020nc",
         }
     }
@@ -227,16 +239,16 @@ impl ExportVideoSignalContract {
             mondrian_core::ColorMatrixCoefficients::Bt2020NonConstant => {
                 ExportYuvMatrix::Bt2020NonConstant
             }
+            mondrian_core::ColorMatrixCoefficients::Bt470Bg => ExportYuvMatrix::Bt470Bg,
+            mondrian_core::ColorMatrixCoefficients::Smpte170M => ExportYuvMatrix::Smpte170M,
+            mondrian_core::ColorMatrixCoefficients::Fcc => ExportYuvMatrix::Fcc,
+            mondrian_core::ColorMatrixCoefficients::Smpte240M => ExportYuvMatrix::Smpte240M,
             mondrian_core::ColorMatrixCoefficients::Unspecified
                 if encoding.primaries == mondrian_core::ColorPrimaries::Bt2020 =>
             {
                 ExportYuvMatrix::Bt2020NonConstant
             }
             mondrian_core::ColorMatrixCoefficients::Bt709
-            | mondrian_core::ColorMatrixCoefficients::Fcc
-            | mondrian_core::ColorMatrixCoefficients::Bt470Bg
-            | mondrian_core::ColorMatrixCoefficients::Smpte170M
-            | mondrian_core::ColorMatrixCoefficients::Smpte240M
             | mondrian_core::ColorMatrixCoefficients::Rgb
             | mondrian_core::ColorMatrixCoefficients::Unspecified => ExportYuvMatrix::Bt709,
         };
