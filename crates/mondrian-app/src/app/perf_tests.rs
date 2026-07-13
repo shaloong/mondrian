@@ -28,7 +28,7 @@ use crate::app_ui::viewer_gpu_output_budget::{
     ViewerGpuOutputHealthVerdict,
 };
 use crate::app_ui::viewer_gpu_preview_headless::{
-    HeadlessViewerGpuAdapter, HeadlessViewerGpuExecution,
+    HeadlessViewerGpuAdapter, HeadlessViewerGpuAdapterInfo, HeadlessViewerGpuExecution,
 };
 use anyhow::Context;
 use serde::Serialize;
@@ -47,7 +47,9 @@ use mondrian_media::{
     VideoColorDiagnosticIssueAggregate,
 };
 use mondrian_platform::{NativeVideoTextureImportProbe, SystemPlatformService};
-use mondrian_renderer::RenderColorStageDiagnostics;
+use mondrian_renderer::{
+    GpuCompositingDiagnostics, GpuViewerSpatialRuntimeDiagnostics, RenderColorStageDiagnostics,
+};
 use mondrian_timeline::track::Track;
 use mondrian_ui_core::tree::TreeWalker;
 use mondrian_ui_core::types::Rect;
@@ -113,13 +115,20 @@ struct HeadlessViewerGpuExtent {
 
 #[derive(Debug, Serialize, Default)]
 struct HeadlessViewerGpuExecutionSummary {
+    adapter: Option<HeadlessViewerGpuAdapterInfo>,
     rendered_frames: usize,
     cached_frames: usize,
     output_extents: Vec<HeadlessViewerGpuExtent>,
-    duration_samples_us: Vec<u64>,
+    wall_duration_samples_us: Vec<u64>,
+    record_submit_samples_us: Vec<u64>,
+    completion_wait_samples_us: Vec<u64>,
+    gpu_duration_samples_us: Vec<u64>,
+    missing_gpu_timestamp_frames: usize,
     fallback_count: usize,
     fallback_reasons: Vec<String>,
     stage_diagnostics: RenderColorStageDiagnostics,
+    compositing_diagnostics: GpuCompositingDiagnostics,
+    spatial_diagnostics: Option<GpuViewerSpatialRuntimeDiagnostics>,
     rendered_decode_execution: AppUiPreviewDecodeExecutionSummary,
 }
 
@@ -137,24 +146,54 @@ impl HeadlessViewerGpuExecutionSummary {
         } else {
             self.rendered_frames = self.rendered_frames.saturating_add(1);
             self.rendered_decode_execution.accumulate(execution.decode_execution);
+            self.wall_duration_samples_us.push(execution.duration_us);
+            self.record_submit_samples_us.push(execution.record_submit_us);
+            self.completion_wait_samples_us.push(execution.completion_wait_us);
+            if let Some(duration_us) = execution.gpu_duration_us {
+                self.gpu_duration_samples_us.push(duration_us);
+            } else {
+                self.missing_gpu_timestamp_frames =
+                    self.missing_gpu_timestamp_frames.saturating_add(1);
+            }
         }
-        self.duration_samples_us.push(execution.duration_us);
         self.fallback_count = self.fallback_count.saturating_add(execution.fallback_reasons.len());
         self.fallback_reasons.extend(execution.fallback_reasons);
         if let Some(diagnostics) = execution.stage_diagnostics {
             self.stage_diagnostics.accumulate(diagnostics);
         }
+        if let Some(diagnostics) = execution.compositing_diagnostics {
+            self.compositing_diagnostics.accumulate(diagnostics);
+        }
+        if let Some(diagnostics) = execution.spatial_diagnostics {
+            self.spatial_diagnostics = Some(diagnostics);
+        }
     }
 
     fn p95_duration_us(&self) -> u64 {
-        let mut samples = self.duration_samples_us.clone();
-        if samples.is_empty() {
-            return 0;
-        }
-        samples.sort_unstable();
-        let rank = samples.len().saturating_mul(95).saturating_add(99) / 100;
-        samples[rank.saturating_sub(1).min(samples.len() - 1)]
+        p95_sample_us(&self.gpu_duration_samples_us)
     }
+
+    fn p95_record_submit_us(&self) -> u64 {
+        p95_sample_us(&self.record_submit_samples_us)
+    }
+
+    fn p95_completion_wait_us(&self) -> u64 {
+        p95_sample_us(&self.completion_wait_samples_us)
+    }
+
+    fn p95_wall_duration_us(&self) -> u64 {
+        p95_sample_us(&self.wall_duration_samples_us)
+    }
+}
+
+fn p95_sample_us(samples: &[u64]) -> u64 {
+    let mut samples = samples.to_vec();
+    if samples.is_empty() {
+        return 0;
+    }
+    samples.sort_unstable();
+    let rank = samples.len().saturating_mul(95).saturating_add(99) / 100;
+    samples[rank.saturating_sub(1).min(samples.len() - 1)]
 }
 
 #[test]
@@ -166,6 +205,11 @@ fn headless_gpu_summary_records_distinct_executed_extents() {
             output_height: height,
             cached: false,
             duration_us: 1,
+            record_submit_us: 1,
+            completion_wait_us: 1,
+            gpu_duration_us: Some(1),
+            compositing_diagnostics: None,
+            spatial_diagnostics: None,
             stage_diagnostics: None,
             fallback_reasons: Vec::new(),
             decode_execution: AppUiPreviewDecodeExecutionSummary::default(),
@@ -222,10 +266,17 @@ struct PreviewExternalPlaybackGateReport {
     visible_frames: usize,
     min_ready_frames: usize,
     ready_frames: usize,
+    min_ready_basis_points: usize,
+    ready_basis_points: usize,
     gpu_rendered_frames: usize,
     gpu_cached_frames: usize,
+    gpu_timestamped_frames: usize,
+    gpu_missing_timestamp_frames: usize,
     gpu_execution_p95_limit_us: u64,
     gpu_execution_p95_observed_us: u64,
+    gpu_record_submit_p95_us: u64,
+    gpu_completion_wait_p95_us: u64,
+    gpu_wall_duration_p95_us: u64,
     gpu_readback_stages: u64,
     gpu_blockers: u64,
     gpu_fallback_count: usize,
@@ -1450,11 +1501,11 @@ fn run_external_continuous_playback_gate(
         1,
         100,
     );
-    let min_ready_percent = env_usize_clamped(
-        "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_READY_PERCENT",
-        90,
+    let min_ready_basis_points = env_usize_clamped(
+        "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_READY_BASIS_POINTS",
+        9_950,
         1,
-        100,
+        10_000,
     );
 
     let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
@@ -1502,7 +1553,7 @@ fn run_external_continuous_playback_gate(
         playback_p95_limit_us,
         playback_queue_wait_p95_limit_us,
         min_visible_percent,
-        min_ready_percent,
+        min_ready_basis_points,
     );
     report.real_media_gates = Some(real_media_gates);
     if professional {
@@ -1590,7 +1641,7 @@ fn evaluate_external_playback_gates(
     playback_decode_p95_limit_us: u64,
     playback_queue_wait_p95_limit_us: u64,
     min_visible_percent: usize,
-    min_ready_percent: usize,
+    min_ready_basis_points: usize,
 ) -> PreviewExternalPlaybackGateReport {
     let playback_decode_p95_observed_us =
         decode_check_observed(decode_report, "preview_decode_playback_cursor_p95_frame_us");
@@ -1600,7 +1651,9 @@ fn evaluate_external_playback_gates(
     );
     let visible_frames = readiness.ready.saturating_add(readiness.stale);
     let min_visible_frames = frames.saturating_mul(min_visible_percent).saturating_add(99) / 100;
-    let min_ready_frames = frames.saturating_mul(min_ready_percent).saturating_add(99) / 100;
+    let min_ready_frames =
+        frames.saturating_mul(min_ready_basis_points).saturating_add(9_999) / 10_000;
+    let ready_basis_points = readiness.ready.saturating_mul(10_000) / frames.max(1);
     let mut failures = Vec::new();
     if playback_decode_p95_observed_us == 0
         || playback_decode_p95_observed_us > playback_decode_p95_limit_us
@@ -1627,6 +1680,11 @@ fn evaluate_external_playback_gates(
     }
     if headless_gpu.stage_diagnostics.gpu_blockers > 0 {
         failures.push("viewer_gpu_blockers");
+    }
+    if headless_gpu.missing_gpu_timestamp_frames > 0
+        || headless_gpu.gpu_duration_samples_us.len() != headless_gpu.rendered_frames
+    {
+        failures.push("viewer_gpu_timestamp_coverage");
     }
     let gpu_execution_p95_observed_us = headless_gpu.p95_duration_us();
     if gpu_execution_p95_observed_us == 0
@@ -1678,10 +1736,17 @@ fn evaluate_external_playback_gates(
         visible_frames,
         min_ready_frames,
         ready_frames: readiness.ready,
+        min_ready_basis_points,
+        ready_basis_points,
         gpu_rendered_frames: headless_gpu.rendered_frames,
         gpu_cached_frames: headless_gpu.cached_frames,
+        gpu_timestamped_frames: headless_gpu.gpu_duration_samples_us.len(),
+        gpu_missing_timestamp_frames: headless_gpu.missing_gpu_timestamp_frames,
         gpu_execution_p95_limit_us,
         gpu_execution_p95_observed_us,
+        gpu_record_submit_p95_us: headless_gpu.p95_record_submit_us(),
+        gpu_completion_wait_p95_us: headless_gpu.p95_completion_wait_us(),
+        gpu_wall_duration_p95_us: headless_gpu.p95_wall_duration_us(),
         gpu_readback_stages: headless_gpu.stage_diagnostics.readback_stages,
         gpu_blockers: headless_gpu.stage_diagnostics.gpu_blockers,
         gpu_fallback_count: headless_gpu.fallback_count,
@@ -1744,6 +1809,8 @@ fn run_preview_media_continuous_playback_probe(
     let mut readiness = PreviewReadinessCounts::default();
     let mut headless_gpu_preroll = HeadlessViewerGpuExecutionSummary::default();
     let mut headless_gpu = HeadlessViewerGpuExecutionSummary::default();
+    headless_gpu_preroll.adapter = Some(gpu_adapter.adapter_info().clone());
+    headless_gpu.adapter = Some(gpu_adapter.adapter_info().clone());
 
     state.seek(0);
     wait_for_headless_gpu_ready(
@@ -3460,7 +3527,7 @@ fn external_playback_gates_fail_on_decode_queue_or_visibility_regression() {
         40_000,
         10_000,
         95,
-        90,
+        9_000,
     );
 
     assert!(!gates.passed);
@@ -3496,7 +3563,7 @@ fn external_playback_gates_pass_when_real_media_thresholds_hold() {
         40_000,
         10_000,
         95,
-        90,
+        9_000,
     );
 
     assert!(gates.passed);
@@ -3522,7 +3589,7 @@ fn external_playback_gates_do_not_treat_repeated_stale_frames_as_current_ready()
         40_000,
         10_000,
         95,
-        90,
+        9_000,
     );
 
     assert_eq!(gates.visible_frames, 20);
@@ -3558,7 +3625,7 @@ fn external_playback_gates_require_real_gpu_execution_without_readback_or_blocke
         40_000,
         10_000,
         95,
-        90,
+        9_000,
     );
 
     assert_eq!(
@@ -3595,7 +3662,7 @@ fn external_playback_gates_fail_on_clock_audio_or_evidence_integrity() {
         40_000,
         10_000,
         95,
-        90,
+        9_000,
     );
 
     assert_eq!(
@@ -3637,7 +3704,7 @@ fn external_playback_gates_fail_on_cpu_frame_store_budget_or_admission() {
         40_000,
         10_000,
         95,
-        90,
+        9_000,
     );
 
     assert_eq!(
@@ -3655,7 +3722,10 @@ fn external_playback_gates_fail_on_cpu_frame_store_budget_or_admission() {
 fn passing_headless_gpu_summary(frames: usize) -> HeadlessViewerGpuExecutionSummary {
     HeadlessViewerGpuExecutionSummary {
         rendered_frames: frames,
-        duration_samples_us: vec![1_000; frames],
+        wall_duration_samples_us: vec![1_000; frames],
+        record_submit_samples_us: vec![400; frames],
+        completion_wait_samples_us: vec![600; frames],
+        gpu_duration_samples_us: vec![500; frames],
         stage_diagnostics: RenderColorStageDiagnostics {
             total_stages: frames as u64,
             gpu_color_stages: frames as u64,

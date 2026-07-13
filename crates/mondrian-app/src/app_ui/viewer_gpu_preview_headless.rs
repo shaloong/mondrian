@@ -11,8 +11,10 @@ use super::preview::{
     AppUiGpuPreviewFrame, AppUiGpuPreviewWorkingInput, AppUiPreviewDecodeExecutionSummary,
 };
 use mondrian_renderer::{
-    native_video_texture_device_features, request_adapter_with_native_video_preference,
-    GpuNativeDecodedFrameImportSupport, RenderColorStageDiagnostics, ViewerGpuExecutionRequest,
+    native_video_texture_device_features, profile::gpu_timestamp_query_device_features,
+    profile::GpuTimestampFrameTimer, request_adapter_with_native_video_preference,
+    GpuCompositingDiagnostics, GpuNativeDecodedFrameImportSupport,
+    GpuViewerSpatialRuntimeDiagnostics, RenderColorStageDiagnostics, ViewerGpuExecutionRequest,
     ViewerGpuExecutionRuntime, ViewerSourceRect,
 };
 use mondrian_ui_widgets::ViewerExternalTexturePresentation;
@@ -28,6 +30,16 @@ pub(crate) struct HeadlessViewerGpuExecution {
     pub cached: bool,
     /// Wall time spent recording, submitting, and waiting for the GPU.
     pub duration_us: u64,
+    /// CPU wall time through command recording and queue submission.
+    pub record_submit_us: u64,
+    /// CPU wall time waiting for the submitted work to complete.
+    pub completion_wait_us: u64,
+    /// Hardware timestamp duration for the Viewer GPU commands.
+    pub gpu_duration_us: Option<u64>,
+    /// Frame-local working-space compositing evidence.
+    pub compositing_diagnostics: Option<GpuCompositingDiagnostics>,
+    /// Cumulative spatial-runtime evidence after this frame.
+    pub spatial_diagnostics: Option<GpuViewerSpatialRuntimeDiagnostics>,
     /// Structured GPU color-stage evidence for a newly rendered output.
     pub stage_diagnostics: Option<RenderColorStageDiagnostics>,
     /// Explicit native/GPU-input fallback reasons for a newly rendered output.
@@ -36,11 +48,25 @@ pub(crate) struct HeadlessViewerGpuExecution {
     pub decode_execution: AppUiPreviewDecodeExecutionSummary,
 }
 
+/// Stable adapter identity serialized by real-GPU execution gates.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct HeadlessViewerGpuAdapterInfo {
+    pub name: String,
+    pub vendor: u32,
+    pub device: u32,
+    pub device_type: String,
+    pub backend: String,
+    pub driver: String,
+    pub driver_info: String,
+}
+
 /// Real no-Surface Adapter over the shared Viewer GPU Preview Runtime.
 pub(crate) struct HeadlessViewerGpuAdapter {
     device: wgpu::Device,
     queue: wgpu::Queue,
     runtime: ViewerGpuExecutionRuntime,
+    timestamp_timer: Option<GpuTimestampFrameTimer>,
+    adapter_info: HeadlessViewerGpuAdapterInfo,
     current_output_key: Option<String>,
 }
 
@@ -60,14 +86,39 @@ impl HeadlessViewerGpuAdapter {
             },
         ))
         .map_err(|error| HeadlessViewerGpuError::Adapter(error.to_string()))?;
+        let supported_features = adapter.features();
+        let raw_adapter_info = adapter.get_info();
         let descriptor = wgpu::DeviceDescriptor {
-            required_features: native_video_texture_device_features(adapter.features()),
+            required_features: native_video_texture_device_features(supported_features)
+                | gpu_timestamp_query_device_features(supported_features),
             ..wgpu::DeviceDescriptor::default()
         };
         let (device, queue) = pollster::block_on(adapter.request_device(&descriptor))
             .map_err(|error| HeadlessViewerGpuError::Device(error.to_string()))?;
         let runtime = ViewerGpuExecutionRuntime::new(&adapter, &device, &queue);
-        Ok(Self { device, queue, runtime, current_output_key: None })
+        let timestamp_timer = GpuTimestampFrameTimer::new(&device, &queue);
+        let adapter_info = HeadlessViewerGpuAdapterInfo {
+            name: raw_adapter_info.name,
+            vendor: raw_adapter_info.vendor,
+            device: raw_adapter_info.device,
+            device_type: format!("{:?}", raw_adapter_info.device_type),
+            backend: format!("{:?}", raw_adapter_info.backend),
+            driver: raw_adapter_info.driver,
+            driver_info: raw_adapter_info.driver_info,
+        };
+        Ok(Self {
+            device,
+            queue,
+            runtime,
+            timestamp_timer,
+            adapter_info,
+            current_output_key: None,
+        })
+    }
+
+    /// Adapter identity bound to this execution device.
+    pub(crate) fn adapter_info(&self) -> &HeadlessViewerGpuAdapterInfo {
+        &self.adapter_info
     }
 
     /// Native import support exposed to the preview scheduling Adapter.
@@ -93,6 +144,11 @@ impl HeadlessViewerGpuAdapter {
                 output_height: frame.height,
                 cached: true,
                 duration_us: elapsed_us(started),
+                record_submit_us: elapsed_us(started),
+                completion_wait_us: 0,
+                gpu_duration_us: None,
+                compositing_diagnostics: None,
+                spatial_diagnostics: None,
                 stage_diagnostics: None,
                 fallback_reasons: Vec::new(),
                 decode_execution: frame.decode_execution(),
@@ -107,6 +163,9 @@ impl HeadlessViewerGpuAdapter {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("headless_viewer_gpu_preview_encoder"),
         });
+        if let Some(timer) = &self.timestamp_timer {
+            timer.begin(&mut encoder);
+        }
         let layers = match &frame.working_input {
             AppUiGpuPreviewWorkingInput::GpuComposite { layers } => layers,
         };
@@ -141,16 +200,36 @@ impl HeadlessViewerGpuAdapter {
             .runtime
             .output_texture_view(&record)
             .map_err(|error| HeadlessViewerGpuError::Record(error.to_string()))?;
+        if let Some(timer) = &self.timestamp_timer {
+            timer.finish(&mut encoder);
+        }
         let submission = self.queue.submit(std::iter::once(encoder.finish()));
-        self.device
-            .poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None })
-            .map_err(|error| HeadlessViewerGpuError::Poll(error.to_string()))?;
+        let record_submit_us = elapsed_us(started);
+        let wait_started = Instant::now();
+        let gpu_duration_us = if let Some(timer) = &self.timestamp_timer {
+            Some(
+                timer
+                    .read_elapsed_us_after_submission(&self.device, submission)
+                    .map_err(|error| HeadlessViewerGpuError::Timestamp(error.to_string()))?,
+            )
+        } else {
+            self.device
+                .poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None })
+                .map_err(|error| HeadlessViewerGpuError::Poll(error.to_string()))?;
+            None
+        };
+        let completion_wait_us = elapsed_us(wait_started);
         self.current_output_key = Some(output_key);
         Ok(HeadlessViewerGpuExecution {
             output_width: frame.width,
             output_height: frame.height,
             cached: false,
             duration_us: elapsed_us(started),
+            record_submit_us,
+            completion_wait_us,
+            gpu_duration_us,
+            compositing_diagnostics: Some(record.compositing_diagnostics),
+            spatial_diagnostics: Some(record.spatial_diagnostics),
             stage_diagnostics: Some(record.stage_diagnostics),
             fallback_reasons: record.fallback_reasons,
             decode_execution: frame.decode_execution(),
@@ -170,6 +249,8 @@ pub(crate) enum HeadlessViewerGpuError {
     Record(String),
     #[error("headless Viewer GPU completion wait failed: {0}")]
     Poll(String),
+    #[error("headless Viewer GPU timestamp query failed: {0}")]
+    Timestamp(String),
 }
 
 fn elapsed_us(started: Instant) -> u64 {

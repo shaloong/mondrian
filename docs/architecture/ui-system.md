@@ -314,6 +314,12 @@ simulate a 30fps playback window and records `Ready`/`Loading`/`Stale`/
 `Unavailable` counts plus a GPU preview candidate probe, with the contract that
 steady playback keeps a current or stale frame visible instead of falling
 through to an unavailable viewer.
+The external-media variant treats current-frame readiness as a basis-point
+contract (99.50% by default), requires complete hardware timestamp coverage for
+every newly rendered frame, and reports hardware GPU, CPU record/submit,
+completion-wait, and total wall p95 independently. The headless adapter's
+explicit completion wait is test-only; the production window submits without a
+per-frame wait.
 
 Viewer models consume an explicit preview readiness state. `Ready` frames are
 current, `Loading` means the requested frame is queued/in flight, and `Stale`
