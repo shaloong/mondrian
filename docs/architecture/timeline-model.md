@@ -36,9 +36,12 @@ renderer/export implementation contracts and are not persisted as editorial
 intent.
 
 Root preview/export color contexts resolve the effective color engine from the
-sequence/project inheritance rules. When the effective engine is
-`MondrianSmart` or explicit OCIO, the context carries the loaded OCIO config's
-default display/view if one is available.
+sequence/project inheritance rules and carry a typed `OutputTransformIntent`.
+`MondrianSmart` resolves to the versioned `MondrianStandard { version: V1 }`
+product intent; an explicitly configured delivery display/view resolves to
+`OcioDisplayView`. This selection is independent from the renderer's CPU/GPU
+execution backend so a backend change cannot silently change project color
+science.
 
 ## Track
 

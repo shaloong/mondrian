@@ -8459,6 +8459,7 @@ fn viewer_preview_cache_key_for_resolved_plan(
     color_context.tone_map.hash(&mut hasher);
     color_context.engine.hash(&mut hasher);
     color_context.display_management.hash(&mut hasher);
+    color_context.output_transform.hash(&mut hasher);
     color_context.ocio_display.hash(&mut hasher);
     color_context.ocio_view.hash(&mut hasher);
     mondrian_core::ocio_config_generation().hash(&mut hasher);
@@ -14389,6 +14390,36 @@ mod tests {
             180,
             &resolved,
             &colorimetric_view,
+        );
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn resolved_media_preview_cache_key_includes_output_transform_intent() {
+        let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
+            .expect("default effect graph");
+        let resolved = vec![ResolvedPreviewElement::Media {
+            frame: test_media_frame_with_size(0, 2, 2, 100),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_graph,
+            frame_seed: 12,
+        }];
+        let sequence_id = SequenceId::new();
+
+        let standard = test_color_context(ColorSpace::Rec709);
+        let mut colorimetric = standard.clone();
+        colorimetric.output_transform = mondrian_core::OutputTransformIntent::Colorimetric;
+        let first =
+            viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &standard);
+        let second = viewer_preview_cache_key_for_resolved_plan(
+            sequence_id,
+            320,
+            180,
+            &resolved,
+            &colorimetric,
         );
 
         assert_ne!(first, second);

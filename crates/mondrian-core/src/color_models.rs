@@ -4,6 +4,43 @@ use crate::types::{Color, ColorSpace, WorkingColorSpace};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Versioned Mondrian display-rendering transform semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MondrianDisplayTransformVersion {
+    /// First stable Mondrian display-rendering transform contract.
+    V1,
+}
+
+/// Product-level intent for a final working-space to display or delivery transform.
+///
+/// This describes the color-science choice independently from the CPU/GPU
+/// execution backend. Preview and export must preserve this intent until the
+/// renderer plans the final output boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum OutputTransformIntent {
+    /// Mondrian's built-in professional display transform.
+    MondrianStandard {
+        /// Versioned rendering-transform semantics stored in project/cache contracts.
+        version: MondrianDisplayTransformVersion,
+    },
+    /// A direct working-space to encoded-output conversion without a view transform.
+    Colorimetric,
+    /// A named display/view transform from the explicitly selected OCIO config.
+    OcioDisplayView {
+        /// OCIO display name.
+        display: String,
+        /// OCIO view name under the display.
+        view: String,
+    },
+}
+
+impl OutputTransformIntent {
+    /// Select the current Mondrian Standard output-transform contract.
+    pub const fn mondrian_standard() -> Self {
+        Self::MondrianStandard { version: MondrianDisplayTransformVersion::V1 }
+    }
+}
+
 /// Display or monitor profile reference used by preview presentation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum MonitorProfileReference {

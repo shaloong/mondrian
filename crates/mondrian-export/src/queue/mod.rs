@@ -3795,6 +3795,10 @@ mod tests {
             missing_metadata_policy:
                 mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
+            output_transform: mondrian_core::OutputTransformIntent::OcioDisplayView {
+                display: "sRGB - Display".to_string(),
+                view: "ACES 2.0 - SDR 100 nits (Rec.709)".to_string(),
+            },
             ocio_display: Some("sRGB - Display".to_string()),
             ocio_view: Some("ACES 2.0 - SDR 100 nits (Rec.709)".to_string()),
             export_delivery_view_error: None,
@@ -3822,6 +3826,7 @@ mod tests {
             missing_metadata_policy:
                 mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
+            output_transform: mondrian_core::OutputTransformIntent::mondrian_standard(),
             ocio_display: None,
             ocio_view: None,
             export_delivery_view_error: None,
@@ -3846,6 +3851,10 @@ mod tests {
             missing_metadata_policy:
                 mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
+            output_transform: mondrian_core::OutputTransformIntent::OcioDisplayView {
+                display: "sRGB - Display".to_string(),
+                view: "ACES 2.0 - SDR 100 nits (Rec.709)".to_string(),
+            },
             ocio_display: Some("sRGB - Display".to_string()),
             ocio_view: Some("ACES 2.0 - SDR 100 nits (Rec.709)".to_string()),
             export_delivery_view_error: None,
@@ -3930,6 +3939,10 @@ mod tests {
             missing_metadata_policy:
                 mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
+            output_transform: mondrian_core::OutputTransformIntent::OcioDisplayView {
+                display: "sRGB - Display".to_string(),
+                view: "ACES 2.0 - SDR 100 nits (Rec.709)".to_string(),
+            },
             ocio_display: Some("sRGB - Display".to_string()),
             ocio_view: Some("ACES 2.0 - SDR 100 nits (Rec.709)".to_string()),
             export_delivery_view_error: None,
@@ -4001,6 +4014,7 @@ mod tests {
             missing_metadata_policy:
                 mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
+            output_transform: mondrian_core::OutputTransformIntent::Colorimetric,
             ocio_display: None,
             ocio_view: None,
             export_delivery_view_error: Some("invalid delivery view".to_string()),

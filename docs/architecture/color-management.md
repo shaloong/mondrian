@@ -63,6 +63,15 @@ rather than silently clamped.
 - `ColorEngine::Ocio`: explicit OCIO mode over `$OCIO`, a selected built-in,
   or a path source.
 
+Final-output color science is selected separately through
+`OutputTransformIntent`. `MondrianStandard` carries an explicit rendering
+transform version from its first release, `OcioDisplayView` carries the named
+display/view selected by advanced policy, and `Colorimetric` requests a direct
+working-to-encoded conversion. The intent survives preview/export planning and
+cache identity independently from the CPU/GPU implementation used to execute
+it. Explicit export delivery-view policy overrides the Standard default rather
+than being hidden in optional display/view strings.
+
 Explicit OCIO mode must load its selected config successfully. It must not
 silently fall back to a different color science. Mondrian Standard follows the
 same rule for the embedded `mondrian_default_ocio_v1` asset.

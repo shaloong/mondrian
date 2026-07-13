@@ -453,6 +453,8 @@ pub struct ColorContext {
     pub missing_metadata_policy: MissingColorMetadataPolicy,
     /// Resolved display-management policy for this render context.
     pub display_management: DisplayManagementPolicy,
+    /// Product-level final output transform selected for this context.
+    pub output_transform: mondrian_core::OutputTransformIntent,
     /// OCIO display name for preview presentation or export delivery view.
     pub ocio_display: Option<String>,
     /// OCIO view name for preview presentation or export delivery view.
@@ -795,17 +797,28 @@ impl SequenceSettings {
         // Resolve the export delivery view from the effective policy.
         match self.resolve_export_delivery_view(project_cm) {
             Ok(Some(resolved)) => {
+                ctx.output_transform = mondrian_core::OutputTransformIntent::OcioDisplayView {
+                    display: resolved.display.clone(),
+                    view: resolved.view.clone(),
+                };
                 ctx.ocio_display = Some(resolved.display);
                 ctx.ocio_view = Some(resolved.view);
             }
             Ok(None) => {
                 // No delivery view configured — leave as None.
+                ctx.output_transform = match &ctx.engine {
+                    ColorEngine::MondrianSmart => {
+                        mondrian_core::OutputTransformIntent::mondrian_standard()
+                    }
+                    ColorEngine::Ocio { .. } => mondrian_core::OutputTransformIntent::Colorimetric,
+                };
                 ctx.ocio_display = None;
                 ctx.ocio_view = None;
             }
             Err(err) => {
                 // Delivery view was configured but validation failed.
                 // Propagate the error so the export path can record Invalid source.
+                ctx.output_transform = mondrian_core::OutputTransformIntent::Colorimetric;
                 ctx.ocio_display = None;
                 ctx.ocio_view = None;
                 ctx.export_delivery_view_error = Some(err);
@@ -883,6 +896,19 @@ impl SequenceSettings {
             (None, None)
         };
 
+        let output_transform = match (&engine, &ocio_display, &ocio_view) {
+            (ColorEngine::MondrianSmart, _, _) => {
+                mondrian_core::OutputTransformIntent::mondrian_standard()
+            }
+            (ColorEngine::Ocio { .. }, Some(display), Some(view)) => {
+                mondrian_core::OutputTransformIntent::OcioDisplayView {
+                    display: display.clone(),
+                    view: view.clone(),
+                }
+            }
+            (ColorEngine::Ocio { .. }, _, _) => mondrian_core::OutputTransformIntent::Colorimetric,
+        };
+
         ColorContext {
             working_color_space: self.working_color_space,
             output_color_space: OcioColorSpaceIdentity::Encoded(output_color_space),
@@ -891,6 +917,7 @@ impl SequenceSettings {
             engine,
             missing_metadata_policy: self.color_management.missing_metadata_policy,
             display_management,
+            output_transform,
             ocio_display,
             ocio_view,
             workflow: self.color_management.workflow,
@@ -914,6 +941,7 @@ impl SequenceSettings {
                     engine,
                     missing_metadata_policy: self.color_management.missing_metadata_policy,
                     display_management: parent.display_management.clone(),
+                    output_transform: parent.output_transform.clone(),
                     ocio_display: parent.ocio_display.clone(),
                     ocio_view: parent.ocio_view.clone(),
                     workflow: self.color_management.workflow,
@@ -928,6 +956,7 @@ impl SequenceSettings {
                 engine: parent.engine.clone(),
                 missing_metadata_policy: parent.missing_metadata_policy,
                 display_management: parent.display_management.clone(),
+                output_transform: parent.output_transform.clone(),
                 ocio_display: parent.ocio_display.clone(),
                 ocio_view: parent.ocio_view.clone(),
                 workflow: parent.workflow,
@@ -947,6 +976,7 @@ impl SequenceSettings {
                     engine,
                     missing_metadata_policy: self.color_management.missing_metadata_policy,
                     display_management: parent.display_management.clone(),
+                    output_transform: parent.output_transform.clone(),
                     ocio_display: parent.ocio_display.clone(),
                     ocio_view: parent.ocio_view.clone(),
                     workflow: self.color_management.workflow,
@@ -2220,14 +2250,16 @@ mod tests {
     }
 
     #[test]
-    fn mondrian_smart_preview_context_loads_default_ocio_display_view() {
+    fn mondrian_smart_preview_context_selects_standard_output_transform() {
         let settings = SequenceSettings::default();
         let ctx = settings
             .root_preview_color_context(&ProjectColorManagement::default(), ColorSpace::Rec709);
 
         assert_eq!(ctx.engine, ColorEngine::MondrianSmart);
-        assert!(ctx.ocio_display.is_some());
-        assert!(ctx.ocio_view.is_some());
+        assert_eq!(
+            ctx.output_transform,
+            mondrian_core::OutputTransformIntent::mondrian_standard()
+        );
         assert!(mondrian_core::mondrian_default_ocio_available());
     }
 
@@ -2324,6 +2356,34 @@ mod tests {
         assert_eq!(view.display, "sRGB - Display");
         assert_eq!(view.view, "ACES 2.0 - SDR 100 nits (Rec.709)");
         assert_eq!(view.source, ExportDeliveryViewSource::ExplicitSequence);
+    }
+
+    #[test]
+    fn explicit_export_delivery_view_overrides_standard_output_transform() {
+        let settings = SequenceSettings {
+            color_management: SequenceColorManagement {
+                inherit: false,
+                display_management: DisplayManagementPolicy {
+                    export_delivery_view: ExportDeliveryViewPolicy::OcioDisplayView {
+                        display: "sRGB - Display".to_string(),
+                        view: "ACES 2.0 - SDR 100 nits (Rec.709)".to_string(),
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let context = settings.root_export_color_context(&ProjectColorManagement::default());
+
+        assert_eq!(
+            context.output_transform,
+            mondrian_core::OutputTransformIntent::OcioDisplayView {
+                display: "sRGB - Display".to_string(),
+                view: "ACES 2.0 - SDR 100 nits (Rec.709)".to_string(),
+            }
+        );
     }
 
     #[test]
