@@ -37,7 +37,10 @@ const PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES: usize = 1800;
 const PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES: usize = 240;
 const PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES: usize = 96;
 const PREVIEW_SCRUB_MIN_FORWARD_DECODE_BUDGET_FRAMES: usize = 12;
-const PREVIEW_SCRUB_SEEK_BUDGET_PADDING_FRAMES: usize = 4;
+// Frame-threaded decoders may retain several reordered frames after a seek.
+// Leave headroom beyond the indexed presentation-frame distance so an
+// ordinary long-GOP seek is not abandoned just before its target is emitted.
+const PREVIEW_SCRUB_SEEK_BUDGET_PADDING_FRAMES: usize = 16;
 const PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES: usize = 72;
 const PREVIEW_SCRUB_SLOW_FORWARD_DECODE_BUDGET_FRAMES: usize = 36;
 const PREVIEW_SCRUB_RECOVERY_FORWARD_DECODE_BUDGET_FRAMES: usize = 48;
@@ -516,7 +519,7 @@ impl PreviewDecodeAccessPolicy {
 
         self.forward_decode_budget_frames = self
             .forward_decode_budget_frames
-            .min(source_adjusted_budget.max(PREVIEW_SCRUB_MIN_FORWARD_DECODE_BUDGET_FRAMES));
+            .min(source_adjusted_budget.max(PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES));
         self
     }
 }
@@ -2923,38 +2926,55 @@ impl PreviewDecodeSession {
         let tb_secs = tb_num / tb_den;
 
         let seek_anchor_pts = self.seek_index.keyframe_at_or_before(target_pts);
-        let (min_ts, max_ts, seek_flags, used_anchor_pts) = match policy.seek_strategy {
-            PreviewDecodeSeekStrategy::KeyframeBefore => {
-                // 关键帧安全模式：不限制 backward seek 范围，避免长 GOP 时落到不可独立解码帧。
-                (
-                    seek_anchor_pts.unwrap_or(i64::MIN),
-                    target_pts,
-                    ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
-                    seek_anchor_pts,
-                )
-            }
-            PreviewDecodeSeekStrategy::BoundedAnyFrame => {
-                let seek_window_secs = policy.any_seek_window_ms as f64 / 1_000.0;
-                let seek_window_pts = (seek_window_secs / tb_secs).round().max(1.0) as i64;
-                let window_min_ts = target_pts.saturating_sub(seek_window_pts);
-                let used_anchor_pts = seek_anchor_pts
-                    .filter(|anchor| *anchor >= window_min_ts && *anchor <= target_pts);
-                let min_ts = used_anchor_pts.unwrap_or(window_min_ts);
-                (
-                    min_ts,
-                    target_pts.saturating_add(seek_window_pts),
-                    ffmpeg::ffi::AVSEEK_FLAG_ANY,
-                    used_anchor_pts,
-                )
-            }
-        };
+        let (min_ts, seek_target_ts, max_ts, seek_flags, used_anchor_pts) =
+            match policy.seek_strategy {
+                PreviewDecodeSeekStrategy::KeyframeBefore => {
+                    // 关键帧安全模式：不限制 backward seek 范围，避免长 GOP 时落到不可独立解码帧。
+                    (
+                        seek_anchor_pts.unwrap_or(i64::MIN),
+                        target_pts,
+                        target_pts,
+                        ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
+                        seek_anchor_pts,
+                    )
+                }
+                PreviewDecodeSeekStrategy::BoundedAnyFrame => {
+                    let seek_window_secs = policy.any_seek_window_ms as f64 / 1_000.0;
+                    let seek_window_pts = (seek_window_secs / tb_secs).round().max(1.0) as i64;
+                    let window_min_ts = target_pts.saturating_sub(seek_window_pts);
+                    let used_anchor_pts = seek_anchor_pts.filter(|anchor| {
+                        *anchor <= target_pts
+                            && pts_distance_to_frames(
+                                target_pts.saturating_sub(*anchor),
+                                self.frame_duration_pts,
+                            ) <= policy.forward_decode_budget_frames
+                    });
+                    if let Some(anchor_pts) = used_anchor_pts {
+                        (
+                            anchor_pts,
+                            target_pts,
+                            target_pts,
+                            ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
+                            Some(anchor_pts),
+                        )
+                    } else {
+                        (
+                            window_min_ts,
+                            target_pts,
+                            target_pts.saturating_add(seek_window_pts),
+                            ffmpeg::ffi::AVSEEK_FLAG_ANY,
+                            None,
+                        )
+                    }
+                }
+            };
 
         let ret = unsafe {
             ffmpeg::ffi::avformat_seek_file(
                 self.input.as_mut_ptr(),
                 self.stream_index as i32,
                 min_ts,
-                target_pts,
+                seek_target_ts,
                 max_ts,
                 seek_flags,
             )
@@ -3044,6 +3064,84 @@ impl PreviewDecodeSession {
                 )?;
                 Ok(Some((selected_pts, frame)))
             };
+
+        // A prior forward request may have returned as soon as it found its
+        // target while the frame-threaded decoder still held reordered output.
+        // Consume that output before submitting another packet: FFmpeg requires
+        // callers to receive frames after AVERROR(EAGAIN), and the retained
+        // frames are also the best candidates for the next playback position.
+        while let Some(decoded) = receive_decoded_video_frame(&mut self.decoder)? {
+            if should_cancel() {
+                return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+            }
+            frames_decoded += 1;
+            let frame_pts = decoded.pts.unwrap_or(i64::MIN);
+            if frame_pts != i64::MIN {
+                self.last_pts = Some(frame_pts);
+                if frame_pts <= target_pts {
+                    best_before = Some((
+                        frame_pts,
+                        RetainedDecodedFrame::retain(&decoded.frame, self.path.as_path())?,
+                    ));
+                    if frame_pts >= target_pts.saturating_sub(self.hit_tolerance_pts) {
+                        let frame = materialize_decoded_frame(
+                            &decoded.frame,
+                            &mut self.hardware_decode_plan,
+                            &mut self.scaler,
+                            &mut self.scaler_source_format,
+                            self.target_width,
+                            self.target_height,
+                            self.path.as_path(),
+                            self.source_color,
+                        )?;
+                        frame.cache_cpu_rgba(
+                            &self.path,
+                            self.fingerprint,
+                            self.target_width,
+                            self.target_height,
+                            frame_pts,
+                        );
+                        return Ok(PreviewDecodeForwardResult::frame(
+                            frame,
+                            frame_pts,
+                            frames_decoded,
+                        ));
+                    }
+                } else {
+                    best_after = Some((
+                        frame_pts,
+                        RetainedDecodedFrame::retain(&decoded.frame, self.path.as_path())?,
+                    ));
+                    if let Some((selected_pts, frame)) = choose_and_convert(
+                        &mut self.hardware_decode_plan,
+                        &mut self.scaler,
+                        &mut self.scaler_source_format,
+                        self.target_width,
+                        self.target_height,
+                        self.path.as_path(),
+                        best_before.as_ref(),
+                        best_after.as_ref(),
+                    )? {
+                        frame.cache_cpu_rgba(
+                            &self.path,
+                            self.fingerprint,
+                            self.target_width,
+                            self.target_height,
+                            selected_pts,
+                        );
+                        return Ok(PreviewDecodeForwardResult::frame(
+                            frame,
+                            selected_pts,
+                            frames_decoded,
+                        ));
+                    }
+                }
+            }
+
+            if policy.forward_decode_budget_exhausted(frames_decoded) {
+                break;
+            }
+        }
 
         for (s, packet) in self.input.packets() {
             if should_cancel() {
@@ -3843,17 +3941,11 @@ fn resolve_cpu_rgba_contract_from_metadata(
         })?;
     let expected_matrix =
         source_video_matrix(source).filter(|matrix| *matrix != DecodedVideoMatrix::Rgb);
-    if let (Some(decoded_matrix), Some(expected_matrix)) = (decoded_matrix, expected_matrix) {
-        if decoded_matrix != expected_matrix {
-            return Err(MondrianError::DecodeFailed {
-                asset_id: path.display().to_string(),
-                reason: format!(
-                    "decoded YUV matrix {decoded_matrix:?} conflicts with resolved source color space {:?} ({expected_matrix:?})",
-                    source.color_space
-                ),
-            });
-        }
-    }
+    // Matrix coefficients describe how the encoded YCbCr samples become RGB;
+    // the resolved source color space describes how that RGB is interpreted by
+    // the color pipeline. CICP permits those facts to differ, so an explicit
+    // decoder matrix remains authoritative and the source contract is only a
+    // fallback when the frame omits matrix metadata.
     let matrix = decoded_matrix.or(expected_matrix).ok_or_else(|| MondrianError::DecodeFailed {
         asset_id: path.display().to_string(),
         reason: format!(
@@ -4311,8 +4403,7 @@ mod tests {
         PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
         PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
         PREVIEW_SCRUB_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS,
-        PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES,
-        PREVIEW_SCRUB_MIN_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_SLOW_ANY_SEEK_WINDOW_MS,
+        PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_SLOW_ANY_SEEK_WINDOW_MS,
         PREVIEW_SCRUB_SLOW_FORWARD_DECODE_BUDGET_FRAMES,
         PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES,
     };
@@ -4857,7 +4948,7 @@ mod tests {
         );
         assert_eq!(
             close_scrub.forward_decode_budget_frames,
-            PREVIEW_SCRUB_MIN_FORWARD_DECODE_BUDGET_FRAMES
+            PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES
         );
 
         let near_next_keyframe_scrub = scrub.adapt_for_request(
@@ -4866,7 +4957,10 @@ mod tests {
             frame_duration_pts,
             PreviewDecodeAdaptiveHints::default(),
         );
-        assert_eq!(near_next_keyframe_scrub.forward_decode_budget_frames, 33);
+        assert_eq!(
+            near_next_keyframe_scrub.forward_decode_budget_frames,
+            PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES
+        );
 
         let unindexed_scrub = scrub.adapt_for_request(
             &PreviewSeekIndex::default(),
@@ -5230,7 +5324,7 @@ mod tests {
     }
 
     #[test]
-    fn cpu_rgba_contract_rejects_matrix_conflicts_and_constant_luminance() {
+    fn cpu_rgba_contract_keeps_explicit_matrix_and_rejects_constant_luminance() {
         let mut conflict = ffmpeg::util::frame::video::Video::new(
             ffmpeg::util::format::pixel::Pixel::YUV420P,
             16,
@@ -5238,13 +5332,13 @@ mod tests {
         );
         conflict.set_color_space(ffmpeg::util::color::Space::BT709);
         conflict.set_color_range(ffmpeg::util::color::Range::MPEG);
-        let error = resolve_cpu_rgba_contract(
+        let contract = resolve_cpu_rgba_contract(
             &conflict,
             PreviewSourceColorContract::new(ColorSpace::Rec2020, DecodedVideoRange::Limited),
             Path::new("conflict.mov"),
         )
-        .expect_err("conflicting standardized matrix facts must fail closed");
-        assert!(error.to_string().contains("conflicts"));
+        .expect("explicit decoded matrix remains authoritative");
+        assert_eq!(contract.applied_matrix, DecodedVideoMatrix::Bt709);
 
         conflict.set_color_space(ffmpeg::util::color::Space::BT2020CL);
         let error = resolve_cpu_rgba_contract(
@@ -5954,6 +6048,46 @@ mod tests {
             .expect("canceled decode should not fail missing media");
 
         assert!(matches!(outcome, PreviewDecodeOutcome::Canceled));
+    }
+
+    #[test]
+    fn playback_session_drains_reordered_frames_between_sequential_requests() {
+        const FIXTURE: &[u8] = include_bytes!("../../../tests/fixtures/small/h264-bframes.mp4");
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("h264-bframes.mp4");
+        std::fs::write(&path, FIXTURE).expect("write synthetic H.264 fixture");
+        clear_global_preview_frame_cache();
+        clear_thread_local_preview_decode_session();
+
+        let mut decoded_pixels = Vec::new();
+        for index in 5..20 {
+            let request = PreviewDecodeRequest::new(
+                path.as_path(),
+                f64::from(index) / 25.0,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                test_source_color(),
+            )
+            .with_max_size(Some(64), Some(64));
+            let outcome = decode_preview_frame_cancellable(request, || false)
+                .expect("sequential B-frame playback request must decode");
+            let PreviewDecodeOutcome::Frame(frame) = outcome else {
+                panic!("CPU playback fixture must return an RGBA frame");
+            };
+            if index > 5 {
+                assert!(
+                    frame.diagnostics.session_reused,
+                    "sequential playback requests must exercise one decoder session"
+                );
+            }
+            decoded_pixels.push(frame.rgba().to_vec());
+        }
+
+        assert!(
+            decoded_pixels.windows(2).any(|frames| frames[0] != frames[1]),
+            "the moving fixture must produce distinct decoded frames"
+        );
+        clear_thread_local_preview_decode_session();
+        clear_global_preview_frame_cache();
     }
 
     #[test]

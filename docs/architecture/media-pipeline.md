@@ -90,8 +90,10 @@ NLEs separate playback, interactive navigation, and precise still extraction:
 Every request also carries a required `PreviewSourceColorContract`: the
 app-resolved input/source color space plus the ingest quantization range. CPU
 decode resolves each YUV frame's matrix and range from decoder metadata, using
-the request contract only for explicitly missing facts, and rejects conflicts,
-unknown facts, and unsupported matrices such as BT.2020 constant luminance.
+the request contract only for explicitly missing facts. An explicit decoded
+matrix is authoritative for YCbCr-to-RGB sampling even when it differs from the
+resolved RGB source color space; those are independent CICP facts. Decode still
+rejects unknown facts and unsupported matrices such as BT.2020 constant luminance.
 Before `sws_scale`, media configures `sws_setColorspaceDetails` with the exact
 matrix, input range, and full-range RGBA output. FFmpeg/swscale defaults are not
 part of Mondrian's color contract.
@@ -107,6 +109,14 @@ priority admission, current/prefetch cancellation, queue diagnostics, and
 timeout reporting around that media request. Do not add mode-specific public
 helpers or a second preview decode pool; they become compatibility debt and
 split future hardware/low-copy routing across shallow wrappers.
+
+Packaged applications carry their complete non-system media/color runtime
+closure. Windows places vcpkg/`FFMPEG_DIR` DLLs beside the executable, Linux
+places collected shared objects under `lib/` with relative RPATH, and macOS
+places dylibs in the app bundle's `Contents/Frameworks` with rewritten install
+names. Every release stage runs `--verify-runtime` in a sanitized environment;
+product startup must not depend on Cargo's test-only search path, Homebrew, or a
+developer-specific `PATH`.
 `PreviewDecodeAccessMode` intentionally has no default value, and serialized
 decode diagnostics must include it. Missing access-mode evidence is a diagnostic
 coverage bug, not a reason to assume still-frame semantics.
@@ -202,6 +212,13 @@ cache and are reported as `PlaybackSessionRingHit`; they are not available to
 scrub or still-frame requests. This keeps continuous playback locality inside
 the media access-mode implementation rather than scattering playback caches
 through app UI code.
+Forward session reuse must also preserve FFmpeg's send/receive backpressure
+contract. A request may return as soon as its target frame is available while a
+frame-threaded decoder still has reordered output queued. The next request
+drains and considers that output before submitting another packet; it must not
+discard those frames or treat `AVERROR(EAGAIN)` from `avcodec_send_packet` as a
+terminal media failure. This keeps sequential playback frame-exact and avoids
+reopening or seeking a healthy decoder merely to clear its output queue.
 Access-mode decode behavior is centralized in a media-layer policy, not in app
 conditionals or FFmpeg call sites. Playback has the widest mostly-forward
 session reuse window, the playback ring, and the exact-path forward decode
@@ -214,6 +231,21 @@ preserves still-frame correctness while preventing latest-wins scrubbing from
 spending the same long-GOP CPU budget as deterministic extraction, and leaves a
 clear replacement point for future hardware-resident playback and low-latency
 scrub backends.
+
+The normal scrub budget derived from an indexed keyframe includes
+decoder-reordering headroom and retains the unindexed safety floor.
+Frame-threaded codecs and imperfect container indexes can make the actual
+decode distance exceed the simple presentation-frame distance, so that
+distance alone is not a safe stopping point. Adaptive hot/slow/recovery modes
+may still tighten that floor because newer input cooperatively cancels their
+work. Timeout and forward-budget exhaustion are transient scheduling outcomes
+and must not enter the terminal media-failure cache; a settled deterministic
+request for the same frame must remain eligible to retry exactly.
+Likewise, completion of a canceled current scrub or still request schedules one
+follow-up render pass so the settled position can submit fresh work after its
+scheduler entry is released. Playback deadline cancellations do not use this
+rule, because immediate resubmission would create a realtime retry loop.
+
 Every preview decode diagnostic emitted by `mondrian-media` must carry the
 resolved access-mode policy contract alongside the observed result:
 `seek_strategy`, `forward_reuse_frame_window`,
@@ -225,7 +257,17 @@ media contract, not a UI presentation issue.
 Each in-process preview decode session also maintains a session-local,
 incremental keyframe seek index from video packet metadata observed during real
 decode work. The index may bound later seeks to an already-known keyframe
-anchor, but it must not perform a blocking whole-file scan on first frame or
+anchor. When bounded scrub selects such an anchor, the requested presentation
+timestamp remains the demux seek target and the seek uses keyframe-safe
+backward semantics with the same bounds as deterministic extraction: the
+anchor is the minimum and the requested timestamp is both target and maximum.
+An indexed anchor is eligible when its presentation-frame distance fits the
+active forward-decode budget; the millisecond any-frame window is only the
+unindexed fallback. This prevents a normal GOP just outside an arbitrary time
+window from being discarded even though it is cheap enough to decode. It also
+prevents the demuxer from selecting the following GOP. `AVSEEK_FLAG_ANY` is reserved for the
+unindexed bounded-window fallback; decoding then
+advances to the requested PTS. The index must not perform a blocking whole-file scan on first frame or
 pretend that unknown GOP structure is known. This is a CPU fallback bridge
 toward a real GOP/keyframe map: future probe-backed indexes and hardware
 decode session adapters should replace the evidence source behind the media

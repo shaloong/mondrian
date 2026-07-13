@@ -887,6 +887,16 @@ impl AppUiPreviewService {
                         mondrian_playback::FrameDeliveryKind::Canceled,
                     ));
                 }
+                // A settled scrub/still request can be cooperatively canceled
+                // while the render generation changes. Its completion releases
+                // the scheduler entry, so request one more render pass to submit
+                // the stable current frame. Playback deadline cancellation is
+                // intentionally excluded to avoid a realtime retry loop.
+                if result.priority == MediaPreviewRequestPriority::Current
+                    && result.access_mode != PreviewDecodeAccessMode::PlaybackCursor
+                {
+                    outcome.visible_change = true;
+                }
                 continue;
             }
             let completed_after_playback_deadline =
@@ -945,7 +955,9 @@ impl AppUiPreviewService {
                     outcome.visible_change |= completion.is_current();
                 }
                 None => {
-                    if completion.is_current() {
+                    let terminal_failure =
+                        result.failure_reason == Some(MediaPreviewFailureReason::DecodeError);
+                    if completion.is_current() && terminal_failure {
                         self.frame_store.borrow_mut().clear_pinned_media_frame();
                     }
                     self.record_preview_decode_failure(result.access_mode, result.failure_reason);
@@ -959,10 +971,10 @@ impl AppUiPreviewService {
                     if completed_after_playback_deadline {
                         continue;
                     }
-                    if completion.should_cache() {
+                    if completion.should_cache() && terminal_failure {
                         self.frame_store.borrow_mut().remember_failure(result.key);
                     }
-                    outcome.visible_change |= completion.is_current();
+                    outcome.visible_change |= completion.is_current() && terminal_failure;
                 }
             }
         }
@@ -15958,6 +15970,52 @@ mod tests {
         );
         assert_eq!(service.scheduler.diagnostics().pending_requests, 1);
         assert_eq!(service.diagnostics().decode_canceled_jobs, 1);
+        service.shutdown();
+    }
+
+    #[test]
+    fn canceled_current_scrub_requests_follow_up_render_for_settled_frame() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let result_tx = install_preview_result_channel_for_test(&service);
+        let generation = service.scheduler.begin_generation();
+        let key = test_media_key(91);
+        assert!(matches!(
+            service.scheduler.request(
+                key.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::ScrubCursor,
+            ),
+            MediaPreviewRequestStatus::Scheduled { .. }
+        ));
+        result_tx
+            .send(media_preview_canceled_result(
+                MediaPreviewJob {
+                    key,
+                    source_secs: 3.0,
+                    generation,
+                    priority: MediaPreviewRequestPriority::Current,
+                    access_mode: PreviewDecodeAccessMode::ScrubCursor,
+                    adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                    hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                    enqueued_at: Instant::now(),
+                    deadline_at: None,
+                    demand_identity: None,
+                    execution_id: None,
+                },
+                1_000,
+                MediaPreviewCancelReason::Obsolete,
+                1_000,
+                Some(1_000),
+            ))
+            .expect("send canceled scrub result");
+
+        let outcome = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5));
+
+        assert!(
+            outcome.visible_change,
+            "settled non-playback work must get a render pass after cancellation"
+        );
         service.shutdown();
     }
 
