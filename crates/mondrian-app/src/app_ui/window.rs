@@ -1347,8 +1347,8 @@ impl WindowViewerGpuPresentationState {
 
 /// Run the app UI Mondrian editor window.
 pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
-    let _background_runtime = build_app_ui_background_runtime()?;
-    let _background_runtime_guard = _background_runtime.enter();
+    let background_runtime = build_app_ui_background_runtime()?;
+    let background_runtime_guard = background_runtime.enter();
     init_app_ui_tracing();
 
     tracing::info!("Mondrian app UI starting");
@@ -1934,7 +1934,21 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
         }
     })?;
 
+    // Dropping a Tokio runtime waits indefinitely for blocking tasks. Once the
+    // native event loop has exited there is no UI left to observe those tasks,
+    // so bound shutdown instead of leaving a headless Mondrian process behind.
+    drop(background_runtime_guard);
+    background_runtime.shutdown_timeout(Duration::from_millis(250));
+
     Ok(())
+}
+
+#[cfg(not(test))]
+pub(crate) fn arm_process_exit_watchdog() {
+    let _ = std::thread::Builder::new().name("mondrian-exit-watchdog".to_owned()).spawn(|| {
+        std::thread::sleep(Duration::from_millis(750));
+        std::process::exit(0);
+    });
 }
 
 fn init_app_ui_tracing() {

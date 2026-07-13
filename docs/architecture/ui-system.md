@@ -312,3 +312,17 @@ of showing a generic empty viewer. The status should remain warning-toned and
 the empty message should include the rejected media path, missing-metadata
 policy, input-resolution branch, and media diagnostic summary. This keeps
 fail-closed color behavior visible without scraping tracing logs.
+The native app entrypoint owns a four-thread Tokio runtime for background UI
+work. After the event loop exits, the runtime is shut down with a bounded
+timeout rather than dropped normally: Tokio's default runtime drop can wait
+indefinitely for blocking tasks and leave a headless Mondrian process after the
+window has closed. Background operations must therefore treat cancellation as
+cooperative and may not rely on an unbounded runtime drain during process exit.
+Once action draining produces a quit command, the host returns it immediately;
+it must not refresh or lay out the widget tree after the preview service and
+project state have already begun shutdown.
+When the host begins a confirmed quit (after any unsaved-work decision), a
+short process-exit watchdog gives preview, project, runtime, and GPU resource
+destruction a final bounded opportunity to finish.
+If a platform driver blocks closure destruction, the watchdog terminates the
+already-cleaned process instead of leaving a ghost or unresponsive window.

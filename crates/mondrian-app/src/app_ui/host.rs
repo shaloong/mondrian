@@ -498,10 +498,16 @@ impl AppUiHost {
         let mut needs_layout = false;
         for action in actions {
             if self.take_pending_close_response(&mut commands, &action) {
+                if commands.quit {
+                    return commands;
+                }
                 needs_layout = true;
                 continue;
             }
             if self.take_guarded_close_or_quit(&mut commands, &action) {
+                if commands.quit {
+                    return commands;
+                }
                 needs_layout = true;
                 continue;
             }
@@ -982,6 +988,8 @@ impl AppUiHost {
                 self.mark_dirty();
             }
             PendingCloseAction::QuitApp => {
+                #[cfg(not(test))]
+                super::window::arm_process_exit_watchdog();
                 self.preview_service.shutdown();
                 if self.app_state.borrow().has_open_project() {
                     if let Err(err) = self.dispatch_editor_action(Action::CloseProject) {
