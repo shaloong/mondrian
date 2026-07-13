@@ -28,6 +28,11 @@ pub(crate) fn ensure_ffmpeg_initialized(path: &Path) -> Result<()> {
     }
 }
 
+/// Verify that the linked FFmpeg runtime can be initialized by a packaged app.
+pub fn verify_ffmpeg_runtime() -> Result<()> {
+    ensure_ffmpeg_initialized(Path::new("<packaged-runtime>"))
+}
+
 pub(crate) fn ffmpeg_log_level_from_env_value(value: Option<String>) -> i32 {
     value
         .map(|value| value.to_ascii_lowercase())

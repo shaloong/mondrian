@@ -92,10 +92,12 @@ git push origin v0.1.1
 
 说明：
 
-- Release 工作流会为 Linux/macOS/Windows 构建并上传产物。
+- Release 工作流会为 Linux/macOS/Windows 构建自包含运行时并上传产物。
 - Linux 构建依赖 `libasound2-dev`（用于 `alsa-sys`）。
 - Windows 构建使用 vcpkg 安装 FFmpeg，并导出 `VCPKG_ROOT`、`PKG_CONFIG_PATH` 等环境变量。
 - Windows Release 包会同时包含 `mondrian.exe` 与 FFmpeg 运行时 DLL（`avcodec-*`、`avformat-*`、`avutil-*` 等）。
+- Linux Release 包会递归收集非基础系统动态库到 `lib/`，并使用相对 RPATH；macOS Release 包会生成 `.app`，把非系统 dylib 放入 `Contents/Frameworks` 并重写加载路径。
+- 三个平台都必须在净化环境中执行 `mondrian --verify-runtime`，FFmpeg 或 OCIO 运行时缺失会直接阻止发布产物上传。
 - `workflow_dispatch` 可用于手动 dry-run 验证构建，不会自动创建 GitHub Release。
 
 ## 测试要求

@@ -34,6 +34,7 @@ pub use decoder::{
     HwAccelBackend, HwAccelCodecConfigMethods, HwAccelCodecConfigProbe, HwAccelDeviceContextProbe,
     HwAccelPixelFormat, HwAccelProbe,
 };
+pub use ffmpeg_runtime::verify_ffmpeg_runtime;
 pub use info::{
     AudioStreamInfo, DetectedColorInterpretation, MediaInfo, VideoCodecProfile,
     VideoColorDetectionMethod, VideoColorDiagnostic, VideoColorDiagnosticIssueAggregate,

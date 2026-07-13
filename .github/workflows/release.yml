@@ -82,13 +82,13 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
             libavdevice-dev libswscale-dev libswresample-dev \
-            libasound2-dev pkg-config
+            libasound2-dev pkg-config patchelf pax-utils
 
       # ── macOS ──────────────────────────────────────────────────────────────
       - name: 安装 FFmpeg 与系统依赖 (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install ffmpeg pkg-config
+          brew install ffmpeg pkg-config dylibbundler
 
       # ── Windows ────────────────────────────────────────────────────────────
       - name: 缓存 vcpkg (Windows)
@@ -247,12 +247,63 @@ jobs:
           }
 
           Copy-Item -Path "$dllSource\*.dll" -Destination $stageDir -Force
+          & (Join-Path $stageDir 'mondrian.exe') --verify-runtime
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Packaged Windows runtime verification failed"
+          }
           Compress-Archive -Path "$stageDir\*" -DestinationPath $env:PACKAGE_PATH
 
-      - name: 打包 (Unix)
-        if: runner.os != 'Windows'
+      - name: 打包并验证 (Linux)
+        if: runner.os == 'Linux'
         run: |
-          tar -czf "$PACKAGE_PATH" "$BIN_PATH"
+          set -euo pipefail
+          stage_dir="$PACKAGE_NAME"
+          mkdir -p "$stage_dir/lib"
+          cp "$BIN_PATH" "$stage_dir/mondrian"
+
+          while IFS= read -r dependency; do
+            [ -f "$dependency" ] || continue
+            name="$(basename "$dependency")"
+            case "$name" in
+              ld-linux*|libc.so*|libm.so*|libdl.so*|libpthread.so*|librt.so*|libgcc_s.so*|libstdc++.so*)
+                continue
+                ;;
+            esac
+            cp -L "$dependency" "$stage_dir/lib/$name"
+          done < <(lddtree -l "$stage_dir/mondrian" | sort -u)
+
+          patchelf --set-rpath '$ORIGIN/lib' "$stage_dir/mondrian"
+          for library in "$stage_dir"/lib/*.so*; do
+            patchelf --set-rpath '$ORIGIN' "$library"
+          done
+          if ldd "$stage_dir/mondrian" | grep -q 'not found'; then
+            ldd "$stage_dir/mondrian"
+            exit 1
+          fi
+          env -i PATH=/usr/bin:/bin HOME="$HOME" "$stage_dir/mondrian" --verify-runtime
+          tar -czf "$PACKAGE_PATH" "$stage_dir"
+
+      - name: 打包并验证 (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          stage_dir="$PACKAGE_NAME"
+          app_dir="$stage_dir/Mondrian.app"
+          executable_dir="$app_dir/Contents/MacOS"
+          frameworks_dir="$app_dir/Contents/Frameworks"
+          mkdir -p "$executable_dir" "$frameworks_dir"
+          cp "$BIN_PATH" "$executable_dir/mondrian"
+          dylibbundler \
+            -od -b \
+            -x "$executable_dir/mondrian" \
+            -d "$frameworks_dir" \
+            -p '@executable_path/../Frameworks/'
+          if otool -L "$executable_dir/mondrian" | grep -E '/(opt/homebrew|usr/local)/'; then
+            echo 'Packaged macOS executable still references Homebrew libraries'
+            exit 1
+          fi
+          env -i PATH=/usr/bin:/bin HOME="$HOME" "$executable_dir/mondrian" --verify-runtime
+          tar -czf "$PACKAGE_PATH" "$stage_dir"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
