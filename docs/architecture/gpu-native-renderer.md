@@ -513,6 +513,11 @@ closed when the link plan still reports blockers. The combined source is
 diagnostic text only. Because these are stage-split GLSL artifacts parsed by
 Naga, the backend entry point for each stage is `main`; vertex and fragment
 stages live in separate modules.
+The wrapper snapshots incoming alpha before calling the OCIO-generated RGB
+program and restores it afterward. CPU execution uses OCIO's strided RGB
+processor on interleaved RGBA for the same contract. Program color transforms
+therefore cannot perturb straight or premultiplied coverage; alpha and data
+semantics stay owned by the compositor rather than the display processor.
 `OcioGpuWgpuRenderPipelineDescriptorPlan` consumes the wrapper-link plan and
 captures the output target format plus render-pipeline descriptor hash.
 `OcioGpuWgpuWrapperShaderModuleArtifactCache` translates the wrapper source
@@ -600,7 +605,10 @@ parity within tolerance, then adds fixed checks, root causes, actions, and
 evidence. The renderer exposes that contract through
 `RenderGpuOutputHealthReport` plus the serializable frame/stage/runtime report
 types, so smoke output and downstream tooling share one schema owned by
-`mondrian-renderer`. This smoke proves renderer-side upload + native GPU OCIO + readback sequencing; it does not prove OS
+`mondrian-renderer`. Schema v2 names the boundary input explicitly as
+`working_color_space`; an output-boundary report must never relabel its
+scene-linear input as an encoded camera/display `ColorSpace`. This smoke proves
+renderer-side upload + native GPU OCIO + readback sequencing; it does not prove OS
 swapchain/display-management correctness, which remains the app-window display
 contract's responsibility.
 The app UI wgpu window session owns one `RenderGpuOutputBoundaryRuntime` for
@@ -651,7 +659,7 @@ Viewer preview evaluation now splits at the correct boundary:
 `CpuColorFrame`, while the app window validates the requested display boundary
 against that contract and records the display/output boundary through the
 session-owned GPU runtime. Unsupported presentation requests, such as HDR output
-on an SDR-only surface, DCI-P3 output on an sRGB surface, Rec.2020 SDR output
+on an SDR-only surface, Display P3 output on an sRGB surface, Rec.2020 SDR output
 with no direct wgpu presentation color space, or camera-log output treated as a
 display space, are structured blockers rather than implicit SDR or OS/backend
 fallbacks. Window resize, scale-factor, and move events refresh the
@@ -795,3 +803,13 @@ that readback must remain explicit in the plan and report. A future encoder path
 may move readback behind an API that still reports parity or staged transfer
 intent. Until that exists, readback reasons and blockers stay part of the
 export color health contract.
+
+## Viewer Resource Reuse
+
+Viewer spatial prefilter, separable Lanczos, working composite, OCIO output, and
+optional ICC display-calibration output textures share one device-scoped,
+exact-contract, byte-bounded resource pool.
+Frame-local handles remain strongly typed and monotonic, while submitted texture
+storage is returned to the pool without a CPU completion wait and reused only
+through ordered queue semantics. Device reset first returns every stage's frame
+resources and then clears the shared pool, preventing stale-device reuse.

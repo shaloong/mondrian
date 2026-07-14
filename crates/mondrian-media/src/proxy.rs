@@ -959,8 +959,12 @@ mod tests {
         let generator = ProxyGenerator::new(ProxyConfig::default());
         let pq = ProxyColorContract::try_new(ColorSpace::Rec2100Pq, 10, DecodedVideoRange::Limited)
             .expect("valid PQ contract");
-        let log = ProxyColorContract::try_new(ColorSpace::SLog3, 10, DecodedVideoRange::Full)
-            .expect("valid log contract");
+        let log = ProxyColorContract::try_new(
+            ColorSpace::SonySLog3SGamut3Cine,
+            10,
+            DecodedVideoRange::Full,
+        )
+        .expect("valid log contract");
 
         assert_eq!(
             generator.encoding_profile(pq).expect("PQ profile"),
@@ -1034,8 +1038,12 @@ mod tests {
 
     #[test]
     fn log_proxy_command_does_not_emit_false_standardized_tags() {
-        let color = ProxyColorContract::try_new(ColorSpace::SLog3, 10, DecodedVideoRange::Full)
-            .expect("valid log contract");
+        let color = ProxyColorContract::try_new(
+            ColorSpace::SonySLog3SGamut3Cine,
+            10,
+            DecodedVideoRange::Full,
+        )
+        .expect("valid log contract");
         let command = ffmpeg_proxy_command(
             ProxyEncodingProfile::H265Main10,
             20,

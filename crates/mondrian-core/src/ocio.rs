@@ -1,9 +1,10 @@
 //! OCIO (OpenColorIO) integration for color management.
 //!
 //! Color transforms are delegated to an OCIO v2.5.2 config whenever a config /
-//! processor can be resolved. `ColorEngine::MondrianSmart` is the productized
+//! processor can be resolved. `ColorEngine::mondrian_standard()` is the productized
 //! default policy and resolves to Mondrian's built-in OCIO config; custom OCIO
-//! mode resolves from [`OcioConfigSource`].
+//! ACES resolves from a pinned official preset, while Custom OCIO resolves from
+//! an explicit [`OcioConfigSource`].
 //!
 //! The config source is determined by [`OcioConfigSource`]:
 //!
@@ -12,14 +13,23 @@
 //! 3. **Path** — explicit `config.ocio` file path
 //! 4. **Environment** — explicit `$OCIO` env var
 
-use crate::types::{ColorSpace, OcioColorSpaceIdentity, OcioConfigSource, WorkingColorSpace};
+use crate::types::{
+    ColorSpace, MondrianStandardPackageIdentity, MondrianStandardVersion, OcioColorSpaceIdentity,
+    OcioConfigSource, WorkingColorSpace,
+};
 pub use ocio_rs::GpuLanguage;
 use ocio_rs::{
-    BuiltinConfigRegistry, CPUProcessor, Config, GpuShaderDesc,
+    transform::{
+        AllocationTransform, BuiltinTransform, ColorSpaceTransform, GroupTransform, Lut3DTransform,
+        MatrixTransform,
+    },
+    Allocation, BuiltinConfigRegistry, CPUProcessor, Config, GpuShaderDesc,
     GpuTextureChannel as OcioRsGpuTextureChannel,
     GpuTextureDimensions as OcioRsGpuTextureDimensions, GpuUniformType as OcioRsGpuUniformType,
     GpuUniformValue as OcioRsGpuUniformValue, Interpolation as OcioRsInterpolation,
+    ReferenceSpaceType, ViewTransform, ViewTransformDirection,
 };
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 // ── Global OCIO state ──────────────────────────────────────────────────────────
@@ -105,15 +115,70 @@ pub fn ocio_config_source() -> Option<OcioConfigSource> {
 /// Intended name for Mondrian's bundled default OCIO config.
 pub const MONDRIAN_DEFAULT_OCIO_CONFIG_NAME: &str = "mondrian_default_ocio_v1";
 
+/// SHA-256 digest pinned to the exact OCIO text shipped by Mondrian Standard v1.
+pub const MONDRIAN_DEFAULT_OCIO_CONFIG_SHA256: &str =
+    MondrianStandardPackageIdentity::V1.config_sha256();
+/// SHA-256 over the versioned config text and every embedded Standard resource.
+pub const MONDRIAN_DEFAULT_OCIO_PACKAGE_SHA256: &str =
+    MondrianStandardPackageIdentity::V1.package_sha256();
+
 const MONDRIAN_DEFAULT_OCIO_VIRTUAL_PATH: &str = "embedded:mondrian_default_ocio_v1";
 const MONDRIAN_DEFAULT_OCIO_CONFIG: &str =
     include_str!("../assets/ocio/mondrian_default_ocio_v1.ocio");
 
+const MONDRIAN_STANDARD_SDR_VIEW_NAME: &str = "Mondrian Standard SDR v1";
+const MONDRIAN_STANDARD_SDR_LUT_NAME: &str = "mondrian_standard_sdr_rec709_v1.cube";
+const MONDRIAN_STANDARD_SDR_LUT_SHA256: &str =
+    "02f4d185608daa67fda01a1a48529bbc1533c8afdc826cde5c78f2eb5bb1b839";
+const MONDRIAN_STANDARD_SDR_LUT: &str =
+    include_str!("../assets/ocio/mondrian_standard_sdr_rec709_v1.cube");
+const MONDRIAN_STANDARD_SDR_LUT_EDGE: usize = 57;
+const MONDRIAN_STANDARD_ASSEMBLY_MANIFEST: &str = concat!(
+    "mondrian-standard-assembly-v1\n",
+    "working=Linear Rec.2020\n",
+    "view=Mondrian Standard SDR v1\n",
+    "scene_reference=UTILITY - ACES-AP0_to_CIE-XYZ-D65_BFD\n",
+    "formation_gamut=FilmLight E-Gamut\n",
+    "shaper=log2[-12.47393,12.5260688117]\n",
+    "formation_lut=mondrian_standard_sdr_rec709_v1.cube;edge=57;interpolation=tetrahedral\n",
+    "display_reference=CIE XYZ-D65 - Display-referred\n",
+    "displays=sRGB - Display,Gamma 2.2 Rec.709 - Display,Rec.1886 Rec.709 - Display,Display P3 - Display\n",
+);
+const MONDRIAN_STANDARD_SDR_ALLOCATION_VARS: [f32; 2] = [-12.47393, 12.526_069];
+
+// FilmLight E-Gamut XYZ D65 -> RGB matrix used by the pinned AgX formation
+// resource. The preceding built-in converts Mondrian's AP0 scene reference to
+// CIE XYZ D65, keeping chromatic adaptation inside stock OCIO.
+const XYZ_D65_TO_FILMLIGHT_E_GAMUT: [f64; 16] = [
+    1.525_052_8,
+    -0.315_913_5,
+    -0.122_658_3,
+    0.0,
+    -0.509_152_6,
+    1.333_327_4,
+    0.138_284_4,
+    0.0,
+    0.095_715_3,
+    0.050_897_4,
+    0.787_955_8,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+];
+
 /// Product-level contract for Mondrian's embedded default OCIO config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MondrianDefaultOcioContract {
+    /// Versioned Mondrian Standard package semantics.
+    pub standard_version: MondrianStandardVersion,
     /// Pinned OCIO config name.
     pub config_name: &'static str,
+    /// SHA-256 digest of the exact embedded OCIO config text.
+    pub content_sha256: &'static str,
+    /// SHA-256 digest covering the config and all embedded resources.
+    pub package_sha256: &'static str,
     /// Virtual path used when the embedded config is loaded into process state.
     pub virtual_path: &'static str,
     /// Default display selected by Standard mode.
@@ -122,10 +187,23 @@ pub struct MondrianDefaultOcioContract {
     pub default_view: &'static str,
     /// Scene-linear working role expected by Mondrian's internal compositor.
     pub scene_linear_role: &'static str,
+    /// Scene-linear wide-gamut working space pinned by Standard v1.
+    pub working_space: WorkingColorSpace,
     /// Mondrian color spaces that must be present in the embedded config.
     pub color_spaces: &'static [MondrianDefaultOcioColorSpace],
     /// Product-supported display/view pairs that must be present in the embedded config.
     pub display_views: &'static [MondrianDefaultOcioDisplayView],
+    /// Immutable non-config resources assembled into the in-memory OCIO package.
+    pub resources: &'static [MondrianDefaultOcioResource],
+}
+
+/// One immutable resource assembled into Mondrian Standard's stock OCIO config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MondrianDefaultOcioResource {
+    /// Stable package-local resource name.
+    pub name: &'static str,
+    /// SHA-256 of the exact embedded bytes.
+    pub content_sha256: &'static str,
 }
 
 /// One Mondrian [`ColorSpace`] mapping guaranteed by the embedded OCIO config.
@@ -149,14 +227,22 @@ pub struct MondrianDefaultOcioDisplayView {
 /// Structured validation summary for Mondrian's embedded OCIO config asset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MondrianDefaultOcioValidationReport {
+    /// Mondrian Standard package version that was validated.
+    pub standard_version: MondrianStandardVersion,
     /// Parsed config name.
     pub config_name: String,
+    /// SHA-256 digest computed from the validated embedded config text.
+    pub content_sha256: String,
+    /// SHA-256 digest computed across config and embedded resources.
+    pub package_sha256: String,
     /// Number of OCIO color spaces in the embedded config.
     pub color_space_count: i32,
     /// Number of Mondrian color-space mappings validated against OCIO canonical names.
     pub color_space_mappings_checked: usize,
     /// Number of product display/view pairs validated against the config.
     pub display_views_checked: usize,
+    /// Number of immutable package resources whose digest and structure were validated.
+    pub resources_checked: usize,
     /// Number of scene/display roles validated.
     pub roles_checked: usize,
     /// Number of color-space CPU processors built from the contract matrix.
@@ -194,7 +280,7 @@ impl std::fmt::Display for MondrianDefaultOcioValidationError {
 
 impl std::error::Error for MondrianDefaultOcioValidationError {}
 
-const MONDRIAN_DEFAULT_OCIO_COLOR_SPACES: [MondrianDefaultOcioColorSpace; 11] = [
+const MONDRIAN_DEFAULT_OCIO_COLOR_SPACES: [MondrianDefaultOcioColorSpace; 20] = [
     MondrianDefaultOcioColorSpace {
         color_space: ColorSpace::Rec709,
         ocio_name: "Camera Rec.709",
@@ -224,27 +310,63 @@ const MONDRIAN_DEFAULT_OCIO_COLOR_SPACES: [MondrianDefaultOcioColorSpace; 11] = 
         ocio_name: "Linear Rec.2020",
     },
     MondrianDefaultOcioColorSpace {
-        color_space: ColorSpace::DciP3,
+        color_space: ColorSpace::DisplayP3,
         ocio_name: "sRGB Encoded P3-D65",
     },
     MondrianDefaultOcioColorSpace {
-        color_space: ColorSpace::AppleLog,
+        color_space: ColorSpace::AppleLogBt2020,
         ocio_name: "Apple Log",
     },
     MondrianDefaultOcioColorSpace {
-        color_space: ColorSpace::SLog3,
+        color_space: ColorSpace::SonySLog3SGamut3,
+        ocio_name: "S-Log3 S-Gamut3",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::SonySLog3SGamut3Cine,
         ocio_name: "S-Log3 S-Gamut3.Cine",
     },
     MondrianDefaultOcioColorSpace {
-        color_space: ColorSpace::ArriLogC4,
+        color_space: ColorSpace::ArriLogC3WideGamut3,
+        ocio_name: "ARRI LogC3 (EI800)",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::ArriLogC4WideGamut4,
         ocio_name: "ARRI LogC4",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::CanonLog2CinemaGamutD55,
+        ocio_name: "CanonLog2 CinemaGamut D55",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::CanonLog3CinemaGamutD55,
+        ocio_name: "CanonLog3 CinemaGamut D55",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::PanasonicVLogVGamut,
+        ocio_name: "V-Log V-Gamut",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::RedLog3G10WideGamutRgb,
+        ocio_name: "Log3G10 REDWideGamutRGB",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::BlackmagicFilmWideGamutGen5,
+        ocio_name: "BMDFilm WideGamut Gen5",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::DjiDLogDGamut,
+        ocio_name: "D-Log D-Gamut",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::DavinciIntermediateWideGamut,
+        ocio_name: "DaVinci Intermediate WideGamut",
     },
 ];
 
-const MONDRIAN_DEFAULT_OCIO_DISPLAY_VIEWS: [MondrianDefaultOcioDisplayView; 7] = [
+const MONDRIAN_DEFAULT_OCIO_DISPLAY_VIEWS: [MondrianDefaultOcioDisplayView; 4] = [
     MondrianDefaultOcioDisplayView {
         display: "sRGB - Display",
-        view: "ACES 2.0 - SDR 100 nits (Rec.709)",
+        view: MONDRIAN_STANDARD_SDR_VIEW_NAME,
     },
     MondrianDefaultOcioDisplayView {
         display: "sRGB - Display",
@@ -252,25 +374,19 @@ const MONDRIAN_DEFAULT_OCIO_DISPLAY_VIEWS: [MondrianDefaultOcioDisplayView; 7] =
     },
     MondrianDefaultOcioDisplayView {
         display: "Rec.1886 Rec.709 - Display",
-        view: "ACES 2.0 - SDR 100 nits (Rec.709)",
+        view: MONDRIAN_STANDARD_SDR_VIEW_NAME,
     },
     MondrianDefaultOcioDisplayView {
         display: "Display P3 - Display",
-        view: "ACES 2.0 - SDR 100 nits (P3 D65)",
-    },
-    MondrianDefaultOcioDisplayView {
-        display: "Display P3 HDR - Display",
-        view: "ACES 2.0 - HDR 1000 nits (P3 D65)",
-    },
-    MondrianDefaultOcioDisplayView {
-        display: "Rec.2100-HLG - Display",
-        view: "ACES 2.0 - HDR 1000 nits (P3 D65)",
-    },
-    MondrianDefaultOcioDisplayView {
-        display: "Rec.2100-PQ - Display",
-        view: "ACES 2.0 - HDR 1000 nits (Rec.2020)",
+        view: MONDRIAN_STANDARD_SDR_VIEW_NAME,
     },
 ];
+
+const MONDRIAN_DEFAULT_OCIO_RESOURCES: [MondrianDefaultOcioResource; 1] =
+    [MondrianDefaultOcioResource {
+        name: MONDRIAN_STANDARD_SDR_LUT_NAME,
+        content_sha256: MONDRIAN_STANDARD_SDR_LUT_SHA256,
+    }];
 
 /// OCIO GPU function name generated for Mondrian wrapper shaders.
 pub const MONDRIAN_OCIO_GPU_FUNCTION_NAME: &str = "mondrian_ocio_main";
@@ -291,13 +407,18 @@ pub fn mondrian_default_ocio_config_text() -> &'static str {
 /// Return the product contract for Mondrian Standard mode's embedded OCIO config.
 pub fn mondrian_default_ocio_contract() -> MondrianDefaultOcioContract {
     MondrianDefaultOcioContract {
+        standard_version: MondrianStandardVersion::V1,
         config_name: MONDRIAN_DEFAULT_OCIO_CONFIG_NAME,
+        content_sha256: MONDRIAN_DEFAULT_OCIO_CONFIG_SHA256,
+        package_sha256: MONDRIAN_DEFAULT_OCIO_PACKAGE_SHA256,
         virtual_path: MONDRIAN_DEFAULT_OCIO_VIRTUAL_PATH,
         default_display: "sRGB - Display",
-        default_view: "ACES 2.0 - SDR 100 nits (Rec.709)",
-        scene_linear_role: "ACEScg",
+        default_view: MONDRIAN_STANDARD_SDR_VIEW_NAME,
+        scene_linear_role: "Linear Rec.2020",
+        working_space: WorkingColorSpace::LinearRec2020,
         color_spaces: &MONDRIAN_DEFAULT_OCIO_COLOR_SPACES,
         display_views: &MONDRIAN_DEFAULT_OCIO_DISPLAY_VIEWS,
+        resources: &MONDRIAN_DEFAULT_OCIO_RESOURCES,
     }
 }
 
@@ -309,23 +430,50 @@ pub fn mondrian_default_ocio_contract() -> MondrianDefaultOcioContract {
 /// non-identity pair and display/view transform can extract a GPU shader.
 pub fn validate_mondrian_default_ocio_contract(
 ) -> Result<MondrianDefaultOcioValidationReport, MondrianDefaultOcioValidationError> {
+    validate_mondrian_default_ocio_contract_text(MONDRIAN_DEFAULT_OCIO_CONFIG)
+}
+
+fn validate_mondrian_default_ocio_contract_text(
+    config_text: &str,
+) -> Result<MondrianDefaultOcioValidationReport, MondrianDefaultOcioValidationError> {
     let contract = mondrian_default_ocio_contract();
-    let config = match Config::from_stream(MONDRIAN_DEFAULT_OCIO_CONFIG) {
+    let content_sha256 = sha256_hex(config_text.as_bytes());
+    if content_sha256 != contract.content_sha256 {
+        return Err(MondrianDefaultOcioValidationError::new(vec![format!(
+            "embedded Mondrian OCIO config SHA-256 mismatch: expected '{}', got '{}'",
+            contract.content_sha256, content_sha256
+        )]));
+    }
+    let config = match build_mondrian_default_ocio_config(config_text) {
         Ok(config) => config,
         Err(err) => {
             return Err(MondrianDefaultOcioValidationError::new(vec![format!(
-                "embedded Mondrian OCIO config '{}' failed to parse: {err}",
+                "embedded Mondrian OCIO package '{}' failed to build: {err}",
                 contract.config_name
             )]));
         }
     };
+    let package_sha256 = match mondrian_default_package_sha256(config_text, &config, contract) {
+        Ok(digest) => digest,
+        Err(err) => return Err(MondrianDefaultOcioValidationError::new(vec![err])),
+    };
+    if package_sha256 != contract.package_sha256 {
+        return Err(MondrianDefaultOcioValidationError::new(vec![format!(
+            "embedded Mondrian OCIO package SHA-256 mismatch: expected '{}', got '{}'",
+            contract.package_sha256, package_sha256
+        )]));
+    }
 
     let mut errors = Vec::new();
     let mut report = MondrianDefaultOcioValidationReport {
+        standard_version: contract.standard_version,
         config_name: config.name().unwrap_or_default(),
+        content_sha256,
+        package_sha256,
         color_space_count: config.num_color_spaces(),
         color_space_mappings_checked: 0,
         display_views_checked: 0,
+        resources_checked: 0,
         roles_checked: 0,
         color_space_cpu_processors_checked: 0,
         color_space_gpu_processors_checked: 0,
@@ -334,6 +482,7 @@ pub fn validate_mondrian_default_ocio_contract(
     };
 
     validate_mondrian_default_config_identity(&config, contract, &mut report, &mut errors);
+    validate_mondrian_default_resources(contract, &mut report, &mut errors);
     validate_mondrian_default_color_spaces(&config, contract, &mut report, &mut errors);
     validate_mondrian_default_display_views(&config, contract, &mut report, &mut errors);
     validate_mondrian_default_color_space_processors(&config, contract, &mut report, &mut errors);
@@ -346,12 +495,371 @@ pub fn validate_mondrian_default_ocio_contract(
     }
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn mondrian_default_package_sha256(
+    config_text: &str,
+    config: &Config,
+    contract: MondrianDefaultOcioContract,
+) -> Result<String, String> {
+    let mut digest = Sha256::new();
+    digest.update(b"mondrian-standard-assembled-ocio-package-v1\0");
+    digest.update(config_text.as_bytes());
+    digest.update([0]);
+    digest.update(MONDRIAN_STANDARD_ASSEMBLY_MANIFEST.as_bytes());
+    digest.update([0]);
+    digest.update(MONDRIAN_STANDARD_SDR_LUT_NAME.as_bytes());
+    digest.update([0]);
+    digest.update(MONDRIAN_STANDARD_SDR_LUT.as_bytes());
+    digest.update([0]);
+    update_mondrian_default_processor_fingerprint(&mut digest, config, contract)?;
+    let digest = digest.finalize();
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    Ok(encoded)
+}
+
+fn update_mondrian_default_processor_fingerprint(
+    digest: &mut Sha256,
+    config: &Config,
+    contract: MondrianDefaultOcioContract,
+) -> Result<(), String> {
+    let working_name = ocio_color_space_name(ColorSpace::Rec2020);
+
+    for mapped in contract.color_spaces {
+        let source_name = ocio_color_space_name(mapped.color_space);
+        update_processor_fingerprint(
+            digest,
+            &format!("colorspace:{source_name}->{working_name}"),
+            config.processor(source_name, working_name).map_err(|err| {
+                format!(
+                    "embedded Mondrian OCIO package could not build semantic fingerprint processor '{source_name}->{working_name}': {err}"
+                )
+            })?,
+        )?;
+        update_processor_fingerprint(
+            digest,
+            &format!("colorspace:{working_name}->{source_name}"),
+            config.processor(working_name, source_name).map_err(|err| {
+                format!(
+                    "embedded Mondrian OCIO package could not build semantic fingerprint processor '{working_name}->{source_name}': {err}"
+                )
+            })?,
+        )?;
+    }
+
+    for display_view in contract.display_views {
+        update_processor_fingerprint(
+            digest,
+            &format!(
+                "display:{working_name}->{}/{}",
+                display_view.display, display_view.view
+            ),
+            config
+                .processor_display(
+                    working_name,
+                    display_view.display,
+                    display_view.view,
+                    ocio_rs::TransformDirection::Forward,
+                )
+                .map_err(|err| {
+                    format!(
+                        "embedded Mondrian OCIO package could not build semantic fingerprint display processor '{working_name}->{}/{}': {err}",
+                        display_view.display, display_view.view
+                    )
+                })?,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn update_processor_fingerprint(
+    digest: &mut Sha256,
+    label: &str,
+    processor: ocio_rs::Processor,
+) -> Result<(), String> {
+    update_fingerprint_field(digest, "processor", label);
+    let processor_cache_id = processor.cache_id().ok_or_else(|| {
+        format!("embedded Mondrian OCIO processor '{label}' has no semantic cache-id")
+    })?;
+    update_fingerprint_field(digest, "processor-cache-id", &processor_cache_id);
+
+    let cpu = processor.default_cpu_processor().map_err(|err| {
+        format!("embedded Mondrian OCIO processor '{label}' has no CPU implementation: {err}")
+    })?;
+    let cpu_cache_id = cpu.cache_id().ok_or_else(|| {
+        format!("embedded Mondrian OCIO CPU processor '{label}' has no semantic cache-id")
+    })?;
+    update_fingerprint_field(digest, "cpu-cache-id", &cpu_cache_id);
+
+    let gpu = processor.default_gpu_processor().map_err(|err| {
+        format!("embedded Mondrian OCIO processor '{label}' has no GPU implementation: {err}")
+    })?;
+    let gpu_cache_id = gpu.cache_id().ok_or_else(|| {
+        format!("embedded Mondrian OCIO GPU processor '{label}' has no semantic cache-id")
+    })?;
+    update_fingerprint_field(digest, "gpu-cache-id", &gpu_cache_id);
+    Ok(())
+}
+
+fn update_fingerprint_field(digest: &mut Sha256, kind: &str, value: &str) {
+    digest.update((kind.len() as u64).to_le_bytes());
+    digest.update(kind.as_bytes());
+    digest.update((value.len() as u64).to_le_bytes());
+    digest.update(value.as_bytes());
+}
+
+fn validate_mondrian_default_resources(
+    contract: MondrianDefaultOcioContract,
+    report: &mut MondrianDefaultOcioValidationReport,
+    errors: &mut Vec<String>,
+) {
+    for resource in contract.resources {
+        match resource.name {
+            MONDRIAN_STANDARD_SDR_LUT_NAME
+                if resource.content_sha256 == MONDRIAN_STANDARD_SDR_LUT_SHA256
+                    && sha256_hex(MONDRIAN_STANDARD_SDR_LUT.as_bytes())
+                        == resource.content_sha256 =>
+            {
+                report.resources_checked += 1;
+            }
+            MONDRIAN_STANDARD_SDR_LUT_NAME => errors.push(format!(
+                "resource '{}' digest contract does not match embedded content",
+                resource.name
+            )),
+            _ => errors.push(format!(
+                "resource '{}' has no embedded package implementation",
+                resource.name
+            )),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct ParsedCube3d {
+    edge: usize,
+    domain_min: [f64; 3],
+    domain_max: [f64; 3],
+    values: Vec<f64>,
+}
+
+fn parse_cube_3d(text: &str) -> Result<ParsedCube3d, String> {
+    let mut edge = None;
+    let mut domain_min = [0.0, 0.0, 0.0];
+    let mut domain_max = [1.0, 1.0, 1.0];
+    let mut values = Vec::new();
+
+    for (line_index, raw_line) in text.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("TITLE") {
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        let Some(first) = fields.next() else {
+            continue;
+        };
+        let line_number = line_index + 1;
+        match first {
+            "LUT_3D_SIZE" => {
+                let parsed = fields
+                    .next()
+                    .ok_or_else(|| format!("line {line_number}: LUT_3D_SIZE is missing"))?
+                    .parse::<usize>()
+                    .map_err(|err| format!("line {line_number}: invalid LUT_3D_SIZE: {err}"))?;
+                if fields.next().is_some() || !(2..=129).contains(&parsed) {
+                    return Err(format!(
+                        "line {line_number}: LUT_3D_SIZE must contain one edge in 2..=129"
+                    ));
+                }
+                edge = Some(parsed);
+            }
+            "DOMAIN_MIN" | "DOMAIN_MAX" => {
+                let mut parsed = [0.0; 3];
+                for channel in &mut parsed {
+                    *channel = fields
+                        .next()
+                        .ok_or_else(|| format!("line {line_number}: {first} needs 3 values"))?
+                        .parse::<f64>()
+                        .map_err(|err| {
+                            format!("line {line_number}: invalid {first} value: {err}")
+                        })?;
+                }
+                if fields.next().is_some() || parsed.iter().any(|value| !value.is_finite()) {
+                    return Err(format!(
+                        "line {line_number}: {first} must contain 3 finite values"
+                    ));
+                }
+                if first == "DOMAIN_MIN" {
+                    domain_min = parsed;
+                } else {
+                    domain_max = parsed;
+                }
+            }
+            _ => {
+                let mut row = Vec::with_capacity(3);
+                row.push(first);
+                row.extend(fields);
+                if row.len() != 3 {
+                    return Err(format!(
+                        "line {line_number}: LUT row must contain exactly 3 values"
+                    ));
+                }
+                for value in row {
+                    let parsed = value.parse::<f64>().map_err(|err| {
+                        format!("line {line_number}: invalid LUT value '{value}': {err}")
+                    })?;
+                    if !parsed.is_finite() {
+                        return Err(format!("line {line_number}: LUT value must be finite"));
+                    }
+                    values.push(parsed);
+                }
+            }
+        }
+    }
+
+    let edge = edge.ok_or_else(|| "LUT_3D_SIZE is missing".to_string())?;
+    let expected_values = edge
+        .checked_pow(3)
+        .and_then(|entries| entries.checked_mul(3))
+        .ok_or_else(|| "LUT_3D_SIZE overflows the host address space".to_string())?;
+    if values.len() != expected_values {
+        return Err(format!(
+            "LUT contains {} channel values; {edge}^3 requires {expected_values}",
+            values.len()
+        ));
+    }
+    if domain_min != [0.0, 0.0, 0.0] || domain_max != [1.0, 1.0, 1.0] {
+        return Err(format!(
+            "Mondrian Standard LUT requires normalized 0..1 domain, got {domain_min:?}..{domain_max:?}"
+        ));
+    }
+
+    Ok(ParsedCube3d { edge, domain_min, domain_max, values })
+}
+
+fn build_mondrian_standard_sdr_view(config: &Config) -> Result<(), String> {
+    let actual_digest = sha256_hex(MONDRIAN_STANDARD_SDR_LUT.as_bytes());
+    if actual_digest != MONDRIAN_STANDARD_SDR_LUT_SHA256 {
+        return Err(format!(
+            "embedded Mondrian Standard resource '{MONDRIAN_STANDARD_SDR_LUT_NAME}' failed integrity validation: expected SHA-256 '{MONDRIAN_STANDARD_SDR_LUT_SHA256}', got '{actual_digest}'"
+        ));
+    }
+    let cube = parse_cube_3d(MONDRIAN_STANDARD_SDR_LUT)
+        .map_err(|err| format!("failed to parse '{MONDRIAN_STANDARD_SDR_LUT_NAME}': {err}"))?;
+    if cube.edge != MONDRIAN_STANDARD_SDR_LUT_EDGE {
+        return Err(format!(
+            "'{MONDRIAN_STANDARD_SDR_LUT_NAME}' edge mismatch: expected {MONDRIAN_STANDARD_SDR_LUT_EDGE}, got {}",
+            cube.edge
+        ));
+    }
+
+    let ap0_to_xyz_d65 = BuiltinTransform::create().map_err(|err| err.to_string())?;
+    ap0_to_xyz_d65
+        .set_style("UTILITY - ACES-AP0_to_CIE-XYZ-D65_BFD")
+        .map_err(|err| err.to_string())?;
+
+    let xyz_to_egamut = MatrixTransform::create().map_err(|err| err.to_string())?;
+    xyz_to_egamut.set_matrix(&XYZ_D65_TO_FILMLIGHT_E_GAMUT);
+
+    let allocation = AllocationTransform::create().map_err(|err| err.to_string())?;
+    allocation.set_allocation(Allocation::Lg2);
+    allocation.set_vars(&MONDRIAN_STANDARD_SDR_ALLOCATION_VARS);
+
+    let formation = Lut3DTransform::create().map_err(|err| err.to_string())?;
+    formation.set_grid_size(cube.edge as u64);
+    formation.set_interpolation(OcioRsInterpolation::Tetrahedral);
+    formation.set_values(&cube.values);
+
+    let to_display_reference = ColorSpaceTransform::create().map_err(|err| err.to_string())?;
+    to_display_reference
+        .set_src("Rec.1886 Rec.709 - Display")
+        .map_err(|err| err.to_string())?;
+    to_display_reference
+        .set_dst("CIE XYZ-D65 - Display-referred")
+        .map_err(|err| err.to_string())?;
+
+    let group = GroupTransform::create().map_err(|err| err.to_string())?;
+    group.append_transform(&ap0_to_xyz_d65);
+    group.append_transform(&xyz_to_egamut);
+    group.append_transform(&allocation);
+    group.append_transform(&formation);
+    group.append_transform(&to_display_reference);
+
+    let view = ViewTransform::create(ReferenceSpaceType::Scene).map_err(|err| err.to_string())?;
+    view.set_name(MONDRIAN_STANDARD_SDR_VIEW_NAME).map_err(|err| err.to_string())?;
+    view.set_family("Mondrian Standard").map_err(|err| err.to_string())?;
+    view.set_description(
+        "Mondrian Standard v1 neutral scene-to-SDR formation: AP0 reference to FilmLight E-Gamut, log2 shaper, pinned AgX formation LUT, then display encoding.",
+    )
+    .map_err(|err| err.to_string())?;
+    view.set_transform(Some(&group), ViewTransformDirection::FromReference);
+    config.add_view_transform(&view);
+
+    config
+        .add_shared_view(
+            MONDRIAN_STANDARD_SDR_VIEW_NAME,
+            MONDRIAN_STANDARD_SDR_VIEW_NAME,
+            "<USE_DISPLAY_NAME>",
+            "",
+            "Any Scene-linear or Log",
+            "Mondrian Standard v1 SDR rendering transform",
+        )
+        .map_err(|err| err.to_string())?;
+    for display in [
+        "sRGB - Display",
+        "Gamma 2.2 Rec.709 - Display",
+        "Rec.1886 Rec.709 - Display",
+        "Display P3 - Display",
+    ] {
+        config
+            .add_display_shared_view(display, MONDRIAN_STANDARD_SDR_VIEW_NAME)
+            .map_err(|err| err.to_string())?;
+    }
+    config
+        .set_active_views(format!(
+            "{MONDRIAN_STANDARD_SDR_VIEW_NAME},Video (colorimetric),Un-tone-mapped,Raw"
+        ))
+        .map_err(|err| err.to_string())?;
+    config.validate().map_err(|err| {
+        format!("Mondrian Standard in-memory OCIO package failed validation: {err}")
+    })?;
+    Ok(())
+}
+
+fn build_mondrian_default_ocio_config(config_text: &str) -> Result<Config, String> {
+    let config = Config::from_stream(config_text)
+        .map_err(|err| format!("failed to parse base Mondrian Standard OCIO config: {err}"))?;
+    build_mondrian_standard_sdr_view(&config)?;
+    Ok(config)
+}
+
 fn validate_mondrian_default_config_identity(
     config: &Config,
     contract: MondrianDefaultOcioContract,
     report: &mut MondrianDefaultOcioValidationReport,
     errors: &mut Vec<String>,
 ) {
+    let working_space_name = ocio_working_color_space_name(contract.working_space);
+    if contract.scene_linear_role != working_space_name {
+        errors.push(format!(
+            "Mondrian Standard working-space contract mismatch: {:?} maps to '{}', role pins '{}'",
+            contract.working_space, working_space_name, contract.scene_linear_role
+        ));
+    }
     if report.config_name != contract.config_name {
         errors.push(format!(
             "embedded Mondrian OCIO config name mismatch: expected '{}', got '{}'",
@@ -630,13 +1138,34 @@ pub fn init_ocio_builtin(name: &str) -> Result<(), String> {
 
 /// Load Mondrian's embedded default OCIO config and set it as the current config.
 pub fn init_mondrian_default_ocio() -> Result<(), String> {
-    let config = Config::from_stream(MONDRIAN_DEFAULT_OCIO_CONFIG).map_err(|e| {
+    let actual_digest = sha256_hex(MONDRIAN_DEFAULT_OCIO_CONFIG.as_bytes());
+    if actual_digest != MONDRIAN_DEFAULT_OCIO_CONFIG_SHA256 {
+        return Err(format!(
+            "embedded Mondrian OCIO config '{}' failed integrity validation: expected SHA-256 '{}', got '{}'",
+            MONDRIAN_DEFAULT_OCIO_CONFIG_NAME,
+            MONDRIAN_DEFAULT_OCIO_CONFIG_SHA256,
+            actual_digest
+        ));
+    }
+    let config = build_mondrian_default_ocio_config(MONDRIAN_DEFAULT_OCIO_CONFIG).map_err(|e| {
         format!(
-            "failed to load embedded Mondrian OCIO config '{}': {e}",
+            "failed to load embedded Mondrian OCIO package '{}': {e}",
             MONDRIAN_DEFAULT_OCIO_CONFIG_NAME
         )
     })?;
-
+    let actual_package_digest = mondrian_default_package_sha256(
+        MONDRIAN_DEFAULT_OCIO_CONFIG,
+        &config,
+        mondrian_default_ocio_contract(),
+    )?;
+    if actual_package_digest != MONDRIAN_DEFAULT_OCIO_PACKAGE_SHA256 {
+        return Err(format!(
+            "embedded Mondrian OCIO package '{}' failed integrity validation: expected SHA-256 '{}', got '{}'",
+            MONDRIAN_DEFAULT_OCIO_CONFIG_NAME,
+            MONDRIAN_DEFAULT_OCIO_PACKAGE_SHA256,
+            actual_package_digest
+        ));
+    }
     if let Ok(mut guard) = OCIO_STATE.lock() {
         guard.set_config(
             PathBuf::from(MONDRIAN_DEFAULT_OCIO_VIRTUAL_PATH),
@@ -789,10 +1318,19 @@ pub fn ocio_color_space_name(cs: ColorSpace) -> &'static str {
         ColorSpace::Rec2020 => "Linear Rec.2020",
         ColorSpace::Rec2100Pq => "Rec.2100-PQ - Display",
         ColorSpace::Rec2100Hlg => "Rec.2100-HLG - Display",
-        ColorSpace::DciP3 => "sRGB Encoded P3-D65",
-        ColorSpace::AppleLog => "Apple Log",
-        ColorSpace::SLog3 => "S-Log3 S-Gamut3.Cine",
-        ColorSpace::ArriLogC4 => "ARRI LogC4",
+        ColorSpace::DisplayP3 => "sRGB Encoded P3-D65",
+        ColorSpace::AppleLogBt2020 => "Apple Log",
+        ColorSpace::SonySLog3SGamut3 => "S-Log3 S-Gamut3",
+        ColorSpace::SonySLog3SGamut3Cine => "S-Log3 S-Gamut3.Cine",
+        ColorSpace::ArriLogC3WideGamut3 => "ARRI LogC3 (EI800)",
+        ColorSpace::ArriLogC4WideGamut4 => "ARRI LogC4",
+        ColorSpace::CanonLog2CinemaGamutD55 => "CanonLog2 CinemaGamut D55",
+        ColorSpace::CanonLog3CinemaGamutD55 => "CanonLog3 CinemaGamut D55",
+        ColorSpace::PanasonicVLogVGamut => "V-Log V-Gamut",
+        ColorSpace::RedLog3G10WideGamutRgb => "Log3G10 REDWideGamutRGB",
+        ColorSpace::BlackmagicFilmWideGamutGen5 => "BMDFilm WideGamut Gen5",
+        ColorSpace::DjiDLogDGamut => "D-Log D-Gamut",
+        ColorSpace::DavinciIntermediateWideGamut => "DaVinci Intermediate WideGamut",
     }
 }
 
@@ -1366,7 +1904,10 @@ fn apply_cpu_processor_float(cpu: &CPUProcessor, data: &mut [f32]) {
     if num_pixels == 0 {
         return;
     }
-    cpu.apply_rgba_pixels(data, num_pixels, 4);
+    // Program color transforms own RGB only. Processing the interleaved buffer
+    // through OCIO's RGB entry point preserves straight/premultiplied alpha
+    // byte-for-byte and avoids a per-frame alpha side buffer.
+    cpu.apply_rgb_pixels(data, num_pixels, 4);
 }
 
 // ── Utility: list available displays / views ───────────────────────────────────
@@ -1415,6 +1956,46 @@ pub fn ocio_default_display_view() -> Option<(String, String)> {
     Some((display, view))
 }
 
+/// Resolve the exact Standard display/view pair for an encoded output target.
+///
+/// This target-aware mapping prevents a P3 or HDR program output from silently
+/// using the config's sRGB default display. Targets without a completed,
+/// versioned Standard View fail closed rather than borrowing an ACES View.
+pub fn mondrian_standard_output_display_view(
+    output: ColorSpace,
+) -> Result<(String, String), String> {
+    let display = match output {
+        ColorSpace::Srgb => "sRGB - Display",
+        ColorSpace::Rec709 => "Rec.1886 Rec.709 - Display",
+        ColorSpace::DisplayP3 => "Display P3 - Display",
+        ColorSpace::Rec2100Hlg => {
+            return Err("Mondrian Standard HLG View is not available in package v1".to_owned());
+        }
+        ColorSpace::Rec2100Pq => {
+            return Err(
+                "Mondrian Standard PQ 1000-nit View is not available in package v1".to_owned(),
+            );
+        }
+        unsupported => {
+            return Err(format!(
+                "Mondrian Standard has no rendering View for output target {unsupported:?}"
+            ));
+        }
+    };
+
+    ensure_mondrian_default_ocio_loaded()?;
+    let views = ocio_view_names(display);
+    if !views.iter().any(|view| view == MONDRIAN_STANDARD_SDR_VIEW_NAME) {
+        return Err(format!(
+            "Mondrian Standard package is missing required display/view '{display}/{MONDRIAN_STANDARD_SDR_VIEW_NAME}'"
+        ));
+    }
+    Ok((
+        display.to_owned(),
+        MONDRIAN_STANDARD_SDR_VIEW_NAME.to_owned(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1437,8 +2018,8 @@ mod tests {
 
     #[test]
     fn mondrian_default_config_asset_parses_and_is_named() {
-        let config = Config::from_stream(mondrian_default_ocio_config_text())
-            .expect("embedded Mondrian OCIO config should parse");
+        let config = build_mondrian_default_ocio_config(mondrian_default_ocio_config_text())
+            .expect("embedded Mondrian OCIO package should build");
         let contract = mondrian_default_ocio_contract();
 
         assert_eq!(config.name().as_deref(), Some(contract.config_name));
@@ -1451,6 +2032,162 @@ mod tests {
             config.default_view(contract.default_display).as_deref(),
             Some(contract.default_view)
         );
+    }
+
+    #[test]
+    fn mondrian_standard_package_pins_linear_rec2020_working_space() {
+        let contract = mondrian_default_ocio_contract();
+        let config = Config::from_stream(mondrian_default_ocio_config_text())
+            .expect("embedded Mondrian OCIO config should parse");
+
+        assert_eq!(contract.working_space, WorkingColorSpace::LinearRec2020);
+        assert_eq!(
+            contract.scene_linear_role,
+            ocio_working_color_space_name(contract.working_space)
+        );
+        assert_eq!(
+            config.role_color_space("scene_linear").as_deref(),
+            Some(contract.scene_linear_role)
+        );
+    }
+
+    #[test]
+    fn linear_rec2020_working_round_trip_preserves_unbounded_scene_values() {
+        ensure_mondrian_default_ocio_loaded().expect("standard mode default config should load");
+        let original = [
+            -0.25, 0.18, 4.0, 0.25, 16.0, -1.0, 0.5, 0.75, 0.001, 2.0, -0.125, 1.0,
+        ];
+        let mut samples = original;
+
+        apply_ocio_identity_float(
+            &mut samples,
+            OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+            OcioColorSpaceIdentity::Working(WorkingColorSpace::AcesCg),
+        )
+        .expect("Linear Rec.2020 to ACEScg comparison processor");
+
+        assert!(samples.chunks_exact(4).flatten().any(|channel| *channel < 0.0));
+        assert!(samples.chunks_exact(4).flatten().any(|channel| *channel > 1.0));
+
+        apply_ocio_identity_float(
+            &mut samples,
+            OcioColorSpaceIdentity::Working(WorkingColorSpace::AcesCg),
+            OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+        )
+        .expect("ACEScg to Linear Rec.2020 comparison processor");
+
+        for (actual, expected) in samples.iter().zip(original) {
+            let tolerance = 2.0e-5 * expected.abs().max(1.0);
+            assert!(
+                (actual - expected).abs() <= tolerance,
+                "round-trip mismatch: expected {expected}, got {actual}, tolerance {tolerance}"
+            );
+        }
+    }
+
+    #[test]
+    fn mondrian_standard_package_rejects_content_outside_its_versioned_digest() {
+        let mut modified = mondrian_default_ocio_config_text().to_owned();
+        modified.push('\n');
+
+        let error = validate_mondrian_default_ocio_contract_text(&modified)
+            .expect_err("modified Standard package content must fail closed");
+
+        assert!(
+            error.issues.iter().any(|issue| {
+                issue.contains("SHA-256 mismatch")
+                    && issue.contains(mondrian_default_ocio_contract().content_sha256)
+            }),
+            "unexpected validation issues: {:#?}",
+            error.issues
+        );
+    }
+
+    #[test]
+    fn mondrian_standard_sdr_resource_has_pinned_domain_and_resolution() {
+        assert_eq!(
+            sha256_hex(MONDRIAN_STANDARD_SDR_LUT.as_bytes()),
+            MONDRIAN_STANDARD_SDR_LUT_SHA256
+        );
+        let cube = parse_cube_3d(MONDRIAN_STANDARD_SDR_LUT)
+            .expect("pinned Mondrian Standard SDR LUT should parse");
+        assert_eq!(cube.edge, MONDRIAN_STANDARD_SDR_LUT_EDGE);
+        assert_eq!(cube.domain_min, [0.0, 0.0, 0.0]);
+        assert_eq!(cube.domain_max, [1.0, 1.0, 1.0]);
+        assert_eq!(cube.values.len(), cube.edge.pow(3) * 3);
+        assert!(cube.values.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn cube_parser_rejects_truncated_and_non_finite_payloads() {
+        let truncated = "LUT_3D_SIZE 2\nDOMAIN_MIN 0 0 0\nDOMAIN_MAX 1 1 1\n0 0 0\n";
+        assert!(parse_cube_3d(truncated)
+            .expect_err("truncated cube must fail")
+            .contains("requires 24"));
+
+        let non_finite = "LUT_3D_SIZE 2\nDOMAIN_MIN 0 0 0\nDOMAIN_MAX 1 1 1\nNaN 0 0\n";
+        assert!(parse_cube_3d(non_finite)
+            .expect_err("non-finite cube value must fail")
+            .contains("must be finite"));
+    }
+
+    #[test]
+    fn mondrian_standard_sdr_view_is_finite_neutral_and_monotonic() {
+        ensure_mondrian_default_ocio_loaded().expect("standard mode default config should load");
+        let contract = mondrian_default_ocio_contract();
+        let mut samples = (-256..=256)
+            .flat_map(|index| {
+                let linear = 0.18_f32 * 2.0_f32.powf(index as f32 / 32.0);
+                [linear, linear, linear, 1.0]
+            })
+            .collect::<Vec<_>>();
+
+        apply_ocio_display_identity_float(
+            &mut samples,
+            OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+            contract.default_display,
+            contract.default_view,
+        )
+        .expect("Mondrian Standard SDR CPU processor");
+
+        let mut previous = f32::NEG_INFINITY;
+        for pixel in samples.chunks_exact(4) {
+            assert!(pixel.iter().all(|channel| channel.is_finite()));
+            let neutral_spread = pixel[..3].iter().copied().fold(f32::NEG_INFINITY, f32::max)
+                - pixel[..3].iter().copied().fold(f32::INFINITY, f32::min);
+            assert!(
+                neutral_spread <= 2.0e-4,
+                "neutral axis spread {neutral_spread} for {pixel:?}"
+            );
+            assert!(
+                pixel[1] + 1.0e-6 >= previous,
+                "tone reversal: previous {previous}, current {}",
+                pixel[1]
+            );
+            previous = pixel[1];
+        }
+    }
+
+    #[test]
+    fn mondrian_standard_sdr_view_handles_negative_and_extended_gamut_without_non_finite_output() {
+        ensure_mondrian_default_ocio_loaded().expect("standard mode default config should load");
+        let contract = mondrian_default_ocio_contract();
+        let mut samples = [
+            -1.0, 0.25, 4.0, 1.0, 16.0, -0.5, 0.125, 1.0, 4.0, 0.0, 32.0, 0.5,
+        ];
+
+        apply_ocio_display_identity_float(
+            &mut samples,
+            OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+            contract.default_display,
+            contract.default_view,
+        )
+        .expect("Mondrian Standard extended-range SDR CPU processor");
+
+        assert!(samples.iter().all(|channel| channel.is_finite()));
+        assert_eq!(samples[3], 1.0);
+        assert_eq!(samples[7], 1.0);
+        assert_eq!(samples[11], 0.5);
     }
 
     #[test]
@@ -1472,8 +2209,8 @@ mod tests {
 
     #[test]
     fn mondrian_default_config_covers_display_view_contract() {
-        let config = Config::from_stream(mondrian_default_ocio_config_text())
-            .expect("embedded Mondrian OCIO config should parse");
+        let config = build_mondrian_default_ocio_config(mondrian_default_ocio_config_text())
+            .expect("embedded Mondrian OCIO package should build");
         let contract = mondrian_default_ocio_contract();
 
         for display_view in contract.display_views {
@@ -1513,12 +2250,31 @@ mod tests {
     }
 
     #[test]
+    fn pinned_aces_mode_presets_exist_in_the_bundled_ocio_registry() {
+        let available = builtin_config_names();
+        for preset in [
+            crate::types::AcesConfigPreset::StudioV4Aces2Ocio25,
+            crate::types::AcesConfigPreset::CgV4Aces2Ocio25,
+        ] {
+            assert!(
+                available.iter().any(|name| name == preset.builtin_name()),
+                "missing pinned ACES preset '{}' in bundled OCIO registry; available={available:?}",
+                preset.builtin_name()
+            );
+        }
+    }
+
+    #[test]
     fn mondrian_default_contract_validation_checks_cpu_and_gpu_processors() {
         let contract = mondrian_default_ocio_contract();
         let report = validate_mondrian_default_ocio_contract()
             .unwrap_or_else(|err| panic!("default OCIO contract errors: {:#?}", err.issues));
 
+        assert_eq!(report.standard_version, contract.standard_version);
         assert_eq!(report.config_name, contract.config_name);
+        assert_eq!(report.content_sha256, contract.content_sha256);
+        assert_eq!(report.package_sha256, contract.package_sha256);
+        assert_eq!(report.resources_checked, contract.resources.len());
         assert_eq!(
             report.color_space_mappings_checked,
             contract.color_spaces.len()
@@ -1545,8 +2301,8 @@ mod tests {
 
     #[test]
     fn mondrian_default_processors_cover_delivery_hdr_and_log_inputs() {
-        let config = Config::from_stream(mondrian_default_ocio_config_text())
-            .expect("embedded Mondrian OCIO config should parse");
+        let config = build_mondrian_default_ocio_config(mondrian_default_ocio_config_text())
+            .expect("embedded Mondrian OCIO package should build");
 
         let processor_pairs = [
             (ColorSpace::Rec709, ColorSpace::Srgb),
@@ -1554,10 +2310,19 @@ mod tests {
             (ColorSpace::Rec2020, ColorSpace::Rec709),
             (ColorSpace::Rec2100Pq, ColorSpace::Rec709),
             (ColorSpace::Rec2100Hlg, ColorSpace::Rec709),
-            (ColorSpace::DciP3, ColorSpace::Rec709),
-            (ColorSpace::AppleLog, ColorSpace::Rec709),
-            (ColorSpace::SLog3, ColorSpace::Rec709),
-            (ColorSpace::ArriLogC4, ColorSpace::Rec709),
+            (ColorSpace::DisplayP3, ColorSpace::Rec709),
+            (ColorSpace::AppleLogBt2020, ColorSpace::Rec709),
+            (ColorSpace::SonySLog3SGamut3, ColorSpace::Rec709),
+            (ColorSpace::SonySLog3SGamut3Cine, ColorSpace::Rec709),
+            (ColorSpace::ArriLogC3WideGamut3, ColorSpace::Rec709),
+            (ColorSpace::ArriLogC4WideGamut4, ColorSpace::Rec709),
+            (ColorSpace::CanonLog2CinemaGamutD55, ColorSpace::Rec709),
+            (ColorSpace::CanonLog3CinemaGamutD55, ColorSpace::Rec709),
+            (ColorSpace::PanasonicVLogVGamut, ColorSpace::Rec709),
+            (ColorSpace::RedLog3G10WideGamutRgb, ColorSpace::Rec709),
+            (ColorSpace::BlackmagicFilmWideGamutGen5, ColorSpace::Rec709),
+            (ColorSpace::DjiDLogDGamut, ColorSpace::Rec709),
+            (ColorSpace::DavinciIntermediateWideGamut, ColorSpace::Rec709),
         ];
 
         for (src, dst) in processor_pairs {
@@ -1591,11 +2356,40 @@ mod tests {
     }
 
     #[test]
+    fn standard_output_targets_resolve_matching_sdr_displays_and_reject_unfinished_hdr_views() {
+        ensure_mondrian_default_ocio_loaded().expect("Standard package");
+
+        assert_eq!(
+            mondrian_standard_output_display_view(ColorSpace::Srgb).expect("sRGB target"),
+            (
+                "sRGB - Display".to_owned(),
+                MONDRIAN_STANDARD_SDR_VIEW_NAME.to_owned()
+            )
+        );
+        assert_eq!(
+            mondrian_standard_output_display_view(ColorSpace::Rec709).expect("Rec.709 target"),
+            (
+                "Rec.1886 Rec.709 - Display".to_owned(),
+                MONDRIAN_STANDARD_SDR_VIEW_NAME.to_owned()
+            )
+        );
+        assert_eq!(
+            mondrian_standard_output_display_view(ColorSpace::DisplayP3).expect("P3 target"),
+            (
+                "Display P3 - Display".to_owned(),
+                MONDRIAN_STANDARD_SDR_VIEW_NAME.to_owned()
+            )
+        );
+        assert!(mondrian_standard_output_display_view(ColorSpace::Rec2100Hlg).is_err());
+        assert!(mondrian_standard_output_display_view(ColorSpace::Rec2100Pq).is_err());
+    }
+
+    #[test]
     fn standard_mode_extracts_gpu_shader_bundle() {
         ensure_mondrian_default_ocio_loaded().expect("standard mode default config should load");
 
         let bundle = extract_ocio_gpu_shader_bundle(
-            ColorSpace::SLog3,
+            ColorSpace::SonySLog3SGamut3Cine,
             ColorSpace::Rec709,
             GpuLanguage::Glsl4_0,
         )
@@ -1653,6 +2447,34 @@ mod tests {
     }
 
     #[test]
+    fn mondrian_standard_sdr_endpoints_are_analytic_gpu_programs() {
+        ensure_mondrian_default_ocio_loaded().expect("standard mode default config should load");
+
+        let to_target_linear = extract_ocio_identity_gpu_shader_bundle(
+            OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+            OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
+            GpuLanguage::Glsl4_0,
+        )
+        .expect("working to target-linear endpoint should produce a GPU program");
+        let to_encoded_output = extract_ocio_identity_gpu_shader_bundle(
+            OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
+            OcioColorSpaceIdentity::Encoded(ColorSpace::Srgb),
+            GpuLanguage::Glsl4_0,
+        )
+        .expect("target-linear to encoded endpoint should produce a GPU program");
+
+        for bundle in [&to_target_linear, &to_encoded_output] {
+            assert_eq!(bundle.texture_2d_count, 0);
+            assert_eq!(bundle.texture_3d_count, 0);
+            assert_eq!(bundle.uniform_count, 0);
+            assert_eq!(bundle.uniform_buffer_size, 0);
+            assert!(bundle.textures_2d.is_empty());
+            assert!(bundle.textures_3d.is_empty());
+            assert!(bundle.uniforms.is_empty());
+        }
+    }
+
+    #[test]
     fn standard_mode_applies_explicit_working_identity_on_cpu() {
         ensure_mondrian_default_ocio_loaded().expect("standard mode default config should load");
         let mut rgba = [0.18, 0.18, 0.18, 1.0];
@@ -1685,10 +2507,22 @@ mod tests {
         assert_eq!(bundle.src_color_space, "Camera Rec.709");
         assert_eq!(
             bundle.dst_color_space,
-            "sRGB - Display/ACES 2.0 - SDR 100 nits (Rec.709)"
+            format!("sRGB - Display/{MONDRIAN_STANDARD_SDR_VIEW_NAME}")
         );
         assert!(bundle.shader_text.contains("mondrian_ocio_main"));
         assert!(bundle.cache_id.as_deref().is_some_and(|id| !id.trim().is_empty()));
+        assert_eq!(bundle.texture_3d_count, 1);
+        assert_eq!(bundle.textures_3d.len(), 1);
+        assert_eq!(
+            bundle.textures_3d[0].edge_len,
+            MONDRIAN_STANDARD_SDR_LUT_EDGE as u32
+        );
+        // OCIO implements tetrahedral reconstruction in generated shader code
+        // and requests nearest texel reads for the underlying 3D texture.
+        assert_eq!(
+            bundle.textures_3d[0].interpolation,
+            OcioGpuTextureInterpolation::Nearest
+        );
     }
 
     #[test]

@@ -620,7 +620,7 @@ mod tests {
             },
             PreviewGpuOutputBlocker::MonitorIccProfileUnmapped {
                 profile_path: Some("display.icc".to_owned()),
-                parsed_color_space: Some("DciP3".to_owned()),
+                parsed_color_space: Some("DisplayP3".to_owned()),
                 reason: "no OCIO display/view match".to_owned(),
             },
             PreviewGpuOutputBlocker::MonitorHdrCapabilityUnknown {
@@ -680,7 +680,7 @@ mod tests {
         });
         breakdown.record(&PreviewGpuOutputBlocker::MonitorIccProfileUnmapped {
             profile_path: Some("display.icc".to_owned()),
-            parsed_color_space: Some("DciP3".to_owned()),
+            parsed_color_space: Some("DisplayP3".to_owned()),
             reason: "no OCIO display/view match".to_owned(),
         });
         breakdown.record(&PreviewGpuOutputBlocker::MonitorHdrCapabilityUnknown {

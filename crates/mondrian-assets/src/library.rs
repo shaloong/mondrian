@@ -963,7 +963,9 @@ mod tests {
         lib.set_asset_interpretation(
             id,
             AssetMediaInterpretation {
-                color: MediaColorInterpretation::Override { color_space: ColorSpace::SLog3 },
+                color: MediaColorInterpretation::Override {
+                    color_space: ColorSpace::SonySLog3SGamut3Cine,
+                },
                 ..AssetMediaInterpretation::default()
             },
         )

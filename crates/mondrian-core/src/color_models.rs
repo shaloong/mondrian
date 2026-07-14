@@ -1,15 +1,8 @@
 //! UI-facing color models and parsing helpers.
 
-use crate::types::{Color, ColorSpace, WorkingColorSpace};
+use crate::types::{Color, ColorSpace, MondrianStandardPackageIdentity, WorkingColorSpace};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-
-/// Versioned Mondrian Standard package semantics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum MondrianStandardVersion {
-    /// First versioned Mondrian Standard OCIO package contract.
-    V1,
-}
 
 /// Product-level intent for a final working-space to display or delivery transform.
 ///
@@ -20,8 +13,8 @@ pub enum MondrianStandardVersion {
 pub enum OutputTransformIntent {
     /// Mondrian's bundled, versioned OCIO color-management package.
     MondrianStandard {
-        /// Versioned Standard package semantics stored in project/cache contracts.
-        version: MondrianStandardVersion,
+        /// Full Standard package identity stored in project/cache contracts.
+        package: MondrianStandardPackageIdentity,
     },
     /// A direct working-space to encoded-output conversion without a view transform.
     Colorimetric,
@@ -37,7 +30,7 @@ pub enum OutputTransformIntent {
 impl OutputTransformIntent {
     /// Select the current Mondrian Standard output-transform contract.
     pub const fn mondrian_standard() -> Self {
-        Self::MondrianStandard { version: MondrianStandardVersion::V1 }
+        Self::MondrianStandard { package: MondrianStandardPackageIdentity::V1 }
     }
 }
 
@@ -136,13 +129,12 @@ impl DisplayToneMapPolicy {
     /// Resolve the concrete tone-map flag for a working -> output boundary.
     pub fn resolve(
         self,
-        auto_tone_map_media: bool,
         scene_referred_workflow: bool,
         _working_color_space: WorkingColorSpace,
         _output_color_space: ColorSpace,
     ) -> bool {
         match self {
-            Self::Automatic => auto_tone_map_media || scene_referred_workflow,
+            Self::Automatic => scene_referred_workflow,
             Self::Always => true,
             Self::Never => false,
         }
@@ -681,24 +673,20 @@ mod tests {
     fn display_tone_map_policy_resolves_boundary_flag() {
         assert!(!DisplayToneMapPolicy::Automatic.resolve(
             false,
-            false,
             WorkingColorSpace::LinearRec2020,
             ColorSpace::Rec709
         ));
         assert!(DisplayToneMapPolicy::Automatic.resolve(
-            false,
             true,
             WorkingColorSpace::LinearRec709,
             ColorSpace::Rec2100Pq
         ));
         assert!(DisplayToneMapPolicy::Always.resolve(
             false,
-            false,
             WorkingColorSpace::LinearRec709,
             ColorSpace::Rec709
         ));
         assert!(!DisplayToneMapPolicy::Never.resolve(
-            true,
             true,
             WorkingColorSpace::LinearRec2020,
             ColorSpace::Rec709

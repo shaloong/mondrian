@@ -3,6 +3,7 @@
 //! The dialog owns shell-local draft state. It emits a typed sequence update
 //! only on Apply, keeping editor mutations in `AppState`.
 
+use mondrian_core::display_labels::color_space_label;
 use mondrian_core::{
     ColorSpace, ExportDeliveryViewPolicy, Rational, Resolution, WorkingColorSpace,
 };
@@ -243,7 +244,7 @@ const PREVIEW_RENDER_FORMAT_OPTIONS: [PreviewRenderFormat; 4] = [
     PreviewRenderFormat::LosslessRgba,
 ];
 
-const COLOR_SPACE_OPTIONS: [ColorSpace; 11] = [
+const COLOR_SPACE_OPTIONS: [ColorSpace; 8] = [
     ColorSpace::Rec709,
     ColorSpace::Rec601Pal,
     ColorSpace::Rec601Ntsc,
@@ -251,10 +252,7 @@ const COLOR_SPACE_OPTIONS: [ColorSpace; 11] = [
     ColorSpace::Rec2100Pq,
     ColorSpace::Srgb,
     ColorSpace::Rec2020,
-    ColorSpace::DciP3,
-    ColorSpace::AppleLog,
-    ColorSpace::SLog3,
-    ColorSpace::ArriLogC4,
+    ColorSpace::DisplayP3,
 ];
 
 const WORKING_COLOR_SPACE_OPTIONS: [WorkingColorSpace; 4] = [
@@ -386,22 +384,6 @@ fn preview_render_format_label(value: PreviewRenderFormat) -> &'static str {
         PreviewRenderFormat::ProResProxy => "ProRes Proxy",
         PreviewRenderFormat::DnxHrLb => "DNxHR LB",
         PreviewRenderFormat::LosslessRgba => "Lossless RGBA",
-    }
-}
-
-fn color_space_label(value: ColorSpace) -> &'static str {
-    match value {
-        ColorSpace::Rec709 => "Rec. 709",
-        ColorSpace::Rec601Pal => "Rec. 601 PAL",
-        ColorSpace::Rec601Ntsc => "Rec. 601 NTSC",
-        ColorSpace::Rec2100Hlg => "Rec. 2100 HLG",
-        ColorSpace::Rec2100Pq => "Rec. 2100 PQ",
-        ColorSpace::Srgb => "sRGB",
-        ColorSpace::Rec2020 => "Rec. 2020",
-        ColorSpace::DciP3 => "DCI-P3",
-        ColorSpace::AppleLog => "Apple Log",
-        ColorSpace::SLog3 => "S-Log3",
-        ColorSpace::ArriLogC4 => "ARRI LogC4",
     }
 }
 

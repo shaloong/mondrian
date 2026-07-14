@@ -139,13 +139,13 @@ impl FakeDisplayProbe {
         let mut s = Self::sdr_pass();
         s.snapshot.monitor_profile_status = MonitorProfileStatus::IccProfileUnmapped {
             profile_path: Some(path.to_owned()),
-            parsed_color_space: Some(ColorSpace::DciP3),
-            reason: "no OCIO display matches DCI-P3".to_owned(),
+            parsed_color_space: Some(ColorSpace::DisplayP3),
+            reason: "no OCIO display matches Display P3".to_owned(),
         };
         s.snapshot.blockers.push(DisplayOutputBlocker::MonitorIccProfileUnmapped {
             profile_path: Some(path.to_owned()),
-            parsed_color_space: Some(ColorSpace::DciP3),
-            reason: "no OCIO display matches DCI-P3".to_owned(),
+            parsed_color_space: Some(ColorSpace::DisplayP3),
+            reason: "no OCIO display matches Display P3".to_owned(),
         });
         s.snapshot.validation_status = DisplayValidationStatus::Fail;
         s
@@ -346,7 +346,7 @@ pub fn compute_display_blockers(
     }
 
     // Surface contract check: wide-gamut output on sRGB-only surface
-    let is_wide_gamut_output = output_color_space.contains("DciP3")
+    let is_wide_gamut_output = output_color_space.contains("DisplayP3")
         || output_color_space.contains("Rec2020")
         || output_color_space.contains("Rec2100");
     let is_srgb_only_surface =
@@ -516,14 +516,14 @@ mod tests {
     #[test]
     fn resolve_monitor_profile_color_space() {
         let policy = DisplayManagementPolicy {
-            monitor_profile: MonitorProfileReference::ColorSpace(ColorSpace::DciP3),
+            monitor_profile: MonitorProfileReference::ColorSpace(ColorSpace::DisplayP3),
             ..Default::default()
         };
         let status = resolve_monitor_profile_status(&policy, false);
         assert_eq!(
             status,
             MonitorProfileStatus::ManagedColorSpace {
-                color_space: ColorSpace::DciP3,
+                color_space: ColorSpace::DisplayP3,
                 source: MonitorProfileSource::UserConfigured,
             }
         );
@@ -629,11 +629,11 @@ mod tests {
     fn compute_blockers_icc_unmapped_fails_closed() {
         let profile = MonitorProfileStatus::IccProfileUnmapped {
             profile_path: Some("display.icc".to_owned()),
-            parsed_color_space: Some(ColorSpace::DciP3),
+            parsed_color_space: Some(ColorSpace::DisplayP3),
             reason: "no OCIO display/view match".to_owned(),
         };
         let hdr = HdrStatus::NotRequested;
-        let blockers = compute_display_blockers(&profile, &hdr, "Bgra8UnormSrgb", "DciP3");
+        let blockers = compute_display_blockers(&profile, &hdr, "Bgra8UnormSrgb", "DisplayP3");
         assert_eq!(blockers.len(), 2);
         assert!(blockers.iter().any(|b| b.code() == "monitor_icc_profile_unmapped"));
         assert!(blockers.iter().any(|b| b.code() == "unsupported_display_color_space"));
@@ -725,7 +725,7 @@ mod tests {
     fn compute_blockers_wide_gamut_on_srgb_surface() {
         let profile = MonitorProfileStatus::NotRequested;
         let hdr = HdrStatus::NotRequested;
-        let blockers = compute_display_blockers(&profile, &hdr, "Bgra8UnormSrgb", "DciP3");
+        let blockers = compute_display_blockers(&profile, &hdr, "Bgra8UnormSrgb", "DisplayP3");
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].code(), "unsupported_display_color_space");
     }
@@ -734,7 +734,7 @@ mod tests {
     fn compute_blockers_wide_gamut_on_rgba16float_no_mismatch() {
         let profile = MonitorProfileStatus::NotRequested;
         let hdr = HdrStatus::NotRequested;
-        let blockers = compute_display_blockers(&profile, &hdr, "Rgba16Float", "DciP3");
+        let blockers = compute_display_blockers(&profile, &hdr, "Rgba16Float", "DisplayP3");
         assert!(blockers.is_empty());
     }
 

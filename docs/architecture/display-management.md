@@ -205,7 +205,7 @@ The display contract produces structured diagnostics for:
 ## Current State (Alpha)
 
 ### Supported
-- SDR preview/export with managed color spaces (Rec.709, sRGB, DCI-P3 via OCIO)
+- SDR preview/export with managed color spaces (Rec.709, sRGB, Display P3 via OCIO)
 - Display contract refresh on resize, scale factor change, window move
 - Surface format selection with color space capability matching
 - Structured blocker taxonomy with health report integration

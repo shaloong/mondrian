@@ -982,7 +982,7 @@ mod tests {
             input_video_range: DecodedVideoRange::Limited,
             working_color_space: WorkingColorSpace::LinearRec709,
             tone_map: false,
-            engine: ColorEngine::MondrianSmart,
+            engine: ColorEngine::mondrian_standard(),
             ocio_generation: mondrian_core::ocio_config_generation(),
         }
     }

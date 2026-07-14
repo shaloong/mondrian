@@ -1,10 +1,7 @@
 //! Color management primitives shared by preview, render and export.
 
-use crate::icc::parse_icc_display_profile;
 use crate::types::{ColorEngine, ColorSpace, OcioColorSpaceIdentity};
-use moxcms::{ColorProfile as CmsColorProfile, Layout as CmsLayout, TransformOptions};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 // ── ColorEngine: centralized dispatch ─────────────────────────────────────────
 
@@ -17,8 +14,8 @@ impl ColorEngine {
         dst: OcioColorSpaceIdentity,
     ) -> Result<(), String> {
         match self {
-            Self::MondrianSmart => crate::ocio::ensure_mondrian_default_ocio_loaded()?,
-            Self::Ocio { .. } => self.ensure_loaded()?,
+            Self::MondrianStandard { .. } => crate::ocio::ensure_mondrian_default_ocio_loaded()?,
+            Self::Aces { .. } | Self::CustomOcio { .. } => self.ensure_loaded()?,
         }
         crate::ocio::apply_ocio_identity_float(data, src, dst)
     }
@@ -32,8 +29,8 @@ impl ColorEngine {
         view: &str,
     ) -> Result<(), String> {
         match self {
-            Self::MondrianSmart => crate::ocio::ensure_mondrian_default_ocio_loaded()?,
-            Self::Ocio { .. } => self.ensure_loaded()?,
+            Self::MondrianStandard { .. } => crate::ocio::ensure_mondrian_default_ocio_loaded()?,
+            Self::Aces { .. } | Self::CustomOcio { .. } => self.ensure_loaded()?,
         }
         crate::ocio::apply_ocio_display_identity_float(data, src, display, view)
     }
@@ -41,24 +38,26 @@ impl ColorEngine {
     /// Whether the engine is ready to process data.
     pub fn is_available(&self) -> bool {
         match self {
-            Self::MondrianSmart => crate::ocio::mondrian_default_ocio_available(),
-            Self::Ocio { .. } => crate::ocio::ocio_available(),
+            Self::MondrianStandard { .. } => crate::ocio::mondrian_default_ocio_available(),
+            Self::Aces { .. } | Self::CustomOcio { .. } => crate::ocio::ocio_available(),
         }
     }
 
     /// Ensure any required external config is loaded.
     pub fn ensure_loaded(&self) -> Result<(), String> {
         match self {
-            Self::MondrianSmart => crate::ocio::ensure_mondrian_default_ocio_loaded(),
-            Self::Ocio { source } => crate::ocio::ensure_ocio_loaded(source),
+            Self::MondrianStandard { .. } => crate::ocio::ensure_mondrian_default_ocio_loaded(),
+            Self::Aces { preset } => crate::ocio::ensure_ocio_loaded(&preset.ocio_source()),
+            Self::CustomOcio { source } => crate::ocio::ensure_ocio_loaded(source),
         }
     }
 
     /// Human-readable name for diagnostics / UI.
     pub fn name(&self) -> &'static str {
         match self {
-            Self::MondrianSmart => "Mondrian Standard",
-            Self::Ocio { .. } => "OpenColorIO",
+            Self::MondrianStandard { .. } => "Mondrian Standard",
+            Self::Aces { .. } => "ACES",
+            Self::CustomOcio { .. } => "Custom OpenColorIO",
         }
     }
 }
@@ -85,8 +84,28 @@ pub enum ColorPrimaries {
     Smpte170M,
     /// ITU-R BT.2020 primaries.
     Bt2020,
-    /// DCI-P3 / Display P3 D65 primaries as represented by FFmpeg `smpte432`.
+    /// Display P3 D65 primaries as represented by FFmpeg `smpte432`.
     P3D65,
+    /// Sony S-Gamut3 primaries.
+    SonySGamut3,
+    /// Sony S-Gamut3.Cine primaries.
+    SonySGamut3Cine,
+    /// ARRI Wide Gamut 3 primaries.
+    ArriWideGamut3,
+    /// ARRI Wide Gamut 4 primaries.
+    ArriWideGamut4,
+    /// Canon Cinema Gamut with a D55 white point.
+    CanonCinemaGamutD55,
+    /// Panasonic V-Gamut primaries.
+    PanasonicVGamut,
+    /// REDWideGamutRGB primaries.
+    RedWideGamutRgb,
+    /// Blackmagic Wide Gamut Gen 5 primaries.
+    BlackmagicWideGamutGen5,
+    /// DJI D-Gamut primaries.
+    DjiDGamut,
+    /// DaVinci Wide Gamut primaries.
+    DavinciWideGamut,
 }
 
 /// CICP-style transfer characteristic used by a [`ColorSpace`].
@@ -108,8 +127,24 @@ pub enum ColorTransferCharacteristic {
     AppleLog,
     /// Sony S-Log3 acquisition transfer.
     SLog3,
+    /// ARRI LogC3 EI800 acquisition transfer.
+    ArriLogC3,
     /// ARRI LogC4 acquisition transfer.
     ArriLogC4,
+    /// Canon Log 2 acquisition transfer.
+    CanonLog2,
+    /// Canon Log 3 acquisition transfer.
+    CanonLog3,
+    /// Panasonic V-Log acquisition transfer.
+    PanasonicVLog,
+    /// RED Log3G10 acquisition transfer.
+    RedLog3G10,
+    /// Blackmagic Film Gen 5 acquisition transfer.
+    BlackmagicFilmGen5,
+    /// DJI D-Log acquisition transfer.
+    DjiDLog,
+    /// DaVinci Intermediate acquisition transfer.
+    DavinciIntermediate,
 }
 
 /// CICP-style matrix coefficients used when encoding YUV/RGB signals.
@@ -164,7 +199,7 @@ impl ColorEncodingSpec {
         }
 
         Some(FfmpegColorTags {
-            color_primaries: self.primaries.ffmpeg_name(),
+            color_primaries: self.primaries.ffmpeg_name()?,
             color_trc: self.transfer.ffmpeg_name()?,
             colorspace: self.matrix.ffmpeg_name()?,
         })
@@ -172,13 +207,23 @@ impl ColorEncodingSpec {
 }
 
 impl ColorPrimaries {
-    fn ffmpeg_name(self) -> &'static str {
+    fn ffmpeg_name(self) -> Option<&'static str> {
         match self {
-            Self::Bt709 => "bt709",
-            Self::Bt470Bg => "bt470bg",
-            Self::Smpte170M => "smpte170m",
-            Self::Bt2020 => "bt2020",
-            Self::P3D65 => "smpte432",
+            Self::Bt709 => Some("bt709"),
+            Self::Bt470Bg => Some("bt470bg"),
+            Self::Smpte170M => Some("smpte170m"),
+            Self::Bt2020 => Some("bt2020"),
+            Self::P3D65 => Some("smpte432"),
+            Self::SonySGamut3
+            | Self::SonySGamut3Cine
+            | Self::ArriWideGamut3
+            | Self::ArriWideGamut4
+            | Self::CanonCinemaGamutD55
+            | Self::PanasonicVGamut
+            | Self::RedWideGamutRgb
+            | Self::BlackmagicWideGamutGen5
+            | Self::DjiDGamut
+            | Self::DavinciWideGamut => None,
         }
     }
 }
@@ -192,7 +237,17 @@ impl ColorTransferCharacteristic {
             Self::Srgb => Some("iec61966-2-1"),
             Self::Hlg => Some("arib-std-b67"),
             Self::Pq => Some("smpte2084"),
-            Self::AppleLog | Self::SLog3 | Self::ArriLogC4 => None,
+            Self::AppleLog
+            | Self::SLog3
+            | Self::ArriLogC3
+            | Self::ArriLogC4
+            | Self::CanonLog2
+            | Self::CanonLog3
+            | Self::PanasonicVLog
+            | Self::RedLog3G10
+            | Self::BlackmagicFilmGen5
+            | Self::DjiDLog
+            | Self::DavinciIntermediate => None,
         }
     }
 }
@@ -223,15 +278,6 @@ pub struct FfmpegColorTags {
     pub colorspace: &'static str,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct RgbaF32Frame {
-    pub width: u32,
-    pub height: u32,
-    /// Linear-light RGBA values. RGB may exceed 1.0 for HDR working spaces.
-    pub data: Vec<[f32; 4]>,
-    pub color_space: ColorSpace,
-}
-
 /// Linear-light RGBA frame in an explicit rendering working space.
 ///
 /// This is a pure frame contract. Color conversion belongs to the configured
@@ -246,189 +292,6 @@ pub struct WorkingRgbaF32Frame {
     pub data: Vec<[f32; 4]>,
     /// Linear rendering identity for the RGB samples.
     pub color_space: crate::WorkingColorSpace,
-}
-
-impl RgbaF32Frame {
-    pub fn from_rgba8(
-        width: u32,
-        height: u32,
-        rgba: &[u8],
-        input: ColorSpace,
-        working: ColorSpace,
-        tone_map: bool,
-    ) -> Self {
-        let expected = width as usize * height as usize * 4;
-        let pixels = rgba.get(..expected).unwrap_or(rgba);
-        let mut data = Vec::with_capacity(pixels.len() / 4);
-        for px in pixels.chunks_exact(4) {
-            let mut rgb = [
-                decode_transfer(input, px[0] as f32 / 255.0),
-                decode_transfer(input, px[1] as f32 / 255.0),
-                decode_transfer(input, px[2] as f32 / 255.0),
-            ];
-            rgb = convert_primaries(rgb, input, working);
-            if tone_map && input.is_hdr() && !working.is_hdr() {
-                rgb = rgb.map(aces_tone_map);
-            }
-            data.push([rgb[0], rgb[1], rgb[2], px[3] as f32 / 255.0]);
-        }
-        Self { width, height, data, color_space: working }
-    }
-
-    pub fn to_rgba8(&self, output: ColorSpace, tone_map: bool) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.data.len() * 4);
-        for px in &self.data {
-            let mut rgb = [px[0], px[1], px[2]];
-            if tone_map && self.color_space.is_hdr() && !output.is_hdr() {
-                rgb = rgb.map(aces_tone_map);
-            }
-            rgb = convert_primaries(rgb, self.color_space, output);
-            out.push(encode_u8(output, rgb[0]));
-            out.push(encode_u8(output, rgb[1]));
-            out.push(encode_u8(output, rgb[2]));
-            out.push((px[3].clamp(0.0, 1.0) * 255.0).round() as u8);
-        }
-        out
-    }
-
-    pub fn convert_to(&mut self, output: ColorSpace, tone_map: bool) {
-        if self.color_space == output {
-            return;
-        }
-        for px in &mut self.data {
-            let mut rgb = [px[0], px[1], px[2]];
-            if tone_map && self.color_space.is_hdr() && !output.is_hdr() {
-                rgb = rgb.map(aces_tone_map);
-            }
-            rgb = convert_primaries(rgb, self.color_space, output);
-            px[0] = rgb[0];
-            px[1] = rgb[1];
-            px[2] = rgb[2];
-        }
-        self.color_space = output;
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DisplayColorProfile {
-    pub name: String,
-    pub color_space: ColorSpace,
-    pub linear_matrix: [[f32; 3]; 3],
-    pub gamma: f32,
-    pub black_luminance_nits: f32,
-    pub white_luminance_nits: f32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub icc_bytes: Option<Vec<u8>>,
-}
-
-impl DisplayColorProfile {
-    pub fn rec709_reference() -> Self {
-        Self {
-            name: "Rec.709 Reference".to_string(),
-            color_space: ColorSpace::Rec709,
-            linear_matrix: IDENTITY_3,
-            gamma: 1.0,
-            black_luminance_nits: 0.0,
-            white_luminance_nits: 100.0,
-            icc_bytes: None,
-        }
-    }
-
-    pub fn display_p3_reference() -> Self {
-        Self {
-            name: "Display P3 Reference".to_string(),
-            color_space: ColorSpace::DciP3,
-            linear_matrix: IDENTITY_3,
-            gamma: 1.0,
-            black_luminance_nits: 0.0,
-            white_luminance_nits: 100.0,
-            icc_bytes: None,
-        }
-    }
-
-    pub fn from_icc_file(path: &Path) -> Result<Self, String> {
-        let data = std::fs::read(path)
-            .map_err(|err| format!("failed to read ICC profile {}: {err}", path.display()))?;
-        let mut profile = Self::from_icc_bytes(&data)?;
-        if profile.name.trim().is_empty() {
-            profile.name =
-                path.file_stem().and_then(|s| s.to_str()).unwrap_or("ICC Profile").to_string();
-        }
-        Ok(profile)
-    }
-
-    pub fn from_icc_bytes(bytes: &[u8]) -> Result<Self, String> {
-        let parsed = parse_icc_display_profile(bytes)?;
-        let color_space = parsed.mapping.color_space().ok_or_else(|| match &parsed.mapping {
-            crate::icc::IccColorSpaceMapping::Unmapped { reason, .. } => reason.clone(),
-            crate::icc::IccColorSpaceMapping::Mapped { .. } => {
-                "ICC profile mapping is internally inconsistent".to_owned()
-            }
-        })?;
-
-        let profile = Self {
-            name: parsed.name,
-            color_space,
-            linear_matrix: parsed.linear_matrix.unwrap_or(IDENTITY_3),
-            gamma: parsed.gamma_compensation.unwrap_or(1.0),
-            black_luminance_nits: 0.0,
-            white_luminance_nits: 100.0,
-            icc_bytes: Some(bytes.to_vec()),
-        };
-        profile.validate()?;
-        Ok(profile)
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        if self.name.trim().is_empty() {
-            return Err("display profile name is empty".to_string());
-        }
-        if !(0.1..=10.0).contains(&self.gamma) {
-            return Err(format!(
-                "display profile gamma out of range: {}",
-                self.gamma
-            ));
-        }
-        if self.white_luminance_nits <= self.black_luminance_nits
-            || self.white_luminance_nits <= 0.0
-        {
-            return Err("display profile luminance range is invalid".to_string());
-        }
-        for row in self.linear_matrix {
-            for value in row {
-                if !value.is_finite() {
-                    return Err("display profile matrix contains non-finite value".to_string());
-                }
-            }
-        }
-        if let Some(icc) = &self.icc_bytes {
-            if icc.is_empty() {
-                return Err("display profile ICC payload is empty".to_string());
-            }
-        }
-        Ok(())
-    }
-
-    pub fn signature_hash(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.name.hash(&mut hasher);
-        self.color_space.hash(&mut hasher);
-        self.gamma.to_bits().hash(&mut hasher);
-        self.black_luminance_nits.to_bits().hash(&mut hasher);
-        self.white_luminance_nits.to_bits().hash(&mut hasher);
-        for row in self.linear_matrix {
-            for value in row {
-                value.to_bits().hash(&mut hasher);
-            }
-        }
-        if let Some(icc) = &self.icc_bytes {
-            for b in icc {
-                b.hash(&mut hasher);
-            }
-        }
-        hasher.finish()
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -466,77 +329,6 @@ pub struct ColorScopes {
     pub histogram: HistogramScope,
     pub waveform: WaveformScope,
     pub vectorscope: Vec<VectorscopeSample>,
-}
-
-pub fn apply_display_profile_rgba8_in_place(
-    data: &mut [u8],
-    source: ColorSpace,
-    profile: &DisplayColorProfile,
-    tone_map: bool,
-) -> Result<(), String> {
-    profile.validate()?;
-    let mut frame =
-        RgbaF32Frame::from_rgba8(1, (data.len() / 4) as u32, data, source, source, tone_map);
-    frame.convert_to(profile.color_space, tone_map);
-
-    if let Some(icc_bytes) = profile.icc_bytes.as_deref() {
-        let mut converted = frame.to_rgba8(profile.color_space, tone_map);
-        if apply_icc_transform_rgba8(&mut converted, profile.color_space, icc_bytes).is_ok() {
-            data.copy_from_slice(&converted[..data.len()]);
-            return Ok(());
-        }
-    }
-
-    for px in &mut frame.data {
-        let rgb = mul3(profile.linear_matrix, [px[0], px[1], px[2]]);
-        px[0] = rgb[0].max(0.0).powf(profile.gamma);
-        px[1] = rgb[1].max(0.0).powf(profile.gamma);
-        px[2] = rgb[2].max(0.0).powf(profile.gamma);
-    }
-    let converted = frame.to_rgba8(profile.color_space, tone_map);
-    data.copy_from_slice(&converted[..data.len()]);
-    Ok(())
-}
-
-fn apply_icc_transform_rgba8(
-    rgba: &mut [u8],
-    source_color_space: ColorSpace,
-    display_icc: &[u8],
-) -> Result<(), String> {
-    let src_profile = crate::display_calibration::cms_profile_for_color_space(source_color_space)
-        .ok_or_else(|| {
-        format!("unsupported source color space for ICC transform: {source_color_space:?}")
-    })?;
-    let dst_profile = CmsColorProfile::new_from_slice(display_icc)
-        .map_err(|err| format!("invalid ICC profile payload: {err}"))?;
-
-    let transform = src_profile
-        .create_transform_8bit(
-            CmsLayout::Rgb,
-            &dst_profile,
-            CmsLayout::Rgb,
-            TransformOptions::default(),
-        )
-        .map_err(|err| format!("failed to build ICC transform: {err}"))?;
-
-    let pixels = rgba.len() / 4;
-    let mut src_rgb = Vec::with_capacity(pixels * 3);
-    for px in rgba.chunks_exact(4) {
-        src_rgb.push(px[0]);
-        src_rgb.push(px[1]);
-        src_rgb.push(px[2]);
-    }
-    let mut dst_rgb = vec![0_u8; src_rgb.len()];
-    transform
-        .transform(&src_rgb, &mut dst_rgb)
-        .map_err(|err| format!("failed to apply ICC transform: {err}"))?;
-
-    for (px, rgb) in rgba.chunks_exact_mut(4).zip(dst_rgb.chunks_exact(3)) {
-        px[0] = rgb[0];
-        px[1] = rgb[1];
-        px[2] = rgb[2];
-    }
-    Ok(())
 }
 
 pub fn compute_color_scopes(
@@ -612,7 +404,7 @@ pub fn compute_color_scopes(
 
 impl ColorSpace {
     /// All product-supported Mondrian color spaces.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 20] = [
         Self::Rec709,
         Self::Rec601Pal,
         Self::Rec601Ntsc,
@@ -620,10 +412,19 @@ impl ColorSpace {
         Self::Rec2100Pq,
         Self::Srgb,
         Self::Rec2020,
-        Self::DciP3,
-        Self::AppleLog,
-        Self::SLog3,
-        Self::ArriLogC4,
+        Self::DisplayP3,
+        Self::AppleLogBt2020,
+        Self::SonySLog3SGamut3,
+        Self::SonySLog3SGamut3Cine,
+        Self::ArriLogC3WideGamut3,
+        Self::ArriLogC4WideGamut4,
+        Self::CanonLog2CinemaGamutD55,
+        Self::CanonLog3CinemaGamutD55,
+        Self::PanasonicVLogVGamut,
+        Self::RedLog3G10WideGamutRgb,
+        Self::BlackmagicFilmWideGamutGen5,
+        Self::DjiDLogDGamut,
+        Self::DavinciIntermediateWideGamut,
     ];
 
     /// Canonical encoding metadata used by preview diagnostics and export tagging.
@@ -671,27 +472,81 @@ impl ColorSpace {
                 matrix: ColorMatrixCoefficients::Bt2020NonConstant,
                 kind: ColorEncodingKind::DisplaySdr,
             },
-            Self::DciP3 => ColorEncodingSpec {
+            Self::DisplayP3 => ColorEncodingSpec {
                 primaries: ColorPrimaries::P3D65,
-                transfer: ColorTransferCharacteristic::Bt709,
-                matrix: ColorMatrixCoefficients::Bt709,
+                transfer: ColorTransferCharacteristic::Srgb,
+                matrix: ColorMatrixCoefficients::Rgb,
                 kind: ColorEncodingKind::DisplaySdr,
             },
-            Self::AppleLog => ColorEncodingSpec {
-                primaries: ColorPrimaries::P3D65,
+            Self::AppleLogBt2020 => ColorEncodingSpec {
+                primaries: ColorPrimaries::Bt2020,
                 transfer: ColorTransferCharacteristic::AppleLog,
                 matrix: ColorMatrixCoefficients::Unspecified,
                 kind: ColorEncodingKind::CameraLog,
             },
-            Self::SLog3 => ColorEncodingSpec {
-                primaries: ColorPrimaries::Bt2020,
+            Self::SonySLog3SGamut3 => ColorEncodingSpec {
+                primaries: ColorPrimaries::SonySGamut3,
                 transfer: ColorTransferCharacteristic::SLog3,
                 matrix: ColorMatrixCoefficients::Unspecified,
                 kind: ColorEncodingKind::CameraLog,
             },
-            Self::ArriLogC4 => ColorEncodingSpec {
-                primaries: ColorPrimaries::Bt709,
+            Self::SonySLog3SGamut3Cine => ColorEncodingSpec {
+                primaries: ColorPrimaries::SonySGamut3Cine,
+                transfer: ColorTransferCharacteristic::SLog3,
+                matrix: ColorMatrixCoefficients::Unspecified,
+                kind: ColorEncodingKind::CameraLog,
+            },
+            Self::ArriLogC3WideGamut3 => ColorEncodingSpec {
+                primaries: ColorPrimaries::ArriWideGamut3,
+                transfer: ColorTransferCharacteristic::ArriLogC3,
+                matrix: ColorMatrixCoefficients::Unspecified,
+                kind: ColorEncodingKind::CameraLog,
+            },
+            Self::ArriLogC4WideGamut4 => ColorEncodingSpec {
+                primaries: ColorPrimaries::ArriWideGamut4,
                 transfer: ColorTransferCharacteristic::ArriLogC4,
+                matrix: ColorMatrixCoefficients::Unspecified,
+                kind: ColorEncodingKind::CameraLog,
+            },
+            Self::CanonLog2CinemaGamutD55 => ColorEncodingSpec {
+                primaries: ColorPrimaries::CanonCinemaGamutD55,
+                transfer: ColorTransferCharacteristic::CanonLog2,
+                matrix: ColorMatrixCoefficients::Unspecified,
+                kind: ColorEncodingKind::CameraLog,
+            },
+            Self::CanonLog3CinemaGamutD55 => ColorEncodingSpec {
+                primaries: ColorPrimaries::CanonCinemaGamutD55,
+                transfer: ColorTransferCharacteristic::CanonLog3,
+                matrix: ColorMatrixCoefficients::Unspecified,
+                kind: ColorEncodingKind::CameraLog,
+            },
+            Self::PanasonicVLogVGamut => ColorEncodingSpec {
+                primaries: ColorPrimaries::PanasonicVGamut,
+                transfer: ColorTransferCharacteristic::PanasonicVLog,
+                matrix: ColorMatrixCoefficients::Unspecified,
+                kind: ColorEncodingKind::CameraLog,
+            },
+            Self::RedLog3G10WideGamutRgb => ColorEncodingSpec {
+                primaries: ColorPrimaries::RedWideGamutRgb,
+                transfer: ColorTransferCharacteristic::RedLog3G10,
+                matrix: ColorMatrixCoefficients::Unspecified,
+                kind: ColorEncodingKind::CameraLog,
+            },
+            Self::BlackmagicFilmWideGamutGen5 => ColorEncodingSpec {
+                primaries: ColorPrimaries::BlackmagicWideGamutGen5,
+                transfer: ColorTransferCharacteristic::BlackmagicFilmGen5,
+                matrix: ColorMatrixCoefficients::Unspecified,
+                kind: ColorEncodingKind::CameraLog,
+            },
+            Self::DjiDLogDGamut => ColorEncodingSpec {
+                primaries: ColorPrimaries::DjiDGamut,
+                transfer: ColorTransferCharacteristic::DjiDLog,
+                matrix: ColorMatrixCoefficients::Unspecified,
+                kind: ColorEncodingKind::CameraLog,
+            },
+            Self::DavinciIntermediateWideGamut => ColorEncodingSpec {
+                primaries: ColorPrimaries::DavinciWideGamut,
+                transfer: ColorTransferCharacteristic::DavinciIntermediate,
                 matrix: ColorMatrixCoefficients::Unspecified,
                 kind: ColorEncodingKind::CameraLog,
             },
@@ -747,6 +602,12 @@ impl ColorSpace {
             }
         }
 
+        if color_primaries.is_some_and(|tag| ffmpeg_tag_eq(tag, "smpte432"))
+            && color_trc.is_none_or(|tag| ffmpeg_tag_eq(tag, "iec61966-2-1"))
+        {
+            return Some(Self::DisplayP3);
+        }
+
         match color_trc {
             Some("smpte2084") => Some(Self::Rec2100Pq),
             Some("arib-std-b67") => Some(Self::Rec2100Hlg),
@@ -755,7 +616,7 @@ impl ColorSpace {
             Some("smpte170m") => Some(Self::Rec601Ntsc),
             _ => match color_primaries {
                 Some("bt2020") => Some(Self::Rec2020),
-                Some("smpte431") | Some("smpte432") => Some(Self::DciP3),
+                Some("smpte432") => Some(Self::DisplayP3),
                 Some("bt709") => {
                     if colorspace.is_some_and(|tag| ffmpeg_tag_eq(tag, "rgb")) {
                         Some(Self::Srgb)
@@ -782,279 +643,12 @@ fn ffmpeg_tag_eq(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right) || matches!((left, right), ("rgb", "gbr") | ("gbr", "rgb"))
 }
 
-fn decode_transfer(space: ColorSpace, v: f32) -> f32 {
-    let v = v.clamp(0.0, 1.0);
-    match space {
-        ColorSpace::Srgb => srgb_to_linear(v),
-        ColorSpace::Rec2100Pq => pq_to_linear(v),
-        ColorSpace::Rec2100Hlg => hlg_to_linear(v),
-        ColorSpace::AppleLog => apple_log_to_linear(v),
-        ColorSpace::SLog3 => slog3_to_linear(v),
-        ColorSpace::ArriLogC4 => logc4_to_linear(v),
-        ColorSpace::Rec601Pal => v.powf(2.8),
-        ColorSpace::Rec601Ntsc | ColorSpace::Rec709 | ColorSpace::Rec2020 | ColorSpace::DciP3 => {
-            rec709_to_linear(v)
-        }
-    }
-}
-
-fn encode_transfer(space: ColorSpace, v: f32) -> f32 {
-    let v = v.max(0.0);
-    match space {
-        ColorSpace::Srgb => linear_to_srgb(v),
-        ColorSpace::Rec2100Pq => linear_to_pq(v),
-        ColorSpace::Rec2100Hlg => linear_to_hlg(v),
-        ColorSpace::AppleLog => linear_to_apple_log(v),
-        ColorSpace::SLog3 => linear_to_slog3(v),
-        ColorSpace::ArriLogC4 => linear_to_logc4(v),
-        ColorSpace::Rec601Pal => v.powf(1.0 / 2.8),
-        ColorSpace::Rec601Ntsc | ColorSpace::Rec709 | ColorSpace::Rec2020 | ColorSpace::DciP3 => {
-            linear_to_rec709(v)
-        }
-    }
-}
-
-fn encode_u8(space: ColorSpace, v: f32) -> u8 {
-    (encode_transfer(space, v).clamp(0.0, 1.0) * 255.0).round() as u8
-}
-
-fn srgb_to_linear(v: f32) -> f32 {
-    if v <= 0.04045 {
-        v / 12.92
-    } else {
-        ((v + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-fn linear_to_srgb(v: f32) -> f32 {
-    if v <= 0.0031308 {
-        v * 12.92
-    } else {
-        1.055 * v.powf(1.0 / 2.4) - 0.055
-    }
-}
-
-fn rec709_to_linear(v: f32) -> f32 {
-    if v < 0.081 {
-        v / 4.5
-    } else {
-        ((v + 0.099) / 1.099).powf(1.0 / 0.45)
-    }
-}
-
-fn linear_to_rec709(v: f32) -> f32 {
-    if v < 0.018 {
-        v * 4.5
-    } else {
-        1.099 * v.powf(0.45) - 0.099
-    }
-}
-
-fn pq_to_linear(v: f32) -> f32 {
-    const M1: f32 = 2610.0 / 16384.0;
-    const M2: f32 = 2523.0 / 32.0;
-    const C1: f32 = 3424.0 / 4096.0;
-    const C2: f32 = 2413.0 / 128.0;
-    const C3: f32 = 2392.0 / 128.0;
-    let p = v.powf(1.0 / M2);
-    let n = (p - C1).max(0.0);
-    let d = C2 - C3 * p;
-    100.0 * (n / d.max(1.0e-6)).powf(1.0 / M1)
-}
-
-fn linear_to_pq(v: f32) -> f32 {
-    const M1: f32 = 2610.0 / 16384.0;
-    const M2: f32 = 2523.0 / 32.0;
-    const C1: f32 = 3424.0 / 4096.0;
-    const C2: f32 = 2413.0 / 128.0;
-    const C3: f32 = 2392.0 / 128.0;
-    let l = (v / 100.0).max(0.0).powf(M1);
-    ((C1 + C2 * l) / (1.0 + C3 * l)).powf(M2)
-}
-
-fn hlg_to_linear(v: f32) -> f32 {
-    const A: f32 = 0.17883277;
-    const B: f32 = 0.28466892;
-    const C: f32 = 0.559_910_7;
-    let scene = if v <= 0.5 {
-        (v * v) / 3.0
-    } else {
-        ((v - C) / A).exp() + B
-    };
-    scene * 12.0
-}
-
-fn linear_to_hlg(v: f32) -> f32 {
-    const A: f32 = 0.17883277;
-    const B: f32 = 0.28466892;
-    const C: f32 = 0.559_910_7;
-    let scene = (v / 12.0).max(0.0);
-    if scene <= 1.0 / 12.0 {
-        (3.0 * scene).sqrt()
-    } else {
-        A * (scene - B).max(1.0e-6).ln() + C
-    }
-}
-
-fn apple_log_to_linear(v: f32) -> f32 {
-    ((v - 0.385_537) / 0.143_894).exp2().max(0.0) * 0.18
-}
-
-fn linear_to_apple_log(v: f32) -> f32 {
-    ((v.max(1.0e-6) / 0.18).log2() * 0.143_894) + 0.385_537
-}
-
-fn slog3_to_linear(v: f32) -> f32 {
-    let x = ((v - 0.410_557) / 0.255).exp10();
-    ((x - 0.01) / 5.0).max(0.0)
-}
-
-fn linear_to_slog3(v: f32) -> f32 {
-    ((v.max(0.0) * 5.0 + 0.01).log10() * 0.255) + 0.410_557
-}
-
-fn logc4_to_linear(v: f32) -> f32 {
-    ((v - 0.391_007) / 0.181_311).exp2().max(0.0) * 0.18
-}
-
-fn linear_to_logc4(v: f32) -> f32 {
-    ((v.max(1.0e-6) / 0.18).log2() * 0.181_311) + 0.391_007
-}
-
-fn aces_tone_map(v: f32) -> f32 {
-    let x = v.max(0.0);
-    ((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)).clamp(0.0, 1.0)
-}
-
-fn convert_primaries(rgb: [f32; 3], from: ColorSpace, to: ColorSpace) -> [f32; 3] {
-    let from = primary_family(from);
-    let to = primary_family(to);
-    if from == to {
-        return rgb;
-    }
-    let rec709 = match from {
-        PrimaryFamily::Rec601Pal => mul3(M_REC601_PAL_TO_REC709, rgb),
-        PrimaryFamily::Rec601Ntsc => mul3(M_REC601_NTSC_TO_REC709, rgb),
-        _ => rgb,
-    };
-    let from = match from {
-        PrimaryFamily::Rec601Pal | PrimaryFamily::Rec601Ntsc => PrimaryFamily::Rec709,
-        other => other,
-    };
-    let converted = match (from, to) {
-        (PrimaryFamily::Rec709, PrimaryFamily::Rec2020) => mul3(M_REC709_TO_REC2020, rec709),
-        (PrimaryFamily::Rec2020, PrimaryFamily::Rec709) => mul3(M_REC2020_TO_REC709, rec709),
-        (PrimaryFamily::Rec709, PrimaryFamily::P3) => mul3(M_REC709_TO_P3, rec709),
-        (PrimaryFamily::P3, PrimaryFamily::Rec709) => mul3(M_P3_TO_REC709, rec709),
-        (PrimaryFamily::P3, PrimaryFamily::Rec2020) => {
-            mul3(M_REC709_TO_REC2020, mul3(M_P3_TO_REC709, rec709))
-        }
-        (PrimaryFamily::Rec2020, PrimaryFamily::P3) => {
-            mul3(M_REC709_TO_P3, mul3(M_REC2020_TO_REC709, rec709))
-        }
-        (_, PrimaryFamily::Rec601Pal | PrimaryFamily::Rec601Ntsc) => match from {
-            PrimaryFamily::Rec709 => rec709,
-            PrimaryFamily::Rec2020 => mul3(M_REC2020_TO_REC709, rec709),
-            PrimaryFamily::P3 => mul3(M_P3_TO_REC709, rec709),
-            PrimaryFamily::Rec601Pal | PrimaryFamily::Rec601Ntsc => rec709,
-        },
-        _ => rec709,
-    };
-    match to {
-        PrimaryFamily::Rec601Pal => mul3(M_REC709_TO_REC601_PAL, converted),
-        PrimaryFamily::Rec601Ntsc => mul3(M_REC709_TO_REC601_NTSC, converted),
-        _ => converted,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PrimaryFamily {
-    Rec709,
-    Rec601Pal,
-    Rec601Ntsc,
-    Rec2020,
-    P3,
-}
-
-fn primary_family(space: ColorSpace) -> PrimaryFamily {
-    match space {
-        ColorSpace::Rec601Pal => PrimaryFamily::Rec601Pal,
-        ColorSpace::Rec601Ntsc => PrimaryFamily::Rec601Ntsc,
-        ColorSpace::Rec2100Hlg
-        | ColorSpace::Rec2100Pq
-        | ColorSpace::Rec2020
-        | ColorSpace::SLog3 => PrimaryFamily::Rec2020,
-        ColorSpace::DciP3 | ColorSpace::AppleLog => PrimaryFamily::P3,
-        ColorSpace::Rec709 | ColorSpace::Srgb | ColorSpace::ArriLogC4 => PrimaryFamily::Rec709,
-    }
-}
-
-const M_REC709_TO_REC2020: [[f32; 3]; 3] = [
-    [0.627_404, 0.329_283, 0.043_313],
-    [0.069_097, 0.919_540, 0.011_362],
-    [0.016_391, 0.088_013, 0.895_596],
-];
-const M_REC601_PAL_TO_REC709: [[f32; 3]; 3] = [
-    [1.044_043_2, -0.044_043_21, 0.0],
-    [0.0, 1.0, 0.0],
-    [0.0, 0.011_793_378, 0.988_206_6],
-];
-const M_REC709_TO_REC601_PAL: [[f32; 3]; 3] = [
-    [0.957_814_75, 0.042_185_236, 0.0],
-    [0.0, 1.0, 0.0],
-    [0.0, -0.011_934_122, 1.011_934_2],
-];
-const M_REC601_NTSC_TO_REC709: [[f32; 3]; 3] = [
-    [0.939_542_06, 0.050_181_36, 0.010_276_579],
-    [0.017_772_224, 0.965_792_83, 0.016_434_914],
-    [-0.001_621_6, -0.004_369_75, 1.005_991_3],
-];
-const M_REC709_TO_REC601_NTSC: [[f32; 3]; 3] = [
-    [1.065_379, -0.055_400_874, -0.009_978_161],
-    [-0.019_632_55, 1.036_363_1, -0.016_730_545],
-    [0.001_632_051, 0.004_412_373, 0.993_955_55],
-];
-const M_REC2020_TO_REC709: [[f32; 3]; 3] = [
-    [1.660_491, -0.587_641, -0.072_850],
-    [-0.124_550, 1.132_9, -0.008_349],
-    [-0.018_151, -0.100_579, 1.118_73],
-];
-const M_REC709_TO_P3: [[f32; 3]; 3] = [
-    [0.822_462, 0.177_538, 0.0],
-    [0.033_194, 0.966_806, 0.0],
-    [0.017_083, 0.072_397, 0.910_520],
-];
-const M_P3_TO_REC709: [[f32; 3]; 3] = [
-    [1.224_94, -0.224_940, 0.0],
-    [-0.042_057, 1.042_057, 0.0],
-    [-0.019_638, -0.078_636, 1.098_274],
-];
-const IDENTITY_3: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-
 fn luma(r: f32, g: f32, b: f32) -> f32 {
     0.2126 * r + 0.7152 * g + 0.0722 * b
 }
 
 fn scope_bin(v: f32, bins: usize) -> usize {
     (v.clamp(0.0, 1.0) * (bins.saturating_sub(1)) as f32).round() as usize
-}
-
-fn mul3(m: [[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
-    [
-        m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
-        m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
-        m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
-    ]
-}
-
-trait Exp10 {
-    fn exp10(self) -> Self;
-}
-
-impl Exp10 for f32 {
-    fn exp10(self) -> Self {
-        10.0_f32.powf(self)
-    }
 }
 
 #[cfg(test)]
@@ -1078,7 +672,13 @@ mod tests {
         assert_eq!(pq.kind, ColorEncodingKind::DisplayHdr);
         assert!(pq.is_hdr());
 
-        let slog3 = ColorSpace::SLog3.encoding();
+        let display_p3 = ColorSpace::DisplayP3.encoding();
+        assert_eq!(display_p3.primaries, ColorPrimaries::P3D65);
+        assert_eq!(display_p3.transfer, ColorTransferCharacteristic::Srgb);
+        assert_eq!(display_p3.matrix, ColorMatrixCoefficients::Rgb);
+        assert_eq!(display_p3.kind, ColorEncodingKind::DisplaySdr);
+
+        let slog3 = ColorSpace::SonySLog3SGamut3Cine.encoding();
         assert_eq!(slog3.kind, ColorEncodingKind::CameraLog);
         assert_eq!(slog3.matrix, ColorMatrixCoefficients::Unspecified);
         assert!(slog3.is_camera_log());
@@ -1097,6 +697,11 @@ mod tests {
         assert_eq!(srgb.color_trc, "iec61966-2-1");
         assert_eq!(srgb.colorspace, "rgb");
 
+        let display_p3 = ColorSpace::DisplayP3.ffmpeg_tags().expect("Display P3 has delivery tags");
+        assert_eq!(display_p3.color_primaries, "smpte432");
+        assert_eq!(display_p3.color_trc, "iec61966-2-1");
+        assert_eq!(display_p3.colorspace, "rgb");
+
         let pal = ColorSpace::Rec601Pal.ffmpeg_tags().expect("PAL has CICP tags");
         assert_eq!(pal.color_primaries, "bt470bg");
         assert_eq!(pal.color_trc, "bt470bg");
@@ -1107,9 +712,9 @@ mod tests {
         assert_eq!(ntsc.color_trc, "smpte170m");
         assert_eq!(ntsc.colorspace, "smpte170m");
 
-        assert_eq!(ColorSpace::AppleLog.ffmpeg_tags(), None);
-        assert_eq!(ColorSpace::SLog3.ffmpeg_tags(), None);
-        assert_eq!(ColorSpace::ArriLogC4.ffmpeg_tags(), None);
+        assert_eq!(ColorSpace::AppleLogBt2020.ffmpeg_tags(), None);
+        assert_eq!(ColorSpace::SonySLog3SGamut3Cine.ffmpeg_tags(), None);
+        assert_eq!(ColorSpace::ArriLogC4WideGamut4.ffmpeg_tags(), None);
     }
 
     #[test]
@@ -1126,6 +731,10 @@ mod tests {
             ColorSpace::from_ffmpeg_tags("bt709", "iec61966-2-1", "gbr"),
             Some(ColorSpace::Srgb)
         );
+        assert_eq!(
+            ColorSpace::from_ffmpeg_tags("smpte432", "iec61966-2-1", "rgb"),
+            Some(ColorSpace::DisplayP3)
+        );
         assert_eq!(ColorSpace::from_ffmpeg_tags("bt709", "bt709", "rgb"), None);
         assert_eq!(
             ColorSpace::from_ffmpeg_tags("bt470bg", "bt470bg", "bt470bg"),
@@ -1139,6 +748,14 @@ mod tests {
 
     #[test]
     fn color_space_resolves_partial_ffmpeg_tag_hints_centrally() {
+        assert_eq!(
+            ColorSpace::from_ffmpeg_tag_hints(Some("smpte432"), Some("iec61966-2-1"), None),
+            Some(ColorSpace::DisplayP3)
+        );
+        assert_eq!(
+            ColorSpace::from_ffmpeg_tag_hints(Some("smpte431"), None, None),
+            None
+        );
         assert_eq!(
             ColorSpace::from_ffmpeg_tag_hints(None, Some("smpte2084"), None),
             Some(ColorSpace::Rec2100Pq)
@@ -1163,30 +780,8 @@ mod tests {
     }
 
     #[test]
-    fn rec601_primary_conversions_round_trip_through_rec709() {
-        let sample = [0.21, 0.47, 0.83];
-        for source in [ColorSpace::Rec601Pal, ColorSpace::Rec601Ntsc] {
-            let rec709 = convert_primaries(sample, source, ColorSpace::Rec709);
-            let round_trip = convert_primaries(rec709, ColorSpace::Rec709, source);
-            for (actual, expected) in round_trip.into_iter().zip(sample) {
-                assert!((actual - expected).abs() < 2.0e-6, "{source:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn log_curve_reference_values_are_stable() {
-        let apple_mid = linear_to_apple_log(0.18);
-        let slog_mid = linear_to_slog3(0.18);
-        let logc_mid = linear_to_logc4(0.18);
-        assert!((apple_mid - 0.385_537).abs() < 1.0e-6);
-        assert!((slog3_to_linear(slog_mid) - 0.18).abs() < 1.0e-5);
-        assert!((logc4_to_linear(logc_mid) - 0.18).abs() < 1.0e-5);
-    }
-
-    #[test]
     fn standard_engine_uses_typed_ocio_identity_without_byte_boundary() {
-        let engine = ColorEngine::MondrianSmart;
+        let engine = ColorEngine::mondrian_standard();
         let mut rgba = vec![0.5_f32, 0.5, 0.5, 0.25];
 
         engine
@@ -1210,7 +805,7 @@ mod tests {
             "mondrian-missing-ocio-config-{}.ocio",
             std::process::id()
         ));
-        let engine = ColorEngine::Ocio {
+        let engine = ColorEngine::CustomOcio {
             source: crate::types::OcioConfigSource::Path { path: missing_path },
         };
         let mut rgba = vec![0.1_f32, 0.2, 0.3, 0.4];
@@ -1226,54 +821,6 @@ mod tests {
 
         assert!(err.contains("OCIO config file not found"));
         assert_eq!(rgba, original);
-    }
-
-    #[test]
-    fn f32_frame_round_trip_preserves_sdr_values() {
-        let rgba = vec![0, 64, 128, 255, 255, 128, 64, 32];
-        let frame =
-            RgbaF32Frame::from_rgba8(2, 1, &rgba, ColorSpace::Rec709, ColorSpace::Rec709, false);
-        let out = frame.to_rgba8(ColorSpace::Rec709, false);
-        for (actual, expected) in out.iter().zip(rgba) {
-            assert!((*actual as i16 - expected as i16).abs() <= 1);
-        }
-    }
-
-    #[test]
-    fn display_profile_rejects_invalid_gamma() {
-        let mut profile = DisplayColorProfile::rec709_reference();
-        profile.gamma = 0.0;
-        assert!(profile.validate().is_err());
-    }
-
-    #[test]
-    fn display_profile_signature_changes_with_matrix() {
-        let mut a = DisplayColorProfile::rec709_reference();
-        let mut b = DisplayColorProfile::rec709_reference();
-        assert_eq!(a.signature_hash(), b.signature_hash());
-        b.linear_matrix[0][0] = 0.99;
-        assert_ne!(a.signature_hash(), b.signature_hash());
-        a.linear_matrix[0][0] = 0.99;
-        assert_eq!(a.signature_hash(), b.signature_hash());
-    }
-
-    #[test]
-    fn display_profile_preserves_alpha() {
-        let mut rgba = vec![64, 128, 192, 17];
-        apply_display_profile_rgba8_in_place(
-            &mut rgba,
-            ColorSpace::Rec709,
-            &DisplayColorProfile::rec709_reference(),
-            false,
-        )
-        .expect("valid display profile");
-        assert_eq!(rgba[3], 17);
-    }
-
-    #[test]
-    fn display_profile_from_icc_rejects_invalid_payload() {
-        let bad_payload = vec![0_u8; 16];
-        assert!(DisplayColorProfile::from_icc_bytes(&bad_payload).is_err());
     }
 
     #[test]

@@ -1223,6 +1223,13 @@ index. `VideoStreamInfo.color_interpretation` is the diagnostic/UI-facing
 interpretation with confidence, evidence, warnings, and a user-overridable flag.
 Evidence records whether a result came from a camera/log metadata hint, exact
 CICP tags, partial CICP tags, unsupported CICP tags, or decoder unavailability.
+Camera/log hints resolve only when they identify both the transfer curve and
+the associated camera gamut. For example, `S-Log3 / S-Gamut3.Cine` is a
+supported exact identity, while bare `S-Log3` remains unresolved. The same rule
+applies to ARRI, Canon, Panasonic, RED, Blackmagic, DJI, Apple, and DaVinci
+camera families. This prevents a plausible-looking but incorrect primary
+conversion from being hidden behind a generic log label. ICC profile names are
+display-profile evidence and are never promoted to camera input identities.
 Warnings preserve machine-readable provenance, not only a resolved color-space
 enum: multiple-hint warnings keep the selected and ignored metadata keys,
 values, and scopes; hint-vs-CICP warnings keep the selected hint and the raw

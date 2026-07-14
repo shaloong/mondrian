@@ -36,7 +36,7 @@ fn working_frame(w: u32, h: u32, rgba: Vec<u8>) -> CpuColorFrame {
         &RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec709,
             false,
-            ColorEngine::MondrianSmart,
+            ColorEngine::mondrian_standard(),
         ),
     )
     .expect("benchmark input transform")
@@ -87,7 +87,7 @@ fn bench_layers(c: &mut Criterion, name: &str, w: u32, h: u32, n: usize) {
                 &RenderColorTransform::display(
                     ColorSpace::Rec709,
                     false,
-                    ColorEngine::MondrianSmart,
+                    ColorEngine::mondrian_standard(),
                 ),
             )
             .expect("benchmark color transform")

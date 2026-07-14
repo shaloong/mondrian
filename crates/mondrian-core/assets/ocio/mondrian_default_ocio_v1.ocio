@@ -26,7 +26,7 @@ roles:
   compositing_log: ACEScct
   data: Raw
   matte_paint: ACEScct
-  scene_linear: ACEScg
+  scene_linear: Linear Rec.2020
   texture_paint: sRGB Encoded Rec.709 (sRGB)
 
 file_rules:

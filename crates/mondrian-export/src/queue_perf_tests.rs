@@ -134,7 +134,7 @@ fn generate_layer(
         &RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec709,
             false,
-            ColorEngine::MondrianSmart,
+            ColorEngine::mondrian_standard(),
         ),
     )
     .expect("perf input transform");

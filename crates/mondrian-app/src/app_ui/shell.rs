@@ -3379,7 +3379,9 @@ mod tests {
         root.handle_shell_action(
             app_shell_interpret_asset_draft_changed_action(InterpretAssetDraftUpdatePayload {
                 interpretation: AssetMediaInterpretation {
-                    color: MediaColorInterpretation::Override { color_space: ColorSpace::SLog3 },
+                    color: MediaColorInterpretation::Override {
+                        color_space: ColorSpace::SonySLog3SGamut3Cine,
+                    },
                     ..AssetMediaInterpretation::default()
                 },
             }),
@@ -3403,7 +3405,7 @@ mod tests {
         assert_eq!(payload.asset_id, asset_id);
         assert_eq!(
             payload.interpretation.color.override_color_space(),
-            Some(ColorSpace::SLog3)
+            Some(ColorSpace::SonySLog3SGamut3Cine)
         );
         assert!(root.modal.is_none());
     }

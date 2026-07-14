@@ -812,10 +812,10 @@ mod tests {
     #[test]
     fn resolve_output_color_space_color_space_override() {
         let policy = DisplayManagementPolicy {
-            monitor_profile: MonitorProfileReference::ColorSpace(ColorSpace::DciP3),
+            monitor_profile: MonitorProfileReference::ColorSpace(ColorSpace::DisplayP3),
             ..default_policy()
         };
         let result = super::resolve_output_color_space(&policy, ColorSpace::Rec709);
-        assert_eq!(result, ColorSpace::DciP3);
+        assert_eq!(result, ColorSpace::DisplayP3);
     }
 }

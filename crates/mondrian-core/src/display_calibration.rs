@@ -294,12 +294,21 @@ pub(crate) fn cms_profile_for_color_space(color_space: ColorSpace) -> Option<Col
         ColorSpace::Rec2020 => Some(ColorProfile::new_bt2020()),
         ColorSpace::Rec2100Pq => Some(ColorProfile::new_bt2020_pq()),
         ColorSpace::Rec2100Hlg => Some(ColorProfile::new_bt2020_hlg()),
-        ColorSpace::DciP3 => Some(ColorProfile::new_dci_p3()),
+        ColorSpace::DisplayP3 => Some(ColorProfile::new_display_p3()),
         ColorSpace::Rec601Pal
         | ColorSpace::Rec601Ntsc
-        | ColorSpace::AppleLog
-        | ColorSpace::SLog3
-        | ColorSpace::ArriLogC4 => None,
+        | ColorSpace::AppleLogBt2020
+        | ColorSpace::SonySLog3SGamut3
+        | ColorSpace::SonySLog3SGamut3Cine
+        | ColorSpace::ArriLogC3WideGamut3
+        | ColorSpace::ArriLogC4WideGamut4
+        | ColorSpace::CanonLog2CinemaGamutD55
+        | ColorSpace::CanonLog3CinemaGamutD55
+        | ColorSpace::PanasonicVLogVGamut
+        | ColorSpace::RedLog3G10WideGamutRgb
+        | ColorSpace::BlackmagicFilmWideGamutGen5
+        | ColorSpace::DjiDLogDGamut
+        | ColorSpace::DavinciIntermediateWideGamut => None,
     }
 }
 
@@ -360,7 +369,7 @@ mod tests {
         let edge_size = 17;
         let sample_count = usize::from(edge_size).pow(3) * 4;
         let error = DisplayCalibrationLut3d::from_rgba32f_samples(
-            ColorSpace::AppleLog,
+            ColorSpace::AppleLogBt2020,
             IccProfileFingerprint::from_bytes(b"unsupported"),
             edge_size,
             vec![0.0; sample_count],
@@ -369,7 +378,7 @@ mod tests {
 
         assert_eq!(
             error,
-            DisplayCalibrationError::UnsupportedSourceColorSpace(ColorSpace::AppleLog)
+            DisplayCalibrationError::UnsupportedSourceColorSpace(ColorSpace::AppleLogBt2020)
         );
     }
 

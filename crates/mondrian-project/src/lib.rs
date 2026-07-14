@@ -22,7 +22,7 @@ use migration::JsonMigrationRegistry;
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 2;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 4;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 1;
 
@@ -515,6 +515,17 @@ mod tests {
             project_document_fingerprint(loaded.document).expect("loaded fingerprint"),
             project_document_fingerprint(reopened).expect("reopened fingerprint")
         );
+    }
+
+    #[test]
+    fn schema_v3_is_rejected_without_an_alpha_compatibility_migration() {
+        let mut legacy = serde_json::to_value(test_document()).expect("serialize document");
+        legacy["schema_version"] = serde_json::json!(3);
+
+        let err = DOCUMENT_MIGRATIONS
+            .migrate(legacy)
+            .expect_err("schema v3 must not migrate implicitly");
+        assert!(err.to_string().contains("missing project document migration"));
     }
 
     #[test]

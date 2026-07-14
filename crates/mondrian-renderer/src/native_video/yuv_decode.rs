@@ -828,7 +828,7 @@ mod tests {
                 input_transform: crate::RenderInputTransform::to_working_gpu(
                     WorkingColorSpace::LinearRec709,
                     false,
-                    ColorEngine::MondrianSmart,
+                    ColorEngine::mondrian_standard(),
                 ),
                 handle_kind: DecodedGpuFrameHandleKind::D3D11Texture2D,
                 source_texture_format: GpuNativeDecodedFrameTextureFormat::Nv12,
@@ -988,7 +988,7 @@ mod tests {
             input_transform: crate::RenderInputTransform::to_working_gpu(
                 WorkingColorSpace::LinearRec2020,
                 true,
-                ColorEngine::MondrianSmart,
+                ColorEngine::mondrian_standard(),
             ),
             handle_kind: DecodedGpuFrameHandleKind::D3D11Texture2D,
             source_texture_format: GpuNativeDecodedFrameTextureFormat::P010,

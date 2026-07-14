@@ -348,7 +348,9 @@ mod tests {
         let library = AssetLibrary::open(temp_root.join("library")).expect("open library");
         let asset_id = library.import_media_file(&media_path).expect("import media");
         let interpretation = AssetMediaInterpretation {
-            color: MediaColorInterpretation::Override { color_space: ColorSpace::SLog3 },
+            color: MediaColorInterpretation::Override {
+                color_space: ColorSpace::SonySLog3SGamut3Cine,
+            },
             ..AssetMediaInterpretation::default()
         };
         library

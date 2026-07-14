@@ -3218,7 +3218,7 @@ mod tests {
             &mondrian_renderer::RenderInputTransform::to_working(
                 WorkingColorSpace::LinearRec709,
                 false,
-                ColorEngine::MondrianSmart,
+                ColorEngine::mondrian_standard(),
             ),
         )
         .expect("test input transform")
@@ -3791,7 +3791,7 @@ mod tests {
             workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
             nested_processing:
                 mondrian_core::timeline_data::NestedColorProcessing::PreserveChildWorkingSpace,
-            engine: ColorEngine::MondrianSmart,
+            engine: ColorEngine::mondrian_standard(),
             missing_metadata_policy:
                 mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
@@ -3822,7 +3822,7 @@ mod tests {
             workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
             nested_processing:
                 mondrian_core::timeline_data::NestedColorProcessing::PreserveChildWorkingSpace,
-            engine: ColorEngine::MondrianSmart,
+            engine: ColorEngine::mondrian_standard(),
             missing_metadata_policy:
                 mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
@@ -3847,7 +3847,7 @@ mod tests {
             workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
             nested_processing:
                 mondrian_core::timeline_data::NestedColorProcessing::PreserveChildWorkingSpace,
-            engine: ColorEngine::MondrianSmart,
+            engine: ColorEngine::mondrian_standard(),
             missing_metadata_policy:
                 mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
@@ -3935,7 +3935,7 @@ mod tests {
             workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
             nested_processing:
                 mondrian_core::timeline_data::NestedColorProcessing::PreserveChildWorkingSpace,
-            engine: ColorEngine::MondrianSmart,
+            engine: ColorEngine::mondrian_standard(),
             missing_metadata_policy:
                 mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
@@ -4010,7 +4010,7 @@ mod tests {
             workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
             nested_processing:
                 mondrian_core::timeline_data::NestedColorProcessing::PreserveChildWorkingSpace,
-            engine: ColorEngine::MondrianSmart,
+            engine: ColorEngine::mondrian_standard(),
             missing_metadata_policy:
                 mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
@@ -4196,7 +4196,7 @@ mod tests {
 
     #[test]
     fn export_color_validation_rejects_camera_log_consumer_codecs() {
-        let mut timeline = timeline_input_with_output_color(ColorSpace::AppleLog);
+        let mut timeline = timeline_input_with_output_color(ColorSpace::AppleLogBt2020);
         timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
         let config = dummy_config("camera-log.mp4");
 
@@ -4208,7 +4208,7 @@ mod tests {
 
     #[test]
     fn export_color_validation_allows_camera_log_prores_intermediate() {
-        let mut timeline = timeline_input_with_output_color(ColorSpace::AppleLog);
+        let mut timeline = timeline_input_with_output_color(ColorSpace::AppleLogBt2020);
         timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Twelve;
 
         let mut config = dummy_config("camera-log.mov");
@@ -4397,7 +4397,9 @@ mod tests {
         timeline.asset_interpretations.insert(
             override_id,
             AssetMediaInterpretation {
-                color: MediaColorInterpretation::Override { color_space: ColorSpace::SLog3 },
+                color: MediaColorInterpretation::Override {
+                    color_space: ColorSpace::SonySLog3SGamut3Cine,
+                },
                 ..AssetMediaInterpretation::default()
             },
         );
@@ -4501,9 +4503,18 @@ mod tests {
     fn color_tag_args_skip_camera_log_spaces_without_standard_delivery_tags() {
         let codec = VideoCodecConfig::ProRes { variant: "hq".to_owned() };
         for color_space in [
-            ColorSpace::AppleLog,
-            ColorSpace::SLog3,
-            ColorSpace::ArriLogC4,
+            ColorSpace::AppleLogBt2020,
+            ColorSpace::SonySLog3SGamut3,
+            ColorSpace::SonySLog3SGamut3Cine,
+            ColorSpace::ArriLogC3WideGamut3,
+            ColorSpace::ArriLogC4WideGamut4,
+            ColorSpace::CanonLog2CinemaGamutD55,
+            ColorSpace::CanonLog3CinemaGamutD55,
+            ColorSpace::PanasonicVLogVGamut,
+            ColorSpace::RedLog3G10WideGamutRgb,
+            ColorSpace::BlackmagicFilmWideGamutGen5,
+            ColorSpace::DjiDLogDGamut,
+            ColorSpace::DavinciIntermediateWideGamut,
         ] {
             let mut settings = SequenceSettings::default();
             settings.color_management.output_color_space = color_space;
@@ -4557,7 +4568,7 @@ mod tests {
         assert_eq!(expected.color_matrix.as_deref(), Some("bt2020nc"));
         assert!(!expected.require_color_tags_absent);
 
-        settings.color_management.output_color_space = ColorSpace::AppleLog;
+        settings.color_management.output_color_space = ColorSpace::AppleLogBt2020;
         settings.color_management.delivery_bit_depth = DeliveryBitDepth::Twelve;
         let prores = VideoCodecConfig::ProRes { variant: "4444xq".to_owned() };
         let expected = expected_export_video_signal(&settings, &prores);

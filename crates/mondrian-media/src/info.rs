@@ -1420,11 +1420,38 @@ fn detect_color_metadata_hint(
 ) -> Option<VideoColorMetadataHint> {
     let haystack = normalize_metadata_hint_text(&format!("{key} {value}"));
     let detected_color_space = if contains_any(&haystack, &["applelog", "applelogprofile"]) {
-        Some(ColorSpace::AppleLog)
-    } else if contains_any(&haystack, &["slog3", "sgamut3cine", "sonyslog3"]) {
-        Some(ColorSpace::SLog3)
-    } else if contains_any(&haystack, &["logc4", "arrilogc4", "arrilogc"]) {
-        Some(ColorSpace::ArriLogC4)
+        Some(ColorSpace::AppleLogBt2020)
+    } else if contains_any(&haystack, &["slog3sgamut3cine", "sonyslog3sgamut3cine"]) {
+        Some(ColorSpace::SonySLog3SGamut3Cine)
+    } else if contains_any(&haystack, &["slog3sgamut3", "sonyslog3sgamut3"]) {
+        Some(ColorSpace::SonySLog3SGamut3)
+    } else if contains_any(&haystack, &["arrilogc4", "logc4widegamut4", "logc4awg4"]) {
+        Some(ColorSpace::ArriLogC4WideGamut4)
+    } else if contains_any(
+        &haystack,
+        &["arrilogc3", "logc3widegamut3", "logc3awg3", "logc3ei800"],
+    ) {
+        Some(ColorSpace::ArriLogC3WideGamut3)
+    } else if contains_any(&haystack, &["canonlog2cinemagamut", "clog2cinemagamut"]) {
+        Some(ColorSpace::CanonLog2CinemaGamutD55)
+    } else if contains_any(&haystack, &["canonlog3cinemagamut", "clog3cinemagamut"]) {
+        Some(ColorSpace::CanonLog3CinemaGamutD55)
+    } else if contains_any(&haystack, &["vlogvgamut", "panasonicvlogvgamut"]) {
+        Some(ColorSpace::PanasonicVLogVGamut)
+    } else if contains_any(&haystack, &["log3g10redwidegamutrgb", "redlog3g10rwg"]) {
+        Some(ColorSpace::RedLog3G10WideGamutRgb)
+    } else if contains_any(
+        &haystack,
+        &["bmdfilmwidegamutgen5", "blackmagicfilmwidegamutgen5"],
+    ) {
+        Some(ColorSpace::BlackmagicFilmWideGamutGen5)
+    } else if contains_any(&haystack, &["dlogdgamut", "djidlogdgamut"]) {
+        Some(ColorSpace::DjiDLogDGamut)
+    } else if contains_any(
+        &haystack,
+        &["davinciintermediatewidegamut", "davinciintermediatedwg"],
+    ) {
+        Some(ColorSpace::DavinciIntermediateWideGamut)
     } else {
         None
     }?;
@@ -1861,7 +1888,7 @@ mod tests {
         );
         let icc_profile = IccColorProfileHint {
             mapping: mondrian_core::icc::IccColorSpaceMapping::Mapped {
-                color_space: ColorSpace::DciP3,
+                color_space: ColorSpace::DisplayP3,
                 method: mondrian_core::icc::IccColorSpaceMappingMethod::ProfileName,
             },
             profile_name: Some("Display P3".to_owned()),
@@ -1869,7 +1896,7 @@ mod tests {
 
         let detection = detect_color_space_from_metadata(&metadata, &[], Some(&icc_profile));
 
-        assert_eq!(detection.color_space, Some(ColorSpace::DciP3));
+        assert_eq!(detection.color_space, Some(ColorSpace::DisplayP3));
         assert_eq!(
             detection.confidence,
             VideoColorInterpretationConfidence::Medium
@@ -1878,7 +1905,7 @@ mod tests {
         assert_eq!(detection.method, VideoColorDetectionMethod::IccProfile);
         assert!(
             detection.evidence.contains(&VideoColorInterpretationEvidence::IccProfile {
-                mapped_color_space: Some(ColorSpace::DciP3),
+                mapped_color_space: Some(ColorSpace::DisplayP3),
                 profile_name: Some("Display P3".to_owned()),
             })
         );
@@ -1952,7 +1979,7 @@ mod tests {
         );
         let icc_profile = IccColorProfileHint {
             mapping: mondrian_core::icc::IccColorSpaceMapping::Mapped {
-                color_space: ColorSpace::DciP3,
+                color_space: ColorSpace::DisplayP3,
                 method: mondrian_core::icc::IccColorSpaceMappingMethod::ProfileName,
             },
             profile_name: Some("Display P3".to_owned()),
@@ -1968,13 +1995,13 @@ mod tests {
         assert_eq!(detection.method, VideoColorDetectionMethod::CicpTags);
         assert!(
             detection.evidence.contains(&VideoColorInterpretationEvidence::IccProfile {
-                mapped_color_space: Some(ColorSpace::DciP3),
+                mapped_color_space: Some(ColorSpace::DisplayP3),
                 profile_name: Some("Display P3".to_owned()),
             })
         );
         assert!(
             detection.warnings.contains(&VideoColorInterpretationWarning::IccCicpMismatch {
-                icc_color_space: ColorSpace::DciP3,
+                icc_color_space: ColorSpace::DisplayP3,
                 cicp_color_space: ColorSpace::Rec709,
             })
         );
@@ -1988,7 +2015,7 @@ mod tests {
             "S-Log3 / S-Gamut3.Cine",
         )
         .expect("slog3 metadata hint");
-        assert_eq!(slog3.detected_color_space, ColorSpace::SLog3);
+        assert_eq!(slog3.detected_color_space, ColorSpace::SonySLog3SGamut3Cine);
 
         let apple_log = detect_color_metadata_hint(
             VideoColorMetadataHintScope::Container,
@@ -1996,7 +2023,7 @@ mod tests {
             "Apple Log",
         )
         .expect("apple log metadata hint");
-        assert_eq!(apple_log.detected_color_space, ColorSpace::AppleLog);
+        assert_eq!(apple_log.detected_color_space, ColorSpace::AppleLogBt2020);
 
         let logc4 = detect_color_metadata_hint(
             VideoColorMetadataHintScope::Stream,
@@ -2004,13 +2031,21 @@ mod tests {
             "ARRI LogC4",
         )
         .expect("arri logc4 metadata hint");
-        assert_eq!(logc4.detected_color_space, ColorSpace::ArriLogC4);
+        assert_eq!(logc4.detected_color_space, ColorSpace::ArriLogC4WideGamut4);
     }
 
     #[test]
     fn metadata_hint_ignores_ambiguous_log_words() {
         assert_eq!(
             detect_color_metadata_hint(VideoColorMetadataHintScope::Container, "log", "enabled"),
+            None
+        );
+        assert_eq!(
+            detect_color_metadata_hint(
+                VideoColorMetadataHintScope::Stream,
+                "camera_profile",
+                "S-Log3",
+            ),
             None
         );
     }
@@ -2026,13 +2061,13 @@ mod tests {
             scope: VideoColorMetadataHintScope::Stream,
             key: "camera_profile".to_string(),
             value: "ARRI LogC4".to_string(),
-            detected_color_space: ColorSpace::ArriLogC4,
+            detected_color_space: ColorSpace::ArriLogC4WideGamut4,
         };
 
         let detection =
             detect_color_space_from_metadata(&metadata, std::slice::from_ref(&hint), None);
 
-        assert_eq!(detection.color_space, Some(ColorSpace::ArriLogC4));
+        assert_eq!(detection.color_space, Some(ColorSpace::ArriLogC4WideGamut4));
         assert_eq!(
             detection.confidence,
             VideoColorInterpretationConfidence::Medium
@@ -2042,7 +2077,7 @@ mod tests {
         assert!(matches!(
             detection.evidence.first(),
             Some(VideoColorInterpretationEvidence::MetadataHint {
-                detected_color_space: ColorSpace::ArriLogC4,
+                detected_color_space: ColorSpace::ArriLogC4WideGamut4,
                 ..
             })
         ));
@@ -2066,20 +2101,23 @@ mod tests {
             VideoColorMetadataHint {
                 scope: VideoColorMetadataHintScope::Stream,
                 key: "camera_profile".to_string(),
-                value: "S-Log3".to_string(),
-                detected_color_space: ColorSpace::SLog3,
+                value: "S-Log3 / S-Gamut3.Cine".to_string(),
+                detected_color_space: ColorSpace::SonySLog3SGamut3Cine,
             },
             VideoColorMetadataHint {
                 scope: VideoColorMetadataHintScope::Container,
                 key: "camera_profile".to_string(),
                 value: "Apple Log".to_string(),
-                detected_color_space: ColorSpace::AppleLog,
+                detected_color_space: ColorSpace::AppleLogBt2020,
             },
         ];
 
         let detection = detect_color_space_from_metadata(&metadata, &hints, None);
 
-        assert_eq!(detection.color_space, Some(ColorSpace::SLog3));
+        assert_eq!(
+            detection.color_space,
+            Some(ColorSpace::SonySLog3SGamut3Cine)
+        );
         assert_eq!(detection.evidence.len(), 2);
         assert!(detection.warnings.contains(
             &VideoColorInterpretationWarning::MultipleMetadataHints {
@@ -2100,7 +2138,7 @@ mod tests {
             scope: VideoColorMetadataHintScope::Stream,
             key: "camera_profile".to_string(),
             value: "ARRI LogC4".to_string(),
-            detected_color_space: ColorSpace::ArriLogC4,
+            detected_color_space: ColorSpace::ArriLogC4WideGamut4,
         };
         let interpretation =
             detect_color_space_from_metadata(&metadata, std::slice::from_ref(&hint), None);
@@ -2118,7 +2156,7 @@ mod tests {
         let summary = diagnostic.summary();
 
         assert!(summary.contains("hint_overrides_cicp"));
-        assert!(summary.contains("Stream:camera_profile=ARRI LogC4->ArriLogC4"));
+        assert!(summary.contains("Stream:camera_profile=ARRI LogC4->ArriLogC4WideGamut4"));
         assert!(summary.contains("cicp=Rec709"));
         assert!(summary.contains("primaries=bt709"));
     }
@@ -2135,13 +2173,13 @@ mod tests {
                 scope: VideoColorMetadataHintScope::Stream,
                 key: "camera_profile".to_string(),
                 value: "ARRI LogC4".to_string(),
-                detected_color_space: ColorSpace::ArriLogC4,
+                detected_color_space: ColorSpace::ArriLogC4WideGamut4,
             },
             VideoColorMetadataHint {
                 scope: VideoColorMetadataHintScope::Container,
                 key: "camera_profile".to_string(),
-                value: "S-Log3".to_string(),
-                detected_color_space: ColorSpace::SLog3,
+                value: "S-Log3 / S-Gamut3.Cine".to_string(),
+                detected_color_space: ColorSpace::SonySLog3SGamut3Cine,
             },
         ];
         let interpretation = detect_color_space_from_metadata(&metadata, &hints, None);
@@ -2175,7 +2213,7 @@ mod tests {
         assert_eq!(
             diagnostic.issue_summary(),
             VideoColorDiagnosticIssueSummary {
-                detected_color_space: Some(ColorSpace::ArriLogC4),
+                detected_color_space: Some(ColorSpace::ArriLogC4WideGamut4),
                 confidence: VideoColorInterpretationConfidence::Medium,
                 source: VideoColorSpaceSource::Metadata,
                 method: VideoColorDetectionMethod::MetadataHint,
@@ -2265,13 +2303,13 @@ mod tests {
                 scope: VideoColorMetadataHintScope::Stream,
                 key: "camera_profile".to_string(),
                 value: "ARRI LogC4".to_string(),
-                detected_color_space: ColorSpace::ArriLogC4,
+                detected_color_space: ColorSpace::ArriLogC4WideGamut4,
             },
             VideoColorMetadataHint {
                 scope: VideoColorMetadataHintScope::Container,
                 key: "camera_profile".to_string(),
-                value: "S-Log3".to_string(),
-                detected_color_space: ColorSpace::SLog3,
+                value: "S-Log3 / S-Gamut3.Cine".to_string(),
+                detected_color_space: ColorSpace::SonySLog3SGamut3Cine,
             },
         ];
         let metadata_interpretation = detect_color_space_from_metadata(&metadata, &hints, None);
@@ -2492,7 +2530,7 @@ mod tests {
                 scope: VideoColorMetadataHintScope::Stream,
                 key: "camera_profile".to_string(),
                 value: "S-Log3 / S-Gamut3.Cine".to_string(),
-                detected_color_space: ColorSpace::SLog3,
+                detected_color_space: ColorSpace::SonySLog3SGamut3Cine,
             }],
             hdr_metadata: vec![VideoHdrMetadataSummary {
                 kind: VideoHdrSideDataKind::MasteringDisplayMetadata,

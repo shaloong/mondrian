@@ -93,7 +93,7 @@ fn set_clip_media_interpretation_is_undoable() {
 
     let selection = SelectedClipRef { track_id, clip_id, is_video_track: true };
     let interpretation = MediaInterpretation {
-        color_space_override: Some(ColorSpace::SLog3),
+        color_space_override: Some(ColorSpace::SonySLog3SGamut3Cine),
         frame_rate_override: Some(Rational::FPS_23976),
         pixel_aspect_ratio_override: Some(PixelAspectRatio::HdAnamorphic1080),
         field_order_override: Some(FieldOrder::UpperFirst),
@@ -133,7 +133,7 @@ fn set_clip_media_interpretation_rejects_locked_tracks() {
         .set_clip_media_interpretation(
             selection,
             MediaInterpretation {
-                color_space_override: Some(ColorSpace::DciP3),
+                color_space_override: Some(ColorSpace::DisplayP3),
                 ..Default::default()
             },
         )

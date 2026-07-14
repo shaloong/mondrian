@@ -34,24 +34,42 @@ one processor or one GPU pass:
 5. display or delivery encoding;
 6. monitor adaptation for presentation only.
 
+Mondrian Standard v1 uses unbounded, scene-referred Linear Rec.2020 with a D65
+white point as its working RGB space. This is a video-first working identity:
+it contains the Rec.709 and P3-D65 primaries, aligns directly with BT.2020 HLG
+and PQ delivery primaries, and avoids making the Standard project model depend
+on ACES AP0/AP1 roles. Floating-point RGB values are not constrained to the
+BT.2020 chromaticity triangle; negative and greater-than-one components remain
+valid and must survive input transforms, effects, compositing, caches, and
+output planning. Stock OCIO may use its scene-reference hub internally and may
+optimize adjacent matrices, but the project-visible working identity and the
+`scene_linear` role are `Linear Rec.2020`.
+
+ACEScg remains available to the ACES product mode and explicit VFX workflows.
+It was not selected for Standard because its AP1/D60 identity would add a
+product-visible ACES dependency and extra chromatic adaptation at the dominant
+D65 video boundaries without providing a demonstrated compositing or GPU
+benefit. Linear Rec.709 was rejected because it is too narrow for P3, BT.2020,
+HDR, and common camera gamuts. Inventing new primaries was rejected because no
+measured stability, coverage, interoperability, or performance benefit
+justifies a new ecosystem contract.
+
 Semantic stage count, OCIO transform-node count, and GPU pass count are not the
 same thing. Performance gates measure the optimized processor and recorded GPU
 work rather than penalizing correct domain separation.
 
-A native specialization may be introduced only when an equivalent stock-OCIO
-processor fails documented capability, fidelity, or performance gates. The
-comparison must use the same mathematical transform, input/output domains,
-precision contract, pass/fusion conditions, corpus, and target GPUs. A native
-path must provide a material and repeatable p95/p99 benefit or implement
-semantics stock OCIO cannot represent accurately. It remains an implementation
-detail, must match the project-visible transform, and cannot become a separate
-look or user-visible quality mode. Maintaining an OCIO fork is not the default
-solution.
+Mondrian does not implement a native alternative to an OCIO processor. Renderer
+optimizations may cache, bind, lower, fuse, or schedule OCIO-generated programs
+and resources, but may not replace their color math. If stock OCIO cannot
+express a required transform, the gap is documented and remains fail-closed;
+it does not authorize a second MDRT or a maintained OCIO fork.
 
-The existing ACES-backed production view remains unchanged until a lightweight
-Mondrian candidate passes OCIO CPU/GPU conformance, representative SDR/HDR
-image-corpus review, preview/export parity, version compatibility, and realtime
-performance gates. This ADR becomes accepted only after the candidate and at
-least one stock-OCIO production path provide that evidence. A same-math native
-comparison is required only if later evidence indicates specialization may be
-necessary.
+The Standard SDR candidate is assembled entirely in stock OCIO as AP0-reference
+to XYZ D65 adaptation, a FilmLight E-Gamut matrix, log2 Allocation shaper, a
+pinned 57-cube AgX formation resource, and display-reference conversion. It is
+the active/default scene View inside the Standard package, while ordinary
+display-referred SDR boundaries remain colorimetric and do not invoke a View.
+The legacy ACES Output Transform is no longer the Standard default. This ADR
+remains proposed until the SDR/P3/HLG/PQ corpus, preview/export parity,
+version-compatibility, packaging, and realtime GPU performance gates are all
+recorded.

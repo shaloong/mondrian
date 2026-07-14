@@ -103,15 +103,6 @@ fn infer_color_space_from_hints(
     hints.push(' ');
     hints.push_str(&profile_color_space.to_ascii_lowercase());
 
-    if hints.contains("s-log3") || hints.contains("slog3") {
-        return mapped(ColorSpace::SLog3);
-    }
-    if hints.contains("logc4") || hints.contains("arri") {
-        return mapped(ColorSpace::ArriLogC4);
-    }
-    if hints.contains("apple log") || hints.contains("applelog") {
-        return mapped(ColorSpace::AppleLog);
-    }
     if hints.contains("pq") || hints.contains("smpte2084") || hints.contains("hdr10") {
         return mapped(ColorSpace::Rec2100Pq);
     }
@@ -122,7 +113,7 @@ fn infer_color_space_from_hints(
         return mapped(ColorSpace::Srgb);
     }
     if hints.contains("display p3") || hints.contains("dci-p3") || hints.contains(" p3") {
-        return mapped(ColorSpace::DciP3);
+        return mapped(ColorSpace::DisplayP3);
     }
     if hints.contains("rec2020") || hints.contains("bt2020") || hints.contains("2020") {
         return mapped(ColorSpace::Rec2020);
@@ -382,7 +373,7 @@ fn reference_rgb_to_xyz_d65(color_space: ColorSpace) -> [[f64; 3]; 3] {
             [0.2627002120, 0.6779980715, 0.0593017165],
             [0.0000000000, 0.0280726930, 1.0609850577],
         ],
-        ColorSpace::DciP3 => [
+        ColorSpace::DisplayP3 => [
             [0.4865709486, 0.2656676932, 0.1982172852],
             [0.2289745641, 0.6917385218, 0.0792869141],
             [0.0000000000, 0.0451133819, 1.0439443689],
@@ -507,7 +498,7 @@ mod tests {
         assert!(matches!(
             mapping,
             IccColorSpaceMapping::Mapped {
-                color_space: ColorSpace::DciP3,
+                color_space: ColorSpace::DisplayP3,
                 method: IccColorSpaceMappingMethod::ProfileName,
             }
         ));

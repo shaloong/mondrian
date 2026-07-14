@@ -622,7 +622,7 @@ mod tests {
         seq.settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
         let mut clip = Clip::new(AssetId::new(), tt(0, tb), tt(20, tb)).expect("valid clip");
         let asset_id = clip.asset_id;
-        clip.interpretation.color_space_override = Some(ColorSpace::AppleLog);
+        clip.interpretation.color_space_override = Some(ColorSpace::AppleLogBt2020);
         clip.interpretation.pixel_aspect_ratio_override = Some(PixelAspectRatio::DvcproHd);
         clip.interpretation.field_order_override = Some(FieldOrder::LowerFirst);
         clip.interpretation.alpha = AlphaInterpretation::Ignore;
@@ -640,7 +640,7 @@ mod tests {
         assert_eq!(diagnostic.asset_id, asset_id);
         assert_eq!(
             diagnostic.input_color_space_override,
-            Some(ColorSpace::AppleLog)
+            Some(ColorSpace::AppleLogBt2020)
         );
         assert_eq!(
             diagnostic.working_color_space,

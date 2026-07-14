@@ -770,8 +770,11 @@ mod tests {
             data: vec![[0.5, 0.25, 0.125, 1.0]],
             color_space: WorkingColorSpace::LinearRec709,
         });
-        let transform =
-            RenderColorTransform::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
+        let transform = RenderColorTransform::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
 
         let output =
             CpuColorTransformExecutor::transform(&source, &transform).expect("display transform");
@@ -806,7 +809,7 @@ mod tests {
             display,
             view,
             false,
-            ColorEngine::MondrianSmart,
+            ColorEngine::mondrian_standard(),
         );
 
         let output = CpuColorTransformExecutor::transform(&source, &transform)
@@ -827,7 +830,7 @@ mod tests {
         let transform = RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec709,
             false,
-            ColorEngine::MondrianSmart,
+            ColorEngine::mondrian_standard(),
         );
 
         let working = CpuColorTransformExecutor::input_to_working(&source, &transform)
@@ -853,7 +856,12 @@ mod tests {
 
     #[test]
     fn input_transform_failure_carries_boundary_descriptors() {
-        let source = CpuEncodedColorFrame::source_rgba8(2, 1, ColorSpace::SLog3, vec![128; 2 * 4]);
+        let source = CpuEncodedColorFrame::source_rgba8(
+            2,
+            1,
+            ColorSpace::SonySLog3SGamut3Cine,
+            vec![128; 2 * 4],
+        );
         let missing_path = std::env::temp_dir().join(format!(
             "mondrian-missing-input-ocio-{}.ocio",
             std::process::id()
@@ -861,7 +869,7 @@ mod tests {
         let transform = RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec709,
             false,
-            ColorEngine::Ocio {
+            ColorEngine::CustomOcio {
                 source: OcioConfigSource::Path { path: missing_path },
             },
         );
@@ -897,7 +905,7 @@ mod tests {
         let transform = RenderColorTransform::export(
             ColorSpace::Srgb,
             false,
-            ColorEngine::Ocio {
+            ColorEngine::CustomOcio {
                 source: OcioConfigSource::Path { path: missing_path },
             },
         );
@@ -922,12 +930,16 @@ mod tests {
     #[test]
     fn gpu_planner_builds_input_shader_plan_with_explicit_boundaries() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
-        let source =
-            CpuEncodedColorFrame::source_rgba8(2, 3, ColorSpace::SLog3, vec![128; 2 * 3 * 4]);
+        let source = CpuEncodedColorFrame::source_rgba8(
+            2,
+            3,
+            ColorSpace::SonySLog3SGamut3Cine,
+            vec![128; 2 * 3 * 4],
+        );
         let transform = RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec709,
             false,
-            ColorEngine::MondrianSmart,
+            ColorEngine::mondrian_standard(),
         );
         let mut cache = OcioGpuShaderCache::default();
         let mut planner = RenderColorTransformGpuPlanner::new(
@@ -960,7 +972,7 @@ mod tests {
         assert_eq!(
             plan.request,
             OcioGpuShaderRequest::ColorSpace {
-                src: OcioColorSpaceIdentity::Encoded(ColorSpace::SLog3),
+                src: OcioColorSpaceIdentity::Encoded(ColorSpace::SonySLog3SGamut3Cine),
                 dst: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
                 language: GpuLanguage::Glsl4_0,
             }
@@ -976,8 +988,11 @@ mod tests {
             data: vec![[0.5, 0.25, 0.125, 1.0]; 20],
             color_space: WorkingColorSpace::LinearRec709,
         });
-        let transform =
-            RenderColorTransform::display(ColorSpace::Srgb, false, ColorEngine::MondrianSmart);
+        let transform = RenderColorTransform::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
         let mut cache = OcioGpuShaderCache::default();
         let mut planner = RenderColorTransformGpuPlanner::new(
             &mut cache,
@@ -1026,7 +1041,7 @@ mod tests {
             display.clone(),
             view.clone(),
             false,
-            ColorEngine::MondrianSmart,
+            ColorEngine::mondrian_standard(),
         );
         let mut cache = OcioGpuShaderCache::default();
         let mut planner = RenderColorTransformGpuPlanner::new(
@@ -1060,8 +1075,11 @@ mod tests {
             data: vec![[0.5, 0.25, 0.125, 1.0]; 4],
             color_space: WorkingColorSpace::LinearRec709,
         });
-        let transform =
-            RenderColorTransform::export(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let transform = RenderColorTransform::export(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
         let mut cache = OcioGpuShaderCache::default();
         let mut planner = RenderColorTransformGpuPlanner::new(
             &mut cache,
@@ -1103,7 +1121,7 @@ mod tests {
         let transform = RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec709,
             false,
-            ColorEngine::MondrianSmart,
+            ColorEngine::mondrian_standard(),
         );
 
         let result = CpuColorTransformExecutor::input_to_working_float(&source, &transform)
@@ -1132,8 +1150,11 @@ mod tests {
             ],
             color_space: WorkingColorSpace::LinearRec709,
         });
-        let transform =
-            RenderColorTransform::export(ColorSpace::Rec709, false, ColorEngine::MondrianSmart);
+        let transform = RenderColorTransform::export(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
 
         let result = CpuColorTransformExecutor::transform_float(&source, &transform)
             .expect("float output transform");
@@ -1174,7 +1195,7 @@ mod tests {
         let transform = RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec709,
             false,
-            ColorEngine::MondrianSmart,
+            ColorEngine::mondrian_standard(),
         );
 
         let result = CpuColorTransformExecutor::input_to_working_float(&float_source, &transform)
@@ -1200,7 +1221,7 @@ mod tests {
             "sRGB - Display",
             "ACES 2.0 - SDR 100 nits (Rec.709)",
             true,
-            ColorEngine::MondrianSmart,
+            ColorEngine::mondrian_standard(),
         );
 
         assert_eq!(transform.output_domain, ColorFrameDomain::Export);
@@ -1231,7 +1252,7 @@ mod tests {
             "sRGB - Display",
             "ACES 2.0 - SDR 100 nits (Rec.709)",
             true,
-            ColorEngine::MondrianSmart,
+            ColorEngine::mondrian_standard(),
         );
 
         let result = CpuColorTransformExecutor::transform_float(&source, &transform)

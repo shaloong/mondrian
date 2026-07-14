@@ -408,7 +408,7 @@ impl AppUiPreviewService {
             input_video_range: DecodedVideoRange::Full,
             working_color_space: WorkingColorSpace::LinearRec709,
             tone_map: false,
-            engine: ColorEngine::MondrianSmart,
+            engine: ColorEngine::mondrian_standard(),
             ocio_generation: mondrian_core::ocio_config_generation(),
         };
         let generation = self.scheduler.begin_generation();
@@ -8828,12 +8828,16 @@ fn output_boundary_from_color_context(
         .output_color_space
         .encoded()
         .ok_or(color_context.output_color_space)?;
-    match (&color_context.ocio_display, &color_context.ocio_view) {
-        (Some(display), Some(view)) => Ok(RenderOutputColorBoundary::display_view(
+    match (
+        color_context.tone_map,
+        &color_context.ocio_display,
+        &color_context.ocio_view,
+    ) {
+        (true, Some(display), Some(view)) => Ok(RenderOutputColorBoundary::display_view(
             output_color_space,
             display.clone(),
             view.clone(),
-            color_context.tone_map,
+            true,
             color_context.engine.clone(),
         )),
         _ => Ok(RenderOutputColorBoundary::display(
@@ -9913,7 +9917,7 @@ mod tests {
     #[test]
     fn cpu_raster_presentation_contract_rejects_hdr_and_wide_gamut_outputs() {
         for output in [
-            ColorSpace::DciP3,
+            ColorSpace::DisplayP3,
             ColorSpace::Rec2100Pq,
             ColorSpace::Rec2100Hlg,
         ] {
@@ -9932,7 +9936,7 @@ mod tests {
         sequence.settings.color_management.display_management =
             mondrian_core::DisplayManagementPolicy {
                 monitor_profile: mondrian_core::MonitorProfileReference::ColorSpace(
-                    ColorSpace::DciP3,
+                    ColorSpace::DisplayP3,
                 ),
                 viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
                 tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
@@ -9942,7 +9946,7 @@ mod tests {
         assert_eq!(
             preview_display_color_space(&sequence, &ProjectColorManagement::default(), None)
                 .expect("display color space"),
-            ColorSpace::DciP3
+            ColorSpace::DisplayP3
         );
     }
 
@@ -10006,7 +10010,7 @@ mod tests {
                 tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
                 ..Default::default()
             };
-        let snapshot = managed_icc_display_snapshot(ColorSpace::DciP3);
+        let snapshot = managed_icc_display_snapshot(ColorSpace::DisplayP3);
 
         let err = preview_display_color_space(
             &sequence,
@@ -10053,7 +10057,7 @@ mod tests {
     fn gpu_preview_frame_for_icc_policy_rejects_uncalibrated_monitor_profile() {
         let service = AppUiPreviewService::new();
         let state = state_with_icc_display_policy(Color::from_rgba8(24, 80, 160, 255));
-        let snapshot = managed_icc_display_snapshot(ColorSpace::DciP3);
+        let snapshot = managed_icc_display_snapshot(ColorSpace::DisplayP3);
         service.set_display_output_snapshot(Some(&snapshot));
 
         assert!(matches!(
@@ -10331,7 +10335,7 @@ mod tests {
         let input_transform = RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec709,
             false,
-            ColorEngine::MondrianSmart,
+            ColorEngine::mondrian_standard(),
         );
         let media = MediaPreviewFrame {
             width: 320,
@@ -14345,7 +14349,9 @@ mod tests {
         };
         let mut p3 = sdr.clone();
         p3.display_management = mondrian_core::DisplayManagementPolicy {
-            monitor_profile: mondrian_core::MonitorProfileReference::ColorSpace(ColorSpace::DciP3),
+            monitor_profile: mondrian_core::MonitorProfileReference::ColorSpace(
+                ColorSpace::DisplayP3,
+            ),
             viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
             tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
             ..Default::default()
@@ -14409,7 +14415,9 @@ mod tests {
         }];
         let sequence_id = SequenceId::new();
 
-        let standard = test_color_context(ColorSpace::Rec709);
+        let mut standard = test_color_context(ColorSpace::Rec709);
+        standard.tone_map = true;
+        standard.output_transform = mondrian_core::OutputTransformIntent::mondrian_standard();
         let mut colorimetric = standard.clone();
         colorimetric.output_transform = mondrian_core::OutputTransformIntent::Colorimetric;
         let first =
@@ -14428,6 +14436,7 @@ mod tests {
     #[test]
     fn preview_working_composite_boundary_uses_resolved_display_view() {
         let mut color_context = test_color_context(ColorSpace::Rec709);
+        color_context.tone_map = true;
         color_context.ocio_display = Some("sRGB - Display".to_owned());
         color_context.ocio_view = Some("ACES 2.0 - SDR 100 nits (Rec.709)".to_owned());
         let mut scratch = TimelineCompositeScratch::default();
@@ -14444,6 +14453,20 @@ mod tests {
     }
 
     #[test]
+    fn preview_boundary_ignores_stale_display_view_when_tone_map_is_disabled() {
+        let mut color_context = test_color_context(ColorSpace::Rec709);
+        color_context.tone_map = false;
+        color_context.ocio_display = Some("sRGB - Display".to_owned());
+        color_context.ocio_view = Some("ACES 2.0 - SDR 100 nits (Rec.709)".to_owned());
+
+        let boundary =
+            output_boundary_from_color_context(&color_context).expect("encoded preview output");
+
+        assert_eq!(boundary.display_view, None);
+        assert!(!boundary.tone_map);
+    }
+
+    #[test]
     fn preview_input_color_resolution_honors_override_metadata_and_missing_policy() {
         let mut color_context = test_color_context(ColorSpace::Rec709);
         color_context.working_color_space = WorkingColorSpace::LinearRec2020;
@@ -14451,17 +14474,17 @@ mod tests {
 
         assert_eq!(
             resolve_preview_input_color_space(
-                Some(ColorSpace::SLog3),
+                Some(ColorSpace::SonySLog3SGamut3Cine),
                 AssetMediaInterpretation::default(),
                 Some(ColorSpace::Srgb),
                 &color_context,
             )
             .resolved,
-            ResolvedInputColor::Color(ColorSpace::SLog3)
+            ResolvedInputColor::Color(ColorSpace::SonySLog3SGamut3Cine)
         );
         assert_eq!(
             resolve_preview_input_color_space(
-                Some(ColorSpace::SLog3),
+                Some(ColorSpace::SonySLog3SGamut3Cine),
                 AssetMediaInterpretation::default(),
                 Some(ColorSpace::Srgb),
                 &color_context,
@@ -14510,7 +14533,7 @@ mod tests {
             None,
             AssetMediaInterpretation {
                 color: mondrian_core::timeline_data::MediaColorInterpretation::Override {
-                    color_space: ColorSpace::AppleLog,
+                    color_space: ColorSpace::AppleLogBt2020,
                 },
                 ..AssetMediaInterpretation::default()
             },
@@ -14519,7 +14542,7 @@ mod tests {
         );
         assert_eq!(
             asset_override.resolved,
-            ResolvedInputColor::Color(ColorSpace::AppleLog)
+            ResolvedInputColor::Color(ColorSpace::AppleLogBt2020)
         );
         assert_eq!(
             asset_override.source,
@@ -14725,7 +14748,7 @@ mod tests {
             override_id,
             AssetMediaInterpretation {
                 color: mondrian_core::timeline_data::MediaColorInterpretation::Override {
-                    color_space: ColorSpace::SLog3,
+                    color_space: ColorSpace::SonySLog3SGamut3Cine,
                 },
                 ..AssetMediaInterpretation::default()
             },
@@ -14849,7 +14872,7 @@ mod tests {
             parent_override_id,
             AssetMediaInterpretation {
                 color: mondrian_core::timeline_data::MediaColorInterpretation::Override {
-                    color_space: ColorSpace::SLog3,
+                    color_space: ColorSpace::SonySLog3SGamut3Cine,
                 },
                 ..AssetMediaInterpretation::default()
             },
@@ -15257,7 +15280,7 @@ mod tests {
             &RenderInputTransform::to_working(
                 WorkingColorSpace::LinearRec2020,
                 false,
-                ColorEngine::MondrianSmart,
+                ColorEngine::mondrian_standard(),
             ),
         )
         .expect("media input transform")
@@ -15285,6 +15308,9 @@ mod tests {
         };
         let mut color_context = test_color_context(ColorSpace::Srgb);
         color_context.working_color_space = WorkingColorSpace::LinearRec2020;
+        color_context.tone_map = true;
+        color_context.ocio_display = Some("sRGB - Display".to_owned());
+        color_context.ocio_view = Some("ACES 2.0 - SDR 100 nits (Rec.709)".to_owned());
         assert!(color_context.ocio_display.is_some());
         assert!(color_context.ocio_view.is_some());
 
@@ -16034,7 +16060,7 @@ mod tests {
             input_video_range: DecodedVideoRange::Limited,
             working_color_space: WorkingColorSpace::LinearRec709,
             tone_map: false,
-            engine: ColorEngine::MondrianSmart,
+            engine: ColorEngine::mondrian_standard(),
             ocio_generation: mondrian_core::ocio_config_generation(),
         };
 
@@ -16083,7 +16109,7 @@ mod tests {
             input_video_range: DecodedVideoRange::Limited,
             working_color_space: WorkingColorSpace::LinearRec709,
             tone_map: false,
-            engine: ColorEngine::MondrianSmart,
+            engine: ColorEngine::mondrian_standard(),
             ocio_generation: mondrian_core::ocio_config_generation(),
         };
 
@@ -16612,7 +16638,7 @@ mod tests {
             input_video_range: DecodedVideoRange::Limited,
             working_color_space: WorkingColorSpace::LinearRec709,
             tone_map: false,
-            engine: ColorEngine::MondrianSmart,
+            engine: ColorEngine::mondrian_standard(),
             ocio_generation: mondrian_core::ocio_config_generation(),
         }
     }
@@ -16698,7 +16724,7 @@ mod tests {
         let input_transform = RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec709,
             false,
-            ColorEngine::MondrianSmart,
+            ColorEngine::mondrian_standard(),
         );
         let frame =
             execute_cpu_input_stage(&source, &input_transform).expect("test media input transform");
@@ -16766,7 +16792,7 @@ mod tests {
             RenderInputTransform::to_working_gpu(
                 WorkingColorSpace::LinearRec709,
                 false,
-                ColorEngine::MondrianSmart,
+                ColorEngine::mondrian_standard(),
             ),
         )
     }
@@ -16778,7 +16804,7 @@ mod tests {
             &RenderOutputColorBoundary::display(
                 ColorSpace::Rec709,
                 false,
-                ColorEngine::MondrianSmart,
+                ColorEngine::mondrian_standard(),
             ),
         )
         .expect("test media output transform")
@@ -16803,7 +16829,7 @@ mod tests {
         let input_transform = RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec709,
             false,
-            ColorEngine::MondrianSmart,
+            ColorEngine::mondrian_standard(),
         );
         let frame = MediaPreviewFrame {
             width: 1,

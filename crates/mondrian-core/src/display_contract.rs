@@ -683,7 +683,7 @@ mod tests {
         let mut snapshot = sdr_pass_snapshot();
         snapshot.monitor_profile_status = MonitorProfileStatus::IccProfileUnmapped {
             profile_path: Some("/path/to/profile.icc".to_owned()),
-            parsed_color_space: Some(ColorSpace::DciP3),
+            parsed_color_space: Some(ColorSpace::DisplayP3),
             reason: "no OCIO display match".to_owned(),
         };
         assert!(snapshot.has_unknown_capabilities());
@@ -748,7 +748,7 @@ mod tests {
             },
             DisplayOutputBlocker::MonitorIccProfileUnmapped {
                 profile_path: Some("display.icc".to_owned()),
-                parsed_color_space: Some(ColorSpace::DciP3),
+                parsed_color_space: Some(ColorSpace::DisplayP3),
                 reason: "no OCIO display/view match".to_owned(),
             },
             DisplayOutputBlocker::MonitorHdrCapabilityUnknown { reason: "no HDR info".to_owned() },
@@ -791,7 +791,7 @@ mod tests {
             },
             DisplayOutputBlocker::MonitorIccProfileUnmapped {
                 profile_path: None,
-                parsed_color_space: Some(ColorSpace::DciP3),
+                parsed_color_space: Some(ColorSpace::DisplayP3),
                 reason: "unmapped".to_owned(),
             },
             DisplayOutputBlocker::MonitorHdrCapabilityUnknown { reason: "unknown".to_owned() },
@@ -864,10 +864,10 @@ mod tests {
         };
         assert!(icc_unsup.to_string().contains("not implemented"));
         let managed = MonitorProfileStatus::ManagedColorSpace {
-            color_space: ColorSpace::DciP3,
+            color_space: ColorSpace::DisplayP3,
             source: MonitorProfileSource::UserConfigured,
         };
-        assert!(managed.to_string().contains("DciP3"));
+        assert!(managed.to_string().contains("DisplayP3"));
     }
 
     #[test]

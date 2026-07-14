@@ -58,7 +58,11 @@ fn identity_graph() -> Arc<mondrian_effects::CompiledEffectGraph> {
 fn encode_rec709(frame: &CpuColorFrame) -> Vec<u8> {
     execute_cpu_output_boundary_rgba8(
         frame,
-        &RenderOutputColorBoundary::display(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+        &RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        ),
     )
     .expect("encode golden frame")
     .rgba
@@ -71,7 +75,7 @@ fn working_frame(w: u32, h: u32, rgba: Vec<u8>) -> CpuColorFrame {
         &RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec709,
             false,
-            ColorEngine::MondrianSmart,
+            ColorEngine::mondrian_standard(),
         ),
     )
     .expect("input transform golden frame")
@@ -275,12 +279,20 @@ fn preview_display_and_export_delivery_boundaries_match_with_stable_hash() {
 
     let preview = execute_cpu_output_boundary_rgba8(
         &frame,
-        &RenderOutputColorBoundary::display(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+        &RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        ),
     )
     .expect("preview display output boundary");
     let export = execute_cpu_output_boundary_rgba8(
         &frame,
-        &RenderOutputColorBoundary::export(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+        &RenderOutputColorBoundary::export(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        ),
     )
     .expect("export delivery output boundary");
 
@@ -309,7 +321,7 @@ fn golden_rec2020_working_to_srgb_output() {
         &RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec2020,
             false,
-            ColorEngine::MondrianSmart,
+            ColorEngine::mondrian_standard(),
         ),
     )
     .expect("input to Rec.2020 working")
@@ -318,12 +330,20 @@ fn golden_rec2020_working_to_srgb_output() {
 
     let preview = execute_cpu_output_boundary_rgba8(
         &frame,
-        &RenderOutputColorBoundary::display(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+        &RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        ),
     )
     .expect("Rec.2020->sRGB display");
     let export = execute_cpu_output_boundary_rgba8(
         &frame,
-        &RenderOutputColorBoundary::export(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+        &RenderOutputColorBoundary::export(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        ),
     )
     .expect("Rec.2020->sRGB export");
 
@@ -436,12 +456,20 @@ fn golden_preview_export_parity_across_color_spaces() {
 
     let preview = execute_cpu_output_boundary_rgba8(
         &frame,
-        &RenderOutputColorBoundary::display(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+        &RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        ),
     )
     .expect("preview display");
     let export = execute_cpu_output_boundary_rgba8(
         &frame,
-        &RenderOutputColorBoundary::export(ColorSpace::Rec709, false, ColorEngine::MondrianSmart),
+        &RenderOutputColorBoundary::export(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        ),
     )
     .expect("export delivery");
 

@@ -7,15 +7,15 @@ Supported color spaces currently include:
 - Rec.2100 PQ
 - sRGB
 - Rec.2020
-- DCI-P3
+- Display P3 (P3-D65 primaries, sRGB transfer)
 - Apple Log
 - S-Log3
 - ARRI LogC4
 
 ## Engine
 
-`ColorEngine` is either MondrianSmart or OCIO. OCIO requires a loaded config.
-MondrianSmart loads Mondrian's embedded `mondrian_default_ocio_v1` config and
+`ColorEngine` is either MondrianStandard or OCIO. OCIO requires a loaded config.
+MondrianStandard loads Mondrian's embedded `mondrian_default_ocio_v1` config and
 must fail closed if that asset cannot parse or cannot produce the requested
 OCIO processor.
 Explicit OCIO sources must not fall back to another source. In particular,

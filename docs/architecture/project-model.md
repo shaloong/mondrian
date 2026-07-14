@@ -68,9 +68,15 @@ is written with that field explicitly.
 
 Archive and document JSON pass through separate version registries before typed
 deserialization. During Alpha there are deliberately no legacy document steps:
-schema v2 is the sole accepted exact-time author schema, and older/future
-versions fail instead of being guessed. The registry remains the explicit seam
-for adding a real migration policy when compatibility becomes a product promise.
+schema v4 is the sole accepted author schema, and older/future versions fail
+instead of being guessed. Version 4 keeps the explicit tagged
+`mondrian_standard` / `aces` / `custom_ocio` project contract and makes every
+Mondrian Standard package-identity field mandatory: product ID/version, config
+ID/SHA-256, complete package SHA-256, working-space ID/version, and default View
+Transform ID/version. The Alpha format intentionally provides no alias,
+fallback, or migration from v3; a missing or edited identity fails closed. The
+registry remains the explicit seam for adding a real migration policy only when
+compatibility becomes a product promise.
 
 SQLite schema ownership remains in `mondrian-assets`. Its ordered Registry uses
 `PRAGMA user_version`, applies each step in a transaction, validates the current

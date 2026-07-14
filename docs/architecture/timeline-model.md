@@ -28,6 +28,12 @@ encoded output identity, while nested contexts carry their parent working
 identity so render recursion cannot mistake an internal handoff for a delivery
 boundary.
 
+New sequences default to the Mondrian Standard v1 working identity, unbounded
+scene-linear Rec.2020. Their initial SDR workflow remains display-referred at
+the program boundary, so ordinary Rec.709 editing uses a direct colorimetric
+OCIO conversion instead of applying the scene View without an explicit
+scene-referred or tone-map request.
+
 `SequenceColorManagement.delivery_bit_depth` is the encoded deliverable sample
 depth and currently permits 8-bit, 10-bit, or 12-bit output. Twelve-bit output
 is reserved for ProRes 4444/4444 XQ. It does not describe
@@ -37,11 +43,13 @@ intent.
 
 Root preview/export color contexts resolve the effective color engine from the
 sequence/project inheritance rules and carry a typed `OutputTransformIntent`.
-`MondrianSmart` resolves to the versioned `MondrianStandard { version: V1 }`
-product intent; an explicitly configured delivery display/view resolves to
-`OcioDisplayView`. This selection is independent from the renderer's CPU/GPU
-execution backend so a backend change cannot silently change project color
-science.
+An ordinary display-referred SDR context remains `Colorimetric`; a
+scene-referred or explicitly tone-mapped Mondrian Standard boundary resolves to
+the fully pinned `MondrianStandard { package }` product intent. An explicitly
+configured delivery display/view resolves to `OcioDisplayView`. A stale
+display/view name is ignored while tone mapping is disabled. This selection is
+independent from the renderer's CPU/GPU execution backend so a backend change
+cannot silently change project color science.
 
 ## Track
 

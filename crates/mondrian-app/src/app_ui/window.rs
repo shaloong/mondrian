@@ -2664,7 +2664,7 @@ fn app_ui_surface_color_space_for_intent(
         AppUiSurfacePresentationIntent::DisplayOutput(ColorSpace::Rec709 | ColorSpace::Srgb) => {
             Some(wgpu::SurfaceColorSpace::Srgb)
         }
-        AppUiSurfacePresentationIntent::DisplayOutput(ColorSpace::DciP3) => {
+        AppUiSurfacePresentationIntent::DisplayOutput(ColorSpace::DisplayP3) => {
             Some(wgpu::SurfaceColorSpace::DisplayP3)
         }
         AppUiSurfacePresentationIntent::DisplayOutput(ColorSpace::Rec2100Pq) => {
@@ -2677,9 +2677,18 @@ fn app_ui_surface_color_space_for_intent(
             ColorSpace::Rec601Pal
             | ColorSpace::Rec601Ntsc
             | ColorSpace::Rec2020
-            | ColorSpace::AppleLog
-            | ColorSpace::SLog3
-            | ColorSpace::ArriLogC4,
+            | ColorSpace::AppleLogBt2020
+            | ColorSpace::SonySLog3SGamut3
+            | ColorSpace::SonySLog3SGamut3Cine
+            | ColorSpace::ArriLogC3WideGamut3
+            | ColorSpace::ArriLogC4WideGamut4
+            | ColorSpace::CanonLog2CinemaGamutD55
+            | ColorSpace::CanonLog3CinemaGamutD55
+            | ColorSpace::PanasonicVLogVGamut
+            | ColorSpace::RedLog3G10WideGamutRgb
+            | ColorSpace::BlackmagicFilmWideGamutGen5
+            | ColorSpace::DjiDLogDGamut
+            | ColorSpace::DavinciIntermediateWideGamut,
         ) => None,
     }
 }
@@ -2767,7 +2776,7 @@ fn app_ui_surface_hdr_mode(color_space: wgpu::SurfaceColorSpace) -> AppUiSurface
 fn surface_color_space_to_color_space(cs: wgpu::SurfaceColorSpace) -> ColorSpace {
     match cs {
         wgpu::SurfaceColorSpace::Srgb => ColorSpace::Srgb,
-        wgpu::SurfaceColorSpace::DisplayP3 => ColorSpace::DciP3,
+        wgpu::SurfaceColorSpace::DisplayP3 => ColorSpace::DisplayP3,
         wgpu::SurfaceColorSpace::Bt2100Pq => ColorSpace::Rec2100Pq,
         wgpu::SurfaceColorSpace::Bt2100Hlg => ColorSpace::Rec2100Hlg,
         _ => ColorSpace::Rec709,
@@ -4561,7 +4570,7 @@ mod tests {
         assert_eq!(
             choose_app_ui_surface_color_contract(
                 &capabilities,
-                AppUiSurfacePresentationIntent::DisplayOutput(ColorSpace::DciP3),
+                AppUiSurfacePresentationIntent::DisplayOutput(ColorSpace::DisplayP3),
             ),
             Ok(AppUiSurfaceColorContract {
                 format: wgpu::TextureFormat::Bgra8UnormSrgb,
@@ -4672,10 +4681,12 @@ mod tests {
         assert_eq!(
             choose_app_ui_surface_color_contract(
                 &capabilities,
-                AppUiSurfacePresentationIntent::DisplayOutput(ColorSpace::SLog3),
+                AppUiSurfacePresentationIntent::DisplayOutput(ColorSpace::SonySLog3SGamut3Cine,),
             ),
             Err(AppUiSurfaceColorContractError {
-                intent: AppUiSurfacePresentationIntent::DisplayOutput(ColorSpace::SLog3),
+                intent: AppUiSurfacePresentationIntent::DisplayOutput(
+                    ColorSpace::SonySLog3SGamut3Cine,
+                ),
                 required_color_space: None,
                 available_formats: vec![wgpu::TextureFormat::Bgra8UnormSrgb],
             })
@@ -4720,7 +4731,7 @@ mod tests {
         let boundary = RenderOutputColorBoundary::display(
             ColorSpace::Rec2100Pq,
             false,
-            mondrian_core::ColorEngine::MondrianSmart,
+            mondrian_core::ColorEngine::mondrian_standard(),
         );
 
         assert_eq!(
@@ -4761,7 +4772,7 @@ mod tests {
         let boundary = RenderOutputColorBoundary::display(
             ColorSpace::Rec709,
             false,
-            mondrian_core::ColorEngine::MondrianSmart,
+            mondrian_core::ColorEngine::mondrian_standard(),
         );
 
         assert_eq!(contract.boundary_blocker(&boundary), None);
@@ -4773,7 +4784,7 @@ mod tests {
         let boundary = RenderOutputColorBoundary::display(
             ColorSpace::Srgb,
             false,
-            mondrian_core::ColorEngine::MondrianSmart,
+            mondrian_core::ColorEngine::mondrian_standard(),
         );
 
         assert_eq!(contract.boundary_blocker(&boundary), None);
@@ -4785,7 +4796,7 @@ mod tests {
         let boundary = RenderOutputColorBoundary::display(
             ColorSpace::Rec709,
             false,
-            mondrian_core::ColorEngine::MondrianSmart,
+            mondrian_core::ColorEngine::mondrian_standard(),
         );
 
         assert_eq!(
@@ -4807,20 +4818,20 @@ mod tests {
     }
 
     #[test]
-    fn display_output_contract_blocks_dci_p3_boundary_on_srgb_surface() {
+    fn display_output_contract_blocks_display_p3_boundary_on_srgb_surface() {
         let mut contract = test_display_output_contract();
         contract.format_color_spaces[0].display_p3 = true;
         let boundary = RenderOutputColorBoundary::display(
-            ColorSpace::DciP3,
+            ColorSpace::DisplayP3,
             false,
-            mondrian_core::ColorEngine::MondrianSmart,
+            mondrian_core::ColorEngine::mondrian_standard(),
         );
 
         assert_eq!(
             contract.boundary_blocker(&boundary),
             Some(
                 AppUiDisplayBoundaryBlocker::OutputColorSpaceRequiresSurfaceColorSpace {
-                    output_color_space: ColorSpace::DciP3,
+                    output_color_space: ColorSpace::DisplayP3,
                     selected_surface_format: wgpu::TextureFormat::Bgra8UnormSrgb,
                     selected_surface_color_space: wgpu::SurfaceColorSpace::Srgb,
                     selected_surface_encoding: AppUiSurfaceEncoding::Srgb,
@@ -4839,16 +4850,16 @@ mod tests {
         let mut contract = test_display_output_contract();
         contract.format_color_spaces[0].display_p3 = true;
         let boundary = RenderOutputColorBoundary::display(
-            ColorSpace::DciP3,
+            ColorSpace::DisplayP3,
             false,
-            mondrian_core::ColorEngine::MondrianSmart,
+            mondrian_core::ColorEngine::mondrian_standard(),
         );
 
         assert_eq!(
             contract.presentation_readiness_for_boundary(&boundary),
             AppUiDisplayPresentationReadinessDiagnostics {
                 status: AppUiDisplayPresentationReadinessStatus::ReconfigureBlockedByPayload,
-                output_color_space: ColorSpace::DciP3,
+                output_color_space: ColorSpace::DisplayP3,
                 current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
                 current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
                 current_surface_encoding: AppUiSurfaceEncodingDiagnostic::Srgb,
@@ -4865,14 +4876,14 @@ mod tests {
     }
 
     #[test]
-    fn display_output_contract_accepts_dci_p3_boundary_on_display_p3_surface() {
+    fn display_output_contract_accepts_display_p3_boundary_on_display_p3_surface() {
         let mut contract = test_display_output_contract();
         contract.surface_color.color_space = wgpu::SurfaceColorSpace::DisplayP3;
         contract.format_color_spaces[0].display_p3 = true;
         let boundary = RenderOutputColorBoundary::display(
-            ColorSpace::DciP3,
+            ColorSpace::DisplayP3,
             false,
-            mondrian_core::ColorEngine::MondrianSmart,
+            mondrian_core::ColorEngine::mondrian_standard(),
         );
 
         assert_eq!(contract.boundary_blocker(&boundary), None);
@@ -4888,7 +4899,7 @@ mod tests {
         let boundary = RenderOutputColorBoundary::display(
             ColorSpace::Rec2100Pq,
             false,
-            mondrian_core::ColorEngine::MondrianSmart,
+            mondrian_core::ColorEngine::mondrian_standard(),
         );
 
         assert_eq!(contract.boundary_blocker(&boundary), None);
@@ -4905,7 +4916,7 @@ mod tests {
         let boundary = RenderOutputColorBoundary::display(
             ColorSpace::Rec2100Pq,
             false,
-            mondrian_core::ColorEngine::MondrianSmart,
+            mondrian_core::ColorEngine::mondrian_standard(),
         );
 
         assert_eq!(
@@ -4936,7 +4947,7 @@ mod tests {
         let boundary = RenderOutputColorBoundary::display(
             ColorSpace::Rec2020,
             false,
-            mondrian_core::ColorEngine::MondrianSmart,
+            mondrian_core::ColorEngine::mondrian_standard(),
         );
 
         assert_eq!(
@@ -4963,16 +4974,16 @@ mod tests {
     fn display_output_contract_blocks_log_boundary_without_surface_contract() {
         let contract = test_display_output_contract();
         let boundary = RenderOutputColorBoundary::display(
-            ColorSpace::SLog3,
+            ColorSpace::SonySLog3SGamut3Cine,
             false,
-            mondrian_core::ColorEngine::MondrianSmart,
+            mondrian_core::ColorEngine::mondrian_standard(),
         );
 
         assert_eq!(
             contract.boundary_blocker(&boundary),
             Some(
                 AppUiDisplayBoundaryBlocker::OutputColorSpaceRequiresSurfaceColorSpace {
-                    output_color_space: ColorSpace::SLog3,
+                    output_color_space: ColorSpace::SonySLog3SGamut3Cine,
                     selected_surface_format: wgpu::TextureFormat::Bgra8UnormSrgb,
                     selected_surface_color_space: wgpu::SurfaceColorSpace::Srgb,
                     selected_surface_encoding: AppUiSurfaceEncoding::Srgb,
@@ -4987,16 +4998,16 @@ mod tests {
     fn display_presentation_readiness_reports_unsupported_log_presentation_intent() {
         let contract = test_display_output_contract();
         let boundary = RenderOutputColorBoundary::display(
-            ColorSpace::SLog3,
+            ColorSpace::SonySLog3SGamut3Cine,
             false,
-            mondrian_core::ColorEngine::MondrianSmart,
+            mondrian_core::ColorEngine::mondrian_standard(),
         );
 
         assert_eq!(
             contract.presentation_readiness_for_boundary(&boundary),
             AppUiDisplayPresentationReadinessDiagnostics {
                 status: AppUiDisplayPresentationReadinessStatus::UnsupportedPresentationIntent,
-                output_color_space: ColorSpace::SLog3,
+                output_color_space: ColorSpace::SonySLog3SGamut3Cine,
                 current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
                 current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
                 current_surface_encoding: AppUiSurfaceEncodingDiagnostic::Srgb,
@@ -5178,7 +5189,7 @@ mod tests {
             ],
         };
         let p3_blocker = AppUiDisplayBoundaryBlocker::OutputColorSpaceRequiresSurfaceColorSpace {
-            output_color_space: ColorSpace::DciP3,
+            output_color_space: ColorSpace::DisplayP3,
             selected_surface_format: wgpu::TextureFormat::Bgra8UnormSrgb,
             selected_surface_color_space: wgpu::SurfaceColorSpace::Srgb,
             selected_surface_encoding: AppUiSurfaceEncoding::Srgb,
@@ -5201,7 +5212,7 @@ mod tests {
                 last_display_contract_blocker: Some(AppUiDisplayBoundaryBlockerDiagnostics {
                     kind:
                         AppUiDisplayBoundaryBlockerKind::OutputColorSpaceRequiresSurfaceColorSpace,
-                    output_color_space: ColorSpace::DciP3,
+                    output_color_space: ColorSpace::DisplayP3,
                     selected_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
                     selected_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
                     selected_surface_encoding: AppUiSurfaceEncodingDiagnostic::Srgb,
@@ -5217,7 +5228,7 @@ mod tests {
                 }),
                 display_issue_summary: Some(AppUiDisplayIssueSummary {
                     reason: AppUiDisplayIssueReason::OutputColorSpaceRequiresSurfaceColorSpace,
-                    output_color_space: ColorSpace::DciP3,
+                    output_color_space: ColorSpace::DisplayP3,
                     preceding_display_contract_refresh: None,
                     display_target: None,
                     current_surface_format: None,
@@ -5256,7 +5267,7 @@ mod tests {
         let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
         let readiness = AppUiDisplayPresentationReadinessDiagnostics {
             status: AppUiDisplayPresentationReadinessStatus::ReconfigureBlockedByPayload,
-            output_color_space: ColorSpace::DciP3,
+            output_color_space: ColorSpace::DisplayP3,
             current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
             current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
             current_surface_encoding: AppUiSurfaceEncodingDiagnostic::Srgb,
@@ -5280,7 +5291,7 @@ mod tests {
                 last_display_presentation_readiness: Some(readiness),
                 display_issue_summary: Some(AppUiDisplayIssueSummary {
                     reason: AppUiDisplayIssueReason::ReconfigureBlockedByPayload,
-                    output_color_space: ColorSpace::DciP3,
+                    output_color_space: ColorSpace::DisplayP3,
                     preceding_display_contract_refresh: None,
                     display_target: None,
                     current_surface_format: Some(AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb),
@@ -5356,7 +5367,7 @@ mod tests {
         let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
         let readiness = AppUiDisplayPresentationReadinessDiagnostics {
             status: AppUiDisplayPresentationReadinessStatus::ReconfigureBlockedByPayload,
-            output_color_space: ColorSpace::DciP3,
+            output_color_space: ColorSpace::DisplayP3,
             current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
             current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
             current_surface_encoding: AppUiSurfaceEncodingDiagnostic::Srgb,
@@ -5377,7 +5388,7 @@ mod tests {
                 .display_issue_summary,
             Some(AppUiDisplayIssueSummary {
                 reason: AppUiDisplayIssueReason::ReconfigureBlockedByPayload,
-                output_color_space: ColorSpace::DciP3,
+                output_color_space: ColorSpace::DisplayP3,
                 preceding_display_contract_refresh: None,
                 display_target: None,
                 current_surface_format: Some(AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb),
@@ -5931,7 +5942,7 @@ mod tests {
         telemetry.record_invocation();
         let readiness = AppUiDisplayPresentationReadinessDiagnostics {
             status: AppUiDisplayPresentationReadinessStatus::ReconfigureBlockedByPayload,
-            output_color_space: ColorSpace::DciP3,
+            output_color_space: ColorSpace::DisplayP3,
             current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
             current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
             current_surface_encoding: AppUiSurfaceEncodingDiagnostic::Srgb,

@@ -5150,7 +5150,9 @@ layout(set = {wrapper_set}, binding = {input_sampler_binding}) uniform sampler m
 
 void {fragment_entry}() {{
     vec4 {pixel_name} = texture(sampler2D(mondrian_wrapper_input_texture, mondrian_wrapper_input_sampler), mondrian_fragment_uv);
+    float mondrian_ocio_preserved_alpha = {pixel_name}.a;
     {ocio_program_call}
+    {pixel_name}.a = mondrian_ocio_preserved_alpha;
     mondrian_fragment_color = {pixel_name};
 }}
 "#,
@@ -6953,7 +6955,7 @@ mod tests {
         let mut shader_cache = OcioGpuShaderCache::default();
         let shader_plan = shader_cache
             .get_or_extract(OcioGpuShaderRequest::ColorSpace {
-                src: ColorSpace::AppleLog.into(),
+                src: ColorSpace::AppleLogBt2020.into(),
                 dst: ColorSpace::Rec709.into(),
                 language: GpuLanguage::Glsl4_0,
             })
@@ -7504,6 +7506,12 @@ mod tests {
             .contains("layout(set = 1, binding = 1) uniform sampler"));
         assert!(artifact.fragment_source.contains("void main()"));
         assert!(artifact.fragment_source.contains("mondrian_ocio_main(mondrian_ocio_pixel);"));
+        assert!(artifact
+            .fragment_source
+            .contains("float mondrian_ocio_preserved_alpha = mondrian_ocio_pixel.a;"));
+        assert!(artifact
+            .fragment_source
+            .contains("mondrian_ocio_pixel.a = mondrian_ocio_preserved_alpha;"));
     }
 
     #[test]
@@ -8031,7 +8039,7 @@ mod tests {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let mut cache = OcioGpuShaderCache::default();
         let request = OcioGpuShaderRequest::ColorSpace {
-            src: ColorSpace::SLog3.into(),
+            src: ColorSpace::SonySLog3SGamut3Cine.into(),
             dst: ColorSpace::Rec709.into(),
             language: GpuLanguage::Glsl4_0,
         };
@@ -8253,7 +8261,7 @@ mod tests {
     }
 
     #[test]
-    fn backend_prep_lowers_display_view_legacy_samplers_to_wgpu_glsl() {
+    fn backend_prep_lowers_default_display_view_legacy_samplers_to_wgpu_glsl() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let (display, view) = ocio_default_display_view().expect("default display/view");
         let mut cache = OcioGpuShaderCache::default();
@@ -8265,16 +8273,36 @@ mod tests {
                 language: GpuLanguage::Glsl4_0,
             })
             .expect("extract display shader");
-        assert!(shader_plan.bundle().shader_text.contains("uniform sampler1D"));
+        let extracted_source = &shader_plan.bundle().shader_text;
+        let has_legacy_1d = extracted_source.contains("uniform sampler1D");
+        let has_legacy_2d = extracted_source.contains("uniform sampler2D");
+        let has_legacy_3d = extracted_source.contains("uniform sampler3D");
+        assert!(
+            has_legacy_1d || has_legacy_2d || has_legacy_3d,
+            "the stock display View must exercise OCIO legacy sampler lowering"
+        );
         let mut prep = OcioGpuWgpuBackendPrepRuntime::default();
 
         let pipeline = prep
             .prepare_static_pipeline(&shader_plan, OcioGpuWgpuColorTargetFormat::Rgba8Unorm)
             .expect("prepare display/view static GPU pipeline");
 
-        assert!(!pipeline.wrapper_source.fragment_source.contains("uniform sampler1D"));
-        assert!(pipeline.wrapper_source.fragment_source.contains("uniform texture2D"));
-        assert!(pipeline.wrapper_source.fragment_source.contains("sampler2D("));
+        let lowered_source = &pipeline.wrapper_source.fragment_source;
+        if has_legacy_1d {
+            assert!(!lowered_source.contains("uniform sampler1D"));
+            assert!(lowered_source.contains("uniform texture2D"));
+            assert!(lowered_source.contains("sampler2D("));
+        }
+        if has_legacy_2d {
+            assert!(!lowered_source.contains("uniform sampler2D"));
+            assert!(lowered_source.contains("uniform texture2D"));
+            assert!(lowered_source.contains("sampler2D("));
+        }
+        if has_legacy_3d {
+            assert!(!lowered_source.contains("uniform sampler3D"));
+            assert!(lowered_source.contains("uniform texture3D"));
+            assert!(lowered_source.contains("sampler3D("));
+        }
         assert_eq!(
             pipeline.wrapper_module_artifact.fragment.entry_point_count,
             1
@@ -8295,7 +8323,7 @@ mod tests {
 
         let prepared = cache
             .prepare_wgpu_execution(OcioGpuShaderRequest::ColorSpace {
-                src: ColorSpace::AppleLog.into(),
+                src: ColorSpace::AppleLogBt2020.into(),
                 dst: ColorSpace::Rec709.into(),
                 language: GpuLanguage::Glsl4_0,
             })
@@ -8330,7 +8358,7 @@ mod tests {
         let mut shader_cache = OcioGpuShaderCache::default();
         let prepared = shader_cache
             .prepare_wgpu_execution(OcioGpuShaderRequest::ColorSpace {
-                src: ColorSpace::SLog3.into(),
+                src: ColorSpace::SonySLog3SGamut3Cine.into(),
                 dst: ColorSpace::Rec709.into(),
                 language: GpuLanguage::Glsl4_0,
             })
@@ -8567,7 +8595,7 @@ mod tests {
         let mut shader_cache = OcioGpuShaderCache::default();
         let plan = shader_cache
             .get_or_extract(OcioGpuShaderRequest::ColorSpace {
-                src: ColorSpace::SLog3.into(),
+                src: ColorSpace::SonySLog3SGamut3Cine.into(),
                 dst: ColorSpace::Rec709.into(),
                 language: GpuLanguage::Glsl4_0,
             })
@@ -8617,7 +8645,7 @@ mod tests {
         let mut shader_cache = OcioGpuShaderCache::default();
         let plan = shader_cache
             .get_or_extract(OcioGpuShaderRequest::ColorSpace {
-                src: ColorSpace::SLog3.into(),
+                src: ColorSpace::SonySLog3SGamut3Cine.into(),
                 dst: ColorSpace::Rec709.into(),
                 language: GpuLanguage::GlslVk4_6,
             })

@@ -32,17 +32,7 @@ const BUTTON_HEIGHT: f32 = 32.0;
 const BUTTON_GAP: f32 = 10.0;
 const BUTTON_BOTTOM_INSET: f32 = 20.0;
 
-const OVERRIDE_COLOR_SPACES: [ColorSpace; 9] = [
-    ColorSpace::Rec709,
-    ColorSpace::Srgb,
-    ColorSpace::Rec2020,
-    ColorSpace::Rec2100Pq,
-    ColorSpace::Rec2100Hlg,
-    ColorSpace::DciP3,
-    ColorSpace::AppleLog,
-    ColorSpace::SLog3,
-    ColorSpace::ArriLogC4,
-];
+const OVERRIDE_COLOR_SPACES: [ColorSpace; 20] = ColorSpace::ALL;
 
 /// Shell-local draft for the Interpret Footage dialog.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -432,7 +422,9 @@ mod tests {
             asset_id,
             "Shot",
             AssetMediaInterpretation {
-                color: MediaColorInterpretation::Override { color_space: ColorSpace::SLog3 },
+                color: MediaColorInterpretation::Override {
+                    color_space: ColorSpace::SonySLog3SGamut3Cine,
+                },
                 ..AssetMediaInterpretation::default()
             },
             Some(detected_interpretation(ColorSpace::Rec2020)),
@@ -443,7 +435,7 @@ mod tests {
         assert_eq!(payload.asset_id, asset_id);
         assert_eq!(
             payload.interpretation.color.override_color_space(),
-            Some(ColorSpace::SLog3)
+            Some(ColorSpace::SonySLog3SGamut3Cine)
         );
     }
 

@@ -2393,7 +2393,7 @@ mod tests {
         contract.input_transform = RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec2020,
             true,
-            mondrian_core::types::ColorEngine::MondrianSmart,
+            mondrian_core::types::ColorEngine::mondrian_standard(),
         );
 
         let err = GpuNativeDecodedFrameImportPlan::from_contract(&mut ids, contract, &support)
@@ -2434,7 +2434,7 @@ mod tests {
             RenderInputTransform::to_working_gpu(
                 WorkingColorSpace::LinearRec2020,
                 true,
-                mondrian_core::types::ColorEngine::MondrianSmart,
+                mondrian_core::types::ColorEngine::mondrian_standard(),
             )
         );
         assert_eq!(
@@ -3219,7 +3219,7 @@ mod tests {
             input_transform: RenderInputTransform::to_working_gpu(
                 WorkingColorSpace::LinearRec2020,
                 true,
-                mondrian_core::types::ColorEngine::MondrianSmart,
+                mondrian_core::types::ColorEngine::mondrian_standard(),
             ),
             handle_kind: DecodedGpuFrameHandleKind::D3D11Texture2D,
             source_texture_format: GpuNativeDecodedFrameTextureFormat::Nv12,

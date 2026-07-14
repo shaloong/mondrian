@@ -121,10 +121,19 @@ pub fn color_space_label(value: ColorSpace) -> &'static str {
         ColorSpace::Rec2100Pq => "Rec. 2100 PQ",
         ColorSpace::Srgb => "sRGB",
         ColorSpace::Rec2020 => "Rec. 2020",
-        ColorSpace::DciP3 => "DCI-P3",
-        ColorSpace::AppleLog => "Apple Log",
-        ColorSpace::SLog3 => "S-Log3",
-        ColorSpace::ArriLogC4 => "ARRI LogC4",
+        ColorSpace::DisplayP3 => "Display P3",
+        ColorSpace::AppleLogBt2020 => "Apple Log / BT.2020",
+        ColorSpace::SonySLog3SGamut3 => "Sony S-Log3 / S-Gamut3",
+        ColorSpace::SonySLog3SGamut3Cine => "Sony S-Log3 / S-Gamut3.Cine",
+        ColorSpace::ArriLogC3WideGamut3 => "ARRI LogC3 / Wide Gamut 3",
+        ColorSpace::ArriLogC4WideGamut4 => "ARRI LogC4 / Wide Gamut 4",
+        ColorSpace::CanonLog2CinemaGamutD55 => "Canon Log 2 / Cinema Gamut D55",
+        ColorSpace::CanonLog3CinemaGamutD55 => "Canon Log 3 / Cinema Gamut D55",
+        ColorSpace::PanasonicVLogVGamut => "Panasonic V-Log / V-Gamut",
+        ColorSpace::RedLog3G10WideGamutRgb => "RED Log3G10 / REDWideGamutRGB",
+        ColorSpace::BlackmagicFilmWideGamutGen5 => "Blackmagic Film Gen 5 / Wide Gamut Gen 5",
+        ColorSpace::DjiDLogDGamut => "DJI D-Log / D-Gamut",
+        ColorSpace::DavinciIntermediateWideGamut => "DaVinci Intermediate / DaVinci Wide Gamut",
     }
 }
 
@@ -246,18 +255,7 @@ mod tests {
 
     #[test]
     fn color_space_label_covers_all_variants() {
-        let spaces = [
-            ColorSpace::Rec709,
-            ColorSpace::Rec2100Hlg,
-            ColorSpace::Rec2100Pq,
-            ColorSpace::Srgb,
-            ColorSpace::Rec2020,
-            ColorSpace::DciP3,
-            ColorSpace::AppleLog,
-            ColorSpace::SLog3,
-            ColorSpace::ArriLogC4,
-        ];
-        for space in spaces {
+        for space in ColorSpace::ALL {
             let label = color_space_label(space);
             assert!(!label.is_empty(), "missing label for {space:?}");
         }
@@ -265,18 +263,8 @@ mod tests {
 
     #[test]
     fn color_space_labels_are_unique() {
-        let all = [
-            ColorSpace::Rec709,
-            ColorSpace::Rec2100Hlg,
-            ColorSpace::Rec2100Pq,
-            ColorSpace::Srgb,
-            ColorSpace::Rec2020,
-            ColorSpace::DciP3,
-            ColorSpace::AppleLog,
-            ColorSpace::SLog3,
-            ColorSpace::ArriLogC4,
-        ];
-        let labels: Vec<&str> = all.iter().map(|&s| color_space_label(s)).collect();
+        let labels: Vec<&str> =
+            ColorSpace::ALL.iter().map(|&space| color_space_label(space)).collect();
         let mut unique = labels.clone();
         unique.sort();
         unique.dedup();

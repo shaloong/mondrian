@@ -12,21 +12,48 @@ normal application builds exercise the real OpenColorIO bridge rather than a
 stub runtime.
 
 The bundled endpoint/input config is packaged as
-`crates/mondrian-core/assets/ocio/mondrian_default_ocio_v1.ocio` and loaded via
-`include_str!` as `embedded:mondrian_default_ocio_v1`. It is pinned to the OCIO
-ACES 2.0 studio config semantics instead of resolving an upstream `latest`
-alias at runtime. This currently pins OCIO-provided input, endpoint, and
-explicit ACES behavior. It remains the bootstrap Standard package until a
-lighter default View Transform passes the gates in proposed ADR-0005.
+`crates/mondrian-core/assets/ocio/mondrian_default_ocio_v1.ocio`. Standard mode
+parses that immutable base and assembles its versioned product View in memory
+with stock OCIO transforms; it never resolves an upstream `latest` alias or a
+machine-local LUT. The base retains pinned OCIO Studio input definitions and
+explicit ACES transforms for the separate ACES-facing capability surface, but
+the Standard active/default View is not an ACES Output Transform.
+
+`Mondrian Standard SDR v1` is a five-stage OCIO `GroupTransform`: the AP0 scene
+reference is adapted to CIE XYZ D65 by an OCIO `BuiltinTransform`, converted to
+FilmLight E-Gamut by a matrix, distributed through an OCIO log2
+`AllocationTransform` covering -10 through +15 stops, formed by the pinned
+57-cube AgX Base resource using tetrahedral reconstruction, and converted to
+the display-reference connection space before display encoding. The resource
+is the authored picture-formation transform, not a low-resolution bake of an
+ACES processor. Its exact upstream commit, byte digest, domain, resolution,
+and BSD-3-Clause notice are recorded in
+`assets/ocio/MONDRIAN_STANDARD_SDR_V1_NOTICE.md`.
+
+The same Standard SDR formation is registered against sRGB, Rec.1886 Rec.709,
+Gamma 2.2 Rec.709, and Display P3 display color spaces. Output-target resolution
+is explicit: sRGB, Rec.709, and P3 select their matching display rather than the
+config's global default. Until a versioned Standard HLG/PQ View is present, an
+HDR tone-map request fails closed and must never borrow an inactive ACES View.
+
+Display-referred SDR projects do not invoke this scene View merely because it
+exists: their output boundary remains direct colorimetric OCIO conversion.
+Scene-referred workflows or an explicit tone-map policy select the Standard
+View, so ordinary Rec.709-to-Rec.709 editing is not needlessly filmicized.
 `mondrian-core::mondrian_default_ocio_contract()` is the Rust-level product
-contract for that asset. It lists the pinned config name, virtual path, default
-display/view, scene-linear working role, supported Mondrian `ColorSpace`
-mappings, and product-supported display/view pairs. Core tests validate the
+contract for that package. It lists the Standard package version, pinned config
+name, exact config and whole-package SHA-256 digests, resource digests, virtual
+path, default display/view,
+scene-linear working role, supported Mondrian `ColorSpace` mappings, and
+product-supported display/view pairs. Loading Standard mode recomputes the
+digest and fails closed before parsing if the embedded content no longer
+matches the versioned contract. Core tests validate the
 embedded `.ocio` file against this contract so config edits fail loudly when
 they break Standard mode.
 `mondrian-core::validate_mondrian_default_ocio_contract()` is the production
-validation gate for this asset. It returns a structured report after proving
-the embedded config parses, matches the pinned roles/display contract, resolves
+validation gate for this package. It returns a structured report after proving
+the embedded config and resources match their digests, the assembled config
+matches the pinned roles/display contract, resolves
 every Mondrian color-space mapping, builds CPU processors for the full contract
 color-space matrix, and extracts GPU shaders for every non-identity
 color-space transform plus every supported display/view transform.
@@ -60,15 +87,20 @@ rather than silently clamped.
 
 ## Transform providers and output intent
 
-- `ColorEngine::MondrianSmart`: productized policy selecting the bundled,
-  version-pinned Mondrian OCIO package.
-- `ColorEngine::Ocio`: explicit OCIO provider over `$OCIO`, a selected built-in,
-  or a path source. Its display/view owns final rendering only when
+- `ColorEngine::MondrianStandard { package }`: productized policy selecting the
+  bundled, version-pinned Mondrian OCIO package. The persisted package identity
+  requires its product ID/version, config ID/SHA-256, full package SHA-256,
+  working-space ID/version, and default View Transform ID/version.
+- `ColorEngine::Aces`: an explicit official ACES mode whose project payload
+  stores a versioned Studio or CG Config preset. Presets resolve to exact OCIO
+  built-in registry identifiers; they never follow an upstream `latest` alias.
+- `ColorEngine::CustomOcio`: explicit studio/user OCIO provider over `$OCIO`, a
+  selected built-in, or a path source. Its display/view owns final rendering only when
   `OutputTransformIntent::OcioDisplayView` is selected.
 
 Final-output color science is selected separately through
-`OutputTransformIntent`. `MondrianStandard` carries an explicit package version
-from its first release, `OcioDisplayView` carries the named
+`OutputTransformIntent`. `MondrianStandard` carries the same complete immutable
+package identity from its first release, `OcioDisplayView` carries the named
 display/view selected by advanced policy, and `Colorimetric` requests a direct
 working-to-encoded conversion. The intent survives preview/export planning and
 cache identity independently from the CPU/GPU implementation used to execute
@@ -125,12 +157,33 @@ Important fields:
 - `delivery_bit_depth`: actual 8-bit or 10-bit encoded sample depth
 - HDR metadata preservation fields
 
+`DisplayToneMapPolicy` controls the final working-to-display/export boundary.
+Its `Automatic` mode follows the effective scene-referred workflow; the
+per-sequence `auto_tone_map_media` authoring preference does not implicitly
+turn every display-referred Rec.709 output into a View transform. That media
+preference remains attached to individual media render plans, while final
+output tone mapping is selected explicitly by workflow or policy. This keeps a
+normal SDR sequence on the direct colorimetric OCIO processor and prevents a
+configured-but-inactive display/view from changing preview or export pixels.
+
 Media probing keeps automatic interpretation evidence separate from user
 overrides. CICP/container tags, camera/log metadata hints, HDR side data, and
 embedded ICC profiles are recorded as diagnostic evidence with confidence and
 warnings; ICC-only streams may resolve to an inferred input color family, while
 ICC-vs-CICP conflicts must be surfaced as warnings rather than silently changing
 an explicit user override.
+
+Camera acquisition identities are never represented by a transfer curve alone.
+Each product `ColorSpace` binds an exact transfer and gamut pair, including
+Apple Log/BT.2020, both Sony S-Log3 gamut variants, ARRI LogC3/AWG3 and
+LogC4/AWG4, Canon Log2/Log3 Cinema Gamut D55, Panasonic V-Log/V-Gamut, RED
+Log3G10/REDWideGamutRGB, Blackmagic Film/Wide Gamut Gen 5, DJI D-Log/D-Gamut,
+and DaVinci Intermediate/Wide Gamut. A bare `S-Log3`, `LogC`, or similar curve
+name is incomplete evidence and remains Unknown until metadata or a user
+override supplies the gamut. ICC display-profile names are not camera metadata
+and must not be used to guess these acquisition identities. The Interpret
+Footage UI exposes the precise pairs; program/display output selectors expose
+delivery spaces only.
 
 Standardized SD video has two explicit encoded product identities:
 `Rec601Pal` uses BT.470BG primaries, the BT.470BG gamma 2.8 transfer, and the
@@ -152,6 +205,16 @@ are rejected when converted to a working identity.
 Project files and sequence-setting actions do not accept encoded acquisition or
 delivery identities in this field.
 
+Mondrian Standard v1 pins `WorkingColorSpace::LinearRec2020`; the bundled OCIO
+config pins its `scene_linear` role to `Linear Rec.2020`, and the package
+contract validates the same mapping. The working values are unbounded
+scene-linear floats, not a 0..1 display signal and not a request to clip colors
+to the BT.2020 triangle. Negative components and values above one are preserved.
+An OCIO round-trip regression test crosses Linear Rec.2020 and ACEScg using
+negative and extended-range samples and enforces a scale-aware `2e-5` tolerance.
+The Linear Rec.2020 to SDR endpoint processor is also required to remain an
+analytic GPU program with no LUT texture or dynamic uniform resources.
+
 `InputColorResolution` returns a `ResolvedInputColor` value: `Color` requires an
 encoded source-to-working processor, `Data` requires an explicit non-color
 bypass, and `Rejected` fails the media path. Missing metadata can assume
@@ -169,6 +232,12 @@ mapping from being attached to an interior color-space conversion.
 OCIO execution also follows source -> working -> output. The Standard mode UI
 can hide OCIO details from normal users, but the backend still routes through
 the Mondrian default OCIO source and fails closed when that source is missing.
+`mondrian-core` no longer exposes the legacy `RgbaF32Frame` /
+`DisplayColorProfile` conversion path that decoded transfer functions, guessed
+camera primary families, or applied a hand-written ACES-like tone curve. Program
+color conversion must use typed OCIO processors. Monitor ICC adaptation remains
+an explicitly separate presentation boundary in `display_calibration` and must
+not become an alternate program rendering transform.
 
 GPU-native decoded video follows the same source -> working contract. Native
 NV12/P010 sampling expands range and converts YCbCr into the resolved encoded
@@ -247,7 +316,7 @@ against its real display-output contract
 space capabilities, `display_hdr_info` snapshot, present modes, alpha modes, and
 current monitor fingerprint). Display preview output is accepted only when the
 requested output color space has a direct presentation contract on the selected
-surface color space. Rec.709/sRGB requires `SurfaceColorSpace::Srgb`, DCI-P3
+surface color space. Rec.709/sRGB requires `SurfaceColorSpace::Srgb`, Display P3
 requires `DisplayP3`, Rec.2100 PQ requires `Bt2100Pq`, and Rec.2100 HLG
 requires `Bt2100Hlg`; Rec.2020 SDR and camera-log acquisition spaces are not
 presentation surfaces and are blocked until the viewer resolves them through an

@@ -679,7 +679,7 @@ mod tests {
             working_color_space: WorkingColorSpace::LinearRec709,
             output_color_space: ColorSpace::Srgb,
             tone_map: true,
-            engine: ColorEngine::MondrianSmart,
+            engine: ColorEngine::mondrian_standard(),
             display: None,
             view: None,
             ocio_generation: mondrian_core::ocio_config_generation(),
@@ -955,7 +955,7 @@ mod tests {
         let context = mondrian_timeline::sequence::SequenceSettings::default()
             .root_preview_color_context(
                 &mondrian_core::ProjectColorManagement::default(),
-                ColorSpace::DciP3,
+                ColorSpace::DisplayP3,
             );
 
         let failure = ThumbnailColorContract::resolve(&asset, &context)
@@ -965,7 +965,7 @@ mod tests {
             failure.reason,
             AssetThumbnailFailureReason::UnsupportedRasterOutput
         );
-        assert!(failure.detail.contains("DciP3"));
+        assert!(failure.detail.contains("DisplayP3"));
     }
 
     #[test]
