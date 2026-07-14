@@ -181,7 +181,7 @@ impl GpuNativeYuvDecodePlan {
                 actual: output.contract(),
             });
         }
-        let Some(source_color_space) = descriptor.color_space.encoded() else {
+        let Some(source_color_space) = descriptor.color_space.color() else {
             return Err(GpuNativeYuvDecodePlanError::InvalidOutputContract {
                 actual: output.contract(),
             });

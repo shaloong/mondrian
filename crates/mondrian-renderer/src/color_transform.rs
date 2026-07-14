@@ -1,8 +1,9 @@
 use crate::EncodedRgbaF32Frame;
 use crate::{
-    ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
-    CpuEncodedColorFrame, CpuEncodedFloatColorFrame, LinearFloatSource, OcioGpuShaderCache,
-    OcioGpuShaderError, OcioGpuShaderRequest, OcioGpuWgpuExecutionPlan,
+    ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency,
+    ColorFrameSpace, CpuColorFrame, CpuEncodedColorFrame, CpuEncodedFloatColorFrame,
+    LinearFloatSource, OcioGpuShaderCache, OcioGpuShaderError, OcioGpuShaderRequest,
+    OcioGpuWgpuExecutionPlan,
 };
 use mondrian_core::{
     types::{ColorEngine, ColorSpace},
@@ -302,19 +303,24 @@ impl CpuColorTransformExecutor {
         };
 
         let mut data = frame.data().to_vec();
-        let source_working = descriptor.color_space.working().ok_or_else(|| {
-            RenderColorTransformError::ExecutionFailed {
-                direction: RenderColorTransformDirection::InputToWorking,
-                input: descriptor,
-                output: output_descriptor,
-                reason: "linear source frame is missing a working-space identity".to_string(),
+        let source_identity = match descriptor.color_space {
+            ColorFrameSpace::Color(source) => OcioColorSpaceIdentity::Color(source),
+            ColorFrameSpace::Working(source) => OcioColorSpaceIdentity::Working(source),
+            ColorFrameSpace::Device(_) => {
+                return Err(RenderColorTransformError::ExecutionFailed {
+                    direction: RenderColorTransformDirection::InputToWorking,
+                    input: descriptor,
+                    output: output_descriptor,
+                    reason: "linear source frame cannot carry a monitor-device identity"
+                        .to_string(),
+                });
             }
-        })?;
+        };
         transform
             .engine
             .convert_identity_float(
                 &mut data,
-                source_working.into(),
+                source_identity,
                 transform.working_color_space.into(),
             )
             .map_err(|reason| RenderColorTransformError::ExecutionFailed {
@@ -365,7 +371,7 @@ impl CpuColorTransformExecutor {
             residency: ColorFrameResidency::Cpu,
         };
 
-        let source = descriptor.color_space.encoded().ok_or_else(|| {
+        let source = descriptor.color_space.color().ok_or_else(|| {
             RenderColorTransformError::ExecutionFailed {
                 direction: RenderColorTransformDirection::InputToWorking,
                 input: descriptor,
@@ -383,7 +389,7 @@ impl CpuColorTransformExecutor {
             .engine
             .convert_identity_float(
                 &mut flat,
-                OcioColorSpaceIdentity::Encoded(source),
+                OcioColorSpaceIdentity::Color(source),
                 OcioColorSpaceIdentity::Working(transform.working_color_space),
             )
             .map_err(|reason| RenderColorTransformError::ExecutionFailed {
@@ -596,16 +602,16 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
             residency: self.options.output_residency,
         };
         let working = transform.working_color_space;
-        let source = input.color_space.encoded().ok_or_else(|| {
+        let source = input.color_space.color().ok_or_else(|| {
             RenderColorTransformError::ExecutionFailed {
                 direction: RenderColorTransformDirection::InputToWorking,
                 input,
                 output,
-                reason: "GPU input frame is missing an encoded color-space identity".to_string(),
+                reason: "GPU input frame is missing an external color-space identity".to_string(),
             }
         })?;
         let request = OcioGpuShaderRequest::ColorSpace {
-            src: OcioColorSpaceIdentity::Encoded(source),
+            src: OcioColorSpaceIdentity::Color(source),
             dst: OcioColorSpaceIdentity::Working(working),
             language: self.options.language,
         };
@@ -663,7 +669,7 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
         } else {
             OcioGpuShaderRequest::ColorSpace {
                 src: OcioColorSpaceIdentity::Working(working),
-                dst: OcioColorSpaceIdentity::Encoded(transform.output_color_space),
+                dst: OcioColorSpaceIdentity::Color(transform.output_color_space),
                 language: self.options.language,
             }
         };
@@ -711,7 +717,7 @@ pub enum RenderColorTransformError {
         /// Input frame domain.
         domain: ColorFrameDomain,
     },
-    /// A frame carried an encoded identity where a working identity was required.
+    /// A frame carried an external color identity where a working identity was required.
     #[error("unsupported render color identity for working transform: {identity:?}")]
     UnsupportedWorkingIdentity {
         /// Actual typed frame identity.
@@ -972,7 +978,7 @@ mod tests {
         assert_eq!(
             plan.request,
             OcioGpuShaderRequest::ColorSpace {
-                src: OcioColorSpaceIdentity::Encoded(ColorSpace::SonySLog3SGamut3Cine),
+                src: OcioColorSpaceIdentity::Color(ColorSpace::SonySLog3SGamut3Cine),
                 dst: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
                 language: GpuLanguage::Glsl4_0,
             }
@@ -1018,7 +1024,7 @@ mod tests {
             plan.request,
             OcioGpuShaderRequest::ColorSpace {
                 src: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
-                dst: OcioColorSpaceIdentity::Encoded(ColorSpace::Srgb),
+                dst: OcioColorSpaceIdentity::Color(ColorSpace::Srgb),
                 language: GpuLanguage::Glsl4_0,
             }
         );
@@ -1099,7 +1105,7 @@ mod tests {
             plan.request,
             OcioGpuShaderRequest::ColorSpace {
                 src: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
-                dst: OcioColorSpaceIdentity::Encoded(ColorSpace::Rec709),
+                dst: OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
                 ..
             }
         ));
@@ -1113,13 +1119,13 @@ mod tests {
         let source = LinearFloatSource::new(
             2,
             2,
-            WorkingColorSpace::LinearRec709,
+            ColorSpace::Aces2065_1,
             vec![
                 0.5, 0.25, 0.125, 1.0, 0.8, 0.6, 0.4, 1.0, 0.2, 0.4, 0.6, 1.0, 1.0, 0.5, 0.0, 1.0,
             ],
         );
         let transform = RenderInputTransform::to_working(
-            WorkingColorSpace::LinearRec709,
+            WorkingColorSpace::LinearRec2020,
             false,
             ColorEngine::mondrian_standard(),
         );
@@ -1134,6 +1140,11 @@ mod tests {
         );
         assert_eq!(result.diagnostics.pixel_count, 4);
         assert!(!result.diagnostics.used_rgba8_boundary);
+        assert_eq!(
+            result.frame.descriptor().color_space,
+            ColorFrameSpace::Working(WorkingColorSpace::LinearRec2020)
+        );
+        assert_ne!(result.frame.rgba_f32().data[0], [0.5, 0.25, 0.125, 1.0]);
     }
 
     #[test]
@@ -1189,8 +1200,7 @@ mod tests {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         // Create a float source with linear values.
         let linear_data = vec![0.5, 0.25, 0.125, 1.0];
-        let float_source =
-            LinearFloatSource::new(1, 1, WorkingColorSpace::LinearRec709, linear_data);
+        let float_source = LinearFloatSource::new(1, 1, ColorSpace::LinearRec709, linear_data);
 
         let transform = RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec709,

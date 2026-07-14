@@ -90,7 +90,7 @@ impl ThumbnailColorContract {
                 "thumbnail decode requires an explicit full or limited source range",
             ));
         }
-        let output_color_space = context.output_color_space.encoded().ok_or_else(|| {
+        let output_color_space = context.output_color_space.color().ok_or_else(|| {
             thumbnail_failure(
                 AssetThumbnailFailureReason::InternalOutputIdentity,
                 "thumbnail presentation requires an encoded output identity",
@@ -943,7 +943,7 @@ mod tests {
 
         assert_eq!(
             Some(color.output_color_space),
-            context.output_color_space.encoded()
+            context.output_color_space.color()
         );
         assert_eq!(color.tone_map, context.tone_map);
         assert_eq!(color.raster_color_space, RasterImageColorSpace::Srgb);

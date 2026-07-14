@@ -34,7 +34,7 @@ impl GpuDisplayCalibrationPlan {
         if descriptor.domain != ColorFrameDomain::Display
             || descriptor.encoding != ColorFrameEncoding::EncodedFloat
             || descriptor.residency != ColorFrameResidency::Gpu
-            || descriptor.color_space.encoded() != Some(calibration.source_color_space)
+            || descriptor.color_space.color() != Some(calibration.source_color_space)
         {
             return Err(GpuDisplayCalibrationPlanError::InvalidInputContract {
                 actual: descriptor,
@@ -855,7 +855,7 @@ mod tests {
             ColorFrameDescriptor {
                 width: 2,
                 height: 1,
-                color_space: ColorFrameSpace::Encoded(color_space),
+                color_space: ColorFrameSpace::Color(color_space),
                 domain: ColorFrameDomain::Display,
                 encoding: ColorFrameEncoding::EncodedFloat,
                 residency: ColorFrameResidency::Gpu,

@@ -362,7 +362,7 @@ pub(crate) fn validate_timeline_export_color_compatibility(
     let bit_depth = settings.color_management.delivery_bit_depth;
     let preserve_hdr = settings.color_management.preserve_hdr_metadata;
 
-    if output_encoding.is_camera_log() {
+    if output_encoding.is_scene_log() {
         if bit_depth == DeliveryBitDepth::Eight {
             return Err("Camera log 输出需要 10-bit 或更高位深".to_string());
         }

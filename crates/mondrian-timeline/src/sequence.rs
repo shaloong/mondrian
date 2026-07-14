@@ -735,6 +735,13 @@ impl SequenceSettings {
                 reason: format!("预览分辨率比例无效: {}", self.preview.resolution_scale),
             });
         }
+        if !self.color_management.output_color_space.is_display_referred() {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "sequence_settings_validate".to_string(),
+                reason: "序列输出必须是显示或交付色彩空间，不能使用场景线性或 Log 输入空间"
+                    .to_string(),
+            });
+        }
         if self.color_management.workflow == ColorWorkflow::Aces
             && !matches!(
                 self.working_color_space,
@@ -920,7 +927,7 @@ impl SequenceSettings {
 
         ColorContext {
             working_color_space: self.working_color_space,
-            output_color_space: OcioColorSpaceIdentity::Encoded(output_color_space),
+            output_color_space: OcioColorSpaceIdentity::Color(output_color_space),
             tone_map,
             nested_processing: self.color_management.nested_processing,
             engine,
@@ -1870,6 +1877,19 @@ mod tests {
     }
 
     #[test]
+    fn sequence_color_management_rejects_source_only_output_space() {
+        let settings = SequenceSettings {
+            color_management: SequenceColorManagement {
+                output_color_space: ColorSpace::AcesCg,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(settings.validate().is_err());
+    }
+
+    #[test]
     fn sequence_color_management_accepts_hdr_output_metadata_policy() {
         let settings = SequenceSettings {
             working_color_space: WorkingColorSpace::LinearRec2020,
@@ -2134,12 +2154,12 @@ mod tests {
         );
         assert_eq!(
             preview.output_color_space,
-            OcioColorSpaceIdentity::Encoded(ColorSpace::Rec709)
+            OcioColorSpaceIdentity::Color(ColorSpace::Rec709)
         );
         assert_eq!(export.working_color_space, WorkingColorSpace::LinearRec2020);
         assert_eq!(
             export.output_color_space,
-            OcioColorSpaceIdentity::Encoded(ColorSpace::Rec2100Pq)
+            OcioColorSpaceIdentity::Color(ColorSpace::Rec2100Pq)
         );
         assert_eq!(preview.engine, export.engine);
         assert_eq!(preview.workflow, export.workflow);
@@ -2180,7 +2200,7 @@ mod tests {
         assert_eq!(
             ctx.display_management
                 .viewer_mode
-                .resolve(ctx.output_color_space.encoded().expect("root preview output")),
+                .resolve(ctx.output_color_space.color().expect("root preview output")),
             mondrian_core::ResolvedViewerDisplayMode::HdrPq
         );
     }
@@ -2236,7 +2256,7 @@ mod tests {
         assert_eq!(
             ctx.display_management
                 .viewer_mode
-                .resolve(ctx.output_color_space.encoded().expect("root preview output")),
+                .resolve(ctx.output_color_space.color().expect("root preview output")),
             mondrian_core::ResolvedViewerDisplayMode::Sdr
         );
     }

@@ -855,7 +855,7 @@ mod tests {
             ColorFrameDescriptor {
                 width: 4,
                 height: 4,
-                color_space: ColorFrameSpace::Encoded(mondrian_core::ColorSpace::Srgb),
+                color_space: ColorFrameSpace::Color(mondrian_core::ColorSpace::Srgb),
                 domain: ColorFrameDomain::Display,
                 encoding: ColorFrameEncoding::EncodedFloat,
                 residency: ColorFrameResidency::Gpu,

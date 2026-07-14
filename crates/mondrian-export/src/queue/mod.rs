@@ -2187,7 +2187,7 @@ fn write_timeline_frames_to_writer<W: Write>(
 fn export_output_boundary_from_context(
     color_context: &ColorContext,
 ) -> Result<RenderOutputColorBoundary, String> {
-    let output_color_space = color_context.output_color_space.encoded().ok_or_else(|| {
+    let output_color_space = color_context.output_color_space.color().ok_or_else(|| {
         "deliverable output boundary requires an encoded output color space".to_owned()
     })?;
     if color_context.tone_map {

@@ -1419,7 +1419,21 @@ fn detect_color_metadata_hint(
     value: &str,
 ) -> Option<VideoColorMetadataHint> {
     let haystack = normalize_metadata_hint_text(&format!("{key} {value}"));
-    let detected_color_space = if contains_any(&haystack, &["applelog", "applelogprofile"]) {
+    let detected_color_space = if contains_any(&haystack, &["aces20651", "aces2065ap0"]) {
+        Some(ColorSpace::Aces2065_1)
+    } else if contains_any(&haystack, &["acescct", "acescctap1"]) {
+        Some(ColorSpace::AcesCct)
+    } else if contains_any(&haystack, &["acescg", "acescgap1"]) {
+        Some(ColorSpace::AcesCg)
+    } else if contains_any(&haystack, &["linearrec2020", "linrec2020"]) {
+        Some(ColorSpace::LinearRec2020)
+    } else if contains_any(&haystack, &["linearrec709", "linrec709", "linearsrgb"]) {
+        Some(ColorSpace::LinearRec709)
+    } else if contains_any(&haystack, &["linearp3d65", "linp3d65"]) {
+        Some(ColorSpace::LinearP3D65)
+    } else if contains_any(&haystack, &["slog2sgamut", "sonyslog2sgamut"]) {
+        Some(ColorSpace::SonySLog2SGamut)
+    } else if contains_any(&haystack, &["applelog", "applelogprofile"]) {
         Some(ColorSpace::AppleLogBt2020)
     } else if contains_any(&haystack, &["slog3sgamut3cine", "sonyslog3sgamut3cine"]) {
         Some(ColorSpace::SonySLog3SGamut3Cine)
@@ -2032,6 +2046,29 @@ mod tests {
         )
         .expect("arri logc4 metadata hint");
         assert_eq!(logc4.detected_color_space, ColorSpace::ArriLogC4WideGamut4);
+    }
+
+    #[test]
+    fn metadata_hint_identifies_scene_linear_aces_and_slog2_sources() {
+        for (key, value, expected) in [
+            ("oiio:ColorSpace", "ACES2065-1", ColorSpace::Aces2065_1),
+            ("ocio:ColorSpace", "ACEScg", ColorSpace::AcesCg),
+            ("ocio:ColorSpace", "ACEScct", ColorSpace::AcesCct),
+            (
+                "ocio:ColorSpace",
+                "Linear Rec.2020",
+                ColorSpace::LinearRec2020,
+            ),
+            (
+                "camera_profile",
+                "Sony S-Log2 / S-Gamut",
+                ColorSpace::SonySLog2SGamut,
+            ),
+        ] {
+            let hint = detect_color_metadata_hint(VideoColorMetadataHintScope::Stream, key, value)
+                .unwrap_or_else(|| panic!("missing metadata hint for {key}={value}"));
+            assert_eq!(hint.detected_color_space, expected);
+        }
     }
 
     #[test]

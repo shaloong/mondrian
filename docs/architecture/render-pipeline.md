@@ -67,6 +67,15 @@ Bare RGBA8 buffers are valid only at source import, debug/golden snapshot, UI
 presentation readback, and CPU encoder boundaries. They are not a renderer-stage
 exchange format.
 
+`LinearFloatSource` accepts either an external scene-linear `ColorSpace` or an
+internal `WorkingColorSpace`. Its frame descriptor preserves that role through
+`ColorFrameSpace::Color` versus `ColorFrameSpace::Working`, and the CPU input
+executor requests the corresponding typed OCIO endpoint before producing the
+sequence working frame. When a decoder supplies external ACES2065-1/ACEScg or
+linear RGB float samples, the renderer bypasses RGBA8 without mislabeling them
+as pre-existing working frames. Media decoders must opt into this entry point
+explicitly.
+
 Nested sequences return typed linear `CpuColorFrame` values to their parent.
 Child working identities may be converted to the parent working identity by an
 explicit OCIO working-to-working processor, but they are never sent through a

@@ -280,7 +280,7 @@ impl std::fmt::Display for MondrianDefaultOcioValidationError {
 
 impl std::error::Error for MondrianDefaultOcioValidationError {}
 
-const MONDRIAN_DEFAULT_OCIO_COLOR_SPACES: [MondrianDefaultOcioColorSpace; 20] = [
+const MONDRIAN_DEFAULT_OCIO_COLOR_SPACES: [MondrianDefaultOcioColorSpace; 27] = [
     MondrianDefaultOcioColorSpace {
         color_space: ColorSpace::Rec709,
         ocio_name: "Camera Rec.709",
@@ -314,8 +314,36 @@ const MONDRIAN_DEFAULT_OCIO_COLOR_SPACES: [MondrianDefaultOcioColorSpace; 20] = 
         ocio_name: "sRGB Encoded P3-D65",
     },
     MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::LinearRec709,
+        ocio_name: "Linear Rec.709 (sRGB)",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::LinearRec2020,
+        ocio_name: "Linear Rec.2020",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::LinearP3D65,
+        ocio_name: "Linear P3-D65",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::Aces2065_1,
+        ocio_name: "ACES2065-1",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::AcesCg,
+        ocio_name: "ACEScg",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::AcesCct,
+        ocio_name: "ACEScct",
+    },
+    MondrianDefaultOcioColorSpace {
         color_space: ColorSpace::AppleLogBt2020,
         ocio_name: "Apple Log",
+    },
+    MondrianDefaultOcioColorSpace {
+        color_space: ColorSpace::SonySLog2SGamut,
+        ocio_name: "S-Log2 S-Gamut",
     },
     MondrianDefaultOcioColorSpace {
         color_space: ColorSpace::SonySLog3SGamut3,
@@ -1319,7 +1347,14 @@ pub fn ocio_color_space_name(cs: ColorSpace) -> &'static str {
         ColorSpace::Rec2100Pq => "Rec.2100-PQ - Display",
         ColorSpace::Rec2100Hlg => "Rec.2100-HLG - Display",
         ColorSpace::DisplayP3 => "sRGB Encoded P3-D65",
+        ColorSpace::LinearRec709 => "Linear Rec.709 (sRGB)",
+        ColorSpace::LinearRec2020 => "Linear Rec.2020",
+        ColorSpace::LinearP3D65 => "Linear P3-D65",
+        ColorSpace::Aces2065_1 => "ACES2065-1",
+        ColorSpace::AcesCg => "ACEScg",
+        ColorSpace::AcesCct => "ACEScct",
         ColorSpace::AppleLogBt2020 => "Apple Log",
+        ColorSpace::SonySLog2SGamut => "S-Log2 S-Gamut",
         ColorSpace::SonySLog3SGamut3 => "S-Log3 S-Gamut3",
         ColorSpace::SonySLog3SGamut3Cine => "S-Log3 S-Gamut3.Cine",
         ColorSpace::ArriLogC3WideGamut3 => "ARRI LogC3 (EI800)",
@@ -1347,7 +1382,7 @@ pub fn ocio_working_color_space_name(space: WorkingColorSpace) -> &'static str {
 /// Resolve an explicit encoded/working OCIO endpoint without role inference.
 pub fn ocio_color_space_identity_name(identity: OcioColorSpaceIdentity) -> &'static str {
     match identity {
-        OcioColorSpaceIdentity::Encoded(space) => ocio_color_space_name(space),
+        OcioColorSpaceIdentity::Color(space) => ocio_color_space_name(space),
         OcioColorSpaceIdentity::Working(space) => ocio_working_color_space_name(space),
     }
 }
@@ -2110,6 +2145,46 @@ mod tests {
     }
 
     #[test]
+    fn new_scene_linear_and_log_inputs_round_trip_through_standard_working_space() {
+        ensure_mondrian_default_ocio_loaded().expect("standard mode default config should load");
+
+        for source in [
+            ColorSpace::LinearRec709,
+            ColorSpace::LinearRec2020,
+            ColorSpace::LinearP3D65,
+            ColorSpace::Aces2065_1,
+            ColorSpace::AcesCg,
+            ColorSpace::AcesCct,
+            ColorSpace::SonySLog2SGamut,
+        ] {
+            let original = [0.18, 0.42, 0.73, 0.375];
+            let mut samples = original;
+            apply_ocio_identity_float(
+                &mut samples,
+                OcioColorSpaceIdentity::Color(source),
+                OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+            )
+            .unwrap_or_else(|error| panic!("{source:?} input processor failed: {error}"));
+            assert!(samples[..3].iter().all(|channel| channel.is_finite()));
+            assert_eq!(samples[3], original[3], "{source:?} input changed alpha");
+
+            apply_ocio_identity_float(
+                &mut samples,
+                OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+                OcioColorSpaceIdentity::Color(source),
+            )
+            .unwrap_or_else(|error| panic!("{source:?} inverse processor failed: {error}"));
+
+            for (actual, expected) in samples.iter().zip(original) {
+                assert!(
+                    (actual - expected).abs() <= 3.0e-5,
+                    "{source:?} round-trip mismatch: expected {expected}, got {actual}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn mondrian_standard_package_rejects_content_outside_its_versioned_digest() {
         let mut modified = mondrian_default_ocio_config_text().to_owned();
         modified.push('\n');
@@ -2335,7 +2410,14 @@ mod tests {
             (ColorSpace::Rec2100Pq, ColorSpace::Rec709),
             (ColorSpace::Rec2100Hlg, ColorSpace::Rec709),
             (ColorSpace::DisplayP3, ColorSpace::Rec709),
+            (ColorSpace::LinearRec709, ColorSpace::Rec709),
+            (ColorSpace::LinearRec2020, ColorSpace::Rec709),
+            (ColorSpace::LinearP3D65, ColorSpace::Rec709),
+            (ColorSpace::Aces2065_1, ColorSpace::Rec709),
+            (ColorSpace::AcesCg, ColorSpace::Rec709),
+            (ColorSpace::AcesCct, ColorSpace::Rec709),
             (ColorSpace::AppleLogBt2020, ColorSpace::Rec709),
+            (ColorSpace::SonySLog2SGamut, ColorSpace::Rec709),
             (ColorSpace::SonySLog3SGamut3, ColorSpace::Rec709),
             (ColorSpace::SonySLog3SGamut3Cine, ColorSpace::Rec709),
             (ColorSpace::ArriLogC3WideGamut3, ColorSpace::Rec709),
@@ -2460,7 +2542,7 @@ mod tests {
 
         let bundle = extract_ocio_identity_gpu_shader_bundle(
             OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
-            OcioColorSpaceIdentity::Encoded(ColorSpace::Srgb),
+            OcioColorSpaceIdentity::Color(ColorSpace::Srgb),
             GpuLanguage::Glsl4_0,
         )
         .expect("linear working identity should produce a GPU shader bundle");
@@ -2482,7 +2564,7 @@ mod tests {
         .expect("working to target-linear endpoint should produce a GPU program");
         let to_encoded_output = extract_ocio_identity_gpu_shader_bundle(
             OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
-            OcioColorSpaceIdentity::Encoded(ColorSpace::Srgb),
+            OcioColorSpaceIdentity::Color(ColorSpace::Srgb),
             GpuLanguage::Glsl4_0,
         )
         .expect("target-linear to encoded endpoint should produce a GPU program");
@@ -2506,7 +2588,7 @@ mod tests {
         apply_ocio_identity_float(
             &mut rgba,
             OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
-            OcioColorSpaceIdentity::Encoded(ColorSpace::Srgb),
+            OcioColorSpaceIdentity::Color(ColorSpace::Srgb),
         )
         .expect("linear working identity should produce a CPU processor");
 

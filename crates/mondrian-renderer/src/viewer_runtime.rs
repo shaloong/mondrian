@@ -762,7 +762,7 @@ impl ViewerGpuNativeVideoFacts {
             .then(|| native_source_texture_format_from_decoded(source.decoded_surface_format))
             .flatten();
         let source_video_sampling = source_texture_format.and_then(|format| {
-            source.source.descriptor().color_space.encoded().and_then(|encoded| {
+            source.source.descriptor().color_space.color().and_then(|encoded| {
                 native_video_sampling_from_decoded(encoded, format, source.decoded_video_sampling)
             })
         });

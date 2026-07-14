@@ -32,7 +32,7 @@ const BUTTON_HEIGHT: f32 = 32.0;
 const BUTTON_GAP: f32 = 10.0;
 const BUTTON_BOTTOM_INSET: f32 = 20.0;
 
-const OVERRIDE_COLOR_SPACES: [ColorSpace; 20] = ColorSpace::ALL;
+const OVERRIDE_COLOR_SPACES: [ColorSpace; 27] = ColorSpace::ALL;
 
 /// Shell-local draft for the Interpret Footage dialog.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -55,6 +55,10 @@ an asset-library mutation that persists `AssetMediaInterpretation`.
 The modal is a compact settings form with a single input color-space dropdown:
 Auto is the default option, explicit color spaces persist as overrides, and Auto
 displays the current resolved/detected result instead of explanatory copy.
+The picker includes encoded delivery/camera spaces plus supported scene-linear
+and ACES source identities. Sequence output controls use a separate fixed list
+of display-referred spaces, so ACES2065-1, ACEScg, ACEScct, linear RGB, and
+camera Log identities cannot appear as presentation targets.
 Non-color data is an asset payload classification for advanced utility-channel
 workflows, not an option in the primary color-space picker. A future payload or
 channel-role control may edit that classification, but the Interpret Footage

@@ -307,6 +307,11 @@ Exact BT.470BG and SMPTE 170M CICP triplets resolve to the PAL and NTSC Rec.601
 product color spaces respectively. Partial matrix-only metadata remains
 diagnosed as partial evidence but may still select the matching Rec.601 family;
 it must not be relabeled as Rec.709.
+Metadata-hint normalization also recognizes exact ACES2065-1, ACEScg, ACEScct,
+linear Rec.709/Rec.2020/P3-D65, and Sony S-Log2/S-Gamut identities. These hints
+retain the same priority/evidence/warning model as existing camera Log hints;
+generic `linear`, `ACES`, or `EXR` text is insufficient. Scene-linear sources
+force high-precision proxy admission just like HDR and scene-Log sources.
 App preview decode execution must run synchronous FFmpeg preview decode on
 dedicated preview worker threads, not on the UI/event thread. Current-frame and
 prefetch workers pass a cooperative cancellation predicate into

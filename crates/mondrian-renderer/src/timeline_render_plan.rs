@@ -656,7 +656,7 @@ mod tests {
                 .input_encoding_override
                 .expect("clip override should carry encoding")
                 .kind,
-            mondrian_core::ColorEncodingKind::CameraLog
+            mondrian_core::ColorEncodingKind::SceneLog
         );
         assert_eq!(
             diagnostic.pixel_aspect_ratio_override,

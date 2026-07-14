@@ -175,7 +175,7 @@ an explicit user override.
 
 Camera acquisition identities are never represented by a transfer curve alone.
 Each product `ColorSpace` binds an exact transfer and gamut pair, including
-Apple Log/BT.2020, both Sony S-Log3 gamut variants, ARRI LogC3/AWG3 and
+Apple Log/BT.2020, Sony S-Log2/S-Gamut, both Sony S-Log3 gamut variants, ARRI LogC3/AWG3 and
 LogC4/AWG4, Canon Log2/Log3 Cinema Gamut D55, Panasonic V-Log/V-Gamut, RED
 Log3G10/REDWideGamutRGB, Blackmagic Film/Wide Gamut Gen 5, DJI D-Log/D-Gamut,
 and DaVinci Intermediate/Wide Gamut. A bare `S-Log3`, `LogC`, or similar curve
@@ -184,6 +184,17 @@ override supplies the gamut. ICC display-profile names are not camera metadata
 and must not be used to guess these acquisition identities. The Interpret
 Footage UI exposes the precise pairs; program/display output selectors expose
 delivery spaces only.
+
+External scene-referred image identities are first-class `ColorSpace` values:
+linear Rec.709, linear Rec.2020, linear P3-D65, ACES2065-1, ACEScg, and ACEScct.
+They are available to automatic metadata interpretation and Interpret Footage,
+but never to sequence output selectors. Generic EXR extension alone is not
+evidence for ACES2065-1: the bundled config's fallback file rule is `Raw`, and
+Mondrian requires explicit image metadata or a user override. ACES2065-1,
+ACEScg, and the three linear RGB sources are valid identities for float source
+frames and do not require an encoded-transfer decode. Decoder integrations must
+preserve float samples into that entry point; support in the identity model does
+not by itself imply that every container decoder already avoids RGBA8.
 
 Standardized SD video has two explicit encoded product identities:
 `Rec601Pal` uses BT.470BG primaries, the BT.470BG gamma 2.8 transfer, and the
@@ -204,10 +215,13 @@ so equal primaries cannot collapse encoded and linear processor endpoints.
 
 `WorkingColorSpace` is the linear-light identity used by rendering, effects, and
 compositing. It is deliberately separate from `ColorSpace`, which identifies
-encoded acquisition and delivery spaces. `OcioColorSpaceIdentity` carries that
-role distinction into CPU/GPU processor requests and cache keys, so encoded
-`Camera Rec.709` cannot alias linear `Linear Rec.709 (sRGB)`. Camera log spaces
-are rejected when converted to a working identity.
+external source and delivery spaces, including scene-linear image sources.
+`OcioColorSpaceIdentity::Color` and `OcioColorSpaceIdentity::Working` carry that
+role distinction into CPU/GPU processor requests and cache keys. Thus an
+external linear ACEScg source and an internal ACEScg working frame remain
+different pipeline roles even though their numerical color space is identical.
+Only scene-linear `ColorSpace` values convert directly into a working identity;
+display-encoded and Log values require an OCIO processor.
 `SequenceSettings.working_color_space` persists `WorkingColorSpace` directly.
 Project files and sequence-setting actions do not accept encoded acquisition or
 delivery identities in this field.
@@ -222,18 +236,18 @@ negative and extended-range samples and enforces a scale-aware `2e-5` tolerance.
 The Linear Rec.2020 to SDR endpoint processor is also required to remain an
 analytic GPU program with no LUT texture or dynamic uniform resources.
 
-`InputColorResolution` returns a `ResolvedInputColor` value: `Color` requires an
-encoded source-to-working processor, `Data` requires an explicit non-color
+`InputColorResolution` returns a `ResolvedInputColor` value: `Color` requires a
+source-to-working processor, `Data` requires an explicit non-color
 bypass, and `Rejected` fails the media path. Missing metadata can assume
 Rec.709 with a diagnosed policy branch or reject the source; it can never
 silently reinterpret encoded samples as the sequence's linear working space.
 
 There is no public monolithic `ColorPipeline`. A source/input transform consumes
-`OcioColorSpaceIdentity::Encoded` and produces
+`OcioColorSpaceIdentity::Color` and produces
 `OcioColorSpaceIdentity::Working`; effects and compositing accept only the
 working identity; display and export boundary transforms consume working pixels
-and produce an encoded presentation/delivery identity. This split prevents an
-encoded `ColorSpace` from being passed as a working space and prevents tone
+and produce a presentation/delivery `Color` identity. This split prevents an
+external `ColorSpace` from being passed as a working space and prevents tone
 mapping from being attached to an interior color-space conversion.
 
 OCIO execution also follows source -> working -> output. The Standard mode UI
@@ -279,7 +293,7 @@ are also distinct: `EncodedRgbaF32Frame` carries nonlinear boundary samples,
 while `WorkingRgbaF32Frame` is reserved for linear-light pixels and carries a
 `WorkingColorSpace` identity.
 
-`ColorFrameDescriptor` stores `ColorFrameSpace::{Encoded, Working}`. Frame
+`ColorFrameDescriptor` stores `ColorFrameSpace::{Color, Working, Device}`. Frame
 domain validation and OCIO processor planning therefore share the same role
 distinction instead of inferring it from transfer characteristics.
 
@@ -511,7 +525,7 @@ with Mondrian's built-in `ColorSpace` enum.
 
 `ColorSpace::encoding()` is the canonical metadata source for color
 primaries, transfer characteristic, matrix coefficients, and whether the space
-is display SDR, display HDR, or camera log. Conversion code, preview
+is display SDR, display HDR, scene-linear, or scene-Log. Conversion code, preview
 diagnostics, validation, and export tagging should read this contract instead
 of maintaining separate ad hoc mappings.
 

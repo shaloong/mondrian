@@ -3981,7 +3981,7 @@ mod tests {
         assert!(json.get("health").is_none());
         assert!(json.get("health_failures").is_none());
         assert!(json.get("passed").is_none());
-        assert_eq!(json["health_report"]["schema_version"], 1);
+        assert_eq!(json["health_report"]["schema_version"], 2);
         assert_eq!(json["health_report"]["verdict"], "Pass");
         assert_eq!(
             json["health_report"]["summary"]["expected_readback_bytes"],
@@ -4307,7 +4307,7 @@ mod tests {
                 src: mondrian_core::OcioColorSpaceIdentity::Working(
                     mondrian_core::WorkingColorSpace::LinearRec709
                 ),
-                dst: mondrian_core::OcioColorSpaceIdentity::Encoded(ColorSpace::Srgb),
+                dst: mondrian_core::OcioColorSpaceIdentity::Color(ColorSpace::Srgb),
                 ..
             }
         ));

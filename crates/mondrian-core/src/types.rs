@@ -279,8 +279,22 @@ pub enum ColorSpace {
     Rec2020,
     /// Apple Display P3: P3-D65 primaries with the IEC 61966-2-1 sRGB curve.
     DisplayP3,
+    /// Scene-linear BT.709/sRGB primaries, typically from float image media.
+    LinearRec709,
+    /// Scene-linear BT.2020 primaries, typically from float image media.
+    LinearRec2020,
+    /// Scene-linear P3-D65 primaries, typically from float image media.
+    LinearP3D65,
+    /// ACES2065-1/AP0 scene-linear interchange media.
+    Aces2065_1,
+    /// ACEScg/AP1 scene-linear media.
+    AcesCg,
+    /// ACEScct/AP1 scene-referred logarithmic media.
+    AcesCct,
     /// Apple Log with BT.2020 primaries.
     AppleLogBt2020,
+    /// Sony S-Log2 with S-Gamut primaries.
+    SonySLog2SGamut,
     /// Sony S-Log3 with S-Gamut3 primaries.
     SonySLog3SGamut3,
     /// Sony S-Log3 with S-Gamut3.Cine primaries.
@@ -337,15 +351,22 @@ impl TryFrom<ColorSpace> for WorkingColorSpace {
 
     fn try_from(color_space: ColorSpace) -> Result<Self, Self::Error> {
         match color_space {
+            ColorSpace::LinearRec709 => Ok(Self::LinearRec709),
+            ColorSpace::LinearRec2020 => Ok(Self::LinearRec2020),
+            ColorSpace::LinearP3D65 => Ok(Self::LinearP3D65),
+            ColorSpace::AcesCg => Ok(Self::AcesCg),
             ColorSpace::Rec709
             | ColorSpace::Rec601Pal
             | ColorSpace::Rec601Ntsc
-            | ColorSpace::Srgb => Ok(Self::LinearRec709),
-            ColorSpace::Rec2020 | ColorSpace::Rec2100Hlg | ColorSpace::Rec2100Pq => {
-                Ok(Self::LinearRec2020)
-            }
-            ColorSpace::DisplayP3 => Ok(Self::LinearP3D65),
-            ColorSpace::AppleLogBt2020
+            | ColorSpace::Rec2100Hlg
+            | ColorSpace::Rec2100Pq
+            | ColorSpace::Srgb
+            | ColorSpace::Rec2020
+            | ColorSpace::DisplayP3
+            | ColorSpace::Aces2065_1
+            | ColorSpace::AcesCct
+            | ColorSpace::AppleLogBt2020
+            | ColorSpace::SonySLog2SGamut
             | ColorSpace::SonySLog3SGamut3
             | ColorSpace::SonySLog3SGamut3Cine
             | ColorSpace::ArriLogC3WideGamut3
@@ -365,23 +386,24 @@ impl TryFrom<ColorSpace> for WorkingColorSpace {
 
 /// Explicit OCIO processor endpoint identity.
 ///
-/// Encoded identities resolve source/delivery color spaces. Working identities
-/// resolve linear scene/render spaces. Processor caches include this enum so
-/// equal primaries with different transfer semantics cannot alias.
+/// Color identities resolve external source/delivery color spaces, including
+/// scene-linear float media. Working identities resolve internal render spaces.
+/// Processor caches include this enum so equal chromaticities in different
+/// pipeline roles cannot alias.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "role", content = "space", rename_all = "snake_case")]
 pub enum OcioColorSpaceIdentity {
-    /// Encoded source, display, or delivery color space.
-    Encoded(ColorSpace),
+    /// External source, display, or delivery color space.
+    Color(ColorSpace),
     /// Linear-light rendering color space.
     Working(WorkingColorSpace),
 }
 
 impl OcioColorSpaceIdentity {
-    /// Return the encoded source/delivery space when this identity is encoded.
-    pub const fn encoded(self) -> Option<ColorSpace> {
+    /// Return the external source/delivery space when present.
+    pub const fn color(self) -> Option<ColorSpace> {
         match self {
-            Self::Encoded(space) => Some(space),
+            Self::Color(space) => Some(space),
             Self::Working(_) => None,
         }
     }
@@ -389,7 +411,7 @@ impl OcioColorSpaceIdentity {
     /// Return the linear rendering space when this identity is a working space.
     pub const fn working(self) -> Option<WorkingColorSpace> {
         match self {
-            Self::Encoded(_) => None,
+            Self::Color(_) => None,
             Self::Working(space) => Some(space),
         }
     }
@@ -397,7 +419,7 @@ impl OcioColorSpaceIdentity {
 
 impl From<ColorSpace> for OcioColorSpaceIdentity {
     fn from(value: ColorSpace) -> Self {
-        Self::Encoded(value)
+        Self::Color(value)
     }
 }
 
@@ -435,7 +457,7 @@ pub enum MondrianStandardConfigId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MondrianStandardConfigDigest {
     /// Digest of `mondrian_default_ocio_v1.ocio`.
-    #[serde(rename = "3d2612a216abab75491a7b45db82f0d9e14aee6a51aaf2e35be0216e9e28569f")]
+    #[serde(rename = "741fa8942e2b1f97878c2baff3b7e0c33759237afef257a3cd4d7e8e812b68d1")]
     V1,
 }
 
@@ -443,7 +465,7 @@ pub enum MondrianStandardConfigDigest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MondrianStandardPackageDigest {
     /// Digest of Standard v1's config plus every embedded resource.
-    #[serde(rename = "11e381b7e91e3ed0d3a17155829df9fed7644bfe45b34df6bbb3c2205c342e8b")]
+    #[serde(rename = "830875c4df720c0f058704fcfcb6a1d98e1f84af15028bc81983b99a3e2d1d91")]
     V1,
 }
 
@@ -508,12 +530,12 @@ impl MondrianStandardPackageIdentity {
 
     /// Exact SHA-256 digest of the embedded OCIO config text.
     pub const fn config_sha256(self) -> &'static str {
-        "3d2612a216abab75491a7b45db82f0d9e14aee6a51aaf2e35be0216e9e28569f"
+        "741fa8942e2b1f97878c2baff3b7e0c33759237afef257a3cd4d7e8e812b68d1"
     }
 
     /// Exact SHA-256 digest of the config and all embedded resources.
     pub const fn package_sha256(self) -> &'static str {
-        "11e381b7e91e3ed0d3a17155829df9fed7644bfe45b34df6bbb3c2205c342e8b"
+        "830875c4df720c0f058704fcfcb6a1d98e1f84af15028bc81983b99a3e2d1d91"
     }
 
     /// Versioned working-space identity pinned by this package.
@@ -646,25 +668,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn working_color_space_conversion_separates_gamut_from_transfer() {
+    fn only_scene_linear_color_spaces_convert_to_working_spaces() {
         assert_eq!(
-            WorkingColorSpace::try_from(ColorSpace::Rec2100Pq),
+            WorkingColorSpace::try_from(ColorSpace::LinearRec2020),
             Ok(WorkingColorSpace::LinearRec2020)
         );
         assert_eq!(
-            WorkingColorSpace::try_from(ColorSpace::Srgb),
-            Ok(WorkingColorSpace::LinearRec709)
+            WorkingColorSpace::try_from(ColorSpace::AcesCg),
+            Ok(WorkingColorSpace::AcesCg)
         );
         assert!(matches!(
-            WorkingColorSpace::try_from(ColorSpace::SonySLog3SGamut3Cine),
-            Err(InvalidWorkingColorSpace { color_space: ColorSpace::SonySLog3SGamut3Cine })
+            WorkingColorSpace::try_from(ColorSpace::Rec2100Pq),
+            Err(InvalidWorkingColorSpace { color_space: ColorSpace::Rec2100Pq })
         ));
     }
 
     #[test]
-    fn ocio_identity_keeps_encoded_and_working_spaces_distinct() {
+    fn ocio_identity_keeps_external_color_and_working_spaces_distinct() {
         assert_ne!(
-            OcioColorSpaceIdentity::Encoded(ColorSpace::Rec709),
+            OcioColorSpaceIdentity::Color(ColorSpace::LinearRec709),
             OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709)
         );
     }

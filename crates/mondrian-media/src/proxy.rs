@@ -148,7 +148,8 @@ impl ProxyColorContract {
     fn needs_high_precision(self) -> bool {
         self.source_bit_depth > 8
             || self.source_color_space.is_hdr()
-            || self.source_color_space.encoding().is_camera_log()
+            || self.source_color_space.is_scene_linear()
+            || self.source_color_space.encoding().is_scene_log()
     }
 }
 

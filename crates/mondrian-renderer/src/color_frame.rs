@@ -54,8 +54,8 @@ pub enum ColorFrameResidency {
 /// Color identity carried by a renderer frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ColorFrameSpace {
-    /// Transfer-encoded source, display, or delivery samples.
-    Encoded(ColorSpace),
+    /// External source, display, or delivery color identity.
+    Color(ColorSpace),
     /// Linear-light effects/compositing samples.
     Working(WorkingColorSpace),
     /// Monitor-device RGB identity after ICC calibration.
@@ -63,10 +63,10 @@ pub enum ColorFrameSpace {
 }
 
 impl ColorFrameSpace {
-    /// Return the encoded identity, if this is a boundary frame.
-    pub const fn encoded(self) -> Option<ColorSpace> {
+    /// Return the external color identity, if this is a boundary frame.
+    pub const fn color(self) -> Option<ColorSpace> {
         match self {
-            Self::Encoded(space) => Some(space),
+            Self::Color(space) => Some(space),
             Self::Working(_) | Self::Device(_) => None,
         }
     }
@@ -74,7 +74,7 @@ impl ColorFrameSpace {
     /// Return the linear identity, if this is a working frame.
     pub const fn working(self) -> Option<WorkingColorSpace> {
         match self {
-            Self::Encoded(_) | Self::Device(_) => None,
+            Self::Color(_) | Self::Device(_) => None,
             Self::Working(space) => Some(space),
         }
     }
@@ -82,7 +82,7 @@ impl ColorFrameSpace {
 
 impl From<ColorSpace> for ColorFrameSpace {
     fn from(value: ColorSpace) -> Self {
-        Self::Encoded(value)
+        Self::Color(value)
     }
 }
 
@@ -1642,7 +1642,7 @@ impl GpuColorFrameReadbackPlan {
             let dst_end = dst_start + self.unpadded_bytes_per_row as usize;
             rgba[dst_start..dst_end].copy_from_slice(&mapped[src_start..src_end]);
         }
-        let color_space = self.output_descriptor.color_space.encoded().ok_or(
+        let color_space = self.output_descriptor.color_space.color().ok_or(
             GpuColorFrameReadbackError::UnsupportedColorIdentity {
                 color_space: self.output_descriptor.color_space,
             },
@@ -1895,7 +1895,7 @@ impl CpuEncodedFloatColorFrame {
         let descriptor = ColorFrameDescriptor {
             width: frame.width,
             height: frame.height,
-            color_space: ColorFrameSpace::Encoded(frame.color_space),
+            color_space: ColorFrameSpace::Color(frame.color_space),
             domain,
             encoding: ColorFrameEncoding::EncodedFloat,
             residency: ColorFrameResidency::Cpu,
@@ -2021,16 +2021,29 @@ pub struct LinearFloatSource {
 
 impl LinearFloatSource {
     /// Create a linear float source frame.
-    pub fn new(width: u32, height: u32, color_space: WorkingColorSpace, data: Vec<f32>) -> Self {
+    pub fn new(
+        width: u32,
+        height: u32,
+        color_space: impl Into<ColorFrameSpace>,
+        data: Vec<f32>,
+    ) -> Self {
         assert_eq!(
             data.len(),
             width as usize * height as usize * 4,
             "LinearFloatSource data length must be width * height * 4"
         );
+        let color_space = color_space.into();
+        assert!(
+            matches!(color_space, ColorFrameSpace::Working(_))
+                || color_space.color().is_some_and(|space| {
+                    space.encoding().kind == mondrian_core::ColorEncodingKind::SceneLinear
+                }),
+            "LinearFloatSource requires a scene-linear external or working identity"
+        );
         let descriptor = ColorFrameDescriptor {
             width,
             height,
-            color_space: color_space.into(),
+            color_space,
             domain: ColorFrameDomain::Source,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Cpu,

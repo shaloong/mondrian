@@ -297,7 +297,14 @@ pub(crate) fn cms_profile_for_color_space(color_space: ColorSpace) -> Option<Col
         ColorSpace::DisplayP3 => Some(ColorProfile::new_display_p3()),
         ColorSpace::Rec601Pal
         | ColorSpace::Rec601Ntsc
+        | ColorSpace::LinearRec709
+        | ColorSpace::LinearRec2020
+        | ColorSpace::LinearP3D65
+        | ColorSpace::Aces2065_1
+        | ColorSpace::AcesCg
+        | ColorSpace::AcesCct
         | ColorSpace::AppleLogBt2020
+        | ColorSpace::SonySLog2SGamut
         | ColorSpace::SonySLog3SGamut3
         | ColorSpace::SonySLog3SGamut3Cine
         | ColorSpace::ArriLogC3WideGamut3

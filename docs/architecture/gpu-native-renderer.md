@@ -607,7 +607,7 @@ evidence. The renderer exposes that contract through
 types, so smoke output and downstream tooling share one schema owned by
 `mondrian-renderer`. Schema v2 names the boundary input explicitly as
 `working_color_space`; an output-boundary report must never relabel its
-scene-linear input as an encoded camera/display `ColorSpace`. This smoke proves
+scene-linear input as an external camera/display `ColorSpace`. This smoke proves
 renderer-side upload + native GPU OCIO + readback sequencing; it does not prove OS
 swapchain/display-management correctness, which remains the app-window display
 contract's responsibility.

@@ -2677,7 +2677,14 @@ fn app_ui_surface_color_space_for_intent(
             ColorSpace::Rec601Pal
             | ColorSpace::Rec601Ntsc
             | ColorSpace::Rec2020
+            | ColorSpace::LinearRec709
+            | ColorSpace::LinearRec2020
+            | ColorSpace::LinearP3D65
+            | ColorSpace::Aces2065_1
+            | ColorSpace::AcesCg
+            | ColorSpace::AcesCct
             | ColorSpace::AppleLogBt2020
+            | ColorSpace::SonySLog2SGamut
             | ColorSpace::SonySLog3SGamut3
             | ColorSpace::SonySLog3SGamut3Cine
             | ColorSpace::ArriLogC3WideGamut3

@@ -69,8 +69,10 @@ pub enum ColorEncodingKind {
     DisplaySdr,
     /// Display-referred HDR delivery or monitoring signal.
     DisplayHdr,
-    /// Camera-log or acquisition-oriented signal without a stable FFmpeg delivery tag.
-    CameraLog,
+    /// Scene-linear float media.
+    SceneLinear,
+    /// Scene-referred logarithmic media without a stable FFmpeg delivery tag.
+    SceneLog,
 }
 
 /// CICP-style color primaries used by a [`ColorSpace`].
@@ -88,6 +90,8 @@ pub enum ColorPrimaries {
     P3D65,
     /// Sony S-Gamut3 primaries.
     SonySGamut3,
+    /// Sony S-Gamut primaries.
+    SonySGamut,
     /// Sony S-Gamut3.Cine primaries.
     SonySGamut3Cine,
     /// ARRI Wide Gamut 3 primaries.
@@ -106,6 +110,10 @@ pub enum ColorPrimaries {
     DjiDGamut,
     /// DaVinci Wide Gamut primaries.
     DavinciWideGamut,
+    /// ACES AP0 primaries with the ACES white point.
+    AcesAp0,
+    /// ACES AP1 primaries with the ACES white point.
+    AcesAp1,
 }
 
 /// CICP-style transfer characteristic used by a [`ColorSpace`].
@@ -123,10 +131,16 @@ pub enum ColorTransferCharacteristic {
     Hlg,
     /// Perceptual Quantizer transfer.
     Pq,
+    /// Linear-light transfer.
+    Linear,
+    /// ACEScct logarithmic transfer.
+    AcesCct,
     /// Apple Log acquisition transfer.
     AppleLog,
     /// Sony S-Log3 acquisition transfer.
     SLog3,
+    /// Sony S-Log2 acquisition transfer.
+    SLog2,
     /// ARRI LogC3 EI800 acquisition transfer.
     ArriLogC3,
     /// ARRI LogC4 acquisition transfer.
@@ -187,14 +201,31 @@ impl ColorEncodingSpec {
         self.kind == ColorEncodingKind::DisplayHdr
     }
 
-    /// Returns true when this space represents an acquisition log signal.
-    pub fn is_camera_log(self) -> bool {
-        self.kind == ColorEncodingKind::CameraLog
+    /// Returns true for display-referred SDR or HDR delivery identities.
+    pub fn is_display_referred(self) -> bool {
+        matches!(
+            self.kind,
+            ColorEncodingKind::DisplaySdr | ColorEncodingKind::DisplayHdr
+        )
+    }
+
+    /// Returns true when samples are already scene-linear.
+    pub fn is_scene_linear(self) -> bool {
+        self.kind == ColorEncodingKind::SceneLinear
+    }
+
+    /// Returns true when this space represents a scene-referred log signal.
+    pub fn is_scene_log(self) -> bool {
+        self.kind == ColorEncodingKind::SceneLog
     }
 
     /// Convert the canonical metadata to FFmpeg color tags when those tags are trustworthy.
     pub fn ffmpeg_tags(self) -> Option<FfmpegColorTags> {
-        if self.is_camera_log() || self.matrix == ColorMatrixCoefficients::Unspecified {
+        if !matches!(
+            self.kind,
+            ColorEncodingKind::DisplaySdr | ColorEncodingKind::DisplayHdr
+        ) || self.matrix == ColorMatrixCoefficients::Unspecified
+        {
             return None;
         }
 
@@ -215,6 +246,7 @@ impl ColorPrimaries {
             Self::Bt2020 => Some("bt2020"),
             Self::P3D65 => Some("smpte432"),
             Self::SonySGamut3
+            | Self::SonySGamut
             | Self::SonySGamut3Cine
             | Self::ArriWideGamut3
             | Self::ArriWideGamut4
@@ -223,7 +255,9 @@ impl ColorPrimaries {
             | Self::RedWideGamutRgb
             | Self::BlackmagicWideGamutGen5
             | Self::DjiDGamut
-            | Self::DavinciWideGamut => None,
+            | Self::DavinciWideGamut
+            | Self::AcesAp0
+            | Self::AcesAp1 => None,
         }
     }
 }
@@ -237,7 +271,10 @@ impl ColorTransferCharacteristic {
             Self::Srgb => Some("iec61966-2-1"),
             Self::Hlg => Some("arib-std-b67"),
             Self::Pq => Some("smpte2084"),
-            Self::AppleLog
+            Self::Linear
+            | Self::AcesCct
+            | Self::AppleLog
+            | Self::SLog2
             | Self::SLog3
             | Self::ArriLogC3
             | Self::ArriLogC4
@@ -404,7 +441,7 @@ pub fn compute_color_scopes(
 
 impl ColorSpace {
     /// All product-supported Mondrian color spaces.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 27] = [
         Self::Rec709,
         Self::Rec601Pal,
         Self::Rec601Ntsc,
@@ -413,7 +450,14 @@ impl ColorSpace {
         Self::Srgb,
         Self::Rec2020,
         Self::DisplayP3,
+        Self::LinearRec709,
+        Self::LinearRec2020,
+        Self::LinearP3D65,
+        Self::Aces2065_1,
+        Self::AcesCg,
+        Self::AcesCct,
         Self::AppleLogBt2020,
+        Self::SonySLog2SGamut,
         Self::SonySLog3SGamut3,
         Self::SonySLog3SGamut3Cine,
         Self::ArriLogC3WideGamut3,
@@ -478,77 +522,119 @@ impl ColorSpace {
                 matrix: ColorMatrixCoefficients::Rgb,
                 kind: ColorEncodingKind::DisplaySdr,
             },
+            Self::LinearRec709 => ColorEncodingSpec {
+                primaries: ColorPrimaries::Bt709,
+                transfer: ColorTransferCharacteristic::Linear,
+                matrix: ColorMatrixCoefficients::Rgb,
+                kind: ColorEncodingKind::SceneLinear,
+            },
+            Self::LinearRec2020 => ColorEncodingSpec {
+                primaries: ColorPrimaries::Bt2020,
+                transfer: ColorTransferCharacteristic::Linear,
+                matrix: ColorMatrixCoefficients::Rgb,
+                kind: ColorEncodingKind::SceneLinear,
+            },
+            Self::LinearP3D65 => ColorEncodingSpec {
+                primaries: ColorPrimaries::P3D65,
+                transfer: ColorTransferCharacteristic::Linear,
+                matrix: ColorMatrixCoefficients::Rgb,
+                kind: ColorEncodingKind::SceneLinear,
+            },
+            Self::Aces2065_1 => ColorEncodingSpec {
+                primaries: ColorPrimaries::AcesAp0,
+                transfer: ColorTransferCharacteristic::Linear,
+                matrix: ColorMatrixCoefficients::Rgb,
+                kind: ColorEncodingKind::SceneLinear,
+            },
+            Self::AcesCg => ColorEncodingSpec {
+                primaries: ColorPrimaries::AcesAp1,
+                transfer: ColorTransferCharacteristic::Linear,
+                matrix: ColorMatrixCoefficients::Rgb,
+                kind: ColorEncodingKind::SceneLinear,
+            },
+            Self::AcesCct => ColorEncodingSpec {
+                primaries: ColorPrimaries::AcesAp1,
+                transfer: ColorTransferCharacteristic::AcesCct,
+                matrix: ColorMatrixCoefficients::Rgb,
+                kind: ColorEncodingKind::SceneLog,
+            },
             Self::AppleLogBt2020 => ColorEncodingSpec {
                 primaries: ColorPrimaries::Bt2020,
                 transfer: ColorTransferCharacteristic::AppleLog,
                 matrix: ColorMatrixCoefficients::Unspecified,
-                kind: ColorEncodingKind::CameraLog,
+                kind: ColorEncodingKind::SceneLog,
+            },
+            Self::SonySLog2SGamut => ColorEncodingSpec {
+                primaries: ColorPrimaries::SonySGamut,
+                transfer: ColorTransferCharacteristic::SLog2,
+                matrix: ColorMatrixCoefficients::Unspecified,
+                kind: ColorEncodingKind::SceneLog,
             },
             Self::SonySLog3SGamut3 => ColorEncodingSpec {
                 primaries: ColorPrimaries::SonySGamut3,
                 transfer: ColorTransferCharacteristic::SLog3,
                 matrix: ColorMatrixCoefficients::Unspecified,
-                kind: ColorEncodingKind::CameraLog,
+                kind: ColorEncodingKind::SceneLog,
             },
             Self::SonySLog3SGamut3Cine => ColorEncodingSpec {
                 primaries: ColorPrimaries::SonySGamut3Cine,
                 transfer: ColorTransferCharacteristic::SLog3,
                 matrix: ColorMatrixCoefficients::Unspecified,
-                kind: ColorEncodingKind::CameraLog,
+                kind: ColorEncodingKind::SceneLog,
             },
             Self::ArriLogC3WideGamut3 => ColorEncodingSpec {
                 primaries: ColorPrimaries::ArriWideGamut3,
                 transfer: ColorTransferCharacteristic::ArriLogC3,
                 matrix: ColorMatrixCoefficients::Unspecified,
-                kind: ColorEncodingKind::CameraLog,
+                kind: ColorEncodingKind::SceneLog,
             },
             Self::ArriLogC4WideGamut4 => ColorEncodingSpec {
                 primaries: ColorPrimaries::ArriWideGamut4,
                 transfer: ColorTransferCharacteristic::ArriLogC4,
                 matrix: ColorMatrixCoefficients::Unspecified,
-                kind: ColorEncodingKind::CameraLog,
+                kind: ColorEncodingKind::SceneLog,
             },
             Self::CanonLog2CinemaGamutD55 => ColorEncodingSpec {
                 primaries: ColorPrimaries::CanonCinemaGamutD55,
                 transfer: ColorTransferCharacteristic::CanonLog2,
                 matrix: ColorMatrixCoefficients::Unspecified,
-                kind: ColorEncodingKind::CameraLog,
+                kind: ColorEncodingKind::SceneLog,
             },
             Self::CanonLog3CinemaGamutD55 => ColorEncodingSpec {
                 primaries: ColorPrimaries::CanonCinemaGamutD55,
                 transfer: ColorTransferCharacteristic::CanonLog3,
                 matrix: ColorMatrixCoefficients::Unspecified,
-                kind: ColorEncodingKind::CameraLog,
+                kind: ColorEncodingKind::SceneLog,
             },
             Self::PanasonicVLogVGamut => ColorEncodingSpec {
                 primaries: ColorPrimaries::PanasonicVGamut,
                 transfer: ColorTransferCharacteristic::PanasonicVLog,
                 matrix: ColorMatrixCoefficients::Unspecified,
-                kind: ColorEncodingKind::CameraLog,
+                kind: ColorEncodingKind::SceneLog,
             },
             Self::RedLog3G10WideGamutRgb => ColorEncodingSpec {
                 primaries: ColorPrimaries::RedWideGamutRgb,
                 transfer: ColorTransferCharacteristic::RedLog3G10,
                 matrix: ColorMatrixCoefficients::Unspecified,
-                kind: ColorEncodingKind::CameraLog,
+                kind: ColorEncodingKind::SceneLog,
             },
             Self::BlackmagicFilmWideGamutGen5 => ColorEncodingSpec {
                 primaries: ColorPrimaries::BlackmagicWideGamutGen5,
                 transfer: ColorTransferCharacteristic::BlackmagicFilmGen5,
                 matrix: ColorMatrixCoefficients::Unspecified,
-                kind: ColorEncodingKind::CameraLog,
+                kind: ColorEncodingKind::SceneLog,
             },
             Self::DjiDLogDGamut => ColorEncodingSpec {
                 primaries: ColorPrimaries::DjiDGamut,
                 transfer: ColorTransferCharacteristic::DjiDLog,
                 matrix: ColorMatrixCoefficients::Unspecified,
-                kind: ColorEncodingKind::CameraLog,
+                kind: ColorEncodingKind::SceneLog,
             },
             Self::DavinciIntermediateWideGamut => ColorEncodingSpec {
                 primaries: ColorPrimaries::DavinciWideGamut,
                 transfer: ColorTransferCharacteristic::DavinciIntermediate,
                 matrix: ColorMatrixCoefficients::Unspecified,
-                kind: ColorEncodingKind::CameraLog,
+                kind: ColorEncodingKind::SceneLog,
             },
         }
     }
@@ -557,18 +643,28 @@ impl ColorSpace {
         self.encoding().is_hdr()
     }
 
+    /// Whether this color space is valid as a sequence presentation destination.
+    pub fn is_display_referred(self) -> bool {
+        self.encoding().is_display_referred()
+    }
+
+    /// Whether this source identity carries scene-linear samples.
+    pub fn is_scene_linear(self) -> bool {
+        self.encoding().is_scene_linear()
+    }
+
     /// FFmpeg tag triplet for standardized delivery spaces.
     ///
-    /// Camera-log acquisition spaces return `None`; exporting them with guessed
-    /// Rec.709 tags would be worse than leaving tags unset.
+    /// Scene-linear and scene-log acquisition spaces return `None`; exporting
+    /// them with guessed delivery tags would mislabel the payload.
     pub fn ffmpeg_tags(self) -> Option<FfmpegColorTags> {
         self.encoding().ffmpeg_tags()
     }
 
     /// Resolve a color space from an exact FFmpeg color-tag triplet.
     ///
-    /// Camera-log acquisition spaces intentionally do not match here because
-    /// Mondrian does not emit trustworthy delivery tags for them.
+    /// Scene-linear and scene-log acquisition spaces intentionally do not match
+    /// here because Mondrian does not emit delivery tags for them.
     pub fn from_ffmpeg_tags(
         color_primaries: &str,
         color_trc: &str,
@@ -663,7 +759,7 @@ mod tests {
         assert_eq!(rec709.matrix, ColorMatrixCoefficients::Bt709);
         assert_eq!(rec709.kind, ColorEncodingKind::DisplaySdr);
         assert!(!rec709.is_hdr());
-        assert!(!rec709.is_camera_log());
+        assert!(!rec709.is_scene_log());
 
         let pq = ColorSpace::Rec2100Pq.encoding();
         assert_eq!(pq.primaries, ColorPrimaries::Bt2020);
@@ -678,10 +774,22 @@ mod tests {
         assert_eq!(display_p3.matrix, ColorMatrixCoefficients::Rgb);
         assert_eq!(display_p3.kind, ColorEncodingKind::DisplaySdr);
 
+        let aces2065 = ColorSpace::Aces2065_1.encoding();
+        assert_eq!(aces2065.primaries, ColorPrimaries::AcesAp0);
+        assert_eq!(aces2065.transfer, ColorTransferCharacteristic::Linear);
+        assert_eq!(aces2065.kind, ColorEncodingKind::SceneLinear);
+        assert!(aces2065.is_scene_linear());
+        assert!(!aces2065.is_display_referred());
+
+        let acescct = ColorSpace::AcesCct.encoding();
+        assert_eq!(acescct.primaries, ColorPrimaries::AcesAp1);
+        assert_eq!(acescct.transfer, ColorTransferCharacteristic::AcesCct);
+        assert!(acescct.is_scene_log());
+
         let slog3 = ColorSpace::SonySLog3SGamut3Cine.encoding();
-        assert_eq!(slog3.kind, ColorEncodingKind::CameraLog);
+        assert_eq!(slog3.kind, ColorEncodingKind::SceneLog);
         assert_eq!(slog3.matrix, ColorMatrixCoefficients::Unspecified);
-        assert!(slog3.is_camera_log());
+        assert!(slog3.is_scene_log());
         assert!(!slog3.is_hdr());
     }
 
@@ -787,7 +895,7 @@ mod tests {
         engine
             .convert_identity_float(
                 &mut rgba,
-                OcioColorSpaceIdentity::Encoded(ColorSpace::Rec709),
+                OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
                 OcioColorSpaceIdentity::Working(crate::types::WorkingColorSpace::LinearRec709),
             )
             .expect("embedded OCIO source-to-working processor");
@@ -814,7 +922,7 @@ mod tests {
         let err = engine
             .convert_identity_float(
                 &mut rgba,
-                OcioColorSpaceIdentity::Encoded(ColorSpace::Rec709),
+                OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
                 OcioColorSpaceIdentity::Working(crate::types::WorkingColorSpace::LinearRec709),
             )
             .expect_err("explicit missing OCIO source must fail closed");

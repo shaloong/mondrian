@@ -8809,7 +8809,7 @@ fn cpu_raster_presentation_contract(
     requested: &ColorContext,
 ) -> Result<CpuRasterPresentationContract, mondrian_core::OcioColorSpaceIdentity> {
     match requested.output_color_space {
-        mondrian_core::OcioColorSpaceIdentity::Encoded(ColorSpace::Rec709 | ColorSpace::Srgb) => {
+        mondrian_core::OcioColorSpaceIdentity::Color(ColorSpace::Rec709 | ColorSpace::Srgb) => {
             let mut color_context = requested.clone();
             color_context.output_color_space = ColorSpace::Srgb.into();
             Ok(CpuRasterPresentationContract {
@@ -8826,7 +8826,7 @@ fn output_boundary_from_color_context(
 ) -> Result<RenderOutputColorBoundary, mondrian_core::OcioColorSpaceIdentity> {
     let output_color_space = color_context
         .output_color_space
-        .encoded()
+        .color()
         .ok_or(color_context.output_color_space)?;
     match (
         color_context.tone_map,
@@ -10107,7 +10107,7 @@ mod tests {
 
         assert_eq!(frame.width, 960);
         assert_eq!(frame.height, 540);
-        assert_eq!(frame.working_color_space, WorkingColorSpace::LinearRec709);
+        assert_eq!(frame.working_color_space, WorkingColorSpace::LinearRec2020);
         match &frame.working_input {
             AppUiGpuPreviewWorkingInput::GpuComposite { layers } => {
                 assert_eq!(layers.len(), 1);
@@ -15233,14 +15233,14 @@ mod tests {
         );
         let export_boundary = match (&color_context.ocio_display, &color_context.ocio_view) {
             (Some(display), Some(view)) => RenderOutputColorBoundary::export_view(
-                color_context.output_color_space.encoded().expect("encoded export output"),
+                color_context.output_color_space.color().expect("encoded export output"),
                 display.clone(),
                 view.clone(),
                 color_context.tone_map,
                 color_context.engine.clone(),
             ),
             _ => RenderOutputColorBoundary::export(
-                color_context.output_color_space.encoded().expect("encoded export output"),
+                color_context.output_color_space.color().expect("encoded export output"),
                 color_context.tone_map,
                 color_context.engine.clone(),
             ),
@@ -15361,14 +15361,14 @@ mod tests {
             );
         let export_boundary = match (&color_context.ocio_display, &color_context.ocio_view) {
             (Some(display), Some(view)) => RenderOutputColorBoundary::export_view(
-                color_context.output_color_space.encoded().expect("encoded export output"),
+                color_context.output_color_space.color().expect("encoded export output"),
                 display.clone(),
                 view.clone(),
                 color_context.tone_map,
                 color_context.engine.clone(),
             ),
             _ => RenderOutputColorBoundary::export(
-                color_context.output_color_space.encoded().expect("encoded export output"),
+                color_context.output_color_space.color().expect("encoded export output"),
                 color_context.tone_map,
                 color_context.engine.clone(),
             ),

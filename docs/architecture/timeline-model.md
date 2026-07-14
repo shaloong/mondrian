@@ -23,10 +23,14 @@ A `Sequence` contains:
 
 Default sequences create `V1..V3` and `A1..A3`. `SequenceSettings` validates resolution, frame rate, audio sample rate/layout, preview settings, and color-management constraints.
 The persisted `working_color_space` is a `WorkingColorSpace`, distinct from
-encoded input and output `ColorSpace` values. Root color contexts carry an
-encoded output identity, while nested contexts carry their parent working
+external input and output `ColorSpace` values. Root color contexts carry a
+display-referred output identity, while nested contexts carry their parent working
 identity so render recursion cannot mistake an internal handoff for a delivery
 boundary.
+Sequence validation rejects scene-linear and scene-Log source identities as
+presentation outputs even if a project file is authored outside the UI; the
+sequence output must be one of the display-referred SDR/HDR identities. This
+does not remove export's separate, explicit professional Log intermediate path.
 
 New sequences default to the Mondrian Standard v1 working identity, unbounded
 scene-linear Rec.2020. Their initial SDR workflow remains display-referred at
