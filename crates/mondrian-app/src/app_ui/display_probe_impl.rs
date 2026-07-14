@@ -613,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn unfinished_standard_hdr_view_fails_closed_instead_of_using_srgb() {
+    fn standard_hdr_view_follows_the_resolved_hlg_and_pq_output_targets() {
         for output in [ColorSpace::Rec2100Pq, ColorSpace::Rec2100Hlg] {
             let (display, view, blocker) = resolve_ocio_display_view(
                 &ColorEngine::mondrian_standard(),
@@ -628,15 +628,8 @@ mod tests {
                         .expect("HDR target has a stable display identity")
                 )
             );
-            assert!(view.is_none());
-            assert!(matches!(
-                blocker,
-                Some(DisplayOutputBlocker::OcioDisplayViewMissing {
-                    display: Some(ref display),
-                    view: None,
-                }) if display == mondrian_core::mondrian_standard_output_display_name(output)
-                    .expect("HDR target has a stable display identity")
-            ));
+            assert_eq!(view.as_deref(), Some("Mondrian Standard HDR 1000 nits v1"));
+            assert!(blocker.is_none());
         }
     }
 

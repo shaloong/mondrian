@@ -465,7 +465,7 @@ pub enum MondrianStandardConfigDigest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MondrianStandardPackageDigest {
     /// Digest of Standard v1's config plus every embedded resource.
-    #[serde(rename = "830875c4df720c0f058704fcfcb6a1d98e1f84af15028bc81983b99a3e2d1d91")]
+    #[serde(rename = "dcd694126ac1a1fa55f64870774d9428e2da737ceaae6623c8ff2b23df48b52e")]
     V1,
 }
 
@@ -535,7 +535,7 @@ impl MondrianStandardPackageIdentity {
 
     /// Exact SHA-256 digest of the config and all embedded resources.
     pub const fn package_sha256(self) -> &'static str {
-        "830875c4df720c0f058704fcfcb6a1d98e1f84af15028bc81983b99a3e2d1d91"
+        "dcd694126ac1a1fa55f64870774d9428e2da737ceaae6623c8ff2b23df48b52e"
     }
 
     /// Versioned working-space identity pinned by this package.

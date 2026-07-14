@@ -14438,7 +14438,7 @@ mod tests {
 
         let mut rec709_view = test_color_context(ColorSpace::Rec709);
         rec709_view.ocio_display = Some("sRGB - Display".to_owned());
-        rec709_view.ocio_view = Some("ACES 2.0 - SDR 100 nits (Rec.709)".to_owned());
+        rec709_view.ocio_view = Some("Mondrian Standard SDR v1".to_owned());
         let mut colorimetric_view = rec709_view.clone();
         colorimetric_view.ocio_view = Some("Video (colorimetric)".to_owned());
         let first = viewer_preview_cache_key_for_resolved_plan(
@@ -14496,7 +14496,7 @@ mod tests {
         let mut color_context = test_color_context(ColorSpace::Rec709);
         color_context.tone_map = true;
         color_context.ocio_display = Some("sRGB - Display".to_owned());
-        color_context.ocio_view = Some("ACES 2.0 - SDR 100 nits (Rec.709)".to_owned());
+        color_context.ocio_view = Some("Mondrian Standard SDR v1".to_owned());
         let mut scratch = TimelineCompositeScratch::default();
 
         let _output = composite_resolved_preview_working(2, 2, &[], &color_context, &mut scratch)
@@ -14507,7 +14507,7 @@ mod tests {
             .display_view
             .expect("resolved display/view");
         assert_eq!(display_view.display, "sRGB - Display");
-        assert_eq!(display_view.view, "ACES 2.0 - SDR 100 nits (Rec.709)");
+        assert_eq!(display_view.view, "Mondrian Standard SDR v1");
     }
 
     #[test]
@@ -14515,7 +14515,7 @@ mod tests {
         let mut color_context = test_color_context(ColorSpace::Rec709);
         color_context.tone_map = false;
         color_context.ocio_display = Some("sRGB - Display".to_owned());
-        color_context.ocio_view = Some("ACES 2.0 - SDR 100 nits (Rec.709)".to_owned());
+        color_context.ocio_view = Some("Mondrian Standard SDR v1".to_owned());
 
         let boundary =
             output_boundary_from_color_context(&color_context).expect("encoded preview output");
@@ -15321,7 +15321,7 @@ mod tests {
 
     #[test]
     fn preview_multilayer_color_output_matches_export_frame_hash() {
-        const REC2020_TO_SRGB_DISPLAY_VIEW_MULTILAYER_GOLDEN_HASH: u64 = 4_283_848_551_210_105_253;
+        const REC2020_TO_SRGB_DISPLAY_VIEW_MULTILAYER_GOLDEN_HASH: u64 = 8_673_714_717_310_354_893;
 
         let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
             .expect("default effect graph");
@@ -15368,7 +15368,7 @@ mod tests {
         color_context.working_color_space = WorkingColorSpace::LinearRec2020;
         color_context.tone_map = true;
         color_context.ocio_display = Some("sRGB - Display".to_owned());
-        color_context.ocio_view = Some("ACES 2.0 - SDR 100 nits (Rec.709)".to_owned());
+        color_context.ocio_view = Some("Mondrian Standard SDR v1".to_owned());
         assert!(color_context.ocio_display.is_some());
         assert!(color_context.ocio_view.is_some());
 

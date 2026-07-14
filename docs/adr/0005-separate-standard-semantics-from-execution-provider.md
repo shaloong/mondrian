@@ -70,6 +70,10 @@ pinned 57-cube AgX formation resource, and display-reference conversion. It is
 the active/default scene View inside the Standard package, while ordinary
 display-referred SDR boundaries remain colorimetric and do not invoke a View.
 The legacy ACES Output Transform is no longer the Standard default. This ADR
-remains proposed until the SDR/P3/HLG/PQ corpus, preview/export parity,
-version-compatibility, packaging, and realtime GPU performance gates are all
+also defines the 1000-nit HDR View as the same stock-OCIO assembly with a pinned
+AgX HDR formation resource, conversion to display-reference XYZ, and one HLG or
+PQ display encoding. HLG and PQ therefore share picture formation instead of
+duplicating or borrowing an ACES Rendering Transform. This ADR remains proposed
+until the complete SDR/P3/HLG/PQ corpus, preview/export parity,
+version-pinned identity, packaging, and realtime GPU performance gates are all
 recorded.

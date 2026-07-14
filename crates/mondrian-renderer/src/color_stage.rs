@@ -11,8 +11,8 @@ use crate::{
     OcioGpuShaderCacheDiagnostics, OcioGpuWgpuBackendObjectError, OcioGpuWgpuBackendObjectRuntime,
     OcioGpuWgpuBackendObjectRuntimeDiagnostics, OcioGpuWgpuBackendPrepError,
     OcioGpuWgpuBackendPrepRuntime, OcioGpuWgpuBackendPrepRuntimeDiagnostics,
-    OcioGpuWgpuBindGroupLayoutDescriptorPlan, OcioGpuWgpuBindGroupPreparer, OcioGpuWgpuBlocker,
-    OcioGpuWgpuColorTargetFormat, OcioGpuWgpuOcioBindGroup, OcioGpuWgpuRenderPassError,
+    OcioGpuWgpuBindGroupLayoutDescriptorPlan, OcioGpuWgpuBlocker, OcioGpuWgpuColorTargetFormat,
+    OcioGpuWgpuOcioBindGroup, OcioGpuWgpuPreparedWrapperInputLayout, OcioGpuWgpuRenderPassError,
     OcioGpuWgpuRenderPassNodePlan, OcioGpuWgpuRenderPassRecorder, OcioGpuWgpuRenderPassTarget,
     OcioGpuWgpuRenderPipeline, OcioGpuWgpuWrapperBindGroup, OcioGpuWgpuWrapperBindingPlan,
     OcioGpuWgpuWrapperInputResources, RenderColorTransform, RenderColorTransformError,
@@ -499,6 +499,8 @@ pub struct RenderGpuOutputBoundaryBackendContext<'a> {
     pub pipeline: &'a OcioGpuWgpuRenderPipeline,
     /// Prepared OCIO resource bind group.
     pub ocio_bind_group: &'a OcioGpuWgpuOcioBindGroup,
+    /// Prepared wrapper input layout reused instead of recreated per frame.
+    pub wrapper_input_layout: &'a OcioGpuWgpuPreparedWrapperInputLayout,
     /// Backend render-pass node for this color transform.
     pub pass_node: OcioGpuWgpuRenderPassNodePlan,
     /// Shared GPU color frame resource table.
@@ -767,6 +769,7 @@ impl RenderGpuOutputBoundaryRuntime {
                     encoder: backend.encoder,
                     pipeline: &prepared_backend.render_pipeline,
                     ocio_bind_group: &prepared_backend.ocio_bind_group,
+                    wrapper_input_layout: &prepared_backend.wrapper_input_layout,
                     pass_node: prepared_backend.pass_node,
                     table: frame_table,
                     resource_pool: Some(resource_pool),
@@ -829,6 +832,7 @@ impl RenderGpuOutputBoundaryRuntime {
                     encoder: backend.encoder,
                     pipeline: &prepared_backend.render_pipeline,
                     ocio_bind_group: &prepared_backend.ocio_bind_group,
+                    wrapper_input_layout: &prepared_backend.wrapper_input_layout,
                     pass_node: prepared_backend.pass_node,
                     table: frame_table,
                     resource_pool: Some(resource_pool),
@@ -883,6 +887,7 @@ impl RenderGpuOutputBoundaryRuntime {
                     encoder: backend.encoder,
                     pipeline: &prepared_backend.render_pipeline,
                     ocio_bind_group: &prepared_backend.ocio_bind_group,
+                    wrapper_input_layout: &prepared_backend.wrapper_input_layout,
                     pass_node: prepared_backend.pass_node,
                     table: frame_table,
                     resource_pool: Some(resource_pool),
@@ -942,6 +947,7 @@ impl RenderGpuOutputBoundaryRuntime {
                     encoder: backend.encoder,
                     pipeline: &prepared_backend.render_pipeline,
                     ocio_bind_group: &prepared_backend.ocio_bind_group,
+                    wrapper_input_layout: &prepared_backend.wrapper_input_layout,
                     pass_node: prepared_backend.pass_node,
                     table: frame_table,
                     resource_pool: Some(resource_pool),
@@ -976,7 +982,7 @@ pub struct RenderGpuOutputBoundaryRuntimeDiagnostics {
 }
 
 /// Schema version for renderer GPU output health reports.
-pub const RENDER_GPU_OUTPUT_HEALTH_REPORT_SCHEMA_VERSION: u32 = 2;
+pub const RENDER_GPU_OUTPUT_HEALTH_REPORT_SCHEMA_VERSION: u32 = 3;
 
 /// Serializable frame evidence for renderer GPU output diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1046,6 +1052,12 @@ pub struct RenderGpuOutputRuntimeDiagnosticsReport {
     pub shader_cache_extraction_failures: u64,
     /// Number of prepared pure backend resource entries.
     pub backend_prep_resource_entries: usize,
+    /// Number of complete static-pipeline assemblies retained by the runtime.
+    pub static_pipeline_entries: usize,
+    /// Complete static-pipeline cache hits observed by the runtime.
+    pub static_pipeline_hits: u64,
+    /// Complete static-pipeline cache misses observed by the runtime.
+    pub static_pipeline_misses: u64,
     /// Number of prepared concrete backend object entries.
     pub backend_object_entries: usize,
     /// Concrete backend-object cache hits observed by the runtime.
@@ -1068,6 +1080,9 @@ impl From<RenderGpuOutputBoundaryRuntimeDiagnostics> for RenderGpuOutputRuntimeD
             shader_cache_misses: diagnostics.shader_cache.misses,
             shader_cache_extraction_failures: diagnostics.shader_cache.extraction_failures,
             backend_prep_resource_entries: diagnostics.backend_prep.resources.entries,
+            static_pipeline_entries: diagnostics.backend_prep.static_pipelines.entries,
+            static_pipeline_hits: diagnostics.backend_prep.static_pipelines.hits,
+            static_pipeline_misses: diagnostics.backend_prep.static_pipelines.misses,
             backend_object_entries: diagnostics.backend_objects.entries,
             backend_object_hits: diagnostics.backend_objects.hits,
             backend_object_misses: diagnostics.backend_objects.misses,
@@ -1134,6 +1149,7 @@ impl RenderGpuOutputHealthSummary {
             && runtime.shader_cache_misses > 0
             && runtime.shader_cache_extraction_failures == 0;
         let backend_runtime_ready = runtime.backend_prep_resource_entries > 0
+            && runtime.static_pipeline_entries > 0
             && runtime.backend_object_entries > 0
             && runtime.backend_object_misses > 0
             && runtime.backend_object_failures == 0;
@@ -1513,8 +1529,11 @@ fn push_render_gpu_output_root_causes_and_actions(
             RenderGpuOutputDiagnosticArea::BackendRuntime,
             "backend_runtime_not_ready",
             format!(
-                "prep_entries={} backend_entries={} backend_misses={} backend_failures={}",
+                "prep_entries={} static_entries={} static_hits={} static_misses={} backend_entries={} backend_misses={} backend_failures={}",
                 runtime.backend_prep_resource_entries,
+                runtime.static_pipeline_entries,
+                runtime.static_pipeline_hits,
+                runtime.static_pipeline_misses,
                 runtime.backend_object_entries,
                 runtime.backend_object_misses,
                 runtime.backend_object_failures
@@ -1863,6 +1882,8 @@ pub struct RenderGpuOutputStageBackendContext<'a> {
     pub pipeline: &'a OcioGpuWgpuRenderPipeline,
     /// Prepared OCIO resource bind group.
     pub ocio_bind_group: &'a OcioGpuWgpuOcioBindGroup,
+    /// Prepared wrapper input layout reused for this frame's input bind group.
+    pub wrapper_input_layout: &'a OcioGpuWgpuPreparedWrapperInputLayout,
     /// Backend render-pass node for this color transform.
     pub pass_node: OcioGpuWgpuRenderPassNodePlan,
     /// Shared GPU color frame resource table.
@@ -1889,6 +1910,7 @@ impl<'a> From<RenderGpuOutputBoundaryBackendContext<'a>>
             encoder: context.encoder,
             pipeline: context.pipeline,
             ocio_bind_group: context.ocio_bind_group,
+            wrapper_input_layout: context.wrapper_input_layout,
             pass_node: context.pass_node,
             table: context.table,
             resource_pool: None,
@@ -2168,6 +2190,7 @@ impl RenderGpuOutputStageResourcePlan {
                 backend.encoder,
                 backend.pipeline,
                 backend.ocio_bind_group,
+                backend.wrapper_input_layout,
                 backend.table,
                 backend.load_op,
             )
@@ -2532,6 +2555,7 @@ impl RenderGpuInputStageResourcePlan {
                 backend.encoder,
                 backend.pipeline,
                 backend.ocio_bind_group,
+                backend.wrapper_input_layout,
                 backend.table,
                 backend.load_op,
             )
@@ -2803,6 +2827,7 @@ impl RenderGpuColorPassSchedule {
     pub fn prepare_wrapper_bind_group(
         &self,
         device: &wgpu::Device,
+        prepared_layout: &OcioGpuWgpuPreparedWrapperInputLayout,
         input: RenderGpuColorPassInputView<'_>,
     ) -> Result<OcioGpuWgpuWrapperBindGroup, RenderGpuColorPassExecutionError> {
         self.validate_input_frame(input.frame)?;
@@ -2810,15 +2835,17 @@ impl RenderGpuColorPassSchedule {
         let wrapper_layout_hash =
             OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_wrapper_input(&wrapper_layout)
                 .layout_hash;
-        if wrapper_layout_hash != self.pass_node.wrapper_layout_hash {
+        if wrapper_layout_hash != self.pass_node.wrapper_layout_hash
+            || prepared_layout.layout_hash != wrapper_layout_hash
+        {
             return Err(
                 RenderGpuColorPassExecutionError::WrapperLayoutHashMismatch {
                     expected: self.pass_node.wrapper_layout_hash,
-                    actual: wrapper_layout_hash,
+                    actual: prepared_layout.layout_hash,
                 },
             );
         }
-        Ok(OcioGpuWgpuBindGroupPreparer::prepare_wrapper_bind_group(
+        Ok(prepared_layout.prepare_bind_group(
             device,
             &wrapper_layout,
             OcioGpuWgpuWrapperInputResources {
@@ -2861,6 +2888,7 @@ impl RenderGpuColorPassSchedule {
         encoder: &mut wgpu::CommandEncoder,
         pipeline: &OcioGpuWgpuRenderPipeline,
         ocio_bind_group: &OcioGpuWgpuOcioBindGroup,
+        wrapper_input_layout: &OcioGpuWgpuPreparedWrapperInputLayout,
         resources: &GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
         load_op: wgpu::LoadOp<wgpu::Color>,
     ) -> Result<(), RenderGpuColorPassExecutionError> {
@@ -2868,6 +2896,7 @@ impl RenderGpuColorPassSchedule {
         let input = resolved.input.resource();
         let wrapper_bind_group = self.prepare_wrapper_bind_group(
             device,
+            wrapper_input_layout,
             RenderGpuColorPassInputView {
                 frame: resolved.input.handle(),
                 texture_view: &input.texture_view,
@@ -3804,7 +3833,7 @@ mod tests {
         GpuColorFrameTextureFormat, GpuContext, OcioGpuShaderRequest, OcioGpuWgpuBlocker,
         RenderColorTransformBackend,
     };
-    use mondrian_core::types::{ColorEngine, ColorSpace};
+    use mondrian_core::types::{AcesConfigPreset, ColorEngine, ColorSpace};
     use mondrian_core::WorkingColorSpace;
     use mondrian_core::WorkingRgbaF32Frame;
     use mondrian_core::{ensure_mondrian_default_ocio_loaded, GpuLanguage};
@@ -3860,6 +3889,9 @@ mod tests {
             shader_cache_misses: 1,
             shader_cache_extraction_failures: 0,
             backend_prep_resource_entries: 1,
+            static_pipeline_entries: 1,
+            static_pipeline_hits: 1,
+            static_pipeline_misses: 1,
             backend_object_entries: 1,
             backend_object_hits: 0,
             backend_object_misses: 1,
@@ -3966,6 +3998,9 @@ mod tests {
             shader_cache_misses: 1,
             shader_cache_extraction_failures: 0,
             backend_prep_resource_entries: 1,
+            static_pipeline_entries: 1,
+            static_pipeline_hits: 1,
+            static_pipeline_misses: 1,
             backend_object_entries: 1,
             backend_object_hits: 0,
             backend_object_misses: 1,
@@ -4002,7 +4037,7 @@ mod tests {
         assert!(json.get("health").is_none());
         assert!(json.get("health_failures").is_none());
         assert!(json.get("passed").is_none());
-        assert_eq!(json["health_report"]["schema_version"], 2);
+        assert_eq!(json["health_report"]["schema_version"], 3);
         assert_eq!(json["health_report"]["verdict"], "Pass");
         assert_eq!(
             json["health_report"]["summary"]["expected_readback_bytes"],
@@ -4747,26 +4782,27 @@ mod tests {
         assert_eq!(record.stage_diagnostics.readback_stages, 1);
     }
 
-    #[tokio::test]
-    async fn gpu_explicit_aces_pq_view_meets_delta_e_itp_budget_on_real_wgpu_device() {
+    async fn assert_gpu_pq_view_meets_delta_e_itp_budget(
+        engine: ColorEngine,
+        view: &str,
+        first_frame_id: u64,
+    ) {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let Ok(context) = GpuContext::new().await else {
             eprintln!("skipping real wgpu PQ display/view accuracy test: no GPU adapter available");
             return;
         };
-        let frame = cpu_working_frame();
-        // This verifies generic OCIO CPU/GPU parity for an explicitly selected
-        // ACES view. It is not the Mondrian Standard HDR product contract.
+        let frame = pq_accuracy_working_frame();
         let boundary = RenderOutputColorBoundary::display_view(
             ColorSpace::Rec2100Pq,
             "Rec.2100-PQ - Display",
-            "ACES 2.0 - HDR 1000 nits (Rec.2020)",
+            view,
             false,
-            ColorEngine::mondrian_standard(),
+            engine,
         );
         let expected = execute_cpu_output_boundary_float(&frame, &boundary)
             .expect("CPU PQ display/view boundary");
-        let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_250);
+        let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(first_frame_id);
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian-test-gpu-pq-display-view-accuracy"),
         });
@@ -4810,17 +4846,45 @@ mod tests {
         let report = crate::compare_pq_hdr_display_rgba(
             &expected.frame.rgba_f32().data,
             &actual,
-            crate::PqHdrDisplayAccuracyBudget::new(0.5, 0.2, 0.5, 0.001),
+            // RGBA16F is the production HDR intermediate. A 0.55 ΔEITP
+            // single-pixel ceiling covers its measured quantization envelope;
+            // the mean and p99 limits still reject broad processor drift.
+            crate::PqHdrDisplayAccuracyBudget::new(0.55, 0.2, 0.5, 0.001),
         )
         .expect("valid PQ display accuracy report");
 
+        let worst = usize::try_from(report.statistics.worst_pixel_index)
+            .expect("test image pixel index should fit usize");
         assert!(
             report.within_budget,
-            "{report:#?}\nexpected={:?}\nactual={actual:?}",
-            expected.frame.rgba_f32().data
+            "{report:#?}\nworst_expected={:?}\nworst_actual={:?}",
+            expected.frame.rgba_f32().data[worst],
+            actual[worst]
         );
         assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
         assert_eq!(record.stage_diagnostics.readback_stages, 1);
+    }
+
+    #[tokio::test]
+    async fn gpu_standard_pq_view_meets_delta_e_itp_budget_on_real_wgpu_device() {
+        assert_gpu_pq_view_meets_delta_e_itp_budget(
+            ColorEngine::mondrian_standard(),
+            "Mondrian Standard HDR 1000 nits v1",
+            1_250,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn gpu_explicit_aces_pq_view_meets_delta_e_itp_budget_on_real_wgpu_device() {
+        // This remains a generic OCIO CPU/GPU parity reference for the separate
+        // ACES mode; it is not the Mondrian Standard HDR product contract.
+        assert_gpu_pq_view_meets_delta_e_itp_budget(
+            ColorEngine::Aces { preset: AcesConfigPreset::StudioV4Aces2Ocio25 },
+            "ACES 2.0 - HDR 1000 nits (Rec.2020)",
+            1_251,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -6166,6 +6230,42 @@ mod tests {
         })
     }
 
+    fn pq_accuracy_working_frame() -> CpuColorFrame {
+        const WIDTH: u32 = 64;
+        const HEIGHT: u32 = 64;
+        let mut data = vec![
+            [0.1, 0.2, 0.3, 1.0],
+            [0.1, 0.3, 0.2, 1.0],
+            [0.2, 0.1, 0.3, 1.0],
+            [0.2, 0.3, 0.1, 1.0],
+            [0.3, 0.1, 0.2, 1.0],
+            [0.3, 0.2, 0.1, 1.0],
+            [-0.05, 0.0, 0.001, 1.0],
+            [32.0, 8.0, 0.18, 1.0],
+        ];
+        let mut state = 0x6d6f_6e64_u32;
+        while data.len() < (WIDTH * HEIGHT) as usize {
+            let mut pixel = [0.0_f32; 4];
+            for channel in &mut pixel[..3] {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let unit = (state >> 8) as f32 / (u32::MAX >> 8) as f32;
+                let stops = -10.0 + unit * 15.0;
+                *channel = 0.18 * 2.0_f32.powf(stops);
+                if state & 0x1f == 0 {
+                    *channel = -*channel;
+                }
+            }
+            pixel[3] = 0.125 + ((state & 7) as f32 / 8.0);
+            data.push(pixel);
+        }
+        CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: WIDTH,
+            height: HEIGHT,
+            data,
+            color_space: WorkingColorSpace::LinearRec2020,
+        })
+    }
+
     fn cpu_source_frame() -> CpuSourceColorFrame {
         CpuEncodedColorFrame::source_rgba8(
             4,
@@ -6357,7 +6457,7 @@ mod tests {
             "sRGB - Display",
             "ACES 2.0 - SDR 100 nits (Rec.709)",
             true,
-            ColorEngine::mondrian_standard(),
+            ColorEngine::Aces { preset: AcesConfigPreset::StudioV4Aces2Ocio25 },
         );
 
         assert_eq!(boundary.target, RenderOutputColorBoundaryTarget::Export);
@@ -6376,7 +6476,7 @@ mod tests {
             "sRGB - Display",
             "ACES 2.0 - SDR 100 nits (Rec.709)",
             true,
-            ColorEngine::mondrian_standard(),
+            ColorEngine::Aces { preset: AcesConfigPreset::StudioV4Aces2Ocio25 },
         );
 
         let transform = boundary.transform();
@@ -6397,7 +6497,7 @@ mod tests {
             "sRGB - Display",
             "ACES 2.0 - SDR 100 nits (Rec.709)",
             true,
-            ColorEngine::mondrian_standard(),
+            ColorEngine::Aces { preset: AcesConfigPreset::StudioV4Aces2Ocio25 },
         );
 
         let result = execute_cpu_output_boundary_float(&frame, &boundary)

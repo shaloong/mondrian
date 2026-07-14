@@ -2338,12 +2338,19 @@ mod tests {
         assert_eq!(p3.ocio_view.as_deref(), Some("Mondrian Standard SDR v1"));
 
         let pq = settings.root_preview_color_context(&project_cm, ColorSpace::Rec2100Pq);
-        assert_eq!(pq.ocio_display, None);
-        assert_eq!(pq.ocio_view, None);
+        assert_eq!(pq.ocio_display.as_deref(), Some("Rec.2100-PQ - Display"));
+        assert_eq!(
+            pq.ocio_view.as_deref(),
+            Some("Mondrian Standard HDR 1000 nits v1")
+        );
         assert_eq!(
             pq.output_transform,
             mondrian_core::OutputTransformIntent::mondrian_standard()
         );
+
+        let hlg = settings.root_preview_color_context(&project_cm, ColorSpace::Rec2100Hlg);
+        assert_eq!(hlg.ocio_display.as_deref(), Some("Rec.2100-HLG - Display"));
+        assert_eq!(hlg.ocio_view, pq.ocio_view);
     }
 
     #[test]

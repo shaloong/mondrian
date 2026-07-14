@@ -33,12 +33,25 @@ and BSD-3-Clause notice are recorded in
 The same Standard SDR formation is registered against sRGB, Rec.1886 Rec.709,
 Gamma 2.2 Rec.709, and Display P3 display color spaces. Output-target resolution
 is explicit: sRGB, Rec.709, and P3 select their matching display rather than the
-config's global default. Until a versioned Standard HLG/PQ View is present, an
-HDR tone-map request retains the matching Rec.2100 HLG/PQ display identity but
-fails closed with no resolved View; it must never borrow the sRGB Standard View
-or an inactive ACES View. Display probing and timeline output planning share
-this target-aware resolver so diagnostics cannot report a different View than
-the render boundary.
+config's global default.
+
+`Mondrian Standard HDR 1000 nits v1` uses the same AP0-reference to XYZ D65,
+FilmLight E-Gamut, and log2 allocation stages, followed by a pinned 57-cube AgX
+1000-nit, P3-D65-limited HDR formation resource. That resource authors a
+Rec.2100 HLG image with a 100-nit program reference white. OCIO then decodes it
+to the shared display-reference XYZ connection space and applies exactly one
+selected display encoding: Rec.2100 HLG or Rec.2100 PQ. Consequently HLG and PQ
+do not have independent picture formation and Standard does not invoke an ACES
+Output Transform. The exact upstream commit, blob and byte digests, domain,
+resolution, authored luminance contract, and BSD-3-Clause notice are recorded
+in `assets/ocio/MONDRIAN_STANDARD_HDR_V1_NOTICE.md`.
+
+Output-target resolution maps Rec.2100 HLG and PQ to that HDR View while SDR
+targets map to the SDR View. A display without its target-class Standard View
+fails closed; it must never borrow the sRGB Standard View or an inactive ACES
+View. Display probing and timeline output planning share this target-aware
+resolver so diagnostics cannot report a different View than the render
+boundary.
 
 Display-referred SDR projects do not invoke this scene View merely because it
 exists: their output boundary remains direct colorimetric OCIO conversion.
@@ -455,7 +468,33 @@ GPU execution uses `RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_
 Real-wgpu conformance tests read back `Rgba16Float` PQ display/view output and
 compare it to the CPU OCIO path with distribution-aware Delta E ITP and separate
 alpha budgets. This guards processor, wrapper, texture-format, readback, and
-half-float precision as one output contract.
+half-float precision as one output contract. The gate covers both the Mondrian
+Standard 1000-nit PQ View and the separate ACES 2 1000-nit reference View; a
+backend change therefore cannot silently break Standard while only the ACES
+reference remains green.
+Engine identity is enforced at processor creation, not inferred from View
+spelling. A Mondrian Standard CPU or GPU request is accepted only when its
+display/view pair belongs to the pinned Standard package contract. ACES Views
+must use an explicit `ColorEngine::Aces` preset even if the immutable Standard
+package's upstream base config happens to contain the same string; cross-mode
+requests fail closed.
+
+Stock OCIO emits tetrahedral 3D-LUT evaluation as six data-dependent GLSL
+branches. Mondrian's wgpu lowering recognizes only that complete generated
+block shape and replaces its corner selection with the algebraically equivalent
+`min`/`max`/`step` formulation: the same four texels and the same tetrahedral
+weights are sampled. It also lowers LUT reads to explicit level-zero sampling;
+renderer LUTs have exactly one mip level, so this removes derivative work
+without changing sampling semantics. Any unrecognized source shape is retained
+unchanged. The recognizer closes the generated LUT operation at its own nested
+brace boundary rather than at a following operation marker, so a terminal LUT
+cannot consume the processor function's return or closing brace; the Standard
+HLG wgpu preparation test covers that terminal-op shape. A 10,000-point corner/weight equivalence test, a 4096-pixel HDR
+CPU/GPU Delta E ITP corpus spanning all six tetrahedra, negative values and
+extended highlights, and the real-wgpu PQ gate protect this lowering. Linear
+3D interpolation is explicitly rejected as a substitute: the fixed extended
+range comparison differs from the tetrahedral reference by more than the
+accepted drop-in budget.
 `RenderOutputColorBoundaryPlanner` owns CPU-only versus PreferGpu stage
 selection for that boundary, and PreferGpu planning reports native blockers
 instead of falling back to CPU stages. The resulting

@@ -1239,7 +1239,9 @@ mod tests {
             "sRGB - Display",
             "ACES 2.0 - SDR 100 nits (Rec.709)",
             true,
-            ColorEngine::mondrian_standard(),
+            ColorEngine::Aces {
+                preset: mondrian_core::types::AcesConfigPreset::StudioV4Aces2Ocio25,
+            },
         );
 
         assert_eq!(transform.output_domain, ColorFrameDomain::Export);
@@ -1270,7 +1272,9 @@ mod tests {
             "sRGB - Display",
             "ACES 2.0 - SDR 100 nits (Rec.709)",
             true,
-            ColorEngine::mondrian_standard(),
+            ColorEngine::Aces {
+                preset: mondrian_core::types::AcesConfigPreset::StudioV4Aces2Ocio25,
+            },
         );
 
         let result = CpuColorTransformExecutor::transform_float(&source, &transform)

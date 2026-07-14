@@ -60,6 +60,13 @@ display/view name is ignored while tone mapping is disabled. This selection is
 independent from the renderer's CPU/GPU execution backend so a backend change
 cannot silently change project color science.
 
+Standard output resolution is target-specific. SDR sRGB/Rec.709/P3 contexts
+select `Mondrian Standard SDR v1`; Rec.2100 HLG and PQ contexts select
+`Mondrian Standard HDR 1000 nits v1` under their respective OCIO displays.
+Preview and export context construction use the same resolver, so the target
+transfer function changes only the display encoding and never selects a second
+HDR picture formation.
+
 ## Track
 
 `Track` owns an ordered `Vec<Clip>` and track-level state:

@@ -134,6 +134,8 @@ pub struct OcioGpuShaderPlan {
     /// Number of uniforms referenced by the shader.
     pub uniform_count: u32,
     bundle: Arc<OcioGpuShaderBundle>,
+    binding_contract: Arc<OcioGpuBindingContract>,
+    binding_contract_hash: u64,
 }
 
 impl OcioGpuShaderPlan {
@@ -1307,7 +1309,7 @@ impl OcioGpuWgpuResourcePlan {
     ) -> Result<Self, OcioGpuBindingContractValidationError> {
         let binding_contract = binding_contract_for_plan(shader_plan);
         binding_contract.validate_for_shader_plan(shader_plan)?;
-        let binding_contract_hash = binding_contract.stable_hash();
+        let binding_contract_hash = shader_plan.binding_contract_hash;
         let wrapper_contract = fullscreen_wrapper_contract_for(&binding_contract);
         let wrapper_contract_hash = hash_value(&wrapper_contract);
         let input_textures = 1;
@@ -3576,10 +3578,20 @@ impl std::error::Error for OcioGpuWgpuBackendPrepError {}
 /// This runtime owns the caches needed to turn a shader plan into validated
 /// layout and wrapper Naga artifacts. Concrete wgpu object creation remains in
 /// the backend caches that consume this prepared static pipeline.
-#[derive(Default)]
 pub struct OcioGpuWgpuBackendPrepRuntime {
     resources: OcioGpuWgpuResourceCache,
     wrapper_module_artifacts: OcioGpuWgpuWrapperShaderModuleArtifactCache,
+    static_pipelines: LruCache<StaticPipelineCacheKey, Arc<OcioGpuWgpuPreparedStaticPipeline>>,
+    static_pipeline_hits: u64,
+    static_pipeline_misses: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct StaticPipelineCacheKey {
+    shader_cache_key: u64,
+    shader_hash: u64,
+    binding_contract_hash: u64,
+    output_format: OcioGpuWgpuColorTargetFormat,
 }
 
 impl OcioGpuWgpuBackendPrepRuntime {
@@ -3593,7 +3605,13 @@ impl OcioGpuWgpuBackendPrepRuntime {
         &mut self,
         shader_plan: &OcioGpuShaderPlan,
         output_format: OcioGpuWgpuColorTargetFormat,
-    ) -> Result<OcioGpuWgpuPreparedStaticPipeline, OcioGpuWgpuBackendPrepError> {
+    ) -> Result<Arc<OcioGpuWgpuPreparedStaticPipeline>, OcioGpuWgpuBackendPrepError> {
+        let cache_key = static_pipeline_cache_key(shader_plan, output_format);
+        if let Some(hit) = self.static_pipelines.get(&cache_key) {
+            self.static_pipeline_hits = self.static_pipeline_hits.saturating_add(1);
+            return Ok(Arc::clone(hit));
+        }
+        self.static_pipeline_misses = self.static_pipeline_misses.saturating_add(1);
         let resources = OcioGpuWgpuResourcePlan::for_shader_plan(shader_plan)
             .map_err(OcioGpuWgpuBackendPrepError::BindingContract)?;
         let resources = self
@@ -3623,7 +3641,7 @@ impl OcioGpuWgpuBackendPrepRuntime {
             .translate(&wrapper_source, &pipeline_layout, &render_descriptor)
             .map_err(OcioGpuWgpuBackendPrepError::WrapperModule)?;
 
-        Ok(OcioGpuWgpuPreparedStaticPipeline {
+        let prepared = Arc::new(OcioGpuWgpuPreparedStaticPipeline {
             resources,
             wrapper_binding,
             pipeline_layout,
@@ -3631,21 +3649,55 @@ impl OcioGpuWgpuBackendPrepRuntime {
             wrapper_source,
             wrapper_module_artifact,
             render_descriptor,
-        })
+        });
+        self.static_pipelines.put(cache_key, Arc::clone(&prepared));
+        Ok(prepared)
     }
 
     /// Return point-in-time cache diagnostics for this runtime.
     pub fn diagnostics(&self) -> OcioGpuWgpuBackendPrepRuntimeDiagnostics {
         OcioGpuWgpuBackendPrepRuntimeDiagnostics {
+            static_pipelines: OcioGpuWgpuStaticPipelineCacheDiagnostics {
+                entries: self.static_pipelines.len(),
+                hits: self.static_pipeline_hits,
+                misses: self.static_pipeline_misses,
+            },
             resources: self.resources.diagnostics(),
             wrapper_module_artifacts: self.wrapper_module_artifacts.diagnostics(),
         }
     }
 }
 
+impl Default for OcioGpuWgpuBackendPrepRuntime {
+    fn default() -> Self {
+        Self {
+            resources: OcioGpuWgpuResourceCache::default(),
+            wrapper_module_artifacts: OcioGpuWgpuWrapperShaderModuleArtifactCache::default(),
+            static_pipelines: LruCache::new(
+                NonZeroUsize::new(64).expect("default static-pipeline cache capacity is non-zero"),
+            ),
+            static_pipeline_hits: 0,
+            static_pipeline_misses: 0,
+        }
+    }
+}
+
+/// Point-in-time diagnostics for complete static OCIO pipeline reuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OcioGpuWgpuStaticPipelineCacheDiagnostics {
+    /// Cached complete static-pipeline assemblies.
+    pub entries: usize,
+    /// Complete static-pipeline cache hits.
+    pub hits: u64,
+    /// Complete static-pipeline cache misses.
+    pub misses: u64,
+}
+
 /// Point-in-time diagnostics for OCIO GPU backend preparation caches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OcioGpuWgpuBackendPrepRuntimeDiagnostics {
+    /// Complete static pipeline assembly cache diagnostics.
+    pub static_pipelines: OcioGpuWgpuStaticPipelineCacheDiagnostics,
     /// Resource-layout cache diagnostics.
     pub resources: OcioGpuWgpuResourceCacheDiagnostics,
     /// Wrapper Naga artifact cache diagnostics.
@@ -4858,7 +4910,10 @@ fn next_non_whitespace_is_open_paren(text: &str) -> bool {
 }
 
 fn binding_contract_for_plan(plan: &OcioGpuShaderPlan) -> OcioGpuBindingContract {
-    let bundle = plan.bundle();
+    Arc::unwrap_or_clone(Arc::clone(&plan.binding_contract))
+}
+
+fn binding_contract_for_bundle(bundle: &OcioGpuShaderBundle) -> OcioGpuBindingContract {
     OcioGpuBindingContract {
         descriptor_set_index: bundle.descriptor_set_index,
         uniform_buffer_binding: bundle.uniform_buffer_binding,
@@ -4917,6 +4972,8 @@ fn plan_from_bundle(
 ) -> OcioGpuShaderPlan {
     let shader_hash = hash_value(&bundle.shader_text);
     let cache_key = hash_request_and_processor(&request, bundle.cache_id.as_deref());
+    let binding_contract = Arc::new(binding_contract_for_bundle(&bundle));
+    let binding_contract_hash = binding_contract.stable_hash();
     OcioGpuShaderPlan {
         request,
         cache_key,
@@ -4927,6 +4984,8 @@ fn plan_from_bundle(
         texture_3d_count: bundle.texture_3d_count,
         uniform_count: bundle.uniform_count,
         bundle,
+        binding_contract,
+        binding_contract_hash,
     }
 }
 
@@ -5208,6 +5267,7 @@ fn lower_ocio_program_source_for_wgpu(shader_plan: &OcioGpuShaderPlan) -> Result
     let sampler_policy = OcioGpuWgpuSamplerBindingPolicy::for_contract(&binding_contract)
         .map_err(|err| format!("OCIO sampler binding policy: {err:?}"))?;
     let source = strip_glsl_version_directives(&bundle.shader_text);
+    let source = lower_ocio_tetrahedral_lut_blocks(&source, bundle);
     let legacy_sampler_1d_names = legacy_sampler_names_for_kind(
         &source,
         &binding_contract,
@@ -5215,6 +5275,100 @@ fn lower_ocio_program_source_for_wgpu(shader_plan: &OcioGpuShaderPlan) -> Result
     );
     let source = lower_legacy_sampler_declarations(&source, &binding_contract, &sampler_policy)?;
     lower_legacy_sampler_texture_calls(&source, &binding_contract, &legacy_sampler_1d_names)
+}
+
+fn lower_ocio_tetrahedral_lut_blocks(source: &str, bundle: &OcioGpuShaderBundle) -> String {
+    let mut replacements = Vec::new();
+    for texture in &bundle.textures_3d {
+        if texture.edge_len < 2 || texture.interpolation != OcioGpuTextureInterpolation::Nearest {
+            continue;
+        }
+        let marker = format!("  // Add LUT 3D processing for {}", texture.texture_name);
+        let Some(start) = source.find(&marker) else {
+            continue;
+        };
+        let search_after_marker = start.saturating_add(marker.len());
+        let Some(end) = glsl_braced_block_end(source, search_after_marker) else {
+            continue;
+        };
+        let block = &source[start..end];
+        let expected_signatures = [
+            "vec3 coords = mondrian_ocio_pixel.rgb",
+            "baseInd = ( baseInd.zyx",
+            "if (frac.r >= frac.g)",
+            "else if (frac.r >= frac.b)",
+            "mondrian_ocio_pixel.rgb = mondrian_ocio_pixel.rgb + (f1 * v1) + (f4 * v4);",
+        ];
+        if !expected_signatures.iter().all(|signature| block.contains(signature))
+            || !block.contains(&format!("texture({}", texture.sampler_name))
+        {
+            continue;
+        }
+        replacements.push((
+            start,
+            end,
+            branchless_tetrahedral_lut_block(
+                &texture.texture_name,
+                &texture.sampler_name,
+                texture.edge_len,
+            ),
+        ));
+    }
+
+    let mut lowered = source.to_owned();
+    for (start, end, replacement) in replacements.into_iter().rev() {
+        lowered.replace_range(start..end, &replacement);
+    }
+    lowered
+}
+
+fn glsl_braced_block_end(source: &str, search_from: usize) -> Option<usize> {
+    let open = source.get(search_from..)?.find('{')? + search_from;
+    let mut depth = 0_u32;
+    for (offset, character) in source.get(open..)?.char_indices() {
+        match character {
+            '{' => depth = depth.checked_add(1)?,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(open + offset + character.len_utf8());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn branchless_tetrahedral_lut_block(
+    texture_name: &str,
+    sampler_name: &str,
+    edge_len: u32,
+) -> String {
+    let scale = edge_len.saturating_sub(1);
+    let edge = f64::from(edge_len);
+    let inverse_edge = 1.0 / edge;
+    format!(
+        r#"  // Semantic-preserving branchless lowering of OCIO tetrahedral interpolation for {texture_name}
+  {{
+    vec3 coords = mondrian_ocio_pixel.rgb * vec3({scale}.0, {scale}.0, {scale}.0);
+    vec3 baseInd = floor(coords);
+    vec3 frac = coords - baseInd;
+    baseInd = (baseInd.zyx + vec3(0.5)) / vec3({edge:.17});
+    vec3 fracTextureOrder = frac.zyx;
+    float maxFrac = max(frac.r, max(frac.g, frac.b));
+    float minFrac = min(frac.r, min(frac.g, frac.b));
+    float midFrac = max(min(frac.r, frac.g), min(max(frac.r, frac.g), frac.b));
+    vec3 texel = vec3({inverse_edge:.17});
+    vec3 v1 = texture({sampler_name}, baseInd).rgb;
+    vec3 v2 = texture({sampler_name}, baseInd + step(vec3(maxFrac), fracTextureOrder) * texel).rgb;
+    vec3 v3 = texture({sampler_name}, baseInd + step(vec3(midFrac), fracTextureOrder) * texel).rgb;
+    vec3 v4 = texture({sampler_name}, baseInd + texel).rgb;
+    mondrian_ocio_pixel.rgb = ((maxFrac - midFrac) * v2) + ((midFrac - minFrac) * v3);
+    mondrian_ocio_pixel.rgb = mondrian_ocio_pixel.rgb + ((1.0 - maxFrac) * v1) + (minFrac * v4);
+  }}
+"#,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5413,11 +5567,11 @@ fn lower_texture_calls_for_sampler(
         let coordinate = source[argument_start..call_end].trim();
         if wrap_1d_coordinate {
             output.push_str(&format!(
-                "texture({sampler_constructor}({texture_name}, {sampler_name}), vec2({coordinate}, 0.5))"
+                "textureLod({sampler_constructor}({texture_name}, {sampler_name}), vec2({coordinate}, 0.5), 0.0)"
             ));
         } else {
             output.push_str(&format!(
-                "texture({sampler_constructor}({texture_name}, {sampler_name}), {coordinate})"
+                "textureLod({sampler_constructor}({texture_name}, {sampler_name}), {coordinate}, 0.0)"
             ));
         }
         cursor = call_end + 1;
@@ -6351,6 +6505,18 @@ fn backend_object_cache_key(static_pipeline: &OcioGpuWgpuPreparedStaticPipeline)
     hasher.finish()
 }
 
+fn static_pipeline_cache_key(
+    shader_plan: &OcioGpuShaderPlan,
+    output_format: OcioGpuWgpuColorTargetFormat,
+) -> StaticPipelineCacheKey {
+    StaticPipelineCacheKey {
+        shader_cache_key: shader_plan.cache_key,
+        shader_hash: shader_plan.shader_hash,
+        binding_contract_hash: shader_plan.binding_contract_hash,
+        output_format,
+    }
+}
+
 fn fullscreen_wrapper_contract_for(
     binding_contract: &OcioGpuBindingContract,
 ) -> OcioGpuFullscreenWrapperContract {
@@ -6867,6 +7033,9 @@ mod tests {
         );
 
         let diagnostics = runtime.diagnostics();
+        assert_eq!(diagnostics.static_pipelines.entries, 1);
+        assert_eq!(diagnostics.static_pipelines.misses, 1);
+        assert_eq!(diagnostics.static_pipelines.hits, 0);
         assert_eq!(diagnostics.resources.entries, 1);
         assert_eq!(diagnostics.resources.misses, 1);
         assert_eq!(diagnostics.resources.hits, 0);
@@ -6884,12 +7053,15 @@ mod tests {
             &second.wrapper_module_artifact
         ));
         let diagnostics = runtime.diagnostics();
+        assert_eq!(diagnostics.static_pipelines.entries, 1);
+        assert_eq!(diagnostics.static_pipelines.misses, 1);
+        assert_eq!(diagnostics.static_pipelines.hits, 1);
         assert_eq!(diagnostics.resources.entries, 1);
         assert_eq!(diagnostics.resources.misses, 1);
-        assert_eq!(diagnostics.resources.hits, 1);
+        assert_eq!(diagnostics.resources.hits, 0);
         assert_eq!(diagnostics.wrapper_module_artifacts.entries, 1);
         assert_eq!(diagnostics.wrapper_module_artifacts.misses, 1);
-        assert_eq!(diagnostics.wrapper_module_artifacts.hits, 1);
+        assert_eq!(diagnostics.wrapper_module_artifacts.hits, 0);
     }
 
     #[test]
@@ -6908,6 +7080,9 @@ mod tests {
             )
         ));
         let diagnostics = runtime.diagnostics();
+        assert_eq!(diagnostics.static_pipelines.entries, 0);
+        assert_eq!(diagnostics.static_pipelines.misses, 1);
+        assert_eq!(diagnostics.static_pipelines.hits, 0);
         assert_eq!(diagnostics.resources.entries, 1);
         assert_eq!(diagnostics.wrapper_module_artifacts.entries, 0);
     }
@@ -8287,6 +8462,147 @@ mod tests {
         assert_eq!(plan.bundle().dst_color_space, format!("{display}/{view}"));
         assert_eq!(plan.bundle().language, GpuLanguage::Glsl4_0);
         assert!(plan.shader_hash != 0);
+    }
+
+    #[test]
+    fn standard_hdr_view_uses_one_3d_lut_and_less_shader_code_than_aces2() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let mut cache = OcioGpuShaderCache::default();
+        let standard = cache
+            .get_or_extract(OcioGpuShaderRequest::DisplayView {
+                engine: ColorEngine::mondrian_standard(),
+                src: mondrian_core::WorkingColorSpace::LinearRec2020.into(),
+                display: "Rec.2100-PQ - Display".to_owned(),
+                view: "Mondrian Standard HDR 1000 nits v1".to_owned(),
+                language: GpuLanguage::Glsl4_0,
+            })
+            .expect("extract Standard HDR shader");
+        let aces = cache
+            .get_or_extract(OcioGpuShaderRequest::DisplayView {
+                engine: ColorEngine::Aces {
+                    preset: mondrian_core::types::AcesConfigPreset::StudioV4Aces2Ocio25,
+                },
+                src: mondrian_core::WorkingColorSpace::LinearRec2020.into(),
+                display: "Rec.2100-PQ - Display".to_owned(),
+                view: "ACES 2.0 - HDR 1000 nits (Rec.2020)".to_owned(),
+                language: GpuLanguage::Glsl4_0,
+            })
+            .expect("extract ACES 2 HDR reference shader");
+
+        assert_eq!(standard.texture_2d_count, 2);
+        assert_eq!(standard.texture_3d_count, 1);
+        assert_eq!(standard.bundle().textures_3d[0].edge_len, 57);
+        assert!(standard.bundle().shader_text.contains("if (frac.r >= frac.g)"));
+        let lowered = lower_ocio_program_source_for_wgpu(&standard)
+            .expect("lower Standard HDR program for wgpu");
+        assert!(lowered.contains("Semantic-preserving branchless lowering"));
+        assert!(!lowered.contains("if (frac.r >= frac.g)"));
+        assert!(lowered.contains("textureLod(sampler3D"));
+        assert!(
+            standard.shader_len < aces.shader_len,
+            "Standard HDR shader should be smaller than ACES 2: Standard={} bytes, ACES={} bytes",
+            standard.shader_len,
+            aces.shader_len
+        );
+    }
+
+    #[test]
+    fn standard_hlg_view_prepares_for_wgpu() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let mut cache = OcioGpuShaderCache::default();
+        let hlg = cache
+            .get_or_extract(OcioGpuShaderRequest::DisplayView {
+                engine: ColorEngine::mondrian_standard(),
+                src: mondrian_core::WorkingColorSpace::LinearRec2020.into(),
+                display: "Rec.2100-HLG - Display".to_owned(),
+                view: "Mondrian Standard HDR 1000 nits v1".to_owned(),
+                language: GpuLanguage::Glsl4_0,
+            })
+            .expect("extract Standard HLG shader");
+        let lowered =
+            lower_ocio_program_source_for_wgpu(&hlg).expect("lower Standard HLG program for wgpu");
+        assert!(lowered.contains("return mondrian_ocio_pixel;"));
+        let mut prep = OcioGpuWgpuBackendPrepRuntime::default();
+        prep.prepare_static_pipeline(&hlg, OcioGpuWgpuColorTargetFormat::Rgba16Float)
+            .expect("prepare Standard HLG static GPU pipeline");
+    }
+
+    #[test]
+    fn branchless_tetrahedral_corner_selection_matches_ocio_branching() {
+        fn ocio_branching(frac: [f32; 3]) -> [([u8; 3], f32); 4] {
+            let [r, g, b] = frac;
+            let (v2, v3, max, mid, min) = if r >= g {
+                if g >= b {
+                    ([0, 0, 1], [0, 1, 1], r, g, b)
+                } else if r >= b {
+                    ([0, 0, 1], [1, 0, 1], r, b, g)
+                } else {
+                    ([1, 0, 0], [1, 0, 1], b, r, g)
+                }
+            } else if g <= b {
+                ([1, 0, 0], [1, 1, 0], b, g, r)
+            } else if r >= b {
+                ([0, 1, 0], [0, 1, 1], g, r, b)
+            } else {
+                ([0, 1, 0], [1, 1, 0], g, b, r)
+            };
+            [
+                ([0, 0, 0], 1.0 - max),
+                (v2, max - mid),
+                (v3, mid - min),
+                ([1, 1, 1], min),
+            ]
+        }
+
+        fn branchless(frac: [f32; 3]) -> [([u8; 3], f32); 4] {
+            let max = frac.into_iter().fold(f32::NEG_INFINITY, f32::max);
+            let min = frac.into_iter().fold(f32::INFINITY, f32::min);
+            let mid = frac[0].min(frac[1]).max(frac[0].max(frac[1]).min(frac[2]));
+            let texture_order = [frac[2], frac[1], frac[0]];
+            let v2 = texture_order.map(|value| u8::from(value >= max));
+            let v3 = texture_order.map(|value| u8::from(value >= mid));
+            [
+                ([0, 0, 0], 1.0 - max),
+                (v2, max - mid),
+                (v3, mid - min),
+                ([1, 1, 1], min),
+            ]
+        }
+
+        fn assert_semantically_equal(frac: [f32; 3]) {
+            let branching = ocio_branching(frac);
+            let lowered = branchless(frac);
+            for ((branch_corner, branch_weight), (lowered_corner, lowered_weight)) in
+                branching.into_iter().zip(lowered)
+            {
+                assert_eq!(branch_weight, lowered_weight, "frac={frac:?}");
+                if branch_weight != 0.0 {
+                    assert_eq!(branch_corner, lowered_corner, "frac={frac:?}");
+                }
+            }
+        }
+
+        let mut state = 0x9e37_79b9_u32;
+        for _ in 0..10_000 {
+            let mut frac = [0.0; 3];
+            for value in &mut frac {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *value = (state >> 8) as f32 / (u32::MAX >> 8) as f32;
+            }
+            assert_semantically_equal(frac);
+        }
+        for frac in [
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [0.5, 0.5, 0.2],
+            [0.5, 0.2, 0.5],
+            [0.2, 0.5, 0.5],
+            [0.2, 0.2, 0.5],
+            [0.2, 0.5, 0.2],
+            [0.5, 0.2, 0.2],
+        ] {
+            assert_semantically_equal(frac);
+        }
     }
 
     #[test]

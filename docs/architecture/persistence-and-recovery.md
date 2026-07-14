@@ -30,6 +30,12 @@ and the source archive unchanged. SQLite migrations subsequently run
 transactionally against this runtime copy; migration never edits the archive in
 place. Saving and reopening is the only path that persists the current versions.
 
+The current archive fixture pins the exact Mondrian Standard package digest
+serialized by `ProjectColorManagement`. A package content change deliberately
+invalidates that fixture until it is regenerated for the new current contract;
+unknown/retired digests are rejected rather than accepted through an implicit
+color migration or substituted with the latest package.
+
 ## Runtime Directory
 
 Each project path maps to a stable temp runtime root:

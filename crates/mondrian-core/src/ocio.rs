@@ -144,12 +144,19 @@ const MONDRIAN_DEFAULT_OCIO_CONFIG: &str =
     include_str!("../assets/ocio/mondrian_default_ocio_v1.ocio");
 
 const MONDRIAN_STANDARD_SDR_VIEW_NAME: &str = "Mondrian Standard SDR v1";
+const MONDRIAN_STANDARD_HDR_1000_VIEW_NAME: &str = "Mondrian Standard HDR 1000 nits v1";
 const MONDRIAN_STANDARD_SDR_LUT_NAME: &str = "mondrian_standard_sdr_rec709_v1.cube";
 const MONDRIAN_STANDARD_SDR_LUT_SHA256: &str =
     "02f4d185608daa67fda01a1a48529bbc1533c8afdc826cde5c78f2eb5bb1b839";
 const MONDRIAN_STANDARD_SDR_LUT: &str =
     include_str!("../assets/ocio/mondrian_standard_sdr_rec709_v1.cube");
 const MONDRIAN_STANDARD_SDR_LUT_EDGE: usize = 57;
+const MONDRIAN_STANDARD_HDR_1000_LUT_NAME: &str = "mondrian_standard_hdr_1000_p3_v1.cube";
+const MONDRIAN_STANDARD_HDR_1000_LUT_SHA256: &str =
+    "80238cf1ed300a377d8c3b30bd3d05f23e7e2065b7e973ea62a5ee0e4f7a8a79";
+const MONDRIAN_STANDARD_HDR_1000_LUT: &str =
+    include_str!("../assets/ocio/mondrian_standard_hdr_1000_p3_v1.cube");
+const MONDRIAN_STANDARD_HDR_1000_LUT_EDGE: usize = 57;
 const MONDRIAN_STANDARD_ASSEMBLY_MANIFEST: &str = concat!(
     "mondrian-standard-assembly-v1\n",
     "working=Linear Rec.2020\n",
@@ -158,8 +165,10 @@ const MONDRIAN_STANDARD_ASSEMBLY_MANIFEST: &str = concat!(
     "formation_gamut=FilmLight E-Gamut\n",
     "shaper=log2[-12.47393,12.5260688117]\n",
     "formation_lut=mondrian_standard_sdr_rec709_v1.cube;edge=57;interpolation=tetrahedral\n",
+    "hdr_view=Mondrian Standard HDR 1000 nits v1\n",
+    "hdr_formation_lut=mondrian_standard_hdr_1000_p3_v1.cube;edge=57;interpolation=tetrahedral;peak_nits=1000;reference_white_nits=100;limit=P3-D65\n",
     "display_reference=CIE XYZ-D65 - Display-referred\n",
-    "displays=sRGB - Display,Gamma 2.2 Rec.709 - Display,Rec.1886 Rec.709 - Display,Display P3 - Display\n",
+    "displays=sRGB - Display,Gamma 2.2 Rec.709 - Display,Rec.1886 Rec.709 - Display,Display P3 - Display,Rec.2100-HLG - Display,Rec.2100-PQ - Display\n",
 );
 const MONDRIAN_STANDARD_SDR_ALLOCATION_VARS: [f32; 2] = [-12.47393, 12.526_069];
 
@@ -408,7 +417,7 @@ const MONDRIAN_DEFAULT_OCIO_COLOR_SPACES: [MondrianDefaultOcioColorSpace; 27] = 
     },
 ];
 
-const MONDRIAN_DEFAULT_OCIO_DISPLAY_VIEWS: [MondrianDefaultOcioDisplayView; 4] = [
+const MONDRIAN_DEFAULT_OCIO_DISPLAY_VIEWS: [MondrianDefaultOcioDisplayView; 6] = [
     MondrianDefaultOcioDisplayView {
         display: "sRGB - Display",
         view: MONDRIAN_STANDARD_SDR_VIEW_NAME,
@@ -425,13 +434,26 @@ const MONDRIAN_DEFAULT_OCIO_DISPLAY_VIEWS: [MondrianDefaultOcioDisplayView; 4] =
         display: "Display P3 - Display",
         view: MONDRIAN_STANDARD_SDR_VIEW_NAME,
     },
+    MondrianDefaultOcioDisplayView {
+        display: "Rec.2100-HLG - Display",
+        view: MONDRIAN_STANDARD_HDR_1000_VIEW_NAME,
+    },
+    MondrianDefaultOcioDisplayView {
+        display: "Rec.2100-PQ - Display",
+        view: MONDRIAN_STANDARD_HDR_1000_VIEW_NAME,
+    },
 ];
 
-const MONDRIAN_DEFAULT_OCIO_RESOURCES: [MondrianDefaultOcioResource; 1] =
-    [MondrianDefaultOcioResource {
+const MONDRIAN_DEFAULT_OCIO_RESOURCES: [MondrianDefaultOcioResource; 2] = [
+    MondrianDefaultOcioResource {
         name: MONDRIAN_STANDARD_SDR_LUT_NAME,
         content_sha256: MONDRIAN_STANDARD_SDR_LUT_SHA256,
-    }];
+    },
+    MondrianDefaultOcioResource {
+        name: MONDRIAN_STANDARD_HDR_1000_LUT_NAME,
+        content_sha256: MONDRIAN_STANDARD_HDR_1000_LUT_SHA256,
+    },
+];
 
 /// OCIO GPU function name generated for Mondrian wrapper shaders.
 pub const MONDRIAN_OCIO_GPU_FUNCTION_NAME: &str = "mondrian_ocio_main";
@@ -566,6 +588,10 @@ fn mondrian_default_package_sha256(
     digest.update([0]);
     digest.update(MONDRIAN_STANDARD_SDR_LUT.as_bytes());
     digest.update([0]);
+    digest.update(MONDRIAN_STANDARD_HDR_1000_LUT_NAME.as_bytes());
+    digest.update([0]);
+    digest.update(MONDRIAN_STANDARD_HDR_1000_LUT.as_bytes());
+    digest.update([0]);
     update_mondrian_default_processor_fingerprint(&mut digest, config, contract)?;
     let digest = digest.finalize();
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -683,6 +709,17 @@ fn validate_mondrian_default_resources(
                 report.resources_checked += 1;
             }
             MONDRIAN_STANDARD_SDR_LUT_NAME => errors.push(format!(
+                "resource '{}' digest contract does not match embedded content",
+                resource.name
+            )),
+            MONDRIAN_STANDARD_HDR_1000_LUT_NAME
+                if resource.content_sha256 == MONDRIAN_STANDARD_HDR_1000_LUT_SHA256
+                    && sha256_hex(MONDRIAN_STANDARD_HDR_1000_LUT.as_bytes())
+                        == resource.content_sha256 =>
+            {
+                report.resources_checked += 1;
+            }
+            MONDRIAN_STANDARD_HDR_1000_LUT_NAME => errors.push(format!(
                 "resource '{}' digest contract does not match embedded content",
                 resource.name
             )),
@@ -874,14 +911,98 @@ fn build_mondrian_standard_sdr_view(config: &Config) -> Result<(), String> {
             .add_display_shared_view(display, MONDRIAN_STANDARD_SDR_VIEW_NAME)
             .map_err(|err| err.to_string())?;
     }
-    config
-        .set_active_views(format!(
-            "{MONDRIAN_STANDARD_SDR_VIEW_NAME},Video (colorimetric),Un-tone-mapped,Raw"
-        ))
+    Ok(())
+}
+
+fn build_mondrian_standard_hdr_1000_view(config: &Config) -> Result<(), String> {
+    build_mondrian_standard_hdr_1000_view_with_interpolation(
+        config,
+        MONDRIAN_STANDARD_HDR_1000_VIEW_NAME,
+        OcioRsInterpolation::Tetrahedral,
+    )
+}
+
+fn build_mondrian_standard_hdr_1000_view_with_interpolation(
+    config: &Config,
+    view_name: &str,
+    interpolation: OcioRsInterpolation,
+) -> Result<(), String> {
+    let actual_digest = sha256_hex(MONDRIAN_STANDARD_HDR_1000_LUT.as_bytes());
+    if actual_digest != MONDRIAN_STANDARD_HDR_1000_LUT_SHA256 {
+        return Err(format!(
+            "embedded Mondrian Standard resource '{MONDRIAN_STANDARD_HDR_1000_LUT_NAME}' failed integrity validation: expected SHA-256 '{MONDRIAN_STANDARD_HDR_1000_LUT_SHA256}', got '{actual_digest}'"
+        ));
+    }
+    let cube = parse_cube_3d(MONDRIAN_STANDARD_HDR_1000_LUT)
+        .map_err(|err| format!("failed to parse '{MONDRIAN_STANDARD_HDR_1000_LUT_NAME}': {err}"))?;
+    if cube.edge != MONDRIAN_STANDARD_HDR_1000_LUT_EDGE {
+        return Err(format!(
+            "'{MONDRIAN_STANDARD_HDR_1000_LUT_NAME}' edge mismatch: expected {MONDRIAN_STANDARD_HDR_1000_LUT_EDGE}, got {}",
+            cube.edge
+        ));
+    }
+
+    let ap0_to_xyz_d65 = BuiltinTransform::create().map_err(|err| err.to_string())?;
+    ap0_to_xyz_d65
+        .set_style("UTILITY - ACES-AP0_to_CIE-XYZ-D65_BFD")
         .map_err(|err| err.to_string())?;
-    config.validate().map_err(|err| {
-        format!("Mondrian Standard in-memory OCIO package failed validation: {err}")
-    })?;
+
+    let xyz_to_egamut = MatrixTransform::create().map_err(|err| err.to_string())?;
+    xyz_to_egamut.set_matrix(&XYZ_D65_TO_FILMLIGHT_E_GAMUT);
+
+    let allocation = AllocationTransform::create().map_err(|err| err.to_string())?;
+    allocation.set_allocation(Allocation::Lg2);
+    allocation.set_vars(&MONDRIAN_STANDARD_SDR_ALLOCATION_VARS);
+
+    let formation = Lut3DTransform::create().map_err(|err| err.to_string())?;
+    formation.set_grid_size(cube.edge as u64);
+    formation.set_interpolation(interpolation);
+    formation.set_values(&cube.values);
+
+    // The pinned formation resource defines a 1000-nit, P3-limited HDR image
+    // in Rec.2100 HLG encoding. Decode that image back to OCIO's common
+    // display-reference XYZ so the selected display color space performs the
+    // one and only final HLG or PQ encoding.
+    let to_display_reference = ColorSpaceTransform::create().map_err(|err| err.to_string())?;
+    to_display_reference
+        .set_src("Rec.2100-HLG - Display")
+        .map_err(|err| err.to_string())?;
+    to_display_reference
+        .set_dst("CIE XYZ-D65 - Display-referred")
+        .map_err(|err| err.to_string())?;
+
+    let group = GroupTransform::create().map_err(|err| err.to_string())?;
+    group.append_transform(&ap0_to_xyz_d65);
+    group.append_transform(&xyz_to_egamut);
+    group.append_transform(&allocation);
+    group.append_transform(&formation);
+    group.append_transform(&to_display_reference);
+
+    let view = ViewTransform::create(ReferenceSpaceType::Scene).map_err(|err| err.to_string())?;
+    view.set_name(view_name).map_err(|err| err.to_string())?;
+    view.set_family("Mondrian Standard").map_err(|err| err.to_string())?;
+    view.set_description(
+        "Mondrian Standard v1 scene-to-HDR formation: AP0 reference to FilmLight E-Gamut, log2 shaper, pinned 1000-nit P3-limited AgX formation LUT, then target display encoding.",
+    )
+    .map_err(|err| err.to_string())?;
+    view.set_transform(Some(&group), ViewTransformDirection::FromReference);
+    config.add_view_transform(&view);
+
+    config
+        .add_shared_view(
+            view_name,
+            view_name,
+            "<USE_DISPLAY_NAME>",
+            "",
+            "Any Scene-linear or Log",
+            "Mondrian Standard v1 1000-nit HDR rendering transform",
+        )
+        .map_err(|err| err.to_string())?;
+    for display in ["Rec.2100-HLG - Display", "Rec.2100-PQ - Display"] {
+        config
+            .add_display_shared_view(display, view_name)
+            .map_err(|err| err.to_string())?;
+    }
     Ok(())
 }
 
@@ -889,6 +1010,15 @@ fn build_mondrian_default_ocio_config(config_text: &str) -> Result<Config, Strin
     let config = Config::from_stream(config_text)
         .map_err(|err| format!("failed to parse base Mondrian Standard OCIO config: {err}"))?;
     build_mondrian_standard_sdr_view(&config)?;
+    build_mondrian_standard_hdr_1000_view(&config)?;
+    config
+        .set_active_views(format!(
+            "{MONDRIAN_STANDARD_SDR_VIEW_NAME},{MONDRIAN_STANDARD_HDR_1000_VIEW_NAME},Video (colorimetric),Un-tone-mapped,Raw"
+        ))
+        .map_err(|err| err.to_string())?;
+    config.validate().map_err(|err| {
+        format!("Mondrian Standard in-memory OCIO package failed validation: {err}")
+    })?;
     Ok(config)
 }
 
@@ -1984,6 +2114,29 @@ fn apply_cached_cpu_processor(
     }
 }
 
+fn validate_engine_display_view_selection(
+    engine: &ColorEngine,
+    display: &str,
+    view: &str,
+) -> Result<(), String> {
+    let ColorEngine::MondrianStandard { package } = engine else {
+        return Ok(());
+    };
+    let contract = mondrian_default_ocio_contract();
+    if contract
+        .display_views
+        .iter()
+        .any(|candidate| candidate.display == display && candidate.view == view)
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "Mondrian Standard package '{}' ({}) does not permit display/view '{display}/{view}'",
+        package.package_id(),
+        package.package_sha256()
+    ))
+}
+
 // ── Public entry points ────────────────────────────────────────────────────────
 
 /// Apply an engine-qualified OCIO conversion using the bounded CPU processor cache.
@@ -2011,6 +2164,7 @@ pub(crate) fn apply_ocio_display_identity_float(
     display: &str,
     view: &str,
 ) -> Result<(), String> {
+    validate_engine_display_view_selection(engine, display, view)?;
     if data.is_empty() {
         return Ok(());
     }
@@ -2078,6 +2232,7 @@ pub fn extract_ocio_display_identity_gpu_shader_bundle(
     view: &str,
     language: GpuLanguage,
 ) -> Result<OcioGpuShaderBundle, String> {
+    validate_engine_display_view_selection(engine, display, view)?;
     with_ocio_config_for_source(&engine.ocio_source(), |config, _generation| {
         extract_ocio_display_identity_gpu_shader_bundle_from_config(
             config, src, display, view, language,
@@ -2209,33 +2364,44 @@ pub fn mondrian_standard_output_display_view(
     output: ColorSpace,
 ) -> Result<(String, String), String> {
     let display = mondrian_standard_output_display_name(output)?;
-    match output {
-        ColorSpace::Rec2100Hlg => {
-            return Err("Mondrian Standard HLG View is not available in package v1".to_owned());
-        }
-        ColorSpace::Rec2100Pq => {
-            return Err(
-                "Mondrian Standard PQ 1000-nit View is not available in package v1".to_owned(),
-            );
-        }
-        _ => {}
-    }
-
-    mondrian_standard_display_view(display)
+    let view = if matches!(output, ColorSpace::Rec2100Hlg | ColorSpace::Rec2100Pq) {
+        MONDRIAN_STANDARD_HDR_1000_VIEW_NAME
+    } else {
+        MONDRIAN_STANDARD_SDR_VIEW_NAME
+    };
+    mondrian_standard_display_view_named(display, view)
 }
 
 /// Resolve Mondrian Standard's versioned View for an explicit OCIO display.
 pub fn mondrian_standard_display_view(display: &str) -> Result<(String, String), String> {
-    let views = ocio_view_names_for_engine(&ColorEngine::mondrian_standard(), display)?;
-    if !views.iter().any(|view| view == MONDRIAN_STANDARD_SDR_VIEW_NAME) {
+    let view = if matches!(display, "Rec.2100-HLG - Display" | "Rec.2100-PQ - Display") {
+        MONDRIAN_STANDARD_HDR_1000_VIEW_NAME
+    } else {
+        MONDRIAN_STANDARD_SDR_VIEW_NAME
+    };
+    mondrian_standard_display_view_named(display, view)
+}
+
+fn mondrian_standard_display_view_named(
+    display: &str,
+    view: &str,
+) -> Result<(String, String), String> {
+    if !mondrian_default_ocio_contract()
+        .display_views
+        .iter()
+        .any(|candidate| candidate.display == display && candidate.view == view)
+    {
         return Err(format!(
-            "Mondrian Standard package is missing required display/view '{display}/{MONDRIAN_STANDARD_SDR_VIEW_NAME}'"
+            "Mondrian Standard package does not declare display/view '{display}/{view}'"
         ));
     }
-    Ok((
-        display.to_owned(),
-        MONDRIAN_STANDARD_SDR_VIEW_NAME.to_owned(),
-    ))
+    let views = ocio_view_names_for_engine(&ColorEngine::mondrian_standard(), display)?;
+    if !views.iter().any(|candidate| candidate == view) {
+        return Err(format!(
+            "Mondrian Standard package is missing required display/view '{display}/{view}'"
+        ));
+    }
+    Ok((display.to_owned(), view.to_owned()))
 }
 
 /// Resolve the OCIO display identity paired with a Standard output target.
@@ -2443,6 +2609,21 @@ mod tests {
     }
 
     #[test]
+    fn mondrian_standard_hdr_resource_has_pinned_domain_and_resolution() {
+        assert_eq!(
+            sha256_hex(MONDRIAN_STANDARD_HDR_1000_LUT.as_bytes()),
+            MONDRIAN_STANDARD_HDR_1000_LUT_SHA256
+        );
+        let cube = parse_cube_3d(MONDRIAN_STANDARD_HDR_1000_LUT)
+            .expect("pinned Mondrian Standard HDR LUT should parse");
+        assert_eq!(cube.edge, MONDRIAN_STANDARD_HDR_1000_LUT_EDGE);
+        assert_eq!(cube.domain_min, [0.0, 0.0, 0.0]);
+        assert_eq!(cube.domain_max, [1.0, 1.0, 1.0]);
+        assert_eq!(cube.values.len(), cube.edge.pow(3) * 3);
+        assert!(cube.values.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
     fn cube_parser_rejects_truncated_and_non_finite_payloads() {
         let truncated = "LUT_3D_SIZE 2\nDOMAIN_MIN 0 0 0\nDOMAIN_MAX 1 1 1\n0 0 0\n";
         assert!(parse_cube_3d(truncated)
@@ -2514,6 +2695,168 @@ mod tests {
         assert_eq!(samples[3], 1.0);
         assert_eq!(samples[7], 1.0);
         assert_eq!(samples[11], 0.5);
+    }
+
+    #[test]
+    fn mondrian_standard_hdr_views_are_finite_neutral_and_monotonic() {
+        ensure_mondrian_default_ocio_loaded().expect("standard mode default config should load");
+
+        for output in [ColorSpace::Rec2100Hlg, ColorSpace::Rec2100Pq] {
+            let (display, view) =
+                mondrian_standard_output_display_view(output).expect("Standard HDR output view");
+            let mut samples = (-320..=480)
+                .flat_map(|index| {
+                    let linear = 0.18_f32 * 2.0_f32.powf(index as f32 / 32.0);
+                    [linear, linear, linear, 1.0]
+                })
+                .collect::<Vec<_>>();
+
+            apply_ocio_display_identity_float(
+                &ColorEngine::mondrian_standard(),
+                &mut samples,
+                OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+                &display,
+                &view,
+            )
+            .unwrap_or_else(|error| panic!("{output:?} Standard HDR processor: {error}"));
+
+            let mut previous = f32::NEG_INFINITY;
+            for pixel in samples.chunks_exact(4) {
+                assert!(
+                    pixel.iter().all(|channel| channel.is_finite()),
+                    "{output:?} produced non-finite {pixel:?}"
+                );
+                let neutral_spread = pixel[..3].iter().copied().fold(f32::NEG_INFINITY, f32::max)
+                    - pixel[..3].iter().copied().fold(f32::INFINITY, f32::min);
+                assert!(
+                    neutral_spread <= 5.0e-4,
+                    "{output:?} neutral axis spread {neutral_spread} for {pixel:?}"
+                );
+                assert!(
+                    pixel[1] + 1.0e-6 >= previous,
+                    "{output:?} tone reversal: previous {previous}, current {}",
+                    pixel[1]
+                );
+                assert!(
+                    (-1.0e-5..=1.000_01).contains(&pixel[1]),
+                    "{output:?} neutral code value outside normalized signal range: {}",
+                    pixel[1]
+                );
+                previous = pixel[1];
+            }
+        }
+    }
+
+    #[test]
+    fn mondrian_standard_hdr_views_share_one_display_referred_formation() {
+        let config = build_mondrian_default_ocio_config(mondrian_default_ocio_config_text())
+            .expect("embedded Mondrian OCIO package should build");
+        let mut hlg = [
+            0.001, 0.001, 0.001, 1.0, 0.18, 0.18, 0.18, 1.0, 1.0, 1.0, 1.0, 1.0, 8.0, 2.0, 0.25,
+            1.0,
+        ];
+        let mut pq = hlg;
+
+        for (display, pixels) in [
+            ("Rec.2100-HLG - Display", &mut hlg[..]),
+            ("Rec.2100-PQ - Display", &mut pq[..]),
+        ] {
+            let processor = config
+                .processor_display(
+                    ocio_working_color_space_name(WorkingColorSpace::LinearRec2020),
+                    display,
+                    MONDRIAN_STANDARD_HDR_1000_VIEW_NAME,
+                    ocio_rs::TransformDirection::Forward,
+                )
+                .unwrap_or_else(|error| panic!("{display} processor: {error}"));
+            processor
+                .default_cpu_processor()
+                .expect("HDR CPU processor")
+                .try_apply_rgba_pixels(pixels, (pixels.len() / 4) as i64, 4)
+                .unwrap_or_else(|error| panic!("{display} apply: {error}"));
+        }
+
+        let pq_to_hlg = config
+            .processor("Rec.2100-PQ - Display", "Rec.2100-HLG - Display")
+            .expect("PQ to HLG display-encoding processor")
+            .default_cpu_processor()
+            .expect("PQ to HLG CPU processor");
+        let pq_pixel_count = (pq.len() / 4) as i64;
+        pq_to_hlg
+            .try_apply_rgba_pixels(&mut pq, pq_pixel_count, 4)
+            .expect("convert PQ rendering to HLG encoding");
+
+        for (index, (actual, expected)) in pq.iter().zip(hlg).enumerate() {
+            assert!(
+                (actual - expected).abs() <= 2.0e-4,
+                "HLG/PQ formation mismatch at channel {index}: expected {expected}, got {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn hdr_linear_lut_interpolation_is_not_equivalent_to_tetrahedral_policy() {
+        const LINEAR_VIEW: &str = "Mondrian Standard HDR linear interpolation test";
+        let config = build_mondrian_default_ocio_config(mondrian_default_ocio_config_text())
+            .expect("embedded Mondrian OCIO package should build");
+        build_mondrian_standard_hdr_1000_view_with_interpolation(
+            &config,
+            LINEAR_VIEW,
+            OcioRsInterpolation::Linear,
+        )
+        .expect("linear-interpolation comparison view");
+
+        let levels = [
+            -0.05_f32, 0.0, 0.000_1, 0.001, 0.01, 0.18, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0,
+        ];
+        let mut tetrahedral = Vec::with_capacity(levels.len().pow(3) * 4);
+        for red in levels {
+            for green in levels {
+                for blue in levels {
+                    tetrahedral.extend_from_slice(&[red, green, blue, 1.0]);
+                }
+            }
+        }
+        let mut linear = tetrahedral.clone();
+        for (view, pixels) in [
+            (MONDRIAN_STANDARD_HDR_1000_VIEW_NAME, &mut tetrahedral),
+            (LINEAR_VIEW, &mut linear),
+        ] {
+            let pixel_count = (pixels.len() / 4) as i64;
+            config
+                .processor_display(
+                    ocio_working_color_space_name(WorkingColorSpace::LinearRec2020),
+                    "Rec.2100-PQ - Display",
+                    view,
+                    ocio_rs::TransformDirection::Forward,
+                )
+                .unwrap_or_else(|error| panic!("{view} processor: {error}"))
+                .default_cpu_processor()
+                .unwrap_or_else(|error| panic!("{view} CPU processor: {error}"))
+                .try_apply_rgba_pixels(pixels, pixel_count, 4)
+                .unwrap_or_else(|error| panic!("{view} apply: {error}"));
+        }
+
+        let mut errors = tetrahedral
+            .chunks_exact(4)
+            .zip(linear.chunks_exact(4))
+            .flat_map(|(tetrahedral, linear)| {
+                (0..3).map(move |channel| (tetrahedral[channel] - linear[channel]).abs())
+            })
+            .collect::<Vec<_>>();
+        assert!(errors.iter().all(|error| error.is_finite()));
+        errors.sort_unstable_by(f32::total_cmp);
+        let p99_index = errors.len().saturating_mul(99).div_ceil(100).saturating_sub(1);
+        let p99 = errors[p99_index];
+        let max = *errors.last().expect("comparison errors");
+        assert!(
+            p99 > 0.002,
+            "linear interpolation unexpectedly became equivalent at p99={p99}"
+        );
+        assert!(
+            max > 0.01,
+            "linear interpolation unexpectedly became equivalent at max={max}"
+        );
     }
 
     #[test]
@@ -2798,7 +3141,7 @@ mod tests {
     }
 
     #[test]
-    fn standard_output_targets_resolve_matching_sdr_displays_and_reject_unfinished_hdr_views() {
+    fn standard_output_targets_resolve_target_specific_sdr_and_hdr_views() {
         ensure_mondrian_default_ocio_loaded().expect("Standard package");
 
         assert_eq!(
@@ -2829,7 +3172,14 @@ mod tests {
                 MONDRIAN_STANDARD_SDR_VIEW_NAME.to_owned()
             )
         );
-        assert!(mondrian_standard_display_view("Rec.2100-PQ - Display").is_err());
+        assert_eq!(
+            mondrian_standard_display_view("Rec.2100-PQ - Display").expect("explicit PQ display"),
+            (
+                "Rec.2100-PQ - Display".to_owned(),
+                MONDRIAN_STANDARD_HDR_1000_VIEW_NAME.to_owned()
+            )
+        );
+        assert!(mondrian_standard_display_view("Gamma 2.2 Rec.709 - Display").is_err());
         assert_eq!(
             mondrian_standard_output_display_name(ColorSpace::Rec2100Hlg)
                 .expect("HLG target display"),
@@ -2840,8 +3190,46 @@ mod tests {
                 .expect("PQ target display"),
             "Rec.2100-PQ - Display"
         );
-        assert!(mondrian_standard_output_display_view(ColorSpace::Rec2100Hlg).is_err());
-        assert!(mondrian_standard_output_display_view(ColorSpace::Rec2100Pq).is_err());
+        assert_eq!(
+            mondrian_standard_output_display_view(ColorSpace::Rec2100Hlg).expect("HLG output view"),
+            (
+                "Rec.2100-HLG - Display".to_owned(),
+                MONDRIAN_STANDARD_HDR_1000_VIEW_NAME.to_owned()
+            )
+        );
+        assert_eq!(
+            mondrian_standard_output_display_view(ColorSpace::Rec2100Pq).expect("PQ output view"),
+            (
+                "Rec.2100-PQ - Display".to_owned(),
+                MONDRIAN_STANDARD_HDR_1000_VIEW_NAME.to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn standard_engine_rejects_cross_mode_aces_views_on_cpu_and_gpu() {
+        let engine = ColorEngine::mondrian_standard();
+        let source = OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020);
+        let mut pixel = [0.18, 0.18, 0.18, 1.0];
+        let cpu_error = apply_ocio_display_identity_float(
+            &engine,
+            &mut pixel,
+            source,
+            "sRGB - Display",
+            "ACES 2.0 - SDR 100 nits (Rec.709)",
+        )
+        .expect_err("Standard CPU path must reject an ACES View");
+        assert!(cpu_error.contains("does not permit display/view"));
+
+        let gpu_error = extract_ocio_display_identity_gpu_shader_bundle(
+            &engine,
+            source,
+            "Rec.2100-PQ - Display",
+            "ACES 2.0 - HDR 1000 nits (Rec.2020)",
+            GpuLanguage::Glsl4_0,
+        )
+        .expect_err("Standard GPU path must reject an ACES View");
+        assert!(gpu_error.contains("does not permit display/view"));
     }
 
     #[test]

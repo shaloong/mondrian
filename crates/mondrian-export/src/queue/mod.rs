@@ -3805,10 +3805,10 @@ mod tests {
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
             output_transform: mondrian_core::OutputTransformIntent::OcioDisplayView {
                 display: "sRGB - Display".to_string(),
-                view: "ACES 2.0 - SDR 100 nits (Rec.709)".to_string(),
+                view: "Mondrian Standard SDR v1".to_string(),
             },
             ocio_display: Some("sRGB - Display".to_string()),
-            ocio_view: Some("ACES 2.0 - SDR 100 nits (Rec.709)".to_string()),
+            ocio_view: Some("Mondrian Standard SDR v1".to_string()),
             export_delivery_view_error: None,
         };
 
@@ -3818,7 +3818,7 @@ mod tests {
         assert!(boundary.tone_map);
         let dv = boundary.display_view.as_ref().unwrap();
         assert_eq!(dv.display, "sRGB - Display");
-        assert_eq!(dv.view, "ACES 2.0 - SDR 100 nits (Rec.709)");
+        assert_eq!(dv.view, "Mondrian Standard SDR v1");
     }
 
     #[test]
@@ -3861,10 +3861,10 @@ mod tests {
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
             output_transform: mondrian_core::OutputTransformIntent::OcioDisplayView {
                 display: "sRGB - Display".to_string(),
-                view: "ACES 2.0 - SDR 100 nits (Rec.709)".to_string(),
+                view: "Mondrian Standard SDR v1".to_string(),
             },
             ocio_display: Some("sRGB - Display".to_string()),
-            ocio_view: Some("ACES 2.0 - SDR 100 nits (Rec.709)".to_string()),
+            ocio_view: Some("Mondrian Standard SDR v1".to_string()),
             export_delivery_view_error: None,
         };
 
@@ -3948,11 +3948,11 @@ mod tests {
                 mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
             output_transform: mondrian_core::OutputTransformIntent::OcioDisplayView {
-                display: "sRGB - Display".to_string(),
-                view: "ACES 2.0 - SDR 100 nits (Rec.709)".to_string(),
+                display: "Rec.1886 Rec.709 - Display".to_string(),
+                view: "Mondrian Standard SDR v1".to_string(),
             },
-            ocio_display: Some("sRGB - Display".to_string()),
-            ocio_view: Some("ACES 2.0 - SDR 100 nits (Rec.709)".to_string()),
+            ocio_display: Some("Rec.1886 Rec.709 - Display".to_string()),
+            ocio_view: Some("Mondrian Standard SDR v1".to_string()),
             export_delivery_view_error: None,
         };
 

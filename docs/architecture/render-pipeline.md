@@ -598,6 +598,9 @@ This perceptual contract is deliberately named sRGB and rejects malformed
 RGBA8 buffers. It must not be applied to Rec.709, Display P3, PQ, HLG, or
 scene-linear data. HDR validation requires an absolute-luminance-aware model
 and target display contract rather than relabeling CIELAB thresholds.
+The production PQ GPU conformance gate applies that model to both the versioned
+Mondrian Standard 1000-nit View and the independent ACES 2 reference View,
+using the matching CPU OCIO processor as the semantic oracle.
 
 ## Export Delivery View Transform
 
@@ -831,6 +834,26 @@ bridge acquisition, cached pipeline/intermediate preparation, YUV recording,
 source-to-working color-stage preparation, resource extraction, and internal
 bridge submission. Multi-layer candidates accumulate those costs before the
 performance gate calculates each field's percentile.
+
+OCIO GPU preparation caches the complete immutable static-pipeline assembly by
+engine-qualified shader cache key, original shader hash, binding-contract hash,
+and output texture format. A warm frame therefore does not rebuild resource
+contracts, wrapper source, Naga artifacts, pipeline layouts, or render
+pipelines. The concrete backend object also owns the wrapper bind-group layout;
+per-frame input bind groups reuse that layout instead of creating another
+layout object. LUT payload hashes are computed once when the immutable shader
+plan is extracted, rather than walking a 57^3 payload during every frame.
+
+The retained ignored `color_view_gpu_perf` hardware gate uses a spatially
+varying GPU-resident 3840x2160 Linear Rec.2020 input and rotates Mondrian
+Standard PQ, Mondrian Standard HLG, and the official ACES 2 1000-nit PQ preset.
+Sixty warm samples per View report GPU timestamp and CPU-record p50/p95/p99, cold preparation, shader
+size, LUT shapes, pass count, uploads, and readbacks. The measured timestamp
+contains exactly one complete OCIO output pass and excludes input generation,
+initialization, timestamp mapping, and CPU completion wait. Both Standard PQ
+and HLG require p95 <= 5 ms; Standard PQ additionally requires p95 <= 80% of
+the like-for-like ACES PQ reference on the measured adapter. Environment
+variables may tighten, but not silently disable, either budget.
 
 Renderer-owned color stages share a device-scoped exact-contract texture pool
 across native import and Viewer output runtimes. A candidate returns its typed

@@ -170,10 +170,12 @@ frame so monitor/output changes cannot reuse a texture produced for the previous
 display target.
 The display snapshot resolves Mondrian Standard's OCIO display/view from the
 effective output color space, not from the config's global default: sRGB,
-Rec.709, and Display P3 therefore retain distinct display identities. A known
-PQ or HLG target also retains its target display identity, but validation fails
-closed with a missing-view blocker until that versioned Standard HDR View is
-implemented; the app must not substitute the sRGB Standard View or an ACES View.
+Rec.709, and Display P3 therefore retain distinct display identities. PQ and
+HLG targets retain their target display identities and resolve the versioned
+`Mondrian Standard HDR 1000 nits v1` View; the app must not substitute the sRGB
+Standard View or an ACES View. Surface/monitor validation remains a later,
+independent boundary and may still block presentation when the device cannot
+carry the requested HDR signal.
 Window display resolution is computed from both the resolved `ColorEngine` and
 display policy, and the session retains both identities. ACES and Custom OCIO
 defaults are resolved only after their exact engine
