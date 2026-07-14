@@ -5,11 +5,13 @@
 //! frames. Downscales build a bounded box-prefilter pyramid before a separable
 //! Lanczos3 reconstruction pass, keeping the final filter footprint bounded.
 
+use std::sync::Arc;
+
 use crate::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency,
     ColorFrameSpace, GpuColorFrameAllocationPlan, GpuColorFrameHandle, GpuColorFrameHandleError,
     GpuColorFrameIdAllocator, GpuColorFrameResource, GpuColorFrameTextureFormat,
-    GpuColorFrameUploader, GpuColorFrameWgpuResource,
+    GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool,
 };
 use bytemuck::{Pod, Zeroable};
 use thiserror::Error;
@@ -319,10 +321,17 @@ pub struct GpuViewerSpatialRuntime {
     prefilters: Vec<GpuColorFrameResource<GpuColorFrameWgpuResource>>,
     horizontal: Option<GpuColorFrameResource<GpuColorFrameWgpuResource>>,
     output: Option<GpuColorFrameResource<GpuColorFrameWgpuResource>>,
+    resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
     diagnostics: GpuViewerSpatialRuntimeDiagnostics,
 }
 
 impl GpuViewerSpatialRuntime {
+    /// Create a spatial runtime that shares a device-scoped texture pool with
+    /// compositing and color-output stages.
+    pub fn with_resource_pool(resource_pool: Arc<GpuColorFrameWgpuResourcePool>) -> Self {
+        Self { resource_pool, ..Self::default() }
+    }
+
     /// Reuse an identity input or record the required crop/resize passes.
     ///
     /// A reused output remains owned by the caller's resource table. A
@@ -410,6 +419,7 @@ impl GpuViewerSpatialRuntime {
             let next_height = selected_height.div_ceil(2);
             let resource = allocate_private_working_resource(
                 device,
+                &self.resource_pool,
                 ids,
                 plan.input.descriptor().color_space,
                 next_width,
@@ -440,6 +450,7 @@ impl GpuViewerSpatialRuntime {
 
         let horizontal = allocate_private_working_resource(
             device,
+            &self.resource_pool,
             ids,
             plan.input.descriptor().color_space,
             output_width,
@@ -458,7 +469,7 @@ impl GpuViewerSpatialRuntime {
         );
         self.horizontal = Some(horizontal);
 
-        let output = GpuColorFrameUploader::allocate(
+        let output = self.resource_pool.acquire(
             device,
             &GpuColorFrameAllocationPlan::for_handle(plan.output.clone()),
         );
@@ -511,12 +522,20 @@ impl GpuViewerSpatialRuntime {
 
     /// Drop frame-local intermediate and output textures.
     pub fn clear_frame_resources(&mut self) {
-        self.prefilters.clear();
-        self.horizontal = None;
-        self.output = None;
+        for resource in self.prefilters.drain(..) {
+            self.resource_pool.release(resource);
+        }
+        if let Some(resource) = self.horizontal.take() {
+            self.resource_pool.release(resource);
+        }
+        if let Some(resource) = self.output.take() {
+            self.resource_pool.release(resource);
+        }
     }
 
-    /// Drop device-dependent state after device replacement.
+    /// Drop the spatial pipeline and return frame resources to the shared pool.
+    /// The device owner is responsible for clearing that pool after all stages
+    /// have returned their resources during device replacement.
     pub fn clear(&mut self) {
         self.clear_frame_resources();
         self.pipeline = None;
@@ -793,6 +812,7 @@ fn should_prefilter(
 
 fn allocate_private_working_resource(
     device: &wgpu::Device,
+    resource_pool: &GpuColorFrameWgpuResourcePool,
     ids: &mut GpuColorFrameIdAllocator,
     color_space: ColorFrameSpace,
     width: u32,
@@ -812,16 +832,16 @@ fn allocate_private_working_resource(
         GpuColorFrameTextureFormat::Rgba32Float,
         label,
     )?;
-    Ok(GpuColorFrameUploader::allocate(
-        device,
-        &GpuColorFrameAllocationPlan::for_handle(handle),
-    ))
+    Ok(resource_pool.acquire(device, &GpuColorFrameAllocationPlan::for_handle(handle)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GpuColorFrameReadback, GpuColorFrameReadbackPlan, GpuColorFrameUploadPlan};
+    use crate::{
+        GpuColorFrameReadback, GpuColorFrameReadbackPlan, GpuColorFrameUploadPlan,
+        GpuColorFrameUploader,
+    };
     use mondrian_core::{
         ensure_mondrian_default_ocio_loaded, ColorEngine, ColorSpace, WorkingColorSpace,
         WorkingRgbaF32Frame,
@@ -1018,7 +1038,7 @@ mod tests {
         let boundary = crate::RenderOutputColorBoundary::display(
             ColorSpace::Srgb,
             false,
-            ColorEngine::MondrianSmart,
+            ColorEngine::mondrian_standard(),
         );
         let record = output_runtime
             .record_wgpu_output_boundary_gpu_frame_owned_backend(
@@ -1058,6 +1078,65 @@ mod tests {
         for (observed, expected) in actual.rgba().iter().zip(reference.rgba.iter()) {
             assert!(u8::abs_diff(*observed, *expected) <= 1);
         }
+    }
+
+    #[tokio::test]
+    async fn spatial_runtime_reuses_exact_contract_textures_across_submitted_frames() {
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping Viewer spatial pool test: no adapter available");
+            return;
+        };
+        let frame = crate::CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 8,
+            height: 8,
+            data: vec![[0.25, 0.5, 0.75, 1.0]; 64],
+            color_space: WorkingColorSpace::LinearRec709,
+        });
+        let upload = GpuColorFrameUploadPlan::from_cpu_color_frame(
+            crate::GpuColorFrameId::from_raw(10_000),
+            &frame,
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "viewer-spatial-pool-input",
+        )
+        .expect("upload plan");
+        let input = GpuColorFrameUploader::upload(&context.device, &context.queue, &upload);
+        let pool = std::sync::Arc::new(GpuColorFrameWgpuResourcePool::default());
+        let mut runtime = GpuViewerSpatialRuntime::with_resource_pool(std::sync::Arc::clone(&pool));
+        let mut ids = GpuColorFrameIdAllocator::new(20_000);
+
+        for frame_index in 0..2 {
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("viewer-spatial-pool-encoder"),
+                });
+            let output = runtime
+                .record(
+                    &context.device,
+                    &mut encoder,
+                    &mut ids,
+                    upload.handle.clone(),
+                    &input.resource().texture_view,
+                    ViewerSourceRect::FULL,
+                    4,
+                    4,
+                )
+                .expect("record Viewer spatial pass");
+            let output = runtime.take_output(&output).expect("take spatial output");
+            context.queue.submit(std::iter::once(encoder.finish()));
+            pool.release(output);
+            runtime.clear_frame_resources();
+
+            let diagnostics = pool.diagnostics();
+            if frame_index == 0 {
+                assert_eq!(diagnostics.hits, 0);
+                assert_eq!(diagnostics.misses, 2);
+            }
+        }
+
+        let diagnostics = pool.diagnostics();
+        assert_eq!(diagnostics.hits, 2);
+        assert_eq!(diagnostics.misses, 2);
+        assert_eq!(diagnostics.retained_resources, 2);
     }
 
     async fn run_spatial(

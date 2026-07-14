@@ -97,9 +97,11 @@ impl ViewerGpuExecutionRuntime {
                 queue,
                 Arc::clone(&resource_pool),
             ),
-            color_output: RenderGpuOutputBoundaryRuntime::with_resource_pool(resource_pool),
-            spatial: GpuViewerSpatialRuntime::default(),
-            display_calibration: GpuDisplayCalibrationRuntime::default(),
+            color_output: RenderGpuOutputBoundaryRuntime::with_resource_pool(Arc::clone(
+                &resource_pool,
+            )),
+            spatial: GpuViewerSpatialRuntime::with_resource_pool(Arc::clone(&resource_pool)),
+            display_calibration: GpuDisplayCalibrationRuntime::with_resource_pool(resource_pool),
             working_compositor: GpuFrameCompositor::new(device),
         }
     }
@@ -329,10 +331,10 @@ impl ViewerGpuExecutionRuntime {
 
     /// Reset all retained execution resources after a device/surface transition.
     pub fn reset(&mut self) {
-        self.color_output.clear_frame_resources();
-        self.color_output.resource_pool().clear();
         self.spatial.clear();
         self.display_calibration.clear();
+        self.color_output.clear_frame_resources();
+        self.color_output.resource_pool().clear();
     }
 }
 
