@@ -66,6 +66,8 @@ pub enum DecodedFrameResidency {
     /// Decoder output is CPU RGBA memory.
     #[default]
     CpuRgba,
+    /// Decoder output is CPU RGBA f32 memory.
+    CpuFloat,
     /// Decoder output is a GPU texture or hardware frame.
     GpuTexture,
 }
@@ -842,6 +844,7 @@ impl DecodedFrameResidency {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::CpuRgba => "CpuRgba",
+            Self::CpuFloat => "CpuFloat",
             Self::GpuTexture => "GpuTexture",
         }
     }
@@ -1138,6 +1141,7 @@ mod tests {
     #[test]
     fn decoded_frame_residency_has_stable_names() {
         assert_eq!(DecodedFrameResidency::CpuRgba.as_str(), "CpuRgba");
+        assert_eq!(DecodedFrameResidency::CpuFloat.as_str(), "CpuFloat");
         assert_eq!(DecodedFrameResidency::GpuTexture.as_str(), "GpuTexture");
     }
 

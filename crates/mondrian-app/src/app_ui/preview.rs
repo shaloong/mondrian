@@ -39,15 +39,15 @@ use mondrian_media::{
 use mondrian_media::{DecodedVideoChromaLocation, PreviewNativeDecodedFrameHandle};
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
-    evaluate_timeline_render_plan, execute_cpu_input_stage, execute_cpu_output_boundary_rgba8,
-    execute_cpu_working_transform, CpuColorFrame, CpuEncodedColorFrame,
-    GpuCompositingBlockerReason, GpuCompositingDiagnostics, RenderColorStageDiagnostics,
-    RenderColorStageGpuBlockerBreakdown, RenderColorTransformDiagnostics,
-    RenderColorTransformDirection, RenderInputTransform, RenderOutputColorBoundary,
-    TimelineAdjustmentLayer, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
-    TimelineCompositeElement, TimelineCompositeLegacyBreakdown, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
-    TimelineRenderPlanElement, TimelineSolidColorLayer,
+    evaluate_timeline_render_plan, execute_cpu_input_stage, execute_cpu_input_stage_float,
+    execute_cpu_output_boundary_rgba8, execute_cpu_working_transform, CpuColorFrame,
+    CpuEncodedColorFrame, GpuCompositingBlockerReason, GpuCompositingDiagnostics,
+    LinearFloatSource, RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
+    RenderColorTransformDiagnostics, RenderColorTransformDirection, RenderInputTransform,
+    RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
+    TimelineCompositeDiagnostics, TimelineCompositeElement, TimelineCompositeLegacyBreakdown,
+    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEvaluationRequest,
+    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 #[cfg(test)]
 use mondrian_renderer::{
@@ -570,7 +570,7 @@ impl AppUiPreviewService {
                 .metrics
                 .decode_canceled_return_latency_last_us
                 .get(),
-            decode_in_process_cpu_rgba_frames: self.metrics.decode_in_process_cpu_rgba_frames.get(),
+            decode_in_process_cpu_frames: self.metrics.decode_in_process_cpu_frames.get(),
             decode_external_ffmpeg_cpu_rgba_frames: self
                 .metrics
                 .decode_external_ffmpeg_cpu_rgba_frames
@@ -1586,8 +1586,9 @@ impl AppUiPreviewService {
         }
         self.record_playback_current_hardware_recovery(priority, &diagnostics);
         match diagnostics.path {
-            PreviewDecodePath::InProcessFfmpegCpuRgba => {
-                bump(&self.metrics.decode_in_process_cpu_rgba_frames);
+            PreviewDecodePath::InProcessFfmpegCpuRgba
+            | PreviewDecodePath::InProcessFfmpegCpuFloat => {
+                bump(&self.metrics.decode_in_process_cpu_frames);
             }
             PreviewDecodePath::InProcessFfmpegNative => {}
             PreviewDecodePath::ExternalFfmpegCpuRgba => {
@@ -2569,8 +2570,8 @@ pub struct AppUiPreviewDiagnostics {
     pub decode_canceled_return_latency_max_us: u64,
     /// Most recent latency after a canceled decode job first observed cancellation.
     pub decode_canceled_return_latency_last_us: u64,
-    /// Successful decodes produced by the in-process FFmpeg CPU RGBA path.
-    pub decode_in_process_cpu_rgba_frames: u64,
+    /// Successful decodes produced by in-process FFmpeg CPU RGBA8/f32 paths.
+    pub decode_in_process_cpu_frames: u64,
     /// Successful decodes produced by the external ffmpeg CPU RGBA path.
     pub decode_external_ffmpeg_cpu_rgba_frames: u64,
     /// Successful playback decodes served from the playback session-local ring.
@@ -2998,8 +2999,8 @@ impl AppUiPreviewDecodeLatencyBuckets {
 pub struct AppUiPreviewDecodeAccessModeProfile {
     /// Successful decode/cache results for this access mode.
     pub frames: u64,
-    /// Successful in-process CPU RGBA results for this access mode.
-    pub in_process_cpu_rgba_frames: u64,
+    /// Successful in-process CPU RGBA8/f32 results for this access mode.
+    pub in_process_cpu_frames: u64,
     /// Successful external ffmpeg CPU RGBA results for this access mode.
     pub external_ffmpeg_cpu_rgba_frames: u64,
     /// Successful playback ring hits for this access mode.
@@ -3192,8 +3193,9 @@ impl AppUiPreviewDecodeAccessModeProfile {
     fn record(&mut self, diagnostics: PreviewDecodeDiagnostics, queue_wait_us: u64) {
         self.frames = self.frames.saturating_add(1);
         match diagnostics.path {
-            PreviewDecodePath::InProcessFfmpegCpuRgba => {
-                self.in_process_cpu_rgba_frames = self.in_process_cpu_rgba_frames.saturating_add(1);
+            PreviewDecodePath::InProcessFfmpegCpuRgba
+            | PreviewDecodePath::InProcessFfmpegCpuFloat => {
+                self.in_process_cpu_frames = self.in_process_cpu_frames.saturating_add(1);
             }
             PreviewDecodePath::InProcessFfmpegNative => {}
             PreviewDecodePath::ExternalFfmpegCpuRgba => {
@@ -3657,8 +3659,8 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub canceled_return_latency_max_us: u64,
     /// Most recent latency after a canceled decode job first observed cancellation.
     pub canceled_return_latency_last_us: u64,
-    /// Successful decodes served from the in-process FFmpeg CPU RGBA path.
-    pub in_process_cpu_rgba_frames: u64,
+    /// Successful decodes served from in-process FFmpeg CPU RGBA8/f32 paths.
+    pub in_process_cpu_frames: u64,
     /// Successful decodes served from the external ffmpeg CPU RGBA path.
     pub external_ffmpeg_cpu_rgba_frames: u64,
     /// Successful playback decodes served from the playback session-local ring.
@@ -5090,7 +5092,7 @@ fn push_preview_decode_root_causes_and_actions(
         );
     }
     let playback_source_decode_frames = playback_profile
-        .in_process_cpu_rgba_frames
+        .in_process_cpu_frames
         .saturating_add(playback_profile.external_ffmpeg_cpu_rgba_frames);
     if playback_source_decode_frames > 0
         && playback_profile.forward_reused_frames == 0
@@ -5488,7 +5490,7 @@ fn push_preview_decode_root_causes_and_actions(
 
     if summary.cache_hit_frames == 0
         && summary
-            .in_process_cpu_rgba_frames
+            .in_process_cpu_frames
             .saturating_add(summary.external_ffmpeg_cpu_rgba_frames)
             > 0
         && summary.playback_session_ring_hit_frames == 0
@@ -5501,7 +5503,7 @@ fn push_preview_decode_root_causes_and_actions(
             format!(
                 "source_decode_frames={} cache_hit_frames=0",
                 summary
-                    .in_process_cpu_rgba_frames
+                    .in_process_cpu_frames
                     .saturating_add(summary.external_ffmpeg_cpu_rgba_frames)
             ),
             "warm_preview_cache_or_proxy",
@@ -6697,7 +6699,7 @@ impl AppUiPreviewDiagnostics {
             canceled_return_latency_total_us: self.decode_canceled_return_latency_total_us,
             canceled_return_latency_max_us: self.decode_canceled_return_latency_max_us,
             canceled_return_latency_last_us: self.decode_canceled_return_latency_last_us,
-            in_process_cpu_rgba_frames: self.decode_in_process_cpu_rgba_frames,
+            in_process_cpu_frames: self.decode_in_process_cpu_frames,
             external_ffmpeg_cpu_rgba_frames: self.decode_external_ffmpeg_cpu_rgba_frames,
             playback_session_ring_hit_frames: self.decode_playback_session_ring_hit_frames,
             cache_hit_frames: self.decode_cache_hit_frames,
@@ -8317,7 +8319,7 @@ struct AppUiPreviewMetrics {
     decode_canceled_return_latency_total_us: Cell<u64>,
     decode_canceled_return_latency_max_us: Cell<u64>,
     decode_canceled_return_latency_last_us: Cell<u64>,
-    decode_in_process_cpu_rgba_frames: Cell<u64>,
+    decode_in_process_cpu_frames: Cell<u64>,
     decode_external_ffmpeg_cpu_rgba_frames: Cell<u64>,
     decode_playback_session_ring_hit_frames: Cell<u64>,
     decode_cache_hit_frames: Cell<u64>,
@@ -9557,6 +9559,77 @@ fn decode_media_preview(
                 color_stage_diagnostics: None,
                 demand_identity,
                 execution_id,
+            }
+        }
+        Ok(PreviewDecodeOutcome::FloatFrame(frame)) => {
+            let decode_diagnostics = frame.diagnostics;
+            let decode_execution = frame.decode_execution;
+            let presentation_quality = preview_decode_presentation_quality(&decode_diagnostics);
+            let width = frame.width;
+            let height = frame.height;
+            let source =
+                LinearFloatSource::new(width, height, job.key.input_color_space, frame.into_data());
+            let input_transform = RenderInputTransform::to_working(
+                job.key.working_color_space,
+                job.key.tone_map,
+                job.key.engine.clone(),
+            );
+            match execute_cpu_input_stage_float(&source, &input_transform) {
+                Ok(output) => MediaPreviewResult {
+                    key: job.key,
+                    frame: Some(MediaPreviewFrame {
+                        width,
+                        height,
+                        frame: Some(output.result.frame),
+                        gpu_source: None,
+                        native_source: None,
+                        signature,
+                        presentation_quality,
+                        decode_execution: AppUiPreviewDecodeExecutionSummary::from_path(
+                            decode_execution,
+                        ),
+                    }),
+                    error: None,
+                    failure_reason: None,
+                    generation: job.generation,
+                    priority,
+                    access_mode,
+                    queue_wait_us,
+                    decode_elapsed_us,
+                    completed_at,
+                    deadline_at,
+                    cancel_observed_elapsed_us: None,
+                    canceled: false,
+                    cancel_reason: None,
+                    decode_diagnostics: Some(decode_diagnostics),
+                    color_diagnostics: Some(output.result.diagnostics),
+                    color_stage_diagnostics: Some(output.stage_diagnostics),
+                    demand_identity,
+                    execution_id,
+                },
+                Err(error) => MediaPreviewResult {
+                    key: job.key,
+                    frame: None,
+                    error: Some(format!(
+                        "float preview input color transform failed: {error}"
+                    )),
+                    failure_reason: Some(MediaPreviewFailureReason::DecodeError),
+                    generation: job.generation,
+                    priority,
+                    access_mode,
+                    queue_wait_us,
+                    decode_elapsed_us,
+                    completed_at,
+                    deadline_at,
+                    cancel_observed_elapsed_us: None,
+                    canceled: false,
+                    cancel_reason: None,
+                    decode_diagnostics: Some(decode_diagnostics),
+                    color_diagnostics: None,
+                    color_stage_diagnostics: None,
+                    demand_identity,
+                    execution_id,
+                },
             }
         }
         Ok(PreviewDecodeOutcome::NativeGpuFrame(frame)) => {
@@ -11010,7 +11083,7 @@ mod tests {
         assert_eq!(diagnostics.decode_canceled_return_latency_total_us, 515);
         assert_eq!(diagnostics.decode_canceled_return_latency_max_us, 400);
         assert_eq!(diagnostics.decode_canceled_return_latency_last_us, 15);
-        assert_eq!(diagnostics.decode_in_process_cpu_rgba_frames, 1);
+        assert_eq!(diagnostics.decode_in_process_cpu_frames, 1);
         assert_eq!(diagnostics.decode_external_ffmpeg_cpu_rgba_frames, 1);
         assert_eq!(diagnostics.decode_playback_session_ring_hit_frames, 1);
         assert_eq!(diagnostics.decode_cache_hit_frames, 1);
@@ -11172,7 +11245,7 @@ mod tests {
         );
         let scrub_profile = diagnostics.decode_access_mode_profiles.scrub_cursor;
         assert_eq!(scrub_profile.frames, 1);
-        assert_eq!(scrub_profile.in_process_cpu_rgba_frames, 1);
+        assert_eq!(scrub_profile.in_process_cpu_frames, 1);
         assert_eq!(scrub_profile.latency_buckets.le_10ms, 1);
         assert_eq!(scrub_profile.latency_buckets.total(), 1);
         assert_eq!(scrub_profile.seeked_frames, 1);
@@ -11379,12 +11452,12 @@ mod tests {
     fn preview_decode_performance_report_fails_scrub_keyframe_seek_strategy() {
         let diagnostics = AppUiPreviewDiagnostics {
             decode_successes: 1,
-            decode_in_process_cpu_rgba_frames: 1,
+            decode_in_process_cpu_frames: 1,
             decode_scrub_cursor_frames: 1,
             decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
                 scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
                     frames: 1,
-                    in_process_cpu_rgba_frames: 1,
+                    in_process_cpu_frames: 1,
                     keyframe_seek_strategy_frames: 1,
                     ..AppUiPreviewDecodeAccessModeProfile::default()
                 },
@@ -11421,12 +11494,12 @@ mod tests {
     fn preview_decode_performance_report_fails_scrub_without_any_seek_window() {
         let diagnostics = AppUiPreviewDiagnostics {
             decode_successes: 1,
-            decode_in_process_cpu_rgba_frames: 1,
+            decode_in_process_cpu_frames: 1,
             decode_scrub_cursor_frames: 1,
             decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
                 scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
                     frames: 1,
-                    in_process_cpu_rgba_frames: 1,
+                    in_process_cpu_frames: 1,
                     bounded_any_seek_strategy_frames: 1,
                     forward_reuse_frame_window_max: 1,
                     forward_decode_budget_frames_max: 8,
@@ -11809,11 +11882,11 @@ mod tests {
     fn preview_decode_performance_report_defaults_to_no_required_access_modes() {
         let diagnostics = AppUiPreviewDiagnostics {
             decode_successes: 1,
-            decode_in_process_cpu_rgba_frames: 1,
+            decode_in_process_cpu_frames: 1,
             decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
                 random_access_still: AppUiPreviewDecodeAccessModeProfile {
                     frames: 1,
-                    in_process_cpu_rgba_frames: 1,
+                    in_process_cpu_frames: 1,
                     ..AppUiPreviewDecodeAccessModeProfile::default()
                 },
                 ..AppUiPreviewDecodeAccessModeProfiles::default()
@@ -11839,11 +11912,11 @@ mod tests {
     fn preview_decode_performance_report_fails_missing_required_access_modes() {
         let diagnostics = AppUiPreviewDiagnostics {
             decode_successes: 1,
-            decode_in_process_cpu_rgba_frames: 1,
+            decode_in_process_cpu_frames: 1,
             decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
                 random_access_still: AppUiPreviewDecodeAccessModeProfile {
                     frames: 1,
-                    in_process_cpu_rgba_frames: 1,
+                    in_process_cpu_frames: 1,
                     ..AppUiPreviewDecodeAccessModeProfile::default()
                 },
                 ..AppUiPreviewDecodeAccessModeProfiles::default()
@@ -11973,7 +12046,7 @@ mod tests {
     fn preview_decode_performance_report_classifies_codec_bound_slow_frame() {
         let diagnostics = AppUiPreviewDiagnostics {
             decode_successes: 1,
-            decode_in_process_cpu_rgba_frames: 1,
+            decode_in_process_cpu_frames: 1,
             decode_total_duration_us: 120_000,
             decode_max_duration_us: 120_000,
             decode_last_duration_us: 120_000,
@@ -11997,7 +12070,7 @@ mod tests {
             decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
                 scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
                     frames: 1,
-                    in_process_cpu_rgba_frames: 1,
+                    in_process_cpu_frames: 1,
                     total_duration_us: 120_000,
                     max_duration_us: 120_000,
                     last_duration_us: 120_000,
@@ -12352,7 +12425,7 @@ mod tests {
     fn preview_decode_performance_report_classifies_queue_wait_bound_frame() {
         let diagnostics = AppUiPreviewDiagnostics {
             decode_successes: 1,
-            decode_in_process_cpu_rgba_frames: 1,
+            decode_in_process_cpu_frames: 1,
             decode_total_duration_us: 12_000,
             decode_max_duration_us: 12_000,
             decode_last_duration_us: 12_000,
@@ -12402,7 +12475,7 @@ mod tests {
             decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
                 scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
                     frames: 1,
-                    in_process_cpu_rgba_frames: 1,
+                    in_process_cpu_frames: 1,
                     total_duration_us: 12_000,
                     max_duration_us: 12_000,
                     last_duration_us: 12_000,
@@ -12553,7 +12626,7 @@ mod tests {
     fn preview_decode_performance_report_flags_expired_playback_current_queue() {
         let diagnostics = AppUiPreviewDiagnostics {
             decode_successes: 1,
-            decode_in_process_cpu_rgba_frames: 1,
+            decode_in_process_cpu_frames: 1,
             decode_total_duration_us: 12_000,
             decode_max_duration_us: 12_000,
             decode_last_duration_us: 12_000,
@@ -12841,7 +12914,7 @@ mod tests {
         };
         let diagnostics = AppUiPreviewDiagnostics {
             decode_successes: 20,
-            decode_in_process_cpu_rgba_frames: 20,
+            decode_in_process_cpu_frames: 20,
             decode_total_duration_us: 1_250_000,
             decode_max_duration_us: 70_000,
             decode_last_duration_us: 60_000,
@@ -12852,7 +12925,7 @@ mod tests {
             decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
                 scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
                     frames: 20,
-                    in_process_cpu_rgba_frames: 20,
+                    in_process_cpu_frames: 20,
                     total_duration_us: 1_250_000,
                     max_duration_us: 70_000,
                     last_duration_us: 60_000,
@@ -12903,7 +12976,7 @@ mod tests {
     fn preview_decode_performance_report_fails_invalid_access_mode_admission() {
         let diagnostics = AppUiPreviewDiagnostics {
             decode_successes: 1,
-            decode_in_process_cpu_rgba_frames: 1,
+            decode_in_process_cpu_frames: 1,
             decode_total_duration_us: 12_000,
             decode_max_duration_us: 12_000,
             decode_last_duration_us: 12_000,
@@ -12954,7 +13027,7 @@ mod tests {
     fn preview_decode_performance_report_fails_worker_transport_drops() {
         let diagnostics = AppUiPreviewDiagnostics {
             decode_successes: 1,
-            decode_in_process_cpu_rgba_frames: 1,
+            decode_in_process_cpu_frames: 1,
             decode_total_duration_us: 12_000,
             decode_max_duration_us: 12_000,
             decode_last_duration_us: 12_000,
@@ -13198,7 +13271,7 @@ mod tests {
             decode_canceled_prefetch_deadline_jobs: 2,
             decode_canceled_prefetch_preempted_jobs: 1,
             decode_canceled_playback_cursor_jobs: 3,
-            decode_in_process_cpu_rgba_frames: 1,
+            decode_in_process_cpu_frames: 1,
             decode_total_duration_us: 12_000,
             decode_max_duration_us: 12_000,
             decode_last_duration_us: 12_000,
@@ -13222,7 +13295,7 @@ mod tests {
             decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
                 playback_cursor: AppUiPreviewDecodeAccessModeProfile {
                     frames: 1,
-                    in_process_cpu_rgba_frames: 1,
+                    in_process_cpu_frames: 1,
                     canceled_jobs: 3,
                     canceled_prefetch_deadline_jobs: 2,
                     canceled_prefetch_preempted_jobs: 1,
@@ -13320,7 +13393,7 @@ mod tests {
             decode_canceled_jobs: 1,
             decode_canceled_still_preempted_jobs: 1,
             decode_canceled_random_access_still_jobs: 1,
-            decode_in_process_cpu_rgba_frames: 1,
+            decode_in_process_cpu_frames: 1,
             decode_total_duration_us: 18_000,
             decode_max_duration_us: 18_000,
             decode_last_duration_us: 18_000,
@@ -13334,7 +13407,7 @@ mod tests {
             decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
                 random_access_still: AppUiPreviewDecodeAccessModeProfile {
                     frames: 1,
-                    in_process_cpu_rgba_frames: 1,
+                    in_process_cpu_frames: 1,
                     canceled_jobs: 1,
                     canceled_still_preempted_jobs: 1,
                     ..AppUiPreviewDecodeAccessModeProfile::default()
@@ -13408,7 +13481,7 @@ mod tests {
     fn preview_decode_performance_report_flags_playback_without_locality() {
         let diagnostics = AppUiPreviewDiagnostics {
             decode_successes: 2,
-            decode_in_process_cpu_rgba_frames: 2,
+            decode_in_process_cpu_frames: 2,
             decode_total_duration_us: 80_000,
             decode_max_duration_us: 45_000,
             decode_last_duration_us: 35_000,
@@ -13428,7 +13501,7 @@ mod tests {
             decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
                 playback_cursor: AppUiPreviewDecodeAccessModeProfile {
                     frames: 2,
-                    in_process_cpu_rgba_frames: 2,
+                    in_process_cpu_frames: 2,
                     total_duration_us: 80_000,
                     max_duration_us: 45_000,
                     last_duration_us: 35_000,
@@ -13532,7 +13605,7 @@ mod tests {
     fn preview_performance_reports_classify_slowest_frame_not_aggregate_total() {
         let decode_diagnostics = AppUiPreviewDiagnostics {
             decode_successes: 2,
-            decode_in_process_cpu_rgba_frames: 2,
+            decode_in_process_cpu_frames: 2,
             decode_total_duration_us: 160_000,
             decode_max_duration_us: 120_000,
             decode_last_duration_us: 40_000,
@@ -13603,7 +13676,7 @@ mod tests {
     fn preview_decode_bottleneck_uses_queue_wait_from_same_slowest_frame() {
         let diagnostics = AppUiPreviewDiagnostics {
             decode_successes: 1,
-            decode_in_process_cpu_rgba_frames: 1,
+            decode_in_process_cpu_frames: 1,
             decode_total_duration_us: 120_000,
             decode_max_duration_us: 120_000,
             decode_last_duration_us: 120_000,
@@ -13623,7 +13696,7 @@ mod tests {
             decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
                 scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
                     frames: 1,
-                    in_process_cpu_rgba_frames: 1,
+                    in_process_cpu_frames: 1,
                     total_duration_us: 120_000,
                     max_duration_us: 120_000,
                     last_duration_us: 120_000,

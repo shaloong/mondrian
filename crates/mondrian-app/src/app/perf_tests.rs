@@ -2777,14 +2777,14 @@ fn preview_color_report_marks_clean_float_linear_path() {
 fn preview_decode_hard_failures_include_failed_report() {
     let diagnostics = AppUiPreviewDiagnostics {
         decode_successes: 1,
-        decode_in_process_cpu_rgba_frames: 1,
+        decode_in_process_cpu_frames: 1,
         decode_total_duration_us: 80_000,
         decode_max_duration_us: 80_000,
         decode_last_duration_us: 80_000,
         decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
             random_access_still: AppUiPreviewDecodeAccessModeProfile {
                 frames: 1,
-                in_process_cpu_rgba_frames: 1,
+                in_process_cpu_frames: 1,
                 total_duration_us: 80_000,
                 max_duration_us: 80_000,
                 last_duration_us: 80_000,
@@ -2853,11 +2853,11 @@ fn preview_render_hard_failures_include_checks_and_root_causes() {
 fn preview_media_decode_access_mode_coverage_requires_scrub_and_still_samples() {
     let diagnostics = AppUiPreviewDiagnostics {
         decode_successes: 1,
-        decode_in_process_cpu_rgba_frames: 1,
+        decode_in_process_cpu_frames: 1,
         decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
             random_access_still: AppUiPreviewDecodeAccessModeProfile {
                 frames: 1,
-                in_process_cpu_rgba_frames: 1,
+                in_process_cpu_frames: 1,
                 ..AppUiPreviewDecodeAccessModeProfile::default()
             },
             ..AppUiPreviewDecodeAccessModeProfiles::default()
@@ -2884,18 +2884,18 @@ fn preview_media_decode_access_mode_coverage_requires_scrub_and_still_samples() 
 fn preview_media_decode_access_mode_coverage_passes_with_scrub_and_still_samples() {
     let diagnostics = AppUiPreviewDiagnostics {
         decode_successes: 2,
-        decode_in_process_cpu_rgba_frames: 2,
+        decode_in_process_cpu_frames: 2,
         decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
             scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
                 frames: 1,
-                in_process_cpu_rgba_frames: 1,
+                in_process_cpu_frames: 1,
                 bounded_any_seek_strategy_frames: 1,
                 any_seek_window_ms_max: 1,
                 ..AppUiPreviewDecodeAccessModeProfile::default()
             },
             random_access_still: AppUiPreviewDecodeAccessModeProfile {
                 frames: 1,
-                in_process_cpu_rgba_frames: 1,
+                in_process_cpu_frames: 1,
                 ..AppUiPreviewDecodeAccessModeProfile::default()
             },
             ..AppUiPreviewDecodeAccessModeProfiles::default()
@@ -2949,11 +2949,11 @@ fn preview_media_decode_access_mode_coverage_rejects_cache_only_samples() {
 fn preview_decode_access_mode_queue_wait_failures_are_scoped_by_mode() {
     let diagnostics = AppUiPreviewDiagnostics {
         decode_successes: 2,
-        decode_in_process_cpu_rgba_frames: 2,
+        decode_in_process_cpu_frames: 2,
         decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
             scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
                 frames: 1,
-                in_process_cpu_rgba_frames: 1,
+                in_process_cpu_frames: 1,
                 queue_wait_total_us: 70_000,
                 queue_wait_max_us: 70_000,
                 queue_wait_last_us: 70_000,
@@ -2963,7 +2963,7 @@ fn preview_decode_access_mode_queue_wait_failures_are_scoped_by_mode() {
             },
             random_access_still: AppUiPreviewDecodeAccessModeProfile {
                 frames: 1,
-                in_process_cpu_rgba_frames: 1,
+                in_process_cpu_frames: 1,
                 queue_wait_total_us: 10_000,
                 queue_wait_max_us: 10_000,
                 queue_wait_last_us: 10_000,
@@ -3000,11 +3000,11 @@ fn preview_decode_access_mode_queue_wait_failures_are_scoped_by_mode() {
 fn preview_playback_decode_failures_include_required_playback_coverage() {
     let diagnostics = AppUiPreviewDiagnostics {
         decode_successes: 1,
-        decode_in_process_cpu_rgba_frames: 1,
+        decode_in_process_cpu_frames: 1,
         decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
             random_access_still: AppUiPreviewDecodeAccessModeProfile {
                 frames: 1,
-                in_process_cpu_rgba_frames: 1,
+                in_process_cpu_frames: 1,
                 ..AppUiPreviewDecodeAccessModeProfile::default()
             },
             ..AppUiPreviewDecodeAccessModeProfiles::default()
@@ -3028,11 +3028,11 @@ fn preview_playback_decode_failures_include_required_playback_coverage() {
 fn preview_playback_decode_failures_include_playback_queue_wait_regressions() {
     let diagnostics = AppUiPreviewDiagnostics {
         decode_successes: 1,
-        decode_in_process_cpu_rgba_frames: 1,
+        decode_in_process_cpu_frames: 1,
         decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
             playback_cursor: AppUiPreviewDecodeAccessModeProfile {
                 frames: 1,
-                in_process_cpu_rgba_frames: 1,
+                in_process_cpu_frames: 1,
                 queue_wait_total_us: 85_000,
                 queue_wait_max_us: 85_000,
                 queue_wait_last_us: 85_000,
@@ -3064,11 +3064,11 @@ fn preview_playback_decode_failures_include_playback_queue_wait_regressions() {
 fn preview_playback_decode_failures_include_sustained_pressure() {
     let diagnostics = AppUiPreviewDiagnostics {
         decode_successes: 1,
-        decode_in_process_cpu_rgba_frames: 1,
+        decode_in_process_cpu_frames: 1,
         decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
             playback_cursor: AppUiPreviewDecodeAccessModeProfile {
                 frames: 1,
-                in_process_cpu_rgba_frames: 1,
+                in_process_cpu_frames: 1,
                 ..AppUiPreviewDecodeAccessModeProfile::default()
             },
             ..AppUiPreviewDecodeAccessModeProfiles::default()
@@ -3097,14 +3097,14 @@ fn preview_playback_decode_failures_include_sustained_pressure() {
 fn preview_playback_decode_failures_include_locality_regressions() {
     let diagnostics = AppUiPreviewDiagnostics {
         decode_successes: 2,
-        decode_in_process_cpu_rgba_frames: 2,
+        decode_in_process_cpu_frames: 2,
         decode_total_duration_us: 80_000,
         decode_max_duration_us: 45_000,
         decode_last_duration_us: 35_000,
         decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
             playback_cursor: AppUiPreviewDecodeAccessModeProfile {
                 frames: 2,
-                in_process_cpu_rgba_frames: 2,
+                in_process_cpu_frames: 2,
                 total_duration_us: 80_000,
                 max_duration_us: 45_000,
                 last_duration_us: 35_000,
@@ -3145,14 +3145,14 @@ fn preview_playback_decode_failures_include_locality_regressions() {
 fn preview_playback_decode_failures_allow_non_playback_warnings() {
     let diagnostics = AppUiPreviewDiagnostics {
         decode_successes: 1,
-        decode_in_process_cpu_rgba_frames: 1,
+        decode_in_process_cpu_frames: 1,
         decode_total_duration_us: 12_000,
         decode_max_duration_us: 12_000,
         decode_last_duration_us: 12_000,
         decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
             scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
                 frames: 1,
-                in_process_cpu_rgba_frames: 1,
+                in_process_cpu_frames: 1,
                 total_duration_us: 12_000,
                 max_duration_us: 12_000,
                 last_duration_us: 12_000,
@@ -3179,14 +3179,14 @@ fn preview_playback_decode_failures_allow_non_playback_warnings() {
 fn preview_playback_decode_failures_ignore_slow_random_still_startup() {
     let diagnostics = AppUiPreviewDiagnostics {
         decode_successes: 2,
-        decode_in_process_cpu_rgba_frames: 2,
+        decode_in_process_cpu_frames: 2,
         decode_total_duration_us: 130_000,
         decode_max_duration_us: 120_000,
         decode_last_duration_us: 10_000,
         decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
             playback_cursor: AppUiPreviewDecodeAccessModeProfile {
                 frames: 1,
-                in_process_cpu_rgba_frames: 1,
+                in_process_cpu_frames: 1,
                 total_duration_us: 10_000,
                 max_duration_us: 10_000,
                 last_duration_us: 10_000,
@@ -3196,7 +3196,7 @@ fn preview_playback_decode_failures_ignore_slow_random_still_startup() {
             },
             random_access_still: AppUiPreviewDecodeAccessModeProfile {
                 frames: 1,
-                in_process_cpu_rgba_frames: 1,
+                in_process_cpu_frames: 1,
                 total_duration_us: 120_000,
                 max_duration_us: 120_000,
                 last_duration_us: 120_000,
@@ -3222,7 +3222,7 @@ fn preview_playback_decode_failures_ignore_slow_random_still_startup() {
 fn preview_perf_report_serializes_color_report() {
     let diagnostics = AppUiPreviewDiagnostics {
         decode_successes: 1,
-        decode_in_process_cpu_rgba_frames: 1,
+        decode_in_process_cpu_frames: 1,
         decode_total_duration_us: 80_000,
         decode_max_duration_us: 80_000,
         decode_last_duration_us: 80_000,

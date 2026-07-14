@@ -861,10 +861,20 @@ must stay on in-process decode/session paths where scheduler cancellation can be
 observed between open, seek, packet/decode, hardware-frame transfer, scale, and
 copy stages.
 Every frame returned by the preview decode boundary is a
-`PreviewDecodeOutcome`: `Frame(RgbaFrame)` for CPU RGBA payloads or
+`PreviewDecodeOutcome`: `Frame(RgbaFrame)` for CPU encoded RGBA8 payloads,
+`FloatFrame(FloatRgbaFrame)` for CPU scene-linear RGBA f32 payloads, or
 `NativeGpuFrame(PreviewNativeDecodedFrame)` for GPU-resident decoder payloads.
 Native FFmpeg results use `PreviewDecodePath::InProcessFfmpegNative`; they are
 never labeled as the in-process CPU RGBA path.
+
+Scene-linear FFmpeg output must not pass through swscale's RGBA8 boundary.
+`GBRPF32LE/BE` and `GBRAPF32LE/BE` frames are unpacked directly from their
+declared planar byte order into interleaved `FloatRgbaFrame` storage. Negative
+values, values above one, and straight alpha are preserved. Preview resize uses
+the float path, and both the playback ring and process-global frame cache retain
+the payload kind. Unsupported scene-linear decoder formats fail closed instead
+of silently quantizing. App preview, thumbnails, and export route this outcome
+through the renderer's `LinearFloatSource` input contract.
 `PreviewNativeDecodedFrame` must carry a
 `PreviewNativeDecodedFrameHandle` minted by the media backend that owns the
 native decoder resource. The handle is a shared lease over an
@@ -1163,10 +1173,11 @@ keeping settled still-frame requests exact. Do not implement scrub speedups by
 silently changing color interpretation or by shrinking decoded media geometry
 unless the renderer has an explicit source-sample extent versus layout extent
 contract.
-`RgbaFrame` stores its RGBA8 payload in shared immutable memory so cache hits can
-adjust per-request diagnostics without deep-copying a 4K frame. Callers that
-need ownership must request it explicitly through the frame consumption API;
-renderer color-frame boundaries should prefer the shared payload constructor.
+`RgbaFrame` and `FloatRgbaFrame` store their payloads in shared immutable memory
+so cache hits can adjust per-request diagnostics without deep-copying a 4K
+frame. Callers that need ownership must request it explicitly through the frame
+consumption API; renderer color-frame boundaries should prefer shared payloads
+where their typed input contract permits it.
 Execution truth is separate from per-request cache diagnostics.
 `PreviewDecodeExecutionPath` is assigned only from an observed FFmpeg hardware
 CPU transfer or a validated native GPU payload and remains unchanged when the
@@ -1203,6 +1214,11 @@ intentionally kept alive for playback locality and must be released through
 `clear_thread_local_preview_decode_session()` at explicit lifecycle boundaries
 such as perf probes, media/project shutdown, or tests that open threaded
 software decoders.
+Codec safety policy may narrow these diagnostic overrides. OpenEXR contexts are
+always serial (`None`, one decoder thread): FFmpeg's frame-threaded EXR path can
+hold the single image until EOF and deadlock during codec-context destruction
+on Windows. Independent image requests remain parallel at the app decode-pool
+level, so this does not serialize the media pipeline globally.
 
 The renderer now owns a GPU input-stage resource contract for decoded CPU RGBA8
 source frames: upload to `Rgba8Unorm`, execute the OCIO GPU input transform, and
@@ -1211,8 +1227,10 @@ bridge for guarded rollout of GPU input transforms. The app viewer uses this
 contract for supported media preview layers before GPU working-space
 compositing, falling back per-layer to CPU working-frame upload only when the
 GPU input stage cannot be recorded. It is not yet a hardware decode or
-zero-copy media path because the decoder boundary still hands CPU memory to the
-renderer.
+zero-copy media path because CPU RGBA8 and scene-linear float outcomes still
+hand CPU memory to the renderer. The float outcome currently enters the CPU
+OCIO input stage; a future GPU float-source upload contract must remain distinct
+from the RGBA8 encoded-source upload.
 
 ## Asset Classification
 

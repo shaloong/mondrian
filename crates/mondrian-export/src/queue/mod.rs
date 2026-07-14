@@ -21,10 +21,11 @@ use mondrian_media::{
 };
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
-    evaluate_timeline_render_plan, execute_cpu_input_stage, execute_cpu_output_boundary_float,
-    execute_cpu_output_boundary_rgba8, execute_cpu_working_transform, ColorFrameResidency,
-    CpuColorFrame, CpuEncodedColorFrame, GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat,
-    GpuContext, RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
+    evaluate_timeline_render_plan, execute_cpu_input_stage, execute_cpu_input_stage_float,
+    execute_cpu_output_boundary_float, execute_cpu_output_boundary_rgba8,
+    execute_cpu_working_transform, ColorFrameResidency, CpuColorFrame, CpuEncodedColorFrame,
+    GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat, GpuContext, LinearFloatSource,
+    RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
     RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
     RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderInputTransform,
     RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
@@ -2853,8 +2854,27 @@ fn decode_video_layer_scaled(
         PreviewSourceColorContract::new(input_color_space, input_video_range),
     )
     .with_max_size(Some(width), Some(height));
-    let decoded = match decode_preview_frame_cancellable(request, || false) {
-        Ok(PreviewDecodeOutcome::Frame(frame)) => frame,
+    let input_transform =
+        RenderInputTransform::to_working(working_color_space, tone_map, engine.clone());
+    let execution = match decode_preview_frame_cancellable(request, || false) {
+        Ok(PreviewDecodeOutcome::Frame(frame)) => {
+            let source = CpuEncodedColorFrame::source_rgba8_shared(
+                frame.width,
+                frame.height,
+                input_color_space,
+                frame.into_shared_data(),
+            );
+            execute_cpu_input_stage(&source, &input_transform)
+        }
+        Ok(PreviewDecodeOutcome::FloatFrame(frame)) => {
+            let source = LinearFloatSource::new(
+                frame.width,
+                frame.height,
+                input_color_space,
+                frame.into_data(),
+            );
+            execute_cpu_input_stage_float(&source, &input_transform)
+        }
         Ok(PreviewDecodeOutcome::Canceled) => {
             return Err(format!(
                 "asset={} path={} err=export still-frame decode canceled unexpectedly",
@@ -2879,19 +2899,7 @@ fn decode_video_layer_scaled(
                 err
             ));
         }
-    };
-    let decoded_width = decoded.width;
-    let decoded_height = decoded.height;
-    let source = CpuEncodedColorFrame::source_rgba8_shared(
-        decoded_width,
-        decoded_height,
-        input_color_space,
-        decoded.into_shared_data(),
-    );
-    let execution = execute_cpu_input_stage(
-        &source,
-        &RenderInputTransform::to_working(working_color_space, tone_map, engine.clone()),
-    )
+    }
     .map_err(|err| format!("asset={asset_id} color transform failed: {err}"))?;
     Ok(Arc::new(DecodedVideoLayer {
         frame: execution.result.frame,

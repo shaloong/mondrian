@@ -116,10 +116,12 @@ color path blocked a fully float/linear frame. Callers should use
 contract for high-level path state and structured legacy reason breakdowns
 instead of re-inferring path safety from individual counters.
 
-Decoded media enters the graph as a typed source/import RGBA8 boundary
-(`CpuEncodedColorFrame::source_rgba8`). Sources that are already in linear
-float (synthetic test data, float decode output, or effect graph intermediates)
-can use `LinearFloatSource` to bypass the RGBA8 quantization path entirely.
+Encoded decoded media enters the graph as a typed source/import RGBA8 boundary
+(`CpuEncodedColorFrame::source_rgba8`). Scene-linear planar-f32 decoder output
+enters as `LinearFloatSource`, so app preview, thumbnails, and export bypass
+RGBA8 quantization while preserving the external source color identity.
+Synthetic float data and effect graph intermediates use the same typed float
+entry point.
 Preview and export must use `RenderInputTransform` plus
 `execute_cpu_input_stage(...)` or `execute_cpu_input_stage_float(...)` to
 produce a result carrying both `CpuColorFrame` and stage diagnostics before
@@ -277,8 +279,10 @@ float deliverable or an unbounded intermediate must use a separately validated
 32F boundary rather than relaxing this policy globally.
 
 Current CPU preview/export execution uses `execute_cpu_input_stage(...)` for
-source boundaries, `execute_cpu_output_boundary_rgba8(...)` for final display
-or export output, and `execute_cpu_output_boundary_float(...)` for
+encoded source boundaries and `execute_cpu_input_stage_float(...)` for
+scene-linear decoder payloads. It uses
+`execute_cpu_output_boundary_rgba8(...)` for final display or export output,
+and `execute_cpu_output_boundary_float(...)` for
 10/12-bit delivery CPU fallback. The float helper delegates to
 `CpuRenderColorStageExecutor::output_transform_float(...)` and returns a
 float `CpuColorFrame` with output transform applied; app/export code should
@@ -343,7 +347,11 @@ window recording it first tries `record_wgpu_input_stage_owned_backend(...)`
 for each eligible media layer, feeds successful outputs to
 `GpuFrameCompositor` as GPU-resident working frames, and records a structured
 CPU-working-upload fallback only for layers whose GPU input stage fails.
-This CPU source contract applies only to `PreviewDecodeOutcome::Frame(RgbaFrame)`.
+This encoded CPU source contract applies only to
+`PreviewDecodeOutcome::Frame(RgbaFrame)`.
+`PreviewDecodeOutcome::FloatFrame` flows through `LinearFloatSource` and the CPU
+float input executor until the renderer owns a separate GPU float-source upload
+contract.
 `PreviewDecodeOutcome::NativeGpuFrame` must flow through the renderer native
 decoded-frame import contract instead of being wrapped in `CpuEncodedColorFrame`
 or silently transferred to CPU.
@@ -361,8 +369,8 @@ variant; it must not infer GPU residency from preview-plan eligibility alone.
 When a preview frame contains media layers, the viewer frame-residency payload
 also carries an app-layer native video import readiness report. That report is
 computed from media decoder residency, platform import probing, and renderer
-native import support. Today it reports `CpuDecodedMedia` for preview media
-because FFmpeg still returns CPU RGBA bytes; zero-copy and low-copy readiness
+native import support. Today it reports `CpuDecodedMedia` for CPU RGBA8 and
+RGBA-f32 preview media; zero-copy and low-copy readiness
 must only appear after a real decoder GPU handle and renderer import support are
 both present.
 

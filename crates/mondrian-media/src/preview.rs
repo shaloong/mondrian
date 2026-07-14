@@ -12,6 +12,7 @@ use crate::decoder::{
 use ffmpeg_next as ffmpeg;
 use mondrian_core::types::ColorSpace;
 use mondrian_core::{ColorMatrixCoefficients, MondrianError, Result};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::cell::RefCell;
@@ -77,6 +78,8 @@ pub enum PreviewDecodeBackend {
 pub enum PreviewDecodePath {
     /// In-process FFmpeg decoder and software scaler returned CPU RGBA bytes.
     InProcessFfmpegCpuRgba,
+    /// In-process FFmpeg decoder preserved scene-linear CPU RGBA f32 samples.
+    InProcessFfmpegCpuFloat,
     /// In-process FFmpeg decoder returned a retained native hardware surface.
     InProcessFfmpegNative,
     /// Experimental external `ffmpeg` process returned CPU RGBA bytes.
@@ -696,6 +699,7 @@ impl PreviewDecodePath {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::InProcessFfmpegCpuRgba => "InProcessFfmpegCpuRgba",
+            Self::InProcessFfmpegCpuFloat => "InProcessFfmpegCpuFloat",
             Self::InProcessFfmpegNative => "InProcessFfmpegNative",
             Self::ExternalFfmpegCpuRgba => "ExternalFfmpegCpuRgba",
             Self::PlaybackSessionRingHit => "PlaybackSessionRingHit",
@@ -1110,11 +1114,30 @@ pub struct RgbaFrame {
     pub decode_execution: PreviewDecodeExecutionPath,
 }
 
+/// CPU-resident RGBA f32 preview frame that preserves scene-linear samples.
+#[derive(Debug, Clone)]
+pub struct FloatRgbaFrame {
+    /// Frame width in pixels.
+    pub width: u32,
+    /// Frame height in pixels.
+    pub height: u32,
+    /// Shared CPU-resident interleaved RGBA f32 pixels.
+    data: Arc<Vec<f32>>,
+    /// Color and alpha semantics of the decoded pixels.
+    pub color_contract: DecodedRgbaFrameContract,
+    /// Decode/cache diagnostics for this frame.
+    pub diagnostics: PreviewDecodeDiagnostics,
+    /// Frame-local execution provenance retained across every cache layer.
+    pub decode_execution: PreviewDecodeExecutionPath,
+}
+
 /// Encoding represented by a decoded CPU RGBA payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DecodedRgbaEncoding {
     /// RGB channels retain the source transfer function and primaries.
     SourceEncodedRgb,
+    /// RGB channels retain scene-linear source values and primaries.
+    SourceLinearRgb,
 }
 
 /// Alpha representation of a decoded CPU RGBA payload.
@@ -1151,6 +1174,16 @@ impl DecodedRgbaFrameContract {
             alpha_mode: DecodedRgbaAlphaMode::Straight,
             applied_matrix,
             applied_range,
+        }
+    }
+
+    fn source_linear(source: PreviewSourceColorContract) -> Self {
+        Self {
+            source,
+            encoding: DecodedRgbaEncoding::SourceLinearRgb,
+            alpha_mode: DecodedRgbaAlphaMode::Straight,
+            applied_matrix: DecodedVideoMatrix::Rgb,
+            applied_range: DecodedVideoRange::Full,
         }
     }
 }
@@ -1672,6 +1705,147 @@ impl RgbaFrame {
     }
 }
 
+impl FloatRgbaFrame {
+    fn new(
+        width: u32,
+        height: u32,
+        data: Vec<f32>,
+        color_contract: DecodedRgbaFrameContract,
+        path: PreviewDecodePath,
+    ) -> Self {
+        debug_assert_eq!(data.len(), width as usize * height as usize * 4);
+        let mut diagnostics = PreviewDecodeDiagnostics::new(path);
+        diagnostics.decoded_frame_residency = DecodedFrameResidency::CpuFloat;
+        Self {
+            width,
+            height,
+            data: Arc::new(data),
+            color_contract,
+            diagnostics,
+            decode_execution: PreviewDecodeExecutionPath::SoftwareCpu,
+        }
+    }
+
+    /// Borrow decoded RGBA f32 pixels.
+    pub fn rgba(&self) -> &[f32] {
+        self.data.as_slice()
+    }
+
+    /// Consume this frame and return shared decoded RGBA f32 pixels.
+    pub fn into_shared_data(self) -> Arc<Vec<f32>> {
+        self.data
+    }
+
+    /// Consume this frame and return owned decoded RGBA f32 pixels.
+    pub fn into_data(self) -> Vec<f32> {
+        Arc::try_unwrap(self.data).unwrap_or_else(|data| data.as_ref().clone())
+    }
+
+    fn with_elapsed(mut self, elapsed: Duration) -> Self {
+        self.diagnostics = self.diagnostics.with_elapsed(elapsed);
+        self
+    }
+
+    fn with_seek_strategy(mut self, seek_strategy: PreviewDecodeSeekStrategy) -> Self {
+        self.diagnostics.seek_strategy = seek_strategy;
+        self
+    }
+
+    fn with_session_reused(mut self, session_reused: bool) -> Self {
+        self.diagnostics.session_reused = session_reused;
+        self
+    }
+
+    fn with_decode_work(mut self, seek_performed: bool, decoded_frame_count: usize) -> Self {
+        self.diagnostics.seek_performed = seek_performed;
+        self.diagnostics.decoded_frame_count = decoded_frame_count.min(u32::MAX as usize) as u32;
+        self
+    }
+
+    fn with_forward_reused(mut self, forward_reused: bool) -> Self {
+        self.diagnostics.forward_reused = forward_reused;
+        self
+    }
+
+    fn with_seek_index_diagnostics(
+        mut self,
+        diagnostics: PreviewSeekIndexDiagnostics,
+        resolution: PreviewSeekResolution,
+    ) -> Self {
+        self.diagnostics.seek_index_available = diagnostics.available;
+        self.diagnostics.seek_index_keyframes = diagnostics.keyframes;
+        self.diagnostics.seek_index_observed_packets = diagnostics.observed_packets;
+        self.diagnostics.seek_index_source = diagnostics.source;
+        self.diagnostics.seek_index_used = resolution.used_index;
+        self.diagnostics.seek_index_anchor_pts = resolution.anchor_pts;
+        self
+    }
+
+    fn with_threading(mut self, kind: PreviewDecodeThreadingKind, count: usize) -> Self {
+        self.diagnostics.threading_kind = kind;
+        self.diagnostics.threading_count = count.min(u32::MAX as usize) as u32;
+        self
+    }
+
+    fn with_hardware_decode_plan(mut self, plan: &PreviewHardwareDecodePlan) -> Self {
+        self.diagnostics = self.diagnostics.with_hardware_decode_plan(plan);
+        self.diagnostics.decoded_frame_residency = DecodedFrameResidency::CpuFloat;
+        self
+    }
+
+    fn with_decoded_surface_format(mut self, format: DecodedVideoSurfaceFormat) -> Self {
+        if self.diagnostics.decoded_surface_format == DecodedVideoSurfaceFormat::Unknown {
+            self.diagnostics.decoded_surface_format = format;
+        }
+        self
+    }
+
+    fn with_decoded_video_sampling(mut self, sampling: DecodedVideoSampling) -> Self {
+        self.diagnostics.decoded_video_sampling = sampling;
+        self
+    }
+
+    fn with_access_mode(mut self, access_mode: PreviewDecodeAccessMode) -> Self {
+        self.diagnostics = self.diagnostics.with_access_mode(access_mode);
+        self
+    }
+
+    fn with_access_policy(mut self, policy: PreviewDecodeAccessPolicy) -> Self {
+        self.diagnostics = self.diagnostics.with_access_policy(policy);
+        self
+    }
+
+    fn with_stage_durations(mut self, durations: PreviewDecodeStageDurations) -> Self {
+        self.diagnostics.stage_durations.accumulate(durations);
+        self
+    }
+
+    fn with_decode_execution(mut self) -> Self {
+        self.decode_execution = self.diagnostics.execution_path();
+        self
+    }
+
+    fn into_cache_hit(mut self, elapsed: Duration, access_mode: PreviewDecodeAccessMode) -> Self {
+        let decoded_surface_format = self.diagnostics.decoded_surface_format;
+        let decoded_video_sampling = self.diagnostics.decoded_video_sampling;
+        self.diagnostics = PreviewDecodeDiagnostics::cache_hit_for_mode(elapsed, access_mode);
+        self.diagnostics.decoded_frame_residency = DecodedFrameResidency::CpuFloat;
+        self.diagnostics.decoded_surface_format = decoded_surface_format;
+        self.diagnostics.decoded_video_sampling = decoded_video_sampling;
+        self
+    }
+
+    fn into_playback_ring_hit(mut self, elapsed: Duration) -> Self {
+        let decoded_surface_format = self.diagnostics.decoded_surface_format;
+        let decoded_video_sampling = self.diagnostics.decoded_video_sampling;
+        self.diagnostics = PreviewDecodeDiagnostics::playback_ring_hit(elapsed);
+        self.diagnostics.decoded_frame_residency = DecodedFrameResidency::CpuFloat;
+        self.diagnostics.decoded_surface_format = decoded_surface_format;
+        self.diagnostics.decoded_video_sampling = decoded_video_sampling;
+        self
+    }
+}
+
 /// Decode one scaled preview frame outcome from an explicit media request.
 ///
 /// This is the single access-mode aware decode boundary. Callers must express
@@ -1702,6 +1876,8 @@ pub fn decode_preview_frame_cancellable(
 pub enum PreviewDecodeOutcome {
     /// Decode completed with a CPU RGBA preview frame.
     Frame(RgbaFrame),
+    /// Decode completed with a CPU scene-linear RGBA f32 preview frame.
+    FloatFrame(FloatRgbaFrame),
     /// Decode completed with a GPU-resident native frame.
     NativeGpuFrame(PreviewNativeDecodedFrame),
     /// The caller marked this request obsolete before a frame was returned.
@@ -2125,14 +2301,27 @@ struct PreviewDecodeForwardResult {
     canceled: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum PreviewDecodedFramePayload {
     CpuRgba(RgbaFrame),
+    CpuFloat(FloatRgbaFrame),
     NativeGpu(PreviewNativeDecodedFrame),
 }
 
+impl From<RgbaFrame> for PreviewDecodedFramePayload {
+    fn from(frame: RgbaFrame) -> Self {
+        Self::CpuRgba(frame)
+    }
+}
+
+impl From<FloatRgbaFrame> for PreviewDecodedFramePayload {
+    fn from(frame: FloatRgbaFrame) -> Self {
+        Self::CpuFloat(frame)
+    }
+}
+
 impl PreviewDecodedFramePayload {
-    fn cache_cpu_rgba(
+    fn cache_cpu_frame(
         &self,
         path: &Path,
         fingerprint: PreviewFileFingerprint,
@@ -2140,15 +2329,91 @@ impl PreviewDecodedFramePayload {
         height: u32,
         pts: i64,
     ) {
-        if let Self::CpuRgba(frame) = self {
-            preview_cache_put_with_fingerprint(
-                path,
-                fingerprint,
-                width,
-                height,
-                pts,
-                frame.clone().with_decode_execution(),
-            );
+        let frame = match self {
+            Self::CpuRgba(frame) => Self::CpuRgba(frame.clone().with_decode_execution()),
+            Self::CpuFloat(frame) => Self::CpuFloat(frame.clone().with_decode_execution()),
+            Self::NativeGpu(_) => return,
+        };
+        preview_cache_put_with_fingerprint(path, fingerprint, width, height, pts, frame);
+    }
+
+    fn source_color(&self) -> Option<PreviewSourceColorContract> {
+        match self {
+            Self::CpuRgba(frame) => Some(frame.color_contract.source),
+            Self::CpuFloat(frame) => Some(frame.color_contract.source),
+            Self::NativeGpu(_) => None,
+        }
+    }
+
+    fn into_cache_hit(self, elapsed: Duration, access_mode: PreviewDecodeAccessMode) -> Self {
+        match self {
+            Self::CpuRgba(frame) => Self::CpuRgba(frame.into_cache_hit(elapsed, access_mode)),
+            Self::CpuFloat(frame) => Self::CpuFloat(frame.into_cache_hit(elapsed, access_mode)),
+            Self::NativeGpu(frame) => Self::NativeGpu(frame),
+        }
+    }
+
+    fn into_playback_ring_hit(self, elapsed: Duration) -> Self {
+        match self {
+            Self::CpuRgba(frame) => Self::CpuRgba(frame.into_playback_ring_hit(elapsed)),
+            Self::CpuFloat(frame) => Self::CpuFloat(frame.into_playback_ring_hit(elapsed)),
+            Self::NativeGpu(frame) => Self::NativeGpu(frame),
+        }
+    }
+
+    fn with_access_policy(self, policy: PreviewDecodeAccessPolicy) -> Self {
+        match self {
+            Self::CpuRgba(frame) => Self::CpuRgba(frame.with_access_policy(policy)),
+            Self::CpuFloat(frame) => Self::CpuFloat(frame.with_access_policy(policy)),
+            Self::NativeGpu(frame) => Self::NativeGpu(frame),
+        }
+    }
+
+    fn with_seek_index_diagnostics(
+        self,
+        diagnostics: PreviewSeekIndexDiagnostics,
+        resolution: PreviewSeekResolution,
+    ) -> Self {
+        match self {
+            Self::CpuRgba(frame) => {
+                Self::CpuRgba(frame.with_seek_index_diagnostics(diagnostics, resolution))
+            }
+            Self::CpuFloat(frame) => {
+                Self::CpuFloat(frame.with_seek_index_diagnostics(diagnostics, resolution))
+            }
+            Self::NativeGpu(frame) => Self::NativeGpu(frame),
+        }
+    }
+
+    fn with_stage_durations(self, durations: PreviewDecodeStageDurations) -> Self {
+        match self {
+            Self::CpuRgba(frame) => Self::CpuRgba(frame.with_stage_durations(durations)),
+            Self::CpuFloat(frame) => Self::CpuFloat(frame.with_stage_durations(durations)),
+            Self::NativeGpu(frame) => Self::NativeGpu(frame),
+        }
+    }
+
+    fn with_hardware_decode_plan(self, plan: &PreviewHardwareDecodePlan) -> Self {
+        match self {
+            Self::CpuRgba(frame) => Self::CpuRgba(frame.with_hardware_decode_plan(plan)),
+            Self::CpuFloat(frame) => Self::CpuFloat(frame.with_hardware_decode_plan(plan)),
+            Self::NativeGpu(frame) => Self::NativeGpu(frame),
+        }
+    }
+
+    fn with_decoded_surface_format(self, format: DecodedVideoSurfaceFormat) -> Self {
+        match self {
+            Self::CpuRgba(frame) => Self::CpuRgba(frame.with_decoded_surface_format(format)),
+            Self::CpuFloat(frame) => Self::CpuFloat(frame.with_decoded_surface_format(format)),
+            Self::NativeGpu(frame) => Self::NativeGpu(frame),
+        }
+    }
+
+    fn into_outcome(self) -> PreviewDecodeOutcome {
+        match self {
+            Self::CpuRgba(frame) => PreviewDecodeOutcome::Frame(frame),
+            Self::CpuFloat(frame) => PreviewDecodeOutcome::FloatFrame(frame),
+            Self::NativeGpu(frame) => PreviewDecodeOutcome::NativeGpuFrame(frame),
         }
     }
 }
@@ -2383,7 +2648,7 @@ fn preview_seek_index_from_stream(stream: &ffmpeg::format::stream::Stream<'_>) -
 
 struct PreviewPlaybackRingEntry {
     pts: i64,
-    frame: RgbaFrame,
+    frame: PreviewDecodedFramePayload,
 }
 
 struct PreviewPlaybackRing {
@@ -2399,7 +2664,7 @@ impl PreviewPlaybackRing {
         }
     }
 
-    fn get(&mut self, target_pts: i64, tolerance_pts: i64) -> Option<RgbaFrame> {
+    fn get(&mut self, target_pts: i64, tolerance_pts: i64) -> Option<PreviewDecodedFramePayload> {
         let mut best_index = None;
         let mut best_distance = i64::MAX;
         for (index, entry) in self.entries.iter().enumerate() {
@@ -2420,7 +2685,8 @@ impl PreviewPlaybackRing {
         Some(frame)
     }
 
-    fn put(&mut self, pts: i64, frame: RgbaFrame) {
+    fn put(&mut self, pts: i64, frame: impl Into<PreviewDecodedFramePayload>) {
+        let frame = frame.into();
         if let Some(index) = self.entries.iter().position(|entry| entry.pts == pts) {
             self.entries.remove(index);
         }
@@ -2617,7 +2883,7 @@ impl PreviewDecodeSession {
             codec_id,
             hardware_decode_device_selector,
         );
-        let requested_threading = preview_decode_threading_config();
+        let requested_threading = preview_decode_threading_config_for_codec(codec_id);
         let ffmpeg_threading = ffmpeg::codec::threading::Config {
             kind: requested_threading.kind.to_ffmpeg(),
             count: requested_threading.count,
@@ -2693,9 +2959,10 @@ impl PreviewDecodeSession {
         let (target_width, target_height) =
             fit_target_size(decoder.width(), decoder.height(), max_width, max_height);
 
-        let defer_scaler_until_cpu_transfer = hardware_decode_context_state.is_some()
-            && preview_hardware_frame_format(decoder.format());
-        let (scaler, scaler_source_format) = if defer_scaler_until_cpu_transfer {
+        let defer_or_bypass_rgba_scaler = source_color.color_space.is_scene_linear()
+            || (hardware_decode_context_state.is_some()
+                && preview_hardware_frame_format(decoder.format()));
+        let (scaler, scaler_source_format) = if defer_or_bypass_rgba_scaler {
             (None, None)
         } else {
             (
@@ -2793,20 +3060,20 @@ impl PreviewDecodeSession {
                 if should_cancel() {
                     return Ok(PreviewDecodeOutcome::Canceled);
                 }
-                return Ok(PreviewDecodeOutcome::Frame(
-                    hit.into_playback_ring_hit(cache_lookup_started_at.elapsed())
-                        .with_access_policy(policy)
-                        .with_seek_index_diagnostics(
-                            self.seek_index.diagnostics(),
-                            PreviewSeekResolution::default(),
-                        )
-                        .with_stage_durations(PreviewDecodeStageDurations {
-                            cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
-                            ..PreviewDecodeStageDurations::default()
-                        })
-                        .with_hardware_decode_plan(&self.hardware_decode_plan)
-                        .with_decoded_surface_format(self.decoded_surface_format),
-                ));
+                return Ok(hit
+                    .into_playback_ring_hit(cache_lookup_started_at.elapsed())
+                    .with_access_policy(policy)
+                    .with_seek_index_diagnostics(
+                        self.seek_index.diagnostics(),
+                        PreviewSeekResolution::default(),
+                    )
+                    .with_stage_durations(PreviewDecodeStageDurations {
+                        cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
+                        ..PreviewDecodeStageDurations::default()
+                    })
+                    .with_hardware_decode_plan(&self.hardware_decode_plan)
+                    .with_decoded_surface_format(self.decoded_surface_format)
+                    .into_outcome());
             }
         }
         if allow_cpu_cache {
@@ -2825,21 +3092,21 @@ impl PreviewDecodeSession {
                 if policy.use_playback_ring {
                     self.playback_ring.put(hit.pts, hit.frame.clone());
                 }
-                return Ok(PreviewDecodeOutcome::Frame(
-                    hit.frame
-                        .into_cache_hit(cache_lookup_started_at.elapsed(), access_mode)
-                        .with_access_policy(policy)
-                        .with_seek_index_diagnostics(
-                            self.seek_index.diagnostics(),
-                            PreviewSeekResolution::default(),
-                        )
-                        .with_stage_durations(PreviewDecodeStageDurations {
-                            cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
-                            ..PreviewDecodeStageDurations::default()
-                        })
-                        .with_hardware_decode_plan(&self.hardware_decode_plan)
-                        .with_decoded_surface_format(self.decoded_surface_format),
-                ));
+                return Ok(hit
+                    .frame
+                    .into_cache_hit(cache_lookup_started_at.elapsed(), access_mode)
+                    .with_access_policy(policy)
+                    .with_seek_index_diagnostics(
+                        self.seek_index.diagnostics(),
+                        PreviewSeekResolution::default(),
+                    )
+                    .with_stage_durations(PreviewDecodeStageDurations {
+                        cache_lookup_us: duration_us(cache_lookup_started_at.elapsed()),
+                        ..PreviewDecodeStageDurations::default()
+                    })
+                    .with_hardware_decode_plan(&self.hardware_decode_plan)
+                    .with_decoded_surface_format(self.decoded_surface_format)
+                    .into_outcome());
             }
         }
         let cache_lookup_us = duration_us(cache_lookup_started_at.elapsed());
@@ -2905,10 +3172,48 @@ impl PreviewDecodeSession {
                         .with_decode_execution();
                     if policy.use_playback_ring {
                         if let Some(selected_pts) = result.selected_pts {
-                            self.playback_ring.put(selected_pts, frame.clone());
+                            self.playback_ring.put(
+                                selected_pts,
+                                PreviewDecodedFramePayload::CpuRgba(frame.clone()),
+                            );
                         }
                     }
                     return Ok(PreviewDecodeOutcome::Frame(frame));
+                }
+                PreviewDecodedFramePayload::CpuFloat(frame) => {
+                    let conversion_us = frame
+                        .diagnostics
+                        .stage_durations
+                        .hardware_transfer_us
+                        .saturating_add(frame.diagnostics.stage_durations.swscale_us)
+                        .saturating_add(frame.diagnostics.stage_durations.rgba_copy_us);
+                    let packet_decode_us =
+                        duration_us(decode_started_at.elapsed()).saturating_sub(conversion_us);
+                    let frame = frame
+                        .with_access_mode(access_mode)
+                        .with_stage_durations(PreviewDecodeStageDurations {
+                            cache_lookup_us,
+                            seek_us,
+                            packet_decode_us,
+                            ..PreviewDecodeStageDurations::default()
+                        })
+                        .with_decode_work(seek_performed, result.decoded_frame_count)
+                        .with_access_policy(policy)
+                        .with_forward_reused(should_continue_forward)
+                        .with_seek_index_diagnostics(self.seek_index.diagnostics(), seek_resolution)
+                        .with_threading(self.threading_kind, self.threading_count)
+                        .with_hardware_decode_plan(&self.hardware_decode_plan)
+                        .with_decoded_surface_format(self.decoded_surface_format)
+                        .with_decode_execution();
+                    if policy.use_playback_ring {
+                        if let Some(selected_pts) = result.selected_pts {
+                            self.playback_ring.put(
+                                selected_pts,
+                                PreviewDecodedFramePayload::CpuFloat(frame.clone()),
+                            );
+                        }
+                    }
+                    return Ok(PreviewDecodeOutcome::FloatFrame(frame));
                 }
                 PreviewDecodedFramePayload::NativeGpu(mut frame) => {
                     let mut diagnostics = frame.diagnostics.with_access_mode(access_mode);
@@ -3139,7 +3444,7 @@ impl PreviewDecodeSession {
                             self.path.as_path(),
                             self.source_color,
                         )?;
-                        frame.cache_cpu_rgba(
+                        frame.cache_cpu_frame(
                             &self.path,
                             self.fingerprint,
                             self.target_width,
@@ -3167,7 +3472,7 @@ impl PreviewDecodeSession {
                         best_before.as_ref(),
                         best_after.as_ref(),
                     )? {
-                        frame.cache_cpu_rgba(
+                        frame.cache_cpu_frame(
                             &self.path,
                             self.fingerprint,
                             self.target_width,
@@ -3232,7 +3537,7 @@ impl PreviewDecodeSession {
                                 self.path.as_path(),
                                 self.source_color,
                             )?;
-                            frame.cache_cpu_rgba(
+                            frame.cache_cpu_frame(
                                 &self.path,
                                 self.fingerprint,
                                 self.target_width,
@@ -3260,7 +3565,7 @@ impl PreviewDecodeSession {
                             best_before.as_ref(),
                             best_after.as_ref(),
                         )? {
-                            frame.cache_cpu_rgba(
+                            frame.cache_cpu_frame(
                                 &self.path,
                                 self.fingerprint,
                                 self.target_width,
@@ -3323,7 +3628,7 @@ impl PreviewDecodeSession {
                             best_before.as_ref(),
                             best_after.as_ref(),
                         )? {
-                            frame.cache_cpu_rgba(
+                            frame.cache_cpu_frame(
                                 &self.path,
                                 self.fingerprint,
                                 self.target_width,
@@ -3358,7 +3663,7 @@ impl PreviewDecodeSession {
             best_before.as_ref(),
             best_after.as_ref(),
         )? {
-            frame.cache_cpu_rgba(
+            frame.cache_cpu_frame(
                 &self.path,
                 self.fingerprint,
                 self.target_width,
@@ -3519,6 +3824,20 @@ fn decode_preview_frame_outcome(
                     })
                     .with_elapsed(started_at.elapsed()),
             )),
+            PreviewDecodeOutcome::FloatFrame(frame) => Ok(PreviewDecodeOutcome::FloatFrame(
+                frame
+                    .with_access_mode(access_mode)
+                    .with_seek_strategy(
+                        PreviewDecodeAccessPolicy::for_access_mode(access_mode).seek_strategy,
+                    )
+                    .with_session_reused(current_match)
+                    .with_stage_durations(PreviewDecodeStageDurations {
+                        session_open_us,
+                        external_process_us,
+                        ..PreviewDecodeStageDurations::default()
+                    })
+                    .with_elapsed(started_at.elapsed()),
+            )),
             PreviewDecodeOutcome::NativeGpuFrame(mut frame) => {
                 frame.diagnostics = frame
                     .diagnostics
@@ -3608,9 +3927,30 @@ fn preview_decode_threading_config() -> PreviewDecodeThreadingConfig {
     PreviewDecodeThreadingConfig { kind, count }
 }
 
+fn preview_decode_threading_config_for_codec(
+    codec_id: ffmpeg::codec::Id,
+) -> PreviewDecodeThreadingConfig {
+    let requested = preview_decode_threading_config();
+    apply_preview_codec_threading_policy(codec_id, requested)
+}
+
+fn apply_preview_codec_threading_policy(
+    codec_id: ffmpeg::codec::Id,
+    requested: PreviewDecodeThreadingConfig,
+) -> PreviewDecodeThreadingConfig {
+    if codec_id == ffmpeg::codec::Id::EXR {
+        // FFmpeg's EXR decoder can retain a single image in its frame-thread
+        // queue until EOF and then deadlock while the codec context is freed on
+        // Windows. Decode-pool concurrency still parallelizes independent image
+        // requests, so serializing within one EXR context is the safe policy.
+        return PreviewDecodeThreadingConfig { kind: PreviewDecodeThreadingKind::None, count: 1 };
+    }
+    requested
+}
+
 #[derive(Clone)]
 struct PreviewCacheHit {
-    frame: RgbaFrame,
+    frame: PreviewDecodedFramePayload,
     pts: i64,
 }
 
@@ -3622,7 +3962,7 @@ struct PreviewFrameCacheEntry {
     width: u32,
     height: u32,
     pts: i64,
-    frame: RgbaFrame,
+    frame: PreviewDecodedFramePayload,
 }
 
 fn preview_cache_get(
@@ -3673,8 +4013,12 @@ fn preview_cache_put_with_fingerprint(
     width: u32,
     height: u32,
     pts: i64,
-    frame: RgbaFrame,
+    frame: impl Into<PreviewDecodedFramePayload>,
 ) {
+    let frame = frame.into();
+    let Some(source_color) = frame.source_color() else {
+        return;
+    };
     let cache = preview_frame_cache();
     let mut guard = match cache.lock() {
         Ok(g) => g,
@@ -3684,7 +4028,7 @@ fn preview_cache_put_with_fingerprint(
     if let Some(index) = guard.iter().position(|entry| {
         entry.path == path
             && entry.fingerprint == fingerprint
-            && entry.source_color == frame.color_contract.source
+            && entry.source_color == source_color
             && entry.width == width
             && entry.height == height
             && entry.pts == pts
@@ -3695,7 +4039,7 @@ fn preview_cache_put_with_fingerprint(
     guard.push_front(PreviewFrameCacheEntry {
         path: path.to_path_buf(),
         fingerprint,
-        source_color: frame.color_contract.source,
+        source_color,
         width,
         height,
         pts,
@@ -4202,6 +4546,161 @@ fn convert_decoded_to_rgba(
     }))
 }
 
+fn convert_decoded_to_float_rgba(
+    decoded: &ffmpeg::util::frame::video::Video,
+    target_width: u32,
+    target_height: u32,
+    path: &Path,
+    source_color: PreviewSourceColorContract,
+) -> Result<FloatRgbaFrame> {
+    if !source_color.color_space.is_scene_linear() {
+        return Err(MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: format!(
+                "float preview materialization requires a scene-linear source identity, got {:?}",
+                source_color.color_space
+            ),
+        });
+    }
+
+    let decoded_surface_format = decoded_surface_format_from_pixel(decoded.format());
+    let decoded_video_sampling = decoded_video_sampling_from_frame(decoded);
+    let copy_started_at = Instant::now();
+    let rgba = unpack_ffmpeg_planar_float_rgba(decoded, path)?;
+    let rgba = resize_float_rgba(
+        &rgba,
+        decoded.width(),
+        decoded.height(),
+        target_width,
+        target_height,
+    );
+    let rgba_copy_us = duration_us(copy_started_at.elapsed());
+
+    Ok(FloatRgbaFrame::new(
+        target_width,
+        target_height,
+        rgba,
+        DecodedRgbaFrameContract::source_linear(source_color),
+        PreviewDecodePath::InProcessFfmpegCpuFloat,
+    )
+    .with_decoded_surface_format(decoded_surface_format)
+    .with_decoded_video_sampling(decoded_video_sampling)
+    .with_stage_durations(PreviewDecodeStageDurations {
+        rgba_copy_us,
+        ..PreviewDecodeStageDurations::default()
+    }))
+}
+
+fn unpack_ffmpeg_planar_float_rgba(
+    decoded: &ffmpeg::util::frame::video::Video,
+    path: &Path,
+) -> Result<Vec<f32>> {
+    let (little_endian, has_alpha) = match decoded.format() {
+        ffmpeg::util::format::pixel::Pixel::GBRPF32LE => (true, false),
+        ffmpeg::util::format::pixel::Pixel::GBRPF32BE => (false, false),
+        ffmpeg::util::format::pixel::Pixel::GBRAPF32LE => (true, true),
+        ffmpeg::util::format::pixel::Pixel::GBRAPF32BE => (false, true),
+        format => {
+            return Err(MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason: format!(
+                    "scene-linear source decoded to unsupported non-planar-f32 format {format:?}; refusing RGBA8 quantization"
+                ),
+            });
+        }
+    };
+
+    let width = decoded.width() as usize;
+    let height = decoded.height() as usize;
+    let mut rgba = vec![0.0_f32; width * height * 4];
+    for y in 0..height {
+        for x in 0..width {
+            let pixel = (y * width + x) * 4;
+            for (channel, plane) in [(0, 2), (1, 0), (2, 1)] {
+                rgba[pixel + channel] =
+                    read_ffmpeg_f32_plane_sample(decoded, plane, x, y, little_endian, path)?;
+            }
+            rgba[pixel + 3] = if has_alpha {
+                read_ffmpeg_f32_plane_sample(decoded, 3, x, y, little_endian, path)?
+            } else {
+                1.0
+            };
+        }
+    }
+    Ok(rgba)
+}
+
+fn read_ffmpeg_f32_plane_sample(
+    decoded: &ffmpeg::util::frame::video::Video,
+    plane: usize,
+    x: usize,
+    y: usize,
+    little_endian: bool,
+    path: &Path,
+) -> Result<f32> {
+    let offset = y * decoded.stride(plane) + x * std::mem::size_of::<f32>();
+    let end = offset + std::mem::size_of::<f32>();
+    let bytes: [u8; 4] = decoded
+        .data(plane)
+        .get(offset..end)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: format!(
+                "FFmpeg float plane {plane} row {y} is shorter than the declared stride"
+            ),
+        })?;
+    Ok(if little_endian {
+        f32::from_le_bytes(bytes)
+    } else {
+        f32::from_be_bytes(bytes)
+    })
+}
+
+fn resize_float_rgba(
+    source: &[f32],
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+) -> Vec<f32> {
+    if source_width == target_width && source_height == target_height {
+        return source.to_vec();
+    }
+
+    let source_width = source_width as usize;
+    let source_height = source_height as usize;
+    let target_width = target_width as usize;
+    let target_height = target_height as usize;
+    let scale_x = source_width as f32 / target_width as f32;
+    let scale_y = source_height as f32 / target_height as f32;
+    let mut output = vec![0.0_f32; target_width * target_height * 4];
+    output.par_chunks_mut(target_width * 4).enumerate().for_each(|(target_y, row)| {
+        let source_y = ((target_y as f32 + 0.5) * scale_y - 0.5)
+            .clamp(0.0, source_height.saturating_sub(1) as f32);
+        let y0 = source_y.floor() as usize;
+        let y1 = (y0 + 1).min(source_height.saturating_sub(1));
+        let fy = source_y - y0 as f32;
+        for target_x in 0..target_width {
+            let source_x = ((target_x as f32 + 0.5) * scale_x - 0.5)
+                .clamp(0.0, source_width.saturating_sub(1) as f32);
+            let x0 = source_x.floor() as usize;
+            let x1 = (x0 + 1).min(source_width.saturating_sub(1));
+            let fx = source_x - x0 as f32;
+            for channel in 0..4 {
+                let top_left = source[(y0 * source_width + x0) * 4 + channel];
+                let top_right = source[(y0 * source_width + x1) * 4 + channel];
+                let bottom_left = source[(y1 * source_width + x0) * 4 + channel];
+                let bottom_right = source[(y1 * source_width + x1) * 4 + channel];
+                let top = top_left + (top_right - top_left) * fx;
+                let bottom = bottom_left + (bottom_right - bottom_left) * fx;
+                row[target_x * 4 + channel] = top + (bottom - top) * fy;
+            }
+        }
+    });
+    output
+}
+
 #[derive(Debug, thiserror::Error)]
 enum PreviewNativeFrameMaterializationError {
     #[error("FFmpeg hardware pixel format {pixel_format:?} has no native media adapter")]
@@ -4287,18 +4786,16 @@ fn materialize_decoded_frame(
         }
     }
 
-    Ok(PreviewDecodedFramePayload::CpuRgba(
-        materialize_decoded_to_cpu_rgba(
-            decoded,
-            hardware_decode_plan,
-            scaler,
-            scaler_source_format,
-            target_width,
-            target_height,
-            path,
-            source_color,
-        )?,
-    ))
+    materialize_decoded_to_cpu(
+        decoded,
+        hardware_decode_plan,
+        scaler,
+        scaler_source_format,
+        target_width,
+        target_height,
+        path,
+        source_color,
+    )
 }
 
 fn materialize_native_decoded_frame(
@@ -4362,7 +4859,7 @@ fn decoded_native_surface_format_from_software_format(
     }
 }
 
-fn materialize_decoded_to_cpu_rgba(
+fn materialize_decoded_to_cpu(
     decoded: &ffmpeg::util::frame::video::Video,
     hardware_decode_plan: &mut PreviewHardwareDecodePlan,
     scaler: &mut Option<ffmpeg::software::scaling::Context>,
@@ -4371,8 +4868,18 @@ fn materialize_decoded_to_cpu_rgba(
     target_height: u32,
     path: &Path,
     source_color: PreviewSourceColorContract,
-) -> Result<RgbaFrame> {
+) -> Result<PreviewDecodedFramePayload> {
     if !preview_hardware_frame_format(decoded.format()) {
+        if source_color.color_space.is_scene_linear() {
+            return convert_decoded_to_float_rgba(
+                decoded,
+                target_width,
+                target_height,
+                path,
+                source_color,
+            )
+            .map(PreviewDecodedFramePayload::CpuFloat);
+        }
         let scaler = ensure_preview_rgba_scaler(
             scaler,
             scaler_source_format,
@@ -4383,7 +4890,8 @@ fn materialize_decoded_to_cpu_rgba(
             target_height,
             path,
         )?;
-        return convert_decoded_to_rgba(decoded, scaler, path, source_color);
+        return convert_decoded_to_rgba(decoded, scaler, path, source_color)
+            .map(PreviewDecodedFramePayload::CpuRgba);
     }
 
     let mut transferred = ffmpeg::util::frame::video::Video::empty();
@@ -4405,6 +4913,23 @@ fn materialize_decoded_to_cpu_rgba(
         ffmpeg::ffi::av_frame_copy_props(transferred.as_mut_ptr(), decoded.as_ptr());
     }
     hardware_decode_plan.mark_hardware_cpu_transfer_observed();
+    if source_color.color_space.is_scene_linear() {
+        return convert_decoded_to_float_rgba(
+            &transferred,
+            target_width,
+            target_height,
+            path,
+            source_color,
+        )
+        .map(|frame| {
+            PreviewDecodedFramePayload::CpuFloat(frame.with_stage_durations(
+                PreviewDecodeStageDurations {
+                    hardware_transfer_us,
+                    ..PreviewDecodeStageDurations::default()
+                },
+            ))
+        });
+    }
     let scaler = ensure_preview_rgba_scaler(
         scaler,
         scaler_source_format,
@@ -4415,14 +4940,14 @@ fn materialize_decoded_to_cpu_rgba(
         target_height,
         path,
     )?;
-    Ok(
-        convert_decoded_to_rgba(&transferred, scaler, path, source_color)?.with_stage_durations(
+    convert_decoded_to_rgba(&transferred, scaler, path, source_color).map(|frame| {
+        PreviewDecodedFramePayload::CpuRgba(frame.with_stage_durations(
             PreviewDecodeStageDurations {
                 hardware_transfer_us,
                 ..PreviewDecodeStageDurations::default()
             },
-        ),
-    )
+        ))
+    })
 }
 
 fn ensure_preview_rgba_scaler<'a>(
@@ -4455,25 +4980,25 @@ fn ensure_preview_rgba_scaler<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
-        convert_decoded_to_rgba, decode_preview_frame_cancellable,
-        decoded_native_surface_format_from_software_format, decoded_surface_format_from_pixel,
-        decoded_video_sampling_from_frame, duration_us, materialize_decoded_frame,
-        preview_cache_get, preview_cache_put_with_fingerprint, preview_create_rgba_scaler,
-        preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_hardware_extra_frames,
-        preview_seek_index_cache_get, preview_seek_index_cache_put, resolve_cpu_rgba_contract,
-        DecodedRgbaFrameContract, FfmpegNativeDecodedFrameResource,
+        apply_preview_codec_threading_policy, clear_global_preview_frame_cache,
+        clear_thread_local_preview_decode_session, convert_decoded_to_rgba,
+        decode_preview_frame_cancellable, decoded_native_surface_format_from_software_format,
+        decoded_surface_format_from_pixel, decoded_video_sampling_from_frame, duration_us,
+        materialize_decoded_frame, preview_cache_get, preview_cache_put_with_fingerprint,
+        preview_create_rgba_scaler, preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode,
+        preview_hardware_extra_frames, preview_seek_index_cache_get, preview_seek_index_cache_put,
+        resolve_cpu_rgba_contract, DecodedRgbaFrameContract, FfmpegNativeDecodedFrameResource,
         FfmpegNativeDecodedFrameResourceError, PreviewDecodeAccessMode, PreviewDecodeAccessPolicy,
         PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeDiagnostics,
         PreviewDecodeExecutionPath, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest,
-        PreviewDecodeSeekStrategy, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
-        PreviewDecodedFramePayload, PreviewFileFingerprint, PreviewHardwareDecodeBlocker,
-        PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
-        PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest, PreviewNativeDecodeFallback,
-        PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
-        PreviewNativeDecodedFrameResource, PreviewPlaybackRing, PreviewScrubAdaptiveClass,
-        PreviewSeekIndex, PreviewSeekIndexDiagnostics, PreviewSeekIndexSource,
-        PreviewSeekResolution, PreviewSourceColorContract, RgbaFrame,
+        PreviewDecodeSeekStrategy, PreviewDecodeStageDurations, PreviewDecodeThreadingConfig,
+        PreviewDecodeThreadingKind, PreviewDecodedFramePayload, PreviewFileFingerprint,
+        PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
+        PreviewHardwareDecodeDecision, PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest,
+        PreviewNativeDecodeFallback, PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError,
+        PreviewNativeDecodedFrameHandle, PreviewNativeDecodedFrameResource, PreviewPlaybackRing,
+        PreviewScrubAdaptiveClass, PreviewSeekIndex, PreviewSeekIndexDiagnostics,
+        PreviewSeekIndexSource, PreviewSeekResolution, PreviewSourceColorContract, RgbaFrame,
         PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES,
         PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS,
         PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
@@ -4518,6 +5043,10 @@ mod tests {
 
     fn test_source_color() -> PreviewSourceColorContract {
         PreviewSourceColorContract::new(ColorSpace::Rec709, DecodedVideoRange::Limited)
+    }
+
+    fn test_linear_source_color() -> PreviewSourceColorContract {
+        PreviewSourceColorContract::new(ColorSpace::Aces2065_1, DecodedVideoRange::Full)
     }
 
     fn test_rgba_contract() -> DecodedRgbaFrameContract {
@@ -4874,6 +5403,20 @@ mod tests {
             Some(PreviewDecodeThreadingKind::Slice)
         );
         assert_eq!(PreviewDecodeThreadingKind::from_env("surprise"), None);
+    }
+
+    #[test]
+    fn exr_decode_policy_disables_frame_thread_shutdown_deadlock() {
+        let requested =
+            PreviewDecodeThreadingConfig { kind: PreviewDecodeThreadingKind::Frame, count: 8 };
+        assert_eq!(
+            apply_preview_codec_threading_policy(ffmpeg::codec::Id::EXR, requested),
+            PreviewDecodeThreadingConfig { kind: PreviewDecodeThreadingKind::None, count: 1 }
+        );
+        assert_eq!(
+            apply_preview_codec_threading_policy(ffmpeg::codec::Id::H264, requested),
+            requested
+        );
     }
 
     #[test]
@@ -5710,20 +6253,25 @@ mod tests {
         ring.put(100, frame_a.clone());
         ring.put(110, frame_b.clone());
 
-        assert_eq!(
-            ring.get(103, 3).expect("within tolerance").rgba(),
-            frame_a.rgba()
-        );
+        let PreviewDecodedFramePayload::CpuRgba(hit) = ring.get(103, 3).expect("within tolerance")
+        else {
+            panic!("RGBA ring entry changed payload kind");
+        };
+        assert_eq!(hit.rgba(), frame_a.rgba());
         assert!(ring.get(104, 3).is_none());
 
         ring.put(120, frame_c.clone());
 
         assert!(ring.get(110, 1).is_none());
-        assert_eq!(
-            ring.get(100, 1).expect("recently used").rgba(),
-            frame_a.rgba()
-        );
-        assert_eq!(ring.get(120, 1).expect("newest").rgba(), frame_c.rgba());
+        let PreviewDecodedFramePayload::CpuRgba(recent) = ring.get(100, 1).expect("recently used")
+        else {
+            panic!("recent RGBA ring entry changed payload kind");
+        };
+        assert_eq!(recent.rgba(), frame_a.rgba());
+        let PreviewDecodedFramePayload::CpuRgba(newest) = ring.get(120, 1).expect("newest") else {
+            panic!("newest RGBA ring entry changed payload kind");
+        };
+        assert_eq!(newest.rgba(), frame_c.rgba());
     }
 
     #[test]
@@ -5966,6 +6514,80 @@ mod tests {
     }
 
     #[test]
+    fn scene_linear_ffmpeg_float_frame_preserves_extended_range_rgba() {
+        let pixel_format = if cfg!(target_endian = "little") {
+            ffmpeg::util::format::pixel::Pixel::GBRAPF32LE
+        } else {
+            ffmpeg::util::format::pixel::Pixel::GBRAPF32BE
+        };
+        let mut decoded = ffmpeg::util::frame::video::Video::new(pixel_format, 2, 1);
+        let pixels = [[-0.25_f32, 0.18, 4.0, 0.5], [0.3, 0.4, 0.5, 1.0]];
+        for (plane, channel) in [(0, 1), (1, 2), (2, 0), (3, 3)] {
+            let stride = decoded.stride(plane);
+            let data = decoded.data_mut(plane);
+            for (x, pixel) in pixels.iter().enumerate() {
+                let start = x * std::mem::size_of::<f32>();
+                data[start..start + std::mem::size_of::<f32>()]
+                    .copy_from_slice(&pixel[channel].to_ne_bytes());
+            }
+            assert!(stride >= 2 * std::mem::size_of::<f32>());
+        }
+        let mut plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            PreviewDecodeBackend::Software,
+            ffmpeg::codec::Id::EXR,
+            None,
+        );
+        let payload = materialize_decoded_frame(
+            &decoded,
+            &mut plan,
+            &mut None,
+            &mut None,
+            2,
+            1,
+            Path::new("synthetic-linear.exr"),
+            test_linear_source_color(),
+        )
+        .expect("scene-linear float frame should materialize without RGBA8 quantization");
+
+        let cached_payload = payload.clone();
+        let PreviewDecodedFramePayload::CpuFloat(frame) = payload else {
+            panic!("scene-linear FFmpeg float output must remain CPU float");
+        };
+        assert_eq!(frame.rgba(), pixels.as_flattened());
+        assert_eq!(
+            frame.diagnostics.decoded_frame_residency,
+            DecodedFrameResidency::CpuFloat
+        );
+
+        clear_global_preview_frame_cache();
+        let path = PathBuf::from("synthetic-linear.exr");
+        let fingerprint = PreviewFileFingerprint {
+            len: Some(128),
+            modified_secs: Some(1),
+            modified_nanos: Some(2),
+        };
+        cached_payload.cache_cpu_frame(&path, fingerprint, 2, 1, 7);
+        let hit = preview_cache_get(&path, fingerprint, test_linear_source_color(), 2, 1, 7, 1)
+            .expect("float preview should enter the shared frame cache");
+        let PreviewDecodedFramePayload::CpuFloat(cached) = hit.frame else {
+            panic!("float preview cache changed payload kind");
+        };
+        assert_eq!(cached.rgba(), pixels.as_flattened());
+        clear_global_preview_frame_cache();
+    }
+
+    #[test]
+    fn float_preview_resize_preserves_extended_range() {
+        let source = vec![
+            -1.0, 0.0, 1.0, 1.0, 1.0, 2.0, 3.0, 1.0, 3.0, 4.0, 5.0, 1.0, 5.0, 6.0, 7.0, 1.0,
+        ];
+        let resized = super::resize_float_rgba(&source, 2, 2, 1, 1);
+        assert_eq!(resized, vec![2.0, 3.0, 4.0, 1.0]);
+    }
+
+    #[test]
     fn gpu_required_software_frame_fails_closed() {
         let decoded =
             ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::RGBA, 2, 2);
@@ -6018,7 +6640,7 @@ mod tests {
 
         let frame = match &payload {
             PreviewDecodedFramePayload::NativeGpu(frame) => frame,
-            PreviewDecodedFramePayload::CpuRgba(_) => {
+            PreviewDecodedFramePayload::CpuRgba(_) | PreviewDecodedFramePayload::CpuFloat(_) => {
                 panic!("explicit D3D11 NV12 frame must not transfer to CPU")
             }
         };
@@ -6041,7 +6663,7 @@ mod tests {
             modified_secs: None,
             modified_nanos: None,
         };
-        payload.cache_cpu_rgba(&path, fingerprint, 960, 540, 42);
+        payload.cache_cpu_frame(&path, fingerprint, 960, 540, 42);
         assert!(
             preview_cache_get(&path, fingerprint, test_source_color(), 960, 540, 42, 1).is_none()
         );
@@ -6366,6 +6988,9 @@ mod tests {
             PreviewDecodeOutcome::NativeGpuFrame(_) => {
                 panic!("still-frame perf decode requires CPU RGBA output")
             }
+            PreviewDecodeOutcome::FloatFrame(_) => {
+                panic!("Rec.709 still-frame perf fixture unexpectedly decoded as float")
+            }
         };
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let report = PreviewDecodePerfReport {
@@ -6458,6 +7083,9 @@ mod tests {
                 }
                 PreviewDecodeOutcome::NativeGpuFrame(_) => {
                     panic!("playback sequence perf decode requires CPU RGBA output")
+                }
+                PreviewDecodeOutcome::FloatFrame(_) => {
+                    panic!("Rec.709 playback perf fixture unexpectedly decoded as float")
                 }
             };
             let elapsed_us = duration_us(frame_started.elapsed());

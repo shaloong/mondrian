@@ -19,8 +19,8 @@ use mondrian_media::{
     PreviewDecodeOutcome, PreviewDecodeRequest, PreviewFileFingerprint, PreviewSourceColorContract,
 };
 use mondrian_renderer::{
-    execute_cpu_input_stage, execute_cpu_output_boundary_rgba8, CpuEncodedColorFrame,
-    RenderInputTransform, RenderOutputColorBoundary,
+    execute_cpu_input_stage, execute_cpu_input_stage_float, execute_cpu_output_boundary_rgba8,
+    CpuEncodedColorFrame, LinearFloatSource, RenderInputTransform, RenderOutputColorBoundary,
 };
 use mondrian_timeline::sequence::{ColorContext, ResolvedInputColor};
 use mondrian_ui_core::RasterImageColorSpace;
@@ -527,6 +527,20 @@ fn decode_thumbnail(job: ThumbnailJob) -> ThumbnailResult {
                 })
             })
         }
+        Ok(PreviewDecodeOutcome::FloatFrame(frame)) => {
+            let width = frame.width;
+            let height = frame.height;
+            let rgba = color_manage_thumbnail_float(width, height, frame.into_data(), &job.color);
+            let key = thumbnail_key(job.asset_id, width, height, job.fingerprint, &job.color);
+            rgba.and_then(|rgba| {
+                RasterImage::new(key, width, height, raster_color_space, rgba).ok_or_else(|| {
+                    thumbnail_failure(
+                        AssetThumbnailFailureReason::InvalidRasterPayload,
+                        "thumbnail float raster payload is invalid",
+                    )
+                })
+            })
+        }
         Ok(PreviewDecodeOutcome::Canceled) => Err(thumbnail_failure(
             AssetThumbnailFailureReason::DecodeCanceled,
             "thumbnail still-frame decode canceled unexpectedly",
@@ -574,6 +588,31 @@ fn color_manage_thumbnail_rgba(
             thumbnail_failure(
                 AssetThumbnailFailureReason::OutputTransformFailed,
                 format!("thumbnail display color transform failed: {err}"),
+            )
+        })
+}
+
+fn color_manage_thumbnail_float(
+    width: u32,
+    height: u32,
+    rgba: Vec<f32>,
+    color: &ThumbnailColorContract,
+) -> Result<Vec<u8>, AssetThumbnailFailure> {
+    let source = LinearFloatSource::new(width, height, color.source_color_space, rgba);
+    let input =
+        RenderInputTransform::to_working(color.working_color_space, false, color.engine.clone());
+    let working = execute_cpu_input_stage_float(&source, &input).map_err(|err| {
+        thumbnail_failure(
+            AssetThumbnailFailureReason::InputTransformFailed,
+            format!("thumbnail float input color transform failed: {err}"),
+        )
+    })?;
+    execute_cpu_output_boundary_rgba8(&working.result.frame, &color.output_boundary())
+        .map(|output| output.rgba)
+        .map_err(|err| {
+            thumbnail_failure(
+                AssetThumbnailFailureReason::OutputTransformFailed,
+                format!("thumbnail float display color transform failed: {err}"),
             )
         })
 }
