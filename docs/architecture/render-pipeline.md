@@ -122,11 +122,12 @@ enters as `LinearFloatSource`, so app preview, thumbnails, and export bypass
 RGBA8 quantization while preserving the external source color identity.
 Synthetic float data and effect graph intermediates use the same typed float
 entry point.
-Preview and export must use `RenderInputTransform` plus
-`execute_cpu_input_stage(...)` or `execute_cpu_input_stage_float(...)` to
-produce a result carrying both `CpuColorFrame` and stage diagnostics before
-building `TimelineMediaLayer`. Timeline media layers therefore carry typed
-working frames, not naked RGBA slices. `CpuColorFrame` stores its linear
+CPU preview/export fallbacks use `RenderInputTransform` plus
+`execute_cpu_source_input_stage(...)` to dispatch the typed source to the
+RGBA8 or float executor. GPU preview retains that same `CpuSourceColorFrame`
+and executes the input transform without first materializing a CPU working
+frame. Timeline media layers therefore carry typed working frames, not naked
+RGBA slices. `CpuColorFrame` stores its linear
 `WorkingRgbaF32Frame` payload in shared immutable storage so preview caches, lazy CPU
 fallbacks, and export scheduling can clone the typed frame contract without
 deep-copying a full 16-byte-per-pixel working frame. Copies that need owned
@@ -292,9 +293,11 @@ not instantiate the final-output executor directly or call
 focused unit tests.
 
 GPU input transforms have their own renderer contract instead of piggybacking
-on final-output plans. `RenderGpuInputStageResourcePlan` accepts a decoded CPU
-`CpuEncodedColorFrame` in the `Source` domain, uploads it as `Rgba8Unorm`,
-records the OCIO GPU input transform, and produces a GPU-resident linear
+on final-output plans. `RenderGpuInputStageResourcePlan` accepts a decoded
+`CpuSourceColorFrame` in the `Source` domain. Encoded RGBA8 uploads as
+`Rgba8Unorm`; scene-linear f32 uploads as `Rgba32Float` without quantization or
+an intermediate CPU OCIO transform. It then records the OCIO GPU input
+transform and produces a GPU-resident linear
 working frame in a renderer-selected `Rgba32Float` texture. The working format
 is not a caller option. It rejects CPU-only plans, plans with native GPU
 blockers, non-source uploads, and non-working outputs. This is the guarded bridge for
@@ -305,9 +308,9 @@ backend-object cache, frame-id allocator, and frame table as output boundaries.
 `GpuFrameCompositor` can consume the resulting `GpuColorFrameHandle` directly
 as a media layer through `GpuCompositeLayerSource::GpuFrame`, so the planned
 preview path can become GPU input transform -> GPU working composite -> GPU
-output boundary without re-uploading that media layer. It is not a hardware
-decode or zero-copy path until `mondrian-media` supplies an actual GPU
-texture/hardware frame instead of CPU RGBA bytes.
+output boundary without re-uploading that media layer. CPU sources still
+require one host-to-device upload; native decoder surfaces use the separate
+low-copy import path below.
 Native hardware-decoded frames must enter through the separate renderer-owned
 `GpuNativeDecodedFrameImportPlan` contract. That contract does not model the
 decoder surface itself as a color-frame handle; it records the decoder handle
@@ -341,25 +344,25 @@ Backend support validation, video sampling validation, and output working-resour
 are all required: a renderer backend must never be asked to import a
 D3D11/NV12 contract while receiving a different native surface, and it must not
 sample a YCbCr surface without explicit range/matrix/bit-depth/chroma metadata.
-The app viewer path now carries each decoded media layer's `CpuEncodedColorFrame`
-plus `RenderInputTransform` alongside its CPU working-frame fallback. During
+The app viewer path now carries each decoded media layer's
+`CpuSourceColorFrame` plus `RenderInputTransform` alongside its lazy CPU
+working-frame fallback. During
 window recording it first tries `record_wgpu_input_stage_owned_backend(...)`
 for each eligible media layer, feeds successful outputs to
 `GpuFrameCompositor` as GPU-resident working frames, and records a structured
 CPU-working-upload fallback only for layers whose GPU input stage fails.
-This encoded CPU source contract applies only to
-`PreviewDecodeOutcome::Frame(RgbaFrame)`.
-`PreviewDecodeOutcome::FloatFrame` flows through `LinearFloatSource` and the CPU
-float input executor until the renderer owns a separate GPU float-source upload
-contract.
+`PreviewDecodeOutcome::Frame(RgbaFrame)` becomes the encoded variant;
+`PreviewDecodeOutcome::FloatFrame` becomes the shared scene-linear float
+variant and uses the same GPU input stage.
 `PreviewDecodeOutcome::NativeGpuFrame` must flow through the renderer native
 decoded-frame import contract instead of being wrapped in `CpuEncodedColorFrame`
 or silently transferred to CPU.
-`CpuEncodedColorFrame` stores decoded RGBA8 payloads in shared immutable
-storage so preview media-cache hits, GPU source contracts, and queued preview
-frame clones do not deep-copy a full source frame. GPU upload plans keep shared
-immutable upload bytes so source upload scheduling and plan clones do not copy a
-decoded RGBA frame before `Queue::write_texture`. CPU-transform boundaries may
+Both `CpuEncodedColorFrame` and `LinearFloatSource` store decoded payloads in
+shared immutable storage so preview media-cache hits, GPU source contracts, and
+queued preview frame clones do not deep-copy a full source frame. GPU upload
+plans preserve that shared u8/f32 payload and expose packed bytes only at
+`Queue::write_texture`; float source upload therefore does not allocate a
+second full-frame byte buffer. CPU-transform boundaries may
 still request owned mutable bytes, but that copy must be visible at the boundary
 rather than hidden in ordinary frame cloning. Media decode callers should use
 the shared `CpuEncodedColorFrame` constructors when handing a decoded
@@ -736,7 +739,7 @@ Resolved preview layers
        -> insert returned working resource into the composite frame table
   -> for each media layer with a source/input contract:
        RenderGpuOutputBoundaryRuntime::record_wgpu_input_stage_owned_backend()
-       -> upload CPU decoded source RGBA8 once as Rgba8Unorm
+       -> upload encoded RGBA8 once as Rgba8Unorm, or scene-linear f32 once as Rgba32Float
        -> run OCIO GPU input transform into Rgba32Float working texture
   -> GpuFrameCompositor::record()
      -> reuse one full-frame, opaque, identity GPU working layer directly
@@ -757,7 +760,7 @@ transform for the supported subset. Retained Windows D3D11 decoder surfaces use
 a low-copy path, not zero-copy: the decoder array slice is copied once into a
 shareable single-slice NV12/P010 texture, while YUV conversion, OCIO input,
 working composite, and output remain GPU-resident. CPU-decoded media still uses
-one RGBA8 source upload. The app media preview cache stores the decoded source
+one typed source upload. The app media preview cache stores the decoded source
 frame plus the `RenderInputTransform` contract without eagerly materializing a
 CPU working frame. CPU working frames are generated lazily only when the CPU
 reference compositor or a runtime fallback actually needs them. It also removes
@@ -772,7 +775,7 @@ the renderer contract is covered by `from_gpu_working_frame()`.
   low-copy import backend; procedural and adjustment layers require no import.
 - **`GpuWithUpload`** — Layer structure supports GPU compositing, but at least
   one layer enters from CPU memory. The preferred media path uploads decoded
-  source RGBA8 once and runs GPU OCIO input before compositing. If that input
+  RGBA8 or scene-linear f32 once and runs GPU OCIO input before compositing. If that input
   stage is unavailable, the app records a structured fallback and uploads an
   already materialized CPU working frame when one exists. Source-only preview
   cache entries fail closed for that GPU attempt instead of silently performing

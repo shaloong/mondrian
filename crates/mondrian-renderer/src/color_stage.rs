@@ -1,11 +1,11 @@
 use crate::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
-    CpuColorTransformExecutor, CpuEncodedColorFrame, GpuColorFrameAllocationPlan,
-    GpuColorFrameHandle, GpuColorFrameId, GpuColorFrameIdAllocator, GpuColorFrameReadback,
-    GpuColorFrameReadbackError, GpuColorFrameReadbackPlan, GpuColorFrameResource,
-    GpuColorFrameResourceTable, GpuColorFrameResourceTableError, GpuColorFrameTextureFormat,
-    GpuColorFrameUploadError, GpuColorFrameUploadPlan, GpuColorFrameUploader,
-    GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool,
+    CpuColorTransformExecutor, CpuEncodedColorFrame, CpuSourceColorFrame,
+    GpuColorFrameAllocationPlan, GpuColorFrameHandle, GpuColorFrameId, GpuColorFrameIdAllocator,
+    GpuColorFrameReadback, GpuColorFrameReadbackError, GpuColorFrameReadbackPlan,
+    GpuColorFrameResource, GpuColorFrameResourceTable, GpuColorFrameResourceTableError,
+    GpuColorFrameTextureFormat, GpuColorFrameUploadError, GpuColorFrameUploadPlan,
+    GpuColorFrameUploader, GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool,
     GpuColorFrameWgpuResourcePoolDiagnostics, GpuCompositeError, GpuCompositeRecord,
     GpuCompositeRequest, GpuFrameCompositor, LinearFloatSource, OcioGpuShaderCache,
     OcioGpuShaderCacheDiagnostics, OcioGpuWgpuBackendObjectError, OcioGpuWgpuBackendObjectRuntime,
@@ -723,11 +723,11 @@ impl RenderGpuOutputBoundaryRuntime {
     }
 
     /// Plan, prepare runtime-owned backend objects, and record a native GPU
-    /// source/input color transform from decoded CPU RGBA8 into GPU working space.
+    /// source/input color transform from a decoded CPU source into GPU working space.
     pub fn record_wgpu_input_stage_owned_backend(
         &mut self,
         transform: &RenderInputTransform,
-        frame: &CpuEncodedColorFrame,
+        frame: &CpuSourceColorFrame,
         gpu_options: RenderColorTransformGpuOptions,
         backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
     ) -> Result<RenderGpuInputStageRecord, RenderGpuInputStageRuntimeRecordError> {
@@ -743,12 +743,9 @@ impl RenderGpuOutputBoundaryRuntime {
         let stage_plan = planner
             .plan_input_to_working(frame.descriptor(), transform)
             .map_err(RenderGpuInputStageRuntimeRecordError::Plan)?;
-        let resources = RenderGpuInputStageResourcePlan::from_cpu_encoded_source_frame(
-            frame_ids,
-            frame,
-            &stage_plan,
-        )
-        .map_err(RenderGpuInputStageRuntimeRecordError::ResourcePlan)?;
+        let resources =
+            RenderGpuInputStageResourcePlan::from_cpu_source_frame(frame_ids, frame, &stage_plan)
+                .map_err(RenderGpuInputStageRuntimeRecordError::ResourcePlan)?;
         let output_format = color_target_format_for_gpu_frame(&resources.output);
         let shader_plan = resources.transform.wgpu.shader_plan.clone();
         let static_pipeline = backend_prep
@@ -1809,8 +1806,8 @@ pub struct RenderGpuOutputStageResourcePlan {
 
 /// Resource materialization plan for one GPU source/input color transform stage.
 ///
-/// This is the renderer-owned path for decoded CPU RGBA8 source frames entering
-/// timeline working space on the GPU: CPU encoded source upload ->
+/// This is the renderer-owned path for decoded CPU source frames entering
+/// timeline working space on the GPU: typed CPU source upload ->
 /// native OCIO GPU input transform -> GPU-resident linear working frame.
 #[derive(Debug, Clone)]
 pub struct RenderGpuInputStageResourcePlan {
@@ -2272,11 +2269,11 @@ impl RenderGpuInputStageResourcePlan {
         }
     }
 
-    /// Build resource plans for a decoded CPU encoded source frame entering a
+    /// Build resource plans for a decoded CPU source frame entering a
     /// planned native GPU input transform.
-    pub fn from_cpu_encoded_source_frame(
+    pub fn from_cpu_source_frame(
         ids: &mut GpuColorFrameIdAllocator,
-        frame: &CpuEncodedColorFrame,
+        frame: &CpuSourceColorFrame,
         stage_plan: &RenderColorStagePlan,
     ) -> Result<Self, RenderGpuInputStageResourcePlanError> {
         let planned = planned_gpu_source_upload_transform(stage_plan)?;
@@ -2300,12 +2297,23 @@ impl RenderGpuInputStageResourcePlan {
                 },
             );
         }
-        let input_upload = GpuColorFrameUploadPlan::from_cpu_encoded_frame(
-            ids.allocate(),
-            frame,
-            GpuColorFrameTextureFormat::Rgba8Unorm,
-            "color-stage-source-input",
-        )
+        let input_upload = match frame {
+            CpuSourceColorFrame::EncodedRgba8(frame) => {
+                GpuColorFrameUploadPlan::from_cpu_encoded_frame(
+                    ids.allocate(),
+                    frame,
+                    GpuColorFrameTextureFormat::Rgba8Unorm,
+                    "color-stage-source-rgba8-input",
+                )
+            }
+            CpuSourceColorFrame::LinearFloat(frame) => {
+                GpuColorFrameUploadPlan::from_linear_float_source(
+                    ids.allocate(),
+                    frame,
+                    "color-stage-source-rgba32float-input",
+                )
+            }
+        }
         .map_err(RenderGpuInputStageResourcePlanError::InputUpload)?;
         if input_upload.handle.descriptor() != planned.gpu_input {
             return Err(
@@ -3128,6 +3136,17 @@ pub fn execute_cpu_input_stage_float(
     CpuRenderColorStageExecutor::input_to_working_float(frame, &plan)
 }
 
+/// Plan and execute the CPU fallback for any supported decoded source payload.
+pub fn execute_cpu_source_input_stage(
+    frame: &CpuSourceColorFrame,
+    transform: &RenderInputTransform,
+) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError> {
+    match frame {
+        CpuSourceColorFrame::EncodedRgba8(frame) => execute_cpu_input_stage(frame, transform),
+        CpuSourceColorFrame::LinearFloat(frame) => execute_cpu_input_stage_float(frame, transform),
+    }
+}
+
 /// Convert a CPU working frame into another linear working identity through OCIO.
 pub fn execute_cpu_working_transform(
     frame: &CpuColorFrame,
@@ -3490,12 +3509,16 @@ fn planned_gpu_source_upload_transform(
             reason: "GPU transform input and output descriptors must be GPU-resident",
         });
     }
+    let supported_source_encoding = matches!(
+        upload_input.encoding,
+        ColorFrameEncoding::EncodedRgba8 | ColorFrameEncoding::LinearFloat
+    );
     if upload_input.domain != ColorFrameDomain::Source
-        || upload_input.encoding != ColorFrameEncoding::EncodedRgba8
+        || !supported_source_encoding
         || upload_input.residency != ColorFrameResidency::Cpu
     {
         return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
-            reason: "GPU input upload must consume a CPU encoded source frame",
+            reason: "GPU input upload must consume CPU RGBA8 or scene-linear float source data",
         });
     }
     if gpu_output.domain != ColorFrameDomain::Working
@@ -4427,6 +4450,60 @@ mod tests {
         assert_eq!(diagnostics.shader_cache.entries, 1);
         assert_eq!(diagnostics.backend_prep.resources.entries, 1);
         assert_eq!(diagnostics.backend_objects.entries, 1);
+    }
+
+    #[tokio::test]
+    async fn gpu_input_stage_runtime_accepts_scene_linear_float_source_on_real_wgpu_device() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping real wgpu float input stage test: no GPU adapter available");
+            return;
+        };
+        let source = CpuSourceColorFrame::LinearFloat(LinearFloatSource::new(
+            2,
+            1,
+            ColorSpace::LinearRec2020,
+            vec![-0.25, 0.18, 2.0, 1.0, 4.0, 0.5, -1.0, 0.25],
+        ));
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_325);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-gpu-float-input-stage"),
+        });
+
+        let record = runtime
+            .record_wgpu_input_stage_owned_backend(
+                &transform,
+                &source,
+                RenderColorTransformGpuOptions::default(),
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &context.device,
+                    queue: &context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                },
+            )
+            .expect("scene-linear float GPU input stage should record");
+        context.queue.submit(std::iter::once(encoder.finish()));
+
+        assert_eq!(
+            record.materialized.input.texture_format(),
+            GpuColorFrameTextureFormat::Rgba32Float
+        );
+        assert_eq!(
+            record.materialized.input.descriptor().encoding,
+            ColorFrameEncoding::LinearFloat
+        );
+        assert_eq!(
+            record.materialized.output.texture_format(),
+            GpuColorFrameTextureFormat::Rgba32Float
+        );
+        assert_eq!(record.stage_diagnostics.upload_stages, 1);
+        assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
     }
 
     #[tokio::test]
@@ -5548,12 +5625,9 @@ mod tests {
         let stage_plan = gpu_input_stage_plan_for_source(&source);
         let mut ids = GpuColorFrameIdAllocator::new(700);
 
-        let resources = RenderGpuInputStageResourcePlan::from_cpu_encoded_source_frame(
-            &mut ids,
-            &source,
-            &stage_plan,
-        )
-        .expect("GPU input stage resources");
+        let resources =
+            RenderGpuInputStageResourcePlan::from_cpu_source_frame(&mut ids, &source, &stage_plan)
+                .expect("GPU input stage resources");
 
         assert_eq!(resources.input.id().raw(), 700);
         assert_eq!(resources.output.id().raw(), 701);
@@ -5594,6 +5668,41 @@ mod tests {
             pass_node,
         )
         .expect("resource-planned GPU input transform should schedule");
+    }
+
+    #[test]
+    fn gpu_input_stage_resource_plan_uploads_scene_linear_float_without_quantization() {
+        let samples = Arc::new(vec![-0.25, 0.18, 2.0, 1.0, 4.0, 0.5, -1.0, 0.25]);
+        let source = CpuSourceColorFrame::LinearFloat(LinearFloatSource::new_shared(
+            2,
+            1,
+            ColorSpace::LinearRec2020,
+            Arc::clone(&samples),
+        ));
+        let stage_plan = gpu_input_stage_plan_for_source(&source);
+        let mut ids = GpuColorFrameIdAllocator::new(705);
+
+        let resources =
+            RenderGpuInputStageResourcePlan::from_cpu_source_frame(&mut ids, &source, &stage_plan)
+                .expect("GPU float input stage resources");
+
+        let upload = resources.input_upload.expect("float source upload");
+        assert_eq!(
+            upload.texture_format,
+            GpuColorFrameTextureFormat::Rgba32Float
+        );
+        assert_eq!(
+            bytemuck::cast_slice::<u8, f32>(upload.bytes()),
+            samples.as_slice()
+        );
+        assert_eq!(
+            resources.output.descriptor().domain,
+            ColorFrameDomain::Working
+        );
+        assert_eq!(
+            resources.output.texture_format(),
+            GpuColorFrameTextureFormat::Rgba32Float
+        );
     }
 
     #[test]
@@ -5670,12 +5779,9 @@ mod tests {
             .expect("CPU input stage plan");
         let mut ids = GpuColorFrameIdAllocator::new(710);
 
-        let err = RenderGpuInputStageResourcePlan::from_cpu_encoded_source_frame(
-            &mut ids,
-            &source,
-            &stage_plan,
-        )
-        .expect_err("CPU-only input plan cannot materialize GPU resources");
+        let err =
+            RenderGpuInputStageResourcePlan::from_cpu_source_frame(&mut ids, &source, &stage_plan)
+                .expect_err("CPU-only input plan cannot materialize GPU resources");
 
         assert!(matches!(
             err,
@@ -5690,12 +5796,9 @@ mod tests {
         add_gpu_stage_blocker(&mut stage_plan);
         let mut ids = GpuColorFrameIdAllocator::new(720);
 
-        let err = RenderGpuInputStageResourcePlan::from_cpu_encoded_source_frame(
-            &mut ids,
-            &source,
-            &stage_plan,
-        )
-        .expect_err("blocked GPU input stage cannot materialize executable resources");
+        let err =
+            RenderGpuInputStageResourcePlan::from_cpu_source_frame(&mut ids, &source, &stage_plan)
+                .expect_err("blocked GPU input stage cannot materialize executable resources");
 
         assert!(matches!(
             err,
@@ -6060,16 +6163,17 @@ mod tests {
         })
     }
 
-    fn cpu_source_frame() -> CpuEncodedColorFrame {
+    fn cpu_source_frame() -> CpuSourceColorFrame {
         CpuEncodedColorFrame::source_rgba8(
             4,
             2,
             ColorSpace::SonySLog3SGamut3Cine,
             [96, 128, 160, 255].repeat(8),
         )
+        .into()
     }
 
-    fn gpu_input_stage_plan_for_source(source: &CpuEncodedColorFrame) -> RenderColorStagePlan {
+    fn gpu_input_stage_plan_for_source(source: &CpuSourceColorFrame) -> RenderColorStagePlan {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let transform = RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec709,
@@ -6392,12 +6496,8 @@ mod tests {
         let source = cpu_source_frame();
         let stage_plan = gpu_input_stage_plan_for_source(&source);
         let mut ids = GpuColorFrameIdAllocator::new(first_id);
-        RenderGpuInputStageResourcePlan::from_cpu_encoded_source_frame(
-            &mut ids,
-            &source,
-            &stage_plan,
-        )
-        .expect("GPU input stage resources")
+        RenderGpuInputStageResourcePlan::from_cpu_source_frame(&mut ids, &source, &stage_plan)
+            .expect("GPU input stage resources")
     }
 
     fn gpu_handle(

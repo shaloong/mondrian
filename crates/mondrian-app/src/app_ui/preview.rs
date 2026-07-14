@@ -39,19 +39,20 @@ use mondrian_media::{
 use mondrian_media::{DecodedVideoChromaLocation, PreviewNativeDecodedFrameHandle};
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
-    evaluate_timeline_render_plan, execute_cpu_input_stage, execute_cpu_input_stage_float,
-    execute_cpu_output_boundary_rgba8, execute_cpu_working_transform, CpuColorFrame,
-    CpuEncodedColorFrame, GpuCompositingBlockerReason, GpuCompositingDiagnostics,
-    LinearFloatSource, RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
-    RenderColorTransformDiagnostics, RenderColorTransformDirection, RenderInputTransform,
-    RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
-    TimelineCompositeDiagnostics, TimelineCompositeElement, TimelineCompositeLegacyBreakdown,
-    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEvaluationRequest,
-    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
+    evaluate_timeline_render_plan, execute_cpu_output_boundary_rgba8,
+    execute_cpu_source_input_stage, execute_cpu_working_transform, CpuColorFrame,
+    CpuEncodedColorFrame, CpuSourceColorFrame, GpuCompositingBlockerReason,
+    GpuCompositingDiagnostics, LinearFloatSource, RenderColorStageDiagnostics,
+    RenderColorStageGpuBlockerBreakdown, RenderColorTransformDiagnostics,
+    RenderColorTransformDirection, RenderInputTransform, RenderOutputColorBoundary,
+    TimelineAdjustmentLayer, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
+    TimelineCompositeElement, TimelineCompositeLegacyBreakdown, TimelineCompositeOptions,
+    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
+    TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 #[cfg(test)]
 use mondrian_renderer::{
-    GpuNativeDecodedFrameImportSource, GpuNativeDecodedFrameTextureFormat,
+    execute_cpu_input_stage, GpuNativeDecodedFrameImportSource, GpuNativeDecodedFrameTextureFormat,
     TimelineCompositeColorPath, ViewerGpuExecutionLayer,
 };
 use mondrian_timeline::sequence::{
@@ -7096,7 +7097,7 @@ impl MediaPreviewFrame {
                     .saturating_mul(self.height as usize)
                     .saturating_mul(4)
                     .saturating_mul(std::mem::size_of::<f32>());
-                source.source.rgba().len().saturating_add(working_reservation)
+                source.source.retained_bytes().saturating_add(working_reservation)
             })
             .unwrap_or(0);
         linear_bytes.saturating_add(source_and_lazy_working_bytes)
@@ -7124,7 +7125,7 @@ impl MediaPreviewFrame {
 
     fn gpu_source(&self) -> Option<mondrian_renderer::ViewerGpuMediaSource> {
         self.gpu_source.as_ref().map(|source| mondrian_renderer::ViewerGpuMediaSource {
-            source: source.source.clone(),
+            source: Arc::clone(&source.source),
             input_transform: source.input_transform.clone(),
             decoder_residency: source.decoder_residency,
             decoder_handle_kind: source.decoder_handle_kind,
@@ -7165,7 +7166,7 @@ impl MediaPreviewFrame {
         let entry = source
             .working_cache
             .get_or_init(|| {
-                execute_cpu_input_stage(&source.source, &source.input_transform)
+                execute_cpu_source_input_stage(source.source.as_ref(), &source.input_transform)
                     .map(|output| MediaPreviewWorkingFrameCacheEntry {
                         frame: output.result.frame,
                         color_diagnostics: output.result.diagnostics,
@@ -7197,7 +7198,7 @@ struct MediaPreviewWorkingFrame {
 
 #[derive(Debug, Clone)]
 struct MediaPreviewGpuSourceFrame {
-    source: CpuEncodedColorFrame,
+    source: Arc<CpuSourceColorFrame>,
     input_transform: RenderInputTransform,
     decoder_residency: DecodedFrameResidency,
     decoder_handle_kind: Option<DecodedGpuFrameHandleKind>,
@@ -7229,9 +7230,9 @@ impl MediaPreviewNativeSourceFrame {
 
 impl MediaPreviewGpuSourceFrame {
     #[cfg(test)]
-    fn new(source: CpuEncodedColorFrame, input_transform: RenderInputTransform) -> Self {
+    fn new(source: impl Into<CpuSourceColorFrame>, input_transform: RenderInputTransform) -> Self {
         Self {
-            source,
+            source: Arc::new(source.into()),
             input_transform,
             decoder_residency: DecodedFrameResidency::CpuRgba,
             decoder_handle_kind: None,
@@ -7242,12 +7243,12 @@ impl MediaPreviewGpuSourceFrame {
     }
 
     fn from_decode_diagnostics(
-        source: CpuEncodedColorFrame,
+        source: impl Into<CpuSourceColorFrame>,
         input_transform: RenderInputTransform,
         diagnostics: PreviewDecodeDiagnostics,
     ) -> Self {
         Self {
-            source,
+            source: Arc::new(source.into()),
             input_transform,
             decoder_residency: diagnostics.decoded_frame_residency,
             decoder_handle_kind: diagnostics.gpu_frame_handle_kind,
@@ -9567,69 +9568,53 @@ fn decode_media_preview(
             let presentation_quality = preview_decode_presentation_quality(&decode_diagnostics);
             let width = frame.width;
             let height = frame.height;
-            let source =
-                LinearFloatSource::new(width, height, job.key.input_color_space, frame.into_data());
+            let source = LinearFloatSource::new_shared(
+                width,
+                height,
+                job.key.input_color_space,
+                frame.into_shared_data(),
+            );
             let input_transform = RenderInputTransform::to_working(
                 job.key.working_color_space,
                 job.key.tone_map,
                 job.key.engine.clone(),
             );
-            match execute_cpu_input_stage_float(&source, &input_transform) {
-                Ok(output) => MediaPreviewResult {
-                    key: job.key,
-                    frame: Some(MediaPreviewFrame {
-                        width,
-                        height,
-                        frame: Some(output.result.frame),
-                        gpu_source: None,
-                        native_source: None,
-                        signature,
-                        presentation_quality,
-                        decode_execution: AppUiPreviewDecodeExecutionSummary::from_path(
-                            decode_execution,
-                        ),
-                    }),
-                    error: None,
-                    failure_reason: None,
-                    generation: job.generation,
-                    priority,
-                    access_mode,
-                    queue_wait_us,
-                    decode_elapsed_us,
-                    completed_at,
-                    deadline_at,
-                    cancel_observed_elapsed_us: None,
-                    canceled: false,
-                    cancel_reason: None,
-                    decode_diagnostics: Some(decode_diagnostics),
-                    color_diagnostics: Some(output.result.diagnostics),
-                    color_stage_diagnostics: Some(output.stage_diagnostics),
-                    demand_identity,
-                    execution_id,
-                },
-                Err(error) => MediaPreviewResult {
-                    key: job.key,
+            let gpu_source = MediaPreviewGpuSourceFrame::from_decode_diagnostics(
+                source,
+                input_transform,
+                decode_diagnostics,
+            );
+            MediaPreviewResult {
+                key: job.key,
+                frame: Some(MediaPreviewFrame {
+                    width,
+                    height,
                     frame: None,
-                    error: Some(format!(
-                        "float preview input color transform failed: {error}"
-                    )),
-                    failure_reason: Some(MediaPreviewFailureReason::DecodeError),
-                    generation: job.generation,
-                    priority,
-                    access_mode,
-                    queue_wait_us,
-                    decode_elapsed_us,
-                    completed_at,
-                    deadline_at,
-                    cancel_observed_elapsed_us: None,
-                    canceled: false,
-                    cancel_reason: None,
-                    decode_diagnostics: Some(decode_diagnostics),
-                    color_diagnostics: None,
-                    color_stage_diagnostics: None,
-                    demand_identity,
-                    execution_id,
-                },
+                    gpu_source: Some(gpu_source),
+                    native_source: None,
+                    signature,
+                    presentation_quality,
+                    decode_execution: AppUiPreviewDecodeExecutionSummary::from_path(
+                        decode_execution,
+                    ),
+                }),
+                error: None,
+                failure_reason: None,
+                generation: job.generation,
+                priority,
+                access_mode,
+                queue_wait_us,
+                decode_elapsed_us,
+                completed_at,
+                deadline_at,
+                cancel_observed_elapsed_us: None,
+                canceled: false,
+                cancel_reason: None,
+                decode_diagnostics: Some(decode_diagnostics),
+                color_diagnostics: None,
+                color_stage_diagnostics: None,
+                demand_identity,
+                execution_id,
             }
         }
         Ok(PreviewDecodeOutcome::NativeGpuFrame(frame)) => {
@@ -16932,6 +16917,44 @@ mod tests {
             second.frame.rgba_f32().data,
             "cached working transform must preserve the exact CPU fallback frame"
         );
+    }
+
+    #[test]
+    fn media_preview_scene_linear_source_stays_gpu_eligible_and_lazily_caches_cpu_fallback() {
+        let samples = Arc::new(vec![-0.25, 0.18, 2.0, 1.0, 4.0, 0.5, -1.0, 0.25]);
+        let source =
+            LinearFloatSource::new_shared(2, 1, ColorSpace::LinearRec709, Arc::clone(&samples));
+        let input_transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let frame = MediaPreviewFrame {
+            width: 2,
+            height: 1,
+            frame: None,
+            gpu_source: Some(MediaPreviewGpuSourceFrame::new(source, input_transform)),
+            native_source: None,
+            signature: 43,
+            presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
+            decode_execution: AppUiPreviewDecodeExecutionSummary::from_path(
+                PreviewDecodeExecutionPath::SoftwareCpu,
+            ),
+        };
+
+        let gpu_source = frame.gpu_source().expect("scene-linear GPU source");
+        let CpuSourceColorFrame::LinearFloat(gpu_float) = gpu_source.source.as_ref() else {
+            panic!("scene-linear preview must retain a float GPU source");
+        };
+        assert!(Arc::ptr_eq(&gpu_float.data_shared(), &samples));
+        assert_eq!(frame.reserved_cpu_bytes(), 64);
+
+        let first = frame.working_frame().expect("first float CPU fallback");
+        let second = frame.working_frame().expect("cached float CPU fallback");
+        assert!(first.color_diagnostics.is_some());
+        assert!(second.color_diagnostics.is_none());
+        assert_eq!(first.frame.rgba_f32().data[0], [-0.25, 0.18, 2.0, 1.0]);
+        assert_eq!(first.frame.rgba_f32().data, second.frame.rgba_f32().data);
     }
 
     fn test_proxy_config(cache_dir: PathBuf) -> mondrian_media::ProxyConfig {

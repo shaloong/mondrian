@@ -20,7 +20,7 @@ use crate::{
     GpuNativeDecodedFrameImportBackend,
 };
 use crate::{
-    CpuColorFrame, CpuEncodedColorFrame, GpuColorFrameIdAllocator, GpuColorFrameResource,
+    CpuColorFrame, CpuSourceColorFrame, GpuColorFrameIdAllocator, GpuColorFrameResource,
     GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool, GpuNativeDecodedFrameImportContract,
     GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
     GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation, GpuVideoRange,
@@ -66,11 +66,11 @@ pub enum ViewerGpuExecutionLayer {
     },
 }
 
-/// Encoded CPU media source plus its exact GPU input transform contract.
+/// CPU media source plus its exact GPU input transform contract.
 #[derive(Debug, Clone)]
 pub struct ViewerGpuMediaSource {
-    /// CPU-decoded encoded RGBA source.
-    pub source: CpuEncodedColorFrame,
+    /// CPU-decoded RGBA8 or scene-linear float source.
+    pub source: Arc<CpuSourceColorFrame>,
     /// Source/import to timeline-working-space transform.
     pub input_transform: RenderInputTransform,
     /// Residency reported by the decoder boundary.

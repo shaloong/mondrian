@@ -128,8 +128,11 @@ When a cached media frame enters a CPU preview fallback, its source/import ->
 working-space transform may be lazily materialized once and reused by clones of
 that same media-frame cache entry. Encoded RGBA8 decode retains a
 `CpuEncodedColorFrame` for the GPU input-transform path. Scene-linear RGBA-f32
-decode instead enters through `LinearFloatSource` and preserves its CPU working
-frame without an RGBA8 round trip. The lazy CPU working frame is only a fallback
+decode instead retains a shared `LinearFloatSource`; the Viewer uploads it
+directly to `Rgba32Float` and executes the OCIO input stage on the GPU. Both
+variants use the same typed source cache, and only materialize a CPU working
+frame when software composition or GPU failure requires it. The lazy CPU
+working frame is only a fallback
 materialization cache and must not replace the source contract or become a
 separate color-interpretation path.
 Decode failures are also held in a bounded LRU key cache so repeated bad media
