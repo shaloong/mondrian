@@ -1999,10 +1999,8 @@ pub fn ocio_default_display_view() -> Option<(String, String)> {
 pub fn mondrian_standard_output_display_view(
     output: ColorSpace,
 ) -> Result<(String, String), String> {
-    let display = match output {
-        ColorSpace::Srgb => "sRGB - Display",
-        ColorSpace::Rec709 => "Rec.1886 Rec.709 - Display",
-        ColorSpace::DisplayP3 => "Display P3 - Display",
+    let display = mondrian_standard_output_display_name(output)?;
+    match output {
         ColorSpace::Rec2100Hlg => {
             return Err("Mondrian Standard HLG View is not available in package v1".to_owned());
         }
@@ -2011,12 +2009,8 @@ pub fn mondrian_standard_output_display_view(
                 "Mondrian Standard PQ 1000-nit View is not available in package v1".to_owned(),
             );
         }
-        unsupported => {
-            return Err(format!(
-                "Mondrian Standard has no rendering View for output target {unsupported:?}"
-            ));
-        }
-    };
+        _ => {}
+    }
 
     ensure_mondrian_default_ocio_loaded()?;
     let views = ocio_view_names(display);
@@ -2029,6 +2023,20 @@ pub fn mondrian_standard_output_display_view(
         display.to_owned(),
         MONDRIAN_STANDARD_SDR_VIEW_NAME.to_owned(),
     ))
+}
+
+/// Resolve the OCIO display identity paired with a Standard output target.
+pub fn mondrian_standard_output_display_name(output: ColorSpace) -> Result<&'static str, String> {
+    match output {
+        ColorSpace::Srgb => Ok("sRGB - Display"),
+        ColorSpace::Rec709 => Ok("Rec.1886 Rec.709 - Display"),
+        ColorSpace::DisplayP3 => Ok("Display P3 - Display"),
+        ColorSpace::Rec2100Hlg => Ok("Rec.2100-HLG - Display"),
+        ColorSpace::Rec2100Pq => Ok("Rec.2100-PQ - Display"),
+        unsupported => Err(format!(
+            "Mondrian Standard has no rendering View for output target {unsupported:?}"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -2485,6 +2493,16 @@ mod tests {
                 "Display P3 - Display".to_owned(),
                 MONDRIAN_STANDARD_SDR_VIEW_NAME.to_owned()
             )
+        );
+        assert_eq!(
+            mondrian_standard_output_display_name(ColorSpace::Rec2100Hlg)
+                .expect("HLG target display"),
+            "Rec.2100-HLG - Display"
+        );
+        assert_eq!(
+            mondrian_standard_output_display_name(ColorSpace::Rec2100Pq)
+                .expect("PQ target display"),
+            "Rec.2100-PQ - Display"
         );
         assert!(mondrian_standard_output_display_view(ColorSpace::Rec2100Hlg).is_err());
         assert!(mondrian_standard_output_display_view(ColorSpace::Rec2100Pq).is_err());

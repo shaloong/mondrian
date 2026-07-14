@@ -88,7 +88,8 @@ pub fn resolve_display_snapshot(
         monitor_hdr_supported,
     );
 
-    let (ocio_display, ocio_view, ocio_blocker) = resolve_ocio_display_view(policy);
+    let (ocio_display, ocio_view, ocio_blocker) =
+        resolve_ocio_display_view(policy, resolved_output_color_space);
 
     let mut blockers = compute_display_blockers(
         &monitor_profile_status,
@@ -381,6 +382,7 @@ fn resolve_output_color_space(
 /// Resolve the OCIO display/view pair from the currently loaded OCIO config.
 fn resolve_ocio_display_view(
     policy: &DisplayManagementPolicy,
+    output_color_space: ColorSpace,
 ) -> (Option<String>, Option<String>, Option<DisplayOutputBlocker>) {
     match &policy.monitor_profile {
         MonitorProfileReference::OcioDisplay { display } => {
@@ -396,9 +398,19 @@ fn resolve_ocio_display_view(
                 ),
             }
         }
-        _ => match mondrian_core::ocio_default_display_view() {
-            Some((display, view)) => (Some(display), Some(view), None),
-            None => (None, None, None),
+        _ => match mondrian_core::mondrian_standard_output_display_view(output_color_space) {
+            Ok((display, view)) => (Some(display), Some(view), None),
+            Err(_) => {
+                let display =
+                    mondrian_core::mondrian_standard_output_display_name(output_color_space)
+                        .ok()
+                        .map(str::to_owned);
+                (
+                    display.clone(),
+                    None,
+                    Some(DisplayOutputBlocker::OcioDisplayViewMissing { display, view: None }),
+                )
+            }
         },
     }
 }
@@ -545,6 +557,40 @@ mod tests {
             MonitorProfileStatus::NotRequested
         );
         assert_eq!(snapshot.hdr_status, HdrStatus::NotRequested);
+    }
+
+    #[test]
+    fn standard_display_view_follows_the_resolved_p3_output_target() {
+        let (display, view, blocker) =
+            resolve_ocio_display_view(&default_policy(), ColorSpace::DisplayP3);
+
+        assert_eq!(display.as_deref(), Some("Display P3 - Display"));
+        assert_eq!(view.as_deref(), Some("Mondrian Standard SDR v1"));
+        assert!(blocker.is_none());
+    }
+
+    #[test]
+    fn unfinished_standard_hdr_view_fails_closed_instead_of_using_srgb() {
+        for output in [ColorSpace::Rec2100Pq, ColorSpace::Rec2100Hlg] {
+            let (display, view, blocker) = resolve_ocio_display_view(&default_policy(), output);
+
+            assert_eq!(
+                display.as_deref(),
+                Some(
+                    mondrian_core::mondrian_standard_output_display_name(output)
+                        .expect("HDR target has a stable display identity")
+                )
+            );
+            assert!(view.is_none());
+            assert!(matches!(
+                blocker,
+                Some(DisplayOutputBlocker::OcioDisplayViewMissing {
+                    display: Some(ref display),
+                    view: None,
+                }) if display == mondrian_core::mondrian_standard_output_display_name(output)
+                    .expect("HDR target has a stable display identity")
+            ));
+        }
     }
 
     #[test]

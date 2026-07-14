@@ -34,7 +34,11 @@ The same Standard SDR formation is registered against sRGB, Rec.1886 Rec.709,
 Gamma 2.2 Rec.709, and Display P3 display color spaces. Output-target resolution
 is explicit: sRGB, Rec.709, and P3 select their matching display rather than the
 config's global default. Until a versioned Standard HLG/PQ View is present, an
-HDR tone-map request fails closed and must never borrow an inactive ACES View.
+HDR tone-map request retains the matching Rec.2100 HLG/PQ display identity but
+fails closed with no resolved View; it must never borrow the sRGB Standard View
+or an inactive ACES View. Display probing and timeline output planning share
+this target-aware resolver so diagnostics cannot report a different View than
+the render boundary.
 
 Display-referred SDR projects do not invoke this scene View merely because it
 exists: their output boundary remains direct colorimetric OCIO conversion.

@@ -4747,13 +4747,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gpu_pq_display_view_meets_delta_e_itp_budget_on_real_wgpu_device() {
+    async fn gpu_explicit_aces_pq_view_meets_delta_e_itp_budget_on_real_wgpu_device() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let Ok(context) = GpuContext::new().await else {
             eprintln!("skipping real wgpu PQ display/view accuracy test: no GPU adapter available");
             return;
         };
         let frame = cpu_working_frame();
+        // This verifies generic OCIO CPU/GPU parity for an explicitly selected
+        // ACES view. It is not the Mondrian Standard HDR product contract.
         let boundary = RenderOutputColorBoundary::display_view(
             ColorSpace::Rec2100Pq,
             "Rec.2100-PQ - Display",

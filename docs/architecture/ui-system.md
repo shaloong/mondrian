@@ -168,6 +168,12 @@ cannot silently reuse the SDR surface path. Resize, scale-factor, and move
 events refresh that contract; any change invalidates the external GPU viewer
 frame so monitor/output changes cannot reuse a texture produced for the previous
 display target.
+The display snapshot resolves Mondrian Standard's OCIO display/view from the
+effective output color space, not from the config's global default: sRGB,
+Rec.709, and Display P3 therefore retain distinct display identities. A known
+PQ or HLG target also retains its target display identity, but validation fails
+closed with a missing-view blocker until that versioned Standard HDR View is
+implemented; the app must not substitute the sRGB Standard View or an ACES View.
 Viewer layout exposes a pixel-aligned `ViewerPresentationGeometry` after the
 dirty widget tree has been refreshed. It separates the complete sequence canvas
 from its visible intersection and derives a stable
