@@ -1289,6 +1289,23 @@ colorspaces:
         - !<MatrixTransform> {matrix: [2.02490528596679, -0.689069761034766, -0.335835524932019, 0, -0.183597032256178, 1.28950620775902, -0.105909175502841, 0, 0.00905856112234766, -0.0592796840575522, 1.0502211229352, 0, 0, 0, 0, 1]}
 
   - !<ColorSpace>
+    name: Camera Rec.2020
+    aliases: [camera_rec2020, rec2020_camera]
+    family: Utility/ITU
+    equalitygroup: ""
+    bitdepth: 32f
+    description: Convert ACES2065-1 to BT.2020 primaries with the BT.2020 SDR camera transfer
+    isdata: false
+    categories: [file-io]
+    encoding: sdr-video
+    allocation: uniform
+    from_scene_reference: !<GroupTransform>
+      name: AP0 to Camera Rec.2020
+      children:
+        - !<MatrixTransform> {matrix: [1.49040952054172, -0.26617091926613, -0.224238601275593, 0, -0.0801674998722558, 1.18216712109757, -0.10199962122531, 0, 0.00322763119162216, -0.0347764757450576, 1.03154884455344, 0, 0, 0, 0, 1]}
+        - !<ExponentWithLinearTransform> {gamma: 2.22222222222222, offset: 0.099, direction: inverse}
+
+  - !<ColorSpace>
     name: Linear Rec.2020
     aliases: [lin_rec2020, lin_rec2020_scene, Utility - Linear - Rec.2020]
     interop_id: lin_rec2020_scene

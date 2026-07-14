@@ -435,7 +435,7 @@ pub enum MondrianStandardConfigId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MondrianStandardConfigDigest {
     /// Digest of `mondrian_default_ocio_v1.ocio`.
-    #[serde(rename = "d68a17b25b54390aab33b30aa32d1b1b37420f9132e1b188e57dac376a8bed42")]
+    #[serde(rename = "3d2612a216abab75491a7b45db82f0d9e14aee6a51aaf2e35be0216e9e28569f")]
     V1,
 }
 
@@ -443,7 +443,7 @@ pub enum MondrianStandardConfigDigest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MondrianStandardPackageDigest {
     /// Digest of Standard v1's config plus every embedded resource.
-    #[serde(rename = "d6f4bf47c5fc4c25411855a89e89a608924a3e22eb2e2994ae458d96de3a6de8")]
+    #[serde(rename = "11e381b7e91e3ed0d3a17155829df9fed7644bfe45b34df6bbb3c2205c342e8b")]
     V1,
 }
 
@@ -508,12 +508,12 @@ impl MondrianStandardPackageIdentity {
 
     /// Exact SHA-256 digest of the embedded OCIO config text.
     pub const fn config_sha256(self) -> &'static str {
-        "d68a17b25b54390aab33b30aa32d1b1b37420f9132e1b188e57dac376a8bed42"
+        "3d2612a216abab75491a7b45db82f0d9e14aee6a51aaf2e35be0216e9e28569f"
     }
 
     /// Exact SHA-256 digest of the config and all embedded resources.
     pub const fn package_sha256(self) -> &'static str {
-        "d6f4bf47c5fc4c25411855a89e89a608924a3e22eb2e2994ae458d96de3a6de8"
+        "11e381b7e91e3ed0d3a17155829df9fed7644bfe45b34df6bbb3c2205c342e8b"
     }
 
     /// Versioned working-space identity pinned by this package.

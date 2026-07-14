@@ -193,6 +193,13 @@ these identities instead of being approximated as Rec.709. The embedded OCIO
 config owns their source-to-working primary and transfer conversion, and its
 full CPU/GPU processor-matrix validation includes both identities.
 
+BT.2020 SDR is likewise an encoded boundary identity, not the Standard working
+space. `ColorSpace::Rec2020` resolves to `Camera Rec.2020` and decodes the
+BT.2020/BT.709-family SDR camera transfer before compositing;
+`WorkingColorSpace::LinearRec2020` alone resolves to `Linear Rec.2020`. A
+numeric regression pins code value 0.5 near 0.26 linear while preserving alpha,
+so equal primaries cannot collapse encoded and linear processor endpoints.
+
 ## Working Space
 
 `WorkingColorSpace` is the linear-light identity used by rendering, effects, and

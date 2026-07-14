@@ -307,7 +307,7 @@ const MONDRIAN_DEFAULT_OCIO_COLOR_SPACES: [MondrianDefaultOcioColorSpace; 20] = 
     },
     MondrianDefaultOcioColorSpace {
         color_space: ColorSpace::Rec2020,
-        ocio_name: "Linear Rec.2020",
+        ocio_name: "Camera Rec.2020",
     },
     MondrianDefaultOcioColorSpace {
         color_space: ColorSpace::DisplayP3,
@@ -537,7 +537,7 @@ fn update_mondrian_default_processor_fingerprint(
     config: &Config,
     contract: MondrianDefaultOcioContract,
 ) -> Result<(), String> {
-    let working_name = ocio_color_space_name(ColorSpace::Rec2020);
+    let working_name = ocio_working_color_space_name(contract.working_space);
 
     for mapped in contract.color_spaces {
         let source_name = ocio_color_space_name(mapped.color_space);
@@ -1315,7 +1315,7 @@ pub fn ocio_color_space_name(cs: ColorSpace) -> &'static str {
         ColorSpace::Rec709 => "Camera Rec.709",
         ColorSpace::Rec601Pal => "Camera Rec.601 PAL",
         ColorSpace::Rec601Ntsc => "Camera Rec.601 NTSC",
-        ColorSpace::Rec2020 => "Linear Rec.2020",
+        ColorSpace::Rec2020 => "Camera Rec.2020",
         ColorSpace::Rec2100Pq => "Rec.2100-PQ - Display",
         ColorSpace::Rec2100Hlg => "Rec.2100-HLG - Display",
         ColorSpace::DisplayP3 => "sRGB Encoded P3-D65",
@@ -2049,6 +2049,30 @@ mod tests {
             config.role_color_space("scene_linear").as_deref(),
             Some(contract.scene_linear_role)
         );
+    }
+
+    #[test]
+    fn encoded_rec2020_is_not_aliased_to_linear_rec2020_working_space() {
+        let encoded_name = ocio_color_space_name(ColorSpace::Rec2020);
+        let linear_name = ocio_working_color_space_name(WorkingColorSpace::LinearRec2020);
+        assert_ne!(encoded_name, linear_name);
+
+        let config = Config::from_stream(mondrian_default_ocio_config_text())
+            .expect("embedded Mondrian OCIO config should parse");
+        let processor = config
+            .processor(encoded_name, linear_name)
+            .expect("encoded Rec.2020 to linear Rec.2020 processor");
+        let cpu = processor.default_cpu_processor().expect("encoded Rec.2020 CPU processor");
+        let mut mid_gray = [0.5, 0.5, 0.5, 0.375];
+        apply_cpu_processor_float(&cpu, &mut mid_gray);
+
+        for channel in &mid_gray[..3] {
+            assert!(
+                (0.24..0.28).contains(channel),
+                "BT.2020 SDR code value 0.5 must decode near 0.26 linear, got {channel}"
+            );
+        }
+        assert_eq!(mid_gray[3], 0.375, "OCIO must preserve alpha");
     }
 
     #[test]
