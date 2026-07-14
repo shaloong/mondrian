@@ -28,9 +28,32 @@ pub(crate) fn ensure_ffmpeg_initialized(path: &Path) -> Result<()> {
     }
 }
 
-/// Verify that the linked FFmpeg runtime can be initialized by a packaged app.
+/// Verify initialization and required decoders in the packaged FFmpeg runtime.
 pub fn verify_ffmpeg_runtime() -> Result<()> {
-    ensure_ffmpeg_initialized(Path::new("<packaged-runtime>"))
+    let runtime_path = Path::new("<packaged-runtime>");
+    ensure_ffmpeg_initialized(runtime_path)?;
+    verify_required_decoders(runtime_path)
+}
+
+fn verify_required_decoders(path: &Path) -> Result<()> {
+    let required = [(c"png", "PNG"), (c"exr", "OpenEXR")];
+    let missing = required
+        .into_iter()
+        .filter_map(|(codec_name, display_name)| {
+            let decoder = unsafe { ffmpeg::ffi::avcodec_find_decoder_by_name(codec_name.as_ptr()) };
+            decoder.is_null().then_some(display_name)
+        })
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(MondrianError::MediaOpen {
+        path: path.display().to_string(),
+        reason: format!(
+            "linked FFmpeg runtime is missing required decoders: {}; Windows builds must install vcpkg ffmpeg[zlib]",
+            missing.join(", ")
+        ),
+    })
 }
 
 pub(crate) fn ffmpeg_log_level_from_env_value(value: Option<String>) -> i32 {
@@ -73,5 +96,10 @@ mod tests {
             ffmpeg_log_level_from_env_value(Some("unknown".to_owned())),
             ffmpeg::ffi::AV_LOG_FATAL
         );
+    }
+
+    #[test]
+    fn packaged_runtime_requires_png_and_openexr_decoders() {
+        verify_ffmpeg_runtime().expect("packaged FFmpeg decoder contract");
     }
 }

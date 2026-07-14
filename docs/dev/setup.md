@@ -19,7 +19,11 @@ Mondrian depends on:
 - cpal audio backend
 - OCIO runtime support through `ocio-rs`
 
-On Windows, install a toolchain capable of building native Rust crates and ensure FFmpeg development libraries are discoverable by the build.
+On Windows, install a toolchain capable of building native Rust crates and use
+`vcpkg install "ffmpeg[zlib]:x64-windows" --recurse`. The `zlib` feature is
+required by FFmpeg's PNG and EXR decoders; a default `ffmpeg:x64-windows`
+install is not a supported Mondrian runtime. Ensure those development libraries
+are discoverable by the build.
 
 ## Optional Tools
 

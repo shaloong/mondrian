@@ -171,8 +171,9 @@ jobs:
             C:\vcpkg\installed
             C:\vcpkg\packages
             C:\vcpkg\triplets\community
-          key: ${{ runner.os }}-vcpkg-ffmpeg-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-vcpkg-ffmpeg-zlib-v1-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
+            ${{ runner.os }}-vcpkg-ffmpeg-zlib-v1-
             ${{ runner.os }}-vcpkg-ffmpeg-
 
       - name: 初始化 vcpkg (Windows)
@@ -191,13 +192,10 @@ jobs:
           $cacheHit = '${{ steps.vcpkg-cache.outputs.cache-hit }}' -eq 'true'
           Write-Host "Cache hit: $cacheHit"
           
-          $ffmpegInstall = 'C:\vcpkg\installed\x64-windows\lib\pkgconfig\libavcodec.pc'
-          if (Test-Path $ffmpegInstall) {
-            Write-Host '✓ FFmpeg already cached and installed, skipping vcpkg install'
-          } else {
-            Write-Host 'Installing FFmpeg via vcpkg (no binary cache available)...'
-            & C:\vcpkg\vcpkg.exe install ffmpeg:x64-windows
-          }
+          # Idempotent install also upgrades an older cache that lacks zlib-backed
+          # PNG/EXR decoders. Checking only libavcodec.pc is insufficient because
+          # that file does not encode the selected FFmpeg component set.
+          & C:\vcpkg\vcpkg.exe install 'ffmpeg[zlib]:x64-windows' --recurse
           
           $pkgConf = 'C:\vcpkg\installed\x64-windows\tools\pkgconf\pkgconf.exe'
           "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append

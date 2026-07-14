@@ -1199,6 +1199,11 @@ during aggressive seek/scrub, must not leak directly to the user terminal as the
 primary diagnostic channel. Developers can opt into noisier FFmpeg output with
 `MONDRIAN_FFMPEG_LOG_LEVEL`; product health should use structured decode
 diagnostics and explicit frame failure/cancellation reasons instead.
+Packaged runtime verification also checks FFmpeg's public decoder registry for
+PNG and OpenEXR. Windows CI, release, and developer setup must install
+`ffmpeg[zlib]`; a `libavcodec.pc` file alone is not evidence that these decoders
+were compiled. The vcpkg step is idempotent and uses `--recurse` so an older
+cache with the default component set is upgraded instead of silently reused.
 Preview path resolution already probes the source/proxy file identity; app
 workers must forward that `PreviewFileFingerprint` into the media decode
 boundary instead of making the decode worker repeat the filesystem metadata
