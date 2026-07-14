@@ -61,6 +61,10 @@ matches the pinned roles/display contract, resolves
 every Mondrian color-space mapping, builds CPU processors for the full contract
 color-space matrix, and extracts GPU shaders for every non-identity
 color-space transform plus every supported display/view transform.
+Selecting an explicit OCIO display while Standard is active still resolves the
+versioned Standard View registered under that display. It never adopts the
+display's config-default ACES View; a display without a Standard View fails
+closed.
 
 ## Color-Science Validation Primitives
 
@@ -119,6 +123,10 @@ substitution of another config, approximate LUT, or non-conformant native conver
 The `$OCIO` environment source is intentionally fail-closed: if the variable is
 unset or points to a missing file, Mondrian reports that selected source as
 invalid instead of scanning machine-specific standard paths.
+`ColorEngine::default_display_view()` is the engine-owned resolution boundary:
+it loads the exact Standard, ACES preset, or Custom OCIO source before reading
+the process-global OCIO default. Product callers must not read a global default
+and then infer which engine it belongs to.
 
 ## OCIO Global State Management
 

@@ -533,17 +533,14 @@ fn resolve_delivery_view_policy(
     match policy {
         ExportDeliveryViewPolicy::None => Ok(None),
         ExportDeliveryViewPolicy::OcioConfigDefault => {
-            engine
-                .ensure_loaded()
+            let (display, view) = engine
+                .default_display_view()
                 .map_err(|err| format!("OCIO config not loaded for export delivery view: {err}"))?;
-            let resolved = mondrian_core::ocio_default_display_view().map(|(display, view)| {
-                ResolvedExportDeliveryView {
-                    display,
-                    view,
-                    source: ExportDeliveryViewSource::ConfigDefault,
-                }
-            });
-            Ok(resolved)
+            Ok(Some(ResolvedExportDeliveryView {
+                display,
+                view,
+                source: ExportDeliveryViewSource::ConfigDefault,
+            }))
         }
         ExportDeliveryViewPolicy::OcioDisplayView { display, view } => {
             validate_ocio_display_view(engine, display, view)?;
@@ -886,11 +883,7 @@ impl SequenceSettings {
                     mondrian_core::mondrian_standard_output_display_view(output_color_space)
                 }
                 ColorEngine::Aces { .. } | ColorEngine::CustomOcio { .. } => {
-                    engine.ensure_loaded().and_then(|()| {
-                        mondrian_core::ocio_default_display_view().ok_or_else(|| {
-                            format!("{} config has no default display/view", engine.name())
-                        })
-                    })
+                    engine.default_display_view()
                 }
             };
             match resolved {

@@ -174,6 +174,14 @@ Rec.709, and Display P3 therefore retain distinct display identities. A known
 PQ or HLG target also retains its target display identity, but validation fails
 closed with a missing-view blocker until that versioned Standard HDR View is
 implemented; the app must not substitute the sRGB Standard View or an ACES View.
+Window display resolution is computed from both the resolved `ColorEngine` and
+display policy, and the session retains both identities. ACES and Custom OCIO
+defaults are resolved only after their exact engine
+config has loaded, and changing the engine alone refreshes the display contract
+and invalidates display-dependent GPU preview state. A failed custom config may
+not reuse whichever Standard or ACES config happened to be globally current.
+An explicit display selected under Standard still resolves the versioned
+Standard View under that display; it never inherits that display's ACES default.
 Viewer layout exposes a pixel-aligned `ViewerPresentationGeometry` after the
 dirty widget tree has been refreshed. It separates the complete sequence canvas
 from its visible intersection and derives a stable

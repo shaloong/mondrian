@@ -2012,6 +2012,11 @@ pub fn mondrian_standard_output_display_view(
         _ => {}
     }
 
+    mondrian_standard_display_view(display)
+}
+
+/// Resolve Mondrian Standard's versioned View for an explicit OCIO display.
+pub fn mondrian_standard_display_view(display: &str) -> Result<(String, String), String> {
     ensure_mondrian_default_ocio_loaded()?;
     let views = ocio_view_names(display);
     if !views.iter().any(|view| view == MONDRIAN_STANDARD_SDR_VIEW_NAME) {
@@ -2494,6 +2499,14 @@ mod tests {
                 MONDRIAN_STANDARD_SDR_VIEW_NAME.to_owned()
             )
         );
+        assert_eq!(
+            mondrian_standard_display_view("Display P3 - Display").expect("explicit P3 display"),
+            (
+                "Display P3 - Display".to_owned(),
+                MONDRIAN_STANDARD_SDR_VIEW_NAME.to_owned()
+            )
+        );
+        assert!(mondrian_standard_display_view("Rec.2100-PQ - Display").is_err());
         assert_eq!(
             mondrian_standard_output_display_name(ColorSpace::Rec2100Hlg)
                 .expect("HLG target display"),

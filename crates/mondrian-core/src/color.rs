@@ -52,6 +52,13 @@ impl ColorEngine {
         }
     }
 
+    /// Load this engine's exact OCIO config and resolve its default display/view.
+    pub fn default_display_view(&self) -> Result<(String, String), String> {
+        self.ensure_loaded()?;
+        crate::ocio::ocio_default_display_view()
+            .ok_or_else(|| format!("{} config has no default display/view", self.name()))
+    }
+
     /// Human-readable name for diagnostics / UI.
     pub fn name(&self) -> &'static str {
         match self {

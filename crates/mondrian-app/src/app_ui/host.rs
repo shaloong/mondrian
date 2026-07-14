@@ -202,23 +202,35 @@ impl AppUiHost {
         self.app_state.borrow()
     }
 
-    /// Get the resolved display management policy for the current sequence/project.
+    /// Get the resolved color engine and display policy for the current sequence/project.
     ///
     /// Applies the inheritance model: if the sequence inherits from project,
-    /// returns the project-level policy; otherwise returns the sequence-level policy.
-    pub(crate) fn resolved_display_management_policy(
+    /// returns the project-level pair; otherwise returns the sequence-level pair.
+    pub(crate) fn resolved_display_color_management(
         &self,
-    ) -> mondrian_core::color_models::DisplayManagementPolicy {
+    ) -> (
+        mondrian_core::ColorEngine,
+        mondrian_core::color_models::DisplayManagementPolicy,
+    ) {
         let state = self.app_state.borrow();
         let project_cm = &state.project_settings.color_management;
         if let Some(sequence) = &state.sequence {
             if sequence.settings.color_management.inherit {
-                project_cm.display_management.clone()
+                (
+                    project_cm.engine.clone(),
+                    project_cm.display_management.clone(),
+                )
             } else {
-                sequence.settings.color_management.display_management.clone()
+                (
+                    sequence.settings.color_management.engine.clone(),
+                    sequence.settings.color_management.display_management.clone(),
+                )
             }
         } else {
-            project_cm.display_management.clone()
+            (
+                project_cm.engine.clone(),
+                project_cm.display_management.clone(),
+            )
         }
     }
 

@@ -11,7 +11,7 @@ use mondrian_core::color_models::{DisplayManagementPolicy, MonitorProfileReferen
 use mondrian_core::display_calibration::DisplayCalibrationLut3d;
 use mondrian_core::display_contract::*;
 use mondrian_core::display_probe::{compute_display_blockers, resolve_hdr_status};
-use mondrian_core::types::ColorSpace;
+use mondrian_core::types::{ColorEngine, ColorSpace};
 #[cfg(not(test))]
 use mondrian_platform::{DisplayHdrProbe, DisplayProfileProbe, SystemPlatformService};
 use mondrian_platform::{
@@ -47,6 +47,7 @@ pub fn resolve_display_snapshot(
     surface_hdr_mode_str: &str,
     supported_surface_color_spaces: &[wgpu::SurfaceColorSpace],
     display_hdr_info: wgpu::DisplayHdrInfo,
+    engine: &ColorEngine,
     policy: &DisplayManagementPolicy,
     output_color_space: ColorSpace,
     refresh_reason: &str,
@@ -89,7 +90,7 @@ pub fn resolve_display_snapshot(
     );
 
     let (ocio_display, ocio_view, ocio_blocker) =
-        resolve_ocio_display_view(policy, resolved_output_color_space);
+        resolve_ocio_display_view(engine, policy, resolved_output_color_space);
 
     let mut blockers = compute_display_blockers(
         &monitor_profile_status,
@@ -168,6 +169,7 @@ fn generate_display_snapshot(
         surface_hdr_mode_str,
         supported_surface_color_spaces,
         display_hdr_info,
+        &ColorEngine::mondrian_standard(),
         policy,
         output_color_space,
         refresh_reason,
@@ -379,40 +381,62 @@ fn resolve_output_color_space(
     }
 }
 
-/// Resolve the OCIO display/view pair from the currently loaded OCIO config.
+/// Resolve the OCIO display/view pair from the exact selected color engine.
 fn resolve_ocio_display_view(
+    engine: &ColorEngine,
     policy: &DisplayManagementPolicy,
     output_color_space: ColorSpace,
 ) -> (Option<String>, Option<String>, Option<DisplayOutputBlocker>) {
     match &policy.monitor_profile {
-        MonitorProfileReference::OcioDisplay { display } => {
-            match mondrian_core::ocio_default_view_for_display(display) {
-                Some(view) => (Some(display.clone()), Some(view), None),
-                None => (
-                    None,
-                    None,
-                    Some(DisplayOutputBlocker::OcioDisplayViewMissing {
-                        display: Some(display.clone()),
-                        view: None,
-                    }),
-                ),
+        MonitorProfileReference::OcioDisplay { display } => match engine {
+            ColorEngine::MondrianStandard { .. } => {
+                match mondrian_core::mondrian_standard_display_view(display) {
+                    Ok((display, view)) => (Some(display), Some(view), None),
+                    Err(_) => unresolved_ocio_display_view(Some(display.clone())),
+                }
             }
-        }
-        _ => match mondrian_core::mondrian_standard_output_display_view(output_color_space) {
-            Ok((display, view)) => (Some(display), Some(view), None),
-            Err(_) => {
-                let display =
-                    mondrian_core::mondrian_standard_output_display_name(output_color_space)
+            ColorEngine::Aces { .. } | ColorEngine::CustomOcio { .. } => {
+                if engine.ensure_loaded().is_err() {
+                    return unresolved_ocio_display_view(Some(display.clone()));
+                }
+                match mondrian_core::ocio_default_view_for_display(display) {
+                    Some(view) => (Some(display.clone()), Some(view), None),
+                    None => unresolved_ocio_display_view(Some(display.clone())),
+                }
+            }
+        },
+        _ => match engine {
+            ColorEngine::MondrianStandard { .. } => {
+                match mondrian_core::mondrian_standard_output_display_view(output_color_space) {
+                    Ok((display, view)) => (Some(display), Some(view), None),
+                    Err(_) => {
+                        let display = mondrian_core::mondrian_standard_output_display_name(
+                            output_color_space,
+                        )
                         .ok()
                         .map(str::to_owned);
-                (
-                    display.clone(),
-                    None,
-                    Some(DisplayOutputBlocker::OcioDisplayViewMissing { display, view: None }),
-                )
+                        unresolved_ocio_display_view(display)
+                    }
+                }
+            }
+            ColorEngine::Aces { .. } | ColorEngine::CustomOcio { .. } => {
+                match engine.default_display_view() {
+                    Ok((display, view)) => (Some(display), Some(view), None),
+                    Err(_) => unresolved_ocio_display_view(None),
+                }
             }
         },
     }
+}
+
+fn unresolved_ocio_display_view(
+    display: Option<String>,
+) -> (Option<String>, Option<String>, Option<DisplayOutputBlocker>) {
+    (
+        display.clone(),
+        None,
+        Some(DisplayOutputBlocker::OcioDisplayViewMissing { display, view: None }),
+    )
 }
 
 /// Compute non-blocking display warnings from resolved statuses.
@@ -561,8 +585,30 @@ mod tests {
 
     #[test]
     fn standard_display_view_follows_the_resolved_p3_output_target() {
-        let (display, view, blocker) =
-            resolve_ocio_display_view(&default_policy(), ColorSpace::DisplayP3);
+        let (display, view, blocker) = resolve_ocio_display_view(
+            &ColorEngine::mondrian_standard(),
+            &default_policy(),
+            ColorSpace::DisplayP3,
+        );
+
+        assert_eq!(display.as_deref(), Some("Display P3 - Display"));
+        assert_eq!(view.as_deref(), Some("Mondrian Standard SDR v1"));
+        assert!(blocker.is_none());
+    }
+
+    #[test]
+    fn explicit_standard_display_cannot_select_an_aces_default_view() {
+        let policy = DisplayManagementPolicy {
+            monitor_profile: MonitorProfileReference::OcioDisplay {
+                display: "Display P3 - Display".to_owned(),
+            },
+            ..default_policy()
+        };
+        let (display, view, blocker) = resolve_ocio_display_view(
+            &ColorEngine::mondrian_standard(),
+            &policy,
+            ColorSpace::DisplayP3,
+        );
 
         assert_eq!(display.as_deref(), Some("Display P3 - Display"));
         assert_eq!(view.as_deref(), Some("Mondrian Standard SDR v1"));
@@ -572,7 +618,11 @@ mod tests {
     #[test]
     fn unfinished_standard_hdr_view_fails_closed_instead_of_using_srgb() {
         for output in [ColorSpace::Rec2100Pq, ColorSpace::Rec2100Hlg] {
-            let (display, view, blocker) = resolve_ocio_display_view(&default_policy(), output);
+            let (display, view, blocker) = resolve_ocio_display_view(
+                &ColorEngine::mondrian_standard(),
+                &default_policy(),
+                output,
+            );
 
             assert_eq!(
                 display.as_deref(),
@@ -591,6 +641,24 @@ mod tests {
                     .expect("HDR target has a stable display identity")
             ));
         }
+    }
+
+    #[test]
+    fn unavailable_custom_engine_does_not_reuse_the_loaded_standard_view() {
+        let engine = ColorEngine::CustomOcio {
+            source: mondrian_core::OcioConfigSource::Path {
+                path: PathBuf::from("missing-custom-display-config.ocio"),
+            },
+        };
+        let (display, view, blocker) =
+            resolve_ocio_display_view(&engine, &default_policy(), ColorSpace::Rec709);
+
+        assert!(display.is_none());
+        assert!(view.is_none());
+        assert!(matches!(
+            blocker,
+            Some(DisplayOutputBlocker::OcioDisplayViewMissing { display: None, view: None })
+        ));
     }
 
     #[test]

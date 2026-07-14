@@ -1293,6 +1293,7 @@ struct AppUiWindowSession {
     display_output_contract: AppUiDisplayOutputContract,
     display_snapshot: Option<mondrian_core::display_contract::DisplayOutputSnapshot>,
     display_calibration: Option<Arc<mondrian_core::display_calibration::DisplayCalibrationLut3d>>,
+    color_engine: mondrian_core::ColorEngine,
     display_management_policy: mondrian_core::color_models::DisplayManagementPolicy,
     frame_renderer: AppUiFrameRenderer,
     renderer_queue: wgpu::Queue,
@@ -3824,7 +3825,7 @@ fn refresh_display_output_contract(
 
     let renderer_rebuilt = contract_requires_invalidation
         && display_output_contract_requires_renderer_rebuild(&previous, &next);
-    let display_management_policy = host.resolved_display_management_policy();
+    let (color_engine, display_management_policy) = host.resolved_display_color_management();
 
     let reason_str = format!("{reason:?}");
     let previous_display_name = previous.display_target.name.clone();
@@ -3840,6 +3841,7 @@ fn refresh_display_output_contract(
         &format!("{:?}", next.surface_color.hdr_mode),
         &next.supported_surface_color_spaces_for_selected_format(),
         next.display_hdr_info.clone(),
+        &color_engine,
         &display_management_policy,
         surface_color_space_to_color_space(next.surface_color.color_space),
         &reason_str,
@@ -3867,6 +3869,7 @@ fn refresh_display_output_contract(
     session.display_snapshot = Some(snapshot);
     session.display_calibration = display_resolution.calibration;
     host.set_display_output_snapshot(session.display_snapshot.as_ref());
+    session.color_engine = color_engine;
     session.display_management_policy = display_management_policy;
 
     session.viewer_gpu_output_telemetry.record_display_contract_refresh(
@@ -3955,7 +3958,7 @@ impl AppUiWindowSession {
         let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
         TreeWalker::layout(host.active_root_mut(), bounds);
 
-        let display_management_policy = host.resolved_display_management_policy();
+        let (color_engine, display_management_policy) = host.resolved_display_color_management();
         let initial_display_resolution = super::display_probe_impl::resolve_display_snapshot(
             display_output_contract.display_target.name.clone(),
             display_output_contract.display_target.position,
@@ -3966,6 +3969,7 @@ impl AppUiWindowSession {
             &format!("{:?}", display_output_contract.surface_color.hdr_mode),
             &display_output_contract.supported_surface_color_spaces_for_selected_format(),
             display_output_contract.display_hdr_info.clone(),
+            &color_engine,
             &display_management_policy,
             surface_color_space_to_color_space(display_output_contract.surface_color.color_space),
             "Startup",
@@ -3985,6 +3989,7 @@ impl AppUiWindowSession {
             display_output_contract,
             display_snapshot: Some(initial_snapshot),
             display_calibration: initial_display_resolution.calibration,
+            color_engine,
             display_management_policy,
             frame_renderer,
             renderer_queue: queue.clone(),
@@ -4033,6 +4038,7 @@ fn drain_actions_and_sync_window_session(
     session: &mut AppUiWindowSession,
 ) {
     let stage_started = Instant::now();
+    let previous_color_engine = session.color_engine.clone();
     let previous_display_policy = session.display_management_policy.clone();
     let commands =
         host.drain_pending_actions(pending_actions, session.current_bounds.get(), platform);
@@ -4042,8 +4048,13 @@ fn drain_actions_and_sync_window_session(
     if should_sync_window {
         sync_window_session_role(host, elwt, instance, adapter, device, session);
         if session.role == AppUiWindowRole::Workspace {
-            let next_display_policy = host.resolved_display_management_policy();
-            if previous_display_policy != next_display_policy {
+            let (next_color_engine, next_display_policy) = host.resolved_display_color_management();
+            if display_color_management_changed(
+                &previous_color_engine,
+                &previous_display_policy,
+                &next_color_engine,
+                &next_display_policy,
+            ) {
                 refresh_display_output_contract(
                     DisplayOutputContractRefreshReason::DisplayPolicyChanged,
                     adapter,
@@ -4057,6 +4068,15 @@ fn drain_actions_and_sync_window_session(
     session
         .event_loop_telemetry
         .record_stage_duration(AppUiEventLoopStage::DrainActions, stage_started.elapsed());
+}
+
+fn display_color_management_changed(
+    previous_engine: &mondrian_core::ColorEngine,
+    previous_policy: &mondrian_core::color_models::DisplayManagementPolicy,
+    next_engine: &mondrian_core::ColorEngine,
+    next_policy: &mondrian_core::color_models::DisplayManagementPolicy,
+) -> bool {
+    previous_engine != next_engine || previous_policy != next_policy
 }
 
 fn shell_commands_should_sync_window_session(commands: AppUiShellCommands) -> bool {
@@ -4372,6 +4392,19 @@ mod tests {
     };
     use mondrian_ui_core::widget::{EventContext, PaintContext};
     use mondrian_ui_core::Widget;
+
+    #[test]
+    fn changing_only_the_color_engine_refreshes_display_management() {
+        let policy = mondrian_core::color_models::DisplayManagementPolicy::default();
+        assert!(display_color_management_changed(
+            &mondrian_core::ColorEngine::mondrian_standard(),
+            &policy,
+            &mondrian_core::ColorEngine::Aces {
+                preset: mondrian_core::AcesConfigPreset::default(),
+            },
+            &policy,
+        ));
+    }
 
     #[test]
     fn playback_clock_discards_idle_time_when_transport_starts_or_resumes() {

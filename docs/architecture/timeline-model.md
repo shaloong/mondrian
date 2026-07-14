@@ -1,5 +1,10 @@
 # Timeline Model
 
+Color-context construction delegates config-default display/view lookup to the
+selected `ColorEngine`. Sequence preview and export planning never read an
+unqualified process-global OCIO default, so a failed ACES or Custom config
+cannot inherit a view from the previously active engine.
+
 `mondrian-timeline` owns editorial time, tracks, clips, and timeline commands.
 
 Persisted positions, ranges, automation keys, and temporal handles use canonical
