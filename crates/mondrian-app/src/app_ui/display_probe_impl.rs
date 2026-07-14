@@ -396,12 +396,9 @@ fn resolve_ocio_display_view(
                 }
             }
             ColorEngine::Aces { .. } | ColorEngine::CustomOcio { .. } => {
-                if engine.ensure_loaded().is_err() {
-                    return unresolved_ocio_display_view(Some(display.clone()));
-                }
-                match mondrian_core::ocio_default_view_for_display(display) {
-                    Some(view) => (Some(display.clone()), Some(view), None),
-                    None => unresolved_ocio_display_view(Some(display.clone())),
+                match engine.default_view_for_display(display) {
+                    Ok(Some(view)) => (Some(display.clone()), Some(view), None),
+                    Ok(None) | Err(_) => unresolved_ocio_display_view(Some(display.clone())),
                 }
             }
         },

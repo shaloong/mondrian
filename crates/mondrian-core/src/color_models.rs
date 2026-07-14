@@ -187,8 +187,7 @@ pub enum ExportDeliveryViewPolicy {
     #[default]
     None,
     /// Use the OCIO config's default display/view as the export delivery
-    /// view. This is resolved at render time via
-    /// `ocio_default_display_view()`.
+    /// view. This is resolved at render time from the selected [`ColorEngine`].
     OcioConfigDefault,
     /// Use a named OCIO display/view pair as the export delivery view.
     /// The display and view names must match entries in the active OCIO

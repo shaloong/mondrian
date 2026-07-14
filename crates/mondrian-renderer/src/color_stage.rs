@@ -3807,9 +3807,7 @@ mod tests {
     use mondrian_core::types::{ColorEngine, ColorSpace};
     use mondrian_core::WorkingColorSpace;
     use mondrian_core::WorkingRgbaF32Frame;
-    use mondrian_core::{
-        ensure_mondrian_default_ocio_loaded, ocio_default_display_view, GpuLanguage,
-    };
+    use mondrian_core::{ensure_mondrian_default_ocio_loaded, GpuLanguage};
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::path::PathBuf;
@@ -4269,6 +4267,7 @@ mod tests {
         runtime
             .shader_cache_mut()
             .get_or_extract(OcioGpuShaderRequest::ColorSpace {
+                engine: ColorEngine::mondrian_standard(),
                 src: ColorSpace::SonySLog3SGamut3Cine.into(),
                 dst: ColorSpace::Rec709.into(),
                 language: GpuLanguage::Glsl4_0,
@@ -4695,7 +4694,9 @@ mod tests {
             eprintln!("skipping real wgpu display/view parity test: no GPU adapter available");
             return;
         };
-        let (display, view) = ocio_default_display_view().expect("default display/view");
+        let (display, view) = ColorEngine::mondrian_standard()
+            .default_display_view()
+            .expect("default display/view");
         let frame = cpu_working_frame();
         let boundary = RenderOutputColorBoundary::display_view(
             ColorSpace::Srgb,
@@ -6326,7 +6327,9 @@ mod tests {
     #[test]
     fn cpu_float_output_boundary_display_view_returns_float_frame() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
-        let (display, view) = ocio_default_display_view().expect("default display/view");
+        let (display, view) = ColorEngine::mondrian_standard()
+            .default_display_view()
+            .expect("default display/view");
         let frame = cpu_working_frame();
         let boundary = RenderOutputColorBoundary::display_view(
             ColorSpace::Srgb,
@@ -6435,7 +6438,9 @@ mod tests {
     #[test]
     fn preview_display_view_boundary_uses_display_target() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
-        let (display, view) = ocio_default_display_view().expect("default display/view");
+        let (display, view) = ColorEngine::mondrian_standard()
+            .default_display_view()
+            .expect("default display/view");
         let boundary = RenderOutputColorBoundary::display_view(
             ColorSpace::Srgb,
             display,
@@ -6594,6 +6599,7 @@ mod tests {
         let mut cache = OcioGpuShaderCache::default();
         // Use a nonexistent display/view to trigger extraction failure.
         let result = cache.prepare_wgpu_execution(OcioGpuShaderRequest::DisplayView {
+            engine: ColorEngine::mondrian_standard(),
             src: ColorSpace::Rec709.into(),
             display: "nonexistent_display_for_structural_test".to_owned(),
             view: "nonexistent_view_for_structural_test".to_owned(),

@@ -3,7 +3,7 @@ use lru::LruCache;
 use mondrian_core::ColorSpace;
 use mondrian_core::{
     extract_ocio_display_identity_gpu_shader_bundle, extract_ocio_identity_gpu_shader_bundle,
-    GpuLanguage, OcioColorSpaceIdentity, OcioGpuShaderBundle, OcioGpuTextureChannel,
+    ColorEngine, GpuLanguage, OcioColorSpaceIdentity, OcioGpuShaderBundle, OcioGpuTextureChannel,
     OcioGpuTextureDimensions, OcioGpuTextureInterpolation, OcioGpuUniformType, OcioGpuUniformValue,
     MONDRIAN_OCIO_GPU_FUNCTION_NAME, MONDRIAN_OCIO_GPU_PIXEL_NAME,
     MONDRIAN_OCIO_GPU_RESOURCE_PREFIX,
@@ -47,14 +47,16 @@ pub enum OcioGpuShaderTargetLanguage {
 /// into pipelines and bind groups.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OcioGpuShaderRequest {
-    /// Convert between two Mondrian color spaces.
+    /// Convert between two OCIO identities under one explicit product engine.
     ColorSpace {
+        engine: ColorEngine,
         src: OcioColorSpaceIdentity,
         dst: OcioColorSpaceIdentity,
         language: GpuLanguage,
     },
     /// Convert a source color space through an OCIO display/view transform.
     DisplayView {
+        engine: ColorEngine,
         src: OcioColorSpaceIdentity,
         display: String,
         view: String,
@@ -65,14 +67,16 @@ pub enum OcioGpuShaderRequest {
 impl Hash for OcioGpuShaderRequest {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
-            Self::ColorSpace { src, dst, language } => {
+            Self::ColorSpace { engine, src, dst, language } => {
                 0u8.hash(state);
+                engine.hash(state);
                 src.hash(state);
                 dst.hash(state);
                 (*language as i32).hash(state);
             }
-            Self::DisplayView { src, display, view, language } => {
+            Self::DisplayView { engine, src, display, view, language } => {
                 1u8.hash(state);
+                engine.hash(state);
                 src.hash(state);
                 display.hash(state);
                 view.hash(state);
@@ -90,12 +94,21 @@ impl OcioGpuShaderRequest {
         }
     }
 
+    /// Product color engine whose exact config must build this shader.
+    pub fn engine(&self) -> &ColorEngine {
+        match self {
+            Self::ColorSpace { engine, .. } | Self::DisplayView { engine, .. } => engine,
+        }
+    }
+
     /// Human-readable source context for diagnostics.
     pub fn source_label(&self) -> String {
         match self {
-            Self::ColorSpace { src, dst, .. } => format!("{src:?}->{dst:?}"),
-            Self::DisplayView { src, display, view, .. } => {
-                format!("{src:?}->{display}/{view}")
+            Self::ColorSpace { engine, src, dst, .. } => {
+                format!("{}:{src:?}->{dst:?}", engine.name())
+            }
+            Self::DisplayView { engine, src, display, view, .. } => {
+                format!("{}:{src:?}->{display}/{view}", engine.name())
             }
         }
     }
@@ -4515,8 +4528,7 @@ impl OcioGpuShaderCache {
         }
     }
 
-    /// Clear all cached entries. Call this when the OCIO config changes to
-    /// prevent stale shader plans from being served.
+    /// Clear all cached entries for renderer or GPU-device lifecycle invalidation.
     pub fn clear(&mut self) {
         self.entries.clear();
     }
@@ -4664,11 +4676,11 @@ pub fn classify_ocio_shader_error(reason: &str) -> OcioGpuWgpuBlocker {
 
 fn extract_bundle(request: &OcioGpuShaderRequest) -> Result<OcioGpuShaderBundle, String> {
     match request {
-        OcioGpuShaderRequest::ColorSpace { src, dst, language } => {
-            extract_ocio_identity_gpu_shader_bundle(*src, *dst, *language)
+        OcioGpuShaderRequest::ColorSpace { engine, src, dst, language } => {
+            extract_ocio_identity_gpu_shader_bundle(engine, *src, *dst, *language)
         }
-        OcioGpuShaderRequest::DisplayView { src, display, view, language } => {
-            extract_ocio_display_identity_gpu_shader_bundle(*src, display, view, *language)
+        OcioGpuShaderRequest::DisplayView { engine, src, display, view, language } => {
+            extract_ocio_display_identity_gpu_shader_bundle(engine, *src, display, view, *language)
         }
     }
 }
@@ -4921,10 +4933,6 @@ fn plan_from_bundle(
 fn request_hash(request: &OcioGpuShaderRequest) -> u64 {
     let mut hasher = DefaultHasher::new();
     request.hash(&mut hasher);
-    // Include OCIO config generation so cache entries are invalidated when the
-    // config changes. This prevents stale shader plans from being served after
-    // a config switch.
-    mondrian_core::ocio_config_generation().hash(&mut hasher);
     hasher.finish()
 }
 
@@ -6406,7 +6414,7 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
 mod tests {
     use super::*;
     use crate::GpuContext;
-    use mondrian_core::{ensure_mondrian_default_ocio_loaded, ocio_default_display_view};
+    use mondrian_core::ensure_mondrian_default_ocio_loaded;
 
     fn f32s_from_bytes(bytes: &[u8]) -> Vec<f32> {
         bytes
@@ -6576,6 +6584,7 @@ mod tests {
 
     fn shader_plan_with_text(shader_text: &str) -> OcioGpuShaderPlan {
         let request = OcioGpuShaderRequest::ColorSpace {
+            engine: ColorEngine::mondrian_standard(),
             src: ColorSpace::Rec709.into(),
             dst: ColorSpace::Srgb.into(),
             language: GpuLanguage::Glsl4_0,
@@ -6602,6 +6611,7 @@ mod tests {
 
     fn shader_plan_with_single_2d_texture_binding(binding_index: u32) -> OcioGpuShaderPlan {
         let request = OcioGpuShaderRequest::ColorSpace {
+            engine: ColorEngine::mondrian_standard(),
             src: ColorSpace::Rec709.into(),
             dst: ColorSpace::Srgb.into(),
             language: GpuLanguage::Glsl4_0,
@@ -6644,6 +6654,7 @@ mod tests {
         binding_index: u32,
     ) -> OcioGpuShaderPlan {
         let request = OcioGpuShaderRequest::ColorSpace {
+            engine: ColorEngine::mondrian_standard(),
             src: ColorSpace::Rec709.into(),
             dst: ColorSpace::Srgb.into(),
             language: GpuLanguage::Glsl4_0,
@@ -6683,6 +6694,7 @@ mod tests {
 
     fn shader_plan_with_single_uniform_buffer_size(buffer_size: usize) -> OcioGpuShaderPlan {
         let request = OcioGpuShaderRequest::ColorSpace {
+            engine: ColorEngine::mondrian_standard(),
             src: ColorSpace::Rec709.into(),
             dst: ColorSpace::Srgb.into(),
             language: GpuLanguage::Glsl4_0,
@@ -6955,6 +6967,7 @@ mod tests {
         let mut shader_cache = OcioGpuShaderCache::default();
         let shader_plan = shader_cache
             .get_or_extract(OcioGpuShaderRequest::ColorSpace {
+                engine: ColorEngine::mondrian_standard(),
                 src: ColorSpace::AppleLogBt2020.into(),
                 dst: ColorSpace::Rec709.into(),
                 language: GpuLanguage::Glsl4_0,
@@ -8039,6 +8052,7 @@ mod tests {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let mut cache = OcioGpuShaderCache::default();
         let request = OcioGpuShaderRequest::ColorSpace {
+            engine: ColorEngine::mondrian_standard(),
             src: ColorSpace::SonySLog3SGamut3Cine.into(),
             dst: ColorSpace::Rec709.into(),
             language: GpuLanguage::Glsl4_0,
@@ -8210,13 +8224,57 @@ mod tests {
     }
 
     #[test]
+    fn shader_cache_never_reuses_a_plan_for_another_engine() {
+        let mut cache = OcioGpuShaderCache::default();
+        let standard_request = OcioGpuShaderRequest::ColorSpace {
+            engine: ColorEngine::mondrian_standard(),
+            src: ColorSpace::SonySLog3SGamut3Cine.into(),
+            dst: ColorSpace::Rec709.into(),
+            language: GpuLanguage::Glsl4_0,
+        };
+        cache
+            .get_or_extract(standard_request.clone())
+            .expect("Standard shader extraction");
+
+        let missing_path = std::env::temp_dir().join(format!(
+            "mondrian-missing-shader-cache-config-{}.ocio",
+            std::process::id()
+        ));
+        let custom_request = OcioGpuShaderRequest::ColorSpace {
+            engine: ColorEngine::CustomOcio {
+                source: mondrian_core::OcioConfigSource::Path { path: missing_path },
+            },
+            src: ColorSpace::SonySLog3SGamut3Cine.into(),
+            dst: ColorSpace::Rec709.into(),
+            language: GpuLanguage::Glsl4_0,
+        };
+
+        let error = cache
+            .get_or_extract(custom_request.clone())
+            .expect_err("missing Custom config must fail instead of hitting Standard cache");
+        assert_eq!(error.request, custom_request);
+        assert_ne!(
+            request_hash(&standard_request),
+            request_hash(&error.request)
+        );
+        let diagnostics = cache.diagnostics();
+        assert_eq!(diagnostics.entries, 1);
+        assert_eq!(diagnostics.hits, 0);
+        assert_eq!(diagnostics.misses, 2);
+        assert_eq!(diagnostics.extraction_failures, 1);
+    }
+
+    #[test]
     fn cache_extracts_display_view_shader_plan() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
-        let (display, view) = ocio_default_display_view().expect("default display/view");
+        let (display, view) = ColorEngine::mondrian_standard()
+            .default_display_view()
+            .expect("default display/view");
         let mut cache = OcioGpuShaderCache::default();
 
         let plan = cache
             .get_or_extract(OcioGpuShaderRequest::DisplayView {
+                engine: ColorEngine::mondrian_standard(),
                 src: ColorSpace::Rec709.into(),
                 display: display.clone(),
                 view: view.clone(),
@@ -8263,10 +8321,13 @@ mod tests {
     #[test]
     fn backend_prep_lowers_default_display_view_legacy_samplers_to_wgpu_glsl() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
-        let (display, view) = ocio_default_display_view().expect("default display/view");
+        let (display, view) = ColorEngine::mondrian_standard()
+            .default_display_view()
+            .expect("default display/view");
         let mut cache = OcioGpuShaderCache::default();
         let shader_plan = cache
             .get_or_extract(OcioGpuShaderRequest::DisplayView {
+                engine: ColorEngine::mondrian_standard(),
                 src: ColorSpace::Rec709.into(),
                 display,
                 view,
@@ -8323,6 +8384,7 @@ mod tests {
 
         let prepared = cache
             .prepare_wgpu_execution(OcioGpuShaderRequest::ColorSpace {
+                engine: ColorEngine::mondrian_standard(),
                 src: ColorSpace::AppleLogBt2020.into(),
                 dst: ColorSpace::Rec709.into(),
                 language: GpuLanguage::Glsl4_0,
@@ -8358,6 +8420,7 @@ mod tests {
         let mut shader_cache = OcioGpuShaderCache::default();
         let prepared = shader_cache
             .prepare_wgpu_execution(OcioGpuShaderRequest::ColorSpace {
+                engine: ColorEngine::mondrian_standard(),
                 src: ColorSpace::SonySLog3SGamut3Cine.into(),
                 dst: ColorSpace::Rec709.into(),
                 language: GpuLanguage::Glsl4_0,
@@ -8395,6 +8458,7 @@ mod tests {
     #[test]
     fn shader_translation_cache_reuses_valid_glsl_to_naga_ir_translation() {
         let request = OcioGpuShaderRequest::ColorSpace {
+            engine: ColorEngine::mondrian_standard(),
             src: ColorSpace::Rec709.into(),
             dst: ColorSpace::Srgb.into(),
             language: GpuLanguage::Glsl4_0,
@@ -8492,6 +8556,7 @@ mod tests {
     #[test]
     fn backend_shader_module_cache_key_rejects_contract_mismatch() {
         let request = OcioGpuShaderRequest::ColorSpace {
+            engine: ColorEngine::mondrian_standard(),
             src: ColorSpace::Rec709.into(),
             dst: ColorSpace::Srgb.into(),
             language: GpuLanguage::Glsl4_0,
@@ -8551,6 +8616,7 @@ mod tests {
     #[test]
     fn shader_translation_rejects_non_glsl_source_without_panic() {
         let request = OcioGpuShaderRequest::ColorSpace {
+            engine: ColorEngine::mondrian_standard(),
             src: ColorSpace::Rec709.into(),
             dst: ColorSpace::Srgb.into(),
             language: GpuLanguage::HlslSm5_0,
@@ -8595,6 +8661,7 @@ mod tests {
         let mut shader_cache = OcioGpuShaderCache::default();
         let plan = shader_cache
             .get_or_extract(OcioGpuShaderRequest::ColorSpace {
+                engine: ColorEngine::mondrian_standard(),
                 src: ColorSpace::SonySLog3SGamut3Cine.into(),
                 dst: ColorSpace::Rec709.into(),
                 language: GpuLanguage::Glsl4_0,
@@ -8645,6 +8712,7 @@ mod tests {
         let mut shader_cache = OcioGpuShaderCache::default();
         let plan = shader_cache
             .get_or_extract(OcioGpuShaderRequest::ColorSpace {
+                engine: ColorEngine::mondrian_standard(),
                 src: ColorSpace::SonySLog3SGamut3Cine.into(),
                 dst: ColorSpace::Rec709.into(),
                 language: GpuLanguage::GlslVk4_6,

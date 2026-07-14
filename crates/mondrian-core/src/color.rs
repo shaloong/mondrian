@@ -6,6 +6,15 @@ use serde::{Deserialize, Serialize};
 // ── ColorEngine: centralized dispatch ─────────────────────────────────────────
 
 impl ColorEngine {
+    /// Resolve the exact OCIO config source owned by this product mode.
+    pub fn ocio_source(&self) -> crate::types::OcioConfigSource {
+        match self {
+            Self::MondrianStandard { .. } => crate::types::OcioConfigSource::MondrianDefault,
+            Self::Aces { preset } => preset.ocio_source(),
+            Self::CustomOcio { source } => source.clone(),
+        }
+    }
+
     /// Apply a float OCIO processor between explicit encoded/working identities.
     pub fn convert_identity_float(
         &self,
@@ -13,11 +22,7 @@ impl ColorEngine {
         src: OcioColorSpaceIdentity,
         dst: OcioColorSpaceIdentity,
     ) -> Result<(), String> {
-        match self {
-            Self::MondrianStandard { .. } => crate::ocio::ensure_mondrian_default_ocio_loaded()?,
-            Self::Aces { .. } | Self::CustomOcio { .. } => self.ensure_loaded()?,
-        }
-        crate::ocio::apply_ocio_identity_float(data, src, dst)
+        crate::ocio::apply_ocio_identity_float(self, data, src, dst)
     }
 
     /// Apply an OCIO display/view processor from an explicit source identity.
@@ -28,19 +33,12 @@ impl ColorEngine {
         display: &str,
         view: &str,
     ) -> Result<(), String> {
-        match self {
-            Self::MondrianStandard { .. } => crate::ocio::ensure_mondrian_default_ocio_loaded()?,
-            Self::Aces { .. } | Self::CustomOcio { .. } => self.ensure_loaded()?,
-        }
-        crate::ocio::apply_ocio_display_identity_float(data, src, display, view)
+        crate::ocio::apply_ocio_display_identity_float(self, data, src, display, view)
     }
 
     /// Whether the engine is ready to process data.
     pub fn is_available(&self) -> bool {
-        match self {
-            Self::MondrianStandard { .. } => crate::ocio::mondrian_default_ocio_available(),
-            Self::Aces { .. } | Self::CustomOcio { .. } => crate::ocio::ocio_available(),
-        }
+        crate::ocio::ocio_config_source().as_ref() == Some(&self.ocio_source())
     }
 
     /// Ensure any required external config is loaded.
@@ -54,9 +52,23 @@ impl ColorEngine {
 
     /// Load this engine's exact OCIO config and resolve its default display/view.
     pub fn default_display_view(&self) -> Result<(String, String), String> {
-        self.ensure_loaded()?;
-        crate::ocio::ocio_default_display_view()
+        crate::ocio::ocio_default_display_view_for_engine(self)?
             .ok_or_else(|| format!("{} config has no default display/view", self.name()))
+    }
+
+    /// Return display names from this engine's exact OCIO config.
+    pub fn display_names(&self) -> Result<Vec<String>, String> {
+        crate::ocio::ocio_display_names_for_engine(self)
+    }
+
+    /// Return view names under a display from this engine's exact OCIO config.
+    pub fn view_names(&self, display: &str) -> Result<Vec<String>, String> {
+        crate::ocio::ocio_view_names_for_engine(self, display)
+    }
+
+    /// Return one display's default view from this engine's exact OCIO config.
+    pub fn default_view_for_display(&self, display: &str) -> Result<Option<String>, String> {
+        crate::ocio::ocio_default_view_for_display_for_engine(self, display)
     }
 
     /// Human-readable name for diagnostics / UI.

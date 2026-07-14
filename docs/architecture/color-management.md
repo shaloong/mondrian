@@ -124,30 +124,55 @@ The `$OCIO` environment source is intentionally fail-closed: if the variable is
 unset or points to a missing file, Mondrian reports that selected source as
 invalid instead of scanning machine-specific standard paths.
 `ColorEngine::default_display_view()` is the engine-owned resolution boundary:
-it loads the exact Standard, ACES preset, or Custom OCIO source before reading
-the process-global OCIO default. Product callers must not read a global default
-and then infer which engine it belongs to.
+it selects the exact Standard, ACES preset, or Custom OCIO source and reads the
+default while holding the same short config-operation lease. Product callers
+cannot read a process-global default and then infer which engine it belongs to;
+the unqualified processor and display-query APIs are intentionally not public.
 
 ## OCIO Global State Management
 
 All OCIO config mutations are centralized in `mondrian_core::ocio` through
 `OcioGlobalState`, a mutex-protected struct that owns:
+
 - The loaded config path (or virtual path for built-in/embedded configs)
 - The source identity (`OcioConfigSource`) that loaded the current config
 - A monotonic generation counter for cache invalidation
 
-`ocio_rs::set_current_config` is called inside the mutex guard so the C++ global
-and Rust metadata are updated atomically. Concurrent `current_config()` callers
-cannot see a half-updated state.
+`OCIO_CONFIG_OPERATION` serializes the exact sequence of selecting a config and
+constructing a CPU Processor or extracting a GPU shader. The lease ends before
+CPU pixel application and before any GPU execution, so frames do not serialize
+on a process-wide color lock. This is required because the current `ocio-rs`
+bridge exposes OCIO's process-global current config during construction even
+though the baked Processor itself is independent afterward.
 
-`ocio_config_generation()` returns the current generation counter. Renderer GPU
-caches (e.g., `OcioGpuShaderCache`) include this generation in their cache keys
-so stale entries are automatically invalidated when the config changes. Callers
-can also explicitly call `OcioGpuShaderCache::clear()` when a config switch is
-detected.
+CPU Processors live in a bounded per-thread LRU keyed by exact config source,
+config revision, encoded/working endpoint identities, and display/view when
+applicable. Immutable embedded and built-in packages use their pinned source
+identity as the stable revision, so switching Standard -> ACES -> Standard does
+not discard the warm Standard Processor. Mutable path/environment sources use
+the loaded generation until their project-level content digest is pinned. A
+warm hit performs no config selection or Processor construction.
+Per-thread storage follows the wrapper's non-`Send`/non-`Sync` contract without
+unsafe cross-thread sharing; hit, miss, eviction, occupancy, and capacity remain
+observable through `ocio_cpu_processor_cache_diagnostics()`.
+
+GPU requests carry `ColorEngine` as part of their immutable cache identity.
+`OcioGpuShaderCache` therefore keeps warm plans for Standard and ACES
+simultaneously and cannot return one engine's shader for another engine merely
+because their endpoint names match. Shader extraction still occurs under the
+short config-operation lease, after which the renderer owns plain shader/LUT/
+uniform metadata and performs compilation and execution without the lease.
+Explicit cache clearing is reserved for renderer/device lifecycle invalidation,
+not ordinary engine switching.
+
+`ocio_config_generation()` remains the process-level revision signal for final
+frame, thumbnail, and diagnostic caches whose results depend on whichever
+project engine is active. It is not used as a substitute for engine identity in
+the renderer's OCIO shader cache.
 
 `ocio_config_source()` returns the source identity of the currently loaded
-config, enabling diagnostics and source-aware idempotency checks.
+config, enabling diagnostics, exact `ColorEngine::is_available()` checks, and
+source-aware idempotency.
 
 ## Project and Sequence
 

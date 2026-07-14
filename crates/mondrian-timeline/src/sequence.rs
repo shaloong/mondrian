@@ -519,9 +519,8 @@ impl SequenceSettings {
 /// Resolve a delivery view policy into a concrete delivery view.
 ///
 /// - `None` → returns `Ok(None)`.
-/// - `OcioConfigDefault` → loads the selected engine config, then resolves via
-///   `ocio_default_display_view()`. Returns `Ok(None)` if the loaded config has
-///   no default display/view.
+/// - `OcioConfigDefault` → resolves the selected engine's exact config default.
+///   Returns `Ok(None)` if that config has no default display/view.
 /// - `OcioDisplayView { display, view }` → validates the display/view
 ///   against the current OCIO config. Returns `Err` if the display or
 ///   view is not found.
@@ -562,17 +561,18 @@ fn validate_ocio_display_view(
     display: &str,
     view: &str,
 ) -> Result<(), String> {
-    engine
-        .ensure_loaded()
+    let displays = engine
+        .display_names()
         .map_err(|err| format!("OCIO config not loaded for export delivery view: {err}"))?;
-    let displays = mondrian_core::ocio_display_names();
     if !displays.iter().any(|d| d == display) {
         return Err(format!(
             "OCIO display '{display}' not found in config; available: {:?}",
             displays
         ));
     }
-    let views = mondrian_core::ocio_view_names(display);
+    let views = engine.view_names(display).map_err(|err| {
+        format!("OCIO config not loaded for export delivery view '{display}': {err}")
+    })?;
     if !views.iter().any(|v| v == view) {
         return Err(format!(
             "OCIO view '{view}' not found under display '{display}'; available: {:?}",

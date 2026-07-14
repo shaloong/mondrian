@@ -2708,6 +2708,7 @@ dependencies = [
  "dashmap",
  "glam",
  "icc-profile",
+ "lru",
  "moxcms 0.7.11",
  "ocio-rs",
  "parking_lot",

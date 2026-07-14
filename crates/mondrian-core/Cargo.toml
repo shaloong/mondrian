@@ -23,6 +23,7 @@ tracing    = { workspace = true }
 crossbeam-channel = { workspace = true }
 parking_lot       = { workspace = true }
 dashmap           = { workspace = true }
+lru               = "0.16"
 # 数学
 glam       = { workspace = true }
 # 颜色管理

@@ -611,6 +611,7 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
             }
         })?;
         let request = OcioGpuShaderRequest::ColorSpace {
+            engine: transform.engine.clone(),
             src: OcioColorSpaceIdentity::Color(source),
             dst: OcioColorSpaceIdentity::Working(working),
             language: self.options.language,
@@ -661,6 +662,7 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
         })?;
         let request = if let Some(display_view) = &transform.display_view {
             OcioGpuShaderRequest::DisplayView {
+                engine: transform.engine.clone(),
                 src: OcioColorSpaceIdentity::Working(working),
                 display: display_view.display.clone(),
                 view: display_view.view.clone(),
@@ -668,6 +670,7 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
             }
         } else {
             OcioGpuShaderRequest::ColorSpace {
+                engine: transform.engine.clone(),
                 src: OcioColorSpaceIdentity::Working(working),
                 dst: OcioColorSpaceIdentity::Color(transform.output_color_space),
                 language: self.options.language,
@@ -764,9 +767,7 @@ pub enum RenderColorTransformError {
 mod tests {
     use super::*;
     use mondrian_core::types::OcioConfigSource;
-    use mondrian_core::{
-        ensure_mondrian_default_ocio_loaded, ocio_default_display_view, WorkingRgbaF32Frame,
-    };
+    use mondrian_core::{ensure_mondrian_default_ocio_loaded, WorkingRgbaF32Frame};
 
     #[test]
     fn cpu_transform_returns_typed_display_boundary_frame() {
@@ -803,7 +804,9 @@ mod tests {
     #[test]
     fn cpu_transform_executes_explicit_display_view_boundary() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
-        let (display, view) = ocio_default_display_view().expect("default display/view");
+        let (display, view) = ColorEngine::mondrian_standard()
+            .default_display_view()
+            .expect("default display/view");
         let source = CpuColorFrame::working(WorkingRgbaF32Frame {
             width: 1,
             height: 1,
@@ -978,6 +981,7 @@ mod tests {
         assert_eq!(
             plan.request,
             OcioGpuShaderRequest::ColorSpace {
+                engine: ColorEngine::mondrian_standard(),
                 src: OcioColorSpaceIdentity::Color(ColorSpace::SonySLog3SGamut3Cine),
                 dst: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
                 language: GpuLanguage::Glsl4_0,
@@ -1023,6 +1027,7 @@ mod tests {
         assert_eq!(
             plan.request,
             OcioGpuShaderRequest::ColorSpace {
+                engine: ColorEngine::mondrian_standard(),
                 src: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
                 dst: OcioColorSpaceIdentity::Color(ColorSpace::Srgb),
                 language: GpuLanguage::Glsl4_0,
@@ -1035,7 +1040,9 @@ mod tests {
     #[test]
     fn gpu_planner_builds_display_view_shader_plan_from_working_descriptor() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
-        let (display, view) = ocio_default_display_view().expect("default display/view");
+        let (display, view) = ColorEngine::mondrian_standard()
+            .default_display_view()
+            .expect("default display/view");
         let source = CpuColorFrame::working(WorkingRgbaF32Frame {
             width: 4,
             height: 5,
@@ -1062,6 +1069,7 @@ mod tests {
         assert_eq!(
             plan.request,
             OcioGpuShaderRequest::DisplayView {
+                engine: ColorEngine::mondrian_standard(),
                 src: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
                 display: display.clone(),
                 view: view.clone(),

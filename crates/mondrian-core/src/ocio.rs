@@ -14,9 +14,10 @@
 //! 4. **Environment** — explicit `$OCIO` env var
 
 use crate::types::{
-    ColorSpace, MondrianStandardPackageIdentity, MondrianStandardVersion, OcioColorSpaceIdentity,
-    OcioConfigSource, WorkingColorSpace,
+    ColorEngine, ColorSpace, MondrianStandardPackageIdentity, MondrianStandardVersion,
+    OcioColorSpaceIdentity, OcioConfigSource, WorkingColorSpace,
 };
+use lru::LruCache;
 pub use ocio_rs::GpuLanguage;
 use ocio_rs::{
     transform::{
@@ -30,7 +31,10 @@ use ocio_rs::{
     ReferenceSpaceType, ViewTransform, ViewTransformDirection,
 };
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // ── Global OCIO state ──────────────────────────────────────────────────────────
 
@@ -74,6 +78,19 @@ struct OcioGlobalState {
 
 static OCIO_STATE: std::sync::Mutex<OcioGlobalState> =
     std::sync::Mutex::new(OcioGlobalState { path: None, source: None, generation: 0 });
+
+/// Serializes config selection with processor/shader construction.
+///
+/// The lease is intentionally released before CPU pixel application or GPU
+/// execution. OCIO processors are baked objects; only their construction must
+/// observe one exact process-global config.
+static OCIO_CONFIG_OPERATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_ocio_config_operation() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    OCIO_CONFIG_OPERATION
+        .lock()
+        .map_err(|_| "OCIO config operation lock is poisoned".to_owned())
+}
 
 impl OcioGlobalState {
     /// Set the current config atomically: update path, source, increment
@@ -1119,6 +1136,11 @@ fn validate_gpu_shader_processor(
 ///
 /// Safe to call again when the user switches configs.
 pub fn init_ocio(path: &Path) -> Result<(), String> {
+    let _lease = lock_ocio_config_operation()?;
+    init_ocio_locked(path)
+}
+
+fn init_ocio_locked(path: &Path) -> Result<(), String> {
     let config = Config::from_file(path.to_string_lossy().as_ref())
         .map_err(|e| format!("failed to load OCIO config from {}: {e}", path.display()))?;
 
@@ -1141,6 +1163,11 @@ pub fn init_ocio(path: &Path) -> Result<(), String> {
 
 /// Load an OCIO built-in config by name and set it as the current config.
 pub fn init_ocio_builtin(name: &str) -> Result<(), String> {
+    let _lease = lock_ocio_config_operation()?;
+    init_ocio_builtin_locked(name)
+}
+
+fn init_ocio_builtin_locked(name: &str) -> Result<(), String> {
     let registry = BuiltinConfigRegistry::get()
         .map_err(|e| format!("failed to access built-in config registry: {e}"))?;
 
@@ -1166,6 +1193,11 @@ pub fn init_ocio_builtin(name: &str) -> Result<(), String> {
 
 /// Load Mondrian's embedded default OCIO config and set it as the current config.
 pub fn init_mondrian_default_ocio() -> Result<(), String> {
+    let _lease = lock_ocio_config_operation()?;
+    init_mondrian_default_ocio_locked()
+}
+
+fn init_mondrian_default_ocio_locked() -> Result<(), String> {
     let actual_digest = sha256_hex(MONDRIAN_DEFAULT_OCIO_CONFIG.as_bytes());
     if actual_digest != MONDRIAN_DEFAULT_OCIO_CONFIG_SHA256 {
         return Err(format!(
@@ -1230,6 +1262,11 @@ pub fn ocio_available() -> bool {
 /// When a different source is requested while another is loaded, the old config
 /// is replaced. This is the only supported way to switch OCIO configs.
 pub fn ensure_ocio_loaded(source: &OcioConfigSource) -> Result<(), String> {
+    let _lease = lock_ocio_config_operation()?;
+    ensure_ocio_loaded_locked(source)
+}
+
+fn ensure_ocio_loaded_locked(source: &OcioConfigSource) -> Result<(), String> {
     // Check if the requested source is already loaded.
     if let Ok(guard) = OCIO_STATE.lock() {
         if guard.source.as_ref() == Some(source) {
@@ -1238,11 +1275,11 @@ pub fn ensure_ocio_loaded(source: &OcioConfigSource) -> Result<(), String> {
     }
     // Different source requested — load it.
     match source {
-        OcioConfigSource::MondrianDefault => init_mondrian_default_ocio(),
-        OcioConfigSource::Builtin { name } => init_ocio_builtin(name),
+        OcioConfigSource::MondrianDefault => init_mondrian_default_ocio_locked(),
+        OcioConfigSource::Builtin { name } => init_ocio_builtin_locked(name),
         OcioConfigSource::Path { path } => {
             if path.exists() {
-                init_ocio(path)
+                init_ocio_locked(path)
             } else {
                 Err(format!(
                     "OCIO config file not found: {}\n\
@@ -1253,9 +1290,31 @@ pub fn ensure_ocio_loaded(source: &OcioConfigSource) -> Result<(), String> {
         }
         OcioConfigSource::Environment => {
             let resolved = resolve_from_environment()?;
-            init_ocio(&resolved)
+            init_ocio_locked(&resolved)
         }
     }
+}
+
+fn with_ocio_config_for_source<T>(
+    source: &OcioConfigSource,
+    operation: impl FnOnce(&Config, u64) -> Result<T, String>,
+) -> Result<T, String> {
+    let _lease = lock_ocio_config_operation()?;
+    ensure_ocio_loaded_locked(source)?;
+    let generation = OCIO_STATE
+        .lock()
+        .map_err(|_| "OCIO global state lock is poisoned".to_owned())?
+        .generation;
+    let config = ocio_rs::current_config()
+        .ok_or_else(|| "OCIO selected source has no current config".to_owned())?;
+    operation(&config, generation)
+}
+
+fn current_ocio_generation_for_source(source: &OcioConfigSource) -> Option<u64> {
+    OCIO_STATE
+        .lock()
+        .ok()
+        .and_then(|state| (state.source.as_ref() == Some(source)).then_some(state.generation))
 }
 
 /// Return the OCIO source used by Mondrian Standard/Simple mode.
@@ -1265,12 +1324,7 @@ pub fn mondrian_default_ocio_source() -> OcioConfigSource {
 
 /// Ensure Mondrian's default OCIO config is loaded.
 pub fn ensure_mondrian_default_ocio_loaded() -> Result<(), String> {
-    let virtual_path = PathBuf::from(MONDRIAN_DEFAULT_OCIO_VIRTUAL_PATH);
-    if already_loaded_with(&virtual_path) {
-        return Ok(());
-    }
-
-    init_mondrian_default_ocio()
+    ensure_ocio_loaded(&OcioConfigSource::MondrianDefault)
 }
 
 /// Return true when Mondrian's default OCIO config is currently loaded.
@@ -1708,14 +1762,11 @@ fn ocio_uniform_value(value: OcioRsGpuUniformValue) -> OcioGpuUniformValue {
 
 // ── CPU transform helpers ──────────────────────────────────────────────────────
 
-/// Obtain a CPU processor for `src → dst` using the current global config.
-fn ocio_cpu_processor(
+fn ocio_cpu_processor_from_config(
+    config: &Config,
     src: OcioColorSpaceIdentity,
     dst: OcioColorSpaceIdentity,
 ) -> Result<CPUProcessor, String> {
-    let config = ocio_rs::current_config()
-        .ok_or_else(|| "no OCIO config loaded (call ensure_ocio_loaded first)".to_string())?;
-
     let src_name = ocio_color_space_identity_name(src);
     let dst_name = ocio_color_space_identity_name(dst);
 
@@ -1728,13 +1779,11 @@ fn ocio_cpu_processor(
         .map_err(|e| format!("OCIO CPU processor '{src_name}' → '{dst_name}': {e}"))
 }
 
-fn ocio_processor(
+fn ocio_processor_from_config(
+    config: &Config,
     src: OcioColorSpaceIdentity,
     dst: OcioColorSpaceIdentity,
 ) -> Result<ocio_rs::Processor, String> {
-    let config = ocio_rs::current_config()
-        .ok_or_else(|| "no OCIO config loaded (call ensure_ocio_loaded first)".to_string())?;
-
     let src_name = ocio_color_space_identity_name(src);
     let dst_name = ocio_color_space_identity_name(dst);
 
@@ -1743,14 +1792,12 @@ fn ocio_processor(
         .map_err(|e| format!("OCIO processor '{src_name}' -> '{dst_name}': {e}"))
 }
 
-fn ocio_display_processor(
+fn ocio_display_processor_from_config(
+    config: &Config,
     src: OcioColorSpaceIdentity,
     display: &str,
     view: &str,
 ) -> Result<ocio_rs::Processor, String> {
-    let config = ocio_rs::current_config()
-        .ok_or_else(|| "no OCIO config loaded (call ensure_ocio_loaded first)".to_string())?;
-
     let src_name = ocio_color_space_identity_name(src);
 
     config
@@ -1763,15 +1810,12 @@ fn ocio_display_processor(
         .map_err(|e| format!("OCIO display processor '{src_name}' -> {display}/{view}: {e}"))
 }
 
-/// Obtain a CPU processor for a display transform using the current global config.
-fn ocio_display_cpu_processor(
+fn ocio_display_cpu_processor_from_config(
+    config: &Config,
     src: OcioColorSpaceIdentity,
     display: &str,
     view: &str,
 ) -> Result<CPUProcessor, String> {
-    let config = ocio_rs::current_config()
-        .ok_or_else(|| "no OCIO config loaded (call ensure_ocio_loaded first)".to_string())?;
-
     let src_name = ocio_color_space_identity_name(src);
 
     let processor = config
@@ -1788,10 +1832,163 @@ fn ocio_display_cpu_processor(
         .map_err(|e| format!("OCIO CPU display processor '{src_name}' → {display}/{view}: {e}"))
 }
 
+const OCIO_CPU_PROCESSOR_CACHE_CAPACITY: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum OcioCpuProcessorRequest {
+    ColorSpace {
+        src: OcioColorSpaceIdentity,
+        dst: OcioColorSpaceIdentity,
+    },
+    DisplayView {
+        src: OcioColorSpaceIdentity,
+        display: String,
+        view: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct OcioCpuProcessorCacheKey {
+    source: OcioConfigSource,
+    revision: u64,
+    request: OcioCpuProcessorRequest,
+}
+
+fn ocio_cpu_processor_config_revision(source: &OcioConfigSource, generation: u64) -> u64 {
+    match source {
+        OcioConfigSource::MondrianDefault | OcioConfigSource::Builtin { .. } => 0,
+        OcioConfigSource::Environment | OcioConfigSource::Path { .. } => generation,
+    }
+}
+
+thread_local! {
+    static OCIO_CPU_PROCESSOR_CACHE: RefCell<LruCache<OcioCpuProcessorCacheKey, CPUProcessor>> =
+        RefCell::new(LruCache::new(
+            NonZeroUsize::new(OCIO_CPU_PROCESSOR_CACHE_CAPACITY)
+                .unwrap_or(NonZeroUsize::MIN),
+        ));
+}
+
+static OCIO_CPU_PROCESSOR_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static OCIO_CPU_PROCESSOR_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
+static OCIO_CPU_PROCESSOR_CACHE_EVICTIONS: AtomicU64 = AtomicU64::new(0);
+
+/// Process-wide counters plus current-thread occupancy for the CPU processor cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OcioCpuProcessorCacheDiagnostics {
+    /// Warm processor lookups served without config selection or reconstruction.
+    pub hits: u64,
+    /// Processor constructions performed after a cache miss.
+    pub misses: u64,
+    /// Least-recently-used processors evicted from thread-local caches.
+    pub evictions: u64,
+    /// Entries in the calling thread's bounded cache.
+    pub current_thread_entries: usize,
+    /// Per-thread entry capacity.
+    pub per_thread_capacity: usize,
+}
+
+/// Return CPU OCIO processor cache diagnostics.
+pub fn ocio_cpu_processor_cache_diagnostics() -> OcioCpuProcessorCacheDiagnostics {
+    OcioCpuProcessorCacheDiagnostics {
+        hits: OCIO_CPU_PROCESSOR_CACHE_HITS.load(Ordering::Relaxed),
+        misses: OCIO_CPU_PROCESSOR_CACHE_MISSES.load(Ordering::Relaxed),
+        evictions: OCIO_CPU_PROCESSOR_CACHE_EVICTIONS.load(Ordering::Relaxed),
+        current_thread_entries: OCIO_CPU_PROCESSOR_CACHE.with(|cache| cache.borrow().len()),
+        per_thread_capacity: OCIO_CPU_PROCESSOR_CACHE_CAPACITY,
+    }
+}
+
+#[cfg(test)]
+fn clear_ocio_cpu_processor_cache_for_current_thread() {
+    OCIO_CPU_PROCESSOR_CACHE.with(|cache| cache.borrow_mut().clear());
+}
+
+fn try_apply_cached_cpu_processor(key: &OcioCpuProcessorCacheKey, data: &mut [f32]) -> bool {
+    OCIO_CPU_PROCESSOR_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let Some(processor) = cache.get(key) else {
+            return false;
+        };
+        apply_cpu_processor_float(processor, data);
+        true
+    })
+}
+
+fn has_cached_cpu_processor(key: &OcioCpuProcessorCacheKey) -> bool {
+    OCIO_CPU_PROCESSOR_CACHE.with(|cache| cache.borrow().contains(key))
+}
+
+fn build_cpu_processor(
+    config: &Config,
+    request: &OcioCpuProcessorRequest,
+) -> Result<CPUProcessor, String> {
+    match request {
+        OcioCpuProcessorRequest::ColorSpace { src, dst } => {
+            ocio_cpu_processor_from_config(config, *src, *dst)
+        }
+        OcioCpuProcessorRequest::DisplayView { src, display, view } => {
+            ocio_display_cpu_processor_from_config(config, *src, display, view)
+        }
+    }
+}
+
+fn apply_cached_cpu_processor(
+    source: OcioConfigSource,
+    request: OcioCpuProcessorRequest,
+    data: &mut [f32],
+) -> Result<(), String> {
+    if let Some(generation) = current_ocio_generation_for_source(&source) {
+        let key = OcioCpuProcessorCacheKey {
+            source: source.clone(),
+            revision: ocio_cpu_processor_config_revision(&source, generation),
+            request: request.clone(),
+        };
+        if try_apply_cached_cpu_processor(&key, data) {
+            OCIO_CPU_PROCESSOR_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
+    }
+
+    let (key, processor) = with_ocio_config_for_source(&source, |config, generation| {
+        let key = OcioCpuProcessorCacheKey {
+            source: source.clone(),
+            revision: ocio_cpu_processor_config_revision(&source, generation),
+            request: request.clone(),
+        };
+        let processor = if has_cached_cpu_processor(&key) {
+            None
+        } else {
+            Some(build_cpu_processor(config, &request)?)
+        };
+        Ok((key, processor))
+    })?;
+
+    if let Some(processor) = processor {
+        OCIO_CPU_PROCESSOR_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.len() == OCIO_CPU_PROCESSOR_CACHE_CAPACITY {
+                OCIO_CPU_PROCESSOR_CACHE_EVICTIONS.fetch_add(1, Ordering::Relaxed);
+            }
+            cache.put(key.clone(), processor);
+        });
+        OCIO_CPU_PROCESSOR_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+    } else {
+        OCIO_CPU_PROCESSOR_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    if try_apply_cached_cpu_processor(&key, data) {
+        Ok(())
+    } else {
+        Err("OCIO CPU processor cache lost a selected processor".to_owned())
+    }
+}
+
 // ── Public entry points ────────────────────────────────────────────────────────
 
-/// Apply an OCIO conversion between explicit encoded/working identities.
-pub fn apply_ocio_identity_float(
+/// Apply an engine-qualified OCIO conversion using the bounded CPU processor cache.
+pub(crate) fn apply_ocio_identity_float(
+    engine: &ColorEngine,
     data: &mut [f32],
     src: OcioColorSpaceIdentity,
     dst: OcioColorSpaceIdentity,
@@ -1799,14 +1996,16 @@ pub fn apply_ocio_identity_float(
     if data.is_empty() || src == dst {
         return Ok(());
     }
-
-    let cpu = ocio_cpu_processor(src, dst)?;
-    apply_cpu_processor_float(&cpu, data);
-    Ok(())
+    apply_cached_cpu_processor(
+        engine.ocio_source(),
+        OcioCpuProcessorRequest::ColorSpace { src, dst },
+        data,
+    )
 }
 
-/// Apply an OCIO display transform from an explicit encoded/working identity.
-pub fn apply_ocio_display_identity_float(
+/// Apply an engine-qualified OCIO display/view transform using the CPU cache.
+pub(crate) fn apply_ocio_display_identity_float(
+    engine: &ColorEngine,
     data: &mut [f32],
     src: OcioColorSpaceIdentity,
     display: &str,
@@ -1815,32 +2014,40 @@ pub fn apply_ocio_display_identity_float(
     if data.is_empty() {
         return Ok(());
     }
-
-    let cpu = ocio_display_cpu_processor(src, display, view)?;
-    apply_cpu_processor_float(&cpu, data);
-    Ok(())
+    apply_cached_cpu_processor(
+        engine.ocio_source(),
+        OcioCpuProcessorRequest::DisplayView {
+            src,
+            display: display.to_owned(),
+            view: view.to_owned(),
+        },
+        data,
+    )
 }
 
-/// Extract a GPU shader bundle for `src -> dst` from the current OCIO config.
+/// Extract an engine-qualified GPU shader bundle under a short config lease.
 ///
 /// The returned bundle is renderer-facing metadata. It deliberately does not
 /// allocate wgpu resources; callers should cache compiled shaders and uploaded
 /// texture/uniform resources by `cache_id` plus their render-target contract.
-pub fn extract_ocio_gpu_shader_bundle(
-    src: ColorSpace,
-    dst: ColorSpace,
-    language: GpuLanguage,
-) -> Result<OcioGpuShaderBundle, String> {
-    extract_ocio_identity_gpu_shader_bundle(src.into(), dst.into(), language)
-}
-
-/// Extract a GPU shader bundle between explicit encoded/working identities.
 pub fn extract_ocio_identity_gpu_shader_bundle(
+    engine: &ColorEngine,
     src: OcioColorSpaceIdentity,
     dst: OcioColorSpaceIdentity,
     language: GpuLanguage,
 ) -> Result<OcioGpuShaderBundle, String> {
-    let processor = ocio_processor(src, dst)?;
+    with_ocio_config_for_source(&engine.ocio_source(), |config, _generation| {
+        extract_ocio_identity_gpu_shader_bundle_from_config(config, src, dst, language)
+    })
+}
+
+fn extract_ocio_identity_gpu_shader_bundle_from_config(
+    config: &Config,
+    src: OcioColorSpaceIdentity,
+    dst: OcioColorSpaceIdentity,
+    language: GpuLanguage,
+) -> Result<OcioGpuShaderBundle, String> {
+    let processor = ocio_processor_from_config(config, src, dst)?;
     let cache_id = processor.cache_id();
     let gpu = processor.default_gpu_processor().map_err(|e| {
         format!(
@@ -1863,24 +2070,29 @@ pub fn extract_ocio_identity_gpu_shader_bundle(
     ))
 }
 
-/// Extract a GPU shader bundle for an OCIO display/view transform.
-pub fn extract_ocio_display_gpu_shader_bundle(
-    src: ColorSpace,
-    display: &str,
-    view: &str,
-    language: GpuLanguage,
-) -> Result<OcioGpuShaderBundle, String> {
-    extract_ocio_display_identity_gpu_shader_bundle(src.into(), display, view, language)
-}
-
-/// Extract a GPU display/view shader from an explicit encoded/working identity.
+/// Extract an engine-qualified display/view GPU shader under a short config lease.
 pub fn extract_ocio_display_identity_gpu_shader_bundle(
+    engine: &ColorEngine,
     src: OcioColorSpaceIdentity,
     display: &str,
     view: &str,
     language: GpuLanguage,
 ) -> Result<OcioGpuShaderBundle, String> {
-    let processor = ocio_display_processor(src, display, view)?;
+    with_ocio_config_for_source(&engine.ocio_source(), |config, _generation| {
+        extract_ocio_display_identity_gpu_shader_bundle_from_config(
+            config, src, display, view, language,
+        )
+    })
+}
+
+fn extract_ocio_display_identity_gpu_shader_bundle_from_config(
+    config: &Config,
+    src: OcioColorSpaceIdentity,
+    display: &str,
+    view: &str,
+    language: GpuLanguage,
+) -> Result<OcioGpuShaderBundle, String> {
+    let processor = ocio_display_processor_from_config(config, src, display, view)?;
     let cache_id = processor.cache_id();
     let gpu = processor.default_gpu_processor().map_err(|e| {
         format!(
@@ -1947,48 +2159,45 @@ fn apply_cpu_processor_float(cpu: &CPUProcessor, data: &mut [f32]) {
 
 // ── Utility: list available displays / views ───────────────────────────────────
 
-/// Return the list of display names from the current OCIO config.
-pub fn ocio_display_names() -> Vec<String> {
-    if !ocio_available() {
-        return Vec::new();
-    }
-    let Some(config) = ocio_rs::current_config() else {
-        return Vec::new();
-    };
-    let n = config.num_displays();
-    (0..n).filter_map(|i| config.display(i)).collect()
+/// List displays from the exact config selected by an engine.
+pub(crate) fn ocio_display_names_for_engine(engine: &ColorEngine) -> Result<Vec<String>, String> {
+    with_ocio_config_for_source(&engine.ocio_source(), |config, _generation| {
+        let count = config.num_displays();
+        Ok((0..count).filter_map(|index| config.display(index)).collect())
+    })
 }
 
-/// Return the list of view names for a given display.
-pub fn ocio_view_names(display: &str) -> Vec<String> {
-    if !ocio_available() {
-        return Vec::new();
-    }
-    let Some(config) = ocio_rs::current_config() else {
-        return Vec::new();
-    };
-    let n = config.num_views(display);
-    (0..n).filter_map(|i| config.view(display, i)).collect()
+/// List views under a display from the exact config selected by an engine.
+pub(crate) fn ocio_view_names_for_engine(
+    engine: &ColorEngine,
+    display: &str,
+) -> Result<Vec<String>, String> {
+    with_ocio_config_for_source(&engine.ocio_source(), |config, _generation| {
+        let count = config.num_views(display);
+        Ok((0..count).filter_map(|index| config.view(display, index)).collect())
+    })
 }
 
-/// Return the default view for a display from the current OCIO config.
-pub fn ocio_default_view_for_display(display: &str) -> Option<String> {
-    if !ocio_available() {
-        return None;
-    }
-    let config = ocio_rs::current_config()?;
-    config.default_view(display)
+/// Resolve one display's default view from the exact engine config.
+pub(crate) fn ocio_default_view_for_display_for_engine(
+    engine: &ColorEngine,
+    display: &str,
+) -> Result<Option<String>, String> {
+    with_ocio_config_for_source(&engine.ocio_source(), |config, _generation| {
+        Ok(config.default_view(display))
+    })
 }
 
-/// Return the default display / view pair from the current OCIO config.
-pub fn ocio_default_display_view() -> Option<(String, String)> {
-    if !ocio_available() {
-        return None;
-    }
-    let config = ocio_rs::current_config()?;
-    let display = config.default_display()?;
-    let view = config.default_view(&display)?;
-    Some((display, view))
+/// Resolve the default display/view pair from the exact engine config.
+pub(crate) fn ocio_default_display_view_for_engine(
+    engine: &ColorEngine,
+) -> Result<Option<(String, String)>, String> {
+    with_ocio_config_for_source(&engine.ocio_source(), |config, _generation| {
+        let Some(display) = config.default_display() else {
+            return Ok(None);
+        };
+        Ok(config.default_view(&display).map(|view| (display, view)))
+    })
 }
 
 /// Resolve the exact Standard display/view pair for an encoded output target.
@@ -2017,8 +2226,7 @@ pub fn mondrian_standard_output_display_view(
 
 /// Resolve Mondrian Standard's versioned View for an explicit OCIO display.
 pub fn mondrian_standard_display_view(display: &str) -> Result<(String, String), String> {
-    ensure_mondrian_default_ocio_loaded()?;
-    let views = ocio_view_names(display);
+    let views = ocio_view_names_for_engine(&ColorEngine::mondrian_standard(), display)?;
     if !views.iter().any(|view| view == MONDRIAN_STANDARD_SDR_VIEW_NAME) {
         return Err(format!(
             "Mondrian Standard package is missing required display/view '{display}/{MONDRIAN_STANDARD_SDR_VIEW_NAME}'"
@@ -2132,6 +2340,7 @@ mod tests {
         let mut samples = original;
 
         apply_ocio_identity_float(
+            &ColorEngine::mondrian_standard(),
             &mut samples,
             OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
             OcioColorSpaceIdentity::Working(WorkingColorSpace::AcesCg),
@@ -2142,6 +2351,7 @@ mod tests {
         assert!(samples.chunks_exact(4).flatten().any(|channel| *channel > 1.0));
 
         apply_ocio_identity_float(
+            &ColorEngine::mondrian_standard(),
             &mut samples,
             OcioColorSpaceIdentity::Working(WorkingColorSpace::AcesCg),
             OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
@@ -2173,6 +2383,7 @@ mod tests {
             let original = [0.18, 0.42, 0.73, 0.375];
             let mut samples = original;
             apply_ocio_identity_float(
+                &ColorEngine::mondrian_standard(),
                 &mut samples,
                 OcioColorSpaceIdentity::Color(source),
                 OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
@@ -2182,6 +2393,7 @@ mod tests {
             assert_eq!(samples[3], original[3], "{source:?} input changed alpha");
 
             apply_ocio_identity_float(
+                &ColorEngine::mondrian_standard(),
                 &mut samples,
                 OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
                 OcioColorSpaceIdentity::Color(source),
@@ -2255,6 +2467,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         apply_ocio_display_identity_float(
+            &ColorEngine::mondrian_standard(),
             &mut samples,
             OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
             contract.default_display,
@@ -2289,6 +2502,7 @@ mod tests {
         ];
 
         apply_ocio_display_identity_float(
+            &ColorEngine::mondrian_standard(),
             &mut samples,
             OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
             contract.default_display,
@@ -2374,6 +2588,113 @@ mod tests {
                 preset.builtin_name()
             );
         }
+    }
+
+    #[test]
+    fn cpu_processor_cache_reuses_engine_qualified_processor() {
+        clear_ocio_cpu_processor_cache_for_current_thread();
+        let before = ocio_cpu_processor_cache_diagnostics();
+        let engine = ColorEngine::mondrian_standard();
+        let original = [0.18, 0.42, 0.73, 0.375];
+        let mut reference = None;
+
+        for _ in 0..4 {
+            let mut sample = original;
+            engine
+                .convert_identity_float(
+                    &mut sample,
+                    OcioColorSpaceIdentity::Color(ColorSpace::SonySLog3SGamut3Cine),
+                    OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+                )
+                .expect("Standard input processor");
+            assert_eq!(sample[3], original[3]);
+            if let Some(expected) = reference {
+                assert_eq!(sample, expected);
+            } else {
+                reference = Some(sample);
+            }
+        }
+
+        let after = ocio_cpu_processor_cache_diagnostics();
+        assert!(after.misses > before.misses);
+        assert!(after.hits > before.hits);
+        assert!((1..=after.per_thread_capacity).contains(&after.current_thread_entries));
+    }
+
+    #[test]
+    fn immutable_cpu_processor_survives_switch_to_another_engine() {
+        clear_ocio_cpu_processor_cache_for_current_thread();
+        let standard = ColorEngine::mondrian_standard();
+        let mut first = [0.18, 0.42, 0.73, 0.375];
+        standard
+            .convert_identity_float(
+                &mut first,
+                OcioColorSpaceIdentity::Color(ColorSpace::SonySLog3SGamut3Cine),
+                OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+            )
+            .expect("first Standard input processor");
+        assert_eq!(
+            ocio_cpu_processor_cache_diagnostics().current_thread_entries,
+            1
+        );
+
+        ColorEngine::Aces {
+            preset: crate::types::AcesConfigPreset::StudioV4Aces2Ocio25,
+        }
+        .default_display_view()
+        .expect("ACES config switch");
+
+        let hits_before = ocio_cpu_processor_cache_diagnostics().hits;
+        let mut second = [0.18, 0.42, 0.73, 0.375];
+        standard
+            .convert_identity_float(
+                &mut second,
+                OcioColorSpaceIdentity::Color(ColorSpace::SonySLog3SGamut3Cine),
+                OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+            )
+            .expect("reselected Standard input processor");
+
+        let after = ocio_cpu_processor_cache_diagnostics();
+        assert_eq!(second, first);
+        assert!(after.hits > hits_before);
+        assert_eq!(after.current_thread_entries, 1);
+    }
+
+    #[test]
+    fn concurrent_engine_queries_never_observe_another_config() {
+        let standard = ColorEngine::mondrian_standard();
+        let aces = ColorEngine::Aces {
+            preset: crate::types::AcesConfigPreset::StudioV4Aces2Ocio25,
+        };
+        let expected_standard = standard.default_display_view().expect("Standard display/view");
+        let expected_aces = aces.default_display_view().expect("ACES display/view");
+        assert_ne!(expected_standard, expected_aces);
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let standard_barrier = std::sync::Arc::clone(&barrier);
+        let standard_thread = std::thread::spawn(move || {
+            standard_barrier.wait();
+            for _ in 0..16 {
+                assert_eq!(
+                    standard.default_display_view().expect("Standard display/view"),
+                    expected_standard
+                );
+            }
+        });
+        let aces_barrier = std::sync::Arc::clone(&barrier);
+        let aces_thread = std::thread::spawn(move || {
+            aces_barrier.wait();
+            for _ in 0..16 {
+                assert_eq!(
+                    aces.default_display_view().expect("ACES display/view"),
+                    expected_aces
+                );
+            }
+        });
+
+        barrier.wait();
+        standard_thread.join().expect("Standard query thread");
+        aces_thread.join().expect("ACES query thread");
     }
 
     #[test]
@@ -2467,7 +2788,9 @@ mod tests {
             Some(Path::new(contract.virtual_path))
         );
         assert_eq!(
-            ocio_default_display_view()
+            ColorEngine::mondrian_standard()
+                .default_display_view()
+                .ok()
                 .as_ref()
                 .map(|(display, view)| { (display.as_str(), view.as_str()) }),
             Some((contract.default_display, contract.default_view))
@@ -2525,9 +2848,10 @@ mod tests {
     fn standard_mode_extracts_gpu_shader_bundle() {
         ensure_mondrian_default_ocio_loaded().expect("standard mode default config should load");
 
-        let bundle = extract_ocio_gpu_shader_bundle(
-            ColorSpace::SonySLog3SGamut3Cine,
-            ColorSpace::Rec709,
+        let bundle = extract_ocio_identity_gpu_shader_bundle(
+            &ColorEngine::mondrian_standard(),
+            OcioColorSpaceIdentity::Color(ColorSpace::SonySLog3SGamut3Cine),
+            OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
             GpuLanguage::Glsl4_0,
         )
         .expect("default config should produce a GPU shader bundle");
@@ -2572,6 +2896,7 @@ mod tests {
         ensure_mondrian_default_ocio_loaded().expect("standard mode default config should load");
 
         let bundle = extract_ocio_identity_gpu_shader_bundle(
+            &ColorEngine::mondrian_standard(),
             OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
             OcioColorSpaceIdentity::Color(ColorSpace::Srgb),
             GpuLanguage::Glsl4_0,
@@ -2588,12 +2913,14 @@ mod tests {
         ensure_mondrian_default_ocio_loaded().expect("standard mode default config should load");
 
         let to_target_linear = extract_ocio_identity_gpu_shader_bundle(
+            &ColorEngine::mondrian_standard(),
             OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
             OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
             GpuLanguage::Glsl4_0,
         )
         .expect("working to target-linear endpoint should produce a GPU program");
         let to_encoded_output = extract_ocio_identity_gpu_shader_bundle(
+            &ColorEngine::mondrian_standard(),
             OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
             OcioColorSpaceIdentity::Color(ColorSpace::Srgb),
             GpuLanguage::Glsl4_0,
@@ -2617,6 +2944,7 @@ mod tests {
         let mut rgba = [0.18, 0.18, 0.18, 1.0];
 
         apply_ocio_identity_float(
+            &ColorEngine::mondrian_standard(),
             &mut rgba,
             OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
             OcioColorSpaceIdentity::Color(ColorSpace::Srgb),
@@ -2630,10 +2958,12 @@ mod tests {
     #[test]
     fn standard_mode_extracts_display_gpu_shader_bundle() {
         ensure_mondrian_default_ocio_loaded().expect("standard mode default config should load");
-        let (display, view) = ocio_default_display_view().expect("default display/view");
+        let engine = ColorEngine::mondrian_standard();
+        let (display, view) = engine.default_display_view().expect("default display/view");
 
-        let bundle = extract_ocio_display_gpu_shader_bundle(
-            ColorSpace::Rec709,
+        let bundle = extract_ocio_display_identity_gpu_shader_bundle(
+            &engine,
+            OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
             &display,
             &view,
             GpuLanguage::Glsl4_0,

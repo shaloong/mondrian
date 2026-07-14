@@ -190,6 +190,11 @@ frame resource table, and exposes an executor-level record method that accepts
 only the per-submission device/queue/encoder/load-op context. Lower-level code
 that already owns a prepared pipeline, OCIO bind group, and pass node may still
 use `RenderGpuOutputBoundaryBackendContext`.
+Every `OcioGpuShaderRequest` carries the exact `ColorEngine`; this engine is part
+of the shader-cache key and is used by core while selecting the config and
+extracting the Processor shader. A Standard plan cannot be reused by ACES or
+Custom OCIO solely because source, destination, display, and view strings match.
+Normal project-engine switching does not flush unrelated warm shader plans.
 For native GPU OCIO execution, `RenderGpuColorPassSchedule` is the bridge
 between the stage plan and backend recorder: it requires GPU-resident source and
 target frame handles, a blocker-free `RenderColorTransformGpuPlan`, and a
