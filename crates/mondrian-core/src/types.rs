@@ -374,16 +374,17 @@ impl From<WorkingColorSpace> for OcioColorSpaceIdentity {
     }
 }
 
-/// 色彩引擎 —— 色彩空间转换的统一分发点。
+/// 色彩空间转换 provider 的统一分发点。
 ///
-/// 所有色彩转换都通过此枚举的方法进行，编译器保证穷尽 match 分发，不会出现
-/// "选了变体但无实现"的静默 bug。
+/// 该枚举选择产品级 OCIO 模式与配置来源。最终输出意图仍由
+/// `OutputTransformIntent` 独立选择，renderer 不从可选字符串猜测产品语义。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ColorEngine {
     /// Mondrian 默认智能模式。
     ///
-    /// 这是产品化策略入口：普通用户看到简化 UI，底层必须使用 Mondrian
-    /// 内置 OCIO config / processor。当前构建未提供内置 config 时应显式报错。
+    /// 这是产品化策略入口：普通用户看到简化 UI，底层选择 Mondrian 固定发布、
+    /// 版本化且不可由外部配置覆盖的 OCIO package。必需的 config/processor
+    /// 不可用时应显式报错。
     #[default]
     MondrianSmart,
     /// OpenColorIO v2.5.2 配置驱动管线。
@@ -402,8 +403,8 @@ pub enum ColorEngine {
 pub enum OcioConfigSource {
     /// Mondrian 内置默认 OCIO config。
     ///
-    /// 这是 Standard / Simple 模式使用的默认来源。UI 可以隐藏 OCIO 细节，
-    /// 但底层仍按 OCIO config / processor 执行。
+    /// 这是 Standard / Simple 模式使用的固定 OCIO package 来源。UI 可以隐藏
+    /// OCIO 细节，但外部 config 不能覆盖该版本的定义。
     #[serde(rename = "mondrian_default")]
     MondrianDefault,
     /// 使用 `OCIO` 环境变量（行业标准）。

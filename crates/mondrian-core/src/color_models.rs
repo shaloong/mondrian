@@ -4,10 +4,10 @@ use crate::types::{Color, ColorSpace, WorkingColorSpace};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Versioned Mondrian display-rendering transform semantics.
+/// Versioned Mondrian Standard package semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum MondrianDisplayTransformVersion {
-    /// First stable Mondrian display-rendering transform contract.
+pub enum MondrianStandardVersion {
+    /// First versioned Mondrian Standard OCIO package contract.
     V1,
 }
 
@@ -18,10 +18,10 @@ pub enum MondrianDisplayTransformVersion {
 /// renderer plans the final output boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OutputTransformIntent {
-    /// Mondrian's built-in professional display transform.
+    /// Mondrian's bundled, versioned OCIO color-management package.
     MondrianStandard {
-        /// Versioned rendering-transform semantics stored in project/cache contracts.
-        version: MondrianDisplayTransformVersion,
+        /// Versioned Standard package semantics stored in project/cache contracts.
+        version: MondrianStandardVersion,
     },
     /// A direct working-space to encoded-output conversion without a view transform.
     Colorimetric,
@@ -37,7 +37,7 @@ pub enum OutputTransformIntent {
 impl OutputTransformIntent {
     /// Select the current Mondrian Standard output-transform contract.
     pub const fn mondrian_standard() -> Self {
-        Self::MondrianStandard { version: MondrianDisplayTransformVersion::V1 }
+        Self::MondrianStandard { version: MondrianStandardVersion::V1 }
     }
 }
 

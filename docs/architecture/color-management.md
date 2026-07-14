@@ -1,21 +1,23 @@
 # Color Management
 
-Mondrian has one color-management pipeline. Mondrian Standard and Custom OCIO
-both resolve color transforms through OCIO config / processor. The bundled
-Mondrian default OCIO config is required for Standard mode; missing config or
-processor failures must surface as errors instead of falling back to another
-color science.
+Mondrian has one typed color-management pipeline. Proposed ADR-0005 defines
+Mondrian Standard as a Mondrian-owned, immutable, versioned OCIO package and
+uses stock OCIO as the default execution infrastructure. Mondrian Standard,
+ACES, and Custom OCIO are product-level modes over that shared integration, not
+three renderer engines. Missing processors or configs required by a selected
+mode must surface as errors instead of falling back to different color science.
 
 The Rust integration is `ocio-rs` 0.2.x with the `bundled` feature enabled, so
 normal application builds exercise the real OpenColorIO bridge rather than a
 stub runtime.
 
-The Standard mode config is packaged as
+The bundled endpoint/input config is packaged as
 `crates/mondrian-core/assets/ocio/mondrian_default_ocio_v1.ocio` and loaded via
 `include_str!` as `embedded:mondrian_default_ocio_v1`. It is pinned to the OCIO
 ACES 2.0 studio config semantics instead of resolving an upstream `latest`
-alias at runtime. Product builds therefore have a deterministic default color
-science while still using real OCIO processors.
+alias at runtime. This currently pins OCIO-provided input, endpoint, and
+explicit ACES behavior. It remains the bootstrap Standard package until a
+lighter default View Transform passes the gates in proposed ADR-0005.
 `mondrian-core::mondrian_default_ocio_contract()` is the Rust-level product
 contract for that asset. It lists the pinned config name, virtual path, default
 display/view, scene-linear working role, supported Mondrian `ColorSpace`
@@ -31,7 +33,7 @@ color-space transform plus every supported display/view transform.
 
 ## Color-Science Validation Primitives
 
-Production transforms continue to execute through OCIO. Independent accuracy
+OCIO-backed production nodes execute through OCIO. Independent accuracy
 validation uses `mondrian-core::color_science`, which owns the finite
 `CieLabD50` value type, explicit normalized sRGB -> D50 CIELAB conversion, and
 CIEDE2000 implementation. These primitives are an oracle-facing measurement
@@ -56,54 +58,17 @@ reference calculation and PQ absolute-luminance endpoints are regression tests.
 Out-of-gamut negative display-linear values are retained through ITP conversion
 rather than silently clamped.
 
-## Mondrian Display Rendering Transform
+## Transform providers and output intent
 
-`mondrian-core::mondrian_display` owns the high-precision CPU reference and
-versioned target contract for Mondrian Display Rendering Transform v1 (MDRT
-v1). It is independent from ACES rendering transforms, ACEScct, and custom OCIO
-display/view selection. The reference consumes RGB after an exact working-to-
-target-linear primary conversion; output transfer encoding remains a separate
-stage after MDRT.
-
-`MondrianOutputTarget` identifies the encoded output space, peak luminance, and
-reference white with deterministic integer cd/m² values. Acquisition/log
-encodings are rejected as output targets. Target-linear `1.0` means reference
-white and peak headroom is `peak_nits / reference_white_nits`.
-
-MDRT v1 uses two analytic, deterministic stages:
-
-- a neutral-axis luminance scale that is exactly linear through 75% of target
-  headroom, then uses a value- and slope-continuous rational shoulder that
-  approaches target peak without a clip;
-- target-gamut compression that leaves the inner 90% gamut unchanged, then
-  compresses chroma along the target-neutral ray with a value- and slope-
-  continuous rational function that asymptotically reaches the boundary.
-
-The reference contains no 3D LUT, logarithm, exponent, per-frame analysis, or
-content-adaptive state. Tests cover SDR preservation, neutral-axis monotonicity,
-HDR headroom, finite/bounded output over an extreme RGB grid, hue-ray
-preservation, knee continuity, invalid targets, and non-finite input rejection.
-These design constraints are consistent with the mid-tone preservation and
-highlight/hue goals described by ITU-R BT.2446, but the formulas are
-Mondrian-owned and are not presented as an implementation of a BT.2446 method.
-
-The CPU reference is currently an oracle, not yet the production output
-backend. `OutputTransformIntent::MondrianStandard` must not switch pixel
-execution to MDRT until a renderer-native implementation passes CPU/GPU
-conformance and image-corpus review. Until then the existing execution payload
-remains unchanged, so introducing the contract cannot silently alter project
-appearance.
-
-## Engines
-
-- `ColorEngine::MondrianSmart`: productized Standard/Simple policy over the
-  Mondrian default OCIO source.
-- `ColorEngine::Ocio`: explicit OCIO mode over `$OCIO`, a selected built-in,
-  or a path source.
+- `ColorEngine::MondrianSmart`: productized policy selecting the bundled,
+  version-pinned Mondrian OCIO package.
+- `ColorEngine::Ocio`: explicit OCIO provider over `$OCIO`, a selected built-in,
+  or a path source. Its display/view owns final rendering only when
+  `OutputTransformIntent::OcioDisplayView` is selected.
 
 Final-output color science is selected separately through
-`OutputTransformIntent`. `MondrianStandard` carries an explicit rendering
-transform version from its first release, `OcioDisplayView` carries the named
+`OutputTransformIntent`. `MondrianStandard` carries an explicit package version
+from its first release, `OcioDisplayView` carries the named
 display/view selected by advanced policy, and `Colorimetric` requests a direct
 working-to-encoded conversion. The intent survives preview/export planning and
 cache identity independently from the CPU/GPU implementation used to execute
@@ -112,7 +77,9 @@ than being hidden in optional display/view strings.
 
 Explicit OCIO mode must load its selected config successfully. It must not
 silently fall back to a different color science. Mondrian Standard follows the
-same rule for the embedded `mondrian_default_ocio_v1` asset.
+same rule whenever an input or endpoint node requires the embedded
+`mondrian_default_ocio_v1` asset. Failure of that provider does not authorize
+substitution of another config, approximate LUT, or non-conformant native conversion.
 The `$OCIO` environment source is intentionally fail-closed: if the variable is
 unset or points to a missing file, Mondrian reports that selected source as
 invalid instead of scanning machine-specific standard paths.

@@ -47,12 +47,16 @@ execution, validating real display behavior, and expanding dirty-media coverage.
    cache lifetime, or readback strategy only. They must not duplicate input
    interpretation, transform selection, compositing semantics, or policy logic.
 
-2. OCIO is the color engine.
+2. Stock OCIO is the single default execution infrastructure.
 
-   Standard mode uses the bundled Mondrian default OCIO config. Custom OCIO mode
-   uses the selected config. Missing config, missing display/view, missing
-   colorspace, shader extraction failure, or processor failure must be reported
-   as structured errors. Do not add "looks fine" fallbacks.
+   Per proposed ADR-0005, Mondrian Standard is a bundled, immutable, versioned
+   OCIO package. ACES and Custom OCIO are parallel product modes over the same
+   integration. Do not build a native color engine speculatively. A native
+   specialization requires a same-math comparison proving a documented
+   capability, fidelity, fusion, or material multi-GPU p95/p99 benefit. Missing
+   config, display/view, colorspace, shader extraction, or processor must be
+   reported as a structured error. Do not add "looks fine" fallbacks,
+   approximate LUT substitutions, or implicit alternate views.
 
 3. No Standard fallback.
 
