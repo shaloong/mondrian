@@ -10,7 +10,7 @@ use crate::plugin_contract::{
 };
 use mondrian_core::{
     automation::{AnimatablePropertyUiMetadata, PropertyBag, PropertyDescriptor, PropertyValue},
-    types::{Color, EffectId},
+    types::{Color, ColorSpace, EffectId},
     TimelineTime,
 };
 // Re-export effect data types from mondrian-core.
@@ -41,6 +41,77 @@ pub enum EffectCachePolicy {
     #[default]
     Deterministic,
     FrameDependent,
+}
+
+/// Color domain in which an effect consumes or produces pixel values.
+///
+/// RGB domains are explicit so the render planner can insert stock-OCIO
+/// processors instead of silently evaluating display- or log-referred math in
+/// the scene-linear working space. Data and alpha/mask payloads are deliberately
+/// non-convertible color domains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "domain", rename_all = "snake_case")]
+pub enum EffectColorDomain {
+    /// The sequence's scene-linear RGB working space.
+    SceneLinearRgb,
+    /// A named log or perceptual RGB encoding resolved through OCIO.
+    LogPerceptualRgb {
+        /// Exact OCIO-backed color-space identity used by the effect.
+        color_space: ColorSpace,
+    },
+    /// Linear-light RGB in an explicit display-primary space.
+    DisplayLinearRgb {
+        /// Exact linear display-primary color-space identity.
+        color_space: ColorSpace,
+    },
+    /// Display-encoded RGB in an explicit output color space.
+    DisplayEncodedRgb {
+        /// Exact encoded display/output color-space identity.
+        color_space: ColorSpace,
+    },
+    /// Non-color data such as depth, normals, or motion vectors.
+    Data,
+    /// A scalar alpha or mask payload.
+    AlphaMask,
+}
+
+impl EffectColorDomain {
+    /// Whether this domain represents color-managed RGB values.
+    pub const fn is_rgb(self) -> bool {
+        matches!(
+            self,
+            Self::SceneLinearRgb
+                | Self::LogPerceptualRgb { .. }
+                | Self::DisplayLinearRgb { .. }
+                | Self::DisplayEncodedRgb { .. }
+        )
+    }
+}
+
+/// Input and output color-domain contract for one effect operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectColorDomainContract {
+    /// Domain required at the operation input.
+    pub input: EffectColorDomain,
+    /// Domain produced by the operation output.
+    pub output: EffectColorDomain,
+}
+
+impl EffectColorDomainContract {
+    /// Declare an effect that preserves one processing domain.
+    pub const fn preserving(domain: EffectColorDomain) -> Self {
+        Self { input: domain, output: domain }
+    }
+
+    /// Scene-linear preserving contract used by built-in working-domain ops.
+    pub const SCENE_LINEAR: Self = Self::preserving(EffectColorDomain::SceneLinearRgb);
+}
+
+impl Default for EffectColorDomainContract {
+    fn default() -> Self {
+        Self::SCENE_LINEAR
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,13 +316,19 @@ pub struct EffectDefinition {
     graph_builder: Option<EffectGraphBuilder>,
     capabilities: EffectCapabilities,
     plugin_contract: Option<EffectPluginContract>,
+    color_domain_contract: EffectColorDomainContract,
 }
 
 impl EffectDefinition {
+    /// Create an effect definition with an explicit processing-domain contract.
+    ///
+    /// Callers must select the domain intentionally; definitions never infer a
+    /// display, log, data, or mask contract from the render operation.
     pub fn new(
         key: impl Into<String>,
         display_name: impl Into<String>,
         default_properties: PropertyBag,
+        color_domain_contract: EffectColorDomainContract,
     ) -> Self {
         Self {
             key: key.into(),
@@ -261,6 +338,7 @@ impl EffectDefinition {
             graph_builder: None,
             capabilities: EffectCapabilities::default(),
             plugin_contract: None,
+            color_domain_contract,
         }
     }
 
@@ -357,6 +435,11 @@ impl EffectDefinition {
 
     pub fn capabilities(&self) -> EffectCapabilities {
         self.capabilities
+    }
+
+    /// Exact input/output processing domain declared by this definition.
+    pub fn color_domain_contract(&self) -> EffectColorDomainContract {
+        self.color_domain_contract
     }
 
     pub fn supports_visual_evaluation(&self) -> bool {
@@ -614,6 +697,7 @@ impl EffectNodeExt for EffectNode {
             }
             if let Some(graph_builder) = definition.graph_builder.as_ref() {
                 let mut staged = builder.clone();
+                staged.set_active_domain_contract(definition.color_domain_contract());
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     graph_builder(self, context, &mut staged)
                 }));
@@ -1004,6 +1088,7 @@ fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
         effect_type.key(),
         builtin_display_name(&effect_type),
         default_properties_for(effect_type.clone()),
+        EffectColorDomainContract::SCENE_LINEAR,
     )
     .with_category(category);
     if let Some(graph_builder) = builtin_graph_builder_for(&effect_type) {
@@ -1291,19 +1376,22 @@ mod tests {
             PropertyValue::Float(0.0),
         ));
         register_effect_definition(
-            EffectDefinition::new(plugin_type.key(), "AI 自动曝光", properties).with_graph_builder(
-                Arc::new(move |effect, context, graph| {
-                    let exposure =
-                        effect.evaluate_f32_by_suffix(&exposure_suffix, context.time, 0.0);
-                    if exposure.abs() > 1e-4 {
-                        graph.append_unary(EffectRenderOp::ColorAdjust {
-                            exposure,
-                            contrast: 1.0,
-                            saturation: 1.0,
-                        });
-                    }
-                }),
-            ),
+            EffectDefinition::new(
+                plugin_type.key(),
+                "AI 自动曝光",
+                properties,
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_graph_builder(Arc::new(move |effect, context, graph| {
+                let exposure = effect.evaluate_f32_by_suffix(&exposure_suffix, context.time, 0.0);
+                if exposure.abs() > 1e-4 {
+                    graph.append_unary(EffectRenderOp::ColorAdjust {
+                        exposure,
+                        contrast: 1.0,
+                        saturation: 1.0,
+                    });
+                }
+            })),
         );
 
         let mut effect = EffectNode::with_defaults(plugin_type.clone());
@@ -1336,22 +1424,27 @@ mod tests {
             PropertyValue::Float(0.4),
         ));
         register_effect_definition(
-            EffectDefinition::new(plugin_type.key(), "Glow", properties)
-                .with_custom_render_processor(
-                    Arc::new(|effect, context| {
-                        let amount = effect.evaluate_f32_by_suffix(
-                            "plugin.render.glow.amount",
-                            context.time,
-                            0.0,
-                        );
-                        if amount > 0.0 {
-                            Some(serde_json::json!({ "amount": amount }))
-                        } else {
-                            None
-                        }
-                    }),
-                    Arc::new(|_, _, _, _, _| Ok(())),
-                ),
+            EffectDefinition::new(
+                plugin_type.key(),
+                "Glow",
+                properties,
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_custom_render_processor(
+                Arc::new(|effect, context| {
+                    let amount = effect.evaluate_f32_by_suffix(
+                        "plugin.render.glow.amount",
+                        context.time,
+                        0.0,
+                    );
+                    if amount > 0.0 {
+                        Some(serde_json::json!({ "amount": amount }))
+                    } else {
+                        None
+                    }
+                }),
+                Arc::new(|_, _, _, _, _| Ok(())),
+            ),
         );
 
         let effect = EffectNode::with_defaults(plugin_type);
@@ -1392,28 +1485,33 @@ mod tests {
             PropertyValue::Float(0.35),
         ));
         register_effect_definition(
-            EffectDefinition::new(plugin_type.key(), "Glow Mix", properties)
-                .with_branching_graph_builder(Arc::new(|effect, context, graph| {
-                    let radius = effect.evaluate_f32_by_suffix(
-                        "plugin.graph.glow_mix.radius",
-                        context.time,
-                        0.0,
-                    );
-                    let opacity = effect
-                        .evaluate_f32_by_suffix("plugin.graph.glow_mix.opacity", context.time, 0.0)
-                        .clamp(0.0, 1.0);
-                    if radius <= 1.0e-4 || opacity <= 1.0e-4 {
-                        return;
-                    }
+            EffectDefinition::new(
+                plugin_type.key(),
+                "Glow Mix",
+                properties,
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_branching_graph_builder(Arc::new(|effect, context, graph| {
+                let radius = effect.evaluate_f32_by_suffix(
+                    "plugin.graph.glow_mix.radius",
+                    context.time,
+                    0.0,
+                );
+                let opacity = effect
+                    .evaluate_f32_by_suffix("plugin.graph.glow_mix.opacity", context.time, 0.0)
+                    .clamp(0.0, 1.0);
+                if radius <= 1.0e-4 || opacity <= 1.0e-4 {
+                    return;
+                }
 
-                    graph.blend_current_with(
-                        mondrian_core::types::BlendMode::Screen,
-                        opacity,
-                        |graph, source| {
-                            graph.add_unary_from(source, EffectRenderOp::GaussianBlur { radius })
-                        },
-                    );
-                })),
+                graph.blend_current_with(
+                    mondrian_core::types::BlendMode::Screen,
+                    opacity,
+                    |graph, source| {
+                        graph.add_unary_from(source, EffectRenderOp::GaussianBlur { radius })
+                    },
+                );
+            })),
         );
 
         let effect = EffectNode::with_defaults(plugin_type.clone());
@@ -1444,30 +1542,35 @@ mod tests {
             PropertyValue::Text("looks/teal_orange.cube".to_string()),
         ));
         register_effect_definition(
-            EffectDefinition::new(plugin_type.key(), "LUT Loader", properties)
-                .with_custom_render_backend(
-                    Arc::new(|effect, context| {
-                        let path = effect
-                            .evaluate_property("plugin.render.lut_loader.asset_path", context.time)
-                            .and_then(|value| match value {
-                                PropertyValue::Text(text) => Some(text),
-                                _ => None,
-                            })
-                            .unwrap_or_default();
-                        Some(serde_json::json!({ "asset_path": path }))
-                    }),
-                    Some(Arc::new(|effect, context| {
-                        effect
-                            .evaluate_property("plugin.render.lut_loader.asset_path", context.time)
-                            .and_then(|value| match value {
-                                PropertyValue::Text(text) => Some(text),
-                                _ => None,
-                            })
-                            .map(|path| format!("lut:{path}"))
-                    })),
-                    EffectCachePolicy::Deterministic,
-                    Arc::new(|_, _, _, _, _| Ok(())),
-                ),
+            EffectDefinition::new(
+                plugin_type.key(),
+                "LUT Loader",
+                properties,
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_custom_render_backend(
+                Arc::new(|effect, context| {
+                    let path = effect
+                        .evaluate_property("plugin.render.lut_loader.asset_path", context.time)
+                        .and_then(|value| match value {
+                            PropertyValue::Text(text) => Some(text),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    Some(serde_json::json!({ "asset_path": path }))
+                }),
+                Some(Arc::new(|effect, context| {
+                    effect
+                        .evaluate_property("plugin.render.lut_loader.asset_path", context.time)
+                        .and_then(|value| match value {
+                            PropertyValue::Text(text) => Some(text),
+                            _ => None,
+                        })
+                        .map(|path| format!("lut:{path}"))
+                })),
+                EffectCachePolicy::Deterministic,
+                Arc::new(|_, _, _, _, _| Ok(())),
+            ),
         );
 
         let effect = EffectNode::with_defaults(plugin_type.clone());
@@ -1492,19 +1595,22 @@ mod tests {
     fn failing_plugin_graph_builder_isolated_and_hidden_after_disable_policy() {
         let plugin_type = EffectType::Plugin("plugin.graph.unstable".to_string());
         register_effect_definition(
-            EffectDefinition::new(plugin_type.key(), "Unstable Graph", PropertyBag::default())
-                .with_plugin_contract(
-                    crate::EffectPluginContract::new("1.0.0")
-                        .with_failure_policy(
-                            crate::EffectPluginFailurePolicy::DisablePluginDefinition,
-                        )
-                        .with_degradation_policy(
-                            crate::EffectPluginDegradationPolicy::HideFromEffectLibrary,
-                        ),
-                )
-                .with_graph_builder(Arc::new(|_, _, _| {
-                    panic!("unstable graph builder");
-                })),
+            EffectDefinition::new(
+                plugin_type.key(),
+                "Unstable Graph",
+                PropertyBag::default(),
+                EffectColorDomainContract::SCENE_LINEAR,
+            )
+            .with_plugin_contract(
+                crate::EffectPluginContract::new("1.0.0")
+                    .with_failure_policy(crate::EffectPluginFailurePolicy::DisablePluginDefinition)
+                    .with_degradation_policy(
+                        crate::EffectPluginDegradationPolicy::HideFromEffectLibrary,
+                    ),
+            )
+            .with_graph_builder(Arc::new(|_, _, _| {
+                panic!("unstable graph builder");
+            })),
         );
 
         let effect = EffectNode::new(plugin_type.clone());

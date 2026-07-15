@@ -1,4 +1,7 @@
-use crate::{EffectCachePolicy, EffectRenderOp, EffectRenderPlan};
+use crate::{
+    EffectCachePolicy, EffectColorDomain, EffectColorDomainContract, EffectRenderOp,
+    EffectRenderPlan,
+};
 use mondrian_core::types::BlendMode;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -17,6 +20,12 @@ pub enum EffectGraphNodeKind {
     UnaryEffect {
         input: EffectGraphNodeId,
         op: EffectRenderOp,
+    },
+    /// Unary operation with an explicit non-default processing-domain contract.
+    DomainEffect {
+        input: EffectGraphNodeId,
+        op: EffectRenderOp,
+        domain_contract: EffectColorDomainContract,
     },
     Blend {
         base: EffectGraphNodeId,
@@ -56,7 +65,8 @@ impl EffectGraphNode {
     pub fn input_ids(&self) -> Vec<EffectGraphNodeId> {
         match self.kind {
             EffectGraphNodeKind::Source => Vec::new(),
-            EffectGraphNodeKind::UnaryEffect { input, .. } => vec![input],
+            EffectGraphNodeKind::UnaryEffect { input, .. }
+            | EffectGraphNodeKind::DomainEffect { input, .. } => vec![input],
             EffectGraphNodeKind::Blend { base, overlay, .. } => vec![base, overlay],
             EffectGraphNodeKind::Mask { input, mask, .. } => vec![input, mask],
             EffectGraphNodeKind::MaskSource { .. } => Vec::new(),
@@ -108,6 +118,12 @@ impl EffectRenderGraph {
                     input.hash(&mut hasher);
                     hash_render_op(op, &mut hasher);
                 }
+                EffectGraphNodeKind::DomainEffect { input, op, domain_contract } => {
+                    8u8.hash(&mut hasher);
+                    input.hash(&mut hasher);
+                    domain_contract.hash(&mut hasher);
+                    hash_render_op(op, &mut hasher);
+                }
                 EffectGraphNodeKind::Blend { base, overlay, blend_mode, opacity } => {
                     2u8.hash(&mut hasher);
                     base.hash(&mut hasher);
@@ -156,6 +172,69 @@ pub struct CompiledEffectGraph {
     pub estimated_cost: u32,
     pub output_cache_enabled: bool,
     pub signature_hash: u64,
+    /// Explicit domain transitions and blockers required by this graph.
+    pub domain_plan: CompiledEffectDomainPlan,
+}
+
+/// One color-domain conversion edge required before a consumer or after output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EffectDomainTransition {
+    /// Consumer node, or `None` when returning the graph output to scene-linear.
+    pub consumer: Option<EffectGraphNodeId>,
+    /// Producer node whose output is converted.
+    pub input: EffectGraphNodeId,
+    /// Producer domain.
+    pub from: EffectColorDomain,
+    /// Consumer/final-output domain.
+    pub to: EffectColorDomain,
+}
+
+/// Why a graph edge cannot be converted by color management.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectDomainBlockerKind {
+    /// Color transforms cannot reinterpret data or alpha/mask payloads.
+    NonRgbDomainTransition,
+    /// A mask input did not produce an alpha/mask payload.
+    MaskInputIsNotAlpha,
+}
+
+/// One fail-closed effect-domain planning blocker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EffectDomainBlocker {
+    /// Consumer node that rejected the edge, or `None` for final output.
+    pub consumer: Option<EffectGraphNodeId>,
+    /// Producer node on the blocked edge.
+    pub input: EffectGraphNodeId,
+    /// Actual producer domain.
+    pub from: EffectColorDomain,
+    /// Required consumer domain.
+    pub to: EffectColorDomain,
+    /// Stable blocker category.
+    pub kind: EffectDomainBlockerKind,
+}
+
+/// Compiled color-domain contract for an effect graph.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CompiledEffectDomainPlan {
+    /// Domain produced by each reachable graph node before final normalization.
+    pub node_output_domains: HashMap<EffectGraphNodeId, EffectColorDomain>,
+    /// Legal RGB conversions that the renderer must resolve through OCIO.
+    pub transitions: Vec<EffectDomainTransition>,
+    /// Invalid data/alpha crossings that must fail closed.
+    pub blockers: Vec<EffectDomainBlocker>,
+}
+
+impl CompiledEffectDomainPlan {
+    /// Whether execution needs one or more OCIO domain conversions.
+    pub fn requires_conversion(&self) -> bool {
+        !self.transitions.is_empty()
+    }
+
+    /// Whether the graph can execute directly in the scene-linear float path.
+    pub fn is_direct_scene_linear(&self) -> bool {
+        self.transitions.is_empty() && self.blockers.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -171,6 +250,7 @@ pub struct EffectGraphBuilderState {
     graph: EffectRenderGraph,
     current_output: EffectGraphNodeId,
     next_id: u32,
+    active_domain_contract: EffectColorDomainContract,
 }
 
 impl Default for EffectGraphBuilderState {
@@ -181,6 +261,7 @@ impl Default for EffectGraphBuilderState {
             graph,
             current_output,
             next_id: current_output.0 + 1,
+            active_domain_contract: EffectColorDomainContract::SCENE_LINEAR,
         }
     }
 }
@@ -198,6 +279,13 @@ impl EffectGraphBuilderState {
         self.current_output
     }
 
+    pub(crate) fn set_active_domain_contract(
+        &mut self,
+        domain_contract: EffectColorDomainContract,
+    ) {
+        self.active_domain_contract = domain_contract;
+    }
+
     pub fn append_unary(&mut self, op: EffectRenderOp) -> EffectGraphNodeId {
         let node_id = self.add_unary_from(self.current_output, op);
         self.current_output = node_id;
@@ -210,10 +298,16 @@ impl EffectGraphBuilderState {
         op: EffectRenderOp,
     ) -> EffectGraphNodeId {
         let id = self.alloc_id();
-        self.graph.nodes.push(EffectGraphNode {
-            id,
-            kind: EffectGraphNodeKind::UnaryEffect { input, op },
-        });
+        let kind = if self.active_domain_contract == EffectColorDomainContract::SCENE_LINEAR {
+            EffectGraphNodeKind::UnaryEffect { input, op }
+        } else {
+            EffectGraphNodeKind::DomainEffect {
+                input,
+                op,
+                domain_contract: self.active_domain_contract,
+            }
+        };
+        self.graph.nodes.push(EffectGraphNode { id, kind });
         id
     }
 
@@ -351,15 +445,25 @@ fn compiled_effect_graph_cache() -> &'static Mutex<CompiledEffectGraphCache> {
 }
 
 pub fn compile_effect_render_graph(plan: &EffectRenderPlan) -> EffectRenderGraph {
+    compile_effect_render_graph_in_domain(plan, EffectColorDomainContract::SCENE_LINEAR)
+}
+
+/// Compile a linear effect plan with one explicit processing-domain contract.
+pub fn compile_effect_render_graph_in_domain(
+    plan: &EffectRenderPlan,
+    domain_contract: EffectColorDomainContract,
+) -> EffectRenderGraph {
     let mut graph = EffectRenderGraph::identity();
     let mut current = graph.output.expect("identity graph should have source output");
 
     for (index, op) in plan.ops.iter().cloned().enumerate() {
         let node_id = EffectGraphNodeId((index + 1) as u32);
-        graph.nodes.push(EffectGraphNode {
-            id: node_id,
-            kind: EffectGraphNodeKind::UnaryEffect { input: current, op },
-        });
+        let kind = if domain_contract == EffectColorDomainContract::SCENE_LINEAR {
+            EffectGraphNodeKind::UnaryEffect { input: current, op }
+        } else {
+            EffectGraphNodeKind::DomainEffect { input: current, op, domain_contract }
+        };
+        graph.nodes.push(EffectGraphNode { id: node_id, kind });
         current = node_id;
     }
 
@@ -367,12 +471,146 @@ pub fn compile_effect_render_graph(plan: &EffectRenderPlan) -> EffectRenderGraph
     graph
 }
 
+/// Compile the reachable effect graph into explicit color-domain edges.
+///
+/// The graph source and final output are scene-linear by compositor contract.
+/// RGB-to-RGB edges become renderer-owned OCIO transitions. Data and alpha
+/// crossings are retained as blockers so callers fail closed instead of
+/// interpreting them as picture RGB.
+pub fn compile_effect_domain_plan(
+    graph: &EffectRenderGraph,
+    schedule: &EffectExecutionSchedule,
+) -> Option<CompiledEffectDomainPlan> {
+    let mut plan = CompiledEffectDomainPlan::default();
+
+    for node_id in &schedule.ordered_nodes {
+        let node = graph.node(*node_id)?;
+        let output_domain = match &node.kind {
+            EffectGraphNodeKind::Source => EffectColorDomain::SceneLinearRgb,
+            EffectGraphNodeKind::UnaryEffect { input, .. } => {
+                let input_domain = *plan.node_output_domains.get(input)?;
+                plan_domain_edge(
+                    &mut plan,
+                    Some(node.id),
+                    *input,
+                    input_domain,
+                    EffectColorDomain::SceneLinearRgb,
+                    EffectDomainBlockerKind::NonRgbDomainTransition,
+                );
+                EffectColorDomain::SceneLinearRgb
+            }
+            EffectGraphNodeKind::DomainEffect { input, domain_contract, .. } => {
+                let input_domain = *plan.node_output_domains.get(input)?;
+                plan_domain_edge(
+                    &mut plan,
+                    Some(node.id),
+                    *input,
+                    input_domain,
+                    domain_contract.input,
+                    EffectDomainBlockerKind::NonRgbDomainTransition,
+                );
+                domain_contract.output
+            }
+            EffectGraphNodeKind::Blend { base, overlay, .. } => {
+                let base_domain = *plan.node_output_domains.get(base)?;
+                let overlay_domain = *plan.node_output_domains.get(overlay)?;
+                plan_domain_edge(
+                    &mut plan,
+                    Some(node.id),
+                    *overlay,
+                    overlay_domain,
+                    base_domain,
+                    EffectDomainBlockerKind::NonRgbDomainTransition,
+                );
+                base_domain
+            }
+            EffectGraphNodeKind::Mask { input, mask, .. } => {
+                let input_domain = *plan.node_output_domains.get(input)?;
+                let mask_domain = *plan.node_output_domains.get(mask)?;
+                if mask_domain != EffectColorDomain::AlphaMask {
+                    plan.blockers.push(EffectDomainBlocker {
+                        consumer: Some(node.id),
+                        input: *mask,
+                        from: mask_domain,
+                        to: EffectColorDomain::AlphaMask,
+                        kind: EffectDomainBlockerKind::MaskInputIsNotAlpha,
+                    });
+                }
+                input_domain
+            }
+            EffectGraphNodeKind::MaskSource { .. } => EffectColorDomain::AlphaMask,
+            EffectGraphNodeKind::MultiInput { inputs, .. } => {
+                let first = *inputs.first()?;
+                let target_domain = *plan.node_output_domains.get(&first)?;
+                for input in inputs.iter().skip(1) {
+                    let input_domain = *plan.node_output_domains.get(input)?;
+                    plan_domain_edge(
+                        &mut plan,
+                        Some(node.id),
+                        *input,
+                        input_domain,
+                        target_domain,
+                        EffectDomainBlockerKind::NonRgbDomainTransition,
+                    );
+                }
+                target_domain
+            }
+        };
+        plan.node_output_domains.insert(node.id, output_domain);
+    }
+
+    let output = graph.output?;
+    let output_domain = *plan.node_output_domains.get(&output)?;
+    plan_domain_edge(
+        &mut plan,
+        None,
+        output,
+        output_domain,
+        EffectColorDomain::SceneLinearRgb,
+        EffectDomainBlockerKind::NonRgbDomainTransition,
+    );
+    Some(plan)
+}
+
+fn plan_domain_edge(
+    plan: &mut CompiledEffectDomainPlan,
+    consumer: Option<EffectGraphNodeId>,
+    input: EffectGraphNodeId,
+    from: EffectColorDomain,
+    to: EffectColorDomain,
+    blocker_kind: EffectDomainBlockerKind,
+) {
+    if from == to {
+        return;
+    }
+    if from.is_rgb() && to.is_rgb() {
+        plan.transitions.push(EffectDomainTransition { consumer, input, from, to });
+    } else {
+        plan.blockers
+            .push(EffectDomainBlocker { consumer, input, from, to, kind: blocker_kind });
+    }
+}
+
 pub fn compile_scheduled_effect_graph(plan: &EffectRenderPlan) -> Option<CompiledEffectGraph> {
     let graph = compile_effect_render_graph(plan);
+    compile_scheduled_render_graph(graph)
+}
+
+/// Compile a linear plan with an explicit color-domain contract.
+pub fn compile_scheduled_effect_graph_in_domain(
+    plan: &EffectRenderPlan,
+    domain_contract: EffectColorDomainContract,
+) -> Option<CompiledEffectGraph> {
+    let graph = compile_effect_render_graph_in_domain(plan, domain_contract);
+    compile_scheduled_render_graph(graph)
+}
+
+fn compile_scheduled_render_graph(graph: EffectRenderGraph) -> Option<CompiledEffectGraph> {
     let schedule = schedule_effect_render_graph(&graph)?;
     let node_profiles = compile_effect_node_profiles(&graph, &schedule)?;
     let (output_cache_policy, estimated_cost, output_cache_enabled) =
         compiled_effect_graph_cache_profile(&graph, &node_profiles)?;
+    let domain_plan = compile_effect_domain_plan(&graph, &schedule)?;
     Some(CompiledEffectGraph {
         node_use_counts: effect_graph_node_use_counts(&graph),
         node_profiles,
@@ -380,6 +618,7 @@ pub fn compile_scheduled_effect_graph(plan: &EffectRenderPlan) -> Option<Compile
         estimated_cost,
         output_cache_enabled,
         signature_hash: graph.signature_hash(),
+        domain_plan,
         graph,
         schedule,
     })
@@ -431,6 +670,7 @@ pub fn get_or_compile_scheduled_render_graph(
     let node_profiles = compile_effect_node_profiles(&graph, &schedule)?;
     let (output_cache_policy, estimated_cost, output_cache_enabled) =
         compiled_effect_graph_cache_profile(&graph, &node_profiles)?;
+    let domain_plan = compile_effect_domain_plan(&graph, &schedule)?;
     let compiled = Arc::new(CompiledEffectGraph {
         signature_hash: signature,
         graph,
@@ -440,6 +680,7 @@ pub fn get_or_compile_scheduled_render_graph(
         output_cache_policy,
         estimated_cost,
         output_cache_enabled,
+        domain_plan,
     });
     let mut cache = compiled_effect_graph_cache().lock().ok()?;
     cache.insert(signature, Arc::clone(&compiled));
@@ -567,6 +808,33 @@ pub fn compile_effect_node_profiles(
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 1u8.hash(&mut hasher);
                 input_profile.subtree_signature.hash(&mut hasher);
+                op.hash_signature(&mut hasher);
+                let cache_policy = if input_profile.cache_policy
+                    == EffectCachePolicy::FrameDependent
+                    || op.cache_policy() == EffectCachePolicy::FrameDependent
+                {
+                    EffectCachePolicy::FrameDependent
+                } else {
+                    EffectCachePolicy::Deterministic
+                };
+                let estimated_cost = input_profile.estimated_cost + op.estimated_cost();
+                let output_cache_enabled = estimated_cost >= 5
+                    || (estimated_cost >= 4
+                        && (use_counts.get(&node.id).copied().unwrap_or(0) > 1
+                            || graph.output == Some(node.id)));
+                CompiledEffectNodeProfile {
+                    subtree_signature: hasher.finish(),
+                    cache_policy,
+                    estimated_cost,
+                    output_cache_enabled,
+                }
+            }
+            EffectGraphNodeKind::DomainEffect { input, op, domain_contract } => {
+                let input_profile = profiles.get(input)?;
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                8u8.hash(&mut hasher);
+                input_profile.subtree_signature.hash(&mut hasher);
+                domain_contract.hash(&mut hasher);
                 op.hash_signature(&mut hasher);
                 let cache_policy = if input_profile.cache_policy
                     == EffectCachePolicy::FrameDependent
@@ -750,6 +1018,46 @@ fn shape_variant_hash(shape: &crate::mask::MaskShape, state: &mut impl std::hash
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_encoded_effect_plans_explicit_round_trip_to_scene_linear() {
+        let display_domain =
+            EffectColorDomain::DisplayEncodedRgb { color_space: mondrian_core::ColorSpace::Rec709 };
+        let plan = EffectRenderPlan {
+            ops: vec![EffectRenderOp::ColorAdjust {
+                exposure: 0.25,
+                contrast: 1.0,
+                saturation: 1.0,
+            }],
+        };
+
+        let compiled = compile_scheduled_effect_graph_in_domain(
+            &plan,
+            EffectColorDomainContract::preserving(display_domain),
+        )
+        .expect("valid effect graph");
+
+        assert_eq!(compiled.domain_plan.transitions.len(), 2);
+        assert_eq!(
+            compiled.domain_plan.transitions[0],
+            EffectDomainTransition {
+                consumer: Some(EffectGraphNodeId(1)),
+                input: EffectGraphNodeId(0),
+                from: EffectColorDomain::SceneLinearRgb,
+                to: display_domain,
+            }
+        );
+        assert_eq!(
+            compiled.domain_plan.transitions[1],
+            EffectDomainTransition {
+                consumer: None,
+                input: EffectGraphNodeId(1),
+                from: display_domain,
+                to: EffectColorDomain::SceneLinearRgb,
+            }
+        );
+        assert!(compiled.domain_plan.blockers.is_empty());
+    }
 
     #[test]
     fn compile_effect_render_graph_builds_linear_chain_from_plan() {

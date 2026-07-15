@@ -187,9 +187,9 @@ pub use timeline_composite::{
     composite_timeline_elements_color_frame_with_diagnostics, composite_timeline_elements_into,
     is_identity_transform, quantize_transform_signature, TimelineAdjustmentLayer,
     TimelineCompositeColorPath, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
-    TimelineCompositeElement, TimelineCompositeFrame, TimelineCompositeLegacyBreakdown,
-    TimelineCompositeOptions, TimelineCompositeScratch, TimelineMediaLayer,
-    TimelineSolidColorLayer,
+    TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement, TimelineCompositeFrame,
+    TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineMediaLayer, TimelineSolidColorLayer,
 };
 pub use timeline_render_plan::{
     collect_timeline_color_diagnostics, collect_timeline_color_diagnostics_with_display_view,

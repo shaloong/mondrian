@@ -21,26 +21,28 @@ pub use adjustment::{
 pub use effect::{
     build_effect_render_graph, compile_clip_effect_graph, effect_category_tree, effect_definition,
     effect_display_name, effect_library_types, register_effect_definition, EffectCacheKeyBuilder,
-    EffectCachePolicy, EffectCapabilities, EffectCategoryNode, EffectDefinition, EffectEvalContext,
-    EffectGraphBuilder, EffectNode, EffectNodeExt, EffectRenderOp, EffectRenderParamsBuilder,
-    EffectRenderPlan, EffectType,
+    EffectCachePolicy, EffectCapabilities, EffectCategoryNode, EffectColorDomain,
+    EffectColorDomainContract, EffectDefinition, EffectEvalContext, EffectGraphBuilder, EffectNode,
+    EffectNodeExt, EffectRenderOp, EffectRenderParamsBuilder, EffectRenderPlan, EffectType,
 };
 pub use execution::{
     apply_compiled_effect_graph, apply_compiled_effect_graph_pass,
     apply_compiled_effect_graph_pass_rgba_f32, apply_compiled_effect_graph_rgba_f32,
     apply_effect_render_graph, apply_effect_render_graph_pass, apply_effect_render_plan,
     apply_effect_render_plan_pass, compiled_effect_graph_supports_rgba_f32,
-    register_custom_render_processor, CustomEffectRenderProcessor, EffectFloatExecutionError,
-    EffectFloatUnsupportedReason,
+    register_custom_render_processor, CustomEffectRenderProcessor, EffectExecutionError,
+    EffectFloatExecutionError, EffectFloatUnsupportedReason,
 };
 pub use gpu_plan::{
     get_or_lower_effect_graph_to_gpu_plan, lower_effect_graph_to_gpu_plan, CompiledEffectGpuPlan,
     EffectGpuPlanBlocker, EffectGpuPointOp, MAX_FUSED_GPU_EFFECT_OPS,
 };
 pub use graph::{
-    compile_effect_render_graph, compile_scheduled_effect_graph,
+    compile_effect_domain_plan, compile_effect_render_graph, compile_effect_render_graph_in_domain,
+    compile_scheduled_effect_graph, compile_scheduled_effect_graph_in_domain,
     get_or_compile_scheduled_effect_graph, get_or_compile_scheduled_render_graph,
-    identity_compiled_effect_graph, schedule_effect_render_graph, CompiledEffectGraph,
+    identity_compiled_effect_graph, schedule_effect_render_graph, CompiledEffectDomainPlan,
+    CompiledEffectGraph, EffectDomainBlocker, EffectDomainBlockerKind, EffectDomainTransition,
     EffectExecutionSchedule, EffectGraphBuilderState, EffectGraphNode, EffectGraphNodeId,
     EffectGraphNodeKind, EffectGraphValue, EffectRenderGraph,
 };

@@ -113,9 +113,19 @@ pub struct EffectPluginDefinitionBuilder {
 }
 
 impl EffectPluginDefinitionBuilder {
-    pub fn new(key: impl Into<String>, display_name: impl Into<String>) -> Self {
+    /// Start a plugin definition with its required processing-domain contract.
+    pub fn new(
+        key: impl Into<String>,
+        display_name: impl Into<String>,
+        color_domain_contract: crate::EffectColorDomainContract,
+    ) -> Self {
         Self {
-            definition: EffectDefinition::new(key, display_name, PropertyBag::default()),
+            definition: EffectDefinition::new(
+                key,
+                display_name,
+                PropertyBag::default(),
+                color_domain_contract,
+            ),
         }
     }
 
@@ -202,35 +212,49 @@ mod tests {
     }
 
     #[test]
+    fn plugin_definition_exposes_its_explicit_color_domain_contract() {
+        let domain = crate::EffectColorDomainContract::preserving(
+            crate::EffectColorDomain::LogPerceptualRgb {
+                color_space: mondrian_core::ColorSpace::AcesCct,
+            },
+        );
+        let definition =
+            EffectPluginDefinitionBuilder::new("plugin.sdk.log_grade", "Log Grade", domain).build();
+
+        assert_eq!(definition.color_domain_contract(), domain);
+    }
+
+    #[test]
     fn plugin_sdk_builds_branching_graph_definition() {
         let plugin_type = EffectType::Plugin("plugin.sdk.soft_glow".to_string());
-        let definition = EffectPluginDefinitionBuilder::new(plugin_type.key(), "Soft Glow")
-            .property(PropertyDescriptor::new(
-                "plugin.sdk.soft_glow.radius",
-                "Radius",
-                PropertyValue::Float(6.0),
-            ))
-            .property(PropertyDescriptor::new(
-                "plugin.sdk.soft_glow.opacity",
-                "Opacity",
-                PropertyValue::Float(0.35),
-            ))
-            .with_branching_graph(|effect, context, graph| {
-                let radius =
-                    effect.evaluate_f32_by_suffix("plugin.sdk.soft_glow.radius", context.time, 0.0);
-                let opacity = effect.evaluate_f32_by_suffix(
-                    "plugin.sdk.soft_glow.opacity",
-                    context.time,
-                    0.0,
-                );
-                if radius <= 1.0e-4 || opacity <= 1.0e-4 {
-                    return;
-                }
-                graph.blend_current(BlendMode::Screen, opacity, |graph, source| {
-                    graph.apply_to(source, EffectRenderOp::GaussianBlur { radius })
-                });
-            })
-            .build();
+        let definition = EffectPluginDefinitionBuilder::new(
+            plugin_type.key(),
+            "Soft Glow",
+            crate::EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .property(PropertyDescriptor::new(
+            "plugin.sdk.soft_glow.radius",
+            "Radius",
+            PropertyValue::Float(6.0),
+        ))
+        .property(PropertyDescriptor::new(
+            "plugin.sdk.soft_glow.opacity",
+            "Opacity",
+            PropertyValue::Float(0.35),
+        ))
+        .with_branching_graph(|effect, context, graph| {
+            let radius =
+                effect.evaluate_f32_by_suffix("plugin.sdk.soft_glow.radius", context.time, 0.0);
+            let opacity =
+                effect.evaluate_f32_by_suffix("plugin.sdk.soft_glow.opacity", context.time, 0.0);
+            if radius <= 1.0e-4 || opacity <= 1.0e-4 {
+                return;
+            }
+            graph.blend_current(BlendMode::Screen, opacity, |graph, source| {
+                graph.apply_to(source, EffectRenderOp::GaussianBlur { radius })
+            });
+        })
+        .build();
         register_effect_definition(definition);
 
         let effect = crate::EffectNode::with_defaults(plugin_type.clone());

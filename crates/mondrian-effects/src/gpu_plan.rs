@@ -58,6 +58,18 @@ impl CompiledEffectGpuPlan {
 /// Stable reason a compiled graph cannot use the fused GPU point path.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EffectGpuPlanBlocker {
+    /// Renderer-owned OCIO transitions must run around this effect graph.
+    #[error("effect graph requires {transitions} unresolved OCIO color-domain transitions")]
+    ColorDomainConversionRequired {
+        /// Number of explicit RGB-domain conversion edges.
+        transitions: usize,
+    },
+    /// Data or alpha domains crossed a color edge and cannot be converted.
+    #[error("effect graph contains {blockers} invalid color-domain edges")]
+    ColorDomainBlocked {
+        /// Number of fail-closed domain blockers.
+        blockers: usize,
+    },
     /// A graph node is not part of a single-source unary chain.
     #[error("effect node {node_id:?} has unsupported GPU topology {kind}")]
     UnsupportedTopology {
@@ -98,6 +110,16 @@ pub fn lower_effect_graph_to_gpu_plan(
     compiled: &CompiledEffectGraph,
 ) -> Result<CompiledEffectGpuPlan, EffectGpuPlanBlocker> {
     let output = compiled.graph.output.ok_or(EffectGpuPlanBlocker::MissingOutput)?;
+    if !compiled.domain_plan.blockers.is_empty() {
+        return Err(EffectGpuPlanBlocker::ColorDomainBlocked {
+            blockers: compiled.domain_plan.blockers.len(),
+        });
+    }
+    if compiled.domain_plan.requires_conversion() {
+        return Err(EffectGpuPlanBlocker::ColorDomainConversionRequired {
+            transitions: compiled.domain_plan.transitions.len(),
+        });
+    }
     let mut previous = None;
     let mut operations = Vec::new();
     for node_id in &compiled.schedule.ordered_nodes {
@@ -241,6 +263,7 @@ fn node_kind_name(kind: &EffectGraphNodeKind) -> &'static str {
     match kind {
         EffectGraphNodeKind::Source => "source",
         EffectGraphNodeKind::UnaryEffect { .. } => "unary",
+        EffectGraphNodeKind::DomainEffect { .. } => "domain_effect",
         EffectGraphNodeKind::Blend { .. } => "blend",
         EffectGraphNodeKind::Mask { .. } => "mask",
         EffectGraphNodeKind::MaskSource { .. } => "mask_source",
@@ -293,6 +316,29 @@ mod tests {
             lower_effect_graph_to_gpu_plan(&compiled),
             Err(EffectGpuPlanBlocker::UnsupportedOperation { op: "gaussian_blur", .. })
         ));
+    }
+
+    #[test]
+    fn rejects_unresolved_color_domain_with_a_typed_gpu_blocker() {
+        let display_domain = crate::EffectColorDomain::DisplayEncodedRgb {
+            color_space: mondrian_core::ColorSpace::Rec709,
+        };
+        let compiled = crate::compile_scheduled_effect_graph_in_domain(
+            &crate::EffectRenderPlan {
+                ops: vec![EffectRenderOp::ColorAdjust {
+                    exposure: 0.25,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                }],
+            },
+            crate::EffectColorDomainContract::preserving(display_domain),
+        )
+        .expect("valid display-domain graph");
+
+        assert_eq!(
+            lower_effect_graph_to_gpu_plan(&compiled),
+            Err(EffectGpuPlanBlocker::ColorDomainConversionRequired { transitions: 2 })
+        );
     }
 
     #[test]

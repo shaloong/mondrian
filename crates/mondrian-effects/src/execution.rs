@@ -7,15 +7,40 @@ use crate::{
     CompiledEffectGraph, EffectExecutionSchedule, EffectGraphNodeId, EffectGraphNodeKind,
     EffectRenderGraph, EffectRenderOp, EffectRenderPlan,
 };
-use mondrian_core::{types::BlendMode, Result};
+use mondrian_core::{types::BlendMode, Result as MondrianResult};
 use std::{
     collections::{HashMap, VecDeque},
     hash::{Hash, Hasher},
     sync::{Arc, Mutex, OnceLock, RwLock},
 };
 
-pub type CustomEffectRenderProcessor =
-    Arc<dyn Fn(&mut Vec<u8>, u32, u32, &serde_json::Value, i64) -> Result<()> + Send + Sync>;
+pub type CustomEffectRenderProcessor = Arc<
+    dyn Fn(&mut Vec<u8>, u32, u32, &serde_json::Value, i64) -> MondrianResult<()> + Send + Sync,
+>;
+
+/// Error returned when an encoded RGBA8 executor cannot honor a compiled
+/// effect graph's color-domain contract.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EffectExecutionError {
+    /// The graph requires renderer-owned stock-OCIO RGB transitions.
+    #[error("effect graph requires {transitions} unresolved RGB color-domain transition(s)")]
+    ColorDomainConversionRequired {
+        /// Number of explicit RGB-domain edges in the compiled plan.
+        transitions: usize,
+    },
+    /// The graph contains non-convertible data or alpha domain edges.
+    #[error("effect graph contains {blockers} non-convertible color-domain blocker(s)")]
+    ColorDomainBlocked {
+        /// Number of fail-closed domain blockers in the compiled plan.
+        blockers: usize,
+    },
+    /// The raw graph and schedule could not produce a complete domain plan.
+    #[error("effect graph does not have a complete color-domain plan")]
+    InvalidColorDomainPlan,
+    /// The authored linear plan could not compile into a schedulable graph.
+    #[error("effect render plan could not compile into a schedulable graph")]
+    InvalidGraph,
+}
 
 /// Error returned when an effect graph cannot execute on the float/linear CPU path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +69,16 @@ pub enum EffectFloatExecutionError {
 /// Reason an effect graph cannot use the float/linear CPU path yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffectFloatUnsupportedReason {
+    /// The graph requires renderer-owned OCIO transitions before float ops run.
+    ColorDomainConversionRequired {
+        /// Number of explicit RGB-domain edges in the compiled plan.
+        transitions: usize,
+    },
+    /// The graph contains non-convertible data/alpha domain edges.
+    ColorDomainBlocked {
+        /// Number of fail-closed domain blockers in the compiled plan.
+        blockers: usize,
+    },
     /// The graph node shape cannot execute on the float path.
     UnsupportedGraphNode {
         /// Stable node kind label for diagnostics.
@@ -319,23 +354,24 @@ pub fn register_custom_render_processor(
         .insert(key.into(), processor);
 }
 
+/// Execute a scene-linear render plan on an encoded RGBA8 boundary.
 pub fn apply_effect_render_plan(
     input: &[u8],
     width: u32,
     height: u32,
     plan: &EffectRenderPlan,
     frame_seed: i64,
-) -> Vec<u8> {
+) -> std::result::Result<Vec<u8>, EffectExecutionError> {
     if plan.is_identity() || input.is_empty() || width == 0 || height == 0 {
-        return input.to_vec();
+        return Ok(input.to_vec());
     }
 
-    let Some(compiled) = get_or_compile_scheduled_effect_graph(plan) else {
-        return input.to_vec();
-    };
+    let compiled =
+        get_or_compile_scheduled_effect_graph(plan).ok_or(EffectExecutionError::InvalidGraph)?;
     apply_compiled_effect_graph(input, width, height, compiled.as_ref(), frame_seed)
 }
 
+/// Execute and blend a scene-linear render plan on an encoded RGBA8 boundary.
 pub fn apply_effect_render_plan_pass(
     base: &[u8],
     width: u32,
@@ -345,7 +381,7 @@ pub fn apply_effect_render_plan_pass(
     blend_mode: Option<BlendMode>,
     frame_seed: i64,
     out: &mut Vec<u8>,
-) {
+) -> std::result::Result<(), EffectExecutionError> {
     let required_len = width as usize * height as usize * 4;
     if out.len() != required_len {
         out.resize(required_len, 0);
@@ -353,18 +389,20 @@ pub fn apply_effect_render_plan_pass(
 
     if required_len == 0 || base.len() != required_len {
         out.clear();
-        return;
+        return Ok(());
     }
 
     if opacity <= 1.0e-4 || plan.is_identity() {
         out.copy_from_slice(base);
-        return;
+        return Ok(());
     }
 
-    let processed = apply_effect_render_plan(base, width, height, plan, frame_seed);
+    let processed = apply_effect_render_plan(base, width, height, plan, frame_seed)?;
     blend_adjustment_result(base, &processed, width, height, opacity, blend_mode, out);
+    Ok(())
 }
 
+/// Execute a raw effect graph when its compiled domain plan needs no conversion.
 pub fn apply_effect_render_graph(
     input: &[u8],
     width: u32,
@@ -372,13 +410,16 @@ pub fn apply_effect_render_graph(
     graph: &EffectRenderGraph,
     schedule: &EffectExecutionSchedule,
     frame_seed: i64,
-) -> Vec<u8> {
+) -> std::result::Result<Vec<u8>, EffectExecutionError> {
+    let domain_plan = crate::compile_effect_domain_plan(graph, schedule)
+        .ok_or(EffectExecutionError::InvalidColorDomainPlan)?;
+    validate_encoded_effect_domain_plan(&domain_plan)?;
     if graph.is_identity() || input.is_empty() || width == 0 || height == 0 {
-        return input.to_vec();
+        return Ok(input.to_vec());
     }
 
     let node_use_counts = effect_graph_node_use_counts(graph);
-    execute_effect_graph(
+    Ok(execute_effect_graph(
         input,
         width,
         height,
@@ -387,7 +428,7 @@ pub fn apply_effect_render_graph(
         &node_use_counts,
         None, // compiled: Option<&CompiledEffectGraph>
         frame_seed,
-    )
+    ))
 }
 
 fn execute_effect_graph(
@@ -415,7 +456,8 @@ fn execute_effect_graph(
                 frame.copy_from_slice(input);
                 outputs.insert(node.id, frame);
             }
-            EffectGraphNodeKind::UnaryEffect { input: input_id, op } => {
+            EffectGraphNodeKind::UnaryEffect { input: input_id, op }
+            | EffectGraphNodeKind::DomainEffect { input: input_id, op, .. } => {
                 if let (Some(compiled), Some(input_signature)) = (compiled, source_input_signature)
                 {
                     if let Some(cached) = get_cached_node_output(
@@ -636,15 +678,17 @@ fn execute_effect_graph(
         .unwrap_or_else(|| input.to_vec())
 }
 
+/// Execute a compiled effect graph on encoded RGBA8, failing on unresolved domains.
 pub fn apply_compiled_effect_graph(
     input: &[u8],
     width: u32,
     height: u32,
     compiled: &CompiledEffectGraph,
     frame_seed: i64,
-) -> Vec<u8> {
+) -> std::result::Result<Vec<u8>, EffectExecutionError> {
+    validate_encoded_effect_domain_plan(&compiled.domain_plan)?;
     if let Some(cached) = get_cached_effect_output(input, width, height, compiled, frame_seed) {
-        return cached;
+        return Ok(cached);
     }
 
     let output = execute_effect_graph(
@@ -659,7 +703,21 @@ pub fn apply_compiled_effect_graph(
     );
 
     put_cached_effect_output(input, width, height, compiled, frame_seed, &output);
-    output
+    Ok(output)
+}
+
+fn validate_encoded_effect_domain_plan(
+    plan: &crate::CompiledEffectDomainPlan,
+) -> std::result::Result<(), EffectExecutionError> {
+    if !plan.blockers.is_empty() {
+        return Err(EffectExecutionError::ColorDomainBlocked { blockers: plan.blockers.len() });
+    }
+    if !plan.transitions.is_empty() {
+        return Err(EffectExecutionError::ColorDomainConversionRequired {
+            transitions: plan.transitions.len(),
+        });
+    }
+    Ok(())
 }
 
 /// Return whether a compiled graph can execute entirely on the float/linear CPU path.
@@ -712,7 +770,8 @@ pub fn apply_compiled_effect_graph_rgba_f32(
                 frame.copy_from_slice(input);
                 outputs.insert(node.id, frame);
             }
-            EffectGraphNodeKind::UnaryEffect { input: input_id, op } => {
+            EffectGraphNodeKind::UnaryEffect { input: input_id, op }
+            | EffectGraphNodeKind::DomainEffect { input: input_id, op, .. } => {
                 let Some(mut source) = take_float_graph_input(
                     &mut outputs,
                     &mut remaining_uses,
@@ -876,6 +935,7 @@ pub fn apply_compiled_effect_graph_pass_rgba_f32(
     Ok(out)
 }
 
+/// Execute and blend a raw graph when its domain plan needs no conversion.
 pub fn apply_effect_render_graph_pass(
     base: &[u8],
     width: u32,
@@ -886,7 +946,7 @@ pub fn apply_effect_render_graph_pass(
     blend_mode: Option<BlendMode>,
     frame_seed: i64,
     out: &mut Vec<u8>,
-) {
+) -> std::result::Result<(), EffectExecutionError> {
     let required_len = width as usize * height as usize * 4;
     if out.len() != required_len {
         out.resize(required_len, 0);
@@ -894,18 +954,20 @@ pub fn apply_effect_render_graph_pass(
 
     if required_len == 0 || base.len() != required_len {
         out.clear();
-        return;
+        return Ok(());
     }
 
     if opacity <= 1.0e-4 || graph.is_identity() {
         out.copy_from_slice(base);
-        return;
+        return Ok(());
     }
 
-    let processed = apply_effect_render_graph(base, width, height, graph, schedule, frame_seed);
+    let processed = apply_effect_render_graph(base, width, height, graph, schedule, frame_seed)?;
     blend_adjustment_result(base, &processed, width, height, opacity, blend_mode, out);
+    Ok(())
 }
 
+/// Execute and blend a compiled graph, failing on unresolved domains.
 pub fn apply_compiled_effect_graph_pass(
     base: &[u8],
     width: u32,
@@ -915,18 +977,23 @@ pub fn apply_compiled_effect_graph_pass(
     blend_mode: Option<BlendMode>,
     frame_seed: i64,
     out: &mut Vec<u8>,
-) {
-    apply_effect_render_graph_pass(
-        base,
-        width,
-        height,
-        &compiled.graph,
-        &compiled.schedule,
-        opacity,
-        blend_mode,
-        frame_seed,
-        out,
-    )
+) -> std::result::Result<(), EffectExecutionError> {
+    let required_len = width as usize * height as usize * 4;
+    if out.len() != required_len {
+        out.resize(required_len, 0);
+    }
+    if required_len == 0 || base.len() != required_len {
+        out.clear();
+        return Ok(());
+    }
+    if opacity <= 1.0e-4 || compiled.graph.is_identity() {
+        out.copy_from_slice(base);
+        return Ok(());
+    }
+
+    let processed = apply_compiled_effect_graph(base, width, height, compiled, frame_seed)?;
+    blend_adjustment_result(base, &processed, width, height, opacity, blend_mode, out);
+    Ok(())
 }
 
 fn get_cached_effect_output(
@@ -1038,13 +1105,30 @@ fn effect_output_cache_enabled_f32(compiled: &CompiledEffectGraph) -> bool {
 fn validate_float_effect_graph(
     compiled: &CompiledEffectGraph,
 ) -> Result<(), EffectFloatExecutionError> {
+    if let Some(blocker) = compiled.domain_plan.blockers.first() {
+        return Err(EffectFloatExecutionError::UnsupportedNode {
+            node_id: blocker.consumer.unwrap_or(blocker.input),
+            reason: EffectFloatUnsupportedReason::ColorDomainBlocked {
+                blockers: compiled.domain_plan.blockers.len(),
+            },
+        });
+    }
+    if let Some(transition) = compiled.domain_plan.transitions.first() {
+        return Err(EffectFloatExecutionError::UnsupportedNode {
+            node_id: transition.consumer.unwrap_or(transition.input),
+            reason: EffectFloatUnsupportedReason::ColorDomainConversionRequired {
+                transitions: compiled.domain_plan.transitions.len(),
+            },
+        });
+    }
     for node_id in &compiled.schedule.ordered_nodes {
         let Some(node) = compiled.graph.node(*node_id) else {
             return Err(unsupported_float_graph_node(*node_id, "missing"));
         };
         match &node.kind {
             EffectGraphNodeKind::Source => {}
-            EffectGraphNodeKind::UnaryEffect { op, .. } => {
+            EffectGraphNodeKind::UnaryEffect { op, .. }
+            | EffectGraphNodeKind::DomainEffect { op, .. } => {
                 if !effect_render_op_supports_rgba_f32(op) {
                     return Err(EffectFloatExecutionError::UnsupportedNode {
                         node_id: node.id,
@@ -1368,6 +1452,39 @@ fn apply_alpha_mask_f32_in_place(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_encoded_effect_cannot_execute_as_scene_linear_without_ocio_transitions() {
+        let display_domain = crate::EffectColorDomain::DisplayEncodedRgb {
+            color_space: mondrian_core::ColorSpace::Rec709,
+        };
+        let compiled = crate::compile_scheduled_effect_graph_in_domain(
+            &EffectRenderPlan {
+                ops: vec![EffectRenderOp::ColorAdjust {
+                    exposure: 0.25,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                }],
+            },
+            crate::EffectColorDomainContract::preserving(display_domain),
+        )
+        .expect("valid display-domain graph");
+
+        assert!(!compiled_effect_graph_supports_rgba_f32(&compiled));
+        assert_eq!(
+            apply_compiled_effect_graph_rgba_f32(&[[0.18, 0.18, 0.18, 1.0]], 1, 1, &compiled, 0,),
+            Err(EffectFloatExecutionError::UnsupportedNode {
+                node_id: EffectGraphNodeId(1),
+                reason: EffectFloatUnsupportedReason::ColorDomainConversionRequired {
+                    transitions: 2,
+                },
+            })
+        );
+        assert_eq!(
+            apply_compiled_effect_graph(&[46, 46, 46, 255], 1, 1, &compiled, 0),
+            Err(EffectExecutionError::ColorDomainConversionRequired { transitions: 2 })
+        );
+    }
 
     #[test]
     fn float_effect_graph_runs_color_adjust_without_clamping_extended_values() {

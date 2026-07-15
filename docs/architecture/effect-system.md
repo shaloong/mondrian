@@ -32,12 +32,39 @@ When placed on a clip, property paths are prefixed as `effect.<effect_id>.<rest>
 
 - `Source`
 - `UnaryEffect`
+- `DomainEffect`
 - `Blend`
 - `Mask`
 - `MaskSource`
 - ordered `MultiInput`
 
-`CompiledEffectGraph` stores schedule, node use counts, cache policies, estimated cost, subtree signatures, and output cache flags.
+`CompiledEffectGraph` stores schedule, node use counts, cache policies, estimated cost, subtree signatures, output cache flags, and a compiled color-domain plan.
+
+## Effect Color Domains
+
+Every `EffectDefinition`, including plugin-authored definitions, declares an
+`EffectColorDomainContract` at registration. There is no implicit compatibility
+default in the definition or plugin-builder APIs. Current built-ins explicitly
+declare the scene-linear working RGB contract.
+
+The contract distinguishes scene-linear RGB, named log/perceptual RGB,
+display-linear RGB, display-encoded RGB, non-color data, and alpha/mask values.
+`DomainEffect` carries that contract into the authored graph. Compilation
+propagates the output domain of every reachable node and produces explicit
+`EffectDomainTransition` edges for convertible RGB boundaries. Data and alpha
+crossings are not guessed or color converted; they produce typed
+`EffectDomainBlocker` values unless the graph supplies the matching payload
+contract, such as an `AlphaMask` input to a mask node.
+
+The timeline compositor owns scene-linear RGB at the graph source and output.
+The renderer is therefore the only layer allowed to resolve planned RGB-domain
+edges through the active stock-OCIO configuration. Effects do not load OCIO,
+select a project color engine, or perform display transforms themselves.
+Until a renderer backend has materialized every planned transition, CPU float,
+legacy RGBA8, and GPU lowering all fail closed. Preview and export report the
+same `effect_domain_blockers` check and do not relabel this state as an RGBA8
+fallback. This guarantees that adding a display- or log-domain effect cannot
+silently execute its math on scene-linear samples.
 
 ## Basic Properties
 
@@ -105,9 +132,12 @@ during preview scrubbing or export retries.
 
 Unsupported graph nodes and render ops return structured
 `EffectFloatExecutionError` / `EffectFloatUnsupportedReason` values so renderer
-callers can make an explicit legacy fallback decision. Custom/plugin processors
-remain unsupported until their ABI declares a float implementation. CPU float
-support does not imply GPU execution support.
+callers can make an explicit legacy fallback decision. Color-domain transitions
+and blockers are different: they are fail-closed and never authorize RGBA8
+execution. The encoded executor returns `EffectExecutionError` for the same
+unresolved domain plan. Custom/plugin processors remain unsupported until their
+ABI declares a float implementation. CPU float support does not imply GPU
+execution support.
 
 `lower_effect_graph_to_gpu_plan(...)` is the backend-neutral GPU boundary. It
 accepts only a compiled single-source unary chain and emits an immutable fused

@@ -79,6 +79,26 @@ versioned Standard View registered under that display. It never adopts the
 display's config-default ACES View; a display without a Standard View fails
 closed.
 
+## Effect Processing Domains
+
+Effects declare processing semantics in `mondrian-effects`; color conversion
+remains renderer-owned. A compiled effect graph starts and ends in the
+sequence's scene-linear working RGB domain and records any internal
+scene-linear, log/perceptual, display-linear, or display-encoded RGB boundary as
+an explicit transition. Those transitions are processor requests against the
+project's selected Standard, ACES, or Custom OCIO configuration; they must not
+be approximated with native transfer functions, an ACES-specific side engine,
+or a baked RGBA8 fallback.
+
+The compiled domain plan is backend-neutral. CPU and GPU backends may fuse
+adjacent matrix, 1D, and 3D OCIO operations when OCIO proves the same processor
+semantics, but they must preserve node order and the exact endpoint identities.
+Non-color data and alpha/mask payloads are typed, non-convertible domains.
+Unresolved RGB transitions and invalid non-color crossings fail closed before
+effect execution. Preview and export expose the shared
+`effect_domain_unresolved` root cause so correctness cannot diverge between
+interactive and final rendering.
+
 ## Color-Science Validation Primitives
 
 OCIO-backed production nodes execute through OCIO. Independent accuracy

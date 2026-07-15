@@ -1342,7 +1342,8 @@ mod tests {
                 }],
             },
             0,
-        );
+        )
+        .expect("execute effect render plan");
 
         assert_eq!(output[0], 128);
         assert_eq!(output[3], 255);
@@ -1382,7 +1383,8 @@ mod tests {
         let schedule = crate::schedule_effect_render_graph(&graph).expect("schedule graph");
         let input = vec![200u8, 40, 20, 255];
 
-        let output = apply_effect_render_graph(&input, 1, 1, &graph, &schedule, 0);
+        let output = apply_effect_render_graph(&input, 1, 1, &graph, &schedule, 0)
+            .expect("execute effect graph");
         assert_eq!(output[3], 255);
         assert!(output[0] < input[0]);
         assert!(output[1] > input[1]);
@@ -1398,13 +1400,17 @@ mod tests {
                 },
                 EffectGraphNode {
                     id: EffectGraphNodeId(1),
-                    kind: EffectGraphNodeKind::UnaryEffect {
+                    kind: EffectGraphNodeKind::DomainEffect {
                         input: EffectGraphNodeId(0),
                         op: EffectRenderOp::Custom {
                             key: "plugin.render.alpha_mask".to_string(),
                             params: serde_json::json!({}),
                             cache_key: None,
                             cache_policy: crate::effect::EffectCachePolicy::Deterministic,
+                        },
+                        domain_contract: crate::EffectColorDomainContract {
+                            input: crate::EffectColorDomain::SceneLinearRgb,
+                            output: crate::EffectColorDomain::AlphaMask,
                         },
                     },
                 },
@@ -1433,7 +1439,8 @@ mod tests {
 
         let schedule = crate::schedule_effect_render_graph(&graph).expect("schedule graph");
         let input = vec![20u8, 30, 40, 255];
-        let output = apply_effect_render_graph(&input, 1, 1, &graph, &schedule, 0);
+        let output = apply_effect_render_graph(&input, 1, 1, &graph, &schedule, 0)
+            .expect("execute alpha-mask effect graph");
         assert_eq!(&output[0..3], &input[0..3]);
         assert_eq!(output[3], 64);
     }
@@ -1478,7 +1485,8 @@ mod tests {
 
         let schedule = crate::schedule_effect_render_graph(&graph).expect("schedule graph");
         let input = vec![100u8, 150, 200, 200];
-        let output = apply_effect_render_graph(&input, 1, 1, &graph, &schedule, 0);
+        let output = apply_effect_render_graph(&input, 1, 1, &graph, &schedule, 0)
+            .expect("execute mask graph");
         // RGB unchanged, alpha halved (200 * 0.5 = 100)
         assert_eq!(&output[0..3], &input[0..3]);
         assert!(
@@ -1528,7 +1536,8 @@ mod tests {
         let schedule = crate::schedule_effect_render_graph(&graph).expect("schedule graph");
         // 2x1 image: left pixel inside rect, right pixel outside.
         let input = vec![255u8, 255, 255, 255, 255, 255, 255, 255];
-        let output = apply_effect_render_graph(&input, 2, 1, &graph, &schedule, 0);
+        let output = apply_effect_render_graph(&input, 2, 1, &graph, &schedule, 0)
+            .expect("execute partial mask graph");
         // Left pixel: alpha modulated (inside mask → opaque → alpha = 255)
         assert_eq!(output[3], 255, "left pixel should stay opaque");
         // Right pixel: alpha = 0 (outside mask, feather=0)
@@ -1558,7 +1567,8 @@ mod tests {
 
         let schedule = crate::schedule_effect_render_graph(&graph).expect("schedule graph");
         let input = vec![64u8, 96, 128, 255];
-        let output = apply_effect_render_graph(&input, 1, 1, &graph, &schedule, 0);
+        let output = apply_effect_render_graph(&input, 1, 1, &graph, &schedule, 0)
+            .expect("execute blend graph");
         assert_eq!(output[3], 255);
         assert!(output[0] >= input[0]);
         assert!(output[1] >= input[1]);
@@ -1594,8 +1604,10 @@ mod tests {
         .expect("compile effect graph");
 
         let input = vec![12u8, 24, 36, 255];
-        let first = apply_compiled_effect_graph(&input, 1, 1, compiled.as_ref(), 0);
-        let second = apply_compiled_effect_graph(&input, 1, 1, compiled.as_ref(), 0);
+        let first = apply_compiled_effect_graph(&input, 1, 1, compiled.as_ref(), 0)
+            .expect("execute first cached graph");
+        let second = apply_compiled_effect_graph(&input, 1, 1, compiled.as_ref(), 0)
+            .expect("execute second cached graph");
 
         assert_eq!(first, second);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -1612,8 +1624,10 @@ mod tests {
         .expect("compile grain graph");
 
         let input = vec![80u8, 90, 100, 255];
-        let first = apply_compiled_effect_graph(&input, 1, 1, compiled.as_ref(), 1);
-        let second = apply_compiled_effect_graph(&input, 1, 1, compiled.as_ref(), 2);
+        let first = apply_compiled_effect_graph(&input, 1, 1, compiled.as_ref(), 1)
+            .expect("execute first seeded graph");
+        let second = apply_compiled_effect_graph(&input, 1, 1, compiled.as_ref(), 2)
+            .expect("execute second seeded graph");
 
         assert_ne!(first, second);
     }
@@ -1660,8 +1674,10 @@ mod tests {
         .expect("compile second graph");
 
         let input = vec![30u8, 60, 90, 255];
-        let _ = apply_compiled_effect_graph(&input, 1, 1, first_graph.as_ref(), 0);
-        let _ = apply_compiled_effect_graph(&input, 1, 1, second_graph.as_ref(), 0);
+        apply_compiled_effect_graph(&input, 1, 1, first_graph.as_ref(), 0)
+            .expect("execute first shared-subtree graph");
+        apply_compiled_effect_graph(&input, 1, 1, second_graph.as_ref(), 0)
+            .expect("execute second shared-subtree graph");
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -1701,7 +1717,8 @@ mod tests {
                 }],
             },
             0,
-        );
+        )
+        .expect("execute fail-safe custom effect");
 
         assert_eq!(output, input);
     }
@@ -1730,7 +1747,8 @@ mod tests {
                 ops: vec![EffectRenderOp::Lut3D { lut, intensity: 1.0 }],
             },
             0,
-        );
+        )
+        .expect("execute LUT effect");
         assert_eq!(&output, &[0, 0, 255, 91]);
     }
 }

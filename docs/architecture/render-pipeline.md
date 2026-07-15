@@ -116,6 +116,17 @@ color path blocked a fully float/linear frame. Callers should use
 contract for high-level path state and structured legacy reason breakdowns
 instead of re-inferring path safety from individual counters.
 
+Compiled effects also carry a backend-neutral color-domain plan. A graph whose
+nodes require log/perceptual, display-linear, or display-encoded RGB is not a
+legacy effect: it is `Blocked` until the renderer has materialized every planned
+edge with the active stock-OCIO engine. `timeline_composite` returns an opaque
+black working frame for that fail-closed state and records media, solid, and
+adjustment-layer domain blocker counters. It must never execute those nodes in
+scene-linear by accident or route them through the RGBA8 compositor. Preview
+and export aggregate the same renderer-owned breakdown and stable report codes.
+Data and alpha-domain graph errors remain blockers rather than color-conversion
+requests.
+
 Encoded decoded media enters the graph as a typed source/import RGBA8 boundary
 (`CpuEncodedColorFrame::source_rgba8`). Scene-linear planar-f32 decoder output
 enters as `LinearFloatSource`, so app preview, thumbnails, and export bypass
