@@ -228,6 +228,11 @@ impl DockPanel {
         self.tab_bar.tab_count()
     }
 
+    /// Panel kind represented by the currently active visible tab.
+    pub fn active_panel_kind(&self) -> PanelKind {
+        self.tab_bar.active_panel_kind().unwrap_or(self.kind)
+    }
+
     /// Panel kinds represented by visible tabs in this dock panel.
     pub fn tab_kinds(&self) -> Vec<PanelKind> {
         self.tab_bar.tab_panel_kinds()
@@ -251,7 +256,7 @@ impl DockPanel {
         }
 
         self.last_active = active;
-        let active_kind = self.tab_bar.active_panel_kind().unwrap_or(self.kind);
+        let active_kind = self.active_panel_kind();
         self.content = Box::new(PanelSlot::new(
             active_kind,
             (self.content_factory)(active_kind, active),

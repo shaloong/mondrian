@@ -33,6 +33,7 @@ pub mod text_input;
 mod text_metrics;
 pub mod timeline_view;
 pub mod vector_icon;
+pub mod video_scopes_surface;
 pub mod viewer_surface;
 
 #[cfg(test)]
@@ -87,6 +88,7 @@ pub use timeline_view::{
     TimelineTrimEdge, TimelineView, TimelineViewState, WaveformDisplay,
 };
 pub use vector_icon::{VectorIcon, VectorIconError};
+pub use video_scopes_surface::{VideoScopesSurface, VideoScopesTextureSet};
 pub use viewer_surface::{
     ViewerControl, ViewerControlAction, ViewerExternalTextureFrame,
     ViewerExternalTexturePresentation, ViewerFrameContent, ViewerFrameImage,

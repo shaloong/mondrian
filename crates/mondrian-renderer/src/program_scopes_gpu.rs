@@ -835,6 +835,30 @@ mod tests {
         assert_eq!(runtime.diagnostics().buffer_allocations, 1);
         assert_eq!(runtime.diagnostics().texture_allocations, 3);
         assert_eq!(runtime.diagnostics().frames_recorded, 1);
+
+        let mut warm_encoder =
+            context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("program-scopes-warm-reuse-encoder"),
+            });
+        runtime
+            .record(
+                &context.device,
+                &context.queue,
+                &mut warm_encoder,
+                &input_view,
+                2,
+                2,
+                request,
+            )
+            .expect("warm GPU scopes record");
+        let submission = context.queue.submit(std::iter::once(warm_encoder.finish()));
+        let _ = context
+            .device
+            .poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None });
+        assert_eq!(runtime.diagnostics().pipeline_creations, 1);
+        assert_eq!(runtime.diagnostics().buffer_allocations, 1);
+        assert_eq!(runtime.diagnostics().texture_allocations, 3);
+        assert_eq!(runtime.diagnostics().frames_recorded, 2);
     }
 
     fn map_test_readback(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<u8> {

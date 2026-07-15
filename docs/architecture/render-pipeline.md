@@ -744,6 +744,9 @@ User scrub/play
     → RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_gpu_frame_owned_backend()
         → Program Output GPU transform (the same OCIO display/view intent as delivery)
         → retain the typed Program Output texture for scopes/cache diagnostics
+    → optional GpuProgramScopesRuntime::record()
+        → exact atomic aggregation from Program Output
+        → GPU-only histogram/waveform/vectorscope display textures
     → optional RenderGpuOutputBoundaryRuntime::record_wgpu_intermediate_color_transform_owned_backend()
         → stock-OCIO colorimetric Program Output → monitor adaptation
         → no pass when both display identities match

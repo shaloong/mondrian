@@ -30,6 +30,7 @@ pub(crate) mod preview_scale;
 pub(crate) mod preview_scheduler_policy;
 pub mod rendering;
 pub mod runtime;
+pub(crate) mod scopes;
 pub mod sequence_settings_dialog;
 pub mod shell;
 pub mod shortcuts;

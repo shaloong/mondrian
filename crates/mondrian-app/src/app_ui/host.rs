@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use mondrian_editor_state::state::WorkspacePreset;
+use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_platform::{NativeVideoTextureImportProbe, PlatformService, SystemPlatformService};
 use mondrian_renderer::GpuNativeDecodedFrameImportSupport;
 use mondrian_ui_core::types::{Point, Rect};
@@ -195,6 +195,11 @@ impl AppUiHost {
         &self,
     ) -> Option<mondrian_ui_widgets::ViewerPresentationGeometry> {
         crate::app_ui::shell::viewer_presentation_geometry(self.active_root())
+    }
+
+    /// Whether a demand-driven panel is the active visible workspace tab.
+    pub(crate) fn is_panel_active(&self, panel: PanelKind) -> bool {
+        self.mode == AppUiMode::Workspace && self.root.is_panel_active(panel)
     }
 
     /// Read-only access to the current app state.

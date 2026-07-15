@@ -12,15 +12,16 @@ use crate::{
     GpuColorFrameHandle, GpuColorFrameTextureFormat, GpuColorFrameWgpuResourcePool,
     GpuCompositeLayer, GpuCompositeLayerSource, GpuCompositeRequest, GpuCompositingDiagnostics,
     GpuDisplayCalibrationRuntime, GpuFrameCompositor, GpuNativeDecodedFrameImportSupport,
-    GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuViewerSpatialRecord,
-    GpuViewerSpatialRuntime, GpuViewerSpatialRuntimeDiagnostics, NativeVideoImportCpuTimings,
-    RenderColorStageDiagnostics, RenderColorTransformGpuOptions,
-    RenderGpuColorTransformRuntimeRecordError, RenderGpuCompositeGraphRecordError,
-    RenderGpuInputStageRecord, RenderGpuInputStageRuntimeRecordError,
-    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
-    RenderGpuOutputBoundaryRuntimeRecordError, RenderMonitorAdaptation, RenderOutputColorBoundary,
-    ViewerGpuExecutionLayer, ViewerGpuMediaSource, ViewerGpuNativeSource,
-    ViewerNativeVideoImportRuntime, ViewerSourceRect,
+    GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuProgramScopesError,
+    GpuProgramScopesRecord, GpuProgramScopesRequest, GpuProgramScopesRuntime,
+    GpuProgramScopesRuntimeDiagnostics, GpuViewerSpatialRecord, GpuViewerSpatialRuntime,
+    GpuViewerSpatialRuntimeDiagnostics, NativeVideoImportCpuTimings, RenderColorStageDiagnostics,
+    RenderColorTransformGpuOptions, RenderGpuColorTransformRuntimeRecordError,
+    RenderGpuCompositeGraphRecordError, RenderGpuInputStageRecord,
+    RenderGpuInputStageRuntimeRecordError, RenderGpuOutputBoundaryRuntime,
+    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderGpuOutputBoundaryRuntimeRecordError,
+    RenderMonitorAdaptation, RenderOutputColorBoundary, ViewerGpuExecutionLayer,
+    ViewerGpuMediaSource, ViewerGpuNativeSource, ViewerNativeVideoImportRuntime, ViewerSourceRect,
 };
 use mondrian_core::display_calibration::DisplayCalibrationLut3d;
 use mondrian_core::types::{BlendMode, Color, SequenceId};
@@ -56,6 +57,8 @@ pub struct ViewerGpuExecutionRequest<'a> {
     pub output_precision: ViewerGpuOutputPrecision,
     /// Optional proven display calibration applied after the output boundary.
     pub display_calibration: Option<Arc<DisplayCalibrationLut3d>>,
+    /// Optional demand-driven analysis of Program Output before monitor adaptation.
+    pub program_scopes: Option<GpuProgramScopesRequest>,
 }
 
 /// Precision contract between a presentation Adapter and Viewer GPU execution.
@@ -101,6 +104,8 @@ pub enum ViewerGpuExecutionGpuStage {
     Spatial,
     /// Program Output boundary commands are complete.
     ProgramOutputBoundary,
+    /// Optional Program Output scopes commands are complete.
+    ProgramScopes,
     /// Preview-only monitor-adaptation commands are complete.
     MonitorAdaptation,
 }
@@ -126,6 +131,7 @@ pub struct ViewerGpuExecutionRuntime {
     color_output: RenderGpuOutputBoundaryRuntime,
     spatial: GpuViewerSpatialRuntime,
     display_calibration: GpuDisplayCalibrationRuntime,
+    program_scopes: GpuProgramScopesRuntime,
     working_compositor: GpuFrameCompositor,
 }
 
@@ -145,6 +151,7 @@ impl ViewerGpuExecutionRuntime {
             )),
             spatial: GpuViewerSpatialRuntime::with_resource_pool(Arc::clone(&resource_pool)),
             display_calibration: GpuDisplayCalibrationRuntime::with_resource_pool(resource_pool),
+            program_scopes: GpuProgramScopesRuntime::default(),
             working_compositor: GpuFrameCompositor::new(device),
         }
     }
@@ -176,6 +183,12 @@ impl ViewerGpuExecutionRuntime {
         &self,
     ) -> crate::GpuCompositorTextureBindingDiagnostics {
         self.working_compositor.texture_binding_diagnostics()
+    }
+
+    /// Point-in-time evidence that hidden scopes perform no work and visible
+    /// scopes reuse retained pipelines and display resources.
+    pub fn program_scopes_diagnostics(&self) -> GpuProgramScopesRuntimeDiagnostics {
+        self.program_scopes.diagnostics()
     }
 
     /// Release resources scoped to the current candidate, retaining pipelines.
@@ -217,6 +230,7 @@ impl ViewerGpuExecutionRuntime {
             request.program_output_boundary,
             request.monitor_adaptation,
         )?;
+        validate_program_scopes_contract(request.program_output_boundary, request.program_scopes)?;
         self.native_video_import.reset_frame_cpu_timings();
         let input_prepare_started = Instant::now();
         let prepared = prepare_composite(
@@ -327,6 +341,40 @@ impl ViewerGpuExecutionRuntime {
         )?;
         stage_diagnostics.accumulate(program_output_record.stage_diagnostics);
         let program_output = program_output_record.materialized.output;
+        let program_scopes_started = Instant::now();
+        let program_scopes = if let Some(scopes_request) = request.program_scopes {
+            let program_output_view = self
+                .color_output
+                .frame_table()
+                .get(&program_output)
+                .map_err(|error| {
+                    ViewerGpuExecutionError::ProgramOutputMissing(format!("{error:?}"))
+                })?
+                .resource()
+                .texture_view
+                .clone();
+            Some(
+                self.program_scopes
+                    .record(
+                        device,
+                        queue,
+                        encoder,
+                        &program_output_view,
+                        request.output_width,
+                        request.output_height,
+                        scopes_request,
+                    )
+                    .map_err(ViewerGpuExecutionError::ProgramScopes)?,
+            )
+        } else {
+            None
+        };
+        let program_scopes_us = elapsed_us(program_scopes_started);
+        mark_gpu_stage(
+            &mut stage_marker,
+            encoder,
+            ViewerGpuExecutionGpuStage::ProgramScopes,
+        )?;
         let monitor_adaptation_started = Instant::now();
         let output = if let Some(transform) = request.monitor_adaptation.gpu_transform() {
             let monitor_record = self
@@ -390,6 +438,7 @@ impl ViewerGpuExecutionRuntime {
         let display_calibration_us = elapsed_us(calibration_started);
         Ok(ViewerGpuExecutionRecord {
             program_output,
+            program_scopes,
             output,
             output_owner,
             stage_diagnostics,
@@ -403,6 +452,7 @@ impl ViewerGpuExecutionRuntime {
                 working_composite_us,
                 spatial_us,
                 program_output_boundary_us,
+                program_scopes_us,
                 monitor_adaptation_us,
                 display_calibration_us,
             },
@@ -455,6 +505,7 @@ impl ViewerGpuExecutionRuntime {
         self.working_compositor.clear_frame_resources();
         self.spatial.clear();
         self.display_calibration.clear();
+        self.program_scopes.clear();
         self.color_output.clear_frame_resources();
         self.color_output.resource_pool().clear();
     }
@@ -483,6 +534,21 @@ fn validate_program_monitor_contract(
     Ok(())
 }
 
+fn validate_program_scopes_contract(
+    boundary: &RenderOutputColorBoundary,
+    request: Option<GpuProgramScopesRequest>,
+) -> Result<(), ViewerGpuExecutionError> {
+    if let Some(request) = request {
+        if boundary.output_color_space != request.signal_color_space() {
+            return Err(ViewerGpuExecutionError::ProgramScopesBoundaryMismatch {
+                program_boundary: boundary.output_color_space,
+                scopes_signal: request.signal_color_space(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn mark_gpu_stage(
     marker: &mut Option<&mut dyn ViewerGpuExecutionStageMarker>,
     encoder: &mut wgpu::CommandEncoder,
@@ -498,6 +564,8 @@ fn mark_gpu_stage(
 pub struct ViewerGpuExecutionRecord {
     /// Program Output retained before preview-only monitor adaptation.
     pub program_output: GpuColorFrameHandle,
+    /// GPU-only scope display products when the active UI requested analysis.
+    pub program_scopes: Option<GpuProgramScopesRecord>,
     /// Renderer-owned output handle retained until frame resources clear.
     pub output: GpuColorFrameHandle,
     output_owner: ViewerGpuExecutionOutputOwner,
@@ -528,6 +596,8 @@ pub struct ViewerGpuExecutionCpuStageTimings {
     pub spatial_us: u64,
     /// Program Output color-boundary command preparation.
     pub program_output_boundary_us: u64,
+    /// Optional Program Output scopes command preparation.
+    pub program_scopes_us: u64,
     /// Preview-only monitor-adaptation command preparation.
     pub monitor_adaptation_us: u64,
     /// Optional display-calibration command preparation.
@@ -566,6 +636,14 @@ pub enum ViewerGpuExecutionError {
         /// Identity expected by monitor adaptation.
         adaptation_input: mondrian_core::types::ColorSpace,
     },
+    /// Scope signal identity did not match the measured Program Output.
+    #[error(
+        "Viewer Program Output boundary {program_boundary:?} does not match scope signal {scopes_signal:?}"
+    )]
+    ProgramScopesBoundaryMismatch {
+        program_boundary: mondrian_core::types::ColorSpace,
+        scopes_signal: mondrian_core::types::ColorSpace,
+    },
     #[error("Viewer GPU working composite graph failed: {0:?}")]
     WorkingComposite(RenderGpuCompositeGraphRecordError),
     #[error("Viewer GPU effect-domain processing failed: {0}")]
@@ -580,6 +658,8 @@ pub enum ViewerGpuExecutionError {
     SpatialTransfer(String),
     #[error("Viewer GPU Program Output boundary failed: {0:?}")]
     ProgramOutputBoundary(RenderGpuOutputBoundaryRuntimeRecordError),
+    #[error("Viewer GPU Program Output scopes failed: {0}")]
+    ProgramScopes(GpuProgramScopesError),
     #[error("Viewer GPU monitor adaptation failed: {0:?}")]
     MonitorAdaptation(RenderGpuColorTransformRuntimeRecordError),
     #[error("Viewer GPU Program Output is missing: {0}")]
@@ -1129,7 +1209,8 @@ mod tests {
         TimelineSolidColorLayer,
     };
     use mondrian_core::{
-        ensure_mondrian_default_ocio_loaded, ColorEngine, ColorSpace, WorkingRgbaF32Frame,
+        ensure_mondrian_default_ocio_loaded, ColorEngine, ColorSpace, WaveformMode,
+        WorkingRgbaF32Frame,
     };
     use mondrian_effects::{
         compile_scheduled_effect_graph_in_domain, get_or_compile_scheduled_render_graph,
@@ -1205,6 +1286,27 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn viewer_rejects_scopes_for_a_different_program_boundary_before_recording() {
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let scopes =
+            GpuProgramScopesRequest::new(ColorSpace::DisplayP3, WaveformMode::Luma, 256, 512)
+                .expect("valid standalone P3 scopes");
+
+        assert!(matches!(
+            validate_program_scopes_contract(&boundary, Some(scopes)),
+            Err(ViewerGpuExecutionError::ProgramScopesBoundaryMismatch {
+                program_boundary: ColorSpace::Rec709,
+                scopes_signal: ColorSpace::DisplayP3,
+            })
+        ));
+        assert!(validate_program_scopes_contract(&boundary, None).is_ok());
+    }
+
     #[tokio::test]
     async fn viewer_retains_program_output_before_gpu_monitor_adaptation() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
@@ -1248,6 +1350,15 @@ mod tests {
                     output_height: 4,
                     output_precision: ViewerGpuOutputPrecision::Encoded8,
                     display_calibration: None,
+                    program_scopes: Some(
+                        GpuProgramScopesRequest::new(
+                            ColorSpace::Rec709,
+                            WaveformMode::Luma,
+                            256,
+                            512,
+                        )
+                        .expect("scope request"),
+                    ),
                 },
             )
             .expect("Viewer GPU monitor adaptation frame");
@@ -1264,6 +1375,9 @@ mod tests {
         assert_eq!(record.stage_diagnostics.gpu_color_stages, 2);
         assert_eq!(record.stage_diagnostics.upload_stages, 0);
         assert_eq!(record.stage_diagnostics.readback_stages, 0);
+        let scopes = record.program_scopes.as_ref().expect("Program Output scopes");
+        assert_eq!(scopes.request.signal_color_space(), ColorSpace::Rec709);
+        assert_eq!(runtime.program_scopes_diagnostics().frames_recorded, 1);
         runtime
             .program_output_texture_view(&record)
             .expect("retained Program Output texture");
@@ -1350,6 +1464,7 @@ mod tests {
                     output_height: 4,
                     output_precision: ViewerGpuOutputPrecision::Encoded8,
                     display_calibration: None,
+                    program_scopes: None,
                 },
             )
             .expect("Viewer GPU effect-domain frame");
@@ -1360,6 +1475,7 @@ mod tests {
         assert_eq!(record.stage_diagnostics.readback_stages, 0);
         assert_eq!(record.compositing_diagnostics.gpu_passthrough_frames, 1);
         assert_eq!(record.compositing_diagnostics.gpu_native_composites, 0);
+        assert_eq!(runtime.program_scopes_diagnostics().frames_recorded, 0);
         assert_eq!(
             record.output.descriptor().domain,
             crate::ColorFrameDomain::Display
@@ -1438,6 +1554,7 @@ mod tests {
                     output_height: 4,
                     output_precision: ViewerGpuOutputPrecision::Encoded8,
                     display_calibration: None,
+                    program_scopes: None,
                 },
             )
             .expect("Viewer CPU working effect-domain frame");
@@ -1522,6 +1639,7 @@ mod tests {
                     output_height: 4,
                     output_precision: ViewerGpuOutputPrecision::Encoded8,
                     display_calibration: None,
+                    program_scopes: None,
                 },
             )
             .expect("Viewer zero-opacity media frame");
@@ -1606,6 +1724,7 @@ mod tests {
                     output_height: 4,
                     output_precision: ViewerGpuOutputPrecision::Encoded8,
                     display_calibration: None,
+                    program_scopes: None,
                 },
             )
             .expect("Viewer GPU solid effect-domain frame");
@@ -1677,6 +1796,7 @@ mod tests {
                     output_height: 4,
                     output_precision: ViewerGpuOutputPrecision::EncodedFloat16,
                     display_calibration: None,
+                    program_scopes: None,
                 },
             )
             .expect("Viewer affine scene-linear solid frame");
@@ -1775,6 +1895,7 @@ mod tests {
                     output_height: 4,
                     output_precision: ViewerGpuOutputPrecision::Encoded8,
                     display_calibration: None,
+                    program_scopes: None,
                 },
             )
             .expect("Viewer GPU external-domain adjustment frame");

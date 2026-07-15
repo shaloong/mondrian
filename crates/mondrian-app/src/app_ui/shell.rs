@@ -16,7 +16,8 @@ use mondrian_ui_widgets::dock_panel::DockPanel;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::{
     AssetGrid, AssetGridState, PanelList, PanelListState, ScrollView, ScrollViewState,
-    TimelineView, TimelineViewState, ViewerPresentationGeometry, ViewerSurface, WaveformDisplay,
+    TimelineView, TimelineViewState, VideoScopesSurface, ViewerPresentationGeometry, ViewerSurface,
+    WaveformDisplay,
 };
 use std::path::Path;
 
@@ -51,7 +52,7 @@ use crate::app_ui::modal::ShellModal;
 use crate::app_ui::new_project_dialog::{default_project_file_name, AppUiNewProjectDraft};
 use crate::app_ui::panels::{
     build_dock_tree_for_preset, build_dock_tree_from_layout, AppUiPanelModels,
-    AssetThumbnailSource, ViewerPanelModel, ViewerPreviewSource,
+    AssetThumbnailSource, ScopesPanelModel, ViewerPanelModel, ViewerPreviewSource,
 };
 use crate::app_ui::pending_close_dialog::PendingCloseDialogAction;
 use crate::app_ui::preferences_dialog::{AppUiPreferencesModel, PreferencesDialogTab};
@@ -725,6 +726,11 @@ impl AppUiAppRoot {
         Some(layout)
     }
 
+    /// Whether `panel` is the active visible tab, without allocating a layout snapshot.
+    pub fn is_panel_active(&self, panel: PanelKind) -> bool {
+        is_panel_active_in_widget(&self.dock, panel)
+    }
+
     fn refresh_shell_menu_checked_state(&mut self) {
         let layout = self.workspace_layout();
         self.title_bar
@@ -860,9 +866,11 @@ impl AppUiAppRoot {
         let mut viewer = ViewerPanelModel::from_app_state_with_preview(state, preview);
         apply_viewer_zoom_mode_to_model(&mut viewer, self.viewer_zoom_mode);
         let preview_waiting = viewer.preview_waiting;
+        self.models.scopes = ScopesPanelModel::from_viewer(&viewer);
         self.models.viewer = viewer;
         self.models.timeline.playhead_frame = frame;
         update_viewer_widgets(&mut self.dock, &self.models.viewer);
+        update_scopes_widgets(&mut self.dock, &self.models.scopes);
         update_timeline_playhead_widgets(&mut self.dock, frame);
         preview_waiting
     }
@@ -1454,6 +1462,17 @@ fn activate_panel_in_widget(
     false
 }
 
+fn is_panel_active_in_widget(widget: &dyn Widget, target: PanelKind) -> bool {
+    if let Some(panel) = widget.as_any().and_then(|any| any.downcast_ref::<DockPanel>()) {
+        return panel.active_panel_kind() == target;
+    }
+    (0..widget.child_count()).any(|index| {
+        widget
+            .child(index)
+            .is_some_and(|child| is_panel_active_in_widget(child, target))
+    })
+}
+
 fn update_timeline_playhead_widgets(widget: &mut dyn Widget, frame: i64) -> bool {
     if let Some(timeline) = widget.as_any_mut().and_then(|any| any.downcast_mut::<TimelineView>()) {
         timeline.set_playhead_frame(frame);
@@ -1490,6 +1509,18 @@ fn update_viewer_widgets(widget: &mut dyn Widget, model: &ViewerPanelModel) -> b
         }
     }
     updated
+}
+
+fn update_scopes_widgets(widget: &mut dyn Widget, model: &ScopesPanelModel) -> bool {
+    if let Some(scopes) =
+        widget.as_any_mut().and_then(|any| any.downcast_mut::<VideoScopesSurface>())
+    {
+        scopes.set_textures(model.textures.clone());
+        return true;
+    }
+    (0..widget.child_count()).fold(false, |updated, index| {
+        updated | widget.child_mut(index).is_some_and(|child| update_scopes_widgets(child, model))
+    })
 }
 
 pub(super) fn viewer_presentation_geometry(
@@ -2511,6 +2542,24 @@ mod tests {
             active_index_for_dock_panel(&root, PanelKind::Export),
             Some(0)
         );
+    }
+
+    #[test]
+    fn app_root_reports_live_scopes_visibility_without_layout_snapshot() {
+        let platform = FakePlatform::default();
+        let mut root = AppUiAppRoot::demo();
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        assert!(!root.is_panel_active(PanelKind::Scopes));
+
+        root.handle_shell_action(
+            Action::SwitchWorkspace(WorkspacePreset::Color),
+            &platform,
+            None,
+        );
+        assert!(root.is_panel_active(PanelKind::Scopes));
+
+        root.handle_shell_action(Action::TogglePanel(PanelKind::Scopes), &platform, None);
+        assert!(!root.is_panel_active(PanelKind::Scopes));
     }
 
     #[test]

@@ -45,8 +45,8 @@ use mondrian_ui_widgets::{
     TimelineClipMove, TimelineClipRef, TimelineClipTrim, TimelineEditCommand, TimelineInOutPoint,
     TimelineSeek, TimelineSeekSource as WidgetTimelineSeekSource, TimelineToolbarIconSlot,
     TimelineTrack, TimelineTrackControl, TimelineTrackControlIconSlot, TimelineTrackMove,
-    TimelineTrackRef, TimelineTrimEdge, TimelineView, ViewerControl, ViewerFrameContent,
-    ViewerStatusTone, ViewerSurface, WaveformDisplay,
+    TimelineTrackRef, TimelineTrimEdge, TimelineView, VideoScopesSurface, VideoScopesTextureSet,
+    ViewerControl, ViewerFrameContent, ViewerStatusTone, ViewerSurface, WaveformDisplay,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -269,6 +269,7 @@ pub struct AppUiPanelModels {
     pub assets: AssetGridModel,
     pub effects: PanelListModel,
     pub viewer: ViewerPanelModel,
+    pub scopes: ScopesPanelModel,
     pub timeline: TimelinePanelModel,
     pub inspector: InspectorPanelModel,
     pub export: ExportPanelModel,
@@ -313,6 +314,8 @@ impl AppUiPanelModels {
         thumbnails: Option<&dyn AssetThumbnailSource>,
         preview: Option<&dyn ViewerPreviewSource>,
     ) -> Self {
+        let viewer = ViewerPanelModel::from_app_state_with_preview(state, preview);
+        let scopes = ScopesPanelModel::from_viewer(&viewer);
         Self {
             assets: AssetGridModel::from_asset_library_in_folder_with_thumbnails(
                 state.asset_library.as_deref(),
@@ -321,7 +324,8 @@ impl AppUiPanelModels {
                 Some(&state.proxy_mode_assets),
             ),
             effects: PanelListModel::from_app_effect_registry(state),
-            viewer: ViewerPanelModel::from_app_state_with_preview(state, preview),
+            viewer,
+            scopes,
             timeline: TimelinePanelModel::from_app_state(state),
             inspector: InspectorPanelModel::from_app_state(state),
             export: ExportPanelModel::from_app_state(state),
@@ -333,10 +337,13 @@ impl AppUiPanelModels {
     /// inspector state from an `AppState` snapshot.
     #[cfg(test)]
     pub fn demo_from_app_state(state: &AppState) -> Self {
+        let viewer = ViewerPanelModel::from_app_state(state);
+        let scopes = ScopesPanelModel::from_viewer(&viewer);
         Self {
             assets: demo_asset_model(),
             effects: PanelListModel::from_app_effect_registry(state),
-            viewer: ViewerPanelModel::from_app_state(state),
+            viewer,
+            scopes,
             timeline: state
                 .sequence
                 .as_ref()
@@ -656,6 +663,24 @@ pub struct ViewerPanelModel {
     pub empty_message: Option<String>,
     pub color_rejection: Option<ViewerPreviewColorRejectionModel>,
     pub color_pipeline_status: Option<ViewerColorPipelineStatus>,
+}
+
+/// Program Output scopes data independent from renderer GPU handles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopesPanelModel {
+    /// Stable registry keys become available only with a current external GPU frame.
+    pub textures: Option<VideoScopesTextureSet>,
+}
+
+impl ScopesPanelModel {
+    pub(crate) fn from_viewer(viewer: &ViewerPanelModel) -> Self {
+        let textures = matches!(
+            viewer.frame_content.as_ref(),
+            Some(ViewerFrameContent::ExternalTexture(_))
+        )
+        .then(crate::app_ui::scopes::texture_set);
+        Self { textures }
+    }
 }
 
 impl ViewerPanelModel {
@@ -1810,7 +1835,7 @@ fn color_workspace(models: AppUiPanelModels) -> DockSplitter {
         SplitDirection::Vertical,
         0.56,
         slot(PanelKind::Inspector, models.clone()),
-        slot(PanelKind::Effects, models.clone()),
+        slot(PanelKind::Scopes, models.clone()),
     );
     let center = DockSplitter::new(
         SplitDirection::Vertical,
@@ -1960,7 +1985,7 @@ fn panel_content_for_slot(kind: PanelKind, models: &AppUiPanelModels) -> Box<dyn
         PanelKind::Assets => Box::new(ScrollView::new(Some(Box::new(asset_grid(&models.assets))))),
         PanelKind::Effects => Box::new(panel_list(&models.effects)),
         PanelKind::Viewer => Box::new(viewer_panel(&models.viewer)),
-        PanelKind::Scopes => Box::new(scopes_panel()),
+        PanelKind::Scopes => Box::new(scopes_panel(&models.scopes)),
         PanelKind::Timeline => Box::new(timeline_panel(&models.timeline)),
         PanelKind::Export => Box::new(ScrollView::new(Some(Box::new(export_panel(
             &models.export,
@@ -1972,22 +1997,12 @@ fn panel_content_for_slot(kind: PanelKind, models: &AppUiPanelModels) -> Box<dyn
     }
 }
 
-fn scopes_panel() -> PropertyPanel {
-    PropertyPanel::with_options(
-        "示波器",
-        PropertyPanelOptions {
-            label_width: 0.0,
-            control_gap: 0.0,
-            row_height: 28.0,
-            section_gap: 0.0,
-            ..PropertyPanelOptions::default()
-        },
-    )
-    .with_embedded_panel_chrome()
-    .with_empty_state(
-        "等待 Program Output",
-        "示波器仅在面板可见时分析当前节目输出。",
-    )
+fn scopes_panel(model: &ScopesPanelModel) -> VideoScopesSurface {
+    let surface = VideoScopesSurface::new();
+    match model.textures.clone() {
+        Some(textures) => surface.with_textures(textures),
+        None => surface,
+    }
 }
 
 fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
@@ -4492,7 +4507,7 @@ mod tests {
     use mondrian_ui_core::UiEvent;
     use mondrian_ui_events::EventRouter;
     use mondrian_ui_widgets::menu::MenuItemKind;
-    use mondrian_ui_widgets::ViewerFrameImage;
+    use mondrian_ui_widgets::{ViewerExternalTextureFrame, ViewerFrameImage};
     use std::cell::RefCell;
     use std::path::PathBuf;
 
@@ -7227,6 +7242,37 @@ mod tests {
         assert!(models.viewer.preview_waiting);
         assert_eq!(frame.key, "stale-preview");
         assert_eq!(models.viewer.empty_message, None);
+    }
+
+    #[test]
+    fn scopes_model_exposes_gpu_registry_keys_only_for_external_viewer_frames() {
+        struct ExternalPreview;
+
+        impl ViewerPreviewSource for ExternalPreview {
+            fn viewer_preview_for_state(&self, _state: &AppState) -> ViewerPreviewState {
+                ViewerPreviewState::Ready(ViewerFrameContent::ExternalTexture(
+                    ViewerExternalTextureFrame::new("viewer-current", 320, 180)
+                        .expect("external frame"),
+                ))
+            }
+        }
+
+        let mut state = AppState::new();
+        state.sequence = Some(Sequence::new("edit"));
+        let external = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
+            &state,
+            None,
+            None,
+            Some(&ExternalPreview),
+        );
+        let textures = external.scopes.textures.expect("GPU scope texture keys");
+        assert_eq!(
+            textures.waveform,
+            crate::app_ui::scopes::WAVEFORM_TEXTURE_KEY
+        );
+
+        let cpu = AppUiPanelModels::from_app_state(&state);
+        assert!(cpu.scopes.textures.is_none());
     }
 
     #[test]

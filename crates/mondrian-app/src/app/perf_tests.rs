@@ -137,6 +137,8 @@ struct HeadlessViewerGpuExecutionSummary {
     #[serde(skip)]
     program_output_boundary_samples_us: Vec<u64>,
     #[serde(skip)]
+    program_scopes_samples_us: Vec<u64>,
+    #[serde(skip)]
     monitor_adaptation_samples_us: Vec<u64>,
     #[serde(skip)]
     display_calibration_samples_us: Vec<u64>,
@@ -188,6 +190,7 @@ impl HeadlessViewerGpuExecutionSummary {
                 self.working_composite_samples_us.push(timings.working_composite_us);
                 self.spatial_samples_us.push(timings.spatial_us);
                 self.program_output_boundary_samples_us.push(timings.program_output_boundary_us);
+                self.program_scopes_samples_us.push(timings.program_scopes_us);
                 self.monitor_adaptation_samples_us.push(timings.monitor_adaptation_us);
                 self.display_calibration_samples_us.push(timings.display_calibration_us);
             }
@@ -247,6 +250,7 @@ impl HeadlessViewerGpuExecutionSummary {
             program_output_boundary_us: field(&self.gpu_stage_samples, |sample| {
                 sample.program_output_boundary_us
             }),
+            program_scopes_us: field(&self.gpu_stage_samples, |sample| sample.program_scopes_us),
             monitor_adaptation_us: field(&self.gpu_stage_samples, |sample| {
                 sample.monitor_adaptation_us
             }),
@@ -275,6 +279,7 @@ impl HeadlessViewerGpuExecutionSummary {
             working_composite_us: p95_sample_us(&self.working_composite_samples_us),
             spatial_us: p95_sample_us(&self.spatial_samples_us),
             program_output_boundary_us: p95_sample_us(&self.program_output_boundary_samples_us),
+            program_scopes_us: p95_sample_us(&self.program_scopes_samples_us),
             monitor_adaptation_us: p95_sample_us(&self.monitor_adaptation_samples_us),
             display_calibration_us: p95_sample_us(&self.display_calibration_samples_us),
         }

@@ -36,18 +36,21 @@ use crate::app_ui::runtime::{
 use crate::app_ui::shortcuts::{register_shortcuts, AppUiShortcutOverride};
 use crate::app_ui::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
 use mondrian_core::types::ColorSpace;
+use mondrian_core::WaveformMode;
+use mondrian_editor_state::state::PanelKind;
 use mondrian_platform::{NativeVideoTextureImportProbe, SystemPlatformService};
 #[cfg(test)]
 use mondrian_renderer::RenderOutputColorBoundary;
 use mondrian_renderer::{
     native_video_texture_device_features, ocio_lut_filtering_device_features,
     request_adapter_with_native_video_preference, GpuNativeDecodedFrameImportSupport,
-    RenderColorStageDiagnostics, RenderGpuOutputBoundaryRuntimeDiagnostics,
-    RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputRuntimeDiagnosticsReport,
-    RenderGpuOutputStageDiagnosticsReport, RenderGpuOutputStageResourcePlanError,
-    RenderOutputColorBoundaryTarget, ViewerGpuExecutionError, ViewerGpuExecutionLayer,
-    ViewerGpuExecutionRequest, ViewerGpuExecutionResidency, ViewerGpuExecutionRuntime,
-    ViewerGpuNativeVideoFacts, ViewerGpuOutputPrecision, ViewerSourceRect,
+    GpuProgramScopesRequest, RenderColorStageDiagnostics,
+    RenderGpuOutputBoundaryRuntimeDiagnostics, RenderGpuOutputBoundaryRuntimeRecordError,
+    RenderGpuOutputRuntimeDiagnosticsReport, RenderGpuOutputStageDiagnosticsReport,
+    RenderGpuOutputStageResourcePlanError, RenderOutputColorBoundaryTarget,
+    ViewerGpuExecutionError, ViewerGpuExecutionLayer, ViewerGpuExecutionRequest,
+    ViewerGpuExecutionResidency, ViewerGpuExecutionRuntime, ViewerGpuNativeVideoFacts,
+    ViewerGpuOutputPrecision, ViewerSourceRect,
 };
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutManager, ShortcutScope};
@@ -1330,6 +1333,8 @@ struct AppUiWindowSession {
     renderer_queue: wgpu::Queue,
     viewer_gpu_execution: ViewerGpuExecutionRuntime,
     viewer_gpu_presentation: WindowViewerGpuPresentationState,
+    program_scopes_registered: bool,
+    program_scopes_refresh_requested: bool,
     viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry,
     render_diagnostic_reporter: AppUiRenderDiagnosticReporter,
     router: EventRouter,
@@ -3161,8 +3166,15 @@ fn prepare_viewer_gpu_preview(
 
     session.viewer_gpu_output_telemetry.record_invocation();
     if session.role != AppUiWindowRole::Workspace {
+        unregister_program_scopes_textures(session);
+        session.program_scopes_refresh_requested = false;
         session.viewer_gpu_output_telemetry.record_non_workspace_skip();
         finish_prepare!();
+    }
+    let program_scopes_requested = host.is_panel_active(PanelKind::Scopes);
+    if !program_scopes_requested {
+        unregister_program_scopes_textures(session);
+        session.program_scopes_refresh_requested = false;
     }
     if host.should_defer_gpu_preview_prepare_for_interaction() {
         session.viewer_gpu_output_telemetry.record_preview_candidate_state(
@@ -3178,6 +3190,16 @@ fn prepare_viewer_gpu_preview(
         finish_prepare!();
     };
     synchronize_viewer_spatial_presentation(session, host, presentation_geometry.presentation);
+    if program_scopes_requested
+        && !session.program_scopes_registered
+        && !session.program_scopes_refresh_requested
+    {
+        // A Viewer frame may already be current when the user opens Scopes.
+        // Reissue that same candidate once so Program Output is still resident
+        // at the renderer boundary instead of measuring monitor output.
+        host.clear_external_viewer_frame();
+        session.program_scopes_refresh_requested = true;
+    }
     let frame = match host.gpu_preview_frame_for_current_state() {
         AppUiGpuPreviewFrameState::Ready(frame) => frame,
         AppUiGpuPreviewFrameState::Current => {
@@ -3197,6 +3219,8 @@ fn prepare_viewer_gpu_preview(
             finish_prepare!();
         }
         AppUiGpuPreviewFrameState::Unavailable => {
+            unregister_program_scopes_textures(session);
+            session.program_scopes_refresh_requested = program_scopes_requested;
             session.viewer_gpu_output_telemetry.record_preview_candidate_state(
                 AppUiViewerGpuOutputPreviewCandidateState::Unavailable,
                 None,
@@ -3268,6 +3292,7 @@ fn prepare_viewer_gpu_preview(
                         }),
                 );
             }
+            unregister_program_scopes_textures(session);
             host.clear_external_viewer_frame();
             finish_prepare!();
         }
@@ -3277,6 +3302,7 @@ fn prepare_viewer_gpu_preview(
         .display_output_contract
         .boundary_blocker_for_color_space(frame.monitor_adaptation.monitor_color_space())
     {
+        unregister_program_scopes_textures(session);
         session.viewer_gpu_output_telemetry.record_display_contract_blocker(&blocker);
         match &blocker {
             AppUiDisplayBoundaryBlocker::HdrOutputRequiresHdrSurface {
@@ -3385,6 +3411,19 @@ fn prepare_viewer_gpu_preview(
             output_height: presentation_geometry.presentation.output_height,
             output_precision,
             display_calibration,
+            program_scopes: viewer_program_scopes_request(
+                program_scopes_requested,
+                frame.program_output_boundary.output_color_space,
+            )
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    sequence_id = %frame.sequence_id,
+                    frame = frame.frame,
+                    %error,
+                    "active scopes panel rejected the Program Output signal"
+                );
+                None
+            }),
         },
     ) {
         Ok(record) => record,
@@ -3483,6 +3522,21 @@ fn prepare_viewer_gpu_preview(
             reason: reason.clone(),
         });
     }
+    if let Some(scopes) = record.program_scopes.as_ref() {
+        if let Err(error) = register_program_scopes_textures(session, device, scopes) {
+            unregister_program_scopes_textures(session);
+            session.program_scopes_refresh_requested = true;
+            tracing::warn!(
+                sequence_id = %frame.sequence_id,
+                frame = frame.frame,
+                %error,
+                "GPU Program Output scope texture registration failed"
+            );
+        }
+    } else {
+        unregister_program_scopes_textures(session);
+        session.program_scopes_refresh_requested = program_scopes_requested;
+    }
     let output_resource = match session.viewer_gpu_execution.output_texture_view(&record) {
         Ok(resource) => resource,
         Err(error) => {
@@ -3506,6 +3560,8 @@ fn prepare_viewer_gpu_preview(
         .map_err(|error| error.to_string());
 
     if let Err(err) = registration {
+        unregister_program_scopes_textures(session);
+        session.program_scopes_refresh_requested = program_scopes_requested;
         session
             .viewer_gpu_output_telemetry
             .record_rejected_external_frame(record.stage_diagnostics);
@@ -3547,6 +3603,17 @@ fn prepare_viewer_gpu_preview(
         .record_prepare_duration(prepare_started.elapsed());
 }
 
+fn viewer_program_scopes_request(
+    active: bool,
+    program_output_color_space: ColorSpace,
+) -> Result<Option<GpuProgramScopesRequest>, mondrian_core::ProgramColorScopeError> {
+    active
+        .then(|| {
+            GpuProgramScopesRequest::new(program_output_color_space, WaveformMode::Luma, 256, 512)
+        })
+        .transpose()
+}
+
 fn synchronize_viewer_spatial_presentation(
     session: &mut AppUiWindowSession,
     host: &AppUiHost,
@@ -3565,9 +3632,59 @@ fn clear_viewer_spatial_presentation(session: &mut AppUiWindowSession, host: &Ap
         session.frame_renderer.unregister_external_texture(&previous);
     }
     session.viewer_gpu_execution.clear_frame_resources();
+    unregister_program_scopes_textures(session);
     if had_presentation {
         host.clear_external_viewer_frame();
     }
+}
+
+fn register_program_scopes_textures(
+    session: &mut AppUiWindowSession,
+    device: &wgpu::Device,
+    scopes: &mondrian_renderer::GpuProgramScopesRecord,
+) -> Result<(), String> {
+    // Claim all stable keys before the first fallible insertion so callers can
+    // roll back a partially registered texture set transactionally.
+    session.program_scopes_registered = true;
+    for (key, view) in [
+        (
+            crate::app_ui::scopes::HISTOGRAM_TEXTURE_KEY,
+            &scopes.histogram_view,
+        ),
+        (
+            crate::app_ui::scopes::WAVEFORM_TEXTURE_KEY,
+            &scopes.waveform_view,
+        ),
+        (
+            crate::app_ui::scopes::VECTORSCOPE_TEXTURE_KEY,
+            &scopes.vectorscope_view,
+        ),
+    ] {
+        let key = ExternalTextureKey::new(key)
+            .ok_or_else(|| "Program Output scope texture key is empty".to_owned())?;
+        session
+            .frame_renderer
+            .register_external_texture_view(device, key, view, ExternalTextureTransfer::Linear)
+            .map_err(|error| error.to_string())?;
+    }
+    session.program_scopes_refresh_requested = false;
+    Ok(())
+}
+
+fn unregister_program_scopes_textures(session: &mut AppUiWindowSession) {
+    if !session.program_scopes_registered {
+        return;
+    }
+    for raw_key in [
+        crate::app_ui::scopes::HISTOGRAM_TEXTURE_KEY,
+        crate::app_ui::scopes::WAVEFORM_TEXTURE_KEY,
+        crate::app_ui::scopes::VECTORSCOPE_TEXTURE_KEY,
+    ] {
+        if let Some(key) = ExternalTextureKey::new(raw_key) {
+            session.frame_renderer.unregister_external_texture(&key);
+        }
+    }
+    session.program_scopes_registered = false;
 }
 
 fn validate_display_calibration_proof(
@@ -3989,6 +4106,7 @@ fn invalidate_display_dependent_gpu_preview(session: &mut AppUiWindowSession, ho
     if let Some(previous) = session.viewer_gpu_presentation.clear() {
         session.frame_renderer.unregister_external_texture(&previous);
     }
+    unregister_program_scopes_textures(session);
     session.viewer_gpu_execution.reset();
     host.clear_external_viewer_frame();
     host.mark_dirty();
@@ -4071,6 +4189,8 @@ impl AppUiWindowSession {
             renderer_queue: queue.clone(),
             viewer_gpu_execution,
             viewer_gpu_presentation: WindowViewerGpuPresentationState::default(),
+            program_scopes_registered: false,
+            program_scopes_refresh_requested: false,
             viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry::default(),
             render_diagnostic_reporter: AppUiRenderDiagnosticReporter::default(),
             router: build_event_router(
@@ -4480,6 +4600,19 @@ mod tests {
             },
             &policy,
         ));
+    }
+
+    #[test]
+    fn hidden_scopes_create_no_viewer_gpu_request() {
+        assert_eq!(
+            viewer_program_scopes_request(false, ColorSpace::Rec709),
+            Ok(None)
+        );
+        let visible = viewer_program_scopes_request(true, ColorSpace::Rec709)
+            .expect("supported Program Output")
+            .expect("visible request");
+        assert_eq!(visible.signal_color_space(), ColorSpace::Rec709);
+        assert_eq!(visible.waveform_mode(), WaveformMode::Luma);
     }
 
     #[test]

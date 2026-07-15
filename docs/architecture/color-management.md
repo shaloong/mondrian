@@ -967,8 +967,12 @@ explicit `ProgramSignalExcursions` even though the density plots group them into
 their endpoint bins. A final renderer float boundary exposes this contract through
 `RenderOutputColorBoundaryFloat::program_scopes`, so callers cannot accidentally
 measure working pixels or a monitor-adapted `ViewerFrameImage`. GPU scopes must
-eventually use a compute/reduction path over the Program Output texture; they
-must not introduce a per-frame GPU-to-CPU readback.
+use the shared `ProgramSignalColorimetry` coefficients and a compute/reduction
+path over the Program Output texture; they must not introduce a per-frame
+GPU-to-CPU readback. The production GPU runtime uses exact atomic-u32 counts and
+generates display density textures on-device. Viewer validation rejects a scope
+request whose signal identity differs from the Program Output boundary before
+recording any GPU work.
 
 GPU preview should use OCIO shader extraction instead of CPU processor execution
 for real-time playback. `mondrian-core::extract_ocio_gpu_shader_bundle` and

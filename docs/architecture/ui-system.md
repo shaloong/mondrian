@@ -99,11 +99,15 @@ and records one undoable snapshot for each committed monitor edit.
 ## Viewer Preview Scheduling
 
 The Color workspace owns a real `Scopes` panel rather than aliasing the Effects
-panel. Expensive analysis is demand-driven by the persisted dock model's active
-tab, not by mere panel presence: a hidden or background Scopes tab schedules no
-renderer aggregation, buffer clearing, readback, or repaint work. Scope input is
-the retained Program Output boundary before local monitor adaptation, so moving
-the window between monitors cannot change measured program values.
+panel. Expensive analysis is demand-driven by the live dock tree's active tab,
+without allocating a persisted layout snapshot on each frame. Mere panel
+presence is insufficient: a hidden or background Scopes tab schedules no
+renderer aggregation, buffer clearing, readback, or scope repaint work. Scope
+input is the retained Program Output boundary before local monitor adaptation,
+so moving the window between monitors cannot change measured program values.
+The window registers GPU-generated waveform, histogram, and vectorscope
+textures with stable UI keys using the linear external-texture contract, and
+unregisters all three when Scopes is hidden or Viewer presentation is reset.
 
 Playback-frame refreshes use a narrow UI update path: the host advances
 `AppState`, then refreshes viewer playback chrome/frame data and the timeline
