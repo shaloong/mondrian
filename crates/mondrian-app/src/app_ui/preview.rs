@@ -48,8 +48,8 @@ use mondrian_renderer::{
     TimelineAdjustmentLayer, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
     TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement,
     TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
-    TimelineSolidColorLayer,
+    TimelineEffectColorRuntime, TimelineEvaluationRequest, TimelineMediaLayer,
+    TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 #[cfg(test)]
 use mondrian_renderer::{
@@ -8892,7 +8892,7 @@ fn composite_resolved_preview_working(
         height,
         &elements,
         TimelineCompositeOptions::default(),
-        color_context.working_color_space,
+        TimelineEffectColorRuntime::new(&color_context.engine, color_context.working_color_space),
         scratch,
     );
     let cpu_composite_us = app_duration_us(cpu_composite_started_at.elapsed());
@@ -15490,7 +15490,10 @@ mod tests {
             1,
             &export_elements,
             TimelineCompositeOptions::default(),
-            color_context.working_color_space,
+            TimelineEffectColorRuntime::new(
+                &color_context.engine,
+                color_context.working_color_space,
+            ),
             &mut export_scratch,
         );
         assert_eq!(
@@ -15613,7 +15616,10 @@ mod tests {
                 2,
                 &export_elements,
                 TimelineCompositeOptions::default(),
-                color_context.working_color_space,
+                TimelineEffectColorRuntime::new(
+                    &color_context.engine,
+                    color_context.working_color_space,
+                ),
                 &mut export_scratch,
             );
         let export_boundary = RenderOutputColorBoundary::from_intent(

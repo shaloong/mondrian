@@ -94,8 +94,11 @@ The compiled domain plan is backend-neutral. CPU and GPU backends may fuse
 adjacent matrix, 1D, and 3D OCIO operations when OCIO proves the same processor
 semantics, but they must preserve node order and the exact endpoint identities.
 Non-color data and alpha/mask payloads are typed, non-convertible domains.
-Unresolved RGB transitions and invalid non-color crossings fail closed before
-effect execution. Preview and export expose the shared
+The CPU timeline backend currently executes legal transitions directly through
+the selected engine's cached OCIO CPU processors without copying between pixel
+containers. Preview and export use that same renderer entry point. Processor
+resolution failures, GPU plans that have not yet scheduled equivalent OCIO
+passes, and invalid non-color crossings remain fail-closed and expose the shared
 `effect_domain_unresolved` root cause so correctness cannot diverge between
 interactive and final rendering.
 

@@ -189,7 +189,7 @@ pub use timeline_composite::{
     TimelineCompositeColorPath, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
     TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement, TimelineCompositeFrame,
     TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineMediaLayer, TimelineSolidColorLayer,
+    TimelineEffectColorRuntime, TimelineMediaLayer, TimelineSolidColorLayer,
 };
 pub use timeline_render_plan::{
     collect_timeline_color_diagnostics, collect_timeline_color_diagnostics_with_display_view,

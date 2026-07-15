@@ -27,9 +27,13 @@ pub use effect::{
 };
 pub use execution::{
     apply_compiled_effect_graph, apply_compiled_effect_graph_pass,
-    apply_compiled_effect_graph_pass_rgba_f32, apply_compiled_effect_graph_rgba_f32,
-    apply_effect_render_graph, apply_effect_render_graph_pass, apply_effect_render_plan,
-    apply_effect_render_plan_pass, compiled_effect_graph_supports_rgba_f32,
+    apply_compiled_effect_graph_pass_rgba_f32,
+    apply_compiled_effect_graph_pass_rgba_f32_with_domain_processor,
+    apply_compiled_effect_graph_rgba_f32,
+    apply_compiled_effect_graph_rgba_f32_with_domain_processor, apply_effect_render_graph,
+    apply_effect_render_graph_pass, apply_effect_render_plan, apply_effect_render_plan_pass,
+    compiled_effect_graph_supports_rgba_f32,
+    compiled_effect_graph_supports_rgba_f32_with_domain_processor,
     register_custom_render_processor, CustomEffectRenderProcessor, EffectExecutionError,
     EffectFloatExecutionError, EffectFloatUnsupportedReason,
 };

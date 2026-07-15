@@ -6,7 +6,7 @@ use mondrian_renderer::{
     composite_timeline_elements_color_frame_with_diagnostics, execute_cpu_input_stage,
     CpuEncodedColorFrame, RenderColorStageDiagnostics, RenderInputTransform,
     TimelineCompositeDiagnostics, TimelineCompositeElement, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineMediaLayer,
+    TimelineCompositeScratch, TimelineEffectColorRuntime, TimelineMediaLayer,
 };
 use serde::Serialize;
 use std::cmp;
@@ -196,7 +196,10 @@ fn compose_frame_layers_with_diagnostics(
         height,
         &elements,
         TimelineCompositeOptions::default(),
-        WorkingColorSpace::LinearRec709,
+        TimelineEffectColorRuntime::new(
+            &ColorEngine::mondrian_standard(),
+            WorkingColorSpace::LinearRec709,
+        ),
         &mut scratch,
     )
     .diagnostics

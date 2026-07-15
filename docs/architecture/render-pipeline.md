@@ -118,14 +118,17 @@ instead of re-inferring path safety from individual counters.
 
 Compiled effects also carry a backend-neutral color-domain plan. A graph whose
 nodes require log/perceptual, display-linear, or display-encoded RGB is not a
-legacy effect: it is `Blocked` until the renderer has materialized every planned
-edge with the active stock-OCIO engine. `timeline_composite` returns an opaque
-black working frame for that fail-closed state and records media, solid, and
-adjustment-layer domain blocker counters. It must never execute those nodes in
-scene-linear by accident or route them through the RGBA8 compositor. Preview
-and export aggregate the same renderer-owned breakdown and stable report codes.
-Data and alpha-domain graph errors remain blockers rather than color-conversion
-requests.
+legacy effect. `TimelineEffectColorRuntime` maps the sequence working domain and
+named effect domains to exact OCIO identities, and the CPU timeline compositor
+executes each planned edge in-place around the relevant graph node. Preview and
+export both supply their project `ColorContext` to this renderer-owned boundary.
+The float effect-output cache includes the engine/config/working-space identity.
+If a processor cannot be resolved, `timeline_composite` returns an opaque black
+working frame and records media, solid, and adjustment-layer domain blocker
+counters. It must never execute those nodes in scene-linear by accident or
+route them through the RGBA8 compositor. Data and alpha-domain graph errors
+remain blockers rather than color-conversion requests. GPU graph lowering also
+remains blocked until the GPU scheduler materializes the same OCIO edges.
 
 Encoded decoded media enters the graph as a typed source/import RGBA8 boundary
 (`CpuEncodedColorFrame::source_rgba8`). Scene-linear planar-f32 decoder output

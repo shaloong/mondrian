@@ -4,8 +4,8 @@ use crate::adjustment::{
 };
 use crate::{
     get_or_compile_scheduled_effect_graph, graph::effect_graph_node_use_counts,
-    CompiledEffectGraph, EffectExecutionSchedule, EffectGraphNodeId, EffectGraphNodeKind,
-    EffectRenderGraph, EffectRenderOp, EffectRenderPlan,
+    CompiledEffectGraph, EffectDomainTransition, EffectExecutionSchedule, EffectGraphNodeId,
+    EffectGraphNodeKind, EffectRenderGraph, EffectRenderOp, EffectRenderPlan,
 };
 use mondrian_core::{types::BlendMode, Result as MondrianResult};
 use std::{
@@ -79,6 +79,15 @@ pub enum EffectFloatUnsupportedReason {
         /// Number of fail-closed domain blockers in the compiled plan.
         blockers: usize,
     },
+    /// A renderer-provided color-domain processor failed.
+    ColorDomainTransitionFailed {
+        /// Source domain of the failed transition.
+        from: crate::EffectColorDomain,
+        /// Destination domain of the failed transition.
+        to: crate::EffectColorDomain,
+        /// Processor failure reason.
+        reason: String,
+    },
     /// The graph node shape cannot execute on the float path.
     UnsupportedGraphNode {
         /// Stable node kind label for diagnostics.
@@ -112,6 +121,7 @@ struct EffectFloatOutputCacheKey {
     width: u32,
     height: u32,
     frame_seed: Option<i64>,
+    domain_cache_key: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -722,7 +732,14 @@ fn validate_encoded_effect_domain_plan(
 
 /// Return whether a compiled graph can execute entirely on the float/linear CPU path.
 pub fn compiled_effect_graph_supports_rgba_f32(compiled: &CompiledEffectGraph) -> bool {
-    validate_float_effect_graph(compiled).is_ok()
+    validate_float_effect_graph(compiled, false).is_ok()
+}
+
+/// Return whether a renderer-provided domain processor makes this graph float-capable.
+pub fn compiled_effect_graph_supports_rgba_f32_with_domain_processor(
+    compiled: &CompiledEffectGraph,
+) -> bool {
+    validate_float_effect_graph(compiled, true).is_ok()
 }
 
 /// Execute a compiled graph over linear `f32` RGBA pixels.
@@ -738,6 +755,51 @@ pub fn apply_compiled_effect_graph_rgba_f32(
     compiled: &CompiledEffectGraph,
     frame_seed: i64,
 ) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
+    apply_compiled_effect_graph_rgba_f32_inner(
+        input, width, height, compiled, frame_seed, None, None,
+    )
+}
+
+/// Execute a compiled float graph with renderer-owned color-domain processors.
+///
+/// `domain_cache_key` must identify the exact color engine/config revision and
+/// working space used by `processor`; it prevents cached outputs from crossing
+/// project color semantics.
+pub fn apply_compiled_effect_graph_rgba_f32_with_domain_processor<F>(
+    input: &[[f32; 4]],
+    width: u32,
+    height: u32,
+    compiled: &CompiledEffectGraph,
+    frame_seed: i64,
+    domain_cache_key: u64,
+    mut processor: F,
+) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError>
+where
+    F: FnMut(&mut [[f32; 4]], EffectDomainTransition) -> Result<(), String>,
+{
+    apply_compiled_effect_graph_rgba_f32_inner(
+        input,
+        width,
+        height,
+        compiled,
+        frame_seed,
+        Some(domain_cache_key),
+        Some(&mut processor),
+    )
+}
+
+type EffectDomainProcessor<'a> =
+    dyn FnMut(&mut [[f32; 4]], EffectDomainTransition) -> Result<(), String> + 'a;
+
+fn apply_compiled_effect_graph_rgba_f32_inner(
+    input: &[[f32; 4]],
+    width: u32,
+    height: u32,
+    compiled: &CompiledEffectGraph,
+    frame_seed: i64,
+    domain_cache_key: Option<u64>,
+    mut processor: Option<&mut EffectDomainProcessor<'_>>,
+) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
     let required_len = width as usize * height as usize;
     if input.len() != required_len {
         return Err(EffectFloatExecutionError::InputSizeMismatch {
@@ -748,8 +810,10 @@ pub fn apply_compiled_effect_graph_rgba_f32(
     if compiled.graph.is_identity() || input.is_empty() || width == 0 || height == 0 {
         return Ok(input.to_vec());
     }
-    validate_float_effect_graph(compiled)?;
-    if let Some(cached) = get_cached_effect_output_f32(input, width, height, compiled, frame_seed) {
+    validate_float_effect_graph(compiled, processor.is_some())?;
+    if let Some(cached) =
+        get_cached_effect_output_f32(input, width, height, compiled, frame_seed, domain_cache_key)
+    {
         return Ok(cached);
     }
 
@@ -781,6 +845,13 @@ pub fn apply_compiled_effect_graph_rgba_f32(
                 ) else {
                     return Err(EffectFloatExecutionError::MissingOutput { node_id: *input_id });
                 };
+                apply_effect_domain_transition(
+                    compiled,
+                    Some(node.id),
+                    *input_id,
+                    &mut source,
+                    &mut processor,
+                )?;
                 if !apply_render_op_f32(&mut source, width, height, op, frame_seed) {
                     return Err(EffectFloatExecutionError::UnsupportedNode {
                         node_id: node.id,
@@ -801,7 +872,7 @@ pub fn apply_compiled_effect_graph_rgba_f32(
                 ) else {
                     return Err(EffectFloatExecutionError::MissingOutput { node_id: *base });
                 };
-                let Some(overlay_frame) = take_float_graph_input(
+                let Some(mut overlay_frame) = take_float_graph_input(
                     &mut outputs,
                     &mut remaining_uses,
                     &mut buffer_pool,
@@ -810,6 +881,13 @@ pub fn apply_compiled_effect_graph_rgba_f32(
                 ) else {
                     return Err(EffectFloatExecutionError::MissingOutput { node_id: *overlay });
                 };
+                apply_effect_domain_transition(
+                    compiled,
+                    Some(node.id),
+                    *overlay,
+                    &mut overlay_frame,
+                    &mut processor,
+                )?;
                 blend_rgba_f32_in_place(
                     &mut base_frame,
                     &overlay_frame,
@@ -867,7 +945,7 @@ pub fn apply_compiled_effect_graph_rgba_f32(
                     return Err(EffectFloatExecutionError::MissingOutput { node_id: first_id });
                 };
                 for overlay_id in &inputs[1..] {
-                    let Some(overlay) = take_float_graph_input(
+                    let Some(mut overlay) = take_float_graph_input(
                         &mut outputs,
                         &mut remaining_uses,
                         &mut buffer_pool,
@@ -878,6 +956,13 @@ pub fn apply_compiled_effect_graph_rgba_f32(
                             node_id: *overlay_id,
                         });
                     };
+                    apply_effect_domain_transition(
+                        compiled,
+                        Some(node.id),
+                        *overlay_id,
+                        &mut overlay,
+                        &mut processor,
+                    )?;
                     blend_rgba_f32_in_place(
                         &mut result,
                         &overlay,
@@ -895,11 +980,54 @@ pub fn apply_compiled_effect_graph_rgba_f32(
     let Some(output_id) = compiled.graph.output else {
         return Ok(input.to_vec());
     };
-    let output = outputs
+    let mut output = outputs
         .remove(&output_id)
         .ok_or(EffectFloatExecutionError::MissingOutput { node_id: output_id })?;
-    put_cached_effect_output_f32(input, width, height, compiled, frame_seed, &output);
+    apply_effect_domain_transition(compiled, None, output_id, &mut output, &mut processor)?;
+    put_cached_effect_output_f32(
+        input,
+        width,
+        height,
+        compiled,
+        frame_seed,
+        domain_cache_key,
+        &output,
+    );
     Ok(output)
+}
+
+fn apply_effect_domain_transition(
+    compiled: &CompiledEffectGraph,
+    consumer: Option<EffectGraphNodeId>,
+    input: EffectGraphNodeId,
+    pixels: &mut [[f32; 4]],
+    processor: &mut Option<&mut EffectDomainProcessor<'_>>,
+) -> Result<(), EffectFloatExecutionError> {
+    let Some(transition) = compiled
+        .domain_plan
+        .transitions
+        .iter()
+        .find(|transition| transition.consumer == consumer && transition.input == input)
+        .copied()
+    else {
+        return Ok(());
+    };
+    let Some(processor) = processor.as_deref_mut() else {
+        return Err(EffectFloatExecutionError::UnsupportedNode {
+            node_id: consumer.unwrap_or(input),
+            reason: EffectFloatUnsupportedReason::ColorDomainConversionRequired {
+                transitions: compiled.domain_plan.transitions.len(),
+            },
+        });
+    };
+    processor(pixels, transition).map_err(|reason| EffectFloatExecutionError::UnsupportedNode {
+        node_id: consumer.unwrap_or(input),
+        reason: EffectFloatUnsupportedReason::ColorDomainTransitionFailed {
+            from: transition.from,
+            to: transition.to,
+            reason,
+        },
+    })
 }
 
 /// Execute a compiled adjustment graph and blend the result over a float base frame.
@@ -930,6 +1058,51 @@ pub fn apply_compiled_effect_graph_pass_rgba_f32(
 
     let processed =
         apply_compiled_effect_graph_rgba_f32(base, width, height, compiled, frame_seed)?;
+    let mut out = base.to_vec();
+    blend_rgba_f32_in_place(&mut out, &processed, opacity, mode, frame_seed);
+    Ok(out)
+}
+
+/// Execute and blend a float adjustment graph with renderer-owned domain processors.
+pub fn apply_compiled_effect_graph_pass_rgba_f32_with_domain_processor<F>(
+    base: &[[f32; 4]],
+    width: u32,
+    height: u32,
+    compiled: &CompiledEffectGraph,
+    opacity: f32,
+    blend_mode: Option<BlendMode>,
+    frame_seed: i64,
+    domain_cache_key: u64,
+    processor: F,
+) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError>
+where
+    F: FnMut(&mut [[f32; 4]], EffectDomainTransition) -> Result<(), String>,
+{
+    let required_len = width as usize * height as usize;
+    if base.len() != required_len {
+        return Err(EffectFloatExecutionError::InputSizeMismatch {
+            expected: required_len,
+            actual: base.len(),
+        });
+    }
+    if required_len == 0 {
+        return Ok(Vec::new());
+    }
+    let mode = blend_mode.unwrap_or(BlendMode::Normal);
+    let opacity = opacity.clamp(0.0, 1.0);
+    if opacity <= 1.0e-4 || compiled.graph.is_identity() {
+        return Ok(base.to_vec());
+    }
+
+    let processed = apply_compiled_effect_graph_rgba_f32_with_domain_processor(
+        base,
+        width,
+        height,
+        compiled,
+        frame_seed,
+        domain_cache_key,
+        processor,
+    )?;
     let mut out = base.to_vec();
     blend_rgba_f32_in_place(&mut out, &processed, opacity, mode, frame_seed);
     Ok(out)
@@ -1053,8 +1226,10 @@ fn get_cached_effect_output_f32(
     height: u32,
     compiled: &CompiledEffectGraph,
     frame_seed: i64,
+    domain_cache_key: Option<u64>,
 ) -> Option<Vec<[f32; 4]>> {
-    let key = effect_output_cache_key_f32(input, width, height, compiled, frame_seed)?;
+    let key =
+        effect_output_cache_key_f32(input, width, height, compiled, frame_seed, domain_cache_key)?;
     let mut cache = effect_float_output_frame_cache().lock().ok()?;
     cache.get(&key)
 }
@@ -1065,9 +1240,12 @@ fn put_cached_effect_output_f32(
     height: u32,
     compiled: &CompiledEffectGraph,
     frame_seed: i64,
+    domain_cache_key: Option<u64>,
     output: &[[f32; 4]],
 ) {
-    let Some(key) = effect_output_cache_key_f32(input, width, height, compiled, frame_seed) else {
+    let Some(key) =
+        effect_output_cache_key_f32(input, width, height, compiled, frame_seed, domain_cache_key)
+    else {
         return;
     };
     let Ok(mut cache) = effect_float_output_frame_cache().lock() else {
@@ -1082,8 +1260,13 @@ fn effect_output_cache_key_f32(
     height: u32,
     compiled: &CompiledEffectGraph,
     frame_seed: i64,
+    domain_cache_key: Option<u64>,
 ) -> Option<EffectFloatOutputCacheKey> {
-    if !effect_output_cache_enabled_f32(compiled) || input.is_empty() || width == 0 || height == 0 {
+    if !effect_output_cache_enabled_f32(compiled, domain_cache_key.is_some())
+        || input.is_empty()
+        || width == 0
+        || height == 0
+    {
         return None;
     }
 
@@ -1095,15 +1278,21 @@ fn effect_output_cache_key_f32(
         frame_seed: (compiled.output_cache_policy
             == crate::effect::EffectCachePolicy::FrameDependent)
             .then_some(frame_seed),
+        domain_cache_key,
     })
 }
 
-fn effect_output_cache_enabled_f32(compiled: &CompiledEffectGraph) -> bool {
-    compiled.output_cache_enabled && validate_float_effect_graph(compiled).is_ok()
+fn effect_output_cache_enabled_f32(
+    compiled: &CompiledEffectGraph,
+    domain_processor_available: bool,
+) -> bool {
+    compiled.output_cache_enabled
+        && validate_float_effect_graph(compiled, domain_processor_available).is_ok()
 }
 
 fn validate_float_effect_graph(
     compiled: &CompiledEffectGraph,
+    domain_processor_available: bool,
 ) -> Result<(), EffectFloatExecutionError> {
     if let Some(blocker) = compiled.domain_plan.blockers.first() {
         return Err(EffectFloatExecutionError::UnsupportedNode {
@@ -1113,13 +1302,15 @@ fn validate_float_effect_graph(
             },
         });
     }
-    if let Some(transition) = compiled.domain_plan.transitions.first() {
-        return Err(EffectFloatExecutionError::UnsupportedNode {
-            node_id: transition.consumer.unwrap_or(transition.input),
-            reason: EffectFloatUnsupportedReason::ColorDomainConversionRequired {
-                transitions: compiled.domain_plan.transitions.len(),
-            },
-        });
+    if !domain_processor_available {
+        if let Some(transition) = compiled.domain_plan.transitions.first() {
+            return Err(EffectFloatExecutionError::UnsupportedNode {
+                node_id: transition.consumer.unwrap_or(transition.input),
+                reason: EffectFloatUnsupportedReason::ColorDomainConversionRequired {
+                    transitions: compiled.domain_plan.transitions.len(),
+                },
+            });
+        }
     }
     for node_id in &compiled.schedule.ordered_nodes {
         let Some(node) = compiled.graph.node(*node_id) else {
@@ -1487,6 +1678,138 @@ mod tests {
     }
 
     #[test]
+    fn domain_processor_executes_in_place_round_trip_around_effect() {
+        let display_domain = crate::EffectColorDomain::DisplayEncodedRgb {
+            color_space: mondrian_core::ColorSpace::Rec709,
+        };
+        let compiled = crate::compile_scheduled_effect_graph_in_domain(
+            &EffectRenderPlan {
+                ops: vec![EffectRenderOp::ColorAdjust {
+                    exposure: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                }],
+            },
+            crate::EffectColorDomainContract::preserving(display_domain),
+        )
+        .expect("valid display-domain graph");
+        let mut transitions = Vec::new();
+
+        let output = apply_compiled_effect_graph_rgba_f32_with_domain_processor(
+            &[[0.4, 0.2, 0.1, 0.75]],
+            1,
+            1,
+            &compiled,
+            0,
+            7,
+            |pixels, transition| {
+                transitions.push(transition);
+                let scale = if transition.to == display_domain {
+                    0.5
+                } else {
+                    2.0
+                };
+                for pixel in pixels {
+                    for channel in &mut pixel[..3] {
+                        *channel *= scale;
+                    }
+                }
+                Ok(())
+            },
+        )
+        .expect("execute graph with resolved domains");
+
+        assert_eq!(transitions, compiled.domain_plan.transitions);
+        for (actual, expected) in output[0].iter().zip([0.4, 0.2, 0.1, 0.75]) {
+            assert!((actual - expected).abs() < 1.0e-6);
+        }
+    }
+
+    #[test]
+    fn domain_processor_failure_preserves_exact_transition_context() {
+        let display_domain = crate::EffectColorDomain::DisplayEncodedRgb {
+            color_space: mondrian_core::ColorSpace::Rec709,
+        };
+        let compiled = crate::compile_scheduled_effect_graph_in_domain(
+            &EffectRenderPlan {
+                ops: vec![EffectRenderOp::ColorAdjust {
+                    exposure: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                }],
+            },
+            crate::EffectColorDomainContract::preserving(display_domain),
+        )
+        .expect("valid display-domain graph");
+
+        let error = apply_compiled_effect_graph_rgba_f32_with_domain_processor(
+            &[[0.4, 0.2, 0.1, 0.75]],
+            1,
+            1,
+            &compiled,
+            0,
+            9_001,
+            |_, transition| Err(format!("missing processor for {:?}", transition.to)),
+        )
+        .expect_err("processor failure must remain structured");
+
+        assert!(matches!(
+            error,
+            EffectFloatExecutionError::UnsupportedNode {
+                reason: EffectFloatUnsupportedReason::ColorDomainTransitionFailed {
+                    from: crate::EffectColorDomain::SceneLinearRgb,
+                    to,
+                    reason,
+                },
+                ..
+            } if to == display_domain && reason.contains("missing processor")
+        ));
+    }
+
+    #[test]
+    fn domain_processed_output_cache_isolated_by_renderer_color_context() {
+        let display_domain = crate::EffectColorDomain::DisplayEncodedRgb {
+            color_space: mondrian_core::ColorSpace::Rec709,
+        };
+        let compiled = crate::compile_scheduled_effect_graph_in_domain(
+            &EffectRenderPlan {
+                ops: vec![
+                    EffectRenderOp::ColorAdjust { exposure: 0.0, contrast: 1.0, saturation: 1.0 },
+                    EffectRenderOp::WhiteBalance { temperature: 0.1, tint: -0.1 },
+                    EffectRenderOp::ColorAdjust { exposure: 0.0, contrast: 1.1, saturation: 0.9 },
+                    EffectRenderOp::WhiteBalance { temperature: -0.05, tint: 0.05 },
+                ],
+            },
+            crate::EffectColorDomainContract::preserving(display_domain),
+        )
+        .expect("valid cacheable display-domain graph");
+        assert!(compiled.output_cache_enabled);
+        let input = [[0.314_159, 0.271_828, 0.161_803, 0.875]];
+        let mut processor_calls = 0;
+
+        for cache_key in [91_001, 91_001, 91_002] {
+            apply_compiled_effect_graph_rgba_f32_with_domain_processor(
+                &input,
+                1,
+                1,
+                &compiled,
+                0,
+                cache_key,
+                |_, _| {
+                    processor_calls += 1;
+                    Ok(())
+                },
+            )
+            .expect("execute cacheable domain graph");
+        }
+
+        assert_eq!(
+            processor_calls, 4,
+            "same context hits; different context misses"
+        );
+    }
+
+    #[test]
     fn float_effect_graph_runs_color_adjust_without_clamping_extended_values() {
         let compiled = get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
             ops: vec![EffectRenderOp::ColorAdjust {
@@ -1578,13 +1901,13 @@ mod tests {
         .expect("compile float adjustment chain");
         let input = [[0.25, 0.5, 0.75, 1.0]];
 
-        assert!(effect_output_cache_key_f32(&input, 1, 1, &compiled, 7).is_some());
-        assert!(get_cached_effect_output_f32(&input, 1, 1, &compiled, 7).is_none());
+        assert!(effect_output_cache_key_f32(&input, 1, 1, &compiled, 7, None).is_some());
+        assert!(get_cached_effect_output_f32(&input, 1, 1, &compiled, 7, None).is_none());
         let output =
             apply_compiled_effect_graph_rgba_f32(&input, 1, 1, &compiled, 7).expect("float chain");
 
         assert_eq!(
-            get_cached_effect_output_f32(&input, 1, 1, &compiled, 7),
+            get_cached_effect_output_f32(&input, 1, 1, &compiled, 7, None),
             Some(output)
         );
     }
@@ -1601,10 +1924,10 @@ mod tests {
         let input = [[0.25, 0.5, 0.75, 1.0]];
 
         assert!(!compiled.output_cache_enabled);
-        assert!(effect_output_cache_key_f32(&input, 1, 1, &compiled, 7).is_none());
+        assert!(effect_output_cache_key_f32(&input, 1, 1, &compiled, 7, None).is_none());
         apply_compiled_effect_graph_rgba_f32(&input, 1, 1, &compiled, 7)
             .expect("low-cost float chain");
-        assert!(get_cached_effect_output_f32(&input, 1, 1, &compiled, 7).is_none());
+        assert!(get_cached_effect_output_f32(&input, 1, 1, &compiled, 7, None).is_none());
     }
 
     #[test]

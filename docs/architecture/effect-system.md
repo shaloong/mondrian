@@ -60,11 +60,14 @@ The timeline compositor owns scene-linear RGB at the graph source and output.
 The renderer is therefore the only layer allowed to resolve planned RGB-domain
 edges through the active stock-OCIO configuration. Effects do not load OCIO,
 select a project color engine, or perform display transforms themselves.
-Until a renderer backend has materialized every planned transition, CPU float,
-legacy RGBA8, and GPU lowering all fail closed. Preview and export report the
-same `effect_domain_blockers` check and do not relabel this state as an RGBA8
-fallback. This guarantees that adding a display- or log-domain effect cannot
-silently execute its math on scene-linear samples.
+The CPU timeline renderer materializes every legal RGB transition in-place on
+the float pixel buffer through the exact project `ColorEngine` and stock OCIO
+processor. Preview and export call this same renderer boundary. Processor
+failure, invalid data/alpha crossings, and backends that have not materialized
+the plan fail closed; they are never relabeled as an RGBA8 fallback. This
+guarantees that adding a display- or log-domain effect cannot silently execute
+its math on scene-linear samples. GPU lowering continues to report a typed
+blocker until its render-pass scheduler can bind the equivalent OCIO processors.
 
 ## Basic Properties
 
@@ -128,16 +131,20 @@ Float/linear graph execution has its own bounded output cache keyed by compiled
 graph signature, typed float input signature, dimensions, and frame seed when a
 graph is frame-dependent. Deterministic multi-op color-correction chains should
 reuse this cache rather than forcing repeated full-frame float adjustment work
-during preview scrubbing or export retries.
+during preview scrubbing or export retries. Domain-processed entries also key
+the exact color engine, working identity, and OCIO configuration generation so
+cached pixels cannot cross project color semantics.
 
 Unsupported graph nodes and render ops return structured
 `EffectFloatExecutionError` / `EffectFloatUnsupportedReason` values so renderer
-callers can make an explicit legacy fallback decision. Color-domain transitions
-and blockers are different: they are fail-closed and never authorize RGBA8
-execution. The encoded executor returns `EffectExecutionError` for the same
-unresolved domain plan. Custom/plugin processors remain unsupported until their
-ABI declares a float implementation. CPU float support does not imply GPU
-execution support.
+callers can make an explicit legacy fallback decision. The renderer may satisfy
+legal RGB transitions through
+`apply_compiled_effect_graph_rgba_f32_with_domain_processor(...)`; transition
+failures and domain blockers are fail-closed and never authorize RGBA8
+execution. The encoded executor returns `EffectExecutionError` for any domain
+plan because it has no typed OCIO runtime. Custom/plugin processors remain
+unsupported until their ABI declares a float implementation. CPU float support
+does not imply GPU execution support.
 
 `lower_effect_graph_to_gpu_plan(...)` is the backend-neutral GPU boundary. It
 accepts only a compiled single-source unary chain and emits an immutable fused

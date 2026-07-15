@@ -1,16 +1,22 @@
 use crate::CpuColorFrame;
 use mondrian_core::{
     types::{BlendMode, Color},
-    WorkingColorSpace, WorkingRgbaF32Frame,
+    ColorEngine, OcioColorSpaceIdentity, WorkingColorSpace, WorkingRgbaF32Frame,
 };
 use mondrian_effects::{
     apply_compiled_effect_graph, apply_compiled_effect_graph_pass,
-    apply_compiled_effect_graph_pass_rgba_f32, apply_compiled_effect_graph_rgba_f32,
-    blend_rgba_f32_pixel_seeded, blend_rgba_pixel_seeded, compiled_effect_graph_supports_rgba_f32,
-    CompiledEffectGraph,
+    apply_compiled_effect_graph_pass_rgba_f32,
+    apply_compiled_effect_graph_pass_rgba_f32_with_domain_processor,
+    apply_compiled_effect_graph_rgba_f32,
+    apply_compiled_effect_graph_rgba_f32_with_domain_processor, blend_rgba_f32_pixel_seeded,
+    blend_rgba_pixel_seeded, compiled_effect_graph_supports_rgba_f32_with_domain_processor,
+    CompiledEffectGraph, EffectColorDomain, EffectDomainTransition, EffectFloatExecutionError,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
 #[derive(Debug, Clone)]
 pub struct TimelineMediaLayer<'a> {
@@ -50,6 +56,52 @@ pub enum TimelineCompositeElement<'a> {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TimelineCompositeOptions {
     pub empty_canvas_transparent: bool,
+}
+
+/// Renderer-owned runtime for resolving effect RGB domains through stock OCIO.
+#[derive(Debug, Clone, Copy)]
+pub struct TimelineEffectColorRuntime<'a> {
+    /// Exact project color engine/config provider.
+    pub engine: &'a ColorEngine,
+    /// Sequence working space represented by `SceneLinearRgb`.
+    pub working_color_space: WorkingColorSpace,
+}
+
+impl<'a> TimelineEffectColorRuntime<'a> {
+    /// Bind a project color engine to one sequence working space.
+    pub const fn new(engine: &'a ColorEngine, working_color_space: WorkingColorSpace) -> Self {
+        Self { engine, working_color_space }
+    }
+
+    fn cache_key(self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.engine.hash(&mut hasher);
+        self.working_color_space.hash(&mut hasher);
+        mondrian_core::ocio::ocio_config_generation().hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn process_transition(
+        self,
+        pixels: &mut [[f32; 4]],
+        transition: EffectDomainTransition,
+    ) -> Result<(), String> {
+        let src = self.identity(transition.from)?;
+        let dst = self.identity(transition.to)?;
+        self.engine.convert_identity_float(pixels.as_flattened_mut(), src, dst)
+    }
+
+    fn identity(self, domain: EffectColorDomain) -> Result<OcioColorSpaceIdentity, String> {
+        match domain {
+            EffectColorDomain::SceneLinearRgb => Ok(self.working_color_space.into()),
+            EffectColorDomain::LogPerceptualRgb { color_space }
+            | EffectColorDomain::DisplayLinearRgb { color_space }
+            | EffectColorDomain::DisplayEncodedRgb { color_space } => Ok(color_space.into()),
+            EffectColorDomain::Data | EffectColorDomain::AlphaMask => {
+                Err(format!("{domain:?} is not a color-managed RGB domain"))
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -353,16 +405,11 @@ pub fn composite_timeline_elements_color_frame(
     height: u32,
     elements: &[TimelineCompositeElement<'_>],
     options: TimelineCompositeOptions,
-    working_color_space: WorkingColorSpace,
+    runtime: TimelineEffectColorRuntime<'_>,
     scratch: &mut TimelineCompositeScratch,
 ) -> CpuColorFrame {
     composite_timeline_elements_color_frame_with_diagnostics(
-        width,
-        height,
-        elements,
-        options,
-        working_color_space,
-        scratch,
+        width, height, elements, options, runtime, scratch,
     )
     .frame
 }
@@ -374,25 +421,32 @@ pub fn composite_timeline_elements_color_frame_with_diagnostics(
     height: u32,
     elements: &[TimelineCompositeElement<'_>],
     options: TimelineCompositeOptions,
-    working_color_space: WorkingColorSpace,
+    runtime: TimelineEffectColorRuntime<'_>,
     scratch: &mut TimelineCompositeScratch,
 ) -> TimelineCompositeFrame {
-    let diagnostics = composite_path_diagnostics(elements);
+    let mut diagnostics = composite_path_diagnostics(elements);
     let frame = if diagnostics.is_color_domain_blocked() {
-        blocked_working_frame(width, height, working_color_space)
+        blocked_working_frame(width, height, runtime.working_color_space)
     } else if diagnostics.uses_legacy_rgba8() {
         let rgba = composite_timeline_elements(width, height, elements, options, scratch)
             .unwrap_or_else(|_| vec![0; width as usize * height as usize * 4]);
-        working_frame_from_normalized_rgba8(width, height, &rgba, working_color_space)
+        working_frame_from_normalized_rgba8(width, height, &rgba, runtime.working_color_space)
     } else {
-        composite_supported_elements_to_working_frame(
+        match composite_supported_elements_to_working_frame(
             width,
             height,
             elements,
             options,
-            working_color_space,
+            runtime.working_color_space,
+            runtime,
             scratch,
-        )
+        ) {
+            Ok(frame) => frame,
+            Err(_) => {
+                mark_effect_domain_execution_blocked(elements, &mut diagnostics);
+                blocked_working_frame(width, height, runtime.working_color_space)
+            }
+        }
     };
     TimelineCompositeFrame { frame: CpuColorFrame::working(frame), diagnostics }
 }
@@ -416,16 +470,17 @@ fn composite_supported_elements_to_working_frame(
     elements: &[TimelineCompositeElement<'_>],
     options: TimelineCompositeOptions,
     working_color_space: WorkingColorSpace,
+    runtime: TimelineEffectColorRuntime<'_>,
     scratch: &mut TimelineCompositeScratch,
-) -> WorkingRgbaF32Frame {
+) -> Result<WorkingRgbaF32Frame, EffectFloatExecutionError> {
     let pixel_count = width as usize * height as usize;
     if pixel_count == 0 {
-        return WorkingRgbaF32Frame {
+        return Ok(WorkingRgbaF32Frame {
             width,
             height,
             data: Vec::new(),
             color_space: working_color_space,
-        };
+        });
     }
 
     let mut canvas = vec![[0.0, 0.0, 0.0, 1.0]; pixel_count];
@@ -439,14 +494,14 @@ fn composite_supported_elements_to_working_frame(
                 let (src_data, src_width, src_height) = if layer.effect_graph.graph.is_identity() {
                     (&frame.data, frame.width, frame.height)
                 } else {
-                    effect_output = apply_compiled_effect_graph_rgba_f32(
+                    effect_output = apply_effect_graph_f32(
                         &frame.data,
                         frame.width,
                         frame.height,
                         &layer.effect_graph,
                         layer.frame_seed,
-                    )
-                    .expect("float-compatible effect graph");
+                        runtime,
+                    )?;
                     (&effect_output, frame.width, frame.height)
                 };
                 alpha_blend_f32_layer(
@@ -480,14 +535,14 @@ fn composite_supported_elements_to_working_frame(
                     let source = if layer.effect_graph.graph.is_identity() {
                         scratch.solid_fill_f32.as_slice()
                     } else {
-                        scratch.solid_effect_f32 = apply_compiled_effect_graph_rgba_f32(
+                        scratch.solid_effect_f32 = apply_effect_graph_f32(
                             &scratch.solid_fill_f32,
                             width,
                             height,
                             &layer.effect_graph,
                             layer.frame_seed,
-                        )
-                        .expect("float-compatible solid effect graph");
+                            runtime,
+                        )?;
                         scratch.solid_effect_f32.as_slice()
                     };
                     alpha_blend_f32_layer(
@@ -512,7 +567,7 @@ fn composite_supported_elements_to_working_frame(
                 {
                     continue;
                 }
-                canvas = apply_compiled_effect_graph_pass_rgba_f32(
+                canvas = apply_effect_graph_pass_f32(
                     &canvas,
                     width,
                     height,
@@ -520,8 +575,8 @@ fn composite_supported_elements_to_working_frame(
                     layer.opacity,
                     layer.blend_mode,
                     layer.frame_seed,
-                )
-                .expect("float-compatible adjustment graph");
+                    runtime,
+                )?;
             }
         }
     }
@@ -530,11 +585,64 @@ fn composite_supported_elements_to_working_frame(
         canvas.fill([0.0, 0.0, 0.0, 0.0]);
     }
 
-    WorkingRgbaF32Frame {
+    Ok(WorkingRgbaF32Frame {
         width,
         height,
         data: canvas,
         color_space: working_color_space,
+    })
+}
+
+fn apply_effect_graph_f32(
+    input: &[[f32; 4]],
+    width: u32,
+    height: u32,
+    graph: &CompiledEffectGraph,
+    frame_seed: i64,
+    runtime: TimelineEffectColorRuntime<'_>,
+) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
+    if graph.domain_plan.requires_conversion() {
+        apply_compiled_effect_graph_rgba_f32_with_domain_processor(
+            input,
+            width,
+            height,
+            graph,
+            frame_seed,
+            runtime.cache_key(),
+            |pixels, transition| runtime.process_transition(pixels, transition),
+        )
+    } else {
+        apply_compiled_effect_graph_rgba_f32(input, width, height, graph, frame_seed)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_effect_graph_pass_f32(
+    input: &[[f32; 4]],
+    width: u32,
+    height: u32,
+    graph: &CompiledEffectGraph,
+    opacity: f32,
+    blend_mode: Option<BlendMode>,
+    frame_seed: i64,
+    runtime: TimelineEffectColorRuntime<'_>,
+) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
+    if graph.domain_plan.requires_conversion() {
+        apply_compiled_effect_graph_pass_rgba_f32_with_domain_processor(
+            input,
+            width,
+            height,
+            graph,
+            opacity,
+            blend_mode,
+            frame_seed,
+            runtime.cache_key(),
+            |pixels, transition| runtime.process_transition(pixels, transition),
+        )
+    } else {
+        apply_compiled_effect_graph_pass_rgba_f32(
+            input, width, height, graph, opacity, blend_mode, frame_seed,
+        )
     }
 }
 
@@ -550,10 +658,12 @@ pub fn composite_path_diagnostics(
     for element in elements {
         match element {
             TimelineCompositeElement::Media(layer) => {
-                if effect_domain_is_unresolved(&layer.effect_graph) {
+                if effect_domain_is_blocked(&layer.effect_graph) {
                     diagnostics.blocked_media_effect_domain =
                         diagnostics.blocked_media_effect_domain.saturating_add(1);
-                } else if !compiled_effect_graph_supports_rgba_f32(&layer.effect_graph) {
+                } else if !compiled_effect_graph_supports_rgba_f32_with_domain_processor(
+                    &layer.effect_graph,
+                ) {
                     diagnostics.legacy_media_effect =
                         diagnostics.legacy_media_effect.saturating_add(1);
                 }
@@ -566,10 +676,12 @@ pub fn composite_path_diagnostics(
                     ));
             }
             TimelineCompositeElement::SolidColor(layer) => {
-                if effect_domain_is_unresolved(&layer.effect_graph) {
+                if effect_domain_is_blocked(&layer.effect_graph) {
                     diagnostics.blocked_solid_effect_domain =
                         diagnostics.blocked_solid_effect_domain.saturating_add(1);
-                } else if !compiled_effect_graph_supports_rgba_f32(&layer.effect_graph) {
+                } else if !compiled_effect_graph_supports_rgba_f32_with_domain_processor(
+                    &layer.effect_graph,
+                ) {
                     diagnostics.legacy_solid_effect =
                         diagnostics.legacy_solid_effect.saturating_add(1);
                 }
@@ -582,10 +694,12 @@ pub fn composite_path_diagnostics(
                     ));
             }
             TimelineCompositeElement::Adjustment(layer) => {
-                if effect_domain_is_unresolved(&layer.effect_graph) {
+                if effect_domain_is_blocked(&layer.effect_graph) {
                     diagnostics.blocked_adjustment_effect_domain =
                         diagnostics.blocked_adjustment_effect_domain.saturating_add(1);
-                } else if !compiled_effect_graph_supports_rgba_f32(&layer.effect_graph) {
+                } else if !compiled_effect_graph_supports_rgba_f32_with_domain_processor(
+                    &layer.effect_graph,
+                ) {
                     diagnostics.legacy_adjustment_effect =
                         diagnostics.legacy_adjustment_effect.saturating_add(1);
                 }
@@ -621,8 +735,42 @@ pub fn composite_path_diagnostics(
     diagnostics
 }
 
-fn effect_domain_is_unresolved(graph: &CompiledEffectGraph) -> bool {
-    graph.domain_plan.requires_conversion() || !graph.domain_plan.blockers.is_empty()
+fn effect_domain_is_blocked(graph: &CompiledEffectGraph) -> bool {
+    !graph.domain_plan.blockers.is_empty()
+        || (graph.domain_plan.requires_conversion()
+            && !compiled_effect_graph_supports_rgba_f32_with_domain_processor(graph))
+}
+
+fn mark_effect_domain_execution_blocked(
+    elements: &[TimelineCompositeElement<'_>],
+    diagnostics: &mut TimelineCompositeDiagnostics,
+) {
+    diagnostics.float_linear_composites = 0;
+    diagnostics.legacy_rgba8_composites = 0;
+    diagnostics.blocked_color_domain_composites = 1;
+    for element in elements {
+        match element {
+            TimelineCompositeElement::Media(layer)
+                if layer.effect_graph.domain_plan.requires_conversion() =>
+            {
+                diagnostics.blocked_media_effect_domain =
+                    diagnostics.blocked_media_effect_domain.saturating_add(1);
+            }
+            TimelineCompositeElement::SolidColor(layer)
+                if layer.effect_graph.domain_plan.requires_conversion() =>
+            {
+                diagnostics.blocked_solid_effect_domain =
+                    diagnostics.blocked_solid_effect_domain.saturating_add(1);
+            }
+            TimelineCompositeElement::Adjustment(layer)
+                if layer.effect_graph.domain_plan.requires_conversion() =>
+            {
+                diagnostics.blocked_adjustment_effect_domain =
+                    diagnostics.blocked_adjustment_effect_domain.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn alpha_blend_f32_solid(
@@ -1059,6 +1207,14 @@ mod tests {
     use super::*;
     use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
 
+    static TEST_COLOR_ENGINE: ColorEngine = ColorEngine::mondrian_standard();
+
+    fn test_color_runtime(
+        working_color_space: WorkingColorSpace,
+    ) -> TimelineEffectColorRuntime<'static> {
+        TimelineEffectColorRuntime::new(&TEST_COLOR_ENGINE, working_color_space)
+    }
+
     fn working_frame(rgba: &[u8], width: u32, height: u32) -> CpuColorFrame {
         CpuColorFrame::working(working_frame_from_normalized_rgba8(
             width,
@@ -1236,7 +1392,7 @@ mod tests {
                 frame_seed: 0,
             })],
             TimelineCompositeOptions::default(),
-            WorkingColorSpace::LinearRec709,
+            test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch,
         );
         assert_eq!(frame.descriptor().domain, crate::ColorFrameDomain::Working);
@@ -1275,7 +1431,7 @@ mod tests {
                 },
             )],
             TimelineCompositeOptions::default(),
-            WorkingColorSpace::LinearRec709,
+            test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch,
         );
 
@@ -1320,7 +1476,7 @@ mod tests {
                 frame_seed: 0,
             })],
             TimelineCompositeOptions::default(),
-            WorkingColorSpace::LinearRec709,
+            test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch,
         );
 
@@ -1362,7 +1518,7 @@ mod tests {
                 }),
             ],
             TimelineCompositeOptions::default(),
-            WorkingColorSpace::LinearRec709,
+            test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch,
         );
 
@@ -1408,7 +1564,7 @@ mod tests {
             1,
             &elements,
             TimelineCompositeOptions::default(),
-            WorkingColorSpace::LinearRec709,
+            test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch,
         );
 
@@ -1445,7 +1601,7 @@ mod tests {
             1,
             &elements,
             TimelineCompositeOptions::default(),
-            WorkingColorSpace::LinearRec709,
+            test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut float_scratch,
         );
 
@@ -1491,7 +1647,7 @@ mod tests {
             1,
             &elements,
             TimelineCompositeOptions::default(),
-            WorkingColorSpace::LinearRec709,
+            test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut float_scratch,
         );
 
@@ -1556,7 +1712,7 @@ mod tests {
             1,
             &elements,
             TimelineCompositeOptions { empty_canvas_transparent: true },
-            WorkingColorSpace::LinearRec709,
+            test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch,
         );
         let pixel = output.frame.rgba_f32().data[0];
@@ -1590,7 +1746,7 @@ mod tests {
             1,
             &elements,
             TimelineCompositeOptions::default(),
-            WorkingColorSpace::LinearRec709,
+            test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch,
         );
         let pixels = &output.rgba_f32().data;
@@ -1625,7 +1781,7 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_effect_color_domain_blocks_instead_of_falling_back_to_rgba8() {
+    fn unavailable_effect_domain_processor_blocks_instead_of_falling_back_to_rgba8() {
         let media = working_frame(&[120, 80, 40, 255], 1, 1);
         let display_domain = mondrian_effects::EffectColorDomain::DisplayEncodedRgb {
             color_space: mondrian_core::ColorSpace::Rec709,
@@ -1652,13 +1808,18 @@ mod tests {
             frame_seed: 0,
         })];
         let mut scratch = TimelineCompositeScratch::default();
+        let unavailable_engine = ColorEngine::CustomOcio {
+            source: mondrian_core::OcioConfigSource::Builtin {
+                name: "test.invalid.effect-domain-config".to_owned(),
+            },
+        };
 
         let output = composite_timeline_elements_color_frame_with_diagnostics(
             1,
             1,
             &elements,
             TimelineCompositeOptions::default(),
-            WorkingColorSpace::LinearRec709,
+            TimelineEffectColorRuntime::new(&unavailable_engine, WorkingColorSpace::LinearRec709),
             &mut scratch,
         );
 
@@ -1688,6 +1849,131 @@ mod tests {
     }
 
     #[test]
+    fn stock_ocio_runtime_executes_display_domain_effect_and_returns_to_working_space() {
+        let engine = ColorEngine::default();
+        engine.ensure_loaded().expect("load Mondrian Standard OCIO package");
+        let media = working_frame(&[120, 80, 40, 255], 1, 1);
+        let input = media.rgba_f32().data[0];
+        let display_domain =
+            EffectColorDomain::DisplayEncodedRgb { color_space: mondrian_core::ColorSpace::Rec709 };
+        let exposure = 0.25;
+        let effect_graph = Arc::new(
+            mondrian_effects::compile_scheduled_effect_graph_in_domain(
+                &EffectRenderPlan {
+                    ops: vec![mondrian_effects::EffectRenderOp::ColorAdjust {
+                        exposure,
+                        contrast: 1.0,
+                        saturation: 1.0,
+                    }],
+                },
+                mondrian_effects::EffectColorDomainContract::preserving(display_domain),
+            )
+            .expect("compile display-domain graph"),
+        );
+        let elements = [TimelineCompositeElement::Media(TimelineMediaLayer {
+            frame: &media,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_graph,
+            frame_seed: 0,
+        })];
+        let mut scratch = TimelineCompositeScratch::default();
+
+        let output = composite_timeline_elements_color_frame_with_diagnostics(
+            1,
+            1,
+            &elements,
+            TimelineCompositeOptions::default(),
+            TimelineEffectColorRuntime::new(&engine, WorkingColorSpace::LinearRec709),
+            &mut scratch,
+        );
+
+        let mut expected = [input];
+        engine
+            .convert_identity_float(
+                expected.as_flattened_mut(),
+                WorkingColorSpace::LinearRec709.into(),
+                mondrian_core::ColorSpace::Rec709.into(),
+            )
+            .expect("convert working to display encoded");
+        for channel in &mut expected[0][..3] {
+            *channel *= 2.0f32.powf(exposure);
+        }
+        engine
+            .convert_identity_float(
+                expected.as_flattened_mut(),
+                mondrian_core::ColorSpace::Rec709.into(),
+                WorkingColorSpace::LinearRec709.into(),
+            )
+            .expect("convert display encoded to working");
+
+        assert_eq!(
+            output.diagnostics.color_path(),
+            TimelineCompositeColorPath::FloatLinear
+        );
+        assert_eq!(output.diagnostics.blocked_color_domain_composites, 0);
+        assert_eq!(output.diagnostics.blocked_media_effect_domain, 0);
+        assert_eq!(output.diagnostics.legacy_rgba8_composites, 0);
+        let actual = output.frame.rgba_f32().data[0];
+        for channel in 0..4 {
+            assert!(
+                (actual[channel] - expected[0][channel]).abs() <= 2.0e-5,
+                "channel {channel}: actual={} expected={}",
+                actual[channel],
+                expected[0][channel]
+            );
+        }
+    }
+
+    #[test]
+    fn display_domain_graph_without_float_abi_stays_blocked_instead_of_claiming_legacy() {
+        let engine = ColorEngine::default();
+        let media = working_frame(&[120, 80, 40, 255], 1, 1);
+        let display_domain =
+            EffectColorDomain::DisplayEncodedRgb { color_space: mondrian_core::ColorSpace::Rec709 };
+        let effect_graph = Arc::new(
+            mondrian_effects::compile_scheduled_effect_graph_in_domain(
+                &EffectRenderPlan {
+                    ops: vec![mondrian_effects::EffectRenderOp::Custom {
+                        key: "test.display.rgba8-only".to_owned(),
+                        params: serde_json::json!({}),
+                        cache_key: None,
+                        cache_policy: mondrian_effects::EffectCachePolicy::Deterministic,
+                    }],
+                },
+                mondrian_effects::EffectColorDomainContract::preserving(display_domain),
+            )
+            .expect("compile display-domain custom graph"),
+        );
+        let elements = [TimelineCompositeElement::Media(TimelineMediaLayer {
+            frame: &media,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_graph,
+            frame_seed: 0,
+        })];
+
+        let output = composite_timeline_elements_color_frame_with_diagnostics(
+            1,
+            1,
+            &elements,
+            TimelineCompositeOptions::default(),
+            TimelineEffectColorRuntime::new(&engine, WorkingColorSpace::LinearRec709),
+            &mut TimelineCompositeScratch::default(),
+        );
+
+        assert_eq!(
+            output.diagnostics.color_path(),
+            TimelineCompositeColorPath::Blocked
+        );
+        assert_eq!(output.diagnostics.blocked_media_effect_domain, 1);
+        assert_eq!(output.diagnostics.legacy_media_effect, 0);
+        assert_eq!(output.frame.rgba_f32().data[0], [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
     fn float_linear_compositor_reports_clean_float_path_diagnostics() {
         let mut scratch = TimelineCompositeScratch::default();
         let media = working_frame(&[64, 128, 192, 255], 1, 1);
@@ -1698,7 +1984,7 @@ mod tests {
             1,
             &elements,
             TimelineCompositeOptions::default(),
-            WorkingColorSpace::LinearRec709,
+            test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch,
         );
 
@@ -1774,7 +2060,7 @@ mod tests {
             2,
             &elements,
             TimelineCompositeOptions::default(),
-            WorkingColorSpace::LinearRec709,
+            test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch,
         );
 
@@ -1822,7 +2108,7 @@ mod tests {
             2,
             &elements_a,
             TimelineCompositeOptions::default(),
-            WorkingColorSpace::LinearRec709,
+            test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch_a,
         );
         let out_b = composite_timeline_elements_color_frame_with_diagnostics(
@@ -1830,7 +2116,7 @@ mod tests {
             2,
             &elements_b,
             TimelineCompositeOptions::default(),
-            WorkingColorSpace::LinearRec709,
+            test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch_b,
         );
 

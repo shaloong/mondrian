@@ -14,10 +14,15 @@ use mondrian_renderer::{
     composite_timeline_elements_color_frame, execute_cpu_input_stage,
     execute_cpu_output_boundary_rgba8, CpuColorFrame, CpuEncodedColorFrame, RenderInputTransform,
     RenderOutputColorBoundary, TimelineCompositeElement, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineMediaLayer,
+    TimelineCompositeScratch, TimelineEffectColorRuntime, TimelineMediaLayer,
 };
 
 const IDENTITY_TRANSFORM: [f32; 6] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+static TEST_COLOR_ENGINE: ColorEngine = ColorEngine::mondrian_standard();
+
+fn test_color_runtime() -> TimelineEffectColorRuntime<'static> {
+    TimelineEffectColorRuntime::new(&TEST_COLOR_ENGINE, WorkingColorSpace::LinearRec709)
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -99,7 +104,7 @@ fn composite_single_layer(w: u32, h: u32, rgba: &[u8], opacity: f32, blend: Blen
         h,
         &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
-        WorkingColorSpace::LinearRec709,
+        test_color_runtime(),
         &mut scratch,
     );
     encode_rec709(&frame)
@@ -170,7 +175,7 @@ fn golden_transparent_canvas() {
         h,
         &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
-        WorkingColorSpace::LinearRec709,
+        test_color_runtime(),
         &mut scratch,
     );
     let result = encode_rec709(&frame);
@@ -236,7 +241,7 @@ fn golden_two_layers_normal() {
         h,
         &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
-        WorkingColorSpace::LinearRec709,
+        test_color_runtime(),
         &mut scratch,
     );
     let result = encode_rec709(&frame);
@@ -273,7 +278,7 @@ fn preview_display_and_export_delivery_boundaries_match_with_stable_hash() {
         h,
         &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
-        WorkingColorSpace::LinearRec709,
+        test_color_runtime(),
         &mut scratch,
     );
 
@@ -387,7 +392,7 @@ fn golden_multilayer_float_linear_blend() {
         h,
         &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
-        WorkingColorSpace::LinearRec709,
+        test_color_runtime(),
         &mut scratch,
     );
     let result = encode_rec709(&frame);
@@ -413,7 +418,7 @@ fn golden_non_identity_transform_float_path() {
         h,
         &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
-        WorkingColorSpace::LinearRec709,
+        test_color_runtime(),
         &mut scratch,
     );
     let result = encode_rec709(&frame);
@@ -450,7 +455,7 @@ fn golden_preview_export_parity_across_color_spaces() {
         h,
         &elements,
         TimelineCompositeOptions { empty_canvas_transparent: true },
-        WorkingColorSpace::LinearRec709,
+        test_color_runtime(),
         &mut scratch,
     );
 

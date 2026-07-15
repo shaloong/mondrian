@@ -10,7 +10,7 @@ use mondrian_renderer::{
     composite_timeline_elements_color_frame, execute_cpu_input_stage, execute_cpu_output_stage,
     CpuColorFrame, CpuEncodedColorFrame, RenderColorTransform, RenderInputTransform,
     TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineMediaLayer,
+    TimelineEffectColorRuntime, TimelineMediaLayer,
 };
 use std::sync::Arc;
 
@@ -72,6 +72,7 @@ fn bench_layers(c: &mut Criterion, name: &str, w: u32, h: u32, n: usize) {
         .collect();
 
     let mut scratch = TimelineCompositeScratch::default();
+    let color_engine = ColorEngine::mondrian_standard();
     c.bench_function(name, |b| {
         b.iter(|| {
             let frame = composite_timeline_elements_color_frame(
@@ -79,7 +80,7 @@ fn bench_layers(c: &mut Criterion, name: &str, w: u32, h: u32, n: usize) {
                 black_box(h),
                 black_box(&elements),
                 TimelineCompositeOptions { empty_canvas_transparent: true },
-                WorkingColorSpace::LinearRec709,
+                TimelineEffectColorRuntime::new(&color_engine, WorkingColorSpace::LinearRec709),
                 &mut scratch,
             );
             execute_cpu_output_stage(

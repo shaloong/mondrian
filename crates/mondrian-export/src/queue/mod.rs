@@ -31,8 +31,8 @@ use mondrian_renderer::{
     RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
     TimelineCompositeDiagnostics, TimelineCompositeDomainBlockerBreakdown,
     TimelineCompositeElement, TimelineCompositeLegacyBreakdown, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
-    TimelineRenderPlanElement, TimelineSolidColorLayer,
+    TimelineCompositeScratch, TimelineEffectColorRuntime, TimelineEvaluationRequest,
+    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{
     ColorContext, DeliveryBitDepth, InputColorResolutionSourceCounts, ResolvedInputColor,
@@ -2730,7 +2730,7 @@ fn render_sequence_frame_into(
         height,
         &composite_elements,
         TimelineCompositeOptions::default(),
-        color_context.working_color_space,
+        TimelineEffectColorRuntime::new(&color_context.engine, color_context.working_color_space),
         &mut scratch,
     );
     if let Some(diagnostics) = composite_diagnostics {
