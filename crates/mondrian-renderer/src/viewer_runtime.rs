@@ -692,7 +692,10 @@ fn prepare_composite<'a>(
             ViewerGpuExecutionLayer::SolidColor { layer, effect_plan } => {
                 prepared.residency.procedural_layers =
                     prepared.residency.procedural_layers.saturating_add(1);
-                if effect_plan.processing_domain() == EffectColorDomain::SceneLinearRgb {
+                let scene_linear =
+                    effect_plan.processing_domain() == EffectColorDomain::SceneLinearRgb;
+                let identity_transform = layer.transform == [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+                if scene_linear && identity_transform {
                     prepared.layers.push(PreparedCompositeLayer {
                         source: PreparedCompositeLayerSource::SolidColor(layer.color),
                         opacity: layer.opacity,
@@ -718,24 +721,33 @@ fn prepare_composite<'a>(
                                 "solid source materialization failed: {error:?}"
                             ))
                         })?;
-                    let index = record_external_domain_effect(
-                        &mut prepared,
-                        runtime,
-                        compositor,
-                        effect_plan,
-                        materialized.output,
-                        request.output_boundary.engine.clone(),
-                        layer.frame_seed,
-                        device,
-                        queue,
-                        encoder,
-                    )?;
+                    let (index, prepared_effect_plan) = if scene_linear {
+                        let index = prepared.gpu_input_handles.len();
+                        prepared.gpu_input_handles.push(materialized.output);
+                        (index, Some(effect_plan.as_ref()))
+                    } else {
+                        (
+                            record_external_domain_effect(
+                                &mut prepared,
+                                runtime,
+                                compositor,
+                                effect_plan,
+                                materialized.output,
+                                request.output_boundary.engine.clone(),
+                                layer.frame_seed,
+                                device,
+                                queue,
+                                encoder,
+                            )?,
+                            None,
+                        )
+                    };
                     prepared.layers.push(PreparedCompositeLayer {
                         source: PreparedCompositeLayerSource::GpuFrame(index),
                         opacity: layer.opacity,
                         blend_mode: layer.blend_mode,
                         transform: layer.transform,
-                        effect_plan: None,
+                        effect_plan: prepared_effect_plan,
                         frame_seed: layer.frame_seed,
                     });
                 }
@@ -1216,6 +1228,67 @@ mod tests {
         assert_eq!(record.stage_diagnostics.readback_stages, 0);
         assert_eq!(record.compositing_diagnostics.gpu_passthrough_frames, 1);
         assert_eq!(record.compositing_diagnostics.gpu_native_composites, 0);
+        assert_eq!(record.residency.procedural_layers, 1);
+    }
+
+    #[tokio::test]
+    async fn viewer_materializes_scene_linear_solid_only_for_affine_transform() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping Viewer affine solid test: no GPU adapter available");
+            return;
+        };
+        let graph = get_or_compile_scheduled_render_graph(EffectGraphBuilderState::new().finish())
+            .expect("valid scene-linear identity graph");
+        let effect_plan =
+            Arc::new(lower_effect_graph_to_gpu_plan(&graph).expect("GPU identity plan"));
+        let layer = ViewerGpuExecutionLayer::SolidColor {
+            layer: TimelineSolidColorLayer {
+                color: Color { r: 0.18, g: 0.08, b: 0.02, a: 1.0 },
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+                transform: [0.75, 0.0, 0.125, 0.0, 0.75, 0.125],
+                effect_graph: Arc::clone(&graph),
+                frame_seed: 0,
+            },
+            effect_plan,
+        };
+        let output_boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut runtime =
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("viewer-affine-scene-solid"),
+        });
+
+        let record = runtime
+            .record(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                ViewerGpuExecutionRequest {
+                    sequence_id: SequenceId::new(),
+                    timeline_frame: 0,
+                    width: 4,
+                    height: 4,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    layers: &[layer],
+                    output_boundary: &output_boundary,
+                    source_rect: ViewerSourceRect::FULL,
+                    output_width: 4,
+                    output_height: 4,
+                    display_calibration: None,
+                },
+            )
+            .expect("Viewer affine scene-linear solid frame");
+        context.queue.submit(std::iter::once(encoder.finish()));
+
+        assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
+        assert_eq!(record.stage_diagnostics.upload_stages, 0);
+        assert_eq!(record.compositing_diagnostics.gpu_native_composites, 1);
         assert_eq!(record.residency.procedural_layers, 1);
     }
 

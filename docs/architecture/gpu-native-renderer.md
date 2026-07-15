@@ -371,6 +371,9 @@ explicit pooled RGBA32F upload node before the same effect-domain route; this
 reports exactly one upload stage and no readback, while GPU/native media retain
 their transfer-free path. The upload plan retains the CPU frame's shared
 immutable RGBA32F payload instead of repacking another full-frame host buffer.
+Scene-linear solids retain the direct procedural-uniform fast path for identity
+transforms; only an affine-transformed solid is materialized, after which it uses
+the same GPU affine/effect compositor as media rather than falling back to CPU.
 External-domain adjustments are scheduled by the renderer-owned composite graph:
 it finalizes the lower accumulator, executes the stock-OCIO round trip, blends
 the processed frame back with the authored adjustment opacity/blend mode, and
