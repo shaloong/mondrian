@@ -49,10 +49,8 @@ pub struct ProjectColorManagement {
     /// Product color mode. The default is [`ColorEngine::mondrian_standard()`], the
     /// versioned Mondrian Standard policy over the immutable bundled OCIO
     /// config; ACES and Custom OCIO are explicit peer modes.
-    #[serde(default)]
     pub engine: ColorEngine,
     /// Project-level display-management policy inherited by sequences.
-    #[serde(default)]
     pub display_management: DisplayManagementPolicy,
 }
 
@@ -68,7 +66,6 @@ pub struct ProjectSettings {
     /// Autosave interval in seconds.
     pub auto_save_interval: u32,
     /// 项目级色彩管理（所有序列默认继承）。
-    #[serde(default)]
     pub color_management: ProjectColorManagement,
 }
 

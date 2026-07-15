@@ -951,6 +951,26 @@ mod tests {
     use mondrian_core::types::OcioConfigSource;
     use mondrian_core::{ensure_mondrian_default_ocio_loaded, WorkingRgbaF32Frame};
 
+    fn pinned_custom_engine(source: OcioConfigSource) -> ColorEngine {
+        ColorEngine::CustomOcio {
+            identity: Box::new(
+                mondrian_core::CustomOcioProjectIdentity::from_pinned_parts(
+                    source,
+                    "0".repeat(64),
+                    "test-resolved-config".to_owned(),
+                    "0".repeat(64),
+                    "Linear Rec.709 (sRGB)".to_owned(),
+                    "Test Display".to_owned(),
+                    "Test View".to_owned(),
+                    mondrian_core::CustomOcioLookIdentity::None,
+                    Vec::new(),
+                    Vec::new(),
+                )
+                .expect("structurally valid Custom OCIO test identity"),
+            ),
+        }
+    }
+
     #[test]
     fn cpu_transform_returns_typed_display_boundary_frame() {
         let source = CpuColorFrame::working(WorkingRgbaF32Frame {
@@ -1060,9 +1080,7 @@ mod tests {
         let transform = RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec709,
             false,
-            ColorEngine::CustomOcio {
-                source: OcioConfigSource::Path { path: missing_path },
-            },
+            pinned_custom_engine(OcioConfigSource::Path { path: missing_path }),
         );
 
         let err = CpuColorTransformExecutor::input_to_working(&source, &transform)
@@ -1096,9 +1114,7 @@ mod tests {
         let transform = RenderColorTransform::export(
             ColorSpace::Srgb,
             false,
-            ColorEngine::CustomOcio {
-                source: OcioConfigSource::Path { path: missing_path },
-            },
+            pinned_custom_engine(OcioConfigSource::Path { path: missing_path }),
         );
 
         let err = CpuColorTransformExecutor::transform(&source, &transform)

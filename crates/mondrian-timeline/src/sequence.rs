@@ -860,8 +860,8 @@ impl SequenceSettings {
         );
 
         // Select one typed output intent. Standard retains its immutable package
-        // identity without consulting OCIO process-global state; ACES and Custom
-        // OCIO materialize their exact config default as a named intent.
+        // identity without consulting OCIO process-global state; ACES resolves
+        // its preset default and Custom OCIO returns its project-pinned pair.
         let output_transform = match (&engine, tone_map) {
             (ColorEngine::MondrianStandard { .. }, true) => {
                 mondrian_core::OutputTransformIntent::mondrian_standard()
@@ -1496,6 +1496,26 @@ mod tests {
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::{DisplayToneMapPolicy, ProjectColorManagement};
 
+    fn pinned_custom_engine(source: OcioConfigSource) -> ColorEngine {
+        ColorEngine::CustomOcio {
+            identity: Box::new(
+                mondrian_core::CustomOcioProjectIdentity::from_pinned_parts(
+                    source,
+                    "0".repeat(64),
+                    "test-resolved-config".to_owned(),
+                    "0".repeat(64),
+                    "Linear Rec.2020".to_owned(),
+                    "Test Display".to_owned(),
+                    "Test View".to_owned(),
+                    mondrian_core::CustomOcioLookIdentity::None,
+                    Vec::new(),
+                    Vec::new(),
+                )
+                .expect("structurally valid Custom OCIO test identity"),
+            ),
+        }
+    }
+
     fn tt(frame: i64, time_base: Rational) -> TimelineTime {
         TimelineTime::from_frame_position(FramePosition::new(frame, time_base))
             .expect("valid test time")
@@ -2013,8 +2033,7 @@ mod tests {
     #[test]
     fn nested_sequence_respects_engine_inherit() {
         let mut parent = SequenceSettings::default();
-        parent.color_management.engine =
-            ColorEngine::CustomOcio { source: OcioConfigSource::Environment };
+        parent.color_management.engine = pinned_custom_engine(OcioConfigSource::Environment);
         parent.color_management.inherit = false;
 
         // Child with inherit=true should get parent's engine
@@ -2029,7 +2048,7 @@ mod tests {
         // ForceParentWorkingSpace uses parent's engine
         assert_eq!(
             child_ctx.engine,
-            ColorEngine::CustomOcio { source: OcioConfigSource::Environment }
+            pinned_custom_engine(OcioConfigSource::Environment)
         );
 
         // PreserveChildWorkingSpace with inherit should also use parent engine
@@ -2037,7 +2056,7 @@ mod tests {
         let child_ctx2 = child.nested_render_color_context(parent_ctx);
         assert_eq!(
             child_ctx2.engine,
-            ColorEngine::CustomOcio { source: OcioConfigSource::Environment }
+            pinned_custom_engine(OcioConfigSource::Environment)
         );
     }
 
@@ -2217,11 +2236,30 @@ mod tests {
     fn custom_ocio_engine_is_preserved_in_context() {
         let mut settings = SequenceSettings::default();
         settings.color_management.inherit = false;
-        settings.color_management.engine =
-            ColorEngine::CustomOcio { source: OcioConfigSource::Environment };
+        settings.color_management.engine = pinned_custom_engine(OcioConfigSource::Environment);
 
         let ctx = settings.root_export_color_context(&ProjectColorManagement::default());
         assert!(matches!(ctx.engine, ColorEngine::CustomOcio { .. }));
+    }
+
+    #[test]
+    fn custom_ocio_scene_output_uses_project_pinned_display_view() {
+        let mut settings = SequenceSettings::default();
+        settings.color_management.inherit = false;
+        settings.color_management.workflow = ColorWorkflow::SceneReferred;
+        settings.color_management.engine = pinned_custom_engine(OcioConfigSource::Environment);
+
+        let ctx = settings
+            .root_preview_color_context(&ProjectColorManagement::default(), ColorSpace::Rec709);
+
+        assert!(ctx.tone_map);
+        assert_eq!(
+            ctx.output_transform,
+            mondrian_core::OutputTransformIntent::OcioDisplayView {
+                display: "Test Display".to_owned(),
+                view: "Test View".to_owned(),
+            }
+        );
     }
 
     #[test]
@@ -2325,9 +2363,9 @@ mod tests {
     #[test]
     fn inherit_flag_controls_engine_source() {
         let project_cm = ProjectColorManagement {
-            engine: ColorEngine::CustomOcio {
-                source: OcioConfigSource::Builtin { name: String::from("aces_1.2") },
-            },
+            engine: pinned_custom_engine(OcioConfigSource::Builtin {
+                name: String::from("aces_1.2"),
+            }),
             display_management: DisplayManagementPolicy::default(),
         };
 
@@ -2338,9 +2376,7 @@ mod tests {
         let ctx = settings.root_export_color_context(&project_cm);
         assert_eq!(
             ctx.engine,
-            ColorEngine::CustomOcio {
-                source: OcioConfigSource::Builtin { name: String::from("aces_1.2") },
-            }
+            pinned_custom_engine(OcioConfigSource::Builtin { name: String::from("aces_1.2") })
         );
 
         // inherit=false → use sequence's own engine

@@ -547,6 +547,26 @@ mod tests {
     use super::*;
     use mondrian_core::color_models::ViewerDisplayMode;
 
+    fn pinned_custom_engine(source: mondrian_core::OcioConfigSource) -> ColorEngine {
+        ColorEngine::CustomOcio {
+            identity: Box::new(
+                mondrian_core::CustomOcioProjectIdentity::from_pinned_parts(
+                    source,
+                    "0".repeat(64),
+                    "test-resolved-config".to_owned(),
+                    "0".repeat(64),
+                    "Linear Rec.2020".to_owned(),
+                    "Test Display".to_owned(),
+                    "Test View".to_owned(),
+                    mondrian_core::CustomOcioLookIdentity::None,
+                    Vec::new(),
+                    Vec::new(),
+                )
+                .expect("structurally valid Custom OCIO test identity"),
+            ),
+        }
+    }
+
     fn default_policy() -> DisplayManagementPolicy {
         DisplayManagementPolicy::default()
     }
@@ -635,11 +655,9 @@ mod tests {
 
     #[test]
     fn unavailable_custom_engine_does_not_reuse_the_loaded_standard_view() {
-        let engine = ColorEngine::CustomOcio {
-            source: mondrian_core::OcioConfigSource::Path {
-                path: PathBuf::from("missing-custom-display-config.ocio"),
-            },
-        };
+        let engine = pinned_custom_engine(mondrian_core::OcioConfigSource::Path {
+            path: PathBuf::from("missing-custom-display-config.ocio"),
+        });
         let (display, view, blocker) =
             resolve_ocio_display_view(&engine, &default_policy(), ColorSpace::Rec709);
 

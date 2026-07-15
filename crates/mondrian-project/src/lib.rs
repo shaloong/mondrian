@@ -22,7 +22,7 @@ use migration::JsonMigrationRegistry;
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 4;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 5;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 1;
 
@@ -210,6 +210,7 @@ pub fn load_project_archive(
     let file = fs::File::open(archive_file)?;
     let mut archive = zip::ZipArchive::new(file)?;
     let (manifest, document) = read_project_archive_metadata_from_zip(&mut archive)?;
+    validate_project_color_engines(&document)?;
 
     let mut db_entry = archive
         .by_name(LIBRARY_ENTRY)
@@ -226,6 +227,32 @@ pub fn load_project_archive(
         document,
         library_schema_version: manifest.library_schema_version,
     })
+}
+
+fn validate_project_color_engines(document: &ProjectDocument) -> anyhow::Result<()> {
+    let mut engines = vec![document.settings.color_management.engine.clone()];
+    engines.extend(
+        document
+            .sequences
+            .sequences
+            .iter()
+            .filter(|sequence| !sequence.settings.color_management.inherit)
+            .map(|sequence| sequence.settings.color_management.engine.clone()),
+    );
+    let mut validated = Vec::new();
+    for engine in engines {
+        if validated.contains(&engine) {
+            continue;
+        }
+        engine.ensure_loaded().map_err(|reason| {
+            anyhow::anyhow!(
+                "project color engine '{}' failed validation: {reason}",
+                engine.name()
+            )
+        })?;
+        validated.push(engine);
+    }
+    Ok(())
 }
 
 /// Save an `.mdp` archive atomically next to the target file.
@@ -379,6 +406,26 @@ mod tests {
     use super::*;
     use mondrian_timeline::Sequence;
 
+    fn missing_custom_engine(path: PathBuf) -> mondrian_core::ColorEngine {
+        mondrian_core::ColorEngine::CustomOcio {
+            identity: Box::new(
+                mondrian_core::CustomOcioProjectIdentity::from_pinned_parts(
+                    mondrian_core::OcioConfigSource::Path { path },
+                    "0".repeat(64),
+                    "missing-config".to_owned(),
+                    "0".repeat(64),
+                    "Linear Rec.2020".to_owned(),
+                    "Test Display".to_owned(),
+                    "Test View".to_owned(),
+                    mondrian_core::CustomOcioLookIdentity::None,
+                    Vec::new(),
+                    Vec::new(),
+                )
+                .expect("structurally valid missing Custom OCIO identity"),
+            ),
+        }
+    }
+
     fn unique_temp_dir(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "mondrian-project-{name}-{}-{}",
@@ -518,14 +565,52 @@ mod tests {
     }
 
     #[test]
-    fn schema_v3_is_rejected_without_an_alpha_compatibility_migration() {
+    fn schema_v4_is_rejected_without_an_alpha_compatibility_migration() {
         let mut legacy = serde_json::to_value(test_document()).expect("serialize document");
-        legacy["schema_version"] = serde_json::json!(3);
+        legacy["schema_version"] = serde_json::json!(4);
 
         let err = DOCUMENT_MIGRATIONS
             .migrate(legacy)
-            .expect_err("schema v3 must not migrate implicitly");
+            .expect_err("schema v4 must not migrate implicitly");
         assert!(err.to_string().contains("missing project document migration"));
+    }
+
+    #[test]
+    fn schema_v5_requires_explicit_project_color_identity() {
+        let value = serde_json::to_value(test_document()).expect("serialize document");
+
+        let mut missing_engine = value.clone();
+        missing_engine["settings"]["color_management"]
+            .as_object_mut()
+            .expect("color-management object")
+            .remove("engine");
+        assert!(serde_json::from_value::<ProjectDocument>(missing_engine).is_err());
+
+        let mut missing_color_management = value;
+        missing_color_management["settings"]
+            .as_object_mut()
+            .expect("settings object")
+            .remove("color_management");
+        assert!(serde_json::from_value::<ProjectDocument>(missing_color_management).is_err());
+    }
+
+    #[test]
+    fn project_open_validation_rejects_missing_sequence_custom_ocio_config() {
+        let mut document = test_document();
+        let missing_path = std::env::temp_dir().join(format!(
+            "mondrian-missing-project-custom-ocio-{}.ocio",
+            std::process::id()
+        ));
+        let active = document.sequences.active_mut().expect("active sequence");
+        active.settings.color_management.inherit = false;
+        active.settings.color_management.engine = missing_custom_engine(missing_path);
+
+        let error = validate_project_color_engines(&document)
+            .expect_err("missing sequence Custom OCIO config must fail project open");
+        assert!(
+            format!("{error:#}").contains("OCIO config file not found"),
+            "{error:#}"
+        );
     }
 
     #[test]

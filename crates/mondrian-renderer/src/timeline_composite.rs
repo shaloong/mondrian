@@ -1209,6 +1209,26 @@ mod tests {
 
     static TEST_COLOR_ENGINE: ColorEngine = ColorEngine::mondrian_standard();
 
+    fn pinned_custom_engine(source: mondrian_core::OcioConfigSource) -> ColorEngine {
+        ColorEngine::CustomOcio {
+            identity: Box::new(
+                mondrian_core::CustomOcioProjectIdentity::from_pinned_parts(
+                    source,
+                    "0".repeat(64),
+                    "test-resolved-config".to_owned(),
+                    "0".repeat(64),
+                    "Linear Rec.709 (sRGB)".to_owned(),
+                    "Test Display".to_owned(),
+                    "Test View".to_owned(),
+                    mondrian_core::CustomOcioLookIdentity::None,
+                    Vec::new(),
+                    Vec::new(),
+                )
+                .expect("structurally valid Custom OCIO test identity"),
+            ),
+        }
+    }
+
     fn test_color_runtime(
         working_color_space: WorkingColorSpace,
     ) -> TimelineEffectColorRuntime<'static> {
@@ -1808,11 +1828,9 @@ mod tests {
             frame_seed: 0,
         })];
         let mut scratch = TimelineCompositeScratch::default();
-        let unavailable_engine = ColorEngine::CustomOcio {
-            source: mondrian_core::OcioConfigSource::Builtin {
-                name: "test.invalid.effect-domain-config".to_owned(),
-            },
-        };
+        let unavailable_engine = pinned_custom_engine(mondrian_core::OcioConfigSource::Builtin {
+            name: "test.invalid.effect-domain-config".to_owned(),
+        });
 
         let output = composite_timeline_elements_color_frame_with_diagnostics(
             1,

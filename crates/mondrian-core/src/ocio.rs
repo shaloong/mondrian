@@ -14,7 +14,8 @@
 //! 4. **Environment** — explicit `$OCIO` env var
 
 use crate::types::{
-    ColorEngine, ColorSpace, MondrianStandardPackageIdentity, MondrianStandardVersion,
+    ColorEngine, ColorSpace, CustomOcioLookIdentity, CustomOcioProjectIdentity,
+    CustomOcioRoleIdentity, MondrianStandardPackageIdentity, MondrianStandardVersion,
     OcioColorSpaceIdentity, OcioConfigSource, WorkingColorSpace,
 };
 use lru::LruCache;
@@ -70,14 +71,20 @@ struct OcioGlobalState {
     path: Option<PathBuf>,
     /// Source identity that loaded the current config.
     source: Option<OcioConfigSource>,
+    /// Full Custom project identity last validated against the loaded config.
+    validated_custom_identity: Option<CustomOcioProjectIdentity>,
     /// Monotonically increasing generation counter. Incremented on every
     /// config load. Callers can use this to detect config changes for cache
     /// invalidation without holding the lock.
     generation: u64,
 }
 
-static OCIO_STATE: std::sync::Mutex<OcioGlobalState> =
-    std::sync::Mutex::new(OcioGlobalState { path: None, source: None, generation: 0 });
+static OCIO_STATE: std::sync::Mutex<OcioGlobalState> = std::sync::Mutex::new(OcioGlobalState {
+    path: None,
+    source: None,
+    validated_custom_identity: None,
+    generation: 0,
+});
 
 /// Serializes config selection with processor/shader construction.
 ///
@@ -102,6 +109,7 @@ impl OcioGlobalState {
         ocio_rs::set_current_config(config);
         self.path = Some(path);
         self.source = Some(source);
+        self.validated_custom_identity = None;
         self.generation = self.generation.wrapping_add(1);
     }
 }
@@ -132,6 +140,11 @@ pub fn ocio_config_changed_since(since_generation: u64) -> bool {
 /// shader caches cannot survive a reload of the same source identity.
 pub fn ocio_gpu_config_revision_for_engine(engine: &ColorEngine) -> Result<u64, String> {
     let source = engine.ocio_source();
+    if matches!(engine, ColorEngine::CustomOcio { .. }) {
+        return with_ocio_config_for_engine(engine, |_config, generation| {
+            Ok(ocio_cpu_processor_config_revision(&source, generation))
+        });
+    }
     match source {
         OcioConfigSource::MondrianDefault | OcioConfigSource::Builtin { .. } => Ok(0),
         OcioConfigSource::Environment | OcioConfigSource::Path { .. } => {
@@ -148,6 +161,22 @@ pub fn ocio_gpu_config_revision_for_engine(engine: &ColorEngine) -> Result<u64, 
 /// Return the current config source identity, if any.
 pub fn ocio_config_source() -> Option<OcioConfigSource> {
     OCIO_STATE.lock().ok().and_then(|g| g.source.clone())
+}
+
+/// Return whether the exact engine identity is loaded and validated.
+pub(crate) fn ocio_engine_is_validated(engine: &ColorEngine) -> bool {
+    let Ok(state) = OCIO_STATE.lock() else {
+        return false;
+    };
+    if state.source.as_ref() != Some(&engine.ocio_source()) {
+        return false;
+    }
+    match engine {
+        ColorEngine::CustomOcio { identity } => {
+            state.validated_custom_identity.as_ref() == Some(identity.as_ref())
+        }
+        ColorEngine::MondrianStandard { .. } | ColorEngine::Aces { .. } => true,
+    }
 }
 
 /// Intended name for Mondrian's bundled default OCIO config.
@@ -588,6 +617,17 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut encoded = String::with_capacity(digest.len() * 2);
     for byte in digest {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn finish_sha256_hex(digest: Sha256) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = digest.finalize();
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
         encoded.push(HEX[(byte >> 4) as usize] as char);
         encoded.push(HEX[(byte & 0x0f) as usize] as char);
     }
@@ -1292,15 +1332,19 @@ pub fn init_ocio(path: &Path) -> Result<(), String> {
 }
 
 fn init_ocio_locked(path: &Path) -> Result<(), String> {
+    init_ocio_from_source_locked(path, OcioConfigSource::Path { path: path.to_path_buf() })
+}
+
+fn init_ocio_from_source_locked(path: &Path, source: OcioConfigSource) -> Result<(), String> {
     let config = Config::from_file(path.to_string_lossy().as_ref())
         .map_err(|e| format!("failed to load OCIO config from {}: {e}", path.display()))?;
 
+    config
+        .validate()
+        .map_err(|e| format!("invalid OCIO config from {}: {e}", path.display()))?;
+
     if let Ok(mut guard) = OCIO_STATE.lock() {
-        guard.set_config(
-            path.to_path_buf(),
-            OcioConfigSource::Path { path: path.to_path_buf() },
-            &config,
-        );
+        guard.set_config(path.to_path_buf(), source, &config);
     }
 
     // The global OCIO context now holds a reference (ref-counted by the C++
@@ -1441,7 +1485,7 @@ fn ensure_ocio_loaded_locked(source: &OcioConfigSource) -> Result<(), String> {
         }
         OcioConfigSource::Environment => {
             let resolved = resolve_from_environment()?;
-            init_ocio_locked(&resolved)
+            init_ocio_from_source_locked(&resolved, OcioConfigSource::Environment)
         }
     }
 }
@@ -1459,6 +1503,350 @@ fn with_ocio_config_for_source<T>(
     let config = ocio_rs::current_config()
         .ok_or_else(|| "OCIO selected source has no current config".to_owned())?;
     operation(&config, generation)
+}
+
+fn resolved_config_cache_id(config: &Config) -> Result<String, String> {
+    let cache_id = config
+        .current_context()
+        .and_then(|context| config.cache_id_for_context(&context))
+        .or_else(|| config.cache_id())
+        .ok_or_else(|| "OCIO config returned no resolved cache identity".to_owned())?;
+    if cache_id.trim().is_empty() {
+        return Err("OCIO config returned a blank resolved cache identity".to_owned());
+    }
+    Ok(cache_id)
+}
+
+fn primary_config_sha256(source: &OcioConfigSource, config: &Config) -> Result<String, String> {
+    let bytes = match source {
+        OcioConfigSource::Path { path } => std::fs::read(path)
+            .map_err(|e| format!("failed to read Custom OCIO config {}: {e}", path.display()))?,
+        OcioConfigSource::Environment => {
+            let path = resolve_from_environment()?;
+            std::fs::read(&path)
+                .map_err(|e| format!("failed to read Custom OCIO config {}: {e}", path.display()))?
+        }
+        OcioConfigSource::Builtin { name } => config
+            .serialize()
+            .ok_or_else(|| format!("built-in OCIO config '{name}' could not be serialized"))?
+            .into_bytes(),
+        OcioConfigSource::MondrianDefault => {
+            return Err(
+                "Mondrian's embedded config belongs to Mondrian Standard, not Custom OCIO"
+                    .to_owned(),
+            );
+        }
+    };
+    Ok(sha256_hex(&bytes))
+}
+
+fn custom_ocio_roles(config: &Config) -> Result<Vec<CustomOcioRoleIdentity>, String> {
+    let mut roles = Vec::with_capacity(config.num_roles().max(0) as usize);
+    for index in 0..config.num_roles() {
+        let role = config
+            .role_name(index)
+            .ok_or_else(|| format!("OCIO role at index {index} has no name"))?;
+        let color_space = config.role_color_space_by_index(index).ok_or_else(|| {
+            format!("OCIO role '{role}' at index {index} has no color-space binding")
+        })?;
+        roles.push(CustomOcioRoleIdentity::new(role, color_space));
+    }
+    roles.sort_by(|left, right| left.role().cmp(right.role()));
+    Ok(roles)
+}
+
+fn custom_ocio_processor_graph_sha256(
+    config: &Config,
+    working_space: &str,
+    display: &str,
+    view: &str,
+) -> Result<String, String> {
+    let mut color_spaces = (0..config.num_color_spaces())
+        .filter_map(|index| config.color_space_name_by_index(index))
+        .collect::<Vec<_>>();
+    color_spaces.sort();
+
+    let mut digest = Sha256::new();
+    digest.update(b"mondrian-custom-ocio-processor-graph-v1\0");
+    update_fingerprint_field(&mut digest, "working-space", working_space);
+    for color_space in color_spaces {
+        if color_space == working_space {
+            continue;
+        }
+        if let Ok(processor) = config.processor(&color_space, working_space) {
+            update_custom_processor_fingerprint(
+                &mut digest,
+                &format!("colorspace:{color_space}->{working_space}"),
+                processor,
+            )?;
+        }
+        if let Ok(processor) = config.processor(working_space, &color_space) {
+            update_custom_processor_fingerprint(
+                &mut digest,
+                &format!("colorspace:{working_space}->{color_space}"),
+                processor,
+            )?;
+        }
+    }
+    let display_processor = config
+        .processor_display(
+            working_space,
+            display,
+            view,
+            ocio_rs::TransformDirection::Forward,
+        )
+        .map_err(|error| {
+            format!(
+                "Custom OCIO display processor '{working_space}' -> {display}/{view} failed: {error}"
+            )
+        })?;
+    update_custom_processor_fingerprint(
+        &mut digest,
+        &format!("display:{working_space}->{display}/{view}"),
+        display_processor,
+    )?;
+    Ok(finish_sha256_hex(digest))
+}
+
+fn update_custom_processor_fingerprint(
+    digest: &mut Sha256,
+    label: &str,
+    processor: ocio_rs::Processor,
+) -> Result<(), String> {
+    update_fingerprint_field(digest, "processor", label);
+    let cache_id = processor
+        .cache_id()
+        .ok_or_else(|| format!("Custom OCIO processor '{label}' has no cache-id"))?;
+    update_fingerprint_field(digest, "processor-cache-id", &cache_id);
+    Ok(())
+}
+
+fn custom_ocio_display_view_look(
+    config: &Config,
+    display: &str,
+    view: &str,
+) -> CustomOcioLookIdentity {
+    match config.display_view_looks(display, view) {
+        Some(looks) if !looks.trim().is_empty() => CustomOcioLookIdentity::DisplayView { looks },
+        _ => CustomOcioLookIdentity::None,
+    }
+}
+
+fn validate_custom_ocio_display_view(
+    config: &Config,
+    display: &str,
+    view: &str,
+) -> Result<(), String> {
+    let display_exists = (0..config.num_displays())
+        .filter_map(|index| config.display(index))
+        .any(|candidate| candidate == display);
+    if !display_exists {
+        return Err(format!(
+            "Custom OCIO config has no display named '{display}'"
+        ));
+    }
+    let view_exists = (0..config.num_views(display))
+        .filter_map(|index| config.view(display, index))
+        .any(|candidate| candidate == view);
+    if !view_exists {
+        return Err(format!(
+            "Custom OCIO display '{display}' has no view named '{view}'"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_custom_ocio_identity(
+    identity: &CustomOcioProjectIdentity,
+    config: &Config,
+) -> Result<(), String> {
+    if !identity.dynamic_properties().is_empty() {
+        return Err(format!(
+            "Custom OCIO project contains {} dynamic-property override(s), but this build does not support applying project-level dynamic properties",
+            identity.dynamic_properties().len()
+        ));
+    }
+    let actual_sha256 = primary_config_sha256(identity.source(), config)?;
+    if actual_sha256 != identity.config_sha256() {
+        return Err(format!(
+            "Custom OCIO config content changed: expected SHA-256 '{}', got '{}' from {}",
+            identity.config_sha256(),
+            actual_sha256,
+            identity.source()
+        ));
+    }
+    let actual_cache_id = resolved_config_cache_id(config)?;
+    if actual_cache_id != identity.resolved_cache_id() {
+        return Err(format!(
+            "Custom OCIO resolved config graph changed: expected cache-id '{}', got '{}'",
+            identity.resolved_cache_id(),
+            actual_cache_id
+        ));
+    }
+    let actual_processor_graph_sha256 = custom_ocio_processor_graph_sha256(
+        config,
+        identity.working_space(),
+        identity.display(),
+        identity.view(),
+    )?;
+    if actual_processor_graph_sha256 != identity.processor_graph_sha256() {
+        return Err(format!(
+            "Custom OCIO executable processor graph or dependency resources changed: expected SHA-256 '{}', got '{}'",
+            identity.processor_graph_sha256(),
+            actual_processor_graph_sha256
+        ));
+    }
+    if config.color_space(identity.working_space()).is_none() {
+        return Err(format!(
+            "Custom OCIO config has no pinned working color space '{}'",
+            identity.working_space()
+        ));
+    }
+    validate_custom_ocio_display_view(config, identity.display(), identity.view())?;
+    let actual_look = custom_ocio_display_view_look(config, identity.display(), identity.view());
+    if &actual_look != identity.look() {
+        return Err(format!(
+            "Custom OCIO display/view look changed for '{}/{}': expected {:?}, got {:?}",
+            identity.display(),
+            identity.view(),
+            identity.look(),
+            actual_look
+        ));
+    }
+    let actual_roles = custom_ocio_roles(config)?;
+    if actual_roles != identity.roles() {
+        return Err(format!(
+            "Custom OCIO role bindings changed: expected {:?}, got {:?}",
+            identity.roles(),
+            actual_roles
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_custom_ocio_identity_loaded_locked(
+    identity: &CustomOcioProjectIdentity,
+    force_reload: bool,
+) -> Result<(), String> {
+    let already_validated = OCIO_STATE
+        .lock()
+        .map_err(|_| "OCIO global state lock is poisoned".to_owned())?
+        .validated_custom_identity
+        .as_ref()
+        == Some(identity);
+    if already_validated && !force_reload {
+        return Ok(());
+    }
+
+    if matches!(
+        identity.source(),
+        OcioConfigSource::Path { .. } | OcioConfigSource::Environment
+    ) {
+        // OCIO caches FileTransform resources process-wide. Explicit Custom
+        // config reloads must invalidate that cache before rebuilding the
+        // processor graph, otherwise a changed LUT at the same path retains
+        // the old cache-id and pixel semantics until process restart.
+        ocio_rs::clear_all_caches();
+    }
+
+    match identity.source() {
+        OcioConfigSource::Path { path } => {
+            if !path.is_file() {
+                return Err(format!(
+                    "OCIO config file not found: {}\nPlace a config.ocio file at this path or change the OCIO source in project settings.",
+                    path.display()
+                ));
+            }
+            init_ocio_from_source_locked(path, identity.source().clone())?;
+        }
+        OcioConfigSource::Environment => {
+            let path = resolve_from_environment()?;
+            init_ocio_from_source_locked(&path, OcioConfigSource::Environment)?;
+        }
+        OcioConfigSource::Builtin { .. } => ensure_ocio_loaded_locked(identity.source())?,
+        OcioConfigSource::MondrianDefault => {
+            return Err("Custom OCIO cannot load the Mondrian Standard config source".to_owned());
+        }
+    }
+
+    let config = ocio_rs::current_config()
+        .ok_or_else(|| "Custom OCIO source has no current config".to_owned())?;
+    validate_custom_ocio_identity(identity, &config)?;
+    OCIO_STATE
+        .lock()
+        .map_err(|_| "OCIO global state lock is poisoned".to_owned())?
+        .validated_custom_identity = Some(identity.clone());
+    Ok(())
+}
+
+fn with_ocio_config_for_engine<T>(
+    engine: &ColorEngine,
+    operation: impl FnOnce(&Config, u64) -> Result<T, String>,
+) -> Result<T, String> {
+    let ColorEngine::CustomOcio { identity } = engine else {
+        return with_ocio_config_for_source(&engine.ocio_source(), operation);
+    };
+    let _lease = lock_ocio_config_operation()?;
+    ensure_custom_ocio_identity_loaded_locked(identity, false)?;
+    let generation = OCIO_STATE
+        .lock()
+        .map_err(|_| "OCIO global state lock is poisoned".to_owned())?
+        .generation;
+    let config = ocio_rs::current_config()
+        .ok_or_else(|| "Custom OCIO source has no current config".to_owned())?;
+    operation(&config, generation)
+}
+
+/// Resolve a Custom OCIO source into a complete reproducible project identity.
+pub fn pin_custom_ocio_project(
+    source: OcioConfigSource,
+    working_space: WorkingColorSpace,
+    display: String,
+    view: String,
+) -> Result<ColorEngine, String> {
+    if matches!(source, OcioConfigSource::MondrianDefault) {
+        return Err(
+            "Mondrian's embedded config must be selected through Mondrian Standard".to_owned(),
+        );
+    }
+    with_ocio_config_for_source(&source, |config, _generation| {
+        config
+            .validate()
+            .map_err(|e| format!("Custom OCIO config validation failed: {e}"))?;
+        let working_space =
+            ocio_color_space_identity_name(OcioColorSpaceIdentity::Working(working_space))
+                .to_owned();
+        if config.color_space(&working_space).is_none() {
+            return Err(format!(
+                "Custom OCIO config has no requested working color space '{working_space}'"
+            ));
+        }
+        validate_custom_ocio_display_view(config, &display, &view)?;
+        let identity = CustomOcioProjectIdentity::from_resolved(
+            source.clone(),
+            primary_config_sha256(&source, config)?,
+            resolved_config_cache_id(config)?,
+            custom_ocio_processor_graph_sha256(config, &working_space, &display, &view)?,
+            working_space,
+            display.clone(),
+            view.clone(),
+            custom_ocio_display_view_look(config, &display, &view),
+            custom_ocio_roles(config)?,
+        );
+        if let Ok(mut state) = OCIO_STATE.lock() {
+            state.validated_custom_identity = Some(identity.clone());
+        }
+        Ok(ColorEngine::CustomOcio { identity: Box::new(identity) })
+    })
+}
+
+/// Load and verify the exact config identity pinned by a color engine.
+pub fn ensure_color_engine_ocio_loaded(engine: &ColorEngine) -> Result<(), String> {
+    let ColorEngine::CustomOcio { identity } = engine else {
+        return with_ocio_config_for_engine(engine, |_config, _generation| Ok(()));
+    };
+    let _lease = lock_ocio_config_operation()?;
+    ensure_custom_ocio_identity_loaded_locked(identity, true)
 }
 
 fn current_ocio_generation_for_source(source: &OcioConfigSource) -> Option<u64> {
@@ -2000,7 +2388,7 @@ enum OcioCpuProcessorRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct OcioCpuProcessorCacheKey {
-    source: OcioConfigSource,
+    engine: ColorEngine,
     revision: u64,
     request: OcioCpuProcessorRequest,
 }
@@ -2085,13 +2473,14 @@ fn build_cpu_processor(
 }
 
 fn apply_cached_cpu_processor(
-    source: OcioConfigSource,
+    engine: &ColorEngine,
     request: OcioCpuProcessorRequest,
     data: &mut [f32],
 ) -> Result<(), String> {
+    let source = engine.ocio_source();
     if let Some(generation) = current_ocio_generation_for_source(&source) {
         let key = OcioCpuProcessorCacheKey {
-            source: source.clone(),
+            engine: engine.clone(),
             revision: ocio_cpu_processor_config_revision(&source, generation),
             request: request.clone(),
         };
@@ -2101,9 +2490,9 @@ fn apply_cached_cpu_processor(
         }
     }
 
-    let (key, processor) = with_ocio_config_for_source(&source, |config, generation| {
+    let (key, processor) = with_ocio_config_for_engine(engine, |config, generation| {
         let key = OcioCpuProcessorCacheKey {
-            source: source.clone(),
+            engine: engine.clone(),
             revision: ocio_cpu_processor_config_revision(&source, generation),
             request: request.clone(),
         };
@@ -2140,22 +2529,56 @@ fn validate_engine_display_view_selection(
     display: &str,
     view: &str,
 ) -> Result<(), String> {
-    let ColorEngine::MondrianStandard { package } = engine else {
+    match engine {
+        ColorEngine::MondrianStandard { package } => {
+            let contract = mondrian_default_ocio_contract();
+            if contract
+                .display_views
+                .iter()
+                .any(|candidate| candidate.display == display && candidate.view == view)
+            {
+                return Ok(());
+            }
+            Err(format!(
+                "Mondrian Standard package '{}' ({}) does not permit display/view '{display}/{view}'",
+                package.package_id(),
+                package.package_sha256()
+            ))
+        }
+        ColorEngine::CustomOcio { identity } => {
+            if identity.display() == display && identity.view() == view {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Custom OCIO project pins display/view '{}/{}', not '{display}/{view}'",
+                    identity.display(),
+                    identity.view()
+                ))
+            }
+        }
+        ColorEngine::Aces { .. } => Ok(()),
+    }
+}
+
+fn validate_engine_working_identities(
+    engine: &ColorEngine,
+    identities: &[OcioColorSpaceIdentity],
+) -> Result<(), String> {
+    let ColorEngine::CustomOcio { identity } = engine else {
         return Ok(());
     };
-    let contract = mondrian_default_ocio_contract();
-    if contract
-        .display_views
-        .iter()
-        .any(|candidate| candidate.display == display && candidate.view == view)
-    {
-        return Ok(());
+    for candidate in identities {
+        if let OcioColorSpaceIdentity::Working(working) = candidate {
+            let actual = ocio_color_space_identity_name(OcioColorSpaceIdentity::Working(*working));
+            if actual != identity.working_space() {
+                return Err(format!(
+                    "Custom OCIO project pins working space '{}', not '{actual}'",
+                    identity.working_space()
+                ));
+            }
+        }
     }
-    Err(format!(
-        "Mondrian Standard package '{}' ({}) does not permit display/view '{display}/{view}'",
-        package.package_id(),
-        package.package_sha256()
-    ))
+    Ok(())
 }
 
 // ── Public entry points ────────────────────────────────────────────────────────
@@ -2167,11 +2590,12 @@ pub(crate) fn apply_ocio_identity_float(
     src: OcioColorSpaceIdentity,
     dst: OcioColorSpaceIdentity,
 ) -> Result<(), String> {
+    validate_engine_working_identities(engine, &[src, dst])?;
     if data.is_empty() || src == dst {
         return Ok(());
     }
     apply_cached_cpu_processor(
-        engine.ocio_source(),
+        engine,
         OcioCpuProcessorRequest::ColorSpace { src, dst },
         data,
     )
@@ -2186,11 +2610,12 @@ pub(crate) fn apply_ocio_display_identity_float(
     view: &str,
 ) -> Result<(), String> {
     validate_engine_display_view_selection(engine, display, view)?;
+    validate_engine_working_identities(engine, &[src])?;
     if data.is_empty() {
         return Ok(());
     }
     apply_cached_cpu_processor(
-        engine.ocio_source(),
+        engine,
         OcioCpuProcessorRequest::DisplayView {
             src,
             display: display.to_owned(),
@@ -2211,7 +2636,8 @@ pub fn extract_ocio_identity_gpu_shader_bundle(
     dst: OcioColorSpaceIdentity,
     language: GpuLanguage,
 ) -> Result<OcioGpuShaderBundle, String> {
-    with_ocio_config_for_source(&engine.ocio_source(), |config, _generation| {
+    validate_engine_working_identities(engine, &[src, dst])?;
+    with_ocio_config_for_engine(engine, |config, _generation| {
         extract_ocio_identity_gpu_shader_bundle_from_config(config, src, dst, language)
     })
 }
@@ -2254,7 +2680,8 @@ pub fn extract_ocio_display_identity_gpu_shader_bundle(
     language: GpuLanguage,
 ) -> Result<OcioGpuShaderBundle, String> {
     validate_engine_display_view_selection(engine, display, view)?;
-    with_ocio_config_for_source(&engine.ocio_source(), |config, _generation| {
+    validate_engine_working_identities(engine, &[src])?;
+    with_ocio_config_for_engine(engine, |config, _generation| {
         extract_ocio_display_identity_gpu_shader_bundle_from_config(
             config, src, display, view, language,
         )
@@ -2337,7 +2764,7 @@ fn apply_cpu_processor_float(cpu: &CPUProcessor, data: &mut [f32]) {
 
 /// List displays from the exact config selected by an engine.
 pub(crate) fn ocio_display_names_for_engine(engine: &ColorEngine) -> Result<Vec<String>, String> {
-    with_ocio_config_for_source(&engine.ocio_source(), |config, _generation| {
+    with_ocio_config_for_engine(engine, |config, _generation| {
         let count = config.num_displays();
         Ok((0..count).filter_map(|index| config.display(index)).collect())
     })
@@ -2348,7 +2775,7 @@ pub(crate) fn ocio_view_names_for_engine(
     engine: &ColorEngine,
     display: &str,
 ) -> Result<Vec<String>, String> {
-    with_ocio_config_for_source(&engine.ocio_source(), |config, _generation| {
+    with_ocio_config_for_engine(engine, |config, _generation| {
         let count = config.num_views(display);
         Ok((0..count).filter_map(|index| config.view(display, index)).collect())
     })
@@ -2359,7 +2786,7 @@ pub(crate) fn ocio_default_view_for_display_for_engine(
     engine: &ColorEngine,
     display: &str,
 ) -> Result<Option<String>, String> {
-    with_ocio_config_for_source(&engine.ocio_source(), |config, _generation| {
+    with_ocio_config_for_engine(engine, |config, _generation| {
         Ok(config.default_view(display))
     })
 }
@@ -2368,7 +2795,7 @@ pub(crate) fn ocio_default_view_for_display_for_engine(
 pub(crate) fn ocio_default_display_view_for_engine(
     engine: &ColorEngine,
 ) -> Result<Option<(String, String)>, String> {
-    with_ocio_config_for_source(&engine.ocio_source(), |config, _generation| {
+    with_ocio_config_for_engine(engine, |config, _generation| {
         let Some(display) = config.default_display() else {
             return Ok(None);
         };
@@ -3159,6 +3586,103 @@ mod tests {
                 .map(|(display, view)| { (display.as_str(), view.as_str()) }),
             Some((contract.default_display, contract.default_view))
         );
+    }
+
+    #[test]
+    fn custom_ocio_project_reopens_exact_identity_and_rejects_content_drift() {
+        let path = std::env::temp_dir().join(format!(
+            "mondrian-custom-ocio-identity-{}-{}.ocio",
+            std::process::id(),
+            ocio_config_generation()
+        ));
+        std::fs::write(&path, mondrian_default_ocio_config_text())
+            .expect("write Custom OCIO test config");
+
+        let engine = ColorEngine::custom_ocio(
+            OcioConfigSource::Path { path: path.clone() },
+            WorkingColorSpace::LinearRec2020,
+            "sRGB - Display",
+            "ACES 2.0 - SDR 100 nits (Rec.709)",
+        )
+        .expect("pin real Custom OCIO config");
+        let serialized = serde_json::to_string(&engine).expect("serialize pinned Custom OCIO");
+        let reopened: ColorEngine =
+            serde_json::from_str(&serialized).expect("reopen pinned Custom OCIO");
+
+        assert_eq!(reopened, engine);
+        assert_eq!(
+            reopened.default_display_view().expect("pinned display/view"),
+            (
+                "sRGB - Display".to_owned(),
+                "ACES 2.0 - SDR 100 nits (Rec.709)".to_owned()
+            )
+        );
+        reopened.ensure_loaded().expect("unchanged config identity");
+
+        let mut changed = mondrian_default_ocio_config_text().to_owned();
+        changed.push_str("\n# external edit after project save\n");
+        std::fs::write(&path, changed).expect("mutate Custom OCIO test config");
+
+        let error = reopened
+            .ensure_loaded()
+            .expect_err("same path with changed config content must fail closed");
+        assert!(error.contains("config content changed"), "{error}");
+
+        std::fs::remove_file(path).expect("remove Custom OCIO test config");
+    }
+
+    #[test]
+    fn custom_ocio_project_rejects_dependency_resource_drift() {
+        const CONFIG: &str = r#"ocio_profile_version: 2.1
+search_path: .
+strictparsing: true
+roles:
+  default: Linear Rec.2020
+  scene_linear: Linear Rec.2020
+displays:
+  Test Display:
+    - !<View> {name: Test View, colorspace: LUT Output}
+active_displays: [Test Display]
+active_views: [Test View]
+colorspaces:
+  - !<ColorSpace>
+    name: Linear Rec.2020
+    isdata: false
+  - !<ColorSpace>
+    name: LUT Output
+    isdata: false
+    from_scene_reference: !<FileTransform> {src: test.cube}
+"#;
+        const IDENTITY_LUT: &str =
+            "LUT_3D_SIZE 2\n0 0 0\n0 0 1\n0 1 0\n0 1 1\n1 0 0\n1 0 1\n1 1 0\n1 1 1\n";
+        const CHANGED_LUT: &str =
+            "LUT_3D_SIZE 2\n0 0 0\n0 0 0.8\n0 0.8 0\n0 0.8 0.8\n0.8 0 0\n0.8 0 0.8\n0.8 0.8 0\n0.8 0.8 0.8\n";
+
+        let directory = std::env::temp_dir().join(format!(
+            "mondrian-custom-ocio-resources-{}-{}",
+            std::process::id(),
+            ocio_config_generation()
+        ));
+        std::fs::create_dir_all(&directory).expect("create Custom OCIO resource directory");
+        let config_path = directory.join("config.ocio");
+        let lut_path = directory.join("test.cube");
+        std::fs::write(&config_path, CONFIG).expect("write Custom OCIO config");
+        std::fs::write(&lut_path, IDENTITY_LUT).expect("write Custom OCIO LUT");
+
+        let engine = ColorEngine::custom_ocio(
+            OcioConfigSource::Path { path: config_path },
+            WorkingColorSpace::LinearRec2020,
+            "Test Display",
+            "Test View",
+        )
+        .expect("pin Custom OCIO config with LUT dependency");
+        engine.ensure_loaded().expect("unchanged Custom OCIO resources");
+
+        std::fs::write(&lut_path, CHANGED_LUT).expect("mutate Custom OCIO LUT dependency");
+        let error = engine.ensure_loaded().expect_err("changed LUT dependency must fail closed");
+        assert!(error.contains("dependency resources changed"), "{error}");
+
+        std::fs::remove_dir_all(directory).expect("remove Custom OCIO resource directory");
     }
 
     #[test]

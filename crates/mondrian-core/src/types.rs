@@ -504,6 +504,245 @@ pub struct MondrianStandardPackageIdentity {
     default_view_transform_version: MondrianStandardVersion,
 }
 
+/// One OCIO role binding pinned by a Custom OCIO project.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomOcioRoleIdentity {
+    role: String,
+    color_space: String,
+}
+
+impl CustomOcioRoleIdentity {
+    pub(crate) fn new(role: String, color_space: String) -> Self {
+        Self { role, color_space }
+    }
+
+    /// Exact role name authored by the pinned config.
+    pub fn role(&self) -> &str {
+        &self.role
+    }
+
+    /// Exact color-space name bound to the role.
+    pub fn color_space(&self) -> &str {
+        &self.color_space
+    }
+}
+
+/// Effective look selection pinned for a Custom OCIO display/view.
+///
+/// A tagged value is used instead of `Option<String>` so a missing project
+/// field cannot deserialize as an implicit `None`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "selection", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CustomOcioLookIdentity {
+    /// The selected display/view applies no looks.
+    None,
+    /// Exact OCIO looks expression authored on the selected display/view.
+    DisplayView { looks: String },
+}
+
+/// A project-authored OCIO dynamic-property override.
+///
+/// Values are canonical strings because OCIO dynamic properties include both
+/// scalar and structured grading values. Mondrian currently persists an empty
+/// list and fails closed on non-empty values until the corresponding typed
+/// editing/execution contract is implemented.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomOcioDynamicPropertyIdentity {
+    property: String,
+    value: String,
+}
+
+impl CustomOcioDynamicPropertyIdentity {
+    /// Exact OCIO dynamic-property name.
+    pub fn property(&self) -> &str {
+        &self.property
+    }
+
+    /// Canonical serialized property value.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+/// Fully pinned, reproducible identity of a Custom OpenColorIO project mode.
+///
+/// The source locator is intentionally insufficient by itself: a path or
+/// environment variable may later resolve to different config text or LUT
+/// resources. `config_sha256` identifies the primary config content,
+/// `resolved_cache_id` identifies the parsed OCIO graph, and
+/// `processor_graph_sha256` covers the executable routes and their resources.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomOcioProjectIdentity {
+    source: OcioConfigSource,
+    config_sha256: String,
+    resolved_cache_id: String,
+    processor_graph_sha256: String,
+    working_space: String,
+    display: String,
+    view: String,
+    look: CustomOcioLookIdentity,
+    roles: Vec<CustomOcioRoleIdentity>,
+    dynamic_properties: Vec<CustomOcioDynamicPropertyIdentity>,
+}
+
+impl CustomOcioProjectIdentity {
+    pub(crate) fn from_resolved(
+        source: OcioConfigSource,
+        config_sha256: String,
+        resolved_cache_id: String,
+        processor_graph_sha256: String,
+        working_space: String,
+        display: String,
+        view: String,
+        look: CustomOcioLookIdentity,
+        roles: Vec<CustomOcioRoleIdentity>,
+    ) -> Self {
+        Self {
+            source,
+            config_sha256,
+            resolved_cache_id,
+            processor_graph_sha256,
+            working_space,
+            display,
+            view,
+            look,
+            roles,
+            dynamic_properties: Vec::new(),
+        }
+    }
+
+    /// Reconstruct a persisted identity from already-pinned fields.
+    ///
+    /// This performs structural validation only. The selected config and all
+    /// dependencies are verified against the fields by `ColorEngine::ensure_loaded`
+    /// and every processor-construction boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_pinned_parts(
+        source: OcioConfigSource,
+        config_sha256: String,
+        resolved_cache_id: String,
+        processor_graph_sha256: String,
+        working_space: String,
+        display: String,
+        view: String,
+        look: CustomOcioLookIdentity,
+        mut roles: Vec<CustomOcioRoleIdentity>,
+        dynamic_properties: Vec<CustomOcioDynamicPropertyIdentity>,
+    ) -> Result<Self, String> {
+        if matches!(source, OcioConfigSource::MondrianDefault) {
+            return Err("Custom OCIO cannot claim the Mondrian Standard config source".to_owned());
+        }
+        if config_sha256.len() != 64 || !config_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("Custom OCIO config SHA-256 must contain exactly 64 hex digits".to_owned());
+        }
+        if processor_graph_sha256.len() != 64
+            || !processor_graph_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(
+                "Custom OCIO processor-graph SHA-256 must contain exactly 64 hex digits".to_owned(),
+            );
+        }
+        for (field, value) in [
+            ("resolved cache-id", resolved_cache_id.as_str()),
+            ("working space", working_space.as_str()),
+            ("display", display.as_str()),
+            ("view", view.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!("Custom OCIO {field} must not be blank"));
+            }
+        }
+        if matches!(&look, CustomOcioLookIdentity::DisplayView { looks } if looks.trim().is_empty())
+        {
+            return Err("Custom OCIO display/view look expression must not be blank".to_owned());
+        }
+        if roles
+            .iter()
+            .any(|role| role.role.trim().is_empty() || role.color_space.trim().is_empty())
+        {
+            return Err("Custom OCIO role names and color spaces must not be blank".to_owned());
+        }
+        roles.sort_by(|left, right| left.role.cmp(&right.role));
+        if roles.windows(2).any(|pair| pair[0].role == pair[1].role) {
+            return Err("Custom OCIO role names must be unique".to_owned());
+        }
+        if dynamic_properties
+            .iter()
+            .any(|property| property.property.trim().is_empty() || property.value.trim().is_empty())
+        {
+            return Err(
+                "Custom OCIO dynamic-property names and values must not be blank".to_owned(),
+            );
+        }
+        Ok(Self {
+            source,
+            config_sha256: config_sha256.to_ascii_lowercase(),
+            resolved_cache_id,
+            processor_graph_sha256: processor_graph_sha256.to_ascii_lowercase(),
+            working_space,
+            display,
+            view,
+            look,
+            roles,
+            dynamic_properties,
+        })
+    }
+
+    /// Config locator selected when this identity was created.
+    pub fn source(&self) -> &OcioConfigSource {
+        &self.source
+    }
+
+    /// SHA-256 of the primary authored/serialized config content.
+    pub fn config_sha256(&self) -> &str {
+        &self.config_sha256
+    }
+
+    /// OCIO cache identity of the parsed config graph.
+    pub fn resolved_cache_id(&self) -> &str {
+        &self.resolved_cache_id
+    }
+
+    /// SHA-256 over all working-space routes and the selected display processor.
+    pub fn processor_graph_sha256(&self) -> &str {
+        &self.processor_graph_sha256
+    }
+
+    /// Exact scene-linear working color-space name.
+    pub fn working_space(&self) -> &str {
+        &self.working_space
+    }
+
+    /// Exact selected display name.
+    pub fn display(&self) -> &str {
+        &self.display
+    }
+
+    /// Exact selected view name.
+    pub fn view(&self) -> &str {
+        &self.view
+    }
+
+    /// Effective look expression of the selected display/view.
+    pub fn look(&self) -> &CustomOcioLookIdentity {
+        &self.look
+    }
+
+    /// Complete sorted role mapping of the pinned config.
+    pub fn roles(&self) -> &[CustomOcioRoleIdentity] {
+        &self.roles
+    }
+
+    /// Project-level dynamic-property overrides.
+    pub fn dynamic_properties(&self) -> &[CustomOcioDynamicPropertyIdentity] {
+        &self.dynamic_properties
+    }
+}
+
 impl MondrianStandardPackageIdentity {
     /// Exact identity of the only package supported by this alpha schema.
     pub const V1: Self = Self {
@@ -573,8 +812,8 @@ pub enum ColorEngine {
     },
     /// User- or studio-supplied OpenColorIO configuration.
     CustomOcio {
-        /// Explicit config source resolved before the first processor request.
-        source: OcioConfigSource,
+        /// Complete config and project-semantic identity.
+        identity: Box<CustomOcioProjectIdentity>,
     },
 }
 
@@ -589,6 +828,14 @@ impl ColorEngine {
         match self {
             Self::MondrianStandard { package } => Some(*package),
             Self::Aces { .. } | Self::CustomOcio { .. } => None,
+        }
+    }
+
+    /// Return the pinned Custom OCIO project identity for this mode.
+    pub fn custom_ocio_identity(&self) -> Option<&CustomOcioProjectIdentity> {
+        match self {
+            Self::CustomOcio { identity } => Some(identity.as_ref()),
+            Self::MondrianStandard { .. } | Self::Aces { .. } => None,
         }
     }
 }
@@ -630,7 +877,7 @@ impl AcesConfigPreset {
 /// 类似达芬奇的色彩科学选择器（预设）和 Nuke 的显式 OCIO 来源。
 /// 每个来源都必须独立解析成功，不能静默回退到其他来源。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OcioConfigSource {
     /// Mondrian 内置默认 OCIO config。
     ///
@@ -714,12 +961,36 @@ mod tests {
     #[test]
     fn color_engine_with_ocio_source_round_trip() {
         let engine = ColorEngine::CustomOcio {
-            source: OcioConfigSource::Builtin { name: "aces_1.2".into() },
+            identity: Box::new(CustomOcioProjectIdentity::from_resolved(
+                OcioConfigSource::Builtin { name: "aces_1.2".into() },
+                "a".repeat(64),
+                "resolved-config-cache-id".to_owned(),
+                "b".repeat(64),
+                "ACEScg".to_owned(),
+                "sRGB".to_owned(),
+                "ACES 1.0 - SDR Video".to_owned(),
+                CustomOcioLookIdentity::None,
+                vec![CustomOcioRoleIdentity::new(
+                    "scene_linear".to_owned(),
+                    "ACEScg".to_owned(),
+                )],
+            )),
         };
         let json = serde_json::to_string(&engine).expect("serialize ColorEngine::CustomOcio");
         let back: ColorEngine =
             serde_json::from_str(&json).expect("deserialize ColorEngine::CustomOcio");
         assert_eq!(back, engine);
+        assert!(json.contains("\"config_sha256\""));
+        assert!(json.contains("\"resolved_cache_id\""));
+        assert!(json.contains("\"dynamic_properties\":[]"));
+
+        let mut incomplete_custom: serde_json::Value =
+            serde_json::from_str(&json).expect("Custom OCIO JSON value");
+        incomplete_custom["identity"]
+            .as_object_mut()
+            .expect("Custom OCIO identity object")
+            .remove("resolved_cache_id");
+        assert!(serde_json::from_value::<ColorEngine>(incomplete_custom).is_err());
 
         let smart = ColorEngine::mondrian_standard();
         let json2 = serde_json::to_string(&smart).expect("serialize MondrianStandard");

@@ -6671,6 +6671,26 @@ mod tests {
     };
     use mondrian_core::{ensure_mondrian_default_ocio_loaded, WorkingColorSpace};
 
+    fn pinned_custom_engine(source: mondrian_core::OcioConfigSource) -> ColorEngine {
+        ColorEngine::CustomOcio {
+            identity: Box::new(
+                mondrian_core::CustomOcioProjectIdentity::from_pinned_parts(
+                    source,
+                    "0".repeat(64),
+                    "test-resolved-config".to_owned(),
+                    "0".repeat(64),
+                    "Linear Rec.2020".to_owned(),
+                    "Test Display".to_owned(),
+                    "Test View".to_owned(),
+                    mondrian_core::CustomOcioLookIdentity::None,
+                    Vec::new(),
+                    Vec::new(),
+                )
+                .expect("structurally valid Custom OCIO test identity"),
+            ),
+        }
+    }
+
     fn f32s_from_bytes(bytes: &[u8]) -> Vec<f32> {
         bytes
             .chunks_exact(4)
@@ -8537,9 +8557,9 @@ mod tests {
             std::process::id()
         ));
         let custom_request = OcioGpuShaderRequest::ColorSpace {
-            engine: ColorEngine::CustomOcio {
-                source: mondrian_core::OcioConfigSource::Path { path: missing_path },
-            },
+            engine: pinned_custom_engine(mondrian_core::OcioConfigSource::Path {
+                path: missing_path,
+            }),
             src: ColorSpace::SonySLog3SGamut3Cine.into(),
             dst: ColorSpace::Rec709.into(),
             language: GpuLanguage::Glsl4_0,
@@ -8563,9 +8583,7 @@ mod tests {
     #[test]
     fn shader_request_cache_key_invalidates_on_config_revision() {
         let request = OcioGpuShaderRequest::ColorSpace {
-            engine: ColorEngine::CustomOcio {
-                source: mondrian_core::OcioConfigSource::Environment,
-            },
+            engine: pinned_custom_engine(mondrian_core::OcioConfigSource::Environment),
             src: ColorSpace::SonySLog3SGamut3Cine.into(),
             dst: ColorSpace::Rec709.into(),
             language: GpuLanguage::Glsl4_0,

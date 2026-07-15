@@ -1,6 +1,8 @@
 //! Color management primitives shared by preview, render and export.
 
-use crate::types::{ColorEngine, ColorSpace, OcioColorSpaceIdentity};
+use crate::types::{
+    ColorEngine, ColorSpace, OcioColorSpaceIdentity, OcioConfigSource, WorkingColorSpace,
+};
 use serde::{Deserialize, Serialize};
 
 // ── ColorEngine: centralized dispatch ─────────────────────────────────────────
@@ -11,7 +13,7 @@ impl ColorEngine {
         match self {
             Self::MondrianStandard { .. } => crate::types::OcioConfigSource::MondrianDefault,
             Self::Aces { preset } => preset.ocio_source(),
-            Self::CustomOcio { source } => source.clone(),
+            Self::CustomOcio { identity } => identity.source().clone(),
         }
     }
 
@@ -38,7 +40,7 @@ impl ColorEngine {
 
     /// Whether the engine is ready to process data.
     pub fn is_available(&self) -> bool {
-        crate::ocio::ocio_config_source().as_ref() == Some(&self.ocio_source())
+        crate::ocio::ocio_engine_is_validated(self)
     }
 
     /// Ensure any required external config is loaded.
@@ -46,12 +48,15 @@ impl ColorEngine {
         match self {
             Self::MondrianStandard { .. } => crate::ocio::ensure_mondrian_default_ocio_loaded(),
             Self::Aces { preset } => crate::ocio::ensure_ocio_loaded(&preset.ocio_source()),
-            Self::CustomOcio { source } => crate::ocio::ensure_ocio_loaded(source),
+            Self::CustomOcio { .. } => crate::ocio::ensure_color_engine_ocio_loaded(self),
         }
     }
 
     /// Load this engine's exact OCIO config and resolve its default display/view.
     pub fn default_display_view(&self) -> Result<(String, String), String> {
+        if let Self::CustomOcio { identity } = self {
+            return Ok((identity.display().to_owned(), identity.view().to_owned()));
+        }
         crate::ocio::ocio_default_display_view_for_engine(self)?
             .ok_or_else(|| format!("{} config has no default display/view", self.name()))
     }
@@ -78,6 +83,19 @@ impl ColorEngine {
             Self::Aces { .. } => "ACES",
             Self::CustomOcio { .. } => "Custom OpenColorIO",
         }
+    }
+
+    /// Resolve and pin a Custom OCIO config plus its project color semantics.
+    ///
+    /// This constructor reads and validates the selected config immediately;
+    /// a bare path is never persisted as a complete project mode.
+    pub fn custom_ocio(
+        source: OcioConfigSource,
+        working_space: WorkingColorSpace,
+        display: impl Into<String>,
+        view: impl Into<String>,
+    ) -> Result<Self, String> {
+        crate::ocio::pin_custom_ocio_project(source, working_space, display.into(), view.into())
     }
 }
 
@@ -933,7 +951,17 @@ mod tests {
             std::process::id()
         ));
         let engine = ColorEngine::CustomOcio {
-            source: crate::types::OcioConfigSource::Path { path: missing_path },
+            identity: Box::new(crate::types::CustomOcioProjectIdentity::from_resolved(
+                crate::types::OcioConfigSource::Path { path: missing_path },
+                "0".repeat(64),
+                "missing-config".to_owned(),
+                "0".repeat(64),
+                "Linear Rec.709".to_owned(),
+                "missing-display".to_owned(),
+                "missing-view".to_owned(),
+                crate::types::CustomOcioLookIdentity::None,
+                Vec::new(),
+            )),
         };
         let mut rgba = vec![0.1_f32, 0.2, 0.3, 0.4];
         let original = rgba.clone();

@@ -36,6 +36,14 @@ invalidates that fixture until it is regenerated for the new current contract;
 unknown/retired digests are rejected rather than accepted through an implicit
 color migration or substituted with the latest package.
 
+Document schema v5 also makes Custom OCIO reproducibility part of the archive
+contract. A Custom project stores its config/content and executable processor
+graph identities together with working/display/view/look/role selections.
+Opening the archive must reload and validate the selected external config; a
+missing config, edited LUT, changed role, or changed default resource is an
+open diagnostic, never a silent substitution. Schema v4 is deliberately not
+migrated during Alpha because it stored only a mutable config locator.
+
 ## Runtime Directory
 
 Each project path maps to a stable temp runtime root:

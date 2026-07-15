@@ -159,11 +159,21 @@ substitution of another config, approximate LUT, or non-conformant native conver
 The `$OCIO` environment source is intentionally fail-closed: if the variable is
 unset or points to a missing file, Mondrian reports that selected source as
 invalid instead of scanning machine-specific standard paths.
-`ColorEngine::default_display_view()` is the engine-owned resolution boundary:
-it selects the exact Standard, ACES preset, or Custom OCIO source and reads the
-default while holding the same short config-operation lease. Product callers
-cannot read a process-global default and then infer which engine it belongs to;
-the unqualified processor and display-query APIs are intentionally not public.
+`ColorEngine::default_display_view()` is the engine-owned resolution boundary.
+Standard and ACES resolve from their immutable package/preset; Custom OCIO
+returns the display/view saved in its project identity rather than re-reading a
+possibly changed config default. Product callers cannot read a process-global
+default and then infer which engine it belongs to; the unqualified processor
+and display-query APIs are intentionally not public.
+
+Custom OCIO is persisted as a complete `CustomOcioProjectIdentity`, not a bare
+locator. It requires the source, primary config SHA-256, parsed OCIO cache-id,
+a SHA-256 over every executable colorspace-to/from-working route plus the
+selected display processor, exact working space, display, view, effective look
+expression, the sorted role map, and an explicit dynamic-property override
+list. Current projects save no dynamic overrides and reject non-empty override
+lists until typed execution exists. Missing fields, semantic mismatches, config
+edits, role/view changes, and external LUT changes fail closed.
 
 ## OCIO Global State Management
 
@@ -172,6 +182,7 @@ All OCIO config mutations are centralized in `mondrian_core::ocio` through
 
 - The loaded config path (or virtual path for built-in/embedded configs)
 - The source identity (`OcioConfigSource`) that loaded the current config
+- The complete Custom identity last validated against that loaded config
 - A monotonic generation counter for cache invalidation
 
 `OCIO_CONFIG_OPERATION` serializes the exact sequence of selecting a config and
@@ -181,13 +192,13 @@ on a process-wide color lock. This is required because the current `ocio-rs`
 bridge exposes OCIO's process-global current config during construction even
 though the baked Processor itself is independent afterward.
 
-CPU Processors live in a bounded per-thread LRU keyed by exact config source,
-config revision, encoded/working endpoint identities, and display/view when
-applicable. Immutable embedded and built-in packages use their pinned source
-identity as the stable revision, so switching Standard -> ACES -> Standard does
-not discard the warm Standard Processor. Mutable path/environment sources use
-the loaded generation until their project-level content digest is pinned. A
-warm hit performs no config selection or Processor construction.
+CPU Processors live in a bounded per-thread LRU keyed by the complete
+`ColorEngine`, config revision, encoded/working endpoint identities, and
+display/view when applicable. Immutable embedded and built-in packages use
+their pinned engine identity as the stable revision, so switching Standard ->
+ACES -> Standard does not discard the warm Standard Processor. Mutable Custom
+path/environment sources additionally use the loaded generation. A warm hit
+performs no config selection, file I/O, or Processor construction.
 Per-thread storage follows the wrapper's non-`Send`/non-`Sync` contract without
 unsafe cross-thread sharing; hit, miss, eviction, occupancy, and capacity remain
 observable through `ocio_cpu_processor_cache_diagnostics()`.
@@ -200,6 +211,14 @@ short config-operation lease, after which the renderer owns plain shader/LUT/
 uniform metadata and performs compilation and execution without the lease.
 Explicit cache clearing is reserved for renderer/device lifecycle invalidation,
 not ordinary engine switching.
+
+Project open or an explicit Custom `ensure_loaded` is different from the warm
+processor path: under the config-operation lease it clears stock OCIO's global
+file/processor caches, reloads path/environment configs, rebuilds the pinned
+processor-graph fingerprint, and increments generation. This is necessary for
+same-path LUT edits to become observable without a process restart. Once the
+identity is validated, shader/processor cache lookups use the stored identity
+and generation and never repeat that work per frame.
 
 `ocio_config_generation()` remains the process-level revision signal for final
 frame, thumbnail, and diagnostic caches whose results depend on whichever
