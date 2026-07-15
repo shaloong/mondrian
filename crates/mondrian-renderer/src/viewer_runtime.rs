@@ -130,6 +130,13 @@ impl ViewerGpuExecutionRuntime {
         self.working_compositor.uniform_arena_diagnostics()
     }
 
+    /// Point-in-time evidence for compositor texture-binding reuse.
+    pub fn compositor_texture_binding_diagnostics(
+        &self,
+    ) -> crate::GpuCompositorTextureBindingDiagnostics {
+        self.working_compositor.texture_binding_diagnostics()
+    }
+
     /// Release resources scoped to the current candidate, retaining pipelines.
     pub fn clear_frame_resources(&mut self) {
         self.working_compositor.clear_frame_resources();

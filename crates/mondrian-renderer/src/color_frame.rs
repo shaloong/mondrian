@@ -422,6 +422,50 @@ pub struct GpuColorFrameWgpuResource {
     pub texture_view: wgpu::TextureView,
     /// Default sampler used when this frame is sampled by a fullscreen pass.
     pub sampler: wgpu::Sampler,
+    cached_bind_groups: Mutex<VecDeque<CachedGpuColorFrameBindGroup>>,
+}
+
+const MAX_CACHED_BIND_GROUPS_PER_GPU_COLOR_FRAME: usize = 8;
+
+struct CachedGpuColorFrameBindGroup {
+    key: u64,
+    bind_group: wgpu::BindGroup,
+}
+
+impl GpuColorFrameWgpuResource {
+    fn new(
+        texture: wgpu::Texture,
+        texture_view: wgpu::TextureView,
+        sampler: wgpu::Sampler,
+    ) -> Self {
+        Self {
+            texture,
+            texture_view,
+            sampler,
+            cached_bind_groups: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    pub(crate) fn cached_bind_group(
+        &self,
+        key: u64,
+        create: impl FnOnce(&wgpu::TextureView) -> wgpu::BindGroup,
+    ) -> (wgpu::BindGroup, bool) {
+        let mut cache = self.cached_bind_groups.lock();
+        if let Some(position) = cache.iter().position(|entry| entry.key == key) {
+            if let Some(entry) = cache.remove(position) {
+                let bind_group = entry.bind_group.clone();
+                cache.push_back(entry);
+                return (bind_group, true);
+            }
+        }
+        let bind_group = create(&self.texture_view);
+        if cache.len() >= MAX_CACHED_BIND_GROUPS_PER_GPU_COLOR_FRAME {
+            cache.pop_front();
+        }
+        cache.push_back(CachedGpuColorFrameBindGroup { key, bind_group: bind_group.clone() });
+        (bind_group, false)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -813,7 +857,7 @@ impl GpuColorFrameUploader {
         let (texture_view, sampler) = create_color_frame_view_and_sampler(device, &texture);
         GpuColorFrameResource::new(
             plan.handle.clone(),
-            GpuColorFrameWgpuResource { texture, texture_view, sampler },
+            GpuColorFrameWgpuResource::new(texture, texture_view, sampler),
         )
     }
 
@@ -849,7 +893,7 @@ impl GpuColorFrameUploader {
         let (texture_view, sampler) = create_color_frame_view_and_sampler(device, &texture);
         GpuColorFrameResource::new(
             plan.handle.clone(),
-            GpuColorFrameWgpuResource { texture, texture_view, sampler },
+            GpuColorFrameWgpuResource::new(texture, texture_view, sampler),
         )
     }
 

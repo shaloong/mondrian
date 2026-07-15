@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_GPU_COMPOSITE_LAYERS: usize = 5;
 const GPU_COMPOSITOR_UNIFORM_ARENA_SLOTS: u32 = 128;
+static NEXT_GPU_COMPOSITOR_BINDING_CACHE_KEY: AtomicU64 = AtomicU64::new(1);
 const GPU_COMPOSITOR_SHADER: &str = r#"
 struct VsOut {
     @builtin(position) position: vec4<f32>,
@@ -48,9 +49,9 @@ struct EffectUniform {
 };
 
 @group(0) @binding(0) var layer_tex: texture_2d<f32>;
-@group(0) @binding(1) var accum_tex: texture_2d<f32>;
-@group(0) @binding(2) var linear_sampler: sampler;
-@group(1) @binding(0) var<uniform> uniforms: CompositeUniforms;
+@group(0) @binding(1) var linear_sampler: sampler;
+@group(1) @binding(0) var accum_tex: texture_2d<f32>;
+@group(2) @binding(0) var<uniform> uniforms: CompositeUniforms;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
@@ -491,7 +492,10 @@ pub enum GpuCompositeError {
 /// Runtime for recording GPU working-space composites.
 pub struct GpuFrameCompositor {
     pipeline: wgpu::RenderPipeline,
-    texture_layout: wgpu::BindGroupLayout,
+    layer_texture_layout: wgpu::BindGroupLayout,
+    accum_texture_layout: wgpu::BindGroupLayout,
+    layer_texture_cache_key: u64,
+    accum_texture_cache_key: u64,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
     uniform_stride: u64,
@@ -499,7 +503,14 @@ pub struct GpuFrameCompositor {
     texture_bind_group_creations: AtomicU64,
     texture_bind_group_cache_hits: AtomicU64,
     sampler: wgpu::Sampler,
-    procedural_dummy_view: wgpu::TextureView,
+    procedural_layer_bind_group: wgpu::BindGroup,
+    procedural_accum_bind_group: wgpu::BindGroup,
+}
+
+#[derive(Clone, Copy)]
+enum GpuCompositeTextureBinding<'a> {
+    Resource(&'a GpuColorFrameWgpuResource),
+    ProceduralDummy,
 }
 
 struct GpuCompositeUniformArenaState {
@@ -535,19 +546,24 @@ impl GpuFrameCompositor {
             label: Some("mondrian_gpu_working_compositor_shader"),
             source: wgpu::ShaderSource::Wgsl(GPU_COMPOSITOR_SHADER.into()),
         });
-        let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("mondrian_gpu_working_compositor_textures"),
-            entries: &[
-                texture_binding(0),
-                texture_binding(1),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
-                    count: None,
-                },
-            ],
-        });
+        let layer_texture_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("mondrian_gpu_working_compositor_layer_texture"),
+                entries: &[
+                    texture_binding(0),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                        count: None,
+                    },
+                ],
+            });
+        let accum_texture_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("mondrian_gpu_working_compositor_accum_texture"),
+                entries: &[texture_binding(0)],
+            });
         let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mondrian_gpu_working_compositor_uniforms"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -565,7 +581,11 @@ impl GpuFrameCompositor {
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mondrian_gpu_working_compositor_layout"),
-            bind_group_layouts: &[Some(&texture_layout), Some(&uniform_layout)],
+            bind_group_layouts: &[
+                Some(&layer_texture_layout),
+                Some(&accum_texture_layout),
+                Some(&uniform_layout),
+            ],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -643,9 +663,36 @@ impl GpuFrameCompositor {
         });
         let procedural_dummy_view =
             procedural_dummy.create_view(&wgpu::TextureViewDescriptor::default());
+        let procedural_layer_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mondrian_gpu_working_compositor_procedural_layer_binding"),
+            layout: &layer_texture_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&procedural_dummy_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+        let procedural_accum_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mondrian_gpu_working_compositor_procedural_accum_binding"),
+            layout: &accum_texture_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&procedural_dummy_view),
+            }],
+        });
+        let layer_texture_cache_key =
+            NEXT_GPU_COMPOSITOR_BINDING_CACHE_KEY.fetch_add(2, Ordering::Relaxed);
         Self {
             pipeline,
-            texture_layout,
+            layer_texture_layout,
+            accum_texture_layout,
+            layer_texture_cache_key,
+            accum_texture_cache_key: layer_texture_cache_key.saturating_add(1),
             uniform_buffer,
             uniform_bind_group,
             uniform_stride,
@@ -656,10 +703,11 @@ impl GpuFrameCompositor {
                     ..GpuCompositorUniformArenaDiagnostics::default()
                 },
             }),
-            texture_bind_group_creations: AtomicU64::new(0),
+            texture_bind_group_creations: AtomicU64::new(2),
             texture_bind_group_cache_hits: AtomicU64::new(0),
             sampler,
-            procedural_dummy_view,
+            procedural_layer_bind_group,
+            procedural_accum_bind_group,
         }
     }
 
@@ -747,7 +795,7 @@ impl GpuFrameCompositor {
             } else {
                 (&target_b, &target_a)
             };
-            let (layer_view, source_kind, solid_color, source_size) = match layer.source {
+            let (layer_binding, source_kind, solid_color, source_size) = match layer.source {
                 GpuCompositeLayerSource::CpuFrame(frame) => {
                     uploaded_cpu_layers = true;
                     let descriptor = frame.descriptor();
@@ -761,11 +809,12 @@ impl GpuFrameCompositor {
                     let uploaded = GpuColorFrameUploader::upload(device, queue, &upload);
                     transient_uploads.push(uploaded);
                     (
-                        &transient_uploads
-                            .last()
-                            .expect("uploaded layer just pushed")
-                            .resource()
-                            .texture_view,
+                        GpuCompositeTextureBinding::Resource(
+                            transient_uploads
+                                .last()
+                                .expect("uploaded layer just pushed")
+                                .resource(),
+                        ),
                         0,
                         [0.0, 0.0, 0.0, 0.0],
                         [descriptor.width as f32, descriptor.height as f32],
@@ -775,20 +824,20 @@ impl GpuFrameCompositor {
                     let resource = table.get(handle).map_err(GpuCompositeError::ResourceTable)?;
                     let descriptor = handle.descriptor();
                     (
-                        &resource.resource().texture_view,
+                        GpuCompositeTextureBinding::Resource(resource.resource()),
                         0,
                         [0.0, 0.0, 0.0, 0.0],
                         [descriptor.width as f32, descriptor.height as f32],
                     )
                 }
                 GpuCompositeLayerSource::SolidColor(color) => (
-                    &accum.resource().texture_view,
+                    GpuCompositeTextureBinding::ProceduralDummy,
                     1,
                     [color.r, color.g, color.b, color.a],
                     [width as f32, height as f32],
                 ),
                 GpuCompositeLayerSource::Adjustment => (
-                    &accum.resource().texture_view,
+                    GpuCompositeTextureBinding::ProceduralDummy,
                     2,
                     [0.0, 0.0, 0.0, 0.0],
                     [width as f32, height as f32],
@@ -800,9 +849,9 @@ impl GpuFrameCompositor {
                 device,
                 queue,
                 encoder,
-                &accum.resource().texture_view,
+                GpuCompositeTextureBinding::Resource(accum.resource()),
                 &dst.resource().texture_view,
-                layer_view,
+                layer_binding,
                 GpuCompositeUniforms {
                     opacity: layer.opacity.clamp(0.0, 1.0),
                     source_kind,
@@ -877,9 +926,9 @@ impl GpuFrameCompositor {
             device,
             queue,
             encoder,
-            &input_resource.resource().texture_view,
+            GpuCompositeTextureBinding::ProceduralDummy,
             &output_resource.resource().texture_view,
-            &input_resource.resource().texture_view,
+            GpuCompositeTextureBinding::Resource(input_resource.resource()),
             GpuCompositeUniforms {
                 opacity: 1.0,
                 source_kind: 3,
@@ -958,9 +1007,9 @@ impl GpuFrameCompositor {
             device,
             queue,
             encoder,
-            &base_resource.resource().texture_view,
+            GpuCompositeTextureBinding::Resource(base_resource.resource()),
             &output_resource.resource().texture_view,
-            &processed_resource.resource().texture_view,
+            GpuCompositeTextureBinding::Resource(processed_resource.resource()),
             GpuCompositeUniforms {
                 opacity: opacity.clamp(0.0, 1.0),
                 source_kind: 0,
@@ -1031,9 +1080,9 @@ impl GpuFrameCompositor {
             device,
             queue,
             encoder,
-            &self.procedural_dummy_view,
+            GpuCompositeTextureBinding::ProceduralDummy,
             &output_resource.resource().texture_view,
-            &self.procedural_dummy_view,
+            GpuCompositeTextureBinding::ProceduralDummy,
             GpuCompositeUniforms {
                 opacity: 1.0,
                 source_kind: 4,
@@ -1059,9 +1108,9 @@ impl GpuFrameCompositor {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        accum_view: &wgpu::TextureView,
+        accum_binding: GpuCompositeTextureBinding<'_>,
         dst_view: &wgpu::TextureView,
-        layer_view: &wgpu::TextureView,
+        layer_binding: GpuCompositeTextureBinding<'_>,
         uniforms: GpuCompositeUniforms,
     ) -> Result<(), GpuCompositeError> {
         let uniform_offset = {
@@ -1084,25 +1133,54 @@ impl GpuFrameCompositor {
             uniform_offset,
             bytemuck::bytes_of(&uniforms),
         );
-        let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("mondrian_gpu_working_compositor_texture_bind_group"),
-            layout: &self.texture_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(layer_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(accum_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        });
-        self.texture_bind_group_creations.fetch_add(1, Ordering::Relaxed);
+        let layer_bind_group = match layer_binding {
+            GpuCompositeTextureBinding::Resource(resource) => {
+                let (bind_group, cache_hit) =
+                    resource.cached_bind_group(self.layer_texture_cache_key, |texture_view| {
+                        device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("mondrian_gpu_working_compositor_layer_binding"),
+                            layout: &self.layer_texture_layout,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(texture_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                                },
+                            ],
+                        })
+                    });
+                self.record_texture_binding_cache_result(cache_hit);
+                bind_group
+            }
+            GpuCompositeTextureBinding::ProceduralDummy => {
+                self.texture_bind_group_cache_hits.fetch_add(1, Ordering::Relaxed);
+                self.procedural_layer_bind_group.clone()
+            }
+        };
+        let accum_bind_group = match accum_binding {
+            GpuCompositeTextureBinding::Resource(resource) => {
+                let (bind_group, cache_hit) =
+                    resource.cached_bind_group(self.accum_texture_cache_key, |texture_view| {
+                        device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("mondrian_gpu_working_compositor_accum_binding"),
+                            layout: &self.accum_texture_layout,
+                            entries: &[wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(texture_view),
+                            }],
+                        })
+                    });
+                self.record_texture_binding_cache_result(cache_hit);
+                bind_group
+            }
+            GpuCompositeTextureBinding::ProceduralDummy => {
+                self.texture_bind_group_cache_hits.fetch_add(1, Ordering::Relaxed);
+                self.procedural_accum_bind_group.clone()
+            }
+        };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("mondrian_gpu_working_compositor_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1120,10 +1198,19 @@ impl GpuFrameCompositor {
             multiview_mask: None,
         });
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &texture_bind_group, &[]);
-        pass.set_bind_group(1, &self.uniform_bind_group, &[uniform_offset as u32]);
+        pass.set_bind_group(0, &layer_bind_group, &[]);
+        pass.set_bind_group(1, &accum_bind_group, &[]);
+        pass.set_bind_group(2, &self.uniform_bind_group, &[uniform_offset as u32]);
         pass.draw(0..4, 0..1);
         Ok(())
+    }
+
+    fn record_texture_binding_cache_result(&self, cache_hit: bool) {
+        if cache_hit {
+            self.texture_bind_group_cache_hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.texture_bind_group_creations.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -1882,7 +1969,107 @@ mod tests {
             compositor.texture_binding_diagnostics().bind_group_creations,
             2
         );
-        assert_eq!(compositor.texture_binding_diagnostics().cache_hits, 0);
+        assert_eq!(compositor.texture_binding_diagnostics().cache_hits, 4);
+    }
+
+    #[tokio::test]
+    async fn compositor_reuses_bind_groups_with_pooled_input_textures() {
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping compositor texture-binding cache test: no GPU adapter available");
+            return;
+        };
+        fn insert_inputs(
+            device: &wgpu::Device,
+            ids: &mut GpuColorFrameIdAllocator,
+            table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+            pool: &GpuColorFrameWgpuResourcePool,
+            descriptor: ColorFrameDescriptor,
+        ) -> [GpuColorFrameHandle; 2] {
+            ["binding-cache-input-a", "binding-cache-input-b"].map(|label| {
+                let handle = GpuColorFrameHandle::new(
+                    ids.allocate(),
+                    descriptor,
+                    GpuColorFrameTextureFormat::Rgba32Float,
+                    label,
+                )
+                .expect("working input handle");
+                let allocation = GpuColorFrameAllocationPlan::for_handle(handle.clone());
+                table.insert(pool.acquire(device, &allocation)).expect("insert working input");
+                handle
+            })
+        }
+
+        let compositor = GpuFrameCompositor::new(&context.device);
+        let mut ids = GpuColorFrameIdAllocator::new(1_025);
+        let mut table = GpuColorFrameResourceTable::new();
+        let pool = GpuColorFrameWgpuResourcePool::default();
+        let descriptor = ColorFrameDescriptor {
+            width: 4,
+            height: 4,
+            color_space: WorkingColorSpace::LinearRec709.into(),
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Gpu,
+        };
+        let mut inputs = insert_inputs(&context.device, &mut ids, &mut table, &pool, descriptor);
+        let mut after_first = None;
+
+        for frame in 0..2 {
+            let layer = |handle| GpuCompositeLayer {
+                source: GpuCompositeLayerSource::GpuFrame(handle),
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: None,
+                frame_seed: 0,
+            };
+            let layers = [layer(&inputs[0]), layer(&inputs[1])];
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("compositor-texture-binding-cache"),
+                });
+            compositor
+                .record(
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    &mut ids,
+                    &mut table,
+                    None,
+                    GpuCompositeRequest {
+                        width: 4,
+                        height: 4,
+                        working_color_space: WorkingColorSpace::LinearRec709,
+                        layers: &layers,
+                    },
+                )
+                .expect("record pooled-input composite");
+            context.queue.submit(std::iter::once(encoder.finish()));
+            compositor.clear_frame_resources();
+            if frame == 0 {
+                after_first = Some(compositor.texture_binding_diagnostics());
+                for handle in &inputs {
+                    let resource =
+                        table.remove(handle.id()).expect("remove submitted input resource");
+                    pool.release(resource);
+                }
+                inputs = insert_inputs(&context.device, &mut ids, &mut table, &pool, descriptor);
+            }
+        }
+
+        let after_first = after_first.expect("first frame diagnostics");
+        let after_second = compositor.texture_binding_diagnostics();
+        assert_eq!(
+            after_second.bind_group_creations - after_first.bind_group_creations,
+            2,
+            "only the two new accumulator textures should need bindings"
+        );
+        assert_eq!(
+            after_second.cache_hits - after_first.cache_hits,
+            2,
+            "both pooled input textures should reuse their layer bindings"
+        );
+        assert_eq!(pool.diagnostics().hits, 2);
     }
 
     #[tokio::test]

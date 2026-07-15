@@ -398,6 +398,14 @@ adjustment remains a zero-pass GPU passthrough.
 `GpuCompositorTextureBindingDiagnostics` separately counts texture bind-group
 creation and cache hits. This keeps backend object churn observable without
 conflating it with uniform-buffer writes or render-pass counts.
+The compositor uses separate sampled-layer and accumulator layouts so each
+binding depends on one texture rather than a per-pass texture pair. Every
+pooled `GpuColorFrameWgpuResource` carries a bounded eight-entry LRU of bindings
+keyed by compositor/layout identity; the cache therefore survives exact-contract
+pool reuse but is dropped with the texture when the pool evicts it. Procedural
+dummy bindings are constructed once with the compositor. Hot-frame recording
+clones lightweight wgpu handles and never extends a global cache that could keep
+otherwise-evicted textures alive.
 
 `viewer_spatial.rs` owns Viewer-only crop and resize processing. Its typed plan
 accepts and produces only GPU-resident `Working + LinearFloat + Rgba32Float`
