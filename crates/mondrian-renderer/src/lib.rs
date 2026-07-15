@@ -217,6 +217,7 @@ pub use viewer_runtime::{
     ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionError, ViewerGpuExecutionGpuStage,
     ViewerGpuExecutionRecord, ViewerGpuExecutionRequest, ViewerGpuExecutionResidency,
     ViewerGpuExecutionRuntime, ViewerGpuExecutionStageMarker, ViewerGpuNativeVideoFacts,
+    ViewerGpuOutputPrecision,
 };
 pub use viewer_spatial::{
     GpuViewerSpatialPlan, GpuViewerSpatialPlanError, GpuViewerSpatialRecord,

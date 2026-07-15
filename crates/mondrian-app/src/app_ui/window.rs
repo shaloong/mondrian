@@ -45,7 +45,8 @@ use mondrian_renderer::{
     RenderGpuOutputStageDiagnosticsReport, RenderGpuOutputStageResourcePlanError,
     RenderOutputColorBoundary, RenderOutputColorBoundaryTarget, ViewerGpuExecutionError,
     ViewerGpuExecutionLayer, ViewerGpuExecutionRequest, ViewerGpuExecutionResidency,
-    ViewerGpuExecutionRuntime, ViewerGpuNativeVideoFacts, ViewerSourceRect,
+    ViewerGpuExecutionRuntime, ViewerGpuNativeVideoFacts, ViewerGpuOutputPrecision,
+    ViewerSourceRect,
 };
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutManager, ShortcutScope};
@@ -3333,6 +3334,10 @@ fn prepare_viewer_gpu_preview(
         }
         None => None,
     };
+    let output_precision = ViewerGpuOutputPrecision::minimum_for_display(
+        frame.boundary.output_color_space,
+        display_calibration.is_some(),
+    );
     let source_rect = presentation_geometry.presentation.normalized_source_rect();
     let record = match session.viewer_gpu_execution.record(
         device,
@@ -3354,6 +3359,7 @@ fn prepare_viewer_gpu_preview(
             },
             output_width: presentation_geometry.presentation.output_width,
             output_height: presentation_geometry.presentation.output_height,
+            output_precision,
             display_calibration,
         },
     ) {

@@ -49,8 +49,44 @@ pub struct ViewerGpuExecutionRequest<'a> {
     pub output_width: u32,
     /// Output height after Viewer spatial processing.
     pub output_height: u32,
+    /// Encoded output precision required by the presentation Adapter.
+    pub output_precision: ViewerGpuOutputPrecision,
     /// Optional proven display calibration applied after the output boundary.
     pub display_calibration: Option<Arc<DisplayCalibrationLut3d>>,
+}
+
+/// Precision contract between a presentation Adapter and Viewer GPU execution.
+///
+/// The renderer cannot infer this from the OCIO output alone: SDR swapchains
+/// normally use an 8-bit carrier, while HDR surfaces, high-bit validation, and
+/// display calibration require a float carrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewerGpuOutputPrecision {
+    /// Normalized 8-bit encoded display code values.
+    Encoded8,
+    /// Half-float encoded display code values without an 8-bit quantization boundary.
+    EncodedFloat16,
+}
+
+impl ViewerGpuOutputPrecision {
+    /// Return the minimum safe carrier for a display target and calibration path.
+    pub fn minimum_for_display(
+        output_color_space: mondrian_core::types::ColorSpace,
+        requires_display_calibration: bool,
+    ) -> Self {
+        if requires_display_calibration || output_color_space.is_hdr() {
+            Self::EncodedFloat16
+        } else {
+            Self::Encoded8
+        }
+    }
+
+    const fn texture_format(self) -> GpuColorFrameTextureFormat {
+        match self {
+            Self::Encoded8 => GpuColorFrameTextureFormat::Rgba8Unorm,
+            Self::EncodedFloat16 => GpuColorFrameTextureFormat::Rgba16Float,
+        }
+    }
 }
 
 /// Ordered GPU command boundary exposed to an optional profiling Adapter.
@@ -168,6 +204,10 @@ impl ViewerGpuExecutionRuntime {
         request: ViewerGpuExecutionRequest<'_>,
         mut stage_marker: Option<&mut dyn ViewerGpuExecutionStageMarker>,
     ) -> Result<ViewerGpuExecutionRecord, ViewerGpuExecutionError> {
+        validate_output_precision(
+            request.output_precision,
+            request.display_calibration.is_some(),
+        )?;
         self.native_video_import.reset_frame_cpu_timings();
         let input_prepare_started = Instant::now();
         let prepared = prepare_composite(
@@ -255,11 +295,7 @@ impl ViewerGpuExecutionRuntime {
             .record_wgpu_output_boundary_gpu_frame_owned_backend(
                 request.output_boundary,
                 &spatial_output,
-                if request.display_calibration.is_some() {
-                    GpuColorFrameTextureFormat::Rgba16Float
-                } else {
-                    GpuColorFrameTextureFormat::Rgba8Unorm
-                },
+                request.output_precision.texture_format(),
                 RenderColorTransformGpuOptions::default(),
                 RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
                     device,
@@ -365,6 +401,16 @@ impl ViewerGpuExecutionRuntime {
     }
 }
 
+fn validate_output_precision(
+    output_precision: ViewerGpuOutputPrecision,
+    has_display_calibration: bool,
+) -> Result<(), ViewerGpuExecutionError> {
+    if has_display_calibration && output_precision != ViewerGpuOutputPrecision::EncodedFloat16 {
+        return Err(ViewerGpuExecutionError::DisplayCalibrationRequiresFloatOutput);
+    }
+    Ok(())
+}
+
 fn mark_gpu_stage(
     marker: &mut Option<&mut dyn ViewerGpuExecutionStageMarker>,
     encoder: &mut wgpu::CommandEncoder,
@@ -431,6 +477,9 @@ pub enum ViewerGpuExecutionError {
     Backpressure(String),
     #[error("Viewer GPU input preparation failed: {0}")]
     InputPreparation(String),
+    /// Display calibration was paired with a quantized output carrier.
+    #[error("Viewer display calibration requires an encoded float16 output carrier")]
+    DisplayCalibrationRequiresFloatOutput,
     #[error("Viewer GPU working composite graph failed: {0:?}")]
     WorkingComposite(RenderGpuCompositeGraphRecordError),
     #[error("Viewer GPU effect-domain processing failed: {0}")]
@@ -1013,6 +1062,36 @@ mod tests {
         assert!(message.contains("adapter LUID mismatch"));
     }
 
+    #[test]
+    fn viewer_output_precision_preserves_hdr_and_calibration_carriers() {
+        assert_eq!(
+            ViewerGpuOutputPrecision::minimum_for_display(ColorSpace::Srgb, false),
+            ViewerGpuOutputPrecision::Encoded8
+        );
+        assert_eq!(
+            ViewerGpuOutputPrecision::minimum_for_display(ColorSpace::DisplayP3, false),
+            ViewerGpuOutputPrecision::Encoded8
+        );
+        for output in [ColorSpace::Rec2100Hlg, ColorSpace::Rec2100Pq] {
+            assert_eq!(
+                ViewerGpuOutputPrecision::minimum_for_display(output, false),
+                ViewerGpuOutputPrecision::EncodedFloat16
+            );
+        }
+        assert_eq!(
+            ViewerGpuOutputPrecision::minimum_for_display(ColorSpace::Srgb, true),
+            ViewerGpuOutputPrecision::EncodedFloat16
+        );
+        assert_eq!(
+            ViewerGpuOutputPrecision::EncodedFloat16.texture_format(),
+            GpuColorFrameTextureFormat::Rgba16Float
+        );
+        assert!(matches!(
+            validate_output_precision(ViewerGpuOutputPrecision::Encoded8, true),
+            Err(ViewerGpuExecutionError::DisplayCalibrationRequiresFloatOutput)
+        ));
+    }
+
     #[tokio::test]
     async fn viewer_records_gpu_media_effect_domain_before_working_composite() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
@@ -1084,6 +1163,7 @@ mod tests {
                     source_rect: ViewerSourceRect::FULL,
                     output_width: 4,
                     output_height: 4,
+                    output_precision: ViewerGpuOutputPrecision::Encoded8,
                     display_calibration: None,
                 },
             )
@@ -1164,6 +1244,7 @@ mod tests {
                     source_rect: ViewerSourceRect::FULL,
                     output_width: 4,
                     output_height: 4,
+                    output_precision: ViewerGpuOutputPrecision::Encoded8,
                     display_calibration: None,
                 },
             )
@@ -1240,6 +1321,7 @@ mod tests {
                     source_rect: ViewerSourceRect::FULL,
                     output_width: 4,
                     output_height: 4,
+                    output_precision: ViewerGpuOutputPrecision::Encoded8,
                     display_calibration: None,
                 },
             )
@@ -1316,6 +1398,7 @@ mod tests {
                     source_rect: ViewerSourceRect::FULL,
                     output_width: 4,
                     output_height: 4,
+                    output_precision: ViewerGpuOutputPrecision::Encoded8,
                     display_calibration: None,
                 },
             )
@@ -1379,6 +1462,7 @@ mod tests {
                     source_rect: ViewerSourceRect::FULL,
                     output_width: 4,
                     output_height: 4,
+                    output_precision: ViewerGpuOutputPrecision::EncodedFloat16,
                     display_calibration: None,
                 },
             )
@@ -1389,6 +1473,10 @@ mod tests {
         assert_eq!(record.stage_diagnostics.upload_stages, 0);
         assert_eq!(record.compositing_diagnostics.gpu_native_composites, 1);
         assert_eq!(record.residency.procedural_layers, 1);
+        assert_eq!(
+            record.output.texture_format(),
+            GpuColorFrameTextureFormat::Rgba16Float
+        );
     }
 
     #[tokio::test]
@@ -1465,6 +1553,7 @@ mod tests {
                     source_rect: ViewerSourceRect::FULL,
                     output_width: 4,
                     output_height: 4,
+                    output_precision: ViewerGpuOutputPrecision::Encoded8,
                     display_calibration: None,
                 },
             )

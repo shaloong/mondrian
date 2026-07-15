@@ -358,6 +358,14 @@ proven calibration; `ViewerGpuExecutionRecord` returns the retained output plus
 stage, compositor, spatial, residency, and fallback evidence. Window and
 headless Adapters resolve the texture view from this same runtime, then perform
 their distinct registration or completion obligations themselves.
+The Adapter also supplies a typed `ViewerGpuOutputPrecision`: SDR without
+calibration may use the lower-bandwidth `Encoded8` carrier, while HLG, PQ,
+high-bit validation, and any display-calibration route use `EncodedFloat16`.
+The renderer no longer guesses output precision from calibration presence, and
+rejects a calibration request paired with an 8-bit carrier before recording
+frame commands. This prevents an HDR View from being silently quantized before
+the presentation boundary without forcing every ordinary SDR frame through a
+half-float target.
 When recording fails, the Window Adapter may unwrap a composite-graph error only
 to preserve the renderer's typed first-blocker telemetry; it must not reproduce
 graph scheduling or collapse effect-domain failures into a generic CPU fallback.

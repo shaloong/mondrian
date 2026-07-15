@@ -21,7 +21,7 @@ use mondrian_renderer::{
     GpuNativeDecodedFrameImportSupport, GpuViewerSpatialRuntimeDiagnostics,
     RenderColorStageDiagnostics, ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionGpuStage,
     ViewerGpuExecutionRequest, ViewerGpuExecutionRuntime, ViewerGpuExecutionStageMarker,
-    ViewerSourceRect,
+    ViewerGpuOutputPrecision, ViewerSourceRect,
 };
 use mondrian_ui_widgets::ViewerExternalTexturePresentation;
 
@@ -261,6 +261,10 @@ impl HeadlessViewerGpuAdapter {
             },
             output_width: presentation.output_width,
             output_height: presentation.output_height,
+            output_precision: ViewerGpuOutputPrecision::minimum_for_display(
+                frame.boundary.output_color_space,
+                false,
+            ),
             display_calibration: None,
         };
         let record_result =
