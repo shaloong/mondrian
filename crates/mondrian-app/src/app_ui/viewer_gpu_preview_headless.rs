@@ -17,10 +17,10 @@ use mondrian_renderer::{
         GpuTimestampQueryRing, GpuTimestampSample, GpuTimestampStageMarker, GpuTimestampToken,
     },
     request_adapter_with_native_video_preference, GpuCompositingDiagnostics,
-    GpuNativeDecodedFrameImportSupport, GpuViewerSpatialRuntimeDiagnostics,
-    RenderColorStageDiagnostics, ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionGpuStage,
-    ViewerGpuExecutionRequest, ViewerGpuExecutionRuntime, ViewerGpuExecutionStageMarker,
-    ViewerSourceRect,
+    GpuCompositorUniformArenaDiagnostics, GpuNativeDecodedFrameImportSupport,
+    GpuViewerSpatialRuntimeDiagnostics, RenderColorStageDiagnostics,
+    ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionGpuStage, ViewerGpuExecutionRequest,
+    ViewerGpuExecutionRuntime, ViewerGpuExecutionStageMarker, ViewerSourceRect,
 };
 use mondrian_ui_widgets::ViewerExternalTexturePresentation;
 
@@ -47,6 +47,8 @@ pub(crate) struct HeadlessViewerGpuExecution {
     pub cpu_stage_timings: Option<ViewerGpuExecutionCpuStageTimings>,
     /// Frame-local working-space compositing evidence.
     pub compositing_diagnostics: Option<GpuCompositingDiagnostics>,
+    /// Cumulative bounded uniform-arena reuse evidence after this frame.
+    pub compositor_uniform_arena: Option<GpuCompositorUniformArenaDiagnostics>,
     /// Cumulative spatial-runtime evidence after this frame.
     pub spatial_diagnostics: Option<GpuViewerSpatialRuntimeDiagnostics>,
     /// Structured GPU color-stage evidence for a newly rendered output.
@@ -208,6 +210,7 @@ impl HeadlessViewerGpuAdapter {
                 gpu_timestamp_token: None,
                 cpu_stage_timings: None,
                 compositing_diagnostics: None,
+                compositor_uniform_arena: Some(self.runtime.compositor_uniform_arena_diagnostics()),
                 spatial_diagnostics: None,
                 stage_diagnostics: None,
                 fallback_reasons: Vec::new(),
@@ -311,6 +314,7 @@ impl HeadlessViewerGpuAdapter {
             gpu_timestamp_token: timestamp_token.map(|token| token.id()),
             cpu_stage_timings: Some(record.cpu_stage_timings),
             compositing_diagnostics: Some(record.compositing_diagnostics),
+            compositor_uniform_arena: Some(self.runtime.compositor_uniform_arena_diagnostics()),
             spatial_diagnostics: Some(record.spatial_diagnostics),
             stage_diagnostics: Some(record.stage_diagnostics),
             fallback_reasons: record.fallback_reasons,

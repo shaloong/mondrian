@@ -133,6 +133,7 @@ struct AppUiViewerGpuOutputTelemetry {
     accumulated_stage_diagnostics: RenderColorStageDiagnostics,
     last_stage_diagnostics: Option<RenderColorStageDiagnostics>,
     last_spatial_runtime: Option<mondrian_renderer::GpuViewerSpatialRuntimeDiagnostics>,
+    last_compositor_uniform_arena: Option<mondrian_renderer::GpuCompositorUniformArenaDiagnostics>,
     last_frame_context: Option<AppUiViewerGpuOutputFrameContext>,
     last_preview_candidate_id: Option<u64>,
     last_preview_candidate_state: Option<AppUiViewerGpuOutputPreviewCandidateState>,
@@ -181,6 +182,8 @@ struct AppUiViewerGpuOutputDiagnostics {
     last_stage_report: Option<RenderGpuOutputStageDiagnosticsReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     spatial_runtime: Option<mondrian_renderer::GpuViewerSpatialRuntimeDiagnostics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compositor_uniform_arena: Option<mondrian_renderer::GpuCompositorUniformArenaDiagnostics>,
     runtime_report: RenderGpuOutputRuntimeDiagnosticsReport,
     health: AppUiViewerGpuOutputHealthSummary,
     health_counts: AppUiViewerGpuOutputHealthCounts,
@@ -545,6 +548,7 @@ impl AppUiViewerGpuOutputTelemetry {
             accumulated_stage_report: self.accumulated_stage_diagnostics.into(),
             last_stage_report: self.last_stage_diagnostics.map(Into::into),
             spatial_runtime: self.last_spatial_runtime,
+            compositor_uniform_arena: self.last_compositor_uniform_arena,
             runtime_report,
             health,
             health_counts: self.health_counts,
@@ -566,6 +570,7 @@ impl AppUiViewerGpuOutputTelemetry {
         self.invocations = self.invocations.saturating_add(1);
         self.last_stage_diagnostics = None;
         self.last_spatial_runtime = None;
+        self.last_compositor_uniform_arena = None;
         self.last_frame_context = None;
         self.last_preview_candidate_id = None;
         self.last_preview_candidate_state = None;
@@ -611,6 +616,13 @@ impl AppUiViewerGpuOutputTelemetry {
         diagnostics: mondrian_renderer::GpuViewerSpatialRuntimeDiagnostics,
     ) {
         self.last_spatial_runtime = Some(diagnostics);
+    }
+
+    fn record_compositor_uniform_arena(
+        &mut self,
+        diagnostics: mondrian_renderer::GpuCompositorUniformArenaDiagnostics,
+    ) {
+        self.last_compositor_uniform_arena = Some(diagnostics);
     }
 
     fn record_non_workspace_skip(&mut self) {
@@ -3406,6 +3418,10 @@ fn prepare_viewer_gpu_preview(
         }
     };
     host.record_preview_gpu_compositing(record.compositing_diagnostics);
+    let uniform_arena = session.viewer_gpu_execution.compositor_uniform_arena_diagnostics();
+    session
+        .viewer_gpu_output_telemetry
+        .record_compositor_uniform_arena(uniform_arena);
     session
         .viewer_gpu_output_telemetry
         .record_spatial_runtime(record.spatial_diagnostics);
@@ -5742,6 +5758,31 @@ mod tests {
         assert!(telemetry
             .diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default())
             .spatial_runtime
+            .is_none());
+    }
+
+    #[test]
+    fn viewer_gpu_output_diagnostics_include_uniform_arena_evidence() {
+        let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
+        let arena = mondrian_renderer::GpuCompositorUniformArenaDiagnostics {
+            buffer_creations: 1,
+            uniform_writes: 7,
+            high_watermark_slots: 3,
+            frame_resets: 2,
+            exhaustions: 0,
+        };
+        telemetry.record_compositor_uniform_arena(arena);
+
+        let diagnostics = telemetry.diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default());
+        assert_eq!(diagnostics.compositor_uniform_arena, Some(arena));
+        assert!(serde_json::to_string(&diagnostics)
+            .expect("serialize Viewer diagnostics")
+            .contains("\"compositor_uniform_arena\""));
+
+        telemetry.record_invocation();
+        assert!(telemetry
+            .diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default())
+            .compositor_uniform_arena
             .is_none());
     }
 

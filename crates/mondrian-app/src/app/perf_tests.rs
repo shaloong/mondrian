@@ -50,8 +50,9 @@ use mondrian_media::{
 use mondrian_platform::{NativeVideoTextureImportProbe, SystemPlatformService};
 use mondrian_renderer::profile::{GpuTimestampSample, GpuTimestampStageDurations};
 use mondrian_renderer::{
-    GpuCompositingDiagnostics, GpuViewerSpatialRuntimeDiagnostics, NativeVideoImportCpuTimings,
-    RenderColorStageDiagnostics, ViewerGpuExecutionCpuStageTimings,
+    GpuCompositingDiagnostics, GpuCompositorUniformArenaDiagnostics,
+    GpuViewerSpatialRuntimeDiagnostics, NativeVideoImportCpuTimings, RenderColorStageDiagnostics,
+    ViewerGpuExecutionCpuStageTimings,
 };
 use mondrian_timeline::track::Track;
 use mondrian_ui_core::tree::TreeWalker;
@@ -148,6 +149,7 @@ struct HeadlessViewerGpuExecutionSummary {
     fallback_reasons: Vec<String>,
     stage_diagnostics: RenderColorStageDiagnostics,
     compositing_diagnostics: GpuCompositingDiagnostics,
+    compositor_uniform_arena: Option<GpuCompositorUniformArenaDiagnostics>,
     spatial_diagnostics: Option<GpuViewerSpatialRuntimeDiagnostics>,
     rendered_decode_execution: AppUiPreviewDecodeExecutionSummary,
     native_import_contract_pools_peak: usize,
@@ -199,6 +201,9 @@ impl HeadlessViewerGpuExecutionSummary {
         }
         if let Some(diagnostics) = execution.compositing_diagnostics {
             self.compositing_diagnostics.accumulate(diagnostics);
+        }
+        if let Some(diagnostics) = execution.compositor_uniform_arena {
+            self.compositor_uniform_arena = Some(diagnostics);
         }
         if let Some(diagnostics) = execution.spatial_diagnostics {
             self.spatial_diagnostics = Some(diagnostics);
@@ -307,6 +312,7 @@ fn headless_gpu_summary_records_distinct_executed_extents() {
             gpu_timestamp_token: Some(u64::from(width) << 32 | u64::from(height)),
             cpu_stage_timings: Some(ViewerGpuExecutionCpuStageTimings::default()),
             compositing_diagnostics: None,
+            compositor_uniform_arena: None,
             spatial_diagnostics: None,
             stage_diagnostics: None,
             fallback_reasons: Vec::new(),

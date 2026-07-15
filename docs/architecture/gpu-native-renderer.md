@@ -878,7 +878,9 @@ arena. Per-pass uniforms use ordered `Queue::write_buffer` writes into that
 persistent buffer and one persistent bind group; frame cleanup resets only the
 slot cursor after submission, eliminating steady-state uniform-buffer/bind-group
 creation without a device poll or CPU wait. Arena capacity, writes, high-water
-mark, resets, and fail-closed exhaustion are exposed as runtime diagnostics.
+mark, resets, and fail-closed exhaustion are exposed as runtime diagnostics and
+persisted in both Window GPU-output JSONL and the existing headless performance
+summary, so steady-state reuse regressions do not require a new stress harness.
 Frame-local handles remain strongly typed and monotonic, while submitted texture
 storage is returned to the pool without a CPU completion wait and reused only
 through ordered queue semantics. Device reset first returns every stage's frame
