@@ -174,6 +174,14 @@ signal precision and keeping monitor adaptation outside the measurement. The
 real-time GPU path must implement equivalent GPU reduction rather than reading
 the full output texture back to the CPU.
 
+`GpuProgramScopesRuntime` is that real-time path. A demand-driven request
+records atomic-u32 histogram, waveform, vectorscope, and signal-excursion counts
+directly against the retained display-encoded Program Output texture. A second
+compute pass materializes three RGBA8 linear display textures for the UI. The
+count buffer, pipelines, display textures, uniforms, and display bind group are
+retained by request shape; normal playback performs no scope readback. The only
+readback is a test-only 2x2 GPU/CPU reference comparison.
+
 Color-transform executors emit `RenderColorTransformDiagnostics` for input and
 output boundaries. Preview diagnostics aggregate transform calls, transformed
 pixels, and temporary RGBA8 boundary crossings so performance smoke tests can

@@ -23,6 +23,7 @@ pub mod native_video;
 pub mod ocio_gpu;
 pub mod pipeline;
 pub mod profile;
+pub mod program_scopes_gpu;
 pub mod shaders;
 pub mod texture_pool;
 pub mod timeline_composite;
@@ -192,6 +193,10 @@ pub use ocio_gpu::{
     OcioGpuWgpuWrapperShaderSourceArtifact,
 };
 pub use pipeline::{CpuRgbaLayer, RenderPipeline};
+pub use program_scopes_gpu::{
+    GpuProgramScopesBufferLayout, GpuProgramScopesError, GpuProgramScopesRecord,
+    GpuProgramScopesRequest, GpuProgramScopesRuntime, GpuProgramScopesRuntimeDiagnostics,
+};
 pub use timeline_composite::{
     composite_path_diagnostics, composite_timeline_elements,
     composite_timeline_elements_color_frame,

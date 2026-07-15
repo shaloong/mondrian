@@ -522,14 +522,19 @@ pub enum ProgramColorScopeError {
     },
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ProgramSignalColorimetry {
+/// Non-constant-luminance coefficients for one display-encoded signal space.
+///
+/// CPU and GPU scopes share this contract so their luma and chroma axes cannot
+/// silently diverge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProgramSignalColorimetry {
     kr: f32,
     kb: f32,
 }
 
 impl ProgramSignalColorimetry {
-    fn for_color_space(color_space: ColorSpace) -> Result<Self, ProgramColorScopeError> {
+    /// Resolve standardized luma coefficients for a scope-compatible signal.
+    pub fn for_color_space(color_space: ColorSpace) -> Result<Self, ProgramColorScopeError> {
         let colorimetry = match color_space {
             ColorSpace::Rec601Pal | ColorSpace::Rec601Ntsc => Self { kr: 0.299, kb: 0.114 },
             ColorSpace::Rec709 | ColorSpace::Srgb => Self { kr: 0.2126, kb: 0.0722 },
@@ -544,6 +549,16 @@ impl ProgramSignalColorimetry {
             }
         };
         Ok(colorimetry)
+    }
+
+    /// Red luma coefficient.
+    pub const fn kr(self) -> f32 {
+        self.kr
+    }
+
+    /// Blue luma coefficient.
+    pub const fn kb(self) -> f32 {
+        self.kb
     }
 
     fn luma(self, r: f32, g: f32, b: f32) -> f32 {
