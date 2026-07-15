@@ -779,9 +779,13 @@ Preview/export parity is protected by frame-level contracts: app preview tests
 compare multilayer preview compositing against the export output boundary with a
 stable RGBA hash, compare the shared preview/export color-health fields for the
 same frame, and compare normalized report verdict/check/root-cause/action
-signatures. Renderer golden tests cover lower-level compositing fixtures. GPU
-and float-pipeline changes must keep these contracts green or update them only
-with intentional visual-reference and diagnostics-contract changes.
+signatures. A separate camera-log golden begins with encoded Sony
+S-Log3/S-Gamut3.Cine bytes, exercises the preview lazy input transform into
+Linear Rec.2020, and compares the resulting Standard sRGB frame pixel-for-pixel
+with an independently executed export input/composite/output chain. Renderer
+golden tests cover lower-level compositing fixtures. GPU and float-pipeline
+changes must keep these contracts green or update them only with intentional
+visual-reference and diagnostics-contract changes.
 
 Camera-log output is treated as a professional intermediate path. Export
 validation rejects consumer delivery codecs for camera-log output and only

@@ -15546,6 +15546,116 @@ mod tests {
     }
 
     #[test]
+    fn preview_camera_log_input_matches_export_frame_hash() {
+        const SLOG3_TO_STANDARD_SDR_GOLDEN_HASH: u64 = 53_462_908_396_589_755;
+
+        let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
+            .expect("default effect graph");
+        let source = CpuEncodedColorFrame::source_rgba8(
+            2,
+            2,
+            ColorSpace::SonySLog3SGamut3Cine,
+            vec![
+                96, 128, 160, 255, 192, 112, 64, 255, 24, 208, 144, 255, 224, 224, 224, 128,
+            ],
+        );
+        let input_transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec2020,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let media = MediaPreviewFrame {
+            width: 2,
+            height: 2,
+            frame: None,
+            gpu_source: Some(MediaPreviewGpuSourceFrame::new(
+                source.clone(),
+                input_transform.clone(),
+            )),
+            native_source: None,
+            signature: 3_003,
+            presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
+            decode_execution: AppUiPreviewDecodeExecutionSummary::from_path(
+                PreviewDecodeExecutionPath::SoftwareCpu,
+            ),
+        };
+        let mut color_context = test_color_context(ColorSpace::Srgb);
+        color_context.working_color_space = WorkingColorSpace::LinearRec2020;
+        color_context.tone_map = true;
+        color_context.output_transform = mondrian_core::OutputTransformIntent::mondrian_standard();
+        let resolved = [ResolvedPreviewElement::Media {
+            frame: media,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_graph: Arc::clone(&effect_graph),
+            frame_seed: 3_003,
+        }];
+        let preview_service = AppUiPreviewService::new();
+        let mut preview_scratch = TimelineCompositeScratch::default();
+        let preview = composite_resolved_preview(
+            &preview_service,
+            2,
+            2,
+            &resolved,
+            &color_context,
+            &mut preview_scratch,
+        )
+        .expect("preview camera-log composite");
+
+        let export_input = execute_cpu_input_stage(&source, &input_transform)
+            .expect("export camera-log input transform");
+        let export_elements = [TimelineCompositeElement::Media(TimelineMediaLayer {
+            frame: &export_input.result.frame,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_graph,
+            frame_seed: 3_003,
+        })];
+        let mut export_scratch = TimelineCompositeScratch::default();
+        let export_working = mondrian_renderer::composite_timeline_elements_color_frame(
+            2,
+            2,
+            &export_elements,
+            TimelineCompositeOptions::default(),
+            TimelineEffectColorRuntime::new(
+                &color_context.engine,
+                color_context.working_color_space,
+            ),
+            &mut export_scratch,
+        );
+        let export_boundary = RenderOutputColorBoundary::from_intent(
+            mondrian_renderer::RenderOutputColorBoundaryTarget::Export,
+            ColorSpace::Srgb,
+            &color_context.output_transform,
+            color_context.tone_map,
+            color_context.engine.clone(),
+        )
+        .expect("resolved export Standard SDR intent");
+        let export =
+            mondrian_renderer::execute_cpu_output_boundary(&export_working, &export_boundary)
+                .expect("export camera-log output transform")
+                .result
+                .frame
+                .into_rgba();
+
+        assert_eq!(preview.rgba, export);
+        assert_eq!(
+            preview_service.diagnostics().color_stage_cpu_input_stages,
+            1
+        );
+        assert_eq!(preview.color_stage_diagnostics.cpu_output_stages, 1);
+        assert_eq!(preview.composite_diagnostics.float_linear_composites, 1);
+        assert_eq!(preview.composite_diagnostics.legacy_rgba8_composites, 0);
+        let hash = stable_rgba_hash(&preview.rgba);
+        assert_eq!(
+            hash, SLOG3_TO_STANDARD_SDR_GOLDEN_HASH,
+            "actual hash={hash}"
+        );
+    }
+
+    #[test]
     fn preview_multilayer_color_output_matches_export_frame_hash() {
         const REC2020_TO_SRGB_DISPLAY_VIEW_MULTILAYER_GOLDEN_HASH: u64 = 8_673_714_717_310_354_893;
 
