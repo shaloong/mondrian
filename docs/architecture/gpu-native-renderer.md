@@ -309,10 +309,14 @@ paired stock-OCIO identity route (`Working -> Effect -> Working`) using the
 project color engine. `ColorFrameDomain::Effect` and
 `RenderGpuColorTransformResourcePlan` describe the GPU-resident floating-point
 intermediate and allocate it from the shared texture pool without upload or
-readback nodes. Scene-linear effects omit the identity route entirely; data and
-alpha domains remain non-convertible. Until the graph recorder interleaves the
-two OCIO passes with the point pass, `GpuFrameCompositor` rejects such plans
-rather than evaluating encoded/log math in working-linear samples.
+readback nodes. `RenderGpuOutputBoundaryRuntime` records the two prepared OCIO
+passes and a standalone `GpuFrameCompositor::record_point_effect_pass` into the
+same caller encoder. The point pass retains the `Effect` descriptor, preserves
+alpha, performs no blend, and returns a GPU working frame only after the second
+stock-OCIO pass. Scene-linear effects omit this route entirely; data and alpha
+domains remain non-convertible. The ordinary working compositor still rejects
+an unmaterialized external-domain plan rather than evaluating encoded/log math
+on working-linear samples.
 App preview diagnostics count internal transforms separately from source input
 and display/output transforms, preserving per-pass call and pixel evidence
 without misclassifying them as transfer boundaries.
@@ -322,6 +326,10 @@ against `apply_compiled_effect_graph_rgba_f32(...)` and
 `apply_compiled_effect_graph_pass_rgba_f32(...)` per channel. This is the
 numerical contract for extending the GPU subset; shader parsing or successful
 command recording alone is not sufficient evidence of effect correctness.
+An additional real-wgpu round-trip test compares
+`Working -> OCIO -> display-encoded point effect -> OCIO -> Working` against the
+stock-OCIO CPU processor with a `3e-5` maximum channel budget and asserts zero
+upload/readback nodes around the effect route.
 
 ## Viewer Working-Linear Spatial Processing
 

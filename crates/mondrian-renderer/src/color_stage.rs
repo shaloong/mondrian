@@ -18,7 +18,8 @@ use crate::{
     OcioGpuWgpuRenderPipeline, OcioGpuWgpuWrapperBindGroup, OcioGpuWgpuWrapperBindingPlan,
     OcioGpuWgpuWrapperInputResources, RenderColorTransform, RenderColorTransformError,
     RenderColorTransformGpuOptions, RenderColorTransformGpuPlan, RenderColorTransformGpuPlanner,
-    RenderInputTransform, RenderInputTransformResult, RenderOcioDisplayView,
+    RenderEffectColorDomainGpuPlanError, RenderEffectColorDomainGpuPlanner, RenderInputTransform,
+    RenderInputTransformResult, RenderIntermediateColorTransform, RenderOcioDisplayView,
     RenderOutputTransformFloatResult, RenderOutputTransformResult,
 };
 use mondrian_core::types::{ColorEngine, ColorSpace};
@@ -604,6 +605,46 @@ pub enum RenderGpuInputStageRuntimeRecordError {
     Record(RenderGpuOutputStageRecordError),
 }
 
+/// Error returned when a runtime-owned in-graph GPU OCIO pass cannot record.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RenderGpuColorTransformRuntimeRecordError {
+    /// The identity transform could not be planned.
+    Plan(RenderColorTransformError),
+    /// GPU frame resources could not be bound to the transform.
+    ResourcePlan(RenderGpuColorTransformResourcePlanError),
+    /// Pure OCIO backend contracts could not be prepared.
+    BackendPrep(OcioGpuWgpuBackendPrepError),
+    /// Concrete wgpu backend objects could not be prepared.
+    BackendObjects(OcioGpuWgpuBackendObjectError),
+    /// Resource materialization or pass recording failed.
+    Record(RenderGpuOutputStageRecordError),
+}
+
+/// Result of recording OCIO -> point effect -> OCIO entirely on the GPU.
+pub struct RenderGpuEffectDomainRecord {
+    /// Working-to-effect OCIO pass.
+    pub to_processing: RenderGpuColorTransformRecord,
+    /// Standalone point-effect pass in the declared processing domain.
+    pub effect: crate::GpuPointEffectRecord,
+    /// Effect-to-working OCIO pass.
+    pub to_working: RenderGpuColorTransformRecord,
+}
+
+/// Error returned when the GPU effect-domain round trip cannot be recorded.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RenderGpuEffectDomainRecordError {
+    /// The declared domain could not be resolved through stock OCIO.
+    Plan(RenderEffectColorDomainGpuPlanError),
+    /// Scene-linear plans belong in the fused working compositor.
+    SceneLinearUsesInlineCompositor,
+    /// The working-to-effect pass failed.
+    ToProcessing(RenderGpuColorTransformRuntimeRecordError),
+    /// The point-effect pass failed.
+    PointEffect(GpuCompositeError),
+    /// The effect-to-working pass failed.
+    ToWorking(RenderGpuColorTransformRuntimeRecordError),
+}
+
 /// Renderer-owned state for native GPU final-output color boundaries.
 ///
 /// App/export code should hold one runtime per render backend lifetime. The
@@ -750,6 +791,158 @@ impl RenderGpuOutputBoundaryRuntime {
             Some(resource_pool),
             request,
         )
+    }
+
+    /// Plan and record one GPU-resident OCIO identity transform between graph nodes.
+    pub fn record_wgpu_intermediate_color_transform_owned_backend(
+        &mut self,
+        transform: &RenderIntermediateColorTransform,
+        input: &GpuColorFrameHandle,
+        output_texture_format: GpuColorFrameTextureFormat,
+        output_label: impl Into<String>,
+        gpu_options: RenderColorTransformGpuOptions,
+        backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
+    ) -> Result<RenderGpuColorTransformRecord, RenderGpuColorTransformRuntimeRecordError> {
+        let transform_plan = {
+            let mut planner =
+                RenderColorTransformGpuPlanner::new(&mut self.shader_cache, gpu_options);
+            planner
+                .plan_identity_transform(input.descriptor(), transform)
+                .map_err(RenderGpuColorTransformRuntimeRecordError::Plan)?
+        };
+        self.record_wgpu_planned_color_transform_owned_backend(
+            transform_plan,
+            input,
+            output_texture_format,
+            output_label,
+            backend,
+        )
+    }
+
+    /// Record one already-planned GPU-resident OCIO transform.
+    pub fn record_wgpu_planned_color_transform_owned_backend(
+        &mut self,
+        transform_plan: RenderColorTransformGpuPlan,
+        input: &GpuColorFrameHandle,
+        output_texture_format: GpuColorFrameTextureFormat,
+        output_label: impl Into<String>,
+        backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
+    ) -> Result<RenderGpuColorTransformRecord, RenderGpuColorTransformRuntimeRecordError> {
+        let Self {
+            backend_prep,
+            backend_objects,
+            frame_ids,
+            frame_table,
+            resource_pool,
+            ..
+        } = self;
+        let resources = RenderGpuColorTransformResourcePlan::from_gpu_frame(
+            frame_ids,
+            input,
+            transform_plan,
+            output_texture_format,
+            output_label,
+        )
+        .map_err(RenderGpuColorTransformRuntimeRecordError::ResourcePlan)?;
+        let output_format = color_target_format_for_gpu_frame(&resources.output);
+        let shader_plan = resources.transform.wgpu.shader_plan.clone();
+        let static_pipeline = backend_prep
+            .prepare_static_pipeline(&shader_plan, output_format)
+            .map_err(RenderGpuColorTransformRuntimeRecordError::BackendPrep)?;
+        let prepared_backend = backend_objects
+            .prepare_backend_objects(
+                backend.device,
+                backend.queue,
+                &shader_plan,
+                &static_pipeline,
+            )
+            .map_err(RenderGpuColorTransformRuntimeRecordError::BackendObjects)?;
+        resources
+            .record_wgpu_color_transform(RenderGpuOutputStageRecordRequest {
+                backend: RenderGpuOutputStageBackendContext {
+                    device: backend.device,
+                    queue: backend.queue,
+                    encoder: backend.encoder,
+                    pipeline: &prepared_backend.render_pipeline,
+                    ocio_bind_group: &prepared_backend.ocio_bind_group,
+                    wrapper_input_layout: &prepared_backend.wrapper_input_layout,
+                    pass_node: prepared_backend.pass_node,
+                    table: frame_table,
+                    resource_pool: Some(resource_pool),
+                    load_op: backend.load_op,
+                },
+            })
+            .map_err(RenderGpuColorTransformRuntimeRecordError::Record)
+    }
+
+    /// Record a non-scene-linear point-effect round trip without CPU transfers.
+    pub fn record_wgpu_effect_domain_round_trip(
+        &mut self,
+        compositor: &GpuFrameCompositor,
+        plan: &mondrian_effects::CompiledEffectGpuPlan,
+        input: &GpuColorFrameHandle,
+        engine: ColorEngine,
+        frame_seed: i64,
+        gpu_options: RenderColorTransformGpuOptions,
+        backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
+    ) -> Result<RenderGpuEffectDomainRecord, RenderGpuEffectDomainRecordError> {
+        let route = {
+            let mut planner =
+                RenderEffectColorDomainGpuPlanner::new(&mut self.shader_cache, gpu_options);
+            planner
+                .plan(input.descriptor(), plan.processing_domain(), engine)
+                .map_err(RenderGpuEffectDomainRecordError::Plan)?
+        };
+        let (Some(to_processing_plan), Some(to_working_plan)) =
+            (route.to_processing, route.to_working)
+        else {
+            return Err(RenderGpuEffectDomainRecordError::SceneLinearUsesInlineCompositor);
+        };
+        let device = backend.device;
+        let queue = backend.queue;
+        let encoder = backend.encoder;
+        let load_op = backend.load_op;
+        let to_processing = self
+            .record_wgpu_planned_color_transform_owned_backend(
+                to_processing_plan,
+                input,
+                GpuColorFrameTextureFormat::Rgba32Float,
+                "effect-domain-processing-input",
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device,
+                    queue,
+                    encoder: &mut *encoder,
+                    load_op,
+                },
+            )
+            .map_err(RenderGpuEffectDomainRecordError::ToProcessing)?;
+        let effect = compositor
+            .record_point_effect_pass(
+                device,
+                &mut *encoder,
+                &mut self.frame_ids,
+                &mut self.frame_table,
+                Some(&self.resource_pool),
+                &to_processing.materialized.output,
+                plan,
+                frame_seed,
+            )
+            .map_err(RenderGpuEffectDomainRecordError::PointEffect)?;
+        let to_working = self
+            .record_wgpu_planned_color_transform_owned_backend(
+                to_working_plan,
+                &effect.output,
+                GpuColorFrameTextureFormat::Rgba32Float,
+                "effect-domain-working-output",
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device,
+                    queue,
+                    encoder: &mut *encoder,
+                    load_op,
+                },
+            )
+            .map_err(RenderGpuEffectDomainRecordError::ToWorking)?;
+        Ok(RenderGpuEffectDomainRecord { to_processing, effect, to_working })
     }
 
     /// Plan, prepare runtime-owned backend objects, and record a native GPU
@@ -1874,6 +2067,57 @@ impl RenderGpuColorTransformResourcePlan {
             transform,
         })
     }
+
+    /// Return diagnostics for this single GPU-resident color pass.
+    pub fn stage_diagnostics(&self) -> RenderColorStageDiagnostics {
+        RenderColorStageDiagnostics {
+            total_stages: 1,
+            gpu_color_stages: 1,
+            stage_pixels: self.output.descriptor().pixel_count() as u64,
+            ..RenderColorStageDiagnostics::default()
+        }
+    }
+
+    /// Bind this resource plan to a prepared OCIO render-pass node.
+    pub fn schedule_pass(
+        &self,
+        pass_node: OcioGpuWgpuRenderPassNodePlan,
+    ) -> Result<RenderGpuColorPassSchedule, RenderGpuColorPassScheduleError> {
+        RenderGpuColorPassSchedule::new(
+            self.input.clone(),
+            self.output.clone(),
+            self.transform.clone(),
+            pass_node,
+        )
+    }
+
+    /// Allocate the output, record the OCIO pass, and keep both frames GPU-resident.
+    pub fn record_wgpu_color_transform(
+        &self,
+        request: RenderGpuOutputStageRecordRequest<'_>,
+    ) -> Result<RenderGpuColorTransformRecord, RenderGpuOutputStageRecordError> {
+        let stage = RenderGpuOutputStageResourcePlan {
+            input: self.input.clone(),
+            output: self.output.clone(),
+            readback: None,
+            input_upload: None,
+            output_allocation: self.output_allocation.clone(),
+            transform: self.transform.clone(),
+        };
+        let record = stage.record_wgpu_output_stage(request)?;
+        Ok(RenderGpuColorTransformRecord {
+            materialized: record.materialized,
+            stage_diagnostics: self.stage_diagnostics(),
+        })
+    }
+}
+
+/// Result of recording one GPU-resident OCIO transform between graph nodes.
+pub struct RenderGpuColorTransformRecord {
+    /// Existing input and newly materialized output handles.
+    pub materialized: RenderGpuOutputStageMaterializedResources,
+    /// Single-pass diagnostics with no upload/readback stages.
+    pub stage_diagnostics: RenderColorStageDiagnostics,
 }
 
 /// Error returned when an in-graph GPU OCIO transform cannot bind resources.
@@ -5944,6 +6188,10 @@ mod tests {
         assert!(!resources.transform.requires_source_upload);
         assert!(!resources.transform.requires_output_readback);
         assert_eq!(ids.next_raw(), 652);
+        let pass_node = pass_node_for_transform(&resources.transform);
+        let schedule = resources.schedule_pass(pass_node).expect("intermediate pass schedule");
+        assert_eq!(schedule.input, resources.input);
+        assert_eq!(schedule.output, resources.output);
     }
 
     #[test]
@@ -6603,6 +6851,164 @@ mod tests {
                 plan.wgpu.blockers.push(blocker.clone());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn gpu_effect_domain_round_trip_matches_stock_ocio_cpu_reference() {
+        use mondrian_effects::{
+            compile_scheduled_effect_graph_in_domain, lower_effect_graph_to_gpu_plan,
+            EffectColorDomain, EffectColorDomainContract, EffectRenderOp, EffectRenderPlan,
+        };
+
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping GPU effect-domain round-trip test: no GPU adapter available");
+            return;
+        };
+        let engine = ColorEngine::mondrian_standard();
+        let domain = EffectColorDomain::DisplayEncodedRgb { color_space: ColorSpace::Rec709 };
+        let graph = compile_scheduled_effect_graph_in_domain(
+            &EffectRenderPlan {
+                ops: vec![EffectRenderOp::ColorAdjust {
+                    exposure: 0.5,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                }],
+            },
+            EffectColorDomainContract::preserving(domain),
+        )
+        .expect("valid display-domain graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("GPU effect plan");
+        let data = (0..16)
+            .map(|index| {
+                let value = index as f32 / 40.0;
+                [value, value * 0.7, value * 0.4, 0.25 + value]
+            })
+            .collect::<Vec<_>>();
+        let mut expected = data.iter().flatten().copied().collect::<Vec<_>>();
+        engine
+            .convert_identity_float(
+                &mut expected,
+                mondrian_core::OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
+                mondrian_core::OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
+            )
+            .expect("CPU working to encoded reference");
+        let exposure = 2.0_f32.powf(0.5);
+        for pixel in expected.chunks_exact_mut(4) {
+            pixel[0] *= exposure;
+            pixel[1] *= exposure;
+            pixel[2] *= exposure;
+        }
+        engine
+            .convert_identity_float(
+                &mut expected,
+                mondrian_core::OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
+                mondrian_core::OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
+            )
+            .expect("CPU encoded to working reference");
+
+        let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_000);
+        let input = GpuColorFrameHandle::new(
+            runtime.frame_ids_mut().allocate(),
+            ColorFrameDescriptor {
+                width: 4,
+                height: 4,
+                color_space: WorkingColorSpace::LinearRec709.into(),
+                domain: ColorFrameDomain::Working,
+                encoding: ColorFrameEncoding::LinearFloat,
+                residency: ColorFrameResidency::Gpu,
+            },
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "effect-round-trip-working-input",
+        )
+        .expect("working input handle");
+        let input_allocation = GpuColorFrameAllocationPlan::for_handle(input.clone());
+        let input_resource = GpuColorFrameUploader::allocate(&context.device, &input_allocation);
+        context.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &input_resource.resource().texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&data),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(64),
+                rows_per_image: Some(4),
+            },
+            wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+        );
+        runtime.frame_table_mut().insert(input_resource).expect("insert working input");
+        let compositor = GpuFrameCompositor::new(&context.device);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("effect-domain-stock-ocio-round-trip"),
+        });
+        let record = runtime
+            .record_wgpu_effect_domain_round_trip(
+                &compositor,
+                &plan,
+                &input,
+                engine,
+                17,
+                RenderColorTransformGpuOptions::default(),
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &context.device,
+                    queue: &context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                },
+            )
+            .expect("record effect-domain GPU round trip");
+        assert_eq!(record.to_processing.stage_diagnostics.upload_stages, 0);
+        assert_eq!(record.to_processing.stage_diagnostics.readback_stages, 0);
+        assert_eq!(record.to_working.stage_diagnostics.upload_stages, 0);
+        assert_eq!(record.to_working.stage_diagnostics.readback_stages, 0);
+        assert_eq!(record.effect.processed_pixels, 16);
+        let output_handle = &record.to_working.materialized.output;
+        assert_eq!(output_handle.descriptor().domain, ColorFrameDomain::Working);
+        let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("effect-domain-round-trip-readback"),
+            size: 256 * 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let output = runtime.frame_table().get(output_handle).expect("round-trip output");
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &output.resource().texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(4),
+                },
+            },
+            wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+        );
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let mapped = map_readback_buffer(&context.device, &readback);
+        let actual = mapped
+            .chunks_exact(256)
+            .take(4)
+            .flat_map(|row| bytemuck::cast_slice::<u8, f32>(&row[..64]).iter().copied())
+            .collect::<Vec<_>>();
+        readback.unmap();
+
+        let max_delta = expected
+            .iter()
+            .zip(&actual)
+            .map(|(expected, actual)| (expected - actual).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_delta <= 3.0e-5,
+            "GPU/CPU round-trip max delta {max_delta}"
+        );
     }
 
     fn map_readback_buffer(device: &wgpu::Device, readback: &wgpu::Buffer) -> Vec<u8> {

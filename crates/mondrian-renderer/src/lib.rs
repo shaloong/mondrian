@@ -71,9 +71,10 @@ pub use color_stage::{
     RenderColorStageGpuBlockerBreakdown, RenderColorStageMode, RenderColorStagePlan,
     RenderColorStagePlanner, RenderGpuColorPassExecutionError, RenderGpuColorPassInputView,
     RenderGpuColorPassResolvedResources, RenderGpuColorPassSchedule,
-    RenderGpuColorPassScheduleError, RenderGpuColorPassTargetView,
+    RenderGpuColorPassScheduleError, RenderGpuColorPassTargetView, RenderGpuColorTransformRecord,
     RenderGpuColorTransformResourcePlan, RenderGpuColorTransformResourcePlanError,
-    RenderGpuInputStageRecord, RenderGpuInputStageResourcePlan,
+    RenderGpuColorTransformRuntimeRecordError, RenderGpuEffectDomainRecord,
+    RenderGpuEffectDomainRecordError, RenderGpuInputStageRecord, RenderGpuInputStageResourcePlan,
     RenderGpuInputStageResourcePlanError, RenderGpuInputStageRuntimeRecordError,
     RenderGpuOutputBoundaryBackendContext, RenderGpuOutputBoundaryRecordError,
     RenderGpuOutputBoundaryRecordRequest, RenderGpuOutputBoundaryRuntime,
@@ -118,7 +119,7 @@ pub use display_calibration::{
 pub use gpu_compositor::{
     evaluate_gpu_compositing_capability, GpuCompositeError, GpuCompositeLayer,
     GpuCompositeLayerSource, GpuCompositeRecord, GpuCompositeRequest, GpuCompositingBlockerReason,
-    GpuCompositingCapability, GpuCompositingDiagnostics, GpuFrameCompositor,
+    GpuCompositingCapability, GpuCompositingDiagnostics, GpuFrameCompositor, GpuPointEffectRecord,
 };
 #[cfg(target_os = "windows")]
 pub use native_video::{

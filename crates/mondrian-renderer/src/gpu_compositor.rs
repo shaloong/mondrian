@@ -103,6 +103,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         uniforms.source_kind == 1u,
     );
     layer_px = apply_effects(layer_px, effect_position);
+    if (uniforms.source_kind == 3u) {
+        return layer_px;
+    }
     return over_straight_alpha(base_px, layer_px, uniforms.opacity);
 }
 
@@ -370,6 +373,14 @@ pub struct GpuCompositeRecord {
     pub diagnostics: GpuCompositingDiagnostics,
 }
 
+/// Result of recording one standalone GPU point-effect pass.
+pub struct GpuPointEffectRecord {
+    /// GPU-resident frame carrying the same effect-domain identity as the input.
+    pub output: GpuColorFrameHandle,
+    /// Number of pixels evaluated by the point-effect shader.
+    pub processed_pixels: u64,
+}
+
 /// Errors returned by native GPU working-space compositing.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GpuCompositeError {
@@ -403,6 +414,26 @@ pub enum GpuCompositeError {
     EffectDomainRequiresExternalPass {
         /// Exact domain that the external pass sequence must materialize.
         domain: EffectColorDomain,
+    },
+    /// A standalone point pass was given a scene, data, or alpha domain.
+    #[error("GPU point-effect pass requires an RGB effect intermediate, got {domain:?}")]
+    PointEffectRequiresRgbIntermediate {
+        /// Unsupported plan domain.
+        domain: EffectColorDomain,
+    },
+    /// The intermediate frame does not match the effect plan's exact domain contract.
+    #[error("GPU point-effect intermediate descriptor mismatch")]
+    PointEffectDescriptorMismatch {
+        /// Descriptor required by the plan.
+        expected: ColorFrameDescriptor,
+        /// Supplied frame descriptor.
+        actual: ColorFrameDescriptor,
+    },
+    /// The point pass requires a floating-point sampled texture.
+    #[error("GPU point-effect input texture must be floating point, got {texture_format:?}")]
+    PointEffectTextureFormatUnsupported {
+        /// Unsupported input texture format.
+        texture_format: GpuColorFrameTextureFormat,
     },
     /// A renderer frame handle could not be created.
     #[error("GPU composite output handle error: {0}")]
@@ -684,6 +715,59 @@ impl GpuFrameCompositor {
         Ok(GpuCompositeRecord { output, diagnostics })
     }
 
+    /// Record a standalone point-effect pass over a typed effect-domain frame.
+    ///
+    /// The pass does not blend or relabel pixels. Renderer-owned OCIO passes
+    /// are responsible for entering and leaving this exact intermediate domain.
+    pub fn record_point_effect_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        input: &GpuColorFrameHandle,
+        plan: &CompiledEffectGpuPlan,
+        frame_seed: i64,
+    ) -> Result<GpuPointEffectRecord, GpuCompositeError> {
+        validate_point_effect_input(input, plan)?;
+        let input_resource = table.get(input).map_err(GpuCompositeError::ResourceTable)?;
+        let descriptor = input.descriptor();
+        let output_resource = create_working_resource(
+            device,
+            ids,
+            descriptor,
+            "gpu-point-effect-output",
+            resource_pool,
+        )?;
+        let width = descriptor.width;
+        let height = descriptor.height;
+        self.record_layer_pass(
+            device,
+            encoder,
+            &input_resource.resource().texture_view,
+            &output_resource.resource().texture_view,
+            &input_resource.resource().texture_view,
+            GpuCompositeUniforms {
+                opacity: 1.0,
+                source_kind: 3,
+                effect_count: plan.operations().len() as u32,
+                frame_seed: frame_seed as u32,
+                solid_color: [0.0; 4],
+                inv_transform0: [1.0, 0.0, 0.0, 0.0],
+                inv_transform1: [1.0, 0.0, 0.0, 0.0],
+                geometry: [width as f32, height as f32, width as f32, height as f32],
+                effects: effect_uniforms(Some(plan)),
+            },
+        );
+        let output = output_resource.handle().clone();
+        table.insert(output_resource).map_err(GpuCompositeError::ResourceTable)?;
+        Ok(GpuPointEffectRecord {
+            output,
+            processed_pixels: u64::from(width).saturating_mul(u64::from(height)),
+        })
+    }
+
     fn record_layer_pass(
         &self,
         device: &wgpu::Device,
@@ -745,6 +829,44 @@ impl GpuFrameCompositor {
         pass.set_bind_group(1, &uniform_bind_group, &[]);
         pass.draw(0..4, 0..1);
     }
+}
+
+fn validate_point_effect_input(
+    input: &GpuColorFrameHandle,
+    plan: &CompiledEffectGpuPlan,
+) -> Result<(), GpuCompositeError> {
+    let actual = input.descriptor();
+    let (color_space, encoding) = match plan.processing_domain() {
+        EffectColorDomain::LogPerceptualRgb { color_space }
+        | EffectColorDomain::DisplayEncodedRgb { color_space } => {
+            (color_space, ColorFrameEncoding::EncodedFloat)
+        }
+        EffectColorDomain::DisplayLinearRgb { color_space } => {
+            (color_space, ColorFrameEncoding::LinearFloat)
+        }
+        domain @ (EffectColorDomain::SceneLinearRgb
+        | EffectColorDomain::Data
+        | EffectColorDomain::AlphaMask) => {
+            return Err(GpuCompositeError::PointEffectRequiresRgbIntermediate { domain });
+        }
+    };
+    let expected = ColorFrameDescriptor {
+        width: actual.width,
+        height: actual.height,
+        color_space: color_space.into(),
+        domain: ColorFrameDomain::Effect,
+        encoding,
+        residency: ColorFrameResidency::Gpu,
+    };
+    if actual != expected {
+        return Err(GpuCompositeError::PointEffectDescriptorMismatch { expected, actual });
+    }
+    if input.texture_format() == GpuColorFrameTextureFormat::Rgba8Unorm {
+        return Err(GpuCompositeError::PointEffectTextureFormatUnsupported {
+            texture_format: input.texture_format(),
+        });
+    }
+    Ok(())
 }
 
 fn single_layer_gpu_passthrough<'a>(
@@ -1191,6 +1313,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn point_effect_pass_accepts_matching_display_encoded_intermediate() {
+        use mondrian_effects::{
+            compile_scheduled_effect_graph_in_domain, lower_effect_graph_to_gpu_plan,
+            EffectColorDomain, EffectColorDomainContract, EffectRenderOp, EffectRenderPlan,
+        };
+
+        let domain =
+            EffectColorDomain::DisplayEncodedRgb { color_space: mondrian_core::ColorSpace::Rec709 };
+        let graph = compile_scheduled_effect_graph_in_domain(
+            &EffectRenderPlan {
+                ops: vec![EffectRenderOp::ColorAdjust {
+                    exposure: 0.25,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                }],
+            },
+            EffectColorDomainContract::preserving(domain),
+        )
+        .expect("valid domain graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("GPU point plan");
+        let input = GpuColorFrameHandle::new(
+            crate::GpuColorFrameId::from_raw(120),
+            ColorFrameDescriptor {
+                width: 1920,
+                height: 1080,
+                color_space: mondrian_core::ColorSpace::Rec709.into(),
+                domain: ColorFrameDomain::Effect,
+                encoding: ColorFrameEncoding::EncodedFloat,
+                residency: ColorFrameResidency::Gpu,
+            },
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "display-effect-input",
+        )
+        .expect("effect input");
+
+        validate_point_effect_input(&input, &plan).expect("matching point effect input");
+    }
+
     #[tokio::test]
     async fn gpu_point_effects_match_cpu_float_reference_on_real_wgpu_device() {
         use crate::color_accuracy::{
@@ -1293,6 +1454,138 @@ mod tests {
                 report.within_budget,
                 "GPU point-effect accuracy budget exceeded: {report:#?}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn standalone_effect_domain_point_pass_matches_numeric_reference() {
+        use mondrian_effects::{
+            compile_scheduled_effect_graph_in_domain, lower_effect_graph_to_gpu_plan,
+            EffectColorDomain, EffectColorDomainContract, EffectRenderOp, EffectRenderPlan,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping standalone point-effect test: no GPU adapter available");
+            return;
+        };
+        let domain =
+            EffectColorDomain::DisplayEncodedRgb { color_space: mondrian_core::ColorSpace::Rec709 };
+        let graph = compile_scheduled_effect_graph_in_domain(
+            &EffectRenderPlan {
+                ops: vec![EffectRenderOp::ColorAdjust {
+                    exposure: 1.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                }],
+            },
+            EffectColorDomainContract::preserving(domain),
+        )
+        .expect("valid display-domain graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("GPU point plan");
+        let data = (0..16)
+            .map(|index| {
+                let value = index as f32 / 32.0;
+                [value, value * 0.75, value * 0.5, 1.0]
+            })
+            .collect::<Vec<_>>();
+        let expected = data
+            .iter()
+            .map(|pixel| [pixel[0] * 2.0, pixel[1] * 2.0, pixel[2] * 2.0, pixel[3]])
+            .collect::<Vec<_>>();
+        let descriptor = ColorFrameDescriptor {
+            width: 4,
+            height: 4,
+            color_space: mondrian_core::ColorSpace::Rec709.into(),
+            domain: ColorFrameDomain::Effect,
+            encoding: ColorFrameEncoding::EncodedFloat,
+            residency: ColorFrameResidency::Gpu,
+        };
+        let input = GpuColorFrameHandle::new(
+            crate::GpuColorFrameId::from_raw(900),
+            descriptor,
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "standalone-effect-input",
+        )
+        .expect("effect input");
+        let input_allocation = GpuColorFrameAllocationPlan::for_handle(input.clone());
+        let input_resource = GpuColorFrameUploader::allocate(&context.device, &input_allocation);
+        context.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &input_resource.resource().texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&data),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(64),
+                rows_per_image: Some(4),
+            },
+            wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+        );
+        let compositor = GpuFrameCompositor::new(&context.device);
+        let mut ids = GpuColorFrameIdAllocator::new(901);
+        let mut table = GpuColorFrameResourceTable::new();
+        table.insert(input_resource).expect("insert effect input");
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("standalone-effect-domain-point-pass"),
+        });
+        let record = compositor
+            .record_point_effect_pass(
+                &context.device,
+                &mut encoder,
+                &mut ids,
+                &mut table,
+                None,
+                &input,
+                &plan,
+                0,
+            )
+            .expect("record standalone point pass");
+        assert_eq!(record.output.descriptor(), descriptor);
+        assert_eq!(record.processed_pixels, 16);
+        let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("standalone-effect-domain-readback"),
+            size: 256 * 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let output = table.get(&record.output).expect("point pass output");
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &output.resource().texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(4),
+                },
+            },
+            wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+        );
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let mapped = map_test_readback(&context.device, &readback);
+        let actual = mapped
+            .chunks_exact(256)
+            .take(4)
+            .flat_map(|row| {
+                bytemuck::cast_slice::<u8, f32>(&row[..64])
+                    .chunks_exact(4)
+                    .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]])
+            })
+            .collect::<Vec<_>>();
+        readback.unmap();
+
+        for (expected, actual) in expected.iter().zip(actual.iter()) {
+            for channel in 0..4 {
+                assert!((expected[channel] - actual[channel]).abs() <= 1.0e-6);
+            }
         }
     }
 
