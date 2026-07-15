@@ -50,9 +50,9 @@ use mondrian_media::{
 use mondrian_platform::{NativeVideoTextureImportProbe, SystemPlatformService};
 use mondrian_renderer::profile::{GpuTimestampSample, GpuTimestampStageDurations};
 use mondrian_renderer::{
-    GpuCompositingDiagnostics, GpuCompositorUniformArenaDiagnostics,
-    GpuViewerSpatialRuntimeDiagnostics, NativeVideoImportCpuTimings, RenderColorStageDiagnostics,
-    ViewerGpuExecutionCpuStageTimings,
+    GpuCompositingDiagnostics, GpuCompositorTextureBindingDiagnostics,
+    GpuCompositorUniformArenaDiagnostics, GpuViewerSpatialRuntimeDiagnostics,
+    NativeVideoImportCpuTimings, RenderColorStageDiagnostics, ViewerGpuExecutionCpuStageTimings,
 };
 use mondrian_timeline::track::Track;
 use mondrian_ui_core::tree::TreeWalker;
@@ -150,6 +150,7 @@ struct HeadlessViewerGpuExecutionSummary {
     stage_diagnostics: RenderColorStageDiagnostics,
     compositing_diagnostics: GpuCompositingDiagnostics,
     compositor_uniform_arena: Option<GpuCompositorUniformArenaDiagnostics>,
+    compositor_texture_bindings: Option<GpuCompositorTextureBindingDiagnostics>,
     spatial_diagnostics: Option<GpuViewerSpatialRuntimeDiagnostics>,
     rendered_decode_execution: AppUiPreviewDecodeExecutionSummary,
     native_import_contract_pools_peak: usize,
@@ -204,6 +205,9 @@ impl HeadlessViewerGpuExecutionSummary {
         }
         if let Some(diagnostics) = execution.compositor_uniform_arena {
             self.compositor_uniform_arena = Some(diagnostics);
+        }
+        if let Some(diagnostics) = execution.compositor_texture_bindings {
+            self.compositor_texture_bindings = Some(diagnostics);
         }
         if let Some(diagnostics) = execution.spatial_diagnostics {
             self.spatial_diagnostics = Some(diagnostics);
@@ -313,6 +317,7 @@ fn headless_gpu_summary_records_distinct_executed_extents() {
             cpu_stage_timings: Some(ViewerGpuExecutionCpuStageTimings::default()),
             compositing_diagnostics: None,
             compositor_uniform_arena: None,
+            compositor_texture_bindings: None,
             spatial_diagnostics: None,
             stage_diagnostics: None,
             fallback_reasons: Vec::new(),

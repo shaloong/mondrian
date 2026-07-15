@@ -622,6 +622,11 @@ capture integrity, viewer output, GPU color path, display contract, display
 capability drift, and media color policy, and emits stable root-cause/action
 codes. Tooling should treat the budget summary as the threshold evidence and
 the health report as the canonical diagnostic interpretation.
+Window, headless, and performance reports also retain compositor texture
+bind-group creation/cache-hit counters. The renderer runtime report carries
+the equivalent OCIO wrapper-input binding counters, allowing warm-frame gates
+to distinguish necessary uniform/pass work from repeated backend object
+creation without forcing a GPU completion wait.
 
 Mondrian's `ColorSpace` enum maps to pinned OCIO color-space names in the
 default config. The mapping is tested for every enum variant, and representative

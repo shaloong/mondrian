@@ -17,10 +17,11 @@ use mondrian_renderer::{
         GpuTimestampQueryRing, GpuTimestampSample, GpuTimestampStageMarker, GpuTimestampToken,
     },
     request_adapter_with_native_video_preference, GpuCompositingDiagnostics,
-    GpuCompositorUniformArenaDiagnostics, GpuNativeDecodedFrameImportSupport,
-    GpuViewerSpatialRuntimeDiagnostics, RenderColorStageDiagnostics,
-    ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionGpuStage, ViewerGpuExecutionRequest,
-    ViewerGpuExecutionRuntime, ViewerGpuExecutionStageMarker, ViewerSourceRect,
+    GpuCompositorTextureBindingDiagnostics, GpuCompositorUniformArenaDiagnostics,
+    GpuNativeDecodedFrameImportSupport, GpuViewerSpatialRuntimeDiagnostics,
+    RenderColorStageDiagnostics, ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionGpuStage,
+    ViewerGpuExecutionRequest, ViewerGpuExecutionRuntime, ViewerGpuExecutionStageMarker,
+    ViewerSourceRect,
 };
 use mondrian_ui_widgets::ViewerExternalTexturePresentation;
 
@@ -49,6 +50,8 @@ pub(crate) struct HeadlessViewerGpuExecution {
     pub compositing_diagnostics: Option<GpuCompositingDiagnostics>,
     /// Cumulative bounded uniform-arena reuse evidence after this frame.
     pub compositor_uniform_arena: Option<GpuCompositorUniformArenaDiagnostics>,
+    /// Cumulative compositor texture-binding reuse evidence after this frame.
+    pub compositor_texture_bindings: Option<GpuCompositorTextureBindingDiagnostics>,
     /// Cumulative spatial-runtime evidence after this frame.
     pub spatial_diagnostics: Option<GpuViewerSpatialRuntimeDiagnostics>,
     /// Structured GPU color-stage evidence for a newly rendered output.
@@ -211,6 +214,9 @@ impl HeadlessViewerGpuAdapter {
                 cpu_stage_timings: None,
                 compositing_diagnostics: None,
                 compositor_uniform_arena: Some(self.runtime.compositor_uniform_arena_diagnostics()),
+                compositor_texture_bindings: Some(
+                    self.runtime.compositor_texture_binding_diagnostics(),
+                ),
                 spatial_diagnostics: None,
                 stage_diagnostics: None,
                 fallback_reasons: Vec::new(),
@@ -315,6 +321,9 @@ impl HeadlessViewerGpuAdapter {
             cpu_stage_timings: Some(record.cpu_stage_timings),
             compositing_diagnostics: Some(record.compositing_diagnostics),
             compositor_uniform_arena: Some(self.runtime.compositor_uniform_arena_diagnostics()),
+            compositor_texture_bindings: Some(
+                self.runtime.compositor_texture_binding_diagnostics(),
+            ),
             spatial_diagnostics: Some(record.spatial_diagnostics),
             stage_diagnostics: Some(record.stage_diagnostics),
             fallback_reasons: record.fallback_reasons,

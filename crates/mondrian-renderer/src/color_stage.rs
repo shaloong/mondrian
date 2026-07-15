@@ -1548,6 +1548,10 @@ pub struct RenderGpuOutputRuntimeDiagnosticsReport {
     pub backend_object_misses: u64,
     /// Concrete backend-object preparation failures observed by the runtime.
     pub backend_object_failures: u64,
+    /// OCIO wrapper input bind groups created for frame textures.
+    pub wrapper_input_bind_group_creations: u64,
+    /// OCIO wrapper input bind groups reused from frame textures.
+    pub wrapper_input_bind_group_cache_hits: u64,
     /// Number of GPU frame-table entries retained by the runtime.
     pub frame_table_entries: usize,
     /// Next GPU frame id that will be allocated.
@@ -1569,6 +1573,14 @@ impl From<RenderGpuOutputBoundaryRuntimeDiagnostics> for RenderGpuOutputRuntimeD
             backend_object_hits: diagnostics.backend_objects.hits,
             backend_object_misses: diagnostics.backend_objects.misses,
             backend_object_failures: diagnostics.backend_objects.failures,
+            wrapper_input_bind_group_creations: diagnostics
+                .backend_objects
+                .wrapper_input_bindings
+                .bind_group_creations,
+            wrapper_input_bind_group_cache_hits: diagnostics
+                .backend_objects
+                .wrapper_input_bindings
+                .cache_hits,
             frame_table_entries: diagnostics.frame_table_entries,
             next_frame_id: diagnostics.next_frame_id,
         }

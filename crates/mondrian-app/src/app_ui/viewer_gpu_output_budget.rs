@@ -2450,6 +2450,8 @@ mod tests {
                 backend_object_hits: 6,
                 backend_object_misses: 7,
                 backend_object_failures: 0,
+                wrapper_input_bind_group_creations: 0,
+                wrapper_input_bind_group_cache_hits: 0,
                 frame_table_entries: 8,
                 next_frame_id: 9,
             })
@@ -2513,6 +2515,8 @@ mod tests {
                 backend_object_hits: 0,
                 backend_object_misses: 1,
                 backend_object_failures: 1,
+                wrapper_input_bind_group_creations: 0,
+                wrapper_input_bind_group_cache_hits: 0,
                 frame_table_entries: 2,
                 next_frame_id: 3,
             })

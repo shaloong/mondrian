@@ -134,6 +134,8 @@ struct AppUiViewerGpuOutputTelemetry {
     last_stage_diagnostics: Option<RenderColorStageDiagnostics>,
     last_spatial_runtime: Option<mondrian_renderer::GpuViewerSpatialRuntimeDiagnostics>,
     last_compositor_uniform_arena: Option<mondrian_renderer::GpuCompositorUniformArenaDiagnostics>,
+    last_compositor_texture_bindings:
+        Option<mondrian_renderer::GpuCompositorTextureBindingDiagnostics>,
     last_frame_context: Option<AppUiViewerGpuOutputFrameContext>,
     last_preview_candidate_id: Option<u64>,
     last_preview_candidate_state: Option<AppUiViewerGpuOutputPreviewCandidateState>,
@@ -184,6 +186,8 @@ struct AppUiViewerGpuOutputDiagnostics {
     spatial_runtime: Option<mondrian_renderer::GpuViewerSpatialRuntimeDiagnostics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     compositor_uniform_arena: Option<mondrian_renderer::GpuCompositorUniformArenaDiagnostics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compositor_texture_bindings: Option<mondrian_renderer::GpuCompositorTextureBindingDiagnostics>,
     runtime_report: RenderGpuOutputRuntimeDiagnosticsReport,
     health: AppUiViewerGpuOutputHealthSummary,
     health_counts: AppUiViewerGpuOutputHealthCounts,
@@ -549,6 +553,7 @@ impl AppUiViewerGpuOutputTelemetry {
             last_stage_report: self.last_stage_diagnostics.map(Into::into),
             spatial_runtime: self.last_spatial_runtime,
             compositor_uniform_arena: self.last_compositor_uniform_arena,
+            compositor_texture_bindings: self.last_compositor_texture_bindings,
             runtime_report,
             health,
             health_counts: self.health_counts,
@@ -571,6 +576,7 @@ impl AppUiViewerGpuOutputTelemetry {
         self.last_stage_diagnostics = None;
         self.last_spatial_runtime = None;
         self.last_compositor_uniform_arena = None;
+        self.last_compositor_texture_bindings = None;
         self.last_frame_context = None;
         self.last_preview_candidate_id = None;
         self.last_preview_candidate_state = None;
@@ -623,6 +629,13 @@ impl AppUiViewerGpuOutputTelemetry {
         diagnostics: mondrian_renderer::GpuCompositorUniformArenaDiagnostics,
     ) {
         self.last_compositor_uniform_arena = Some(diagnostics);
+    }
+
+    fn record_compositor_texture_bindings(
+        &mut self,
+        diagnostics: mondrian_renderer::GpuCompositorTextureBindingDiagnostics,
+    ) {
+        self.last_compositor_texture_bindings = Some(diagnostics);
     }
 
     fn record_non_workspace_skip(&mut self) {
@@ -3422,6 +3435,10 @@ fn prepare_viewer_gpu_preview(
     session
         .viewer_gpu_output_telemetry
         .record_compositor_uniform_arena(uniform_arena);
+    let texture_bindings = session.viewer_gpu_execution.compositor_texture_binding_diagnostics();
+    session
+        .viewer_gpu_output_telemetry
+        .record_compositor_texture_bindings(texture_bindings);
     session
         .viewer_gpu_output_telemetry
         .record_spatial_runtime(record.spatial_diagnostics);
