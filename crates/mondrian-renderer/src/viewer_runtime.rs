@@ -123,8 +123,16 @@ impl ViewerGpuExecutionRuntime {
         self.color_output.diagnostics()
     }
 
+    /// Point-in-time evidence for persistent compositor uniform reuse.
+    pub fn compositor_uniform_arena_diagnostics(
+        &self,
+    ) -> crate::GpuCompositorUniformArenaDiagnostics {
+        self.working_compositor.uniform_arena_diagnostics()
+    }
+
     /// Release resources scoped to the current candidate, retaining pipelines.
     pub fn clear_frame_resources(&mut self) {
+        self.working_compositor.clear_frame_resources();
         self.color_output.clear_frame_resources();
         self.spatial.clear_frame_resources();
         self.display_calibration.clear_frame_resources();
@@ -342,6 +350,7 @@ impl ViewerGpuExecutionRuntime {
 
     /// Reset all retained execution resources after a device/surface transition.
     pub fn reset(&mut self) {
+        self.working_compositor.clear_frame_resources();
         self.spatial.clear();
         self.display_calibration.clear();
         self.color_output.clear_frame_resources();
@@ -697,6 +706,7 @@ fn prepare_composite<'a>(
                         .record_wgpu_solid_source(
                             compositor,
                             device,
+                            queue,
                             encoder,
                             request.width,
                             request.height,

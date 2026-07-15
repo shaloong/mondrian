@@ -121,8 +121,8 @@ pub use display_calibration::{
 pub use gpu_compositor::{
     evaluate_gpu_compositing_capability, GpuCompositeError, GpuCompositeLayer,
     GpuCompositeLayerSource, GpuCompositeRecord, GpuCompositeRequest, GpuCompositingBlockerReason,
-    GpuCompositingCapability, GpuCompositingDiagnostics, GpuFrameCompositor, GpuPointEffectRecord,
-    GpuSolidSourceRecord,
+    GpuCompositingCapability, GpuCompositingDiagnostics, GpuCompositorUniformArenaDiagnostics,
+    GpuFrameCompositor, GpuPointEffectRecord, GpuSolidSourceRecord,
 };
 #[cfg(target_os = "windows")]
 pub use native_video::{

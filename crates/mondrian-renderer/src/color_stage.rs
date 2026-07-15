@@ -838,6 +838,7 @@ impl RenderGpuOutputBoundaryRuntime {
         &mut self,
         compositor: &GpuFrameCompositor,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         width: u32,
         height: u32,
@@ -847,6 +848,7 @@ impl RenderGpuOutputBoundaryRuntime {
         let Self { frame_ids, frame_table, resource_pool, .. } = self;
         compositor.record_solid_source_pass(
             device,
+            queue,
             encoder,
             frame_ids,
             frame_table,
@@ -1020,6 +1022,7 @@ impl RenderGpuOutputBoundaryRuntime {
         let effect = compositor
             .record_point_effect_pass(
                 device,
+                queue,
                 &mut *encoder,
                 &mut self.frame_ids,
                 &mut self.frame_table,

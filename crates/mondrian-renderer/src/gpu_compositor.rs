@@ -18,10 +18,11 @@ use mondrian_core::types::{BlendMode, Color};
 use mondrian_effects::{
     CompiledEffectGpuPlan, EffectColorDomain, EffectGpuPointOp, MAX_FUSED_GPU_EFFECT_OPS,
 };
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use wgpu::util::DeviceExt;
 
 const MAX_GPU_COMPOSITE_LAYERS: usize = 5;
+const GPU_COMPOSITOR_UNIFORM_ARENA_SLOTS: u32 = 128;
 const GPU_COMPOSITOR_SHADER: &str = r#"
 struct VsOut {
     @builtin(position) position: vec4<f32>,
@@ -391,6 +392,21 @@ pub struct GpuSolidSourceRecord {
     pub materialized_pixels: u64,
 }
 
+/// Bounded uniform-arena evidence for the compositor hot path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GpuCompositorUniformArenaDiagnostics {
+    /// Persistent GPU buffers created for this arena.
+    pub buffer_creations: u64,
+    /// Uniform payloads written into reserved slots.
+    pub uniform_writes: u64,
+    /// Peak slots reserved within one frame lifetime.
+    pub high_watermark_slots: u32,
+    /// Frame-lifetime resets after ordered submission.
+    pub frame_resets: u64,
+    /// Attempts rejected because callers did not reset the bounded arena.
+    pub exhaustions: u64,
+}
+
 /// Errors returned by native GPU working-space compositing.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GpuCompositeError {
@@ -445,6 +461,12 @@ pub enum GpuCompositeError {
         /// Unsupported input texture format.
         texture_format: GpuColorFrameTextureFormat,
     },
+    /// The bounded per-frame uniform arena was not reset after ordered submission.
+    #[error("GPU compositor uniform arena exhausted at {capacity} slots")]
+    UniformArenaExhausted {
+        /// Fixed slot capacity.
+        capacity: u32,
+    },
     /// A renderer frame handle could not be created.
     #[error("GPU composite output handle error: {0}")]
     OutputHandle(#[from] crate::GpuColorFrameHandleError),
@@ -460,9 +482,17 @@ pub enum GpuCompositeError {
 pub struct GpuFrameCompositor {
     pipeline: wgpu::RenderPipeline,
     texture_layout: wgpu::BindGroupLayout,
-    uniform_layout: wgpu::BindGroupLayout,
+    uniform_buffer: wgpu::Buffer,
+    uniform_bind_group: wgpu::BindGroup,
+    uniform_stride: u64,
+    uniform_arena: Mutex<GpuCompositeUniformArenaState>,
     sampler: wgpu::Sampler,
     procedural_dummy_view: wgpu::TextureView,
+}
+
+struct GpuCompositeUniformArenaState {
+    next_slot: u32,
+    diagnostics: GpuCompositorUniformArenaDiagnostics,
 }
 
 #[repr(C)]
@@ -513,8 +543,10 @@ impl GpuFrameCompositor {
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+                    has_dynamic_offset: true,
+                    min_binding_size: wgpu::BufferSize::new(
+                        std::mem::size_of::<GpuCompositeUniforms>() as u64,
+                    ),
                 },
                 count: None,
             }],
@@ -565,6 +597,28 @@ impl GpuFrameCompositor {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..wgpu::SamplerDescriptor::default()
         });
+        let uniform_size = std::mem::size_of::<GpuCompositeUniforms>() as u64;
+        let uniform_alignment =
+            u64::from(device.limits().min_uniform_buffer_offset_alignment.max(1));
+        let uniform_stride = uniform_size.div_ceil(uniform_alignment) * uniform_alignment;
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mondrian_gpu_working_compositor_uniform_arena"),
+            size: uniform_stride.saturating_mul(u64::from(GPU_COMPOSITOR_UNIFORM_ARENA_SLOTS)),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mondrian_gpu_working_compositor_uniform_arena_bind_group"),
+            layout: &uniform_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &uniform_buffer,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(uniform_size),
+                }),
+            }],
+        });
         let procedural_dummy = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("mondrian_gpu_procedural_dummy"),
             size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
@@ -580,10 +634,31 @@ impl GpuFrameCompositor {
         Self {
             pipeline,
             texture_layout,
-            uniform_layout,
+            uniform_buffer,
+            uniform_bind_group,
+            uniform_stride,
+            uniform_arena: Mutex::new(GpuCompositeUniformArenaState {
+                next_slot: 0,
+                diagnostics: GpuCompositorUniformArenaDiagnostics {
+                    buffer_creations: 1,
+                    ..GpuCompositorUniformArenaDiagnostics::default()
+                },
+            }),
             sampler,
             procedural_dummy_view,
         }
+    }
+
+    /// Reset frame-local uniform slots after the caller has ordered submission.
+    pub fn clear_frame_resources(&self) {
+        let mut arena = self.uniform_arena.lock();
+        arena.next_slot = 0;
+        arena.diagnostics.frame_resets = arena.diagnostics.frame_resets.saturating_add(1);
+    }
+
+    /// Return point-in-time evidence for persistent uniform-arena reuse.
+    pub fn uniform_arena_diagnostics(&self) -> GpuCompositorUniformArenaDiagnostics {
+        self.uniform_arena.lock().diagnostics
     }
 
     /// Record a GPU working-space composite into the supplied command encoder
@@ -698,6 +773,7 @@ impl GpuFrameCompositor {
                 .expect("validate_request rejects unsupported transforms");
             self.record_layer_pass(
                 device,
+                queue,
                 encoder,
                 &accum.resource().texture_view,
                 &dst.resource().texture_view,
@@ -720,7 +796,7 @@ impl GpuFrameCompositor {
                     geometry: [width as f32, height as f32, source_size[0], source_size[1]],
                     effects: effect_uniforms(layer.effect_plan),
                 },
-            );
+            )?;
             src_is_a = !src_is_a;
         }
 
@@ -751,6 +827,7 @@ impl GpuFrameCompositor {
     pub fn record_point_effect_pass(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         ids: &mut GpuColorFrameIdAllocator,
         table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
@@ -773,6 +850,7 @@ impl GpuFrameCompositor {
         let height = descriptor.height;
         self.record_layer_pass(
             device,
+            queue,
             encoder,
             &input_resource.resource().texture_view,
             &output_resource.resource().texture_view,
@@ -788,7 +866,7 @@ impl GpuFrameCompositor {
                 geometry: [width as f32, height as f32, width as f32, height as f32],
                 effects: effect_uniforms(Some(plan)),
             },
-        );
+        )?;
         let output = output_resource.handle().clone();
         table.insert(output_resource).map_err(GpuCompositeError::ResourceTable)?;
         Ok(GpuPointEffectRecord {
@@ -806,6 +884,7 @@ impl GpuFrameCompositor {
     pub fn record_solid_source_pass(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         ids: &mut GpuColorFrameIdAllocator,
         table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
@@ -834,6 +913,7 @@ impl GpuFrameCompositor {
         )?;
         self.record_layer_pass(
             device,
+            queue,
             encoder,
             &self.procedural_dummy_view,
             &output_resource.resource().texture_view,
@@ -849,7 +929,7 @@ impl GpuFrameCompositor {
                 geometry: [width as f32, height as f32, width as f32, height as f32],
                 effects: effect_uniforms(None),
             },
-        );
+        )?;
         let output = output_resource.handle().clone();
         table.insert(output_resource).map_err(GpuCompositeError::ResourceTable)?;
         Ok(GpuSolidSourceRecord {
@@ -861,17 +941,33 @@ impl GpuFrameCompositor {
     fn record_layer_pass(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         accum_view: &wgpu::TextureView,
         dst_view: &wgpu::TextureView,
         layer_view: &wgpu::TextureView,
         uniforms: GpuCompositeUniforms,
-    ) {
-        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mondrian_gpu_working_compositor_layer_uniform"),
-            contents: bytemuck::bytes_of(&uniforms),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+    ) -> Result<(), GpuCompositeError> {
+        let uniform_offset = {
+            let mut arena = self.uniform_arena.lock();
+            if arena.next_slot >= GPU_COMPOSITOR_UNIFORM_ARENA_SLOTS {
+                arena.diagnostics.exhaustions = arena.diagnostics.exhaustions.saturating_add(1);
+                return Err(GpuCompositeError::UniformArenaExhausted {
+                    capacity: GPU_COMPOSITOR_UNIFORM_ARENA_SLOTS,
+                });
+            }
+            let slot = arena.next_slot;
+            arena.next_slot = arena.next_slot.saturating_add(1);
+            arena.diagnostics.uniform_writes = arena.diagnostics.uniform_writes.saturating_add(1);
+            arena.diagnostics.high_watermark_slots =
+                arena.diagnostics.high_watermark_slots.max(arena.next_slot);
+            u64::from(slot).saturating_mul(self.uniform_stride)
+        };
+        queue.write_buffer(
+            &self.uniform_buffer,
+            uniform_offset,
+            bytemuck::bytes_of(&uniforms),
+        );
         let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("mondrian_gpu_working_compositor_texture_bind_group"),
             layout: &self.texture_layout,
@@ -889,14 +985,6 @@ impl GpuFrameCompositor {
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
                 },
             ],
-        });
-        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("mondrian_gpu_working_compositor_uniform_bind_group"),
-            layout: &self.uniform_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
         });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("mondrian_gpu_working_compositor_pass"),
@@ -916,8 +1004,9 @@ impl GpuFrameCompositor {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &texture_bind_group, &[]);
-        pass.set_bind_group(1, &uniform_bind_group, &[]);
+        pass.set_bind_group(1, &self.uniform_bind_group, &[uniform_offset as u32]);
         pass.draw(0..4, 0..1);
+        Ok(())
     }
 }
 
@@ -1563,6 +1652,7 @@ mod tests {
         let record = compositor
             .record_solid_source_pass(
                 &context.device,
+                &context.queue,
                 &mut encoder,
                 &mut ids,
                 &mut table,
@@ -1617,6 +1707,47 @@ mod tests {
             }
         }
         readback.unmap();
+    }
+
+    #[tokio::test]
+    async fn compositor_uniform_arena_reuses_one_buffer_across_submitted_frames() {
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping compositor uniform arena test: no GPU adapter available");
+            return;
+        };
+        let compositor = GpuFrameCompositor::new(&context.device);
+        let mut ids = GpuColorFrameIdAllocator::new(975);
+        let mut table = GpuColorFrameResourceTable::new();
+
+        for frame in 0..2 {
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("compositor-uniform-arena-reuse"),
+                });
+            compositor
+                .record_solid_source_pass(
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    &mut ids,
+                    &mut table,
+                    None,
+                    4,
+                    4,
+                    WorkingColorSpace::LinearRec709,
+                    Color { r: frame as f32, g: 0.25, b: 0.5, a: 1.0 },
+                )
+                .expect("record solid through uniform arena");
+            context.queue.submit(std::iter::once(encoder.finish()));
+            compositor.clear_frame_resources();
+        }
+
+        let diagnostics = compositor.uniform_arena_diagnostics();
+        assert_eq!(diagnostics.buffer_creations, 1);
+        assert_eq!(diagnostics.uniform_writes, 2);
+        assert_eq!(diagnostics.high_watermark_slots, 1);
+        assert_eq!(diagnostics.frame_resets, 2);
+        assert_eq!(diagnostics.exhaustions, 0);
     }
 
     #[tokio::test]
@@ -1696,6 +1827,7 @@ mod tests {
         let record = compositor
             .record_point_effect_pass(
                 &context.device,
+                &context.queue,
                 &mut encoder,
                 &mut ids,
                 &mut table,

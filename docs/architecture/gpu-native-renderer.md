@@ -864,6 +864,12 @@ export color health contract.
 Viewer spatial prefilter, separable Lanczos, working composite, OCIO output, and
 optional ICC display-calibration output textures share one device-scoped,
 exact-contract, byte-bounded resource pool.
+The working compositor also owns one fixed 128-slot, dynamically-offset uniform
+arena. Per-pass uniforms use ordered `Queue::write_buffer` writes into that
+persistent buffer and one persistent bind group; frame cleanup resets only the
+slot cursor after submission, eliminating steady-state uniform-buffer/bind-group
+creation without a device poll or CPU wait. Arena capacity, writes, high-water
+mark, resets, and fail-closed exhaustion are exposed as runtime diagnostics.
 Frame-local handles remain strongly typed and monotonic, while submitted texture
 storage is returned to the pool without a CPU completion wait and reused only
 through ordered queue semantics. Device reset first returns every stage's frame
