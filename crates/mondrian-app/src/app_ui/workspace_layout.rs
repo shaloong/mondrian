@@ -90,6 +90,21 @@ impl AppUiWorkspaceLayout {
         }
     }
 
+    /// Whether `panel` is the active tab in one of the visible dock leaves.
+    ///
+    /// Presence alone is insufficient for demand-driven panels: a grouped
+    /// background tab must not schedule renderer work until it becomes active.
+    pub fn is_panel_active(&self, panel: PanelKind) -> bool {
+        match self {
+            Self::Split { first, second, .. } => {
+                first.is_panel_active(panel) || second.is_panel_active(panel)
+            }
+            Self::Panel { kind, active_index, hidden_tabs, tabs } => {
+                panel_tabs_for_leaf(*kind, hidden_tabs, tabs).get(*active_index) == Some(&panel)
+            }
+        }
+    }
+
     /// Remove a direct dock panel leaf and collapse now-empty split branches.
     ///
     /// Returns `None` when the requested panel was the only remaining leaf.
@@ -520,6 +535,7 @@ fn panel_tabs(kind: PanelKind) -> &'static [PanelKind] {
     match kind {
         PanelKind::Assets => &[PanelKind::Assets, PanelKind::Effects],
         PanelKind::Viewer => &[PanelKind::Viewer],
+        PanelKind::Scopes => &[PanelKind::Scopes],
         PanelKind::Timeline => &[PanelKind::Timeline],
         PanelKind::Inspector => &[PanelKind::Inspector],
         PanelKind::Effects => &[PanelKind::Effects],
@@ -631,6 +647,17 @@ mod tests {
                 second: Box::new(layout_panel(PanelKind::Timeline, 0)),
             }
         );
+    }
+
+    #[test]
+    fn demand_driven_panel_is_active_only_when_its_tab_is_selected() {
+        let background = layout_tabs(vec![PanelKind::Viewer, PanelKind::Scopes], 0);
+        assert!(background.contains_panel(PanelKind::Scopes));
+        assert!(!background.is_panel_active(PanelKind::Scopes));
+
+        let active = layout_tabs(vec![PanelKind::Viewer, PanelKind::Scopes], 1);
+        assert!(active.is_panel_active(PanelKind::Scopes));
+        assert!(!active.is_panel_active(PanelKind::Viewer));
     }
 
     #[test]

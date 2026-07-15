@@ -86,6 +86,10 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                     Action::TogglePanel(PanelKind::Viewer),
                 )),
                 menu_item_with_shortcut(MenuItem::new(
+                    PanelKind::Scopes.display_name(),
+                    Action::TogglePanel(PanelKind::Scopes),
+                )),
+                menu_item_with_shortcut(MenuItem::new(
                     PanelKind::Timeline.display_name(),
                     Action::TogglePanel(PanelKind::Timeline),
                 )),
@@ -864,6 +868,7 @@ mod tests {
         for panel in [
             PanelKind::Assets,
             PanelKind::Viewer,
+            PanelKind::Scopes,
             PanelKind::Timeline,
             PanelKind::Inspector,
             PanelKind::Effects,

@@ -1946,6 +1946,7 @@ fn default_tabs_for_slot(kind: PanelKind) -> &'static [PanelKind] {
     match kind {
         PanelKind::Assets => &[PanelKind::Assets, PanelKind::Effects],
         PanelKind::Viewer => &[PanelKind::Viewer],
+        PanelKind::Scopes => &[PanelKind::Scopes],
         PanelKind::Timeline => &[PanelKind::Timeline],
         PanelKind::Inspector => &[PanelKind::Inspector],
         PanelKind::Effects => &[PanelKind::Effects],
@@ -1959,6 +1960,7 @@ fn panel_content_for_slot(kind: PanelKind, models: &AppUiPanelModels) -> Box<dyn
         PanelKind::Assets => Box::new(ScrollView::new(Some(Box::new(asset_grid(&models.assets))))),
         PanelKind::Effects => Box::new(panel_list(&models.effects)),
         PanelKind::Viewer => Box::new(viewer_panel(&models.viewer)),
+        PanelKind::Scopes => Box::new(scopes_panel()),
         PanelKind::Timeline => Box::new(timeline_panel(&models.timeline)),
         PanelKind::Export => Box::new(ScrollView::new(Some(Box::new(export_panel(
             &models.export,
@@ -1968,6 +1970,24 @@ fn panel_content_for_slot(kind: PanelKind, models: &AppUiPanelModels) -> Box<dyn
         ))))),
         PanelKind::NodeGraph => Box::new(node_graph_panel(&models.node_graph)),
     }
+}
+
+fn scopes_panel() -> PropertyPanel {
+    PropertyPanel::with_options(
+        "示波器",
+        PropertyPanelOptions {
+            label_width: 0.0,
+            control_gap: 0.0,
+            row_height: 28.0,
+            section_gap: 0.0,
+            ..PropertyPanelOptions::default()
+        },
+    )
+    .with_embedded_panel_chrome()
+    .with_empty_state(
+        "等待 Program Output",
+        "示波器仅在面板可见时分析当前节目输出。",
+    )
 }
 
 fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {

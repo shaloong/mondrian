@@ -98,6 +98,13 @@ and records one undoable snapshot for each committed monitor edit.
 
 ## Viewer Preview Scheduling
 
+The Color workspace owns a real `Scopes` panel rather than aliasing the Effects
+panel. Expensive analysis is demand-driven by the persisted dock model's active
+tab, not by mere panel presence: a hidden or background Scopes tab schedules no
+renderer aggregation, buffer clearing, readback, or repaint work. Scope input is
+the retained Program Output boundary before local monitor adaptation, so moving
+the window between monitors cannot change measured program values.
+
 Playback-frame refreshes use a narrow UI update path: the host advances
 `AppState`, then refreshes viewer playback chrome/frame data and the timeline
 playhead without rebuilding the full dock tree.

@@ -100,7 +100,7 @@ impl WorkspaceLayout {
                         ratio: 0.5,
                         children: vec![
                             DockNode::Panel { kind: PanelKind::Inspector },
-                            DockNode::Panel { kind: PanelKind::Effects },
+                            DockNode::Panel { kind: PanelKind::Scopes },
                         ],
                     },
                 ],
@@ -292,6 +292,14 @@ mod tests {
         assert!(panels.contains(&PanelKind::Timeline));
         assert!(panels.contains(&PanelKind::Inspector));
         assert!(panels.contains(&PanelKind::Assets));
+    }
+
+    #[test]
+    fn color_layout_contains_real_scopes_panel() {
+        let panels = WorkspaceLayout::color().collect_panels();
+        assert!(panels.contains(&PanelKind::Viewer));
+        assert!(panels.contains(&PanelKind::Inspector));
+        assert!(panels.contains(&PanelKind::Scopes));
     }
 
     #[test]

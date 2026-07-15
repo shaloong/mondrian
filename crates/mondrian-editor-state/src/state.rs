@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PanelKind {
     Viewer,
+    Scopes,
     Timeline,
     Assets,
     Inspector,
@@ -39,6 +40,7 @@ impl PanelKind {
     pub fn display_name(self) -> &'static str {
         match self {
             Self::Viewer => "预览",
+            Self::Scopes => "示波器",
             Self::Timeline => "时间线",
             Self::Assets => "素材",
             Self::Inspector => "检查器",
@@ -51,6 +53,7 @@ impl PanelKind {
     pub fn icon_name(self) -> &'static str {
         match self {
             Self::Viewer => "viewer",
+            Self::Scopes => "scopes",
             Self::Timeline => "timeline",
             Self::Assets => "assets",
             Self::Inspector => "inspector",
@@ -60,8 +63,9 @@ impl PanelKind {
         }
     }
 
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Viewer,
+        Self::Scopes,
         Self::Timeline,
         Self::Assets,
         Self::Inspector,
@@ -234,8 +238,8 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════════
 
     #[test]
-    fn panel_kind_all_has_7_variants() {
-        assert_eq!(PanelKind::ALL.len(), 7);
+    fn panel_kind_all_has_8_variants() {
+        assert_eq!(PanelKind::ALL.len(), 8);
     }
 
     #[test]
