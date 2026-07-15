@@ -866,20 +866,17 @@ impl SequenceSettings {
             (ColorEngine::MondrianStandard { .. }, true) => {
                 mondrian_core::OutputTransformIntent::mondrian_standard()
             }
-            (ColorEngine::Aces { .. } | ColorEngine::CustomOcio { .. }, true) => {
-                match engine.default_display_view() {
-                    Ok((display, view)) => {
-                        mondrian_core::OutputTransformIntent::OcioDisplayView { display, view }
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            target: "mondrian::color",
-                            engine = engine.name(),
-                            reason = %err,
-                            "preview OCIO display/view resolution failed"
-                        );
-                        mondrian_core::OutputTransformIntent::Colorimetric
-                    }
+            (ColorEngine::Aces { preset }, true) => {
+                let (display, view) = preset.default_display_view();
+                mondrian_core::OutputTransformIntent::OcioDisplayView {
+                    display: display.to_owned(),
+                    view: view.to_owned(),
+                }
+            }
+            (ColorEngine::CustomOcio { identity }, true) => {
+                mondrian_core::OutputTransformIntent::OcioDisplayView {
+                    display: identity.display().to_owned(),
+                    view: identity.view().to_owned(),
                 }
             }
             _ => mondrian_core::OutputTransformIntent::Colorimetric,
@@ -2258,6 +2255,28 @@ mod tests {
             mondrian_core::OutputTransformIntent::OcioDisplayView {
                 display: "Test Display".to_owned(),
                 view: "Test View".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn aces_scene_output_uses_preset_pinned_display_view() {
+        let mut settings = SequenceSettings::default();
+        settings.color_management.inherit = false;
+        settings.color_management.workflow = ColorWorkflow::Aces;
+        settings.color_management.engine = ColorEngine::Aces {
+            preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+        };
+
+        let ctx = settings
+            .root_preview_color_context(&ProjectColorManagement::default(), ColorSpace::Rec709);
+
+        assert!(ctx.tone_map);
+        assert_eq!(
+            ctx.output_transform,
+            mondrian_core::OutputTransformIntent::OcioDisplayView {
+                display: "sRGB - Display".to_owned(),
+                view: "ACES 2.0 - SDR 100 nits (Rec.709)".to_owned(),
             }
         );
     }

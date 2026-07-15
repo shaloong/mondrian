@@ -858,6 +858,21 @@ pub enum AcesConfigPreset {
 }
 
 impl AcesConfigPreset {
+    /// Display identity pinned by this immutable ACES config release.
+    pub const fn default_display(self) -> &'static str {
+        "sRGB - Display"
+    }
+
+    /// View identity pinned by this immutable ACES config release.
+    pub const fn default_view(self) -> &'static str {
+        "ACES 2.0 - SDR 100 nits (Rec.709)"
+    }
+
+    /// Exact default display/view identity of this preset.
+    pub const fn default_display_view(self) -> (&'static str, &'static str) {
+        (self.default_display(), self.default_view())
+    }
+
     /// Exact built-in OCIO registry identifier for this immutable preset.
     pub const fn builtin_name(self) -> &'static str {
         match self {

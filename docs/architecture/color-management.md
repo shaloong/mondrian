@@ -166,6 +166,13 @@ possibly changed config default. Product callers cannot read a process-global
 default and then infer which engine it belongs to; the unqualified processor
 and display-query APIs are intentionally not public.
 
+Each versioned ACES preset also pins its default display/view pair and a
+registry regression verifies those names against the bundled stock OCIO
+config. Timeline context creation therefore records the named ACES intent
+without selecting process-global state. A missing preset or processor fails at
+the explicit load/planning boundary; it must never rewrite that intent to
+`Colorimetric`.
+
 Custom OCIO is persisted as a complete `CustomOcioProjectIdentity`, not a bare
 locator. It requires the source, primary config SHA-256, parsed OCIO cache-id,
 a SHA-256 over every executable colorspace-to/from-working route plus the

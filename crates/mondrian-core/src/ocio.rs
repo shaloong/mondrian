@@ -3382,6 +3382,29 @@ mod tests {
     }
 
     #[test]
+    fn pinned_aces_default_views_match_the_bundled_ocio_registry() {
+        for preset in [
+            crate::types::AcesConfigPreset::StudioV4Aces2Ocio25,
+            crate::types::AcesConfigPreset::CgV4Aces2Ocio25,
+        ] {
+            let actual =
+                with_ocio_config_for_source(&preset.ocio_source(), |config, _generation| {
+                    let display = config
+                        .default_display()
+                        .ok_or_else(|| "ACES preset has no default display".to_owned())?;
+                    let view = config.default_view(&display).ok_or_else(|| {
+                        "ACES preset default display has no default view".to_owned()
+                    })?;
+                    Ok((display, view))
+                })
+                .expect("bundled ACES default display/view");
+            let expected = preset.default_display_view();
+            assert_eq!(actual.0, expected.0, "preset={preset:?}");
+            assert_eq!(actual.1, expected.1, "preset={preset:?}");
+        }
+    }
+
+    #[test]
     fn cpu_processor_cache_reuses_engine_qualified_processor() {
         clear_ocio_cpu_processor_cache_for_current_thread();
         let before = ocio_cpu_processor_cache_diagnostics();

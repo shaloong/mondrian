@@ -54,8 +54,15 @@ impl ColorEngine {
 
     /// Load this engine's exact OCIO config and resolve its default display/view.
     pub fn default_display_view(&self) -> Result<(String, String), String> {
-        if let Self::CustomOcio { identity } = self {
-            return Ok((identity.display().to_owned(), identity.view().to_owned()));
+        match self {
+            Self::Aces { preset } => {
+                let (display, view) = preset.default_display_view();
+                return Ok((display.to_owned(), view.to_owned()));
+            }
+            Self::CustomOcio { identity } => {
+                return Ok((identity.display().to_owned(), identity.view().to_owned()));
+            }
+            Self::MondrianStandard { .. } => {}
         }
         crate::ocio::ocio_default_display_view_for_engine(self)?
             .ok_or_else(|| format!("{} config has no default display/view", self.name()))
