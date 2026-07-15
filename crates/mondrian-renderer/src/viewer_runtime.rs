@@ -23,6 +23,7 @@ use crate::{
 use mondrian_core::display_calibration::DisplayCalibrationLut3d;
 use mondrian_core::types::{BlendMode, Color, SequenceId};
 use mondrian_core::WorkingColorSpace;
+use mondrian_effects::EffectColorDomain;
 use mondrian_media::{DecodedFrameResidency, DecodedGpuFrameHandleKind};
 
 /// Immutable renderer input for one Viewer GPU execution.
@@ -157,6 +158,7 @@ impl ViewerGpuExecutionRuntime {
             &request,
             &mut self.color_output,
             &mut self.native_video_import,
+            &self.working_compositor,
             device,
             queue,
             encoder,
@@ -411,6 +413,8 @@ pub enum ViewerGpuExecutionError {
     InputPreparation(String),
     #[error("Viewer GPU working composite failed: {0:?}")]
     WorkingComposite(crate::GpuCompositeError),
+    #[error("Viewer GPU effect-domain processing failed: {0}")]
+    EffectDomain(String),
     #[error("Viewer GPU working output is missing: {0}")]
     WorkingOutputMissing(String),
     #[error("Viewer GPU spatial processing failed: {0}")]
@@ -498,6 +502,7 @@ fn prepare_composite<'a>(
     request: &ViewerGpuExecutionRequest<'a>,
     runtime: &mut RenderGpuOutputBoundaryRuntime,
     native_runtime: &mut ViewerNativeVideoImportRuntime,
+    compositor: &GpuFrameCompositor,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
@@ -621,16 +626,61 @@ fn prepare_composite<'a>(
                         }
                     }
                 };
+                let (source, effect_plan) =
+                    if effect_plan.processing_domain() == EffectColorDomain::SceneLinearRgb {
+                        (source, Some(effect_plan.as_ref()))
+                    } else {
+                        let PreparedCompositeLayerSource::GpuFrame(index) = source else {
+                            return Err(ViewerGpuExecutionError::EffectDomain(
+                            "non-scene-linear media effect requires a GPU-resident working source"
+                                .to_owned(),
+                        ));
+                        };
+                        let input = prepared.gpu_input_handles[index].clone();
+                        let record = runtime
+                            .record_wgpu_effect_domain_round_trip(
+                                compositor,
+                                effect_plan,
+                                &input,
+                                request.output_boundary.engine.clone(),
+                                *frame_seed,
+                                RenderColorTransformGpuOptions::default(),
+                                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                                    device,
+                                    queue,
+                                    encoder: &mut *encoder,
+                                    load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                },
+                            )
+                            .map_err(|error| {
+                                ViewerGpuExecutionError::EffectDomain(format!("{error:?}"))
+                            })?;
+                        prepared
+                            .input_stage_diagnostics
+                            .accumulate(record.to_processing.stage_diagnostics);
+                        prepared
+                            .input_stage_diagnostics
+                            .accumulate(record.to_working.stage_diagnostics);
+                        let index = prepared.gpu_input_handles.len();
+                        prepared.gpu_input_handles.push(record.to_working.materialized.output);
+                        (PreparedCompositeLayerSource::GpuFrame(index), None)
+                    };
                 prepared.layers.push(PreparedCompositeLayer {
                     source,
                     opacity: *opacity,
                     blend_mode: BlendMode::Normal,
                     transform: *transform,
-                    effect_plan: Some(effect_plan),
+                    effect_plan,
                     frame_seed: *frame_seed,
                 });
             }
             ViewerGpuExecutionLayer::SolidColor { layer, effect_plan } => {
+                if effect_plan.processing_domain() != EffectColorDomain::SceneLinearRgb {
+                    return Err(ViewerGpuExecutionError::EffectDomain(
+                        "non-scene-linear solid effects require a procedural materialization pass"
+                            .to_owned(),
+                    ));
+                }
                 prepared.residency.procedural_layers =
                     prepared.residency.procedural_layers.saturating_add(1);
                 prepared.layers.push(PreparedCompositeLayer {
@@ -647,14 +697,22 @@ fn prepare_composite<'a>(
                 opacity,
                 blend_mode,
                 frame_seed,
-            } => prepared.layers.push(PreparedCompositeLayer {
-                source: PreparedCompositeLayerSource::Adjustment,
-                opacity: *opacity,
-                blend_mode: *blend_mode,
-                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                effect_plan: Some(effect_plan),
-                frame_seed: *frame_seed,
-            }),
+            } => {
+                if effect_plan.processing_domain() != EffectColorDomain::SceneLinearRgb {
+                    return Err(ViewerGpuExecutionError::EffectDomain(
+                        "non-scene-linear adjustment effects require accumulator graph interleaving"
+                            .to_owned(),
+                    ));
+                }
+                prepared.layers.push(PreparedCompositeLayer {
+                    source: PreparedCompositeLayerSource::Adjustment,
+                    opacity: *opacity,
+                    blend_mode: *blend_mode,
+                    transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    effect_plan: Some(effect_plan),
+                    frame_seed: *frame_seed,
+                });
+            }
         }
     }
 
@@ -815,8 +873,16 @@ impl ViewerGpuNativeVideoFacts {
 
 #[cfg(test)]
 mod tests {
-    use super::native_import_failure_without_cpu_fallback;
-    use mondrian_media::{DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat};
+    use super::*;
+    use crate::{CpuEncodedColorFrame, CpuSourceColorFrame, GpuContext, RenderInputTransform};
+    use mondrian_core::{ensure_mondrian_default_ocio_loaded, ColorEngine, ColorSpace};
+    use mondrian_effects::{
+        compile_scheduled_effect_graph_in_domain, lower_effect_graph_to_gpu_plan,
+        EffectColorDomain, EffectColorDomainContract, EffectRenderOp, EffectRenderPlan,
+    };
+    use mondrian_media::{
+        DecodedGpuFrameHandleKind, DecodedVideoSampling, DecodedVideoSurfaceFormat,
+    };
 
     #[test]
     fn terminal_native_import_failure_preserves_backend_error_detail() {
@@ -828,5 +894,93 @@ mod tests {
 
         assert!(message.contains("D3D11Texture2D P010"));
         assert!(message.contains("adapter LUID mismatch"));
+    }
+
+    #[tokio::test]
+    async fn viewer_records_gpu_media_effect_domain_before_working_composite() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping Viewer effect-domain integration test: no GPU adapter available");
+            return;
+        };
+        let domain = EffectColorDomain::DisplayEncodedRgb { color_space: ColorSpace::Rec709 };
+        let graph = compile_scheduled_effect_graph_in_domain(
+            &EffectRenderPlan {
+                ops: vec![EffectRenderOp::ColorAdjust {
+                    exposure: 0.25,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                }],
+            },
+            EffectColorDomainContract::preserving(domain),
+        )
+        .expect("valid display-domain graph");
+        let effect_plan =
+            Arc::new(lower_effect_graph_to_gpu_plan(&graph).expect("GPU effect plan"));
+        let source = Arc::new(CpuSourceColorFrame::from(
+            CpuEncodedColorFrame::source_rgba8(4, 4, ColorSpace::Rec709, vec![96; 4 * 4 * 4]),
+        ));
+        let layer = ViewerGpuExecutionLayer::Media {
+            frame: None,
+            gpu_source: Some(ViewerGpuMediaSource {
+                source,
+                input_transform: RenderInputTransform::to_working_gpu(
+                    WorkingColorSpace::LinearRec709,
+                    false,
+                    ColorEngine::mondrian_standard(),
+                ),
+                decoder_residency: DecodedFrameResidency::CpuRgba,
+                decoder_handle_kind: None,
+                decoded_surface_format: DecodedVideoSurfaceFormat::Rgba8,
+                decoded_video_sampling: DecodedVideoSampling::default(),
+            }),
+            native_source: None,
+            opacity: 1.0,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan,
+            frame_seed: 7,
+        };
+        let output_boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut runtime =
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("viewer-effect-domain-integration"),
+        });
+
+        let record = runtime
+            .record(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                ViewerGpuExecutionRequest {
+                    sequence_id: SequenceId::new(),
+                    timeline_frame: 7,
+                    width: 4,
+                    height: 4,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    layers: &[layer],
+                    output_boundary: &output_boundary,
+                    source_rect: ViewerSourceRect::FULL,
+                    output_width: 4,
+                    output_height: 4,
+                    display_calibration: None,
+                },
+            )
+            .expect("Viewer GPU effect-domain frame");
+        context.queue.submit(std::iter::once(encoder.finish()));
+
+        assert_eq!(record.stage_diagnostics.gpu_color_stages, 4);
+        assert_eq!(record.stage_diagnostics.upload_stages, 1);
+        assert_eq!(record.stage_diagnostics.readback_stages, 0);
+        assert_eq!(record.compositing_diagnostics.gpu_passthrough_frames, 1);
+        assert_eq!(record.compositing_diagnostics.gpu_native_composites, 0);
+        assert_eq!(
+            record.output.descriptor().domain,
+            crate::ColorFrameDomain::Display
+        );
     }
 }

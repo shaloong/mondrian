@@ -359,6 +359,15 @@ stage, compositor, spatial, residency, and fallback evidence. Window and
 headless Adapters resolve the texture view from this same runtime, then perform
 their distinct registration or completion obligations themselves.
 
+GPU-resident media layers with log or display-encoded effect domains are
+preprocessed through the runtime-owned `OCIO -> point effect -> OCIO` route
+before working-linear affine/compositing. The consumed plan is removed from the
+working compositor request, so an otherwise eligible single layer can retain
+its passthrough path. CPU-only media and external-domain solid or adjustment
+layers fail with typed effect-domain errors until their upload, procedural
+materialization, or accumulator-interleaving graph nodes exist; they must not
+silently evaluate the effect in working-linear samples.
+
 `viewer_spatial.rs` owns Viewer-only crop and resize processing. Its typed plan
 accepts and produces only GPU-resident `Working + LinearFloat + Rgba32Float`
 frames, so it cannot be scheduled after an OCIO display/output transform or an
