@@ -1,3 +1,4 @@
+use crate::color_frame::GpuColorFrameWgpuResource;
 use lru::LruCache;
 #[cfg(test)]
 use mondrian_core::ColorSpace;
@@ -12,7 +13,10 @@ use std::borrow::Cow;
 use std::collections::{hash_map::DefaultHasher, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+static NEXT_OCIO_WRAPPER_BINDING_CACHE_KEY: AtomicU64 = AtomicU64::new(1);
 
 /// Shader stage used when translating OCIO GPU shader text for wgpu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -3712,6 +3716,18 @@ pub struct OcioGpuWgpuPreparedWrapperInputLayout {
     pub layout_hash: u64,
     /// Concrete wgpu bind-group layout reused for per-frame wrapper bind groups.
     pub layout: wgpu::BindGroupLayout,
+    binding_cache_key: u64,
+    bind_group_creations: AtomicU64,
+    cache_hits: AtomicU64,
+}
+
+/// Point-in-time evidence for OCIO wrapper input binding reuse.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OcioGpuWgpuWrapperInputBindingCacheDiagnostics {
+    /// Wrapper input bind groups created for GPU frame resources.
+    pub bind_group_creations: u64,
+    /// Existing wrapper input bind groups reused from GPU frame resources.
+    pub cache_hits: u64,
 }
 
 impl OcioGpuWgpuPreparedWrapperInputLayout {
@@ -3729,6 +3745,49 @@ impl OcioGpuWgpuPreparedWrapperInputLayout {
             &self.layout,
             input,
         )
+    }
+
+    /// Prepare or reuse the wrapper binding cached with a pooled GPU frame resource.
+    pub fn prepare_cached_bind_group(
+        &self,
+        device: &wgpu::Device,
+        wrapper_binding: &OcioGpuWgpuWrapperBindingPlan,
+        input: &GpuColorFrameWgpuResource,
+    ) -> OcioGpuWgpuWrapperBindGroup {
+        let (bind_group, cache_hit) =
+            input.cached_bind_group(self.binding_cache_key, |texture_view| {
+                let resources = OcioGpuWgpuWrapperInputResources {
+                    input_texture_view: texture_view,
+                    input_sampler: &input.sampler,
+                };
+                OcioGpuWgpuBindGroupPreparer::prepare_wrapper_bind_group_with_layout(
+                    device,
+                    wrapper_binding,
+                    self.layout_hash,
+                    &self.layout,
+                    resources,
+                )
+                .bind_group
+            });
+        if cache_hit {
+            self.cache_hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.bind_group_creations.fetch_add(1, Ordering::Relaxed);
+        }
+        OcioGpuWgpuWrapperBindGroup {
+            bind_group_index: wrapper_binding.bind_group,
+            layout_hash: self.layout_hash,
+            layout: self.layout.clone(),
+            bind_group,
+        }
+    }
+
+    /// Return point-in-time wrapper input binding reuse evidence.
+    pub fn binding_cache_diagnostics(&self) -> OcioGpuWgpuWrapperInputBindingCacheDiagnostics {
+        OcioGpuWgpuWrapperInputBindingCacheDiagnostics {
+            bind_group_creations: self.bind_group_creations.load(Ordering::Relaxed),
+            cache_hits: self.cache_hits.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -3909,6 +3968,9 @@ impl OcioGpuWgpuBackendObjectRuntime {
             bind_group: static_pipeline.wrapper_binding.bind_group,
             layout_hash: wrapper_descriptor.layout_hash,
             layout: wrapper_layout,
+            binding_cache_key: NEXT_OCIO_WRAPPER_BINDING_CACHE_KEY.fetch_add(1, Ordering::Relaxed),
+            bind_group_creations: AtomicU64::new(0),
+            cache_hits: AtomicU64::new(0),
         };
 
         let pipeline_layout = OcioGpuWgpuPipelineLayoutPreparer::prepare_with_wrapper_layout(
@@ -3955,6 +4017,16 @@ impl OcioGpuWgpuBackendObjectRuntime {
 
     /// Return point-in-time diagnostics for backend object caches.
     pub fn diagnostics(&self) -> OcioGpuWgpuBackendObjectRuntimeDiagnostics {
+        let wrapper_input_bindings = self.objects.iter().fold(
+            OcioGpuWgpuWrapperInputBindingCacheDiagnostics::default(),
+            |mut total, (_, objects)| {
+                let current = objects.wrapper_input_layout.binding_cache_diagnostics();
+                total.bind_group_creations =
+                    total.bind_group_creations.saturating_add(current.bind_group_creations);
+                total.cache_hits = total.cache_hits.saturating_add(current.cache_hits);
+                total
+            },
+        );
         OcioGpuWgpuBackendObjectRuntimeDiagnostics {
             entries: self.objects.len(),
             hits: self.hits,
@@ -3962,6 +4034,7 @@ impl OcioGpuWgpuBackendObjectRuntime {
             failures: self.failures,
             wrapper_modules: self.wrapper_modules.diagnostics(),
             render_pipelines: self.render_pipelines.diagnostics(),
+            wrapper_input_bindings,
         }
     }
 }
@@ -3987,6 +4060,8 @@ pub struct OcioGpuWgpuBackendObjectRuntimeDiagnostics {
     pub wrapper_modules: OcioGpuWgpuWrapperShaderModuleCacheDiagnostics,
     /// Render-pipeline cache diagnostics.
     pub render_pipelines: OcioGpuWgpuRenderPipelineCacheDiagnostics,
+    /// Per-frame wrapper input binding cache diagnostics.
+    pub wrapper_input_bindings: OcioGpuWgpuWrapperInputBindingCacheDiagnostics,
 }
 
 /// Cached wgpu shader module produced from a validated Naga OCIO shader.
@@ -6579,8 +6654,12 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::GpuContext;
-    use mondrian_core::ensure_mondrian_default_ocio_loaded;
+    use crate::{
+        ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency,
+        GpuColorFrameAllocationPlan, GpuColorFrameHandle, GpuColorFrameId,
+        GpuColorFrameTextureFormat, GpuColorFrameUploader, GpuContext,
+    };
+    use mondrian_core::{ensure_mondrian_default_ocio_loaded, WorkingColorSpace};
 
     fn f32s_from_bytes(bytes: &[u8]) -> Vec<f32> {
         bytes
@@ -7124,6 +7203,7 @@ mod tests {
                 failures: 0,
                 wrapper_modules: OcioGpuWgpuWrapperShaderModuleCache::default().diagnostics(),
                 render_pipelines: OcioGpuWgpuRenderPipelineCache::default().diagnostics(),
+                wrapper_input_bindings: OcioGpuWgpuWrapperInputBindingCacheDiagnostics::default(),
             }
         );
     }
@@ -7206,6 +7286,35 @@ mod tests {
         assert_ne!(first.render_pipeline.cache_key, 0);
         assert_ne!(first.pass_node.node_hash, 0);
 
+        let input_handle = GpuColorFrameHandle::new(
+            GpuColorFrameId::from_raw(9_001),
+            ColorFrameDescriptor {
+                width: 4,
+                height: 4,
+                color_space: WorkingColorSpace::LinearRec709.into(),
+                domain: ColorFrameDomain::Working,
+                encoding: ColorFrameEncoding::LinearFloat,
+                residency: ColorFrameResidency::Gpu,
+            },
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "ocio-wrapper-binding-cache-input",
+        )
+        .expect("wrapper cache input handle");
+        let input = GpuColorFrameUploader::allocate(
+            &context.device,
+            &GpuColorFrameAllocationPlan::for_handle(input_handle),
+        );
+        first.wrapper_input_layout.prepare_cached_bind_group(
+            &context.device,
+            &static_pipeline.wrapper_binding,
+            input.resource(),
+        );
+        first.wrapper_input_layout.prepare_cached_bind_group(
+            &context.device,
+            &static_pipeline.wrapper_binding,
+            input.resource(),
+        );
+
         let diagnostics = object_runtime.diagnostics();
         assert_eq!(diagnostics.entries, 1);
         assert_eq!(diagnostics.misses, 1);
@@ -7217,6 +7326,8 @@ mod tests {
         assert_eq!(diagnostics.render_pipelines.entries, 1);
         assert_eq!(diagnostics.render_pipelines.misses, 1);
         assert_eq!(diagnostics.render_pipelines.hits, 0);
+        assert_eq!(diagnostics.wrapper_input_bindings.bind_group_creations, 1);
+        assert_eq!(diagnostics.wrapper_input_bindings.cache_hits, 1);
 
         let (device_without_filtering, queue_without_filtering) = context
             .adapter

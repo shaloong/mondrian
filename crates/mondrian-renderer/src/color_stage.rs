@@ -3530,6 +3530,31 @@ impl RenderGpuColorPassSchedule {
         ))
     }
 
+    fn prepare_cached_wrapper_bind_group(
+        &self,
+        device: &wgpu::Device,
+        prepared_layout: &OcioGpuWgpuPreparedWrapperInputLayout,
+        input_frame: &GpuColorFrameHandle,
+        input: &GpuColorFrameWgpuResource,
+    ) -> Result<OcioGpuWgpuWrapperBindGroup, RenderGpuColorPassExecutionError> {
+        self.validate_input_frame(input_frame)?;
+        let wrapper_layout = self.wrapper_binding_plan();
+        let wrapper_layout_hash =
+            OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_wrapper_input(&wrapper_layout)
+                .layout_hash;
+        if wrapper_layout_hash != prepared_layout.layout_hash
+            || self.pass_node.wrapper_layout_hash != prepared_layout.layout_hash
+        {
+            return Err(
+                RenderGpuColorPassExecutionError::WrapperLayoutHashMismatch {
+                    expected: self.pass_node.wrapper_layout_hash,
+                    actual: prepared_layout.layout_hash,
+                },
+            );
+        }
+        Ok(prepared_layout.prepare_cached_bind_group(device, &wrapper_layout, input))
+    }
+
     /// Record this scheduled pass into a wgpu command encoder.
     pub fn record_wgpu(
         &self,
@@ -3569,14 +3594,11 @@ impl RenderGpuColorPassSchedule {
     ) -> Result<(), RenderGpuColorPassExecutionError> {
         let resolved = self.resolve_resources(resources)?;
         let input = resolved.input.resource();
-        let wrapper_bind_group = self.prepare_wrapper_bind_group(
+        let wrapper_bind_group = self.prepare_cached_wrapper_bind_group(
             device,
             wrapper_input_layout,
-            RenderGpuColorPassInputView {
-                frame: resolved.input.handle(),
-                texture_view: &input.texture_view,
-                sampler: &input.sampler,
-            },
+            resolved.input.handle(),
+            input,
         )?;
         let output = resolved.output.resource();
         self.record_wgpu(
@@ -5281,12 +5303,21 @@ mod tests {
             runtime.clear_frame_resources();
         }
 
-        let diagnostics = runtime.diagnostics().resource_pool;
+        let runtime_diagnostics = runtime.diagnostics();
+        let diagnostics = runtime_diagnostics.resource_pool;
         assert_eq!(diagnostics.hits, 2);
         assert_eq!(diagnostics.misses, 2);
         assert_eq!(diagnostics.releases, 4);
         assert_eq!(diagnostics.evictions, 0);
         assert_eq!(diagnostics.retained_resources, 2);
+        assert_eq!(
+            runtime_diagnostics.backend_objects.wrapper_input_bindings.bind_group_creations,
+            1
+        );
+        assert_eq!(
+            runtime_diagnostics.backend_objects.wrapper_input_bindings.cache_hits,
+            1
+        );
     }
 
     #[tokio::test]

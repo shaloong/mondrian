@@ -407,6 +407,15 @@ dummy bindings are constructed once with the compositor. Hot-frame recording
 clones lightweight wgpu handles and never extends a global cache that could keep
 otherwise-evicted textures alive.
 
+OCIO fullscreen wrapper inputs use the same resource-owned cache rather than
+creating a texture/sampler bind group for every color stage on every frame.
+Each prepared wrapper layout receives a device-runtime identity key; its
+creation/hit counters are aggregated into
+`OcioGpuWgpuBackendObjectRuntimeDiagnostics::wrapper_input_bindings`. Because
+the cached binding lives on `GpuColorFrameWgpuResource`, an exact-contract pool
+hit remains warm even though the new frame handle has a different ID, while a
+pool eviction drops both texture and binding together.
+
 `viewer_spatial.rs` owns Viewer-only crop and resize processing. Its typed plan
 accepts and produces only GPU-resident `Working + LinearFloat + Rgba32Float`
 frames, so it cannot be scheduled after an OCIO display/output transform or an
