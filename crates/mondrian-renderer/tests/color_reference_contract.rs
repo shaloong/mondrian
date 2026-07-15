@@ -4,10 +4,11 @@ use mondrian_renderer::{
     ColorReferencePayloadFormat, ColorReferencePixels, ColorReferenceValidationError,
 };
 
-mod support;
+#[path = "support/color_reference_image.rs"]
+mod color_reference_image;
 
+use color_reference_image::ImageColorReferenceDecoder;
 use sha2::{Digest, Sha256};
-use support::color_reference_image::ImageColorReferenceDecoder;
 
 const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 

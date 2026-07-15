@@ -597,6 +597,19 @@ distinguish color arithmetic from alpha corruption. Real-wgpu point-effect
 tests include negative and above-one working values and fail closed on NaN or
 infinity.
 
+Mondrian Standard v1 additionally has a package-digest-pinned numeric quality
+corpus. The same generated working-space samples execute through the production
+CPU OCIO SDR and PQ output boundaries; a separate implementation of the View is
+not used as the oracle. The corpus enforces objective invariants rather than
+self-comparison: finite normalized outputs, exact alpha preservation, neutral
+axis, monotonic tone response, dense non-negative hue-boundary continuity, a
+locally dense negative-channel continuity path, 10-bit ramp cardinality, and
+legal/full-range signal codes. Public ColorChecker 2005 D50 xyY coordinates are
+converted through an explicit Bradford D50-to-D65 adaptation and XYZ-to-linear
+Rec.2020 matrix before entering that same production boundary. They provide
+externally sourced stimuli, while future independent application frames provide
+external output evidence on top of the invariants.
+
 Encoded SDR sRGB output validation uses a separate
 `SrgbDisplayAccuracyBudget`/`SrgbDisplayAccuracyReport` contract. It converts
 RGB code values through the explicit sRGB -> XYZ D65 -> Bradford-adapted XYZ

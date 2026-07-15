@@ -1,7 +1,17 @@
 {
   "schema_version": 1,
-  "corpus_revision": "2026-07-11",
+  "corpus_revision": "2026-07-15",
   "entries": [
+    {
+      "id": "mondrian-standard-quality-v1",
+      "path": "color/metadata/mondrian-standard-quality-corpus-v1.json",
+      "availability": "committed",
+      "sha256": "2869076d641466d3e7a6e990fa288e27058a24af918e0e907fada5aee30dd6c3",
+      "size_bytes": 6951,
+      "provenance": { "source": "Mondrian v1 stimulus recipes plus Colour Science ColorChecker 2005 xyY data under BSD-3-Clause", "redistribution": "permitted" },
+      "media": { "kind": "numeric-color-reference", "container": "json", "codec": "utf-8", "width": null, "height": null, "frame_rate": "not-applicable", "frame_rate_mode": "not-applicable", "bit_depth": "float32-recipes", "primaries": "rec2020-and-cie-xyy", "transfer": "scene-linear-and-reference", "matrix": "not-applicable", "range": "extended-float" },
+      "purposes": ["mondrian-standard-quality", "colorchecker-reference", "sdr-hdr-view-invariants", "gamut-boundary-continuity"]
+    },
     {
       "id": "sony-slog3-uhd-5994-001",
       "path": "color/source/广东-03-Sony-59.940 DF-Slog3-灰片.MP4",

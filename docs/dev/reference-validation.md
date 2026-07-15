@@ -34,6 +34,18 @@ fail-closed before any tolerance comparison. `public_specification` and
 export be added later without claiming that Mondrian-generated goldens already
 establish subjective parity.
 
+The committed `mondrian-standard-quality-v1` numeric corpus is a separate
+objective stimulus contract pinned to the Standard package digest. It covers 22
+quality categories and drives the production CPU OCIO SDR/PQ boundaries. Gates
+include finite output, normalized display-signal tolerance of one 12-bit code,
+alpha preservation, neutral-axis stability, tone monotonicity, high-saturation
+hue-boundary continuity, local negative-channel continuity, 10-bit ramp shape,
+and explicit 10-bit legal/full-range codes. ColorChecker 2005 xyY data comes
+from Colour Science 0.4.7 under BSD-3-Clause with attribution in the corpus and
+are converted from D50 xyY to linear Rec.2020 test stimuli before rendering.
+Synthetic objective gates do not replace independent PNG/OpenEXR reference
+frames or subjective review of skin, fabric, LED, neon, flame, and highlights.
+
 ## Asset classes
 
 | Class | Repository | PR | Windows nightly/release |

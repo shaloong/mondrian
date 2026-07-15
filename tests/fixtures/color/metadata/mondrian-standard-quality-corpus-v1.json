@@ -1,0 +1,217 @@
+{
+  "schema_version": 1,
+  "corpus_id": "mondrian-standard-quality-v1",
+  "package_sha256": "dcd694126ac1a1fa55f64870774d9428e2da737ceaae6623c8ff2b23df48b52e",
+  "required_categories": [
+    "color_checker",
+    "grayscale",
+    "neutral_gradient",
+    "near_black_gradient",
+    "over_white",
+    "negative_values",
+    "high_saturation_primaries_secondaries",
+    "skin_tone",
+    "red_blue_fabric",
+    "led",
+    "neon",
+    "stage_lights",
+    "flame",
+    "sun_highlight_reflection",
+    "metal",
+    "cg_exr",
+    "sdr_hdr_mix",
+    "transparent_edges",
+    "glow_blur",
+    "subtitles_solid_graphics",
+    "ten_bit_gradient",
+    "legal_full_range_video"
+  ],
+  "source_references": [
+    {
+      "id": "colour-science-colorchecker-2005-xyy",
+      "source_uri": "https://github.com/colour-science/colour/tree/v0.4.7/colour/characterisation/datasets/colour_checkers",
+      "producer": "Colour Developers",
+      "producer_version": "0.4.7",
+      "coordinate_space": "CIE xyY; ColorChecker 2005; D50",
+      "license": "BSD-3-Clause",
+      "license_uri": "https://github.com/colour-science/colour/blob/v0.4.7/LICENSE",
+      "copyright_notice": "Copyright 2013 Colour Developers; redistributed under BSD-3-Clause",
+      "patches": [
+        { "id": "dark_skin", "coordinates": [0.4316, 0.3777, 0.1008] },
+        { "id": "light_skin", "coordinates": [0.4197, 0.3744, 0.3495] },
+        { "id": "blue_sky", "coordinates": [0.2760, 0.3016, 0.1836] },
+        { "id": "foliage", "coordinates": [0.3703, 0.4499, 0.1325] },
+        { "id": "blue_flower", "coordinates": [0.2999, 0.2856, 0.2304] },
+        { "id": "bluish_green", "coordinates": [0.2848, 0.3911, 0.4178] },
+        { "id": "orange", "coordinates": [0.5295, 0.4055, 0.3118] },
+        { "id": "purplish_blue", "coordinates": [0.2305, 0.2106, 0.1126] },
+        { "id": "moderate_red", "coordinates": [0.5012, 0.3273, 0.1938] },
+        { "id": "purple", "coordinates": [0.3319, 0.2482, 0.0637] },
+        { "id": "yellow_green", "coordinates": [0.3984, 0.5008, 0.4446] },
+        { "id": "orange_yellow", "coordinates": [0.4957, 0.4427, 0.4357] },
+        { "id": "blue", "coordinates": [0.2018, 0.1692, 0.0575] },
+        { "id": "green", "coordinates": [0.3253, 0.5032, 0.2318] },
+        { "id": "red", "coordinates": [0.5686, 0.3303, 0.1257] },
+        { "id": "yellow", "coordinates": [0.4697, 0.4734, 0.5981] },
+        { "id": "magenta", "coordinates": [0.4159, 0.2688, 0.2009] },
+        { "id": "cyan", "coordinates": [0.2131, 0.3023, 0.1930] },
+        { "id": "white_9_5", "coordinates": [0.3469, 0.3608, 0.9131] },
+        { "id": "neutral_8", "coordinates": [0.3440, 0.3584, 0.5894] },
+        { "id": "neutral_6_5", "coordinates": [0.3432, 0.3581, 0.3632] },
+        { "id": "neutral_5", "coordinates": [0.3446, 0.3579, 0.1915] },
+        { "id": "neutral_3_5", "coordinates": [0.3401, 0.3548, 0.0883] },
+        { "id": "black_2", "coordinates": [0.3406, 0.3537, 0.0311] }
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "neutral-stop-ramp",
+      "categories": ["grayscale", "neutral_gradient", "near_black_gradient", "over_white"],
+      "render_through_standard": true,
+      "stimulus": {
+        "kind": "neutral_stop_ramp",
+        "middle_gray": 0.18,
+        "start_stop": -16,
+        "end_stop": 10,
+        "samples_per_stop": 32
+      }
+    },
+    {
+      "id": "extended-gamut-cube",
+      "categories": [
+        "negative_values",
+        "high_saturation_primaries_secondaries",
+        "led",
+        "neon",
+        "stage_lights",
+        "flame",
+        "sun_highlight_reflection",
+        "metal",
+        "cg_exr"
+      ],
+      "render_through_standard": true,
+      "stimulus": {
+        "kind": "cube_grid",
+        "levels": [-0.25, 0.0, 0.01, 0.18, 1.0, 2.0, 4.0, 16.0],
+        "alpha": 1.0
+      }
+    },
+    {
+      "id": "color-checker-2005",
+      "categories": ["color_checker", "skin_tone"],
+      "render_through_standard": true,
+      "stimulus": {
+        "kind": "colorimetric_reference",
+        "source_reference_id": "colour-science-colorchecker-2005-xyy"
+      }
+    },
+    {
+      "id": "red-blue-fabric-patches",
+      "categories": ["red_blue_fabric"],
+      "render_through_standard": true,
+      "stimulus": {
+        "kind": "rgba_patches",
+        "pixels": [
+          [0.30, 0.015, 0.008, 1.0],
+          [0.008, 0.025, 0.30, 1.0]
+        ]
+      }
+    },
+    {
+      "id": "high-saturation-hue-boundary-sweep",
+      "categories": ["high_saturation_primaries_secondaries", "led", "neon", "stage_lights"],
+      "render_through_standard": true,
+      "stimulus": {
+        "kind": "hue_sweep",
+        "center": 0.75,
+        "radius": 0.75,
+        "samples": 720
+      }
+    },
+    {
+      "id": "negative-channel-zero-boundary-line",
+      "categories": ["negative_values"],
+      "render_through_standard": true,
+      "stimulus": {
+        "kind": "rgba_line",
+        "start": [0.9044444, -0.35033, -0.014114827, 1.0],
+        "end": [0.90611076, -0.3456819, -0.020428956, 1.0],
+        "samples": 1025
+      }
+    },
+    {
+      "id": "mixed-sdr-hdr-patches",
+      "categories": ["sdr_hdr_mix"],
+      "render_through_standard": true,
+      "stimulus": {
+        "kind": "rgba_patches",
+        "pixels": [
+          [0.001, 0.001, 0.001, 1.0],
+          [0.18, 0.18, 0.18, 1.0],
+          [1.0, 1.0, 1.0, 1.0],
+          [4.0, 2.0, 0.5, 1.0],
+          [16.0, 16.0, 16.0, 1.0]
+        ]
+      }
+    },
+    {
+      "id": "transparent-highlight-edge",
+      "categories": ["transparent_edges"],
+      "render_through_standard": true,
+      "stimulus": {
+        "kind": "alpha_ramp",
+        "rgb": [4.0, 0.5, 0.1],
+        "steps": 64
+      }
+    },
+    {
+      "id": "spatial-highlight-impulse",
+      "categories": ["glow_blur"],
+      "render_through_standard": true,
+      "stimulus": {
+        "kind": "spatial_impulse",
+        "width": 65,
+        "background": [0.001, 0.001, 0.001, 1.0],
+        "impulse": [16.0, 4.0, 0.5, 1.0]
+      }
+    },
+    {
+      "id": "title-and-solid-graphics",
+      "categories": ["subtitles_solid_graphics"],
+      "render_through_standard": true,
+      "stimulus": {
+        "kind": "rgba_patches",
+        "pixels": [
+          [0.0, 0.0, 0.0, 1.0],
+          [1.0, 1.0, 1.0, 1.0],
+          [1.0, 0.0, 0.0, 1.0],
+          [0.0, 1.0, 0.0, 1.0],
+          [0.0, 0.0, 1.0, 1.0]
+        ]
+      }
+    },
+    {
+      "id": "ten-bit-neutral-gradient",
+      "categories": ["ten_bit_gradient"],
+      "render_through_standard": true,
+      "stimulus": {
+        "kind": "quantized_ramp",
+        "bit_depth": 10
+      }
+    },
+    {
+      "id": "ten-bit-video-range-contract",
+      "categories": ["legal_full_range_video"],
+      "render_through_standard": false,
+      "stimulus": {
+        "kind": "video_range_codes",
+        "bit_depth": 10,
+        "legal_min": 64,
+        "legal_max": 940,
+        "full_min": 0,
+        "full_max": 1023
+      }
+    }
+  ]
+}
