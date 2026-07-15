@@ -1080,6 +1080,13 @@ texture for presentation or encoding.
   blockers to be resolved. The app-window path validates display contract
   compatibility before recording.
 
+The renderer's real-wgpu parity gate executes one varied Linear Rec.2020 float
+stimulus through every Mondrian Standard target (sRGB, Rec.709, Display P3,
+HLG, and PQ), reads the production RGBA16F boundary, and compares it with the
+stock-OCIO CPU float result under a 0.001 maximum channel-error budget. The five
+targets share one device/runtime during the test, matching production cache
+reuse instead of hiding target-specific shader drift behind separate setup.
+
 CPU fallback is always explicitly recorded — never silently used as "GPU ready".
 Preview and export never independently interpret color spaces; they share the
 same `ColorContext`, `RenderOutputColorBoundary`, and `RenderColorTransform`

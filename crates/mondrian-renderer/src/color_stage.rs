@@ -4634,6 +4634,8 @@ mod tests {
             backend_object_hits: 0,
             backend_object_misses: 1,
             backend_object_failures: 0,
+            wrapper_input_bind_group_creations: 1,
+            wrapper_input_bind_group_cache_hits: 0,
             frame_table_entries: 2,
             next_frame_id: 3,
         };
@@ -4743,6 +4745,8 @@ mod tests {
             backend_object_hits: 0,
             backend_object_misses: 1,
             backend_object_failures: 0,
+            wrapper_input_bind_group_creations: 1,
+            wrapper_input_bind_group_cache_hits: 0,
             frame_table_entries: 2,
             next_frame_id: 3,
         };
@@ -5470,63 +5474,88 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gpu_output_boundary_runtime_matches_cpu_display_view_on_real_wgpu_device() {
+    async fn gpu_output_boundary_runtime_matches_cpu_for_all_standard_views_on_real_wgpu_device() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let Ok(context) = GpuContext::new().await else {
             eprintln!("skipping real wgpu display/view parity test: no GPU adapter available");
             return;
         };
-        let (display, view) = ColorEngine::mondrian_standard()
-            .default_display_view()
-            .expect("default display/view");
-        let frame = cpu_working_frame();
-        let boundary = RenderOutputColorBoundary::display_view(
-            ColorSpace::Srgb,
-            display,
-            view,
-            false,
-            ColorEngine::mondrian_standard(),
-        );
-        let expected = execute_cpu_output_boundary_rgba8(&frame, &boundary)
-            .expect("CPU display/view boundary should encode RGBA8");
+        let frame = standard_view_parity_working_frame();
         let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_200);
-        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("mondrian-test-gpu-display-view-boundary-parity"),
-        });
-
-        let record = runtime
-            .record_wgpu_output_boundary_owned_backend(
-                &boundary,
-                &frame,
-                GpuColorFrameTextureFormat::Rgba8Unorm,
-                RenderColorTransformGpuOptions {
-                    output_residency: ColorFrameResidency::Cpu,
-                    ..RenderColorTransformGpuOptions::default()
-                },
-                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
-                    device: &context.device,
-                    queue: &context.queue,
-                    encoder: &mut encoder,
-                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                },
+        for output in [
+            ColorSpace::Srgb,
+            ColorSpace::Rec709,
+            ColorSpace::DisplayP3,
+            ColorSpace::Rec2100Hlg,
+            ColorSpace::Rec2100Pq,
+        ] {
+            let boundary = RenderOutputColorBoundary::from_intent(
+                RenderOutputColorBoundaryTarget::Display,
+                output,
+                &OutputTransformIntent::mondrian_standard(),
+                true,
+                ColorEngine::mondrian_standard(),
             )
-            .expect("runtime-owned GPU display/view boundary should record");
-        let readback_buffer = record
-            .readback_buffer
-            .expect("CPU-resident GPU display/view boundary should record readback");
+            .expect("Standard display/view boundary");
+            let expected = execute_cpu_output_boundary_float(&frame, &boundary)
+                .expect("CPU Standard display/view boundary");
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian-test-gpu-display-view-boundary-parity"),
+                });
 
-        context.queue.submit(std::iter::once(encoder.finish()));
-        let readback_plan = GpuColorFrameReadbackPlan::encoded_rgba8(record.materialized.output)
-            .expect("GPU display/view output should be readable as RGBA8");
-        let mapped = map_readback_buffer(&context.device, &readback_buffer);
-        let actual = readback_plan
-            .unpack_mapped_rgba8(&mapped)
-            .expect("display/view readback should unpack into encoded frame");
-        readback_buffer.unmap();
+            let record = runtime
+                .record_wgpu_output_boundary_owned_backend(
+                    &boundary,
+                    &frame,
+                    GpuColorFrameTextureFormat::Rgba16Float,
+                    RenderColorTransformGpuOptions {
+                        output_residency: ColorFrameResidency::Cpu,
+                        ..RenderColorTransformGpuOptions::default()
+                    },
+                    RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                        device: &context.device,
+                        queue: &context.queue,
+                        encoder: &mut encoder,
+                        load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    },
+                )
+                .expect("runtime-owned GPU Standard display/view boundary should record");
+            let readback_buffer = record
+                .readback_buffer
+                .expect("CPU-resident GPU display/view boundary should record readback");
 
-        assert_srgb_display_accurate(&expected.rgba, actual.rgba());
-        assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
-        assert_eq!(record.stage_diagnostics.readback_stages, 1);
+            context.queue.submit(std::iter::once(encoder.finish()));
+            let readback_plan =
+                GpuColorFrameReadbackPlan::encoded_rgba16float(record.materialized.output)
+                    .expect("GPU display/view output should be readable as RGBA16F");
+            let mapped = map_readback_buffer(&context.device, &readback_buffer);
+            let actual = readback_plan
+                .unpack_mapped_rgba16float(&mapped)
+                .expect("display/view readback should unpack into float samples");
+            readback_buffer.unmap();
+
+            let expected =
+                expected.frame.rgba_f32().data.iter().flatten().copied().collect::<Vec<_>>();
+            assert_eq!(
+                actual.len(),
+                expected.len(),
+                "{output:?} readback sample count"
+            );
+            let max_delta = expected
+                .iter()
+                .copied()
+                .zip(actual.iter().copied())
+                .map(|(expected, actual)| (expected - actual).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                max_delta <= 0.001,
+                "{output:?} Standard GPU/CPU max float delta {max_delta} exceeds RGBA16F budget"
+            );
+            assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
+            assert_eq!(record.stage_diagnostics.readback_stages, 1);
+            runtime.clear_frame_resources();
+        }
     }
 
     async fn assert_gpu_pq_view_meets_delta_e_itp_budget(
@@ -7039,6 +7068,26 @@ mod tests {
             height: 2,
             data: vec![[0.25, 0.5, 0.75, 1.0]; 8],
             color_space: WorkingColorSpace::LinearRec709,
+        })
+    }
+
+    fn standard_view_parity_working_frame() -> CpuColorFrame {
+        let data = vec![
+            [-0.05, 0.0, 0.001, 1.0],
+            [0.001, 0.001, 0.001, 0.875],
+            [0.18, 0.18, 0.18, 0.75],
+            [1.0, 1.0, 1.0, 0.625],
+            [1.0, 0.0, 0.0, 0.5],
+            [0.0, 1.0, 0.0, 0.375],
+            [0.0, 0.0, 1.0, 0.25],
+            [4.0, 2.0, 0.5, 0.125],
+            [16.0, 16.0, 16.0, 1.0],
+        ];
+        CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: u32::try_from(data.len()).expect("parity corpus width"),
+            height: 1,
+            data,
+            color_space: WorkingColorSpace::LinearRec2020,
         })
     }
 
