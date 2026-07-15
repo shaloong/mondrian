@@ -2,9 +2,11 @@
 //!
 //! The plan deliberately contains no graphics API objects. It is the contract
 //! between effect graph compilation and renderer backends that execute fused
-//! point operations over linear floating-point working-space pixels.
+//! point operations over typed floating-point color-domain pixels.
 
-use crate::{CompiledEffectGraph, EffectGraphNodeId, EffectGraphNodeKind, EffectRenderOp};
+use crate::{
+    CompiledEffectGraph, EffectColorDomain, EffectGraphNodeId, EffectGraphNodeKind, EffectRenderOp,
+};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex, OnceLock},
@@ -36,6 +38,7 @@ pub enum EffectGpuPointOp {
 pub struct CompiledEffectGpuPlan {
     operations: Vec<EffectGpuPointOp>,
     graph_signature: u64,
+    processing_domain: EffectColorDomain,
 }
 
 impl CompiledEffectGpuPlan {
@@ -49,6 +52,11 @@ impl CompiledEffectGpuPlan {
         self.graph_signature
     }
 
+    /// Exact color domain in which the point operations must execute.
+    pub fn processing_domain(&self) -> EffectColorDomain {
+        self.processing_domain
+    }
+
     /// Whether this plan performs no pixel changes.
     pub fn is_identity(&self) -> bool {
         self.operations.is_empty()
@@ -58,11 +66,29 @@ impl CompiledEffectGpuPlan {
 /// Stable reason a compiled graph cannot use the fused GPU point path.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EffectGpuPlanBlocker {
-    /// Renderer-owned OCIO transitions must run around this effect graph.
-    #[error("effect graph requires {transitions} unresolved OCIO color-domain transitions")]
-    ColorDomainConversionRequired {
-        /// Number of explicit RGB-domain conversion edges.
+    /// The compiled transition graph is not one supported preserving RGB domain.
+    #[error("effect graph has unsupported GPU color-domain plan with {transitions} transitions")]
+    UnsupportedColorDomainPlan {
+        /// Number of explicit RGB-domain transitions in the compiled graph.
         transitions: usize,
+    },
+    /// A GPU point operation changes its processing domain.
+    #[error("effect node {node_id:?} changes GPU processing domain from {input:?} to {output:?}")]
+    NonPreservingColorDomain {
+        /// Node containing the non-preserving operation.
+        node_id: EffectGraphNodeId,
+        /// Required input domain.
+        input: EffectColorDomain,
+        /// Produced output domain.
+        output: EffectColorDomain,
+    },
+    /// One fused point pass cannot execute operations declared in different domains.
+    #[error("effect graph mixes GPU processing domains {first:?} and {next:?}")]
+    MixedProcessingDomains {
+        /// First processing domain in the chain.
+        first: EffectColorDomain,
+        /// Conflicting later processing domain.
+        next: EffectColorDomain,
     },
     /// Data or alpha domains crossed a color edge and cannot be converted.
     #[error("effect graph contains {blockers} invalid color-domain edges")]
@@ -115,13 +141,9 @@ pub fn lower_effect_graph_to_gpu_plan(
             blockers: compiled.domain_plan.blockers.len(),
         });
     }
-    if compiled.domain_plan.requires_conversion() {
-        return Err(EffectGpuPlanBlocker::ColorDomainConversionRequired {
-            transitions: compiled.domain_plan.transitions.len(),
-        });
-    }
     let mut previous = None;
     let mut operations = Vec::new();
+    let mut processing_domain = None;
     for node_id in &compiled.schedule.ordered_nodes {
         let Some(node) = compiled.graph.node(*node_id) else {
             return Err(EffectGpuPlanBlocker::DisconnectedChain { node_id: *node_id });
@@ -139,6 +161,27 @@ pub fn lower_effect_graph_to_gpu_plan(
                 if Some(*input) != previous {
                     return Err(EffectGpuPlanBlocker::DisconnectedChain { node_id: *node_id });
                 }
+                merge_processing_domain(&mut processing_domain, EffectColorDomain::SceneLinearRgb)?;
+                operations.push(lower_point_op(*node_id, op)?);
+                if operations.len() > MAX_FUSED_GPU_EFFECT_OPS {
+                    return Err(EffectGpuPlanBlocker::TooManyOperations {
+                        actual: operations.len(),
+                        maximum: MAX_FUSED_GPU_EFFECT_OPS,
+                    });
+                }
+            }
+            EffectGraphNodeKind::DomainEffect { input, op, domain_contract } => {
+                if Some(*input) != previous {
+                    return Err(EffectGpuPlanBlocker::DisconnectedChain { node_id: *node_id });
+                }
+                if domain_contract.input != domain_contract.output {
+                    return Err(EffectGpuPlanBlocker::NonPreservingColorDomain {
+                        node_id: *node_id,
+                        input: domain_contract.input,
+                        output: domain_contract.output,
+                    });
+                }
+                merge_processing_domain(&mut processing_domain, domain_contract.input)?;
                 operations.push(lower_point_op(*node_id, op)?);
                 if operations.len() > MAX_FUSED_GPU_EFFECT_OPS {
                     return Err(EffectGpuPlanBlocker::TooManyOperations {
@@ -159,10 +202,46 @@ pub fn lower_effect_graph_to_gpu_plan(
     if previous != Some(output) {
         return Err(EffectGpuPlanBlocker::DisconnectedChain { node_id: output });
     }
+    let processing_domain = processing_domain.unwrap_or(EffectColorDomain::SceneLinearRgb);
+    let transitions_match = if processing_domain == EffectColorDomain::SceneLinearRgb {
+        compiled.domain_plan.transitions.is_empty()
+    } else {
+        compiled.domain_plan.transitions.len() == 2
+            && compiled.domain_plan.transitions.iter().any(|transition| {
+                transition.from == EffectColorDomain::SceneLinearRgb
+                    && transition.to == processing_domain
+            })
+            && compiled.domain_plan.transitions.iter().any(|transition| {
+                transition.from == processing_domain
+                    && transition.to == EffectColorDomain::SceneLinearRgb
+            })
+    };
+    if !transitions_match {
+        return Err(EffectGpuPlanBlocker::UnsupportedColorDomainPlan {
+            transitions: compiled.domain_plan.transitions.len(),
+        });
+    }
     Ok(CompiledEffectGpuPlan {
         operations,
         graph_signature: compiled.signature_hash,
+        processing_domain,
     })
+}
+
+fn merge_processing_domain(
+    current: &mut Option<EffectColorDomain>,
+    next: EffectColorDomain,
+) -> Result<(), EffectGpuPlanBlocker> {
+    match *current {
+        Some(first) if first != next => {
+            Err(EffectGpuPlanBlocker::MixedProcessingDomains { first, next })
+        }
+        Some(_) => Ok(()),
+        None => {
+            *current = Some(next);
+            Ok(())
+        }
+    }
 }
 
 /// Return a shared cached GPU plan for a compiled effect graph.
@@ -319,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unresolved_color_domain_with_a_typed_gpu_blocker() {
+    fn lowers_preserving_display_domain_with_explicit_processing_identity() {
         let display_domain = crate::EffectColorDomain::DisplayEncodedRgb {
             color_space: mondrian_core::ColorSpace::Rec709,
         };
@@ -335,10 +414,41 @@ mod tests {
         )
         .expect("valid display-domain graph");
 
-        assert_eq!(
+        let plan = lower_effect_graph_to_gpu_plan(&compiled)
+            .expect("renderer can schedule preserving RGB domain transitions");
+
+        assert_eq!(plan.processing_domain(), display_domain);
+        assert_eq!(plan.operations().len(), 1);
+    }
+
+    #[test]
+    fn rejects_non_preserving_gpu_processing_domain() {
+        let input = crate::EffectColorDomain::DisplayEncodedRgb {
+            color_space: mondrian_core::ColorSpace::Rec709,
+        };
+        let output = crate::EffectColorDomain::DisplayLinearRgb {
+            color_space: mondrian_core::ColorSpace::LinearRec709,
+        };
+        let compiled = crate::compile_scheduled_effect_graph_in_domain(
+            &crate::EffectRenderPlan {
+                ops: vec![EffectRenderOp::ColorAdjust {
+                    exposure: 0.25,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                }],
+            },
+            crate::EffectColorDomainContract { input, output },
+        )
+        .expect("valid domain graph");
+
+        assert!(matches!(
             lower_effect_graph_to_gpu_plan(&compiled),
-            Err(EffectGpuPlanBlocker::ColorDomainConversionRequired { transitions: 2 })
-        );
+            Err(EffectGpuPlanBlocker::NonPreservingColorDomain {
+                input: actual_input,
+                output: actual_output,
+                ..
+            }) if actual_input == input && actual_output == output
+        ));
     }
 
     #[test]

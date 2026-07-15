@@ -66,8 +66,11 @@ processor. Preview and export call this same renderer boundary. Processor
 failure, invalid data/alpha crossings, and backends that have not materialized
 the plan fail closed; they are never relabeled as an RGBA8 fallback. This
 guarantees that adding a display- or log-domain effect cannot silently execute
-its math on scene-linear samples. GPU lowering continues to report a typed
-blocker until its render-pass scheduler can bind the equivalent OCIO processors.
+its math on scene-linear samples. GPU lowering retains one exact preserving RGB
+processing domain on `CompiledEffectGpuPlan`; mixed or non-preserving domains
+remain typed blockers. The legacy working compositor accepts only
+`SceneLinearRgb`, so a non-linear plan cannot execute before the renderer has
+materialized its surrounding stock-OCIO passes.
 
 ## Basic Properties
 
@@ -148,7 +151,9 @@ does not imply GPU execution support.
 
 `lower_effect_graph_to_gpu_plan(...)` is the backend-neutral GPU boundary. It
 accepts only a compiled single-source unary chain and emits an immutable fused
-point plan without wgpu objects. ColorAdjust, WhiteBalance, Vignette, and Grain
+point plan without wgpu objects. One preserving scene-linear, log/perceptual,
+display-linear, or display-encoded processing domain is retained as part of the
+plan rather than interpreted by the effects crate. ColorAdjust, WhiteBalance, Vignette, and Grain
 are supported in source order with a bounded eight-op pass; spatial operations,
 LUT resources, custom processors, and branching graph nodes return typed
 `EffectGpuPlanBlocker` values. This makes capability checks deterministic and

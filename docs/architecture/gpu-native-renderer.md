@@ -303,6 +303,20 @@ sampling, LUT resources, and custom operations remain explicit lowering
 blockers until dedicated renderer graph passes provide their resource and alpha
 contracts.
 
+Non-scene-linear point plans carry their exact `EffectColorDomain` into the
+renderer. `RenderEffectColorDomainGpuPlanner` resolves that declaration into a
+paired stock-OCIO identity route (`Working -> Effect -> Working`) using the
+project color engine. `ColorFrameDomain::Effect` and
+`RenderGpuColorTransformResourcePlan` describe the GPU-resident floating-point
+intermediate and allocate it from the shared texture pool without upload or
+readback nodes. Scene-linear effects omit the identity route entirely; data and
+alpha domains remain non-convertible. Until the graph recorder interleaves the
+two OCIO passes with the point pass, `GpuFrameCompositor` rejects such plans
+rather than evaluating encoded/log math in working-linear samples.
+App preview diagnostics count internal transforms separately from source input
+and display/output transforms, preserving per-pass call and pixel evidence
+without misclassifying them as transfer boundaries.
+
 A real-wgpu readback test compares the fused media and adjustment outputs
 against `apply_compiled_effect_graph_rgba_f32(...)` and
 `apply_compiled_effect_graph_pass_rgba_f32(...)` per channel. This is the

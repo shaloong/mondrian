@@ -676,6 +676,14 @@ impl AppUiPreviewService {
             color_input_transform_pixels: self.metrics.color_input_transform_pixels.get(),
             color_output_transform_calls: self.metrics.color_output_transform_calls.get(),
             color_output_transform_pixels: self.metrics.color_output_transform_pixels.get(),
+            color_intermediate_transform_calls: self
+                .metrics
+                .color_intermediate_transform_calls
+                .get(),
+            color_intermediate_transform_pixels: self
+                .metrics
+                .color_intermediate_transform_pixels
+                .get(),
             color_rgba8_boundary_calls: self.metrics.color_rgba8_boundary_calls.get(),
             color_stage_plans: self.metrics.color_stage_plans.get(),
             color_stage_total_stages: self.metrics.color_stage_total_stages.get(),
@@ -1556,6 +1564,13 @@ impl AppUiPreviewService {
                 bump(&self.metrics.color_output_transform_calls);
                 add_cell(
                     &self.metrics.color_output_transform_pixels,
+                    diagnostics.pixel_count as u64,
+                );
+            }
+            RenderColorTransformDirection::Intermediate => {
+                bump(&self.metrics.color_intermediate_transform_calls);
+                add_cell(
+                    &self.metrics.color_intermediate_transform_pixels,
                     diagnostics.pixel_count as u64,
                 );
             }
@@ -2815,6 +2830,10 @@ pub struct AppUiPreviewDiagnostics {
     pub color_output_transform_calls: u64,
     /// Pixels processed by timeline working-space transforms into preview/output encoding.
     pub color_output_transform_pixels: u64,
+    /// GPU-resident OCIO transforms between internal render-graph nodes.
+    pub color_intermediate_transform_calls: u64,
+    /// Pixels processed by GPU-resident internal OCIO transforms.
+    pub color_intermediate_transform_pixels: u64,
     /// Color transforms that crossed the temporary RGBA8 CPU boundary.
     pub color_rgba8_boundary_calls: u64,
     /// Render color stage plans executed by preview.
@@ -8505,6 +8524,8 @@ struct AppUiPreviewMetrics {
     color_input_transform_pixels: Cell<u64>,
     color_output_transform_calls: Cell<u64>,
     color_output_transform_pixels: Cell<u64>,
+    color_intermediate_transform_calls: Cell<u64>,
+    color_intermediate_transform_pixels: Cell<u64>,
     color_rgba8_boundary_calls: Cell<u64>,
     color_stage_plans: Cell<u64>,
     color_stage_total_stages: Cell<u64>,

@@ -15,7 +15,9 @@ use crate::{
 };
 use bytemuck::{Pod, Zeroable};
 use mondrian_core::types::{BlendMode, Color};
-use mondrian_effects::{CompiledEffectGpuPlan, EffectGpuPointOp, MAX_FUSED_GPU_EFFECT_OPS};
+use mondrian_effects::{
+    CompiledEffectGpuPlan, EffectColorDomain, EffectGpuPointOp, MAX_FUSED_GPU_EFFECT_OPS,
+};
 use serde::{Deserialize, Serialize};
 use wgpu::util::DeviceExt;
 
@@ -396,6 +398,12 @@ pub enum GpuCompositeError {
     /// An adjustment layer did not provide a non-identity GPU effect plan.
     #[error("GPU adjustment layer requires a non-identity effect plan")]
     AdjustmentMissingEffectPlan,
+    /// An effect must be surrounded by renderer-owned OCIO passes before composition.
+    #[error("GPU working compositor cannot execute effect domain {domain:?} inline")]
+    EffectDomainRequiresExternalPass {
+        /// Exact domain that the external pass sequence must materialize.
+        domain: EffectColorDomain,
+    },
     /// A renderer frame handle could not be created.
     #[error("GPU composite output handle error: {0}")]
     OutputHandle(#[from] crate::GpuColorFrameHandleError),
@@ -805,6 +813,12 @@ fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuComposit
         return Err(GpuCompositeError::Blocked { reason });
     }
     for layer in request.layers {
+        if let Some(plan) = layer.effect_plan {
+            let domain = plan.processing_domain();
+            if domain != EffectColorDomain::SceneLinearRgb {
+                return Err(GpuCompositeError::EffectDomainRequiresExternalPass { domain });
+            }
+        }
         if matches!(layer.source, GpuCompositeLayerSource::Adjustment)
             && layer.effect_plan.is_none_or(CompiledEffectGpuPlan::is_identity)
         {
@@ -1132,6 +1146,48 @@ mod tests {
         assert_eq!(
             validate_request(&request),
             Err(GpuCompositeError::AdjustmentMissingEffectPlan)
+        );
+    }
+
+    #[test]
+    fn working_compositor_rejects_effect_plan_declared_in_external_color_domain() {
+        use mondrian_effects::{
+            compile_scheduled_effect_graph_in_domain, lower_effect_graph_to_gpu_plan,
+            EffectColorDomain, EffectColorDomainContract, EffectRenderOp, EffectRenderPlan,
+        };
+
+        let domain =
+            EffectColorDomain::DisplayEncodedRgb { color_space: mondrian_core::ColorSpace::Rec709 };
+        let graph = compile_scheduled_effect_graph_in_domain(
+            &EffectRenderPlan {
+                ops: vec![EffectRenderOp::ColorAdjust {
+                    exposure: 0.25,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                }],
+            },
+            EffectColorDomainContract::preserving(domain),
+        )
+        .expect("valid domain graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("GPU point plan");
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::Adjustment,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&plan),
+            frame_seed: 0,
+        };
+        let request = GpuCompositeRequest {
+            width: 4,
+            height: 4,
+            working_color_space: WorkingColorSpace::LinearRec709,
+            layers: &[layer],
+        };
+
+        assert_eq!(
+            validate_request(&request),
+            Err(GpuCompositeError::EffectDomainRequiresExternalPass { domain })
         );
     }
 

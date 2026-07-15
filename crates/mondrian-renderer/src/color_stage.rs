@@ -1,18 +1,19 @@
 use crate::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
     CpuColorTransformExecutor, CpuEncodedColorFrame, CpuSourceColorFrame,
-    GpuColorFrameAllocationPlan, GpuColorFrameHandle, GpuColorFrameId, GpuColorFrameIdAllocator,
-    GpuColorFrameReadback, GpuColorFrameReadbackError, GpuColorFrameReadbackPlan,
-    GpuColorFrameResource, GpuColorFrameResourceTable, GpuColorFrameResourceTableError,
-    GpuColorFrameTextureFormat, GpuColorFrameUploadError, GpuColorFrameUploadPlan,
-    GpuColorFrameUploader, GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool,
-    GpuColorFrameWgpuResourcePoolDiagnostics, GpuCompositeError, GpuCompositeRecord,
-    GpuCompositeRequest, GpuFrameCompositor, LinearFloatSource, OcioGpuShaderCache,
-    OcioGpuShaderCacheDiagnostics, OcioGpuWgpuBackendObjectError, OcioGpuWgpuBackendObjectRuntime,
-    OcioGpuWgpuBackendObjectRuntimeDiagnostics, OcioGpuWgpuBackendPrepError,
-    OcioGpuWgpuBackendPrepRuntime, OcioGpuWgpuBackendPrepRuntimeDiagnostics,
-    OcioGpuWgpuBindGroupLayoutDescriptorPlan, OcioGpuWgpuBlocker, OcioGpuWgpuColorTargetFormat,
-    OcioGpuWgpuOcioBindGroup, OcioGpuWgpuPreparedWrapperInputLayout, OcioGpuWgpuRenderPassError,
+    GpuColorFrameAllocationPlan, GpuColorFrameHandle, GpuColorFrameHandleError, GpuColorFrameId,
+    GpuColorFrameIdAllocator, GpuColorFrameReadback, GpuColorFrameReadbackError,
+    GpuColorFrameReadbackPlan, GpuColorFrameResource, GpuColorFrameResourceTable,
+    GpuColorFrameResourceTableError, GpuColorFrameTextureFormat, GpuColorFrameUploadError,
+    GpuColorFrameUploadPlan, GpuColorFrameUploader, GpuColorFrameWgpuResource,
+    GpuColorFrameWgpuResourcePool, GpuColorFrameWgpuResourcePoolDiagnostics, GpuCompositeError,
+    GpuCompositeRecord, GpuCompositeRequest, GpuFrameCompositor, LinearFloatSource,
+    OcioGpuShaderCache, OcioGpuShaderCacheDiagnostics, OcioGpuWgpuBackendObjectError,
+    OcioGpuWgpuBackendObjectRuntime, OcioGpuWgpuBackendObjectRuntimeDiagnostics,
+    OcioGpuWgpuBackendPrepError, OcioGpuWgpuBackendPrepRuntime,
+    OcioGpuWgpuBackendPrepRuntimeDiagnostics, OcioGpuWgpuBindGroupLayoutDescriptorPlan,
+    OcioGpuWgpuBlocker, OcioGpuWgpuColorTargetFormat, OcioGpuWgpuOcioBindGroup,
+    OcioGpuWgpuPreparedWrapperInputLayout, OcioGpuWgpuRenderPassError,
     OcioGpuWgpuRenderPassNodePlan, OcioGpuWgpuRenderPassRecorder, OcioGpuWgpuRenderPassTarget,
     OcioGpuWgpuRenderPipeline, OcioGpuWgpuWrapperBindGroup, OcioGpuWgpuWrapperBindingPlan,
     OcioGpuWgpuWrapperInputResources, RenderColorTransform, RenderColorTransformError,
@@ -1799,6 +1800,148 @@ pub struct RenderGpuColorPassSchedule {
     pub transform: RenderColorTransformGpuPlan,
     /// Backend render-pass node that records the fullscreen OCIO draw.
     pub pass_node: OcioGpuWgpuRenderPassNodePlan,
+}
+
+/// Resource plan for one GPU-resident OCIO transform between render-graph nodes.
+///
+/// This contract has no implicit transfer boundary: both input and output stay
+/// in the shared renderer resource table and the output texture is reusable.
+#[derive(Debug, Clone)]
+pub struct RenderGpuColorTransformResourcePlan {
+    /// Existing GPU input frame consumed by the color pass.
+    pub input: GpuColorFrameHandle,
+    /// Newly allocated GPU output frame produced by the color pass.
+    pub output: GpuColorFrameHandle,
+    /// Allocation contract for the output texture.
+    pub output_allocation: GpuColorFrameAllocationPlan,
+    /// Executable GPU OCIO transform bound to these descriptors.
+    pub transform: RenderColorTransformGpuPlan,
+}
+
+impl RenderGpuColorTransformResourcePlan {
+    /// Bind a blocker-free GPU transform to an existing input and a new output target.
+    pub fn from_gpu_frame(
+        ids: &mut GpuColorFrameIdAllocator,
+        input: &GpuColorFrameHandle,
+        transform: RenderColorTransformGpuPlan,
+        output_texture_format: GpuColorFrameTextureFormat,
+        output_label: impl Into<String>,
+    ) -> Result<Self, RenderGpuColorTransformResourcePlanError> {
+        if !transform.wgpu.can_execute() {
+            return Err(
+                RenderGpuColorTransformResourcePlanError::NativeBlockersRemaining {
+                    blockers: transform.wgpu.blockers.len(),
+                },
+            );
+        }
+        if transform.requires_source_upload || transform.requires_output_readback {
+            return Err(
+                RenderGpuColorTransformResourcePlanError::TransferBoundaryRequired {
+                    source_upload: transform.requires_source_upload,
+                    output_readback: transform.requires_output_readback,
+                },
+            );
+        }
+        if transform.diagnostics.input != input.descriptor() {
+            return Err(
+                RenderGpuColorTransformResourcePlanError::InputDescriptorMismatch {
+                    expected: transform.diagnostics.input,
+                    actual: input.descriptor(),
+                },
+            );
+        }
+        let output_descriptor = transform.diagnostics.output;
+        if output_descriptor.residency != ColorFrameResidency::Gpu {
+            return Err(
+                RenderGpuColorTransformResourcePlanError::OutputIsNotGpuResident {
+                    descriptor: output_descriptor,
+                },
+            );
+        }
+        validate_gpu_color_target_encoding(output_descriptor.encoding, output_texture_format)?;
+        let output = GpuColorFrameHandle::new(
+            ids.allocate(),
+            output_descriptor,
+            output_texture_format,
+            output_label,
+        )
+        .map_err(RenderGpuColorTransformResourcePlanError::OutputHandle)?;
+        let output_allocation = GpuColorFrameAllocationPlan::for_handle(output.clone());
+        Ok(Self {
+            input: input.clone(),
+            output,
+            output_allocation,
+            transform,
+        })
+    }
+}
+
+/// Error returned when an in-graph GPU OCIO transform cannot bind resources.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RenderGpuColorTransformResourcePlanError {
+    /// OCIO GPU preparation left deterministic native blockers.
+    #[error("GPU color transform has {blockers} unresolved native blockers")]
+    NativeBlockersRemaining {
+        /// Number of blockers reported by the prepared OCIO plan.
+        blockers: usize,
+    },
+    /// The transform still requires a CPU/GPU transfer boundary.
+    #[error(
+        "GPU color transform requires transfer boundary (upload={source_upload}, readback={output_readback})"
+    )]
+    TransferBoundaryRequired {
+        /// Whether a source upload is still required.
+        source_upload: bool,
+        /// Whether an output readback is still required.
+        output_readback: bool,
+    },
+    /// The supplied handle does not satisfy the transform input contract.
+    #[error("GPU color transform input mismatch: expected {expected:?}, actual {actual:?}")]
+    InputDescriptorMismatch {
+        /// Planned input descriptor.
+        expected: ColorFrameDescriptor,
+        /// Supplied handle descriptor.
+        actual: ColorFrameDescriptor,
+    },
+    /// The planned intermediate would leave GPU residency.
+    #[error("GPU color transform output is not GPU-resident: {descriptor:?}")]
+    OutputIsNotGpuResident {
+        /// Invalid planned output descriptor.
+        descriptor: ColorFrameDescriptor,
+    },
+    /// The output encoding cannot be represented by the selected texture format.
+    #[error("GPU color target encoding {encoding:?} does not match {texture_format:?}")]
+    OutputTextureEncodingMismatch {
+        /// Planned pixel encoding.
+        encoding: ColorFrameEncoding,
+        /// Requested texture format.
+        texture_format: GpuColorFrameTextureFormat,
+    },
+    /// The typed output handle could not be constructed.
+    #[error("GPU color transform output handle is invalid: {0}")]
+    OutputHandle(GpuColorFrameHandleError),
+}
+
+fn validate_gpu_color_target_encoding(
+    encoding: ColorFrameEncoding,
+    texture_format: GpuColorFrameTextureFormat,
+) -> Result<(), RenderGpuColorTransformResourcePlanError> {
+    let matches = match texture_format {
+        GpuColorFrameTextureFormat::Rgba8Unorm => encoding == ColorFrameEncoding::EncodedRgba8,
+        GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float => {
+            encoding != ColorFrameEncoding::EncodedRgba8
+        }
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(
+            RenderGpuColorTransformResourcePlanError::OutputTextureEncodingMismatch {
+                encoding,
+                texture_format,
+            },
+        )
+    }
 }
 
 /// GPU input texture view borrowed while materializing a scheduled OCIO color pass.
@@ -3858,7 +4001,7 @@ mod tests {
     use crate::{
         GpuColorFrameId, GpuColorFrameIdAllocator, GpuColorFrameReadbackPlan,
         GpuColorFrameTextureFormat, GpuContext, OcioGpuShaderRequest, OcioGpuWgpuBlocker,
-        RenderColorTransformBackend,
+        RenderColorTransformBackend, RenderIntermediateColorTransform,
     };
     use mondrian_core::types::{AcesConfigPreset, ColorEngine, ColorSpace};
     use mondrian_core::WorkingColorSpace;
@@ -5740,6 +5883,67 @@ mod tests {
         assert_eq!(diagnostics.upload_stages, 0);
         assert_eq!(diagnostics.gpu_color_stages, 1);
         assert_eq!(diagnostics.readback_stages, 0);
+    }
+
+    #[test]
+    fn gpu_intermediate_resource_plan_allocates_float_target_without_transfers() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let input_descriptor = ColorFrameDescriptor {
+            width: 3840,
+            height: 2160,
+            color_space: WorkingColorSpace::LinearRec2020.into(),
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Gpu,
+        };
+        let input = gpu_handle_with_format(
+            650,
+            input_descriptor,
+            GpuColorFrameTextureFormat::Rgba16Float,
+            "effect-input",
+        );
+        let transform = RenderIntermediateColorTransform {
+            output_identity: mondrian_core::OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
+            output_domain: ColorFrameDomain::Effect,
+            output_encoding: ColorFrameEncoding::EncodedFloat,
+            engine: ColorEngine::mondrian_standard(),
+        };
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorTransformGpuPlanner::new(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+        let transform_plan = planner
+            .plan_identity_transform(input_descriptor, &transform)
+            .expect("effect-domain transform plan");
+        let mut ids = GpuColorFrameIdAllocator::new(651);
+
+        let resources = RenderGpuColorTransformResourcePlan::from_gpu_frame(
+            &mut ids,
+            &input,
+            transform_plan,
+            GpuColorFrameTextureFormat::Rgba16Float,
+            "effect-domain-target",
+        )
+        .expect("GPU intermediate resources");
+
+        assert_eq!(resources.input, input);
+        assert_eq!(resources.output.id().raw(), 651);
+        assert_eq!(
+            resources.output.descriptor().domain,
+            ColorFrameDomain::Effect
+        );
+        assert_eq!(
+            resources.output.descriptor().encoding,
+            ColorFrameEncoding::EncodedFloat
+        );
+        assert_eq!(
+            resources.output.texture_format(),
+            GpuColorFrameTextureFormat::Rgba16Float
+        );
+        assert!(!resources.transform.requires_source_upload);
+        assert!(!resources.transform.requires_output_readback);
+        assert_eq!(ids.next_raw(), 652);
     }
 
     #[test]

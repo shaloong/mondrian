@@ -17,6 +17,8 @@ pub enum ColorFrameDomain {
     Source,
     /// Timeline working-space pixels after input transforms and compositing.
     Working,
+    /// Color-managed intermediate pixels prepared for an effect's declared domain.
+    Effect,
     /// Presentation pixels after a display/view transform.
     Display,
     /// Delivery pixels after export/output transforms.

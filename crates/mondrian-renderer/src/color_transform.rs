@@ -28,6 +28,8 @@ pub enum RenderColorTransformDirection {
     InputToWorking,
     /// Timeline working pixels leaving to display/export.
     WorkingToOutput,
+    /// GPU-resident color-managed intermediate used inside the render graph.
+    Intermediate,
 }
 
 /// Diagnostics emitted by renderer color transform execution.
@@ -146,6 +148,132 @@ pub struct RenderColorTransform {
     pub engine: ColorEngine,
     /// Execution backend selected for this transform.
     pub backend: RenderColorTransformBackend,
+}
+
+/// Identity-to-identity transform used for a color-managed render-graph intermediate.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RenderIntermediateColorTransform {
+    /// Exact OCIO destination identity.
+    pub output_identity: OcioColorSpaceIdentity,
+    /// Semantic role carried by the intermediate frame.
+    pub output_domain: ColorFrameDomain,
+    /// Floating-point encoding produced by the transform.
+    pub output_encoding: ColorFrameEncoding,
+    /// Color engine used to resolve and execute the OCIO processor.
+    pub engine: ColorEngine,
+}
+
+/// Paired OCIO GPU transforms surrounding one effect processing domain.
+#[derive(Debug, Clone)]
+pub struct RenderEffectColorDomainGpuPlan {
+    /// Working-to-processing transform, absent for scene-linear effects.
+    pub to_processing: Option<RenderColorTransformGpuPlan>,
+    /// Processing-to-working transform, absent for scene-linear effects.
+    pub to_working: Option<RenderColorTransformGpuPlan>,
+}
+
+/// Planner that resolves effect-domain semantics into renderer-owned OCIO passes.
+pub struct RenderEffectColorDomainGpuPlanner<'a> {
+    color: RenderColorTransformGpuPlanner<'a>,
+}
+
+impl<'a> RenderEffectColorDomainGpuPlanner<'a> {
+    /// Create an effect-domain planner over the shared OCIO shader cache.
+    pub fn new(cache: &'a mut OcioGpuShaderCache, options: RenderColorTransformGpuOptions) -> Self {
+        Self {
+            color: RenderColorTransformGpuPlanner::new(cache, options),
+        }
+    }
+
+    /// Plan a no-transfer GPU round trip around an effect's declared domain.
+    pub fn plan(
+        &mut self,
+        input: ColorFrameDescriptor,
+        domain: mondrian_effects::EffectColorDomain,
+        engine: ColorEngine,
+    ) -> Result<RenderEffectColorDomainGpuPlan, RenderEffectColorDomainGpuPlanError> {
+        let working = match (
+            input.domain,
+            input.color_space,
+            input.encoding,
+            input.residency,
+        ) {
+            (
+                ColorFrameDomain::Working,
+                ColorFrameSpace::Working(working),
+                ColorFrameEncoding::LinearFloat,
+                ColorFrameResidency::Gpu,
+            ) => working,
+            _ => {
+                return Err(RenderEffectColorDomainGpuPlanError::InvalidWorkingInput {
+                    descriptor: input,
+                });
+            }
+        };
+        let (output_identity, output_encoding) = match domain {
+            mondrian_effects::EffectColorDomain::SceneLinearRgb => {
+                return Ok(RenderEffectColorDomainGpuPlan {
+                    to_processing: None,
+                    to_working: None,
+                });
+            }
+            mondrian_effects::EffectColorDomain::LogPerceptualRgb { color_space }
+            | mondrian_effects::EffectColorDomain::DisplayEncodedRgb { color_space } => (
+                OcioColorSpaceIdentity::Color(color_space),
+                ColorFrameEncoding::EncodedFloat,
+            ),
+            mondrian_effects::EffectColorDomain::DisplayLinearRgb { color_space } => (
+                OcioColorSpaceIdentity::Color(color_space),
+                ColorFrameEncoding::LinearFloat,
+            ),
+            mondrian_effects::EffectColorDomain::Data
+            | mondrian_effects::EffectColorDomain::AlphaMask => {
+                return Err(RenderEffectColorDomainGpuPlanError::NonRgbDomain { domain });
+            }
+        };
+        let to_processing = self.color.plan_identity_transform(
+            input,
+            &RenderIntermediateColorTransform {
+                output_identity,
+                output_domain: ColorFrameDomain::Effect,
+                output_encoding,
+                engine: engine.clone(),
+            },
+        )?;
+        let to_working = self.color.plan_identity_transform(
+            to_processing.diagnostics.output,
+            &RenderIntermediateColorTransform {
+                output_identity: OcioColorSpaceIdentity::Working(working),
+                output_domain: ColorFrameDomain::Working,
+                output_encoding: ColorFrameEncoding::LinearFloat,
+                engine,
+            },
+        )?;
+        Ok(RenderEffectColorDomainGpuPlan {
+            to_processing: Some(to_processing),
+            to_working: Some(to_working),
+        })
+    }
+}
+
+/// Error returned when an effect domain cannot become a GPU OCIO pass pair.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum RenderEffectColorDomainGpuPlanError {
+    /// The route must begin with a GPU-resident linear working frame.
+    #[error("effect GPU color route requires a GPU linear working frame, got {descriptor:?}")]
+    InvalidWorkingInput {
+        /// Invalid input contract.
+        descriptor: ColorFrameDescriptor,
+    },
+    /// Data and alpha are not color-convertible RGB domains.
+    #[error("effect GPU color route cannot convert non-RGB domain {domain:?}")]
+    NonRgbDomain {
+        /// Non-convertible domain.
+        domain: mondrian_effects::EffectColorDomain,
+    },
+    /// One of the stock-OCIO transforms could not be planned.
+    #[error(transparent)]
+    ColorTransform(#[from] RenderColorTransformError),
 }
 
 /// Input transform requested by a decode/source boundary.
@@ -684,6 +812,45 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
         )
     }
 
+    /// Plan an arbitrary OCIO identity-to-identity transform between GPU render nodes.
+    ///
+    /// Unlike input and output boundary planning, this path preserves residency and
+    /// never implies an upload or readback. It is used for explicit effect domains.
+    pub fn plan_identity_transform(
+        &mut self,
+        input: ColorFrameDescriptor,
+        transform: &RenderIntermediateColorTransform,
+    ) -> Result<RenderColorTransformGpuPlan, RenderColorTransformError> {
+        let source_identity = frame_space_identity(input.color_space).ok_or_else(|| {
+            RenderColorTransformError::ExecutionFailed {
+                direction: RenderColorTransformDirection::Intermediate,
+                input,
+                output: input,
+                reason: "GPU intermediate cannot use a monitor-device identity".to_string(),
+            }
+        })?;
+        let output = ColorFrameDescriptor {
+            width: input.width,
+            height: input.height,
+            color_space: identity_frame_space(transform.output_identity),
+            domain: transform.output_domain,
+            encoding: transform.output_encoding,
+            residency: input.residency,
+        };
+        let request = OcioGpuShaderRequest::ColorSpace {
+            engine: transform.engine.clone(),
+            src: source_identity,
+            dst: transform.output_identity,
+            language: self.options.language,
+        };
+        self.plan(
+            RenderColorTransformDirection::Intermediate,
+            input,
+            output,
+            request,
+        )
+    }
+
     fn plan(
         &mut self,
         direction: RenderColorTransformDirection,
@@ -708,6 +875,21 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
             requires_source_upload: input.residency == ColorFrameResidency::Cpu,
             requires_output_readback: output.residency == ColorFrameResidency::Cpu,
         })
+    }
+}
+
+fn frame_space_identity(space: ColorFrameSpace) -> Option<OcioColorSpaceIdentity> {
+    match space {
+        ColorFrameSpace::Color(space) => Some(OcioColorSpaceIdentity::Color(space)),
+        ColorFrameSpace::Working(space) => Some(OcioColorSpaceIdentity::Working(space)),
+        ColorFrameSpace::Device(_) => None,
+    }
+}
+
+fn identity_frame_space(identity: OcioColorSpaceIdentity) -> ColorFrameSpace {
+    match identity {
+        OcioColorSpaceIdentity::Color(space) => ColorFrameSpace::Color(space),
+        OcioColorSpaceIdentity::Working(space) => ColorFrameSpace::Working(space),
     }
 }
 
@@ -1035,6 +1217,114 @@ mod tests {
         );
         assert!(plan.wgpu.blockers.is_empty());
         assert!(plan.wgpu.can_execute());
+    }
+
+    #[test]
+    fn gpu_planner_builds_resident_effect_domain_identity_transform() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let input = ColorFrameDescriptor {
+            width: 3840,
+            height: 2160,
+            color_space: WorkingColorSpace::LinearRec2020.into(),
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Gpu,
+        };
+        let transform = RenderIntermediateColorTransform {
+            output_identity: OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
+            output_domain: ColorFrameDomain::Effect,
+            output_encoding: ColorFrameEncoding::EncodedFloat,
+            engine: ColorEngine::mondrian_standard(),
+        };
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorTransformGpuPlanner::new(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+
+        let plan = planner
+            .plan_identity_transform(input, &transform)
+            .expect("effect-domain GPU plan");
+
+        assert_eq!(plan.direction, RenderColorTransformDirection::Intermediate);
+        assert_eq!(plan.diagnostics.input, input);
+        assert_eq!(plan.diagnostics.output.domain, ColorFrameDomain::Effect);
+        assert_eq!(
+            plan.diagnostics.output.color_space,
+            ColorFrameSpace::Color(ColorSpace::Rec709)
+        );
+        assert_eq!(
+            plan.diagnostics.output.encoding,
+            ColorFrameEncoding::EncodedFloat
+        );
+        assert_eq!(plan.diagnostics.output.residency, ColorFrameResidency::Gpu);
+        assert!(!plan.requires_source_upload);
+        assert!(!plan.requires_output_readback);
+        assert!(plan.can_execute_in_place_on_gpu());
+        assert_eq!(
+            plan.request,
+            OcioGpuShaderRequest::ColorSpace {
+                engine: ColorEngine::mondrian_standard(),
+                src: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+                dst: OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
+                language: GpuLanguage::Glsl4_0,
+            }
+        );
+    }
+
+    #[test]
+    fn effect_domain_planner_builds_gpu_round_trip_without_transfer_nodes() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let input = ColorFrameDescriptor {
+            width: 3840,
+            height: 2160,
+            color_space: WorkingColorSpace::LinearRec2020.into(),
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Gpu,
+        };
+        let domain = mondrian_effects::EffectColorDomain::DisplayEncodedRgb {
+            color_space: ColorSpace::Rec709,
+        };
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderEffectColorDomainGpuPlanner::new(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+
+        let route = planner
+            .plan(input, domain, ColorEngine::mondrian_standard())
+            .expect("effect color route");
+        let to_processing = route.to_processing.expect("working to effect");
+        let to_working = route.to_working.expect("effect to working");
+
+        assert_eq!(to_processing.diagnostics.input, input);
+        assert_eq!(
+            to_processing.diagnostics.output.domain,
+            ColorFrameDomain::Effect
+        );
+        assert_eq!(
+            to_processing.diagnostics.output.encoding,
+            ColorFrameEncoding::EncodedFloat
+        );
+        assert_eq!(
+            to_working.diagnostics.input,
+            to_processing.diagnostics.output
+        );
+        assert_eq!(
+            to_working.diagnostics.output.domain,
+            ColorFrameDomain::Working
+        );
+        assert_eq!(
+            to_working.diagnostics.output.color_space,
+            WorkingColorSpace::LinearRec2020.into()
+        );
+        assert_eq!(
+            to_working.diagnostics.output.encoding,
+            ColorFrameEncoding::LinearFloat
+        );
+        assert!(to_processing.can_execute_in_place_on_gpu());
+        assert!(to_working.can_execute_in_place_on_gpu());
     }
 
     #[test]
