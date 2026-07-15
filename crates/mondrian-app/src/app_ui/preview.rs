@@ -343,39 +343,34 @@ impl AppUiPreviewService {
 
     fn hardware_decode_request_for_access_mode(
         &self,
-        access_mode: PreviewDecodeAccessMode,
+        _access_mode: PreviewDecodeAccessMode,
     ) -> PreviewHardwareDecodeRequest {
-        match access_mode {
-            PreviewDecodeAccessMode::PlaybackCursor => self.playback_hardware_decode_request.get(),
-            PreviewDecodeAccessMode::ScrubCursor
-            | PreviewDecodeAccessMode::RandomAccessStillFrame => PreviewHardwareDecodeRequest::Auto,
-        }
+        self.playback_hardware_decode_request.get()
     }
 
     fn hardware_decode_device_selector_for_access_mode(
         &self,
-        access_mode: PreviewDecodeAccessMode,
+        _access_mode: PreviewDecodeAccessMode,
     ) -> Option<HwAccelDeviceSelector> {
-        match access_mode {
-            PreviewDecodeAccessMode::PlaybackCursor => {
-                self.playback_hardware_decode_device_selector.get()
-            }
-            PreviewDecodeAccessMode::ScrubCursor
-            | PreviewDecodeAccessMode::RandomAccessStillFrame => None,
-        }
+        self.playback_hardware_decode_device_selector.get()
     }
 
     #[cfg(test)]
     pub(crate) fn seed_pending_preview_work_for_test(&self) {
         self.seed_pending_preview_work_with_access_mode_for_test(
             PreviewDecodeAccessMode::ScrubCursor,
+            None,
         );
     }
 
     #[cfg(test)]
-    pub(crate) fn seed_pending_playback_current_preview_work_for_test(&self) {
+    pub(crate) fn seed_pending_playback_current_preview_work_for_test(
+        &self,
+        demand_identity: mondrian_playback::FrameDemandIdentity,
+    ) {
         self.seed_pending_preview_work_with_access_mode_for_test(
             PreviewDecodeAccessMode::PlaybackCursor,
+            Some(demand_identity),
         );
     }
 
@@ -396,6 +391,7 @@ impl AppUiPreviewService {
     fn seed_pending_preview_work_with_access_mode_for_test(
         &self,
         access_mode: PreviewDecodeAccessMode,
+        demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
     ) {
         let key = MediaPreviewKey {
             asset_id: AssetId::new(),
@@ -413,8 +409,6 @@ impl AppUiPreviewService {
             ocio_generation: mondrian_core::ocio_config_generation(),
         };
         let generation = self.scheduler.begin_generation();
-        let demand_identity = (access_mode == PreviewDecodeAccessMode::PlaybackCursor)
-            .then(Self::test_frame_demand_identity);
         let _ = self.scheduler.request_with_demand_identity(
             key.clone(),
             generation,
@@ -819,42 +813,63 @@ impl AppUiPreviewService {
     }
 
     /// Poll completed background media preview decodes.
-    pub fn poll_finished(&self) -> bool {
-        self.poll_finished_outcome().visible_change
+    pub fn poll_finished(
+        &self,
+        pending_playback_demand: Option<mondrian_playback::FrameDemandIdentity>,
+    ) -> bool {
+        self.poll_finished_outcome(pending_playback_demand).visible_change
     }
 
-    pub(crate) fn poll_finished_outcome(&self) -> AppUiPreviewPollOutcome {
+    pub(crate) fn poll_finished_outcome(
+        &self,
+        pending_playback_demand: Option<mondrian_playback::FrameDemandIdentity>,
+    ) -> AppUiPreviewPollOutcome {
         self.poll_finished_outcome_with_budget(
             MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL,
             Duration::from_micros(MEDIA_PREVIEW_COMPLETED_RESULTS_POLL_BUDGET_US),
+            pending_playback_demand,
         )
     }
 
-    pub(crate) fn expire_stalled_realtime_current(&self) -> AppUiPreviewPollOutcome {
-        self.expire_stalled_realtime_current_with_timeout(Duration::from_micros(
-            MEDIA_PREVIEW_PLAYBACK_BUFFERING_STALL_TIMEOUT_US,
-        ))
+    pub(crate) fn expire_stalled_realtime_current(
+        &self,
+        pending_playback_demand: Option<mondrian_playback::FrameDemandIdentity>,
+    ) -> AppUiPreviewPollOutcome {
+        self.expire_stalled_realtime_current_with_timeout(
+            Duration::from_micros(MEDIA_PREVIEW_PLAYBACK_BUFFERING_STALL_TIMEOUT_US),
+            pending_playback_demand,
+        )
     }
 
     fn expire_stalled_realtime_current_with_timeout(
         &self,
         timeout: Duration,
+        pending_playback_demand: Option<mondrian_playback::FrameDemandIdentity>,
     ) -> AppUiPreviewPollOutcome {
         let expired = self.scheduler.expire_realtime_current_older_than(timeout);
         if expired.is_empty() {
             return AppUiPreviewPollOutcome::default();
         }
         let canceled_queued_jobs = expired.len() as u64;
-        let frame_deliveries = expired
-            .iter()
-            .filter(|request| request.access_mode == PreviewDecodeAccessMode::PlaybackCursor)
-            .filter_map(|request| request.demand_identity)
+        // Scheduler-current work can outlive the Playback Session demand that
+        // created it (for example after a GPU presentation completed first).
+        // Only the still-pending Playback identity has terminal authority, and
+        // multiple redundant jobs for it collapse to one Late observation.
+        let frame_deliveries = pending_playback_demand
+            .and_then(|pending_identity| {
+                expired.iter().find_map(|request| {
+                    (request.access_mode == PreviewDecodeAccessMode::PlaybackCursor
+                        && request.demand_identity == Some(pending_identity))
+                    .then_some(pending_identity)
+                })
+            })
             .map(|identity| {
                 mondrian_playback::FrameDelivery::for_demand(
                     identity,
                     mondrian_playback::FrameDeliveryKind::Late,
                 )
             })
+            .into_iter()
             .collect::<Vec<_>>();
         add_cell(
             &self.metrics.playback_current_stalled_expirations,
@@ -872,14 +887,21 @@ impl AppUiPreviewService {
     }
 
     #[cfg(test)]
-    fn poll_finished_with_budget(&self, max_results: usize, time_budget: Duration) -> bool {
-        self.poll_finished_outcome_with_budget(max_results, time_budget).visible_change
+    fn poll_finished_with_budget(
+        &self,
+        max_results: usize,
+        time_budget: Duration,
+        pending_playback_demand: Option<mondrian_playback::FrameDemandIdentity>,
+    ) -> bool {
+        self.poll_finished_outcome_with_budget(max_results, time_budget, pending_playback_demand)
+            .visible_change
     }
 
     fn poll_finished_outcome_with_budget(
         &self,
         max_results: usize,
         time_budget: Duration,
+        pending_playback_demand: Option<mondrian_playback::FrameDemandIdentity>,
     ) -> AppUiPreviewPollOutcome {
         let poll_started = Instant::now();
         bump(&self.metrics.completion_poll_calls);
@@ -915,6 +937,12 @@ impl AppUiPreviewService {
             let completion_demand_identity =
                 completion_resolution.demand_identity.or(result.demand_identity);
             let completion_deadline_at = completion_resolution.deadline_at.or(result.deadline_at);
+            let owns_pending_playback_demand = completion.is_current()
+                && completion_demand_identity.is_some()
+                && completion_demand_identity == pending_playback_demand;
+            let presentation_current = completion.is_current()
+                && (result.access_mode != PreviewDecodeAccessMode::PlaybackCursor
+                    || owns_pending_playback_demand);
             let startup_preroll = media_preview_result_is_startup_preroll(&result);
             if !startup_preroll {
                 self.record_preview_decode_queue_wait(
@@ -929,13 +957,12 @@ impl AppUiPreviewService {
                     result.cancel_reason,
                     result.decode_elapsed_us,
                     result.cancel_observed_elapsed_us,
+                    owns_pending_playback_demand,
                 );
-                if let Some(identity) = completion_demand_identity {
-                    outcome.frame_deliveries.push(mondrian_playback::FrameDelivery::for_demand(
-                        identity,
-                        mondrian_playback::FrameDeliveryKind::Canceled,
-                    ));
-                }
+                // Decode work cancellation is scheduler evidence, not a frame
+                // presentation. Emitting it as a terminal FrameDelivery races
+                // the Playback Session's newer demand and turns expected
+                // latest-wins cleanup into a rejected stale delivery.
                 // A settled scrub/still request can be cooperatively canceled
                 // while the render generation changes. Its completion releases
                 // the scheduler entry, so request one more render pass to submit
@@ -950,22 +977,24 @@ impl AppUiPreviewService {
             }
             let completed_after_playback_deadline =
                 media_preview_completed_after_playback_deadline(&result, completion_deadline_at);
-            if let Some(identity) = completion_demand_identity {
-                let kind = playback_frame_delivery_kind(
-                    completed_after_playback_deadline,
-                    result.frame.is_some(),
-                    result.priority,
-                    result.decode_diagnostics.as_ref().map(PlaybackDecodeExecution::from),
-                );
-                match kind {
-                    mondrian_playback::FrameDeliveryKind::Ready => {
-                        // Successful decode is non-terminal: the Presentation Adapter
-                        // finishes the demand after its output is actually usable.
+            if presentation_current {
+                if let Some(identity) = completion_demand_identity {
+                    let kind = playback_frame_delivery_kind(
+                        completed_after_playback_deadline,
+                        result.frame.is_some(),
+                        result.priority,
+                        result.decode_diagnostics.as_ref().map(PlaybackDecodeExecution::from),
+                    );
+                    match kind {
+                        mondrian_playback::FrameDeliveryKind::Ready => {
+                            // Successful decode is non-terminal: the Presentation Adapter
+                            // finishes the demand after its output is actually usable.
+                        }
+                        mondrian_playback::FrameDeliveryKind::Degraded => {}
+                        _ => outcome
+                            .frame_deliveries
+                            .push(mondrian_playback::FrameDelivery::for_demand(identity, kind)),
                     }
-                    mondrian_playback::FrameDeliveryKind::Degraded => {}
-                    _ => outcome
-                        .frame_deliveries
-                        .push(mondrian_playback::FrameDelivery::for_demand(identity, kind)),
                 }
             }
             if let Some(diagnostics) = result.decode_diagnostics {
@@ -981,7 +1010,7 @@ impl AppUiPreviewService {
                     );
                 }
             }
-            if completed_after_playback_deadline {
+            if completed_after_playback_deadline && owns_pending_playback_demand {
                 self.record_playback_current_late_drop(1);
             }
             match result.frame {
@@ -1001,16 +1030,21 @@ impl AppUiPreviewService {
                         frame_store.insert_media_frame(
                             result.key.clone(),
                             frame,
-                            completion.is_current(),
+                            presentation_current,
                         );
                         frame_store.forget_failure(&result.key);
                     }
-                    outcome.visible_change |= completion.is_current();
+                    outcome.visible_change |= presentation_current;
                 }
                 None => {
+                    if let Some(reason) = result.failure_reason {
+                        self.scrub_adaptation
+                            .borrow_mut()
+                            .observe_failure(result.access_mode, reason);
+                    }
                     let terminal_failure =
                         result.failure_reason == Some(MediaPreviewFailureReason::DecodeError);
-                    if completion.is_current() && terminal_failure {
+                    if presentation_current && terminal_failure {
                         self.frame_store.borrow_mut().clear_pinned_media_frame();
                     }
                     self.record_preview_decode_failure(result.access_mode, result.failure_reason);
@@ -1027,7 +1061,10 @@ impl AppUiPreviewService {
                     if completion.should_cache() && terminal_failure {
                         self.frame_store.borrow_mut().remember_failure(result.key);
                     }
-                    outcome.visible_change |= completion.is_current() && terminal_failure;
+                    // A current retryable failure changed adaptive decode policy.
+                    // Request one refresh so the same target can recover through
+                    // the conservative keyframe path instead of stalling forever.
+                    outcome.visible_change |= presentation_current;
                 }
             }
         }
@@ -1689,6 +1726,7 @@ impl AppUiPreviewService {
         reason: Option<MediaPreviewCancelReason>,
         elapsed_us: u64,
         observed_elapsed_us: Option<u64>,
+        owns_pending_playback_demand: bool,
     ) {
         bump(&self.metrics.decode_canceled_jobs);
         let reason = reason.unwrap_or(MediaPreviewCancelReason::Unknown);
@@ -1700,7 +1738,9 @@ impl AppUiPreviewService {
             }
             MediaPreviewCancelReason::PlaybackDeadline => {
                 bump(&self.metrics.decode_canceled_playback_deadline_jobs);
-                self.record_playback_current_late_drop(1);
+                if owns_pending_playback_demand {
+                    self.record_playback_current_late_drop(1);
+                }
             }
             MediaPreviewCancelReason::PrefetchPreemptedByCurrent => {
                 bump(&self.metrics.decode_canceled_prefetch_preempted_jobs);
@@ -3112,8 +3152,6 @@ pub struct AppUiPreviewDecodeAccessModeProfile {
     pub hardware_decode_cpu_not_requested_frames: u64,
     /// Decode requests that selected CPU RGBA because hardware residency is unavailable.
     pub hardware_decode_cpu_unavailable_frames: u64,
-    /// Decode requests that selected CPU RGBA because the access mode cannot use hardware decode.
-    pub hardware_decode_access_mode_unsupported_frames: u64,
     /// Decode requests blocked at a backend that cannot return native GPU residency.
     pub hardware_decode_backend_unavailable_frames: u64,
     /// Decode requests whose FFmpeg decoder has no matching hardware config.
@@ -3360,10 +3398,6 @@ impl AppUiPreviewDecodeAccessModeProfile {
             PreviewHardwareDecodeDecision::CpuRgbaHardwareUnavailable => {
                 self.hardware_decode_cpu_unavailable_frames =
                     self.hardware_decode_cpu_unavailable_frames.saturating_add(1);
-            }
-            PreviewHardwareDecodeDecision::CpuRgbaAccessModeUnsupported => {
-                self.hardware_decode_access_mode_unsupported_frames =
-                    self.hardware_decode_access_mode_unsupported_frames.saturating_add(1);
             }
             PreviewHardwareDecodeDecision::CpuRgbaBackendUnavailable => {
                 self.hardware_decode_backend_unavailable_frames =
@@ -4898,7 +4932,7 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::AccessMode,
             "preview_decode_access_mode_over_budget",
             format!(
-                "access_mode={} frames={} max_duration_us={} p95_upper_bound_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} max_frame_queue_wait_us={} max_frame_bottleneck={:?} seeked_frames={} keyframe_seek_strategy_frames={} bounded_any_seek_strategy_frames={} forward_reuse_frame_window_max={} forward_decode_budget_frames_max={} any_seek_window_ms_max={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} seek_index_available_frames={} seek_index_used_frames={} seek_index_keyframes_max={} seek_index_observed_packets_max={} seek_index_probe_backed_frames={} seek_index_session_observed_frames={} hardware_decode_active_frames={} zero_copy_active_frames={} gpu_texture_resident_frames={} decoded_nv12_surface_frames={} decoded_p010_surface_frames={} hardware_decode_texture_residency_blocker_frames={} hardware_decode_auto_requested_frames={} hardware_decode_prefer_hardware_requested_frames={} hardware_decode_prefer_gpu_requested_frames={} hardware_decode_require_gpu_requested_frames={} hardware_decode_cpu_not_requested_frames={} hardware_decode_cpu_unavailable_frames={} hardware_decode_access_mode_unsupported_frames={} hardware_decode_backend_unavailable_frames={} hardware_decode_codec_unsupported_frames={} hardware_decode_device_context_attempted_frames={} hardware_decode_device_context_created_frames={} hardware_decode_device_context_unavailable_frames={} hardware_decode_cpu_transfer_frames={} hardware_decode_cpu_transfer_configured_frames={} hardware_decode_cpu_transfer_observed_frames={} hardware_decode_cpu_transfer_setup_failed_frames={} hardware_decode_cpu_transfer_decoder_open_failed_frames={} hardware_decode_cpu_transfer_awaiting_frame_frames={} hardware_decode_backend_boundary_frames={} hardware_decode_gpu_resident_native_frames={} hardware_decode_candidate_d3d12va_frames={} hardware_decode_candidate_d3d11va_frames={} hardware_decode_candidate_dxva2_frames={} hardware_decode_candidate_videotoolbox_frames={} hardware_decode_candidate_vaapi_frames={} hardware_decode_candidate_vdpau_frames={} hardware_decode_candidate_cuda_frames={} hardware_decode_adapter_unavailable_frames={} decoded_frame_count={} max_decoded_frame_count={} session_open_us={} cache_lookup_us={} seek_us={} packet_decode_us={} hardware_transfer_us={} swscale_us={} rgba_copy_us={} external_process_us={} cache_hit_frames={} playback_session_ring_hit_frames={} latency_buckets={:?}",
+                "access_mode={} frames={} max_duration_us={} p95_upper_bound_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} max_frame_queue_wait_us={} max_frame_bottleneck={:?} seeked_frames={} keyframe_seek_strategy_frames={} bounded_any_seek_strategy_frames={} forward_reuse_frame_window_max={} forward_decode_budget_frames_max={} any_seek_window_ms_max={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} seek_index_available_frames={} seek_index_used_frames={} seek_index_keyframes_max={} seek_index_observed_packets_max={} seek_index_probe_backed_frames={} seek_index_session_observed_frames={} hardware_decode_active_frames={} zero_copy_active_frames={} gpu_texture_resident_frames={} decoded_nv12_surface_frames={} decoded_p010_surface_frames={} hardware_decode_texture_residency_blocker_frames={} hardware_decode_auto_requested_frames={} hardware_decode_prefer_hardware_requested_frames={} hardware_decode_prefer_gpu_requested_frames={} hardware_decode_require_gpu_requested_frames={} hardware_decode_cpu_not_requested_frames={} hardware_decode_cpu_unavailable_frames={} hardware_decode_backend_unavailable_frames={} hardware_decode_codec_unsupported_frames={} hardware_decode_device_context_attempted_frames={} hardware_decode_device_context_created_frames={} hardware_decode_device_context_unavailable_frames={} hardware_decode_cpu_transfer_frames={} hardware_decode_cpu_transfer_configured_frames={} hardware_decode_cpu_transfer_observed_frames={} hardware_decode_cpu_transfer_setup_failed_frames={} hardware_decode_cpu_transfer_decoder_open_failed_frames={} hardware_decode_cpu_transfer_awaiting_frame_frames={} hardware_decode_backend_boundary_frames={} hardware_decode_gpu_resident_native_frames={} hardware_decode_candidate_d3d12va_frames={} hardware_decode_candidate_d3d11va_frames={} hardware_decode_candidate_dxva2_frames={} hardware_decode_candidate_videotoolbox_frames={} hardware_decode_candidate_vaapi_frames={} hardware_decode_candidate_vdpau_frames={} hardware_decode_candidate_cuda_frames={} hardware_decode_adapter_unavailable_frames={} decoded_frame_count={} max_decoded_frame_count={} session_open_us={} cache_lookup_us={} seek_us={} packet_decode_us={} hardware_transfer_us={} swscale_us={} rgba_copy_us={} external_process_us={} cache_hit_frames={} playback_session_ring_hit_frames={} latency_buckets={:?}",
                 access_mode.as_str(),
                 profile.frames,
                 profile.max_duration_us,
@@ -4935,7 +4969,6 @@ fn push_preview_decode_root_causes_and_actions(
                 profile.hardware_decode_require_gpu_requested_frames,
                 profile.hardware_decode_cpu_not_requested_frames,
                 profile.hardware_decode_cpu_unavailable_frames,
-                profile.hardware_decode_access_mode_unsupported_frames,
                 profile.hardware_decode_backend_unavailable_frames,
                 profile.hardware_decode_codec_unsupported_frames,
                 profile.hardware_decode_device_context_attempted_frames,
@@ -7813,7 +7846,7 @@ impl AppUiPreviewService {
                 .then(|| state.playback_frame_deadline_at(Instant::now()))
                 .flatten(),
             (access_mode == PreviewDecodeAccessMode::PlaybackCursor)
-                .then(|| state.playback_frame_demand_identity())
+                .then(|| state.pending_playback_frame_demand_identity())
                 .flatten(),
             adaptive_hints,
         );
@@ -9218,6 +9251,18 @@ impl PreviewScrubAdaptationState {
             self.slow_latency_score = self.slow_latency_score.saturating_sub(1);
         }
     }
+
+    fn observe_failure(
+        &mut self,
+        access_mode: PreviewDecodeAccessMode,
+        reason: MediaPreviewFailureReason,
+    ) {
+        if access_mode == PreviewDecodeAccessMode::ScrubCursor
+            && reason == MediaPreviewFailureReason::ForwardDecodeBudgetExhausted
+        {
+            self.slow_latency_score = self.slow_latency_score.max(2);
+        }
+    }
 }
 
 fn source_micros(source_secs: f64) -> i64 {
@@ -10140,7 +10185,7 @@ mod tests {
     }
 
     #[test]
-    fn gpu_preview_frame_for_state_returns_gpu_composite_candidate() {
+    fn paused_gpu_candidate_carries_untimed_presentation_authority() {
         let service = AppUiPreviewService::new();
         let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
 
@@ -10167,11 +10212,9 @@ mod tests {
         }
         assert!(frame.external_texture_key().starts_with("app-ui.viewer.gpu:"));
         assert_eq!(frame.preview_candidate_id(), 1);
-        assert_eq!(
-            frame.presentation_ticket(),
-            None,
-            "paused still-frame candidates must not carry playback authority"
-        );
+        let ticket = frame.presentation_ticket().expect("paused current-frame presentation ticket");
+        assert_eq!(ticket.deadline(), None);
+        assert_eq!(ticket.identity().target_frame, state.current_frame());
 
         let diagnostics = service.diagnostics();
         assert_eq!(diagnostics.gpu_preview_candidate_requests, 1);
@@ -10187,7 +10230,8 @@ mod tests {
         let service = AppUiPreviewService::new();
         let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
         state.play();
-        let identity = state.playback_frame_demand_identity().expect("frame demand identity");
+        let identity =
+            state.pending_playback_frame_demand_identity().expect("frame demand identity");
 
         let frame = match service.gpu_preview_frame_for_state(&state) {
             AppUiGpuPreviewFrameState::Ready(frame) => frame,
@@ -10705,6 +10749,9 @@ mod tests {
             external_process: false,
             cpu_resident: true,
             seek_performed: false,
+            requested_pts: None,
+            selected_pts: None,
+            temporal_approximation: false,
             seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
             forward_reuse_frame_window: 0,
             forward_decode_budget_frames: 0,
@@ -10750,6 +10797,31 @@ mod tests {
     }
 
     #[test]
+    fn nearest_keyframe_scrub_is_explicitly_degraded_until_settled() {
+        let mut diagnostics = test_preview_decode_diagnostics(
+            PreviewDecodeAccessMode::ScrubCursor,
+            PreviewHardwareDecodeDecision::CpuRgbaNotRequested,
+            PreviewHardwareDecodeBlocker::None,
+        );
+        diagnostics.hardware_decode_request = PreviewHardwareDecodeRequest::Auto;
+        diagnostics.requested_pts = Some(1_000);
+        diagnostics.selected_pts = Some(960);
+        diagnostics.temporal_approximation = true;
+
+        assert_eq!(
+            preview_decode_presentation_quality(&diagnostics),
+            mondrian_playback::FramePresentationQuality::Degraded
+        );
+
+        diagnostics.selected_pts = diagnostics.requested_pts;
+        diagnostics.temporal_approximation = false;
+        assert_eq!(
+            preview_decode_presentation_quality(&diagnostics),
+            mondrian_playback::FramePresentationQuality::Ready
+        );
+    }
+
+    #[test]
     fn preview_diagnostics_count_decode_paths_and_duration() {
         let service = AppUiPreviewService::new();
 
@@ -10762,6 +10834,9 @@ mod tests {
                 external_process: false,
                 cpu_resident: true,
                 seek_performed: true,
+                requested_pts: Some(100),
+                selected_pts: Some(100),
+                temporal_approximation: false,
                 seek_strategy: PreviewDecodeSeekStrategy::BoundedAnyFrame,
                 forward_reuse_frame_window: 1,
                 forward_decode_budget_frames: 8,
@@ -10826,6 +10901,9 @@ mod tests {
                 external_process: true,
                 cpu_resident: true,
                 seek_performed: false,
+                requested_pts: None,
+                selected_pts: None,
+                temporal_approximation: false,
                 seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
                 forward_reuse_frame_window: 3,
                 forward_decode_budget_frames: 48,
@@ -10890,6 +10968,9 @@ mod tests {
                 external_process: false,
                 cpu_resident: true,
                 seek_performed: false,
+                requested_pts: None,
+                selected_pts: None,
+                temporal_approximation: false,
                 seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
                 forward_reuse_frame_window: 0,
                 forward_decode_budget_frames: 48,
@@ -10954,6 +11035,9 @@ mod tests {
                 external_process: false,
                 cpu_resident: true,
                 seek_performed: false,
+                requested_pts: None,
+                selected_pts: None,
+                temporal_approximation: false,
                 seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
                 forward_reuse_frame_window: 3,
                 forward_decode_budget_frames: 48,
@@ -11031,18 +11115,21 @@ mod tests {
             Some(MediaPreviewCancelReason::PrefetchDeadline),
             700,
             Some(600),
+            false,
         );
         service.record_preview_decode_cancel(
             PreviewDecodeAccessMode::ScrubCursor,
             Some(MediaPreviewCancelReason::Obsolete),
             1_400,
             Some(1_000),
+            false,
         );
         service.record_preview_decode_cancel(
             PreviewDecodeAccessMode::RandomAccessStillFrame,
             Some(MediaPreviewCancelReason::Shutdown),
             20,
             Some(5),
+            false,
         );
 
         let diagnostics = service.diagnostics();
@@ -11357,6 +11444,7 @@ mod tests {
             Some(MediaPreviewCancelReason::PrefetchPreemptedByCurrent),
             120,
             Some(80),
+            false,
         );
 
         let diagnostics = service.diagnostics();
@@ -11381,6 +11469,7 @@ mod tests {
             Some(MediaPreviewCancelReason::PlaybackDeadline),
             0,
             Some(0),
+            true,
         );
 
         let diagnostics = service.diagnostics();
@@ -11409,6 +11498,7 @@ mod tests {
             Some(MediaPreviewCancelReason::StillPreemptedByRealtimeCurrent),
             320,
             Some(200),
+            false,
         );
 
         let diagnostics = service.diagnostics();
@@ -15548,14 +15638,16 @@ mod tests {
     #[test]
     fn stalled_playback_current_expiration_releases_pending_and_queued_work() {
         let service = AppUiPreviewService::new_without_workers_for_test();
-        service.seed_pending_playback_current_preview_work_for_test();
+        let demand_identity = AppUiPreviewService::test_frame_demand_identity();
+        service.seed_pending_playback_current_preview_work_for_test(demand_identity);
 
         let before = service.diagnostics();
         assert_eq!(before.scheduler.pending_requests, 1);
         assert_eq!(before.worker_queue.queued_jobs, 1);
         assert!(service.current_frame_pending.get());
 
-        let outcome = service.expire_stalled_realtime_current_with_timeout(Duration::ZERO);
+        let outcome = service
+            .expire_stalled_realtime_current_with_timeout(Duration::ZERO, Some(demand_identity));
         assert!(!outcome.visible_change);
         assert!(outcome.transport_change);
         assert_eq!(outcome.frame_deliveries.len(), 1);
@@ -15578,13 +15670,49 @@ mod tests {
     }
 
     #[test]
+    fn expired_work_cannot_publish_late_after_its_demand_completed() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let completed_identity = AppUiPreviewService::test_frame_demand_identity();
+        service.seed_pending_playback_current_preview_work_for_test(completed_identity);
+        let mut engine = mondrian_playback::PlaybackEngine::new(
+            Rational::new(1, 25),
+            mondrian_playback::PlaybackPolicy::default(),
+        )
+        .expect("playback engine");
+        engine
+            .play(10, mondrian_playback::MonotonicTimestamp::ZERO)
+            .expect("priming demand");
+        engine
+            .complete_priming(
+                mondrian_playback::ClockMaster::Synthetic,
+                mondrian_playback::MonotonicTimestamp::ZERO,
+            )
+            .expect("replacement demand");
+        let replacement_identity =
+            engine.pending_frame_demand().expect("replacement pending demand").identity();
+        assert_ne!(replacement_identity, completed_identity);
+
+        let outcome = service.expire_stalled_realtime_current_with_timeout(
+            Duration::ZERO,
+            Some(replacement_identity),
+        );
+
+        assert!(
+            outcome.frame_deliveries.is_empty(),
+            "scheduler expiration must not revive an already-completed playback demand"
+        );
+        assert_eq!(service.diagnostics().scheduler.pending_requests, 0);
+    }
+
+    #[test]
     fn stalled_scrub_releases_capacity_without_reporting_playback_delivery() {
         let service = AppUiPreviewService::new_without_workers_for_test();
         service.seed_pending_preview_work_with_access_mode_for_test(
             PreviewDecodeAccessMode::ScrubCursor,
+            None,
         );
 
-        let outcome = service.expire_stalled_realtime_current_with_timeout(Duration::ZERO);
+        let outcome = service.expire_stalled_realtime_current_with_timeout(Duration::ZERO, None);
 
         assert!(!outcome.visible_change);
         assert!(outcome.transport_change);
@@ -15600,16 +15728,23 @@ mod tests {
     fn repeated_late_playback_current_frames_enter_pressure_recovery() {
         let service = AppUiPreviewService::new_without_workers_for_test();
 
-        service.seed_pending_playback_current_preview_work_for_test();
+        let demand_identity = AppUiPreviewService::test_frame_demand_identity();
+        service.seed_pending_playback_current_preview_work_for_test(demand_identity);
         assert!(
             service
-                .expire_stalled_realtime_current_with_timeout(Duration::ZERO)
+                .expire_stalled_realtime_current_with_timeout(
+                    Duration::ZERO,
+                    Some(demand_identity),
+                )
                 .transport_change
         );
-        service.seed_pending_playback_current_preview_work_for_test();
+        service.seed_pending_playback_current_preview_work_for_test(demand_identity);
         assert!(
             service
-                .expire_stalled_realtime_current_with_timeout(Duration::ZERO)
+                .expire_stalled_realtime_current_with_timeout(
+                    Duration::ZERO,
+                    Some(demand_identity),
+                )
                 .transport_change
         );
 
@@ -16256,12 +16391,14 @@ mod tests {
         let result_tx = install_preview_result_channel_for_test(&service);
         let key = test_media_key(77);
         let generation = service.scheduler.begin_generation();
+        let demand_identity = AppUiPreviewService::test_frame_demand_identity();
         assert_eq!(
-            service.scheduler.request(
+            service.scheduler.request_with_demand_identity(
                 key.clone(),
                 generation,
                 MediaPreviewRequestPriority::Current,
                 PreviewDecodeAccessMode::PlaybackCursor,
+                Some(demand_identity),
             ),
             MediaPreviewRequestStatus::Scheduled { evicted_prefetch: None, evicted_still: None }
         );
@@ -16279,7 +16416,7 @@ mod tests {
                 hardware_decode_device_selector: None,
                 enqueued_at: Instant::now(),
                 deadline_at: Some(Instant::now() - Duration::from_millis(1)),
-                demand_identity: None,
+                demand_identity: Some(demand_identity),
                 execution_id: None,
             },
             12_000,
@@ -16289,10 +16426,18 @@ mod tests {
         );
         result_tx.send(result).expect("send canceled result");
 
-        let outcome = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5));
+        let outcome = service.poll_finished_outcome_with_budget(
+            8,
+            Duration::from_millis(5),
+            Some(demand_identity),
+        );
         assert!(
             !outcome.visible_change,
             "deadline cancellation is scheduler/diagnostic evidence, not a new visible frame"
+        );
+        assert!(
+            outcome.frame_deliveries.is_empty(),
+            "canceled decode work is not a terminal frame presentation"
         );
         assert!(!outcome.needs_follow_up_poll);
         let diagnostics = service.diagnostics();
@@ -16314,8 +16459,9 @@ mod tests {
         let service = AppUiPreviewService::new_without_workers_for_test();
         let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
         state.play();
-        let demand_identity =
-            state.playback_frame_demand_identity().expect("playback demand identity");
+        let demand_identity = state
+            .pending_playback_frame_demand_identity()
+            .expect("playback demand identity");
         let result_tx = install_preview_result_channel_for_test(&service);
         let key = test_media_key(78);
         let generation = service.scheduler.begin_generation();
@@ -16335,7 +16481,11 @@ mod tests {
         result.demand_identity = Some(demand_identity);
         result_tx.send(result).expect("send late successful result");
 
-        let outcome = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5));
+        let outcome = service.poll_finished_outcome_with_budget(
+            8,
+            Duration::from_millis(5),
+            Some(demand_identity),
+        );
 
         assert!(
             !outcome.visible_change,
@@ -16366,12 +16516,103 @@ mod tests {
     }
 
     #[test]
+    fn preview_service_stale_late_completion_cannot_publish_terminal_delivery() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+        state.play();
+        let demand_identity = state
+            .pending_playback_frame_demand_identity()
+            .expect("playback demand identity");
+        let result_tx = install_preview_result_channel_for_test(&service);
+        let key = test_media_key(782);
+        let generation = service.scheduler.begin_generation();
+        assert!(matches!(
+            service.scheduler.request_with_binding(
+                key.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                Some(demand_identity),
+                Some(Instant::now() - Duration::from_millis(1)),
+            ),
+            MediaPreviewRequestStatus::Scheduled { .. }
+        ));
+        let _newer_generation = service.scheduler.begin_generation();
+        let mut result = test_successful_media_preview_result(key, generation, 9);
+        result.priority = MediaPreviewRequestPriority::Current;
+        result.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
+        result.deadline_at = Some(Instant::now() - Duration::from_millis(1));
+        result.demand_identity = Some(demand_identity);
+        result_tx.send(result).expect("send stale late result");
+
+        let outcome = service.poll_finished_outcome_with_budget(
+            8,
+            Duration::from_millis(5),
+            Some(demand_identity),
+        );
+
+        assert!(outcome.frame_deliveries.is_empty());
+        assert_eq!(service.diagnostics().scheduler.completed_stale_results, 1);
+        service.shutdown();
+    }
+
+    #[test]
+    fn preview_service_current_late_completion_cannot_revive_replaced_playback_demand() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+        state.play();
+        let completed_identity = state
+            .pending_playback_frame_demand_identity()
+            .expect("completed playback demand identity");
+        let result_tx = install_preview_result_channel_for_test(&service);
+        let key = test_media_key(783);
+        let generation = service.scheduler.begin_generation();
+        assert!(matches!(
+            service.scheduler.request_with_binding(
+                key.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                Some(completed_identity),
+                Some(Instant::now() - Duration::from_millis(1)),
+            ),
+            MediaPreviewRequestStatus::Scheduled { .. }
+        ));
+        state.seek(1);
+        let replacement_identity = state
+            .pending_playback_frame_demand_identity()
+            .expect("replacement playback demand identity");
+        assert_ne!(replacement_identity, completed_identity);
+        let mut result = test_successful_media_preview_result(key, generation, 9);
+        result.priority = MediaPreviewRequestPriority::Current;
+        result.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
+        result.deadline_at = Some(Instant::now() - Duration::from_millis(1));
+        result.demand_identity = Some(completed_identity);
+        result_tx.send(result).expect("send replaced late result");
+
+        let outcome = service.poll_finished_outcome_with_budget(
+            8,
+            Duration::from_millis(5),
+            Some(replacement_identity),
+        );
+
+        assert!(outcome.frame_deliveries.is_empty());
+        assert_eq!(
+            service.diagnostics().playback_schedule.current_drop_late_decisions,
+            0,
+            "completed-demand cleanup must not create pressure on its replacement"
+        );
+        service.shutdown();
+    }
+
+    #[test]
     fn preview_service_deadline_uses_worker_completion_not_later_poll_time() {
         let service = AppUiPreviewService::new_without_workers_for_test();
         let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
         state.play();
-        let demand_identity =
-            state.playback_frame_demand_identity().expect("playback demand identity");
+        let demand_identity = state
+            .pending_playback_frame_demand_identity()
+            .expect("playback demand identity");
         let result_tx = install_preview_result_channel_for_test(&service);
         let key = test_media_key(781);
         let generation = service.scheduler.begin_generation();
@@ -16395,7 +16636,11 @@ mod tests {
         result.completed_at = deadline - Duration::from_millis(1);
         result_tx.send(result).expect("send on-time worker result");
 
-        let outcome = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5));
+        let outcome = service.poll_finished_outcome_with_budget(
+            8,
+            Duration::from_millis(5),
+            Some(demand_identity),
+        );
 
         assert!(outcome.visible_change);
         assert!(outcome.frame_deliveries.is_empty());
@@ -16412,8 +16657,9 @@ mod tests {
         let service = AppUiPreviewService::new_without_workers_for_test();
         let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
         state.play();
-        let demand_identity =
-            state.playback_frame_demand_identity().expect("playback demand identity");
+        let demand_identity = state
+            .pending_playback_frame_demand_identity()
+            .expect("playback demand identity");
         let result_tx = install_preview_result_channel_for_test(&service);
         let key = test_media_key(79);
         let generation = service.scheduler.begin_generation();
@@ -16440,7 +16686,11 @@ mod tests {
         result.decode_diagnostics = Some(decode_diagnostics);
         result_tx.send(result).expect("send degraded successful result");
 
-        let outcome = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5));
+        let outcome = service.poll_finished_outcome_with_budget(
+            8,
+            Duration::from_millis(5),
+            Some(demand_identity),
+        );
 
         assert!(
             outcome.visible_change,
@@ -16523,7 +16773,7 @@ mod tests {
                 .expect("send canceled result");
         }
 
-        let outcome = service.poll_finished_outcome_with_budget(1, Duration::from_millis(5));
+        let outcome = service.poll_finished_outcome_with_budget(1, Duration::from_millis(5), None);
 
         assert!(!outcome.visible_change);
         assert!(
@@ -16573,7 +16823,7 @@ mod tests {
             ))
             .expect("send canceled scrub result");
 
-        let outcome = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5));
+        let outcome = service.poll_finished_outcome_with_budget(8, Duration::from_millis(5), None);
 
         assert!(
             outcome.visible_change,
@@ -17148,7 +17398,7 @@ mod tests {
     }
 
     #[test]
-    fn hardware_decode_request_is_runtime_gated_to_playback_access_mode() {
+    fn gpu_viewer_hardware_decode_admission_covers_every_access_mode() {
         let service = AppUiPreviewService::new_without_workers_for_test();
 
         assert_eq!(
@@ -17182,19 +17432,25 @@ mod tests {
         );
         assert_eq!(
             service.hardware_decode_request_for_access_mode(PreviewDecodeAccessMode::ScrubCursor),
-            PreviewHardwareDecodeRequest::Auto
+            PreviewHardwareDecodeRequest::PreferGpuResident
         );
         assert_eq!(
             service.hardware_decode_device_selector_for_access_mode(
                 PreviewDecodeAccessMode::ScrubCursor
             ),
-            None
+            Some(HwAccelDeviceSelector::D3D11VaAdapterIndex(1))
         );
         assert_eq!(
             service.hardware_decode_request_for_access_mode(
                 PreviewDecodeAccessMode::RandomAccessStillFrame
             ),
-            PreviewHardwareDecodeRequest::Auto
+            PreviewHardwareDecodeRequest::PreferGpuResident
+        );
+        assert_eq!(
+            service.hardware_decode_device_selector_for_access_mode(
+                PreviewDecodeAccessMode::RandomAccessStillFrame
+            ),
+            Some(HwAccelDeviceSelector::D3D11VaAdapterIndex(1))
         );
     }
 
@@ -17226,6 +17482,9 @@ mod tests {
             external_process: false,
             cpu_resident: true,
             seek_performed: true,
+            requested_pts: Some(100),
+            selected_pts: Some(100),
+            temporal_approximation: false,
             seek_strategy: PreviewDecodeSeekStrategy::BoundedAnyFrame,
             forward_reuse_frame_window: 0,
             forward_decode_budget_frames: 0,
@@ -17273,6 +17532,16 @@ mod tests {
         key.source_micros += 100_000;
         assert_eq!(
             adaptation.observe_request(&key).scrub_class,
+            PreviewScrubAdaptiveClass::SlowLatency
+        );
+
+        let mut failed_adaptation = PreviewScrubAdaptationState::default();
+        failed_adaptation.observe_failure(
+            PreviewDecodeAccessMode::ScrubCursor,
+            MediaPreviewFailureReason::ForwardDecodeBudgetExhausted,
+        );
+        assert_eq!(
+            failed_adaptation.observe_request(&key).scrub_class,
             PreviewScrubAdaptiveClass::SlowLatency
         );
     }
@@ -17574,7 +17843,7 @@ mod tests {
                 .expect("send test preview result");
         }
 
-        assert!(service.poll_finished_with_budget(2, Duration::from_secs(1)));
+        assert!(service.poll_finished_with_budget(2, Duration::from_secs(1), None));
         let diagnostics = service.diagnostics();
         assert_eq!(diagnostics.decode_successes, 2);
         assert_eq!(diagnostics.completion_poll_calls, 1);
@@ -17584,7 +17853,7 @@ mod tests {
         assert_eq!(diagnostics.completion_poll_time_budget_exhaustions, 0);
         assert_eq!(service.scheduler.pending_len(), 1);
 
-        assert!(service.poll_finished_with_budget(2, Duration::from_secs(1)));
+        assert!(service.poll_finished_with_budget(2, Duration::from_secs(1), None));
         let diagnostics = service.diagnostics();
         assert_eq!(diagnostics.decode_successes, 3);
         assert_eq!(diagnostics.completion_poll_calls, 2);
@@ -17622,7 +17891,7 @@ mod tests {
                 .expect("send test preview result");
         }
 
-        assert!(service.poll_finished_with_budget(8, Duration::ZERO));
+        assert!(service.poll_finished_with_budget(8, Duration::ZERO, None));
 
         let diagnostics = service.diagnostics();
         assert_eq!(diagnostics.decode_successes, 1);

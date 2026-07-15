@@ -725,7 +725,7 @@ mod tests {
             sequence_id: None,
             timeline_revision: 1,
             target: FramePosition::new(target_frame, Rational::new(1, 25)),
-            deadline: at(500),
+            deadline: Some(at(500)),
             preview_scale: PreviewResolutionScale::Full,
         }
     }

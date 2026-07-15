@@ -2110,7 +2110,7 @@ mod tests {
     }
 
     #[test]
-    fn media_preview_job_queue_current_work_steals_idle_playback_lane_before_prefetch() {
+    fn media_preview_job_queue_current_scrub_keeps_interactive_session_affinity() {
         let (sender, receiver) = media_preview_job_queue(2);
         let scrub = test_media_key(1);
         let playback_prefetch = test_media_key(2);
@@ -2131,20 +2131,20 @@ mod tests {
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
 
-        let scrub_job = receiver
-            .recv_for_worker(MediaPreviewWorkerLane::Playback)
-            .expect("idle playback lane should help visible current work before prefetch");
-        assert_eq!(scrub_job.key, scrub);
-        assert_eq!(scrub_job.access_mode, PreviewDecodeAccessMode::ScrubCursor);
-
         let playback_job = receiver
             .recv_for_worker(MediaPreviewWorkerLane::Playback)
-            .expect("playback lane should still own playback prefetch after current work");
+            .expect("playback lane should preserve interactive decoder affinity");
         assert_eq!(playback_job.key, playback_prefetch);
         assert_eq!(
             playback_job.access_mode,
             PreviewDecodeAccessMode::PlaybackCursor
         );
+
+        let scrub_job = receiver
+            .recv_for_worker(MediaPreviewWorkerLane::Interactive)
+            .expect("interactive lane should own current scrub work");
+        assert_eq!(scrub_job.key, scrub);
+        assert_eq!(scrub_job.access_mode, PreviewDecodeAccessMode::ScrubCursor);
     }
 
     #[test]
@@ -2176,12 +2176,6 @@ mod tests {
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
 
-        let scrub_job = receiver
-            .recv_for_worker(MediaPreviewWorkerLane::Playback)
-            .expect("fresh current scrub should beat expired playback on idle playback lane");
-        assert_eq!(scrub_job.key, fresh_scrub);
-        assert_eq!(scrub_job.access_mode, PreviewDecodeAccessMode::ScrubCursor);
-
         match receiver
             .recv_for_worker_outcome(MediaPreviewWorkerLane::Playback)
             .expect("expired playback job should produce a structured queue outcome")
@@ -2197,6 +2191,11 @@ mod tests {
                 panic!("expired playback job must not be dispatched for decode: {job:?}");
             }
         }
+        let scrub_job = receiver
+            .recv_for_worker(MediaPreviewWorkerLane::Interactive)
+            .expect("fresh current scrub should retain interactive lane affinity");
+        assert_eq!(scrub_job.key, fresh_scrub);
+        assert_eq!(scrub_job.access_mode, PreviewDecodeAccessMode::ScrubCursor);
         let diagnostics = sender.diagnostics();
         assert_eq!(diagnostics.queued_expired_playback_current_jobs, 0);
         assert_eq!(diagnostics.dropped_expired_playback_current_jobs, 1);

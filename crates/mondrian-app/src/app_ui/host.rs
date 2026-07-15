@@ -408,9 +408,13 @@ impl AppUiHost {
         }
         let media_imports_changed = self.app_state.borrow_mut().poll_media_imports();
         let thumbnails_changed = self.asset_thumbnails.poll_finished();
-        let mut preview_outcome = self.preview_service.poll_finished_outcome();
+        let pending_playback_demand =
+            self.app_state.borrow().pending_playback_frame_demand_identity();
+        let mut preview_outcome =
+            self.preview_service.poll_finished_outcome(pending_playback_demand);
         let waveform_changed = self.waveform_cache.poll_finished();
-        preview_outcome.merge(self.preview_service.expire_stalled_realtime_current());
+        preview_outcome
+            .merge(self.preview_service.expire_stalled_realtime_current(pending_playback_demand));
         let playback_delivery_changed =
             preview_outcome
                 .frame_deliveries
@@ -2020,7 +2024,13 @@ mod tests {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let mut host = workspace_host_without_preview_workers("buffering-stall-release");
         host.app_state.borrow_mut().play();
-        host.preview_service.seed_pending_playback_current_preview_work_for_test();
+        let demand_identity = host
+            .app_state
+            .borrow()
+            .pending_playback_frame_demand_identity()
+            .expect("playing state has pending demand");
+        host.preview_service
+            .seed_pending_playback_current_preview_work_for_test(demand_identity);
         let before_render_requests = host.preview_service.diagnostics().render_requests;
 
         std::thread::sleep(Duration::from_millis(275));

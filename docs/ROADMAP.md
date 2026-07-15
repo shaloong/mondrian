@@ -292,7 +292,7 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 | 指标 | Alpha/Beta 门槛 |
 | --- | --- |
-| 支持硬解的 4K25/30 HEVC Main10 | 1× 连续播放，无持续掉帧；实际 hardware/native path 有帧级证据 |
+| 支持硬解的 4K23.976-60 HEVC Main10 | 1× 连续播放，无持续掉帧；实际 hardware/native path 有帧级证据 |
 | 不支持硬解或压力过高 | 自动选择 1/2、1/4 或代理；UI 不冻结，降级原因可见 |
 | warm seek 首张可用图像 | p95 ≤ 200 ms |
 | accurate seek 稳定到目标帧 | p95 ≤ 500 ms |
@@ -387,8 +387,9 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 ### 播放、缓存与代理
 
-- [ ] Windows 支持硬解的 4K25/30 HEVC Main10 进入真实 FFmpeg hardware → native surface → GPU YUV/working path；不支持时自动低分辨率/代理。
+- [ ] Windows 支持硬解的 4K23.976-60 HEVC Main10 进入真实 FFmpeg hardware → native surface → GPU YUV/working path；不支持时自动低分辨率/代理。
 - [ ] seek/scrub 为 latest-wins；旧 generation 在预算内观察取消且不能发布旧帧。
+- [ ] 固定参考机门禁要求 playback/scrub 与 exact-still 的协作式取消返回均稳定在 5 ms 内；当前实时 lane 已达标，exact-still 的最坏延迟仍需收敛。
 - [ ] CPU decoded cache、GPU/working cache、proxy index 都有字节预算、LRU/eviction、source revision 和颜色解释 key。
 - [ ] 播放开始后音频保持主时钟；视频迟到采用 drop/repeat/降质，不能把常态播放变成反复静音等待视频。
 

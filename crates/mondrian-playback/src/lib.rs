@@ -95,8 +95,9 @@ pub struct FrameDemand {
     pub timeline_revision: u64,
     /// Exact target timeline position.
     pub target: FramePosition,
-    /// Latest useful presentation time for this demand.
-    pub deadline: MonotonicTimestamp,
+    /// Latest useful presentation time for realtime work, or `None` for a
+    /// paused current-frame presentation that remains useful until superseded.
+    pub deadline: Option<MonotonicTimestamp>,
     /// Runtime-only spatial quality selected by recovery policy.
     pub preview_scale: PreviewResolutionScale,
 }
@@ -130,7 +131,7 @@ pub enum FramePresentationQuality {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FramePresentationTicket {
     identity: FrameDemandIdentity,
-    deadline: MonotonicTimestamp,
+    deadline: Option<MonotonicTimestamp>,
     quality: FramePresentationQuality,
 }
 
@@ -150,13 +151,13 @@ impl FramePresentationTicket {
     }
 
     /// Return the authoritative presentation deadline.
-    pub const fn deadline(self) -> MonotonicTimestamp {
+    pub const fn deadline(self) -> Option<MonotonicTimestamp> {
         self.deadline
     }
 
     /// Classify real presentation completion against the demand deadline.
     pub fn complete_at(self, completed_at: MonotonicTimestamp) -> FrameDelivery {
-        let kind = if completed_at >= self.deadline {
+        let kind = if self.deadline.is_some_and(|deadline| completed_at >= deadline) {
             FrameDeliveryKind::Late
         } else {
             match self.quality {
@@ -637,6 +638,9 @@ impl PlaybackEngine {
         self.active_target_frame = Some(self.position.frame);
         self.reset_runtime_policy();
         self.reanchor(now);
+        if !was_running {
+            self.refresh_untimed_frame_demand()?;
+        }
         Ok(self.snapshot())
     }
 
@@ -646,7 +650,7 @@ impl PlaybackEngine {
         if self.state == TransportState::Priming {
             if let Some(deadline) = self
                 .active_demand
-                .map(|demand| demand.deadline)
+                .and_then(|demand| demand.deadline)
                 .filter(|deadline| now >= *deadline)
             {
                 self.state = TransportState::Playing;
@@ -655,11 +659,14 @@ impl PlaybackEngine {
             }
         }
         self.advance_position(now)?;
-        if matches!(
-            self.state,
-            TransportState::Playing | TransportState::Recovering
-        ) {
-            self.refresh_frame_demand_if_target_changed(now)?;
+        match self.state {
+            TransportState::Playing | TransportState::Recovering => {
+                self.refresh_frame_demand_if_target_changed(now)?;
+            }
+            TransportState::Ended => {
+                self.refresh_untimed_frame_demand_if_target_changed()?;
+            }
+            _ => {}
         }
         Ok(self.snapshot())
     }
@@ -801,15 +808,20 @@ impl PlaybackEngine {
             last_effective_consumed_frames: effective_consumed,
         });
         self.clock_master = Some(ClockMaster::AudioDevice);
-        if self.active_target_frame != Some(self.position.frame) {
+        let target_changed = self.active_target_frame != Some(self.position.frame);
+        if target_changed {
             self.active_target_frame = Some(self.position.frame);
             self.terminal_delivery = None;
-            self.refresh_frame_demand(observation.observed_at)?;
         }
         if self.position.frame >= self.end_frame {
             self.state = TransportState::Ended;
             self.clock_master = None;
             self.audio_device_anchor = None;
+            if target_changed {
+                self.refresh_untimed_frame_demand()?;
+            }
+        } else if target_changed {
+            self.refresh_frame_demand(observation.observed_at)?;
         }
         Ok(self.snapshot())
     }
@@ -1073,6 +1085,19 @@ impl PlaybackEngine {
         Ok(())
     }
 
+    fn refresh_untimed_frame_demand_if_target_changed(&mut self) -> Result<(), PlaybackError> {
+        let current_matches = self.active_demand.is_some_and(|demand| {
+            demand.epoch == self.epoch
+                && demand.quality_revision == self.quality_revision
+                && demand.target == self.position
+                && demand.deadline.is_none()
+        });
+        if !current_matches {
+            self.refresh_untimed_frame_demand()?;
+        }
+        Ok(())
+    }
+
     fn refresh_frame_demand(&mut self, now: MonotonicTimestamp) -> Result<(), PlaybackError> {
         let frame_duration = frame_duration(self.position.time_base)?;
         self.refresh_frame_demand_with_duration(now, frame_duration)
@@ -1093,7 +1118,25 @@ impl PlaybackEngine {
             sequence_id: self.sequence_id,
             timeline_revision: self.timeline_revision,
             target: self.position,
-            deadline: now.saturating_add(useful_duration),
+            deadline: Some(now.saturating_add(useful_duration)),
+            preview_scale: self.preview_scale,
+        });
+        self.terminal_delivery = None;
+        Ok(())
+    }
+
+    fn refresh_untimed_frame_demand(&mut self) -> Result<(), PlaybackError> {
+        validate_time_base(self.position.time_base)?;
+        let sequence = FrameDemandSequence(self.next_demand_sequence);
+        self.next_demand_sequence = self.next_demand_sequence.saturating_add(1);
+        self.active_demand = Some(FrameDemand {
+            epoch: self.epoch,
+            quality_revision: self.quality_revision,
+            sequence,
+            sequence_id: self.sequence_id,
+            timeline_revision: self.timeline_revision,
+            target: self.position,
+            deadline: None,
             preview_scale: self.preview_scale,
         });
         self.terminal_delivery = None;
@@ -1220,7 +1263,7 @@ mod tests {
             sequence_id: None,
             timeline_revision: 9,
             target: FramePosition::new(42, Rational::new(1, 25)),
-            deadline: ts(40),
+            deadline: Some(ts(40)),
             preview_scale: PreviewResolutionScale::Full,
         };
         let ready = FramePresentationTicket::for_demand(demand, FramePresentationQuality::Ready);
@@ -1278,6 +1321,26 @@ mod tests {
             .unwrap();
         assert_eq!(advanced.position.frame, 1);
         assert_eq!(advanced.clock_master, Some(ClockMaster::AudioDevice));
+    }
+
+    #[test]
+    fn audio_clock_natural_end_publishes_an_untimed_final_demand() {
+        let mut engine = engine();
+        engine.play(1, ts(0)).unwrap();
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+        engine
+            .observe_audio_device_clock(audio_observation(&engine, 1_000, ts(0)))
+            .unwrap();
+
+        let ended = engine
+            .observe_audio_device_clock(audio_observation(&engine, 2_920, ts(40)))
+            .unwrap();
+        let final_demand = engine.pending_frame_demand().expect("final demand");
+
+        assert_eq!(ended.state, TransportState::Ended);
+        assert_eq!(ended.clock_master, None);
+        assert_eq!(final_demand.target.frame, 1);
+        assert_eq!(final_demand.deadline, None);
     }
 
     #[test]
@@ -1537,6 +1600,25 @@ mod tests {
     }
 
     #[test]
+    fn paused_seek_publishes_an_untimed_current_frame_demand() {
+        let mut engine = engine();
+
+        let snapshot =
+            engine.seek(FramePosition::new(50, Rational::new(1, 25)), ts(10)).expect("seek");
+        let demand = engine.pending_frame_demand().expect("paused seek demand");
+
+        assert_eq!(snapshot.state, TransportState::Paused);
+        assert_eq!(demand.target, snapshot.position);
+        assert!(demand.deadline.is_none());
+        let ticket = FramePresentationTicket::for_demand(demand, FramePresentationQuality::Ready);
+        assert_eq!(ticket.deadline(), None);
+        assert_eq!(
+            ticket.complete_at(ts(10_000)).kind,
+            FrameDeliveryKind::Ready
+        );
+    }
+
+    #[test]
     fn sustained_pressure_recovers_by_resolution_without_proxy_semantics() {
         let policy = PlaybackPolicy {
             priming_limit: Duration::from_millis(500),
@@ -1703,7 +1785,7 @@ mod tests {
         engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
         let first = engine.frame_demand().expect("initial demand");
         assert_eq!(first.target.frame, 0);
-        assert_eq!(first.deadline, ts(40));
+        assert_eq!(first.deadline, Some(ts(40)));
 
         engine.tick(ts(10)).unwrap();
         assert_eq!(engine.frame_demand(), Some(first));
@@ -1712,7 +1794,31 @@ mod tests {
         let second = engine.frame_demand().expect("next demand");
         assert_eq!(second.target.frame, 1);
         assert!(second.sequence.get() > first.sequence.get());
-        assert_eq!(second.deadline, ts(80));
+        assert_eq!(second.deadline, Some(ts(80)));
+    }
+
+    #[test]
+    fn natural_end_replaces_the_previous_terminal_with_an_untimed_final_demand() {
+        let mut engine = engine();
+        engine.play(2, ts(0)).unwrap();
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+        engine.tick(ts(40)).unwrap();
+        let penultimate = engine.pending_frame_demand().expect("penultimate demand");
+        assert_eq!(penultimate.target.frame, 1);
+        assert!(engine
+            .observe_frame_delivery(FrameDelivery::for_demand(
+                penultimate.identity(),
+                FrameDeliveryKind::Ready,
+            ))
+            .unwrap());
+
+        let snapshot = engine.tick(ts(80)).unwrap();
+        let final_demand = engine.pending_frame_demand().expect("final demand");
+
+        assert_eq!(snapshot.state, TransportState::Ended);
+        assert_eq!(final_demand.target.frame, 2);
+        assert_eq!(final_demand.deadline, None);
+        assert!(final_demand.sequence.get() > penultimate.sequence.get());
     }
 
     #[test]

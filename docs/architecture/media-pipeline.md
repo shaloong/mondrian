@@ -74,8 +74,11 @@ NLEs separate playback, interactive navigation, and precise still extraction:
   locality, and is the seam where hardware decode, low-copy P010/NV12
   residency, deadline/drop policy, and GPU input transforms belong.
 - `PreviewDecodeAccessMode::ScrubCursor` is for latest-wins playhead dragging,
-  jog, and shuttle. It prioritizes cancellation and seek latency over warming a
-  long forward queue.
+  jog, and shuttle. With a probe-backed index it seeks toward the nearest
+  keyframe and presents the first valid decoded frame inside the adjacent-GOP
+  evidence radius. That temporal approximation is Degraded; the settled request
+  then resolves the exact frame. It prioritizes cancellation and visible
+  feedback over warming a long forward queue.
 - `PreviewDecodeAccessMode::RandomAccessStillFrame` is for deterministic still
   extraction: thumbnails, poster frames, export fallback, diagnostics, and exact
   one-off requests.
@@ -141,17 +144,20 @@ Embedded ICC profiles likewise cannot manufacture that source contract. Media
 ingest records a mapped ICC identity only when the shared core parser identifies
 a supported named standard; generic RGB/GRAY profiles remain unmapped evidence
 and enter the explicit missing-metadata policy.
-App preview scheduling preserves playback cursor locality without letting idle
-workers sit beside visible current-frame work. When more than one preview decode
-worker exists, worker 0 has playback affinity and the remaining workers have
-interactive affinities for scrub/still work. Those affinities are
-work-conserving for `Current` requests: any idle worker may steal the highest
-ranked current-frame job before taking lane-local background work. `Prefetch`
-remains playback-only and lower priority than every current-frame request. With
-only one worker, the lane is `Any` so all modes still make progress. Because
-workers filter by lane, enqueue and priority promotion wake all preview workers,
-not just one; otherwise a playback-only queue could wake an interactive worker
-and leave the playback worker asleep until another request arrives.
+App preview scheduling preserves decoder-session locality with semantic worker
+lanes. When more than one preview decode worker exists, worker 0 has playback
+affinity and the remaining workers are assigned scrub/still or shared
+non-playback affinity according to the CPU budget. A worker may dequeue current
+work only when its lane accepts that work class; allowing an idle Playback or
+Scrub worker to steal an exact Still request cold-opens additional FFmpeg/D3D11
+sessions, churns decoder surfaces, and can block realtime work behind a
+deterministic seek. `Prefetch` remains playback-only and lower priority than
+every eligible current-frame request. With only one worker, the lane is `Any`;
+the two-worker fallback uses `Playback` plus `NonPlayback`, so reduced machines
+still make progress without a hidden cross-lane exception. Because workers
+filter by lane, enqueue and priority promotion wake all preview workers, not
+just one; otherwise a playback-only queue could wake a non-playback worker and
+leave the playback worker asleep until another request arrives.
 Forward prefetch is a playback-only behavior. Settled still-frame preview and
 active scrubbing must not enqueue `PlaybackCursor` prefetch work, because that
 turns random access or latest-wins interaction into hidden background playback
@@ -201,11 +207,11 @@ switch, and natural end-of-playback transitions also settle the preview access
 source before the next non-playing viewer request. New UI states must extend
 that intent layer instead of passing booleans or strategy flags into
 `mondrian-media`.
-Playback cursor cancellation is cooperative but non-destructive to the playback
-decode session: a prefetch budget miss should not throw away the warmed
-mostly-forward decoder stream. Scrub and still-frame cancellation remain
-session-destructive because those modes represent latest-wins seeks or exact
-random-access work where stale decoder position is more dangerous than locality.
+Playback and scrub cancellation are cooperative but non-destructive to their
+mode-local decode sessions: a prefetch budget miss or superseded pointer target
+must not throw away the warmed decoder/device context. Every subsequent seek
+flushes and repositions the decoder before reuse. Exact still-frame cancellation
+remains session-destructive because stale partial decode state is not useful.
 The playback decode session also owns a small forward RGBA ring. Ring hits are
 strictly bounded by the same PTS tolerance as the process-global preview frame
 cache and are reported as `PlaybackSessionRingHit`; they are not available to
@@ -224,7 +230,8 @@ conditionals or FFmpeg call sites. Playback has the widest mostly-forward
 session reuse window, the playback ring, and the exact-path forward decode
 budget; scrub has only a very short forward reuse window, a smaller CPU
 fallback forward-scan budget, no playback ring, and the low-latency
-bounded-any seek strategy; random-access still extraction has no forward reuse
+probe-backed approximate-first-frame strategy with a bounded-any fallback;
+random-access still extraction has no forward reuse
 and keeps keyframe-safe exact seeking with the exact-path budget. Scrub
 low-latency seek is product semantics, not an opt-in environment variable. This
 preserves still-frame correctness while preventing latest-wins scrubbing from
@@ -244,12 +251,16 @@ request for the same frame must remain eligible to retry exactly.
 Likewise, completion of a canceled current scrub or still request schedules one
 follow-up render pass so the settled position can submit fresh work after its
 scheduler entry is released. Playback deadline cancellations do not use this
-rule, because immediate resubmission would create a realtime retry loop.
+rule, because immediate resubmission would create a realtime retry loop. Decode
+cancellation is scheduler evidence, not a frame presentation: it records its
+reason and return latency but must not emit `FrameDelivery::Canceled` for an
+identity already replaced by latest-wins scheduling.
 
 Every preview decode diagnostic emitted by `mondrian-media` must carry the
 resolved access-mode policy contract alongside the observed result:
 `seek_strategy`, `forward_reuse_frame_window`,
-`forward_decode_budget_frames`, and `any_seek_window_ms`. App/UI performance
+`forward_decode_budget_frames`, `any_seek_window_ms`, `requested_pts`,
+`selected_pts`, and `temporal_approximation`. App/UI performance
 reports may aggregate those fields, but must not reconstruct them from app
 conditionals. This keeps policy bugs diagnosable: for example, a scrub sample
 that reports `BoundedAnyFrame` with a zero `any_seek_window_ms` is a broken
@@ -257,17 +268,17 @@ media contract, not a UI presentation issue.
 Each in-process preview decode session also maintains a session-local,
 incremental keyframe seek index from video packet metadata observed during real
 decode work. The index may bound later seeks to an already-known keyframe
-anchor. When bounded scrub selects such an anchor, the requested presentation
-timestamp remains the demux seek target and the seek uses keyframe-safe
-backward semantics with the same bounds as deterministic extraction: the
-anchor is the minimum and the requested timestamp is both target and maximum.
-An indexed anchor is eligible when its presentation-frame distance fits the
-active forward-decode budget; the millisecond any-frame window is only the
-unindexed fallback. This prevents a normal GOP just outside an arbitrary time
-window from being discarded even though it is cheap enough to decode. It also
-prevents the demuxer from selecting the following GOP. `AVSEEK_FLAG_ANY` is reserved for the
-unindexed bounded-window fallback; decoding then
-advances to the requested PTS. The index must not perform a blocking whole-file scan on first frame or
+anchor. When bounded scrub has index evidence, it selects the nearest keyframe,
+seeks toward that timestamp with keyframe-safe backward semantics, and requests
+FFmpeg `NonKey` discard as an optimization. Hardware decoders are not required
+to honor that discard hint: the warm phase accepts the first valid decoded
+frame within the adjacent indexed-GOP radius, preventing a slow-result feedback
+loop from making the same target permanently exhaust a smaller recovery budget.
+Diagnostics preserve both requested and selected PTS plus
+`temporal_approximation`; presentation policy reports the result as Degraded
+rather than claiming frame accuracy. `AVSEEK_FLAG_ANY` is
+reserved for the unindexed bounded-window fallback. The index must not perform
+a blocking whole-file scan on first frame or
 pretend that unknown GOP structure is known. This is a CPU fallback bridge
 toward a real GOP/keyframe map: future probe-backed indexes and hardware
 decode session adapters should replace the evidence source behind the media
@@ -364,10 +375,11 @@ models without synchronously rebuilding Viewer preview content.
 The same counter must appear in the preview decode performance summary/report
 even before a worker returns a canceled decode result, because the product
 symptom is already user-visible at the moment the demand expires.
-Each expired identity-bearing playback request released this way must also count
-as a playback late-drop decision and a proxy/hardware recommendation decision so
-clock-driven playback diagnostics do not under-report frames that were skipped
-before a worker produced a cancellation result. Re-requesting the same media key
+Expired playback work counts as one late-drop and proxy/hardware recommendation
+only when its identity equals the Playback Engine's still-pending demand.
+Redundant jobs collapse to that single decision; work that outlives an accepted
+presentation releases capacity without reviving or penalizing the completed
+demand. Re-requesting the same media key
 refreshes stall age only when generation, access mode, or Frame Demand identity
 changes; duplicate redraws for one demand cannot keep stalled work alive.
 Consecutive current playback late drops form a sustained playback pressure
@@ -390,21 +402,38 @@ pressure root cause is a playback smoke failure, not merely advisory evidence.
 The external real-media variant also emits `real_media_gates` and fails on
 `PlaybackCursor` decode p95, queue-wait p95, or visible-frame-ratio regression;
 those gates must remain separate from broad timeout windows so slow-but-eventual
-4K playback is not mistaken for production readiness.
+4K playback is not mistaken for production readiness. The generic decode report
+still records and diagnoses the slowest individual frame, but the continuous
+playback hard-failure selector does not let one session-open maximum override a
+healthy p95 plus readiness gate. Timeout, queue loss, invalid access modes,
+sustained pressure, missing locality, and p95 regressions remain hard failures.
 
 External smoke media is always registered from one real `MediaInfo::probe`;
 the harness does not synthesize codec, profile, resolution, bit depth, duration,
 frame count, or color facts from a filename. It builds the sequence at the
 probed rational frame rate and advances 1× using a nanosecond frame interval.
+The media probe canonicalizes positive FFmpeg average rates that fall within
+100 ppm of a standard nominal cinema/broadcast rate. This removes container
+time-base quantization (for example, an 11 ppm drift around `24000/1001`)
+without rounding genuinely distinct or variable rates into a standard cadence.
 The dedicated ignored
-`preview_media_4k_hevc_main10_hardware_playback_gate` requires
-`MONDRIAN_PREVIEW_4K_HEVC_MAIN10_MEDIA_PATH` and never reports a skip when that
-fixture is absent. Its `professional_media_gates` require decoder-proven UHD
-HEVC Main10 identity, sufficient duration, 25/29.97/30 fps, and at least 90%
+`preview_media_professional_4k_hevc_main10_hardware_playback_gate` requires
+`MONDRIAN_PREVIEW_PROFESSIONAL_4K_HEVC_MAIN10_MEDIA_PATH` and never reports a
+skip when that fixture is absent. Before starting GPU work, the harness rejects
+sources shorter than the complete observation window; it must never extend a
+short clip beyond source EOF and call that professional evidence. Its
+`professional_media_gates` require decoder-proven UHD HEVC Main10 identity,
+sufficient duration, 23.976/24/25/29.97/30/50/59.94/60 fps, and at least 90%
 actual P010/10-bit hardware provenance on media layers attached to completed
 headless Viewer GPU candidates. CPU-transfer hardware decode and retained
 native hardware decode are reported separately; both are actual hardware
 execution, while candidate/config/device probes are not.
+Once a GPU Viewer Adapter has admitted a hardware decode request and device
+selector, that decision applies to playback, active scrub, and settled still
+access modes. Reverting scrub or still requests to `Auto` would silently move a
+4K Main10 interaction from the admitted native P010 path back to CPU decode and
+is forbidden. CPU-only preview services retain the default `Auto` policy
+because no GPU Adapter admission is installed.
 When background preview completion changes Viewer lifecycle, the app host may
 perform one preview-aware model refresh, then adapt its payload-free feedback
 without requesting preview again. A feedback transition must not trigger a
@@ -499,8 +528,13 @@ active playback or interactive scrubbing when the pending window or worker
 transport queue is full. Scheduler admission and the job queue may evict queued
 still-frame current work for `PlaybackCursor` or `ScrubCursor` current work;
 they must not let still-frame work evict those real-time modes. On a shared
-interactive worker lane, `ScrubCursor` jobs are selected ahead of still-frame
-jobs even when the still-frame request arrived first. A newly admitted
+non-playback worker lane, `ScrubCursor` jobs are selected ahead of still-frame
+jobs even when the still-frame request arrived first. Newly admitted scrub and
+still requests retain their Interactive/Still/NonPlayback/Any lane affinity
+instead of cold-opening another thread-local hardware decoder on an
+incompatible idle worker. This preserves pointer latency, exact-seek locality,
+and realtime playback isolation without serializing same-generation work across
+compatible shared lanes. A newly admitted
 `PlaybackCursor` or `ScrubCursor` current request also preempts already-pending
 still-frame current work before the pending window or worker transport queue is
 full; the app must cancel matching queued jobs immediately so deterministic
@@ -569,11 +603,11 @@ contracts (`in_flight_current_jobs`, `in_flight_prefetch_jobs`,
 `in_flight_random_access_still_jobs`) so diagnostics can separate queued backlog
 from workers actively occupied by playback, scrub, or exact still-frame decode.
 The same activity snapshot must include worker-lane occupancy and
-`in_flight_cross_lane_current_jobs`. Cross-lane current-frame work is allowed as
-visible-work overflow, such as an idle playback lane helping a scrub current
-frame before playback prefetch, but persistent cross-lane evidence means the
-worker split or software-decode budget is too tight and should be tuned before
-blaming codec throughput, color conversion, or GPU upload.
+`in_flight_cross_lane_current_jobs`. In normal multi-lane operation cross-lane
+current work is an invariant violation; only lanes whose declared acceptance
+already spans a class (`Any` or `NonPlayback`) may share it. Persistent
+cross-lane evidence therefore points at an Adapter mapping bug, not spare
+capacity that should be exploited before codec, color, or GPU analysis.
 It also carries per-access-mode decode profiles for playback, scrub, and
 random-access still requests: frame counts, cache/ring/source path counts,
 end-to-end duration totals/maxima, worker-queue wait totals/maxima, seek counts,
@@ -594,6 +628,12 @@ bound from those buckets and emit per-mode p95 checks. This is intentionally a
 bounded diagnostic approximation, not an exact retained sample list: the JSONL
 should show whether real-media stalls are sustained across most frames or just
 single-frame spikes without growing unbounded UI telemetry state.
+Completion freshness also gates terminal publication: a result may emit
+playback Late/Failed only when it is broker `Current` and its captured identity
+equals the Playback Engine's still-pending demand. `CacheOnly`, `Stale`, and
+broker-current cleanup for a replaced/completed demand may be cached or
+discarded according to their completion contract, but cannot refresh visible
+state, create playback pressure, or publish another terminal delivery.
 The versioned report must emit access-mode-specific latency checks and root
 causes, so perf tooling can fail on `PlaybackCursor`, `ScrubCursor`, or
 `RandomAccessStillFrame` regressions without reverse-engineering raw counters.
@@ -670,7 +710,7 @@ removed: native output is an owned decoder-resource lease, not a raw plane
 container or a handle-kind diagnostic.
 `PreviewHardwareDecodeDecision` records the media-layer selection for each
 request. A GPU preference must resolve to a structured CPU RGBA reason such as
-`CpuRgbaHardwareUnavailable`, `CpuRgbaAccessModeUnsupported`,
+`CpuRgbaHardwareUnavailable`,
 `CpuRgbaBackendUnavailable`, `CpuRgbaCodecUnsupported`,
 `CpuRgbaBackendBoundary`, or `HardwareDecodeCpuTransfer` until the selected
 decoder actually produces a native surface admitted by the caller's combined
@@ -1015,9 +1055,9 @@ decode real keyframe/GOP evidence without a full packet scan before first frame.
 When a container exposes no usable index, sessions continue to learn keyframe
 anchors from decoded packets and report `SessionObserved` instead of pretending
 the source was probe-backed.
-`ScrubCursor` derives its effective forward-decode budget per request from that
-evidence: probe-backed anchors close to the target get a tight budget, missing
-or session-only evidence gets a smaller responsiveness-first budget, and exact
+`ScrubCursor` derives its effective selection/decode budget per request from
+that evidence: probe-backed anchors use bounded approximate-first-frame selection,
+missing or session-only evidence gets a bounded responsiveness-first budget, and exact
 playback/still requests keep their larger deterministic budget. The budget
 reported in `PreviewDecodeDiagnostics.forward_decode_budget_frames` is the
 effective budget that was actually used for that request.
@@ -1056,12 +1096,11 @@ Preview decode also exposes a cooperative cancellation boundary for interactive
 work: app workers pass a generation-aware predicate to the media decoder, and
 the media loop checks it before opening, seeking, packet decode, frame receive,
 EOF draining, and RGBA conversion. If cancellation fires, the decoder returns a
-typed canceled outcome rather than a media failure. `PlaybackCursor`
-cancellation preserves its thread-local FFmpeg session so sustained playback
-and forward prefetch can retain decoder residency; `ScrubCursor` and
-`RandomAccessStillFrame` cancellation discard only their own mode-specific
-session because their packet/frame state may be mid-stream and should not poison
-subsequent precise or latest-wins requests. The experimental external-process
+typed canceled outcome rather than a media failure. `PlaybackCursor` and
+`ScrubCursor` cancellation preserve their thread-local FFmpeg sessions so
+sustained playback, forward prefetch, and pointer dragging retain decoder/device
+residency; `RandomAccessStillFrame` cancellation discards only its mode-specific
+session. The experimental external-process
 CPU RGBA path must follow the same session-retention policy even though the
 child process itself cannot be interrupted mid-run. This keeps stale work from
 being cached or marked as a failed source while preserving independent playback,

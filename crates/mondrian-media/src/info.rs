@@ -919,6 +919,9 @@ pub struct VideoStreamInfo {
     pub height: u32,
     pub frame_rate: Rational,
     /// Whether `frame_rate` came from a positive FFmpeg stream rational.
+    ///
+    /// Container time-base quantization within 100 ppm of a standard nominal
+    /// rate is canonicalized to that exact rational.
     #[serde(default)]
     pub frame_rate_proven: bool,
     pub pixel_format: PixelFormat,
@@ -1887,8 +1890,40 @@ fn map_rational(value: ffmpeg::Rational) -> (Rational, bool) {
     if num <= 0 || den <= 0 {
         (Rational::new(0, 1), false)
     } else {
-        (Rational::new(num as i64, den as i64), true)
+        (
+            canonicalize_frame_rate(Rational::new(num as i64, den as i64)),
+            true,
+        )
     }
+}
+
+fn canonicalize_frame_rate(frame_rate: Rational) -> Rational {
+    const TOLERANCE_PPM: i128 = 100;
+    const NOMINAL_RATES: [Rational; 12] = [
+        Rational::FPS_10,
+        Rational::FPS_12,
+        Rational::FPS_125,
+        Rational::FPS_15,
+        Rational::FPS_23976,
+        Rational::FPS_24,
+        Rational::FPS_25,
+        Rational::FPS_2997,
+        Rational::FPS_30,
+        Rational::FPS_50,
+        Rational::FPS_5994,
+        Rational::FPS_60,
+    ];
+
+    NOMINAL_RATES
+        .into_iter()
+        .find(|nominal| {
+            let cross_error = ((frame_rate.num as i128) * (nominal.den as i128)
+                - (nominal.num as i128) * (frame_rate.den as i128))
+                .abs();
+            let nominal_cross = (nominal.num as i128).abs() * (frame_rate.den as i128).abs();
+            cross_error.saturating_mul(1_000_000) <= nominal_cross.saturating_mul(TOLERANCE_PPM)
+        })
+        .unwrap_or(frame_rate)
 }
 
 fn map_pixel_format(pixel: ffmpeg::util::format::pixel::Pixel) -> Option<PixelFormat> {
@@ -1990,6 +2025,19 @@ mod tests {
         assert_eq!(
             map_pixel_format(ffmpeg::util::format::pixel::Pixel::None),
             None
+        );
+    }
+
+    #[test]
+    fn probe_mapping_canonicalizes_container_quantization_near_nominal_rate() {
+        assert_eq!(
+            map_rational(ffmpeg::Rational(19_200_000, 800_791)),
+            (Rational::FPS_23976, true)
+        );
+        assert_eq!(
+            map_rational(ffmpeg::Rational(24_01, 100)),
+            (Rational::new(24_01, 100), true),
+            "a rate outside the quantization tolerance must remain exact"
         );
     }
 

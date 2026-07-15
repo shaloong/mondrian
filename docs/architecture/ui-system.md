@@ -282,6 +282,12 @@ generation checks that protect continuous playback from stale decode work.
 Current-frame media requests are scheduled before forward prefetch, and the
 worker queue/pending set are bounded. When playback outruns decode, obsolete or
 excess preview jobs are dropped instead of back-pressuring the UI thread.
+The host supplies the Playback Engine's still-pending demand identity both when
+it polls completed work and when it expires realtime work. Polling and
+expiration always release scheduler capacity, but only an exact pending
+identity may refresh visible playback state, create late-pressure evidence, or
+become one `Late` delivery; work left behind after a GPU presentation completed
+cannot publish another terminal outcome.
 The UI thread must also consume completed background preview results with a
 small per-poll budget. Large bursts of completed decode jobs are spread across
 event-loop turns so pointer/keyboard/window events keep priority over cache and
@@ -299,6 +305,13 @@ slow-latency, or recovery policy. Each service call produces
 when the frame is ready. Window-level telemetry records this candidate id and
 state alongside structured runtime/stage evidence so a JSONL record can be
 linked against the exact working-space attempt that fed it.
+Window-side Viewer replacement is a commit operation: a previous external GPU
+texture remains registered until the replacement output has recorded,
+registered, and been accepted by preview state. Typed renderer backpressure
+retains that output without blocking the UI thread; subsequent event-loop turns
+may retry the current candidate, while superseded candidates are discarded by
+normal preview identity rules. This prevents transient native bridge or GPU
+queue pressure from producing a blank Viewer.
 Preview diagnostics keep decode-stage timings separate from post-decode viewer
 render timings. Decode reports classify session open, cache lookup, seek,
 packet/decode, software scale, RGBA copy, and external-process wait cost;

@@ -52,8 +52,9 @@ pub(crate) fn preview_hardware_decode_effective(diagnostics: &PreviewDecodeDiagn
 pub(crate) fn preview_decode_presentation_quality(
     diagnostics: &PreviewDecodeDiagnostics,
 ) -> FramePresentationQuality {
-    if playback_hardware_decode_requested(diagnostics.hardware_decode_request)
-        && !preview_hardware_decode_effective(diagnostics)
+    if diagnostics.temporal_approximation
+        || (playback_hardware_decode_requested(diagnostics.hardware_decode_request)
+            && !preview_hardware_decode_effective(diagnostics))
     {
         FramePresentationQuality::Degraded
     } else {

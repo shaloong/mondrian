@@ -22,6 +22,16 @@ pub(crate) const PROFESSIONAL_MIN_ACCURATE_SEEKS: u64 = 50;
 pub(crate) const PROFESSIONAL_MIN_SUPERSEDED_SEEKS: u64 = 99;
 const PROFESSIONAL_WARM_SEEK_P95_LIMIT_US: u64 = 200_000;
 const PROFESSIONAL_ACCURATE_SEEK_P95_LIMIT_US: u64 = 500_000;
+const PROFESSIONAL_FRAME_RATES: [Rational; 8] = [
+    Rational::FPS_23976,
+    Rational::FPS_24,
+    Rational::FPS_25,
+    Rational::FPS_2997,
+    Rational::FPS_30,
+    Rational::FPS_50,
+    Rational::FPS_5994,
+    Rational::FPS_60,
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct PreviewPlaybackMediaProbeReport {
@@ -80,6 +90,30 @@ impl PreviewPlaybackMediaProbeReport {
             .unwrap_or(u128::MAX)
             .min(u64::MAX as u128) as u64)
     }
+
+    /// Reject a fixture that cannot cover the requested observation window.
+    pub(crate) fn ensure_observation_coverage(
+        &self,
+        frames: usize,
+        frame_interval_ns: u64,
+    ) -> anyhow::Result<()> {
+        let required_duration_us = required_media_duration_us(frames, frame_interval_ns);
+        anyhow::ensure!(
+            self.duration_us >= required_duration_us,
+            "professional playback observation requires at least {required_duration_us} us of source media, but the probe provides {} us",
+            self.duration_us
+        );
+        Ok(())
+    }
+}
+
+fn required_media_duration_us(frames: usize, frame_interval_ns: u64) -> u64 {
+    (frames as u128)
+        .saturating_mul(frame_interval_ns as u128)
+        .saturating_add(999)
+        .checked_div(1_000)
+        .unwrap_or(u128::MAX)
+        .min(u64::MAX as u128) as u64
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -95,7 +129,6 @@ pub(crate) struct PreviewProfessionalPlaybackGateReport {
     hardware_requested_frames: u64,
     fallback_cpu_not_requested_frames: u64,
     fallback_cpu_unavailable_frames: u64,
-    fallback_access_mode_unsupported_frames: u64,
     fallback_backend_unavailable_frames: u64,
     fallback_codec_unsupported_frames: u64,
     fallback_device_context_unavailable_frames: u64,
@@ -154,7 +187,6 @@ pub(crate) fn evaluate_professional_playback(
 ) -> PreviewProfessionalPlaybackGateReport {
     let media = observation.media;
     let mut failures = Vec::new();
-    let expected_frame_rates = [Rational::FPS_25, Rational::FPS_2997, Rational::FPS_30];
     if media.codec != VideoCodec::H265 {
         push_failure(
             &mut failures,
@@ -194,11 +226,11 @@ pub(crate) fn evaluate_professional_playback(
             media.frame_rate.to_string(),
             media.source,
         );
-    } else if !expected_frame_rates.contains(&media.frame_rate) {
+    } else if !PROFESSIONAL_FRAME_RATES.contains(&media.frame_rate) {
         push_failure(
             &mut failures,
             "media_frame_rate_mismatch",
-            "25, 30000/1001, or 30 fps",
+            "24000/1001, 24, 25, 30000/1001, 30, 50, 60000/1001, or 60 fps",
             media.frame_rate.to_string(),
             media.source,
         );
@@ -221,12 +253,8 @@ pub(crate) fn evaluate_professional_playback(
             media.source,
         );
     }
-    let required_duration_us = (observation.frames as u128)
-        .saturating_mul(observation.frame_interval_ns as u128)
-        .saturating_add(999)
-        .checked_div(1_000)
-        .unwrap_or(u128::MAX)
-        .min(u64::MAX as u128) as u64;
+    let required_duration_us =
+        required_media_duration_us(observation.frames, observation.frame_interval_ns);
     if media.duration_us < required_duration_us {
         push_failure(
             &mut failures,
@@ -432,8 +460,6 @@ pub(crate) fn evaluate_professional_playback(
         hardware_requested_frames,
         fallback_cpu_not_requested_frames: playback.hardware_decode_cpu_not_requested_frames,
         fallback_cpu_unavailable_frames: playback.hardware_decode_cpu_unavailable_frames,
-        fallback_access_mode_unsupported_frames: playback
-            .hardware_decode_access_mode_unsupported_frames,
         fallback_backend_unavailable_frames: playback.hardware_decode_backend_unavailable_frames,
         fallback_codec_unsupported_frames: playback.hardware_decode_codec_unsupported_frames,
         fallback_device_context_unavailable_frames: playback
@@ -565,6 +591,50 @@ mod tests {
             ]
         );
         assert!(!report.passed);
+    }
+
+    #[test]
+    fn preflight_rejects_media_shorter_than_observation_window() {
+        let mut media = main10_media();
+        media.duration_us = 2_880_000;
+
+        let error = media
+            .ensure_observation_coverage(45_000, 40_000_000)
+            .expect_err("short source must not start a thirty-minute gate");
+
+        assert!(error.to_string().contains("requires at least 1800000000 us"));
+        assert!(error.to_string().contains("provides 2880000 us"));
+    }
+
+    #[test]
+    fn professional_gate_accepts_cinema_broadcast_and_high_frame_rates() {
+        for frame_rate in PROFESSIONAL_FRAME_RATES {
+            let mut media = main10_media();
+            media.frame_rate = frame_rate;
+            let evidence = passing_playback_evidence();
+            let diagnostics = AppUiPreviewDiagnostics::default();
+            let report = evaluate_professional_playback(
+                ProfessionalPlaybackObservation {
+                    media: &media,
+                    rendered_decode_execution: AppUiPreviewDecodeExecutionSummary {
+                        media_layers: 100,
+                        hardware_native_layers: 100,
+                        p010_10_bit_hardware_layers: 100,
+                        ..AppUiPreviewDecodeExecutionSummary::default()
+                    },
+                    viewer_fallback_count: 0,
+                    viewer_fallback_reasons: &[],
+                    playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
+                    playback_evidence: &evidence,
+                    preview_diagnostics: &diagnostics,
+                    frames: 45_000,
+                    frame_interval_ns: 40_000_000,
+                },
+                90,
+            );
+
+            assert!(report.passed, "{frame_rate}: {:?}", report.failures);
+        }
     }
 
     #[test]

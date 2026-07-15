@@ -260,7 +260,8 @@ Each demand includes:
 - exact target Timeline Time plus the resolved video Frame Position and
   evaluation-grid contract;
 - access intent (`PlaybackCursor`, `ScrubCursor`, `StillFrame`);
-- presentation deadline and demand sequence number;
+- optional presentation deadline and demand sequence number; paused seek
+  demands are untimed and remain useful until superseded;
 - requested output extent/temporary resolution scale;
 - proxy/original selection fixed by user/project policy;
 - source/color/display contract revision;
@@ -270,6 +271,12 @@ Each demand includes:
 The Engine emits demands based on clock position plus a bounded lookahead.
 Prefetch is advisory, playback-only, slack-only, and cannot displace visible
 current-frame work.
+When either Synthetic or Audio Device Clock Master reaches natural end, the
+Engine invalidates the prior realtime demand and publishes a new untimed demand
+for the exact final frame before settling in `Ended`. It must never clear a
+terminal marker while retaining the old demand identity: that would revive an
+already presented frame and allow redundant timeout work to emit a second
+terminal delivery.
 
 ## Frame request scheduling
 
@@ -312,6 +319,13 @@ the three semantic classes and projects generic diagnostics into its report
 schema. The Condvar queue, semantic lane selection, capacity reservation, and
 deadline dequeue now live behind the playback-owned Interface without importing
 FFmpeg types.
+Every current work class retains semantic lane affinity. Playback runs on
+Playback/Any, scrub on Interactive/NonPlayback/Any, and exact still work on
+Still/NonPlayback/Any. This prevents one request stream from cold-opening a
+decoder/device session on each idle worker and prevents deterministic still
+decode from occupying the realtime playback lane. Parallelism remains
+available through lanes whose declared acceptance spans the class rather than
+through implicit cross-lane stealing.
 
 Admission across the pending-binding window and worker queue is transactional.
 The Broker first computes one eviction that can satisfy every active capacity
@@ -337,7 +351,8 @@ Terminal outcomes are:
 - `Late`: correct result completed after its deadline.
 - `StaleAvailable`: at the demand deadline, policy closed the demand while a
   previously presented frame could remain visible.
-- `Degraded`: an explicitly allowed temporary resolution or HDR-to-SDR path was
+- `Degraded`: an explicitly allowed temporary resolution, HDR-to-SDR path, or
+  adjacent-GOP approximate frame shown during active pointer scrubbing was
   executed and reported, or a correct CPU frame remained presentable after an
   explicitly requested hardware decode path did not actually engage.
 - `Blocked`: correctness/capability policy forbids presentation.
@@ -350,10 +365,21 @@ quality revision, reason code, and stage durations.
 
 `FramePresentationTicket` is the Playback Module's opaque Interface for final
 presentation. It binds the exact demand identity, authoritative
-`MonotonicTimestamp` deadline, and an allowed on-time quality of Ready or
+optional `MonotonicTimestamp` deadline, and an allowed quality of Ready or
 Degraded. CPU, Window GPU, and headless GPU Adapters call `complete_at` with
-their actual completion timestamp; only this Module classifies Ready/Degraded
-versus Late. Adapters never compare or reconstruct deadlines themselves.
+their actual completion timestamp; only this Module classifies timed work as
+Ready/Degraded versus Late. An untimed paused-seek ticket cannot become Late,
+but its exact identity is still invalidated by the next demand. Adapters never
+compare or reconstruct deadlines themselves.
+
+Terminal authority ends as soon as the Engine accepts one delivery. Preview
+Adapters may attach an identity or deadline only from `pending_frame_demand`,
+not merely from the last active demand. Scheduler-current work can outlive that
+authority when presentation wins a race with redundant decode work. Expiration
+must still cancel and release all such work, but may publish at most one `Late`
+and only when its identity equals the Engine's still-pending demand. This keeps
+the one-terminal invariant at the Playback/Preview boundary instead of treating
+an internal queue entry as permission to revive a completed demand.
 
 Only the Playback Engine interprets a delivery:
 
@@ -716,8 +742,9 @@ removed. Window redraw may still defer duplicate GPU candidate preparation while
 Loading, but that presentation guard has no transport authority.
 
 The Engine now emits a Frame Demand containing epoch, quality revision, demand
-sequence, sequence/timeline revision, exact target, preview scale, and monotonic
-deadline. Its opaque Adapter identity projects epoch, quality revision, demand
+sequence, sequence/timeline revision, exact target, preview scale, and an
+optional monotonic deadline. Paused seek emits an untimed current-frame demand;
+playback/priming emits a timed demand. Its opaque Adapter identity projects epoch, quality revision, demand
 sequence, and target frame. Preview workers consume an absolute wall projection
 of the demand deadline instead of independently reconstructing frame duration.
 Same-epoch completions for a superseded demand are rejected before target
@@ -726,8 +753,10 @@ validation.
 Playback-current preview jobs carry the opaque identity projection (`epoch`,
 quality revision, demand sequence, target frame) through queue, worker, result,
 and app polling. Media workers do not interpret playback policy. Polling returns
-exact terminal deliveries only for Late, Failed, or Canceled work. A successful
-Ready/Degraded decode is staged as nonterminal readiness; its classification is
+exact terminal deliveries only for Late or Failed frame work. Decode-job
+cancellation remains broker/media evidence and does not masquerade as a frame
+presentation for an identity that latest-wins scheduling may already have
+replaced. A successful Ready/Degraded decode is staged as nonterminal readiness; its classification is
 attached as a Frame Presentation Ticket to the exact GPU candidate or CPU
 presentation and terminates the demand only after that Adapter produces a usable
 output. The ticket's final completion timestamp, not decode completion, decides
@@ -772,6 +801,10 @@ remaining budget to a later enqueue time. Presentation completion uses the same
 mapping, and Playback Evidence records that completion timestamp behind a
 monotonic high-water mark. Demand latency therefore includes final CPU/GPU
 presentation work rather than stopping at decode readiness.
+Before play, pause, stop, or seek mutates the transport, the App Adapter advances
+its runtime timestamp to that high-water mark. A paused GPU presentation can
+therefore never make the next playback epoch begin with a partly expired
+preroll deadline.
 
 Play and running seek now remain in bounded Priming. Ready or allowed Degraded
 delivery starts Synthetic Master immediately; after the 500 ms policy deadline,
@@ -863,11 +896,21 @@ rational cadence, frame-local decode provenance carried through caches and
 prefetch, the exact Viewer candidate, and a completed headless GPU submission.
 Its Adapter derives a non-overridable minimum frame count from 30 minutes and
 the probed rational cadence, sizes Playback Evidence retention for the complete
-run, completes 50 warm plus 50 accurate cross-region seeks through the same GPU
-presentation path, and then schedules a 100-seek latest-wins burst. The gate
+run, pauses transport, completes 50 approximate warm plus 50 exact
+cross-region seeks through the same GPU presentation path, and then schedules a
+100-seek latest-wins burst. The gate
 requires warm p95 at or below 200 ms, accurate p95 at or below 500 ms, at least
 99 superseded-seek observations, no rejected old terminal delivery, no evidence
 overflow, and zero Broker pending/queued/in-flight residency after the burst.
+The report preserves cancellation return-latency evidence separately for
+playback, scrub, and exact-still lanes. Realtime cancellation is not allowed to
+hide a slower deterministic still decoder: the product gate will require each
+class to return cooperatively within its own fixed budget once exact-still
+session interruption is bounded on every supported backend.
+Steady playback is evaluated by p95 plus at least 99.5% current-frame readiness;
+the slowest single decode remains explicit diagnostic evidence but one
+session-open outlier cannot independently fail a 30-minute run whose sustained
+distribution and presentation hit rate pass.
 The deterministic rules and versioned structured failure codes live in the
 deep `app::playback_acceptance` Module; the perf harness is an Adapter that only
 collects real probe, playback, and completed-presentation observations.

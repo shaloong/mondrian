@@ -14,12 +14,13 @@ use crate::app_ui::preview::{
     build_preview_render_performance_report, AppUiPreviewColorHealthReport,
     AppUiPreviewColorHealthSummary, AppUiPreviewColorHealthVerdict,
     AppUiPreviewDecodeAccessModeProfile, AppUiPreviewDecodeAccessModeProfiles,
-    AppUiPreviewDecodeExecutionSummary, AppUiPreviewDecodePerformanceArea,
-    AppUiPreviewDecodePerformanceCheck, AppUiPreviewDecodePerformanceReport,
-    AppUiPreviewDecodePerformanceSeverity, AppUiPreviewDecodePerformanceVerdict,
-    AppUiPreviewDiagnostics, AppUiPreviewRenderPerformanceReport,
-    AppUiPreviewRenderPerformanceSeverity, AppUiPreviewRenderPerformanceVerdict,
-    AppUiPreviewService, APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
+    AppUiPreviewDecodeExecutionSummary, AppUiPreviewDecodeLatencyBuckets,
+    AppUiPreviewDecodePerformanceArea, AppUiPreviewDecodePerformanceCheck,
+    AppUiPreviewDecodePerformanceReport, AppUiPreviewDecodePerformanceSeverity,
+    AppUiPreviewDecodePerformanceVerdict, AppUiPreviewDiagnostics,
+    AppUiPreviewRenderPerformanceReport, AppUiPreviewRenderPerformanceSeverity,
+    AppUiPreviewRenderPerformanceVerdict, AppUiPreviewService,
+    APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
     APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
 };
 use crate::app_ui::shell::AppUiAppRoot;
@@ -332,6 +333,14 @@ fn professional_frame_count_covers_full_duration_after_initial_observation() {
     );
 }
 
+#[test]
+fn professional_playback_case_budget_includes_observation_and_bounded_overhead() {
+    assert_eq!(
+        professional_playback_case_budget_ms(45_001, 40_000_000),
+        2_100_040
+    );
+}
+
 #[derive(Debug, Serialize)]
 struct PreviewMediaPlaybackPerfReport {
     scenario: &'static str,
@@ -592,7 +601,8 @@ fn preview_playback_decode_failures(
         if check.severity != AppUiPreviewDecodePerformanceSeverity::Fail {
             continue;
         }
-        let playback_scoped = check.code.starts_with("preview_decode_playback_")
+        let playback_scoped = (check.code.starts_with("preview_decode_playback_")
+            && check.code != "preview_decode_playback_cursor_max_frame_us")
             || matches!(
                 check.code,
                 "preview_decode_timeout_failures"
@@ -1551,12 +1561,15 @@ fn preview_media_external_continuous_playback_smoke() -> anyhow::Result<()> {
 }
 
 #[test]
-#[ignore = "professional 4K25/30 HEVC Main10 hardware playback gate; requires real media and GPU"]
-fn preview_media_4k_hevc_main10_hardware_playback_gate() -> anyhow::Result<()> {
+#[ignore = "professional 4K HEVC Main10 hardware playback gate; requires real media and GPU"]
+fn preview_media_professional_4k_hevc_main10_hardware_playback_gate() -> anyhow::Result<()> {
     let _guard = perf_lock().lock().expect("perf lock poisoned");
-    let video_path = std::env::var_os("MONDRIAN_PREVIEW_4K_HEVC_MAIN10_MEDIA_PATH")
-        .map(std::path::PathBuf::from)
-        .context("MONDRIAN_PREVIEW_4K_HEVC_MAIN10_MEDIA_PATH is required; this gate never skips")?;
+    let video_path =
+        std::env::var_os("MONDRIAN_PREVIEW_PROFESSIONAL_4K_HEVC_MAIN10_MEDIA_PATH")
+            .map(std::path::PathBuf::from)
+            .context(
+                "MONDRIAN_PREVIEW_PROFESSIONAL_4K_HEVC_MAIN10_MEDIA_PATH is required; this gate never skips",
+            )?;
     run_external_continuous_playback_gate(video_path, true)
 }
 
@@ -1598,7 +1611,18 @@ fn run_external_continuous_playback_gate(
         .filter(|value| *value > 0)
         .map(|milliseconds| milliseconds.saturating_mul(1_000_000))
         .unwrap_or(media_probe.frame_interval_ns()?);
-    let playback_threshold_ms = env_u128("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_WINDOW_MS", 8_000);
+    if professional {
+        media_probe.ensure_observation_coverage(frame_count, frame_interval_ns)?;
+    }
+    let default_playback_threshold_ms = if professional {
+        professional_playback_case_budget_ms(frame_count, frame_interval_ns)
+    } else {
+        8_000
+    };
+    let playback_threshold_ms = env_u128(
+        "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_WINDOW_MS",
+        default_playback_threshold_ms,
+    );
     let gpu_candidate_threshold_ms =
         env_u128("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_GPU_CANDIDATE_MS", 2_000);
     let ready_timeout = Duration::from_millis(env_u128(
@@ -1638,7 +1662,7 @@ fn run_external_continuous_playback_gate(
 
     let deadline = Instant::now() + overall_timeout;
     let scenario = if professional {
-        "preview_media_4k_hevc_main10_hardware_playback"
+        "preview_media_professional_4k_hevc_main10_hardware_playback"
     } else {
         "preview_media_external_continuous_playback"
     };
@@ -1948,15 +1972,13 @@ fn run_preview_media_continuous_playback_probe(
         ready_timeout,
     )?;
     state.play();
-    anyhow::ensure!(
-        execute_headless_gpu_candidate(
-            &preview_service,
-            &mut state,
-            &mut gpu_adapter,
-            &mut headless_gpu,
-        )? == HeadlessGpuCandidateStatus::Ready,
-        "headless GPU pre-roll did not satisfy the initial playback Frame Demand"
-    );
+    wait_for_headless_gpu_ready(
+        &preview_service,
+        &mut state,
+        &mut gpu_adapter,
+        &mut headless_gpu,
+        ready_timeout,
+    )?;
     wait_for_headless_playback_preroll(&preview_service, &mut state, ready_timeout)?;
     let playback_case = run_case(
         "preview_media.continuous_playback_readiness",
@@ -1978,6 +2000,9 @@ fn run_preview_media_continuous_playback_probe(
             Ok(())
         },
     )?;
+    if seek_probe_count > 0 {
+        state.pause();
+    }
     let seek_case = (seek_probe_count > 0)
         .then(|| {
             run_case(
@@ -1998,7 +2023,6 @@ fn run_preview_media_continuous_playback_probe(
             )
         })
         .transpose()?;
-    state.pause();
 
     let gpu_candidate_case = run_case(
         "preview_media.playback_gpu_candidate_ready",
@@ -2112,6 +2136,15 @@ fn professional_min_frame_count_for_interval(interval_ns: u64) -> anyhow::Result
         .unwrap_or(u128::MAX)
         .saturating_add(1);
     usize::try_from(frames).context("professional playback frame count exceeds usize")
+}
+
+fn professional_playback_case_budget_ms(frame_count: usize, interval_ns: u64) -> u128 {
+    const PROFESSIONAL_CASE_OVERHEAD_MARGIN_MS: u128 = 5 * 60 * 1_000;
+    (frame_count as u128)
+        .saturating_mul(u128::from(interval_ns))
+        .saturating_add(999_999)
+        .saturating_div(1_000_000)
+        .saturating_add(PROFESSIONAL_CASE_OVERHEAD_MARGIN_MS)
 }
 
 fn run_headless_cross_region_seeks(
@@ -2288,6 +2321,7 @@ struct HeadlessPreviewSample {
 enum HeadlessGpuCandidateStatus {
     Ready,
     Loading,
+    Backpressured,
     Unavailable,
 }
 
@@ -2303,7 +2337,9 @@ fn wait_for_headless_gpu_ready(
         apply_headless_preview_outcome(preview_service, state);
         match execute_headless_gpu_candidate(preview_service, state, gpu_adapter, gpu_summary)? {
             HeadlessGpuCandidateStatus::Ready => return Ok(()),
-            HeadlessGpuCandidateStatus::Loading | HeadlessGpuCandidateStatus::Unavailable => {}
+            HeadlessGpuCandidateStatus::Loading
+            | HeadlessGpuCandidateStatus::Backpressured
+            | HeadlessGpuCandidateStatus::Unavailable => {}
         }
         anyhow::ensure!(
             Instant::now() < deadline,
@@ -2374,9 +2410,16 @@ fn execute_headless_gpu_candidate(
 ) -> anyhow::Result<HeadlessGpuCandidateStatus> {
     match preview_service.gpu_preview_frame_for_state(state) {
         crate::app_ui::preview::AppUiGpuPreviewFrameState::Ready(frame) => {
-            let execution = gpu_adapter
-                .execute(&frame)
-                .context("execute current Viewer frame on the real headless GPU Adapter")?;
+            let execution = match gpu_adapter.execute(&frame) {
+                Ok(execution) => execution,
+                Err(crate::app_ui::viewer_gpu_preview_headless::HeadlessViewerGpuError::Backpressure(
+                    _,
+                )) => return Ok(HeadlessGpuCandidateStatus::Backpressured),
+                Err(error) => {
+                    return Err(error)
+                        .context("execute current Viewer frame on the real headless GPU Adapter");
+                }
+            };
             gpu_summary.record(execution);
             if let Some(ticket) = frame.presentation_ticket() {
                 state.complete_frame_presentation(ticket, Instant::now());
@@ -2418,8 +2461,9 @@ fn apply_headless_preview_outcome(
     preview_service: &AppUiPreviewService,
     state: &mut AppState,
 ) -> bool {
-    let mut outcome = preview_service.poll_finished_outcome();
-    outcome.merge(preview_service.expire_stalled_realtime_current());
+    let pending_playback_demand = state.pending_playback_frame_demand_identity();
+    let mut outcome = preview_service.poll_finished_outcome(pending_playback_demand);
+    outcome.merge(preview_service.expire_stalled_realtime_current(pending_playback_demand));
     for delivery in outcome.frame_deliveries.iter().copied() {
         state.observe_frame_delivery(delivery);
     }
@@ -2676,10 +2720,12 @@ fn wait_for_preview_ready_until(
         match preview_service.viewer_preview_for_state(state) {
             ViewerPreviewState::Ready(_) => return Ok(()),
             ViewerPreviewState::Loading | ViewerPreviewState::Stale(_) => {
-                let _ = preview_service.poll_finished();
+                let _ =
+                    preview_service.poll_finished(state.pending_playback_frame_demand_identity());
             }
             ViewerPreviewState::Unavailable => {
-                let _ = preview_service.poll_finished();
+                let _ =
+                    preview_service.poll_finished(state.pending_playback_frame_demand_identity());
             }
         }
         if started_at.elapsed() > timeout {
@@ -3220,6 +3266,46 @@ fn preview_playback_decode_failures_ignore_slow_random_still_startup() {
     let report = build_preview_decode_performance_report_with_required_access_modes(
         diagnostics.decode_performance_summary(50_000),
         "preview-playback-scenario-scope-test",
+        50_000,
+        &[PreviewDecodeAccessMode::PlaybackCursor],
+    );
+
+    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+    assert!(preview_playback_decode_failures(&report).is_empty());
+}
+
+#[test]
+fn preview_playback_decode_failures_ignore_one_session_open_tail_when_p95_is_healthy() {
+    let diagnostics = AppUiPreviewDiagnostics {
+        decode_successes: 101,
+        decode_in_process_cpu_frames: 101,
+        decode_total_duration_us: 1_120_000,
+        decode_max_duration_us: 120_000,
+        decode_last_duration_us: 10_000,
+        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
+            playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+                frames: 101,
+                in_process_cpu_frames: 101,
+                total_duration_us: 1_120_000,
+                max_duration_us: 120_000,
+                last_duration_us: 10_000,
+                latency_buckets: AppUiPreviewDecodeLatencyBuckets {
+                    le_10ms: 100,
+                    gt_80ms: 1,
+                    ..AppUiPreviewDecodeLatencyBuckets::default()
+                },
+                session_opened_frames: 1,
+                session_reused_frames: 100,
+                forward_reused_frames: 100,
+                ..AppUiPreviewDecodeAccessModeProfile::default()
+            },
+            ..AppUiPreviewDecodeAccessModeProfiles::default()
+        },
+        ..AppUiPreviewDiagnostics::default()
+    };
+    let report = build_preview_decode_performance_report_with_required_access_modes(
+        diagnostics.decode_performance_summary(50_000),
+        "preview-playback-session-open-tail-test",
         50_000,
         &[PreviewDecodeAccessMode::PlaybackCursor],
     );

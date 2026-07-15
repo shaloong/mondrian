@@ -1009,7 +1009,10 @@ where
     queue
         .iter()
         .enumerate()
-        .filter(|(_, queued)| queued.request.priority == FrameWorkPriority::Current)
+        .filter(|(_, queued)| {
+            queued.request.priority == FrameWorkPriority::Current
+                && lane.accepts(queued.request.work_class)
+        })
         .min_by_key(|(_, queued)| {
             (
                 deadline_expired(queued.request.deadline),
@@ -1206,6 +1209,32 @@ mod tests {
         assert_eq!(diagnostics.pending_requests, 0);
         assert_eq!(diagnostics.queued_work, 0);
         assert_eq!(diagnostics.in_flight_work, 0);
+    }
+
+    #[test]
+    fn current_still_work_preserves_decoder_lane_affinity() {
+        let queue = VecDeque::from([QueuedWork { request: request(1, 1, FrameWorkClass::Still) }]);
+
+        assert_eq!(
+            next_work_index(&queue, FrameWorkerLane::Playback, &|_| false),
+            None
+        );
+        assert_eq!(
+            next_work_index(&queue, FrameWorkerLane::Interactive, &|_| false),
+            None
+        );
+        assert_eq!(
+            next_work_index(&queue, FrameWorkerLane::Still, &|_| false),
+            Some(0)
+        );
+        assert_eq!(
+            next_work_index(&queue, FrameWorkerLane::NonPlayback, &|_| false),
+            Some(0)
+        );
+        assert_eq!(
+            next_work_index(&queue, FrameWorkerLane::Any, &|_| false),
+            Some(0)
+        );
     }
 
     #[test]

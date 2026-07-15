@@ -43,10 +43,8 @@ const PREVIEW_SCRUB_MIN_FORWARD_DECODE_BUDGET_FRAMES: usize = 12;
 // ordinary long-GOP seek is not abandoned just before its target is emitted.
 const PREVIEW_SCRUB_SEEK_BUDGET_PADDING_FRAMES: usize = 16;
 const PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES: usize = 72;
-const PREVIEW_SCRUB_SLOW_FORWARD_DECODE_BUDGET_FRAMES: usize = 36;
 const PREVIEW_SCRUB_RECOVERY_FORWARD_DECODE_BUDGET_FRAMES: usize = 48;
 const PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS: u64 = 250;
-const PREVIEW_SCRUB_SLOW_ANY_SEEK_WINDOW_MS: u64 = 120;
 const PREVIEW_SCRUB_RECOVERY_ANY_SEEK_WINDOW_MS: u64 = 180;
 const PREVIEW_FRAME_CACHE_CAPACITY: usize = 256;
 const PREVIEW_SEEK_INDEX_CACHE_CAPACITY: usize = 32;
@@ -192,8 +190,6 @@ pub enum PreviewHardwareDecodeDecision {
     CpuRgbaNotRequested,
     /// Hardware decode was requested but no active GPU-resident adapter exists.
     CpuRgbaHardwareUnavailable,
-    /// Hardware decode was requested for an access mode that is not allowed to use it.
-    CpuRgbaAccessModeUnsupported,
     /// Hardware decode was requested but the selected backend cannot provide native residency.
     CpuRgbaBackendUnavailable,
     /// Hardware decode was requested but FFmpeg has no matching codec/backend config.
@@ -405,6 +401,7 @@ struct PreviewDecodeAccessPolicy {
     forward_decode_budget_frames: usize,
     use_playback_ring: bool,
     preserve_session_on_cancel: bool,
+    keyframe_only: bool,
     seek_strategy: PreviewDecodeSeekStrategy,
     any_seek_window_ms: u64,
     scrub_adaptive_class: PreviewScrubAdaptiveClass,
@@ -419,6 +416,7 @@ impl PreviewDecodeAccessPolicy {
                 forward_decode_budget_frames: PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
                 use_playback_ring: true,
                 preserve_session_on_cancel: true,
+                keyframe_only: false,
                 seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
                 any_seek_window_ms: 0,
                 scrub_adaptive_class: PreviewScrubAdaptiveClass::Normal,
@@ -428,7 +426,8 @@ impl PreviewDecodeAccessPolicy {
                 forward_reuse_frame_window: PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
                 forward_decode_budget_frames: PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
                 use_playback_ring: false,
-                preserve_session_on_cancel: false,
+                preserve_session_on_cancel: true,
+                keyframe_only: true,
                 seek_strategy: PreviewDecodeSeekStrategy::BoundedAnyFrame,
                 any_seek_window_ms: PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS,
                 scrub_adaptive_class: PreviewScrubAdaptiveClass::Normal,
@@ -439,6 +438,7 @@ impl PreviewDecodeAccessPolicy {
                 forward_decode_budget_frames: PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
                 use_playback_ring: false,
                 preserve_session_on_cancel: false,
+                keyframe_only: false,
                 seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
                 any_seek_window_ms: 0,
                 scrub_adaptive_class: PreviewScrubAdaptiveClass::Normal,
@@ -463,9 +463,9 @@ impl PreviewDecodeAccessPolicy {
             PreviewScrubAdaptiveClass::SlowLatency => {
                 self.forward_decode_budget_frames = self
                     .forward_decode_budget_frames
-                    .min(PREVIEW_SCRUB_SLOW_FORWARD_DECODE_BUDGET_FRAMES);
+                    .min(PREVIEW_SCRUB_RECOVERY_FORWARD_DECODE_BUDGET_FRAMES);
                 self.any_seek_window_ms =
-                    self.any_seek_window_ms.min(PREVIEW_SCRUB_SLOW_ANY_SEEK_WINDOW_MS);
+                    self.any_seek_window_ms.min(PREVIEW_SCRUB_RECOVERY_ANY_SEEK_WINDOW_MS);
             }
             PreviewScrubAdaptiveClass::Recovery => {
                 self.forward_decode_budget_frames = self
@@ -495,6 +495,16 @@ impl PreviewDecodeAccessPolicy {
 
     fn forward_decode_budget_exhausted(self, frames_decoded: usize) -> bool {
         frames_decoded >= self.forward_decode_budget_frames
+    }
+
+    fn accepts_first_decoded_approximation(
+        self,
+        selected_pts: i64,
+        target_pts: i64,
+        max_distance_pts: i64,
+    ) -> bool {
+        self.keyframe_only
+            && selected_pts.saturating_sub(target_pts).abs() <= max_distance_pts.max(1)
     }
 
     fn adapt_for_request(
@@ -774,6 +784,15 @@ pub struct PreviewDecodeDiagnostics {
     /// Whether the decoder had to seek before producing this frame.
     #[serde(default)]
     pub seek_performed: bool,
+    /// Requested stream timestamp before any interactive approximation.
+    #[serde(default)]
+    pub requested_pts: Option<i64>,
+    /// Stream timestamp actually selected for presentation.
+    #[serde(default)]
+    pub selected_pts: Option<i64>,
+    /// Whether interactive scrubbing intentionally presented a nearby keyframe.
+    #[serde(default)]
+    pub temporal_approximation: bool,
     /// Seek strategy requested by the access-mode policy for this frame.
     #[serde(default)]
     pub seek_strategy: PreviewDecodeSeekStrategy,
@@ -932,6 +951,9 @@ impl PreviewDecodeDiagnostics {
             external_process: path == PreviewDecodePath::ExternalFfmpegCpuRgba,
             cpu_resident: path != PreviewDecodePath::InProcessFfmpegNative,
             seek_performed: false,
+            requested_pts: None,
+            selected_pts: None,
+            temporal_approximation: false,
             seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
             forward_reuse_frame_window: 0,
             forward_decode_budget_frames: 0,
@@ -1614,6 +1636,14 @@ impl RgbaFrame {
         self
     }
 
+    fn with_temporal_selection(mut self, requested_pts: i64, selected_pts: Option<i64>) -> Self {
+        self.diagnostics.requested_pts = Some(requested_pts);
+        self.diagnostics.selected_pts = selected_pts;
+        self.diagnostics.temporal_approximation =
+            selected_pts.is_some_and(|selected_pts| selected_pts != requested_pts);
+        self
+    }
+
     fn with_seek_strategy(mut self, seek_strategy: PreviewDecodeSeekStrategy) -> Self {
         self.diagnostics.seek_strategy = seek_strategy;
         self
@@ -1759,6 +1789,14 @@ impl FloatRgbaFrame {
     fn with_decode_work(mut self, seek_performed: bool, decoded_frame_count: usize) -> Self {
         self.diagnostics.seek_performed = seek_performed;
         self.diagnostics.decoded_frame_count = decoded_frame_count.min(u32::MAX as usize) as u32;
+        self
+    }
+
+    fn with_temporal_selection(mut self, requested_pts: i64, selected_pts: Option<i64>) -> Self {
+        self.diagnostics.requested_pts = Some(requested_pts);
+        self.diagnostics.selected_pts = selected_pts;
+        self.diagnostics.temporal_approximation =
+            selected_pts.is_some_and(|selected_pts| selected_pts != requested_pts);
         self
     }
 
@@ -2058,7 +2096,7 @@ impl PreviewHardwareDecodePlan {
 
     fn plan_requires_device_context(
         request: PreviewHardwareDecodeRequest,
-        access_mode: PreviewDecodeAccessMode,
+        _access_mode: PreviewDecodeAccessMode,
         backend: PreviewDecodeBackend,
     ) -> bool {
         matches!(
@@ -2066,13 +2104,11 @@ impl PreviewHardwareDecodePlan {
             PreviewHardwareDecodeRequest::PreferHardwareDecode
                 | PreviewHardwareDecodeRequest::PreferGpuResident
                 | PreviewHardwareDecodeRequest::RequireGpuResident
-        ) && access_mode == PreviewDecodeAccessMode::PlaybackCursor
-            && backend != PreviewDecodeBackend::ExternalFfmpegCpuRgba
+        ) && backend != PreviewDecodeBackend::ExternalFfmpegCpuRgba
     }
 
-    fn should_configure_hardware_decoder(&self, access_mode: PreviewDecodeAccessMode) -> bool {
+    fn should_configure_hardware_decoder(&self, _access_mode: PreviewDecodeAccessMode) -> bool {
         self.request != PreviewHardwareDecodeRequest::Auto
-            && access_mode == PreviewDecodeAccessMode::PlaybackCursor
             && self.ffmpeg_codec_config.ffmpeg_codec_config_available
             && self.ffmpeg_device_context.device_context_created
     }
@@ -2166,7 +2202,7 @@ impl PreviewHardwareDecodePlan {
 
     fn decision_for(
         request: PreviewHardwareDecodeRequest,
-        access_mode: PreviewDecodeAccessMode,
+        _access_mode: PreviewDecodeAccessMode,
         backend: PreviewDecodeBackend,
         probe: &HwAccelProbe,
         ffmpeg_codec_config: &HwAccelCodecConfigProbe,
@@ -2174,9 +2210,6 @@ impl PreviewHardwareDecodePlan {
     ) -> PreviewHardwareDecodeDecision {
         if request == PreviewHardwareDecodeRequest::Auto {
             return PreviewHardwareDecodeDecision::CpuRgbaNotRequested;
-        }
-        if access_mode != PreviewDecodeAccessMode::PlaybackCursor {
-            return PreviewHardwareDecodeDecision::CpuRgbaAccessModeUnsupported;
         }
         if backend == PreviewDecodeBackend::ExternalFfmpegCpuRgba {
             return PreviewHardwareDecodeDecision::CpuRgbaBackendBoundary;
@@ -2546,6 +2579,45 @@ impl PreviewSeekIndex {
         match self.keyframe_pts.binary_search(&target_pts) {
             Ok(index) => self.keyframe_pts.get(index + 1).copied(),
             Err(index) => self.keyframe_pts.get(index).copied(),
+        }
+    }
+
+    fn nearest_keyframe(&self, target_pts: i64) -> Option<i64> {
+        let before = self.keyframe_at_or_before(target_pts);
+        let after = self.keyframe_after(target_pts);
+        match (before, after) {
+            (Some(before), Some(after)) => {
+                if target_pts.saturating_sub(before) <= after.saturating_sub(target_pts) {
+                    Some(before)
+                } else {
+                    Some(after)
+                }
+            }
+            (Some(before), None) => Some(before),
+            (None, Some(after)) => Some(after),
+            (None, None) => None,
+        }
+    }
+
+    fn adjacent_keyframe_radius(&self, target_pts: i64) -> Option<i64> {
+        let search = self.keyframe_pts.binary_search(&target_pts);
+        let insertion = search.unwrap_or_else(|index| index);
+        let before = insertion
+            .checked_sub(1)
+            .and_then(|index| self.keyframe_pts.get(index))
+            .map(|pts| target_pts.saturating_sub(*pts).abs());
+        let after_index = match search {
+            Ok(index) => index.saturating_add(1),
+            Err(index) => index,
+        };
+        let after = self
+            .keyframe_pts
+            .get(after_index)
+            .map(|pts| pts.saturating_sub(target_pts).abs());
+        match (before, after) {
+            (Some(before), Some(after)) => Some(before.max(after)),
+            (Some(distance), None) | (None, Some(distance)) => Some(distance),
+            (None, None) => None,
         }
     }
 
@@ -3052,6 +3124,16 @@ impl PreviewDecodeSession {
             self.frame_duration_pts,
             adaptive_hints,
         );
+        let decode_target_pts = if policy.keyframe_only {
+            self.seek_index.nearest_keyframe(target_pts).unwrap_or(target_pts)
+        } else {
+            target_pts
+        };
+        self.decoder.skip_frame(if policy.keyframe_only {
+            ffmpeg::codec::discard::Discard::NonKey
+        } else {
+            ffmpeg::codec::discard::Discard::Default
+        });
 
         let cache_lookup_started_at = Instant::now();
         let allow_cpu_cache = !self.hardware_decode_request.prefers_gpu_residency();
@@ -3116,7 +3198,7 @@ impl PreviewDecodeSession {
             .map(|last| {
                 policy.can_continue_forward(
                     last,
-                    target_pts,
+                    decode_target_pts,
                     self.frame_duration_pts,
                     self.reached_eof,
                 )
@@ -3131,7 +3213,7 @@ impl PreviewDecodeSession {
                 return Ok(PreviewDecodeOutcome::Canceled);
             }
             let seek_started_at = Instant::now();
-            seek_resolution = self.seek_to_target(target_pts, policy)?;
+            seek_resolution = self.seek_to_target(decode_target_pts, policy)?;
             seek_us = duration_us(seek_started_at.elapsed());
         }
 
@@ -3139,7 +3221,7 @@ impl PreviewDecodeSession {
             return Ok(PreviewDecodeOutcome::Canceled);
         }
         let decode_started_at = Instant::now();
-        let result = self.decode_forward_until(target_pts, policy, should_cancel)?;
+        let result = self.decode_forward_until(decode_target_pts, policy, should_cancel)?;
         if result.canceled {
             return Ok(PreviewDecodeOutcome::Canceled);
         }
@@ -3163,6 +3245,7 @@ impl PreviewDecodeSession {
                             ..PreviewDecodeStageDurations::default()
                         })
                         .with_decode_work(seek_performed, result.decoded_frame_count)
+                        .with_temporal_selection(target_pts, result.selected_pts)
                         .with_access_policy(policy)
                         .with_forward_reused(should_continue_forward)
                         .with_seek_index_diagnostics(self.seek_index.diagnostics(), seek_resolution)
@@ -3198,6 +3281,7 @@ impl PreviewDecodeSession {
                             ..PreviewDecodeStageDurations::default()
                         })
                         .with_decode_work(seek_performed, result.decoded_frame_count)
+                        .with_temporal_selection(target_pts, result.selected_pts)
                         .with_access_policy(policy)
                         .with_forward_reused(should_continue_forward)
                         .with_seek_index_diagnostics(self.seek_index.diagnostics(), seek_resolution)
@@ -3224,6 +3308,10 @@ impl PreviewDecodeSession {
                         ..PreviewDecodeStageDurations::default()
                     });
                     diagnostics.seek_performed = seek_performed;
+                    diagnostics.requested_pts = Some(target_pts);
+                    diagnostics.selected_pts = result.selected_pts;
+                    diagnostics.temporal_approximation =
+                        result.selected_pts.is_some_and(|selected_pts| selected_pts != target_pts);
                     diagnostics.decoded_frame_count =
                         result.decoded_frame_count.min(u32::MAX as usize) as u32;
                     diagnostics = diagnostics.with_access_policy(policy);
@@ -3357,10 +3445,18 @@ impl PreviewDecodeSession {
         let mut best_before: Option<(i64, RetainedDecodedFrame)> = None;
         let mut best_after: Option<(i64, RetainedDecodedFrame)> = None;
         let mut frames_decoded: usize = 0;
-        let max_select_distance_pts =
+        let exact_select_distance_pts =
             self.frame_duration_pts.saturating_mul(2).max(1).min(
                 seconds_to_stream_pts(PREVIEW_MAX_SELECT_DISTANCE_SECS, self.stream_tb).max(1),
             );
+        let max_select_distance_pts = if policy.keyframe_only {
+            self.seek_index
+                .adjacent_keyframe_radius(target_pts)
+                .unwrap_or(exact_select_distance_pts)
+                .max(exact_select_distance_pts)
+        } else {
+            exact_select_distance_pts
+        };
 
         let choose_and_convert =
             |hardware_decode_plan: &mut PreviewHardwareDecodePlan,
@@ -3433,6 +3529,28 @@ impl PreviewDecodeSession {
                         frame_pts,
                         RetainedDecodedFrame::retain(&decoded.frame, self.path.as_path())?,
                     ));
+                    if policy.accepts_first_decoded_approximation(
+                        frame_pts,
+                        target_pts,
+                        max_select_distance_pts,
+                    ) {
+                        if let Some((selected_pts, frame)) = choose_and_convert(
+                            &mut self.hardware_decode_plan,
+                            &mut self.scaler,
+                            &mut self.scaler_source_format,
+                            self.target_width,
+                            self.target_height,
+                            self.path.as_path(),
+                            best_before.as_ref(),
+                            None,
+                        )? {
+                            return Ok(PreviewDecodeForwardResult::frame(
+                                frame,
+                                selected_pts,
+                                frames_decoded,
+                            ));
+                        }
+                    }
                     if frame_pts >= target_pts.saturating_sub(self.hit_tolerance_pts) {
                         let frame = materialize_decoded_frame(
                             &decoded.frame,
@@ -3523,6 +3641,28 @@ impl PreviewDecodeSession {
                             frame_pts,
                             RetainedDecodedFrame::retain(&decoded.frame, self.path.as_path())?,
                         ));
+                        if policy.accepts_first_decoded_approximation(
+                            frame_pts,
+                            target_pts,
+                            max_select_distance_pts,
+                        ) {
+                            if let Some((selected_pts, frame)) = choose_and_convert(
+                                &mut self.hardware_decode_plan,
+                                &mut self.scaler,
+                                &mut self.scaler_source_format,
+                                self.target_width,
+                                self.target_height,
+                                self.path.as_path(),
+                                best_before.as_ref(),
+                                None,
+                            )? {
+                                return Ok(PreviewDecodeForwardResult::frame(
+                                    frame,
+                                    selected_pts,
+                                    frames_decoded,
+                                ));
+                            }
+                        }
                         if frame_pts >= target_pts.saturating_sub(self.hit_tolerance_pts) {
                             if should_cancel() {
                                 return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
@@ -3613,6 +3753,29 @@ impl PreviewDecodeSession {
                             frame_pts,
                             RetainedDecodedFrame::retain(&decoded.frame, self.path.as_path())?,
                         ));
+                        if policy.accepts_first_decoded_approximation(
+                            frame_pts,
+                            target_pts,
+                            max_select_distance_pts,
+                        ) {
+                            if let Some((selected_pts, frame)) = choose_and_convert(
+                                &mut self.hardware_decode_plan,
+                                &mut self.scaler,
+                                &mut self.scaler_source_format,
+                                self.target_width,
+                                self.target_height,
+                                self.path.as_path(),
+                                best_before.as_ref(),
+                                None,
+                            )? {
+                                self.reached_eof = true;
+                                return Ok(PreviewDecodeForwardResult::frame(
+                                    frame,
+                                    selected_pts,
+                                    frames_decoded,
+                                ));
+                            }
+                        }
                     } else {
                         best_after = Some((
                             frame_pts,
@@ -5003,7 +5166,6 @@ mod tests {
         PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS,
         PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
         PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES,
-        PREVIEW_SCRUB_SLOW_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_SLOW_FORWARD_DECODE_BUDGET_FRAMES,
         PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES,
     };
     use crate::decoder::{
@@ -5273,19 +5435,17 @@ mod tests {
     }
 
     #[test]
-    fn hardware_decode_plan_rejects_non_playback_access_modes() {
-        let plan = PreviewHardwareDecodePlan::resolve(
-            PreviewHardwareDecodeRequest::PreferGpuResident,
+    fn hardware_decode_plan_supports_interactive_access_modes() {
+        for access_mode in [
             PreviewDecodeAccessMode::ScrubCursor,
-            PreviewDecodeBackend::Auto,
-            ffmpeg::codec::Id::H264,
-            None,
-        );
-
-        assert_eq!(
-            plan.decision,
-            PreviewHardwareDecodeDecision::CpuRgbaAccessModeUnsupported
-        );
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+        ] {
+            assert!(PreviewHardwareDecodePlan::plan_requires_device_context(
+                PreviewHardwareDecodeRequest::PreferGpuResident,
+                access_mode,
+                PreviewDecodeBackend::Auto,
+            ));
+        }
     }
 
     #[test]
@@ -5449,7 +5609,7 @@ mod tests {
             "RandomAccessStillFrame"
         );
         assert!(PreviewDecodeAccessMode::PlaybackCursor.preserves_session_on_cancel());
-        assert!(!PreviewDecodeAccessMode::ScrubCursor.preserves_session_on_cancel());
+        assert!(PreviewDecodeAccessMode::ScrubCursor.preserves_session_on_cancel());
         assert!(!PreviewDecodeAccessMode::RandomAccessStillFrame.preserves_session_on_cancel());
         assert_eq!(
             PreviewDecodeSeekStrategy::KeyframeBefore.as_str(),
@@ -5528,6 +5688,7 @@ mod tests {
         );
         assert!(playback.use_playback_ring);
         assert!(playback.preserve_session_on_cancel);
+        assert!(!playback.keyframe_only);
         assert_eq!(
             playback.seek_strategy,
             PreviewDecodeSeekStrategy::KeyframeBefore
@@ -5544,7 +5705,8 @@ mod tests {
         );
         assert!(scrub.forward_decode_budget_frames < playback.forward_decode_budget_frames);
         assert!(!scrub.use_playback_ring);
-        assert!(!scrub.preserve_session_on_cancel);
+        assert!(scrub.preserve_session_on_cancel);
+        assert!(scrub.keyframe_only);
         assert_eq!(
             scrub.seek_strategy,
             PreviewDecodeSeekStrategy::BoundedAnyFrame
@@ -5558,6 +5720,7 @@ mod tests {
         );
         assert!(!still.use_playback_ring);
         assert!(!still.preserve_session_on_cancel);
+        assert!(!still.keyframe_only);
         assert_eq!(
             still.seek_strategy,
             PreviewDecodeSeekStrategy::KeyframeBefore
@@ -5574,6 +5737,19 @@ mod tests {
             .forward_decode_budget_exhausted(scrub.forward_decode_budget_frames.saturating_sub(1)));
         assert!(scrub.forward_decode_budget_exhausted(scrub.forward_decode_budget_frames));
         assert!(scrub.forward_decode_budget_exhausted(scrub.forward_decode_budget_frames + 1));
+    }
+
+    #[test]
+    fn only_scrub_accepts_first_decoded_frame_inside_evidenced_gop_radius() {
+        let scrub =
+            PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::ScrubCursor);
+        let still = PreviewDecodeAccessPolicy::for_access_mode(
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+        );
+
+        assert!(scrub.accepts_first_decoded_approximation(1_900, 2_000, 100));
+        assert!(!scrub.accepts_first_decoded_approximation(1_899, 2_000, 100));
+        assert!(!still.accepts_first_decoded_approximation(1_900, 2_000, 100));
     }
 
     #[test]
@@ -5649,10 +5825,12 @@ mod tests {
             slow.scrub_adaptive_class,
             PreviewScrubAdaptiveClass::SlowLatency
         );
-        assert!(
-            slow.forward_decode_budget_frames <= PREVIEW_SCRUB_SLOW_FORWARD_DECODE_BUDGET_FRAMES
+        assert_eq!(
+            slow.seek_strategy,
+            PreviewDecodeSeekStrategy::BoundedAnyFrame
         );
-        assert!(slow.any_seek_window_ms <= PREVIEW_SCRUB_SLOW_ANY_SEEK_WINDOW_MS);
+        assert!(slow.any_seek_window_ms > 0);
+        assert!(slow.forward_decode_budget_frames > 0);
 
         let hot = scrub.adapt_for_request(
             &probe_index,
@@ -5734,6 +5912,13 @@ mod tests {
         assert_eq!(index.keyframe_at_or_before(199), Some(100));
         assert_eq!(index.keyframe_at_or_before(200), Some(200));
         assert_eq!(index.keyframe_at_or_before(1_000), Some(200));
+        assert_eq!(index.nearest_keyframe(60), Some(50));
+        assert_eq!(index.nearest_keyframe(90), Some(100));
+        assert_eq!(index.nearest_keyframe(150), Some(100));
+        assert_eq!(index.adjacent_keyframe_radius(50), Some(50));
+        assert_eq!(index.adjacent_keyframe_radius(100), Some(100));
+        assert_eq!(index.adjacent_keyframe_radius(150), Some(50));
+        assert_eq!(index.adjacent_keyframe_radius(200), Some(100));
         assert_eq!(
             index.diagnostics(),
             PreviewSeekIndexDiagnostics {

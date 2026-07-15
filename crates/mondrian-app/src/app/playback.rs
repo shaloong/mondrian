@@ -59,6 +59,10 @@ impl AppState {
         }
     }
 
+    fn synchronize_playback_runtime_to_evidence(&mut self) {
+        self.playback_now = self.playback_now.max(self.playback_evidence_now);
+    }
+
     /// Return a stable bounded report for diagnostics and headless/perf Adapters.
     pub fn playback_evidence_report(&self) -> PlaybackEvidenceReport {
         self.playback_evidence.report()
@@ -78,6 +82,7 @@ impl AppState {
     }
 
     pub fn play(&mut self) {
+        self.synchronize_playback_runtime_to_evidence();
         let Ok(end_frame) = self.last_content_frame() else {
             tracing::error!("failed to resolve exact Sequence duration onto playback frame grid");
             return;
@@ -103,6 +108,7 @@ impl AppState {
     }
 
     pub fn pause(&mut self) {
+        self.synchronize_playback_runtime_to_evidence();
         let frames = self.current_frame();
         self.settle_preview_access_source();
         if let Err(error) = self.playback_engine.pause(self.playback_now) {
@@ -114,6 +120,7 @@ impl AppState {
     }
 
     pub fn stop(&mut self) {
+        self.synchronize_playback_runtime_to_evidence();
         self.settle_preview_access_source();
         if let Err(error) = self.playback_engine.stop(self.playback_now) {
             tracing::error!(%error, "failed to stop Playback Session");
@@ -131,6 +138,7 @@ impl AppState {
     }
 
     pub fn seek_with_source(&mut self, frame: i64, source: TimelineSeekSource) {
+        self.synchronize_playback_runtime_to_evidence();
         let was_running = self.is_playing();
         self.last_timeline_seek_source = source;
         let Ok(end_frame) = self.last_content_frame() else {
@@ -571,20 +579,23 @@ impl AppState {
     /// Project the current Frame Demand deadline into the production wall-clock
     /// domain at the exact sampling instant used by a Preview Adapter.
     pub fn playback_frame_deadline_at(&self, sampled_at: Instant) -> Option<Instant> {
-        let demand = self.playback_engine.frame_demand()?;
+        let demand = self.playback_engine.pending_frame_demand()?;
+        let deadline = demand.deadline?;
         let sampled_timestamp = self
             .playback_presentation_timestamp_at(sampled_at)
             .max(self.playback_evidence_now);
-        let remaining = demand
-            .deadline
+        let remaining = deadline
             .duration_since_origin()
             .saturating_sub(sampled_timestamp.duration_since_origin());
         sampled_at.checked_add(remaining)
     }
 
-    /// Identity preview adapters must return with terminal current-frame work.
-    pub fn playback_frame_demand_identity(&self) -> Option<mondrian_playback::FrameDemandIdentity> {
-        self.playback_engine.frame_demand().map(|demand| demand.identity())
+    /// Identity preview adapters may return only while the current demand still
+    /// accepts a terminal presentation/decode observation.
+    pub fn pending_playback_frame_demand_identity(
+        &self,
+    ) -> Option<mondrian_playback::FrameDemandIdentity> {
+        self.playback_engine.pending_frame_demand().map(|demand| demand.identity())
     }
 
     /// Create exact authority for a Presentation Adapter to finish the current demand.
@@ -592,9 +603,6 @@ impl AppState {
         &self,
         quality: FramePresentationQuality,
     ) -> Option<FramePresentationTicket> {
-        if !self.is_playing() {
-            return None;
-        }
         self.playback_engine
             .pending_frame_demand()
             .map(|demand| FramePresentationTicket::for_demand(demand, quality))
@@ -988,6 +996,26 @@ mod tests {
     }
 
     #[test]
+    fn paused_seek_presentation_records_real_warm_latency() {
+        let mut state = state_with_sequence(40);
+
+        state.seek_with_source(10, TimelineSeekSource::PointerDrag);
+        let ticket = state
+            .playback_frame_presentation_ticket(FramePresentationQuality::Ready)
+            .expect("paused seek presentation ticket");
+        let completed_at = state.playback_presentation_wall_anchor + Duration::from_millis(120);
+        assert!(!state.complete_frame_presentation(ticket, completed_at));
+
+        let report = state.playback_evidence_report();
+        assert_eq!(report.deliveries.ready, 1);
+        assert_eq!(report.warm_seek_latency.count, 1);
+        assert_eq!(report.warm_seek_latency.p95_us, 120_000);
+
+        state.play();
+        assert_eq!(state.playback_now, state.playback_evidence_now);
+    }
+
+    #[test]
     fn advance_playback_clock_accumulates_subframe_ticks() {
         let mut state = state_with_sequence(20);
         play_ready(&mut state);
@@ -1160,7 +1188,8 @@ mod tests {
     fn completion_for_pre_seek_demand_cannot_mutate_new_session() {
         let mut state = state_with_sequence(30);
         state.play();
-        let old_identity = state.playback_frame_demand_identity().expect("priming demand identity");
+        let old_identity =
+            state.pending_playback_frame_demand_identity().expect("priming demand identity");
 
         state.seek(10);
         let before = state.playback_engine.snapshot();
