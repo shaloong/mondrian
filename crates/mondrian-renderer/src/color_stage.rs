@@ -7,13 +7,13 @@ use crate::{
     GpuColorFrameResourceTableError, GpuColorFrameTextureFormat, GpuColorFrameUploadError,
     GpuColorFrameUploadPlan, GpuColorFrameUploader, GpuColorFrameWgpuResource,
     GpuColorFrameWgpuResourcePool, GpuColorFrameWgpuResourcePoolDiagnostics, GpuCompositeError,
-    GpuCompositeRecord, GpuCompositeRequest, GpuFrameCompositor, LinearFloatSource,
-    OcioGpuShaderCache, OcioGpuShaderCacheDiagnostics, OcioGpuWgpuBackendObjectError,
-    OcioGpuWgpuBackendObjectRuntime, OcioGpuWgpuBackendObjectRuntimeDiagnostics,
-    OcioGpuWgpuBackendPrepError, OcioGpuWgpuBackendPrepRuntime,
-    OcioGpuWgpuBackendPrepRuntimeDiagnostics, OcioGpuWgpuBindGroupLayoutDescriptorPlan,
-    OcioGpuWgpuBlocker, OcioGpuWgpuColorTargetFormat, OcioGpuWgpuOcioBindGroup,
-    OcioGpuWgpuPreparedWrapperInputLayout, OcioGpuWgpuRenderPassError,
+    GpuCompositeRecord, GpuCompositeRequest, GpuFrameCompositor, GpuSolidSourceRecord,
+    LinearFloatSource, OcioGpuShaderCache, OcioGpuShaderCacheDiagnostics,
+    OcioGpuWgpuBackendObjectError, OcioGpuWgpuBackendObjectRuntime,
+    OcioGpuWgpuBackendObjectRuntimeDiagnostics, OcioGpuWgpuBackendPrepError,
+    OcioGpuWgpuBackendPrepRuntime, OcioGpuWgpuBackendPrepRuntimeDiagnostics,
+    OcioGpuWgpuBindGroupLayoutDescriptorPlan, OcioGpuWgpuBlocker, OcioGpuWgpuColorTargetFormat,
+    OcioGpuWgpuOcioBindGroup, OcioGpuWgpuPreparedWrapperInputLayout, OcioGpuWgpuRenderPassError,
     OcioGpuWgpuRenderPassNodePlan, OcioGpuWgpuRenderPassRecorder, OcioGpuWgpuRenderPassTarget,
     OcioGpuWgpuRenderPipeline, OcioGpuWgpuWrapperBindGroup, OcioGpuWgpuWrapperBindingPlan,
     OcioGpuWgpuWrapperInputResources, RenderColorTransform, RenderColorTransformError,
@@ -22,7 +22,7 @@ use crate::{
     RenderInputTransformResult, RenderIntermediateColorTransform, RenderOcioDisplayView,
     RenderOutputTransformFloatResult, RenderOutputTransformResult,
 };
-use mondrian_core::types::{ColorEngine, ColorSpace};
+use mondrian_core::types::{Color, ColorEngine, ColorSpace};
 use mondrian_core::{
     OutputTransformIntent, OutputTransformIntentResolutionError, WorkingColorSpace,
 };
@@ -790,6 +790,32 @@ impl RenderGpuOutputBoundaryRuntime {
             frame_table,
             Some(resource_pool),
             request,
+        )
+    }
+
+    /// Materialize one unblended procedural solid into the shared working-frame table.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_wgpu_solid_source(
+        &mut self,
+        compositor: &GpuFrameCompositor,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        width: u32,
+        height: u32,
+        working_color_space: WorkingColorSpace,
+        color: Color,
+    ) -> Result<GpuSolidSourceRecord, GpuCompositeError> {
+        let Self { frame_ids, frame_table, resource_pool, .. } = self;
+        compositor.record_solid_source_pass(
+            device,
+            encoder,
+            frame_ids,
+            frame_table,
+            Some(resource_pool),
+            width,
+            height,
+            working_color_space,
+            color,
         )
     }
 
