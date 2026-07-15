@@ -1249,23 +1249,40 @@ Media probe separates detected metadata from policy assumptions.
 `VideoStreamInfo.detected_color_space` is the transform-facing detected-only
 index. `VideoStreamInfo.color_interpretation` is the diagnostic/UI-facing
 interpretation with confidence, evidence, warnings, and a user-overridable flag.
-Evidence records whether a result came from a camera/log metadata hint, exact
-CICP tags, partial CICP tags, unsupported CICP tags, or decoder unavailability.
+Evidence records whether a result came from a camera/log metadata hint, a
+complete file-name pair, exact CICP tags, partial CICP tags, ICC, unsupported
+CICP tags, or decoder unavailability. `interpret_video_color_metadata(...)`
+owns the selection policy so decoder integrations do not duplicate it.
 Camera/log hints resolve only when they identify both the transfer curve and
 the associated camera gamut. For example, `S-Log3 / S-Gamut3.Cine` is a
 supported exact identity, while bare `S-Log3` remains unresolved. The same rule
 applies to ARRI, Canon, Panasonic, RED, Blackmagic, DJI, Apple, and DaVinci
-camera families. This prevents a plausible-looking but incorrect primary
-conversion from being hidden behind a generic log label. ICC profile names are
-display-profile evidence and are never promoted to camera input identities.
+camera families. File names participate only when they contain the complete
+pair, and remain low-confidence descriptive evidence; bare names such as
+`Slog3` or `Log3G10` do not invent a gamut. This prevents a plausible-looking
+but incorrect primary conversion from being hidden behind a generic log label.
+ICC profile names are display-profile evidence and are never promoted to camera
+input identities.
+Selection is deterministic: declared stream metadata outranks declared
+container metadata; either is high confidence and may override conflicting
+CICP while retaining a warning. Exact CICP outranks free-form/container comments
+and file-name inference. Partial CICP and mapped ICC are medium confidence;
+descriptive text and complete file-name pairs are low confidence and are used
+only when no stronger usable evidence exists. An unmapped ICC profile is
+retained as evidence and warning but does not suppress a complete low-confidence
+hint.
 Warnings preserve machine-readable provenance, not only a resolved color-space
 enum: multiple-hint warnings keep the selected and ignored metadata keys,
 values, and scopes; hint-vs-CICP warnings keep the selected hint and the raw
-CICP triplet that conflicted with it. `VideoColorDiagnostic::summary()` is the
+CICP triplet that conflicted with it; lower-priority warnings record the method
+that won and every conflicting descriptive hint it rejected.
+`VideoColorDiagnostic::summary()` is the
 stable compact form for logs/export errors and should include those warning
 details. `VideoColorDiagnostic::issue_summary()` is the machine-readable
 contract for UI, telemetry, smoke JSONL, and export reports; callers must
 consume its counters and flags instead of parsing the compact summary string.
+The summary schema is strict: new evidence counters are required fields rather
+than serde-defaulted compatibility values, so stale reports fail visibly.
 `VideoColorDiagnosticIssueAggregate` is the shared rollup for combining many
 per-stream diagnostics into one report surface.
 Clip-level `MediaInterpretation` can override color space, frame rate, pixel aspect ratio, field order, and alpha interpretation.

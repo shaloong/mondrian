@@ -217,11 +217,16 @@ normal SDR sequence on the direct colorimetric OCIO processor and prevents a
 configured-but-inactive display/view from changing preview or export pixels.
 
 Media probing keeps automatic interpretation evidence separate from user
-overrides. CICP/container tags, camera/log metadata hints, HDR side data, and
-embedded ICC profiles are recorded as diagnostic evidence with confidence and
-warnings; ICC-only streams may resolve to an inferred input color family, while
-ICC-vs-CICP conflicts must be surfaced as warnings rather than silently changing
-an explicit user override.
+overrides. CICP/container tags, camera/log metadata hints, complete
+transfer-and-gamut pairs in file names, HDR side data, and embedded ICC profiles
+are recorded as diagnostic evidence with confidence and warnings. Declared
+stream metadata outranks declared container metadata. Exact CICP outranks
+free-form comments and file-name inference; partial CICP and mapped ICC are
+medium confidence; a complete pair found only in descriptive text or a file
+name is low confidence. Conflicting lower-priority evidence is retained in a
+structured warning instead of disappearing. ICC-only streams may resolve to an
+inferred input color family, while ICC-vs-CICP conflicts must be surfaced as
+warnings rather than silently changing an explicit user override.
 
 Camera acquisition identities are never represented by a transfer curve alone.
 Each product `ColorSpace` binds an exact transfer and gamut pair, including
@@ -230,10 +235,11 @@ LogC4/AWG4, Canon Log2/Log3 Cinema Gamut D55, Panasonic V-Log/V-Gamut, RED
 Log3G10/REDWideGamutRGB, Blackmagic Film/Wide Gamut Gen 5, DJI D-Log/D-Gamut,
 and DaVinci Intermediate/Wide Gamut. A bare `S-Log3`, `LogC`, or similar curve
 name is incomplete evidence and remains Unknown until metadata or a user
-override supplies the gamut. ICC display-profile names are not camera metadata
-and must not be used to guess these acquisition identities. The Interpret
-Footage UI exposes the precise pairs; program/display output selectors expose
-delivery spaces only.
+override supplies the gamut. The same rule applies to file names: `Slog3` or
+`Log3G10` alone is not enough to infer primaries. ICC display-profile names are
+not camera metadata and must not be used to guess these acquisition identities.
+The Interpret Footage UI exposes the precise pairs; program/display output
+selectors expose delivery spaces only.
 
 External scene-referred image identities are first-class `ColorSpace` values:
 linear Rec.709, linear Rec.2020, linear P3-D65, ACES2065-1, ACEScg, and ACEScct.

@@ -104,7 +104,7 @@ impl PixelFormat {
 /// How a video stream's input color metadata was resolved by media probing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VideoColorSpaceSource {
-    /// Container/codec metadata explicitly identified the color space.
+    /// Media evidence identified or inferred the color space.
     Metadata,
     /// Metadata was missing or unsupported; callers must apply missing-metadata policy.
     MissingMetadata,
@@ -115,7 +115,7 @@ pub enum VideoColorSpaceSource {
 /// Method that produced a video stream's color metadata decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VideoColorDetectionMethod {
-    /// Explicit acquisition/log metadata hint won.
+    /// An acquisition/log metadata hint won; confidence distinguishes declarations from inference.
     MetadataHint,
     /// An embedded ICC profile identified the input color family.
     IccProfile,
@@ -132,11 +132,11 @@ pub enum VideoColorDetectionMethod {
 pub enum VideoColorInterpretationConfidence {
     /// No supported interpretation was available.
     None,
-    /// A weak or incomplete hint was present, but callers should treat it cautiously.
+    /// A complete transfer/gamut pair appeared only in descriptive text or a file name.
     Low,
-    /// A partial metadata match or free-form acquisition hint identified a likely color space.
+    /// Partial CICP tags or a mapped ICC profile identified a likely color space.
     Medium,
-    /// Explicit metadata identified a supported color space.
+    /// Exact CICP tags or a declared acquisition metadata field identified a supported color space.
     High,
 }
 
@@ -227,7 +227,7 @@ pub enum VideoColorInterpretationEvidence {
 /// Warning emitted while interpreting video color metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VideoColorInterpretationWarning {
-    /// Multiple metadata hints were found; the first stable probe-order hint was selected.
+    /// Conflicting metadata hints were found; the highest-priority declaration was selected.
     MultipleMetadataHints {
         /// Selected metadata hint.
         selected: VideoColorMetadataHint,
@@ -242,6 +242,20 @@ pub enum VideoColorInterpretationWarning {
         cicp_color_space: ColorSpace,
         /// Raw CICP metadata that conflicted with the selected hint.
         cicp_metadata: VideoColorMetadata,
+    },
+    /// A free-form metadata field was used only because no stronger color evidence existed.
+    DescriptiveMetadataHintInference {
+        /// Low-confidence hint selected as the fallback interpretation.
+        selected: VideoColorMetadataHint,
+    },
+    /// Stronger structured evidence won over conflicting free-form metadata hints.
+    LowerPriorityMetadataHints {
+        /// Detection method that supplied the selected interpretation.
+        selected_method: VideoColorDetectionMethod,
+        /// Color space selected by the stronger evidence.
+        selected_color_space: ColorSpace,
+        /// Conflicting metadata hints that were retained but not selected.
+        ignored: Vec<VideoColorMetadataHint>,
     },
     /// The result came from partial CICP tags instead of a complete exact triplet.
     PartialCicpTags {
@@ -296,6 +310,8 @@ pub enum VideoColorMetadataHintScope {
     Container,
     /// Video stream-level metadata.
     Stream,
+    /// Complete transfer-and-gamut pair parsed from the source file name.
+    FileName,
 }
 
 /// Metadata hint that identifies an acquisition or camera-log color space.
@@ -387,6 +403,10 @@ pub struct VideoColorDiagnosticIssueSummary {
     pub ignored_metadata_hints: u64,
     /// Number of warnings where a metadata hint overrode conflicting CICP tags.
     pub metadata_hint_overrides_cicp_tags: u64,
+    /// Number of warnings where stronger evidence overrode free-form metadata hints.
+    pub lower_priority_metadata_hints: u64,
+    /// Number of lower-priority metadata hints retained but not selected.
+    pub ignored_lower_priority_metadata_hints: u64,
     /// Number of partial CICP inference warnings.
     pub partial_cicp_tags: u64,
     /// Number of missing or unsupported CICP warnings.
@@ -461,6 +481,10 @@ pub struct VideoColorDiagnosticIssueAggregate {
     pub ignored_metadata_hints: u64,
     /// Total hint-vs-CICP conflict warnings.
     pub metadata_hint_overrides_cicp_tags: u64,
+    /// Total warnings where stronger evidence overrode free-form metadata hints.
+    pub lower_priority_metadata_hints: u64,
+    /// Total lower-priority metadata hints retained but not selected.
+    pub ignored_lower_priority_metadata_hints: u64,
     /// Total partial CICP inference warnings.
     pub partial_cicp_tags: u64,
     /// Total missing or unsupported CICP warnings.
@@ -590,6 +614,8 @@ impl VideoColorDiagnostic {
             multiple_metadata_hints: 0,
             ignored_metadata_hints: 0,
             metadata_hint_overrides_cicp_tags: 0,
+            lower_priority_metadata_hints: 0,
+            ignored_lower_priority_metadata_hints: 0,
             partial_cicp_tags: 0,
             missing_or_unsupported_cicp_tags: 0,
             decoder_unavailable: 0,
@@ -615,6 +641,14 @@ impl VideoColorDiagnostic {
                 VideoColorInterpretationWarning::MetadataHintOverridesCicpTags { .. } => {
                     summary.metadata_hint_overrides_cicp_tags =
                         summary.metadata_hint_overrides_cicp_tags.saturating_add(1);
+                }
+                VideoColorInterpretationWarning::DescriptiveMetadataHintInference { .. } => {}
+                VideoColorInterpretationWarning::LowerPriorityMetadataHints { ignored, .. } => {
+                    summary.lower_priority_metadata_hints =
+                        summary.lower_priority_metadata_hints.saturating_add(1);
+                    summary.ignored_lower_priority_metadata_hints = summary
+                        .ignored_lower_priority_metadata_hints
+                        .saturating_add(ignored.len() as u64);
                 }
                 VideoColorInterpretationWarning::PartialCicpTags { .. } => {
                     summary.partial_cicp_tags = summary.partial_cicp_tags.saturating_add(1);
@@ -689,6 +723,12 @@ impl VideoColorDiagnosticIssueAggregate {
         self.metadata_hint_overrides_cicp_tags = self
             .metadata_hint_overrides_cicp_tags
             .saturating_add(summary.metadata_hint_overrides_cicp_tags);
+        self.lower_priority_metadata_hints = self
+            .lower_priority_metadata_hints
+            .saturating_add(summary.lower_priority_metadata_hints);
+        self.ignored_lower_priority_metadata_hints = self
+            .ignored_lower_priority_metadata_hints
+            .saturating_add(summary.ignored_lower_priority_metadata_hints);
         self.partial_cicp_tags = self.partial_cicp_tags.saturating_add(summary.partial_cicp_tags);
         self.missing_or_unsupported_cicp_tags = self
             .missing_or_unsupported_cicp_tags
@@ -809,6 +849,22 @@ impl VideoColorInterpretationWarning {
                     cicp_metadata.summary()
                 )
             }
+            Self::DescriptiveMetadataHintInference { selected } => {
+                format!(
+                    "descriptive_hint_inference(selected={})",
+                    selected.summary()
+                )
+            }
+            Self::LowerPriorityMetadataHints { selected_method, selected_color_space, ignored } => {
+                let ignored = ignored
+                    .iter()
+                    .map(VideoColorMetadataHint::summary)
+                    .collect::<Vec<_>>()
+                    .join("|");
+                format!(
+                    "lower_priority_hints(selected_method={selected_method:?},selected={selected_color_space:?},ignored={ignored})"
+                )
+            }
             Self::PartialCicpTags { detected_color_space } => {
                 format!("partial_cicp(detected={detected_color_space:?})")
             }
@@ -882,7 +938,7 @@ pub struct VideoStreamInfo {
     pub color_detection_method: VideoColorDetectionMethod,
     /// Raw CICP-style color metadata reported by FFmpeg when the decoder opens.
     pub color_metadata: Option<VideoColorMetadata>,
-    /// Acquisition/log metadata hints captured from container and stream metadata.
+    /// Acquisition/log hints captured from stream, container, or complete file-name pairs.
     #[serde(default)]
     pub color_metadata_hints: Vec<VideoColorMetadataHint>,
     /// HDR-related stream side-data summaries.
@@ -983,6 +1039,14 @@ impl MediaInfo {
         let container = input.format().name().to_lowercase();
         let container_color_hints =
             collect_color_metadata_hints(VideoColorMetadataHintScope::Container, &input.metadata());
+        let file_name_color_hint =
+            path.file_name().and_then(|file_name| file_name.to_str()).and_then(|file_name| {
+                parse_video_color_metadata_hint(
+                    VideoColorMetadataHintScope::FileName,
+                    "filename",
+                    file_name,
+                )
+            });
 
         let mut video_streams = Vec::new();
         let mut audio_streams = Vec::new();
@@ -996,6 +1060,7 @@ impl MediaInfo {
                         &stream.metadata(),
                     );
                     color_metadata_hints.extend(container_color_hints.clone());
+                    color_metadata_hints.extend(file_name_color_hint.clone());
                     let hdr_metadata = collect_hdr_metadata_summaries(&stream);
                     let mut width = 0;
                     let mut height = 0;
@@ -1197,11 +1262,16 @@ fn detect_color_space_from_metadata(
     );
     let cicp_color_space = exact_cicp.or(hinted_cicp);
 
-    if let Some(selected_hint) = metadata_hints.first() {
+    if let Some((selected_index, selected_hint)) = metadata_hints
+        .iter()
+        .enumerate()
+        .filter(|(_, hint)| metadata_hint_is_explicit_declaration(hint))
+        .min_by_key(|(index, hint)| (metadata_hint_scope_priority(hint.scope), *index))
+    {
         let color_space = selected_hint.detected_color_space;
         let mut interpretation = DetectedColorInterpretation {
             color_space: Some(color_space),
-            confidence: VideoColorInterpretationConfidence::Medium,
+            confidence: VideoColorInterpretationConfidence::High,
             source: VideoColorSpaceSource::Metadata,
             method: VideoColorDetectionMethod::MetadataHint,
             evidence: metadata_hints.iter().map(metadata_hint_evidence).collect(),
@@ -1213,12 +1283,20 @@ fn detect_color_space_from_metadata(
             icc_profile,
             cicp_color_space,
         );
-        if metadata_hints.len() > 1 {
+        let conflicting_hints = metadata_hints
+            .iter()
+            .enumerate()
+            .filter(|(index, hint)| {
+                *index != selected_index && hint.detected_color_space != color_space
+            })
+            .map(|(_, hint)| hint.clone())
+            .collect::<Vec<_>>();
+        if !conflicting_hints.is_empty() {
             interpretation
                 .warnings
                 .push(VideoColorInterpretationWarning::MultipleMetadataHints {
                     selected: selected_hint.clone(),
-                    ignored: metadata_hints.iter().skip(1).cloned().collect(),
+                    ignored: conflicting_hints,
                 });
         }
         if let Some(cicp_color_space) = cicp_color_space.filter(|cicp| *cicp != color_space) {
@@ -1234,17 +1312,19 @@ fn detect_color_space_from_metadata(
     }
 
     if let Some(color_space) = exact_cicp {
+        let mut evidence = vec![VideoColorInterpretationEvidence::ExactCicpTags {
+            primaries: metadata.primaries.clone(),
+            transfer: metadata.transfer.clone(),
+            matrix: metadata.matrix.clone(),
+            detected_color_space: color_space,
+        }];
+        evidence.extend(metadata_hints.iter().map(metadata_hint_evidence));
         let mut interpretation = DetectedColorInterpretation {
             color_space: Some(color_space),
             confidence: VideoColorInterpretationConfidence::High,
             source: VideoColorSpaceSource::Metadata,
             method: VideoColorDetectionMethod::CicpTags,
-            evidence: vec![VideoColorInterpretationEvidence::ExactCicpTags {
-                primaries: metadata.primaries.clone(),
-                transfer: metadata.transfer.clone(),
-                matrix: metadata.matrix.clone(),
-                detected_color_space: color_space,
-            }],
+            evidence,
             warnings: Vec::new(),
             user_overridable: true,
         };
@@ -1253,21 +1333,30 @@ fn detect_color_space_from_metadata(
             icc_profile,
             Some(color_space),
         );
+        if let Some(warning) = lower_priority_metadata_hints_warning(
+            metadata_hints,
+            VideoColorDetectionMethod::CicpTags,
+            color_space,
+        ) {
+            interpretation.warnings.push(warning);
+        }
         return interpretation;
     }
 
     if let Some(color_space) = hinted_cicp {
+        let mut evidence = vec![VideoColorInterpretationEvidence::PartialCicpTags {
+            primaries: metadata.primaries.clone(),
+            transfer: metadata.transfer.clone(),
+            matrix: metadata.matrix.clone(),
+            detected_color_space: color_space,
+        }];
+        evidence.extend(metadata_hints.iter().map(metadata_hint_evidence));
         let mut interpretation = DetectedColorInterpretation {
             color_space: Some(color_space),
             confidence: VideoColorInterpretationConfidence::Medium,
             source: VideoColorSpaceSource::Metadata,
             method: VideoColorDetectionMethod::CicpTags,
-            evidence: vec![VideoColorInterpretationEvidence::PartialCicpTags {
-                primaries: metadata.primaries.clone(),
-                transfer: metadata.transfer.clone(),
-                matrix: metadata.matrix.clone(),
-                detected_color_space: color_space,
-            }],
+            evidence,
             warnings: vec![VideoColorInterpretationWarning::PartialCicpTags {
                 detected_color_space: color_space,
             }],
@@ -1278,11 +1367,42 @@ fn detect_color_space_from_metadata(
             icc_profile,
             Some(color_space),
         );
+        if let Some(warning) = lower_priority_metadata_hints_warning(
+            metadata_hints,
+            VideoColorDetectionMethod::CicpTags,
+            color_space,
+        ) {
+            interpretation.warnings.push(warning);
+        }
         return interpretation;
     }
 
     if let Some(icc_profile) = icc_profile {
-        let Some(color_space) = icc_profile.mapping.color_space() else {
+        if let Some(color_space) = icc_profile.mapping.color_space() {
+            let mut evidence = vec![VideoColorInterpretationEvidence::IccProfile {
+                mapped_color_space: Some(color_space),
+                profile_name: icc_profile.profile_name.clone(),
+            }];
+            evidence.extend(metadata_hints.iter().map(metadata_hint_evidence));
+            let mut interpretation = DetectedColorInterpretation {
+                color_space: Some(color_space),
+                confidence: VideoColorInterpretationConfidence::Medium,
+                source: VideoColorSpaceSource::Metadata,
+                method: VideoColorDetectionMethod::IccProfile,
+                evidence,
+                warnings: vec![VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags],
+                user_overridable: true,
+            };
+            if let Some(warning) = lower_priority_metadata_hints_warning(
+                metadata_hints,
+                VideoColorDetectionMethod::IccProfile,
+                color_space,
+            ) {
+                interpretation.warnings.push(warning);
+            }
+            return interpretation;
+        }
+        if metadata_hints.is_empty() {
             let mut interpretation = DetectedColorInterpretation {
                 color_space: None,
                 confidence: VideoColorInterpretationConfidence::None,
@@ -1294,19 +1414,19 @@ fn detect_color_space_from_metadata(
             };
             append_unmapped_icc_warning(&mut interpretation, icc_profile);
             return interpretation;
-        };
-        return DetectedColorInterpretation {
-            color_space: Some(color_space),
-            confidence: VideoColorInterpretationConfidence::Medium,
-            source: VideoColorSpaceSource::Metadata,
-            method: VideoColorDetectionMethod::IccProfile,
-            evidence: vec![VideoColorInterpretationEvidence::IccProfile {
-                mapped_color_space: Some(color_space),
-                profile_name: icc_profile.profile_name.clone(),
-            }],
-            warnings: vec![VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags],
-            user_overridable: true,
-        };
+        }
+    }
+
+    if let Some((_, selected_hint)) = metadata_hints
+        .iter()
+        .enumerate()
+        .min_by_key(|(index, hint)| (metadata_hint_scope_priority(hint.scope), *index))
+    {
+        return descriptive_metadata_hint_interpretation(
+            selected_hint,
+            metadata_hints,
+            icc_profile,
+        );
     }
 
     let mut interpretation = DetectedColorInterpretation {
@@ -1324,6 +1444,61 @@ fn detect_color_space_from_metadata(
     };
     append_icc_profile_evidence_and_warnings(&mut interpretation, icc_profile, None);
     interpretation
+}
+
+fn descriptive_metadata_hint_interpretation(
+    selected_hint: &VideoColorMetadataHint,
+    metadata_hints: &[VideoColorMetadataHint],
+    icc_profile: Option<&IccColorProfileHint>,
+) -> DetectedColorInterpretation {
+    let mut interpretation = DetectedColorInterpretation {
+        color_space: Some(selected_hint.detected_color_space),
+        confidence: VideoColorInterpretationConfidence::Low,
+        source: VideoColorSpaceSource::Metadata,
+        method: VideoColorDetectionMethod::MetadataHint,
+        evidence: metadata_hints.iter().map(metadata_hint_evidence).collect(),
+        warnings: vec![
+            VideoColorInterpretationWarning::DescriptiveMetadataHintInference {
+                selected: selected_hint.clone(),
+            },
+            VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags,
+        ],
+        user_overridable: true,
+    };
+    let conflicting_hints = metadata_hints
+        .iter()
+        .filter(|hint| {
+            !std::ptr::eq(*hint, selected_hint)
+                && hint.detected_color_space != selected_hint.detected_color_space
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !conflicting_hints.is_empty() {
+        interpretation
+            .warnings
+            .push(VideoColorInterpretationWarning::MultipleMetadataHints {
+                selected: selected_hint.clone(),
+                ignored: conflicting_hints,
+            });
+    }
+    append_icc_profile_evidence_and_warnings(
+        &mut interpretation,
+        icc_profile,
+        Some(selected_hint.detected_color_space),
+    );
+    interpretation
+}
+
+/// Interpret structured video color metadata without applying project policy.
+///
+/// This entry point is shared by decoder integrations that already captured
+/// CICP tags and acquisition metadata hints. Missing metadata remains unresolved;
+/// the timeline's missing-metadata policy owns any later assumption.
+pub fn interpret_video_color_metadata(
+    metadata: &VideoColorMetadata,
+    metadata_hints: &[VideoColorMetadataHint],
+) -> DetectedColorInterpretation {
+    detect_color_space_from_metadata(metadata, metadata_hints, None)
 }
 
 fn append_icc_profile_evidence_and_warnings(
@@ -1403,17 +1578,64 @@ fn metadata_hint_evidence(hint: &VideoColorMetadataHint) -> VideoColorInterpreta
     }
 }
 
+fn lower_priority_metadata_hints_warning(
+    metadata_hints: &[VideoColorMetadataHint],
+    selected_method: VideoColorDetectionMethod,
+    selected_color_space: ColorSpace,
+) -> Option<VideoColorInterpretationWarning> {
+    let ignored = metadata_hints
+        .iter()
+        .filter(|hint| hint.detected_color_space != selected_color_space)
+        .cloned()
+        .collect::<Vec<_>>();
+    (!ignored.is_empty()).then_some(
+        VideoColorInterpretationWarning::LowerPriorityMetadataHints {
+            selected_method,
+            selected_color_space,
+            ignored,
+        },
+    )
+}
+
+fn metadata_hint_is_explicit_declaration(hint: &VideoColorMetadataHint) -> bool {
+    const DECLARATION_KEY_SUFFIXES: [&str; 9] = [
+        "cameraprofile",
+        "cameralog",
+        "cameracolorspace",
+        "colorprofile",
+        "colorspace",
+        "gammagamut",
+        "inputcolorspace",
+        "logprofile",
+        "sourcecolorspace",
+    ];
+    let key = normalize_metadata_hint_text(&hint.key);
+    DECLARATION_KEY_SUFFIXES.iter().any(|suffix| key.ends_with(suffix))
+}
+
+fn metadata_hint_scope_priority(scope: VideoColorMetadataHintScope) -> u8 {
+    match scope {
+        VideoColorMetadataHintScope::Stream => 0,
+        VideoColorMetadataHintScope::Container => 1,
+        VideoColorMetadataHintScope::FileName => 2,
+    }
+}
+
 fn collect_color_metadata_hints(
     scope: VideoColorMetadataHintScope,
     metadata: &ffmpeg::DictionaryRef<'_>,
 ) -> Vec<VideoColorMetadataHint> {
     metadata
         .iter()
-        .filter_map(|(key, value)| detect_color_metadata_hint(scope, key, value))
+        .filter_map(|(key, value)| parse_video_color_metadata_hint(scope, key, value))
         .collect()
 }
 
-fn detect_color_metadata_hint(
+/// Parse one container, stream, or file-name field as a complete color-space hint.
+///
+/// Ambiguous curve-only or gamut-only text remains unresolved because a
+/// professional acquisition identity requires both transfer and primaries.
+pub fn parse_video_color_metadata_hint(
     scope: VideoColorMetadataHintScope,
     key: &str,
     value: &str,
@@ -1929,6 +2151,45 @@ mod tests {
     }
 
     #[test]
+    fn icc_profile_keeps_conflicting_descriptive_hint_as_ignored_evidence() {
+        let metadata = capture_color_metadata(
+            Primaries::Unspecified,
+            TransferCharacteristic::Unspecified,
+            Space::Unspecified,
+        );
+        let hint = VideoColorMetadataHint {
+            scope: VideoColorMetadataHintScope::Container,
+            key: "comment".to_string(),
+            value: "converted from S-Log3 / S-Gamut3.Cine".to_string(),
+            detected_color_space: ColorSpace::SonySLog3SGamut3Cine,
+        };
+        let icc_profile = IccColorProfileHint {
+            mapping: mondrian_core::icc::IccColorSpaceMapping::Mapped {
+                color_space: ColorSpace::DisplayP3,
+                method: mondrian_core::icc::IccColorSpaceMappingMethod::ProfileName,
+            },
+            profile_name: Some("Display P3".to_owned()),
+        };
+
+        let detection = detect_color_space_from_metadata(
+            &metadata,
+            std::slice::from_ref(&hint),
+            Some(&icc_profile),
+        );
+
+        assert_eq!(detection.color_space, Some(ColorSpace::DisplayP3));
+        assert_eq!(detection.method, VideoColorDetectionMethod::IccProfile);
+        assert!(detection.evidence.contains(&metadata_hint_evidence(&hint)));
+        assert!(detection.warnings.contains(
+            &VideoColorInterpretationWarning::LowerPriorityMetadataHints {
+                selected_method: VideoColorDetectionMethod::IccProfile,
+                selected_color_space: ColorSpace::DisplayP3,
+                ignored: vec![hint],
+            }
+        ));
+    }
+
+    #[test]
     fn unmapped_icc_profile_never_becomes_implicit_rec709() {
         let metadata = capture_color_metadata(
             Primaries::Unspecified,
@@ -1985,6 +2246,48 @@ mod tests {
     }
 
     #[test]
+    fn unmapped_icc_does_not_hide_complete_low_confidence_metadata_hint() {
+        let metadata = capture_color_metadata(
+            Primaries::Unspecified,
+            TransferCharacteristic::Unspecified,
+            Space::Unspecified,
+        );
+        let hint = VideoColorMetadataHint {
+            scope: VideoColorMetadataHintScope::FileName,
+            key: "filename".to_owned(),
+            value: "A001_Sony_S-Log3_S-Gamut3.Cine.mov".to_owned(),
+            detected_color_space: ColorSpace::SonySLog3SGamut3Cine,
+        };
+        let icc_profile = IccColorProfileHint {
+            mapping: mondrian_core::icc::IccColorSpaceMapping::Unmapped {
+                profile_color_space: "RGB".to_owned(),
+                reason: "unknown primaries".to_owned(),
+            },
+            profile_name: Some("Unknown RGB".to_owned()),
+        };
+
+        let detection = detect_color_space_from_metadata(
+            &metadata,
+            std::slice::from_ref(&hint),
+            Some(&icc_profile),
+        );
+
+        assert_eq!(
+            detection.color_space,
+            Some(ColorSpace::SonySLog3SGamut3Cine)
+        );
+        assert_eq!(
+            detection.confidence,
+            VideoColorInterpretationConfidence::Low
+        );
+        assert!(detection.evidence.contains(&icc_profile_evidence(&icc_profile)));
+        assert!(detection.warnings.iter().any(|warning| matches!(
+            warning,
+            VideoColorInterpretationWarning::IccProfileUnmapped { .. }
+        )));
+    }
+
+    #[test]
     fn detect_color_space_reports_icc_cicp_mismatch_without_changing_cicp_decision() {
         let metadata = capture_color_metadata(
             Primaries::BT709,
@@ -2023,7 +2326,7 @@ mod tests {
 
     #[test]
     fn metadata_hint_identifies_camera_log_spaces() {
-        let slog3 = detect_color_metadata_hint(
+        let slog3 = parse_video_color_metadata_hint(
             VideoColorMetadataHintScope::Stream,
             "com.sony.colorProfile",
             "S-Log3 / S-Gamut3.Cine",
@@ -2031,7 +2334,7 @@ mod tests {
         .expect("slog3 metadata hint");
         assert_eq!(slog3.detected_color_space, ColorSpace::SonySLog3SGamut3Cine);
 
-        let apple_log = detect_color_metadata_hint(
+        let apple_log = parse_video_color_metadata_hint(
             VideoColorMetadataHintScope::Container,
             "com.apple.proapps.cameraLog",
             "Apple Log",
@@ -2039,13 +2342,46 @@ mod tests {
         .expect("apple log metadata hint");
         assert_eq!(apple_log.detected_color_space, ColorSpace::AppleLogBt2020);
 
-        let logc4 = detect_color_metadata_hint(
+        let logc4 = parse_video_color_metadata_hint(
             VideoColorMetadataHintScope::Stream,
             "camera_profile",
             "ARRI LogC4",
         )
         .expect("arri logc4 metadata hint");
         assert_eq!(logc4.detected_color_space, ColorSpace::ArriLogC4WideGamut4);
+    }
+
+    #[test]
+    fn namespaced_camera_profile_is_an_explicit_high_confidence_declaration() {
+        let metadata = capture_color_metadata(
+            Primaries::BT709,
+            TransferCharacteristic::BT709,
+            Space::BT709,
+        );
+        let hint = parse_video_color_metadata_hint(
+            VideoColorMetadataHintScope::Stream,
+            "com.sony.colorProfile",
+            "S-Log3 / S-Gamut3.Cine",
+        )
+        .expect("complete Sony color profile declaration");
+
+        let detection = interpret_video_color_metadata(&metadata, std::slice::from_ref(&hint));
+
+        assert_eq!(
+            detection.color_space,
+            Some(ColorSpace::SonySLog3SGamut3Cine)
+        );
+        assert_eq!(
+            detection.confidence,
+            VideoColorInterpretationConfidence::High
+        );
+        assert!(detection.warnings.contains(
+            &VideoColorInterpretationWarning::MetadataHintOverridesCicpTags {
+                selected: hint,
+                cicp_color_space: ColorSpace::Rec709,
+                cicp_metadata: metadata,
+            }
+        ));
     }
 
     #[test]
@@ -2065,23 +2401,120 @@ mod tests {
                 ColorSpace::SonySLog2SGamut,
             ),
         ] {
-            let hint = detect_color_metadata_hint(VideoColorMetadataHintScope::Stream, key, value)
-                .unwrap_or_else(|| panic!("missing metadata hint for {key}={value}"));
+            let hint =
+                parse_video_color_metadata_hint(VideoColorMetadataHintScope::Stream, key, value)
+                    .unwrap_or_else(|| panic!("missing metadata hint for {key}={value}"));
             assert_eq!(hint.detected_color_space, expected);
         }
     }
 
     #[test]
+    fn declared_metadata_parser_covers_every_supported_camera_log_gamut_pair() {
+        let cases = [
+            ("Apple Log", ColorSpace::AppleLogBt2020),
+            ("Sony S-Log2 / S-Gamut", ColorSpace::SonySLog2SGamut),
+            ("Sony S-Log3 / S-Gamut3", ColorSpace::SonySLog3SGamut3),
+            (
+                "Sony S-Log3 / S-Gamut3.Cine",
+                ColorSpace::SonySLog3SGamut3Cine,
+            ),
+            ("ARRI LogC3 / AWG3", ColorSpace::ArriLogC3WideGamut3),
+            ("ARRI LogC4 / AWG4", ColorSpace::ArriLogC4WideGamut4),
+            (
+                "Canon Log2 / Cinema Gamut D55",
+                ColorSpace::CanonLog2CinemaGamutD55,
+            ),
+            (
+                "Canon Log3 / Cinema Gamut D55",
+                ColorSpace::CanonLog3CinemaGamutD55,
+            ),
+            ("Panasonic V-Log / V-Gamut", ColorSpace::PanasonicVLogVGamut),
+            (
+                "RED Log3G10 / REDWideGamutRGB",
+                ColorSpace::RedLog3G10WideGamutRgb,
+            ),
+            (
+                "Blackmagic Film / Wide Gamut Gen 5",
+                ColorSpace::BlackmagicFilmWideGamutGen5,
+            ),
+            ("DJI D-Log / D-Gamut", ColorSpace::DjiDLogDGamut),
+            (
+                "DaVinci Intermediate / Wide Gamut",
+                ColorSpace::DavinciIntermediateWideGamut,
+            ),
+        ];
+
+        for (value, expected) in cases {
+            let hint = parse_video_color_metadata_hint(
+                VideoColorMetadataHintScope::Stream,
+                "camera_profile",
+                value,
+            )
+            .unwrap_or_else(|| panic!("supported metadata declaration was not parsed: {value}"));
+            assert_eq!(hint.detected_color_space, expected, "value={value}");
+        }
+    }
+
+    #[test]
+    fn complete_filename_pair_is_only_a_low_confidence_fallback() {
+        let metadata = capture_color_metadata(
+            Primaries::Unspecified,
+            TransferCharacteristic::Unspecified,
+            Space::Unspecified,
+        );
+        let hint = parse_video_color_metadata_hint(
+            VideoColorMetadataHintScope::FileName,
+            "filename",
+            "A001_Sony_S-Log3_S-Gamut3.Cine.mov",
+        )
+        .expect("complete filename pair should be preserved as evidence");
+
+        let detection = interpret_video_color_metadata(&metadata, std::slice::from_ref(&hint));
+
+        assert_eq!(
+            detection.color_space,
+            Some(ColorSpace::SonySLog3SGamut3Cine)
+        );
+        assert_eq!(
+            detection.confidence,
+            VideoColorInterpretationConfidence::Low
+        );
+        assert!(detection.warnings.contains(
+            &VideoColorInterpretationWarning::DescriptiveMetadataHintInference { selected: hint }
+        ));
+    }
+
+    #[test]
     fn metadata_hint_ignores_ambiguous_log_words() {
         assert_eq!(
-            detect_color_metadata_hint(VideoColorMetadataHintScope::Container, "log", "enabled"),
+            parse_video_color_metadata_hint(
+                VideoColorMetadataHintScope::Container,
+                "log",
+                "enabled"
+            ),
             None
         );
         assert_eq!(
-            detect_color_metadata_hint(
+            parse_video_color_metadata_hint(
                 VideoColorMetadataHintScope::Stream,
                 "camera_profile",
                 "S-Log3",
+            ),
+            None
+        );
+        assert_eq!(
+            parse_video_color_metadata_hint(
+                VideoColorMetadataHintScope::FileName,
+                "filename",
+                "clip-Sony-Slog3.mov",
+            ),
+            None
+        );
+        assert_eq!(
+            parse_video_color_metadata_hint(
+                VideoColorMetadataHintScope::FileName,
+                "filename",
+                "clip-RED-Log3G10.mov",
             ),
             None
         );
@@ -2107,7 +2540,7 @@ mod tests {
         assert_eq!(detection.color_space, Some(ColorSpace::ArriLogC4WideGamut4));
         assert_eq!(
             detection.confidence,
-            VideoColorInterpretationConfidence::Medium
+            VideoColorInterpretationConfidence::High
         );
         assert_eq!(detection.source, VideoColorSpaceSource::Metadata);
         assert_eq!(detection.method, VideoColorDetectionMethod::MetadataHint);
@@ -2123,6 +2556,149 @@ mod tests {
                 selected: hint,
                 cicp_color_space: ColorSpace::Rec709,
                 cicp_metadata: metadata
+            }
+        ));
+    }
+
+    #[test]
+    fn descriptive_metadata_text_cannot_override_exact_cicp_tags() {
+        let metadata = capture_color_metadata(
+            Primaries::BT709,
+            TransferCharacteristic::BT709,
+            Space::BT709,
+        );
+        let hint = VideoColorMetadataHint {
+            scope: VideoColorMetadataHintScope::Container,
+            key: "comment".to_string(),
+            value: "graded from S-Log3 / S-Gamut3.Cine".to_string(),
+            detected_color_space: ColorSpace::SonySLog3SGamut3Cine,
+        };
+
+        let detection = interpret_video_color_metadata(&metadata, std::slice::from_ref(&hint));
+
+        assert_eq!(detection.color_space, Some(ColorSpace::Rec709));
+        assert_eq!(
+            detection.confidence,
+            VideoColorInterpretationConfidence::High
+        );
+        assert_eq!(detection.method, VideoColorDetectionMethod::CicpTags);
+        assert!(detection.evidence.contains(&metadata_hint_evidence(&hint)));
+        assert!(detection.warnings.contains(
+            &VideoColorInterpretationWarning::LowerPriorityMetadataHints {
+                selected_method: VideoColorDetectionMethod::CicpTags,
+                selected_color_space: ColorSpace::Rec709,
+                ignored: vec![hint.clone()],
+            }
+        ));
+        let diagnostic = VideoColorDiagnostic {
+            detected_color_space: detection.color_space,
+            color_range: DecodedVideoRange::Unknown,
+            interpretation: detection.clone(),
+            source: detection.source,
+            method: detection.method,
+            metadata: Some(metadata),
+            metadata_hints: vec![hint],
+            hdr_metadata: Vec::new(),
+        };
+        let summary = diagnostic.issue_summary();
+        assert_eq!(summary.lower_priority_metadata_hints, 1);
+        assert_eq!(summary.ignored_lower_priority_metadata_hints, 1);
+    }
+
+    #[test]
+    fn descriptive_metadata_text_is_a_diagnosed_low_confidence_fallback() {
+        let metadata = capture_color_metadata(
+            Primaries::Unspecified,
+            TransferCharacteristic::Unspecified,
+            Space::Unspecified,
+        );
+        let hint = VideoColorMetadataHint {
+            scope: VideoColorMetadataHintScope::Container,
+            key: "comment".to_string(),
+            value: "source is S-Log3 / S-Gamut3.Cine".to_string(),
+            detected_color_space: ColorSpace::SonySLog3SGamut3Cine,
+        };
+
+        let detection = interpret_video_color_metadata(&metadata, std::slice::from_ref(&hint));
+
+        assert_eq!(
+            detection.color_space,
+            Some(ColorSpace::SonySLog3SGamut3Cine)
+        );
+        assert_eq!(
+            detection.confidence,
+            VideoColorInterpretationConfidence::Low
+        );
+        assert_eq!(detection.method, VideoColorDetectionMethod::MetadataHint);
+        assert!(detection.warnings.contains(
+            &VideoColorInterpretationWarning::DescriptiveMetadataHintInference { selected: hint }
+        ));
+    }
+
+    #[test]
+    fn explicit_metadata_declaration_wins_independent_of_dictionary_order() {
+        let metadata = capture_color_metadata(
+            Primaries::Unspecified,
+            TransferCharacteristic::Unspecified,
+            Space::Unspecified,
+        );
+        let descriptive = VideoColorMetadataHint {
+            scope: VideoColorMetadataHintScope::Stream,
+            key: "comment".to_string(),
+            value: "converted from S-Log3 / S-Gamut3.Cine".to_string(),
+            detected_color_space: ColorSpace::SonySLog3SGamut3Cine,
+        };
+        let declared = VideoColorMetadataHint {
+            scope: VideoColorMetadataHintScope::Stream,
+            key: "camera_profile".to_string(),
+            value: "ARRI LogC4".to_string(),
+            detected_color_space: ColorSpace::ArriLogC4WideGamut4,
+        };
+
+        let detection =
+            interpret_video_color_metadata(&metadata, &[descriptive.clone(), declared.clone()]);
+
+        assert_eq!(detection.color_space, Some(ColorSpace::ArriLogC4WideGamut4));
+        assert_eq!(
+            detection.confidence,
+            VideoColorInterpretationConfidence::High
+        );
+        assert!(detection.warnings.contains(
+            &VideoColorInterpretationWarning::MultipleMetadataHints {
+                selected: declared,
+                ignored: vec![descriptive],
+            }
+        ));
+    }
+
+    #[test]
+    fn stream_declaration_has_stable_priority_over_container_declaration() {
+        let metadata = capture_color_metadata(
+            Primaries::Unspecified,
+            TransferCharacteristic::Unspecified,
+            Space::Unspecified,
+        );
+        let container = VideoColorMetadataHint {
+            scope: VideoColorMetadataHintScope::Container,
+            key: "camera_profile".to_string(),
+            value: "Apple Log".to_string(),
+            detected_color_space: ColorSpace::AppleLogBt2020,
+        };
+        let stream = VideoColorMetadataHint {
+            scope: VideoColorMetadataHintScope::Stream,
+            key: "camera_profile".to_string(),
+            value: "ARRI LogC4".to_string(),
+            detected_color_space: ColorSpace::ArriLogC4WideGamut4,
+        };
+
+        let detection =
+            interpret_video_color_metadata(&metadata, &[container.clone(), stream.clone()]);
+
+        assert_eq!(detection.color_space, Some(ColorSpace::ArriLogC4WideGamut4));
+        assert!(detection.warnings.contains(
+            &VideoColorInterpretationWarning::MultipleMetadataHints {
+                selected: stream,
+                ignored: vec![container],
             }
         ));
     }
@@ -2251,7 +2827,7 @@ mod tests {
             diagnostic.issue_summary(),
             VideoColorDiagnosticIssueSummary {
                 detected_color_space: Some(ColorSpace::ArriLogC4WideGamut4),
-                confidence: VideoColorInterpretationConfidence::Medium,
+                confidence: VideoColorInterpretationConfidence::High,
                 source: VideoColorSpaceSource::Metadata,
                 method: VideoColorDetectionMethod::MetadataHint,
                 has_raw_cicp_metadata: true,
@@ -2261,6 +2837,8 @@ mod tests {
                 multiple_metadata_hints: 1,
                 ignored_metadata_hints: 1,
                 metadata_hint_overrides_cicp_tags: 1,
+                lower_priority_metadata_hints: 0,
+                ignored_lower_priority_metadata_hints: 0,
                 partial_cicp_tags: 0,
                 missing_or_unsupported_cicp_tags: 0,
                 decoder_unavailable: 0,
@@ -2406,8 +2984,8 @@ mod tests {
                 method_cicp_tags: 0,
                 method_missing_metadata: 0,
                 method_decoder_unavailable: 1,
-                confidence_high: 0,
-                confidence_medium: 1,
+                confidence_high: 1,
+                confidence_medium: 0,
                 confidence_low: 0,
                 confidence_none: 1,
                 metadata_hint_count: 2,
@@ -2416,6 +2994,8 @@ mod tests {
                 multiple_metadata_hints: 1,
                 ignored_metadata_hints: 1,
                 metadata_hint_overrides_cicp_tags: 1,
+                lower_priority_metadata_hints: 0,
+                ignored_lower_priority_metadata_hints: 0,
                 partial_cicp_tags: 0,
                 missing_or_unsupported_cicp_tags: 0,
                 decoder_unavailable: 1,

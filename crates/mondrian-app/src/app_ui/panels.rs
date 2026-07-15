@@ -7126,6 +7126,8 @@ mod tests {
                         multiple_metadata_hints: 0,
                         ignored_metadata_hints: 0,
                         metadata_hint_overrides_cicp_tags: 0,
+                        lower_priority_metadata_hints: 0,
+                        ignored_lower_priority_metadata_hints: 0,
                         partial_cicp_tags: 0,
                         missing_or_unsupported_cicp_tags: 1,
                         decoder_unavailable: 0,

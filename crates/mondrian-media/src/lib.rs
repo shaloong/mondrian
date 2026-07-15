@@ -36,12 +36,13 @@ pub use decoder::{
 };
 pub use ffmpeg_runtime::verify_ffmpeg_runtime;
 pub use info::{
-    AudioStreamInfo, DetectedColorInterpretation, MediaInfo, VideoCodecProfile,
-    VideoColorDetectionMethod, VideoColorDiagnostic, VideoColorDiagnosticIssueAggregate,
-    VideoColorDiagnosticIssueSummary, VideoColorInterpretationConfidence,
-    VideoColorInterpretationEvidence, VideoColorInterpretationWarning, VideoColorMetadata,
-    VideoColorMetadataHint, VideoColorMetadataHintScope, VideoColorSpaceSource, VideoColorTag,
-    VideoHdrMetadataSummary, VideoHdrSideDataKind, VideoStreamInfo,
+    interpret_video_color_metadata, parse_video_color_metadata_hint, AudioStreamInfo,
+    DetectedColorInterpretation, MediaInfo, VideoCodecProfile, VideoColorDetectionMethod,
+    VideoColorDiagnostic, VideoColorDiagnosticIssueAggregate, VideoColorDiagnosticIssueSummary,
+    VideoColorInterpretationConfidence, VideoColorInterpretationEvidence,
+    VideoColorInterpretationWarning, VideoColorMetadata, VideoColorMetadataHint,
+    VideoColorMetadataHintScope, VideoColorSpaceSource, VideoColorTag, VideoHdrMetadataSummary,
+    VideoHdrSideDataKind, VideoStreamInfo,
 };
 pub use multilevel_cache::{CacheTier, MultiLevelCache, ResolvedMediaPath};
 pub use preview::{

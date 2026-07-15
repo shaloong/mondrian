@@ -55,6 +55,11 @@ an asset-library mutation that persists `AssetMediaInterpretation`.
 The modal is a compact settings form with a single input color-space dropdown:
 Auto is the default option, explicit color spaces persist as overrides, and Auto
 displays the current resolved/detected result instead of explanatory copy.
+The Auto label carries detector confidence, selection method, and warning count.
+Machine-readable diagnostics also retain counts for lower-priority metadata
+hints rejected by CICP or ICC, so preview/export health surfaces can distinguish
+an unambiguous result from one that won over conflicting comments or file-name
+inference without parsing display strings.
 The picker includes encoded delivery/camera spaces plus supported scene-linear
 and ACES source identities. Sequence output controls use a separate fixed list
 of display-referred spaces, so ACES2065-1, ACEScg, ACEScct, linear RGB, and
