@@ -32,6 +32,7 @@ $env:MONDRIAN_PERF_OUTPUT='target/perf/preview-playback.jsonl'; cargo test -p mo
 $env:MONDRIAN_PREVIEW_DECODE_FIXTURE='E:\media\sample-4k-hdr.mov'; $env:MONDRIAN_PREVIEW_DECODE_TIMESTAMP='1.0'; $env:MONDRIAN_PREVIEW_DECODE_MAX_WIDTH='1920'; $env:MONDRIAN_PREVIEW_DECODE_MAX_HEIGHT='1080'; cargo test -p mondrian-media preview_decode_fixture_perf_smoke -- --ignored --nocapture
 $env:MONDRIAN_RENDERER_GPU_OUTPUT_SMOKE_OUTPUT='target/perf/renderer-gpu-output.jsonl'; cargo test -p mondrian-renderer gpu_output_boundary_runtime_smoke_report_on_real_wgpu_device -- --ignored --nocapture
 $env:MONDRIAN_COLOR_VIEW_GPU_PERF_OUTPUT='target/perf/color-view-4k.jsonl'; cargo test -p mondrian-renderer --test color_view_gpu_perf standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2 -- --ignored --nocapture
+$env:MONDRIAN_COLOR_TRANSFORM_GPU_PERF_OUTPUT='target/perf/color-transform-4k.jsonl'; cargo test -p mondrian-renderer --test color_view_gpu_perf standard_input_transforms_4k_gpu_timestamp_meet_budget -- --ignored --nocapture
 ```
 
 The color-View gate requires a timestamp-capable real adapter. It rotates 60
@@ -55,6 +56,22 @@ be set with `MONDRIAN_COLOR_VIEW_GPU_PERF_SAMPLES` (20..500). The synchronous
 timestamp mapping is part of this offline gate only and is outside the measured
 GPU interval; production presentation continues to use the asynchronous query
 ring.
+
+The separate color-transform gate rotates Identity, Linear Rec.2020 to encoded
+Rec.709 (the matrix + OETF class), encoded Rec.709 to the project working
+space, and Sony S-Log3/S-Gamut3.Cine to the working space. It uses the
+production intermediate and GPU-resident input-stage recorders rather than a
+benchmark-only shader. Source textures are allocated and initialized before
+measurement; each timestamp contains exactly one OCIO fullscreen pass and no
+upload or readback. The schema-1 report records p50/p95/p99, cold CPU record
+cost, shader/LUT resources, exact processor identities, and measured cache
+deltas. Every transform has a default 4K p95 budget of 5 ms, configurable with
+`MONDRIAN_COLOR_TRANSFORM_4K_P95_US`; sample count is controlled by
+`MONDRIAN_COLOR_TRANSFORM_GPU_PERF_SAMPLES` (20..500). Its warm-path gate also
+requires every measured output to come from the texture pool and every wrapper
+input binding to be reused. Both 4K gates are ignored manual hardware tests;
+ordinary `cargo test -p mondrian-renderer --test color_view_gpu_perf` runs only
+their fast report and gate-logic coverage.
 
 Export simulation reports include a versioned `color_report`. The report embeds
 the export color diagnostics summary and adds verdict, fixed checks, root

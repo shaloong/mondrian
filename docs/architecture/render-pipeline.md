@@ -909,6 +909,19 @@ texture, or evicts a pooled texture. Wrapper-binding and exact-contract texture
 pool hits must cover every rotated View sample, so the timestamp budget cannot
 mask recurring per-frame GPU object churn.
 
+The same ignored integration target retains a separate schema-1 input and
+primitive-transform gate. It rotates OCIO identity, Linear Rec.2020 to encoded
+Rec.709 (matrix + OETF class), Rec.709 to working, and Sony
+S-Log3/S-Gamut3.Cine to working. Identity and matrix/OETF use the production
+GPU intermediate-transform recorder; decoded-source cases use the production
+GPU-resident input-stage recorder. Source allocation and initialization happen
+before timestamps, and measured samples contain one OCIO pass with neither
+upload nor readback. The report carries exact source/destination identities,
+processor cache id, shader/LUT resource shape, cold and warm CPU record cost,
+GPU p50/p95/p99, and runtime-cache deltas. Its 5 ms default p95 budget and
+creation-free warm-path gate are independent of the View-versus-ACES gate so
+input-stage regressions cannot be hidden by output-stage results.
+
 Renderer-owned color stages share a device-scoped exact-contract texture pool
 across native import and Viewer output runtimes. A candidate returns its typed
 resources only after its prior commands were submitted to the same ordered GPU

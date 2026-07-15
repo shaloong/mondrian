@@ -10,11 +10,13 @@ use mondrian_effects::{
 use mondrian_renderer::profile::{gpu_timestamp_query_device_features, GpuTimestampFrameTimer};
 use mondrian_renderer::{
     native_video_texture_device_features, ocio_lut_filtering_device_features,
-    request_adapter_with_native_video_preference, ColorFrameResidency, GpuColorFrameHandle,
+    request_adapter_with_native_video_preference, ColorFrameDescriptor, ColorFrameDomain,
+    ColorFrameEncoding, ColorFrameResidency, GpuColorFrameAllocationPlan, GpuColorFrameHandle,
     GpuColorFrameTextureFormat, GpuCompositeLayer, GpuCompositeLayerSource, GpuCompositeRequest,
     GpuFrameCompositor, OcioGpuShaderPlan, OcioGpuShaderRequest, RenderColorTransformGpuOptions,
     RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeDiagnostics,
-    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderOutputColorBoundary,
+    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderInputTransform,
+    RenderIntermediateColorTransform, RenderOutputColorBoundary,
 };
 use serde::Serialize;
 use std::fs::OpenOptions;
@@ -27,6 +29,7 @@ const HEIGHT: u32 = 2_160;
 const DEFAULT_SAMPLE_COUNT: usize = 60;
 const DEFAULT_STANDARD_P95_BUDGET_US: u64 = 5_000;
 const DEFAULT_STANDARD_TO_ACES_P95_RATIO: f64 = 0.80;
+const DEFAULT_TRANSFORM_P95_BUDGET_US: u64 = 5_000;
 const WARMUP_COUNT: usize = 4;
 
 struct TimestampGpuContext {
@@ -62,6 +65,36 @@ impl ViewCase {
             src: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
             display: self.display.to_owned(),
             view: self.view.to_owned(),
+            language: GpuLanguage::Glsl4_0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TransformExecution {
+    Intermediate {
+        output_domain: ColorFrameDomain,
+        output_encoding: ColorFrameEncoding,
+        output_texture_format: GpuColorFrameTextureFormat,
+    },
+    InputToWorking,
+}
+
+#[derive(Clone)]
+struct TransformCase {
+    mode: &'static str,
+    operation_class: &'static str,
+    src: OcioColorSpaceIdentity,
+    dst: OcioColorSpaceIdentity,
+    execution: TransformExecution,
+}
+
+impl TransformCase {
+    fn shader_request(&self) -> OcioGpuShaderRequest {
+        OcioGpuShaderRequest::ColorSpace {
+            engine: ColorEngine::mondrian_standard(),
+            src: self.src,
+            dst: self.dst,
             language: GpuLanguage::Glsl4_0,
         }
     }
@@ -155,6 +188,94 @@ struct ColorViewGpuPerfReport {
     standard_hlg: ViewReport,
     aces_reference_pq: ViewReport,
     comparison: ComparisonReport,
+}
+
+#[derive(Debug, Serialize)]
+struct TransformReport {
+    mode: &'static str,
+    operation_class: &'static str,
+    source_identity: String,
+    destination_identity: String,
+    cold_record_cpu_us: u64,
+    warm_record_cpu_us: QuantilesUs,
+    warm_gpu_us: QuantilesUs,
+    shader: ShaderReport,
+    fullscreen_passes: u32,
+    output_texture_writes: u32,
+    input_uploads_in_measured_region: u32,
+    gpu_readbacks_in_measured_region: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct ColorTransformGpuPerfReport {
+    schema_version: u32,
+    scenario: &'static str,
+    width: u32,
+    height: u32,
+    samples_per_transform: usize,
+    warmups_per_transform: usize,
+    measured_region: &'static str,
+    adapter: AdapterReport,
+    runtime_cache: TransformRuntimeCacheReport,
+    identity: TransformReport,
+    matrix_oetf: TransformReport,
+    rec709_to_working: TransformReport,
+    camera_log_to_working: TransformReport,
+    p95_budget_us: u64,
+    all_transforms_within_budget: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TransformRuntimeCacheReport {
+    measured_delta: RuntimeCacheActivity,
+    warm_path_gate: TransformWarmPathReuseGate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+struct TransformWarmPathReuseGate {
+    expected_samples: u64,
+    shader_cache_creation_free: bool,
+    static_pipeline_creation_free: bool,
+    backend_object_creation_free: bool,
+    wrapper_bind_group_creation_free: bool,
+    output_texture_allocation_free: bool,
+    wrapper_bind_group_hits_cover_samples: bool,
+    output_texture_hits_cover_samples: bool,
+    passed: bool,
+}
+
+impl TransformWarmPathReuseGate {
+    fn evaluate(activity: RuntimeCacheActivity, expected_samples: u64) -> Self {
+        let shader_cache_creation_free =
+            activity.shader_misses == 0 && activity.shader_extraction_failures == 0;
+        let static_pipeline_creation_free = activity.static_pipeline_misses == 0;
+        let backend_object_creation_free =
+            activity.backend_object_misses == 0 && activity.backend_object_failures == 0;
+        let wrapper_bind_group_creation_free = activity.wrapper_bind_group_creations == 0;
+        let output_texture_allocation_free =
+            activity.texture_pool_misses == 0 && activity.texture_pool_evictions == 0;
+        let wrapper_bind_group_hits_cover_samples =
+            activity.wrapper_bind_group_cache_hits >= expected_samples;
+        let output_texture_hits_cover_samples = activity.texture_pool_hits >= expected_samples;
+        let passed = shader_cache_creation_free
+            && static_pipeline_creation_free
+            && backend_object_creation_free
+            && wrapper_bind_group_creation_free
+            && output_texture_allocation_free
+            && wrapper_bind_group_hits_cover_samples
+            && output_texture_hits_cover_samples;
+        Self {
+            expected_samples,
+            shader_cache_creation_free,
+            static_pipeline_creation_free,
+            backend_object_creation_free,
+            wrapper_bind_group_creation_free,
+            output_texture_allocation_free,
+            wrapper_bind_group_hits_cover_samples,
+            output_texture_hits_cover_samples,
+            passed,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -572,6 +693,229 @@ async fn standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2() -> Result<
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "manual 4K hardware timestamp gate; requires a timestamp-capable real GPU"]
+async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> {
+    ensure_mondrian_default_ocio_loaded()
+        .map_err(|error| anyhow!("load Mondrian Standard OCIO package: {error}"))?;
+    let Some(context) = create_timestamp_gpu_context().await? else {
+        eprintln!(
+            "MONDRIAN_COLOR_TRANSFORM_GPU_PERF_JSON={}",
+            serde_json::json!({
+                "schema_version": 1,
+                "scenario": "renderer_color_transform_4k_gpu_timestamp",
+                "skipped": "no real adapter with complete encoder timestamp-query support"
+            })
+        );
+        return Ok(());
+    };
+
+    let sample_count = env_usize_clamped(
+        "MONDRIAN_COLOR_TRANSFORM_GPU_PERF_SAMPLES",
+        DEFAULT_SAMPLE_COUNT,
+        20,
+        500,
+    );
+    let p95_budget_us = env_u64(
+        "MONDRIAN_COLOR_TRANSFORM_4K_P95_US",
+        DEFAULT_TRANSFORM_P95_BUDGET_US,
+    );
+    let identity = TransformCase {
+        mode: "identity",
+        operation_class: "OCIO optimized identity",
+        src: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+        dst: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+        execution: TransformExecution::Intermediate {
+            output_domain: ColorFrameDomain::Working,
+            output_encoding: ColorFrameEncoding::LinearFloat,
+            output_texture_format: GpuColorFrameTextureFormat::Rgba32Float,
+        },
+    };
+    let matrix_oetf = TransformCase {
+        mode: "matrix_oetf",
+        operation_class: "primaries matrix plus Rec.709 display OETF",
+        src: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+        dst: OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
+        execution: TransformExecution::Intermediate {
+            output_domain: ColorFrameDomain::Effect,
+            output_encoding: ColorFrameEncoding::EncodedFloat,
+            output_texture_format: GpuColorFrameTextureFormat::Rgba16Float,
+        },
+    };
+    let rec709_to_working = TransformCase {
+        mode: "rec709_to_working",
+        operation_class: "Rec.709 input decode plus primaries conversion",
+        src: OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
+        dst: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+        execution: TransformExecution::InputToWorking,
+    };
+    let camera_log_to_working = TransformCase {
+        mode: "sony_slog3_sgamut3cine_to_working",
+        operation_class: "camera log decode plus gamut conversion",
+        src: OcioColorSpaceIdentity::Color(ColorSpace::SonySLog3SGamut3Cine),
+        dst: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+        execution: TransformExecution::InputToWorking,
+    };
+
+    let compositor = GpuFrameCompositor::new(&context.device);
+    let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(80_000);
+    let working_input =
+        create_spatially_varying_4k_working_frame(&context, &compositor, &mut runtime)?;
+    let rec709_input = create_encoded_float_source(
+        &context,
+        &mut runtime,
+        ColorSpace::Rec709,
+        "mondrian-color-transform-rec709-input",
+    )?;
+    let camera_log_input = create_encoded_float_source(
+        &context,
+        &mut runtime,
+        ColorSpace::SonySLog3SGamut3Cine,
+        "mondrian-color-transform-slog3-input",
+    )?;
+    let timer = GpuTimestampFrameTimer::new(&context.device, &context.queue)
+        .context("timestamp features were enabled but timer creation failed")?;
+
+    let cases = [
+        (&identity, &working_input),
+        (&matrix_oetf, &working_input),
+        (&rec709_to_working, &rec709_input),
+        (&camera_log_to_working, &camera_log_input),
+    ];
+    let mut cold_record_cpu_us = [0_u64; 4];
+    for (index, (case, input)) in cases.iter().enumerate() {
+        cold_record_cpu_us[index] =
+            record_transform_sample(&context, &mut runtime, input, case, None, 3)?.record_cpu_us;
+    }
+    for _ in 0..WARMUP_COUNT {
+        for (case, input) in cases {
+            record_transform_sample(&context, &mut runtime, input, case, None, 3)?;
+        }
+    }
+
+    let shaders = [
+        runtime
+            .shader_cache_mut()
+            .get_or_extract(identity.shader_request())
+            .context("extract cached identity GPU shader")?,
+        runtime
+            .shader_cache_mut()
+            .get_or_extract(matrix_oetf.shader_request())
+            .context("extract cached matrix + OETF GPU shader")?,
+        runtime
+            .shader_cache_mut()
+            .get_or_extract(rec709_to_working.shader_request())
+            .context("extract cached Rec.709 input GPU shader")?,
+        runtime
+            .shader_cache_mut()
+            .get_or_extract(camera_log_to_working.shader_request())
+            .context("extract cached camera-log input GPU shader")?,
+    ];
+    let runtime_before_measurement = RuntimeCacheActivity::from_runtime(runtime.diagnostics());
+    let mut samples = std::array::from_fn::<ViewSamples, 4, _>(|_| ViewSamples::default());
+    for iteration in 0..sample_count {
+        for offset in 0..cases.len() {
+            let index = (iteration + offset) % cases.len();
+            let (case, input) = cases[index];
+            let sample =
+                record_transform_sample(&context, &mut runtime, input, case, Some(&timer), 3)?;
+            samples[index]
+                .gpu_us
+                .push(sample.gpu_us.context("measured sample missing GPU timestamp")?);
+            samples[index].record_cpu_us.push(sample.record_cpu_us);
+        }
+    }
+
+    let runtime_diagnostics = runtime.diagnostics();
+    let measured_cache_activity = RuntimeCacheActivity::from_runtime(runtime_diagnostics)
+        .delta_since(runtime_before_measurement);
+    let expected_samples = u64::try_from(sample_count)
+        .expect("bounded sample count fits u64")
+        .saturating_mul(u64::try_from(cases.len()).expect("case count fits u64"));
+    let warm_path_gate =
+        TransformWarmPathReuseGate::evaluate(measured_cache_activity, expected_samples);
+    let [identity_samples, matrix_samples, rec709_samples, camera_log_samples] = samples;
+    let reports = [
+        build_transform_report(
+            &identity,
+            cold_record_cpu_us[0],
+            identity_samples,
+            &shaders[0],
+        ),
+        build_transform_report(
+            &matrix_oetf,
+            cold_record_cpu_us[1],
+            matrix_samples,
+            &shaders[1],
+        ),
+        build_transform_report(
+            &rec709_to_working,
+            cold_record_cpu_us[2],
+            rec709_samples,
+            &shaders[2],
+        ),
+        build_transform_report(
+            &camera_log_to_working,
+            cold_record_cpu_us[3],
+            camera_log_samples,
+            &shaders[3],
+        ),
+    ];
+    let all_transforms_within_budget =
+        reports.iter().all(|report| report.warm_gpu_us.p95 <= p95_budget_us);
+    let [identity, matrix_oetf, rec709_to_working, camera_log_to_working] = reports;
+    let info = context.adapter.get_info();
+    let report = ColorTransformGpuPerfReport {
+        schema_version: 1,
+        scenario: "renderer_color_transform_4k_gpu_timestamp",
+        width: WIDTH,
+        height: HEIGHT,
+        samples_per_transform: sample_count,
+        warmups_per_transform: WARMUP_COUNT,
+        measured_region:
+            "one production OCIO fullscreen pass only; source initialization, upload, and timestamp readback excluded",
+        adapter: AdapterReport {
+            name: info.name,
+            backend: format!("{:?}", info.backend),
+            device_type: format!("{:?}", info.device_type),
+            driver: info.driver,
+            driver_info: info.driver_info,
+        },
+        runtime_cache: TransformRuntimeCacheReport {
+            measured_delta: measured_cache_activity,
+            warm_path_gate,
+        },
+        identity,
+        matrix_oetf,
+        rec709_to_working,
+        camera_log_to_working,
+        p95_budget_us,
+        all_transforms_within_budget,
+    };
+    let json = serde_json::to_string(&report).context("serialize color-transform GPU report")?;
+    eprintln!("MONDRIAN_COLOR_TRANSFORM_GPU_PERF_JSON={json}");
+    if let Some(path) =
+        std::env::var_os("MONDRIAN_COLOR_TRANSFORM_GPU_PERF_OUTPUT").map(PathBuf::from)
+    {
+        append_jsonl(&path, &json)?;
+    }
+
+    assert!(
+        report.runtime_cache.warm_path_gate.passed,
+        "warm 4K color-transform sampling created or failed to reuse GPU runtime objects\n{json}"
+    );
+    assert!(
+        report.all_transforms_within_budget,
+        "Mondrian Standard 4K transform p95 exceeds {} us budget: identity={} us, matrix+OETF={} us, Rec.709={} us, camera-log={} us\n{json}",
+        report.p95_budget_us,
+        report.identity.warm_gpu_us.p95,
+        report.matrix_oetf.warm_gpu_us.p95,
+        report.rec709_to_working.warm_gpu_us.p95,
+        report.camera_log_to_working.warm_gpu_us.p95,
+    );
+    Ok(())
+}
+
 async fn create_timestamp_gpu_context() -> Result<Option<TimestampGpuContext>> {
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
@@ -677,6 +1021,171 @@ fn create_spatially_varying_4k_working_frame(
     Ok(input)
 }
 
+fn create_encoded_float_source(
+    context: &TimestampGpuContext,
+    runtime: &mut RenderGpuOutputBoundaryRuntime,
+    color_space: ColorSpace,
+    label: &'static str,
+) -> Result<GpuColorFrameHandle> {
+    let handle = GpuColorFrameHandle::new(
+        runtime.frame_ids_mut().allocate(),
+        ColorFrameDescriptor {
+            width: WIDTH,
+            height: HEIGHT,
+            color_space: color_space.into(),
+            domain: ColorFrameDomain::Source,
+            encoding: ColorFrameEncoding::EncodedFloat,
+            residency: ColorFrameResidency::Gpu,
+        },
+        GpuColorFrameTextureFormat::Rgba16Float,
+        label,
+    )
+    .map_err(|error| anyhow!("create {label} handle: {error}"))?;
+    let allocation = GpuColorFrameAllocationPlan::for_handle(handle.clone());
+    let pool = runtime.resource_pool();
+    let resource = pool.acquire(&context.device, &allocation);
+    let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("mondrian-color-transform-source-initialization"),
+    });
+    {
+        let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("mondrian-color-transform-source-clear"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &resource.resource().texture_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.18, g: 0.42, b: 0.73, a: 1.0 }),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+    }
+    let submission = context.queue.submit(std::iter::once(encoder.finish()));
+    context
+        .device
+        .poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None })
+        .with_context(|| format!("complete {label} initialization"))?;
+    runtime
+        .frame_table_mut()
+        .insert(resource)
+        .map_err(|error| anyhow!("insert {label}: {error:?}"))?;
+    Ok(handle)
+}
+
+fn record_transform_sample(
+    context: &TimestampGpuContext,
+    runtime: &mut RenderGpuOutputBoundaryRuntime,
+    input: &GpuColorFrameHandle,
+    case: &TransformCase,
+    timer: Option<&GpuTimestampFrameTimer>,
+    retained_input_count: usize,
+) -> Result<RecordedSample> {
+    let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("mondrian-color-transform-4k-sample"),
+    });
+    if let Some(timer) = timer {
+        timer.begin(&mut encoder);
+    }
+    let started = Instant::now();
+    let (output_id, stage_diagnostics) = match case.execution {
+        TransformExecution::Intermediate {
+            output_domain,
+            output_encoding,
+            output_texture_format,
+        } => {
+            let record = runtime
+                .record_wgpu_intermediate_color_transform_owned_backend(
+                    &RenderIntermediateColorTransform {
+                        output_identity: case.dst,
+                        output_domain,
+                        output_encoding,
+                        engine: ColorEngine::mondrian_standard(),
+                    },
+                    input,
+                    output_texture_format,
+                    format!("mondrian-color-transform-{}-output", case.mode),
+                    RenderColorTransformGpuOptions {
+                        output_residency: ColorFrameResidency::Gpu,
+                        ..RenderColorTransformGpuOptions::default()
+                    },
+                    RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                        device: &context.device,
+                        queue: &context.queue,
+                        encoder: &mut encoder,
+                        load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    },
+                )
+                .map_err(|error| anyhow!("record {} transform: {error:?}", case.mode))?;
+            (record.materialized.output.id(), record.stage_diagnostics)
+        }
+        TransformExecution::InputToWorking => {
+            let output = GpuColorFrameHandle::new(
+                runtime.frame_ids_mut().allocate(),
+                ColorFrameDescriptor {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    color_space: WorkingColorSpace::LinearRec2020.into(),
+                    domain: ColorFrameDomain::Working,
+                    encoding: ColorFrameEncoding::LinearFloat,
+                    residency: ColorFrameResidency::Gpu,
+                },
+                GpuColorFrameTextureFormat::Rgba32Float,
+                format!("mondrian-color-transform-{}-output", case.mode),
+            )
+            .map_err(|error| anyhow!("create {} output handle: {error}", case.mode))?;
+            let record = runtime
+                .record_wgpu_input_stage_gpu_frame_owned_backend(
+                    &RenderInputTransform::to_working_gpu(
+                        WorkingColorSpace::LinearRec2020,
+                        false,
+                        ColorEngine::mondrian_standard(),
+                    ),
+                    input,
+                    &output,
+                    RenderColorTransformGpuOptions {
+                        output_residency: ColorFrameResidency::Gpu,
+                        ..RenderColorTransformGpuOptions::default()
+                    },
+                    RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                        device: &context.device,
+                        queue: &context.queue,
+                        encoder: &mut encoder,
+                        load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    },
+                )
+                .map_err(|error| anyhow!("record {} input transform: {error:?}", case.mode))?;
+            (record.materialized.output.id(), record.stage_diagnostics)
+        }
+    };
+    let record_cpu_us = saturating_u64(started.elapsed().as_micros());
+    if let Some(timer) = timer {
+        timer.finish(&mut encoder);
+    }
+    assert_eq!(stage_diagnostics.gpu_color_stages, 1);
+    assert_eq!(stage_diagnostics.upload_stages, 0);
+    assert_eq!(stage_diagnostics.readback_stages, 0);
+    let submission = context.queue.submit(std::iter::once(encoder.finish()));
+    let gpu_us = timer
+        .map(|timer| {
+            timer
+                .read_elapsed_us_after_submission(&context.device, submission)
+                .context("read color-transform hardware timestamp")
+        })
+        .transpose()?;
+    let output = runtime
+        .frame_table_mut()
+        .remove(output_id)
+        .context("recorded transform output missing from resource table")?;
+    runtime.resource_pool().release(output);
+    assert_eq!(runtime.frame_table().len(), retained_input_count);
+    Ok(RecordedSample { gpu_us, record_cpu_us })
+}
+
 fn record_view_sample(
     context: &TimestampGpuContext,
     runtime: &mut RenderGpuOutputBoundaryRuntime,
@@ -746,37 +1255,63 @@ fn build_view_report(
         cold_record_cpu_us,
         warm_record_cpu_us: quantiles(samples.record_cpu_us),
         warm_gpu_us: quantiles(samples.gpu_us),
-        shader: ShaderReport {
-            bytes: shader.shader_len,
-            texture_2d_count: shader.texture_2d_count,
-            texture_3d_count: shader.texture_3d_count,
-            textures_2d: shader
-                .bundle()
-                .textures_2d
-                .iter()
-                .map(|texture| Lut2dReport {
-                    width: texture.width,
-                    height: texture.height,
-                    channels: format!("{:?}", texture.channel),
-                    interpolation: format!("{:?}", texture.interpolation),
-                })
-                .collect(),
-            textures_3d: shader
-                .bundle()
-                .textures_3d
-                .iter()
-                .map(|texture| Lut3dReport {
-                    edge_length: texture.edge_len,
-                    interpolation: format!("{:?}", texture.interpolation),
-                })
-                .collect(),
-            uniform_count: shader.uniform_count,
-            processor_cache_id: shader.processor_cache_id.clone(),
-        },
+        shader: shader_report(shader),
         fullscreen_passes: 1,
         output_texture_writes: 1,
         input_uploads_in_measured_region: 0,
         gpu_readbacks_in_measured_region: 0,
+    }
+}
+
+fn build_transform_report(
+    case: &TransformCase,
+    cold_record_cpu_us: u64,
+    samples: ViewSamples,
+    shader: &OcioGpuShaderPlan,
+) -> TransformReport {
+    TransformReport {
+        mode: case.mode,
+        operation_class: case.operation_class,
+        source_identity: format!("{:?}", case.src),
+        destination_identity: format!("{:?}", case.dst),
+        cold_record_cpu_us,
+        warm_record_cpu_us: quantiles(samples.record_cpu_us),
+        warm_gpu_us: quantiles(samples.gpu_us),
+        shader: shader_report(shader),
+        fullscreen_passes: 1,
+        output_texture_writes: 1,
+        input_uploads_in_measured_region: 0,
+        gpu_readbacks_in_measured_region: 0,
+    }
+}
+
+fn shader_report(shader: &OcioGpuShaderPlan) -> ShaderReport {
+    ShaderReport {
+        bytes: shader.shader_len,
+        texture_2d_count: shader.texture_2d_count,
+        texture_3d_count: shader.texture_3d_count,
+        textures_2d: shader
+            .bundle()
+            .textures_2d
+            .iter()
+            .map(|texture| Lut2dReport {
+                width: texture.width,
+                height: texture.height,
+                channels: format!("{:?}", texture.channel),
+                interpolation: format!("{:?}", texture.interpolation),
+            })
+            .collect(),
+        textures_3d: shader
+            .bundle()
+            .textures_3d
+            .iter()
+            .map(|texture| Lut3dReport {
+                edge_length: texture.edge_len,
+                interpolation: format!("{:?}", texture.interpolation),
+            })
+            .collect(),
+        uniform_count: shader.uniform_count,
+        processor_cache_id: shader.processor_cache_id.clone(),
     }
 }
 
@@ -925,5 +1460,28 @@ mod tests {
             )
             .passed
         );
+    }
+
+    #[test]
+    fn transform_warm_path_gate_rejects_per_sample_allocations() {
+        let activity = RuntimeCacheActivity {
+            shader_hits: 12,
+            static_pipeline_hits: 12,
+            backend_object_hits: 12,
+            wrapper_bind_group_cache_hits: 12,
+            texture_pool_hits: 12,
+            texture_pool_releases: 12,
+            ..RuntimeCacheActivity::default()
+        };
+
+        assert!(TransformWarmPathReuseGate::evaluate(activity, 12).passed);
+        assert!(
+            !TransformWarmPathReuseGate::evaluate(
+                RuntimeCacheActivity { texture_pool_misses: 1, ..activity },
+                12,
+            )
+            .passed
+        );
+        assert!(!TransformWarmPathReuseGate::evaluate(activity, 13).passed);
     }
 }
