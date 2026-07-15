@@ -11,6 +11,7 @@
 pub mod batched_pipeline;
 pub mod color_accuracy;
 pub mod color_frame;
+pub mod color_reference;
 pub mod color_report_vocab;
 pub mod color_stage;
 pub mod color_transform;
@@ -56,6 +57,11 @@ pub use color_frame::{
     GpuNativeDecodedFrameSourceDescriptor, GpuNativeDecodedFrameSourceFormatError,
     GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation,
     GpuVideoRange, LinearFloatSource,
+};
+pub use color_reference::{
+    import_external_color_reference, ColorReferenceAlpha, ColorReferenceDecoder,
+    ColorReferenceDescriptor, ColorReferenceEncoding, ColorReferenceFrame, ColorReferenceOrigin,
+    ColorReferencePayloadFormat, ColorReferencePixels, ColorReferenceValidationError,
 };
 pub use color_stage::{
     execute_cpu_input_stage, execute_cpu_input_stage_float, execute_cpu_output_boundary,

@@ -22,6 +22,18 @@ camera folklore are not acceptable evidence for codec or color metadata. Before
 a fixture drives a color golden, probe evidence and an independently trusted
 reference frame or numeric patch values must be added.
 
+External color references use renderer's versioned `ColorReferenceDescriptor`
+contract. Each descriptor separates payload format (PNG, OpenEXR, or numeric
+JSON) from pixel encoding (for example sRGB RGBA8, BT.2100 PQ float, or
+scene-linear Rec.2020 float), and pins both the source stimulus and payload with
+SHA-256. It also records producer/specification version, dimensions, alpha
+semantics, reference white, and nominal peak where applicable. Import is
+fail-closed before any tolerance comparison. `public_specification` and
+`independent_application` are independent evidence;
+`mondrian_regression` is intentionally not. This lets a commercial application
+export be added later without claiming that Mondrian-generated goldens already
+establish subjective parity.
+
 ## Asset classes
 
 | Class | Repository | PR | Windows nightly/release |
