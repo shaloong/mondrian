@@ -14,6 +14,13 @@ mod quality_corpus;
 use quality_corpus::{QualityCase, QualityCorpus};
 
 const NORMALIZED_SIGNAL_EPSILON: f32 = 1.0 / 4_095.0;
+const STANDARD_OUTPUT_TARGETS: [ColorSpace; 5] = [
+    ColorSpace::Srgb,
+    ColorSpace::Rec709,
+    ColorSpace::DisplayP3,
+    ColorSpace::Rec2100Hlg,
+    ColorSpace::Rec2100Pq,
+];
 
 const CORPUS_JSON: &str =
     include_str!("../../../tests/fixtures/color/metadata/mondrian-standard-quality-corpus-v1.json");
@@ -113,13 +120,13 @@ fn quality_corpus_contract_is_complete_independently_sourced_and_package_pinned(
 }
 
 #[test]
-fn production_standard_sdr_and_pq_views_satisfy_objective_corpus_invariants() {
+fn production_standard_views_satisfy_objective_corpus_invariants() {
     ensure_mondrian_default_ocio_loaded().expect("Mondrian Standard OCIO package");
     let corpus = parse_corpus();
 
     for case in corpus.cases.iter().filter(|case| case.render_through_standard) {
         let input = corpus.pixels_for(case);
-        for output in [ColorSpace::Srgb, ColorSpace::Rec2100Pq] {
+        for output in STANDARD_OUTPUT_TARGETS {
             let rendered = render_standard(&input, output);
             assert_eq!(rendered.len(), input.len(), "{} {output:?}", case.id);
             for (pixel_index, (source, result)) in input.iter().zip(&rendered).enumerate() {
@@ -152,24 +159,36 @@ fn production_standard_sdr_and_pq_views_satisfy_objective_corpus_invariants() {
         .iter()
         .find(|case| case.id == "neutral-stop-ramp")
         .expect("neutral stop ramp");
-    assert_neutral_monotonic(&corpus, neutral, ColorSpace::Srgb, 2.0e-4);
-    assert_neutral_monotonic(&corpus, neutral, ColorSpace::Rec2100Pq, 5.0e-4);
+    for output in STANDARD_OUTPUT_TARGETS {
+        assert_neutral_monotonic(&corpus, neutral, output, 5.0e-4);
+    }
 
     let hue_boundary = corpus
         .cases
         .iter()
         .find(|case| case.id == "high-saturation-hue-boundary-sweep")
         .expect("high-saturation hue boundary sweep");
-    assert_hue_boundary_continuity(&corpus, hue_boundary, ColorSpace::Srgb);
-    assert_hue_boundary_continuity(&corpus, hue_boundary, ColorSpace::Rec2100Pq);
+    for output in STANDARD_OUTPUT_TARGETS {
+        assert_hue_boundary_continuity(&corpus, hue_boundary, output);
+    }
 
     let negative_boundary = corpus
         .cases
         .iter()
         .find(|case| case.id == "negative-channel-zero-boundary-line")
         .expect("negative-channel boundary line");
-    assert_local_continuity(&corpus, negative_boundary, ColorSpace::Srgb, 0.005);
-    assert_local_continuity(&corpus, negative_boundary, ColorSpace::Rec2100Pq, 0.005);
+    for output in STANDARD_OUTPUT_TARGETS {
+        assert_local_continuity(&corpus, negative_boundary, output, 0.005);
+    }
+
+    let ten_bit = corpus
+        .cases
+        .iter()
+        .find(|case| case.id == "ten-bit-neutral-gradient")
+        .expect("10-bit neutral gradient");
+    for output in STANDARD_OUTPUT_TARGETS {
+        assert_ten_bit_gradient_resolution(&corpus, ten_bit, output);
+    }
 }
 
 fn parse_corpus() -> QualityCorpus {
@@ -296,6 +315,26 @@ fn assert_local_continuity(
     assert!(
         max_adjacent_delta <= limit,
         "{} {output:?} local discontinuity: {max_adjacent_delta} > {limit}",
+        case.id
+    );
+}
+
+fn assert_ten_bit_gradient_resolution(
+    corpus: &QualityCorpus,
+    case: &QualityCase,
+    output: ColorSpace,
+) {
+    let rendered = render_standard(&corpus.pixels_for(case), output);
+    let positive_steps = rendered.windows(2).filter(|pair| pair[1][1] > pair[0][1]).count();
+    let reversals = rendered.windows(2).filter(|pair| pair[1][1] < pair[0][1]).count();
+    eprintln!(
+        "{} {output:?} gradient resolution: positive_steps={positive_steps}, reversals={reversals}",
+        case.id
+    );
+    assert_eq!(reversals, 0, "{} {output:?} has tone reversals", case.id);
+    assert!(
+        positive_steps >= 1_010,
+        "{} {output:?} preserves only {positive_steps}/1023 input transitions",
         case.id
     );
 }
