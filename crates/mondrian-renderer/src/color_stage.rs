@@ -3954,6 +3954,29 @@ pub struct RenderOutputColorBoundaryFloat {
     pub output_descriptor: ColorFrameDescriptor,
 }
 
+impl RenderOutputColorBoundaryFloat {
+    /// Measure video scopes from this exact display/export-encoded output.
+    ///
+    /// Keeping this method on the final float boundary prevents callers from
+    /// accidentally measuring working-linear pixels, a monitor-adapted UI
+    /// raster, or an RGBA8-quantized HDR signal.
+    pub fn program_scopes(
+        &self,
+        waveform_mode: mondrian_core::WaveformMode,
+        bins: usize,
+    ) -> Result<mondrian_core::ColorScopes, mondrian_core::ProgramColorScopeError> {
+        let frame = self.frame.rgba_f32();
+        mondrian_core::compute_program_color_scopes_rgba_f32(
+            &frame.data,
+            frame.width,
+            frame.height,
+            frame.color_space,
+            waveform_mode,
+            bins,
+        )
+    }
+}
+
 /// Plan and execute a CPU final-output boundary, returning float output without
 /// u8 quantization.
 ///
@@ -7627,6 +7650,13 @@ mod tests {
             assert!((0.0..=1.0).contains(&b));
             assert!((0.0..=1.0).contains(&a));
         }
+        let scopes = result
+            .program_scopes(mondrian_core::WaveformMode::RgbParade, 1024)
+            .expect("float program-output scopes");
+        assert_eq!(scopes.signal_color_space, ColorSpace::Rec709);
+        assert_eq!(scopes.sample_count, 8);
+        assert_eq!(scopes.histogram.red.iter().sum::<u32>(), 8);
+        assert_eq!(scopes.waveform.values.iter().sum::<u32>(), 24);
     }
 
     #[test]

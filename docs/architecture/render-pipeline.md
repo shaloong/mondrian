@@ -167,6 +167,12 @@ effects, with `used_rgba8_boundary: true` in diagnostics.
 When a float output transform needs OCIO's contiguous f32 buffer, it must pack
 directly from the borrowed `CpuColorFrame` pixels and avoid cloning the whole
 typed `Vec<[f32; 4]>` before flattening.
+`RenderOutputColorBoundaryFloat::program_scopes(...)` is the renderer-owned CPU
+reference seam for program video scopes. It measures the boundary's encoded
+float pixels with their exact output color-space identity, preserving 10-bit/HDR
+signal precision and keeping monitor adaptation outside the measurement. The
+real-time GPU path must implement equivalent GPU reduction rather than reading
+the full output texture back to the CPU.
 
 Color-transform executors emit `RenderColorTransformDiagnostics` for input and
 output boundaries. Preview diagnostics aggregate transform calls, transformed

@@ -940,6 +940,19 @@ when `$OCIO` is not configured.
 Preview cache keys include the complete typed output intent. An intent change
 invalidates cached viewer frames even when the output `ColorSpace` is unchanged.
 
+Program video scopes are measured from the exact float display/export-encoded
+Program Output, before any monitor/ICC adaptation or UI raster conversion.
+`mondrian-core::compute_program_color_scopes_rgba_f32` requires an explicit
+standardized output identity and selects Rec.601, Rec.709/sRGB, Display P3, or
+Rec.2020 luma/chroma coefficients accordingly. Working-linear and camera-log
+identities, malformed buffers, and non-finite RGB fail closed. The RGBA8 helper
+exists for already-quantized SDR boundaries, but HDR/10-bit scope paths must use
+the float helper. A final renderer float boundary exposes this contract through
+`RenderOutputColorBoundaryFloat::program_scopes`, so callers cannot accidentally
+measure working pixels or a monitor-adapted `ViewerFrameImage`. GPU scopes must
+eventually use a compute/reduction path over the Program Output texture; they
+must not introduce a per-frame GPU-to-CPU readback.
+
 GPU preview should use OCIO shader extraction instead of CPU processor execution
 for real-time playback. `mondrian-core::extract_ocio_gpu_shader_bundle` and
 `mondrian-core::extract_ocio_display_gpu_shader_bundle` are the core extraction

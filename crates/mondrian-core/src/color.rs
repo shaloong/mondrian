@@ -377,51 +377,254 @@ pub struct WorkingRgbaF32Frame {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WaveformMode {
+    /// One encoded-signal luma trace.
     Luma,
+    /// Separate encoded red, green, and blue traces.
     RgbParade,
 }
 
+/// Horizontal program-signal waveform density.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WaveformScope {
+    /// Signal component layout.
     pub mode: WaveformMode,
+    /// Number of horizontal source columns.
     pub width: usize,
+    /// Number of vertical signal bins.
     pub bins: usize,
+    /// Row-major sample density, with RGB parade planes stored consecutively.
     pub values: Vec<u32>,
 }
 
+/// RGB and luma histograms for one program-output frame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HistogramScope {
+    /// Number of bins per component.
     pub bins: usize,
+    /// Encoded red-channel counts.
     pub red: Vec<u32>,
+    /// Encoded green-channel counts.
     pub green: Vec<u32>,
+    /// Encoded blue-channel counts.
     pub blue: Vec<u32>,
+    /// Non-constant-luminance encoded luma counts for the declared signal primaries.
     pub luma: Vec<u32>,
 }
 
+/// One occupied cell in the normalized program-signal vectorscope grid.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VectorscopeSample {
+    /// Normalized blue-difference coordinate in `[-0.5, 0.5]`.
     pub u: f32,
+    /// Normalized red-difference coordinate in `[-0.5, 0.5]`.
     pub v: f32,
+    /// Number of pixels accumulated into this cell.
     pub weight: u32,
 }
 
+/// Video scopes measured from a single display-encoded Program Output frame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ColorScopes {
+    /// Exact standardized signal color space used for luma/chroma math.
+    pub signal_color_space: ColorSpace,
+    /// Number of RGBA pixels measured.
+    pub sample_count: u64,
+    /// Per-component and luma distributions.
     pub histogram: HistogramScope,
+    /// Horizontal signal distribution.
     pub waveform: WaveformScope,
+    /// Occupied normalized chroma cells.
     pub vectorscope: Vec<VectorscopeSample>,
 }
 
-pub fn compute_color_scopes(
+/// Failure to measure a buffer as an encoded Program Output signal.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ProgramColorScopeError {
+    /// A frame must contain at least one pixel in each dimension.
+    #[error("program scope dimensions must be non-zero, got {width}x{height}")]
+    InvalidDimensions {
+        /// Declared width.
+        width: u32,
+        /// Declared height.
+        height: u32,
+    },
+    /// The RGBA8 payload does not match the declared dimensions exactly.
+    #[error("program scope RGBA8 byte length mismatch: expected {expected}, got {actual}")]
+    Rgba8ByteLengthMismatch {
+        /// Required byte count.
+        expected: usize,
+        /// Supplied byte count.
+        actual: usize,
+    },
+    /// The float payload does not match the declared pixel count exactly.
+    #[error("program scope float pixel length mismatch: expected {expected}, got {actual}")]
+    FloatPixelLengthMismatch {
+        /// Required pixel count.
+        expected: usize,
+        /// Supplied pixel count.
+        actual: usize,
+    },
+    /// The declared frame dimensions cannot be represented by the host.
+    #[error("program scope dimensions overflow host address space: {width}x{height}")]
+    DimensionsOverflow {
+        /// Declared width.
+        width: u32,
+        /// Declared height.
+        height: u32,
+    },
+    /// The declared identity is not a supported display-encoded output signal.
+    #[error("{color_space:?} is not a supported program-output signal color space")]
+    UnsupportedSignalColorSpace {
+        /// Rejected identity.
+        color_space: ColorSpace,
+    },
+    /// Float scopes refuse invalid values rather than silently binning them.
+    #[error("program scope pixel {pixel} channel {channel} is not finite")]
+    NonFiniteSample {
+        /// Zero-based pixel index.
+        pixel: usize,
+        /// RGB channel index (`0 = R`, `1 = G`, `2 = B`).
+        channel: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProgramSignalColorimetry {
+    kr: f32,
+    kb: f32,
+}
+
+impl ProgramSignalColorimetry {
+    fn for_color_space(color_space: ColorSpace) -> Result<Self, ProgramColorScopeError> {
+        let colorimetry = match color_space {
+            ColorSpace::Rec601Pal | ColorSpace::Rec601Ntsc => Self { kr: 0.299, kb: 0.114 },
+            ColorSpace::Rec709 | ColorSpace::Srgb => Self { kr: 0.2126, kb: 0.0722 },
+            ColorSpace::DisplayP3 => Self { kr: 0.228_974_6, kb: 0.079_286_9 },
+            ColorSpace::Rec2020 | ColorSpace::Rec2100Hlg | ColorSpace::Rec2100Pq => {
+                Self { kr: 0.2627, kb: 0.0593 }
+            }
+            unsupported => {
+                return Err(ProgramColorScopeError::UnsupportedSignalColorSpace {
+                    color_space: unsupported,
+                });
+            }
+        };
+        Ok(colorimetry)
+    }
+
+    fn luma(self, r: f32, g: f32, b: f32) -> f32 {
+        let kg = 1.0 - self.kr - self.kb;
+        self.kr * r + kg * g + self.kb * b
+    }
+
+    fn chroma(self, r: f32, b: f32, y: f32) -> (f32, f32) {
+        let u = (b - y) / (2.0 * (1.0 - self.kb));
+        let v = (r - y) / (2.0 * (1.0 - self.kr));
+        (u, v)
+    }
+}
+
+/// Measure display-encoded RGBA8 pixels at the Program Output boundary.
+///
+/// The RGB channels are interpreted as non-linear signal values in
+/// `signal_color_space`; alpha is ignored. This function deliberately rejects
+/// working spaces and camera-log identities because applying display-signal
+/// luma/chroma coefficients to those values would produce misleading scopes.
+pub fn compute_program_color_scopes_rgba8(
     rgba: &[u8],
     width: u32,
     height: u32,
+    signal_color_space: ColorSpace,
     waveform_mode: WaveformMode,
     bins: usize,
-) -> ColorScopes {
+) -> Result<ColorScopes, ProgramColorScopeError> {
+    let expected = expected_program_scope_pixels(width, height)?
+        .checked_mul(4)
+        .ok_or(ProgramColorScopeError::DimensionsOverflow { width, height })?;
+    if rgba.len() != expected {
+        return Err(ProgramColorScopeError::Rgba8ByteLengthMismatch {
+            expected,
+            actual: rgba.len(),
+        });
+    }
+    compute_program_color_scopes_rgb(
+        rgba.chunks_exact(4).map(|pixel| {
+            [
+                pixel[0] as f32 / 255.0,
+                pixel[1] as f32 / 255.0,
+                pixel[2] as f32 / 255.0,
+            ]
+        }),
+        width,
+        height,
+        signal_color_space,
+        waveform_mode,
+        bins,
+    )
+}
+
+/// Measure float display-encoded RGBA pixels at the Program Output boundary.
+///
+/// This is the precision-preserving scope path for 10-bit and HDR output. RGB
+/// values outside `0..=1` are retained as endpoint overloads rather than being
+/// quantized to RGBA8 first. Non-finite samples fail closed.
+pub fn compute_program_color_scopes_rgba_f32(
+    rgba: &[[f32; 4]],
+    width: u32,
+    height: u32,
+    signal_color_space: ColorSpace,
+    waveform_mode: WaveformMode,
+    bins: usize,
+) -> Result<ColorScopes, ProgramColorScopeError> {
+    let expected = expected_program_scope_pixels(width, height)?;
+    if rgba.len() != expected {
+        return Err(ProgramColorScopeError::FloatPixelLengthMismatch {
+            expected,
+            actual: rgba.len(),
+        });
+    }
+    for (pixel_index, pixel) in rgba.iter().enumerate() {
+        for (channel, value) in pixel[..3].iter().enumerate() {
+            if !value.is_finite() {
+                return Err(ProgramColorScopeError::NonFiniteSample {
+                    pixel: pixel_index,
+                    channel,
+                });
+            }
+        }
+    }
+    compute_program_color_scopes_rgb(
+        rgba.iter().map(|pixel| [pixel[0], pixel[1], pixel[2]]),
+        width,
+        height,
+        signal_color_space,
+        waveform_mode,
+        bins,
+    )
+}
+
+fn expected_program_scope_pixels(width: u32, height: u32) -> Result<usize, ProgramColorScopeError> {
+    if width == 0 || height == 0 {
+        return Err(ProgramColorScopeError::InvalidDimensions { width, height });
+    }
+    usize::try_from(width)
+        .ok()
+        .and_then(|width| usize::try_from(height).ok().and_then(|height| width.checked_mul(height)))
+        .ok_or(ProgramColorScopeError::DimensionsOverflow { width, height })
+}
+
+fn compute_program_color_scopes_rgb(
+    rgb: impl Iterator<Item = [f32; 3]>,
+    width: u32,
+    height: u32,
+    signal_color_space: ColorSpace,
+    waveform_mode: WaveformMode,
+    bins: usize,
+) -> Result<ColorScopes, ProgramColorScopeError> {
+    let colorimetry = ProgramSignalColorimetry::for_color_space(signal_color_space)?;
     let bins = bins.clamp(16, 1024);
-    let width_usize = width.max(1) as usize;
-    let expected_pixels = width as usize * height as usize;
+    let width_usize = width as usize;
+    let expected_pixels = width_usize * height as usize;
     let mut histogram = HistogramScope {
         bins,
         red: vec![0; bins],
@@ -441,33 +644,36 @@ pub fn compute_color_scopes(
     };
     let mut vectors = vec![VectorscopeSample { u: 0.0, v: 0.0, weight: 0 }; 64 * 64];
 
-    for (idx, px) in rgba.chunks_exact(4).take(expected_pixels).enumerate() {
+    for (idx, [r, g, b]) in rgb.enumerate() {
         let x = idx % width_usize;
-        let r = px[0] as f32 / 255.0;
-        let g = px[1] as f32 / 255.0;
-        let b = px[2] as f32 / 255.0;
-        let y = luma(r, g, b).clamp(0.0, 1.0);
+        let y = colorimetry.luma(r, g, b).clamp(0.0, 1.0);
         let rb = scope_bin(r, bins);
         let gb = scope_bin(g, bins);
         let bb = scope_bin(b, bins);
         let yb = scope_bin(y, bins);
-        histogram.red[rb] += 1;
-        histogram.green[gb] += 1;
-        histogram.blue[bb] += 1;
-        histogram.luma[yb] += 1;
+        histogram.red[rb] = histogram.red[rb].saturating_add(1);
+        histogram.green[gb] = histogram.green[gb].saturating_add(1);
+        histogram.blue[bb] = histogram.blue[bb].saturating_add(1);
+        histogram.luma[yb] = histogram.luma[yb].saturating_add(1);
 
         match waveform_mode {
-            WaveformMode::Luma => waveform.values[x * bins + yb] += 1,
+            WaveformMode::Luma => {
+                let value = &mut waveform.values[x * bins + yb];
+                *value = value.saturating_add(1);
+            }
             WaveformMode::RgbParade => {
                 let plane = width_usize * bins;
-                waveform.values[x * bins + rb] += 1;
-                waveform.values[plane + x * bins + gb] += 1;
-                waveform.values[plane * 2 + x * bins + bb] += 1;
+                for index in [
+                    x * bins + rb,
+                    plane + x * bins + gb,
+                    plane * 2 + x * bins + bb,
+                ] {
+                    waveform.values[index] = waveform.values[index].saturating_add(1);
+                }
             }
         }
 
-        let u = (b - y) * 0.565;
-        let v = (r - y) * 0.713;
+        let (u, v) = colorimetry.chroma(r, b, y);
         let ux = ((u + 0.5).clamp(0.0, 0.999) * 64.0) as usize;
         let vy = ((v + 0.5).clamp(0.0, 0.999) * 64.0) as usize;
         let sample = &mut vectors[vy * 64 + ux];
@@ -476,11 +682,13 @@ pub fn compute_color_scopes(
         sample.weight = sample.weight.saturating_add(1);
     }
 
-    ColorScopes {
+    Ok(ColorScopes {
+        signal_color_space,
+        sample_count: expected_pixels as u64,
         histogram,
         waveform,
         vectorscope: vectors.into_iter().filter(|sample| sample.weight > 0).collect(),
-    }
+    })
 }
 
 impl ColorSpace {
@@ -783,10 +991,6 @@ fn ffmpeg_tag_eq(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right) || matches!((left, right), ("rgb", "gbr") | ("gbr", "rgb"))
 }
 
-fn luma(r: f32, g: f32, b: f32) -> f32 {
-    0.2126 * r + 0.7152 * g + 0.0722 * b
-}
-
 fn scope_bin(v: f32, bins: usize) -> usize {
     (v.clamp(0.0, 1.0) * (bins.saturating_sub(1)) as f32).round() as usize
 }
@@ -986,14 +1190,127 @@ mod tests {
     }
 
     #[test]
-    fn scopes_count_pixels_and_rgb_parade_channels() {
+    fn program_scopes_count_pixels_and_rgb_parade_channels() {
         let rgba = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 0, 0, 0, 255];
-        let scopes = compute_color_scopes(&rgba, 2, 2, WaveformMode::RgbParade, 16);
+        let scopes = compute_program_color_scopes_rgba8(
+            &rgba,
+            2,
+            2,
+            ColorSpace::Rec709,
+            WaveformMode::RgbParade,
+            16,
+        )
+        .expect("valid Rec.709 program signal");
+        assert_eq!(scopes.signal_color_space, ColorSpace::Rec709);
+        assert_eq!(scopes.sample_count, 4);
         assert_eq!(scopes.histogram.red.iter().sum::<u32>(), 4);
         assert_eq!(scopes.histogram.green.iter().sum::<u32>(), 4);
         assert_eq!(scopes.histogram.blue.iter().sum::<u32>(), 4);
         assert_eq!(scopes.histogram.luma.iter().sum::<u32>(), 4);
         assert_eq!(scopes.waveform.values.iter().sum::<u32>(), 12);
         assert!(!scopes.vectorscope.is_empty());
+    }
+
+    #[test]
+    fn program_scopes_use_output_primaries_for_luma() {
+        let red = [255, 0, 0, 255];
+        let rec709 = compute_program_color_scopes_rgba8(
+            &red,
+            1,
+            1,
+            ColorSpace::Rec709,
+            WaveformMode::Luma,
+            101,
+        )
+        .expect("Rec.709 scope");
+        let rec2020 = compute_program_color_scopes_rgba8(
+            &red,
+            1,
+            1,
+            ColorSpace::Rec2100Pq,
+            WaveformMode::Luma,
+            101,
+        )
+        .expect("Rec.2020/PQ scope");
+
+        assert_eq!(rec709.histogram.luma[21], 1);
+        assert_eq!(rec2020.histogram.luma[26], 1);
+        assert_ne!(rec709.histogram.luma, rec2020.histogram.luma);
+    }
+
+    #[test]
+    fn program_scopes_fail_closed_for_invalid_signal_contracts() {
+        let invalid_length = compute_program_color_scopes_rgba8(
+            &[0, 0, 0],
+            1,
+            1,
+            ColorSpace::Rec709,
+            WaveformMode::Luma,
+            64,
+        )
+        .expect_err("truncated RGBA must be rejected");
+        assert!(matches!(
+            invalid_length,
+            ProgramColorScopeError::Rgba8ByteLengthMismatch { expected: 4, actual: 3 }
+        ));
+        let invalid_float_length = compute_program_color_scopes_rgba_f32(
+            &[],
+            1,
+            1,
+            ColorSpace::Rec709,
+            WaveformMode::Luma,
+            64,
+        )
+        .expect_err("missing float pixel must be rejected");
+        assert_eq!(
+            invalid_float_length,
+            ProgramColorScopeError::FloatPixelLengthMismatch { expected: 1, actual: 0 }
+        );
+
+        let unsupported = compute_program_color_scopes_rgba8(
+            &[0, 0, 0, 255],
+            1,
+            1,
+            ColorSpace::SonySLog3SGamut3,
+            WaveformMode::Luma,
+            64,
+        )
+        .expect_err("camera-log source is not a program-output signal");
+        assert!(matches!(
+            unsupported,
+            ProgramColorScopeError::UnsupportedSignalColorSpace {
+                color_space: ColorSpace::SonySLog3SGamut3
+            }
+        ));
+    }
+
+    #[test]
+    fn float_program_scopes_preserve_hdr_precision_and_reject_non_finite_rgb() {
+        let pixels = [[0.501, 0.0, 0.0, 1.0], [0.509, 0.0, 0.0, 1.0]];
+        let scopes = compute_program_color_scopes_rgba_f32(
+            &pixels,
+            2,
+            1,
+            ColorSpace::Rec2100Pq,
+            WaveformMode::RgbParade,
+            1024,
+        )
+        .expect("finite PQ signal");
+        assert_eq!(scopes.histogram.red[513], 1);
+        assert_eq!(scopes.histogram.red[521], 1);
+
+        let invalid = compute_program_color_scopes_rgba_f32(
+            &[[0.0, f32::NAN, 0.0, 1.0]],
+            1,
+            1,
+            ColorSpace::Rec709,
+            WaveformMode::Luma,
+            64,
+        )
+        .expect_err("non-finite program signal must fail closed");
+        assert_eq!(
+            invalid,
+            ProgramColorScopeError::NonFiniteSample { pixel: 0, channel: 1 }
+        );
     }
 }
