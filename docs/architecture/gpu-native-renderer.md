@@ -358,6 +358,9 @@ proven calibration; `ViewerGpuExecutionRecord` returns the retained output plus
 stage, compositor, spatial, residency, and fallback evidence. Window and
 headless Adapters resolve the texture view from this same runtime, then perform
 their distinct registration or completion obligations themselves.
+When recording fails, the Window Adapter may unwrap a composite-graph error only
+to preserve the renderer's typed first-blocker telemetry; it must not reproduce
+graph scheduling or collapse effect-domain failures into a generic CPU fallback.
 
 GPU-resident media layers with log or display-encoded effect domains are
 preprocessed through the runtime-owned `OCIO -> point effect -> OCIO` route

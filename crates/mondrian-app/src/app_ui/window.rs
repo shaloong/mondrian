@@ -3353,7 +3353,9 @@ fn prepare_viewer_gpu_preview(
                             cpu_composited_pixels: u64::from(frame.width)
                                 .saturating_mul(u64::from(frame.height)),
                             first_blocker: match composite_error {
-                                mondrian_renderer::GpuCompositeError::Blocked { reason } => {
+                                mondrian_renderer::RenderGpuCompositeGraphRecordError::Composite(
+                                    mondrian_renderer::GpuCompositeError::Blocked { reason },
+                                ) => {
                                     Some(*reason)
                                 }
                                 _ => Some(
