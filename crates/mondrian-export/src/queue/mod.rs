@@ -29,9 +29,10 @@ use mondrian_renderer::{
     RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
     RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderInputTransform,
     RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
-    TimelineCompositeDiagnostics, TimelineCompositeElement, TimelineCompositeLegacyBreakdown,
-    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEvaluationRequest,
-    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
+    TimelineCompositeDiagnostics, TimelineCompositeDomainBlockerBreakdown,
+    TimelineCompositeElement, TimelineCompositeLegacyBreakdown, TimelineCompositeOptions,
+    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
+    TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::{
     ColorContext, DeliveryBitDepth, InputColorResolutionSourceCounts, ResolvedInputColor,
@@ -725,6 +726,10 @@ pub struct ExportJobColorDiagnosticsSummary {
     pub legacy_reason_total: u64,
     /// Structured legacy RGBA8 fallback reasons.
     pub legacy_breakdown: TimelineCompositeLegacyBreakdown,
+    /// Composite plans blocked on unresolved effect-domain semantics.
+    pub blocked_color_domain_composites: u64,
+    /// Structured unresolved effect-domain reasons.
+    pub domain_blockers: TimelineCompositeDomainBlockerBreakdown,
     /// Whether all diagnosed composites stayed in the float/linear path.
     pub fully_float_linear: bool,
     /// Whether native GPU color scheduling was free of upload/readback and blockers.
@@ -732,7 +737,7 @@ pub struct ExportJobColorDiagnosticsSummary {
 }
 
 /// Schema version for export color health reports.
-pub const EXPORT_COLOR_HEALTH_REPORT_SCHEMA_VERSION: u32 = 1;
+pub const EXPORT_COLOR_HEALTH_REPORT_SCHEMA_VERSION: u32 = 2;
 
 /// Versioned export color health report for UI, telemetry, perf, and job artifacts.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -893,6 +898,13 @@ impl ExportJobColorDiagnosticsSummary {
             ExportColorHealthArea::CompositePath,
             color_report_vocab::check::LEGACY_REASON_TOTAL,
             self.legacy_reason_total,
+            0,
+        );
+        push_export_max_check(
+            &mut checks,
+            ExportColorHealthArea::CompositePath,
+            color_report_vocab::check::EFFECT_DOMAIN_BLOCKERS,
+            self.domain_blockers.total().max(self.blocked_color_domain_composites),
             0,
         );
         push_export_max_check(
@@ -1129,7 +1141,7 @@ fn push_export_root_causes_and_actions(
             "Configure an export delivery view policy in project or sequence display management.",
         );
     }
-    if !summary.fully_float_linear || summary.legacy_reason_total > 0 {
+    if summary.legacy_rgba8_composites > 0 || summary.legacy_reason_total > 0 {
         push_export_root_cause_with_action(
             root_causes,
             actions,
@@ -1142,6 +1154,24 @@ fn push_export_root_causes_and_actions(
             ),
             color_report_vocab::action::MIGRATE_LEGACY_COMPOSITE_REASON,
             "Use structured legacy RGBA8 reasons to migrate export composites back to float/linear.",
+        );
+    }
+    if summary.blocked_color_domain_composites > 0 || !summary.domain_blockers.is_empty() {
+        push_export_root_cause_with_action(
+            root_causes,
+            actions,
+            ExportColorHealthArea::CompositePath,
+            color_report_vocab::root_cause::EFFECT_DOMAIN_UNRESOLVED,
+            ExportColorHealthSeverity::Fail,
+            format!(
+                "blocked_composites={} media={} solid={} adjustment={}",
+                summary.blocked_color_domain_composites,
+                summary.domain_blockers.media_effect,
+                summary.domain_blockers.solid_effect,
+                summary.domain_blockers.adjustment_effect
+            ),
+            color_report_vocab::action::RESOLVE_EFFECT_DOMAIN_TRANSITIONS,
+            "Resolve every effect-domain edge through the renderer OCIO planner; never run it as scene-linear or RGBA8.",
         );
     }
 }
@@ -1246,6 +1276,8 @@ impl ExportJobColorDiagnostics {
             legacy_rgba8_composites: composite.legacy_rgba8_composites,
             legacy_reason_total: composite.legacy_breakdown.total(),
             legacy_breakdown: composite.legacy_breakdown,
+            blocked_color_domain_composites: composite.blocked_composites,
+            domain_blockers: composite.domain_blockers,
             fully_float_linear: composite.is_fully_float_linear(),
             gpu_path_ready: {
                 if self.gpu_output_attempts == 0 && self.gpu_output_cpu_fallbacks == 0 {
@@ -3634,6 +3666,44 @@ mod tests {
             .any(|root| root.code == "export_gpu_color_stage_blocked"));
     }
 
+    #[test]
+    fn unresolved_effect_domain_is_a_distinct_fail_closed_export_failure() {
+        let mut diagnostics = ExportJobColorDiagnostics::default();
+        diagnostics.record_frame_diagnostics(
+            InputColorResolutionSourceCounts::default(),
+            RenderColorStageDiagnostics::default(),
+            TimelineCompositeDiagnostics {
+                elements: 1,
+                blocked_color_domain_composites: 1,
+                blocked_adjustment_effect_domain: 1,
+                ..TimelineCompositeDiagnostics::default()
+            },
+        );
+
+        let summary = diagnostics.summary().expect("export color health");
+        assert_eq!(summary.legacy_rgba8_composites, 0);
+        assert_eq!(summary.blocked_color_domain_composites, 1);
+        assert_eq!(summary.domain_blockers.adjustment_effect, 1);
+
+        let report = summary.health_report("effect-domain-blocker");
+        assert_eq!(report.verdict, ExportColorHealthVerdict::Fail);
+        assert!(report.checks.iter().any(|check| {
+            check.code == color_report_vocab::check::EFFECT_DOMAIN_BLOCKERS
+                && check.severity == ExportColorHealthSeverity::Fail
+                && check.observed == 1
+        }));
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| { root.code == color_report_vocab::root_cause::EFFECT_DOMAIN_UNRESOLVED }));
+        assert!(report.actions.iter().any(|action| {
+            action.code == color_report_vocab::action::RESOLVE_EFFECT_DOMAIN_TRANSITIONS
+        }));
+        assert!(!report.root_causes.iter().any(|root| {
+            root.code == color_report_vocab::root_cause::LEGACY_RGBA8_COMPOSITE_PATH
+        }));
+    }
+
     /// Exercise the real CPU fallback render branch with float-path failure
     /// injection.
     ///
@@ -4053,7 +4123,9 @@ mod tests {
             .root_causes
             .iter()
             .any(|root| root.code == "missing_export_color_evidence"));
-        assert!(report.root_causes.iter().any(|root| root.code == "legacy_rgba8_composite_path"));
+        assert!(!report.root_causes.iter().any(|root| {
+            root.code == color_report_vocab::root_cause::LEGACY_RGBA8_COMPOSITE_PATH
+        }));
     }
 
     #[test]
@@ -4837,7 +4909,8 @@ mod tests {
             )],
             mondrian_renderer::TimelineCompositeOptions::default(),
             &mut scratch,
-        );
+        )
+        .expect("composite export media effect");
 
         assert_eq!(output[0], output[1]);
         assert_eq!(output[1], output[2]);
@@ -4897,7 +4970,8 @@ mod tests {
             ],
             mondrian_renderer::TimelineCompositeOptions::default(),
             &mut scratch,
-        );
+        )
+        .expect("composite export adjustment stack");
 
         assert_eq!(&output[0..4], &[54, 54, 54, 255]);
         assert_eq!(&output[4..8], &[0, 255, 0, 255]);

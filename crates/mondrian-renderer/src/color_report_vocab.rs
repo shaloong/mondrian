@@ -24,6 +24,8 @@ pub mod check {
     pub const TRANSFER_STAGES: &str = "transfer_stages";
     /// Total structured legacy RGBA8 fallback reasons.
     pub const LEGACY_REASON_TOTAL: &str = "legacy_reason_total";
+    /// Composite plans blocked on unresolved effect-domain semantics.
+    pub const EFFECT_DOMAIN_BLOCKERS: &str = "effect_domain_blockers";
     /// Inputs rejected by missing-metadata policy.
     pub const POLICY_REJECTIONS: &str = "policy_rejections";
     /// Number of CPU output fallback frames.
@@ -39,6 +41,7 @@ pub const SHARED_CHECK_CODES: &[&str] = &[
     check::GPU_BLOCKERS,
     check::TRANSFER_STAGES,
     check::LEGACY_REASON_TOTAL,
+    check::EFFECT_DOMAIN_BLOCKERS,
     check::POLICY_REJECTIONS,
     check::CPU_OUTPUT_FALLBACK_FRAMES,
     check::GPU_OUTPUT_BLOCKERS,
@@ -58,6 +61,8 @@ pub mod root_cause {
     pub const TRANSFER_STAGE_PRESENT: &str = "transfer_stage_present";
     /// Composites fell back to legacy RGBA8 path.
     pub const LEGACY_RGBA8_COMPOSITE_PATH: &str = "legacy_rgba8_composite_path";
+    /// Effect-domain transitions are unresolved or invalid.
+    pub const EFFECT_DOMAIN_UNRESOLVED: &str = "effect_domain_unresolved";
     /// Missing-metadata policy rejected a media source.
     pub const INPUT_COLOR_POLICY_REJECTED_SOURCE: &str = "input_color_policy_rejected_source";
     /// Preview output boundary fell back to CPU RGBA8.
@@ -122,6 +127,8 @@ pub mod action {
     pub const REMOVE_TRANSFER_STAGE: &str = "remove_transfer_stage";
     /// Migrate legacy RGBA8 composite reasons back to float/linear.
     pub const MIGRATE_LEGACY_COMPOSITE_REASON: &str = "migrate_legacy_composite_reason";
+    /// Resolve effect-domain edges with the renderer's OCIO planner.
+    pub const RESOLVE_EFFECT_DOMAIN_TRANSITIONS: &str = "resolve_effect_domain_transitions";
     /// Investigate why CPU output fallback was used.
     pub const INVESTIGATE_CPU_FALLBACK: &str = "investigate_cpu_fallback";
     /// Prepare OCIO GPU resources (config, processor, shader extraction).
@@ -216,6 +223,7 @@ mod tests {
         assert_eq!(check::GPU_BLOCKERS, "gpu_blockers");
         assert_eq!(check::TRANSFER_STAGES, "transfer_stages");
         assert_eq!(check::LEGACY_REASON_TOTAL, "legacy_reason_total");
+        assert_eq!(check::EFFECT_DOMAIN_BLOCKERS, "effect_domain_blockers");
         assert_eq!(check::POLICY_REJECTIONS, "policy_rejections");
         assert_eq!(
             check::CPU_OUTPUT_FALLBACK_FRAMES,
@@ -312,6 +320,7 @@ mod tests {
     fn is_shared_check_code_works() {
         assert!(is_shared_check_code("fully_float_linear"));
         assert!(is_shared_check_code("gpu_blockers"));
+        assert!(is_shared_check_code("effect_domain_blockers"));
         assert!(is_shared_check_code("cpu_output_fallback_frames"));
         assert!(is_shared_check_code("gpu_output_blockers"));
         assert!(!is_shared_check_code("diagnosed_frames_present"));

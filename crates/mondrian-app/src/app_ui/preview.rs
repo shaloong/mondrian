@@ -46,9 +46,10 @@ use mondrian_renderer::{
     RenderColorStageGpuBlockerBreakdown, RenderColorTransformDiagnostics,
     RenderColorTransformDirection, RenderInputTransform, RenderOutputColorBoundary,
     TimelineAdjustmentLayer, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
-    TimelineCompositeElement, TimelineCompositeLegacyBreakdown, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineMediaLayer,
-    TimelineRenderPlanElement, TimelineSolidColorLayer,
+    TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement,
+    TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
+    TimelineSolidColorLayer,
 };
 #[cfg(test)]
 use mondrian_renderer::{
@@ -745,6 +746,19 @@ impl AppUiPreviewService {
             color_composite_legacy_adjustment_effect: self
                 .metrics
                 .color_composite_legacy_adjustment_effect
+                .get(),
+            color_composite_blocked_domains: self.metrics.color_composite_blocked_domains.get(),
+            color_composite_blocked_media_effect_domain: self
+                .metrics
+                .color_composite_blocked_media_effect_domain
+                .get(),
+            color_composite_blocked_solid_effect_domain: self
+                .metrics
+                .color_composite_blocked_solid_effect_domain
+                .get(),
+            color_composite_blocked_adjustment_effect_domain: self
+                .metrics
+                .color_composite_blocked_adjustment_effect_domain
                 .get(),
             cpu_output_fallback_frames: self.metrics.cpu_output_fallback_frames.get(),
             cpu_output_fallback_pixels: self.metrics.cpu_output_fallback_pixels.get(),
@@ -2057,6 +2071,22 @@ impl AppUiPreviewService {
             &self.metrics.color_composite_legacy_adjustment_effect,
             diagnostics.legacy_adjustment_effect,
         );
+        add_cell(
+            &self.metrics.color_composite_blocked_domains,
+            diagnostics.blocked_color_domain_composites,
+        );
+        add_cell(
+            &self.metrics.color_composite_blocked_media_effect_domain,
+            diagnostics.blocked_media_effect_domain,
+        );
+        add_cell(
+            &self.metrics.color_composite_blocked_solid_effect_domain,
+            diagnostics.blocked_solid_effect_domain,
+        );
+        add_cell(
+            &self.metrics.color_composite_blocked_adjustment_effect_domain,
+            diagnostics.blocked_adjustment_effect_domain,
+        );
     }
 
     pub(crate) fn record_cpu_output_fallback(&self, width: u32, height: u32) {
@@ -2843,6 +2873,14 @@ pub struct AppUiPreviewDiagnostics {
     pub color_composite_legacy_adjustment_blend_mode: u64,
     /// Legacy RGBA8 fallbacks caused by adjustment effect graphs.
     pub color_composite_legacy_adjustment_effect: u64,
+    /// Composite plans blocked on unresolved effect-domain semantics.
+    pub color_composite_blocked_domains: u64,
+    /// Media effects blocked on unresolved effect-domain semantics.
+    pub color_composite_blocked_media_effect_domain: u64,
+    /// Solid effects blocked on unresolved effect-domain semantics.
+    pub color_composite_blocked_solid_effect_domain: u64,
+    /// Adjustment effects blocked on unresolved effect-domain semantics.
+    pub color_composite_blocked_adjustment_effect_domain: u64,
     /// Number of raster preview frames that used CPU output transform fallback.
     pub cpu_output_fallback_frames: u64,
     /// Pixels processed through CPU output transform fallback.
@@ -2949,6 +2987,10 @@ pub struct AppUiPreviewColorHealthSummary {
     pub legacy_reason_total: u64,
     /// Structured legacy RGBA8 fallback reasons.
     pub legacy_breakdown: TimelineCompositeLegacyBreakdown,
+    /// Composite plans blocked on unresolved effect-domain semantics.
+    pub blocked_color_domain_composites: u64,
+    /// Structured unresolved effect-domain reasons.
+    pub domain_blockers: TimelineCompositeDomainBlockerBreakdown,
     /// Whether all diagnosed composites stayed in the float/linear path.
     pub fully_float_linear: bool,
     /// Whether native GPU color scheduling was free of upload/readback and blockers.
@@ -6237,7 +6279,7 @@ fn classify_preview_render_bottleneck(
 }
 
 /// Schema version for preview color health reports.
-pub const APP_UI_PREVIEW_COLOR_HEALTH_REPORT_SCHEMA_VERSION: u32 = 1;
+pub const APP_UI_PREVIEW_COLOR_HEALTH_REPORT_SCHEMA_VERSION: u32 = 2;
 
 /// Versioned preview color health report for UI, telemetry, and perf artifacts.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -6393,6 +6435,13 @@ pub fn build_preview_color_health_report(
         );
         push_preview_max_check(
             &mut checks,
+            AppUiPreviewColorHealthArea::CompositePath,
+            color_report_vocab::check::EFFECT_DOMAIN_BLOCKERS,
+            summary.domain_blockers.total().max(summary.blocked_color_domain_composites),
+            0,
+        );
+        push_preview_max_check(
+            &mut checks,
             AppUiPreviewColorHealthArea::InputColorPolicy,
             color_report_vocab::check::POLICY_REJECTIONS,
             summary.policy_rejections,
@@ -6543,7 +6592,7 @@ fn push_preview_root_causes_and_actions(
             "Trace why preview color work introduced upload/readback transfer stages.",
         );
     }
-    if !summary.fully_float_linear || summary.legacy_reason_total > 0 {
+    if summary.legacy_rgba8_composites > 0 || summary.legacy_reason_total > 0 {
         push_preview_root_cause_with_action(
             root_causes,
             actions,
@@ -6555,6 +6604,23 @@ fn push_preview_root_causes_and_actions(
             ),
             color_report_vocab::action::MIGRATE_LEGACY_COMPOSITE_REASON,
             "Use structured legacy RGBA8 reasons to migrate preview composites back to float/linear.",
+        );
+    }
+    if summary.blocked_color_domain_composites > 0 || !summary.domain_blockers.is_empty() {
+        push_preview_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewColorHealthArea::CompositePath,
+            color_report_vocab::root_cause::EFFECT_DOMAIN_UNRESOLVED,
+            format!(
+                "blocked_composites={} media={} solid={} adjustment={}",
+                summary.blocked_color_domain_composites,
+                summary.domain_blockers.media_effect,
+                summary.domain_blockers.solid_effect,
+                summary.domain_blockers.adjustment_effect
+            ),
+            color_report_vocab::action::RESOLVE_EFFECT_DOMAIN_TRANSITIONS,
+            "Resolve every effect-domain edge through the renderer OCIO planner; never run it as scene-linear or RGBA8.",
         );
     }
     if summary.gpu_compositing.cpu_fallback_composites > 0 {
@@ -6831,6 +6897,10 @@ impl AppUiPreviewDiagnostics {
             legacy_solid_effect: self.color_composite_legacy_solid_effect,
             legacy_adjustment_blend_mode: self.color_composite_legacy_adjustment_blend_mode,
             legacy_adjustment_effect: self.color_composite_legacy_adjustment_effect,
+            blocked_color_domain_composites: self.color_composite_blocked_domains,
+            blocked_media_effect_domain: self.color_composite_blocked_media_effect_domain,
+            blocked_solid_effect_domain: self.color_composite_blocked_solid_effect_domain,
+            blocked_adjustment_effect_domain: self.color_composite_blocked_adjustment_effect_domain,
             ..TimelineCompositeDiagnostics::default()
         }
         .color_path_summary()
@@ -6894,6 +6964,8 @@ impl AppUiPreviewDiagnostics {
             legacy_rgba8_composites: composite.legacy_rgba8_composites,
             legacy_reason_total: composite.legacy_breakdown.total(),
             legacy_breakdown: composite.legacy_breakdown,
+            blocked_color_domain_composites: composite.blocked_composites,
+            domain_blockers: composite.domain_blockers,
             fully_float_linear: composite.is_fully_float_linear()
                 && self.color_composite_plans == composite.composite_plans(),
             gpu_path_ready: stages.gpu_blockers == 0
@@ -8462,6 +8534,10 @@ struct AppUiPreviewMetrics {
     color_composite_legacy_solid_effect: Cell<u64>,
     color_composite_legacy_adjustment_blend_mode: Cell<u64>,
     color_composite_legacy_adjustment_effect: Cell<u64>,
+    color_composite_blocked_domains: Cell<u64>,
+    color_composite_blocked_media_effect_domain: Cell<u64>,
+    color_composite_blocked_solid_effect_domain: Cell<u64>,
+    color_composite_blocked_adjustment_effect_domain: Cell<u64>,
     cpu_output_fallback_frames: Cell<u64>,
     cpu_output_fallback_pixels: Cell<u64>,
     preview_gpu_output_blocker_frames: Cell<u64>,
@@ -13945,8 +14021,49 @@ mod tests {
         );
         assert_eq!(preview.legacy_reason_total, export.legacy_reason_total);
         assert_eq!(preview.legacy_breakdown, export.legacy_breakdown);
+        assert_eq!(
+            preview.blocked_color_domain_composites,
+            export.blocked_color_domain_composites
+        );
+        assert_eq!(preview.domain_blockers, export.domain_blockers);
         assert_eq!(preview.fully_float_linear, export.fully_float_linear);
         assert_eq!(preview.gpu_path_ready, export.gpu_path_ready);
+    }
+
+    #[test]
+    fn unresolved_effect_domain_is_a_distinct_fail_closed_preview_failure() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            color_composite_plans: 1,
+            color_composite_elements: 1,
+            color_composite_blocked_domains: 1,
+            color_composite_blocked_media_effect_domain: 1,
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let composite = diagnostics.composite_color_path_summary();
+        assert_eq!(composite.path, TimelineCompositeColorPath::Blocked);
+        assert_eq!(composite.legacy_rgba8_composites, 0);
+        assert_eq!(composite.blocked_composites, 1);
+        assert_eq!(composite.domain_blockers.media_effect, 1);
+
+        let summary = diagnostics.color_health_summary().expect("preview color health");
+        let report = summary.health_report("effect-domain-blocker");
+        assert_eq!(report.verdict, AppUiPreviewColorHealthVerdict::Fail);
+        assert!(report.checks.iter().any(|check| {
+            check.code == color_report_vocab::check::EFFECT_DOMAIN_BLOCKERS
+                && check.severity == AppUiPreviewColorHealthSeverity::Fail
+                && check.observed == 1
+        }));
+        assert!(report
+            .root_causes
+            .iter()
+            .any(|root| { root.code == color_report_vocab::root_cause::EFFECT_DOMAIN_UNRESOLVED }));
+        assert!(report.actions.iter().any(|action| {
+            action.code == color_report_vocab::action::RESOLVE_EFFECT_DOMAIN_TRANSITIONS
+        }));
+        assert!(!report.root_causes.iter().any(|root| {
+            root.code == color_report_vocab::root_cause::LEGACY_RGBA8_COMPOSITE_PATH
+        }));
     }
 
     fn assert_preview_export_color_reports_match(

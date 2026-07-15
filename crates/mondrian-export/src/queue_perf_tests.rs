@@ -419,7 +419,10 @@ fn export_perf_sim_report_includes_color_report() {
     )
     .expect("export perf report");
 
-    assert_eq!(report.color_report.schema_version, 1);
+    assert_eq!(
+        report.color_report.schema_version,
+        super::EXPORT_COLOR_HEALTH_REPORT_SCHEMA_VERSION
+    );
     assert_eq!(report.color_report.profile, "export-color-health-test");
     assert_eq!(report.color_report.verdict, ExportColorHealthVerdict::Pass);
     assert_eq!(report.color_report.summary.diagnosed_frames, 3);
@@ -443,7 +446,10 @@ fn export_perf_sim_report_includes_color_report() {
     assert!(report_json.get("color_health_passed").is_none());
     assert!(report_json.get("color_health_budget").is_none());
     assert!(report_json.get("color_health_failures").is_none());
-    assert_eq!(report_json["color_report"]["schema_version"], 1);
+    assert_eq!(
+        report_json["color_report"]["schema_version"],
+        serde_json::Value::from(super::EXPORT_COLOR_HEALTH_REPORT_SCHEMA_VERSION)
+    );
     assert_eq!(report_json["color_report"]["verdict"], "Pass");
     assert_eq!(
         report_json["color_report"]["summary"]["gpu_blocker_breakdown"]
