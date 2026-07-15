@@ -14,6 +14,7 @@ const VECTOR_GRID: u32 = 64;
 const HISTOGRAM_HEIGHT: u32 = 128;
 const VECTOR_TEXTURE_SIZE: u32 = 256;
 const WORKGROUP_SIZE: u32 = 16;
+const PIXELS_PER_INVOCATION: u32 = 4;
 const DISPLAY_WORKGROUP_SIZE: u32 = 8;
 
 /// Bounded configuration for one GPU Program Output scope request.
@@ -259,7 +260,7 @@ impl GpuProgramScopesRuntime {
             pass.set_pipeline(&pipelines.aggregate_pipeline);
             pass.set_bind_group(0, &aggregate_bind_group, &[]);
             pass.dispatch_workgroups(
-                input_width.div_ceil(WORKGROUP_SIZE),
+                input_width.div_ceil(WORKGROUP_SIZE * PIXELS_PER_INVOCATION),
                 input_height.div_ceil(WORKGROUP_SIZE),
                 1,
             );
@@ -578,57 +579,120 @@ struct Uniforms {
 @group(0) @binding(2) var<uniform> uniforms: Uniforms;
 
 fn signal_bin(value: f32) -> u32 {
-    return min(u32(clamp(value, 0.0, 1.0) * f32(uniforms.bins)), uniforms.bins - 1u);
+    return u32(floor(clamp(value, 0.0, 1.0) * f32(uniforms.bins - 1u) + 0.5));
 }
 
-fn observe_excursion(value: f32, low_offset: u32, high_offset: u32) {
-    if value < 0.0 {
-        atomicAdd(&counts[low_offset], 1u);
-    } else if value > 1.0 {
-        atomicAdd(&counts[high_offset], 1u);
+const INVALID_KEY: u32 = 0xffffffffu;
+
+fn add_grouped(keys: array<u32, 4>) {
+    for (var i = 0u; i < 4u; i += 1u) {
+        let key = keys[i];
+        if key == INVALID_KEY {
+            continue;
+        }
+        var is_first = true;
+        for (var previous = 0u; previous < i; previous += 1u) {
+            if keys[previous] == key {
+                is_first = false;
+            }
+        }
+        if !is_first {
+            continue;
+        }
+        var occurrences = 1u;
+        for (var following = i + 1u; following < 4u; following += 1u) {
+            if keys[following] == key {
+                occurrences += 1u;
+            }
+        }
+        atomicAdd(&counts[key], occurrences);
     }
 }
 
 @compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= uniforms.input_width || gid.y >= uniforms.input_height {
+    let first_x = gid.x * 4u;
+    if first_x >= uniforms.input_width || gid.y >= uniforms.input_height {
         return;
     }
-    let rgb = textureLoad(source, vec2<i32>(gid.xy), 0).rgb;
-    if any(rgb != rgb) {
-        return;
+    var red_histogram: array<u32, 4>;
+    var green_histogram: array<u32, 4>;
+    var blue_histogram: array<u32, 4>;
+    var luma_histogram: array<u32, 4>;
+    var waveform_red_or_luma: array<u32, 4>;
+    var waveform_green: array<u32, 4>;
+    var waveform_blue: array<u32, 4>;
+    var vectorscope: array<u32, 4>;
+    var red_excursion: array<u32, 4>;
+    var green_excursion: array<u32, 4>;
+    var blue_excursion: array<u32, 4>;
+    var luma_excursion: array<u32, 4>;
+    for (var i = 0u; i < 4u; i += 1u) {
+        red_histogram[i] = INVALID_KEY;
+        green_histogram[i] = INVALID_KEY;
+        blue_histogram[i] = INVALID_KEY;
+        luma_histogram[i] = INVALID_KEY;
+        waveform_red_or_luma[i] = INVALID_KEY;
+        waveform_green[i] = INVALID_KEY;
+        waveform_blue[i] = INVALID_KEY;
+        vectorscope[i] = INVALID_KEY;
+        red_excursion[i] = INVALID_KEY;
+        green_excursion[i] = INVALID_KEY;
+        blue_excursion[i] = INVALID_KEY;
+        luma_excursion[i] = INVALID_KEY;
     }
-    let kg = 1.0 - uniforms.kr - uniforms.kb;
-    let y = uniforms.kr * rgb.r + kg * rgb.g + uniforms.kb * rgb.b;
-    observe_excursion(rgb.r, 0u, 1u);
-    observe_excursion(rgb.g, 2u, 3u);
-    observe_excursion(rgb.b, 4u, 5u);
-    observe_excursion(y, 6u, 7u);
-
-    let rb = signal_bin(rgb.r);
-    let gb = signal_bin(rgb.g);
-    let bb = signal_bin(rgb.b);
-    let yb = signal_bin(y);
-    atomicAdd(&counts[uniforms.histogram_offset + rb], 1u);
-    atomicAdd(&counts[uniforms.histogram_offset + uniforms.bins + gb], 1u);
-    atomicAdd(&counts[uniforms.histogram_offset + 2u * uniforms.bins + bb], 1u);
-    atomicAdd(&counts[uniforms.histogram_offset + 3u * uniforms.bins + yb], 1u);
-
-    let wx = min(gid.x * uniforms.waveform_width / uniforms.input_width, uniforms.waveform_width - 1u);
     let plane = uniforms.waveform_width * uniforms.bins;
-    if uniforms.waveform_channels == 1u {
-        atomicAdd(&counts[uniforms.waveform_offset + wx * uniforms.bins + yb], 1u);
-    } else {
-        atomicAdd(&counts[uniforms.waveform_offset + wx * uniforms.bins + rb], 1u);
-        atomicAdd(&counts[uniforms.waveform_offset + plane + wx * uniforms.bins + gb], 1u);
-        atomicAdd(&counts[uniforms.waveform_offset + 2u * plane + wx * uniforms.bins + bb], 1u);
-    }
+    for (var i = 0u; i < 4u; i += 1u) {
+        let x = first_x + i;
+        if x >= uniforms.input_width {
+            continue;
+        }
+        let rgb = textureLoad(source, vec2<i32>(i32(x), i32(gid.y)), 0).rgb;
+        if any(rgb != rgb) {
+            continue;
+        }
+        let kg = 1.0 - uniforms.kr - uniforms.kb;
+        let y = uniforms.kr * rgb.r + kg * rgb.g + uniforms.kb * rgb.b;
+        let rb = signal_bin(rgb.r);
+        let gb = signal_bin(rgb.g);
+        let bb = signal_bin(rgb.b);
+        let yb = signal_bin(y);
+        red_histogram[i] = uniforms.histogram_offset + rb;
+        green_histogram[i] = uniforms.histogram_offset + uniforms.bins + gb;
+        blue_histogram[i] = uniforms.histogram_offset + 2u * uniforms.bins + bb;
+        luma_histogram[i] = uniforms.histogram_offset + 3u * uniforms.bins + yb;
 
-    let u = (rgb.b - y) / (2.0 * (1.0 - uniforms.kb));
-    let v = (rgb.r - y) / (2.0 * (1.0 - uniforms.kr));
-    let ux = min(u32(clamp(u + 0.5, 0.0, 0.999999) * 64.0), 63u);
-    let vy = min(u32(clamp(v + 0.5, 0.0, 0.999999) * 64.0), 63u);
-    atomicAdd(&counts[uniforms.vectorscope_offset + vy * 64u + ux], 1u);
+        let wx = min(x * uniforms.waveform_width / uniforms.input_width, uniforms.waveform_width - 1u);
+        waveform_red_or_luma[i] = uniforms.waveform_offset + wx * uniforms.bins + select(yb, rb, uniforms.waveform_channels != 1u);
+        if uniforms.waveform_channels != 1u {
+            waveform_green[i] = uniforms.waveform_offset + plane + wx * uniforms.bins + gb;
+            waveform_blue[i] = uniforms.waveform_offset + 2u * plane + wx * uniforms.bins + bb;
+        }
+
+        let clamped_y = clamp(y, 0.0, 1.0);
+        let u = (rgb.b - clamped_y) / (2.0 * (1.0 - uniforms.kb));
+        let v = (rgb.r - clamped_y) / (2.0 * (1.0 - uniforms.kr));
+        let ux = min(u32(clamp(u + 0.5, 0.0, 0.999) * 64.0), 63u);
+        let vy = min(u32(clamp(v + 0.5, 0.0, 0.999) * 64.0), 63u);
+        vectorscope[i] = uniforms.vectorscope_offset + vy * 64u + ux;
+
+        red_excursion[i] = select(INVALID_KEY, select(1u, 0u, rgb.r < 0.0), rgb.r < 0.0 || rgb.r > 1.0);
+        green_excursion[i] = select(INVALID_KEY, select(3u, 2u, rgb.g < 0.0), rgb.g < 0.0 || rgb.g > 1.0);
+        blue_excursion[i] = select(INVALID_KEY, select(5u, 4u, rgb.b < 0.0), rgb.b < 0.0 || rgb.b > 1.0);
+        luma_excursion[i] = select(INVALID_KEY, select(7u, 6u, y < 0.0), y < 0.0 || y > 1.0);
+    }
+    add_grouped(red_histogram);
+    add_grouped(green_histogram);
+    add_grouped(blue_histogram);
+    add_grouped(luma_histogram);
+    add_grouped(waveform_red_or_luma);
+    add_grouped(waveform_green);
+    add_grouped(waveform_blue);
+    add_grouped(vectorscope);
+    add_grouped(red_excursion);
+    add_grouped(green_excursion);
+    add_grouped(blue_excursion);
+    add_grouped(luma_excursion);
 }
 "#;
 
@@ -698,7 +762,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 mod tests {
     use super::*;
     use crate::GpuContext;
-    use mondrian_core::compute_program_color_scopes_rgba8;
+    use mondrian_core::{
+        compute_program_color_scopes_rgba8, compute_program_color_scopes_rgba_f32,
+    };
 
     #[test]
     fn buffer_layout_is_compact_and_non_overlapping() {
@@ -859,6 +925,135 @@ mod tests {
         assert_eq!(runtime.diagnostics().buffer_allocations, 1);
         assert_eq!(runtime.diagnostics().texture_allocations, 3);
         assert_eq!(runtime.diagnostics().frames_recorded, 2);
+    }
+
+    #[tokio::test]
+    async fn grouped_gpu_counts_preserve_float_excursions_vectors_and_tail_pixels() {
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping GPU scopes test: no adapter available");
+            return;
+        };
+        let pixels = [
+            [-0.25, 0.20, 0.30, 1.0],
+            [1.25, 0.40, 0.50, 1.0],
+            [0.60, -0.10, 0.70, 1.0],
+            [0.80, 1.40, -0.20, 1.0],
+            [0.10, 0.20, 1.30, 1.0],
+        ];
+        let input = context.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("program-scopes-grouped-float-input"),
+            size: wgpu::Extent3d { width: 5, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        context.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &input,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&pixels),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(5 * 16),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d { width: 5, height: 1, depth_or_array_layers: 1 },
+        );
+        let input_view = input.create_view(&wgpu::TextureViewDescriptor::default());
+        let request =
+            GpuProgramScopesRequest::new(ColorSpace::Rec709, WaveformMode::RgbParade, 16, 64)
+                .expect("scope request");
+        let mut runtime = GpuProgramScopesRuntime::default();
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("program-scopes-grouped-float-encoder"),
+        });
+        let record = runtime
+            .record(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                &input_view,
+                5,
+                1,
+                request,
+            )
+            .expect("GPU float scopes record");
+        let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("program-scopes-grouped-float-readback"),
+            size: record.buffer_layout.byte_size(),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_buffer_to_buffer(
+            record.counts(),
+            0,
+            &readback,
+            0,
+            record.buffer_layout.byte_size(),
+        );
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let bytes = map_test_readback(&context.device, &readback);
+        let actual = bytemuck::cast_slice::<u8, u32>(&bytes);
+        let cpu = compute_program_color_scopes_rgba_f32(
+            &pixels,
+            5,
+            1,
+            ColorSpace::Rec709,
+            WaveformMode::RgbParade,
+            16,
+        )
+        .expect("CPU float scopes reference");
+
+        assert_eq!(
+            &actual[..8],
+            &[
+                cpu.excursions.red.below_nominal as u32,
+                cpu.excursions.red.above_nominal as u32,
+                cpu.excursions.green.below_nominal as u32,
+                cpu.excursions.green.above_nominal as u32,
+                cpu.excursions.blue.below_nominal as u32,
+                cpu.excursions.blue.above_nominal as u32,
+                cpu.excursions.luma.below_nominal as u32,
+                cpu.excursions.luma.above_nominal as u32,
+            ]
+        );
+        let histogram = record.buffer_layout.histogram_offset as usize;
+        assert_eq!(
+            &actual[histogram..histogram + 16],
+            cpu.histogram.red.as_slice()
+        );
+        assert_eq!(
+            &actual[histogram + 16..histogram + 32],
+            cpu.histogram.green.as_slice()
+        );
+        assert_eq!(
+            &actual[histogram + 32..histogram + 48],
+            cpu.histogram.blue.as_slice()
+        );
+        assert_eq!(
+            &actual[histogram + 48..histogram + 64],
+            cpu.histogram.luma.as_slice()
+        );
+        let waveform = record.buffer_layout.waveform_offset as usize;
+        let vectorscope = record.buffer_layout.vectorscope_offset as usize;
+        assert_eq!(
+            actual[waveform..vectorscope].iter().copied().sum::<u32>(),
+            15
+        );
+        let mut expected_vectorscope = vec![0u32; 64 * 64];
+        for sample in cpu.vectorscope {
+            let x = ((sample.u + 0.5) * 64.0).floor() as usize;
+            let y = ((sample.v + 0.5) * 64.0).floor() as usize;
+            expected_vectorscope[y * 64 + x] = sample.weight;
+        }
+        assert_eq!(&actual[vectorscope..], expected_vectorscope.as_slice());
+        assert_eq!(actual[vectorscope..].iter().copied().sum::<u32>(), 5);
     }
 
     fn map_test_readback(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<u8> {

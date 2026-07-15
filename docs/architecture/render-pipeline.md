@@ -756,6 +756,17 @@ User scrub/play
   → refresh newly published external Viewer frame and paint
 ```
 
+The exact scopes aggregation groups four horizontally adjacent samples per
+shader invocation and coalesces equal destination counters before the global
+atomic write. Every pixel, tail pixel, excursion, histogram bin, waveform
+sample, and vectorscope sample remains counted; flat or locally coherent image
+regions avoid the worst global-atomic contention. The ignored
+`program_scopes_gpu_perf` gate records two warmups and eight 4K samples with
+hardware timestamps. It requires pooled pipelines/count storage/display
+textures, GPU p95 <= 5 ms, and CPU command-recording p95 <= 0.5 ms by default.
+Timestamp mapping and its CPU completion wait exist only in the test harness,
+outside the production recording path.
+
 The native `working_input` is a GPU-composited working texture. CPU fallback is
 the separately diagnosed raster preview path; it is not a second interpretation
 of this native stage graph.
