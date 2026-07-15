@@ -4006,6 +4006,88 @@ pub fn execute_cpu_output_boundary_float(
     })
 }
 
+/// CPU fallback result retaining Program Output before preview-only adaptation.
+#[derive(Debug)]
+pub struct RenderProgramMonitorBoundaryRgba8 {
+    /// Exact float Program Output shared with export/scopes semantics.
+    pub program_output: RenderOutputColorBoundaryFloat,
+    /// Optional diagnostics for a non-identity monitor adaptation.
+    pub monitor_color_diagnostics: Option<crate::RenderColorTransformDiagnostics>,
+    /// Aggregate Program Output plus monitor-adaptation stage diagnostics.
+    pub stage_diagnostics: RenderColorStageDiagnostics,
+    /// Final monitor/surface encoded RGBA8 presentation pixels.
+    pub rgba: Vec<u8>,
+    /// Descriptor of the final RGBA8 presentation boundary.
+    pub output_descriptor: ColorFrameDescriptor,
+}
+
+/// Execute CPU fallback as Program Output followed by preview-only monitor
+/// adaptation, quantizing only after both OCIO float stages are complete.
+pub fn execute_cpu_program_monitor_boundary_rgba8(
+    frame: &CpuColorFrame,
+    program_boundary: &RenderOutputColorBoundary,
+    adaptation: &crate::RenderMonitorAdaptation,
+) -> Result<RenderProgramMonitorBoundaryRgba8, RenderColorTransformError> {
+    if program_boundary.output_color_space != adaptation.program_output_color_space() {
+        let input = frame.descriptor();
+        return Err(RenderColorTransformError::ExecutionFailed {
+            direction: crate::RenderColorTransformDirection::Intermediate,
+            input,
+            output: ColorFrameDescriptor {
+                width: input.width,
+                height: input.height,
+                color_space: adaptation.monitor_color_space().into(),
+                domain: ColorFrameDomain::Display,
+                encoding: ColorFrameEncoding::EncodedRgba8,
+                residency: ColorFrameResidency::Cpu,
+            },
+            reason: format!(
+                "Program Output {:?} does not match monitor adaptation input {:?}",
+                program_boundary.output_color_space,
+                adaptation.program_output_color_space()
+            ),
+        });
+    }
+
+    let program_output = execute_cpu_output_boundary_float(frame, program_boundary)?;
+    let mut stage_diagnostics = program_output.stage_diagnostics;
+    let (monitor_frame, monitor_color_diagnostics) = if adaptation.requires_pass() {
+        let result = crate::CpuColorTransformExecutor::monitor_adaptation_float(
+            &program_output.frame,
+            adaptation,
+        )?;
+        stage_diagnostics.accumulate(RenderColorStageDiagnostics {
+            total_stages: 1,
+            cpu_output_stages: 1,
+            stage_pixels: result.diagnostics.pixel_count as u64,
+            ..RenderColorStageDiagnostics::default()
+        });
+        (result.frame, Some(result.diagnostics))
+    } else {
+        (program_output.frame.clone(), None)
+    };
+    let rgba = monitor_frame
+        .rgba_f32()
+        .data
+        .iter()
+        .flat_map(|pixel| {
+            pixel.iter().map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8)
+        })
+        .collect();
+    let descriptor = monitor_frame.descriptor();
+    let output_descriptor = ColorFrameDescriptor {
+        encoding: ColorFrameEncoding::EncodedRgba8,
+        ..descriptor
+    };
+    Ok(RenderProgramMonitorBoundaryRgba8 {
+        program_output,
+        monitor_color_diagnostics,
+        stage_diagnostics,
+        rgba,
+        output_descriptor,
+    })
+}
+
 impl<'a> RenderColorStagePlanner<'a> {
     /// Create a planner that always schedules CPU color transforms.
     pub fn cpu_only() -> Self {
@@ -7657,6 +7739,52 @@ mod tests {
         assert_eq!(scopes.sample_count, 8);
         assert_eq!(scopes.histogram.red.iter().sum::<u32>(), 8);
         assert_eq!(scopes.waveform.values.iter().sum::<u32>(), 24);
+    }
+
+    #[test]
+    fn cpu_program_monitor_boundary_quantizes_only_after_monitor_adaptation() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let adaptation = crate::RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::Srgb,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("SDR monitor adaptation");
+
+        let result = execute_cpu_program_monitor_boundary_rgba8(&frame, &boundary, &adaptation)
+            .expect("CPU Program Output plus monitor adaptation");
+
+        assert_eq!(
+            result.program_output.output_descriptor.color_space,
+            ColorSpace::Rec709.into()
+        );
+        assert_eq!(
+            result.program_output.output_descriptor.encoding,
+            ColorFrameEncoding::EncodedFloat
+        );
+        assert_eq!(
+            result.output_descriptor.color_space,
+            ColorSpace::Srgb.into()
+        );
+        assert_eq!(
+            result.output_descriptor.encoding,
+            ColorFrameEncoding::EncodedRgba8
+        );
+        assert_eq!(result.rgba.len(), 8 * 4);
+        let monitor = result.monitor_color_diagnostics.expect("monitor pass diagnostics");
+        assert_eq!(
+            monitor.direction,
+            crate::RenderColorTransformDirection::Intermediate
+        );
+        assert!(!monitor.used_rgba8_boundary);
+        assert_eq!(result.stage_diagnostics.cpu_output_stages, 2);
+        assert_eq!(result.stage_diagnostics.stage_pixels, 16);
     }
 
     #[test]

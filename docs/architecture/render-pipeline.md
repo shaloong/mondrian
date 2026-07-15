@@ -766,8 +766,13 @@ structurally comparable without adding a render pass.
 ### CPU Fallback Path
 
 When the window GPU output path cannot execute, the viewer falls back to the
-raster preview path (`composite_resolved_preview`), which uses
-`execute_cpu_output_boundary_rgba8()` as the explicit CPU presentation path.
+raster preview path (`composite_resolved_preview`). It resolves the same root
+Program Output context as the GPU Viewer, executes
+`execute_cpu_program_monitor_boundary_rgba8()`, retains the encoded-float
+Program Output, applies a second stock-OCIO encoded-float adaptation to the
+sRGB UI atlas, and quantizes only after both transforms. The fallback therefore
+cannot replace the program View with the atlas identity or insert an
+intermediate RGBA8 round-trip.
 GPU-output failures are recorded at the window boundary:
 
 - `cpu_output_fallback_frames` — Number of frames using CPU fallback.

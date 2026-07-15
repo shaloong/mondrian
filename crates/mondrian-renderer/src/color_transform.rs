@@ -787,6 +787,94 @@ impl CpuColorTransformExecutor {
 
         Ok(RenderOutputTransformFloatResult { frame: out_frame, diagnostics })
     }
+
+    /// Apply a preview-only Program Output to monitor colorimetric transform on
+    /// encoded float data without introducing an RGBA8 boundary.
+    pub fn monitor_adaptation_float(
+        frame: &CpuEncodedFloatColorFrame,
+        adaptation: &RenderMonitorAdaptation,
+    ) -> Result<RenderOutputTransformFloatResult, RenderColorTransformError> {
+        let descriptor = frame.descriptor();
+        let output_descriptor = ColorFrameDescriptor {
+            width: descriptor.width,
+            height: descriptor.height,
+            color_space: adaptation.monitor_color_space.into(),
+            domain: ColorFrameDomain::Display,
+            encoding: ColorFrameEncoding::EncodedFloat,
+            residency: ColorFrameResidency::Cpu,
+        };
+        if !matches!(
+            descriptor.domain,
+            ColorFrameDomain::Display | ColorFrameDomain::Export
+        ) {
+            return Err(RenderColorTransformError::UnsupportedInputDomain {
+                domain: descriptor.domain,
+            });
+        }
+        if descriptor.encoding != ColorFrameEncoding::EncodedFloat {
+            return Err(RenderColorTransformError::ExecutionFailed {
+                direction: RenderColorTransformDirection::Intermediate,
+                input: descriptor,
+                output: output_descriptor,
+                reason: "CPU monitor adaptation requires encoded-float input".to_owned(),
+            });
+        }
+        let source = descriptor.color_space.color().ok_or_else(|| {
+            RenderColorTransformError::ExecutionFailed {
+                direction: RenderColorTransformDirection::Intermediate,
+                input: descriptor,
+                output: output_descriptor,
+                reason: "CPU monitor adaptation input has no encoded color identity".to_owned(),
+            }
+        })?;
+        if source != adaptation.program_output_color_space {
+            return Err(RenderColorTransformError::ExecutionFailed {
+                direction: RenderColorTransformDirection::Intermediate,
+                input: descriptor,
+                output: output_descriptor,
+                reason: format!(
+                    "Program Output {source:?} does not match monitor adaptation input {:?}",
+                    adaptation.program_output_color_space
+                ),
+            });
+        }
+
+        let mut flat = flatten_rgba_f32_pixels(&frame.rgba_f32().data);
+        adaptation
+            .engine
+            .convert_identity_float(
+                &mut flat,
+                OcioColorSpaceIdentity::Color(source),
+                OcioColorSpaceIdentity::Color(adaptation.monitor_color_space),
+            )
+            .map_err(|reason| RenderColorTransformError::ExecutionFailed {
+                direction: RenderColorTransformDirection::Intermediate,
+                input: descriptor,
+                output: output_descriptor,
+                reason,
+            })?;
+        let pixels = flat.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
+        let frame = CpuEncodedFloatColorFrame::new(
+            EncodedRgbaF32Frame {
+                width: descriptor.width,
+                height: descriptor.height,
+                data: pixels,
+                color_space: adaptation.monitor_color_space,
+            },
+            ColorFrameDomain::Display,
+        );
+        Ok(RenderOutputTransformFloatResult {
+            frame,
+            diagnostics: RenderColorTransformDiagnostics {
+                backend: RenderColorTransformBackend::CpuOcioFloat,
+                direction: RenderColorTransformDirection::Intermediate,
+                input: descriptor,
+                output: output_descriptor,
+                pixel_count: descriptor.pixel_count(),
+                used_rgba8_boundary: false,
+            },
+        })
+    }
 }
 
 fn flatten_rgba_f32_pixels(pixels: &[[f32; 4]]) -> Vec<f32> {
@@ -1484,6 +1572,46 @@ mod tests {
                 color_space: ColorSpace::LinearRec2020,
             }
         );
+    }
+
+    #[test]
+    fn cpu_monitor_adaptation_converts_encoded_float_without_rgba8_boundary() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let frame = CpuEncodedFloatColorFrame::new(
+            EncodedRgbaF32Frame {
+                width: 2,
+                height: 1,
+                data: vec![[0.1, 0.2, 0.3, 1.0], [0.8, 0.6, 0.4, 0.5]],
+                color_space: ColorSpace::Rec709,
+            },
+            ColorFrameDomain::Display,
+        );
+        let adaptation = RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::Srgb,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("SDR monitor adaptation");
+
+        let result = CpuColorTransformExecutor::monitor_adaptation_float(&frame, &adaptation)
+            .expect("CPU monitor adaptation");
+
+        assert_eq!(
+            result.diagnostics.direction,
+            RenderColorTransformDirection::Intermediate
+        );
+        assert_eq!(result.diagnostics.input, frame.descriptor());
+        assert_eq!(
+            result.diagnostics.output.color_space,
+            ColorFrameSpace::Color(ColorSpace::Srgb)
+        );
+        assert_eq!(result.diagnostics.output.domain, ColorFrameDomain::Display);
+        assert_eq!(
+            result.diagnostics.output.encoding,
+            ColorFrameEncoding::EncodedFloat
+        );
+        assert!(!result.diagnostics.used_rgba8_boundary);
+        assert_eq!(result.frame.rgba_f32().data[1][3], 0.5);
     }
 
     #[test]

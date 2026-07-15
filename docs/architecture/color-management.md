@@ -912,11 +912,14 @@ Output context from the sequence output color space. Preview, scopes, and export
 must consume this semantic boundary before any local monitor adaptation. The
 export delivery view is resolved from
 the effective `ExportDeliveryViewPolicy` in `display_management` (inherited from
-project or overridden by sequence). The native GPU Viewer now resolves this
-Program Output context first. `SequenceSettings::root_preview_color_context(...)`
-remains only at diagnosed CPU/UI raster compatibility seams while those paths
-are moved to the same two-boundary contract; it must not be used by the native
-Viewer GPU scheduler.
+project or overridden by sequence). The native GPU Viewer resolves this Program
+Output context first. The CPU raster fallback does the same through
+`execute_cpu_program_monitor_boundary_rgba8()`: it retains float Program Output,
+adapts to the sRGB UI atlas with a second stock-OCIO processor, and quantizes
+only at the atlas boundary. `SequenceSettings::root_preview_color_context(...)`
+remains only in analysis/test utilities that explicitly inspect a requested
+preview target; production Viewer scheduling does not use it as a substitute
+for Program Output.
 
 `RenderMonitorAdaptation` is the renderer-owned preview-only contract from the
 encoded Program Output identity to the local monitor identity. It is a stock

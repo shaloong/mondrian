@@ -39,7 +39,7 @@ use mondrian_media::{
 use mondrian_media::{DecodedVideoChromaLocation, PreviewNativeDecodedFrameHandle};
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
-    evaluate_timeline_render_plan, execute_cpu_output_boundary_rgba8,
+    evaluate_timeline_render_plan, execute_cpu_program_monitor_boundary_rgba8,
     execute_cpu_source_input_stage, execute_cpu_working_transform, CpuColorFrame,
     CpuEncodedColorFrame, CpuSourceColorFrame, GpuCompositingBlockerReason,
     GpuCompositingDiagnostics, LinearFloatSource, RenderColorStageDiagnostics,
@@ -1139,10 +1139,19 @@ impl AppUiPreviewService {
                 return ViewerPreviewState::Unavailable;
             }
         };
-        let color_context = sequence.settings.root_preview_color_context(
-            &state.project_settings.color_management,
-            display_color_space,
-        );
+        let color_context = sequence
+            .settings
+            .root_program_color_context(&state.project_settings.color_management);
+        if let Some(reason) = color_context.export_delivery_view_error.as_ref() {
+            self.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
+                feature: "program_output_view".to_owned(),
+                reason: reason.clone(),
+            });
+            self.scheduler.prune_obsolete();
+            self.frame_store.borrow_mut().clear_pinned_viewer_frame();
+            bump(&self.metrics.unavailable_frames);
+            return ViewerPreviewState::Unavailable;
+        }
         self.activate_preview_generation(ViewerPreviewGenerationKey::from_state(
             state,
             sequence,
@@ -1225,7 +1234,7 @@ impl AppUiPreviewService {
                         width,
                         height,
                         &resolved.elements,
-                        &raster_contract.color_context,
+                        &resolved.color_context,
                         &mut self.scratch.borrow_mut(),
                     ) {
                         Ok(rgba) => rgba,
@@ -1237,6 +1246,9 @@ impl AppUiPreviewService {
                     render_stage_durations.accumulate(output.render_stage_durations);
                     self.record_composite(output.composite_diagnostics);
                     self.record_color_transform(output.color_diagnostics);
+                    if let Some(diagnostics) = output.monitor_color_diagnostics {
+                        self.record_color_transform(diagnostics);
+                    }
                     self.record_color_stage(output.color_stage_diagnostics);
                     let rgba = output.rgba;
                     let frame_packaging_started_at = Instant::now();
@@ -8871,6 +8883,7 @@ struct PreviewCompositeOutput {
     rgba: Vec<u8>,
     composite_diagnostics: TimelineCompositeDiagnostics,
     color_diagnostics: RenderColorTransformDiagnostics,
+    monitor_color_diagnostics: Option<RenderColorTransformDiagnostics>,
     color_stage_diagnostics: RenderColorStageDiagnostics,
     render_stage_durations: AppUiPreviewRenderStageDurations,
 }
@@ -8996,24 +9009,23 @@ fn composite_resolved_preview_working(
 
 #[derive(Debug, Clone, PartialEq)]
 struct CpuRasterPresentationContract {
-    color_context: ColorContext,
     raster_color_space: mondrian_ui_core::RasterImageColorSpace,
 }
 
 fn cpu_raster_presentation_contract(
     requested: &ColorContext,
-) -> Result<CpuRasterPresentationContract, mondrian_core::OcioColorSpaceIdentity> {
-    match requested.output_color_space {
-        mondrian_core::OcioColorSpaceIdentity::Color(ColorSpace::Rec709 | ColorSpace::Srgb) => {
-            let mut color_context = requested.clone();
-            color_context.output_color_space = ColorSpace::Srgb.into();
-            Ok(CpuRasterPresentationContract {
-                color_context,
-                raster_color_space: mondrian_ui_core::RasterImageColorSpace::Srgb,
-            })
-        }
-        unsupported => Err(unsupported),
-    }
+) -> Result<CpuRasterPresentationContract, String> {
+    let program_output = requested.output_color_space.color().ok_or_else(|| {
+        format!(
+            "Program Output {:?} is not an encoded color identity",
+            requested.output_color_space
+        )
+    })?;
+    RenderMonitorAdaptation::new(program_output, ColorSpace::Srgb, requested.engine.clone())
+        .map_err(|error| error.to_string())?;
+    Ok(CpuRasterPresentationContract {
+        raster_color_space: mondrian_ui_core::RasterImageColorSpace::Srgb,
+    })
 }
 
 fn output_boundary_from_color_context(
@@ -9213,14 +9225,22 @@ fn composite_resolved_preview(
     let mut render_stage_durations = composite.render_stage_durations;
     let boundary = output_boundary_from_color_context(color_context)
         .map_err(|error| format!("unsupported preview output transform: {error}"))?;
-    execute_cpu_output_boundary_rgba8(&composite.frame, &boundary)
+    let program_output = boundary.output_color_space;
+    let adaptation = RenderMonitorAdaptation::new(
+        program_output,
+        ColorSpace::Srgb,
+        color_context.engine.clone(),
+    )
+    .map_err(|error| format!("unsupported CPU raster monitor adaptation: {error}"))?;
+    execute_cpu_program_monitor_boundary_rgba8(&composite.frame, &boundary, &adaptation)
         .map(|output| {
             render_stage_durations.cpu_output_boundary_us =
                 app_duration_us(output_boundary_started_at.elapsed());
             PreviewCompositeOutput {
                 rgba: output.rgba,
                 composite_diagnostics: composite.composite_diagnostics,
-                color_diagnostics: output.color_diagnostics,
+                color_diagnostics: output.program_output.color_diagnostics,
+                monitor_color_diagnostics: output.monitor_color_diagnostics,
                 color_stage_diagnostics: output.stage_diagnostics,
                 render_stage_durations,
             }
@@ -10153,15 +10173,7 @@ mod tests {
         let contract = cpu_raster_presentation_contract(&requested)
             .expect("Rec.709 viewer output has an sRGB raster presentation contract");
 
-        assert_eq!(
-            contract.color_context.working_color_space,
-            requested.working_color_space
-        );
-        assert_eq!(
-            contract.color_context.output_color_space,
-            ColorSpace::Srgb.into()
-        );
-        assert_eq!(contract.color_context.tone_map, requested.tone_map);
+        assert_eq!(requested.output_color_space, ColorSpace::Rec709.into());
         assert_eq!(
             contract.raster_color_space,
             mondrian_ui_core::RasterImageColorSpace::Srgb
@@ -10169,18 +10181,54 @@ mod tests {
     }
 
     #[test]
-    fn cpu_raster_presentation_contract_rejects_hdr_and_wide_gamut_outputs() {
-        for output in [
-            ColorSpace::DisplayP3,
-            ColorSpace::Rec2100Pq,
-            ColorSpace::Rec2100Hlg,
-        ] {
+    fn cpu_raster_presentation_contract_adapts_wide_gamut_sdr_and_rejects_hdr() {
+        let p3 = test_color_context(ColorSpace::DisplayP3);
+        assert!(cpu_raster_presentation_contract(&p3).is_ok());
+
+        for output in [ColorSpace::Rec2100Pq, ColorSpace::Rec2100Hlg] {
             let requested = test_color_context(output);
-            assert_eq!(
-                cpu_raster_presentation_contract(&requested),
-                Err(output.into())
-            );
+            let error = cpu_raster_presentation_contract(&requested)
+                .expect_err("HDR to sRGB raster requires an explicit rendering policy");
+            assert!(error.contains("dynamic-range class"));
         }
+    }
+
+    #[test]
+    fn cpu_raster_preview_retains_program_output_before_srgb_adaptation() {
+        let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
+            .expect("default effect graph");
+        let resolved = [ResolvedPreviewElement::SolidColor(
+            TimelineSolidColorLayer {
+                color: Color::from_rgba8(48, 96, 192, 255),
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_graph,
+                frame_seed: 0,
+            },
+        )];
+        let color_context = test_color_context(ColorSpace::Rec709);
+        let service = AppUiPreviewService::new();
+        let mut scratch = TimelineCompositeScratch::default();
+
+        let output =
+            composite_resolved_preview(&service, 2, 2, &resolved, &color_context, &mut scratch)
+                .expect("CPU raster Program Output and monitor adaptation");
+
+        assert_eq!(
+            output.color_diagnostics.output.color_space,
+            ColorSpace::Rec709.into()
+        );
+        let monitor = output.monitor_color_diagnostics.expect("sRGB adaptation diagnostics");
+        assert_eq!(monitor.input.color_space, ColorSpace::Rec709.into());
+        assert_eq!(monitor.output.color_space, ColorSpace::Srgb.into());
+        assert_eq!(
+            monitor.direction,
+            RenderColorTransformDirection::Intermediate
+        );
+        assert!(!monitor.used_rgba8_boundary);
+        assert_eq!(output.color_stage_diagnostics.cpu_output_stages, 2);
+        assert_eq!(output.rgba.len(), 2 * 2 * 4);
     }
 
     #[test]

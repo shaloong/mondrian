@@ -66,10 +66,11 @@ pub use color_reference::{
 pub use color_stage::{
     execute_cpu_input_stage, execute_cpu_input_stage_float, execute_cpu_output_boundary,
     execute_cpu_output_boundary_float, execute_cpu_output_boundary_rgba8, execute_cpu_output_stage,
-    execute_cpu_source_input_stage, execute_cpu_working_transform, CpuRenderColorStageExecutor,
-    RenderColorStage, RenderColorStageDiagnostics, RenderColorStageExecution,
-    RenderColorStageGpuBlockerBreakdown, RenderColorStageMode, RenderColorStagePlan,
-    RenderColorStagePlanner, RenderGpuColorPassExecutionError, RenderGpuColorPassInputView,
+    execute_cpu_program_monitor_boundary_rgba8, execute_cpu_source_input_stage,
+    execute_cpu_working_transform, CpuRenderColorStageExecutor, RenderColorStage,
+    RenderColorStageDiagnostics, RenderColorStageExecution, RenderColorStageGpuBlockerBreakdown,
+    RenderColorStageMode, RenderColorStagePlan, RenderColorStagePlanner,
+    RenderGpuColorPassExecutionError, RenderGpuColorPassInputView,
     RenderGpuColorPassResolvedResources, RenderGpuColorPassSchedule,
     RenderGpuColorPassScheduleError, RenderGpuColorPassTargetView, RenderGpuColorTransformRecord,
     RenderGpuColorTransformResourcePlan, RenderGpuColorTransformResourcePlanError,
@@ -94,7 +95,8 @@ pub use color_stage::{
     RenderOutputColorBoundaryExecutor, RenderOutputColorBoundaryFloat,
     RenderOutputColorBoundaryGpuRecordError, RenderOutputColorBoundaryPlanner,
     RenderOutputColorBoundaryRgba8, RenderOutputColorBoundaryStagePlan,
-    RenderOutputColorBoundaryTarget, RENDER_GPU_OUTPUT_HEALTH_REPORT_SCHEMA_VERSION,
+    RenderOutputColorBoundaryTarget, RenderProgramMonitorBoundaryRgba8,
+    RENDER_GPU_OUTPUT_HEALTH_REPORT_SCHEMA_VERSION,
 };
 pub use color_transform::{
     CpuColorTransformExecutor, RenderColorTransform, RenderColorTransformBackend,
