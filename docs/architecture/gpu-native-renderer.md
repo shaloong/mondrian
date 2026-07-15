@@ -416,6 +416,12 @@ the cached binding lives on `GpuColorFrameWgpuResource`, an exact-contract pool
 hit remains warm even though the new frame handle has a different ID, while a
 pool eviction drops both texture and binding together.
 
+GPU shader extraction keys include the core OCIO config revision in addition
+to engine, endpoints/view, language, and the extracted processor cache ID.
+Immutable Mondrian/ACES packages use revision zero; mutable Custom OCIO
+path/environment sources use the selected config generation, matching the CPU
+processor cache invalidation contract.
+
 `viewer_spatial.rs` owns Viewer-only crop and resize processing. Its typed plan
 accepts and produces only GPU-resident `Working + LinearFloat + Rgba32Float`
 frames, so it cannot be scheduled after an OCIO display/output transform or an

@@ -1150,3 +1150,11 @@ the taxonomy.
 ## HDR/SDR
 
 HDR output spaces include Rec.2100 PQ/HLG. Tone mapping is required when scene/HDR working data targets SDR output. HDR metadata can only be preserved for HDR output spaces.
+## OCIO Cache Revision Contract
+
+Mondrian Standard and pinned builtin ACES packages are immutable and use cache
+revision zero; their complete package/source identity is already part of every
+processor and shader request. Custom path and environment configs use the
+monotonic OCIO selection generation. CPU processor and renderer GPU shader
+caches therefore invalidate together when a mutable source is reloaded, while
+the default hot path performs no generation lock or filesystem check.

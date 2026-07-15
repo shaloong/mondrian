@@ -124,6 +124,27 @@ pub fn ocio_config_changed_since(since_generation: u64) -> bool {
     ocio_config_generation() != since_generation
 }
 
+/// Return the cache revision for the exact config selected by a color engine.
+///
+/// Immutable embedded/builtin packages are fully identified by their source
+/// and therefore use revision zero without touching global OCIO state. Mutable
+/// path/environment sources use the selected config generation so renderer
+/// shader caches cannot survive a reload of the same source identity.
+pub fn ocio_gpu_config_revision_for_engine(engine: &ColorEngine) -> Result<u64, String> {
+    let source = engine.ocio_source();
+    match source {
+        OcioConfigSource::MondrianDefault | OcioConfigSource::Builtin { .. } => Ok(0),
+        OcioConfigSource::Environment | OcioConfigSource::Path { .. } => {
+            let _lease = lock_ocio_config_operation()?;
+            ensure_ocio_loaded_locked(&source)?;
+            OCIO_STATE
+                .lock()
+                .map(|state| state.generation)
+                .map_err(|_| "OCIO global state lock is poisoned".to_owned())
+        }
+    }
+}
+
 /// Return the current config source identity, if any.
 pub fn ocio_config_source() -> Option<OcioConfigSource> {
     OCIO_STATE.lock().ok().and_then(|g| g.source.clone())
@@ -3405,5 +3426,21 @@ mod tests {
         ensure_mondrian_default_ocio_loaded().expect("second load");
         let gen2 = ocio_config_generation();
         assert_eq!(gen1, gen2, "repeated load should not change generation");
+    }
+
+    #[test]
+    fn immutable_gpu_config_revisions_are_generation_independent() {
+        assert_eq!(
+            ocio_gpu_config_revision_for_engine(&ColorEngine::mondrian_standard())
+                .expect("Mondrian revision"),
+            0
+        );
+        assert_eq!(
+            ocio_gpu_config_revision_for_engine(&ColorEngine::Aces {
+                preset: crate::types::AcesConfigPreset::StudioV4Aces2Ocio25,
+            })
+            .expect("ACES revision"),
+            0
+        );
     }
 }

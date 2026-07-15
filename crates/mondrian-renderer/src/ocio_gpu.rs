@@ -4,8 +4,9 @@ use lru::LruCache;
 use mondrian_core::ColorSpace;
 use mondrian_core::{
     extract_ocio_display_identity_gpu_shader_bundle, extract_ocio_identity_gpu_shader_bundle,
-    ColorEngine, GpuLanguage, OcioColorSpaceIdentity, OcioGpuShaderBundle, OcioGpuTextureChannel,
-    OcioGpuTextureDimensions, OcioGpuTextureInterpolation, OcioGpuUniformType, OcioGpuUniformValue,
+    ocio_gpu_config_revision_for_engine, ColorEngine, GpuLanguage, OcioColorSpaceIdentity,
+    OcioGpuShaderBundle, OcioGpuTextureChannel, OcioGpuTextureDimensions,
+    OcioGpuTextureInterpolation, OcioGpuUniformType, OcioGpuUniformValue,
     MONDRIAN_OCIO_GPU_FUNCTION_NAME, MONDRIAN_OCIO_GPU_PIXEL_NAME,
     MONDRIAN_OCIO_GPU_RESOURCE_PREFIX,
 };
@@ -4665,7 +4666,15 @@ impl OcioGpuShaderCache {
         &mut self,
         request: OcioGpuShaderRequest,
     ) -> Result<Arc<OcioGpuShaderPlan>, OcioGpuShaderError> {
-        let request_key = request_hash(&request);
+        let config_revision = match ocio_gpu_config_revision_for_engine(request.engine()) {
+            Ok(revision) => revision,
+            Err(reason) => {
+                self.misses = self.misses.saturating_add(1);
+                self.extraction_failures = self.extraction_failures.saturating_add(1);
+                return Err(OcioGpuShaderError { request, reason });
+            }
+        };
+        let request_key = request_hash(&request, config_revision);
         if let Some(hit) = self.entries.get(&request_key) {
             self.hits += 1;
             return Ok(Arc::clone(hit));
@@ -5064,9 +5073,10 @@ fn plan_from_bundle(
     }
 }
 
-fn request_hash(request: &OcioGpuShaderRequest) -> u64 {
+fn request_hash(request: &OcioGpuShaderRequest, config_revision: u64) -> u64 {
     let mut hasher = DefaultHasher::new();
     request.hash(&mut hasher);
+    config_revision.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -8540,14 +8550,29 @@ mod tests {
             .expect_err("missing Custom config must fail instead of hitting Standard cache");
         assert_eq!(error.request, custom_request);
         assert_ne!(
-            request_hash(&standard_request),
-            request_hash(&error.request)
+            request_hash(&standard_request, 0),
+            request_hash(&error.request, 0)
         );
         let diagnostics = cache.diagnostics();
         assert_eq!(diagnostics.entries, 1);
         assert_eq!(diagnostics.hits, 0);
         assert_eq!(diagnostics.misses, 2);
         assert_eq!(diagnostics.extraction_failures, 1);
+    }
+
+    #[test]
+    fn shader_request_cache_key_invalidates_on_config_revision() {
+        let request = OcioGpuShaderRequest::ColorSpace {
+            engine: ColorEngine::CustomOcio {
+                source: mondrian_core::OcioConfigSource::Environment,
+            },
+            src: ColorSpace::SonySLog3SGamut3Cine.into(),
+            dst: ColorSpace::Rec709.into(),
+            language: GpuLanguage::Glsl4_0,
+        };
+
+        assert_eq!(request_hash(&request, 7), request_hash(&request, 7));
+        assert_ne!(request_hash(&request, 7), request_hash(&request, 8));
     }
 
     #[test]
