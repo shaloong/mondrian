@@ -909,8 +909,10 @@ Display transforms belong at preview presentation. Export transforms belong at e
 
 `SequenceSettings::root_preview_color_context(...)` builds the monitor
 presentation context with a caller-provided display/output color space.
-`SequenceSettings::root_export_color_context(...)` builds the delivery context
-from the sequence output color space. The export delivery view is resolved from
+`SequenceSettings::root_program_color_context(...)` builds the shared Program
+Output context from the sequence output color space. Preview, scopes, and export
+must consume this semantic boundary before any local monitor adaptation. The
+export delivery view is resolved from
 the effective `ExportDeliveryViewPolicy` in `display_management` (inherited from
 project or overridden by sequence). Callers must choose one of these explicit
 entry points instead of using a generic root render context.

@@ -2246,7 +2246,7 @@ fn render_timeline_frame_into(
     let color_context = timeline
         .sequence
         .settings
-        .root_export_color_context(&timeline.project_color_management);
+        .root_program_color_context(&timeline.project_color_management);
 
     render_sequence_frame_into(
         timeline,
@@ -2281,7 +2281,7 @@ pub fn export_input_color_resolution_counts_for_frame(
     let color_context = timeline
         .sequence
         .settings
-        .root_export_color_context(&timeline.project_color_management);
+        .root_program_color_context(&timeline.project_color_management);
     export_sequence_input_color_resolution_counts(
         timeline,
         &timeline.sequence,

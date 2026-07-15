@@ -50,8 +50,12 @@ the float working space or the renderer-to-encoder pipe precision. Those are
 renderer/export implementation contracts and are not persisted as editorial
 intent.
 
-Root preview/export color contexts resolve the effective color engine from the
-sequence/project inheritance rules and carry a typed `OutputTransformIntent`.
+`root_program_color_context` resolves the effective color engine from the
+sequence/project inheritance rules and carries the one typed
+`OutputTransformIntent` shared by preview program pixels, scopes, and export.
+`root_preview_color_context` remains the explicitly separate local monitor
+presentation request until the renderer applies it as monitor adaptation after
+Program Output; it must never be used as the scope or delivery identity.
 An ordinary display-referred SDR context remains `Colorimetric`; a
 scene-referred or explicitly tone-mapped Mondrian Standard boundary resolves to
 the fully pinned `MondrianStandard { package }` product intent. An explicitly
@@ -65,7 +69,7 @@ Standard output resolution is target-specific. SDR sRGB/Rec.709/P3 contexts
 select `Mondrian Standard SDR v1`; Rec.2100 HLG and PQ contexts select
 `Mondrian Standard HDR 1000 nits v1` under their respective OCIO displays.
 Core resolves that target-specific view from the typed intent when renderer
-constructs either a preview or export boundary, so the target transfer function
+constructs a Program Output boundary, so the target transfer function
 changes only the display encoding and never selects a second HDR picture
 formation.
 

@@ -775,18 +775,18 @@ impl SequenceSettings {
         Ok(())
     }
 
-    /// Build the final-output color context for root sequence export.
+    /// Build the Program Output color context shared by preview, scopes, and export.
     ///
-    /// Export uses the sequence output color space because the rendered frames
-    /// will be encoded and tagged for delivery. When the sequence inherits
-    /// color management from the project (`color_management.inherit == true`),
+    /// Program Output uses the sequence output color space because these pixels
+    /// define the program before any local monitor adaptation. When the sequence
+    /// inherits color management from the project (`color_management.inherit == true`),
     /// the `engine` is taken from `project_cm` instead of per-sequence settings.
     ///
     /// The export delivery view is resolved into the single
     /// `output_transform` intent from the effective `ExportDeliveryViewPolicy`.
     /// Invalid configured views fail closed to a colorimetric intent and retain
     /// a structured diagnostic reason.
-    pub fn root_export_color_context(
+    pub fn root_program_color_context(
         &self,
         project_cm: &mondrian_core::ProjectColorManagement,
     ) -> ColorContext {
@@ -2039,7 +2039,7 @@ mod tests {
         child.color_management.inherit = true;
         child.color_management.nested_processing = NestedColorProcessing::ForceParentWorkingSpace;
 
-        let parent_ctx = parent.root_export_color_context(&ProjectColorManagement::default());
+        let parent_ctx = parent.root_program_color_context(&ProjectColorManagement::default());
         let child_ctx = child.nested_render_color_context(parent_ctx.clone());
 
         // ForceParentWorkingSpace uses parent's engine
@@ -2068,7 +2068,7 @@ mod tests {
             ..Default::default()
         };
 
-        let ctx = settings.root_export_color_context(&ProjectColorManagement::default());
+        let ctx = settings.root_program_color_context(&ProjectColorManagement::default());
         assert!(
             ctx.tone_map,
             "SceneReferred should always enable tone mapping"
@@ -2082,7 +2082,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let ctx2 = aces_settings.root_export_color_context(&ProjectColorManagement::default());
+        let ctx2 = aces_settings.root_program_color_context(&ProjectColorManagement::default());
         assert!(ctx2.tone_map, "ACES should always enable tone mapping");
 
         let display_settings = SequenceSettings {
@@ -2093,7 +2093,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let ctx3 = display_settings.root_export_color_context(&ProjectColorManagement::default());
+        let ctx3 = display_settings.root_program_color_context(&ProjectColorManagement::default());
         assert!(
             !ctx3.tone_map,
             "DisplayReferred with auto_tone_map=false should not tone map"
@@ -2101,7 +2101,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_and_export_root_color_contexts_separate_presentation_from_delivery() {
+    fn preview_monitor_and_program_output_contexts_are_explicitly_distinct() {
         let settings = SequenceSettings {
             working_color_space: WorkingColorSpace::LinearRec2020,
             color_management: SequenceColorManagement {
@@ -2114,7 +2114,7 @@ mod tests {
         let project_cm = ProjectColorManagement::default();
 
         let preview = settings.root_preview_color_context(&project_cm, ColorSpace::Rec709);
-        let export = settings.root_export_color_context(&project_cm);
+        let program = settings.root_program_color_context(&project_cm);
 
         assert_eq!(
             preview.working_color_space,
@@ -2124,19 +2124,22 @@ mod tests {
             preview.output_color_space,
             OcioColorSpaceIdentity::Color(ColorSpace::Rec709)
         );
-        assert_eq!(export.working_color_space, WorkingColorSpace::LinearRec2020);
         assert_eq!(
-            export.output_color_space,
+            program.working_color_space,
+            WorkingColorSpace::LinearRec2020
+        );
+        assert_eq!(
+            program.output_color_space,
             OcioColorSpaceIdentity::Color(ColorSpace::Rec2100Pq)
         );
-        assert_eq!(preview.engine, export.engine);
-        assert_eq!(preview.workflow, export.workflow);
+        assert_eq!(preview.engine, program.engine);
+        assert_eq!(preview.workflow, program.workflow);
         assert_eq!(
             preview.missing_metadata_policy,
-            export.missing_metadata_policy
+            program.missing_metadata_policy
         );
         assert!(preview.tone_map);
-        assert!(export.tone_map);
+        assert!(program.tone_map);
     }
 
     #[test]
@@ -2235,7 +2238,7 @@ mod tests {
         settings.color_management.inherit = false;
         settings.color_management.engine = pinned_custom_engine(OcioConfigSource::Environment);
 
-        let ctx = settings.root_export_color_context(&ProjectColorManagement::default());
+        let ctx = settings.root_program_color_context(&ProjectColorManagement::default());
         assert!(matches!(ctx.engine, ColorEngine::CustomOcio { .. }));
     }
 
@@ -2282,9 +2285,9 @@ mod tests {
     }
 
     #[test]
-    fn mondrian_standard_default_export_context_is_colorimetric() {
+    fn mondrian_standard_default_program_context_is_colorimetric() {
         let settings = SequenceSettings::default();
-        let ctx = settings.root_export_color_context(&ProjectColorManagement::default());
+        let ctx = settings.root_program_color_context(&ProjectColorManagement::default());
         assert_eq!(ctx.engine, ColorEngine::mondrian_standard());
         assert!(!ctx.tone_map);
         assert_eq!(
@@ -2308,7 +2311,7 @@ mod tests {
     }
 
     #[test]
-    fn mondrian_standard_tone_map_uses_same_default_view_for_preview_and_export() {
+    fn mondrian_standard_tone_map_keeps_one_product_intent_across_targets() {
         let project_cm = ProjectColorManagement {
             engine: ColorEngine::mondrian_standard(),
             display_management: DisplayManagementPolicy {
@@ -2319,15 +2322,15 @@ mod tests {
         let settings = SequenceSettings::default();
 
         let preview = settings.root_preview_color_context(&project_cm, ColorSpace::Rec709);
-        let export = settings.root_export_color_context(&project_cm);
+        let program = settings.root_program_color_context(&project_cm);
 
         assert!(preview.tone_map);
-        assert!(export.tone_map);
+        assert!(program.tone_map);
         assert_eq!(
             preview.output_transform,
             mondrian_core::OutputTransformIntent::mondrian_standard()
         );
-        assert_eq!(preview.output_transform, export.output_transform);
+        assert_eq!(preview.output_transform, program.output_transform);
     }
 
     #[test]
@@ -2392,7 +2395,7 @@ mod tests {
         let mut settings = SequenceSettings::default();
         settings.color_management.inherit = true;
         settings.color_management.engine = ColorEngine::mondrian_standard();
-        let ctx = settings.root_export_color_context(&project_cm);
+        let ctx = settings.root_program_color_context(&project_cm);
         assert_eq!(
             ctx.engine,
             pinned_custom_engine(OcioConfigSource::Builtin { name: String::from("aces_1.2") })
@@ -2400,7 +2403,7 @@ mod tests {
 
         // inherit=false → use sequence's own engine
         settings.color_management.inherit = false;
-        let ctx2 = settings.root_export_color_context(&project_cm);
+        let ctx2 = settings.root_program_color_context(&project_cm);
         assert_eq!(ctx2.engine, ColorEngine::mondrian_standard());
     }
 
@@ -2491,7 +2494,7 @@ mod tests {
             ..Default::default()
         };
 
-        let context = settings.root_export_color_context(&ProjectColorManagement::default());
+        let context = settings.root_program_color_context(&ProjectColorManagement::default());
 
         assert_eq!(
             context.output_transform,
@@ -2537,7 +2540,7 @@ mod tests {
             color_management: SequenceColorManagement { inherit: true, ..Default::default() },
             ..Default::default()
         };
-        let ctx = settings.root_export_color_context(&project_cm);
+        let ctx = settings.root_program_color_context(&project_cm);
         assert!(matches!(
             ctx.output_transform,
             mondrian_core::OutputTransformIntent::OcioDisplayView { .. }
@@ -2564,7 +2567,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let ctx = settings.root_export_color_context(&project_cm);
+        let ctx = settings.root_program_color_context(&project_cm);
         // Sequence override to None should prevent project delivery view.
         assert_eq!(
             ctx.output_transform,
@@ -2609,10 +2612,10 @@ mod tests {
     }
 
     #[test]
-    fn export_context_no_delivery_view_records_no_issue_when_tone_map_false() {
+    fn program_context_without_delivery_view_has_no_issue_when_tone_map_is_disabled() {
         let settings = SequenceSettings::default();
         let project_cm = ProjectColorManagement::default();
-        let ctx = settings.root_export_color_context(&project_cm);
+        let ctx = settings.root_program_color_context(&project_cm);
         // Default policy is None, tone_map depends on workflow/output.
         // If tone_map is false, no issue should be recorded.
         if !ctx.tone_map {

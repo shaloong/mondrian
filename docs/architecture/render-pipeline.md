@@ -690,7 +690,7 @@ Policies:
 
 `SequenceSettings::resolve_export_delivery_view(project_cm)` resolves the
 effective policy into a `ResolvedExportDeliveryView` (or `None`/`Err`).
-When tone mapping is active, `root_export_color_context()` converts a successful
+When tone mapping is active, `root_program_color_context()` converts a successful
 result into the context's single `OutputTransformIntent::OcioDisplayView`.
 Invalid display/view resolution stores the error in
 `ColorContext::export_delivery_view_error` and fails closed to `Colorimetric`.
