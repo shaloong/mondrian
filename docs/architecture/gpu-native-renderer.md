@@ -367,9 +367,13 @@ frame, then use that same route; layer opacity, affine transform, and blending
 remain after the effect-domain round trip in authored order. The consumed plan
 is removed from the working compositor request, so an otherwise eligible
 single layer can retain its passthrough path. CPU-only media and external-domain
-adjustment layers fail with typed effect-domain errors until their upload or
-accumulator-interleaving graph nodes exist; they must not silently evaluate the
-effect in working-linear samples.
+media fail with typed effect-domain errors until a working-frame upload node
+exists; they must not silently evaluate the effect in working-linear samples.
+External-domain adjustments are scheduled by the renderer-owned composite graph:
+it finalizes the lower accumulator, executes the stock-OCIO round trip, blends
+the processed frame back with the authored adjustment opacity/blend mode, and
+continues upper layers from that working accumulator. Contiguous ordinary layers
+remain batched rather than forcing one compositor submission per layer.
 
 `viewer_spatial.rs` owns Viewer-only crop and resize processing. Its typed plan
 accepts and produces only GPU-resident `Working + LinearFloat + Rgba32Float`

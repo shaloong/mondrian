@@ -7,13 +7,14 @@ use crate::{
     GpuColorFrameResourceTableError, GpuColorFrameTextureFormat, GpuColorFrameUploadError,
     GpuColorFrameUploadPlan, GpuColorFrameUploader, GpuColorFrameWgpuResource,
     GpuColorFrameWgpuResourcePool, GpuColorFrameWgpuResourcePoolDiagnostics, GpuCompositeError,
-    GpuCompositeRecord, GpuCompositeRequest, GpuFrameCompositor, GpuSolidSourceRecord,
-    LinearFloatSource, OcioGpuShaderCache, OcioGpuShaderCacheDiagnostics,
-    OcioGpuWgpuBackendObjectError, OcioGpuWgpuBackendObjectRuntime,
-    OcioGpuWgpuBackendObjectRuntimeDiagnostics, OcioGpuWgpuBackendPrepError,
-    OcioGpuWgpuBackendPrepRuntime, OcioGpuWgpuBackendPrepRuntimeDiagnostics,
-    OcioGpuWgpuBindGroupLayoutDescriptorPlan, OcioGpuWgpuBlocker, OcioGpuWgpuColorTargetFormat,
-    OcioGpuWgpuOcioBindGroup, OcioGpuWgpuPreparedWrapperInputLayout, OcioGpuWgpuRenderPassError,
+    GpuCompositeLayer, GpuCompositeLayerSource, GpuCompositeRecord, GpuCompositeRequest,
+    GpuCompositingDiagnostics, GpuFrameCompositor, GpuSolidSourceRecord, LinearFloatSource,
+    OcioGpuShaderCache, OcioGpuShaderCacheDiagnostics, OcioGpuWgpuBackendObjectError,
+    OcioGpuWgpuBackendObjectRuntime, OcioGpuWgpuBackendObjectRuntimeDiagnostics,
+    OcioGpuWgpuBackendPrepError, OcioGpuWgpuBackendPrepRuntime,
+    OcioGpuWgpuBackendPrepRuntimeDiagnostics, OcioGpuWgpuBindGroupLayoutDescriptorPlan,
+    OcioGpuWgpuBlocker, OcioGpuWgpuColorTargetFormat, OcioGpuWgpuOcioBindGroup,
+    OcioGpuWgpuPreparedWrapperInputLayout, OcioGpuWgpuRenderPassError,
     OcioGpuWgpuRenderPassNodePlan, OcioGpuWgpuRenderPassRecorder, OcioGpuWgpuRenderPassTarget,
     OcioGpuWgpuRenderPipeline, OcioGpuWgpuWrapperBindGroup, OcioGpuWgpuWrapperBindingPlan,
     OcioGpuWgpuWrapperInputResources, RenderColorTransform, RenderColorTransformError,
@@ -645,6 +646,27 @@ pub enum RenderGpuEffectDomainRecordError {
     ToWorking(RenderGpuColorTransformRuntimeRecordError),
 }
 
+/// Result of recording a working composite graph with interleaved effect-domain nodes.
+pub struct RenderGpuCompositeGraphRecord {
+    /// GPU-resident working frame produced by the complete layer graph.
+    pub output: GpuColorFrameHandle,
+    /// Accumulated diagnostics from every working-composite segment.
+    pub compositing_diagnostics: GpuCompositingDiagnostics,
+    /// Accumulated diagnostics from interleaved stock-OCIO transforms.
+    pub color_stage_diagnostics: RenderColorStageDiagnostics,
+    /// Number of adjustment nodes executed outside working-linear space.
+    pub external_adjustment_passes: u64,
+}
+
+/// Error returned while recording an interleaved GPU composite graph.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RenderGpuCompositeGraphRecordError {
+    /// A working-composite segment could not be recorded.
+    Composite(GpuCompositeError),
+    /// An external-domain adjustment could not be executed.
+    EffectDomain(Box<RenderGpuEffectDomainRecordError>),
+}
+
 /// Renderer-owned state for native GPU final-output color boundaries.
 ///
 /// App/export code should hold one runtime per render backend lifetime. The
@@ -969,6 +991,175 @@ impl RenderGpuOutputBoundaryRuntime {
             )
             .map_err(RenderGpuEffectDomainRecordError::ToWorking)?;
         Ok(RenderGpuEffectDomainRecord { to_processing, effect, to_working })
+    }
+
+    /// Record a working composite while interleaving external-domain adjustments.
+    ///
+    /// Contiguous ordinary layers remain batched in one compositor call. Before
+    /// each log/display adjustment, the lower accumulator is finalized, routed
+    /// through stock OCIO and the point-effect pass, blended back with the
+    /// adjustment's authored opacity/blend mode, and reused as the next base.
+    /// External-domain media and solids must already be materialized as GPU
+    /// working frames by the source scheduler.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_wgpu_composite_graph(
+        &mut self,
+        compositor: &GpuFrameCompositor,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        request: GpuCompositeRequest<'_>,
+        engine: ColorEngine,
+        gpu_options: RenderColorTransformGpuOptions,
+    ) -> Result<RenderGpuCompositeGraphRecord, RenderGpuCompositeGraphRecordError> {
+        let mut compositing_diagnostics = GpuCompositingDiagnostics::default();
+        let mut color_stage_diagnostics = RenderColorStageDiagnostics::default();
+        let mut external_adjustment_passes = 0_u64;
+        let mut current: Option<GpuColorFrameHandle> = None;
+        let mut segment_start = 0_usize;
+
+        for (index, layer) in request.layers.iter().enumerate() {
+            let Some(effect_plan) = layer.effect_plan else {
+                continue;
+            };
+            if !matches!(layer.source, GpuCompositeLayerSource::Adjustment)
+                || effect_plan.processing_domain()
+                    == mondrian_effects::EffectColorDomain::SceneLinearRgb
+            {
+                continue;
+            }
+
+            let lower = self.record_wgpu_composite_segment(
+                compositor,
+                device,
+                queue,
+                encoder,
+                request.width,
+                request.height,
+                request.working_color_space,
+                current.as_ref(),
+                &request.layers[segment_start..index],
+            )?;
+            compositing_diagnostics.accumulate(lower.diagnostics);
+            let base = lower.output;
+            let effect = self
+                .record_wgpu_effect_domain_round_trip(
+                    compositor,
+                    effect_plan,
+                    &base,
+                    engine.clone(),
+                    layer.frame_seed,
+                    gpu_options,
+                    RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                        device,
+                        queue,
+                        encoder: &mut *encoder,
+                        load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    },
+                )
+                .map_err(|error| {
+                    RenderGpuCompositeGraphRecordError::EffectDomain(Box::new(error))
+                })?;
+            color_stage_diagnostics.accumulate(effect.to_processing.stage_diagnostics);
+            color_stage_diagnostics.accumulate(effect.to_working.stage_diagnostics);
+            let processed = effect.to_working.materialized.output;
+            let blend_layers = [
+                GpuCompositeLayer {
+                    source: GpuCompositeLayerSource::GpuFrame(&base),
+                    opacity: 1.0,
+                    blend_mode: mondrian_core::types::BlendMode::Normal,
+                    transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    effect_plan: None,
+                    frame_seed: 0,
+                },
+                GpuCompositeLayer {
+                    source: GpuCompositeLayerSource::GpuFrame(&processed),
+                    opacity: layer.opacity,
+                    blend_mode: layer.blend_mode,
+                    transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    effect_plan: None,
+                    frame_seed: layer.frame_seed,
+                },
+            ];
+            let blended = self
+                .record_wgpu_working_composite(
+                    compositor,
+                    device,
+                    queue,
+                    encoder,
+                    GpuCompositeRequest {
+                        width: request.width,
+                        height: request.height,
+                        working_color_space: request.working_color_space,
+                        layers: &blend_layers,
+                    },
+                )
+                .map_err(RenderGpuCompositeGraphRecordError::Composite)?;
+            compositing_diagnostics.accumulate(blended.diagnostics);
+            current = Some(blended.output);
+            external_adjustment_passes = external_adjustment_passes.saturating_add(1);
+            segment_start = index.saturating_add(1);
+        }
+
+        let final_segment = self.record_wgpu_composite_segment(
+            compositor,
+            device,
+            queue,
+            encoder,
+            request.width,
+            request.height,
+            request.working_color_space,
+            current.as_ref(),
+            &request.layers[segment_start..],
+        )?;
+        compositing_diagnostics.accumulate(final_segment.diagnostics);
+        Ok(RenderGpuCompositeGraphRecord {
+            output: final_segment.output,
+            compositing_diagnostics,
+            color_stage_diagnostics,
+            external_adjustment_passes,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_wgpu_composite_segment(
+        &mut self,
+        compositor: &GpuFrameCompositor,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        width: u32,
+        height: u32,
+        working_color_space: WorkingColorSpace,
+        base: Option<&GpuColorFrameHandle>,
+        layers: &[GpuCompositeLayer<'_>],
+    ) -> Result<GpuCompositeRecord, RenderGpuCompositeGraphRecordError> {
+        let mut scheduled =
+            Vec::with_capacity(layers.len().saturating_add(usize::from(base.is_some())));
+        if let Some(base) = base {
+            scheduled.push(GpuCompositeLayer {
+                source: GpuCompositeLayerSource::GpuFrame(base),
+                opacity: 1.0,
+                blend_mode: mondrian_core::types::BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: None,
+                frame_seed: 0,
+            });
+        }
+        scheduled.extend_from_slice(layers);
+        self.record_wgpu_working_composite(
+            compositor,
+            device,
+            queue,
+            encoder,
+            GpuCompositeRequest {
+                width,
+                height,
+                working_color_space,
+                layers: &scheduled,
+            },
+        )
+        .map_err(RenderGpuCompositeGraphRecordError::Composite)
     }
 
     /// Plan, prepare runtime-owned backend objects, and record a native GPU
@@ -7034,6 +7225,191 @@ mod tests {
         assert!(
             max_delta <= 3.0e-5,
             "GPU/CPU round-trip max delta {max_delta}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gpu_composite_graph_external_adjustment_matches_cpu_reference() {
+        use mondrian_effects::{
+            compile_scheduled_effect_graph_in_domain, lower_effect_graph_to_gpu_plan,
+            EffectColorDomain, EffectColorDomainContract, EffectRenderOp, EffectRenderPlan,
+        };
+
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping GPU external adjustment parity test: no GPU adapter available");
+            return;
+        };
+        let engine = ColorEngine::mondrian_standard();
+        let domain = EffectColorDomain::DisplayEncodedRgb { color_space: ColorSpace::Rec709 };
+        let graph = compile_scheduled_effect_graph_in_domain(
+            &EffectRenderPlan {
+                ops: vec![EffectRenderOp::ColorAdjust {
+                    exposure: 0.5,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                }],
+            },
+            EffectColorDomainContract::preserving(domain),
+        )
+        .expect("valid display-domain adjustment graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("GPU adjustment plan");
+        let data = (0..16)
+            .map(|index| {
+                let value = index as f32 / 40.0;
+                [value, value * 0.7, value * 0.4, 1.0]
+            })
+            .collect::<Vec<_>>();
+        let mut processed = data.iter().flatten().copied().collect::<Vec<_>>();
+        engine
+            .convert_identity_float(
+                &mut processed,
+                mondrian_core::OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
+                mondrian_core::OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
+            )
+            .expect("CPU working to encoded reference");
+        let exposure = 2.0_f32.powf(0.5);
+        for pixel in processed.chunks_exact_mut(4) {
+            pixel[0] *= exposure;
+            pixel[1] *= exposure;
+            pixel[2] *= exposure;
+        }
+        engine
+            .convert_identity_float(
+                &mut processed,
+                mondrian_core::OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
+                mondrian_core::OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
+            )
+            .expect("CPU encoded to working reference");
+        let opacity = 0.6_f32;
+        let expected = data
+            .iter()
+            .zip(processed.chunks_exact(4))
+            .flat_map(|(base, adjusted)| {
+                [
+                    base[0] * (1.0 - opacity) + adjusted[0] * opacity,
+                    base[1] * (1.0 - opacity) + adjusted[1] * opacity,
+                    base[2] * (1.0 - opacity) + adjusted[2] * opacity,
+                    1.0,
+                ]
+            })
+            .collect::<Vec<_>>();
+
+        let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_100);
+        let input = GpuColorFrameHandle::new(
+            runtime.frame_ids_mut().allocate(),
+            ColorFrameDescriptor {
+                width: 4,
+                height: 4,
+                color_space: WorkingColorSpace::LinearRec709.into(),
+                domain: ColorFrameDomain::Working,
+                encoding: ColorFrameEncoding::LinearFloat,
+                residency: ColorFrameResidency::Gpu,
+            },
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "external-adjustment-working-input",
+        )
+        .expect("working input handle");
+        let allocation = GpuColorFrameAllocationPlan::for_handle(input.clone());
+        let input_resource = GpuColorFrameUploader::allocate(&context.device, &allocation);
+        context.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &input_resource.resource().texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&data),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(64),
+                rows_per_image: Some(4),
+            },
+            wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+        );
+        runtime.frame_table_mut().insert(input_resource).expect("insert working input");
+        let layers = [
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::GpuFrame(&input),
+                opacity: 1.0,
+                blend_mode: mondrian_core::types::BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: None,
+                frame_seed: 0,
+            },
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::Adjustment,
+                opacity,
+                blend_mode: mondrian_core::types::BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 19,
+            },
+        ];
+        let compositor = GpuFrameCompositor::new(&context.device);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("external-adjustment-composite-graph"),
+        });
+        let record = runtime
+            .record_wgpu_composite_graph(
+                &compositor,
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                GpuCompositeRequest {
+                    width: 4,
+                    height: 4,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    layers: &layers,
+                },
+                engine,
+                RenderColorTransformGpuOptions::default(),
+            )
+            .expect("record external adjustment composite graph");
+        assert_eq!(record.external_adjustment_passes, 1);
+        assert_eq!(record.color_stage_diagnostics.gpu_color_stages, 2);
+        assert_eq!(record.color_stage_diagnostics.upload_stages, 0);
+        assert_eq!(record.color_stage_diagnostics.readback_stages, 0);
+        let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("external-adjustment-readback"),
+            size: 256 * 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let output = runtime.frame_table().get(&record.output).expect("graph output");
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &output.resource().texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(4),
+                },
+            },
+            wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+        );
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let mapped = map_readback_buffer(&context.device, &readback);
+        let actual = mapped
+            .chunks_exact(256)
+            .take(4)
+            .flat_map(|row| bytemuck::cast_slice::<u8, f32>(&row[..64]).iter().copied())
+            .collect::<Vec<_>>();
+        readback.unmap();
+        let max_delta = expected
+            .iter()
+            .zip(&actual)
+            .map(|(expected, actual)| (expected - actual).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_delta <= 3.0e-5,
+            "GPU/CPU adjustment max delta {max_delta}"
         );
     }
 
