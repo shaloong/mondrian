@@ -529,6 +529,9 @@ fn prepare_composite<'a>(
     };
 
     for layer in request.layers {
+        if viewer_layer_has_zero_contribution(layer) {
+            continue;
+        }
         match layer {
             ViewerGpuExecutionLayer::Media {
                 frame,
@@ -771,6 +774,15 @@ fn prepare_composite<'a>(
     }
 
     Ok(prepared)
+}
+
+fn viewer_layer_has_zero_contribution(layer: &ViewerGpuExecutionLayer) -> bool {
+    let opacity = match layer {
+        ViewerGpuExecutionLayer::Media { opacity, .. }
+        | ViewerGpuExecutionLayer::Adjustment { opacity, .. } => *opacity,
+        ViewerGpuExecutionLayer::SolidColor { layer, .. } => layer.opacity,
+    };
+    opacity.clamp(0.0, 1.0) == 0.0
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1156,6 +1168,86 @@ mod tests {
         assert_eq!(record.stage_diagnostics.readback_stages, 0);
         assert_eq!(record.residency.cpu_upload_layers, 1);
         assert_eq!(record.compositing_diagnostics.gpu_passthrough_frames, 1);
+    }
+
+    #[tokio::test]
+    async fn viewer_skips_zero_opacity_media_before_upload_and_effect_domain() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping Viewer zero-opacity media test: no GPU adapter available");
+            return;
+        };
+        let domain = EffectColorDomain::DisplayEncodedRgb { color_space: ColorSpace::Rec709 };
+        let graph = compile_scheduled_effect_graph_in_domain(
+            &EffectRenderPlan {
+                ops: vec![EffectRenderOp::ColorAdjust {
+                    exposure: 0.25,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                }],
+            },
+            EffectColorDomainContract::preserving(domain),
+        )
+        .expect("valid display-domain graph");
+        let effect_plan =
+            Arc::new(lower_effect_graph_to_gpu_plan(&graph).expect("GPU effect plan"));
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 4,
+            height: 4,
+            color_space: WorkingColorSpace::LinearRec709,
+            data: vec![[0.18, 0.08, 0.02, 1.0]; 16],
+        });
+        let layer = ViewerGpuExecutionLayer::Media {
+            frame: Some(frame),
+            gpu_source: None,
+            native_source: None,
+            opacity: 0.0,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan,
+            frame_seed: 9,
+        };
+        let output_boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut runtime =
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("viewer-zero-opacity-media"),
+        });
+
+        let record = runtime
+            .record(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                ViewerGpuExecutionRequest {
+                    sequence_id: SequenceId::new(),
+                    timeline_frame: 9,
+                    width: 4,
+                    height: 4,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    layers: &[layer],
+                    output_boundary: &output_boundary,
+                    source_rect: ViewerSourceRect::FULL,
+                    output_width: 4,
+                    output_height: 4,
+                    display_calibration: None,
+                },
+            )
+            .expect("Viewer zero-opacity media frame");
+        context.queue.submit(std::iter::once(encoder.finish()));
+
+        assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
+        assert_eq!(record.stage_diagnostics.upload_stages, 0);
+        assert_eq!(record.stage_diagnostics.readback_stages, 0);
+        assert_eq!(record.residency.media_layers, 0);
+        assert_eq!(record.residency.cpu_upload_layers, 0);
+        assert_eq!(
+            runtime.compositor_uniform_arena_diagnostics().uniform_writes,
+            0
+        );
     }
 
     #[tokio::test]

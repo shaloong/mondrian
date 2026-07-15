@@ -386,6 +386,15 @@ adjustment merge is a dedicated single-pass node that samples the original
 accumulator directly; it does not build a two-layer composite or allocate/copy
 an extra accumulator first.
 
+Layers whose clamped opacity is exactly zero are non-contributing graph nodes.
+The Viewer removes them before native import, CPU upload, source color
+conversion, procedural materialization, or effect-domain preparation. The
+shared composite graph also ignores zero-opacity external adjustments, and the
+low-level compositor excludes all zero-contribution layers from capability
+validation, passthrough selection, and pass recording. Diagnostics therefore
+describe only executed work, and a visible GPU layer beneath an invisible
+adjustment remains a zero-pass GPU passthrough.
+
 `viewer_spatial.rs` owns Viewer-only crop and resize processing. Its typed plan
 accepts and produces only GPU-resident `Working + LinearFloat + Rgba32Float`
 frames, so it cannot be scheduled after an OCIO display/output transform or an

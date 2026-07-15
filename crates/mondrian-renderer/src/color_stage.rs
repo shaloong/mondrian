@@ -1075,6 +1075,9 @@ impl RenderGpuOutputBoundaryRuntime {
         let mut segment_start = 0_usize;
 
         for (index, layer) in request.layers.iter().enumerate() {
+            if layer.opacity.clamp(0.0, 1.0) == 0.0 {
+                continue;
+            }
             let Some(effect_plan) = layer.effect_plan else {
                 continue;
             };
@@ -7906,6 +7909,101 @@ mod tests {
         assert_eq!(breakdown.ocio_resource_bind_group_not_prepared, 1);
         assert_eq!(breakdown.fullscreen_wrapper_not_prepared, 1);
         assert_eq!(breakdown.render_pipeline_not_prepared, 1);
+    }
+
+    #[tokio::test]
+    async fn gpu_composite_graph_skips_zero_opacity_external_adjustment() {
+        use mondrian_effects::{
+            compile_scheduled_effect_graph_in_domain, lower_effect_graph_to_gpu_plan,
+            EffectColorDomain, EffectColorDomainContract, EffectRenderOp, EffectRenderPlan,
+        };
+
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping zero-opacity adjustment test: no GPU adapter available");
+            return;
+        };
+        let domain = EffectColorDomain::DisplayEncodedRgb { color_space: ColorSpace::Rec709 };
+        let graph = compile_scheduled_effect_graph_in_domain(
+            &EffectRenderPlan {
+                ops: vec![EffectRenderOp::ColorAdjust {
+                    exposure: 0.5,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                }],
+            },
+            EffectColorDomainContract::preserving(domain),
+        )
+        .expect("valid display-domain adjustment graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("GPU adjustment plan");
+        let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_200);
+        let input = GpuColorFrameHandle::new(
+            runtime.frame_ids_mut().allocate(),
+            ColorFrameDescriptor {
+                width: 4,
+                height: 4,
+                color_space: WorkingColorSpace::LinearRec709.into(),
+                domain: ColorFrameDomain::Working,
+                encoding: ColorFrameEncoding::LinearFloat,
+                residency: ColorFrameResidency::Gpu,
+            },
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "zero-opacity-adjustment-input",
+        )
+        .expect("working input handle");
+        let allocation = GpuColorFrameAllocationPlan::for_handle(input.clone());
+        runtime
+            .frame_table_mut()
+            .insert(GpuColorFrameUploader::allocate(
+                &context.device,
+                &allocation,
+            ))
+            .expect("insert working input");
+        let layers = [
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::GpuFrame(&input),
+                opacity: 1.0,
+                blend_mode: mondrian_core::types::BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: None,
+                frame_seed: 0,
+            },
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::Adjustment,
+                opacity: 0.0,
+                blend_mode: mondrian_core::types::BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 19,
+            },
+        ];
+        let compositor = GpuFrameCompositor::new(&context.device);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("zero-opacity-adjustment-composite-graph"),
+        });
+
+        let record = runtime
+            .record_wgpu_composite_graph(
+                &compositor,
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                GpuCompositeRequest {
+                    width: 4,
+                    height: 4,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    layers: &layers,
+                },
+                ColorEngine::mondrian_standard(),
+                RenderColorTransformGpuOptions::default(),
+            )
+            .expect("record zero-opacity adjustment graph");
+
+        assert_eq!(record.output.id(), input.id());
+        assert_eq!(record.external_adjustment_passes, 0);
+        assert_eq!(record.color_stage_diagnostics.gpu_color_stages, 0);
+        assert_eq!(record.compositing_diagnostics.gpu_passthrough_frames, 1);
+        assert_eq!(compositor.uniform_arena_diagnostics().uniform_writes, 0);
     }
 
     #[test]

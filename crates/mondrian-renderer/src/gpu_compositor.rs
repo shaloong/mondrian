@@ -717,6 +717,9 @@ impl GpuFrameCompositor {
         let mut uploaded_cpu_layers = false;
         let mut src_is_a = true;
         for (index, layer) in request.layers.iter().enumerate() {
+            if layer_has_zero_contribution(layer) {
+                continue;
+            }
             let (accum, dst) = if src_is_a {
                 (&target_a, &target_b)
             } else {
@@ -1142,7 +1145,12 @@ fn validate_point_effect_input(
 fn single_layer_gpu_passthrough<'a>(
     request: &'a GpuCompositeRequest<'a>,
 ) -> Option<&'a GpuColorFrameHandle> {
-    let [layer] = request.layers else { return None };
+    let mut contributing_layers =
+        request.layers.iter().filter(|layer| !layer_has_zero_contribution(layer));
+    let layer = contributing_layers.next()?;
+    if contributing_layers.next().is_some() {
+        return None;
+    }
     let GpuCompositeLayerSource::GpuFrame(handle) = layer.source else {
         return None;
     };
@@ -1192,19 +1200,23 @@ fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuComposit
             height: request.height,
         });
     }
+    let contributing_layers =
+        request.layers.iter().filter(|layer| !layer_has_zero_contribution(layer));
     let capability = evaluate_gpu_compositing_capability(
-        request.layers.len(),
-        request.layers.iter().any(|layer| !gpu_transform_supported(layer)),
-        request.layers.iter().any(|layer| layer.blend_mode != BlendMode::Normal),
-        request
-            .layers
-            .iter()
+        contributing_layers.clone().count(),
+        contributing_layers.clone().any(|layer| !gpu_transform_supported(layer)),
+        contributing_layers.clone().any(|layer| layer.blend_mode != BlendMode::Normal),
+        contributing_layers
+            .clone()
             .all(|layer| !matches!(layer.source, GpuCompositeLayerSource::CpuFrame(_))),
     );
     if let GpuCompositingCapability::CpuFallback { reason } = capability {
         return Err(GpuCompositeError::Blocked { reason });
     }
     for layer in request.layers {
+        if layer_has_zero_contribution(layer) {
+            continue;
+        }
         if let Some(plan) = layer.effect_plan {
             let domain = plan.processing_domain();
             if domain != EffectColorDomain::SceneLinearRgb {
@@ -1238,6 +1250,10 @@ fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuComposit
         }
     }
     Ok(())
+}
+
+fn layer_has_zero_contribution(layer: &GpuCompositeLayer<'_>) -> bool {
+    layer.opacity.clamp(0.0, 1.0) == 0.0
 }
 
 fn gpu_transform_supported(layer: &GpuCompositeLayer<'_>) -> bool {
