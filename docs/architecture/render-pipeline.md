@@ -902,6 +902,12 @@ initialization, timestamp mapping, and CPU completion wait. Both Standard PQ
 and HLG require p95 <= 5 ms; Standard PQ additionally requires p95 <= 80% of
 the like-for-like ACES PQ reference on the measured adapter. Environment
 variables may tighten, but not silently disable, either budget.
+The schema-3 report snapshots cache counters around the measured interval and
+fails when any warm sample extracts a shader, prepares a static pipeline or
+backend object, creates an OCIO wrapper input binding, allocates an output
+texture, or evicts a pooled texture. Wrapper-binding and exact-contract texture
+pool hits must cover every rotated View sample, so the timestamp budget cannot
+mask recurring per-frame GPU object churn.
 
 Renderer-owned color stages share a device-scoped exact-contract texture pool
 across native import and Viewer output runtimes. A candidate returns its typed

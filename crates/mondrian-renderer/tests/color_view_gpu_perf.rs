@@ -13,8 +13,8 @@ use mondrian_renderer::{
     request_adapter_with_native_video_preference, ColorFrameResidency, GpuColorFrameHandle,
     GpuColorFrameTextureFormat, GpuCompositeLayer, GpuCompositeLayerSource, GpuCompositeRequest,
     GpuFrameCompositor, OcioGpuShaderPlan, OcioGpuShaderRequest, RenderColorTransformGpuOptions,
-    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
-    RenderOutputColorBoundary,
+    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeDiagnostics,
+    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderOutputColorBoundary,
 };
 use serde::Serialize;
 use std::fs::OpenOptions;
@@ -169,6 +169,152 @@ struct RuntimeCacheReport {
     texture_pool_hits: u64,
     texture_pool_misses: u64,
     texture_pool_releases: u64,
+    measured_delta: RuntimeCacheActivity,
+    warm_path_gate: WarmPathReuseGate,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+struct RuntimeCacheActivity {
+    shader_hits: u64,
+    shader_misses: u64,
+    shader_extraction_failures: u64,
+    static_pipeline_hits: u64,
+    static_pipeline_misses: u64,
+    backend_object_hits: u64,
+    backend_object_misses: u64,
+    backend_object_failures: u64,
+    wrapper_bind_group_creations: u64,
+    wrapper_bind_group_cache_hits: u64,
+    texture_pool_hits: u64,
+    texture_pool_misses: u64,
+    texture_pool_releases: u64,
+    texture_pool_evictions: u64,
+}
+
+impl RuntimeCacheActivity {
+    fn from_runtime(diagnostics: RenderGpuOutputBoundaryRuntimeDiagnostics) -> Self {
+        Self {
+            shader_hits: diagnostics.shader_cache.hits,
+            shader_misses: diagnostics.shader_cache.misses,
+            shader_extraction_failures: diagnostics.shader_cache.extraction_failures,
+            static_pipeline_hits: diagnostics.backend_prep.static_pipelines.hits,
+            static_pipeline_misses: diagnostics.backend_prep.static_pipelines.misses,
+            backend_object_hits: diagnostics.backend_objects.hits,
+            backend_object_misses: diagnostics.backend_objects.misses,
+            backend_object_failures: diagnostics.backend_objects.failures,
+            wrapper_bind_group_creations: diagnostics
+                .backend_objects
+                .wrapper_input_bindings
+                .bind_group_creations,
+            wrapper_bind_group_cache_hits: diagnostics
+                .backend_objects
+                .wrapper_input_bindings
+                .cache_hits,
+            texture_pool_hits: diagnostics.resource_pool.hits,
+            texture_pool_misses: diagnostics.resource_pool.misses,
+            texture_pool_releases: diagnostics.resource_pool.releases,
+            texture_pool_evictions: diagnostics.resource_pool.evictions,
+        }
+    }
+
+    fn delta_since(self, before: Self) -> Self {
+        Self {
+            shader_hits: monotonic_delta(self.shader_hits, before.shader_hits),
+            shader_misses: monotonic_delta(self.shader_misses, before.shader_misses),
+            shader_extraction_failures: monotonic_delta(
+                self.shader_extraction_failures,
+                before.shader_extraction_failures,
+            ),
+            static_pipeline_hits: monotonic_delta(
+                self.static_pipeline_hits,
+                before.static_pipeline_hits,
+            ),
+            static_pipeline_misses: monotonic_delta(
+                self.static_pipeline_misses,
+                before.static_pipeline_misses,
+            ),
+            backend_object_hits: monotonic_delta(
+                self.backend_object_hits,
+                before.backend_object_hits,
+            ),
+            backend_object_misses: monotonic_delta(
+                self.backend_object_misses,
+                before.backend_object_misses,
+            ),
+            backend_object_failures: monotonic_delta(
+                self.backend_object_failures,
+                before.backend_object_failures,
+            ),
+            wrapper_bind_group_creations: monotonic_delta(
+                self.wrapper_bind_group_creations,
+                before.wrapper_bind_group_creations,
+            ),
+            wrapper_bind_group_cache_hits: monotonic_delta(
+                self.wrapper_bind_group_cache_hits,
+                before.wrapper_bind_group_cache_hits,
+            ),
+            texture_pool_hits: monotonic_delta(self.texture_pool_hits, before.texture_pool_hits),
+            texture_pool_misses: monotonic_delta(
+                self.texture_pool_misses,
+                before.texture_pool_misses,
+            ),
+            texture_pool_releases: monotonic_delta(
+                self.texture_pool_releases,
+                before.texture_pool_releases,
+            ),
+            texture_pool_evictions: monotonic_delta(
+                self.texture_pool_evictions,
+                before.texture_pool_evictions,
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+struct WarmPathReuseGate {
+    expected_view_samples: u64,
+    shader_cache_creation_free: bool,
+    static_pipeline_creation_free: bool,
+    backend_object_creation_free: bool,
+    wrapper_bind_group_creation_free: bool,
+    output_texture_allocation_free: bool,
+    wrapper_bind_group_hits_cover_samples: bool,
+    output_texture_hits_cover_samples: bool,
+    passed: bool,
+}
+
+impl WarmPathReuseGate {
+    fn evaluate(activity: RuntimeCacheActivity, expected_view_samples: u64) -> Self {
+        let shader_cache_creation_free =
+            activity.shader_misses == 0 && activity.shader_extraction_failures == 0;
+        let static_pipeline_creation_free = activity.static_pipeline_misses == 0;
+        let backend_object_creation_free =
+            activity.backend_object_misses == 0 && activity.backend_object_failures == 0;
+        let wrapper_bind_group_creation_free = activity.wrapper_bind_group_creations == 0;
+        let output_texture_allocation_free =
+            activity.texture_pool_misses == 0 && activity.texture_pool_evictions == 0;
+        let wrapper_bind_group_hits_cover_samples =
+            activity.wrapper_bind_group_cache_hits >= expected_view_samples;
+        let output_texture_hits_cover_samples = activity.texture_pool_hits >= expected_view_samples;
+        let passed = shader_cache_creation_free
+            && static_pipeline_creation_free
+            && backend_object_creation_free
+            && wrapper_bind_group_creation_free
+            && output_texture_allocation_free
+            && wrapper_bind_group_hits_cover_samples
+            && output_texture_hits_cover_samples;
+        Self {
+            expected_view_samples,
+            shader_cache_creation_free,
+            static_pipeline_creation_free,
+            backend_object_creation_free,
+            wrapper_bind_group_creation_free,
+            output_texture_allocation_free,
+            wrapper_bind_group_hits_cover_samples,
+            output_texture_hits_cover_samples,
+            passed,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -191,7 +337,7 @@ async fn standard_hdr_4k_gpu_timestamp_is_materially_faster_than_aces2() -> Resu
         eprintln!(
             "MONDRIAN_COLOR_VIEW_GPU_PERF_JSON={}",
             serde_json::json!({
-                "schema_version": 2,
+                "schema_version": 3,
                 "scenario": "renderer_color_view_4k_gpu_timestamp",
                 "skipped": "no real adapter with complete encoder timestamp-query support"
             })
@@ -264,6 +410,7 @@ async fn standard_hdr_4k_gpu_timestamp_is_materially_faster_than_aces2() -> Resu
         .shader_cache_mut()
         .get_or_extract(aces_pq_case.shader_request())
         .context("extract cached ACES 2 PQ GPU shader")?;
+    let runtime_before_measurement = RuntimeCacheActivity::from_runtime(runtime.diagnostics());
 
     let mut standard_pq_samples = ViewSamples::default();
     let mut standard_hlg_samples = ViewSamples::default();
@@ -294,6 +441,14 @@ async fn standard_hdr_4k_gpu_timestamp_is_materially_faster_than_aces2() -> Resu
             samples.record_cpu_us.push(sample.record_cpu_us);
         }
     }
+    let runtime_diagnostics = runtime.diagnostics();
+    let measured_cache_activity = RuntimeCacheActivity::from_runtime(runtime_diagnostics)
+        .delta_since(runtime_before_measurement);
+    let expected_view_samples = u64::try_from(sample_count)
+        .expect("bounded sample count fits u64")
+        .saturating_mul(3);
+    let warm_path_gate =
+        WarmPathReuseGate::evaluate(measured_cache_activity, expected_view_samples);
 
     let standard_pq = build_view_report(
         &standard_pq_case,
@@ -333,10 +488,9 @@ async fn standard_hdr_4k_gpu_timestamp_is_materially_faster_than_aces2() -> Resu
         maximum_standard_to_aces_p95_ratio: maximum_ratio,
         standard_pq_is_materially_faster: p95_ratio <= maximum_ratio,
     };
-    let runtime_diagnostics = runtime.diagnostics();
     let info = context.adapter.get_info();
     let report = ColorViewGpuPerfReport {
-        schema_version: 2,
+        schema_version: 3,
         scenario: "renderer_color_view_4k_gpu_timestamp",
         width: WIDTH,
         height: HEIGHT,
@@ -366,6 +520,8 @@ async fn standard_hdr_4k_gpu_timestamp_is_materially_faster_than_aces2() -> Resu
             texture_pool_hits: runtime_diagnostics.resource_pool.hits,
             texture_pool_misses: runtime_diagnostics.resource_pool.misses,
             texture_pool_releases: runtime_diagnostics.resource_pool.releases,
+            measured_delta: measured_cache_activity,
+            warm_path_gate,
         },
         standard_pq,
         standard_hlg,
@@ -378,6 +534,10 @@ async fn standard_hdr_4k_gpu_timestamp_is_materially_faster_than_aces2() -> Resu
         append_jsonl(&path, &json)?;
     }
 
+    assert!(
+        report.runtime_cache.warm_path_gate.passed,
+        "warm 4K color-view sampling created or failed to reuse GPU runtime objects\n{json}"
+    );
     assert!(
         report.comparison.all_standard_views_within_budget,
         "Mondrian Standard 4K HDR p95 exceeds {} us budget: PQ={} us, HLG={} us\n{json}",
@@ -631,6 +791,12 @@ fn saturating_u64(value: u128) -> u64 {
     value.min(u128::from(u64::MAX)) as u64
 }
 
+fn monotonic_delta(after: u64, before: u64) -> u64 {
+    after
+        .checked_sub(before)
+        .expect("runtime diagnostic counters must remain monotonic")
+}
+
 fn env_usize_clamped(name: &str, default: usize, min: usize, max: usize) -> usize {
     std::env::var(name)
         .ok()
@@ -676,6 +842,70 @@ mod tests {
         assert_eq!(
             quantiles(samples),
             QuantilesUs { p50: 50, p95: 95, p99: 99, min: 1, max: 100 }
+        );
+    }
+
+    #[test]
+    fn runtime_cache_delta_preserves_each_warm_path_counter() {
+        let before = RuntimeCacheActivity {
+            shader_hits: 10,
+            shader_misses: 3,
+            static_pipeline_hits: 8,
+            backend_object_hits: 7,
+            wrapper_bind_group_creations: 3,
+            wrapper_bind_group_cache_hits: 6,
+            texture_pool_hits: 5,
+            texture_pool_misses: 2,
+            texture_pool_releases: 4,
+            ..RuntimeCacheActivity::default()
+        };
+        let after = RuntimeCacheActivity {
+            shader_hits: 19,
+            shader_misses: 3,
+            static_pipeline_hits: 17,
+            backend_object_hits: 16,
+            wrapper_bind_group_creations: 3,
+            wrapper_bind_group_cache_hits: 15,
+            texture_pool_hits: 14,
+            texture_pool_misses: 2,
+            texture_pool_releases: 13,
+            ..RuntimeCacheActivity::default()
+        };
+
+        assert_eq!(
+            after.delta_since(before),
+            RuntimeCacheActivity {
+                shader_hits: 9,
+                static_pipeline_hits: 9,
+                backend_object_hits: 9,
+                wrapper_bind_group_cache_hits: 9,
+                texture_pool_hits: 9,
+                texture_pool_releases: 9,
+                ..RuntimeCacheActivity::default()
+            }
+        );
+    }
+
+    #[test]
+    fn warm_path_gate_requires_reuse_for_every_measured_view() {
+        let activity = RuntimeCacheActivity {
+            shader_hits: 9,
+            static_pipeline_hits: 9,
+            backend_object_hits: 9,
+            wrapper_bind_group_cache_hits: 9,
+            texture_pool_hits: 9,
+            texture_pool_releases: 9,
+            ..RuntimeCacheActivity::default()
+        };
+
+        assert!(WarmPathReuseGate::evaluate(activity, 9).passed);
+        assert!(!WarmPathReuseGate::evaluate(activity, 10).passed);
+        assert!(
+            !WarmPathReuseGate::evaluate(
+                RuntimeCacheActivity { wrapper_bind_group_creations: 1, ..activity },
+                9,
+            )
+            .passed
         );
     }
 }

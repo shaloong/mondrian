@@ -41,7 +41,14 @@ frame. Both Standard output encodings must satisfy the absolute p95 budget; the
 PQ result is also compared with the like-for-like ACES PQ reference. Its JSONL record
 contains GPU and CPU-record p50/p95/p99, cold initialization, raw OCIO shader
 bytes, LUT dimensions/interpolation, pass/write/upload/readback counts, adapter
-identity, and relative performance. Defaults are
+identity, and relative performance. Schema 3 also snapshots runtime counters
+immediately before and after the measured samples. Its warm-path gate requires
+zero measured shader extraction, static-pipeline preparation, concrete backend
+object preparation, wrapper input bind-group creation, texture allocation, or
+pool eviction; wrapper-binding and output-texture pool hits must cover every
+measured View sample. This distinguishes a fast steady-state pass from a run
+that hides recurring GPU object creation behind acceptable timestamp results.
+Defaults are
 `MONDRIAN_STANDARD_HDR_4K_P95_US=5000`,
 `MONDRIAN_STANDARD_HDR_TO_ACES_P95_RATIO=0.8`, and 60 samples; sample count may
 be set with `MONDRIAN_COLOR_VIEW_GPU_PERF_SAMPLES` (20..500). The synchronous
