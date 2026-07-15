@@ -130,6 +130,7 @@ struct ComparisonReport {
     standard_pq_to_aces_p95_ratio: f64,
     standard_pq_to_aces_p99_ratio: f64,
     standard_p95_budget_us: u64,
+    standard_sdr_p95_within_budget: bool,
     standard_pq_p95_within_budget: bool,
     standard_hlg_p95_within_budget: bool,
     all_standard_views_within_budget: bool,
@@ -149,6 +150,7 @@ struct ColorViewGpuPerfReport {
     measured_region: &'static str,
     adapter: AdapterReport,
     runtime_cache: RuntimeCacheReport,
+    standard_sdr: ViewReport,
     standard_pq: ViewReport,
     standard_hlg: ViewReport,
     aces_reference_pq: ViewReport,
@@ -330,14 +332,14 @@ struct RecordedSample {
 
 #[tokio::test]
 #[ignore = "manual 4K hardware timestamp gate; requires a timestamp-capable real GPU"]
-async fn standard_hdr_4k_gpu_timestamp_is_materially_faster_than_aces2() -> Result<()> {
+async fn standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2() -> Result<()> {
     ensure_mondrian_default_ocio_loaded()
         .map_err(|error| anyhow!("load Mondrian Standard OCIO package: {error}"))?;
     let Some(context) = create_timestamp_gpu_context().await? else {
         eprintln!(
             "MONDRIAN_COLOR_VIEW_GPU_PERF_JSON={}",
             serde_json::json!({
-                "schema_version": 3,
+                "schema_version": 4,
                 "scenario": "renderer_color_view_4k_gpu_timestamp",
                 "skipped": "no real adapter with complete encoder timestamp-query support"
             })
@@ -359,6 +361,13 @@ async fn standard_hdr_4k_gpu_timestamp_is_materially_faster_than_aces2() -> Resu
         "MONDRIAN_STANDARD_HDR_TO_ACES_P95_RATIO",
         DEFAULT_STANDARD_TO_ACES_P95_RATIO,
     );
+    let standard_sdr_case = ViewCase {
+        mode: "mondrian_standard_sdr",
+        engine: ColorEngine::mondrian_standard(),
+        output_color_space: ColorSpace::Srgb,
+        display: "sRGB - Display",
+        view: "Mondrian Standard SDR v1",
+    };
     let standard_pq_case = ViewCase {
         mode: "mondrian_standard_pq",
         engine: ColorEngine::mondrian_standard(),
@@ -387,17 +396,24 @@ async fn standard_hdr_4k_gpu_timestamp_is_materially_faster_than_aces2() -> Resu
     let timer = GpuTimestampFrameTimer::new(&context.device, &context.queue)
         .context("timestamp features were enabled but timer creation failed")?;
 
+    let standard_sdr_cold =
+        record_view_sample(&context, &mut runtime, &input, &standard_sdr_case, None)?;
     let standard_pq_cold =
         record_view_sample(&context, &mut runtime, &input, &standard_pq_case, None)?;
     let standard_hlg_cold =
         record_view_sample(&context, &mut runtime, &input, &standard_hlg_case, None)?;
     let aces_pq_cold = record_view_sample(&context, &mut runtime, &input, &aces_pq_case, None)?;
     for _ in 0..WARMUP_COUNT {
+        record_view_sample(&context, &mut runtime, &input, &standard_sdr_case, None)?;
         record_view_sample(&context, &mut runtime, &input, &standard_pq_case, None)?;
         record_view_sample(&context, &mut runtime, &input, &standard_hlg_case, None)?;
         record_view_sample(&context, &mut runtime, &input, &aces_pq_case, None)?;
     }
 
+    let standard_sdr_shader = runtime
+        .shader_cache_mut()
+        .get_or_extract(standard_sdr_case.shader_request())
+        .context("extract cached Standard SDR GPU shader")?;
     let standard_pq_shader = runtime
         .shader_cache_mut()
         .get_or_extract(standard_pq_case.shader_request())
@@ -412,28 +428,18 @@ async fn standard_hdr_4k_gpu_timestamp_is_materially_faster_than_aces2() -> Resu
         .context("extract cached ACES 2 PQ GPU shader")?;
     let runtime_before_measurement = RuntimeCacheActivity::from_runtime(runtime.diagnostics());
 
+    let mut standard_sdr_samples = ViewSamples::default();
     let mut standard_pq_samples = ViewSamples::default();
     let mut standard_hlg_samples = ViewSamples::default();
     let mut aces_pq_samples = ViewSamples::default();
     for iteration in 0..sample_count {
-        let ordered = match iteration % 3 {
-            0 => [
-                (&standard_pq_case, &mut standard_pq_samples),
-                (&standard_hlg_case, &mut standard_hlg_samples),
-                (&aces_pq_case, &mut aces_pq_samples),
-            ],
-            1 => [
-                (&standard_hlg_case, &mut standard_hlg_samples),
-                (&aces_pq_case, &mut aces_pq_samples),
-                (&standard_pq_case, &mut standard_pq_samples),
-            ],
-            _ => [
-                (&aces_pq_case, &mut aces_pq_samples),
-                (&standard_pq_case, &mut standard_pq_samples),
-                (&standard_hlg_case, &mut standard_hlg_samples),
-            ],
-        };
-        for (case, samples) in ordered {
+        for offset in 0..4 {
+            let (case, samples) = match (iteration + offset) % 4 {
+                0 => (&standard_sdr_case, &mut standard_sdr_samples),
+                1 => (&standard_pq_case, &mut standard_pq_samples),
+                2 => (&standard_hlg_case, &mut standard_hlg_samples),
+                _ => (&aces_pq_case, &mut aces_pq_samples),
+            };
             let sample = record_view_sample(&context, &mut runtime, &input, case, Some(&timer))?;
             samples
                 .gpu_us
@@ -446,10 +452,16 @@ async fn standard_hdr_4k_gpu_timestamp_is_materially_faster_than_aces2() -> Resu
         .delta_since(runtime_before_measurement);
     let expected_view_samples = u64::try_from(sample_count)
         .expect("bounded sample count fits u64")
-        .saturating_mul(3);
+        .saturating_mul(4);
     let warm_path_gate =
         WarmPathReuseGate::evaluate(measured_cache_activity, expected_view_samples);
 
+    let standard_sdr = build_view_report(
+        &standard_sdr_case,
+        standard_sdr_cold.record_cpu_us,
+        standard_sdr_samples,
+        &standard_sdr_shader,
+    );
     let standard_pq = build_view_report(
         &standard_pq_case,
         standard_pq_cold.record_cpu_us,
@@ -476,21 +488,25 @@ async fn standard_hdr_4k_gpu_timestamp_is_materially_faster_than_aces2() -> Resu
         standard_pq.warm_gpu_us.p99,
         aces_reference_pq.warm_gpu_us.p99,
     );
+    let standard_sdr_within_budget = standard_sdr.warm_gpu_us.p95 <= standard_p95_budget_us;
     let standard_pq_within_budget = standard_pq.warm_gpu_us.p95 <= standard_p95_budget_us;
     let standard_hlg_within_budget = standard_hlg.warm_gpu_us.p95 <= standard_p95_budget_us;
     let comparison = ComparisonReport {
         standard_pq_to_aces_p95_ratio: p95_ratio,
         standard_pq_to_aces_p99_ratio: p99_ratio,
         standard_p95_budget_us,
+        standard_sdr_p95_within_budget: standard_sdr_within_budget,
         standard_pq_p95_within_budget: standard_pq_within_budget,
         standard_hlg_p95_within_budget: standard_hlg_within_budget,
-        all_standard_views_within_budget: standard_pq_within_budget && standard_hlg_within_budget,
+        all_standard_views_within_budget: standard_sdr_within_budget
+            && standard_pq_within_budget
+            && standard_hlg_within_budget,
         maximum_standard_to_aces_p95_ratio: maximum_ratio,
         standard_pq_is_materially_faster: p95_ratio <= maximum_ratio,
     };
     let info = context.adapter.get_info();
     let report = ColorViewGpuPerfReport {
-        schema_version: 3,
+        schema_version: 4,
         scenario: "renderer_color_view_4k_gpu_timestamp",
         width: WIDTH,
         height: HEIGHT,
@@ -523,6 +539,7 @@ async fn standard_hdr_4k_gpu_timestamp_is_materially_faster_than_aces2() -> Resu
             measured_delta: measured_cache_activity,
             warm_path_gate,
         },
+        standard_sdr,
         standard_pq,
         standard_hlg,
         aces_reference_pq,
@@ -540,8 +557,9 @@ async fn standard_hdr_4k_gpu_timestamp_is_materially_faster_than_aces2() -> Resu
     );
     assert!(
         report.comparison.all_standard_views_within_budget,
-        "Mondrian Standard 4K HDR p95 exceeds {} us budget: PQ={} us, HLG={} us\n{json}",
+        "Mondrian Standard 4K View p95 exceeds {} us budget: SDR={} us, PQ={} us, HLG={} us\n{json}",
         report.comparison.standard_p95_budget_us,
+        report.standard_sdr.warm_gpu_us.p95,
         report.standard_pq.warm_gpu_us.p95,
         report.standard_hlg.warm_gpu_us.p95,
     );

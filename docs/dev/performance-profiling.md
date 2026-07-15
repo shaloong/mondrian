@@ -31,17 +31,17 @@ $env:MONDRIAN_PREVIEW_EXTERNAL_MEDIA_PATH='E:\Video Projects\Mondrian Test\HEVC 
 $env:MONDRIAN_PERF_OUTPUT='target/perf/preview-playback.jsonl'; cargo test -p mondrian-app preview_media_continuous_playback_smoke -- --ignored --nocapture
 $env:MONDRIAN_PREVIEW_DECODE_FIXTURE='E:\media\sample-4k-hdr.mov'; $env:MONDRIAN_PREVIEW_DECODE_TIMESTAMP='1.0'; $env:MONDRIAN_PREVIEW_DECODE_MAX_WIDTH='1920'; $env:MONDRIAN_PREVIEW_DECODE_MAX_HEIGHT='1080'; cargo test -p mondrian-media preview_decode_fixture_perf_smoke -- --ignored --nocapture
 $env:MONDRIAN_RENDERER_GPU_OUTPUT_SMOKE_OUTPUT='target/perf/renderer-gpu-output.jsonl'; cargo test -p mondrian-renderer gpu_output_boundary_runtime_smoke_report_on_real_wgpu_device -- --ignored --nocapture
-$env:MONDRIAN_COLOR_VIEW_GPU_PERF_OUTPUT='target/perf/color-view-4k.jsonl'; cargo test -p mondrian-renderer --test color_view_gpu_perf standard_hdr_4k_gpu_timestamp_is_materially_faster_than_aces2 -- --ignored --nocapture
+$env:MONDRIAN_COLOR_VIEW_GPU_PERF_OUTPUT='target/perf/color-view-4k.jsonl'; cargo test -p mondrian-renderer --test color_view_gpu_perf standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2 -- --ignored --nocapture
 ```
 
 The color-View gate requires a timestamp-capable real adapter. It rotates 60
-warm 4K samples each for Mondrian Standard PQ, Mondrian Standard HLG, and the
-official ACES 2 1000-nit PQ preset over the same non-empty GPU-resident working
-frame. Both Standard output encodings must satisfy the absolute p95 budget; the
-PQ result is also compared with the like-for-like ACES PQ reference. Its JSONL record
+warm 4K samples each for Mondrian Standard SDR, PQ, HLG, and the official ACES
+2 1000-nit PQ preset over the same non-empty GPU-resident working frame. All
+three Standard Views must satisfy the absolute p95 budget; the PQ result is also
+compared with the like-for-like ACES PQ reference. Its JSONL record
 contains GPU and CPU-record p50/p95/p99, cold initialization, raw OCIO shader
 bytes, LUT dimensions/interpolation, pass/write/upload/readback counts, adapter
-identity, and relative performance. Schema 3 also snapshots runtime counters
+identity, and relative performance. Schema 4 also snapshots runtime counters
 immediately before and after the measured samples. Its warm-path gate requires
 zero measured shader extraction, static-pipeline preparation, concrete backend
 object preparation, wrapper input bind-group creation, texture allocation, or

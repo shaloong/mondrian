@@ -894,15 +894,15 @@ plan is extracted, rather than walking a 57^3 payload during every frame.
 
 The retained ignored `color_view_gpu_perf` hardware gate uses a spatially
 varying GPU-resident 3840x2160 Linear Rec.2020 input and rotates Mondrian
-Standard PQ, Mondrian Standard HLG, and the official ACES 2 1000-nit PQ preset.
-Sixty warm samples per View report GPU timestamp and CPU-record p50/p95/p99, cold preparation, shader
+Standard SDR, PQ, HLG, and the official ACES 2 1000-nit PQ preset. Sixty warm
+samples per View report GPU timestamp and CPU-record p50/p95/p99, cold preparation, shader
 size, LUT shapes, pass count, uploads, and readbacks. The measured timestamp
 contains exactly one complete OCIO output pass and excludes input generation,
-initialization, timestamp mapping, and CPU completion wait. Both Standard PQ
+initialization, timestamp mapping, and CPU completion wait. Standard SDR, PQ,
 and HLG require p95 <= 5 ms; Standard PQ additionally requires p95 <= 80% of
 the like-for-like ACES PQ reference on the measured adapter. Environment
 variables may tighten, but not silently disable, either budget.
-The schema-3 report snapshots cache counters around the measured interval and
+The schema-4 report snapshots cache counters around the measured interval and
 fails when any warm sample extracts a shader, prepares a static pipeline or
 backend object, creates an OCIO wrapper input binding, allocates an output
 texture, or evicts a pooled texture. Wrapper-binding and exact-contract texture
