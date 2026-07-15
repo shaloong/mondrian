@@ -104,8 +104,11 @@ impl ViewerGpuExecutionStageMarker for HeadlessGpuStageMarker<'_> {
                 GpuTimestampStageMarker::AfterWorkingComposite
             }
             ViewerGpuExecutionGpuStage::Spatial => GpuTimestampStageMarker::AfterSpatial,
-            ViewerGpuExecutionGpuStage::OutputBoundary => {
-                GpuTimestampStageMarker::AfterOutputBoundary
+            ViewerGpuExecutionGpuStage::ProgramOutputBoundary => {
+                GpuTimestampStageMarker::AfterProgramOutputBoundary
+            }
+            ViewerGpuExecutionGpuStage::MonitorAdaptation => {
+                GpuTimestampStageMarker::AfterMonitorAdaptation
             }
         };
         self.ring
@@ -252,7 +255,8 @@ impl HeadlessViewerGpuAdapter {
             height: frame.height,
             working_color_space: frame.working_color_space,
             layers,
-            output_boundary: &frame.boundary,
+            program_output_boundary: &frame.program_output_boundary,
+            monitor_adaptation: &frame.monitor_adaptation,
             source_rect: ViewerSourceRect {
                 x: source_rect.x,
                 y: source_rect.y,
@@ -262,7 +266,7 @@ impl HeadlessViewerGpuAdapter {
             output_width: presentation.output_width,
             output_height: presentation.output_height,
             output_precision: ViewerGpuOutputPrecision::minimum_for_display(
-                frame.boundary.output_color_space,
+                frame.monitor_adaptation.monitor_color_space(),
                 false,
             ),
             display_calibration: None,

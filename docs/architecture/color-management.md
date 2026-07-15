@@ -907,15 +907,25 @@ than recomputing color interpretation from asset records.
 
 Display transforms belong at preview presentation. Export transforms belong at export encoding/tagging. Do not bake display transforms into timeline source data.
 
-`SequenceSettings::root_preview_color_context(...)` builds the monitor
-presentation context with a caller-provided display/output color space.
 `SequenceSettings::root_program_color_context(...)` builds the shared Program
 Output context from the sequence output color space. Preview, scopes, and export
 must consume this semantic boundary before any local monitor adaptation. The
 export delivery view is resolved from
 the effective `ExportDeliveryViewPolicy` in `display_management` (inherited from
-project or overridden by sequence). Callers must choose one of these explicit
-entry points instead of using a generic root render context.
+project or overridden by sequence). The native GPU Viewer now resolves this
+Program Output context first. `SequenceSettings::root_preview_color_context(...)`
+remains only at diagnosed CPU/UI raster compatibility seams while those paths
+are moved to the same two-boundary contract; it must not be used by the native
+Viewer GPU scheduler.
+
+`RenderMonitorAdaptation` is the renderer-owned preview-only contract from the
+encoded Program Output identity to the local monitor identity. It is a stock
+OCIO color-space processor, never a second View Transform. Matching identities
+take a zero-pass route. SDR-to-HDR and HDR-to-SDR requests fail closed rather
+than hiding a second rendering transform inside monitor adaptation. The Viewer
+GPU runtime retains the pre-adaptation Program Output handle independently from
+the final monitor handle, keeping scopes and future Program Output caches
+unaffected by ICC/surface policy.
 
 Display management is explicit in the resolved `ColorContext`. Project settings
 own the default `DisplayManagementPolicy`; sequences inherit that policy unless

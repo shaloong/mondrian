@@ -721,7 +721,11 @@ User scrub/play
     → host.gpu_preview_frame_for_current_state()
       → AppUiPreviewService::gpu_preview_frame_for_state()
         → resolve_sequence_elements()  [timeline render plan]
-        → returns AppUiGpuPreviewFrame { working_input, boundary }
+        → returns AppUiGpuPreviewFrame {
+            working_input,
+            program_output_boundary,
+            monitor_adaptation,
+          }
           where working_input is GpuComposite { layers }
     → RenderGpuOutputBoundaryRuntime::record_wgpu_input_stage_owned_backend()
         for media layers with source/input contracts
@@ -730,7 +734,11 @@ User scrub/play
         → working-linear prefilter/crop/resize into visible Viewer pixels
         → transfer typed output into the shared OCIO frame table
     → RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_gpu_frame_owned_backend()
-        → GPU output transform (OCIO display/view)
+        → Program Output GPU transform (the same OCIO display/view intent as delivery)
+        → retain the typed Program Output texture for scopes/cache diagnostics
+    → optional RenderGpuOutputBoundaryRuntime::record_wgpu_intermediate_color_transform_owned_backend()
+        → stock-OCIO colorimetric Program Output → monitor adaptation
+        → no pass when both display identities match
     → optional GPU ICC monitor calibration
     → frame_renderer.register_external_texture_view()
     → queue.submit()
@@ -740,9 +748,20 @@ User scrub/play
 The native `working_input` is a GPU-composited working texture. CPU fallback is
 the separately diagnosed raster preview path; it is not a second interpretation
 of this native stage graph.
-The `boundary` is a `RenderOutputColorBoundary` carrying the target display/view
-for presentation. The GPU path executes the display transform on the GPU via
-`RenderGpuOutputBoundaryRuntime`.
+The `program_output_boundary` is a `RenderOutputColorBoundary` carrying the
+sequence Program Output intent. Monitor selection cannot replace that View.
+`RenderMonitorAdaptation` separately carries the preview-only monitor identity;
+it permits same-class SDR-to-SDR or HDR-to-HDR colorimetric conversion and
+fails closed on SDR/HDR class changes because those require an explicit
+rendering/tone-mapping policy. The Viewer record retains both Program Output
+and final monitor handles in one pooled GPU resource table. Scopes consume the
+former; presentation and optional ICC calibration consume the latter. Neither
+route performs upload/readback between these stages.
+
+Viewer GPU hardware timestamps and CPU command-recording attribution expose
+Program Output and Monitor Adaptation as separate stages. Identical identities
+still emit the ordered zero-duration monitor marker so profiling remains
+structurally comparable without adding a render pass.
 
 ### CPU Fallback Path
 

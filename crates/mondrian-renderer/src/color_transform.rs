@@ -163,6 +163,103 @@ pub struct RenderIntermediateColorTransform {
     pub engine: ColorEngine,
 }
 
+/// Preview-only colorimetric adaptation from Program Output to the local monitor.
+///
+/// This stage never contains a rendering/view transform. It may only convert
+/// between display-referred identities in the same SDR or HDR dynamic-range
+/// class, ensuring monitor selection cannot change the program rendering.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RenderMonitorAdaptation {
+    program_output_color_space: ColorSpace,
+    monitor_color_space: ColorSpace,
+    engine: ColorEngine,
+}
+
+impl RenderMonitorAdaptation {
+    /// Build a fail-closed Program Output to monitor colorimetric adaptation.
+    pub fn new(
+        program_output_color_space: ColorSpace,
+        monitor_color_space: ColorSpace,
+        engine: ColorEngine,
+    ) -> Result<Self, RenderMonitorAdaptationError> {
+        if !program_output_color_space.is_display_referred() {
+            return Err(RenderMonitorAdaptationError::UnsupportedProgramOutput {
+                color_space: program_output_color_space,
+            });
+        }
+        if !monitor_color_space.is_display_referred() {
+            return Err(RenderMonitorAdaptationError::UnsupportedMonitorOutput {
+                color_space: monitor_color_space,
+            });
+        }
+        if program_output_color_space.is_hdr() != monitor_color_space.is_hdr() {
+            return Err(RenderMonitorAdaptationError::DynamicRangeClassMismatch {
+                program_output: program_output_color_space,
+                monitor_output: monitor_color_space,
+            });
+        }
+        Ok(Self {
+            program_output_color_space,
+            monitor_color_space,
+            engine,
+        })
+    }
+
+    /// Program Output identity expected at the adaptation input.
+    pub const fn program_output_color_space(&self) -> ColorSpace {
+        self.program_output_color_space
+    }
+
+    /// Local monitor identity produced by the adaptation.
+    pub const fn monitor_color_space(&self) -> ColorSpace {
+        self.monitor_color_space
+    }
+
+    /// Whether the monitor differs from Program Output and needs one OCIO pass.
+    pub fn requires_pass(&self) -> bool {
+        self.program_output_color_space != self.monitor_color_space
+    }
+
+    /// Build the stock-OCIO identity transform for a required adaptation pass.
+    ///
+    /// `None` is an intentional zero-pass route when both identities match.
+    pub fn gpu_transform(&self) -> Option<RenderIntermediateColorTransform> {
+        self.requires_pass().then(|| RenderIntermediateColorTransform {
+            output_identity: OcioColorSpaceIdentity::Color(self.monitor_color_space),
+            output_domain: ColorFrameDomain::Display,
+            output_encoding: ColorFrameEncoding::EncodedFloat,
+            engine: self.engine.clone(),
+        })
+    }
+}
+
+/// Invalid monitor-adaptation contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RenderMonitorAdaptationError {
+    /// Program Output must already be display-referred.
+    #[error("Program Output {color_space:?} is not display-referred")]
+    UnsupportedProgramOutput {
+        /// Rejected Program Output identity.
+        color_space: ColorSpace,
+    },
+    /// A monitor target must be display-referred.
+    #[error("monitor output {color_space:?} is not display-referred")]
+    UnsupportedMonitorOutput {
+        /// Rejected monitor identity.
+        color_space: ColorSpace,
+    },
+    /// Tone/dynamic-range mapping belongs in an explicit rendering policy.
+    #[error(
+        "monitor adaptation cannot change dynamic-range class from {program_output:?} to {monitor_output:?}"
+    )]
+    DynamicRangeClassMismatch {
+        /// Program Output identity.
+        program_output: ColorSpace,
+        /// Requested monitor identity.
+        monitor_output: ColorSpace,
+    },
+}
+
 /// Paired OCIO GPU transforms surrounding one effect processing domain.
 #[derive(Debug, Clone)]
 pub struct RenderEffectColorDomainGpuPlan {
@@ -1284,6 +1381,107 @@ mod tests {
                 src: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
                 dst: OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
                 language: GpuLanguage::Glsl4_0,
+            }
+        );
+    }
+
+    #[test]
+    fn monitor_adaptation_uses_no_pass_for_identical_program_and_monitor_spaces() {
+        let adaptation = RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::Rec709,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("matching display-referred spaces");
+
+        assert!(!adaptation.requires_pass());
+        assert_eq!(adaptation.gpu_transform(), None);
+    }
+
+    #[test]
+    fn monitor_adaptation_plans_sdr_colorimetric_pass_without_transfers() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let adaptation = RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::DisplayP3,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("SDR monitor adaptation");
+        let input = ColorFrameDescriptor {
+            width: 3840,
+            height: 2160,
+            color_space: ColorSpace::Rec709.into(),
+            domain: ColorFrameDomain::Display,
+            encoding: ColorFrameEncoding::EncodedFloat,
+            residency: ColorFrameResidency::Gpu,
+        };
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorTransformGpuPlanner::new(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+
+        let plan = planner
+            .plan_identity_transform(
+                input,
+                &adaptation.gpu_transform().expect("required adaptation pass"),
+            )
+            .expect("monitor adaptation GPU plan");
+
+        assert!(adaptation.requires_pass());
+        assert_eq!(plan.diagnostics.input, input);
+        assert_eq!(plan.diagnostics.output.domain, ColorFrameDomain::Display);
+        assert_eq!(
+            plan.diagnostics.output.color_space,
+            ColorFrameSpace::Color(ColorSpace::DisplayP3)
+        );
+        assert_eq!(
+            plan.diagnostics.output.encoding,
+            ColorFrameEncoding::EncodedFloat
+        );
+        assert!(plan.can_execute_in_place_on_gpu());
+        assert_eq!(
+            plan.request,
+            OcioGpuShaderRequest::ColorSpace {
+                engine: ColorEngine::mondrian_standard(),
+                src: OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
+                dst: OcioColorSpaceIdentity::Color(ColorSpace::DisplayP3),
+                language: GpuLanguage::Glsl4_0,
+            }
+        );
+    }
+
+    #[test]
+    fn monitor_adaptation_rejects_dynamic_range_class_changes() {
+        let error = RenderMonitorAdaptation::new(
+            ColorSpace::Rec2100Pq,
+            ColorSpace::Rec709,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect_err("HDR to SDR requires a rendering transform, not monitor adaptation");
+
+        assert_eq!(
+            error,
+            RenderMonitorAdaptationError::DynamicRangeClassMismatch {
+                program_output: ColorSpace::Rec2100Pq,
+                monitor_output: ColorSpace::Rec709,
+            }
+        );
+    }
+
+    #[test]
+    fn monitor_adaptation_rejects_non_display_identities() {
+        let error = RenderMonitorAdaptation::new(
+            ColorSpace::LinearRec2020,
+            ColorSpace::Srgb,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect_err("scene-linear program output is invalid");
+
+        assert_eq!(
+            error,
+            RenderMonitorAdaptationError::UnsupportedProgramOutput {
+                color_space: ColorSpace::LinearRec2020,
             }
         );
     }

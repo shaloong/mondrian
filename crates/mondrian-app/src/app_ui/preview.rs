@@ -44,12 +44,12 @@ use mondrian_renderer::{
     CpuEncodedColorFrame, CpuSourceColorFrame, GpuCompositingBlockerReason,
     GpuCompositingDiagnostics, LinearFloatSource, RenderColorStageDiagnostics,
     RenderColorStageGpuBlockerBreakdown, RenderColorTransformDiagnostics,
-    RenderColorTransformDirection, RenderInputTransform, RenderOutputColorBoundary,
-    TimelineAdjustmentLayer, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
-    TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement,
-    TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineEffectColorRuntime, TimelineEvaluationRequest, TimelineMediaLayer,
-    TimelineRenderPlanElement, TimelineSolidColorLayer,
+    RenderColorTransformDirection, RenderInputTransform, RenderMonitorAdaptation,
+    RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
+    TimelineCompositeDiagnostics, TimelineCompositeDomainBlockerBreakdown,
+    TimelineCompositeElement, TimelineCompositeLegacyBreakdown, TimelineCompositeOptions,
+    TimelineCompositeScratch, TimelineEffectColorRuntime, TimelineEvaluationRequest,
+    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 #[cfg(test)]
 use mondrian_renderer::{
@@ -85,6 +85,7 @@ use crate::app_ui::preview_access_mode::{
 use crate::app_ui::preview_frame_store::PreviewCpuFrameStore;
 #[cfg(test)]
 use crate::app_ui::preview_frame_store::PreviewCpuFrameStoreConfig;
+use crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 use crate::app_ui::preview_scheduler_policy::{
     media_preview_forward_prefetch_window_frames, playback_frame_delivery_kind,
@@ -1321,10 +1322,51 @@ impl AppUiPreviewService {
                 return AppUiGpuPreviewFrameState::Unavailable;
             }
         };
-        let color_context = sequence.settings.root_preview_color_context(
-            &state.project_settings.color_management,
+        let color_context = sequence
+            .settings
+            .root_program_color_context(&state.project_settings.color_management);
+        if let Some(reason) = color_context.export_delivery_view_error.as_ref() {
+            self.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
+                feature: "program_output_view".to_owned(),
+                reason: reason.clone(),
+            });
+            self.scheduler.prune_obsolete();
+            self.external_viewer_frame.replace(None);
+            bump(&self.metrics.gpu_preview_candidate_unavailable);
+            return AppUiGpuPreviewFrameState::Unavailable;
+        }
+        let Some(program_output_color_space) = color_context.output_color_space.color() else {
+            self.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
+                feature: "program_output_identity".to_owned(),
+                reason: format!(
+                    "Program Output {:?} is not an encoded color identity",
+                    color_context.output_color_space
+                ),
+            });
+            self.scheduler.prune_obsolete();
+            self.external_viewer_frame.replace(None);
+            bump(&self.metrics.gpu_preview_candidate_unavailable);
+            return AppUiGpuPreviewFrameState::Unavailable;
+        };
+        let monitor_adaptation = match RenderMonitorAdaptation::new(
+            program_output_color_space,
             display_color_space,
-        );
+            color_context.engine.clone(),
+        ) {
+            Ok(adaptation) => adaptation,
+            Err(error) => {
+                self.record_preview_gpu_output_blocker(
+                    &PreviewGpuOutputBlocker::UnsupportedFeature {
+                        feature: "monitor_adaptation".to_owned(),
+                        reason: error.to_string(),
+                    },
+                );
+                self.scheduler.prune_obsolete();
+                self.external_viewer_frame.replace(None);
+                bump(&self.metrics.gpu_preview_candidate_unavailable);
+                return AppUiGpuPreviewFrameState::Unavailable;
+            }
+        };
         self.activate_preview_generation(ViewerPreviewGenerationKey::from_state(
             state,
             sequence,
@@ -1333,7 +1375,7 @@ impl AppUiPreviewService {
             height,
             display_color_space,
         ));
-        let resolved = match self.resolve_sequence_elements(
+        let mut resolved = match self.resolve_sequence_elements(
             state,
             sequence,
             frame,
@@ -1356,6 +1398,9 @@ impl AppUiPreviewService {
                 return AppUiGpuPreviewFrameState::Unavailable;
             }
         };
+        if let Some(cache_key) = resolved.cache_key.as_mut() {
+            *cache_key = cache_key.with_monitor_adaptation(&monitor_adaptation);
+        }
         self.current_presentation_quality
             .set(resolved_preview_presentation_quality(&resolved.elements));
         let Some(cache_key) = resolved.cache_key.clone() else {
@@ -1372,7 +1417,9 @@ impl AppUiPreviewService {
             bump(&self.metrics.gpu_preview_candidate_current);
             return AppUiGpuPreviewFrameState::Current;
         }
-        let Ok(boundary) = output_boundary_from_color_context(&resolved.color_context) else {
+        let Ok(program_output_boundary) =
+            output_boundary_from_color_context(&resolved.color_context)
+        else {
             bump(&self.metrics.gpu_preview_candidate_unavailable);
             return AppUiGpuPreviewFrameState::Unavailable;
         };
@@ -1419,7 +1466,8 @@ impl AppUiPreviewService {
             height,
             working_color_space: resolved.color_context.working_color_space,
             working_input,
-            boundary,
+            program_output_boundary,
+            monitor_adaptation,
             preview_candidate_id: candidate_id,
             presentation_ticket: self.playback_presentation_ticket(state),
             decode_execution,
@@ -7025,8 +7073,10 @@ pub(crate) struct AppUiGpuPreviewFrame {
     pub working_color_space: WorkingColorSpace,
     /// Working-space input that enters the GPU output boundary.
     pub working_input: AppUiGpuPreviewWorkingInput,
-    /// Display/output boundary to execute on the GPU.
-    pub boundary: RenderOutputColorBoundary,
+    /// Program Output boundary shared with delivery/export semantics.
+    pub program_output_boundary: RenderOutputColorBoundary,
+    /// Preview-only Program Output to local-monitor adaptation.
+    pub monitor_adaptation: RenderMonitorAdaptation,
     /// Monotonic identifier for this working-frame candidate.
     preview_candidate_id: u64,
     /// Exact terminal delivery to emit only after presentation succeeds.
@@ -7410,6 +7460,20 @@ pub(crate) struct ViewerPreviewCacheKey {
     width: u32,
     height: u32,
     plan_signature: u64,
+}
+
+impl ViewerPreviewCacheKey {
+    fn with_monitor_adaptation(&self, adaptation: &RenderMonitorAdaptation) -> Self {
+        let mut hasher = DefaultHasher::new();
+        self.plan_signature.hash(&mut hasher);
+        adaptation.hash(&mut hasher);
+        Self {
+            sequence_id: self.sequence_id,
+            width: self.width,
+            height: self.height,
+            plan_signature: hasher.finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10320,6 +10384,42 @@ mod tests {
         assert_eq!(diagnostics.gpu_preview_candidate_loading, 0);
         assert_eq!(diagnostics.gpu_preview_candidate_unavailable, 0);
         assert_eq!(diagnostics.gpu_preview_candidate_pixels, 960_u64 * 540);
+    }
+
+    #[test]
+    fn gpu_candidate_separates_program_output_from_monitor_identity() {
+        let service = AppUiPreviewService::new();
+        let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+        let baseline_frame = match service.gpu_preview_frame_for_state(&state) {
+            AppUiGpuPreviewFrameState::Ready(frame) => frame,
+            _ => panic!("expected baseline GPU preview candidate"),
+        };
+        state.project_settings.color_management.display_management.monitor_profile =
+            mondrian_core::MonitorProfileReference::IccProfile {
+                profile_id: "test-monitor".to_owned(),
+            };
+        let snapshot = calibrated_icc_display_snapshot(ColorSpace::Srgb);
+        service.set_display_output_snapshot(Some(&snapshot));
+
+        let frame = match service.gpu_preview_frame_for_state(&state) {
+            AppUiGpuPreviewFrameState::Ready(frame) => frame,
+            _ => panic!("expected ready GPU preview candidate"),
+        };
+
+        assert_eq!(
+            frame.program_output_boundary.output_color_space,
+            ColorSpace::Rec709
+        );
+        assert_eq!(
+            frame.monitor_adaptation.program_output_color_space(),
+            ColorSpace::Rec709
+        );
+        assert_eq!(
+            frame.monitor_adaptation.monitor_color_space(),
+            ColorSpace::Srgb
+        );
+        assert!(frame.monitor_adaptation.requires_pass());
+        assert_ne!(frame.cache_key, baseline_frame.cache_key);
     }
 
     #[test]

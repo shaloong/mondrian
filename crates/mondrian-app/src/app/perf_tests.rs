@@ -135,7 +135,9 @@ struct HeadlessViewerGpuExecutionSummary {
     #[serde(skip)]
     spatial_samples_us: Vec<u64>,
     #[serde(skip)]
-    output_boundary_samples_us: Vec<u64>,
+    program_output_boundary_samples_us: Vec<u64>,
+    #[serde(skip)]
+    monitor_adaptation_samples_us: Vec<u64>,
     #[serde(skip)]
     display_calibration_samples_us: Vec<u64>,
     gpu_duration_samples_us: Vec<u64>,
@@ -185,7 +187,8 @@ impl HeadlessViewerGpuExecutionSummary {
                 self.native_video_import_samples.push(timings.native_video_import);
                 self.working_composite_samples_us.push(timings.working_composite_us);
                 self.spatial_samples_us.push(timings.spatial_us);
-                self.output_boundary_samples_us.push(timings.output_boundary_us);
+                self.program_output_boundary_samples_us.push(timings.program_output_boundary_us);
+                self.monitor_adaptation_samples_us.push(timings.monitor_adaptation_us);
                 self.display_calibration_samples_us.push(timings.display_calibration_us);
             }
             if let Some(token) = execution.gpu_timestamp_token {
@@ -241,7 +244,12 @@ impl HeadlessViewerGpuExecutionSummary {
                 sample.through_working_composite_us
             }),
             spatial_us: field(&self.gpu_stage_samples, |sample| sample.spatial_us),
-            output_boundary_us: field(&self.gpu_stage_samples, |sample| sample.output_boundary_us),
+            program_output_boundary_us: field(&self.gpu_stage_samples, |sample| {
+                sample.program_output_boundary_us
+            }),
+            monitor_adaptation_us: field(&self.gpu_stage_samples, |sample| {
+                sample.monitor_adaptation_us
+            }),
             display_calibration_us: field(&self.gpu_stage_samples, |sample| {
                 sample.display_calibration_us
             }),
@@ -266,7 +274,8 @@ impl HeadlessViewerGpuExecutionSummary {
             native_video_import: p95_native_video_import(&self.native_video_import_samples),
             working_composite_us: p95_sample_us(&self.working_composite_samples_us),
             spatial_us: p95_sample_us(&self.spatial_samples_us),
-            output_boundary_us: p95_sample_us(&self.output_boundary_samples_us),
+            program_output_boundary_us: p95_sample_us(&self.program_output_boundary_samples_us),
+            monitor_adaptation_us: p95_sample_us(&self.monitor_adaptation_samples_us),
             display_calibration_us: p95_sample_us(&self.display_calibration_samples_us),
         }
     }

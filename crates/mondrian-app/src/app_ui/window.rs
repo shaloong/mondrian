@@ -37,16 +37,17 @@ use crate::app_ui::shortcuts::{register_shortcuts, AppUiShortcutOverride};
 use crate::app_ui::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
 use mondrian_core::types::ColorSpace;
 use mondrian_platform::{NativeVideoTextureImportProbe, SystemPlatformService};
+#[cfg(test)]
+use mondrian_renderer::RenderOutputColorBoundary;
 use mondrian_renderer::{
     native_video_texture_device_features, ocio_lut_filtering_device_features,
     request_adapter_with_native_video_preference, GpuNativeDecodedFrameImportSupport,
     RenderColorStageDiagnostics, RenderGpuOutputBoundaryRuntimeDiagnostics,
     RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputRuntimeDiagnosticsReport,
     RenderGpuOutputStageDiagnosticsReport, RenderGpuOutputStageResourcePlanError,
-    RenderOutputColorBoundary, RenderOutputColorBoundaryTarget, ViewerGpuExecutionError,
-    ViewerGpuExecutionLayer, ViewerGpuExecutionRequest, ViewerGpuExecutionResidency,
-    ViewerGpuExecutionRuntime, ViewerGpuNativeVideoFacts, ViewerGpuOutputPrecision,
-    ViewerSourceRect,
+    RenderOutputColorBoundaryTarget, ViewerGpuExecutionError, ViewerGpuExecutionLayer,
+    ViewerGpuExecutionRequest, ViewerGpuExecutionResidency, ViewerGpuExecutionRuntime,
+    ViewerGpuNativeVideoFacts, ViewerGpuOutputPrecision, ViewerSourceRect,
 };
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutManager, ShortcutScope};
@@ -309,7 +310,10 @@ struct AppUiViewerGpuOutputFrameContext {
     height: u32,
     external_texture_key: String,
     output_target: AppUiViewerGpuOutputTarget,
+    /// Program Output identity before preview-only monitor adaptation.
     output_color_space: ColorSpace,
+    /// Local monitor identity after preview-only colorimetric adaptation.
+    monitor_color_space: ColorSpace,
     tone_map: bool,
     preview_candidate_id: Option<u64>,
     preview_candidate_state: AppUiViewerGpuOutputPreviewCandidateState,
@@ -804,12 +808,13 @@ impl AppUiViewerGpuOutputFrameContext {
             width: frame.width,
             height: frame.height,
             external_texture_key,
-            output_target: AppUiViewerGpuOutputTarget::from(frame.boundary.target),
-            output_color_space: frame.boundary.output_color_space,
-            tone_map: frame.boundary.tone_map,
+            output_target: AppUiViewerGpuOutputTarget::from(frame.program_output_boundary.target),
+            output_color_space: frame.program_output_boundary.output_color_space,
+            monitor_color_space: frame.monitor_adaptation.monitor_color_space(),
+            tone_map: frame.program_output_boundary.tone_map,
             preview_candidate_id: Some(frame.preview_candidate_id()),
             preview_candidate_state: AppUiViewerGpuOutputPreviewCandidateState::Ready,
-            display_view: frame.boundary.display_view.as_ref().map(|display_view| {
+            display_view: frame.program_output_boundary.display_view.as_ref().map(|display_view| {
                 AppUiViewerGpuOutputDisplayView {
                     display: display_view.display.clone(),
                     view: display_view.view.clone(),
@@ -2075,30 +2080,25 @@ struct AppUiDisplayTarget {
 }
 
 impl AppUiDisplayOutputContract {
-    fn presentation_readiness_for_boundary(
+    fn presentation_readiness_for_color_space(
         &self,
-        boundary: &RenderOutputColorBoundary,
+        output_color_space: ColorSpace,
     ) -> AppUiDisplayPresentationReadinessDiagnostics {
-        if boundary.target != RenderOutputColorBoundaryTarget::Display {
-            return self.display_presentation_readiness_current(boundary.output_color_space);
-        }
         if app_ui_surface_color_space_matches_display_output(
             self.surface_color.color_space,
-            boundary.output_color_space,
+            output_color_space,
         ) {
-            return self.display_presentation_readiness_current(boundary.output_color_space);
+            return self.display_presentation_readiness_current(output_color_space);
         }
 
-        let intent = AppUiSurfacePresentationIntent::DisplayOutput(boundary.output_color_space);
+        let intent = AppUiSurfacePresentationIntent::DisplayOutput(output_color_space);
         let desired =
             choose_app_ui_surface_color_contract(&self.surface_capabilities_snapshot(), intent);
         match desired {
             Ok(desired_surface) => AppUiDisplayPresentationReadinessDiagnostics {
                 status: AppUiDisplayPresentationReadinessStatus::ReconfigureBlockedByPayload,
-                output_color_space: boundary.output_color_space,
-                current_surface_format: app_ui_surface_format_diagnostic(
-                    self.surface_color.format,
-                ),
+                output_color_space,
+                current_surface_format: app_ui_surface_format_diagnostic(self.surface_color.format),
                 current_surface_color_space: app_ui_surface_color_space_diagnostic(
                     self.surface_color.color_space,
                 ),
@@ -2122,17 +2122,28 @@ impl AppUiDisplayOutputContract {
             },
             Err(err) if err.required_color_space.is_none() => {
                 self.display_presentation_readiness_unsupported(
-                    boundary.output_color_space,
+                    output_color_space,
                     AppUiDisplayPresentationReadinessStatus::UnsupportedPresentationIntent,
                     None,
                 )
             }
             Err(err) => self.display_presentation_readiness_unsupported(
-                boundary.output_color_space,
+                output_color_space,
                 AppUiDisplayPresentationReadinessStatus::UnsupportedSurfaceContract,
                 err.required_color_space,
             ),
         }
+    }
+
+    #[cfg(test)]
+    fn presentation_readiness_for_boundary(
+        &self,
+        boundary: &RenderOutputColorBoundary,
+    ) -> AppUiDisplayPresentationReadinessDiagnostics {
+        if boundary.target != RenderOutputColorBoundaryTarget::Display {
+            return self.display_presentation_readiness_current(boundary.output_color_space);
+        }
+        self.presentation_readiness_for_color_space(boundary.output_color_space)
     }
 
     fn display_presentation_readiness_current(
@@ -2192,6 +2203,7 @@ impl AppUiDisplayOutputContract {
         }
     }
 
+    #[cfg(test)]
     fn boundary_blocker(
         &self,
         boundary: &RenderOutputColorBoundary,
@@ -2199,13 +2211,20 @@ impl AppUiDisplayOutputContract {
         if boundary.target != RenderOutputColorBoundaryTarget::Display {
             return None;
         }
+        self.boundary_blocker_for_color_space(boundary.output_color_space)
+    }
+
+    fn boundary_blocker_for_color_space(
+        &self,
+        output_color_space: ColorSpace,
+    ) -> Option<AppUiDisplayBoundaryBlocker> {
         let supported_surface_color_spaces =
             self.supported_surface_color_spaces_for_selected_format();
-        if boundary.output_color_space.is_hdr()
+        if output_color_space.is_hdr()
             && self.surface_color.hdr_mode == AppUiSurfaceHdrMode::SdrOnly
         {
             return Some(AppUiDisplayBoundaryBlocker::HdrOutputRequiresHdrSurface {
-                output_color_space: boundary.output_color_space,
+                output_color_space,
                 selected_surface_format: self.surface_color.format,
                 selected_surface_color_space: self.surface_color.color_space,
                 selected_surface_encoding: self.surface_color.encoding,
@@ -2216,14 +2235,14 @@ impl AppUiDisplayOutputContract {
 
         if app_ui_surface_color_space_matches_display_output(
             self.surface_color.color_space,
-            boundary.output_color_space,
+            output_color_space,
         ) {
             return None;
         }
 
         Some(
             AppUiDisplayBoundaryBlocker::OutputColorSpaceRequiresSurfaceColorSpace {
-                output_color_space: boundary.output_color_space,
+                output_color_space,
                 selected_surface_format: self.surface_color.format,
                 selected_surface_color_space: self.surface_color.color_space,
                 selected_surface_encoding: self.surface_color.encoding,
@@ -3209,7 +3228,7 @@ fn prepare_viewer_gpu_preview(
     );
     let presentation_readiness = session
         .display_output_contract
-        .presentation_readiness_for_boundary(&frame.boundary);
+        .presentation_readiness_for_color_space(frame.monitor_adaptation.monitor_color_space());
     session
         .viewer_gpu_output_telemetry
         .record_display_presentation_readiness(presentation_readiness);
@@ -3254,7 +3273,10 @@ fn prepare_viewer_gpu_preview(
         }
     }
 
-    if let Some(blocker) = session.display_output_contract.boundary_blocker(&frame.boundary) {
+    if let Some(blocker) = session
+        .display_output_contract
+        .boundary_blocker_for_color_space(frame.monitor_adaptation.monitor_color_space())
+    {
         session.viewer_gpu_output_telemetry.record_display_contract_blocker(&blocker);
         match &blocker {
             AppUiDisplayBoundaryBlocker::HdrOutputRequiresHdrSurface {
@@ -3290,7 +3312,8 @@ fn prepare_viewer_gpu_preview(
             frame = frame.frame,
             width = frame.width,
             height = frame.height,
-            output_color_space = ?frame.boundary.output_color_space,
+            program_output_color_space = ?frame.program_output_boundary.output_color_space,
+            monitor_color_space = ?frame.monitor_adaptation.monitor_color_space(),
             display_target = ?session.display_output_contract.display_target,
             surface_format = ?session.display_output_contract.surface_color.format,
             surface_color_space = ?session.display_output_contract.surface_color.color_space,
@@ -3335,7 +3358,7 @@ fn prepare_viewer_gpu_preview(
         None => None,
     };
     let output_precision = ViewerGpuOutputPrecision::minimum_for_display(
-        frame.boundary.output_color_space,
+        frame.monitor_adaptation.monitor_color_space(),
         display_calibration.is_some(),
     );
     let source_rect = presentation_geometry.presentation.normalized_source_rect();
@@ -3350,7 +3373,8 @@ fn prepare_viewer_gpu_preview(
             height: frame.height,
             working_color_space: frame.working_color_space,
             layers,
-            output_boundary: &frame.boundary,
+            program_output_boundary: &frame.program_output_boundary,
+            monitor_adaptation: &frame.monitor_adaptation,
             source_rect: ViewerSourceRect {
                 x: source_rect.x,
                 y: source_rect.y,
@@ -3397,7 +3421,7 @@ fn prepare_viewer_gpu_preview(
                         },
                     );
                 }
-                ViewerGpuExecutionError::OutputBoundary(boundary_error) => {
+                ViewerGpuExecutionError::ProgramOutputBoundary(boundary_error) => {
                     session.viewer_gpu_output_telemetry.record_record_failure();
                     host.record_preview_cpu_output_fallback(frame.width, frame.height);
                     if let RenderGpuOutputBoundaryRuntimeRecordError::ResourcePlan(
@@ -6186,6 +6210,7 @@ mod tests {
             external_texture_key: "app-ui.viewer.gpu:sequence-for-jsonl:1920x1080:feed".to_owned(),
             output_target: AppUiViewerGpuOutputTarget::Display,
             output_color_space: ColorSpace::Srgb,
+            monitor_color_space: ColorSpace::Srgb,
             tone_map: false,
             preview_candidate_id: Some(2),
             preview_candidate_state: AppUiViewerGpuOutputPreviewCandidateState::Ready,

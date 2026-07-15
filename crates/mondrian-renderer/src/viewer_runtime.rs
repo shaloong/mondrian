@@ -15,11 +15,12 @@ use crate::{
     GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuViewerSpatialRecord,
     GpuViewerSpatialRuntime, GpuViewerSpatialRuntimeDiagnostics, NativeVideoImportCpuTimings,
     RenderColorStageDiagnostics, RenderColorTransformGpuOptions,
-    RenderGpuCompositeGraphRecordError, RenderGpuInputStageRecord,
-    RenderGpuInputStageRuntimeRecordError, RenderGpuOutputBoundaryRuntime,
-    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderGpuOutputBoundaryRuntimeRecordError,
-    RenderOutputColorBoundary, ViewerGpuExecutionLayer, ViewerGpuMediaSource,
-    ViewerGpuNativeSource, ViewerNativeVideoImportRuntime, ViewerSourceRect,
+    RenderGpuColorTransformRuntimeRecordError, RenderGpuCompositeGraphRecordError,
+    RenderGpuInputStageRecord, RenderGpuInputStageRuntimeRecordError,
+    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
+    RenderGpuOutputBoundaryRuntimeRecordError, RenderMonitorAdaptation, RenderOutputColorBoundary,
+    ViewerGpuExecutionLayer, ViewerGpuMediaSource, ViewerGpuNativeSource,
+    ViewerNativeVideoImportRuntime, ViewerSourceRect,
 };
 use mondrian_core::display_calibration::DisplayCalibrationLut3d;
 use mondrian_core::types::{BlendMode, Color, SequenceId};
@@ -41,8 +42,10 @@ pub struct ViewerGpuExecutionRequest<'a> {
     pub working_color_space: WorkingColorSpace,
     /// Bottom-to-top layer stack entering working-linear compositing.
     pub layers: &'a [ViewerGpuExecutionLayer],
-    /// Exact display/output transform to execute after spatial processing.
-    pub output_boundary: &'a RenderOutputColorBoundary,
+    /// Exact Program Output transform shared with delivery/export.
+    pub program_output_boundary: &'a RenderOutputColorBoundary,
+    /// Preview-only Program Output to local-monitor adaptation.
+    pub monitor_adaptation: &'a RenderMonitorAdaptation,
     /// Normalized crop in the working composite.
     pub source_rect: ViewerSourceRect,
     /// Output width after Viewer spatial processing.
@@ -96,8 +99,10 @@ pub enum ViewerGpuExecutionGpuStage {
     WorkingComposite,
     /// Viewer spatial commands are complete.
     Spatial,
-    /// Display/output boundary commands are complete.
-    OutputBoundary,
+    /// Program Output boundary commands are complete.
+    ProgramOutputBoundary,
+    /// Preview-only monitor-adaptation commands are complete.
+    MonitorAdaptation,
 }
 
 /// Adapter hook for writing GPU markers without coupling execution to a profiler.
@@ -208,6 +213,10 @@ impl ViewerGpuExecutionRuntime {
             request.output_precision,
             request.display_calibration.is_some(),
         )?;
+        validate_program_monitor_contract(
+            request.program_output_boundary,
+            request.monitor_adaptation,
+        )?;
         self.native_video_import.reset_frame_cpu_timings();
         let input_prepare_started = Instant::now();
         let prepared = prepare_composite(
@@ -238,7 +247,7 @@ impl ViewerGpuExecutionRuntime {
                     working_color_space: request.working_color_space,
                     layers: &gpu_layers,
                 },
-                request.output_boundary.engine.clone(),
+                request.program_output_boundary.engine.clone(),
                 RenderColorTransformGpuOptions::default(),
             )
             .map_err(ViewerGpuExecutionError::WorkingComposite)?;
@@ -289,13 +298,18 @@ impl ViewerGpuExecutionRuntime {
             encoder,
             ViewerGpuExecutionGpuStage::Spatial,
         )?;
-        let output_boundary_started = Instant::now();
-        let mut output_record = self
+        let program_output_boundary_started = Instant::now();
+        let program_output_texture_format = if request.monitor_adaptation.requires_pass() {
+            GpuColorFrameTextureFormat::Rgba16Float
+        } else {
+            request.output_precision.texture_format()
+        };
+        let program_output_record = self
             .color_output
             .record_wgpu_output_boundary_gpu_frame_owned_backend(
-                request.output_boundary,
+                request.program_output_boundary,
                 &spatial_output,
-                request.output_precision.texture_format(),
+                program_output_texture_format,
                 RenderColorTransformGpuOptions::default(),
                 RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
                     device,
@@ -304,16 +318,44 @@ impl ViewerGpuExecutionRuntime {
                     load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                 },
             )
-            .map_err(ViewerGpuExecutionError::OutputBoundary)?;
-        let output_boundary_us = elapsed_us(output_boundary_started);
+            .map_err(ViewerGpuExecutionError::ProgramOutputBoundary)?;
+        let program_output_boundary_us = elapsed_us(program_output_boundary_started);
         mark_gpu_stage(
             &mut stage_marker,
             encoder,
-            ViewerGpuExecutionGpuStage::OutputBoundary,
+            ViewerGpuExecutionGpuStage::ProgramOutputBoundary,
         )?;
-        stage_diagnostics.accumulate(output_record.stage_diagnostics);
-        output_record.stage_diagnostics = stage_diagnostics;
-        let output = output_record.materialized.output;
+        stage_diagnostics.accumulate(program_output_record.stage_diagnostics);
+        let program_output = program_output_record.materialized.output;
+        let monitor_adaptation_started = Instant::now();
+        let output = if let Some(transform) = request.monitor_adaptation.gpu_transform() {
+            let monitor_record = self
+                .color_output
+                .record_wgpu_intermediate_color_transform_owned_backend(
+                    &transform,
+                    &program_output,
+                    GpuColorFrameTextureFormat::Rgba16Float,
+                    "viewer-monitor-adaptation",
+                    RenderColorTransformGpuOptions::default(),
+                    RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                        device,
+                        queue,
+                        encoder,
+                        load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    },
+                )
+                .map_err(ViewerGpuExecutionError::MonitorAdaptation)?;
+            stage_diagnostics.accumulate(monitor_record.stage_diagnostics);
+            monitor_record.materialized.output
+        } else {
+            program_output.clone()
+        };
+        let monitor_adaptation_us = elapsed_us(monitor_adaptation_started);
+        mark_gpu_stage(
+            &mut stage_marker,
+            encoder,
+            ViewerGpuExecutionGpuStage::MonitorAdaptation,
+        )?;
         let calibration_started = Instant::now();
         let (output, output_owner) = if let Some(calibration) = request.display_calibration {
             let output_view = self
@@ -347,9 +389,10 @@ impl ViewerGpuExecutionRuntime {
         };
         let display_calibration_us = elapsed_us(calibration_started);
         Ok(ViewerGpuExecutionRecord {
+            program_output,
             output,
             output_owner,
-            stage_diagnostics: output_record.stage_diagnostics,
+            stage_diagnostics,
             compositing_diagnostics: composite.compositing_diagnostics,
             spatial_diagnostics,
             residency,
@@ -359,7 +402,8 @@ impl ViewerGpuExecutionRuntime {
                 native_video_import: self.native_video_import.frame_cpu_timings(),
                 working_composite_us,
                 spatial_us,
-                output_boundary_us,
+                program_output_boundary_us,
+                monitor_adaptation_us,
                 display_calibration_us,
             },
         })
@@ -391,6 +435,21 @@ impl ViewerGpuExecutionRuntime {
         }
     }
 
+    /// Resolve the Program Output texture before local monitor adaptation.
+    ///
+    /// Scopes and program-output diagnostics must consume this view so local
+    /// display policy cannot change measured program values.
+    pub fn program_output_texture_view(
+        &self,
+        record: &ViewerGpuExecutionRecord,
+    ) -> Result<wgpu::TextureView, ViewerGpuExecutionError> {
+        self.color_output
+            .frame_table()
+            .get(&record.program_output)
+            .map(|resource| resource.resource().texture_view.clone())
+            .map_err(|error| ViewerGpuExecutionError::ProgramOutputMissing(format!("{error:?}")))
+    }
+
     /// Reset all retained execution resources after a device/surface transition.
     pub fn reset(&mut self) {
         self.working_compositor.clear_frame_resources();
@@ -411,6 +470,19 @@ fn validate_output_precision(
     Ok(())
 }
 
+fn validate_program_monitor_contract(
+    boundary: &RenderOutputColorBoundary,
+    adaptation: &RenderMonitorAdaptation,
+) -> Result<(), ViewerGpuExecutionError> {
+    if boundary.output_color_space != adaptation.program_output_color_space() {
+        return Err(ViewerGpuExecutionError::ProgramMonitorBoundaryMismatch {
+            program_boundary: boundary.output_color_space,
+            adaptation_input: adaptation.program_output_color_space(),
+        });
+    }
+    Ok(())
+}
+
 fn mark_gpu_stage(
     marker: &mut Option<&mut dyn ViewerGpuExecutionStageMarker>,
     encoder: &mut wgpu::CommandEncoder,
@@ -424,6 +496,8 @@ fn mark_gpu_stage(
 
 /// Successful GPU recording evidence consumed by presentation Adapters.
 pub struct ViewerGpuExecutionRecord {
+    /// Program Output retained before preview-only monitor adaptation.
+    pub program_output: GpuColorFrameHandle,
     /// Renderer-owned output handle retained until frame resources clear.
     pub output: GpuColorFrameHandle,
     output_owner: ViewerGpuExecutionOutputOwner,
@@ -452,8 +526,10 @@ pub struct ViewerGpuExecutionCpuStageTimings {
     pub working_composite_us: u64,
     /// Viewer crop/resize command preparation.
     pub spatial_us: u64,
-    /// Display/output color-boundary command preparation.
-    pub output_boundary_us: u64,
+    /// Program Output color-boundary command preparation.
+    pub program_output_boundary_us: u64,
+    /// Preview-only monitor-adaptation command preparation.
+    pub monitor_adaptation_us: u64,
     /// Optional display-calibration command preparation.
     pub display_calibration_us: u64,
 }
@@ -480,6 +556,16 @@ pub enum ViewerGpuExecutionError {
     /// Display calibration was paired with a quantized output carrier.
     #[error("Viewer display calibration requires an encoded float16 output carrier")]
     DisplayCalibrationRequiresFloatOutput,
+    /// Program Output and monitor adaptation were wired from different roots.
+    #[error(
+        "Viewer Program Output boundary {program_boundary:?} does not match monitor adaptation input {adaptation_input:?}"
+    )]
+    ProgramMonitorBoundaryMismatch {
+        /// Program Output boundary destination.
+        program_boundary: mondrian_core::types::ColorSpace,
+        /// Identity expected by monitor adaptation.
+        adaptation_input: mondrian_core::types::ColorSpace,
+    },
     #[error("Viewer GPU working composite graph failed: {0:?}")]
     WorkingComposite(RenderGpuCompositeGraphRecordError),
     #[error("Viewer GPU effect-domain processing failed: {0}")]
@@ -492,8 +578,12 @@ pub enum ViewerGpuExecutionError {
     SpatialOutputMissing,
     #[error("Viewer GPU spatial resource transfer failed: {0}")]
     SpatialTransfer(String),
-    #[error("Viewer GPU display output boundary failed: {0:?}")]
-    OutputBoundary(RenderGpuOutputBoundaryRuntimeRecordError),
+    #[error("Viewer GPU Program Output boundary failed: {0:?}")]
+    ProgramOutputBoundary(RenderGpuOutputBoundaryRuntimeRecordError),
+    #[error("Viewer GPU monitor adaptation failed: {0:?}")]
+    MonitorAdaptation(RenderGpuColorTransformRuntimeRecordError),
+    #[error("Viewer GPU Program Output is missing: {0}")]
+    ProgramOutputMissing(String),
     #[error("Viewer GPU display output is missing: {0}")]
     DisplayOutputMissing(String),
     #[error("Viewer GPU display calibration failed: {0}")]
@@ -731,7 +821,7 @@ fn prepare_composite<'a>(
                         compositor,
                         effect_plan,
                         input,
-                        request.output_boundary.engine.clone(),
+                        request.program_output_boundary.engine.clone(),
                         *frame_seed,
                         device,
                         queue,
@@ -792,7 +882,7 @@ fn prepare_composite<'a>(
                                 compositor,
                                 effect_plan,
                                 materialized.output,
-                                request.output_boundary.engine.clone(),
+                                request.program_output_boundary.engine.clone(),
                                 layer.frame_seed,
                                 device,
                                 queue,
@@ -1092,6 +1182,94 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn viewer_rejects_monitor_adaptation_for_a_different_program_boundary() {
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let adaptation = crate::RenderMonitorAdaptation::new(
+            ColorSpace::Srgb,
+            ColorSpace::DisplayP3,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("valid standalone SDR adaptation");
+
+        assert!(matches!(
+            validate_program_monitor_contract(&boundary, &adaptation),
+            Err(ViewerGpuExecutionError::ProgramMonitorBoundaryMismatch {
+                program_boundary: ColorSpace::Rec709,
+                adaptation_input: ColorSpace::Srgb,
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn viewer_retains_program_output_before_gpu_monitor_adaptation() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping Viewer monitor-adaptation test: no GPU adapter available");
+            return;
+        };
+        let program_output_boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let monitor_adaptation = RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::DisplayP3,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("SDR monitor adaptation");
+        let mut runtime =
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("viewer-monitor-adaptation-integration"),
+        });
+
+        let record = runtime
+            .record(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                ViewerGpuExecutionRequest {
+                    sequence_id: SequenceId::new(),
+                    timeline_frame: 0,
+                    width: 4,
+                    height: 4,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    layers: &[],
+                    program_output_boundary: &program_output_boundary,
+                    monitor_adaptation: &monitor_adaptation,
+                    source_rect: ViewerSourceRect::FULL,
+                    output_width: 4,
+                    output_height: 4,
+                    output_precision: ViewerGpuOutputPrecision::Encoded8,
+                    display_calibration: None,
+                },
+            )
+            .expect("Viewer GPU monitor adaptation frame");
+        context.queue.submit(std::iter::once(encoder.finish()));
+
+        assert_eq!(
+            record.program_output.descriptor().color_space,
+            crate::ColorFrameSpace::Color(ColorSpace::Rec709)
+        );
+        assert_eq!(
+            record.output.descriptor().color_space,
+            crate::ColorFrameSpace::Color(ColorSpace::DisplayP3)
+        );
+        assert_eq!(record.stage_diagnostics.gpu_color_stages, 2);
+        assert_eq!(record.stage_diagnostics.upload_stages, 0);
+        assert_eq!(record.stage_diagnostics.readback_stages, 0);
+        runtime
+            .program_output_texture_view(&record)
+            .expect("retained Program Output texture");
+        runtime.output_texture_view(&record).expect("retained monitor output texture");
+    }
+
     #[tokio::test]
     async fn viewer_records_gpu_media_effect_domain_before_working_composite() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
@@ -1141,6 +1319,12 @@ mod tests {
             false,
             ColorEngine::mondrian_standard(),
         );
+        let monitor_adaptation = RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::Rec709,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("matching monitor adaptation");
         let mut runtime =
             ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1159,7 +1343,8 @@ mod tests {
                     height: 4,
                     working_color_space: WorkingColorSpace::LinearRec709,
                     layers: &[layer],
-                    output_boundary: &output_boundary,
+                    program_output_boundary: &output_boundary,
+                    monitor_adaptation: &monitor_adaptation,
                     source_rect: ViewerSourceRect::FULL,
                     output_width: 4,
                     output_height: 4,
@@ -1222,6 +1407,12 @@ mod tests {
             false,
             ColorEngine::mondrian_standard(),
         );
+        let monitor_adaptation = RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::Rec709,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("matching monitor adaptation");
         let mut runtime =
             ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1240,7 +1431,8 @@ mod tests {
                     height: 4,
                     working_color_space: WorkingColorSpace::LinearRec709,
                     layers: &[layer],
-                    output_boundary: &output_boundary,
+                    program_output_boundary: &output_boundary,
+                    monitor_adaptation: &monitor_adaptation,
                     source_rect: ViewerSourceRect::FULL,
                     output_width: 4,
                     output_height: 4,
@@ -1299,6 +1491,12 @@ mod tests {
             false,
             ColorEngine::mondrian_standard(),
         );
+        let monitor_adaptation = RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::Rec709,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("matching monitor adaptation");
         let mut runtime =
             ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1317,7 +1515,8 @@ mod tests {
                     height: 4,
                     working_color_space: WorkingColorSpace::LinearRec709,
                     layers: &[layer],
-                    output_boundary: &output_boundary,
+                    program_output_boundary: &output_boundary,
+                    monitor_adaptation: &monitor_adaptation,
                     source_rect: ViewerSourceRect::FULL,
                     output_width: 4,
                     output_height: 4,
@@ -1376,6 +1575,12 @@ mod tests {
             false,
             ColorEngine::mondrian_standard(),
         );
+        let monitor_adaptation = RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::Rec709,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("matching monitor adaptation");
         let mut runtime =
             ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1394,7 +1599,8 @@ mod tests {
                     height: 4,
                     working_color_space: WorkingColorSpace::LinearRec709,
                     layers: &[layer],
-                    output_boundary: &output_boundary,
+                    program_output_boundary: &output_boundary,
+                    monitor_adaptation: &monitor_adaptation,
                     source_rect: ViewerSourceRect::FULL,
                     output_width: 4,
                     output_height: 4,
@@ -1440,6 +1646,12 @@ mod tests {
             false,
             ColorEngine::mondrian_standard(),
         );
+        let monitor_adaptation = RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::Rec709,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("matching monitor adaptation");
         let mut runtime =
             ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1458,7 +1670,8 @@ mod tests {
                     height: 4,
                     working_color_space: WorkingColorSpace::LinearRec709,
                     layers: &[layer],
-                    output_boundary: &output_boundary,
+                    program_output_boundary: &output_boundary,
+                    monitor_adaptation: &monitor_adaptation,
                     source_rect: ViewerSourceRect::FULL,
                     output_width: 4,
                     output_height: 4,
@@ -1531,6 +1744,12 @@ mod tests {
             false,
             ColorEngine::mondrian_standard(),
         );
+        let monitor_adaptation = RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::Rec709,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("matching monitor adaptation");
         let mut runtime =
             ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1549,7 +1768,8 @@ mod tests {
                     height: 4,
                     working_color_space: WorkingColorSpace::LinearRec709,
                     layers: &layers,
-                    output_boundary: &output_boundary,
+                    program_output_boundary: &output_boundary,
+                    monitor_adaptation: &monitor_adaptation,
                     source_rect: ViewerSourceRect::FULL,
                     output_width: 4,
                     output_height: 4,

@@ -102,8 +102,8 @@ pub use color_transform::{
     RenderColorTransformGpuOptions, RenderColorTransformGpuPlan, RenderColorTransformGpuPlanner,
     RenderEffectColorDomainGpuPlan, RenderEffectColorDomainGpuPlanError,
     RenderEffectColorDomainGpuPlanner, RenderInputTransform, RenderInputTransformResult,
-    RenderIntermediateColorTransform, RenderOcioDisplayView, RenderOutputTransformFloatResult,
-    RenderOutputTransformResult,
+    RenderIntermediateColorTransform, RenderMonitorAdaptation, RenderMonitorAdaptationError,
+    RenderOcioDisplayView, RenderOutputTransformFloatResult, RenderOutputTransformResult,
 };
 pub use compositor::{CompositorConfig, FrameCompositor};
 pub use context::GpuContext;
