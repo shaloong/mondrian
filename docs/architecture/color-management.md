@@ -949,7 +949,9 @@ standardized output identity and selects Rec.601, Rec.709/sRGB, Display P3, or
 Rec.2020 luma/chroma coefficients accordingly. Working-linear and camera-log
 identities, malformed buffers, and non-finite RGB fail closed. The RGBA8 helper
 exists for already-quantized SDR boundaries, but HDR/10-bit scope paths must use
-the float helper. A final renderer float boundary exposes this contract through
+the float helper. Negative and above-nominal RGB/luma values remain visible as
+explicit `ProgramSignalExcursions` even though the density plots group them into
+their endpoint bins. A final renderer float boundary exposes this contract through
 `RenderOutputColorBoundaryFloat::program_scopes`, so callers cannot accidentally
 measure working pixels or a monitor-adapted `ViewerFrameImage`. GPU scopes must
 eventually use a compute/reduction path over the Program Output texture; they

@@ -422,6 +422,38 @@ pub struct VectorscopeSample {
     pub weight: u32,
 }
 
+/// Counts outside the normalized `0..=1` Program Output signal interval.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgramSignalExcursionCounts {
+    /// Samples below nominal black.
+    pub below_nominal: u64,
+    /// Samples above nominal peak signal.
+    pub above_nominal: u64,
+}
+
+impl ProgramSignalExcursionCounts {
+    fn observe(&mut self, value: f32) {
+        if value < 0.0 {
+            self.below_nominal = self.below_nominal.saturating_add(1);
+        } else if value > 1.0 {
+            self.above_nominal = self.above_nominal.saturating_add(1);
+        }
+    }
+}
+
+/// Per-component signal excursions preserved alongside endpoint scope bins.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgramSignalExcursions {
+    /// Encoded red excursions.
+    pub red: ProgramSignalExcursionCounts,
+    /// Encoded green excursions.
+    pub green: ProgramSignalExcursionCounts,
+    /// Encoded blue excursions.
+    pub blue: ProgramSignalExcursionCounts,
+    /// Encoded non-constant-luminance luma excursions.
+    pub luma: ProgramSignalExcursionCounts,
+}
+
 /// Video scopes measured from a single display-encoded Program Output frame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ColorScopes {
@@ -429,6 +461,8 @@ pub struct ColorScopes {
     pub signal_color_space: ColorSpace,
     /// Number of RGBA pixels measured.
     pub sample_count: u64,
+    /// Counts hidden by endpoint binning, including negative signal and superwhite.
+    pub excursions: ProgramSignalExcursions,
     /// Per-component and luma distributions.
     pub histogram: HistogramScope,
     /// Horizontal signal distribution.
@@ -643,10 +677,16 @@ fn compute_program_color_scopes_rgb(
         values: vec![0; width_usize * bins * waveform_channels],
     };
     let mut vectors = vec![VectorscopeSample { u: 0.0, v: 0.0, weight: 0 }; 64 * 64];
+    let mut excursions = ProgramSignalExcursions::default();
 
     for (idx, [r, g, b]) in rgb.enumerate() {
         let x = idx % width_usize;
-        let y = colorimetry.luma(r, g, b).clamp(0.0, 1.0);
+        let y_signal = colorimetry.luma(r, g, b);
+        excursions.red.observe(r);
+        excursions.green.observe(g);
+        excursions.blue.observe(b);
+        excursions.luma.observe(y_signal);
+        let y = y_signal.clamp(0.0, 1.0);
         let rb = scope_bin(r, bins);
         let gb = scope_bin(g, bins);
         let bb = scope_bin(b, bins);
@@ -685,6 +725,7 @@ fn compute_program_color_scopes_rgb(
     Ok(ColorScopes {
         signal_color_space,
         sample_count: expected_pixels as u64,
+        excursions,
         histogram,
         waveform,
         vectorscope: vectors.into_iter().filter(|sample| sample.weight > 0).collect(),
@@ -1312,5 +1353,28 @@ mod tests {
             invalid,
             ProgramColorScopeError::NonFiniteSample { pixel: 0, channel: 1 }
         );
+    }
+
+    #[test]
+    fn float_program_scopes_report_negative_and_superwhite_signal_excursions() {
+        let pixels = [[-0.1, 0.5, 1.2, 1.0], [1.1, -0.2, 0.4, 1.0]];
+        let scopes = compute_program_color_scopes_rgba_f32(
+            &pixels,
+            2,
+            1,
+            ColorSpace::Rec709,
+            WaveformMode::Luma,
+            64,
+        )
+        .expect("finite extended Rec.709 signal");
+
+        assert_eq!(scopes.excursions.red.below_nominal, 1);
+        assert_eq!(scopes.excursions.red.above_nominal, 1);
+        assert_eq!(scopes.excursions.green.below_nominal, 1);
+        assert_eq!(scopes.excursions.green.above_nominal, 0);
+        assert_eq!(scopes.excursions.blue.below_nominal, 0);
+        assert_eq!(scopes.excursions.blue.above_nominal, 1);
+        assert_eq!(scopes.histogram.red.first(), Some(&1));
+        assert_eq!(scopes.histogram.red.last(), Some(&1));
     }
 }
