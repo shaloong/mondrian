@@ -55,6 +55,12 @@ DisplayOutputSnapshot {
 }
 ```
 
+The snapshot's `ocio_display`/`ocio_view` fields are resolved surface-validation
+evidence, not the execution state stored in timeline `ColorContext`. Production
+preview/export execution uses the context's typed `OutputTransformIntent` and
+the shared renderer boundary resolver; this prevents display probing and render
+scheduling from becoming competing color-science authorities.
+
 ### MonitorProfileStatus
 
 Status of the OS monitor ICC profile. The fail-closed chain:

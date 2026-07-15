@@ -1,6 +1,8 @@
 //! UI-facing color models and parsing helpers.
 
-use crate::types::{Color, ColorSpace, MondrianStandardPackageIdentity, WorkingColorSpace};
+use crate::types::{
+    Color, ColorEngine, ColorSpace, MondrianStandardPackageIdentity, WorkingColorSpace,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -32,6 +34,76 @@ impl OutputTransformIntent {
     pub const fn mondrian_standard() -> Self {
         Self::MondrianStandard { package: MondrianStandardPackageIdentity::V1 }
     }
+
+    /// Resolve this product intent into the optional OCIO display/view pair
+    /// consumed by a renderer output boundary.
+    ///
+    /// `Colorimetric` deliberately returns no view. Mondrian Standard resolves
+    /// the output-target-specific view from its immutable package and rejects
+    /// an engine/package mismatch instead of silently executing another config.
+    pub fn resolve_display_view(
+        &self,
+        output_color_space: ColorSpace,
+        engine: &ColorEngine,
+    ) -> Result<Option<(String, String)>, OutputTransformIntentResolutionError> {
+        match self {
+            Self::Colorimetric => Ok(None),
+            Self::OcioDisplayView { display, view } => Ok(Some((display.clone(), view.clone()))),
+            Self::MondrianStandard { package } => {
+                let ColorEngine::MondrianStandard { package: engine_package } = engine else {
+                    return Err(OutputTransformIntentResolutionError::EngineMismatch {
+                        intent: "Mondrian Standard".to_owned(),
+                        engine: engine.name().to_owned(),
+                    });
+                };
+                if package != engine_package {
+                    return Err(OutputTransformIntentResolutionError::PackageMismatch {
+                        intent_sha256: package.package_sha256().to_owned(),
+                        engine_sha256: engine_package.package_sha256().to_owned(),
+                    });
+                }
+                crate::mondrian_standard_output_display_view(output_color_space)
+                    .map(Some)
+                    .map_err(|reason| {
+                        OutputTransformIntentResolutionError::UnsupportedStandardOutput {
+                            output_color_space,
+                            reason,
+                        }
+                    })
+            }
+        }
+    }
+}
+
+/// Failure to resolve a product output-transform intent for renderer execution.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum OutputTransformIntentResolutionError {
+    /// The selected engine cannot execute the requested product intent.
+    #[error("output transform intent {intent} cannot execute through {engine}")]
+    EngineMismatch {
+        /// Human-readable product intent.
+        intent: String,
+        /// Human-readable selected engine.
+        engine: String,
+    },
+    /// The Standard intent and engine pin different immutable packages.
+    #[error(
+        "Mondrian Standard package mismatch: intent sha256={intent_sha256}, engine sha256={engine_sha256}"
+    )]
+    PackageMismatch {
+        /// Package digest pinned by the intent.
+        intent_sha256: String,
+        /// Package digest pinned by the engine.
+        engine_sha256: String,
+    },
+    /// Mondrian Standard has no view for the requested encoded output target.
+    #[error("Mondrian Standard cannot resolve {output_color_space:?}: {reason}")]
+    UnsupportedStandardOutput {
+        /// Requested encoded output target.
+        output_color_space: ColorSpace,
+        /// Resolution failure from the package registry.
+        reason: String,
+    },
 }
 
 /// Display or monitor profile reference used by preview presentation.
@@ -689,6 +761,36 @@ mod tests {
             true,
             WorkingColorSpace::LinearRec2020,
             ColorSpace::Rec709
+        ));
+    }
+
+    #[test]
+    fn output_transform_intent_resolves_standard_view_for_output_target() {
+        let intent = OutputTransformIntent::mondrian_standard();
+        let resolved = intent
+            .resolve_display_view(ColorSpace::Rec2100Pq, &ColorEngine::mondrian_standard())
+            .expect("Mondrian Standard PQ view")
+            .expect("display/view");
+
+        assert_eq!(resolved.0, "Rec.2100-PQ - Display");
+        assert_eq!(resolved.1, "Mondrian Standard HDR 1000 nits v1");
+    }
+
+    #[test]
+    fn output_transform_intent_rejects_standard_engine_drift() {
+        let intent = OutputTransformIntent::mondrian_standard();
+        let error = intent
+            .resolve_display_view(
+                ColorSpace::Srgb,
+                &ColorEngine::Aces {
+                    preset: crate::AcesConfigPreset::StudioV4Aces2Ocio25,
+                },
+            )
+            .expect_err("Standard intent must not execute through ACES");
+
+        assert!(matches!(
+            error,
+            OutputTransformIntentResolutionError::EngineMismatch { .. }
         ));
     }
 }

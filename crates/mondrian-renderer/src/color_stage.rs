@@ -21,7 +21,9 @@ use crate::{
     RenderOutputTransformFloatResult, RenderOutputTransformResult,
 };
 use mondrian_core::types::{ColorEngine, ColorSpace};
-use mondrian_core::WorkingColorSpace;
+use mondrian_core::{
+    OutputTransformIntent, OutputTransformIntentResolutionError, WorkingColorSpace,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -345,6 +347,31 @@ pub struct RenderOutputColorBoundary {
 }
 
 impl RenderOutputColorBoundary {
+    /// Resolve a product-level output-transform intent into one renderer-owned
+    /// display or export boundary.
+    ///
+    /// This is the production integration entry point shared by preview and
+    /// export. It prevents callers from separately interpreting Standard,
+    /// explicit OCIO view, and colorimetric modes.
+    pub fn from_intent(
+        target: RenderOutputColorBoundaryTarget,
+        output_color_space: ColorSpace,
+        intent: &OutputTransformIntent,
+        tone_map: bool,
+        engine: ColorEngine,
+    ) -> Result<Self, OutputTransformIntentResolutionError> {
+        let display_view = intent
+            .resolve_display_view(output_color_space, &engine)?
+            .map(|(display, view)| RenderOcioDisplayView::new(display, view));
+        Ok(Self {
+            target,
+            output_color_space,
+            display_view,
+            tone_map,
+            engine,
+        })
+    }
+
     /// Build a display/viewer output boundary.
     pub fn display(output_color_space: ColorSpace, tone_map: bool, engine: ColorEngine) -> Self {
         Self {
@@ -3836,7 +3863,7 @@ mod tests {
     use mondrian_core::types::{AcesConfigPreset, ColorEngine, ColorSpace};
     use mondrian_core::WorkingColorSpace;
     use mondrian_core::WorkingRgbaF32Frame;
-    use mondrian_core::{ensure_mondrian_default_ocio_loaded, GpuLanguage};
+    use mondrian_core::{ensure_mondrian_default_ocio_loaded, GpuLanguage, OutputTransformIntent};
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::path::PathBuf;
@@ -3863,6 +3890,35 @@ mod tests {
         device_type: String,
         driver: String,
         driver_info: String,
+    }
+
+    #[test]
+    fn output_boundary_resolves_product_intent_for_display_and_export() {
+        let intent = OutputTransformIntent::mondrian_standard();
+        let engine = ColorEngine::mondrian_standard();
+        let display = RenderOutputColorBoundary::from_intent(
+            RenderOutputColorBoundaryTarget::Display,
+            ColorSpace::Rec2100Pq,
+            &intent,
+            true,
+            engine.clone(),
+        )
+        .expect("display boundary");
+        let export = RenderOutputColorBoundary::from_intent(
+            RenderOutputColorBoundaryTarget::Export,
+            ColorSpace::Rec2100Pq,
+            &intent,
+            true,
+            engine,
+        )
+        .expect("export boundary");
+
+        assert_eq!(display.target, RenderOutputColorBoundaryTarget::Display);
+        assert_eq!(export.target, RenderOutputColorBoundaryTarget::Export);
+        assert_eq!(display.display_view, export.display_view);
+        let view = display.display_view.expect("Standard PQ view");
+        assert_eq!(view.display, "Rec.2100-PQ - Display");
+        assert_eq!(view.view, "Mondrian Standard HDR 1000 nits v1");
     }
 
     #[test]

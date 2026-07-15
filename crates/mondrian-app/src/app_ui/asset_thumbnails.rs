@@ -13,7 +13,7 @@ use crate::app_ui::preview_access_mode::{
 };
 use mondrian_assets::{AssetKind, AssetRecord};
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
-use mondrian_core::WorkingColorSpace;
+use mondrian_core::{OutputTransformIntent, WorkingColorSpace};
 use mondrian_media::{
     decode_preview_frame_cancellable, DecodedVideoRange, PreviewDecodeAccessMode,
     PreviewDecodeOutcome, PreviewDecodeRequest, PreviewFileFingerprint, PreviewSourceColorContract,
@@ -45,8 +45,7 @@ struct ThumbnailColorContract {
     output_color_space: ColorSpace,
     tone_map: bool,
     engine: ColorEngine,
-    display: Option<String>,
-    view: Option<String>,
+    output_transform: OutputTransformIntent,
     ocio_generation: u64,
     raster_color_space: RasterImageColorSpace,
 }
@@ -114,28 +113,26 @@ impl ThumbnailColorContract {
             output_color_space,
             tone_map: context.tone_map,
             engine: context.engine.clone(),
-            display: context.ocio_display.clone(),
-            view: context.ocio_view.clone(),
+            output_transform: context.output_transform.clone(),
             ocio_generation: mondrian_core::ocio_config_generation(),
             raster_color_space,
         })
     }
 
-    fn output_boundary(&self) -> RenderOutputColorBoundary {
-        match (&self.display, &self.view) {
-            (Some(display), Some(view)) => RenderOutputColorBoundary::display_view(
-                self.output_color_space,
-                display.clone(),
-                view.clone(),
-                self.tone_map,
-                self.engine.clone(),
-            ),
-            _ => RenderOutputColorBoundary::display(
-                self.output_color_space,
-                self.tone_map,
-                self.engine.clone(),
-            ),
-        }
+    fn output_boundary(&self) -> Result<RenderOutputColorBoundary, AssetThumbnailFailure> {
+        RenderOutputColorBoundary::from_intent(
+            mondrian_renderer::RenderOutputColorBoundaryTarget::Display,
+            self.output_color_space,
+            &self.output_transform,
+            self.tone_map,
+            self.engine.clone(),
+        )
+        .map_err(|error| {
+            thumbnail_failure(
+                AssetThumbnailFailureReason::OutputTransformFailed,
+                format!("thumbnail output intent resolution failed: {error}"),
+            )
+        })
     }
 }
 
@@ -582,7 +579,8 @@ fn color_manage_thumbnail_rgba(
             format!("thumbnail input color transform failed: {err}"),
         )
     })?;
-    execute_cpu_output_boundary_rgba8(&working.result.frame, &color.output_boundary())
+    let boundary = color.output_boundary()?;
+    execute_cpu_output_boundary_rgba8(&working.result.frame, &boundary)
         .map(|output| output.rgba)
         .map_err(|err| {
             thumbnail_failure(
@@ -607,7 +605,8 @@ fn color_manage_thumbnail_float(
             format!("thumbnail float input color transform failed: {err}"),
         )
     })?;
-    execute_cpu_output_boundary_rgba8(&working.result.frame, &color.output_boundary())
+    let boundary = color.output_boundary()?;
+    execute_cpu_output_boundary_rgba8(&working.result.frame, &boundary)
         .map(|output| output.rgba)
         .map_err(|err| {
             thumbnail_failure(
@@ -719,11 +718,19 @@ mod tests {
             output_color_space: ColorSpace::Srgb,
             tone_map: true,
             engine: ColorEngine::mondrian_standard(),
-            display: None,
-            view: None,
+            output_transform: OutputTransformIntent::mondrian_standard(),
             ocio_generation: mondrian_core::ocio_config_generation(),
             raster_color_space: RasterImageColorSpace::Srgb,
         }
+    }
+
+    #[test]
+    fn thumbnail_boundary_resolves_the_shared_standard_intent() {
+        let boundary = thumbnail_color_contract().output_boundary().expect("thumbnail boundary");
+        let display_view = boundary.display_view.expect("Standard display/view");
+
+        assert_eq!(display_view.display, "sRGB - Display");
+        assert_eq!(display_view.view, "Mondrian Standard SDR v1");
     }
 
     fn configured_cache() -> AssetThumbnailCache {

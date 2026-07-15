@@ -637,15 +637,13 @@ contracts are:
 
 - **Input color-space transform**: encoded `source → working` conversion via
   `RenderInputTransform`. Does not carry tone mapping.
-- **Preview display/view transform**: viewer presentation via
-  `RenderOutputColorBoundary::display_view(...)` with `target: Display`.
- 受 monitor/surface/display policy 影响。
-- **Export delivery view transform**: encoded delivery output via
-  `RenderOutputColorBoundary::export_view(...)` with `target: Export`.
-  Carries the OCIO display/view transform (which includes tone mapping)
-  into the export boundary. Uses `RenderColorTransform::delivery_view(...)`
-  internally, which dispatches through the explicit working-identity OCIO
-  display processor.
+- **Preview display/view transform**: viewer presentation resolved by
+  `RenderOutputColorBoundary::from_intent(...)` with `target: Display`.
+  受 monitor/surface/display policy 影响。
+- **Export delivery view transform**: encoded delivery output resolved by the
+  same constructor with `target: Export`. A named intent becomes an internal
+  `RenderColorTransform::delivery_view(...)`, which dispatches through the
+  explicit working-identity OCIO display processor.
 
 ### Export Delivery View Policy
 
@@ -672,19 +670,18 @@ Policies:
 
 `SequenceSettings::resolve_export_delivery_view(project_cm)` resolves the
 effective policy into a `ResolvedExportDeliveryView` (or `None`/`Err`).
-`root_export_color_context()` calls this resolver and populates
-`ocio_display`/`ocio_view` from the result. If the resolver fails
-(invalid display/view), the error is stored in
-`ColorContext::export_delivery_view_error` for diagnostics.
+When tone mapping is active, `root_export_color_context()` converts a successful
+result into the context's single `OutputTransformIntent::OcioDisplayView`.
+Invalid display/view resolution stores the error in
+`ColorContext::export_delivery_view_error` and fails closed to `Colorimetric`.
+When tone mapping is disabled the delivery-view policy is not applied.
 
 `export_output_boundary_from_context(...)` in the export crate resolves
-the boundary:
-
-- `tone_map=true` + `ocio_display`/`ocio_view` present →
-  `RenderOutputColorBoundary::export_view(...)` (delivery view path)
-- `tone_map=true` + no view → plain `RenderOutputColorBoundary::export(...)`
-  + `ToneMapRequestedWithoutExportViewTransform` diagnostic
-- `tone_map=false` → plain export boundary, no view, no issue
+the boundary exclusively through `RenderOutputColorBoundary::from_intent(...)`.
+Mondrian Standard resolves its output-target view from the pinned package;
+explicit OCIO intent carries the validated named view; colorimetric intent
+carries no view. If tone mapping is requested but the resolved boundary has no
+view, export records `ToneMapRequestedWithoutExportViewTransform`.
 
 Health reports distinguish export delivery view availability from preview
 display/view: `output_transform_issues` records when tone mapping was

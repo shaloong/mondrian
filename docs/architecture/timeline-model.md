@@ -55,17 +55,19 @@ sequence/project inheritance rules and carry a typed `OutputTransformIntent`.
 An ordinary display-referred SDR context remains `Colorimetric`; a
 scene-referred or explicitly tone-mapped Mondrian Standard boundary resolves to
 the fully pinned `MondrianStandard { package }` product intent. An explicitly
-configured delivery display/view resolves to `OcioDisplayView`. A stale
-display/view name is ignored while tone mapping is disabled. This selection is
+configured delivery display/view resolves to `OcioDisplayView` only while tone
+mapping is active. No resolved display/view strings are stored beside the
+intent, so contradictory context state is unrepresentable. This selection is
 independent from the renderer's CPU/GPU execution backend so a backend change
 cannot silently change project color science.
 
 Standard output resolution is target-specific. SDR sRGB/Rec.709/P3 contexts
 select `Mondrian Standard SDR v1`; Rec.2100 HLG and PQ contexts select
 `Mondrian Standard HDR 1000 nits v1` under their respective OCIO displays.
-Preview and export context construction use the same resolver, so the target
-transfer function changes only the display encoding and never selects a second
-HDR picture formation.
+Core resolves that target-specific view from the typed intent when renderer
+constructs either a preview or export boundary, so the target transfer function
+changes only the display encoding and never selects a second HDR picture
+formation.
 
 ## Track
 

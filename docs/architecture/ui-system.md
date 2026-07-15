@@ -181,6 +181,10 @@ HLG targets retain their target display identities and resolve the versioned
 Standard View or an ACES View. Surface/monitor validation remains a later,
 independent boundary and may still block presentation when the device cannot
 carry the requested HDR signal.
+Those snapshot strings are validation evidence only. Preview and asset
+thumbnail execution pass the typed `ColorContext::output_transform` to
+`RenderOutputColorBoundary::from_intent(...)`; neither app path reconstructs
+the OCIO boundary from snapshot or optional context strings.
 Window display resolution is computed from both the resolved `ColorEngine` and
 display policy, and the session retains both identities. ACES and Custom OCIO
 defaults are resolved only after their exact engine

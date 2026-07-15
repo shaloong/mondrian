@@ -8463,8 +8463,6 @@ fn viewer_preview_cache_key_for_resolved_plan(
     color_context.engine.hash(&mut hasher);
     color_context.display_management.hash(&mut hasher);
     color_context.output_transform.hash(&mut hasher);
-    color_context.ocio_display.hash(&mut hasher);
-    color_context.ocio_view.hash(&mut hasher);
     mondrian_core::ocio_config_generation().hash(&mut hasher);
     elements.len().hash(&mut hasher);
     for element in elements {
@@ -8826,29 +8824,21 @@ fn cpu_raster_presentation_contract(
 
 fn output_boundary_from_color_context(
     color_context: &ColorContext,
-) -> Result<RenderOutputColorBoundary, mondrian_core::OcioColorSpaceIdentity> {
-    let output_color_space = color_context
-        .output_color_space
-        .color()
-        .ok_or(color_context.output_color_space)?;
-    match (
+) -> Result<RenderOutputColorBoundary, String> {
+    let output_color_space = color_context.output_color_space.color().ok_or_else(|| {
+        format!(
+            "preview output identity {:?} is not an encoded color space",
+            color_context.output_color_space
+        )
+    })?;
+    RenderOutputColorBoundary::from_intent(
+        mondrian_renderer::RenderOutputColorBoundaryTarget::Display,
+        output_color_space,
+        &color_context.output_transform,
         color_context.tone_map,
-        &color_context.ocio_display,
-        &color_context.ocio_view,
-    ) {
-        (true, Some(display), Some(view)) => Ok(RenderOutputColorBoundary::display_view(
-            output_color_space,
-            display.clone(),
-            view.clone(),
-            true,
-            color_context.engine.clone(),
-        )),
-        _ => Ok(RenderOutputColorBoundary::display(
-            output_color_space,
-            color_context.tone_map,
-            color_context.engine.clone(),
-        )),
-    }
+        color_context.engine.clone(),
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn gpu_composite_layers_for_resolved(
@@ -9028,7 +9018,7 @@ fn composite_resolved_preview(
     let output_boundary_started_at = Instant::now();
     let mut render_stage_durations = composite.render_stage_durations;
     let boundary = output_boundary_from_color_context(color_context)
-        .map_err(|space| format!("unsupported preview output identity: {space:?}"))?;
+        .map_err(|error| format!("unsupported preview output transform: {error}"))?;
     execute_cpu_output_boundary_rgba8(&composite.frame, &boundary)
         .map(|output| {
             render_stage_durations.cpu_output_boundary_us =
@@ -14423,7 +14413,7 @@ mod tests {
     }
 
     #[test]
-    fn resolved_media_preview_cache_key_includes_display_view_context() {
+    fn resolved_media_preview_cache_key_includes_explicit_output_view_intent() {
         let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
             .expect("default effect graph");
         let resolved = vec![ResolvedPreviewElement::Media {
@@ -14437,10 +14427,16 @@ mod tests {
         let sequence_id = SequenceId::new();
 
         let mut rec709_view = test_color_context(ColorSpace::Rec709);
-        rec709_view.ocio_display = Some("sRGB - Display".to_owned());
-        rec709_view.ocio_view = Some("Mondrian Standard SDR v1".to_owned());
+        rec709_view.output_transform = mondrian_core::OutputTransformIntent::OcioDisplayView {
+            display: "sRGB - Display".to_owned(),
+            view: "Mondrian Standard SDR v1".to_owned(),
+        };
         let mut colorimetric_view = rec709_view.clone();
-        colorimetric_view.ocio_view = Some("Video (colorimetric)".to_owned());
+        colorimetric_view.output_transform =
+            mondrian_core::OutputTransformIntent::OcioDisplayView {
+                display: "sRGB - Display".to_owned(),
+                view: "Video (colorimetric)".to_owned(),
+            };
         let first = viewer_preview_cache_key_for_resolved_plan(
             sequence_id,
             320,
@@ -14495,8 +14491,10 @@ mod tests {
     fn preview_working_composite_boundary_uses_resolved_display_view() {
         let mut color_context = test_color_context(ColorSpace::Rec709);
         color_context.tone_map = true;
-        color_context.ocio_display = Some("sRGB - Display".to_owned());
-        color_context.ocio_view = Some("Mondrian Standard SDR v1".to_owned());
+        color_context.output_transform = mondrian_core::OutputTransformIntent::OcioDisplayView {
+            display: "sRGB - Display".to_owned(),
+            view: "Mondrian Standard SDR v1".to_owned(),
+        };
         let mut scratch = TimelineCompositeScratch::default();
 
         let _output = composite_resolved_preview_working(2, 2, &[], &color_context, &mut scratch)
@@ -14511,11 +14509,10 @@ mod tests {
     }
 
     #[test]
-    fn preview_boundary_ignores_stale_display_view_when_tone_map_is_disabled() {
+    fn preview_boundary_uses_colorimetric_intent_when_tone_map_is_disabled() {
         let mut color_context = test_color_context(ColorSpace::Rec709);
         color_context.tone_map = false;
-        color_context.ocio_display = Some("sRGB - Display".to_owned());
-        color_context.ocio_view = Some("Mondrian Standard SDR v1".to_owned());
+        color_context.output_transform = mondrian_core::OutputTransformIntent::Colorimetric;
 
         let boundary =
             output_boundary_from_color_context(&color_context).expect("encoded preview output");
@@ -15293,20 +15290,14 @@ mod tests {
             expected_frame.descriptor().color_space,
             color_context.working_color_space.into()
         );
-        let export_boundary = match (&color_context.ocio_display, &color_context.ocio_view) {
-            (Some(display), Some(view)) => RenderOutputColorBoundary::export_view(
-                color_context.output_color_space.color().expect("encoded export output"),
-                display.clone(),
-                view.clone(),
-                color_context.tone_map,
-                color_context.engine.clone(),
-            ),
-            _ => RenderOutputColorBoundary::export(
-                color_context.output_color_space.color().expect("encoded export output"),
-                color_context.tone_map,
-                color_context.engine.clone(),
-            ),
-        };
+        let export_boundary = RenderOutputColorBoundary::from_intent(
+            mondrian_renderer::RenderOutputColorBoundaryTarget::Export,
+            color_context.output_color_space.color().expect("encoded export output"),
+            &color_context.output_transform,
+            color_context.tone_map,
+            color_context.engine.clone(),
+        )
+        .expect("resolved export intent");
         let export =
             mondrian_renderer::execute_cpu_output_boundary(&expected_frame, &export_boundary)
                 .expect("export color transform");
@@ -15371,10 +15362,7 @@ mod tests {
         let mut color_context = test_color_context(ColorSpace::Srgb);
         color_context.working_color_space = WorkingColorSpace::LinearRec2020;
         color_context.tone_map = true;
-        color_context.ocio_display = Some("sRGB - Display".to_owned());
-        color_context.ocio_view = Some("Mondrian Standard SDR v1".to_owned());
-        assert!(color_context.ocio_display.is_some());
-        assert!(color_context.ocio_view.is_some());
+        color_context.output_transform = mondrian_core::OutputTransformIntent::mondrian_standard();
 
         let resolved = vec![
             ResolvedPreviewElement::Media {
@@ -15421,20 +15409,14 @@ mod tests {
                 color_context.working_color_space,
                 &mut export_scratch,
             );
-        let export_boundary = match (&color_context.ocio_display, &color_context.ocio_view) {
-            (Some(display), Some(view)) => RenderOutputColorBoundary::export_view(
-                color_context.output_color_space.color().expect("encoded export output"),
-                display.clone(),
-                view.clone(),
-                color_context.tone_map,
-                color_context.engine.clone(),
-            ),
-            _ => RenderOutputColorBoundary::export(
-                color_context.output_color_space.color().expect("encoded export output"),
-                color_context.tone_map,
-                color_context.engine.clone(),
-            ),
-        };
+        let export_boundary = RenderOutputColorBoundary::from_intent(
+            mondrian_renderer::RenderOutputColorBoundaryTarget::Export,
+            color_context.output_color_space.color().expect("encoded export output"),
+            &color_context.output_transform,
+            color_context.tone_map,
+            color_context.engine.clone(),
+        )
+        .expect("resolved export intent");
         let export_output =
             mondrian_renderer::execute_cpu_output_boundary(&export_working.frame, &export_boundary)
                 .expect("export multilayer color transform");

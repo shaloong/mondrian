@@ -1,9 +1,10 @@
 use mondrian_core::{
-    ensure_mondrian_default_ocio_loaded, mondrian_standard_output_display_view, ColorEngine,
-    ColorSpace, MondrianStandardPackageIdentity, WorkingColorSpace, WorkingRgbaF32Frame,
+    ensure_mondrian_default_ocio_loaded, ColorEngine, ColorSpace, MondrianStandardPackageIdentity,
+    OutputTransformIntent, WorkingColorSpace, WorkingRgbaF32Frame,
 };
 use mondrian_renderer::{
     execute_cpu_output_boundary_float, CpuColorFrame, RenderOutputColorBoundary,
+    RenderOutputColorBoundaryTarget,
 };
 use std::collections::BTreeSet;
 
@@ -183,15 +184,14 @@ fn render_standard(input: &[[f32; 4]], output: ColorSpace) -> Vec<[f32; 4]> {
         data: input.to_vec(),
         color_space: WorkingColorSpace::LinearRec2020,
     });
-    let (display, view) =
-        mondrian_standard_output_display_view(output).expect("Standard output display/view");
-    let boundary = RenderOutputColorBoundary::display_view(
+    let boundary = RenderOutputColorBoundary::from_intent(
+        RenderOutputColorBoundaryTarget::Display,
         output,
-        display,
-        view,
+        &OutputTransformIntent::mondrian_standard(),
         false,
         ColorEngine::mondrian_standard(),
-    );
+    )
+    .expect("Standard output intent");
     execute_cpu_output_boundary_float(&frame, &boundary)
         .expect("production CPU OCIO output boundary")
         .frame

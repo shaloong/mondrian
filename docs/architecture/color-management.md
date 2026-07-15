@@ -462,11 +462,14 @@ fails as a typed backend-object error before bind-group creation rather than
 silently changing the LUT to nearest sampling. Real-wgpu coverage builds a
 filtering Apple Log -> Rec.709 OCIO pipeline on the selected production device.
 
-Preview and export final transforms are renderer execution concerns. App and
-export crates build a `RenderOutputColorBoundary` from their `ColorContext` and
-pass typed working frames to renderer stage execution helpers; they must not
-construct display/export `RenderColorTransform` values or duplicate
-working -> output conversion logic locally. CPU reference execution uses
+Preview and export final transforms are renderer execution concerns.
+`ColorContext::output_transform` is the only product-level transform truth;
+the context does not duplicate resolved OCIO display/view strings.
+App, thumbnail, and export code call
+`RenderOutputColorBoundary::from_intent(...)`, which resolves the same intent
+into a Display or Export boundary. They must not reinterpret Mondrian Standard,
+construct display/export `RenderColorTransform` values, or duplicate working ->
+output conversion logic locally. CPU reference execution uses
 `execute_cpu_output_boundary_rgba8(...)`, which returns encoded pixels plus
 color/stage diagnostics in the same boundary result. App/export crates must not
 instantiate `RenderOutputColorBoundaryExecutor::cpu_only()` directly. Native
@@ -866,22 +869,18 @@ render/export policy.
 boundaries, including HDR-working to SDR-output presentation, so preview, export,
 cache keys, and future diagnostics do not infer tone mapping from scattered booleans.
 
-For preview contexts, root sequence contexts copy the currently loaded OCIO
-config's default display/view into the context when one is available. For export
-contexts, the delivery view is resolved from `ExportDeliveryViewPolicy` — the OCIO
-config defaults are NOT automatically used as export delivery views. Absence of a
-delivery view in the export context is valid when no policy is configured; it
-triggers a fail-closed diagnostic when tone mapping is requested.
-Mondrian Standard preview contexts must explicitly load the embedded
-`mondrian_default_ocio_v1` config before resolving the default display/view.
-They must not call OCIO's process-global current-config query while Mondrian's
-own OCIO state is empty, because that lets OCIO probe `$OCIO` independently and
-print "Color management disabled" even though Standard mode is supposed to use
-the bundled config. Explicit environment OCIO remains fail-closed when `$OCIO`
-is not configured.
-Preview cache keys and timeline color diagnostics treat display/view as part of
-the effective presentation context. A display/view change must invalidate cached
-viewer frames even when the output `ColorSpace` enum is unchanged.
+Root contexts retain one typed `OutputTransformIntent`. Colorimetric contexts
+carry no view. Tone-mapped Standard contexts carry the immutable package
+identity; core resolves its target-specific SDR/PQ/HLG display/view only when
+renderer builds the boundary and rejects engine/package drift. ACES and Custom
+OCIO contexts resolve a named `OcioDisplayView` from their exact selected config.
+Export delivery policy may replace the Standard intent with an explicitly
+validated `OcioDisplayView`, but only when tone mapping is active. A missing or
+invalid view becomes a colorimetric intent plus fail-closed diagnostics rather
+than partially populated strings. Explicit environment OCIO remains fail-closed
+when `$OCIO` is not configured.
+Preview cache keys include the complete typed output intent. An intent change
+invalidates cached viewer frames even when the output `ColorSpace` is unchanged.
 
 GPU preview should use OCIO shader extraction instead of CPU processor execution
 for real-time playback. `mondrian-core::extract_ocio_gpu_shader_bundle` and

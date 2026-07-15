@@ -455,10 +455,6 @@ pub struct ColorContext {
     pub display_management: DisplayManagementPolicy,
     /// Product-level final output transform selected for this context.
     pub output_transform: mondrian_core::OutputTransformIntent,
-    /// OCIO display name for preview presentation or export delivery view.
-    pub ocio_display: Option<String>,
-    /// OCIO view name for preview presentation or export delivery view.
-    pub ocio_view: Option<String>,
     /// Delivery view resolution error, if a delivery view policy was
     /// configured but could not be resolved. Used by the export path to
     /// distinguish `Missing` (no policy) from `Invalid` (policy configured
@@ -786,11 +782,10 @@ impl SequenceSettings {
     /// color management from the project (`color_management.inherit == true`),
     /// the `engine` is taken from `project_cm` instead of per-sequence settings.
     ///
-    /// The export delivery view (`ocio_display`/`ocio_view`) is resolved from
-    /// the effective `ExportDeliveryViewPolicy` in `display_management`. If
-    /// no policy is configured or the policy cannot resolve, these fields
-    /// remain `None` and the export will fail closed when tone mapping is
-    /// requested.
+    /// The export delivery view is resolved into the single
+    /// `output_transform` intent from the effective `ExportDeliveryViewPolicy`.
+    /// Invalid configured views fail closed to a colorimetric intent and retain
+    /// a structured diagnostic reason.
     pub fn root_export_color_context(
         &self,
         project_cm: &mondrian_core::ProjectColorManagement,
@@ -798,27 +793,26 @@ impl SequenceSettings {
         let mut ctx = self
             .root_color_context_for_output(project_cm, self.color_management.output_color_space);
 
+        if !ctx.tone_map {
+            return ctx;
+        }
+
         // Resolve the export delivery view from the effective policy.
         match self.resolve_export_delivery_view(project_cm) {
             Ok(Some(resolved)) => {
                 ctx.output_transform = mondrian_core::OutputTransformIntent::OcioDisplayView {
-                    display: resolved.display.clone(),
-                    view: resolved.view.clone(),
+                    display: resolved.display,
+                    view: resolved.view,
                 };
-                ctx.ocio_display = Some(resolved.display);
-                ctx.ocio_view = Some(resolved.view);
             }
             Ok(None) => {
-                // No explicit delivery override. Keep the same default view
-                // resolved by `root_color_context_for_output` when tone mapping
-                // is requested; colorimetric contexts already carry no view.
+                // No explicit delivery override. Keep the product intent
+                // selected by `root_color_context_for_output`.
             }
             Err(err) => {
                 // Delivery view was configured but validation failed.
                 // Propagate the error so the export path can record Invalid source.
                 ctx.output_transform = mondrian_core::OutputTransformIntent::Colorimetric;
-                ctx.ocio_display = None;
-                ctx.ocio_view = None;
                 ctx.export_delivery_view_error = Some(err);
             }
         }
@@ -865,56 +859,29 @@ impl SequenceSettings {
             output_color_space,
         );
 
-        // Auto-populate OCIO display/view from the resolved engine config.
-        //
-        // Do not call OCIO's process-global current config before Mondrian has
-        // explicitly loaded the selected source. Otherwise OCIO may probe
-        // `$OCIO` on its own and print "Color management disabled" even though
-        // Mondrian Standard should use the embedded default config.
-        let (ocio_display, ocio_view) = if tone_map
-            && matches!(
-                engine,
-                ColorEngine::MondrianStandard { .. }
-                    | ColorEngine::Aces { .. }
-                    | ColorEngine::CustomOcio { .. }
-            ) {
-            let resolved = match &engine {
-                ColorEngine::MondrianStandard { .. } => {
-                    mondrian_core::mondrian_standard_output_display_view(output_color_space)
-                }
-                ColorEngine::Aces { .. } | ColorEngine::CustomOcio { .. } => {
-                    engine.default_display_view()
-                }
-            };
-            match resolved {
-                Ok((display, view)) => (Some(display), Some(view)),
-                Err(err) => {
-                    tracing::warn!(
-                        target: "mondrian::color",
-                        engine = engine.name(),
-                        reason = %err,
-                        "preview OCIO display/view resolution failed"
-                    );
-                    (None, None)
-                }
-            }
-        } else {
-            (None, None)
-        };
-
-        let output_transform = match (&engine, tone_map, &ocio_display, &ocio_view) {
-            (ColorEngine::MondrianStandard { .. }, true, _, _) => {
+        // Select one typed output intent. Standard retains its immutable package
+        // identity without consulting OCIO process-global state; ACES and Custom
+        // OCIO materialize their exact config default as a named intent.
+        let output_transform = match (&engine, tone_map) {
+            (ColorEngine::MondrianStandard { .. }, true) => {
                 mondrian_core::OutputTransformIntent::mondrian_standard()
             }
-            (
-                ColorEngine::Aces { .. } | ColorEngine::CustomOcio { .. },
-                true,
-                Some(display),
-                Some(view),
-            ) => mondrian_core::OutputTransformIntent::OcioDisplayView {
-                display: display.clone(),
-                view: view.clone(),
-            },
+            (ColorEngine::Aces { .. } | ColorEngine::CustomOcio { .. }, true) => {
+                match engine.default_display_view() {
+                    Ok((display, view)) => {
+                        mondrian_core::OutputTransformIntent::OcioDisplayView { display, view }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "mondrian::color",
+                            engine = engine.name(),
+                            reason = %err,
+                            "preview OCIO display/view resolution failed"
+                        );
+                        mondrian_core::OutputTransformIntent::Colorimetric
+                    }
+                }
+            }
             _ => mondrian_core::OutputTransformIntent::Colorimetric,
         };
 
@@ -927,8 +894,6 @@ impl SequenceSettings {
             missing_metadata_policy: self.color_management.missing_metadata_policy,
             display_management,
             output_transform,
-            ocio_display,
-            ocio_view,
             workflow: self.color_management.workflow,
             export_delivery_view_error: None,
         }
@@ -951,8 +916,6 @@ impl SequenceSettings {
                     missing_metadata_policy: self.color_management.missing_metadata_policy,
                     display_management: parent.display_management.clone(),
                     output_transform: parent.output_transform.clone(),
-                    ocio_display: parent.ocio_display.clone(),
-                    ocio_view: parent.ocio_view.clone(),
                     workflow: self.color_management.workflow,
                     export_delivery_view_error: None,
                 }
@@ -966,8 +929,6 @@ impl SequenceSettings {
                 missing_metadata_policy: parent.missing_metadata_policy,
                 display_management: parent.display_management.clone(),
                 output_transform: parent.output_transform.clone(),
-                ocio_display: parent.ocio_display.clone(),
-                ocio_view: parent.ocio_view.clone(),
                 workflow: parent.workflow,
                 export_delivery_view_error: None,
             },
@@ -986,8 +947,6 @@ impl SequenceSettings {
                     missing_metadata_policy: self.color_management.missing_metadata_policy,
                     display_management: parent.display_management.clone(),
                     output_transform: parent.output_transform.clone(),
-                    ocio_display: parent.ocio_display.clone(),
-                    ocio_view: parent.ocio_view.clone(),
                     workflow: self.color_management.workflow,
                     export_delivery_view_error: None,
                 }
@@ -2255,7 +2214,7 @@ mod tests {
     }
 
     #[test]
-    fn ocio_engine_populates_display_view_in_context() {
+    fn custom_ocio_engine_is_preserved_in_context() {
         let mut settings = SequenceSettings::default();
         settings.color_management.inherit = false;
         settings.color_management.engine =
@@ -2271,8 +2230,6 @@ mod tests {
         let ctx = settings.root_export_color_context(&ProjectColorManagement::default());
         assert_eq!(ctx.engine, ColorEngine::mondrian_standard());
         assert!(!ctx.tone_map);
-        assert_eq!(ctx.ocio_display, None);
-        assert_eq!(ctx.ocio_view, None);
         assert_eq!(
             ctx.output_transform,
             mondrian_core::OutputTransformIntent::Colorimetric
@@ -2287,8 +2244,6 @@ mod tests {
 
         assert_eq!(ctx.engine, ColorEngine::mondrian_standard());
         assert!(!ctx.tone_map);
-        assert_eq!(ctx.ocio_display, None);
-        assert_eq!(ctx.ocio_view, None);
         assert_eq!(
             ctx.output_transform,
             mondrian_core::OutputTransformIntent::Colorimetric
@@ -2311,10 +2266,6 @@ mod tests {
 
         assert!(preview.tone_map);
         assert!(export.tone_map);
-        assert!(preview.ocio_display.is_some());
-        assert!(preview.ocio_view.is_some());
-        assert_eq!(preview.ocio_display, export.ocio_display);
-        assert_eq!(preview.ocio_view, export.ocio_view);
         assert_eq!(
             preview.output_transform,
             mondrian_core::OutputTransformIntent::mondrian_standard()
@@ -2334,14 +2285,25 @@ mod tests {
         let settings = SequenceSettings::default();
 
         let p3 = settings.root_preview_color_context(&project_cm, ColorSpace::DisplayP3);
-        assert_eq!(p3.ocio_display.as_deref(), Some("Display P3 - Display"));
-        assert_eq!(p3.ocio_view.as_deref(), Some("Mondrian Standard SDR v1"));
+        assert_eq!(
+            p3.output_transform
+                .resolve_display_view(ColorSpace::DisplayP3, &p3.engine)
+                .expect("P3 intent"),
+            Some((
+                "Display P3 - Display".to_owned(),
+                "Mondrian Standard SDR v1".to_owned(),
+            ))
+        );
 
         let pq = settings.root_preview_color_context(&project_cm, ColorSpace::Rec2100Pq);
-        assert_eq!(pq.ocio_display.as_deref(), Some("Rec.2100-PQ - Display"));
         assert_eq!(
-            pq.ocio_view.as_deref(),
-            Some("Mondrian Standard HDR 1000 nits v1")
+            pq.output_transform
+                .resolve_display_view(ColorSpace::Rec2100Pq, &pq.engine)
+                .expect("PQ intent"),
+            Some((
+                "Rec.2100-PQ - Display".to_owned(),
+                "Mondrian Standard HDR 1000 nits v1".to_owned(),
+            ))
         );
         assert_eq!(
             pq.output_transform,
@@ -2349,8 +2311,15 @@ mod tests {
         );
 
         let hlg = settings.root_preview_color_context(&project_cm, ColorSpace::Rec2100Hlg);
-        assert_eq!(hlg.ocio_display.as_deref(), Some("Rec.2100-HLG - Display"));
-        assert_eq!(hlg.ocio_view, pq.ocio_view);
+        assert_eq!(
+            hlg.output_transform
+                .resolve_display_view(ColorSpace::Rec2100Hlg, &hlg.engine)
+                .expect("HLG intent"),
+            Some((
+                "Rec.2100-HLG - Display".to_owned(),
+                "Mondrian Standard HDR 1000 nits v1".to_owned(),
+            ))
+        );
     }
 
     #[test]
@@ -2430,6 +2399,7 @@ mod tests {
             color_management: SequenceColorManagement {
                 inherit: false,
                 display_management: DisplayManagementPolicy {
+                    tone_map_policy: DisplayToneMapPolicy::Always,
                     export_delivery_view: ExportDeliveryViewPolicy::OcioDisplayView {
                         display: "sRGB - Display".to_string(),
                         view: "Mondrian Standard SDR v1".to_string(),
@@ -2454,6 +2424,7 @@ mod tests {
             color_management: SequenceColorManagement {
                 inherit: false,
                 display_management: DisplayManagementPolicy {
+                    tone_map_policy: DisplayToneMapPolicy::Always,
                     export_delivery_view: ExportDeliveryViewPolicy::OcioDisplayView {
                         display: "sRGB - Display".to_string(),
                         view: "Mondrian Standard SDR v1".to_string(),
@@ -2502,6 +2473,7 @@ mod tests {
         let project_cm = ProjectColorManagement {
             engine: ColorEngine::mondrian_standard(),
             display_management: DisplayManagementPolicy {
+                tone_map_policy: DisplayToneMapPolicy::Always,
                 export_delivery_view: ExportDeliveryViewPolicy::OcioConfigDefault,
                 ..Default::default()
             },
@@ -2511,12 +2483,10 @@ mod tests {
             ..Default::default()
         };
         let ctx = settings.root_export_color_context(&project_cm);
-        // With inherit=true and project policy=OcioConfigDefault, the export
-        // context should have ocio_display/ocio_view populated (if OCIO is available).
-        // If OCIO is not available, they'll be None — that's correct fail-closed.
-        if ctx.ocio_display.is_some() {
-            assert!(ctx.ocio_view.is_some());
-        }
+        assert!(matches!(
+            ctx.output_transform,
+            mondrian_core::OutputTransformIntent::OcioDisplayView { .. }
+        ));
     }
 
     #[test]
@@ -2541,8 +2511,10 @@ mod tests {
         };
         let ctx = settings.root_export_color_context(&project_cm);
         // Sequence override to None should prevent project delivery view.
-        assert_eq!(ctx.ocio_display, None);
-        assert_eq!(ctx.ocio_view, None);
+        assert_eq!(
+            ctx.output_transform,
+            mondrian_core::OutputTransformIntent::Colorimetric
+        );
     }
 
     #[test]
@@ -2589,8 +2561,10 @@ mod tests {
         // Default policy is None, tone_map depends on workflow/output.
         // If tone_map is false, no issue should be recorded.
         if !ctx.tone_map {
-            assert_eq!(ctx.ocio_display, None);
-            assert_eq!(ctx.ocio_view, None);
+            assert_eq!(
+                ctx.output_transform,
+                mondrian_core::OutputTransformIntent::Colorimetric
+            );
         }
     }
 }

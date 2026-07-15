@@ -2175,39 +2175,23 @@ fn write_timeline_frames_to_writer<W: Write>(
 
 /// Build the export output boundary from the resolved color context.
 ///
-/// When `tone_map` is requested and an OCIO delivery view is available,
-/// returns an [`RenderOutputColorBoundary::export_view`] boundary that
-/// carries the OCIO display/view transform (which includes tone mapping).
-///
-/// When `tone_map` is requested but no delivery view is available, returns
-/// a plain [`RenderOutputColorBoundary::export`] boundary. The caller
-/// should record `ToneMapRequestedWithoutExportViewTransform` in this case.
-///
-/// When `tone_map` is not requested, returns a plain export boundary
-/// without any view transform.
+/// The renderer resolves the product-level output-transform intent. Preview
+/// and export therefore cannot independently reinterpret Mondrian Standard,
+/// an explicit OCIO view, or a colorimetric delivery.
 fn export_output_boundary_from_context(
     color_context: &ColorContext,
 ) -> Result<RenderOutputColorBoundary, String> {
     let output_color_space = color_context.output_color_space.color().ok_or_else(|| {
         "deliverable output boundary requires an encoded output color space".to_owned()
     })?;
-    if color_context.tone_map {
-        if let (Some(display), Some(view)) = (&color_context.ocio_display, &color_context.ocio_view)
-        {
-            return Ok(RenderOutputColorBoundary::export_view(
-                output_color_space,
-                display.clone(),
-                view.clone(),
-                true,
-                color_context.engine.clone(),
-            ));
-        }
-    }
-    Ok(RenderOutputColorBoundary::export(
+    RenderOutputColorBoundary::from_intent(
+        mondrian_renderer::RenderOutputColorBoundaryTarget::Export,
         output_color_space,
+        &color_context.output_transform,
         color_context.tone_map,
         color_context.engine.clone(),
-    ))
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn render_timeline_frame_into(
@@ -3807,8 +3791,6 @@ mod tests {
                 display: "sRGB - Display".to_string(),
                 view: "Mondrian Standard SDR v1".to_string(),
             },
-            ocio_display: Some("sRGB - Display".to_string()),
-            ocio_view: Some("Mondrian Standard SDR v1".to_string()),
             export_delivery_view_error: None,
         };
 
@@ -3822,7 +3804,7 @@ mod tests {
     }
 
     #[test]
-    fn export_output_boundary_from_context_plain_export_when_no_view() {
+    fn export_output_boundary_from_context_resolves_standard_intent() {
         let ctx = ColorContext {
             working_color_space: WorkingColorSpace::LinearRec709,
             output_color_space: ColorSpace::Srgb.into(),
@@ -3835,19 +3817,17 @@ mod tests {
                 mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
             output_transform: mondrian_core::OutputTransformIntent::mondrian_standard(),
-            ocio_display: None,
-            ocio_view: None,
             export_delivery_view_error: None,
         };
 
         let boundary = export_output_boundary_from_context(&ctx).expect("encoded output");
         assert_eq!(boundary.target, RenderOutputColorBoundaryTarget::Export);
-        assert!(boundary.display_view.is_none());
+        assert!(boundary.display_view.is_some());
         assert!(boundary.tone_map);
     }
 
     #[test]
-    fn export_output_boundary_from_context_plain_export_when_no_tone_map() {
+    fn export_output_boundary_from_context_preserves_explicit_intent_without_tone_flag() {
         let ctx = ColorContext {
             working_color_space: WorkingColorSpace::LinearRec709,
             output_color_space: ColorSpace::Rec709.into(),
@@ -3863,14 +3843,12 @@ mod tests {
                 display: "sRGB - Display".to_string(),
                 view: "Mondrian Standard SDR v1".to_string(),
             },
-            ocio_display: Some("sRGB - Display".to_string()),
-            ocio_view: Some("Mondrian Standard SDR v1".to_string()),
             export_delivery_view_error: None,
         };
 
         let boundary = export_output_boundary_from_context(&ctx).expect("encoded output");
         assert_eq!(boundary.target, RenderOutputColorBoundaryTarget::Export);
-        assert!(boundary.display_view.is_none());
+        assert!(boundary.display_view.is_some());
         assert!(!boundary.tone_map);
     }
 
@@ -3908,8 +3886,7 @@ mod tests {
 
     /// When an explicit delivery view is configured, the real export render
     /// path produces an export_view boundary and records no transform issue.
-    /// This uses a hand-built ColorContext with ocio_display/ocio_view set,
-    /// since root_export_color_context intentionally clears them.
+    /// This uses a hand-built context to exercise the shared output intent.
     #[test]
     fn export_real_render_with_view_records_no_transform_issue() {
         let mut seq = Sequence::new("explicit-delivery-view");
@@ -3951,8 +3928,6 @@ mod tests {
                 display: "Rec.1886 Rec.709 - Display".to_string(),
                 view: "Mondrian Standard SDR v1".to_string(),
             },
-            ocio_display: Some("Rec.1886 Rec.709 - Display".to_string()),
-            ocio_view: Some("Mondrian Standard SDR v1".to_string()),
             export_delivery_view_error: None,
         };
 
@@ -4023,8 +3998,6 @@ mod tests {
                 mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
             output_transform: mondrian_core::OutputTransformIntent::Colorimetric,
-            ocio_display: None,
-            ocio_view: None,
             export_delivery_view_error: Some("invalid delivery view".to_string()),
         };
 
