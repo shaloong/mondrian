@@ -1325,8 +1325,8 @@ impl WindowViewerGpuPresentationState {
         self.registered_texture_key.take()
     }
 
-    fn register(&mut self, key: ExternalTextureKey) {
-        self.registered_texture_key = Some(key);
+    fn replace_registration(&mut self, key: ExternalTextureKey) -> Option<ExternalTextureKey> {
+        self.registered_texture_key.replace(key)
     }
 
     fn presentation(&self) -> Option<ViewerExternalTexturePresentation> {
@@ -3277,9 +3277,6 @@ fn prepare_viewer_gpu_preview(
         finish_prepare!();
     }
 
-    if let Some(previous) = session.viewer_gpu_presentation.take_registration() {
-        session.frame_renderer.unregister_external_texture(&previous);
-    }
     session.viewer_gpu_execution.clear_frame_resources();
 
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -3337,6 +3334,17 @@ fn prepare_viewer_gpu_preview(
     ) {
         Ok(record) => record,
         Err(error) => {
+            if let ViewerGpuExecutionError::Backpressure(reason) = &error {
+                tracing::debug!(
+                    sequence_id = %frame.sequence_id,
+                    frame = frame.frame,
+                    width = frame.width,
+                    height = frame.height,
+                    reason,
+                    "viewer GPU preview retained the current output under bounded backpressure"
+                );
+                finish_prepare!();
+            }
             match &error {
                 ViewerGpuExecutionError::WorkingComposite(composite_error) => {
                     host.record_preview_gpu_compositing(
@@ -3392,7 +3400,6 @@ fn prepare_viewer_gpu_preview(
                 height = frame.height,
                 "viewer GPU preview recording failed: {error}"
             );
-            host.clear_external_viewer_frame();
             finish_prepare!();
         }
     };
@@ -3420,7 +3427,6 @@ fn prepare_viewer_gpu_preview(
                 frame = frame.frame,
                 "viewer GPU preview output texture missing from runtime: {error}"
             );
-            host.clear_external_viewer_frame();
             finish_prepare!();
         }
     };
@@ -3448,7 +3454,6 @@ fn prepare_viewer_gpu_preview(
             surface_format = ?session.display_output_contract.surface_color.format,
             "viewer GPU preview external texture registration failed: {err}"
         );
-        host.clear_external_viewer_frame();
         finish_prepare!();
     }
     queue.submit(std::iter::once(encoder.finish()));
@@ -3459,7 +3464,13 @@ fn prepare_viewer_gpu_preview(
         presentation_geometry.presentation,
     ) {
         session.viewer_gpu_output_telemetry.record_registered_frame(stage_diagnostics);
-        session.viewer_gpu_presentation.register(texture_key);
+        if let Some(previous) =
+            session.viewer_gpu_presentation.replace_registration(texture_key.clone())
+        {
+            if previous != texture_key {
+                session.frame_renderer.unregister_external_texture(&previous);
+            }
+        }
     } else {
         session
             .viewer_gpu_output_telemetry
@@ -4423,6 +4434,17 @@ mod tests {
             continuous_playback_elapsed(previous_tick, current_tick, true, false),
             Duration::ZERO
         );
+    }
+
+    #[test]
+    fn viewer_registration_swap_retains_previous_until_commit() {
+        let first = ExternalTextureKey::new("viewer:first").expect("valid first key");
+        let second = ExternalTextureKey::new("viewer:second").expect("valid second key");
+        let mut state = WindowViewerGpuPresentationState::default();
+
+        assert_eq!(state.replace_registration(first.clone()), None);
+        assert_eq!(state.replace_registration(second.clone()), Some(first));
+        assert_eq!(state.take_registration(), Some(second));
     }
 
     #[test]

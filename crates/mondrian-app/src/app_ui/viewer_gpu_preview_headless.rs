@@ -55,6 +55,10 @@ pub(crate) struct HeadlessViewerGpuExecution {
     pub fallback_reasons: Vec<String>,
     /// Frame-local decode provenance bound to this exact Viewer candidate.
     pub decode_execution: AppUiPreviewDecodeExecutionSummary,
+    /// Native-import contract pools retained after this execution.
+    pub native_import_contract_pools: usize,
+    /// Native-import bridge entries retained after this execution.
+    pub native_import_bridge_entries: usize,
 }
 
 /// Stable adapter identity serialized by real-GPU execution gates.
@@ -192,6 +196,8 @@ impl HeadlessViewerGpuAdapter {
         let started = Instant::now();
         let output_key = frame.external_texture_key();
         if self.current_output_key.as_deref() == Some(output_key.as_str()) {
+            let (native_import_contract_pools, native_import_bridge_entries) =
+                self.runtime.native_import_pool_residency();
             return Ok(HeadlessViewerGpuExecution {
                 output_width: frame.width,
                 output_height: frame.height,
@@ -206,6 +212,8 @@ impl HeadlessViewerGpuAdapter {
                 stage_diagnostics: None,
                 fallback_reasons: Vec::new(),
                 decode_execution: frame.decode_execution(),
+                native_import_contract_pools,
+                native_import_bridge_entries,
             });
         }
         let presentation = ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
@@ -259,14 +267,23 @@ impl HeadlessViewerGpuAdapter {
             } else {
                 self.runtime.record(&self.device, &self.queue, &mut encoder, request)
             };
-        if record_result.is_err() {
-            if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token) {
-                ring.abandon_frame(token)
-                    .map_err(|error| HeadlessViewerGpuError::Timestamp(error.to_string()))?;
+        let record = match record_result {
+            Ok(record) => record,
+            Err(error) => {
+                if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token) {
+                    ring.abandon_frame(token)
+                        .map_err(|error| HeadlessViewerGpuError::Timestamp(error.to_string()))?;
+                }
+                if matches!(
+                    error,
+                    mondrian_renderer::ViewerGpuExecutionError::Backpressure(_)
+                ) {
+                    let _ = self.device.poll(wgpu::PollType::Poll);
+                    return Err(HeadlessViewerGpuError::Backpressure(error.to_string()));
+                }
+                return Err(HeadlessViewerGpuError::Record(error.to_string()));
             }
-        }
-        let record =
-            record_result.map_err(|error| HeadlessViewerGpuError::Record(error.to_string()))?;
+        };
         let _output_texture = self
             .runtime
             .output_texture_view(&record)
@@ -282,6 +299,8 @@ impl HeadlessViewerGpuAdapter {
                 .map_err(|error| HeadlessViewerGpuError::Timestamp(error.to_string()))?;
         }
         self.current_output_key = Some(output_key);
+        let (native_import_contract_pools, native_import_bridge_entries) =
+            self.runtime.native_import_pool_residency();
         Ok(HeadlessViewerGpuExecution {
             output_width: frame.width,
             output_height: frame.height,
@@ -296,6 +315,8 @@ impl HeadlessViewerGpuAdapter {
             stage_diagnostics: Some(record.stage_diagnostics),
             fallback_reasons: record.fallback_reasons,
             decode_execution: frame.decode_execution(),
+            native_import_contract_pools,
+            native_import_bridge_entries,
         })
     }
 }
@@ -308,6 +329,8 @@ pub(crate) enum HeadlessViewerGpuError {
     Device(String),
     #[error("invalid headless Viewer presentation extent {width}x{height}")]
     InvalidPresentation { width: u32, height: u32 },
+    #[error("headless Viewer GPU execution is temporarily backpressured: {0}")]
+    Backpressure(String),
     #[error("headless Viewer GPU recording failed: {0}")]
     Record(String),
     #[error("headless Viewer GPU timestamp query failed: {0}")]

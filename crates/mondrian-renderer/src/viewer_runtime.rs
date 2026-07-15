@@ -111,6 +111,11 @@ impl ViewerGpuExecutionRuntime {
         self.native_video_import.support()
     }
 
+    /// Current bounded native-import contract-pool and bridge-entry residency.
+    pub fn native_import_pool_residency(&self) -> (usize, usize) {
+        self.native_video_import.pool_residency()
+    }
+
     /// Aggregate output-stage diagnostics without exposing the resource table.
     pub fn color_output_diagnostics(&self) -> crate::RenderGpuOutputBoundaryRuntimeDiagnostics {
         self.color_output.diagnostics()
@@ -398,6 +403,10 @@ enum ViewerGpuExecutionOutputOwner {
 /// Stage-specific failures from the shared Viewer GPU execution Interface.
 #[derive(Debug, thiserror::Error)]
 pub enum ViewerGpuExecutionError {
+    /// Bounded native/GPU resources are still in flight. The presentation
+    /// adapter should retain its current output and retry or discard this candidate.
+    #[error("Viewer GPU execution is backpressured: {0}")]
+    Backpressure(String),
     #[error("Viewer GPU input preparation failed: {0}")]
     InputPreparation(String),
     #[error("Viewer GPU working composite failed: {0:?}")]
@@ -519,6 +528,11 @@ fn prepare_composite<'a>(
                     Some(source) => {
                         match record_native_video_layer(source, native_runtime, runtime) {
                             Ok(handle) => Some(handle),
+                            Err(error) if error.is_backpressure() => {
+                                return Err(ViewerGpuExecutionError::Backpressure(
+                                    error.to_string(),
+                                ));
+                            }
                             Err(error) => {
                                 prepared.residency.gpu_input_failures =
                                     prepared.residency.gpu_input_failures.saturating_add(1);
@@ -532,7 +546,7 @@ fn prepare_composite<'a>(
                                     height = request.height,
                                     "viewer native video import failed: {error}"
                                 );
-                                native_import_error = Some(error);
+                                native_import_error = Some(error.to_string());
                                 None
                             }
                         }
@@ -663,7 +677,7 @@ fn record_native_video_layer(
     source: &ViewerGpuNativeSource,
     native_runtime: &mut ViewerNativeVideoImportRuntime,
     color_runtime: &mut RenderGpuOutputBoundaryRuntime,
-) -> Result<GpuColorFrameHandle, String> {
+) -> Result<GpuColorFrameHandle, crate::GpuNativeDecodedFrameImportError> {
     let resource = native_runtime.import(
         color_runtime.frame_ids_mut(),
         source.source_color_space,
@@ -674,10 +688,16 @@ fn record_native_video_layer(
     if color_runtime
         .frame_table_mut()
         .insert(resource)
-        .map_err(|error| format!("native working resource insertion failed: {error:?}"))?
+        .map_err(
+            |error| crate::GpuNativeDecodedFrameImportError::BackendRejected {
+                reason: format!("native working resource insertion failed: {error:?}"),
+            },
+        )?
         .is_some()
     {
-        return Err("native working frame unexpectedly replaced a live resource".to_owned());
+        return Err(crate::GpuNativeDecodedFrameImportError::BackendRejected {
+            reason: "native working frame unexpectedly replaced a live resource".to_owned(),
+        });
     }
     Ok(handle)
 }

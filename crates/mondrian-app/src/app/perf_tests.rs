@@ -149,10 +149,18 @@ struct HeadlessViewerGpuExecutionSummary {
     compositing_diagnostics: GpuCompositingDiagnostics,
     spatial_diagnostics: Option<GpuViewerSpatialRuntimeDiagnostics>,
     rendered_decode_execution: AppUiPreviewDecodeExecutionSummary,
+    native_import_contract_pools_peak: usize,
+    native_import_bridge_entries_peak: usize,
 }
 
 impl HeadlessViewerGpuExecutionSummary {
     fn record(&mut self, execution: HeadlessViewerGpuExecution) {
+        self.native_import_contract_pools_peak = self
+            .native_import_contract_pools_peak
+            .max(execution.native_import_contract_pools);
+        self.native_import_bridge_entries_peak = self
+            .native_import_bridge_entries_peak
+            .max(execution.native_import_bridge_entries);
         let output_extent = HeadlessViewerGpuExtent {
             width: execution.output_width,
             height: execution.output_height,
@@ -302,6 +310,8 @@ fn headless_gpu_summary_records_distinct_executed_extents() {
             stage_diagnostics: None,
             fallback_reasons: Vec::new(),
             decode_execution: AppUiPreviewDecodeExecutionSummary::default(),
+            native_import_contract_pools: 0,
+            native_import_bridge_entries: 0,
         });
     }
 

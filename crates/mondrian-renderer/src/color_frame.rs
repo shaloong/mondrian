@@ -1532,6 +1532,16 @@ pub enum GpuNativeDecodedFrameImportError {
     /// The media payload could not produce a renderer source descriptor.
     #[error(transparent)]
     SourceFormat(#[from] GpuNativeDecodedFrameSourceFormatError),
+    /// Every bounded native-import resource for this contract is still in flight.
+    ///
+    /// This is transient queue backpressure, not a capability or correctness
+    /// failure. Callers should retain the last presented frame and retry or
+    /// discard this candidate according to their scheduling policy.
+    #[error("native decoded frame import is backpressured: {reason}")]
+    Backpressure {
+        /// Stable backend detail for telemetry and diagnosis.
+        reason: String,
+    },
     /// Backend rejected the native decoded frame.
     #[error("native decoded frame import backend rejected the frame: {reason}")]
     BackendRejected {
@@ -1554,6 +1564,13 @@ pub enum GpuNativeDecodedFrameImportError {
         /// Actual returned resource contract.
         actual: GpuColorFrameContract,
     },
+}
+
+impl GpuNativeDecodedFrameImportError {
+    /// Whether this failure is transient bounded-resource backpressure.
+    pub fn is_backpressure(&self) -> bool {
+        matches!(self, Self::Backpressure { .. })
+    }
 }
 
 /// GPU-to-CPU readback plan for one encoded color frame.

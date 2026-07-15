@@ -348,6 +348,26 @@ impl D3D11Dx12SharedVideoTexture {
         }
     }
 
+    /// Whether every submitted renderer operation for this entry has completed.
+    ///
+    /// This is a lock-free fence query used by bounded pool eviction. It never
+    /// waits for the GPU and returns false for reserved, acquired, or poisoned
+    /// protocol state.
+    pub fn renderer_work_completed(&self) -> Result<bool, D3D11Dx12SharedVideoTextureError> {
+        if self.timeline.phase() != NativeVideoSyncPhase::Idle {
+            return Ok(false);
+        }
+        let Some(required) = self.timeline.reusable_after() else {
+            return Ok(true);
+        };
+        // SAFETY: d3d12_fence is live; this is a lock-free completion query.
+        let completed = unsafe { self.d3d12_fence.GetCompletedValue() };
+        if completed == u64::MAX {
+            return Err(D3D11Dx12SharedVideoTextureError::DeviceRemoved);
+        }
+        Ok(completed >= required)
+    }
+
     fn validate_reuse(
         &self,
         source: &ValidatedD3D11NativeDecodedFrame,

@@ -179,6 +179,21 @@ without a CPU wait, and any partially submitted failure permanently poisons the
 entry. The complete import backend pools entries by source device, storage,
 color, and sampling contract; it grows the pool for bounded in-flight work,
 returns busy at the configured limit, and evicts poisoned entries before reuse.
+Pool exhaustion is exposed as typed `GpuNativeDecodedFrameImportError::Backpressure`,
+not flattened into a terminal backend rejection. The shared Viewer runtime
+propagates that retryable state as `ViewerGpuExecutionError::Backpressure` so
+presentation adapters can keep the last completed output visible and let the
+scheduler retry or discard the obsolete candidate. Capability mismatches,
+protocol violations, and device errors remain terminal structured failures;
+backpressure must never trigger a surprise CPU transfer or an unbounded pool.
+Decoder device identities are also bounded: the backend retains at most eight
+source-contract pools and evicts the least-recently-used pool only after every
+bridge fence in it has completed. This prevents playback/scrub/still session
+churn from retaining one D3D11 context, shared texture, and NT handle set per
+historical decoder. If every contract pool is still in flight, admission returns
+typed backpressure instead of waiting or allocating a ninth pool. Headless GPU
+evidence records peak contract-pool and bridge-entry residency so long-run gates
+can distinguish bounded reuse from handle accumulation.
 The bridge never relies on `Flush`, implicit sRGB, or an undocumented
 resource-state assumption. A real-GPU ignored smoke test exercises NT-handle
 creation/opening, both API devices on the same adapter, fence transfer, resource

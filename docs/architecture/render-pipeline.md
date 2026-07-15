@@ -787,6 +787,16 @@ Resolved preview layers
   -> frame_renderer.register_external_texture_view()
 ```
 
+Viewer publication is transactional. The window registers the newly completed
+output and publishes its candidate identity before it unregisters the prior
+texture key. Native-import backpressure or a failed candidate therefore leaves
+the last completed frame registered instead of clearing the Viewer to white.
+Intentional presentation invalidation (project/display/geometry changes) still
+owns explicit clearing; an incomplete replacement does not.
+The same execution evidence reports peak native-import contract pools and
+bridge entries. Contract pools are globally bounded and completion-aware, while
+each contract retains its own bounded in-flight bridge ring.
+
 This keeps preview playback GPU-resident from input conversion through output
 transform for the supported subset. Retained Windows D3D11 decoder surfaces use
 a low-copy path, not zero-copy: the decoder array slice is copied once into a

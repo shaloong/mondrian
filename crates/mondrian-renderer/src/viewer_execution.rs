@@ -22,9 +22,9 @@ use crate::{
 use crate::{
     CpuColorFrame, CpuSourceColorFrame, GpuColorFrameIdAllocator, GpuColorFrameResource,
     GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool, GpuNativeDecodedFrameImportContract,
-    GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
-    GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation, GpuVideoRange,
-    NativeVideoImportCpuTimings, RenderInputTransform, TimelineSolidColorLayer,
+    GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportSupport,
+    GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation,
+    GpuVideoRange, NativeVideoImportCpuTimings, RenderInputTransform, TimelineSolidColorLayer,
 };
 
 /// One renderer-neutral layer entering Viewer GPU execution.
@@ -171,6 +171,15 @@ impl ViewerNativeVideoImportRuntime {
         NativeVideoImportCpuTimings::default()
     }
 
+    /// Bounded native-import contract-pool and bridge-entry residency.
+    pub fn pool_residency(&self) -> (usize, usize) {
+        #[cfg(target_os = "windows")]
+        if let Some(backend) = self.backend.as_ref() {
+            return (backend.contract_pool_count(), backend.bridge_entry_count());
+        }
+        (0, 0)
+    }
+
     /// Import one native decoder payload into a renderer-owned working resource.
     pub fn import(
         &mut self,
@@ -178,23 +187,24 @@ impl ViewerNativeVideoImportRuntime {
         source_color_space: ColorSpace,
         input_transform: &RenderInputTransform,
         native_frame: &PreviewNativeDecodedFrame,
-    ) -> Result<GpuColorFrameResource<GpuColorFrameWgpuResource>, String> {
+    ) -> Result<GpuColorFrameResource<GpuColorFrameWgpuResource>, GpuNativeDecodedFrameImportError>
+    {
         let source_texture_format = native_source_texture_format_from_decoded(
             native_frame.surface_format,
         )
-        .ok_or_else(|| {
-            format!(
+        .ok_or_else(|| GpuNativeDecodedFrameImportError::BackendRejected {
+            reason: format!(
                 "decoded native surface format {:?} has no renderer import contract",
                 native_frame.surface_format
-            )
+            ),
         })?;
         let video_sampling = native_video_sampling_from_decoded(
             source_color_space,
             source_texture_format,
             native_frame.diagnostics.decoded_video_sampling,
         )
-        .ok_or_else(|| {
-            "decoded native surface has incomplete video sampling metadata".to_owned()
+        .ok_or_else(|| GpuNativeDecodedFrameImportError::BackendRejected {
+            reason: "decoded native surface has incomplete video sampling metadata".to_owned(),
         })?;
         let contract = GpuNativeDecodedFrameImportContract {
             width: native_frame.width,
@@ -209,23 +219,27 @@ impl ViewerNativeVideoImportRuntime {
         #[cfg(target_os = "windows")]
         {
             let backend = self.backend.as_mut().ok_or_else(|| {
-                self.support
-                    .unavailable_reason
-                    .clone()
-                    .unwrap_or_else(|| "native video backend is unavailable".to_owned())
+                GpuNativeDecodedFrameImportError::BackendRejected {
+                    reason: self
+                        .support
+                        .unavailable_reason
+                        .clone()
+                        .unwrap_or_else(|| "native video backend is unavailable".to_owned()),
+                }
             })?;
             execute_native_decoded_frame_import(backend, ids, contract, native_frame)
                 .map(|execution| execution.resource)
-                .map_err(|error| error.to_string())
         }
         #[cfg(not(target_os = "windows"))]
         {
             let _ = (ids, contract, native_frame);
-            Err(self
-                .support
-                .unavailable_reason
-                .clone()
-                .unwrap_or_else(|| "native video backend is unavailable".to_owned()))
+            Err(GpuNativeDecodedFrameImportError::BackendRejected {
+                reason: self
+                    .support
+                    .unavailable_reason
+                    .clone()
+                    .unwrap_or_else(|| "native video backend is unavailable".to_owned()),
+            })
         }
     }
 }

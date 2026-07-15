@@ -38,6 +38,9 @@ pub enum D3D11Dx12NativeVideoImportBackendCreateError {
     /// A zero-sized in-flight pool could never import a frame.
     #[error("native video bridge pool limit must be greater than zero")]
     ZeroBridgePoolLimit,
+    /// A zero-sized contract-pool limit could never retain a decoder session.
+    #[error("native video contract pool limit must be greater than zero")]
+    ZeroContractPoolLimit,
 }
 
 /// Resource-pool policy for the Windows native video import backend.
@@ -46,11 +49,17 @@ pub struct D3D11Dx12NativeVideoImportBackendOptions {
     /// Maximum bridge entries for one immutable source/sampling contract.
     /// Reaching the limit returns busy without a CPU wait.
     pub max_frames_in_flight_per_contract: usize,
+    /// Maximum decoder-device/source contract pools retained by the renderer.
+    /// Completed least-recently-used pools are evicted without a GPU wait.
+    pub max_contract_pools: usize,
 }
 
 impl Default for D3D11Dx12NativeVideoImportBackendOptions {
     fn default() -> Self {
-        Self { max_frames_in_flight_per_contract: 4 }
+        Self {
+            max_frames_in_flight_per_contract: 4,
+            max_contract_pools: 8,
+        }
     }
 }
 
@@ -68,8 +77,9 @@ pub struct D3D11Dx12NativeVideoImportBackend {
     support: GpuNativeDecodedFrameImportSupport,
     yuv_decoder: GpuNativeYuvDecoder,
     color_runtime: RenderGpuOutputBoundaryRuntime,
-    pools: HashMap<D3D11BridgePoolKey, Vec<D3D11NativeVideoPipelineEntry>>,
+    pools: HashMap<D3D11BridgePoolKey, D3D11NativeVideoPipelinePool>,
     options: D3D11Dx12NativeVideoImportBackendOptions,
+    contract_use_sequence: u64,
     frame_cpu_timings: NativeVideoImportCpuTimings,
 }
 
@@ -131,6 +141,9 @@ impl D3D11Dx12NativeVideoImportBackend {
         if options.max_frames_in_flight_per_contract == 0 {
             return Err(D3D11Dx12NativeVideoImportBackendCreateError::ZeroBridgePoolLimit);
         }
+        if options.max_contract_pools == 0 {
+            return Err(D3D11Dx12NativeVideoImportBackendCreateError::ZeroContractPoolLimit);
+        }
         let renderer_adapter_luid = renderer_adapter_luid(adapter)?;
         let decoder_adapter_index = renderer_adapter_dxgi_index(adapter)?;
         let mut formats = Vec::with_capacity(2);
@@ -160,13 +173,19 @@ impl D3D11Dx12NativeVideoImportBackend {
             color_runtime: RenderGpuOutputBoundaryRuntime::with_resource_pool(resource_pool),
             pools: HashMap::new(),
             options,
+            contract_use_sequence: 0,
             frame_cpu_timings: NativeVideoImportCpuTimings::default(),
         })
     }
 
     /// Return the number of reusable bridge entries currently allocated.
     pub fn bridge_entry_count(&self) -> usize {
-        self.pools.values().map(Vec::len).sum()
+        self.pools.values().map(|pool| pool.entries.len()).sum()
+    }
+
+    /// Return the number of decoder-device/source contracts currently retained.
+    pub fn contract_pool_count(&self) -> usize {
+        self.pools.len()
     }
 
     /// Borrow the OCIO runtime used by the native input path.
@@ -188,14 +207,16 @@ impl D3D11Dx12NativeVideoImportBackend {
         &mut self,
         plan: &GpuNativeDecodedFrameImportPlan,
         native_frame: &PreviewNativeDecodedFrame,
-    ) -> Result<GpuColorFrameResource<GpuColorFrameWgpuResource>, String> {
+    ) -> Result<GpuColorFrameResource<GpuColorFrameWgpuResource>, GpuNativeDecodedFrameImportError>
+    {
         let total_started = Instant::now();
         let source_validation_started = Instant::now();
         let source =
             validated_d3d11_native_decoded_frame_for_luid(self.renderer_adapter_luid, native_frame)
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| backend_rejected(error.to_string()))?;
         let key = D3D11BridgePoolKey::new(&source, plan);
         let source_validation_us = elapsed_us(source_validation_started);
+        self.ensure_contract_pool(key)?;
         let Self {
             device,
             queue,
@@ -203,21 +224,28 @@ impl D3D11Dx12NativeVideoImportBackend {
             color_runtime,
             pools,
             options,
+            contract_use_sequence,
             frame_cpu_timings,
             ..
         } = self;
-        let pool = pools.entry(key).or_default();
+        *contract_use_sequence = contract_use_sequence.saturating_add(1);
+        let pool = pools.get_mut(&key).ok_or_else(|| {
+            backend_rejected("native video contract pool disappeared after admission".to_owned())
+        })?;
+        pool.last_used_sequence = *contract_use_sequence;
         let bridge_acquire_started = Instant::now();
         let (entry_index, prepared_native) = acquire_or_grow_entry(
-            pool,
+            &mut pool.entries,
             options.max_frames_in_flight_per_contract,
             device,
             queue,
             &source,
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(native_bridge_import_error)?;
         let bridge_acquire_us = elapsed_us(bridge_acquire_started);
-        let entry = &mut pool[entry_index];
+        let entry = pool.entries.get_mut(entry_index).ok_or_else(|| {
+            backend_rejected("native video bridge acquisition returned an invalid index".to_owned())
+        })?;
         let pipeline_prepare_started = Instant::now();
         let yuv_plan = match GpuNativeYuvDecodePlan::from_import_plan(
             plan,
@@ -228,11 +256,11 @@ impl D3D11Dx12NativeVideoImportBackend {
         ) {
             Ok(plan) => plan,
             Err(error) => {
-                return Err(discard_with_reason(
+                return Err(backend_rejected(discard_with_reason(
                     entry,
                     prepared_native,
                     error.to_string(),
-                ));
+                )));
             }
         };
 
@@ -240,11 +268,11 @@ impl D3D11Dx12NativeVideoImportBackend {
             let views = match entry.bridge.plane_views(&prepared_native) {
                 Ok(views) => views,
                 Err(error) => {
-                    return Err(discard_with_reason(
+                    return Err(backend_rejected(discard_with_reason(
                         entry,
                         prepared_native,
                         error.to_string(),
-                    ));
+                    )));
                 }
             };
             entry.prepared_yuv = Some(yuv_decoder.prepare_pass(
@@ -336,7 +364,11 @@ impl D3D11Dx12NativeVideoImportBackend {
                 Ok(result) => result,
                 Err(reason) => {
                     restore_encoded_source(color_runtime, entry, plan);
-                    return Err(discard_with_reason(entry, prepared_native, reason));
+                    return Err(backend_rejected(discard_with_reason(
+                        entry,
+                        prepared_native,
+                        reason,
+                    )));
                 }
             };
         entry.encoded_source = Some(encoded_payload);
@@ -344,7 +376,7 @@ impl D3D11Dx12NativeVideoImportBackend {
         entry
             .bridge
             .submit_renderer_commands(prepared_native, std::iter::once(encoder.finish()))
-            .map_err(|error| error.to_string())?;
+            .map_err(native_bridge_import_error)?;
         let submit_us = elapsed_us(submit_started);
         frame_cpu_timings.accumulate(NativeVideoImportCpuTimings {
             source_validation_us,
@@ -357,6 +389,49 @@ impl D3D11Dx12NativeVideoImportBackend {
             total_us: elapsed_us(total_started),
         });
         Ok(working)
+    }
+
+    fn ensure_contract_pool(
+        &mut self,
+        key: D3D11BridgePoolKey,
+    ) -> Result<(), GpuNativeDecodedFrameImportError> {
+        if self.pools.contains_key(&key) {
+            return Ok(());
+        }
+        if self.pools.len() >= self.options.max_contract_pools {
+            let mut candidates = Vec::with_capacity(self.pools.len());
+            for (candidate_key, pool) in &self.pools {
+                let mut reclaimable = true;
+                for entry in &pool.entries {
+                    if !entry
+                        .bridge
+                        .renderer_work_completed()
+                        .map_err(native_bridge_import_error)?
+                    {
+                        reclaimable = false;
+                        break;
+                    }
+                }
+                candidates.push((*candidate_key, pool.last_used_sequence, reclaimable));
+            }
+            let Some(reclaim_key) = select_oldest_reclaimable_contract(candidates) else {
+                return Err(GpuNativeDecodedFrameImportError::Backpressure {
+                    reason: format!(
+                        "all {} native video contract pools are still in flight",
+                        self.options.max_contract_pools
+                    ),
+                });
+            };
+            self.pools.remove(&reclaim_key);
+        }
+        self.pools.insert(
+            key,
+            D3D11NativeVideoPipelinePool {
+                entries: Vec::new(),
+                last_used_sequence: self.contract_use_sequence,
+            },
+        );
+        Ok(())
     }
 }
 
@@ -378,8 +453,26 @@ impl GpuNativeDecodedFrameImportBackend for D3D11Dx12NativeVideoImportBackend {
         native_frame: &Self::NativeFrame,
     ) -> Result<GpuColorFrameResource<Self::Resource>, GpuNativeDecodedFrameImportError> {
         self.import_frame(plan, native_frame)
-            .map_err(|reason| GpuNativeDecodedFrameImportError::BackendRejected { reason })
     }
+}
+
+fn native_bridge_import_error(
+    error: D3D11Dx12SharedVideoTextureError,
+) -> GpuNativeDecodedFrameImportError {
+    match error {
+        D3D11Dx12SharedVideoTextureError::EntryBusy { required, completed } => {
+            GpuNativeDecodedFrameImportError::Backpressure {
+                reason: format!(
+                    "shared native video texture is busy until fence {required}, completed {completed}"
+                ),
+            }
+        }
+        error => backend_rejected(error.to_string()),
+    }
+}
+
+fn backend_rejected(reason: String) -> GpuNativeDecodedFrameImportError {
+    GpuNativeDecodedFrameImportError::BackendRejected { reason }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -422,6 +515,21 @@ struct D3D11NativeVideoPipelineEntry {
     bridge: D3D11Dx12SharedVideoTexture,
     prepared_yuv: Option<GpuNativeYuvPreparedPass>,
     encoded_source: Option<GpuColorFrameWgpuResource>,
+}
+
+struct D3D11NativeVideoPipelinePool {
+    entries: Vec<D3D11NativeVideoPipelineEntry>,
+    last_used_sequence: u64,
+}
+
+fn select_oldest_reclaimable_contract<K: Copy>(
+    candidates: impl IntoIterator<Item = (K, u64, bool)>,
+) -> Option<K> {
+    candidates
+        .into_iter()
+        .filter(|(_, _, reclaimable)| *reclaimable)
+        .min_by_key(|(_, last_used_sequence, _)| *last_used_sequence)
+        .map(|(key, _, _)| key)
 }
 
 fn acquire_or_grow_entry(
@@ -481,4 +589,57 @@ fn discard_with_reason(
 
 fn format_input_stage_error(error: RenderGpuInputStageRuntimeRecordError) -> String {
     format!("OCIO native input stage failed: {error:?}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exhausted_bridge_pool_is_retryable_backpressure() {
+        let error = native_bridge_import_error(D3D11Dx12SharedVideoTextureError::EntryBusy {
+            required: 8,
+            completed: 6,
+        });
+
+        assert!(error.is_backpressure());
+        assert!(error.to_string().contains("fence 8, completed 6"));
+    }
+
+    #[test]
+    fn bridge_protocol_failure_remains_terminal() {
+        let error = native_bridge_import_error(D3D11Dx12SharedVideoTextureError::SyncProtocol {
+            reason: "foreign frame token".to_owned(),
+        });
+
+        assert!(!error.is_backpressure());
+        assert!(matches!(
+            error,
+            GpuNativeDecodedFrameImportError::BackendRejected { .. }
+        ));
+    }
+
+    #[test]
+    fn contract_pool_eviction_selects_oldest_completed_candidate() {
+        assert_eq!(
+            select_oldest_reclaimable_contract([
+                ("recent", 30, true),
+                ("busy-oldest", 1, false),
+                ("oldest-complete", 10, true),
+            ]),
+            Some("oldest-complete")
+        );
+        assert_eq!(
+            select_oldest_reclaimable_contract([("busy-a", 1, false), ("busy-b", 2, false)]),
+            None
+        );
+    }
+
+    #[test]
+    fn default_native_pool_policy_is_bounded_in_both_dimensions() {
+        let options = D3D11Dx12NativeVideoImportBackendOptions::default();
+
+        assert_eq!(options.max_frames_in_flight_per_contract, 4);
+        assert_eq!(options.max_contract_pools, 8);
+    }
 }
