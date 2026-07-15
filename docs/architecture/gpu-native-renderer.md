@@ -395,6 +395,10 @@ validation, passthrough selection, and pass recording. Diagnostics therefore
 describe only executed work, and a visible GPU layer beneath an invisible
 adjustment remains a zero-pass GPU passthrough.
 
+`GpuCompositorTextureBindingDiagnostics` separately counts texture bind-group
+creation and cache hits. This keeps backend object churn observable without
+conflating it with uniform-buffer writes or render-pass counts.
+
 `viewer_spatial.rs` owns Viewer-only crop and resize processing. Its typed plan
 accepts and produces only GPU-resident `Working + LinearFloat + Rgba32Float`
 frames, so it cannot be scheduled after an OCIO display/output transform or an

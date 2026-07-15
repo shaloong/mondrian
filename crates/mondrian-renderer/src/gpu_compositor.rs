@@ -20,6 +20,7 @@ use mondrian_effects::{
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_GPU_COMPOSITE_LAYERS: usize = 5;
 const GPU_COMPOSITOR_UNIFORM_ARENA_SLOTS: u32 = 128;
@@ -407,6 +408,15 @@ pub struct GpuCompositorUniformArenaDiagnostics {
     pub exhaustions: u64,
 }
 
+/// Point-in-time evidence for compositor texture-binding object reuse.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GpuCompositorTextureBindingDiagnostics {
+    /// Texture bind groups created since compositor construction.
+    pub bind_group_creations: u64,
+    /// Existing texture bind groups reused without backend object creation.
+    pub cache_hits: u64,
+}
+
 /// Errors returned by native GPU working-space compositing.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GpuCompositeError {
@@ -486,6 +496,8 @@ pub struct GpuFrameCompositor {
     uniform_bind_group: wgpu::BindGroup,
     uniform_stride: u64,
     uniform_arena: Mutex<GpuCompositeUniformArenaState>,
+    texture_bind_group_creations: AtomicU64,
+    texture_bind_group_cache_hits: AtomicU64,
     sampler: wgpu::Sampler,
     procedural_dummy_view: wgpu::TextureView,
 }
@@ -644,6 +656,8 @@ impl GpuFrameCompositor {
                     ..GpuCompositorUniformArenaDiagnostics::default()
                 },
             }),
+            texture_bind_group_creations: AtomicU64::new(0),
+            texture_bind_group_cache_hits: AtomicU64::new(0),
             sampler,
             procedural_dummy_view,
         }
@@ -659,6 +673,14 @@ impl GpuFrameCompositor {
     /// Return point-in-time evidence for persistent uniform-arena reuse.
     pub fn uniform_arena_diagnostics(&self) -> GpuCompositorUniformArenaDiagnostics {
         self.uniform_arena.lock().diagnostics
+    }
+
+    /// Return point-in-time compositor texture-binding reuse evidence.
+    pub fn texture_binding_diagnostics(&self) -> GpuCompositorTextureBindingDiagnostics {
+        GpuCompositorTextureBindingDiagnostics {
+            bind_group_creations: self.texture_bind_group_creations.load(Ordering::Relaxed),
+            cache_hits: self.texture_bind_group_cache_hits.load(Ordering::Relaxed),
+        }
     }
 
     /// Record a GPU working-space composite into the supplied command encoder
@@ -1080,6 +1102,7 @@ impl GpuFrameCompositor {
                 },
             ],
         });
+        self.texture_bind_group_creations.fetch_add(1, Ordering::Relaxed);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("mondrian_gpu_working_compositor_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1855,6 +1878,11 @@ mod tests {
         assert_eq!(diagnostics.high_watermark_slots, 1);
         assert_eq!(diagnostics.frame_resets, 2);
         assert_eq!(diagnostics.exhaustions, 0);
+        assert_eq!(
+            compositor.texture_binding_diagnostics().bind_group_creations,
+            2
+        );
+        assert_eq!(compositor.texture_binding_diagnostics().cache_hits, 0);
     }
 
     #[tokio::test]
