@@ -366,9 +366,11 @@ their unblended, untransformed, full-precision color into a pooled working GPU
 frame, then use that same route; layer opacity, affine transform, and blending
 remain after the effect-domain round trip in authored order. The consumed plan
 is removed from the working compositor request, so an otherwise eligible
-single layer can retain its passthrough path. CPU-only media and external-domain
-media fail with typed effect-domain errors until a working-frame upload node
-exists; they must not silently evaluate the effect in working-linear samples.
+single layer can retain its passthrough path. CPU working-frame fallbacks use an
+explicit pooled RGBA32F upload node before the same effect-domain route; this
+reports exactly one upload stage and no readback, while GPU/native media retain
+their transfer-free path. The upload plan retains the CPU frame's shared
+immutable RGBA32F payload instead of repacking another full-frame host buffer.
 External-domain adjustments are scheduled by the renderer-owned composite graph:
 it finalizes the lower accumulator, executes the stock-OCIO round trip, blends
 the processed frame back with the authored adjustment opacity/blend mode, and

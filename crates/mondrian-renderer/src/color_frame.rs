@@ -669,6 +669,7 @@ pub struct GpuColorFrameUploadPlan {
 enum GpuColorFrameUploadPayload {
     Bytes(Arc<Vec<u8>>),
     Float32(Arc<Vec<f32>>),
+    WorkingRgba32(Arc<WorkingRgbaF32Frame>),
 }
 
 impl GpuColorFrameUploadPayload {
@@ -676,6 +677,7 @@ impl GpuColorFrameUploadPayload {
         match self {
             Self::Bytes(bytes) => bytes.as_slice(),
             Self::Float32(samples) => bytemuck::cast_slice(samples.as_slice()),
+            Self::WorkingRgba32(frame) => bytemuck::cast_slice(frame.data.as_slice()),
         }
     }
 }
@@ -697,8 +699,10 @@ impl GpuColorFrameUploadPlan {
         validate_cpu_pixel_count(descriptor, frame.rgba_f32().data.len())?;
         let handle = GpuColorFrameHandle::new(id, descriptor, texture_format, label)
             .map_err(GpuColorFrameUploadError::Handle)?;
-        let bytes = bytemuck::cast_slice(&frame.rgba_f32().data).to_vec();
-        Self::new(handle, GpuColorFrameUploadPayload::Bytes(Arc::new(bytes)))
+        Self::new(
+            handle,
+            GpuColorFrameUploadPayload::WorkingRgba32(frame.rgba_f32_shared()),
+        )
     }
 
     /// Build an upload plan for a CPU encoded RGBA8 boundary frame.
@@ -1934,6 +1938,11 @@ impl CpuColorFrame {
         self.frame.as_ref()
     }
 
+    /// Clone the shared immutable linear-light frame backing this wrapper.
+    pub fn rgba_f32_shared(&self) -> Arc<WorkingRgbaF32Frame> {
+        Arc::clone(&self.frame)
+    }
+
     /// Consume this wrapper and return the underlying linear-light frame.
     pub fn into_rgba_f32(self) -> WorkingRgbaF32Frame {
         Arc::try_unwrap(self.frame).unwrap_or_else(|frame| frame.as_ref().clone())
@@ -3098,6 +3107,10 @@ mod tests {
         assert_eq!(plan.bytes().len(), 2 * 16);
         let floats: &[f32] = bytemuck::cast_slice(plan.bytes());
         assert_eq!(floats, &[0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 0.5]);
+        let GpuColorFrameUploadPayload::WorkingRgba32(payload) = &plan.payload else {
+            panic!("CPU working upload should retain the shared frame payload");
+        };
+        assert!(Arc::ptr_eq(payload, &frame.frame));
     }
 
     #[test]

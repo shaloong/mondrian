@@ -630,31 +630,47 @@ fn prepare_composite<'a>(
                         }
                     }
                 };
-                let (source, effect_plan) =
-                    if effect_plan.processing_domain() == EffectColorDomain::SceneLinearRgb {
-                        (source, Some(effect_plan.as_ref()))
-                    } else {
-                        let PreparedCompositeLayerSource::GpuFrame(index) = source else {
+                let (source, effect_plan) = if effect_plan.processing_domain()
+                    == EffectColorDomain::SceneLinearRgb
+                {
+                    (source, Some(effect_plan.as_ref()))
+                } else {
+                    let input = match source {
+                        PreparedCompositeLayerSource::GpuFrame(index) => {
+                            prepared.gpu_input_handles[index].clone()
+                        }
+                        PreparedCompositeLayerSource::CpuFrame(frame) => {
+                            let upload = runtime
+                                .upload_wgpu_working_frame(device, queue, frame)
+                                .map_err(|error| {
+                                    ViewerGpuExecutionError::EffectDomain(format!(
+                                        "CPU working source upload failed: {error:?}"
+                                    ))
+                                })?;
+                            prepared.input_stage_diagnostics.accumulate(upload.stage_diagnostics);
+                            upload.output
+                        }
+                        PreparedCompositeLayerSource::SolidColor(_)
+                        | PreparedCompositeLayerSource::Adjustment => {
                             return Err(ViewerGpuExecutionError::EffectDomain(
-                            "non-scene-linear media effect requires a GPU-resident working source"
-                                .to_owned(),
-                        ));
-                        };
-                        let input = prepared.gpu_input_handles[index].clone();
-                        let index = record_external_domain_effect(
-                            &mut prepared,
-                            runtime,
-                            compositor,
-                            effect_plan,
-                            input,
-                            request.output_boundary.engine.clone(),
-                            *frame_seed,
-                            device,
-                            queue,
-                            encoder,
-                        )?;
-                        (PreparedCompositeLayerSource::GpuFrame(index), None)
+                                "media effect received a non-media prepared source".to_owned(),
+                            ));
+                        }
                     };
+                    let index = record_external_domain_effect(
+                        &mut prepared,
+                        runtime,
+                        compositor,
+                        effect_plan,
+                        input,
+                        request.output_boundary.engine.clone(),
+                        *frame_seed,
+                        device,
+                        queue,
+                        encoder,
+                    )?;
+                    (PreparedCompositeLayerSource::GpuFrame(index), None)
+                };
                 prepared.layers.push(PreparedCompositeLayer {
                     source,
                     opacity: *opacity,
@@ -932,7 +948,9 @@ mod tests {
         CpuEncodedColorFrame, CpuSourceColorFrame, GpuContext, RenderInputTransform,
         TimelineSolidColorLayer,
     };
-    use mondrian_core::{ensure_mondrian_default_ocio_loaded, ColorEngine, ColorSpace};
+    use mondrian_core::{
+        ensure_mondrian_default_ocio_loaded, ColorEngine, ColorSpace, WorkingRgbaF32Frame,
+    };
     use mondrian_effects::{
         compile_scheduled_effect_graph_in_domain, get_or_compile_scheduled_render_graph,
         lower_effect_graph_to_gpu_plan, EffectColorDomain, EffectColorDomainContract,
@@ -1040,6 +1058,82 @@ mod tests {
             record.output.descriptor().domain,
             crate::ColorFrameDomain::Display
         );
+    }
+
+    #[tokio::test]
+    async fn viewer_uploads_cpu_working_media_for_external_effect_domain() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping Viewer CPU effect-domain upload test: no GPU adapter available");
+            return;
+        };
+        let domain = EffectColorDomain::DisplayEncodedRgb { color_space: ColorSpace::Rec709 };
+        let graph = compile_scheduled_effect_graph_in_domain(
+            &EffectRenderPlan {
+                ops: vec![EffectRenderOp::ColorAdjust {
+                    exposure: 0.25,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                }],
+            },
+            EffectColorDomainContract::preserving(domain),
+        )
+        .expect("valid display-domain graph");
+        let effect_plan =
+            Arc::new(lower_effect_graph_to_gpu_plan(&graph).expect("GPU effect plan"));
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 4,
+            height: 4,
+            color_space: WorkingColorSpace::LinearRec709,
+            data: vec![[0.18, 0.08, 0.02, 1.0]; 16],
+        });
+        let layer = ViewerGpuExecutionLayer::Media {
+            frame: Some(frame),
+            gpu_source: None,
+            native_source: None,
+            opacity: 1.0,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan,
+            frame_seed: 9,
+        };
+        let output_boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut runtime =
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("viewer-cpu-working-effect-domain"),
+        });
+
+        let record = runtime
+            .record(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                ViewerGpuExecutionRequest {
+                    sequence_id: SequenceId::new(),
+                    timeline_frame: 9,
+                    width: 4,
+                    height: 4,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    layers: &[layer],
+                    output_boundary: &output_boundary,
+                    source_rect: ViewerSourceRect::FULL,
+                    output_width: 4,
+                    output_height: 4,
+                    display_calibration: None,
+                },
+            )
+            .expect("Viewer CPU working effect-domain frame");
+        context.queue.submit(std::iter::once(encoder.finish()));
+
+        assert_eq!(record.stage_diagnostics.gpu_color_stages, 3);
+        assert_eq!(record.stage_diagnostics.upload_stages, 1);
+        assert_eq!(record.stage_diagnostics.readback_stages, 0);
+        assert_eq!(record.residency.cpu_upload_layers, 1);
+        assert_eq!(record.compositing_diagnostics.gpu_passthrough_frames, 1);
     }
 
     #[tokio::test]

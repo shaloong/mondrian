@@ -667,6 +667,23 @@ pub enum RenderGpuCompositeGraphRecordError {
     EffectDomain(Box<RenderGpuEffectDomainRecordError>),
 }
 
+/// Result of explicitly uploading one CPU working frame into the shared GPU table.
+pub struct RenderGpuWorkingFrameUploadRecord {
+    /// GPU-resident working frame produced by the upload.
+    pub output: GpuColorFrameHandle,
+    /// Transfer-stage evidence for the explicit boundary.
+    pub stage_diagnostics: RenderColorStageDiagnostics,
+}
+
+/// Error returned when a CPU working frame cannot enter the shared GPU table.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RenderGpuWorkingFrameUploadError {
+    /// The CPU frame could not be represented by the working texture contract.
+    Plan(GpuColorFrameUploadError),
+    /// The runtime resource table rejected the uploaded frame.
+    ResourceTable(GpuColorFrameResourceTableError),
+}
+
 /// Renderer-owned state for native GPU final-output color boundaries.
 ///
 /// App/export code should hold one runtime per render backend lifetime. The
@@ -839,6 +856,42 @@ impl RenderGpuOutputBoundaryRuntime {
             working_color_space,
             color,
         )
+    }
+
+    /// Upload one CPU working frame into this runtime's pooled GPU frame table.
+    ///
+    /// This is an explicit source-residency boundary for CPU decode/fallback
+    /// paths that must enter a non-scene-linear GPU effect domain. It records no
+    /// readback and performs no color transform.
+    pub fn upload_wgpu_working_frame(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        frame: &CpuColorFrame,
+    ) -> Result<RenderGpuWorkingFrameUploadRecord, RenderGpuWorkingFrameUploadError> {
+        let plan = GpuColorFrameUploadPlan::from_cpu_color_frame(
+            self.frame_ids.allocate(),
+            frame,
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "gpu-working-frame-upload",
+        )
+        .map_err(RenderGpuWorkingFrameUploadError::Plan)?;
+        let output = plan.handle.clone();
+        let resource =
+            GpuColorFrameUploader::upload_with_pool(device, queue, &plan, &self.resource_pool);
+        self.frame_table
+            .insert(resource)
+            .map_err(RenderGpuWorkingFrameUploadError::ResourceTable)?;
+        let pixels = output.descriptor().pixel_count() as u64;
+        Ok(RenderGpuWorkingFrameUploadRecord {
+            output,
+            stage_diagnostics: RenderColorStageDiagnostics {
+                total_stages: 1,
+                upload_stages: 1,
+                stage_pixels: pixels,
+                ..RenderColorStageDiagnostics::default()
+            },
+        })
     }
 
     /// Plan and record one GPU-resident OCIO identity transform between graph nodes.
