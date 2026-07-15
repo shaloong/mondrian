@@ -375,7 +375,10 @@ External-domain adjustments are scheduled by the renderer-owned composite graph:
 it finalizes the lower accumulator, executes the stock-OCIO round trip, blends
 the processed frame back with the authored adjustment opacity/blend mode, and
 continues upper layers from that working accumulator. Contiguous ordinary layers
-remain batched rather than forcing one compositor submission per layer.
+remain batched rather than forcing one compositor submission per layer. The
+adjustment merge is a dedicated single-pass node that samples the original
+accumulator directly; it does not build a two-layer composite or allocate/copy
+an extra accumulator first.
 
 `viewer_spatial.rs` owns Viewer-only crop and resize processing. Its typed plan
 accepts and produces only GPU-resident `Working + LinearFloat + Rgba32Float`

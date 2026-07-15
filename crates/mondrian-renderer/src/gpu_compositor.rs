@@ -875,6 +875,97 @@ impl GpuFrameCompositor {
         })
     }
 
+    /// Blend an already processed adjustment frame over its original accumulator.
+    ///
+    /// Unlike a two-layer general composite, this graph node samples the base
+    /// accumulator directly and therefore records one full-frame pass and one
+    /// output allocation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_adjustment_blend_pass(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        base: &GpuColorFrameHandle,
+        processed: &GpuColorFrameHandle,
+        opacity: f32,
+        blend_mode: BlendMode,
+        working_color_space: mondrian_core::WorkingColorSpace,
+    ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        let validation_layers = [
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::GpuFrame(base),
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: None,
+                frame_seed: 0,
+            },
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::GpuFrame(processed),
+                opacity,
+                blend_mode,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: None,
+                frame_seed: 0,
+            },
+        ];
+        let descriptor = base.descriptor();
+        validate_request(&GpuCompositeRequest {
+            width: descriptor.width,
+            height: descriptor.height,
+            working_color_space,
+            layers: &validation_layers,
+        })?;
+        let base_resource = table.get(base).map_err(GpuCompositeError::ResourceTable)?;
+        let processed_resource = table.get(processed).map_err(GpuCompositeError::ResourceTable)?;
+        let output_resource = create_working_resource(
+            device,
+            ids,
+            descriptor,
+            "gpu-adjustment-blend-output",
+            resource_pool,
+        )?;
+        self.record_layer_pass(
+            device,
+            queue,
+            encoder,
+            &base_resource.resource().texture_view,
+            &output_resource.resource().texture_view,
+            &processed_resource.resource().texture_view,
+            GpuCompositeUniforms {
+                opacity: opacity.clamp(0.0, 1.0),
+                source_kind: 0,
+                effect_count: 0,
+                frame_seed: 0,
+                solid_color: [0.0; 4],
+                inv_transform0: [1.0, 0.0, 0.0, 0.0],
+                inv_transform1: [1.0, 0.0, 0.0, 0.0],
+                geometry: [
+                    descriptor.width as f32,
+                    descriptor.height as f32,
+                    descriptor.width as f32,
+                    descriptor.height as f32,
+                ],
+                effects: effect_uniforms(None),
+            },
+        )?;
+        let output = output_resource.handle().clone();
+        table.insert(output_resource).map_err(GpuCompositeError::ResourceTable)?;
+        Ok(GpuCompositeRecord {
+            output,
+            diagnostics: GpuCompositingDiagnostics {
+                gpu_native_composites: 1,
+                gpu_composited_pixels: u64::from(descriptor.width)
+                    .saturating_mul(u64::from(descriptor.height)),
+                ..GpuCompositingDiagnostics::default()
+            },
+        })
+    }
+
     /// Materialize an unblended procedural solid as a working-linear GPU frame.
     ///
     /// Layer opacity, affine transformation, blending, and effects are

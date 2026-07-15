@@ -1119,38 +1119,23 @@ impl RenderGpuOutputBoundaryRuntime {
             color_stage_diagnostics.accumulate(effect.to_processing.stage_diagnostics);
             color_stage_diagnostics.accumulate(effect.to_working.stage_diagnostics);
             let processed = effect.to_working.materialized.output;
-            let blend_layers = [
-                GpuCompositeLayer {
-                    source: GpuCompositeLayerSource::GpuFrame(&base),
-                    opacity: 1.0,
-                    blend_mode: mondrian_core::types::BlendMode::Normal,
-                    transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                    effect_plan: None,
-                    frame_seed: 0,
-                },
-                GpuCompositeLayer {
-                    source: GpuCompositeLayerSource::GpuFrame(&processed),
-                    opacity: layer.opacity,
-                    blend_mode: layer.blend_mode,
-                    transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                    effect_plan: None,
-                    frame_seed: layer.frame_seed,
-                },
-            ];
-            let blended = self
-                .record_wgpu_working_composite(
-                    compositor,
+            let blended = {
+                let Self { frame_ids, frame_table, resource_pool, .. } = self;
+                compositor.record_adjustment_blend_pass(
                     device,
                     queue,
                     encoder,
-                    GpuCompositeRequest {
-                        width: request.width,
-                        height: request.height,
-                        working_color_space: request.working_color_space,
-                        layers: &blend_layers,
-                    },
+                    frame_ids,
+                    frame_table,
+                    Some(resource_pool),
+                    &base,
+                    &processed,
+                    layer.opacity,
+                    layer.blend_mode,
+                    request.working_color_space,
                 )
-                .map_err(RenderGpuCompositeGraphRecordError::Composite)?;
+            }
+            .map_err(RenderGpuCompositeGraphRecordError::Composite)?;
             compositing_diagnostics.accumulate(blended.diagnostics);
             current = Some(blended.output);
             external_adjustment_passes = external_adjustment_passes.saturating_add(1);
@@ -7426,6 +7411,7 @@ mod tests {
         assert_eq!(record.color_stage_diagnostics.gpu_color_stages, 2);
         assert_eq!(record.color_stage_diagnostics.upload_stages, 0);
         assert_eq!(record.color_stage_diagnostics.readback_stages, 0);
+        assert_eq!(compositor.uniform_arena_diagnostics().uniform_writes, 2);
         let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("external-adjustment-readback"),
             size: 256 * 4,
