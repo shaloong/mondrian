@@ -314,8 +314,10 @@ Absent matrix metadata is distinct from an explicitly unsupported matrix.
 Only the absent case may use the resolved source contract's matrix; explicit
 BT.2020 constant-luminance, derived, YCgCo, and ICtCp-style matrices remain
 fail-closed until their conversion math is implemented.
-Exact BT.470BG and SMPTE 170M CICP triplets resolve to the PAL and NTSC Rec.601
-product color spaces respectively. Partial matrix-only metadata remains
+Complete BT.470BG/gamma-2.8 and SMPTE 170M primaries/transfer pairs resolve to
+the PAL and NTSC Rec.601 product color spaces respectively, regardless of
+whether the decoded samples are RGB or YCbCr. Matrix remains an independent
+sampling fact. Partial matrix-only metadata remains
 diagnosed as partial evidence but may still select the matching Rec.601 family;
 it must not be relabeled as Rec.709.
 Metadata-hint normalization also recognizes exact ACES2065-1, ACEScg, ACEScct,
@@ -1299,9 +1301,10 @@ Media probe separates detected metadata from policy assumptions.
 index. `VideoStreamInfo.color_interpretation` is the diagnostic/UI-facing
 interpretation with confidence, evidence, warnings, and a user-overridable flag.
 Evidence records whether a result came from a camera/log metadata hint, a
-complete file-name pair, exact CICP tags, partial CICP tags, ICC, unsupported
-CICP tags, or decoder unavailability. `interpret_video_color_metadata(...)`
-owns the selection policy so decoder integrations do not duplicate it.
+complete file-name pair, complete CICP colorimetry, partial CICP tags, ICC,
+unsupported CICP tags, or decoder unavailability.
+`interpret_video_color_metadata(...)` owns the selection policy so decoder
+integrations do not duplicate it.
 Camera/log hints resolve only when they identify both the transfer curve and
 the associated camera gamut. For example, `S-Log3 / S-Gamut3.Cine` is a
 supported exact identity, while bare `S-Log3` remains unresolved. The same rule

@@ -1102,17 +1102,37 @@ impl ColorSpace {
         })
     }
 
+    /// Resolve an input RGB color identity from complete FFmpeg primaries and transfer tags.
+    ///
+    /// Matrix coefficients describe how encoded YCbCr samples become RGB; they
+    /// are not part of the resulting RGB colorimetry. Media import therefore
+    /// resolves the RGB identity from primaries plus transfer and retains the
+    /// decoder matrix as an independent sampling contract.
+    pub fn from_ffmpeg_colorimetry(color_primaries: &str, color_trc: &str) -> Option<Self> {
+        let mut candidates = Self::ALL.into_iter().filter(|color_space| {
+            color_space.ffmpeg_tags().is_some_and(|tags| {
+                ffmpeg_tag_eq(tags.color_primaries, color_primaries)
+                    && ffmpeg_tag_eq(tags.color_trc, color_trc)
+            })
+        });
+        let candidate = candidates.next()?;
+        candidates.next().is_none().then_some(candidate)
+    }
+
     /// Resolve a color space from partial FFmpeg tag hints.
     ///
     /// This is used for media metadata interpretation where some containers
-    /// provide only transfer, primaries, or matrix tags. Exact triplets win;
-    /// partial matches are deliberately centralized here so media probing does
-    /// not carry its own color-space knowledge table.
+    /// provide only transfer, primaries, or matrix tags. Complete input
+    /// colorimetry wins; partial matches are deliberately centralized here so
+    /// media probing does not carry its own color-space knowledge table.
     pub fn from_ffmpeg_tag_hints(
         color_primaries: Option<&str>,
         color_trc: Option<&str>,
         colorspace: Option<&str>,
     ) -> Option<Self> {
+        // RGB/GBR is a sampling identity, not evidence that distinguishes an
+        // sRGB transfer from another transfer over the same primaries.
+        let colorspace = colorspace.filter(|matrix| !ffmpeg_tag_eq(matrix, "gbr"));
         if color_primaries.is_none() && color_trc.is_none() && colorspace.is_none() {
             return None;
         }
@@ -1290,6 +1310,23 @@ mod tests {
     }
 
     #[test]
+    fn input_colorimetry_is_independent_from_rgb_or_yuv_sampling_matrix() {
+        assert_eq!(
+            ColorSpace::from_ffmpeg_colorimetry("bt709", "bt709"),
+            Some(ColorSpace::Rec709)
+        );
+        assert_eq!(
+            ColorSpace::from_ffmpeg_colorimetry("bt2020", "smpte2084"),
+            Some(ColorSpace::Rec2100Pq)
+        );
+        assert_eq!(
+            ColorSpace::from_ffmpeg_tags("bt709", "bt709", "rgb"),
+            None,
+            "strict delivery tag parsing must still include matrix coefficients"
+        );
+    }
+
+    #[test]
     fn color_space_resolves_partial_ffmpeg_tag_hints_centrally() {
         assert_eq!(
             ColorSpace::from_ffmpeg_tag_hints(Some("smpte432"), Some("iec61966-2-1"), None),
@@ -1305,7 +1342,8 @@ mod tests {
         );
         assert_eq!(
             ColorSpace::from_ffmpeg_tag_hints(Some("bt709"), None, Some("rgb")),
-            Some(ColorSpace::Srgb)
+            None,
+            "RGB sampling alone cannot distinguish Rec.709 from sRGB transfer"
         );
         assert_eq!(
             ColorSpace::from_ffmpeg_tag_hints(None, None, Some("bt709")),

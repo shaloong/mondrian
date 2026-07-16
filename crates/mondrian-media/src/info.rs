@@ -186,7 +186,7 @@ pub enum VideoColorInterpretationEvidence {
         /// Color space identified by the hint.
         detected_color_space: ColorSpace,
     },
-    /// A complete, exact CICP/FFmpeg tag triplet matched a supported delivery space.
+    /// Complete CICP/FFmpeg primaries and transfer tags matched a supported RGB identity.
     ExactCicpTags {
         /// Color primaries tag.
         primaries: VideoColorTag,
@@ -1649,10 +1649,9 @@ impl DetectedColorInterpretation {
 }
 
 fn exact_cicp_color_space(metadata: &VideoColorMetadata) -> Option<ColorSpace> {
-    ColorSpace::from_ffmpeg_tags(
+    ColorSpace::from_ffmpeg_colorimetry(
         metadata.primaries.name.as_deref()?,
         metadata.transfer.name.as_deref()?,
-        metadata.matrix.name.as_deref()?,
     )
 }
 
@@ -2257,25 +2256,36 @@ mod tests {
     }
 
     #[test]
-    fn detect_color_space_marks_rgb_bt709_as_srgb_metadata() {
+    fn detect_color_space_does_not_invent_srgb_from_rgb_sampling() {
         let detection = detect_color_space(
             Primaries::BT709,
             TransferCharacteristic::Unspecified,
             Space::RGB,
         );
 
-        assert_eq!(detection.color_space, Some(ColorSpace::Srgb));
+        assert_eq!(detection.color_space, None);
         assert_eq!(
             detection.confidence,
-            VideoColorInterpretationConfidence::Medium
+            VideoColorInterpretationConfidence::None
         );
+        assert_eq!(detection.source, VideoColorSpaceSource::UnsupportedMetadata);
+        assert_eq!(
+            detection.method,
+            VideoColorDetectionMethod::UnsupportedCicpTags
+        );
+        assert!(detection
+            .warnings
+            .contains(&VideoColorInterpretationWarning::UnsupportedCicpTags));
+    }
+
+    #[test]
+    fn detect_color_space_uses_rgb_sampling_without_losing_rec709_colorimetry() {
+        let detection =
+            detect_color_space(Primaries::BT709, TransferCharacteristic::BT709, Space::RGB);
+
+        assert_eq!(detection.color_space, Some(ColorSpace::Rec709));
         assert_eq!(detection.source, VideoColorSpaceSource::Metadata);
         assert_eq!(detection.method, VideoColorDetectionMethod::CicpTags);
-        assert!(
-            detection.warnings.contains(&VideoColorInterpretationWarning::PartialCicpTags {
-                detected_color_space: ColorSpace::Srgb
-            })
-        );
     }
 
     #[test]

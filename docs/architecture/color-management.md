@@ -346,12 +346,16 @@ name is low confidence. Conflicting lower-priority evidence is retained in a
 structured warning instead of disappearing. ICC-only streams may resolve to an
 inferred input color family, while ICC-vs-CICP conflicts must be surfaced as
 warnings rather than silently changing an explicit user override.
-Partial CICP inference is permitted only when every primaries, transfer, and
-matrix field that is actually present is compatible with exactly one supported
-product space. A complete unsupported triplet, an unsupported partial
-combination, or a single tag shared by multiple spaces remains Unknown with its
-raw tags preserved; one familiar transfer function must never erase a
-contradictory or unsupported primaries/matrix declaration.
+Complete input RGB identity is resolved from the CICP primaries and transfer;
+matrix coefficients remain an independent YCbCr-to-RGB sampling fact. An RGB
+identity matrix therefore cannot distinguish Rec.709 from sRGB when transfer
+metadata is absent. Partial CICP inference is permitted only when every usable
+primaries, transfer, and non-RGB matrix field that is actually present is
+compatible with exactly one supported product space. A complete unsupported
+pair, an unsupported partial combination, or a single tag shared by multiple
+spaces remains Unknown with its raw tags preserved; one familiar transfer
+function must never erase a contradictory or unsupported primaries/matrix
+declaration.
 `ocio_identity_processor_cache_id()` resolves the processor identity for the
 effective source and working endpoints under the exact pinned engine/config.
 It creates no GPU shader or renderer resource and fails closed on missing
@@ -788,7 +792,9 @@ for standardized delivery/monitoring spaces. Camera-log acquisition spaces such
 as Apple Log, S-Log3, and ARRI LogC4 currently do not emit FFmpeg delivery tags,
 because writing guessed Rec.709 tags would mislabel the exported media.
 Reverse media identification also lives on the same contract:
-`ColorSpace::from_ffmpeg_tags(...)` resolves exact delivery tag triplets, and
+`ColorSpace::from_ffmpeg_tags(...)` resolves strict delivery tag triplets,
+`ColorSpace::from_ffmpeg_colorimetry(...)` resolves complete input RGB
+colorimetry without conflating it with sampling matrix, and
 `ColorSpace::from_ffmpeg_tag_hints(...)` contains the centralized partial-tag
 interpretation rules used by media probing. `mondrian-media` must capture raw
 FFmpeg/CICP tags and call those core helpers rather than maintaining a separate
