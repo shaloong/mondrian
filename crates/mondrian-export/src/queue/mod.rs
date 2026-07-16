@@ -4323,6 +4323,36 @@ mod tests {
     }
 
     #[test]
+    fn export_color_validation_binds_content_light_to_standard_view_peak() {
+        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec2100Pq);
+        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
+        timeline.sequence.settings.color_management.preserve_hdr_metadata = true;
+        let mut mastering = VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference();
+        mastering.luminance.as_mut().expect("reference luminance").max =
+            mondrian_core::VideoHdrRational::new(4000, 1);
+        timeline.sequence.settings.color_management.hdr_mastering_display = Some(mastering);
+        timeline.sequence.settings.color_management.hdr_content_light =
+            Some(VideoContentLightMetadata::hdr10_1000_nit_reference());
+        let mut config = dummy_config("hdr-content-light-contract.mp4");
+        config.preset.video = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
+
+        validate_timeline_export_color_compatibility(&config, &timeline)
+            .expect("mastering-display capability may exceed the Standard View's content peak");
+
+        timeline.sequence.settings.color_management.hdr_mastering_display =
+            Some(VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference());
+        timeline.sequence.settings.color_management.hdr_content_light =
+            Some(VideoContentLightMetadata {
+                max_content_light_level: 1200,
+                max_frame_average_light_level: 400,
+            });
+        let err = validate_timeline_export_color_compatibility(&config, &timeline)
+            .expect_err("MaxCLL must not exceed the fixed Standard View peak");
+        assert!(err.contains("峰值为 1000 nit"));
+        assert!(err.contains("MaxCLL 声明 1200 nit"));
+    }
+
+    #[test]
     fn export_color_validation_rejects_unimplemented_hdr_metadata_backends() {
         let mut timeline = timeline_input_with_output_color(ColorSpace::Rec2100Pq);
         timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;

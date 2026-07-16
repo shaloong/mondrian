@@ -59,6 +59,13 @@ the float working space or the renderer-to-encoder pipe precision. Those are
 renderer/export implementation contracts and are not persisted as editorial
 intent.
 
+When `preserve_hdr_metadata` is enabled, `SequenceSettings` requires complete
+typed ST 2086 mastering-display and CTA-861.3 content-light payloads. Validation
+rejects invalid rationals, impossible CIE xy coordinates, unordered mastering
+luminance, and non-positive or unordered MaxCLL/MaxFALL values at the persisted
+domain boundary. Output-View-specific content-peak checks remain an export
+responsibility because they depend on the effective inherited color engine.
+
 `root_program_color_context` resolves the effective color engine from the
 sequence/project inheritance rules and carries the one typed
 `OutputTransformIntent` shared by preview program pixels, scopes, and export.

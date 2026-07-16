@@ -307,6 +307,37 @@ pub struct MondrianDefaultOcioDisplayView {
     pub view: &'static str,
 }
 
+/// Versioned program-output contract resolved by Mondrian Standard.
+///
+/// The OCIO display/view defines pixel semantics; luminance and gamut fields
+/// bind delivery metadata and diagnostics to that same immutable View.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MondrianStandardOutputTargetContract {
+    /// Encoded program-output color space.
+    pub output_color_space: ColorSpace,
+    /// Pinned OCIO display.
+    pub display: &'static str,
+    /// Pinned OCIO View Transform.
+    pub view: &'static str,
+    /// Canonical encoded primaries/transfer/matrix contract.
+    pub encoding: crate::ColorEncodingSpec,
+    /// Gamut limit authored into the rendering transform.
+    pub rendering_gamut_limit: crate::ColorPrimaries,
+    /// Diffuse/reference white used by the rendering transform, in cd/m².
+    pub reference_white_nits: u32,
+    /// Nominal peak represented by the rendering transform, in cd/m².
+    pub nominal_peak_nits: u32,
+    /// Nominal black level in thousandths of a cd/m².
+    pub black_level_millinits: u32,
+}
+
+impl MondrianStandardOutputTargetContract {
+    /// Returns true when this target is display-referred HDR.
+    pub fn is_hdr(self) -> bool {
+        self.encoding.is_hdr()
+    }
+}
+
 /// Structured validation summary for Mondrian's embedded OCIO config asset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MondrianDefaultOcioValidationReport {
@@ -2928,13 +2959,8 @@ pub(crate) fn ocio_default_display_view_for_engine(
 pub fn mondrian_standard_output_display_view(
     output: ColorSpace,
 ) -> Result<(String, String), String> {
-    let display = mondrian_standard_output_display_name(output)?;
-    let view = if matches!(output, ColorSpace::Rec2100Hlg | ColorSpace::Rec2100Pq) {
-        MONDRIAN_STANDARD_HDR_1000_VIEW_NAME
-    } else {
-        MONDRIAN_STANDARD_SDR_VIEW_NAME
-    };
-    mondrian_standard_display_view_named(display, view)
+    let contract = mondrian_standard_output_target_contract(output)?;
+    mondrian_standard_display_view_named(contract.display, contract.view)
 }
 
 /// Resolve Mondrian Standard's versioned View for an explicit OCIO display.
@@ -2971,16 +2997,67 @@ fn mondrian_standard_display_view_named(
 
 /// Resolve the OCIO display identity paired with a Standard output target.
 pub fn mondrian_standard_output_display_name(output: ColorSpace) -> Result<&'static str, String> {
-    match output {
-        ColorSpace::Srgb => Ok("sRGB - Display"),
-        ColorSpace::Rec709 => Ok("Rec.1886 Rec.709 - Display"),
-        ColorSpace::DisplayP3 => Ok("Display P3 - Display"),
-        ColorSpace::Rec2100Hlg => Ok("Rec.2100-HLG - Display"),
-        ColorSpace::Rec2100Pq => Ok("Rec.2100-PQ - Display"),
-        unsupported => Err(format!(
-            "Mondrian Standard has no rendering View for output target {unsupported:?}"
-        )),
-    }
+    Ok(mondrian_standard_output_target_contract(output)?.display)
+}
+
+/// Resolve the immutable luminance, gamut, encoding, and OCIO View contract
+/// for one Mondrian Standard v1 program-output target.
+pub fn mondrian_standard_output_target_contract(
+    output: ColorSpace,
+) -> Result<MondrianStandardOutputTargetContract, String> {
+    let (display, view, rendering_gamut_limit, reference_white_nits, nominal_peak_nits) =
+        match output {
+            ColorSpace::Srgb => (
+                "sRGB - Display",
+                MONDRIAN_STANDARD_SDR_VIEW_NAME,
+                crate::ColorPrimaries::Bt709,
+                100,
+                100,
+            ),
+            ColorSpace::Rec709 => (
+                "Rec.1886 Rec.709 - Display",
+                MONDRIAN_STANDARD_SDR_VIEW_NAME,
+                crate::ColorPrimaries::Bt709,
+                100,
+                100,
+            ),
+            ColorSpace::DisplayP3 => (
+                "Display P3 - Display",
+                MONDRIAN_STANDARD_SDR_VIEW_NAME,
+                crate::ColorPrimaries::P3D65,
+                100,
+                100,
+            ),
+            ColorSpace::Rec2100Hlg => (
+                "Rec.2100-HLG - Display",
+                MONDRIAN_STANDARD_HDR_1000_VIEW_NAME,
+                crate::ColorPrimaries::P3D65,
+                100,
+                1000,
+            ),
+            ColorSpace::Rec2100Pq => (
+                "Rec.2100-PQ - Display",
+                MONDRIAN_STANDARD_HDR_1000_VIEW_NAME,
+                crate::ColorPrimaries::P3D65,
+                100,
+                1000,
+            ),
+            unsupported => {
+                return Err(format!(
+                    "Mondrian Standard has no rendering View for output target {unsupported:?}"
+                ));
+            }
+        };
+    Ok(MondrianStandardOutputTargetContract {
+        output_color_space: output,
+        display,
+        view,
+        encoding: output.encoding(),
+        rendering_gamut_limit,
+        reference_white_nits,
+        nominal_peak_nits,
+        black_level_millinits: 0,
+    })
 }
 
 #[cfg(test)]
@@ -3916,6 +3993,22 @@ colorspaces:
                 MONDRIAN_STANDARD_HDR_1000_VIEW_NAME.to_owned()
             )
         );
+        let pq = mondrian_standard_output_target_contract(ColorSpace::Rec2100Pq)
+            .expect("PQ output contract");
+        assert!(pq.is_hdr());
+        assert_eq!(pq.output_color_space, ColorSpace::Rec2100Pq);
+        assert_eq!(pq.encoding.primaries, crate::ColorPrimaries::Bt2020);
+        assert_eq!(pq.rendering_gamut_limit, crate::ColorPrimaries::P3D65);
+        assert_eq!(pq.reference_white_nits, 100);
+        assert_eq!(pq.nominal_peak_nits, 1000);
+        assert_eq!(pq.black_level_millinits, 0);
+
+        let rec709 = mondrian_standard_output_target_contract(ColorSpace::Rec709)
+            .expect("Rec.709 output contract");
+        assert!(!rec709.is_hdr());
+        assert_eq!(rec709.reference_white_nits, 100);
+        assert_eq!(rec709.nominal_peak_nits, 100);
+        assert!(mondrian_standard_output_target_contract(ColorSpace::Rec2020).is_err());
     }
 
     #[test]

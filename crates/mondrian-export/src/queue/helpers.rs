@@ -320,16 +320,23 @@ pub(crate) fn apply_h265_hdr_metadata_args(
 
 fn h265_hdr_metadata_params(settings: &SequenceSettings) -> Result<String, String> {
     let cm = &settings.color_management;
-    let mastering = cm
+    let mastering_metadata = cm
         .hdr_mastering_display
         .as_ref()
-        .ok_or_else(|| "保留 HDR metadata 需要 SMPTE ST 2086 母版显示元数据".to_string())?
+        .ok_or_else(|| "保留 HDR metadata 需要 SMPTE ST 2086 母版显示元数据".to_string())?;
+    mastering_metadata
+        .validate()
+        .map_err(|error| format!("SMPTE ST 2086 母版显示元数据无效: {error}"))?;
+    let mastering = mastering_metadata
         .to_x265_master_display()
         .ok_or_else(|| "SMPTE ST 2086 母版显示元数据不完整".to_string())?;
-    let cll = cm
+    let content_light = cm
         .hdr_content_light
-        .ok_or_else(|| "保留 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string())?
-        .to_x265_max_cll();
+        .ok_or_else(|| "保留 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string())?;
+    content_light
+        .validate()
+        .map_err(|error| format!("MaxCLL/MaxFALL 内容光级别元数据无效: {error}"))?;
+    let cll = content_light.to_x265_max_cll();
     Ok(format!("master-display={mastering}:max-cll={cll}"))
 }
 
@@ -383,11 +390,37 @@ pub(crate) fn validate_timeline_export_color_compatibility(
     if preserve_hdr && bit_depth == DeliveryBitDepth::Eight {
         return Err("保留 HDR metadata 需要 10-bit 或更高位深".to_string());
     }
-    if preserve_hdr && settings.color_management.hdr_mastering_display.is_none() {
-        return Err("保留 HDR metadata 需要 SMPTE ST 2086 母版显示元数据".to_string());
-    }
-    if preserve_hdr && settings.color_management.hdr_content_light.is_none() {
-        return Err("保留 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string());
+    if preserve_hdr {
+        let mastering = settings
+            .color_management
+            .hdr_mastering_display
+            .as_ref()
+            .ok_or_else(|| "保留 HDR metadata 需要 SMPTE ST 2086 母版显示元数据".to_string())?;
+        mastering
+            .validate()
+            .map_err(|error| format!("HDR mastering metadata 无效: {error}"))?;
+        let content_light = settings
+            .color_management
+            .hdr_content_light
+            .ok_or_else(|| "保留 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string())?;
+        content_light
+            .validate()
+            .map_err(|error| format!("HDR content-light metadata 无效: {error}"))?;
+
+        let engine = if settings.color_management.inherit {
+            &timeline.project_color_management.engine
+        } else {
+            &settings.color_management.engine
+        };
+        if matches!(engine, mondrian_core::ColorEngine::MondrianStandard { .. }) {
+            let target = mondrian_core::mondrian_standard_output_target_contract(output)?;
+            if content_light.max_content_light_level > target.nominal_peak_nits {
+                return Err(format!(
+                    "Mondrian Standard {:?} View 峰值为 {} nit，但 MaxCLL 声明 {} nit",
+                    output, target.nominal_peak_nits, content_light.max_content_light_level
+                ));
+            }
+        }
     }
     if preserve_hdr && !matches!(&config.preset.video, VideoCodecConfig::H265 { .. }) {
         return Err(

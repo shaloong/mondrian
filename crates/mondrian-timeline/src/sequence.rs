@@ -749,21 +749,32 @@ impl SequenceSettings {
                 reason: "只有 HDR 输出色彩空间可以保留 HDR metadata".to_string(),
             });
         }
-        if self.color_management.preserve_hdr_metadata
-            && self.color_management.hdr_mastering_display.is_none()
-        {
-            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                step_id: "sequence_settings_validate".to_string(),
-                reason: "保留 HDR metadata 需要 SMPTE ST 2086 母版显示元数据".to_string(),
-            });
-        }
-        if self.color_management.preserve_hdr_metadata
-            && self.color_management.hdr_content_light.is_none()
-        {
-            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                step_id: "sequence_settings_validate".to_string(),
-                reason: "保留 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string(),
-            });
+        if self.color_management.preserve_hdr_metadata {
+            let mastering =
+                self.color_management.hdr_mastering_display.as_ref().ok_or_else(|| {
+                    mondrian_core::MondrianError::WorkflowStepFailed {
+                        step_id: "sequence_settings_validate".to_string(),
+                        reason: "保留 HDR metadata 需要 SMPTE ST 2086 母版显示元数据".to_string(),
+                    }
+                })?;
+            mastering.validate().map_err(|error| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "sequence_settings_validate".to_string(),
+                    reason: format!("HDR mastering metadata 无效: {error}"),
+                }
+            })?;
+            let content_light = self.color_management.hdr_content_light.ok_or_else(|| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "sequence_settings_validate".to_string(),
+                    reason: "保留 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string(),
+                }
+            })?;
+            content_light.validate().map_err(|error| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "sequence_settings_validate".to_string(),
+                    reason: format!("HDR content-light metadata 无效: {error}"),
+                }
+            })?;
         }
         Ok(())
     }
@@ -1888,6 +1899,41 @@ mod tests {
             ..Default::default()
         };
         assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn sequence_color_management_rejects_numerically_invalid_hdr_metadata() {
+        let mut mastering = VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference();
+        mastering.luminance.as_mut().expect("reference luminance").max =
+            mondrian_core::VideoHdrRational::new(1000, 0);
+        let invalid_mastering = SequenceSettings {
+            color_management: SequenceColorManagement {
+                output_color_space: ColorSpace::Rec2100Pq,
+                preserve_hdr_metadata: true,
+                hdr_mastering_display: Some(mastering),
+                hdr_content_light: Some(VideoContentLightMetadata::hdr10_1000_nit_reference()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(invalid_mastering.validate().is_err());
+
+        let invalid_content_light = SequenceSettings {
+            color_management: SequenceColorManagement {
+                output_color_space: ColorSpace::Rec2100Pq,
+                preserve_hdr_metadata: true,
+                hdr_mastering_display: Some(
+                    VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference(),
+                ),
+                hdr_content_light: Some(VideoContentLightMetadata {
+                    max_content_light_level: 400,
+                    max_frame_average_light_level: 500,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(invalid_content_light.validate().is_err());
     }
 
     #[test]

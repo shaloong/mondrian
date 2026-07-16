@@ -53,6 +53,15 @@ View. Display probing and timeline output planning share this target-aware
 resolver so diagnostics cannot report a different View than the render
 boundary.
 
+`MondrianStandardOutputTargetContract` is the single typed description of each
+Standard program output. It binds the selected OCIO display/View to the encoded
+primaries/transfer/matrix, authored rendering gamut limit, reference white,
+nominal peak, and nominal black. SDR targets currently bind 100-nit reference
+white and peak; HLG/PQ bind 100-nit reference white and the fixed 1000-nit,
+P3-D65-limited HDR View. Display/view lookup delegates to this contract so
+rendering, validation, and delivery metadata cannot maintain parallel string or
+luminance tables.
+
 An explicitly DisplayReferred technical workflow does not invoke this scene
 View: its output boundary remains direct colorimetric OCIO conversion. New
 projects are SceneReferred and select the Standard View by default; its SDR
@@ -843,6 +852,12 @@ introduced.
 Sequence/export HDR preservation stores these typed core payloads directly and
 fails closed when either ST 2086 mastering-display metadata or MaxCLL/MaxFALL
 content-light metadata is missing; export must not synthesize hidden defaults.
+Core validates positive rational denominators, physical CIE xy coordinates,
+ordered mastering luminance bounds, and `0 < MaxFALL <= MaxCLL` before an
+encoder string can be formed. ST 2086 mastering luminance describes the display
+used while authoring, so it is deliberately not required to equal Standard's
+content peak. MaxCLL describes the brightest content pixel and therefore must
+not exceed the fixed Standard View peak when metadata preservation is enabled.
 Preview/export parity is protected by frame-level contracts: app preview tests
 compare multilayer preview compositing against the export output boundary with a
 stable RGBA hash, compare the shared preview/export color-health fields for the
