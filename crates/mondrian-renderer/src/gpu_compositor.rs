@@ -95,18 +95,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let base_px = textureSample(accum_tex, linear_sampler, in.uv);
     let source_position = source_coordinate(in.uv);
     var layer_px: vec4<f32>;
-    if (uniforms.source_kind == 1u || uniforms.source_kind == 4u) {
+    if (uniforms.source_kind == 1u) {
+        layer_px = select(vec4<f32>(0.0), uniforms.solid_color, source_inside(source_position));
+    } else if (uniforms.source_kind == 4u) {
         layer_px = uniforms.solid_color;
     } else if (uniforms.source_kind == 2u) {
         layer_px = base_px;
     } else {
         layer_px = sample_layer(source_position);
     }
-    let effect_position = select(
-        source_position - vec2<f32>(0.5),
-        in.uv * uniforms.geometry.zw - vec2<f32>(0.5),
-        uniforms.source_kind == 1u,
-    );
+    let effect_position = source_position - vec2<f32>(0.5);
     layer_px = apply_effects(layer_px, effect_position);
     if (uniforms.source_kind == 3u || uniforms.source_kind == 4u) {
         return layer_px;
@@ -130,14 +128,19 @@ fn source_coordinate(dst_uv: vec2<f32>) -> vec2<f32> {
 }
 
 fn sample_layer(src_center: vec2<f32>) -> vec4<f32> {
-    let src_size = uniforms.geometry.zw;
-    if (src_center.x < 0.5 ||
-        src_center.y < 0.5 ||
-        src_center.x >= src_size.x + 0.5 ||
-        src_center.y >= src_size.y + 0.5) {
+    if (!source_inside(src_center)) {
         return vec4<f32>(0.0);
     }
+    let src_size = uniforms.geometry.zw;
     return textureSample(layer_tex, linear_sampler, src_center / src_size);
+}
+
+fn source_inside(src_center: vec2<f32>) -> bool {
+    let src_size = uniforms.geometry.zw;
+    return src_center.x >= 0.5 &&
+        src_center.y >= 0.5 &&
+        src_center.x < src_size.x + 0.5 &&
+        src_center.y < src_size.y + 0.5;
 }
 
 fn grain_noise(position: vec2<f32>) -> f32 {
@@ -350,7 +353,8 @@ pub struct GpuCompositeLayer<'a> {
     pub opacity: f32,
     /// Timeline blend mode. Only `Normal` is accepted by the current GPU path.
     pub blend_mode: BlendMode,
-    /// Timeline affine transform. Media accepts invertible transforms; solids require identity.
+    /// Timeline affine transform. Media and solids accept invertible transforms.
+    /// Adjustment layers require identity because they process the destination accumulator.
     pub transform: [f32; 6],
     /// Lowered pointwise effect plan evaluated in working-linear space.
     pub effect_plan: Option<&'a CompiledEffectGpuPlan>,
@@ -1368,12 +1372,10 @@ fn layer_has_zero_contribution(layer: &GpuCompositeLayer<'_>) -> bool {
 
 fn gpu_transform_supported(layer: &GpuCompositeLayer<'_>) -> bool {
     match layer.source {
-        GpuCompositeLayerSource::CpuFrame(_) | GpuCompositeLayerSource::GpuFrame(_) => {
-            invert_affine(layer.transform).is_some()
-        }
-        GpuCompositeLayerSource::SolidColor(_) | GpuCompositeLayerSource::Adjustment => {
-            is_identity_transform(layer.transform)
-        }
+        GpuCompositeLayerSource::CpuFrame(_)
+        | GpuCompositeLayerSource::GpuFrame(_)
+        | GpuCompositeLayerSource::SolidColor(_) => invert_affine(layer.transform).is_some(),
+        GpuCompositeLayerSource::Adjustment => is_identity_transform(layer.transform),
     }
 }
 
@@ -1850,6 +1852,65 @@ mod tests {
                 report.within_budget,
                 "GPU point-effect accuracy budget exceeded: {report:#?}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn affine_procedural_solid_matches_cpu_float_effect_reference() {
+        use mondrian_effects::{
+            apply_compiled_effect_graph_rgba_f32, get_or_compile_scheduled_render_graph,
+            lower_effect_graph_to_gpu_plan, EffectGraphBuilderState, EffectRenderOp,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping affine procedural-solid parity test: no GPU adapter available");
+            return;
+        };
+        let color = Color { r: 1.25, g: -0.125, b: 0.375, a: 0.625 };
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::Vignette { intensity: 0.55, feather: 0.65 });
+        let graph = get_or_compile_scheduled_render_graph(builder.finish())
+            .expect("valid procedural-solid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("GPU vignette plan");
+        let effected_source = apply_compiled_effect_graph_rgba_f32(
+            &vec![[color.r, color.g, color.b, color.a]; 16],
+            4,
+            4,
+            &graph,
+            17,
+        )
+        .expect("CPU float procedural-solid reference");
+        let mut expected = vec![[0.0, 0.0, 0.0, 1.0]; 16];
+        for y in 0..4 {
+            for x in 1..4 {
+                let source = effected_source[y * 4 + (x - 1)];
+                expected[y * 4 + x] = [
+                    source[0] * source[3],
+                    source[1] * source[3],
+                    source[2] * source[3],
+                    1.0,
+                ];
+            }
+        }
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::SolidColor(color),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&plan),
+            frame_seed: 17,
+        };
+
+        let actual = readback_test_composite(&context, &[layer]);
+        for (index, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
+            for channel in 0..4 {
+                assert!(
+                    (expected[channel] - actual[channel]).abs() <= 3.0e-5,
+                    "affine solid mismatch at pixel {index}, channel {channel}: expected {}, actual {}",
+                    expected[channel],
+                    actual[channel]
+                );
+            }
         }
     }
 
@@ -2331,6 +2392,43 @@ mod tests {
         };
 
         validate_request(&request).expect("GPU compositor should support affine media sampling");
+    }
+
+    #[test]
+    fn gpu_composite_request_accepts_affine_solid_transform() {
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::SolidColor(Color {
+                r: 1.5,
+                g: -0.25,
+                b: 0.5,
+                a: 0.75,
+            }),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [0.75, 0.0, 1.0, 0.0, 0.75, 1.0],
+            effect_plan: None,
+            frame_seed: 0,
+        };
+        let request = GpuCompositeRequest {
+            width: 16,
+            height: 16,
+            working_color_space: WorkingColorSpace::LinearRec709,
+            layers: &[layer],
+        };
+
+        validate_request(&request)
+            .expect("GPU compositor should sample an invertible procedural-solid transform");
+
+        let mut singular = layer;
+        singular.transform = [0.0; 6];
+        let layers = [singular];
+        let request = GpuCompositeRequest { layers: &layers, ..request };
+        assert_eq!(
+            validate_request(&request).expect_err("singular solid transform must stay blocked"),
+            GpuCompositeError::Blocked {
+                reason: GpuCompositingBlockerReason::UnsupportedTransform,
+            }
+        );
     }
 
     #[test]

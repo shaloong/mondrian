@@ -1019,8 +1019,9 @@ and adjustment elements:
   Vignette, or Grain chain; effects run before source-over composition;
 - adjustment layers process the lower accumulated working pixels and blend the
   result back with their opacity, matching the CPU float reference semantics;
-- media layers may use invertible affine transforms; solid layers currently
-  require identity transforms to match the float reference compositor;
+- media and scene-linear procedural-solid layers may use invertible affine
+  transforms; external effect-domain solids materialize before their OCIO
+  round trip so authored effect/transform order remains unchanged;
 - all executed layers must use `BlendMode::Normal`;
 - skipped leading/identity/zero-opacity adjustments do not consume capacity;
   the remaining executed layer count must be ≤5.

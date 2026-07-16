@@ -923,8 +923,7 @@ fn prepare_composite<'a>(
                     prepared.residency.procedural_layers.saturating_add(1);
                 let scene_linear =
                     effect_plan.processing_domain() == EffectColorDomain::SceneLinearRgb;
-                let identity_transform = layer.transform == [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
-                if scene_linear && identity_transform {
+                if scene_linear {
                     prepared.layers.push(PreparedCompositeLayer {
                         source: PreparedCompositeLayerSource::SolidColor(layer.color),
                         opacity: layer.opacity,
@@ -1739,7 +1738,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn viewer_materializes_scene_linear_solid_only_for_affine_transform() {
+    async fn viewer_keeps_affine_scene_linear_solid_procedural() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let Ok(context) = GpuContext::new().await else {
             eprintln!("skipping Viewer affine solid test: no GPU adapter available");

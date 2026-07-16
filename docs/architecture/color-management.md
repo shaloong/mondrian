@@ -1260,9 +1260,9 @@ and `document_unsupported_feature` action code.
   when HDR correctness cannot be confirmed.
 - **GPU compositing** — The `gpu_compositor.rs` module is wired into the
   preview/viewer GPU path for the safe production subset: media-layer affine
-  transforms, identity solid transforms, Normal blend mode, supported fused
-  working-linear media/solid effect chains, working-linear adjustment layers,
-  and at most five executed layers.
+  transforms, procedural-solid affine transforms, Normal blend mode, supported
+  fused working-linear media/solid effect chains, working-linear adjustment
+  layers, and at most five executed layers.
   It composites into an `Rgba32Float` working-space GPU texture, then feeds the
   same renderer-owned OCIO GPU output boundary used by the rest of preview.
   GPU effect lowering supports ColorAdjust, WhiteBalance, Vignette, and Grain

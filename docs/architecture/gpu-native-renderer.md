@@ -372,19 +372,22 @@ graph scheduling or collapse effect-domain failures into a generic CPU fallback.
 
 GPU-resident media layers with log or display-encoded effect domains are
 preprocessed through the runtime-owned `OCIO -> point effect -> OCIO` route
-before working-linear affine/compositing. Procedural solids first materialize
-their unblended, untransformed, full-precision color into a pooled working GPU
-frame, then use that same route; layer opacity, affine transform, and blending
-remain after the effect-domain round trip in authored order. The consumed plan
+before working-linear affine/compositing. Procedural solids with those external
+effect domains first materialize their unblended, untransformed, full-precision
+color into a pooled working GPU frame, then use that same route; layer opacity,
+affine transform, and blending remain after the effect-domain round trip in
+authored order. The consumed plan
 is removed from the working compositor request, so an otherwise eligible
 single layer can retain its passthrough path. CPU working-frame fallbacks use an
 explicit pooled RGBA32F upload node before the same effect-domain route; this
 reports exactly one upload stage and no readback, while GPU/native media retain
 their transfer-free path. The upload plan retains the CPU frame's shared
 immutable RGBA32F payload instead of repacking another full-frame host buffer.
-Scene-linear solids retain the direct procedural-uniform fast path for identity
-transforms; only an affine-transformed solid is materialized, after which it uses
-the same GPU affine/effect compositor as media rather than falling back to CPU.
+Scene-linear solids retain the direct procedural-uniform fast path for every
+invertible affine transform. The composite shader applies inverse-affine source
+bounds and evaluates fused position-dependent effects in source coordinates,
+so transformed solids need neither a full-frame materialization pass nor a
+second RGBA32F texture. Singular transforms remain typed blockers.
 External-domain adjustments are scheduled by the renderer-owned composite graph:
 it finalizes the lower accumulator, executes the stock-OCIO round trip, blends
 the processed frame back with the authored adjustment opacity/blend mode, and
