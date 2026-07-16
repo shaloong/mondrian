@@ -169,12 +169,13 @@ rather than silently clamped.
 
 Final-output color science is selected separately through
 `OutputTransformIntent`. `MondrianStandard` carries the same complete immutable
-package identity from its first release, `OcioDisplayView` carries the named
-display/view selected by advanced policy, and `Colorimetric` requests a direct
-working-to-encoded conversion. The intent survives preview/export planning and
-cache identity independently from the CPU/GPU implementation used to execute
-it. Explicit export delivery-view policy overrides the Standard default rather
-than being hidden in optional display/view strings.
+package identity from its first release, `Aces` carries a target-aware preset,
+`OcioDisplayView` carries a named display/view already resolved by the selected
+Custom OCIO identity, and `Colorimetric` requests a direct working-to-encoded
+conversion. The intent survives preview/export planning and cache identity
+independently from the CPU/GPU implementation used to execute it. There is no
+second project/sequence display-view override: the selected engine identity is
+the sole source of the final picture-formation transform.
 
 Explicit OCIO mode must load its selected config successfully. It must not
 silently fall back to a different color science. Mondrian Standard follows the
@@ -1026,11 +1027,11 @@ Display transforms belong at preview presentation. Export transforms belong at e
 
 `SequenceSettings::root_program_color_context(...)` builds the shared Program
 Output context from the sequence output color space. Preview, scopes, and export
-must consume this semantic boundary before any local monitor adaptation. The
-export delivery view is resolved from
-the effective `ExportDeliveryViewPolicy` in `display_management` (inherited from
-project or overridden by sequence). The native GPU Viewer resolves this Program
-Output context first. The CPU raster fallback does the same through
+must consume this semantic boundary before any local monitor adaptation. Its
+typed output intent is resolved exclusively from the effective color engine and
+requested output target; display management cannot replace that engine-owned
+intent. The native GPU Viewer resolves this Program Output context first. The
+CPU raster fallback does the same through
 `execute_cpu_program_monitor_boundary_rgba8()`: it retains float Program Output,
 adapts to the sRGB UI atlas with a second stock-OCIO processor, and quantizes
 only at the atlas boundary. `SequenceSettings::root_preview_color_context(...)`
@@ -1050,7 +1051,9 @@ unaffected by ICC/surface policy.
 Display management is explicit in the resolved `ColorContext`. Project settings
 own the default `DisplayManagementPolicy`; sequences inherit that policy unless
 they disable color-management inheritance. The policy carries the monitor/profile
-reference, viewer SDR/HDR mode, tone-map policy, and export delivery view policy.
+reference, viewer SDR/HDR mode, and tone-map policy. It intentionally carries no
+output display/view selector because that would create a second color-engine
+truth source.
 The app sequence settings panel must expose that inheritance boundary before
 sequence-level color controls. When inheritance is enabled, sequence-local color
 controls are presentation-only draft state and must not be shown as active
@@ -1062,12 +1065,12 @@ cache keys, and future diagnostics do not infer tone mapping from scattered bool
 Root contexts retain one typed `OutputTransformIntent`. Colorimetric contexts
 carry no view. Tone-mapped Standard contexts carry the immutable package
 identity; core resolves its target-specific SDR/PQ/HLG display/view only when
-renderer builds the boundary and rejects engine/package drift. ACES and Custom
-OCIO contexts resolve a named `OcioDisplayView` from their exact selected config.
-Export delivery policy may replace the Standard intent with an explicitly
-validated `OcioDisplayView`, but only when tone mapping is active. A missing or
-invalid view becomes a colorimetric intent plus fail-closed diagnostics rather
-than partially populated strings. Explicit environment OCIO remains fail-closed
+renderer builds the boundary and rejects engine/package drift. ACES contexts
+carry a target-aware preset; Custom OCIO contexts resolve a named
+`OcioDisplayView` from their exact selected config identity. A missing,
+unsupported, or invalid engine-owned output mapping fails closed instead of
+falling back to a different View or partially populated strings. Explicit
+environment OCIO remains fail-closed
 when `$OCIO` is not configured.
 Preview cache keys include the complete typed output intent. An intent change
 invalidates cached viewer frames even when the output `ColorSpace` is unchanged.

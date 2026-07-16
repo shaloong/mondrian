@@ -622,8 +622,6 @@ impl ExportOutputPrecisionFailureBreakdown {
 pub enum ExportOutputTransformIssueReason {
     /// Tone mapping was requested but the export output boundary did not carry an OCIO view transform.
     ToneMapRequestedWithoutExportViewTransform,
-    /// An export delivery view policy was configured but failed validation/resolution.
-    InvalidExportDeliveryView,
 }
 
 /// Structured final export output transform semantic issue counts.
@@ -631,15 +629,12 @@ pub enum ExportOutputTransformIssueReason {
 pub struct ExportOutputTransformIssueBreakdown {
     /// Tone mapping was requested without an export view/display-view transform.
     pub tone_map_requested_without_export_view_transform: u64,
-    /// Export delivery view policy was configured but invalid or unresolved.
-    pub invalid_export_delivery_view: u64,
 }
 
 impl ExportOutputTransformIssueBreakdown {
     /// Return total issue count across all recorded reasons.
     pub fn total(&self) -> u64 {
         self.tone_map_requested_without_export_view_transform
-            .saturating_add(self.invalid_export_delivery_view)
     }
 
     /// Merge another breakdown in place.
@@ -648,9 +643,6 @@ impl ExportOutputTransformIssueBreakdown {
             tone_map_requested_without_export_view_transform: self
                 .tone_map_requested_without_export_view_transform
                 .saturating_add(other.tone_map_requested_without_export_view_transform),
-            invalid_export_delivery_view: self
-                .invalid_export_delivery_view
-                .saturating_add(other.invalid_export_delivery_view),
         }
     }
 
@@ -660,10 +652,6 @@ impl ExportOutputTransformIssueBreakdown {
             ExportOutputTransformIssueReason::ToneMapRequestedWithoutExportViewTransform => {
                 self.tone_map_requested_without_export_view_transform =
                     self.tone_map_requested_without_export_view_transform.saturating_add(1)
-            }
-            ExportOutputTransformIssueReason::InvalidExportDeliveryView => {
-                self.invalid_export_delivery_view =
-                    self.invalid_export_delivery_view.saturating_add(1)
             }
         }
         self
@@ -1124,17 +1112,14 @@ fn push_export_root_causes_and_actions(
             "export_output_transform_issue",
             ExportColorHealthSeverity::Fail,
             format!(
-                "output_transform_issues={} tone_map_requested_without_export_view_transform={} invalid_export_delivery_view={}",
+                "output_transform_issues={} tone_map_requested_without_export_view_transform={}",
                 summary.output_transform_issues,
                 summary
                     .output_transform_issue_reasons
                     .tone_map_requested_without_export_view_transform,
-                summary
-                    .output_transform_issue_reasons
-                    .invalid_export_delivery_view
             ),
-            "configure_export_delivery_view",
-            "Configure an export delivery view policy in project or sequence display management.",
+            "inspect_export_output_intent",
+            "Inspect why the engine-owned output intent did not resolve an OCIO View.",
         );
     }
     if summary.legacy_rgba8_composites > 0 || summary.legacy_reason_total > 0 {
@@ -2776,11 +2761,6 @@ fn render_sequence_frame_into(
     let boundary = export_output_boundary_from_context(&color_context)?;
     if color_context.tone_map && boundary.display_view.is_none() {
         if let Some(diagnostics) = export_diagnostics.as_deref_mut() {
-            if color_context.export_delivery_view_error.is_some() {
-                diagnostics.record_output_transform_issue(
-                    ExportOutputTransformIssueReason::InvalidExportDeliveryView,
-                );
-            }
             diagnostics.record_output_transform_issue(
                 ExportOutputTransformIssueReason::ToneMapRequestedWithoutExportViewTransform,
             );
@@ -3892,7 +3872,7 @@ mod tests {
         assert!(report
             .actions
             .iter()
-            .any(|action| action.code == "configure_export_delivery_view"));
+            .any(|action| action.code == "inspect_export_output_intent"));
     }
 
     #[test]
@@ -3912,7 +3892,6 @@ mod tests {
                 display: "sRGB - Display".to_string(),
                 view: "Mondrian Standard SDR v2".to_string(),
             },
-            export_delivery_view_error: None,
         };
 
         let boundary = export_output_boundary_from_context(&ctx).expect("encoded output");
@@ -3938,7 +3917,6 @@ mod tests {
                 mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
             output_transform: mondrian_core::OutputTransformIntent::mondrian_standard(),
-            export_delivery_view_error: None,
         };
 
         let boundary = export_output_boundary_from_context(&ctx).expect("encoded output");
@@ -3964,7 +3942,6 @@ mod tests {
                 display: "sRGB - Display".to_string(),
                 view: "Mondrian Standard SDR v2".to_string(),
             },
-            export_delivery_view_error: None,
         };
 
         let boundary = export_output_boundary_from_context(&ctx).expect("encoded output");
@@ -4005,12 +3982,12 @@ mod tests {
             .any(|root| root.code == "export_output_transform_issue"));
     }
 
-    /// When an explicit delivery view is configured, the real export render
-    /// path produces an export_view boundary and records no transform issue.
-    /// This uses a hand-built context to exercise the shared output intent.
+    /// A renderer-level named output intent produces an export-view boundary
+    /// and records no transform issue. Product policy resolves this intent;
+    /// the render queue does not expose a second authoring override.
     #[test]
-    fn export_real_render_with_view_records_no_transform_issue() {
-        let mut seq = Sequence::new("explicit-delivery-view");
+    fn export_real_render_with_named_output_intent_records_no_transform_issue() {
+        let mut seq = Sequence::new("named-output-intent");
         seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Eight;
         let tb = seq.time_base();
         seq.video_tracks[0]
@@ -4049,7 +4026,6 @@ mod tests {
                 display: "Rec.1886 Rec.709 - Display".to_string(),
                 view: "Mondrian Standard SDR v2".to_string(),
             },
-            export_delivery_view_error: None,
         };
 
         let boundary = export_output_boundary_from_context(&ctx).expect("encoded output");
@@ -4075,85 +4051,11 @@ mod tests {
             None,
             Some(&mut diagnostics),
         )
-        .expect("render with explicit delivery view");
+        .expect("render with named output intent");
 
         assert_eq!(canvas.len(), 2 * 2 * 4);
         assert_eq!(diagnostics.output_transform_issues, 0);
         assert_eq!(diagnostics.output_transform_issue_reasons.total(), 0);
-    }
-
-    #[test]
-    fn export_real_render_with_invalid_delivery_view_records_invalid_transform_issue() {
-        let mut seq = Sequence::new("invalid-delivery-view");
-        seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Eight;
-        let tb = seq.time_base();
-        seq.video_tracks[0]
-            .add_clip(
-                Clip::new_solid_color(
-                    AssetId::new(),
-                    mondrian_core::Color::from_rgba8(128, 128, 128, 255),
-                    tt(0, tb),
-                    tt(1, tb),
-                )
-                .expect("valid clip"),
-            )
-            .expect("add solid clip");
-        let timeline = TimelineExportInput {
-            sequence: seq,
-            sequences: Vec::new(),
-            asset_paths: HashMap::new(),
-            asset_color_spaces: HashMap::new(),
-            asset_interpretations: HashMap::new(),
-            asset_color_diagnostics: HashMap::new(),
-            range: TimelineExportRange::SequenceInOut,
-            project_color_management: mondrian_core::ProjectColorManagement::default(),
-        };
-        let ctx = ColorContext {
-            working_color_space: WorkingColorSpace::LinearRec709,
-            output_color_space: ColorSpace::Rec709.into(),
-            tone_map: true,
-            workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
-            nested_processing:
-                mondrian_core::timeline_data::NestedColorProcessing::PreserveChildWorkingSpace,
-            engine: ColorEngine::mondrian_standard(),
-            missing_metadata_policy:
-                mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
-            display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
-            output_transform: mondrian_core::OutputTransformIntent::Colorimetric,
-            export_delivery_view_error: Some("invalid delivery view".to_string()),
-        };
-
-        let mut diagnostics = ExportJobColorDiagnostics::default();
-        let mut canvas = vec![0u8; 2 * 2 * 4];
-        render_sequence_frame_into(
-            &timeline,
-            &timeline.sequence,
-            0,
-            2,
-            2,
-            ctx,
-            ExportAlphaMode::FlattenBlack,
-            SequenceRenderTarget::Deliverable(&mut canvas),
-            0,
-            None,
-            None,
-            None,
-            Some(&mut diagnostics),
-        )
-        .expect("render with invalid delivery view should fail closed through diagnostics");
-
-        assert_eq!(canvas.len(), 2 * 2 * 4);
-        assert_eq!(diagnostics.output_transform_issues, 2);
-        assert_eq!(
-            diagnostics
-                .output_transform_issue_reasons
-                .tone_map_requested_without_export_view_transform,
-            1
-        );
-        assert_eq!(
-            diagnostics.output_transform_issue_reasons.invalid_export_delivery_view,
-            1
-        );
     }
 
     #[test]

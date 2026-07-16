@@ -1174,16 +1174,6 @@ impl AppUiPreviewService {
         let color_context = sequence
             .settings
             .root_program_color_context(&state.project_settings.color_management);
-        if let Some(reason) = color_context.export_delivery_view_error.as_ref() {
-            self.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
-                feature: "program_output_view".to_owned(),
-                reason: reason.clone(),
-            });
-            self.scheduler.prune_obsolete();
-            self.frame_store.borrow_mut().clear_pinned_viewer_frame();
-            bump(&self.metrics.unavailable_frames);
-            return ViewerPreviewState::Unavailable;
-        }
         self.activate_preview_generation(ViewerPreviewGenerationKey::from_state(
             state,
             sequence,
@@ -1383,16 +1373,6 @@ impl AppUiPreviewService {
         let color_context = sequence
             .settings
             .root_program_color_context(&state.project_settings.color_management);
-        if let Some(reason) = color_context.export_delivery_view_error.as_ref() {
-            self.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
-                feature: "program_output_view".to_owned(),
-                reason: reason.clone(),
-            });
-            self.scheduler.prune_obsolete();
-            self.external_viewer_frame.replace(None);
-            bump(&self.metrics.gpu_preview_candidate_unavailable);
-            return AppUiGpuPreviewFrameState::Unavailable;
-        }
         let Some(program_output_color_space) = color_context.output_color_space.color() else {
             self.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
                 feature: "program_output_identity".to_owned(),
@@ -10352,7 +10332,6 @@ mod tests {
                 },
                 viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
                 tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
-                ..Default::default()
             };
         state
     }
@@ -10463,7 +10442,6 @@ mod tests {
                 ),
                 viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
                 tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
-                ..Default::default()
             };
 
         assert_eq!(
@@ -10484,7 +10462,6 @@ mod tests {
                 ),
                 viewer_mode: mondrian_core::ViewerDisplayMode::HdrPq,
                 tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
-                ..Default::default()
             };
 
         assert_eq!(
@@ -10505,7 +10482,6 @@ mod tests {
                 },
                 viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
                 tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
-                ..Default::default()
             };
 
         let err = preview_display_color_space(&sequence, &ProjectColorManagement::default(), None)
@@ -10531,7 +10507,6 @@ mod tests {
                 },
                 viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
                 tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
-                ..Default::default()
             };
         let snapshot = managed_icc_display_snapshot(ColorSpace::DisplayP3);
 
@@ -10561,7 +10536,6 @@ mod tests {
                 },
                 viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
                 tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
-                ..Default::default()
             };
         let snapshot = calibrated_icc_display_snapshot(ColorSpace::Srgb);
 
@@ -15042,7 +15016,6 @@ mod tests {
             monitor_profile: mondrian_core::MonitorProfileReference::ColorSpace(ColorSpace::Rec709),
             viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
             tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
-            ..Default::default()
         };
         let mut p3 = sdr.clone();
         p3.display_management = mondrian_core::DisplayManagementPolicy {
@@ -15051,7 +15024,6 @@ mod tests {
             ),
             viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
             tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
-            ..Default::default()
         };
         let first =
             viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &sdr);

@@ -666,10 +666,10 @@ The production PQ GPU conformance gate applies that model to both the versioned
 Mondrian Standard 1000-nit View and the independent ACES 2 reference View,
 using the matching CPU OCIO processor as the semantic oracle.
 
-## Export Delivery View Transform
+## Engine-Owned Output View Transform
 
-Export tone mapping is delivered through an explicit OCIO delivery view
-transform, not through the color-space pipeline. The three transform
+Export tone mapping is delivered through the selected color engine's typed OCIO
+output View, not through the color-space pipeline. The three transform
 contracts are:
 
 - **Input color-space transform**: encoded `source → working` conversion via
@@ -682,36 +682,19 @@ contracts are:
   `RenderColorTransform::delivery_view(...)`, which dispatches through the
   explicit working-identity OCIO display processor.
 
-### Export Delivery View Policy
+### Single Output-Intent Authority
 
-The export delivery view is configured through
-`DisplayManagementPolicy::export_delivery_view: ExportDeliveryViewPolicy`,
-which lives in both `ProjectColorManagement` and
-`SequenceColorManagement`. Sequences inherit the project policy unless they
-override it.
+`SequenceSettings::root_program_color_context(project_cm)` resolves exactly one
+`OutputTransformIntent` from the effective color engine and the sequence output
+target. Mondrian Standard carries its immutable package identity, ACES carries a
+target-aware preset, Custom OCIO carries a display/view pinned to its config
+identity, and an explicitly display-referred workflow carries `Colorimetric`.
 
-The sequence settings UI exposes this as a color-management source selector plus
-an export delivery view selector. Sequence-local delivery view edits are active
-only when color-management inheritance is disabled; otherwise export resolution
-continues to use the project policy. UI code must write the typed
-`ExportDeliveryViewPolicy` into `SequenceColorManagement.display_management`
-instead of passing ad-hoc display/view strings directly to the export queue.
-
-Policies:
-- `None` (default) — no delivery view configured. Tone-mapped export fails
-  closed with `ToneMapRequestedWithoutExportViewTransform`.
-- `OcioConfigDefault` — uses the OCIO config's default display/view,
-  resolved at render time via `ocio_default_display_view()`.
-- `OcioDisplayView { display, view }` — uses a named OCIO display/view
-  pair. Validated against the current OCIO config at resolve time.
-
-`SequenceSettings::resolve_export_delivery_view(project_cm)` resolves the
-effective policy into a `ResolvedExportDeliveryView` (or `None`/`Err`).
-When tone mapping is active, `root_program_color_context()` converts a successful
-result into the context's single `OutputTransformIntent::OcioDisplayView`.
-Invalid display/view resolution stores the error in
-`ColorContext::export_delivery_view_error` and fails closed to `Colorimetric`.
-When tone mapping is disabled the delivery-view policy is not applied.
+`DisplayManagementPolicy` is limited to monitor/profile identity, Viewer mode,
+and tone-map policy. It cannot replace the engine-owned output View. The sequence
+settings UI therefore exposes the engine and output target, but no independent
+export display/view selector. This prevents preview pixels, encoded pixels, and
+container color metadata from describing different output transforms.
 
 `export_output_boundary_from_context(...)` in the export crate resolves
 the boundary exclusively through `RenderOutputColorBoundary::from_intent(...)`.
@@ -728,10 +711,11 @@ peak remains independent because it describes the authoring monitor, not the
 brightest content pixel; a valid 4000-nit mastering display can therefore
 describe content formed by the 1000-nit Standard View.
 
-Health reports distinguish export delivery view availability from preview
-display/view: `output_transform_issues` records when tone mapping was
-requested but no delivery view was available. This is a Fail condition
-in the health report. The action code is `configure_export_delivery_view`.
+Health reports distinguish export output-View availability from preview
+display/view: `output_transform_issues` records when tone mapping was requested
+but the engine-owned output intent could not provide a View. This is a Fail
+condition in the health report. The action code is
+`inspect_export_output_intent`.
 
 ## Preview/Viewer GPU Output Boundary
 

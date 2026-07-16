@@ -7,8 +7,7 @@ use mondrian_core::effect_data::EffectType;
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, ClipId, EffectId, JobId, SequenceId, TrackId};
 use mondrian_core::{
-    ColorEngine, ColorSpace, ExportDeliveryViewPolicy, ProjectSettings, Rational, Resolution,
-    WorkingColorSpace,
+    ColorEngine, ColorSpace, ProjectSettings, Rational, Resolution, WorkingColorSpace,
 };
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
@@ -1033,8 +1032,6 @@ pub enum SequenceSettingsDraftUpdatePayload {
     DeliveryBitDepth(DeliveryBitDepth),
     /// Whether HDR metadata should be preserved for HDR output spaces.
     PreserveHdrMetadata(bool),
-    /// Export delivery view transform policy used by tone-mapped exports.
-    ExportDeliveryViewPolicy(ExportDeliveryViewPolicy),
     /// Active sequence audio sample rate in Hz.
     AudioSampleRate(u32),
     /// Active sequence audio channel layout.
