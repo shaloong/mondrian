@@ -1,9 +1,10 @@
 # Timeline Model
 
-Color-context construction delegates config-default display/view lookup to the
+Color-context construction delegates target-qualified output View lookup to the
 selected `ColorEngine`. Sequence preview and export planning never read an
 unqualified process-global OCIO default, so a failed ACES or Custom config
-cannot inherit a view from the previously active engine.
+cannot inherit a View from the previously active engine or reuse one output
+binding under another delivery label.
 
 `mondrian-timeline` owns editorial time, tracks, clips, and timeline commands.
 
@@ -74,10 +75,12 @@ presentation request until the renderer applies it as monitor adaptation after
 Program Output; it must never be used as the scope or delivery identity.
 An ordinary display-referred SDR context remains `Colorimetric`; a
 scene-referred or explicitly tone-mapped Mondrian Standard boundary resolves to
-the fully pinned `MondrianStandard { package }` product intent. An explicitly
-configured delivery display/view resolves to `OcioDisplayView` only while tone
-mapping is active. No resolved display/view strings are stored beside the
-intent, so contradictory context state is unrepresentable. This selection is
+the fully pinned `MondrianStandard { package }` product intent. ACES carries its
+preset and Custom OCIO carries only a target-qualified `CustomOcio` intent; the
+engine identity owns the corresponding display/view/output-endpoint binding.
+No resolved display/view strings are stored beside the intent, so contradictory
+context state is unrepresentable. A Custom target absent from the pinned output
+binding set fails sequence validation before render planning. This selection is
 independent from the renderer's CPU/GPU execution backend so a backend change
 cannot silently change project color science.
 

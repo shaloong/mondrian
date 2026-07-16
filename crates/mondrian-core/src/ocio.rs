@@ -14,9 +14,9 @@
 //! 4. **Environment** — explicit `$OCIO` env var
 
 use crate::types::{
-    ColorEngine, ColorSpace, CustomOcioLookIdentity, CustomOcioProjectIdentity,
-    CustomOcioRoleIdentity, MondrianStandardPackageIdentity, MondrianStandardVersion,
-    OcioColorSpaceIdentity, OcioConfigSource, WorkingColorSpace,
+    ColorEngine, ColorSpace, CustomOcioLookIdentity, CustomOcioOutputIdentity,
+    CustomOcioProjectIdentity, CustomOcioRoleIdentity, MondrianStandardPackageIdentity,
+    MondrianStandardVersion, OcioColorSpaceIdentity, OcioConfigSource, WorkingColorSpace,
 };
 use lru::LruCache;
 pub use ocio_rs::GpuLanguage;
@@ -2079,8 +2079,7 @@ fn custom_ocio_roles(config: &Config) -> Result<Vec<CustomOcioRoleIdentity>, Str
 fn custom_ocio_processor_graph_sha256(
     config: &Config,
     working_space: &str,
-    display: &str,
-    view: &str,
+    outputs: &[CustomOcioOutputIdentity],
 ) -> Result<String, String> {
     let mut color_spaces = (0..config.num_color_spaces())
         .filter_map(|index| config.color_space_name_by_index(index))
@@ -2088,7 +2087,7 @@ fn custom_ocio_processor_graph_sha256(
     color_spaces.sort();
 
     let mut digest = Sha256::new();
-    digest.update(b"mondrian-custom-ocio-processor-graph-v1\0");
+    digest.update(b"mondrian-custom-ocio-processor-graph-v2\0");
     update_fingerprint_field(&mut digest, "working-space", working_space);
     for color_space in color_spaces {
         if color_space == working_space {
@@ -2109,23 +2108,41 @@ fn custom_ocio_processor_graph_sha256(
             )?;
         }
     }
-    let display_processor = config
-        .processor_display(
-            working_space,
-            display,
-            view,
-            ocio_rs::TransformDirection::Forward,
-        )
-        .map_err(|error| {
-            format!(
-                "Custom OCIO display processor '{working_space}' -> {display}/{view} failed: {error}"
+    for output in outputs {
+        update_fingerprint_field(
+            &mut digest,
+            "output-target",
+            &format!("{:?}", output.output_color_space()),
+        );
+        update_fingerprint_field(
+            &mut digest,
+            "display-color-space",
+            output.display_color_space(),
+        );
+        let display_processor = config
+            .processor_display(
+                working_space,
+                output.display(),
+                output.view(),
+                ocio_rs::TransformDirection::Forward,
             )
-        })?;
-    update_custom_processor_fingerprint(
-        &mut digest,
-        &format!("display:{working_space}->{display}/{view}"),
-        display_processor,
-    )?;
+            .map_err(|error| {
+                format!(
+                    "Custom OCIO display processor '{working_space}' -> {}/{} failed: {error}",
+                    output.display(),
+                    output.view()
+                )
+            })?;
+        update_custom_processor_fingerprint(
+            &mut digest,
+            &format!(
+                "display:{working_space}->{}/{}",
+                output.display(),
+                output.view()
+            ),
+            display_processor,
+        )?;
+    }
     Ok(finish_sha256_hex(digest))
 }
 
@@ -2151,6 +2168,138 @@ fn custom_ocio_display_view_look(
         Some(looks) if !looks.trim().is_empty() => CustomOcioLookIdentity::DisplayView { looks },
         _ => CustomOcioLookIdentity::None,
     }
+}
+
+fn resolve_custom_ocio_output_identity(
+    config: &Config,
+    output_color_space: ColorSpace,
+    display: String,
+    view: String,
+) -> Result<CustomOcioOutputIdentity, String> {
+    if !output_color_space.is_display_referred() {
+        return Err(format!(
+            "Custom OCIO output target {output_color_space:?} is not display-referred"
+        ));
+    }
+    validate_custom_ocio_display_view(config, &display, &view)?;
+    let authored_display_color_space = config
+        .display_view_color_space_name(&display, &view)
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "Custom OCIO display/view '{display}/{view}' has no display color-space endpoint"
+            )
+        })?;
+    let display_color_space = if authored_display_color_space == "<USE_DISPLAY_NAME>" {
+        display.clone()
+    } else {
+        authored_display_color_space
+    };
+    if config.color_space(&display_color_space).is_none() {
+        return Err(format!(
+            "Custom OCIO display/view '{display}/{view}' references missing display color space '{display_color_space}'"
+        ));
+    }
+    if let Some(recognized) = recognized_custom_ocio_output_target(config, &display_color_space) {
+        if recognized != output_color_space {
+            return Err(format!(
+                "Custom OCIO display/view '{display}/{view}' resolves to recognized {recognized:?} endpoint '{display_color_space}', not declared {output_color_space:?}"
+            ));
+        }
+    }
+    Ok(CustomOcioOutputIdentity::from_resolved(
+        output_color_space,
+        display.clone(),
+        view.clone(),
+        display_color_space,
+        custom_ocio_display_view_look(config, &display, &view),
+    ))
+}
+
+fn conventional_ocio_display_color_space(output: ColorSpace) -> Option<&'static str> {
+    match output {
+        ColorSpace::Srgb => Some("sRGB - Display"),
+        ColorSpace::Rec709 => Some("Rec.1886 Rec.709 - Display"),
+        ColorSpace::DisplayP3 => Some("Display P3 - Display"),
+        ColorSpace::Rec2020 => Some("Rec.2020 SDR - Display"),
+        ColorSpace::Rec2100Pq => Some("Rec.2100-PQ - Display"),
+        ColorSpace::Rec2100Hlg => Some("Rec.2100-HLG - Display"),
+        _ => None,
+    }
+}
+
+fn recognized_custom_ocio_output_target(
+    config: &Config,
+    display_color_space: &str,
+) -> Option<ColorSpace> {
+    let canonical = config.color_space(display_color_space)?.name()?;
+    ColorSpace::ALL.into_iter().find(|candidate| {
+        candidate.is_display_referred()
+            && (canonical == ocio_color_space_name(*candidate)
+                || conventional_ocio_display_color_space(*candidate) == Some(canonical.as_str()))
+    })
+}
+
+fn resolve_custom_ocio_view_for_output(
+    config: &Config,
+    output_color_space: ColorSpace,
+) -> Result<(String, String), String> {
+    let mut candidates = Vec::new();
+    for display in (0..config.num_displays()).filter_map(|index| config.display(index)) {
+        for view in (0..config.num_views(&display)).filter_map(|index| config.view(&display, index))
+        {
+            let Some(authored_endpoint_name) =
+                config.display_view_color_space_name(&display, &view)
+            else {
+                continue;
+            };
+            let endpoint_name = if authored_endpoint_name == "<USE_DISPLAY_NAME>" {
+                display.clone()
+            } else {
+                authored_endpoint_name
+            };
+            if recognized_custom_ocio_output_target(config, &endpoint_name)
+                == Some(output_color_space)
+            {
+                candidates.push((display.clone(), view));
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        return Err(format!(
+            "Custom OCIO config has no View with a recognized {output_color_space:?} display color-space endpoint; select an explicit display/view binding"
+        ));
+    }
+    if let Some(default_display) = config.default_display() {
+        if let Some(default_view) = config.default_view(&default_display) {
+            if candidates
+                .iter()
+                .any(|candidate| candidate.0 == default_display && candidate.1 == default_view)
+            {
+                return Ok((default_display, default_view));
+            }
+        }
+    }
+    let default_view_candidates = candidates
+        .iter()
+        .filter(|(display, view)| config.default_view(display).as_deref() == Some(view.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if let [candidate] = default_view_candidates.as_slice() {
+        return Ok(candidate.clone());
+    }
+    if let [candidate] = candidates.as_slice() {
+        return Ok(candidate.clone());
+    }
+    Err(format!(
+        "Custom OCIO config has multiple Views for {output_color_space:?}; select an explicit display/view binding: {}",
+        candidates
+            .iter()
+            .map(|(display, view)| format!("{display}/{view}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
 }
 
 fn validate_custom_ocio_display_view(
@@ -2204,12 +2353,8 @@ fn validate_custom_ocio_identity(
             actual_cache_id
         ));
     }
-    let actual_processor_graph_sha256 = custom_ocio_processor_graph_sha256(
-        config,
-        identity.working_space(),
-        identity.display(),
-        identity.view(),
-    )?;
+    let actual_processor_graph_sha256 =
+        custom_ocio_processor_graph_sha256(config, identity.working_space(), identity.outputs())?;
     if actual_processor_graph_sha256 != identity.processor_graph_sha256() {
         return Err(format!(
             "Custom OCIO executable processor graph or dependency resources changed: expected SHA-256 '{}', got '{}'",
@@ -2223,16 +2368,21 @@ fn validate_custom_ocio_identity(
             identity.working_space()
         ));
     }
-    validate_custom_ocio_display_view(config, identity.display(), identity.view())?;
-    let actual_look = custom_ocio_display_view_look(config, identity.display(), identity.view());
-    if &actual_look != identity.look() {
-        return Err(format!(
-            "Custom OCIO display/view look changed for '{}/{}': expected {:?}, got {:?}",
-            identity.display(),
-            identity.view(),
-            identity.look(),
-            actual_look
-        ));
+    for expected in identity.outputs() {
+        let actual = resolve_custom_ocio_output_identity(
+            config,
+            expected.output_color_space(),
+            expected.display().to_owned(),
+            expected.view().to_owned(),
+        )?;
+        if &actual != expected {
+            return Err(format!(
+                "Custom OCIO output binding changed for {:?}: expected {:?}, got {:?}",
+                expected.output_color_space(),
+                expected,
+                actual
+            ));
+        }
     }
     let actual_roles = custom_ocio_roles(config)?;
     if actual_roles != identity.roles() {
@@ -2323,23 +2473,31 @@ fn with_ocio_config_for_engine<T>(
 pub fn pin_custom_ocio_project(
     source: OcioConfigSource,
     working_space: WorkingColorSpace,
+    output_color_space: ColorSpace,
     display: String,
     view: String,
 ) -> Result<ColorEngine, String> {
-    pin_custom_ocio_project_with_selection(source, working_space, Some((display, view)))
+    pin_custom_ocio_project_with_selection(
+        source,
+        working_space,
+        output_color_space,
+        Some((display, view)),
+    )
 }
 
-/// Resolve a Custom OCIO source and pin its declared default display/view.
-pub fn pin_custom_ocio_project_default(
+/// Resolve a Custom OCIO source and pin a uniquely target-compatible View.
+pub fn pin_custom_ocio_project_for_output(
     source: OcioConfigSource,
     working_space: WorkingColorSpace,
+    output_color_space: ColorSpace,
 ) -> Result<ColorEngine, String> {
-    pin_custom_ocio_project_with_selection(source, working_space, None)
+    pin_custom_ocio_project_with_selection(source, working_space, output_color_space, None)
 }
 
 fn pin_custom_ocio_project_with_selection(
     source: OcioConfigSource,
     working_space: WorkingColorSpace,
+    output_color_space: ColorSpace,
     display_view: Option<(String, String)>,
 ) -> Result<ColorEngine, String> {
     if matches!(source, OcioConfigSource::MondrianStandard { .. }) {
@@ -2361,26 +2519,21 @@ fn pin_custom_ocio_project_with_selection(
         }
         let (display, view) = match display_view {
             Some((display, view)) => (display, view),
-            None => {
-                let display = config.default_display().ok_or_else(|| {
-                    "Custom OCIO config has no declared default display".to_owned()
-                })?;
-                let view = config.default_view(&display).ok_or_else(|| {
-                    format!("Custom OCIO display '{display}' has no declared default view")
-                })?;
-                (display, view)
-            }
+            None => resolve_custom_ocio_view_for_output(config, output_color_space)?,
         };
-        validate_custom_ocio_display_view(config, &display, &view)?;
+        let outputs = vec![resolve_custom_ocio_output_identity(
+            config,
+            output_color_space,
+            display,
+            view,
+        )?];
         let identity = CustomOcioProjectIdentity::from_resolved(
             source.clone(),
             primary_config_sha256(&source, config)?,
             resolved_config_cache_id(config)?,
-            custom_ocio_processor_graph_sha256(config, &working_space, &display, &view)?,
+            custom_ocio_processor_graph_sha256(config, &working_space, &outputs)?,
             working_space,
-            display.clone(),
-            view.clone(),
-            custom_ocio_display_view_look(config, &display, &view),
+            outputs,
             custom_ocio_roles(config)?,
         );
         if let Ok(mut state) = OCIO_STATE.lock() {
@@ -3096,13 +3249,15 @@ fn validate_engine_display_view_selection(
             ))
         }
         ColorEngine::CustomOcio { identity } => {
-            if identity.display() == display && identity.view() == view {
+            if identity
+                .outputs()
+                .iter()
+                .any(|output| output.display() == display && output.view() == view)
+            {
                 Ok(())
             } else {
                 Err(format!(
-                    "Custom OCIO project pins display/view '{}/{}', not '{display}/{view}'",
-                    identity.display(),
-                    identity.view()
+                    "Custom OCIO project does not pin display/view '{display}/{view}'"
                 ))
             }
         }
@@ -4452,6 +4607,7 @@ mod tests {
         let engine = ColorEngine::custom_ocio(
             OcioConfigSource::Path { path: path.clone() },
             WorkingColorSpace::LinearRec2020,
+            ColorSpace::Srgb,
             "sRGB - Display",
             "ACES 2.0 - SDR 100 nits (Rec.709)",
         )
@@ -4462,7 +4618,9 @@ mod tests {
 
         assert_eq!(reopened, engine);
         assert_eq!(
-            reopened.default_display_view().expect("pinned display/view"),
+            reopened
+                .output_display_view(ColorSpace::Srgb)
+                .expect("pinned sRGB output binding"),
             (
                 "sRGB - Display".to_owned(),
                 "ACES 2.0 - SDR 100 nits (Rec.709)".to_owned()
@@ -4483,7 +4641,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_ocio_project_pins_config_default_display_and_view() {
+    fn custom_ocio_project_does_not_relabel_the_config_default_for_another_target() {
         let path = std::env::temp_dir().join(format!(
             "mondrian-custom-ocio-default-view-{}-{}.ocio",
             std::process::id(),
@@ -4492,15 +4650,27 @@ mod tests {
         std::fs::write(&path, mondrian_default_ocio_config_text())
             .expect("write Custom OCIO test config");
 
-        let engine = ColorEngine::custom_ocio_default(
+        let mismatch = ColorEngine::custom_ocio(
             OcioConfigSource::Path { path: path.clone() },
             WorkingColorSpace::LinearRec2020,
+            ColorSpace::Rec2100Pq,
+            "sRGB - Display",
+            "ACES 2.0 - SDR 100 nits (Rec.709)",
+        )
+        .expect_err("a recognized sRGB endpoint must not be declared as PQ");
+        assert!(mismatch.contains("recognized Srgb endpoint"), "{mismatch}");
+        assert!(mismatch.contains("not declared Rec2100Pq"), "{mismatch}");
+
+        let engine = ColorEngine::custom_ocio_for_output(
+            OcioConfigSource::Path { path: path.clone() },
+            WorkingColorSpace::LinearRec2020,
+            ColorSpace::Rec709,
         )
         .expect("pin Custom OCIO defaults");
         assert_eq!(
-            engine.default_display_view().expect("pinned defaults"),
+            engine.output_display_view(ColorSpace::Rec709).expect("pinned Rec.709 binding"),
             (
-                "sRGB - Display".to_owned(),
+                "Rec.1886 Rec.709 - Display".to_owned(),
                 "ACES 2.0 - SDR 100 nits (Rec.709)".to_owned()
             )
         );
@@ -4550,6 +4720,7 @@ colorspaces:
         let engine = ColorEngine::custom_ocio(
             OcioConfigSource::Path { path: config_path },
             WorkingColorSpace::LinearRec2020,
+            ColorSpace::Rec709,
             "Test Display",
             "Test View",
         )

@@ -4,7 +4,9 @@
 //! Custom OCIO selection boundary. Creation and settings dialogs provide only
 //! their draft-specific actions.
 
-use mondrian_core::{AcesConfigPreset, ColorEngine, OcioConfigSource, WorkingColorSpace};
+use mondrian_core::{
+    AcesConfigPreset, ColorEngine, ColorSpace, OcioConfigSource, WorkingColorSpace,
+};
 use mondrian_editor_state::Action;
 use mondrian_platform::{FileFilter, PlatformService};
 use mondrian_ui_widgets::menu::MenuItem;
@@ -18,6 +20,7 @@ use crate::app::ui_actions::app_shell_select_custom_ocio_config_action;
 pub(crate) fn choose_custom_ocio_config(
     platform: &dyn PlatformService,
     working_space: WorkingColorSpace,
+    output_color_space: ColorSpace,
 ) -> Result<Option<ColorEngine>, String> {
     let Some(path) = platform
         .open_file_dialog(
@@ -28,7 +31,12 @@ pub(crate) fn choose_custom_ocio_config(
     else {
         return Ok(None);
     };
-    ColorEngine::custom_ocio_default(OcioConfigSource::Path { path }, working_space).map(Some)
+    ColorEngine::custom_ocio_for_output(
+        OcioConfigSource::Path { path },
+        working_space,
+        output_color_space,
+    )
+    .map(Some)
 }
 
 /// Return the stable product label for a project color engine.

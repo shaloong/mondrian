@@ -3888,10 +3888,7 @@ mod tests {
             missing_metadata_policy:
                 mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
-            output_transform: mondrian_core::OutputTransformIntent::OcioDisplayView {
-                display: "sRGB - Display".to_string(),
-                view: "Mondrian Standard SDR v2".to_string(),
-            },
+            output_transform: mondrian_core::OutputTransformIntent::mondrian_standard(),
         };
 
         let boundary = export_output_boundary_from_context(&ctx).expect("encoded output");
@@ -3904,29 +3901,7 @@ mod tests {
     }
 
     #[test]
-    fn export_output_boundary_from_context_resolves_standard_intent() {
-        let ctx = ColorContext {
-            working_color_space: WorkingColorSpace::LinearRec709,
-            output_color_space: ColorSpace::Srgb.into(),
-            tone_map: true,
-            workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
-            nested_processing:
-                mondrian_core::timeline_data::NestedColorProcessing::PreserveChildWorkingSpace,
-            engine: ColorEngine::mondrian_standard(),
-            missing_metadata_policy:
-                mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
-            display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
-            output_transform: mondrian_core::OutputTransformIntent::mondrian_standard(),
-        };
-
-        let boundary = export_output_boundary_from_context(&ctx).expect("encoded output");
-        assert_eq!(boundary.target, RenderOutputColorBoundaryTarget::Export);
-        assert!(boundary.display_view.is_some());
-        assert!(boundary.tone_map);
-    }
-
-    #[test]
-    fn export_output_boundary_from_context_preserves_explicit_intent_without_tone_flag() {
+    fn export_output_boundary_preserves_engine_intent_without_tone_flag() {
         let ctx = ColorContext {
             working_color_space: WorkingColorSpace::LinearRec709,
             output_color_space: ColorSpace::Rec709.into(),
@@ -3938,10 +3913,7 @@ mod tests {
             missing_metadata_policy:
                 mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
-            output_transform: mondrian_core::OutputTransformIntent::OcioDisplayView {
-                display: "sRGB - Display".to_string(),
-                view: "Mondrian Standard SDR v2".to_string(),
-            },
+            output_transform: mondrian_core::OutputTransformIntent::mondrian_standard(),
         };
 
         let boundary = export_output_boundary_from_context(&ctx).expect("encoded output");
@@ -3982,12 +3954,11 @@ mod tests {
             .any(|root| root.code == "export_output_transform_issue"));
     }
 
-    /// A renderer-level named output intent produces an export-view boundary
-    /// and records no transform issue. Product policy resolves this intent;
-    /// the render queue does not expose a second authoring override.
+    /// A versioned engine-owned output intent produces an export-view boundary
+    /// and records no transform issue; the queue exposes no authoring override.
     #[test]
-    fn export_real_render_with_named_output_intent_records_no_transform_issue() {
-        let mut seq = Sequence::new("named-output-intent");
+    fn export_real_render_with_engine_output_intent_records_no_transform_issue() {
+        let mut seq = Sequence::new("engine-output-intent");
         seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Eight;
         let tb = seq.time_base();
         seq.video_tracks[0]
@@ -4022,10 +3993,7 @@ mod tests {
             missing_metadata_policy:
                 mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
-            output_transform: mondrian_core::OutputTransformIntent::OcioDisplayView {
-                display: "Rec.1886 Rec.709 - Display".to_string(),
-                view: "Mondrian Standard SDR v2".to_string(),
-            },
+            output_transform: mondrian_core::OutputTransformIntent::mondrian_standard(),
         };
 
         let boundary = export_output_boundary_from_context(&ctx).expect("encoded output");
@@ -4051,7 +4019,7 @@ mod tests {
             None,
             Some(&mut diagnostics),
         )
-        .expect("render with named output intent");
+        .expect("render with engine-owned output intent");
 
         assert_eq!(canvas.len(), 2 * 2 * 4);
         assert_eq!(diagnostics.output_transform_issues, 0);

@@ -750,7 +750,8 @@ impl SequenceSettings {
 
         // Select one typed output intent. Standard retains its immutable package
         // identity without consulting OCIO process-global state; ACES resolves
-        // its preset default and Custom OCIO returns its project-pinned pair.
+        // its target-aware preset and Custom OCIO carries the target used to
+        // resolve exactly one project-pinned output binding.
         let output_transform = match (&engine, tone_map) {
             (ColorEngine::MondrianStandard { package }, true) => {
                 mondrian_core::OutputTransformIntent::mondrian_standard_package(*package)
@@ -758,11 +759,8 @@ impl SequenceSettings {
             (ColorEngine::Aces { preset }, true) => {
                 mondrian_core::OutputTransformIntent::aces_preset(*preset)
             }
-            (ColorEngine::CustomOcio { identity }, true) => {
-                mondrian_core::OutputTransformIntent::OcioDisplayView {
-                    display: identity.display().to_owned(),
-                    view: identity.view().to_owned(),
-                }
+            (ColorEngine::CustomOcio { .. }, true) => {
+                mondrian_core::OutputTransformIntent::CustomOcio { output_color_space }
             }
             _ => mondrian_core::OutputTransformIntent::Colorimetric,
         };
@@ -1384,9 +1382,14 @@ mod tests {
                     "test-resolved-config".to_owned(),
                     "0".repeat(64),
                     "Linear Rec.2020".to_owned(),
-                    "Test Display".to_owned(),
-                    "Test View".to_owned(),
-                    mondrian_core::CustomOcioLookIdentity::None,
+                    vec![mondrian_core::CustomOcioOutputIdentity::from_pinned_parts(
+                        ColorSpace::Rec709,
+                        "Test Display".to_owned(),
+                        "Test View".to_owned(),
+                        "Test Display Color Space".to_owned(),
+                        mondrian_core::CustomOcioLookIdentity::None,
+                    )
+                    .expect("valid Custom OCIO output binding")],
                     Vec::new(),
                     Vec::new(),
                 )
@@ -2185,11 +2188,26 @@ mod tests {
         assert!(ctx.tone_map);
         assert_eq!(
             ctx.output_transform,
-            mondrian_core::OutputTransformIntent::OcioDisplayView {
-                display: "Test Display".to_owned(),
-                view: "Test View".to_owned(),
+            mondrian_core::OutputTransformIntent::CustomOcio {
+                output_color_space: ColorSpace::Rec709,
             }
         );
+    }
+
+    #[test]
+    fn custom_ocio_scene_output_rejects_an_unpinned_output_target() {
+        let mut settings = SequenceSettings::default();
+        settings.color_management.inherit = false;
+        settings.color_management.workflow = ColorWorkflow::SceneReferred;
+        settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
+        settings.color_management.engine = pinned_custom_engine(OcioConfigSource::Environment);
+
+        let error = settings
+            .validate_with_project_color_management(&ProjectColorManagement::default())
+            .expect_err("Custom OCIO must not relabel its pinned SDR View as Rec.2100 PQ");
+
+        assert!(error.to_string().contains("Rec2100Pq"));
+        assert!(error.to_string().contains("output binding"));
     }
 
     #[test]

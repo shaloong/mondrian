@@ -606,6 +606,103 @@ pub enum CustomOcioLookIdentity {
     DisplayView { looks: String },
 }
 
+/// One exact Custom OCIO rendering View bound to a Mondrian output target.
+///
+/// OCIO display/view names do not, by themselves, identify the encoded signal
+/// that Mondrian must tag in a deliverable. The binding therefore persists both
+/// the standardized output identity and OCIO's exact display color-space name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomOcioOutputIdentity {
+    output_color_space: ColorSpace,
+    display: String,
+    view: String,
+    display_color_space: String,
+    look: CustomOcioLookIdentity,
+}
+
+impl CustomOcioOutputIdentity {
+    pub(crate) fn from_resolved(
+        output_color_space: ColorSpace,
+        display: String,
+        view: String,
+        display_color_space: String,
+        look: CustomOcioLookIdentity,
+    ) -> Self {
+        Self {
+            output_color_space,
+            display,
+            view,
+            display_color_space,
+            look,
+        }
+    }
+
+    /// Reconstruct one persisted output binding from already-pinned fields.
+    pub fn from_pinned_parts(
+        output_color_space: ColorSpace,
+        display: String,
+        view: String,
+        display_color_space: String,
+        look: CustomOcioLookIdentity,
+    ) -> Result<Self, String> {
+        let output =
+            Self::from_resolved(output_color_space, display, view, display_color_space, look);
+        output.validate_structure()?;
+        Ok(output)
+    }
+
+    fn validate_structure(&self) -> Result<(), String> {
+        if !self.output_color_space.is_display_referred() {
+            return Err(format!(
+                "Custom OCIO output binding target {:?} is not display-referred",
+                self.output_color_space
+            ));
+        }
+        for (field, value) in [
+            ("display", self.display.as_str()),
+            ("view", self.view.as_str()),
+            ("display color space", self.display_color_space.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!(
+                    "Custom OCIO output binding {field} must not be blank"
+                ));
+            }
+        }
+        if matches!(&self.look, CustomOcioLookIdentity::DisplayView { looks } if looks.trim().is_empty())
+        {
+            return Err("Custom OCIO display/view look expression must not be blank".to_owned());
+        }
+        Ok(())
+    }
+
+    /// Standardized encoded output identity used for scopes and container tags.
+    pub const fn output_color_space(&self) -> ColorSpace {
+        self.output_color_space
+    }
+
+    /// Exact OCIO display name.
+    pub fn display(&self) -> &str {
+        &self.display
+    }
+
+    /// Exact OCIO View name under [`Self::display`].
+    pub fn view(&self) -> &str {
+        &self.view
+    }
+
+    /// Exact OCIO display color-space endpoint reported for this View.
+    pub fn display_color_space(&self) -> &str {
+        &self.display_color_space
+    }
+
+    /// Effective look expression of this display/view.
+    pub fn look(&self) -> &CustomOcioLookIdentity {
+        &self.look
+    }
+}
+
 /// A project-authored OCIO dynamic-property override.
 ///
 /// Values are canonical strings because OCIO dynamic properties include both
@@ -638,19 +735,49 @@ impl CustomOcioDynamicPropertyIdentity {
 /// resources. `config_sha256` identifies the primary config content,
 /// `resolved_cache_id` identifies the parsed OCIO graph, and
 /// `processor_graph_sha256` covers the executable routes and their resources.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct CustomOcioProjectIdentity {
     source: OcioConfigSource,
     config_sha256: String,
     resolved_cache_id: String,
     processor_graph_sha256: String,
     working_space: String,
-    display: String,
-    view: String,
-    look: CustomOcioLookIdentity,
+    outputs: Vec<CustomOcioOutputIdentity>,
     roles: Vec<CustomOcioRoleIdentity>,
     dynamic_properties: Vec<CustomOcioDynamicPropertyIdentity>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SerializedCustomOcioProjectIdentity {
+    source: OcioConfigSource,
+    config_sha256: String,
+    resolved_cache_id: String,
+    processor_graph_sha256: String,
+    working_space: String,
+    outputs: Vec<CustomOcioOutputIdentity>,
+    roles: Vec<CustomOcioRoleIdentity>,
+    dynamic_properties: Vec<CustomOcioDynamicPropertyIdentity>,
+}
+
+impl<'de> Deserialize<'de> for CustomOcioProjectIdentity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let serialized = SerializedCustomOcioProjectIdentity::deserialize(deserializer)?;
+        Self::from_pinned_parts(
+            serialized.source,
+            serialized.config_sha256,
+            serialized.resolved_cache_id,
+            serialized.processor_graph_sha256,
+            serialized.working_space,
+            serialized.outputs,
+            serialized.roles,
+            serialized.dynamic_properties,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 impl CustomOcioProjectIdentity {
@@ -660,9 +787,7 @@ impl CustomOcioProjectIdentity {
         resolved_cache_id: String,
         processor_graph_sha256: String,
         working_space: String,
-        display: String,
-        view: String,
-        look: CustomOcioLookIdentity,
+        outputs: Vec<CustomOcioOutputIdentity>,
         roles: Vec<CustomOcioRoleIdentity>,
     ) -> Self {
         Self {
@@ -671,9 +796,7 @@ impl CustomOcioProjectIdentity {
             resolved_cache_id,
             processor_graph_sha256,
             working_space,
-            display,
-            view,
-            look,
+            outputs,
             roles,
             dynamic_properties: Vec::new(),
         }
@@ -691,9 +814,7 @@ impl CustomOcioProjectIdentity {
         resolved_cache_id: String,
         processor_graph_sha256: String,
         working_space: String,
-        display: String,
-        view: String,
-        look: CustomOcioLookIdentity,
+        mut outputs: Vec<CustomOcioOutputIdentity>,
         mut roles: Vec<CustomOcioRoleIdentity>,
         dynamic_properties: Vec<CustomOcioDynamicPropertyIdentity>,
     ) -> Result<Self, String> {
@@ -714,16 +835,38 @@ impl CustomOcioProjectIdentity {
         for (field, value) in [
             ("resolved cache-id", resolved_cache_id.as_str()),
             ("working space", working_space.as_str()),
-            ("display", display.as_str()),
-            ("view", view.as_str()),
         ] {
             if value.trim().is_empty() {
                 return Err(format!("Custom OCIO {field} must not be blank"));
             }
         }
-        if matches!(&look, CustomOcioLookIdentity::DisplayView { looks } if looks.trim().is_empty())
+        if outputs.is_empty() {
+            return Err("Custom OCIO project must pin at least one output binding".to_owned());
+        }
+        for output in &outputs {
+            output.validate_structure()?;
+        }
+        outputs.sort_by_key(|output| {
+            ColorSpace::ALL
+                .iter()
+                .position(|candidate| *candidate == output.output_color_space)
+                .unwrap_or(usize::MAX)
+        });
+        if outputs
+            .windows(2)
+            .any(|pair| pair[0].output_color_space == pair[1].output_color_space)
         {
-            return Err("Custom OCIO display/view look expression must not be blank".to_owned());
+            return Err("Custom OCIO output binding targets must be unique".to_owned());
+        }
+        for (index, output) in outputs.iter().enumerate() {
+            if outputs[index + 1..].iter().any(|candidate| {
+                candidate.display == output.display && candidate.view == output.view
+            }) {
+                return Err(format!(
+                    "Custom OCIO display/view '{}/{}' cannot label multiple output targets",
+                    output.display, output.view
+                ));
+            }
         }
         if roles
             .iter()
@@ -749,9 +892,7 @@ impl CustomOcioProjectIdentity {
             resolved_cache_id,
             processor_graph_sha256: processor_graph_sha256.to_ascii_lowercase(),
             working_space,
-            display,
-            view,
-            look,
+            outputs,
             roles,
             dynamic_properties,
         })
@@ -772,7 +913,7 @@ impl CustomOcioProjectIdentity {
         &self.resolved_cache_id
     }
 
-    /// SHA-256 over all working-space routes and the selected display processor.
+    /// SHA-256 over all working-space routes and selected output processors.
     pub fn processor_graph_sha256(&self) -> &str {
         &self.processor_graph_sha256
     }
@@ -782,19 +923,16 @@ impl CustomOcioProjectIdentity {
         &self.working_space
     }
 
-    /// Exact selected display name.
-    pub fn display(&self) -> &str {
-        &self.display
+    /// Complete output bindings sorted by standardized output identity.
+    pub fn outputs(&self) -> &[CustomOcioOutputIdentity] {
+        &self.outputs
     }
 
-    /// Exact selected view name.
-    pub fn view(&self) -> &str {
-        &self.view
-    }
-
-    /// Effective look expression of the selected display/view.
-    pub fn look(&self) -> &CustomOcioLookIdentity {
-        &self.look
+    /// Resolve the one View explicitly bound to a standardized output target.
+    pub fn output(&self, output_color_space: ColorSpace) -> Option<&CustomOcioOutputIdentity> {
+        self.outputs
+            .iter()
+            .find(|output| output.output_color_space == output_color_space)
     }
 
     /// Complete sorted role mapping of the pinned config.
@@ -1121,9 +1259,13 @@ mod tests {
                 "resolved-config-cache-id".to_owned(),
                 "b".repeat(64),
                 "ACEScg".to_owned(),
-                "sRGB".to_owned(),
-                "ACES 1.0 - SDR Video".to_owned(),
-                CustomOcioLookIdentity::None,
+                vec![CustomOcioOutputIdentity::from_resolved(
+                    ColorSpace::Srgb,
+                    "sRGB".to_owned(),
+                    "ACES 1.0 - SDR Video".to_owned(),
+                    "Utility - sRGB - Texture".to_owned(),
+                    CustomOcioLookIdentity::None,
+                )],
                 vec![CustomOcioRoleIdentity::new(
                     "scene_linear".to_owned(),
                     "ACEScg".to_owned(),
@@ -1136,6 +1278,8 @@ mod tests {
         assert_eq!(back, engine);
         assert!(json.contains("\"config_sha256\""));
         assert!(json.contains("\"resolved_cache_id\""));
+        assert!(json.contains("\"outputs\""));
+        assert!(json.contains("\"display_color_space\":\"Utility - sRGB - Texture\""));
         assert!(json.contains("\"dynamic_properties\":[]"));
 
         let mut incomplete_custom: serde_json::Value =
@@ -1145,6 +1289,19 @@ mod tests {
             .expect("Custom OCIO identity object")
             .remove("resolved_cache_id");
         assert!(serde_json::from_value::<ColorEngine>(incomplete_custom).is_err());
+
+        let mut duplicate_output: serde_json::Value =
+            serde_json::from_str(&json).expect("Custom OCIO JSON value");
+        let outputs = duplicate_output["identity"]["outputs"]
+            .as_array_mut()
+            .expect("Custom OCIO outputs");
+        let mut duplicate = outputs[0].clone();
+        duplicate["output_color_space"] = serde_json::json!("Rec2100Pq");
+        outputs.push(duplicate);
+        assert!(
+            serde_json::from_value::<ColorEngine>(duplicate_output).is_err(),
+            "one display/view cannot claim two standardized output labels"
+        );
 
         let smart = ColorEngine::mondrian_standard();
         let json2 = serde_json::to_string(&smart).expect("serialize MondrianStandard");

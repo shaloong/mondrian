@@ -687,8 +687,9 @@ contracts are:
 `SequenceSettings::root_program_color_context(project_cm)` resolves exactly one
 `OutputTransformIntent` from the effective color engine and the sequence output
 target. Mondrian Standard carries its immutable package identity, ACES carries a
-target-aware preset, Custom OCIO carries a display/view pinned to its config
-identity, and an explicitly display-referred workflow carries `Colorimetric`.
+target-aware preset, Custom OCIO carries the requested output target and resolves
+its display/view/output-endpoint tuple from the pinned config identity, and an
+explicitly display-referred workflow carries `Colorimetric`.
 
 `DisplayManagementPolicy` is limited to monitor/profile identity, Viewer mode,
 and tone-map policy. It cannot replace the engine-owned output View. The sequence
@@ -699,9 +700,10 @@ container color metadata from describing different output transforms.
 `export_output_boundary_from_context(...)` in the export crate resolves
 the boundary exclusively through `RenderOutputColorBoundary::from_intent(...)`.
 Mondrian Standard resolves its output-target view from the pinned package;
-explicit OCIO intent carries the validated named view; colorimetric intent
-carries no view. If tone mapping is requested but the resolved boundary has no
-view, export records `ToneMapRequestedWithoutExportViewTransform`.
+Custom OCIO resolves only a binding matching the encoded output target;
+colorimetric intent carries no view. If tone mapping is requested but the
+resolved boundary has no view, export records
+`ToneMapRequestedWithoutExportViewTransform`.
 
 HDR metadata validation occurs before encoder launch and again before libx265
 parameter construction. The effective inherited/overridden engine determines

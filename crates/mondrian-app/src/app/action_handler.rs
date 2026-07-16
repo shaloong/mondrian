@@ -2501,9 +2501,14 @@ mod tests {
                     "test-config".to_owned(),
                     "0".repeat(64),
                     working_space.to_owned(),
-                    "Test Display".to_owned(),
-                    "Test View".to_owned(),
-                    mondrian_core::CustomOcioLookIdentity::None,
+                    vec![mondrian_core::CustomOcioOutputIdentity::from_pinned_parts(
+                        ColorSpace::Rec709,
+                        "Test Display".to_owned(),
+                        "Test View".to_owned(),
+                        "Test Display Color Space".to_owned(),
+                        mondrian_core::CustomOcioLookIdentity::None,
+                    )
+                    .expect("valid Custom OCIO output binding")],
                     Vec::new(),
                     Vec::new(),
                 )

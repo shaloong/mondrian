@@ -54,20 +54,56 @@ impl ColorEngine {
         }
     }
 
-    /// Load this engine's exact OCIO config and resolve its default display/view.
+    /// Load this engine's exact OCIO config and resolve its unqualified default display/view.
+    ///
+    /// Custom OCIO deliberately rejects this query because its output bindings
+    /// must always be selected by standardized target identity.
     pub fn default_display_view(&self) -> Result<(String, String), String> {
         match self {
             Self::Aces { preset } => {
                 let (display, view) = preset.default_display_view();
                 return Ok((display.to_owned(), view.to_owned()));
             }
-            Self::CustomOcio { identity } => {
-                return Ok((identity.display().to_owned(), identity.view().to_owned()));
+            Self::CustomOcio { .. } => {
+                return Err(
+                    "Custom OCIO display/view resolution requires an explicit output target"
+                        .to_owned(),
+                );
             }
             Self::MondrianStandard { .. } => {}
         }
         crate::ocio::ocio_default_display_view_for_engine(self)?
             .ok_or_else(|| format!("{} config has no default display/view", self.name()))
+    }
+
+    /// Resolve the exact engine-owned View for a standardized encoded output target.
+    pub fn output_display_view(
+        &self,
+        output_color_space: ColorSpace,
+    ) -> Result<(String, String), String> {
+        match self {
+            Self::MondrianStandard { package } => {
+                crate::ocio::mondrian_standard_output_display_view_for_package(
+                    *package,
+                    output_color_space,
+                )
+            }
+            Self::Aces { preset } => preset
+                .output_display_view(output_color_space)
+                .map(|(display, view)| (display.to_owned(), view.to_owned()))
+                .ok_or_else(|| {
+                    format!(
+                        "ACES preset '{}' has no output View for {output_color_space:?}",
+                        preset.builtin_name()
+                    )
+                }),
+            Self::CustomOcio { identity } => identity
+                .output(output_color_space)
+                .map(|output| (output.display().to_owned(), output.view().to_owned()))
+                .ok_or_else(|| {
+                    format!("Custom OCIO project has no output binding for {output_color_space:?}")
+                }),
+        }
     }
 
     /// Return display names from this engine's exact OCIO config.
@@ -101,21 +137,30 @@ impl ColorEngine {
     pub fn custom_ocio(
         source: OcioConfigSource,
         working_space: WorkingColorSpace,
+        output_color_space: ColorSpace,
         display: impl Into<String>,
         view: impl Into<String>,
     ) -> Result<Self, String> {
-        crate::ocio::pin_custom_ocio_project(source, working_space, display.into(), view.into())
+        crate::ocio::pin_custom_ocio_project(
+            source,
+            working_space,
+            output_color_space,
+            display.into(),
+            view.into(),
+        )
     }
 
-    /// Resolve and pin a Custom OCIO config using its declared default display/view.
+    /// Resolve and pin a Custom OCIO config for one standardized output target.
     ///
-    /// The resolved names are persisted in the complete project identity, so
-    /// reopening the project never depends on a later config default.
-    pub fn custom_ocio_default(
+    /// Auto-selection succeeds only when the config exposes a uniquely
+    /// target-compatible display color space. Ambiguous or unknown semantics
+    /// require [`Self::custom_ocio`] with an explicit display/view declaration.
+    pub fn custom_ocio_for_output(
         source: OcioConfigSource,
         working_space: WorkingColorSpace,
+        output_color_space: ColorSpace,
     ) -> Result<Self, String> {
-        crate::ocio::pin_custom_ocio_project_default(source, working_space)
+        crate::ocio::pin_custom_ocio_project_for_output(source, working_space, output_color_space)
     }
 
     /// Return the single working space pinned by this product mode, if any.
@@ -1363,9 +1408,13 @@ mod tests {
                 "0".repeat(64),
                 crate::ocio::ocio_working_color_space_name(WorkingColorSpace::LinearRec709)
                     .to_owned(),
-                "missing-display".to_owned(),
-                "missing-view".to_owned(),
-                crate::types::CustomOcioLookIdentity::None,
+                vec![crate::types::CustomOcioOutputIdentity::from_resolved(
+                    ColorSpace::Rec709,
+                    "missing-display".to_owned(),
+                    "missing-view".to_owned(),
+                    "missing-display-color-space".to_owned(),
+                    crate::types::CustomOcioLookIdentity::None,
+                )],
                 Vec::new(),
             )),
         };

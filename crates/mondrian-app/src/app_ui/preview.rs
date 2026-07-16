@@ -15034,7 +15034,7 @@ mod tests {
     }
 
     #[test]
-    fn resolved_media_preview_cache_key_includes_explicit_output_view_intent() {
+    fn resolved_media_preview_cache_key_includes_versioned_output_transform_intent() {
         let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
             .expect("default effect graph");
         let resolved = vec![ResolvedPreviewElement::Media {
@@ -15047,31 +15047,18 @@ mod tests {
         }];
         let sequence_id = SequenceId::new();
 
-        let mut rec709_view = test_color_context(ColorSpace::Rec709);
-        rec709_view.output_transform = mondrian_core::OutputTransformIntent::OcioDisplayView {
-            display: "sRGB - Display".to_owned(),
-            view: "Mondrian Standard SDR v2".to_owned(),
+        let current = test_color_context(ColorSpace::Rec709);
+        let mut legacy = current.clone();
+        legacy.engine = ColorEngine::MondrianStandard {
+            package: mondrian_core::MondrianStandardPackageIdentity::V2,
         };
-        let mut colorimetric_view = rec709_view.clone();
-        colorimetric_view.output_transform =
-            mondrian_core::OutputTransformIntent::OcioDisplayView {
-                display: "sRGB - Display".to_owned(),
-                view: "Video (colorimetric)".to_owned(),
-            };
-        let first = viewer_preview_cache_key_for_resolved_plan(
-            sequence_id,
-            320,
-            180,
-            &resolved,
-            &rec709_view,
+        legacy.output_transform = mondrian_core::OutputTransformIntent::mondrian_standard_package(
+            mondrian_core::MondrianStandardPackageIdentity::V2,
         );
-        let second = viewer_preview_cache_key_for_resolved_plan(
-            sequence_id,
-            320,
-            180,
-            &resolved,
-            &colorimetric_view,
-        );
+        let first =
+            viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &current);
+        let second =
+            viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &legacy);
 
         assert_ne!(first, second);
     }
@@ -15140,10 +15127,7 @@ mod tests {
     fn preview_working_composite_boundary_uses_resolved_display_view() {
         let mut color_context = test_color_context(ColorSpace::Rec709);
         color_context.tone_map = true;
-        color_context.output_transform = mondrian_core::OutputTransformIntent::OcioDisplayView {
-            display: "sRGB - Display".to_owned(),
-            view: "Mondrian Standard SDR v2".to_owned(),
-        };
+        color_context.output_transform = mondrian_core::OutputTransformIntent::mondrian_standard();
         let mut scratch = TimelineCompositeScratch::default();
 
         let _output = composite_resolved_preview_working(2, 2, &[], &color_context, &mut scratch)

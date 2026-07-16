@@ -1206,7 +1206,13 @@ mod tests {
             .engine
             .custom_ocio_identity()
             .expect("pinned Custom OCIO identity");
-        assert_eq!(identity.display(), "sRGB - Display");
+        assert_eq!(
+            identity
+                .output(mondrian_core::ColorSpace::Rec709)
+                .expect("Rec.709 output binding")
+                .display(),
+            "Rec.1886 Rec.709 - Display"
+        );
         assert!(!identity.processor_graph_sha256().is_empty());
     }
 }

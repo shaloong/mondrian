@@ -436,8 +436,11 @@ impl NewProjectDialog {
     /// Run the native Custom OCIO selection flow and update the draft only
     /// after a complete reproducible engine identity has been pinned.
     pub fn choose_custom_ocio(&mut self, platform: &dyn PlatformService) {
-        match choose_custom_ocio_config(platform, self.draft.sequence_settings.working_color_space)
-        {
+        match choose_custom_ocio_config(
+            platform,
+            self.draft.sequence_settings.working_color_space,
+            self.draft.sequence_settings.color_management.output_color_space,
+        ) {
             Ok(Some(engine)) => {
                 self.apply_update(NewProjectDraftUpdatePayload::ColorEngine(engine));
             }

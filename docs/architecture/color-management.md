@@ -164,14 +164,14 @@ rather than silently clamped.
   stores a versioned Studio or CG Config preset. Presets resolve to exact OCIO
   built-in registry identifiers; they never follow an upstream `latest` alias.
 - `ColorEngine::CustomOcio`: explicit studio/user OCIO provider over `$OCIO`, a
-  selected built-in, or a path source. Its display/view owns final rendering only when
-  `OutputTransformIntent::OcioDisplayView` is selected.
+  selected built-in, or a path source. Its target-qualified output bindings own
+  final rendering when `OutputTransformIntent::CustomOcio` is selected.
 
 Final-output color science is selected separately through
 `OutputTransformIntent`. `MondrianStandard` carries the same complete immutable
 package identity from its first release, `Aces` carries a target-aware preset,
-`OcioDisplayView` carries a named display/view already resolved by the selected
-Custom OCIO identity, and `Colorimetric` requests a direct working-to-encoded
+`CustomOcio` carries the requested standardized output target while the selected
+engine identity owns its named display/view, and `Colorimetric` requests a direct working-to-encoded
 conversion. The intent survives preview/export planning and cache identity
 independently from the CPU/GPU implementation used to execute it. There is no
 second project/sequence display-view override: the selected engine identity is
@@ -185,12 +185,12 @@ substitution of another config, approximate LUT, or non-conformant native conver
 The `$OCIO` environment source is intentionally fail-closed: if the variable is
 unset or points to a missing file, Mondrian reports that selected source as
 invalid instead of scanning machine-specific standard paths.
-`ColorEngine::default_display_view()` is the engine-owned resolution boundary.
-Standard and ACES resolve from their immutable package/preset; Custom OCIO
-returns the display/view saved in its project identity rather than re-reading a
-possibly changed config default. Product callers cannot read a process-global
-default and then infer which engine it belongs to; the unqualified processor
-and display-query APIs are intentionally not public.
+`ColorEngine::output_display_view(target)` is the engine-owned resolution
+boundary. Standard and ACES resolve from their immutable package/preset; Custom
+OCIO resolves only an exact binding saved for that target. Its unqualified
+`default_display_view()` query is rejected. Product callers cannot read a
+process-global default and then infer which engine or output label it belongs
+to; the unqualified processor and display-query APIs are intentionally not public.
 
 Each versioned ACES preset also pins its default display/view pair and a
 registry regression verifies those names against the bundled stock OCIO
@@ -216,17 +216,28 @@ comparing GPU output with the stock-OCIO CPU result.
 Custom OCIO is persisted as a complete `CustomOcioProjectIdentity`, not a bare
 locator. It requires the source, primary config SHA-256, parsed OCIO cache-id,
 a SHA-256 over every executable colorspace-to/from-working route plus the
-selected display processor, exact working space, display, view, effective look
-expression, the sorted role map, and an explicit dynamic-property override
-list. Current projects save no dynamic overrides and reject non-empty override
-lists until typed execution exists. Missing fields, semantic mismatches, config
-edits, role/view changes, and external LUT changes fail closed.
-When a caller selects only a Custom `.ocio` file, `custom_ocio_default` resolves
-the config-declared default display/view during that same validated load and
-persists the resolved names in the identity. It does not defer default lookup
-until project reopen or frame rendering. Advanced callers may instead pin an
-explicit display/view through `custom_ocio`; both paths produce the same complete
-identity contract.
+selected output processors, the exact working space, and a sorted non-empty set
+of `CustomOcioOutputIdentity` bindings. Each binding contains one standardized
+Mondrian `ColorSpace`, exact display/view, the resolved OCIO display color-space
+endpoint (including resolution of `<USE_DISPLAY_NAME>`), and effective look
+expression. The same target cannot appear twice and one display/view cannot
+claim multiple output labels. The identity also pins the sorted role map and an
+explicit dynamic-property override list. Current projects save no dynamic
+overrides and reject non-empty override lists until typed execution exists.
+Missing fields, semantic mismatches, config edits, role/view/endpoint changes,
+and external LUT changes fail closed during deserialization or config validation.
+
+When the UI selects only a Custom `.ocio` file,
+`custom_ocio_for_output` scans the config for a uniquely target-compatible
+display color-space endpoint. It prefers that display's declared default View,
+but never substitutes the config's global default for another output target.
+Recognized sRGB, Rec.709, Display P3, Rec.2020 SDR, PQ, and HLG endpoint names
+must agree with the requested label. Unknown or ambiguous studio conventions
+require an explicit `custom_ocio` display/view declaration; that declaration and
+the actual endpoint are both pinned. The current simple UI creates one binding
+for the active/new sequence output. The identity is already a set so an advanced
+mapping UI can add multiple delivery targets without changing project semantics;
+until then, any unbound sequence output fails validation rather than relabeling.
 The current Custom identity also pins exactly one Mondrian working-space name;
 its processor-graph digest is defined around that space. Sequence/project
 validation therefore rejects a Custom engine paired with any other sequence
@@ -1066,8 +1077,9 @@ Root contexts retain one typed `OutputTransformIntent`. Colorimetric contexts
 carry no view. Tone-mapped Standard contexts carry the immutable package
 identity; core resolves its target-specific SDR/PQ/HLG display/view only when
 renderer builds the boundary and rejects engine/package drift. ACES contexts
-carry a target-aware preset; Custom OCIO contexts resolve a named
-`OcioDisplayView` from their exact selected config identity. A missing,
+carry a target-aware preset; Custom OCIO contexts carry a target-qualified
+`CustomOcio` intent and resolve the named View only from that target's exact
+project binding. A missing,
 unsupported, or invalid engine-owned output mapping fails closed instead of
 falling back to a different View or partially populated strings. Explicit
 environment OCIO remains fail-closed

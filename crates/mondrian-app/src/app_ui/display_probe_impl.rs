@@ -420,7 +420,10 @@ fn resolve_ocio_display_view(
                 }
             }
             ColorEngine::Aces { .. } | ColorEngine::CustomOcio { .. } => {
-                match engine.default_display_view() {
+                if engine.ensure_loaded().is_err() {
+                    return unresolved_ocio_display_view(None);
+                }
+                match engine.output_display_view(output_color_space) {
                     Ok((display, view)) => (Some(display), Some(view), None),
                     Err(_) => unresolved_ocio_display_view(None),
                 }
@@ -559,9 +562,14 @@ mod tests {
                     "test-resolved-config".to_owned(),
                     "0".repeat(64),
                     "Linear Rec.2020".to_owned(),
-                    "Test Display".to_owned(),
-                    "Test View".to_owned(),
-                    mondrian_core::CustomOcioLookIdentity::None,
+                    vec![mondrian_core::CustomOcioOutputIdentity::from_pinned_parts(
+                        ColorSpace::Rec709,
+                        "Test Display".to_owned(),
+                        "Test View".to_owned(),
+                        "Test Display Color Space".to_owned(),
+                        mondrian_core::CustomOcioLookIdentity::None,
+                    )
+                    .expect("valid Custom OCIO output binding")],
                     Vec::new(),
                     Vec::new(),
                 )

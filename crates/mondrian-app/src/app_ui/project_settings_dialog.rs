@@ -4,7 +4,7 @@
 //! project color engine to `AppState`, where all inheriting sequences and the
 //! selected OCIO config are validated atomically.
 
-use mondrian_core::{ColorEngine, WorkingColorSpace};
+use mondrian_core::{ColorEngine, ColorSpace, WorkingColorSpace};
 use mondrian_platform::PlatformService;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
@@ -28,12 +28,18 @@ pub struct AppUiProjectSettingsDraft {
     pub engine: ColorEngine,
     /// Active sequence working space used when pinning a Custom config.
     pub working_space: WorkingColorSpace,
+    /// Active sequence output target bound while pinning a Custom config.
+    pub output_color_space: ColorSpace,
 }
 
 impl AppUiProjectSettingsDraft {
     /// Build a draft from current project and active-sequence state.
-    pub fn new(engine: ColorEngine, working_space: WorkingColorSpace) -> Self {
-        Self { engine, working_space }
+    pub fn new(
+        engine: ColorEngine,
+        working_space: WorkingColorSpace,
+        output_color_space: ColorSpace,
+    ) -> Self {
+        Self { engine, working_space, output_color_space }
     }
 
     /// Apply one shell-local update.
@@ -77,13 +83,27 @@ fn engine_detail(engine: &ColorEngine, working_space: WorkingColorSpace) -> Stri
             preset.builtin_name(),
             working_space_label(working_space)
         ),
-        ColorEngine::CustomOcio { identity } => format!(
-            "{}\nDisplay/View：{} / {}\n配置 SHA-256：{}",
-            identity.source(),
-            identity.display(),
-            identity.view(),
-            identity.config_sha256()
-        ),
+        ColorEngine::CustomOcio { identity } => {
+            let outputs = identity
+                .outputs()
+                .iter()
+                .map(|output| {
+                    format!(
+                        "{:?}：{} / {}",
+                        output.output_color_space(),
+                        output.display(),
+                        output.view()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("；");
+            format!(
+                "{}\n输出绑定：{}\n配置 SHA-256：{}",
+                identity.source(),
+                outputs,
+                identity.config_sha256()
+            )
+        }
     }
 }
 
@@ -183,7 +203,11 @@ impl ProjectSettingsDialog {
 
     /// Run native Custom OCIO selection and update only after complete pinning.
     pub fn choose_custom_ocio(&mut self, platform: &dyn PlatformService) {
-        match choose_custom_ocio_config(platform, self.draft.working_space) {
+        match choose_custom_ocio_config(
+            platform,
+            self.draft.working_space,
+            self.draft.output_color_space,
+        ) {
             Ok(Some(engine)) => {
                 self.apply_update(ProjectSettingsDraftUpdatePayload::ColorEngine(engine));
             }

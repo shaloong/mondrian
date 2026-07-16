@@ -27,12 +27,10 @@ pub enum OutputTransformIntent {
     },
     /// A direct working-space to encoded-output conversion without a view transform.
     Colorimetric,
-    /// A named display/view transform from the explicitly selected OCIO config.
-    OcioDisplayView {
-        /// OCIO display name.
-        display: String,
-        /// OCIO view name under the display.
-        view: String,
+    /// A target-qualified output binding from a fully pinned Custom OCIO identity.
+    CustomOcio {
+        /// Standardized output target whose display/view must exist in the engine identity.
+        output_color_space: ColorSpace,
     },
 }
 
@@ -66,7 +64,31 @@ impl OutputTransformIntent {
     ) -> Result<Option<(String, String)>, OutputTransformIntentResolutionError> {
         match self {
             Self::Colorimetric => Ok(None),
-            Self::OcioDisplayView { display, view } => Ok(Some((display.clone(), view.clone()))),
+            Self::CustomOcio { output_color_space: intent_output } => {
+                let ColorEngine::CustomOcio { identity } = engine else {
+                    return Err(OutputTransformIntentResolutionError::EngineMismatch {
+                        intent: format!("Custom OCIO output {intent_output:?}"),
+                        engine: engine.name().to_owned(),
+                    });
+                };
+                if intent_output != &output_color_space {
+                    return Err(
+                        OutputTransformIntentResolutionError::CustomOcioOutputMismatch {
+                            intent_output: *intent_output,
+                            requested_output: output_color_space,
+                        },
+                    );
+                }
+                identity
+                    .output(output_color_space)
+                    .map(|output| (output.display().to_owned(), output.view().to_owned()))
+                    .map(Some)
+                    .ok_or(
+                        OutputTransformIntentResolutionError::UnsupportedCustomOcioOutput {
+                            output_color_space,
+                        },
+                    )
+            }
             Self::Aces { preset } => {
                 let ColorEngine::Aces { preset: engine_preset } = engine else {
                     return Err(OutputTransformIntentResolutionError::EngineMismatch {
@@ -167,6 +189,22 @@ pub enum OutputTransformIntentResolutionError {
         /// Built-in config identifier pinned by the intent.
         preset: String,
         /// Requested encoded output target.
+        output_color_space: ColorSpace,
+    },
+    /// The runtime intent and output boundary request disagree on the Custom target.
+    #[error(
+        "Custom OCIO output intent targets {intent_output:?}, not requested {requested_output:?}"
+    )]
+    CustomOcioOutputMismatch {
+        /// Target stored in the typed output intent.
+        intent_output: ColorSpace,
+        /// Target requested by the render boundary.
+        requested_output: ColorSpace,
+    },
+    /// The pinned Custom identity does not provide a binding for this output target.
+    #[error("Custom OCIO project has no output binding for {output_color_space:?}")]
+    UnsupportedCustomOcioOutput {
+        /// Requested standardized encoded output target.
         output_color_space: ColorSpace,
     },
 }
@@ -669,6 +707,31 @@ mod tests {
         );
     }
 
+    fn pinned_custom_rec709_engine() -> ColorEngine {
+        ColorEngine::CustomOcio {
+            identity: Box::new(
+                crate::CustomOcioProjectIdentity::from_pinned_parts(
+                    crate::OcioConfigSource::Environment,
+                    "0".repeat(64),
+                    "test-config".to_owned(),
+                    "1".repeat(64),
+                    "Linear Rec.2020".to_owned(),
+                    vec![crate::CustomOcioOutputIdentity::from_pinned_parts(
+                        ColorSpace::Rec709,
+                        "Rec.709 Display".to_owned(),
+                        "Studio View".to_owned(),
+                        "Camera Rec.709".to_owned(),
+                        crate::CustomOcioLookIdentity::None,
+                    )
+                    .expect("valid Rec.709 output binding")],
+                    Vec::new(),
+                    Vec::new(),
+                )
+                .expect("valid Custom OCIO identity"),
+            ),
+        }
+    }
+
     #[test]
     fn hex_parses_short_and_long_forms() {
         assert_eq!(
@@ -858,6 +921,35 @@ mod tests {
         assert!(matches!(
             drift,
             OutputTransformIntentResolutionError::AcesPresetMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn custom_output_intent_resolves_only_its_pinned_target() {
+        let engine = pinned_custom_rec709_engine();
+        let intent = OutputTransformIntent::CustomOcio { output_color_space: ColorSpace::Rec709 };
+
+        assert_eq!(
+            intent
+                .resolve_display_view(ColorSpace::Rec709, &engine)
+                .expect("pinned Custom Rec.709 output")
+                .expect("display/view"),
+            ("Rec.709 Display".to_owned(), "Studio View".to_owned())
+        );
+        assert!(matches!(
+            intent
+                .resolve_display_view(ColorSpace::Rec2100Pq, &engine)
+                .expect_err("Custom output intent must remain target-qualified"),
+            OutputTransformIntentResolutionError::CustomOcioOutputMismatch { .. }
+        ));
+
+        let unsupported =
+            OutputTransformIntent::CustomOcio { output_color_space: ColorSpace::Rec2100Pq };
+        assert!(matches!(
+            unsupported
+                .resolve_display_view(ColorSpace::Rec2100Pq, &engine)
+                .expect_err("unbound Custom PQ output must fail closed"),
+            OutputTransformIntentResolutionError::UnsupportedCustomOcioOutput { .. }
         ));
     }
 

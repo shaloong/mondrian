@@ -1245,6 +1245,7 @@ impl AppUiAppRoot {
                     AppUiProjectSettingsDraft::new(
                         self.project_color_management.engine.clone(),
                         sequence.settings.working_color_space,
+                        sequence.settings.color_management.output_color_space,
                     ),
                 ));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
@@ -3041,8 +3042,12 @@ mod tests {
             identity.source(),
             &mondrian_core::OcioConfigSource::Path { path: config_path }
         );
-        assert_eq!(identity.display(), "sRGB - Display");
-        assert_eq!(identity.view(), "ACES 2.0 - SDR 100 nits (Rec.709)");
+        let output = identity
+            .output(mondrian_core::ColorSpace::Rec709)
+            .expect("Rec.709 output binding");
+        assert_eq!(output.display(), "Rec.1886 Rec.709 - Display");
+        assert_eq!(output.view(), "ACES 2.0 - SDR 100 nits (Rec.709)");
+        assert!(!output.display_color_space().is_empty());
         assert!(!identity.config_sha256().is_empty());
         assert!(!identity.processor_graph_sha256().is_empty());
         assert!(dialog.error_text().is_empty());
