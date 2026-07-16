@@ -269,13 +269,12 @@ must use the renderer-owned `execute_cpu_output_boundary_float(...)` helper,
 which applies the working -> output OCIO float transform without u8
 quantization. The caller flattens the float result into `[f32]` and uses
 `ExportFrameContract::pack_rgba_f32(...)` to produce `rgba64le` pipe bytes.
-Only when the float helper is unavailable or fails should the CPU fallback
-pack an RGBA8 boundary into that pipe contract; that path must remain
-diagnostically visible as a precision fallback (`CpuRgba8BoundaryPackedToFloatPipe`).
-Health reports must distinguish GPU output fallback from output precision
-fallback: the former explains why native GPU output did not execute, while the
-latter explains why a 10/12-bit delivery contract was supplied by bytes
-derived from an RGBA8 CPU output boundary.
+If both the GPU output path and renderer-owned CPU float helper fail, 10/12-bit
+export fails closed. It must never manufacture an `rgba64le` payload from an
+RGBA8 boundary. Export diagnostics record `FloatBoundaryUnavailable`, retain
+the independent GPU fallback reason, and emit the renderer error before the job
+can produce a misleading high-bit deliverable. Health report schema 3 names
+this evidence as an output-precision failure, not a fallback.
 Tone-mapped export delivery must also be explicit. If an export color context
 requests tone mapping but the final export output boundary does not carry an
 OCIO export view/display-view transform, the export health report must fail

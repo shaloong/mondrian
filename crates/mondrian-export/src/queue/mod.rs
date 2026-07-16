@@ -142,7 +142,7 @@ fn export_frame_contract(settings: &SequenceSettings) -> ExportFrameContract {
 /// In production this is a transparent pass-through to the renderer's
 /// `execute_cpu_output_boundary_float`. Test builds support failure injection
 /// via `FORCE_FLOAT_BOUNDARY_FAILURE` so integration tests can exercise the
-/// RGBA8 precision-fallback branch without mocking the color engine.
+/// high-precision fail-closed branch without mocking the color engine.
 fn cpu_output_boundary_float(
     frame: &CpuColorFrame,
     boundary: &RenderOutputColorBoundary,
@@ -166,7 +166,7 @@ fn cpu_output_boundary_float(
 #[cfg(test)]
 thread_local! {
     /// Test-only flag that forces `cpu_output_boundary_float` to return
-    /// `Err`, exercising the RGBA8 precision-fallback branch in real render code.
+    /// `Err`, exercising the high-precision fail-closed branch in real render code.
     static FORCE_FLOAT_BOUNDARY_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Test-only flag that forces export GPU output scheduling to fail before runtime access.
     static FORCE_GPU_BOUNDARY_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -459,10 +459,10 @@ pub struct ExportJobColorDiagnostics {
     pub gpu_output_cpu_fallbacks: u64,
     /// Structured GPU export fallback reasons.
     pub gpu_output_fallback_reasons: ExportGpuOutputFallbackBreakdown,
-    /// Final export output precision fallbacks observed while encoding.
-    pub output_precision_fallbacks: u64,
-    /// Structured final export output precision fallback reasons.
-    pub output_precision_fallback_reasons: ExportOutputPrecisionFallbackBreakdown,
+    /// High-precision export output boundary failures observed while encoding.
+    pub output_precision_failures: u64,
+    /// Structured high-precision export output boundary failure reasons.
+    pub output_precision_failure_reasons: ExportOutputPrecisionFailureBreakdown,
     /// Final export output transform semantic issues observed while encoding.
     pub output_transform_issues: u64,
     /// Structured final export output transform semantic issue reasons.
@@ -483,14 +483,11 @@ impl ExportJobColorDiagnostics {
             self.gpu_output_fallback_reasons.accumulate(fallback_reasons);
     }
 
-    /// Record one precision fallback at the final export output contract.
-    pub fn record_output_precision_fallback(
-        &mut self,
-        reason: ExportOutputPrecisionFallbackReason,
-    ) {
-        self.output_precision_fallbacks = self.output_precision_fallbacks.saturating_add(1);
-        self.output_precision_fallback_reasons =
-            self.output_precision_fallback_reasons.add_reason(reason);
+    /// Record one fail-closed high-precision export output boundary failure.
+    pub fn record_output_precision_failure(&mut self, reason: ExportOutputPrecisionFailureReason) {
+        self.output_precision_failures = self.output_precision_failures.saturating_add(1);
+        self.output_precision_failure_reasons =
+            self.output_precision_failure_reasons.add_reason(reason);
     }
 
     /// Record one semantic issue at the final export output transform.
@@ -579,41 +576,40 @@ impl ExportGpuOutputFallbackBreakdown {
     }
 }
 
-/// Structured reason for final export output precision fallback.
+/// Structured reason that a high-precision export output boundary failed closed.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ExportOutputPrecisionFallbackReason {
-    /// Integer delivery fell back to an RGBA8 CPU output boundary before float-pipe packing.
-    CpuRgba8BoundaryPackedToFloatPipe,
+pub enum ExportOutputPrecisionFailureReason {
+    /// GPU output failed and the renderer-owned CPU float boundary was unavailable.
+    FloatBoundaryUnavailable,
 }
 
-/// Structured final export output precision fallback counts.
+/// Structured high-precision export output boundary failure counts.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct ExportOutputPrecisionFallbackBreakdown {
-    /// Integer delivery used an RGBA8 CPU output boundary before `rgba64le` pipe packing.
-    pub cpu_rgba8_boundary_packed_to_float_pipe: u64,
+pub struct ExportOutputPrecisionFailureBreakdown {
+    /// GPU output failed and the renderer-owned CPU float boundary was unavailable.
+    pub float_boundary_unavailable: u64,
 }
 
-impl ExportOutputPrecisionFallbackBreakdown {
-    /// Return total fallback count across all recorded reasons.
+impl ExportOutputPrecisionFailureBreakdown {
+    /// Return total failure count across all recorded reasons.
     pub fn total(&self) -> u64 {
-        self.cpu_rgba8_boundary_packed_to_float_pipe
+        self.float_boundary_unavailable
     }
 
     /// Merge another breakdown in place.
     pub fn accumulate(self, other: Self) -> Self {
         Self {
-            cpu_rgba8_boundary_packed_to_float_pipe: self
-                .cpu_rgba8_boundary_packed_to_float_pipe
-                .saturating_add(other.cpu_rgba8_boundary_packed_to_float_pipe),
+            float_boundary_unavailable: self
+                .float_boundary_unavailable
+                .saturating_add(other.float_boundary_unavailable),
         }
     }
 
     /// Map one reason into a mut accumulator entry.
-    pub fn add_reason(mut self, reason: ExportOutputPrecisionFallbackReason) -> Self {
+    pub fn add_reason(mut self, reason: ExportOutputPrecisionFailureReason) -> Self {
         match reason {
-            ExportOutputPrecisionFallbackReason::CpuRgba8BoundaryPackedToFloatPipe => {
-                self.cpu_rgba8_boundary_packed_to_float_pipe =
-                    self.cpu_rgba8_boundary_packed_to_float_pipe.saturating_add(1)
+            ExportOutputPrecisionFailureReason::FloatBoundaryUnavailable => {
+                self.float_boundary_unavailable = self.float_boundary_unavailable.saturating_add(1)
             }
         }
         self
@@ -710,10 +706,10 @@ pub struct ExportJobColorDiagnosticsSummary {
     pub gpu_output_cpu_fallbacks: u64,
     /// Structured GPU output fallback reasons for export output boundary.
     pub gpu_output_fallback_reasons: ExportGpuOutputFallbackBreakdown,
-    /// Final export output precision fallbacks.
-    pub output_precision_fallbacks: u64,
-    /// Structured final export output precision fallback reasons.
-    pub output_precision_fallback_reasons: ExportOutputPrecisionFallbackBreakdown,
+    /// Fail-closed high-precision export output boundary failures.
+    pub output_precision_failures: u64,
+    /// Structured high-precision export output boundary failure reasons.
+    pub output_precision_failure_reasons: ExportOutputPrecisionFailureBreakdown,
     /// Final export output transform semantic issues.
     pub output_transform_issues: u64,
     /// Structured final export output transform semantic issue reasons.
@@ -737,7 +733,7 @@ pub struct ExportJobColorDiagnosticsSummary {
 }
 
 /// Schema version for export color health reports.
-pub const EXPORT_COLOR_HEALTH_REPORT_SCHEMA_VERSION: u32 = 2;
+pub const EXPORT_COLOR_HEALTH_REPORT_SCHEMA_VERSION: u32 = 3;
 
 /// Versioned export color health report for UI, telemetry, perf, and job artifacts.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -882,8 +878,8 @@ impl ExportJobColorDiagnosticsSummary {
         push_export_max_check(
             &mut checks,
             ExportColorHealthArea::CompositePath,
-            "export_output_precision_fallbacks",
-            self.output_precision_fallbacks,
+            "export_output_precision_failures",
+            self.output_precision_failures,
             0,
         );
         push_export_max_check(
@@ -1100,24 +1096,23 @@ fn push_export_root_causes_and_actions(
             "Trace export GPU output attempts and keep CPU fallback reasons explicit.",
         );
     }
-    if summary.output_precision_fallbacks > 0
-        || summary.output_precision_fallback_reasons.total() > 0
+    if summary.output_precision_failures > 0 || summary.output_precision_failure_reasons.total() > 0
     {
         push_export_root_cause_with_action(
             root_causes,
             actions,
             ExportColorHealthArea::CompositePath,
-            "export_output_precision_fallback",
+            "export_output_precision_failure",
             ExportColorHealthSeverity::Fail,
             format!(
-                "output_precision_fallbacks={} cpu_rgba8_boundary_packed_to_float_pipe={}",
-                summary.output_precision_fallbacks,
+                "output_precision_failures={} float_boundary_unavailable={}",
+                summary.output_precision_failures,
                 summary
-                    .output_precision_fallback_reasons
-                    .cpu_rgba8_boundary_packed_to_float_pipe
+                    .output_precision_failure_reasons
+                    .float_boundary_unavailable
             ),
-            "replace_export_cpu_rgba8_output_boundary",
-            "Replace the integer-delivery RGBA8 fallback with a renderer-owned float output boundary.",
+            "inspect_export_float_output_boundary",
+            "Inspect why both the GPU output path and renderer-owned CPU float output boundary failed.",
         );
     }
     if summary.output_transform_issues > 0 || summary.output_transform_issue_reasons.total() > 0 {
@@ -1243,8 +1238,8 @@ impl ExportJobColorDiagnostics {
             && counts.total() == 0
             && stages.total_stages == 0
             && composite.composite_plans() == 0
-            && self.output_precision_fallbacks == 0
-            && self.output_precision_fallback_reasons.total() == 0
+            && self.output_precision_failures == 0
+            && self.output_precision_failure_reasons.total() == 0
             && self.output_transform_issues == 0
             && self.output_transform_issue_reasons.total() == 0
         {
@@ -1268,8 +1263,8 @@ impl ExportJobColorDiagnostics {
             gpu_output_attempts: self.gpu_output_attempts,
             gpu_output_cpu_fallbacks: self.gpu_output_cpu_fallbacks,
             gpu_output_fallback_reasons: self.gpu_output_fallback_reasons,
-            output_precision_fallbacks: self.output_precision_fallbacks,
-            output_precision_fallback_reasons: self.output_precision_fallback_reasons,
+            output_precision_failures: self.output_precision_failures,
+            output_precision_failure_reasons: self.output_precision_failure_reasons,
             output_transform_issues: self.output_transform_issues,
             output_transform_issue_reasons: self.output_transform_issue_reasons,
             float_linear_composites: composite.float_linear_composites,
@@ -1281,15 +1276,15 @@ impl ExportJobColorDiagnostics {
             fully_float_linear: composite.is_fully_float_linear(),
             gpu_path_ready: {
                 if self.gpu_output_attempts == 0 && self.gpu_output_cpu_fallbacks == 0 {
-                    self.output_precision_fallbacks == 0
-                        && self.output_precision_fallback_reasons.total() == 0
+                    self.output_precision_failures == 0
+                        && self.output_precision_failure_reasons.total() == 0
                         && self.output_transform_issues == 0
                         && self.output_transform_issue_reasons.total() == 0
                 } else {
                     self.gpu_output_cpu_fallbacks == 0
                         && self.gpu_output_fallback_reasons.total() == 0
-                        && self.output_precision_fallbacks == 0
-                        && self.output_precision_fallback_reasons.total() == 0
+                        && self.output_precision_failures == 0
+                        && self.output_precision_failure_reasons.total() == 0
                         && self.output_transform_issues == 0
                         && self.output_transform_issue_reasons.total() == 0
                         && stages.gpu_blockers == 0
@@ -2786,18 +2781,20 @@ fn render_sequence_frame_into(
                             .collect();
                         frame_contract.pack_rgba_f32(&flat)
                     }
-                    Err(_float_err) => {
-                        let encoded = execute_cpu_output_boundary_rgba8(&rendered.frame, &boundary)
-                            .map_err(|err| format!("final color transform failed: {err}"))?;
-                        if let Some(diagnostics) = stage_diagnostics {
-                            diagnostics.accumulate(encoded.stage_diagnostics);
-                        }
+                    Err(float_err) => {
                         if let Some(diagnostics) = export_diagnostics.as_deref_mut() {
-                            diagnostics.record_output_precision_fallback(
-                                ExportOutputPrecisionFallbackReason::CpuRgba8BoundaryPackedToFloatPipe,
+                            diagnostics.record_export_output_boundary(
+                                gpu_output_attempts,
+                                gpu_output_cpu_fallbacks,
+                                gpu_output_fallback_reasons,
+                            );
+                            diagnostics.record_output_precision_failure(
+                                ExportOutputPrecisionFailureReason::FloatBoundaryUnavailable,
                             );
                         }
-                        frame_contract.pack_rgba8(&encoded.rgba)
+                        return Err(format!(
+                            "high-precision export output boundary failed closed; refusing RGBA8 downgrade: {float_err}"
+                        ));
                     }
                 }
             } else {
@@ -3715,28 +3712,25 @@ mod tests {
         }));
     }
 
-    /// Exercise the real CPU fallback render branch with float-path failure
+    /// Exercise the real high-bit CPU render branch with float-path failure
     /// injection.
     ///
     /// This test sets `FORCE_FLOAT_BOUNDARY_FAILURE` so that the renderer's
     /// `execute_cpu_output_boundary_float` returns `Err` immediately. The
-    /// export pipeline then falls back to the RGBA8 output boundary and packs
-    /// into the `rgba64le` pipe contract. We verify:
+    /// export pipeline must refuse to manufacture an `rgba64le` payload from
+    /// an RGBA8 boundary. We verify:
     ///
-    /// 1. The canvas is the correct high-bit `rgba64le` size.
-    /// 2. `output_precision_fallback` is recorded (the fallback happened).
-    /// 3. The health report verdict is `Fail` with the expected root cause.
+    /// 1. Rendering returns an explicit fail-closed error.
+    /// 2. The GPU failure remains diagnosed independently.
+    /// 3. No RGBA8 precision fallback is accepted as successful output.
     ///
-    /// **Scope note:** both the float and RGBA8 paths share the same
-    /// `ColorEngine` (OCIO config). We cannot make the float path fail
-    /// independently of the RGBA8 path through config alone. The test hook
-    /// `cpu_output_boundary_float` bypasses the engine at the
-    /// wrapper level, allowing the RGBA8 path to still succeed while the
-    /// float path is force-failed. This is the sanctioned injection point
-    /// for long-term fallback-path testing.
+    /// **Scope note:** the test hook fails `cpu_output_boundary_float` at its
+    /// wrapper boundary without corrupting the shared `ColorEngine` or OCIO
+    /// config. This is the sanctioned injection point for long-term
+    /// fail-closed-path testing.
     #[test]
-    fn precision_fallback_path_still_records_fallback_when_float_helper_unavailable() {
-        let mut seq = Sequence::new("precision-fallback-injected");
+    fn high_bit_export_fails_closed_when_float_helper_is_unavailable() {
+        let mut seq = Sequence::new("precision-failure-injected");
         seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
         let tb = seq.time_base();
         seq.video_tracks[0]
@@ -3766,7 +3760,7 @@ mod tests {
 
         let _gpu_guard = GpuBoundaryFailureGuard::activate();
         let _guard = FloatBoundaryFailureGuard::activate();
-        render_timeline_frame_into(
+        let error = render_timeline_frame_into(
             &timeline,
             0,
             2,
@@ -3777,40 +3771,37 @@ mod tests {
             None,
             Some(&mut export_diagnostics),
         )
-        .expect("render should succeed via RGBA8 fallback");
+        .expect_err("10-bit export must reject RGBA8 precision downgrade");
 
-        // Canvas is high-bit rgba64le
-        assert_eq!(canvas.len(), 2 * 2 * 8);
-
-        // The precision fallback was recorded through real render code
+        assert!(error.contains("high-precision export output boundary failed closed"));
+        assert!(error.contains("refusing RGBA8 downgrade"));
+        assert_eq!(export_diagnostics.gpu_output_cpu_fallbacks, 1);
+        assert_eq!(export_diagnostics.output_precision_failures, 1);
         assert_eq!(
-            export_diagnostics.output_precision_fallbacks, 1,
-            "real render fallback path must record output_precision_fallback"
-        );
-        assert_eq!(
-            export_diagnostics
-                .output_precision_fallback_reasons
-                .cpu_rgba8_boundary_packed_to_float_pipe,
+            export_diagnostics.output_precision_failure_reasons.float_boundary_unavailable,
             1
         );
 
-        // Health report reflects the fallback
         let report = export_diagnostics
-            .health_report("precision-fallback-real-path")
-            .expect("health report");
+            .health_report("precision-failure-real-path")
+            .expect("precision failure health report");
+        assert_eq!(
+            report.schema_version,
+            EXPORT_COLOR_HEALTH_REPORT_SCHEMA_VERSION
+        );
         assert_eq!(report.verdict, ExportColorHealthVerdict::Fail);
         assert!(report.checks.iter().any(|check| {
-            check.code == "export_output_precision_fallbacks"
+            check.code == "export_output_precision_failures"
                 && check.severity == ExportColorHealthSeverity::Fail
         }));
         assert!(report
             .root_causes
             .iter()
-            .any(|root| root.code == "export_output_precision_fallback"));
+            .any(|root| root.code == "export_output_precision_failure"));
         assert!(report
             .actions
             .iter()
-            .any(|action| action.code == "replace_export_cpu_rgba8_output_boundary"));
+            .any(|action| action.code == "inspect_export_float_output_boundary"));
     }
 
     #[test]
@@ -5059,7 +5050,7 @@ mod tests {
     }
 
     #[test]
-    fn ten_bit_cpu_fallback_does_not_record_precision_fallback() {
+    fn ten_bit_cpu_float_fallback_does_not_record_precision_failure() {
         let mut seq = Sequence::new("high-bit-float-fallback");
         seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
         let tb = seq.time_base();
@@ -5102,13 +5093,13 @@ mod tests {
 
         assert_eq!(canvas.len(), 2 * 2 * 8);
         assert_eq!(
-            export_diagnostics.output_precision_fallbacks, 0,
-            "high-bit float path should not record precision fallback"
+            export_diagnostics.output_precision_failures, 0,
+            "high-bit float path should not record precision failure"
         );
         assert_eq!(
-            export_diagnostics.output_precision_fallback_reasons.total(),
+            export_diagnostics.output_precision_failure_reasons.total(),
             0,
-            "high-bit float path should have zero precision fallback reasons"
+            "high-bit float path should have zero precision failure reasons"
         );
     }
 

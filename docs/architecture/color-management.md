@@ -753,7 +753,9 @@ require 12-bit. A 10/12-bit delivery uses the internal `Rgba16Float` export fram
 contract and `rgba64le` FFmpeg pipe so the renderer output transform is not
 quantized to 8-bit before encoding. That internal transport does not represent
 a 16-bit-float deliverable; no such user-facing option exists until a real
-float image/video backend is implemented.
+float image/video backend is implemented. If GPU output and the renderer-owned
+CPU float boundary both fail, export stops with structured precision-failure
+diagnostics; an RGBA8 boundary is never expanded into a nominally high-bit pipe.
 
 Derived proxy media follows the same encoding contract. The app resolves one
 `ProxyColorContract` from asset interpretation plus ingest metadata before
