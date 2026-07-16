@@ -47,7 +47,7 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                 ),
                 MenuItem::submenu("导出", vec![MenuItem::inert("导出设置...")]),
                 MenuItem::separator(),
-                MenuItem::inert("项目设置..."),
+                command_menu_item("file.project_settings"),
                 MenuItem::separator(),
                 command_menu_item("file.close_project"),
             ],
@@ -835,11 +835,8 @@ mod tests {
     fn placeholder_menu_rows_are_inert_instead_of_noop_actions() {
         let menu_items = default_menu_items();
 
-        for (menu_label, item_label) in [
-            ("文件", "文件夹..."),
-            ("文件", "导出设置..."),
-            ("文件", "项目设置..."),
-        ] {
+        for (menu_label, item_label) in [("文件", "文件夹..."), ("文件", "导出设置...")]
+        {
             let item = menu_item_deep(&menu_items, menu_label, item_label);
             assert!(
                 !item.enabled,
@@ -854,6 +851,19 @@ mod tests {
                 "{menu_label}/{item_label} should not carry a hidden command"
             );
         }
+    }
+
+    #[test]
+    fn project_settings_menu_row_dispatches_the_registered_command() {
+        let menu_items = default_menu_items();
+        let item = menu_item(&menu_items, "文件", "项目设置...");
+
+        assert_eq!(
+            item.action(),
+            Some(&crate::app::ui_actions::app_shell_project_settings_action())
+        );
+        assert!(item.enabled);
+        assert!(item.has_command());
     }
 
     #[test]

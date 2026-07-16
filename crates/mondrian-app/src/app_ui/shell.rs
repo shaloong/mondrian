@@ -24,26 +24,30 @@ use std::path::Path;
 use crate::app::ui_actions::{
     assets_import_files_action, assets_relink_asset_action, assets_set_interpretation_action,
     export_set_draft_action, project_create_with_settings_action,
-    project_recover_from_autosave_action, sequence_update_settings_action,
-    AppShellCopySystemInfoPayload, AppShellInterpretAssetDialogPayload,
-    AppShellOpenRecentProjectPayload, AppShellRelinkAssetDialogPayload,
-    AppShellRelocatePanelPayload, AppShellRevealInFileManagerPayload, AssetsImportFilesPayload,
-    AssetsRelinkAssetPayload, DockDropAreaPayload, ExportDraftUpdatePayload,
-    ExportOutputDialogPayload, ImportMediaDialogPayload, InterpretAssetDraftUpdatePayload,
-    NewProjectDraftUpdatePayload, PreferencesTabPayload, ProjectRecoverFromAutosavePayload,
-    SequenceSettingsDraftUpdatePayload, SequenceSettingsTabPayload, ViewerSetZoomScalePayload,
-    APP_SHELL_ABOUT, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
+    project_recover_from_autosave_action, project_set_color_engine_action,
+    sequence_update_settings_action, AppShellCopySystemInfoPayload,
+    AppShellInterpretAssetDialogPayload, AppShellOpenRecentProjectPayload,
+    AppShellRelinkAssetDialogPayload, AppShellRelocatePanelPayload,
+    AppShellRevealInFileManagerPayload, AssetsImportFilesPayload, AssetsRelinkAssetPayload,
+    DockDropAreaPayload, ExportDraftUpdatePayload, ExportOutputDialogPayload,
+    ImportMediaDialogPayload, InterpretAssetDraftUpdatePayload, NewProjectDraftUpdatePayload,
+    PreferencesTabPayload, ProjectRecoverFromAutosavePayload, ProjectSetColorEnginePayload,
+    ProjectSettingsDraftUpdatePayload, SequenceSettingsDraftUpdatePayload,
+    SequenceSettingsTabPayload, ViewerSetZoomScalePayload, APP_SHELL_ABOUT,
+    APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
     APP_SHELL_CONFIRM_INTERPRET_ASSET_DIALOG, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG,
-    APP_SHELL_CONFIRM_SEQUENCE_SETTINGS, APP_SHELL_COPY_SYSTEM_INFO,
-    APP_SHELL_EXPORT_OUTPUT_DIALOG, APP_SHELL_IMPORT_MEDIA_DIALOG,
+    APP_SHELL_CONFIRM_PROJECT_SETTINGS, APP_SHELL_CONFIRM_SEQUENCE_SETTINGS,
+    APP_SHELL_COPY_SYSTEM_INFO, APP_SHELL_EXPORT_OUTPUT_DIALOG, APP_SHELL_IMPORT_MEDIA_DIALOG,
     APP_SHELL_INTERPRET_ASSET_DIALOG, APP_SHELL_INTERPRET_ASSET_DRAFT_CHANGED, APP_SHELL_NAMESPACE,
     APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
     APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES,
-    APP_SHELL_PREFERENCES_TAB_CHANGED, APP_SHELL_RECOVER_PROJECT, APP_SHELL_RELINK_ASSET_DIALOG,
-    APP_SHELL_RELOCATE_PANEL, APP_SHELL_REVEAL_IN_FILE_MANAGER, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
-    APP_SHELL_SELECT_CUSTOM_OCIO_CONFIG, APP_SHELL_SEQUENCE_SETTINGS,
-    APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED, APP_SHELL_SEQUENCE_SETTINGS_TAB_CHANGED,
-    VIEWER_CYCLE_ZOOM, VIEWER_NAMESPACE, VIEWER_SET_ZOOM_SCALE,
+    APP_SHELL_PREFERENCES_TAB_CHANGED, APP_SHELL_PROJECT_SETTINGS,
+    APP_SHELL_PROJECT_SETTINGS_DRAFT_CHANGED, APP_SHELL_RECOVER_PROJECT,
+    APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_RELOCATE_PANEL, APP_SHELL_REVEAL_IN_FILE_MANAGER,
+    APP_SHELL_SAVE_PROJECT_AS_DIALOG, APP_SHELL_SELECT_CUSTOM_OCIO_CONFIG,
+    APP_SHELL_SEQUENCE_SETTINGS, APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED,
+    APP_SHELL_SEQUENCE_SETTINGS_TAB_CHANGED, VIEWER_CYCLE_ZOOM, VIEWER_NAMESPACE,
+    VIEWER_SET_ZOOM_SCALE,
 };
 use crate::app::AppState;
 use crate::app_ui::interpret_asset_dialog::AppUiInterpretAssetDraft;
@@ -57,10 +61,11 @@ use crate::app_ui::panels::{
 use crate::app_ui::pending_close_dialog::PendingCloseDialogAction;
 use crate::app_ui::preferences_dialog::{AppUiPreferencesModel, PreferencesDialogTab};
 use crate::app_ui::preferences_store::AppUiPreferences;
+use crate::app_ui::project_settings_dialog::AppUiProjectSettingsDraft;
 use crate::app_ui::sequence_settings_dialog::AppUiSequenceSettingsDraft;
 use crate::app_ui::title_bar::{TitleBar, TITLE_BAR_HEIGHT};
 use crate::app_ui::workspace_layout::{AppUiWorkspaceLayout, DockDropArea};
-use mondrian_core::{MondrianError, Result};
+use mondrian_core::{MondrianError, ProjectColorManagement, Result};
 
 /// Default file extension for Mondrian project containers.
 pub const PROJECT_FILE_EXTENSION: &str = "mdp";
@@ -559,6 +564,7 @@ pub struct AppUiAppRoot {
     custom_workspace_layout: Option<AppUiWorkspaceLayout>,
     viewer_zoom_mode: ViewerZoomMode,
     active_sequence: Option<Sequence>,
+    project_color_management: ProjectColorManagement,
     modal: Option<ShellModal>,
     bounds: Rect,
 }
@@ -629,6 +635,7 @@ impl AppUiAppRoot {
             status_bar_model(state),
         );
         root.active_sequence = state.sequence.clone();
+        root.project_color_management = state.project_settings.color_management.clone();
         root
     }
 
@@ -698,6 +705,7 @@ impl AppUiAppRoot {
             custom_workspace_layout,
             viewer_zoom_mode,
             active_sequence: None,
+            project_color_management: ProjectColorManagement::default(),
             modal: None,
             bounds: Rect::ZERO,
         };
@@ -925,6 +933,7 @@ impl AppUiAppRoot {
         );
         self.status_bar.set_model(status_bar_model(state));
         self.active_sequence = state.sequence.clone();
+        self.project_color_management = state.project_settings.color_management.clone();
         let mut models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
             state,
             self.asset_folder_id.as_deref(),
@@ -1187,6 +1196,10 @@ impl AppUiAppRoot {
             {
                 if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_new_project_mut) {
                     dialog.choose_custom_ocio(platform);
+                } else if let Some(dialog) =
+                    self.modal.as_mut().and_then(ShellModal::as_project_settings_mut)
+                {
+                    dialog.choose_custom_ocio(platform);
                 }
                 Ok(None)
             }
@@ -1220,6 +1233,53 @@ impl AppUiAppRoot {
                 self.modal = None;
                 Ok(Some(project_create_with_settings_action(
                     draft.into_payload(path),
+                )))
+            }
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PROJECT_SETTINGS =>
+            {
+                let Some(sequence) = self.active_sequence.as_ref() else {
+                    return Ok(None);
+                };
+                self.modal = Some(ShellModal::project_settings(
+                    AppUiProjectSettingsDraft::new(
+                        self.project_color_management.engine.clone(),
+                        sequence.settings.working_color_space,
+                    ),
+                ));
+                if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
+                    self.layout(self.bounds);
+                }
+                Ok(None)
+            }
+            Action::Custom { namespace, name, payload }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == APP_SHELL_PROJECT_SETTINGS_DRAFT_CHANGED =>
+            {
+                let update: ProjectSettingsDraftUpdatePayload = serde_json::from_value(payload)
+                    .map_err(|err| app_shell_action_error(&name, err))?;
+                if let Some(dialog) =
+                    self.modal.as_mut().and_then(ShellModal::as_project_settings_mut)
+                {
+                    dialog.apply_update(update);
+                }
+                Ok(None)
+            }
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == APP_SHELL_CONFIRM_PROJECT_SETTINGS =>
+            {
+                let Some(engine) = self
+                    .modal
+                    .as_ref()
+                    .and_then(ShellModal::as_project_settings)
+                    .map(|dialog| dialog.draft().engine.clone())
+                else {
+                    return Ok(None);
+                };
+                self.modal = None;
+                Ok(Some(project_set_color_engine_action(
+                    ProjectSetColorEnginePayload { engine },
                 )))
             }
             Action::Custom { namespace, name, .. }
@@ -1877,17 +1937,18 @@ mod tests {
     use crate::app::ui_actions::{
         app_shell_about_action, app_shell_cancel_new_project_dialog_action,
         app_shell_close_modal_action, app_shell_confirm_interpret_asset_dialog_action,
-        app_shell_confirm_new_project_dialog_action, app_shell_confirm_sequence_settings_action,
-        app_shell_export_output_dialog_action, app_shell_import_media_dialog_action,
-        app_shell_import_media_dialog_action_with_target, app_shell_interpret_asset_dialog_action,
-        app_shell_interpret_asset_draft_changed_action, app_shell_new_project_dialog_action,
-        app_shell_new_project_draft_changed_action, app_shell_open_project_dialog_action,
-        app_shell_open_recent_project_action, app_shell_preferences_action,
-        app_shell_preferences_tab_changed_action, app_shell_recover_project_action,
-        app_shell_relink_asset_dialog_action, app_shell_relocate_panel_action,
-        app_shell_reveal_in_file_manager_action, app_shell_save_project_as_dialog_action,
-        app_shell_select_custom_ocio_config_action, app_shell_sequence_settings_action,
-        app_shell_sequence_settings_draft_changed_action,
+        app_shell_confirm_new_project_dialog_action, app_shell_confirm_project_settings_action,
+        app_shell_confirm_sequence_settings_action, app_shell_export_output_dialog_action,
+        app_shell_import_media_dialog_action, app_shell_import_media_dialog_action_with_target,
+        app_shell_interpret_asset_dialog_action, app_shell_interpret_asset_draft_changed_action,
+        app_shell_new_project_dialog_action, app_shell_new_project_draft_changed_action,
+        app_shell_open_project_dialog_action, app_shell_open_recent_project_action,
+        app_shell_preferences_action, app_shell_preferences_tab_changed_action,
+        app_shell_project_settings_action, app_shell_project_settings_draft_changed_action,
+        app_shell_recover_project_action, app_shell_relink_asset_dialog_action,
+        app_shell_relocate_panel_action, app_shell_reveal_in_file_manager_action,
+        app_shell_save_project_as_dialog_action, app_shell_select_custom_ocio_config_action,
+        app_shell_sequence_settings_action, app_shell_sequence_settings_draft_changed_action,
         app_shell_sequence_settings_tab_changed_action, viewer_cycle_zoom_action,
         viewer_set_zoom_scale_action, AppShellInterpretAssetDialogPayload,
         AppShellOpenRecentProjectPayload, AppShellRelinkAssetDialogPayload,
@@ -1896,11 +1957,13 @@ mod tests {
         ExportDraftUpdatePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
         InterpretAssetDraftUpdatePayload, NewProjectDraftUpdatePayload, PreferencesTabPayload,
         ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
+        ProjectSetColorEnginePayload, ProjectSettingsDraftUpdatePayload,
         SequenceSettingsDraftUpdatePayload, SequenceSettingsTabPayload,
         SequenceUpdateSettingsPayload, ViewerSetZoomScalePayload, ASSETS_IMPORT_FILES,
         ASSETS_NAMESPACE, ASSETS_RELINK_ASSET, ASSETS_SET_INTERPRETATION, EXPORT_NAMESPACE,
         EXPORT_SET_DRAFT, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
-        PROJECT_RECOVER_FROM_AUTOSAVE, SEQUENCE_NAMESPACE, SEQUENCE_UPDATE_SETTINGS,
+        PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_SET_COLOR_ENGINE, SEQUENCE_NAMESPACE,
+        SEQUENCE_UPDATE_SETTINGS,
     };
     use crate::app_ui::panels::ViewerPreviewState;
     use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
@@ -3010,6 +3073,75 @@ mod tests {
             mondrian_core::ColorEngine::mondrian_standard()
         );
         assert!(dialog.error_text().contains("not found"));
+    }
+
+    #[test]
+    fn app_root_project_settings_commits_complete_color_engine_action() {
+        let platform = FakePlatform::default();
+        let mut state = AppState::new();
+        state.sequence = Some(Sequence::new("Program"));
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        let engine = mondrian_core::ColorEngine::Aces {
+            preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+        };
+
+        root.handle_shell_action(app_shell_project_settings_action(), &platform, None);
+        assert!(root.modal.as_ref().and_then(ShellModal::as_project_settings).is_some());
+        root.handle_shell_action(
+            app_shell_project_settings_draft_changed_action(
+                ProjectSettingsDraftUpdatePayload::ColorEngine(engine.clone()),
+            ),
+            &platform,
+            None,
+        );
+        let action = root
+            .handle_shell_action(app_shell_confirm_project_settings_action(), &platform, None)
+            .expect("project color engine action");
+
+        let Action::Custom { namespace, name, payload } = action else {
+            panic!("expected project custom action");
+        };
+        assert_eq!(namespace, PROJECT_NAMESPACE);
+        assert_eq!(name, PROJECT_SET_COLOR_ENGINE);
+        let payload: ProjectSetColorEnginePayload =
+            serde_json::from_value(payload).expect("project color payload");
+        assert_eq!(payload.engine, engine);
+        assert!(root.modal.is_none());
+    }
+
+    #[test]
+    fn app_root_project_settings_pins_selected_custom_ocio() {
+        let config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../mondrian-core/assets/ocio/mondrian_default_ocio_v1.ocio");
+        let platform = FakePlatform {
+            open_paths: Some(vec![config_path]),
+            ..FakePlatform::default()
+        };
+        let mut state = AppState::new();
+        state.sequence = Some(Sequence::new("Program"));
+        let mut root = AppUiAppRoot::from_app_state(&state);
+
+        root.handle_shell_action(app_shell_project_settings_action(), &platform, None);
+        root.handle_shell_action(
+            app_shell_select_custom_ocio_config_action(),
+            &platform,
+            None,
+        );
+
+        let dialog = root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_project_settings)
+            .expect("project-settings dialog");
+        let identity = dialog
+            .draft()
+            .engine
+            .custom_ocio_identity()
+            .expect("pinned Custom OCIO identity");
+        assert_eq!(identity.working_space(), "Linear Rec.2020");
+        assert!(!identity.config_sha256().is_empty());
+        assert!(!identity.processor_graph_sha256().is_empty());
+        assert!(dialog.error_text().is_empty());
     }
 
     #[test]

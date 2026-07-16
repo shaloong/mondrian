@@ -12,12 +12,13 @@ use crate::app::ui_actions::{
     TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
     TimelineSetTrackControlPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
     TimelineTrimSelectedClipsToPlayheadPayload, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
-    APP_SHELL_SAVE_PROJECT_AS_DIALOG, APP_SHELL_SEQUENCE_SETTINGS, SEQUENCE_DELETE,
-    SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT,
-    SEQUENCE_SWITCH_ACTIVE, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_MOVE_CLIP,
-    TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK,
-    TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED,
-    TIMELINE_SET_TRACK_CONTROL, TIMELINE_TRIM_CLIPS, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
+    APP_SHELL_PROJECT_SETTINGS, APP_SHELL_SAVE_PROJECT_AS_DIALOG, APP_SHELL_SEQUENCE_SETTINGS,
+    SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_RETURN_TO_PARENT,
+    SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE, TIMELINE_ADD_TRACK,
+    TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
+    TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
+    TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
+    TIMELINE_TRIM_CLIPS, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
 };
 use crate::app::AppState;
 use mondrian_core::types::ClipId;
@@ -61,6 +62,11 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SEQUENCE_SETTINGS =>
         {
             state.sequence.is_some()
+        }
+        Action::Custom { namespace, name, .. }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PROJECT_SETTINGS =>
+        {
+            state.has_open_project()
         }
         Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SAVE_PROJECT_AS_DIALOG =>
@@ -437,9 +443,10 @@ mod tests {
         mondrian_core::TimelineTime::new(numerator, time_base.den).expect("valid test time")
     }
     use crate::app::ui_actions::{
-        timeline_add_track_action, timeline_clear_in_out_points_action, timeline_move_clip_action,
-        timeline_move_track_action, timeline_roll_selected_cut_to_playhead_action,
-        timeline_seek_action, timeline_select_clip_action, timeline_set_in_out_point_action,
+        app_shell_project_settings_action, timeline_add_track_action,
+        timeline_clear_in_out_points_action, timeline_move_clip_action, timeline_move_track_action,
+        timeline_roll_selected_cut_to_playhead_action, timeline_seek_action,
+        timeline_select_clip_action, timeline_set_in_out_point_action,
         timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
         timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
         TimelineAddTrackKind, TimelineAddTrackPayload, TimelineInOutPointPayloadKind,
@@ -465,6 +472,18 @@ mod tests {
         state.selection.selected_clips =
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
         state
+    }
+
+    #[test]
+    fn project_settings_requires_a_saved_open_project() {
+        let action = app_shell_project_settings_action();
+        let mut state = AppState::new();
+
+        assert!(!app_state_action_enabled(&action, &state));
+        state.sequence = Some(Sequence::new("Edit"));
+        assert!(!app_state_action_enabled(&action, &state));
+        state.current_project_path = Some(std::path::PathBuf::from("project.mdp"));
+        assert!(app_state_action_enabled(&action, &state));
     }
 
     #[test]

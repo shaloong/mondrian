@@ -13,7 +13,8 @@ use mondrian_ui_core::types::{KeyCode, Modifiers};
 use crate::app::ui_actions::{
     app_shell_about_action, app_shell_import_media_dialog_action,
     app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
-    app_shell_preferences_action, app_shell_quit_action, app_shell_save_project_as_dialog_action,
+    app_shell_preferences_action, app_shell_project_settings_action, app_shell_quit_action,
+    app_shell_save_project_as_dialog_action,
 };
 
 /// Stable command descriptor consumed by menus, shortcuts, and preferences.
@@ -102,6 +103,14 @@ pub fn default_commands() -> Vec<AppUiCommandDescriptor> {
             AppUiCommandCategory::File,
             Some(ShortcutBinding::ctrl_shift(KeyCode::S)),
             action_save_project_as,
+        ),
+        command(
+            "file.project_settings",
+            "项目设置",
+            "项目设置...",
+            AppUiCommandCategory::File,
+            None,
+            action_project_settings,
         ),
         command(
             "file.close_project",
@@ -424,6 +433,9 @@ fn action_save_project() -> Action {
 }
 fn action_save_project_as() -> Action {
     app_shell_save_project_as_dialog_action()
+}
+fn action_project_settings() -> Action {
+    app_shell_project_settings_action()
 }
 fn action_close_project() -> Action {
     Action::CloseProject

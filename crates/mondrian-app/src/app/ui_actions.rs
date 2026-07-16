@@ -184,7 +184,13 @@ pub const APP_SHELL_NAMESPACE: &str = "app.shell";
 pub const APP_SHELL_NEW_PROJECT_DIALOG: &str = "new_project_dialog";
 /// App-shell request to update one app UI new-project draft setting.
 pub const APP_SHELL_NEW_PROJECT_DRAFT_CHANGED: &str = "new_project_draft_changed";
-/// App-shell request to choose and validate a Custom OCIO config for a new project.
+/// App-shell request to open project-level color settings.
+pub const APP_SHELL_PROJECT_SETTINGS: &str = "project_settings";
+/// App-shell request to update the project-settings color draft.
+pub const APP_SHELL_PROJECT_SETTINGS_DRAFT_CHANGED: &str = "project_settings_draft_changed";
+/// App-shell request to commit project-level color settings.
+pub const APP_SHELL_CONFIRM_PROJECT_SETTINGS: &str = "confirm_project_settings";
+/// App-shell request to choose and validate a Custom OCIO project config.
 pub const APP_SHELL_SELECT_CUSTOM_OCIO_CONFIG: &str = "select_custom_ocio_config";
 /// App-shell request to confirm the app UI new-project dialog.
 pub const APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG: &str = "confirm_new_project_dialog";
@@ -977,6 +983,13 @@ pub enum NewProjectDraftUpdatePayload {
     PreviewCacheEnabled(bool),
 }
 
+/// One mutation to the shell-local project color-settings draft.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProjectSettingsDraftUpdatePayload {
+    /// Complete project color engine; Custom OCIO values are already pinned.
+    ColorEngine(ColorEngine),
+}
+
 /// One mutation to the shell-local sequence-settings draft.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SequenceSettingsDraftUpdatePayload {
@@ -1369,6 +1382,23 @@ pub fn app_shell_new_project_draft_changed_action(payload: NewProjectDraftUpdate
 /// Build an app-shell request for selecting a Custom OCIO config.
 pub fn app_shell_select_custom_ocio_config_action() -> Action {
     custom_app_shell_action(APP_SHELL_SELECT_CUSTOM_OCIO_CONFIG)
+}
+
+/// Build an app-shell request for project-level color settings.
+pub fn app_shell_project_settings_action() -> Action {
+    custom_app_shell_action(APP_SHELL_PROJECT_SETTINGS)
+}
+
+/// Build an app-shell request for changing the project-settings draft.
+pub fn app_shell_project_settings_draft_changed_action(
+    payload: ProjectSettingsDraftUpdatePayload,
+) -> Action {
+    custom_app_shell_action_with_payload(APP_SHELL_PROJECT_SETTINGS_DRAFT_CHANGED, payload)
+}
+
+/// Build an app-shell request for committing project-level color settings.
+pub fn app_shell_confirm_project_settings_action() -> Action {
+    custom_app_shell_action(APP_SHELL_CONFIRM_PROJECT_SETTINGS)
 }
 
 /// Build an app-shell request for confirming the new-project dialog.

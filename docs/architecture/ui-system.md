@@ -48,13 +48,15 @@ Dropdowns, context menus, popovers, and tooltips should render through overlay p
 Menus, shortcut preferences, command palette, and future plugins should consume `app_ui::commands` descriptors. Menus are command presentation, not business logic owners.
 
 The startup and editor shells share the same new-project dialog state machine.
-Its color-mode dropdown writes a complete `ProjectSettings.color_management.engine`
-for Mondrian Standard or a pinned ACES preset. Choosing Custom OpenColorIO emits
-a shell request for the native `.ocio` picker; the dialog then asks the core
-color boundary to validate and pin the config's working/display/view and digest
-identity. Invalid configs remain visible as dialog errors and never create a
-partial path-only project mode. The two shells only route the request and must
-not duplicate this state transition.
+New-project and project-settings workflows consume one app-UI color-engine
+catalog; neither dialog owns the product list of Mondrian Standard, pinned ACES
+presets, and Custom OpenColorIO. Their dropdowns produce workflow-local draft
+actions while the shared native-selection boundary validates a chosen `.ocio`
+file and pins its working/display/view and digest identity. Invalid configs
+remain visible as dialog errors and never create a partial path-only mode. The
+two shells only route requests and must not duplicate this state transition.
+Applying the project-settings modal emits one complete project-domain engine
+replacement action. The modal never mutates renderer or persistence state.
 
 Opening an editor dialog is a shell action because it mutates transient UI state,
 not the undoable domain model. The dialog's committed payload must flow through a

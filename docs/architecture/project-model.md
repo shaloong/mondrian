@@ -43,6 +43,10 @@ candidate `ProjectColorManagement`, then loads the exact OCIO config, replaces
 the engine, stops playback, refreshes preview access identity, and saves. A
 validation/load/save failure leaves or restores the previous project engine;
 the UI never mutates renderer state directly.
+The editor exposes this action through File -> Project Settings. Its transient
+draft starts from the persisted project engine and uses the active sequence's
+working space only to build a reproducible Custom OCIO identity; `AppState`
+still validates every inheriting sequence before accepting that identity.
 
 ## Runtime State
 

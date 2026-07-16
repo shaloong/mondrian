@@ -6,11 +6,8 @@
 
 use std::path::Path;
 
-use mondrian_core::{
-    AcesConfigPreset, ColorEngine, OcioConfigSource, ProjectSettings, Rational, Resolution,
-    WorkingColorSpace,
-};
-use mondrian_platform::{FileFilter, PlatformService};
+use mondrian_core::{ProjectSettings, Rational, Resolution};
+use mondrian_platform::PlatformService;
 use mondrian_timeline::SequenceSettings;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
@@ -21,8 +18,11 @@ use mondrian_ui_widgets::{Button, Checkbox, DialogSurface, Label, TextInput};
 
 use crate::app::ui_actions::{
     app_shell_cancel_new_project_dialog_action, app_shell_confirm_new_project_dialog_action,
-    app_shell_new_project_draft_changed_action, app_shell_select_custom_ocio_config_action,
-    NewProjectDraftUpdatePayload, ProjectCreateWithSettingsPayload,
+    app_shell_new_project_draft_changed_action, NewProjectDraftUpdatePayload,
+    ProjectCreateWithSettingsPayload,
+};
+use crate::app_ui::color_management_controls::{
+    choose_custom_ocio_config, color_engine_label, color_engine_menu_items,
 };
 use crate::app_ui::icons::AppIcon;
 use crate::app_ui::shell::PROJECT_FILE_EXTENSION;
@@ -135,26 +135,6 @@ pub fn default_project_file_name(name: &str) -> String {
     } else {
         format!("{stem}.{PROJECT_FILE_EXTENSION}")
     }
-}
-
-/// Choose and fully pin a Custom OCIO config for a new-project draft.
-///
-/// Canceling returns `Ok(None)`. Invalid or incompatible configs fail before
-/// any partial Custom mode can enter the draft.
-fn choose_custom_ocio_for_new_project(
-    platform: &dyn PlatformService,
-    working_space: WorkingColorSpace,
-) -> Result<Option<ColorEngine>, String> {
-    let Some(path) = platform
-        .open_file_dialog(
-            "选择 OpenColorIO 配置",
-            &[FileFilter::new("OpenColorIO 配置", vec!["ocio"])],
-        )
-        .and_then(|paths| paths.into_iter().next())
-    else {
-        return Ok(None);
-    };
-    ColorEngine::custom_ocio_default(OcioConfigSource::Path { path }, working_space).map(Some)
 }
 
 const RESOLUTION_PRESETS: [(&str, Resolution); 4] = [
@@ -272,41 +252,14 @@ fn audio_sample_rate_dropdown_for(draft: &AppUiNewProjectDraft) -> Dropdown {
     .with_max_visible_items(3)
 }
 
-fn color_engine_label(engine: &ColorEngine) -> &'static str {
-    match engine {
-        ColorEngine::MondrianStandard { .. } => "Mondrian Standard",
-        ColorEngine::Aces { preset: AcesConfigPreset::StudioV4Aces2Ocio25 } => "ACES 2.0 Studio",
-        ColorEngine::Aces { preset: AcesConfigPreset::CgV4Aces2Ocio25 } => "ACES 2.0 CG",
-        ColorEngine::CustomOcio { .. } => "自定义 OpenColorIO",
-    }
-}
-
 fn color_engine_dropdown_for(draft: &AppUiNewProjectDraft) -> Dropdown {
-    let color_engine_action = |label, engine| {
-        MenuItem::new(
-            label,
-            app_shell_new_project_draft_changed_action(NewProjectDraftUpdatePayload::ColorEngine(
-                engine,
-            )),
-        )
-    };
     Dropdown::new(
         color_engine_label(&draft.project_settings.color_management.engine),
-        vec![
-            color_engine_action("Mondrian Standard", ColorEngine::mondrian_standard()),
-            color_engine_action(
-                "ACES 2.0 Studio",
-                ColorEngine::Aces { preset: AcesConfigPreset::StudioV4Aces2Ocio25 },
-            ),
-            color_engine_action(
-                "ACES 2.0 CG",
-                ColorEngine::Aces { preset: AcesConfigPreset::CgV4Aces2Ocio25 },
-            ),
-            MenuItem::new(
-                "选择自定义 OpenColorIO…",
-                app_shell_select_custom_ocio_config_action(),
-            ),
-        ],
+        color_engine_menu_items(|engine| {
+            app_shell_new_project_draft_changed_action(NewProjectDraftUpdatePayload::ColorEngine(
+                engine,
+            ))
+        }),
     )
     .with_max_visible_items(4)
 }
@@ -483,10 +436,8 @@ impl NewProjectDialog {
     /// Run the native Custom OCIO selection flow and update the draft only
     /// after a complete reproducible engine identity has been pinned.
     pub fn choose_custom_ocio(&mut self, platform: &dyn PlatformService) {
-        match choose_custom_ocio_for_new_project(
-            platform,
-            self.draft.sequence_settings.working_color_space,
-        ) {
+        match choose_custom_ocio_config(platform, self.draft.sequence_settings.working_color_space)
+        {
             Ok(Some(engine)) => {
                 self.apply_update(NewProjectDraftUpdatePayload::ColorEngine(engine));
             }

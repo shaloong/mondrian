@@ -15,6 +15,7 @@ use crate::app_ui::pending_close_dialog::{PendingCloseDialog, PendingCloseDialog
 use crate::app_ui::preferences_dialog::{
     AppUiPreferencesModel, PreferencesDialog, PreferencesDialogTab,
 };
+use crate::app_ui::project_settings_dialog::{AppUiProjectSettingsDraft, ProjectSettingsDialog};
 use crate::app_ui::sequence_settings_dialog::{AppUiSequenceSettingsDraft, SequenceSettingsDialog};
 
 /// Shell-local modal dialog.
@@ -24,6 +25,7 @@ pub enum ShellModal {
     NewProject(Box<NewProjectDialog>),
     PendingClose(Box<PendingCloseDialog>),
     Preferences(Box<PreferencesDialog>),
+    ProjectSettings(Box<ProjectSettingsDialog>),
     SequenceSettings(Box<SequenceSettingsDialog>),
 }
 
@@ -56,6 +58,11 @@ impl ShellModal {
     /// Build the product preferences modal with one selected section.
     pub fn preferences_with_tab(model: AppUiPreferencesModel, tab: PreferencesDialogTab) -> Self {
         Self::Preferences(Box::new(PreferencesDialog::with_model_and_tab(model, tab)))
+    }
+
+    /// Build the project-level color-settings modal.
+    pub fn project_settings(draft: AppUiProjectSettingsDraft) -> Self {
+        Self::ProjectSettings(Box::new(ProjectSettingsDialog::new(draft)))
     }
 
     /// Build the active-sequence settings modal.
@@ -127,6 +134,22 @@ impl ShellModal {
         }
     }
 
+    /// Access the project-settings modal when it is active.
+    pub fn as_project_settings(&self) -> Option<&ProjectSettingsDialog> {
+        match self {
+            Self::ProjectSettings(dialog) => Some(dialog.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// Mutably access the project-settings modal when it is active.
+    pub fn as_project_settings_mut(&mut self) -> Option<&mut ProjectSettingsDialog> {
+        match self {
+            Self::ProjectSettings(dialog) => Some(dialog.as_mut()),
+            _ => None,
+        }
+    }
+
     /// Access the sequence-settings modal when it is active.
     pub fn as_sequence_settings(&self) -> Option<&SequenceSettingsDialog> {
         match self {
@@ -152,6 +175,7 @@ impl Widget for ShellModal {
             Self::NewProject(dialog) => dialog.id(),
             Self::PendingClose(dialog) => dialog.id(),
             Self::Preferences(dialog) => dialog.id(),
+            Self::ProjectSettings(dialog) => dialog.id(),
             Self::SequenceSettings(dialog) => dialog.id(),
         }
     }
@@ -163,6 +187,7 @@ impl Widget for ShellModal {
             Self::NewProject(dialog) => dialog.measure(constraint),
             Self::PendingClose(dialog) => dialog.measure(constraint),
             Self::Preferences(dialog) => dialog.measure(constraint),
+            Self::ProjectSettings(dialog) => dialog.measure(constraint),
             Self::SequenceSettings(dialog) => dialog.measure(constraint),
         }
     }
@@ -174,6 +199,7 @@ impl Widget for ShellModal {
             Self::NewProject(dialog) => dialog.layout(bounds),
             Self::PendingClose(dialog) => dialog.layout(bounds),
             Self::Preferences(dialog) => dialog.layout(bounds),
+            Self::ProjectSettings(dialog) => dialog.layout(bounds),
             Self::SequenceSettings(dialog) => dialog.layout(bounds),
         }
     }
@@ -185,6 +211,7 @@ impl Widget for ShellModal {
             Self::NewProject(dialog) => dialog.event(event, ctx),
             Self::PendingClose(dialog) => dialog.event(event, ctx),
             Self::Preferences(dialog) => dialog.event(event, ctx),
+            Self::ProjectSettings(dialog) => dialog.event(event, ctx),
             Self::SequenceSettings(dialog) => dialog.event(event, ctx),
         }
     }
@@ -196,6 +223,7 @@ impl Widget for ShellModal {
             Self::NewProject(dialog) => dialog.paint(ctx),
             Self::PendingClose(dialog) => dialog.paint(ctx),
             Self::Preferences(dialog) => dialog.paint(ctx),
+            Self::ProjectSettings(dialog) => dialog.paint(ctx),
             Self::SequenceSettings(dialog) => dialog.paint(ctx),
         }
     }
@@ -207,6 +235,7 @@ impl Widget for ShellModal {
             Self::NewProject(dialog) => dialog.hit_test(point),
             Self::PendingClose(dialog) => dialog.hit_test(point),
             Self::Preferences(dialog) => dialog.hit_test(point),
+            Self::ProjectSettings(dialog) => dialog.hit_test(point),
             Self::SequenceSettings(dialog) => dialog.hit_test(point),
         }
     }
@@ -222,6 +251,7 @@ impl Widget for ShellModal {
             Self::NewProject(dialog) => dialog.can_focus(),
             Self::PendingClose(dialog) => dialog.can_focus(),
             Self::Preferences(dialog) => dialog.can_focus(),
+            Self::ProjectSettings(dialog) => dialog.can_focus(),
             Self::SequenceSettings(dialog) => dialog.can_focus(),
         }
     }
@@ -233,6 +263,7 @@ impl Widget for ShellModal {
             Self::NewProject(dialog) => dialog.accepts_text_input(),
             Self::PendingClose(dialog) => dialog.accepts_text_input(),
             Self::Preferences(dialog) => dialog.accepts_text_input(),
+            Self::ProjectSettings(dialog) => dialog.accepts_text_input(),
             Self::SequenceSettings(dialog) => dialog.accepts_text_input(),
         }
     }
@@ -244,6 +275,7 @@ impl Widget for ShellModal {
             Self::NewProject(dialog) => dialog.child_count(),
             Self::PendingClose(dialog) => dialog.child_count(),
             Self::Preferences(dialog) => dialog.child_count(),
+            Self::ProjectSettings(dialog) => dialog.child_count(),
             Self::SequenceSettings(dialog) => dialog.child_count(),
         }
     }
@@ -255,6 +287,7 @@ impl Widget for ShellModal {
             Self::NewProject(dialog) => dialog.child(index),
             Self::PendingClose(dialog) => dialog.child(index),
             Self::Preferences(dialog) => dialog.child(index),
+            Self::ProjectSettings(dialog) => dialog.child(index),
             Self::SequenceSettings(dialog) => dialog.child(index),
         }
     }
@@ -266,6 +299,7 @@ impl Widget for ShellModal {
             Self::NewProject(dialog) => dialog.child_mut(index),
             Self::PendingClose(dialog) => dialog.child_mut(index),
             Self::Preferences(dialog) => dialog.child_mut(index),
+            Self::ProjectSettings(dialog) => dialog.child_mut(index),
             Self::SequenceSettings(dialog) => dialog.child_mut(index),
         }
     }
