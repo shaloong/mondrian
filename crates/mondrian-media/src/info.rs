@@ -2086,6 +2086,40 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_cicp_combination_remains_unknown_with_raw_evidence() {
+        let detection = detect_color_space(
+            Primaries::SMPTE432,
+            TransferCharacteristic::SMPTE2084,
+            Space::RGB,
+        );
+
+        assert_eq!(detection.color_space, None);
+        assert_eq!(
+            detection.confidence,
+            VideoColorInterpretationConfidence::None
+        );
+        assert_eq!(detection.source, VideoColorSpaceSource::MissingMetadata);
+        assert_eq!(detection.method, VideoColorDetectionMethod::MissingMetadata);
+        assert!(matches!(
+            detection.evidence.first(),
+            Some(VideoColorInterpretationEvidence::UnsupportedCicpTags {
+                primaries,
+                transfer,
+                matrix,
+            }) if primaries.name.as_deref() == Some("smpte432")
+                && transfer.name.as_deref() == Some("smpte2084")
+                && matrix.name.as_deref().is_some_and(|name| name == "gbr" || name == "rgb")
+        ));
+        assert!(detection
+            .warnings
+            .contains(&VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags));
+        assert!(!detection.warnings.iter().any(|warning| matches!(
+            warning,
+            VideoColorInterpretationWarning::PartialCicpTags { .. }
+        )));
+    }
+
+    #[test]
     fn detect_color_space_marks_rgb_bt709_as_srgb_metadata() {
         let detection = detect_color_space(
             Primaries::BT709,

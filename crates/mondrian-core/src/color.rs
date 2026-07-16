@@ -1066,53 +1066,32 @@ impl ColorSpace {
         color_trc: Option<&str>,
         colorspace: Option<&str>,
     ) -> Option<Self> {
-        if let (Some(primaries), Some(transfer), Some(matrix)) =
-            (color_primaries, color_trc, colorspace)
-        {
-            if let Some(color_space) = Self::from_ffmpeg_tags(primaries, transfer, matrix) {
-                return Some(color_space);
-            }
+        if color_primaries.is_none() && color_trc.is_none() && colorspace.is_none() {
+            return None;
         }
 
-        if color_primaries.is_some_and(|tag| ffmpeg_tag_eq(tag, "smpte432"))
-            && color_trc.is_none_or(|tag| ffmpeg_tag_eq(tag, "iec61966-2-1"))
-        {
-            return Some(Self::DisplayP3);
-        }
-
-        match color_trc {
-            Some("smpte2084") => Some(Self::Rec2100Pq),
-            Some("arib-std-b67") => Some(Self::Rec2100Hlg),
-            Some("iec61966-2-1") => Some(Self::Srgb),
-            Some("bt470bg") | Some("gamma28") => Some(Self::Rec601Pal),
-            Some("smpte170m") => Some(Self::Rec601Ntsc),
-            _ => match color_primaries {
-                Some("bt2020") => Some(Self::Rec2020),
-                Some("smpte432") => Some(Self::DisplayP3),
-                Some("bt709") => {
-                    if colorspace.is_some_and(|tag| ffmpeg_tag_eq(tag, "rgb")) {
-                        Some(Self::Srgb)
-                    } else {
-                        Some(Self::Rec709)
-                    }
-                }
-                Some("bt470bg") => Some(Self::Rec601Pal),
-                Some("smpte170m") => Some(Self::Rec601Ntsc),
-                _ => match colorspace {
-                    Some("bt709") => Some(Self::Rec709),
-                    Some("bt470bg") => Some(Self::Rec601Pal),
-                    Some("smpte170m") => Some(Self::Rec601Ntsc),
-                    Some("bt2020nc") | Some("bt2020c") => Some(Self::Rec2020),
-                    Some(tag) if ffmpeg_tag_eq(tag, "rgb") => Some(Self::Srgb),
-                    _ => None,
-                },
-            },
-        }
+        let mut candidates = Self::ALL.into_iter().filter(|color_space| {
+            color_space.ffmpeg_tags().is_some_and(|tags| {
+                ffmpeg_partial_tag_matches(color_primaries, tags.color_primaries)
+                    && ffmpeg_partial_tag_matches(color_trc, tags.color_trc)
+                    && ffmpeg_partial_tag_matches(colorspace, tags.colorspace)
+            })
+        });
+        let candidate = candidates.next()?;
+        candidates.next().is_none().then_some(candidate)
     }
 }
 
+fn ffmpeg_partial_tag_matches(actual: Option<&str>, expected: &str) -> bool {
+    actual.is_none_or(|actual| ffmpeg_tag_eq(actual, expected))
+}
+
 fn ffmpeg_tag_eq(left: &str, right: &str) -> bool {
-    left.eq_ignore_ascii_case(right) || matches!((left, right), ("rgb", "gbr") | ("gbr", "rgb"))
+    left.eq_ignore_ascii_case(right)
+        || matches!(
+            (left, right),
+            ("rgb", "gbr") | ("gbr", "rgb") | ("gamma28", "bt470bg") | ("bt470bg", "gamma28")
+        )
 }
 
 fn scope_bin(v: f32, bins: usize) -> usize {
@@ -1294,6 +1273,58 @@ mod tests {
             Some(ColorSpace::Rec601Ntsc)
         );
         assert_eq!(ColorSpace::from_ffmpeg_tag_hints(None, None, None), None);
+    }
+
+    #[test]
+    fn color_space_keeps_unsupported_complete_cicp_tags_unresolved() {
+        assert_eq!(
+            ColorSpace::from_ffmpeg_tag_hints(Some("smpte432"), Some("smpte2084"), Some("rgb")),
+            None,
+            "P3 primaries plus PQ transfer must not be relabeled as BT.2020 Rec.2100 PQ"
+        );
+    }
+
+    #[test]
+    fn color_space_does_not_ignore_an_unsupported_present_cicp_field() {
+        assert_eq!(
+            ColorSpace::from_ffmpeg_tag_hints(Some("smpte432"), Some("smpte2084"), None),
+            None,
+            "a missing matrix must not erase the explicit P3/PQ combination"
+        );
+    }
+
+    #[test]
+    fn color_space_only_infers_partial_cicp_when_all_present_fields_are_compatible() {
+        let conflicts = [
+            (Some("bt709"), Some("arib-std-b67"), None),
+            (Some("bt2020"), Some("iec61966-2-1"), None),
+            (Some("bt709"), Some("bt470bg"), None),
+            (Some("bt709"), Some("smpte170m"), None),
+            (Some("bt2020"), Some("bt709"), Some("bt709")),
+        ];
+
+        for (primaries, transfer, matrix) in conflicts {
+            assert_eq!(
+                ColorSpace::from_ffmpeg_tag_hints(primaries, transfer, matrix),
+                None,
+                "conflicting CICP fields must remain unresolved: primaries={primaries:?}, transfer={transfer:?}, matrix={matrix:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn color_space_keeps_ambiguous_single_cicp_tags_unresolved() {
+        for (primaries, transfer, matrix) in [
+            (Some("bt2020"), None, None),
+            (None, Some("iec61966-2-1"), None),
+            (None, None, Some("rgb")),
+        ] {
+            assert_eq!(
+                ColorSpace::from_ffmpeg_tag_hints(primaries, transfer, matrix),
+                None,
+                "one tag shared by multiple product spaces must remain unresolved: primaries={primaries:?}, transfer={transfer:?}, matrix={matrix:?}"
+            );
+        }
     }
 
     #[test]

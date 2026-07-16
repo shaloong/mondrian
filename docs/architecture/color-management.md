@@ -313,6 +313,12 @@ name is low confidence. Conflicting lower-priority evidence is retained in a
 structured warning instead of disappearing. ICC-only streams may resolve to an
 inferred input color family, while ICC-vs-CICP conflicts must be surfaced as
 warnings rather than silently changing an explicit user override.
+Partial CICP inference is permitted only when every primaries, transfer, and
+matrix field that is actually present is compatible with exactly one supported
+product space. A complete unsupported triplet, an unsupported partial
+combination, or a single tag shared by multiple spaces remains Unknown with its
+raw tags preserved; one familiar transfer function must never erase a
+contradictory or unsupported primaries/matrix declaration.
 `ocio_identity_processor_cache_id()` resolves the processor identity for the
 effective source and working endpoints under the exact pinned engine/config.
 It creates no GPU shader or renderer resource and fails closed on missing
