@@ -4864,16 +4864,20 @@ fn translate_naga_shader_stage(
 
     let mut frontend = naga::front::glsl::Frontend::default();
     let options = naga::front::glsl::Options::from(stage.to_naga());
-    let module = frontend
-        .parse(&options, shader_text)
-        .map_err(|err| OcioGpuShaderTranslationFailure::ParseFailed { message: err.to_string() })?;
+    let module = frontend.parse(&options, shader_text).map_err(|err| {
+        OcioGpuShaderTranslationFailure::ParseFailed {
+            message: err.emit_to_string_with_path(shader_text, "ocio-wrapper.glsl"),
+        }
+    })?;
 
     let mut validator = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::empty(),
     );
     let info = validator.validate(&module).map_err(|err| {
-        OcioGpuShaderTranslationFailure::ValidationFailed { message: err.to_string() }
+        OcioGpuShaderTranslationFailure::ValidationFailed {
+            message: err.emit_to_string_with_path(shader_text, "ocio-wrapper.glsl"),
+        }
     })?;
 
     let mut diagnostics = Vec::new();
@@ -5350,6 +5354,7 @@ fn lower_ocio_program_source_for_wgpu(shader_plan: &OcioGpuShaderPlan) -> Result
     let sampler_policy = OcioGpuWgpuSamplerBindingPolicy::for_contract(&binding_contract)
         .map_err(|err| format!("OCIO sampler binding policy: {err:?}"))?;
     let source = strip_glsl_version_directives(&bundle.shader_text);
+    let source = lower_redundant_nested_component_swizzles(&source);
     let source = lower_ocio_tetrahedral_lut_blocks(&source, bundle);
     let legacy_sampler_1d_names = legacy_sampler_names_for_kind(
         &source,
@@ -5358,6 +5363,30 @@ fn lower_ocio_program_source_for_wgpu(shader_plan: &OcioGpuShaderPlan) -> Result
     );
     let source = lower_legacy_sampler_declarations(&source, &binding_contract, &sampler_policy)?;
     lower_legacy_sampler_texture_calls(&source, &binding_contract, &legacy_sampler_1d_names)
+}
+
+fn lower_redundant_nested_component_swizzles(source: &str) -> String {
+    // OCIO's GradingRGBCurve shader emits assignments such as `pixel.rgb.r = ...`.
+    // They are valid GLSL and exactly equivalent to `pixel.r = ...`, but Naga's
+    // GLSL frontend currently lowers the nested swizzle to a non-storable pointer.
+    // Flatten only identity swizzles, preserving the OCIO processor semantics.
+    const IDENTITY_SWIZZLES: [(&str, &str); 10] = [
+        (".rgb.r", ".r"),
+        (".rgb.g", ".g"),
+        (".rgb.b", ".b"),
+        (".rgba.r", ".r"),
+        (".rgba.g", ".g"),
+        (".rgba.b", ".b"),
+        (".rgba.a", ".a"),
+        (".xyz.x", ".x"),
+        (".xyz.y", ".y"),
+        (".xyz.z", ".z"),
+    ];
+    IDENTITY_SWIZZLES
+        .into_iter()
+        .fold(source.to_owned(), |lowered, (nested, direct)| {
+            lowered.replace(nested, direct)
+        })
 }
 
 fn lower_ocio_tetrahedral_lut_blocks(source: &str, bundle: &OcioGpuShaderBundle) -> String {
@@ -8677,6 +8706,22 @@ mod tests {
         let mut prep = OcioGpuWgpuBackendPrepRuntime::default();
         prep.prepare_static_pipeline(&hlg, OcioGpuWgpuColorTargetFormat::Rgba16Float)
             .expect("prepare Standard HLG static GPU pipeline");
+    }
+
+    #[test]
+    fn wgpu_lowering_flattens_identity_nested_component_swizzles() {
+        let source = r#"pixel.rgb.r = pixel.rgb.g;
+pixel.rgba.b = pixel.rgba.a;
+position.xyz.z = position.xyz.x;
+pixel.bgr.r = 0.0;"#;
+
+        assert_eq!(
+            lower_redundant_nested_component_swizzles(source),
+            r#"pixel.r = pixel.g;
+pixel.b = pixel.a;
+position.z = position.x;
+pixel.bgr.r = 0.0;"#
+        );
     }
 
     #[test]
