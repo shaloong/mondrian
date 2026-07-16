@@ -1804,6 +1804,22 @@ pub fn pin_custom_ocio_project(
     display: String,
     view: String,
 ) -> Result<ColorEngine, String> {
+    pin_custom_ocio_project_with_selection(source, working_space, Some((display, view)))
+}
+
+/// Resolve a Custom OCIO source and pin its declared default display/view.
+pub fn pin_custom_ocio_project_default(
+    source: OcioConfigSource,
+    working_space: WorkingColorSpace,
+) -> Result<ColorEngine, String> {
+    pin_custom_ocio_project_with_selection(source, working_space, None)
+}
+
+fn pin_custom_ocio_project_with_selection(
+    source: OcioConfigSource,
+    working_space: WorkingColorSpace,
+    display_view: Option<(String, String)>,
+) -> Result<ColorEngine, String> {
     if matches!(source, OcioConfigSource::MondrianDefault) {
         return Err(
             "Mondrian's embedded config must be selected through Mondrian Standard".to_owned(),
@@ -1821,6 +1837,18 @@ pub fn pin_custom_ocio_project(
                 "Custom OCIO config has no requested working color space '{working_space}'"
             ));
         }
+        let (display, view) = match display_view {
+            Some((display, view)) => (display, view),
+            None => {
+                let display = config.default_display().ok_or_else(|| {
+                    "Custom OCIO config has no declared default display".to_owned()
+                })?;
+                let view = config.default_view(&display).ok_or_else(|| {
+                    format!("Custom OCIO display '{display}' has no declared default view")
+                })?;
+                (display, view)
+            }
+        };
         validate_custom_ocio_display_view(config, &display, &view)?;
         let identity = CustomOcioProjectIdentity::from_resolved(
             source.clone(),
@@ -3674,6 +3702,33 @@ mod tests {
             .ensure_loaded()
             .expect_err("same path with changed config content must fail closed");
         assert!(error.contains("config content changed"), "{error}");
+
+        std::fs::remove_file(path).expect("remove Custom OCIO test config");
+    }
+
+    #[test]
+    fn custom_ocio_project_pins_config_default_display_and_view() {
+        let path = std::env::temp_dir().join(format!(
+            "mondrian-custom-ocio-default-view-{}-{}.ocio",
+            std::process::id(),
+            ocio_config_generation()
+        ));
+        std::fs::write(&path, mondrian_default_ocio_config_text())
+            .expect("write Custom OCIO test config");
+
+        let engine = ColorEngine::custom_ocio_default(
+            OcioConfigSource::Path { path: path.clone() },
+            WorkingColorSpace::LinearRec2020,
+        )
+        .expect("pin Custom OCIO defaults");
+        assert_eq!(
+            engine.default_display_view().expect("pinned defaults"),
+            (
+                "sRGB - Display".to_owned(),
+                "ACES 2.0 - SDR 100 nits (Rec.709)".to_owned()
+            )
+        );
+        engine.ensure_loaded().expect("reopen pinned defaults");
 
         std::fs::remove_file(path).expect("remove Custom OCIO test config");
     }

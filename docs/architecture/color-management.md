@@ -182,6 +182,12 @@ expression, the sorted role map, and an explicit dynamic-property override
 list. Current projects save no dynamic overrides and reject non-empty override
 lists until typed execution exists. Missing fields, semantic mismatches, config
 edits, role/view changes, and external LUT changes fail closed.
+When a caller selects only a Custom `.ocio` file, `custom_ocio_default` resolves
+the config-declared default display/view during that same validated load and
+persists the resolved names in the identity. It does not defer default lookup
+until project reopen or frame rendering. Advanced callers may instead pin an
+explicit display/view through `custom_ocio`; both paths produce the same complete
+identity contract.
 
 ## OCIO Global State Management
 

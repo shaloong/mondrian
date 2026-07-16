@@ -104,6 +104,17 @@ impl ColorEngine {
     ) -> Result<Self, String> {
         crate::ocio::pin_custom_ocio_project(source, working_space, display.into(), view.into())
     }
+
+    /// Resolve and pin a Custom OCIO config using its declared default display/view.
+    ///
+    /// The resolved names are persisted in the complete project identity, so
+    /// reopening the project never depends on a later config default.
+    pub fn custom_ocio_default(
+        source: OcioConfigSource,
+        working_space: WorkingColorSpace,
+    ) -> Result<Self, String> {
+        crate::ocio::pin_custom_ocio_project_default(source, working_space)
+    }
 }
 
 /// Broad encoding category used by validation, preview diagnostics and export tagging.
