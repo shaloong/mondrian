@@ -7,7 +7,7 @@ ACES, and Custom OCIO are product-level modes over that shared integration, not
 three renderer engines. Missing processors or configs required by a selected
 mode must surface as errors instead of falling back to different color science.
 
-The Rust integration is `ocio-rs` 0.2.x with the `bundled` feature enabled, so
+The Rust integration is `ocio-rs` 0.2.1 with the `bundled` feature enabled, so
 normal application builds exercise the real OpenColorIO bridge rather than a
 stub runtime.
 
@@ -192,9 +192,9 @@ The current Custom identity also pins exactly one Mondrian working-space name;
 its processor-graph digest is defined around that space. Sequence/project
 validation therefore rejects a Custom engine paired with any other sequence
 working space before render planning or persistence. CPU/GPU processor creation
-retains the same check as a defense-in-depth boundary. Standard and ACES modes
-may continue to use any supported typed working space from their immutable
-configs.
+retains the same check as a defense-in-depth boundary. Mondrian Standard pins
+the package-defined Linear Rec.2020 working space, while ACES keeps its
+supported working-space selection explicit.
 
 ## OCIO Global State Management
 
@@ -213,6 +213,12 @@ on a process-wide color lock. This is required because the current `ocio-rs`
 bridge exposes OCIO's process-global current config during construction even
 though the baked Processor itself is independent afterward.
 
+Global config installation, cache invalidation, config serialization, Standard
+transform construction, and GPU descriptor extraction use `ocio-rs`'s fallible
+APIs. A bridge failure leaves Mondrian's source identity and generation
+unchanged and is reported to the caller; no path may silently retain a stale
+config or panic at the FFI boundary.
+
 CPU Processors live in a bounded per-thread LRU keyed by the complete
 `ColorEngine`, config revision, encoded/working endpoint identities, and
 display/view when applicable. Immutable embedded and built-in packages use
@@ -220,9 +226,10 @@ their pinned engine identity as the stable revision, so switching Standard ->
 ACES -> Standard does not discard the warm Standard Processor. Mutable Custom
 path/environment sources additionally use the loaded generation. A warm hit
 performs no config selection, file I/O, or Processor construction.
-Per-thread storage follows the wrapper's non-`Send`/non-`Sync` contract without
-unsafe cross-thread sharing; hit, miss, eviction, occupancy, and capacity remain
-observable through `ocio_cpu_processor_cache_diagnostics()`.
+Per-thread storage avoids cross-thread dynamic-property sharing and a cache-wide
+hot-path lock even though `ocio-rs` 0.2.1 marks baked processors as thread-safe;
+hit, miss, eviction, occupancy, and capacity remain observable through
+`ocio_cpu_processor_cache_diagnostics()`.
 
 GPU requests carry `ColorEngine` as part of their immutable cache identity.
 `OcioGpuShaderCache` therefore keeps warm plans for Standard and ACES

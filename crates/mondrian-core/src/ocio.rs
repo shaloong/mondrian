@@ -105,12 +105,19 @@ impl OcioGlobalState {
     ///
     /// The mutex is held for the entire operation so concurrent
     /// `current_config()` callers cannot see a half-updated state.
-    fn set_config(&mut self, path: PathBuf, source: OcioConfigSource, config: &Config) {
-        ocio_rs::set_current_config(config);
+    fn set_config(
+        &mut self,
+        path: PathBuf,
+        source: OcioConfigSource,
+        config: &Config,
+    ) -> Result<(), String> {
+        ocio_rs::try_set_current_config(config)
+            .map_err(|err| format!("failed to install process-global OCIO config: {err}"))?;
         self.path = Some(path);
         self.source = Some(source);
         self.validated_custom_identity = None;
         self.generation = self.generation.wrapping_add(1);
+        Ok(())
     }
 }
 
@@ -916,16 +923,24 @@ fn build_mondrian_standard_sdr_view(config: &Config) -> Result<(), String> {
         .map_err(|err| err.to_string())?;
 
     let xyz_to_egamut = MatrixTransform::create().map_err(|err| err.to_string())?;
-    xyz_to_egamut.set_matrix(&XYZ_D65_TO_FILMLIGHT_E_GAMUT);
+    xyz_to_egamut
+        .set_matrix(&XYZ_D65_TO_FILMLIGHT_E_GAMUT)
+        .map_err(|err| format!("Mondrian Standard SDR gamut matrix: {err}"))?;
 
     let allocation = AllocationTransform::create().map_err(|err| err.to_string())?;
     allocation.set_allocation(Allocation::Lg2);
-    allocation.set_vars(&MONDRIAN_STANDARD_SDR_ALLOCATION_VARS);
+    allocation
+        .set_vars(&MONDRIAN_STANDARD_SDR_ALLOCATION_VARS)
+        .map_err(|err| format!("Mondrian Standard SDR allocation variables: {err}"))?;
 
     let formation = Lut3DTransform::create().map_err(|err| err.to_string())?;
-    formation.set_grid_size(cube.edge as u64);
+    formation
+        .set_grid_size(cube.edge as u64)
+        .map_err(|err| format!("Mondrian Standard SDR LUT grid size: {err}"))?;
     formation.set_interpolation(OcioRsInterpolation::Tetrahedral);
-    formation.set_values(&cube.values);
+    formation
+        .set_values(&cube.values)
+        .map_err(|err| format!("Mondrian Standard SDR LUT values: {err}"))?;
 
     let to_display_reference = ColorSpaceTransform::create().map_err(|err| err.to_string())?;
     to_display_reference
@@ -936,11 +951,21 @@ fn build_mondrian_standard_sdr_view(config: &Config) -> Result<(), String> {
         .map_err(|err| err.to_string())?;
 
     let group = GroupTransform::create().map_err(|err| err.to_string())?;
-    group.append_transform(&ap0_to_xyz_d65);
-    group.append_transform(&xyz_to_egamut);
-    group.append_transform(&allocation);
-    group.append_transform(&formation);
-    group.append_transform(&to_display_reference);
+    group
+        .append_transform(&ap0_to_xyz_d65)
+        .map_err(|err| format!("Mondrian Standard SDR reference transform: {err}"))?;
+    group
+        .append_transform(&xyz_to_egamut)
+        .map_err(|err| format!("Mondrian Standard SDR gamut transform: {err}"))?;
+    group
+        .append_transform(&allocation)
+        .map_err(|err| format!("Mondrian Standard SDR allocation transform: {err}"))?;
+    group
+        .append_transform(&formation)
+        .map_err(|err| format!("Mondrian Standard SDR formation transform: {err}"))?;
+    group
+        .append_transform(&to_display_reference)
+        .map_err(|err| format!("Mondrian Standard SDR display transform: {err}"))?;
 
     let view = ViewTransform::create(ReferenceSpaceType::Scene).map_err(|err| err.to_string())?;
     view.set_name(MONDRIAN_STANDARD_SDR_VIEW_NAME).map_err(|err| err.to_string())?;
@@ -1009,16 +1034,24 @@ fn build_mondrian_standard_hdr_1000_view_with_interpolation(
         .map_err(|err| err.to_string())?;
 
     let xyz_to_egamut = MatrixTransform::create().map_err(|err| err.to_string())?;
-    xyz_to_egamut.set_matrix(&XYZ_D65_TO_FILMLIGHT_E_GAMUT);
+    xyz_to_egamut
+        .set_matrix(&XYZ_D65_TO_FILMLIGHT_E_GAMUT)
+        .map_err(|err| format!("Mondrian Standard HDR gamut matrix: {err}"))?;
 
     let allocation = AllocationTransform::create().map_err(|err| err.to_string())?;
     allocation.set_allocation(Allocation::Lg2);
-    allocation.set_vars(&MONDRIAN_STANDARD_SDR_ALLOCATION_VARS);
+    allocation
+        .set_vars(&MONDRIAN_STANDARD_SDR_ALLOCATION_VARS)
+        .map_err(|err| format!("Mondrian Standard HDR allocation variables: {err}"))?;
 
     let formation = Lut3DTransform::create().map_err(|err| err.to_string())?;
-    formation.set_grid_size(cube.edge as u64);
+    formation
+        .set_grid_size(cube.edge as u64)
+        .map_err(|err| format!("Mondrian Standard HDR LUT grid size: {err}"))?;
     formation.set_interpolation(interpolation);
-    formation.set_values(&cube.values);
+    formation
+        .set_values(&cube.values)
+        .map_err(|err| format!("Mondrian Standard HDR LUT values: {err}"))?;
 
     // The pinned formation resource defines a 1000-nit, P3-limited HDR image
     // in Rec.2100 HLG encoding. Decode that image back to OCIO's common
@@ -1033,11 +1066,21 @@ fn build_mondrian_standard_hdr_1000_view_with_interpolation(
         .map_err(|err| err.to_string())?;
 
     let group = GroupTransform::create().map_err(|err| err.to_string())?;
-    group.append_transform(&ap0_to_xyz_d65);
-    group.append_transform(&xyz_to_egamut);
-    group.append_transform(&allocation);
-    group.append_transform(&formation);
-    group.append_transform(&to_display_reference);
+    group
+        .append_transform(&ap0_to_xyz_d65)
+        .map_err(|err| format!("Mondrian Standard HDR reference transform: {err}"))?;
+    group
+        .append_transform(&xyz_to_egamut)
+        .map_err(|err| format!("Mondrian Standard HDR gamut transform: {err}"))?;
+    group
+        .append_transform(&allocation)
+        .map_err(|err| format!("Mondrian Standard HDR allocation transform: {err}"))?;
+    group
+        .append_transform(&formation)
+        .map_err(|err| format!("Mondrian Standard HDR formation transform: {err}"))?;
+    group
+        .append_transform(&to_display_reference)
+        .map_err(|err| format!("Mondrian Standard HDR display transform: {err}"))?;
 
     let view = ViewTransform::create(ReferenceSpaceType::Scene).map_err(|err| err.to_string())?;
     view.set_name(view_name).map_err(|err| err.to_string())?;
@@ -1306,7 +1349,10 @@ fn validate_gpu_shader_processor(
             return false;
         }
     };
-    gpu.extract_shader_info(&mut desc);
+    if let Err(err) = gpu.try_extract_shader_info(&mut desc) {
+        errors.push(format!("{label} OCIO GPU shader extraction failed: {err}"));
+        return false;
+    }
     match extracted_shader_text(&desc) {
         Ok(shader_text) if shader_text.contains(MONDRIAN_OCIO_GPU_FUNCTION_NAME) => true,
         Ok(_) => {
@@ -1343,9 +1389,10 @@ fn init_ocio_from_source_locked(path: &Path, source: OcioConfigSource) -> Result
         .validate()
         .map_err(|e| format!("invalid OCIO config from {}: {e}", path.display()))?;
 
-    if let Ok(mut guard) = OCIO_STATE.lock() {
-        guard.set_config(path.to_path_buf(), source, &config);
-    }
+    OCIO_STATE
+        .lock()
+        .map_err(|_| "OCIO global state lock is poisoned".to_owned())?
+        .set_config(path.to_path_buf(), source, &config)?;
 
     // The global OCIO context now holds a reference (ref-counted by the C++
     // library).  We deliberately forget the Rust wrapper so the ref-count
@@ -1371,13 +1418,14 @@ fn init_ocio_builtin_locked(name: &str) -> Result<(), String> {
         .ok_or_else(|| format!("built-in OCIO config not found: '{name}'"))?;
 
     let virtual_path = PathBuf::from(format!("builtin:{name}"));
-    if let Ok(mut guard) = OCIO_STATE.lock() {
-        guard.set_config(
+    OCIO_STATE
+        .lock()
+        .map_err(|_| "OCIO global state lock is poisoned".to_owned())?
+        .set_config(
             virtual_path,
             OcioConfigSource::Builtin { name: name.to_string() },
             &config,
-        );
-    }
+        )?;
 
     // Keep the registry alive — its Config references need it.
     std::mem::forget(registry);
@@ -1421,13 +1469,14 @@ fn init_mondrian_default_ocio_locked() -> Result<(), String> {
             actual_package_digest
         ));
     }
-    if let Ok(mut guard) = OCIO_STATE.lock() {
-        guard.set_config(
+    OCIO_STATE
+        .lock()
+        .map_err(|_| "OCIO global state lock is poisoned".to_owned())?
+        .set_config(
             PathBuf::from(MONDRIAN_DEFAULT_OCIO_VIRTUAL_PATH),
             OcioConfigSource::MondrianDefault,
             &config,
-        );
-    }
+        )?;
     std::mem::forget(config);
 
     tracing::info!(
@@ -1528,6 +1577,7 @@ fn primary_config_sha256(source: &OcioConfigSource, config: &Config) -> Result<S
         }
         OcioConfigSource::Builtin { name } => config
             .serialize()
+            .map_err(|err| format!("built-in OCIO config '{name}' serialization failed: {err}"))?
             .ok_or_else(|| format!("built-in OCIO config '{name}' could not be serialized"))?
             .into_bytes(),
         OcioConfigSource::MondrianDefault => {
@@ -1746,7 +1796,8 @@ fn ensure_custom_ocio_identity_loaded_locked(
         // config reloads must invalidate that cache before rebuilding the
         // processor graph, otherwise a changed LUT at the same path retains
         // the old cache-id and pixel semantics until process restart.
-        ocio_rs::clear_all_caches();
+        ocio_rs::try_clear_all_caches()
+            .map_err(|err| format!("failed to clear process-global OCIO caches: {err}"))?;
     }
 
     match identity.source() {
@@ -2710,7 +2761,13 @@ fn extract_ocio_identity_gpu_shader_bundle_from_config(
         )
     })?;
     let mut desc = configured_gpu_shader_desc(language)?;
-    gpu.extract_shader_info(&mut desc);
+    gpu.try_extract_shader_info(&mut desc).map_err(|err| {
+        format!(
+            "OCIO GPU shader extraction '{}' -> '{}': {err}",
+            ocio_color_space_identity_name(src),
+            ocio_color_space_identity_name(dst)
+        )
+    })?;
     let shader_text = extracted_shader_text(&desc)?;
 
     Ok(OcioGpuShaderBundle::for_color_space(
@@ -2756,7 +2813,12 @@ fn extract_ocio_display_identity_gpu_shader_bundle_from_config(
         )
     })?;
     let mut desc = configured_gpu_shader_desc(language)?;
-    gpu.extract_shader_info(&mut desc);
+    gpu.try_extract_shader_info(&mut desc).map_err(|err| {
+        format!(
+            "OCIO GPU display shader extraction '{}' -> {display}/{view}: {err}",
+            ocio_color_space_identity_name(src)
+        )
+    })?;
     let shader_text = extracted_shader_text(&desc)?;
 
     Ok(OcioGpuShaderBundle::for_display(
@@ -2772,23 +2834,26 @@ fn extract_ocio_display_identity_gpu_shader_bundle_from_config(
 
 fn configured_gpu_shader_desc(language: GpuLanguage) -> Result<GpuShaderDesc, String> {
     let desc = GpuShaderDesc::create().map_err(|e| format!("OCIO GPU shader desc: {e}"))?;
-    desc.set_language(language);
+    desc.set_language(language)
+        .map_err(|e| format!("OCIO GPU shader language: {e}"))?;
     desc.set_function_name(MONDRIAN_OCIO_GPU_FUNCTION_NAME)
         .map_err(|e| format!("OCIO GPU shader function name: {e}"))?;
     desc.set_pixel_name(MONDRIAN_OCIO_GPU_PIXEL_NAME)
         .map_err(|e| format!("OCIO GPU shader pixel name: {e}"))?;
     desc.set_resource_prefix(MONDRIAN_OCIO_GPU_RESOURCE_PREFIX)
         .map_err(|e| format!("OCIO GPU shader resource prefix: {e}"))?;
-    desc.set_descriptor_set_index(
+    desc.try_set_descriptor_set_index(
         MONDRIAN_OCIO_GPU_DESCRIPTOR_SET_INDEX,
         MONDRIAN_OCIO_GPU_TEXTURE_BINDING_START,
-    );
+    )
+    .map_err(|e| format!("OCIO GPU shader descriptor binding: {e}"))?;
     Ok(desc)
 }
 
 fn extracted_shader_text(desc: &GpuShaderDesc) -> Result<String, String> {
     let shader_text = desc
-        .shader_text()
+        .try_shader_text()
+        .map_err(|e| format!("OCIO GPU shader text query: {e}"))?
         .ok_or_else(|| "OCIO GPU shader extraction returned empty shader text".to_string())?;
     if shader_text.trim().is_empty() {
         return Err("OCIO GPU shader extraction returned blank shader text".to_string());
