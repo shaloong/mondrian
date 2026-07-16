@@ -2,9 +2,11 @@
 
 use mondrian_core::display_labels::color_space_label;
 use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
-use mondrian_core::types::{AssetId, ColorSpace};
+use mondrian_core::types::{AssetId, ColorSpace, OcioColorSpaceIdentity};
 use mondrian_media::{
-    DetectedColorInterpretation, VideoColorDetectionMethod, VideoColorInterpretationConfidence,
+    DecodedVideoRange, DetectedColorInterpretation, VideoColorDetectionMethod,
+    VideoColorInterpretationConfidence, VideoColorInterpretationEvidence,
+    VideoColorInterpretationWarning, VideoColorTag,
 };
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
@@ -13,14 +15,15 @@ use mondrian_ui_widgets::{Button, DialogSurface, Dropdown, Label, MenuItem};
 
 use crate::app::ui_actions::{
     app_shell_close_modal_action, app_shell_confirm_interpret_asset_dialog_action,
-    app_shell_interpret_asset_draft_changed_action, AssetsSetInterpretationPayload,
+    app_shell_interpret_asset_draft_changed_action, AppShellInputColorPipelineDiagnostics,
+    AppShellVideoSignalDiagnostics, AssetsSetInterpretationPayload,
     InterpretAssetDraftUpdatePayload,
 };
 
 const CARD_MIN_WIDTH: f32 = 500.0;
 const CARD_WIDTH: f32 = 620.0;
-const CARD_MIN_HEIGHT: f32 = 300.0;
-const CARD_HEIGHT: f32 = 360.0;
+const CARD_MIN_HEIGHT: f32 = 500.0;
+const CARD_HEIGHT: f32 = 580.0;
 const CONTENT_PADDING: f32 = 24.0;
 const TITLE_FONT_SIZE: f32 = 18.0;
 const BODY_FONT_SIZE: f32 = 13.0;
@@ -45,6 +48,10 @@ pub struct AppUiInterpretAssetDraft {
     pub interpretation: AssetMediaInterpretation,
     /// Current structured automatic color interpretation from media metadata.
     pub auto_interpretation: Option<DetectedColorInterpretation>,
+    /// Raw signal and effective OCIO identities supplied only when the dialog opens.
+    pub video_signal: Option<AppShellVideoSignalDiagnostics>,
+    /// Effective project/sequence input pipeline used for processor diagnostics.
+    pub input_pipeline: Option<AppShellInputColorPipelineDiagnostics>,
 }
 
 impl AppUiInterpretAssetDraft {
@@ -60,7 +67,20 @@ impl AppUiInterpretAssetDraft {
             asset_name: asset_name.into(),
             interpretation,
             auto_interpretation,
+            video_signal: None,
+            input_pipeline: None,
         }
+    }
+
+    /// Attach the raw signal and effective input pipeline captured by the asset action.
+    pub fn with_input_diagnostics(
+        mut self,
+        video_signal: Option<AppShellVideoSignalDiagnostics>,
+        input_pipeline: Option<AppShellInputColorPipelineDiagnostics>,
+    ) -> Self {
+        self.video_signal = video_signal;
+        self.input_pipeline = input_pipeline;
+        self
     }
 
     /// Apply one draft update from the dialog controls.
@@ -90,6 +110,7 @@ pub struct InterpretAssetDialog {
     status_value_label: Label,
     color_space_label: Label,
     color_space_dropdown: Dropdown,
+    diagnostics_label: Label,
     apply_button: Button,
     cancel_button: Button,
 }
@@ -126,6 +147,11 @@ impl InterpretAssetDialog {
                 AssetMediaInterpretation::default(),
                 None,
             ),
+            diagnostics_label: Label::new(String::new())
+                .muted()
+                .with_font_size(BODY_FONT_SIZE)
+                .with_padding(0.0, 0.0)
+                .wrapped(),
             apply_button: Button::new("应用")
                 .on_click(app_shell_confirm_interpret_asset_dialog_action()),
             cancel_button: Button::new("取消").on_click(app_shell_close_modal_action()),
@@ -153,6 +179,7 @@ impl InterpretAssetDialog {
             self.draft.interpretation,
             self.draft.auto_interpretation.as_ref(),
         );
+        self.diagnostics_label.set_text(input_color_diagnostics_text(&self.draft));
     }
 }
 
@@ -276,6 +303,195 @@ fn interpretation_status(draft: &AppUiInterpretAssetDraft) -> String {
     }
 }
 
+fn button_y_for_card(card: Rect) -> f32 {
+    card.y + card.height - BUTTON_BOTTOM_INSET - BUTTON_HEIGHT
+}
+
+fn input_color_diagnostics_text(draft: &AppUiInterpretAssetDraft) -> String {
+    let Some(pipeline) = draft.input_pipeline.as_ref() else {
+        return "输入诊断：未提供项目色彩上下文".to_owned();
+    };
+    let interpretation = draft.auto_interpretation.as_ref();
+    let source = match draft.interpretation.color {
+        MediaColorInterpretation::Override { color_space } => Some(color_space),
+        MediaColorInterpretation::Auto => interpretation.and_then(|value| value.color_space),
+    };
+    let decision = match draft.interpretation.color {
+        MediaColorInterpretation::Override { .. } => "用户显式覆盖".to_owned(),
+        MediaColorInterpretation::Auto => interpretation
+            .map(|value| {
+                let inference = if value.confidence == VideoColorInterpretationConfidence::High {
+                    "确定/声明"
+                } else if value.color_space.is_some() {
+                    "推断"
+                } else {
+                    "未知"
+                };
+                format!(
+                    "自动 · {} · {} · {}",
+                    method_label(value.method),
+                    confidence_label(value.confidence),
+                    inference
+                )
+            })
+            .unwrap_or_else(|| "自动 · 未探测".to_owned()),
+    };
+    let signal = draft
+        .video_signal
+        .as_ref()
+        .map(video_signal_summary)
+        .unwrap_or_else(|| "Range/Primaries/Transfer/Matrix：无视频信号".to_owned());
+    let evidence = interpretation
+        .map(|value| summarize_entries(&value.evidence, evidence_summary, 3))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "无".to_owned());
+    let warnings = interpretation
+        .map(|value| summarize_entries(&value.warnings, warning_summary, 3))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "无".to_owned());
+    let working = working_color_space_label(pipeline.working_color_space);
+    let processor = source.map_or_else(
+        || "不可用：输入空间尚未解析，保持 Unknown/按项目缺失元数据策略处理".to_owned(),
+        |source| {
+            mondrian_core::ocio_identity_processor_cache_id(
+                &pipeline.engine,
+                OcioColorSpaceIdentity::Color(source),
+                OcioColorSpaceIdentity::Working(pipeline.working_color_space),
+            )
+            .unwrap_or_else(|error| format!("不可用：{error}"))
+        },
+    );
+    let path = source
+        .map(|source| color_space_label(source).to_owned())
+        .unwrap_or_else(|| "Unknown".to_owned());
+    format!(
+        "识别：{decision}\n{signal}\n依据：{evidence}\n警告：{warnings}\n路径：{path} → {working}（{}）\nOCIO processor cache-id：{processor}",
+        pipeline.engine.name()
+    )
+}
+
+fn video_signal_summary(signal: &AppShellVideoSignalDiagnostics) -> String {
+    let range = match signal.range {
+        DecodedVideoRange::Full => "Full",
+        DecodedVideoRange::Limited => "Limited",
+        DecodedVideoRange::Unknown => "Unknown",
+    };
+    signal.color_metadata.as_ref().map_or_else(
+        || format!("Range：{range} · Primaries/Transfer/Matrix：未提供"),
+        |metadata| {
+            format!(
+                "Range：{range} · Primaries：{} · Transfer：{} · Matrix：{}",
+                video_color_tag_summary(&metadata.primaries),
+                video_color_tag_summary(&metadata.transfer),
+                video_color_tag_summary(&metadata.matrix)
+            )
+        },
+    )
+}
+
+fn video_color_tag_summary(tag: &VideoColorTag) -> String {
+    if !tag.specified {
+        return format!("unspecified({})", tag.code);
+    }
+    tag.name
+        .as_ref()
+        .map(|name| format!("{name}({})", tag.code))
+        .unwrap_or_else(|| tag.code.to_string())
+}
+
+fn evidence_summary(evidence: &VideoColorInterpretationEvidence) -> String {
+    match evidence {
+        VideoColorInterpretationEvidence::MetadataHint {
+            scope,
+            key,
+            value,
+            detected_color_space,
+        } => format!(
+            "{:?} metadata {key}={value} → {}",
+            scope,
+            color_space_label(*detected_color_space)
+        ),
+        VideoColorInterpretationEvidence::ExactCicpTags {
+            primaries,
+            transfer,
+            matrix,
+            detected_color_space,
+        } => format!(
+            "完整 CICP {}/{}/{} → {}",
+            video_color_tag_summary(primaries),
+            video_color_tag_summary(transfer),
+            video_color_tag_summary(matrix),
+            color_space_label(*detected_color_space)
+        ),
+        VideoColorInterpretationEvidence::PartialCicpTags {
+            primaries,
+            transfer,
+            matrix,
+            detected_color_space,
+        } => format!(
+            "部分 CICP {}/{}/{} → {}",
+            video_color_tag_summary(primaries),
+            video_color_tag_summary(transfer),
+            video_color_tag_summary(matrix),
+            color_space_label(*detected_color_space)
+        ),
+        VideoColorInterpretationEvidence::UnsupportedCicpTags { primaries, transfer, matrix } => {
+            format!(
+                "不支持的 CICP {}/{}/{}",
+                video_color_tag_summary(primaries),
+                video_color_tag_summary(transfer),
+                video_color_tag_summary(matrix)
+            )
+        }
+        VideoColorInterpretationEvidence::DecoderUnavailable => "解码器不可用".to_owned(),
+        VideoColorInterpretationEvidence::IccProfile { mapped_color_space, profile_name } => {
+            format!(
+                "ICC {} → {}",
+                profile_name.as_deref().unwrap_or("未命名"),
+                mapped_color_space.map(color_space_label).unwrap_or("未映射")
+            )
+        }
+    }
+}
+
+fn warning_summary(warning: &VideoColorInterpretationWarning) -> String {
+    match warning {
+        VideoColorInterpretationWarning::MultipleMetadataHints { .. } => "多个 metadata hint 冲突",
+        VideoColorInterpretationWarning::MetadataHintOverridesCicpTags { .. } => {
+            "metadata hint 覆盖冲突 CICP"
+        }
+        VideoColorInterpretationWarning::DescriptiveMetadataHintInference { .. } => {
+            "仅依据描述性 metadata 推断"
+        }
+        VideoColorInterpretationWarning::LowerPriorityMetadataHints { .. } => {
+            "已忽略冲突的低优先级 hint"
+        }
+        VideoColorInterpretationWarning::PartialCicpTags { .. } => "仅有部分 CICP",
+        VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags => "CICP 缺失或不支持",
+        VideoColorInterpretationWarning::DecoderUnavailable => "解码器不可用",
+        VideoColorInterpretationWarning::IccProfileUnmapped { .. } => "ICC 无法映射",
+        VideoColorInterpretationWarning::IccCicpMismatch { .. } => "ICC 与 CICP 冲突",
+    }
+    .to_owned()
+}
+
+fn summarize_entries<T>(entries: &[T], summarize: fn(&T) -> String, maximum: usize) -> String {
+    let mut summaries = entries.iter().take(maximum).map(summarize).collect::<Vec<_>>();
+    if entries.len() > maximum {
+        summaries.push(format!("另有 {} 项", entries.len() - maximum));
+    }
+    summaries.join("；")
+}
+
+fn working_color_space_label(working: mondrian_core::WorkingColorSpace) -> &'static str {
+    match working {
+        mondrian_core::WorkingColorSpace::LinearRec709 => "Mondrian Working Linear Rec.709",
+        mondrian_core::WorkingColorSpace::LinearRec2020 => "Mondrian Working Linear Rec.2020",
+        mondrian_core::WorkingColorSpace::LinearP3D65 => "Mondrian Working Linear P3-D65",
+        mondrian_core::WorkingColorSpace::AcesCg => "ACEScg/AP1 Linear",
+    }
+}
+
 impl Widget for InterpretAssetDialog {
     fn id(&self) -> WidgetId {
         self.id
@@ -320,7 +536,15 @@ impl Widget for InterpretAssetDialog {
             ROW_HEIGHT,
         ));
 
-        let button_y = self.card.y + self.card.height - BUTTON_BOTTOM_INSET - BUTTON_HEIGHT;
+        row_y += ROW_HEIGHT + ROW_GAP;
+        self.diagnostics_label.layout(Rect::new(
+            content.x,
+            row_y,
+            content.width,
+            (button_y_for_card(self.card) - row_y - ROW_GAP).max(120.0),
+        ));
+
+        let button_y = button_y_for_card(self.card);
         let cancel_x = self.card.x + self.card.width - CONTENT_PADDING - BUTTON_WIDTH;
         let apply_x = cancel_x - BUTTON_GAP - BUTTON_WIDTH;
         self.apply_button
@@ -365,6 +589,7 @@ impl Widget for InterpretAssetDialog {
         self.status_label.paint(ctx);
         self.status_value_label.paint(ctx);
         self.color_space_label.paint(ctx);
+        self.diagnostics_label.paint(ctx);
         self.apply_button.paint(ctx);
         self.cancel_button.paint(ctx);
         self.color_space_dropdown.paint(ctx);
@@ -375,7 +600,7 @@ impl Widget for InterpretAssetDialog {
     }
 
     fn child_count(&self) -> usize {
-        8
+        9
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
@@ -386,8 +611,9 @@ impl Widget for InterpretAssetDialog {
             3 => Some(&self.status_value_label),
             4 => Some(&self.color_space_label),
             5 => Some(&self.color_space_dropdown),
-            6 => Some(&self.apply_button),
-            7 => Some(&self.cancel_button),
+            6 => Some(&self.diagnostics_label),
+            7 => Some(&self.apply_button),
+            8 => Some(&self.cancel_button),
             _ => None,
         }
     }
@@ -400,8 +626,9 @@ impl Widget for InterpretAssetDialog {
             3 => Some(&mut self.status_value_label),
             4 => Some(&mut self.color_space_label),
             5 => Some(&mut self.color_space_dropdown),
-            6 => Some(&mut self.apply_button),
-            7 => Some(&mut self.cancel_button),
+            6 => Some(&mut self.diagnostics_label),
+            7 => Some(&mut self.apply_button),
+            8 => Some(&mut self.cancel_button),
             _ => None,
         }
     }
@@ -586,6 +813,76 @@ mod tests {
         let status = interpretation_status(&draft);
 
         assert!(status.contains("1 个警告"));
+    }
+
+    #[test]
+    fn input_diagnostics_preserve_signal_evidence_and_processor_identity() {
+        mondrian_core::ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let primaries = VideoColorTag {
+            code: 1,
+            name: Some("bt709".to_owned()),
+            specified: true,
+        };
+        let transfer = VideoColorTag {
+            code: 1,
+            name: Some("bt709".to_owned()),
+            specified: true,
+        };
+        let matrix = VideoColorTag {
+            code: 1,
+            name: Some("bt709".to_owned()),
+            specified: true,
+        };
+        let mut interpretation = detected_interpretation(ColorSpace::Rec709);
+        interpretation.evidence.push(VideoColorInterpretationEvidence::ExactCicpTags {
+            primaries: primaries.clone(),
+            transfer: transfer.clone(),
+            matrix: matrix.clone(),
+            detected_color_space: ColorSpace::Rec709,
+        });
+        let draft = AppUiInterpretAssetDraft::new(
+            AssetId::new(),
+            "Camera A.mov",
+            AssetMediaInterpretation::default(),
+            Some(interpretation),
+        )
+        .with_input_diagnostics(
+            Some(AppShellVideoSignalDiagnostics {
+                range: DecodedVideoRange::Limited,
+                color_metadata: Some(mondrian_media::VideoColorMetadata {
+                    primaries,
+                    transfer,
+                    matrix,
+                }),
+            }),
+            Some(AppShellInputColorPipelineDiagnostics {
+                engine: mondrian_core::ColorEngine::mondrian_standard(),
+                working_color_space: mondrian_core::WorkingColorSpace::LinearRec2020,
+            }),
+        );
+
+        let diagnostics = input_color_diagnostics_text(&draft);
+        assert!(diagnostics.contains("Limited"));
+        assert!(diagnostics.contains("Primaries：bt709(1)"));
+        assert!(diagnostics.contains("完整 CICP"));
+        assert!(diagnostics.contains("Rec. 709 → Mondrian Working Linear Rec.2020"));
+        assert!(diagnostics.contains("OCIO processor cache-id："));
+        assert!(!diagnostics.contains("processor cache-id：不可用"));
+    }
+
+    #[test]
+    fn input_diagnostics_fail_closed_without_effective_pipeline_identity() {
+        let draft = AppUiInterpretAssetDraft::new(
+            AssetId::new(),
+            "Detached.mov",
+            AssetMediaInterpretation::default(),
+            Some(detected_interpretation(ColorSpace::Rec709)),
+        );
+
+        assert_eq!(
+            input_color_diagnostics_text(&draft),
+            "输入诊断：未提供项目色彩上下文"
+        );
     }
 
     fn detected_interpretation(color_space: ColorSpace) -> DetectedColorInterpretation {

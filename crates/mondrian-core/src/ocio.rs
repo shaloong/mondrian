@@ -2625,6 +2625,30 @@ pub(crate) fn apply_ocio_display_identity_float(
     )
 }
 
+/// Resolve the stable stock-OCIO processor cache id for one input transform.
+///
+/// This diagnostic query creates no GPU shader or renderer resource and fails
+/// closed when the selected engine/config or either identity is unavailable.
+pub fn ocio_identity_processor_cache_id(
+    engine: &ColorEngine,
+    src: OcioColorSpaceIdentity,
+    dst: OcioColorSpaceIdentity,
+) -> Result<String, String> {
+    validate_engine_working_identities(engine, &[src, dst])?;
+    with_ocio_config_for_engine(engine, |config, _generation| {
+        ocio_processor_from_config(config, src, dst)?
+            .cache_id()
+            .filter(|cache_id| !cache_id.trim().is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "OCIO processor '{}' -> '{}' returned an empty cache id",
+                    ocio_color_space_identity_name(src),
+                    ocio_color_space_identity_name(dst)
+                )
+            })
+    })
+}
+
 /// Extract an engine-qualified GPU shader bundle under a short config lease.
 ///
 /// The returned bundle is renderer-facing metadata. It deliberately does not
@@ -3845,6 +3869,22 @@ colorspaces:
             assert_eq!(texture.value_count, texture.values.len());
             assert!(texture.edge_len > 0);
         }
+    }
+
+    #[test]
+    fn input_processor_cache_id_query_matches_gpu_processor_identity() {
+        ensure_mondrian_default_ocio_loaded().expect("standard mode default config should load");
+        let engine = ColorEngine::mondrian_standard();
+        let source = OcioColorSpaceIdentity::Color(ColorSpace::SonySLog3SGamut3Cine);
+        let working = OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020);
+        let cache_id = ocio_identity_processor_cache_id(&engine, source, working)
+            .expect("input processor cache id");
+        let bundle =
+            extract_ocio_identity_gpu_shader_bundle(&engine, source, working, GpuLanguage::Glsl4_0)
+                .expect("matching GPU processor bundle");
+
+        assert!(!cache_id.trim().is_empty());
+        assert_eq!(bundle.cache_id.as_deref(), Some(cache_id.as_str()));
     }
 
     #[test]

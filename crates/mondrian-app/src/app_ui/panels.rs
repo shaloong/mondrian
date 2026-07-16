@@ -73,8 +73,9 @@ use crate::app::ui_actions::{
     timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
     timeline_trim_clips_action, timeline_trim_selected_clips_to_playhead_action,
     viewer_set_preview_resolution_scale_action, viewer_set_zoom_scale_action,
-    AppShellInterpretAssetDialogPayload, AppShellRelinkAssetDialogPayload,
-    AppShellRelocatePanelPayload, AppShellRevealInFileManagerPayload, AssetsCreateAssetPayload,
+    AppShellInputColorPipelineDiagnostics, AppShellInterpretAssetDialogPayload,
+    AppShellRelinkAssetDialogPayload, AppShellRelocatePanelPayload,
+    AppShellRevealInFileManagerPayload, AppShellVideoSignalDiagnostics, AssetsCreateAssetPayload,
     AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
     AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
     AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsOpenFolderPayload,
@@ -316,12 +317,14 @@ impl AppUiPanelModels {
     ) -> Self {
         let viewer = ViewerPanelModel::from_app_state_with_preview(state, preview);
         let scopes = ScopesPanelModel::from_viewer(&viewer);
+        let input_pipeline = asset_input_pipeline_for_state(state);
         Self {
             assets: AssetGridModel::from_asset_library_in_folder_with_thumbnails(
                 state.asset_library.as_deref(),
                 asset_folder_id,
                 thumbnails,
                 Some(&state.proxy_mode_assets),
+                Some(&input_pipeline),
             ),
             effects: PanelListModel::from_app_effect_registry(state),
             viewer,
@@ -369,6 +372,24 @@ impl AppUiPanelModels {
     pub fn demo() -> Self {
         let state = demo_app_state();
         Self::demo_from_app_state(&state)
+    }
+}
+
+fn asset_input_pipeline_for_state(state: &AppState) -> AppShellInputColorPipelineDiagnostics {
+    let Some(sequence) = state.sequence.as_ref() else {
+        return AppShellInputColorPipelineDiagnostics {
+            engine: state.project_settings.color_management.engine.clone(),
+            working_color_space: WorkingColorSpace::LinearRec2020,
+        };
+    };
+    let engine = if sequence.settings.color_management.inherit {
+        state.project_settings.color_management.engine.clone()
+    } else {
+        sequence.settings.color_management.engine.clone()
+    };
+    AppShellInputColorPipelineDiagnostics {
+        engine,
+        working_color_space: sequence.settings.working_color_space,
     }
 }
 
@@ -448,7 +469,13 @@ impl AssetGridModel {
         library: Option<&AssetLibrary>,
         current_folder_id: Option<&str>,
     ) -> Self {
-        Self::from_asset_library_in_folder_with_thumbnails(library, current_folder_id, None, None)
+        Self::from_asset_library_in_folder_with_thumbnails(
+            library,
+            current_folder_id,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Build the project asset browser for a shell-local folder selection,
@@ -458,6 +485,7 @@ impl AssetGridModel {
         current_folder_id: Option<&str>,
         thumbnails: Option<&dyn AssetThumbnailSource>,
         proxy_mode_assets: Option<&std::collections::HashSet<AssetId>>,
+        input_pipeline: Option<&AppShellInputColorPipelineDiagnostics>,
     ) -> Self {
         let colors = current_theme().colors.clone();
         let Some(library) = library else {
@@ -522,6 +550,7 @@ impl AssetGridModel {
             current_folder,
             thumbnails,
             proxy_mode_assets,
+            input_pipeline,
         );
         if items.is_empty() {
             return AssetGridModel::new("Assets", Vec::new())
@@ -2285,12 +2314,14 @@ fn asset_grid_item_from_asset(
     asset: AssetRecord,
     thumbnails: Option<&dyn AssetThumbnailSource>,
     proxy_mode: bool,
+    input_pipeline: Option<&AppShellInputColorPipelineDiagnostics>,
 ) -> AssetGridItem {
     let badge = asset_kind_badge(&asset.kind);
     let accent = asset_kind_accent(&asset.kind);
     let icon = asset_kind_icon(&asset.kind);
     let thumbnail_state = thumbnails.map(|source| source.thumbnail_for_asset(&asset));
-    let context_menu_items = asset_grid_asset_context_menu_items(&asset, proxy_mode);
+    let context_menu_items =
+        asset_grid_asset_context_menu_items(&asset, proxy_mode, input_pipeline);
     let offline = asset_is_offline(&asset);
     let proxied = proxy_mode && matches!(asset.kind, AssetKind::Video);
     let duration_label = asset_duration_label(asset.media_info.duration);
@@ -2319,7 +2350,11 @@ fn asset_grid_item_from_asset(
     with_asset_icon(item, icon)
 }
 
-fn asset_grid_asset_context_menu_items(asset: &AssetRecord, proxy_mode: bool) -> Vec<MenuItem> {
+fn asset_grid_asset_context_menu_items(
+    asset: &AssetRecord,
+    proxy_mode: bool,
+    input_pipeline: Option<&AppShellInputColorPipelineDiagnostics>,
+) -> Vec<MenuItem> {
     let mut items = Vec::new();
     if asset_has_file_manager_target(asset) {
         items.push(asset_menu_item(
@@ -2333,6 +2368,13 @@ fn asset_grid_asset_context_menu_items(asset: &AssetRecord, proxy_mode: bool) ->
                         .media_info
                         .primary_video()
                         .map(|video| video.color_interpretation.clone()),
+                    video_signal: asset.media_info.primary_video().map(|video| {
+                        AppShellVideoSignalDiagnostics {
+                            range: video.color_range,
+                            color_metadata: video.color_metadata.clone(),
+                        }
+                    }),
+                    input_pipeline: input_pipeline.cloned(),
                 }),
             ),
             AppIcon::Film,
@@ -2399,6 +2441,7 @@ fn asset_grid_items_from_library_records(
     current_folder: Option<&FolderRecord>,
     thumbnails: Option<&dyn AssetThumbnailSource>,
     proxy_mode_assets: Option<&std::collections::HashSet<AssetId>>,
+    input_pipeline: Option<&AppShellInputColorPipelineDiagnostics>,
 ) -> Vec<AssetGridItem> {
     let mut items =
         Vec::with_capacity(folders.len() + assets.len() + usize::from(current_folder.is_some()));
@@ -2416,7 +2459,7 @@ fn asset_grid_items_from_library_records(
             .filter(|asset| asset.folder_id.as_deref() == parent_id)
             .map(|asset| {
                 let proxy_mode = proxy_mode_assets.is_some_and(|ids| ids.contains(&asset.id));
-                asset_grid_item_from_asset(asset, thumbnails, proxy_mode)
+                asset_grid_item_from_asset(asset, thumbnails, proxy_mode, input_pipeline)
             }),
     );
     items
@@ -5565,7 +5608,7 @@ mod tests {
         let asset_id = AssetId::new();
         let path = PathBuf::from("E:/media/shot.mov");
         let item =
-            asset_grid_item_from_asset(test_video_asset(asset_id, path.clone()), None, false);
+            asset_grid_item_from_asset(test_video_asset(asset_id, path.clone()), None, false, None);
         let model = AssetGridModel::new("Assets", vec![item]);
         let mut grid = asset_grid(&model);
         grid.layout(Rect::new(0.0, 0.0, 360.0, 240.0));
@@ -5686,10 +5729,15 @@ mod tests {
     #[test]
     fn assets_panel_offline_file_card_context_menu_includes_relink() {
         let asset_id = AssetId::new();
+        let input_pipeline = AppShellInputColorPipelineDiagnostics {
+            engine: mondrian_core::ColorEngine::mondrian_standard(),
+            working_color_space: WorkingColorSpace::LinearP3D65,
+        };
         let item = asset_grid_item_from_asset(
             test_video_asset(asset_id, PathBuf::from("E:/missing/shot.mov")),
             None,
             false,
+            Some(&input_pipeline),
         );
 
         assert_eq!(badge_labels(&item), ["视频", "离线"]);
@@ -5722,6 +5770,16 @@ mod tests {
             serde_json::from_value(payload.clone()).expect("interpret payload");
         assert_eq!(payload.asset_id, asset_id);
         assert_eq!(payload.asset_name, "shot.mov");
+        let signal = payload.video_signal.expect("primary-video signal diagnostics");
+        assert_eq!(signal.range, mondrian_media::DecodedVideoRange::Limited);
+        assert_eq!(
+            signal.color_metadata.expect("raw CICP metadata").primaries.name.as_deref(),
+            Some("bt709")
+        );
+        assert_eq!(
+            payload.input_pipeline.expect("effective input pipeline").working_color_space,
+            WorkingColorSpace::LinearP3D65
+        );
     }
 
     #[test]
@@ -5731,8 +5789,12 @@ mod tests {
         let media_path = root.join("shot.mov");
         std::fs::write(&media_path, b"not decoded in this view-model test").expect("write media");
         let asset_id = AssetId::new();
-        let item =
-            asset_grid_item_from_asset(test_video_asset(asset_id, media_path.clone()), None, false);
+        let item = asset_grid_item_from_asset(
+            test_video_asset(asset_id, media_path.clone()),
+            None,
+            false,
+            None,
+        );
 
         assert_eq!(badge_labels(&item), ["视频"]);
         assert_eq!(item.context_menu_items.len(), 5);
@@ -5753,7 +5815,7 @@ mod tests {
         assert!(payload.enabled);
 
         let proxied =
-            asset_grid_item_from_asset(test_video_asset(asset_id, media_path), None, true);
+            asset_grid_item_from_asset(test_video_asset(asset_id, media_path), None, true, None);
         assert_eq!(badge_labels(&proxied), ["视频", "代理"]);
         assert_eq!(proxied.badges[1].tone, AssetGridBadgeTone::Success);
         assert_eq!(proxied.context_menu_items[2].label, "关闭代理模式");
@@ -9403,6 +9465,58 @@ mod tests {
     }
 
     fn test_video_asset(asset_id: AssetId, path: PathBuf) -> AssetRecord {
+        let primaries = mondrian_media::VideoColorTag {
+            code: 1,
+            name: Some("bt709".to_owned()),
+            specified: true,
+        };
+        let transfer = primaries.clone();
+        let matrix = primaries.clone();
+        let color_metadata = mondrian_media::VideoColorMetadata {
+            primaries: primaries.clone(),
+            transfer: transfer.clone(),
+            matrix: matrix.clone(),
+        };
+        let mut media_info = mondrian_media::MediaInfo::synthetic_solid_color();
+        media_info.has_video = true;
+        media_info.video_streams.push(mondrian_media::VideoStreamInfo {
+            index: 0,
+            codec: mondrian_media::info::VideoCodec::H264,
+            codec_profile: mondrian_media::VideoCodecProfile::Unknown,
+            width: 1920,
+            height: 1080,
+            frame_rate: Rational::FPS_24,
+            frame_rate_proven: true,
+            pixel_format: mondrian_media::info::PixelFormat::Yuv420p,
+            pixel_format_proven: true,
+            color_range: mondrian_media::DecodedVideoRange::Limited,
+            detected_color_space: Some(ColorSpace::Rec709),
+            color_interpretation: mondrian_media::DetectedColorInterpretation {
+                color_space: Some(ColorSpace::Rec709),
+                confidence: mondrian_media::VideoColorInterpretationConfidence::High,
+                source: mondrian_media::VideoColorSpaceSource::Metadata,
+                method: mondrian_media::VideoColorDetectionMethod::CicpTags,
+                evidence: vec![
+                    mondrian_media::VideoColorInterpretationEvidence::ExactCicpTags {
+                        primaries,
+                        transfer,
+                        matrix,
+                        detected_color_space: ColorSpace::Rec709,
+                    },
+                ],
+                warnings: Vec::new(),
+                user_overridable: true,
+            },
+            color_space_source: mondrian_media::VideoColorSpaceSource::Metadata,
+            color_detection_method: mondrian_media::VideoColorDetectionMethod::CicpTags,
+            color_metadata: Some(color_metadata),
+            color_metadata_hints: Vec::new(),
+            hdr_metadata: Vec::new(),
+            bit_depth: 8,
+            has_alpha: false,
+            avg_bitrate: 10_000_000,
+            total_frames: Some(240),
+        });
         AssetRecord {
             id: asset_id,
             name: path.file_name().and_then(|name| name.to_str()).unwrap_or("shot.mov").to_owned(),
@@ -9411,7 +9525,7 @@ mod tests {
             source: None,
             folder_id: None,
             interpretation: mondrian_core::timeline_data::AssetMediaInterpretation::default(),
-            media_info: mondrian_media::MediaInfo::synthetic_adjustment_layer(),
+            media_info,
             created_at: "2026-06-19T00:00:00Z".to_owned(),
             updated_at: "2026-06-19T00:00:00Z".to_owned(),
         }

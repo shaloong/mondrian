@@ -276,6 +276,13 @@ name is low confidence. Conflicting lower-priority evidence is retained in a
 structured warning instead of disappearing. ICC-only streams may resolve to an
 inferred input color family, while ICC-vs-CICP conflicts must be surfaced as
 warnings rather than silently changing an explicit user override.
+`ocio_identity_processor_cache_id()` resolves the processor identity for the
+effective source and working endpoints under the exact pinned engine/config.
+It creates no GPU shader or renderer resource and fails closed on missing
+configs or identities. Interpret Footage uses this query only after the modal
+opens, alongside the retained raw range/CICP/evidence payload, so diagnostics
+name the processor that production GPU extraction will use without adding work
+to the asset-panel refresh path.
 
 Camera acquisition identities are never represented by a transfer curve alone.
 Each product `ColorSpace` binds an exact transfer and gamut pair, including

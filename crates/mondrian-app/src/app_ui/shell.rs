@@ -1241,7 +1241,8 @@ impl AppUiAppRoot {
                     payload.asset_name,
                     payload.interpretation,
                     payload.auto_interpretation,
-                );
+                )
+                .with_input_diagnostics(payload.video_signal, payload.input_pipeline);
                 self.modal = Some(ShellModal::interpret_asset(draft));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
                     self.layout(self.bounds);
@@ -3422,6 +3423,8 @@ mod tests {
                 asset_name: "Shot A.mov".to_owned(),
                 interpretation: AssetMediaInterpretation::default(),
                 auto_interpretation: None,
+                video_signal: None,
+                input_pipeline: None,
             }),
             &platform,
             None,

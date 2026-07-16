@@ -52,10 +52,17 @@ not the undoable domain model. The dialog's committed payload must flow through 
 domain/app action owned by the target subsystem. For example, Asset Library →
 Interpret Footage opens an app-shell modal, but applying Auto/Override is
 an asset-library mutation that persists `AssetMediaInterpretation`.
-The modal is a compact settings form with a single input color-space dropdown:
-Auto is the default option, explicit color spaces persist as overrides, and Auto
-displays the current resolved/detected result instead of explanatory copy.
-The Auto label carries detector confidence, selection method, and warning count.
+The modal keeps the input color-space dropdown compact while retaining a
+read-only diagnostic body: Auto is the default option, explicit color spaces
+persist as overrides, and Auto displays the current resolved/detected result.
+The action that opens the modal must preserve decoder range, raw CICP
+primaries/transfer/matrix, detector evidence and warnings, plus the effective
+engine and working identity; reducing this payload to the final color-space
+guess loses the facts needed to audit an inference. The dialog displays the
+resolution method/confidence, whether the result is inferred, user override
+state, signal tags, evidence/warnings, the input-to-working path, and the exact
+stock-OCIO processor cache-id. Processor identity is queried only when the user
+opens or changes the dialog, never while rebuilding asset cards.
 Machine-readable diagnostics also retain counts for lower-priority metadata
 hints rejected by CICP or ICC, so preview/export health surfaces can distinguish
 an unambiguous result from one that won over conflicting comments or file-name

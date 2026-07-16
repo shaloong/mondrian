@@ -7,12 +7,13 @@ use mondrian_core::effect_data::EffectType;
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, ClipId, EffectId, JobId, SequenceId, TrackId};
 use mondrian_core::{
-    ColorSpace, ExportDeliveryViewPolicy, ProjectSettings, Rational, Resolution, WorkingColorSpace,
+    ColorEngine, ColorSpace, ExportDeliveryViewPolicy, ProjectSettings, Rational, Resolution,
+    WorkingColorSpace,
 };
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
 use mondrian_export::preset::{ExportPreset, TimelineExportRange};
-use mondrian_media::DetectedColorInterpretation;
+use mondrian_media::{DecodedVideoRange, DetectedColorInterpretation, VideoColorMetadata};
 use mondrian_timeline::{
     sequence::{
         ColorWorkflow, DeliveryBitDepth, MissingColorMetadataPolicy, NestedColorProcessing,
@@ -860,6 +861,28 @@ pub struct AppShellInterpretAssetDialogPayload {
     pub interpretation: AssetMediaInterpretation,
     /// Current structured automatic color interpretation from media metadata.
     pub auto_interpretation: Option<DetectedColorInterpretation>,
+    /// Raw primary-video signal metadata retained for user-visible diagnostics.
+    pub video_signal: Option<AppShellVideoSignalDiagnostics>,
+    /// Effective project/sequence input pipeline used to identify the OCIO processor.
+    pub input_pipeline: Option<AppShellInputColorPipelineDiagnostics>,
+}
+
+/// Raw encoded-signal facts shown by Interpret Footage without re-probing media.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppShellVideoSignalDiagnostics {
+    /// Decoder-proven full/limited range, or explicit unknown.
+    pub range: DecodedVideoRange,
+    /// Raw CICP primaries/transfer/matrix triplet when FFmpeg exposed it.
+    pub color_metadata: Option<VideoColorMetadata>,
+}
+
+/// Effective input-to-working identities resolved before opening Interpret Footage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppShellInputColorPipelineDiagnostics {
+    /// Exact immutable/config-pinned OCIO engine selected by the project or sequence.
+    pub engine: ColorEngine,
+    /// Scene-linear working identity receiving this asset.
+    pub working_color_space: WorkingColorSpace,
 }
 
 /// Draft update emitted by the Interpret Footage dialog.
