@@ -508,7 +508,7 @@ pub enum MondrianStandardHdrViewTransformId {
 /// Every field is intentionally required. Runtime package resolution accepts
 /// only one complete declared identity and rejects mismatched or partially
 /// edited project payloads instead of resolving them to the current package.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MondrianStandardPackageIdentity {
     package_id: MondrianStandardPackageId,
@@ -522,6 +522,51 @@ pub struct MondrianStandardPackageIdentity {
     sdr_view_transform_version: MondrianStandardVersion,
     hdr_view_transform_id: MondrianStandardHdrViewTransformId,
     hdr_view_transform_version: MondrianStandardVersion,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SerializedMondrianStandardPackageIdentity {
+    package_id: MondrianStandardPackageId,
+    package_version: MondrianStandardVersion,
+    config_id: MondrianStandardConfigId,
+    config_sha256: MondrianStandardConfigDigest,
+    package_sha256: MondrianStandardPackageDigest,
+    working_space_id: MondrianStandardWorkingSpaceId,
+    working_space_version: MondrianStandardVersion,
+    sdr_view_transform_id: MondrianStandardSdrViewTransformId,
+    sdr_view_transform_version: MondrianStandardVersion,
+    hdr_view_transform_id: MondrianStandardHdrViewTransformId,
+    hdr_view_transform_version: MondrianStandardVersion,
+}
+
+impl<'de> Deserialize<'de> for MondrianStandardPackageIdentity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let serialized = SerializedMondrianStandardPackageIdentity::deserialize(deserializer)?;
+        let identity = Self {
+            package_id: serialized.package_id,
+            package_version: serialized.package_version,
+            config_id: serialized.config_id,
+            config_sha256: serialized.config_sha256,
+            package_sha256: serialized.package_sha256,
+            working_space_id: serialized.working_space_id,
+            working_space_version: serialized.working_space_version,
+            sdr_view_transform_id: serialized.sdr_view_transform_id,
+            sdr_view_transform_version: serialized.sdr_view_transform_version,
+            hdr_view_transform_id: serialized.hdr_view_transform_id,
+            hdr_view_transform_version: serialized.hdr_view_transform_version,
+        };
+        if identity == Self::V2 || identity == Self::V3 {
+            Ok(identity)
+        } else {
+            Err(serde::de::Error::custom(
+                "unsupported or internally inconsistent Mondrian Standard package identity",
+            ))
+        }
+    }
 }
 
 /// One OCIO role binding pinned by a Custom OCIO project.
@@ -1104,6 +1149,18 @@ mod tests {
             serde_json::to_value(ColorEngine::mondrian_standard()).expect("serialize Standard");
         tampered["package"]["package_sha256"] = serde_json::Value::String("0".repeat(64));
         assert!(serde_json::from_value::<ColorEngine>(tampered).is_err());
+
+        let v2 = ColorEngine::MondrianStandard { package: MondrianStandardPackageIdentity::V2 };
+        let v2_round_trip: ColorEngine = serde_json::from_value(
+            serde_json::to_value(&v2).expect("serialize legacy Standard v2"),
+        )
+        .expect("deserialize supported legacy Standard v2");
+        assert_eq!(v2_round_trip, v2);
+
+        let mut mixed_identity =
+            serde_json::to_value(ColorEngine::mondrian_standard()).expect("serialize Standard");
+        mixed_identity["package"]["package_version"] = serde_json::json!("v2");
+        assert!(serde_json::from_value::<ColorEngine>(mixed_identity).is_err());
 
         let mut swapped_view =
             serde_json::to_value(ColorEngine::mondrian_standard()).expect("serialize Standard");

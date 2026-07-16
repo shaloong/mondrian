@@ -486,7 +486,7 @@ mod tests {
         let opened_sequence = opened.sequences.active().expect("active sequence after reopen");
         assert_eq!(
             opened_sequence.settings.color_management.workflow,
-            mondrian_timeline::sequence::ColorWorkflow::DisplayReferred
+            mondrian_timeline::sequence::ColorWorkflow::SceneReferred
         );
         let opened_context = opened_sequence
             .settings
@@ -497,7 +497,7 @@ mod tests {
         );
         assert_eq!(
             opened_context.output_transform,
-            mondrian_core::OutputTransformIntent::Colorimetric
+            mondrian_core::OutputTransformIntent::mondrian_standard()
         );
 
         let runtime_library = root.join("runtime-library");
@@ -512,7 +512,7 @@ mod tests {
             loaded.document.sequences.active().expect("active sequence after archive load");
         assert_eq!(
             loaded_sequence.settings.color_management.workflow,
-            mondrian_timeline::sequence::ColorWorkflow::DisplayReferred
+            mondrian_timeline::sequence::ColorWorkflow::SceneReferred
         );
         assert_eq!(
             fs::read(runtime_library.join("index.db")).expect("read extracted db"),
@@ -551,6 +551,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn document_fingerprint_includes_exact_standard_package_identity() {
+        let current = test_document();
+        let mut legacy = current.clone();
+        legacy.settings.color_management.engine = mondrian_core::ColorEngine::MondrianStandard {
+            package: mondrian_core::MondrianStandardPackageIdentity::V2,
+        };
+
+        assert_ne!(
+            project_document_fingerprint(current).expect("current package fingerprint"),
+            project_document_fingerprint(legacy).expect("legacy package fingerprint")
+        );
+    }
+
     fn write_current_fixture_archive(path: &Path, library: &[u8]) {
         let file = fs::File::create(path).expect("create fixture archive");
         let mut writer = zip::ZipWriter::new(file);
@@ -577,6 +591,20 @@ mod tests {
         let first = read_project_document_from_archive(&source).expect("first open");
         let second = read_project_document_from_archive(&source).expect("second open");
         assert_eq!(
+            first.settings.color_management.engine,
+            mondrian_core::ColorEngine::mondrian_standard()
+        );
+        let first_context = first
+            .sequences
+            .active()
+            .expect("active current-fixture sequence")
+            .settings
+            .root_program_color_context(&first.settings.color_management);
+        assert_eq!(
+            first_context.output_transform,
+            mondrian_core::OutputTransformIntent::mondrian_standard()
+        );
+        assert_eq!(
             project_document_fingerprint(first.clone()).expect("first fingerprint"),
             project_document_fingerprint(second).expect("second fingerprint")
         );
@@ -592,6 +620,54 @@ mod tests {
             project_document_fingerprint(loaded.document).expect("loaded fingerprint"),
             project_document_fingerprint(reopened).expect("reopened fingerprint")
         );
+    }
+
+    #[test]
+    fn legacy_standard_v2_archive_reopens_without_visual_identity_drift() {
+        let root = unique_temp_dir("legacy-standard-v2");
+        let db_path = root.join("index.db");
+        fs::write(&db_path, b"sqlite legacy Standard v2").expect("write legacy library");
+        let project_path = root.join("legacy-standard-v2.mdp");
+        let mut document = test_document();
+        let v2_engine = mondrian_core::ColorEngine::MondrianStandard {
+            package: mondrian_core::MondrianStandardPackageIdentity::V2,
+        };
+        document.settings.color_management.engine = v2_engine.clone();
+        document
+            .sequences
+            .active_mut()
+            .expect("active legacy sequence")
+            .settings
+            .color_management
+            .engine = v2_engine.clone();
+
+        save_project_archive(&document, &db_path, &project_path)
+            .expect("save legacy Standard v2 archive");
+        let reopened = read_project_document_from_archive(&project_path)
+            .expect("reopen legacy Standard v2 archive");
+        assert_eq!(reopened.settings.color_management.engine, v2_engine);
+        let context = reopened
+            .sequences
+            .active()
+            .expect("active reopened legacy sequence")
+            .settings
+            .root_program_color_context(&reopened.settings.color_management);
+        assert_eq!(
+            context.output_transform,
+            mondrian_core::OutputTransformIntent::mondrian_standard_package(
+                mondrian_core::MondrianStandardPackageIdentity::V2,
+            )
+        );
+        let (display, view) = context
+            .output_transform
+            .resolve_display_view(
+                mondrian_core::ColorSpace::Rec709,
+                &reopened.settings.color_management.engine,
+            )
+            .expect("resolve legacy Standard v2 output")
+            .expect("legacy Standard v2 display/view");
+        assert_eq!(display, "Rec.1886 Rec.709 - Display");
+        assert_eq!(view, "Mondrian Standard SDR v1");
     }
 
     #[test]

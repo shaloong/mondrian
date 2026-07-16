@@ -34,7 +34,11 @@ The current archive fixture pins the exact Mondrian Standard package digest
 serialized by `ProjectColorManagement`. A package content change deliberately
 invalidates that fixture until it is regenerated for the new current contract;
 unknown/retired digests are rejected rather than accepted through an implicit
-color migration or substituted with the latest package.
+color migration or substituted with the latest package. Deserialization accepts
+only complete registered package identities: individually valid v2/v3 field
+values cannot be mixed into an unregistered hybrid identity. Archive and preview
+fingerprints, OCIO CPU processor keys, and renderer GPU shader keys all include
+the exact package identity.
 
 Document schema v7 retains the v5 Custom OCIO reproducibility contract and the
 v6 removal of the redundant sequence-level ACES workflow selector. It also

@@ -8608,6 +8608,24 @@ mod tests {
     }
 
     #[test]
+    fn shader_request_cache_key_distinguishes_standard_packages() {
+        let request_for = |package| OcioGpuShaderRequest::ColorSpace {
+            engine: ColorEngine::MondrianStandard { package },
+            src: ColorSpace::SonySLog3SGamut3Cine.into(),
+            dst: WorkingColorSpace::LinearRec2020.into(),
+            language: GpuLanguage::Glsl4_0,
+        };
+        let legacy = request_for(mondrian_core::MondrianStandardPackageIdentity::V2);
+        let current = request_for(mondrian_core::MondrianStandardPackageIdentity::V3);
+
+        assert_ne!(request_hash(&legacy, 0), request_hash(&current, 0));
+        assert_ne!(
+            hash_request_and_processor(&legacy, Some("same-processor-id")),
+            hash_request_and_processor(&current, Some("same-processor-id"))
+        );
+    }
+
+    #[test]
     fn shader_request_cache_key_invalidates_on_config_revision() {
         let request = OcioGpuShaderRequest::ColorSpace {
             engine: pinned_custom_engine(mondrian_core::OcioConfigSource::Environment),
