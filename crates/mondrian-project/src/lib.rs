@@ -486,7 +486,7 @@ mod tests {
         let opened_sequence = opened.sequences.active().expect("active sequence after reopen");
         assert_eq!(
             opened_sequence.settings.color_management.workflow,
-            mondrian_timeline::sequence::ColorWorkflow::SceneReferred
+            mondrian_timeline::sequence::ColorWorkflow::DisplayReferred
         );
         let opened_context = opened_sequence
             .settings
@@ -497,7 +497,7 @@ mod tests {
         );
         assert_eq!(
             opened_context.output_transform,
-            mondrian_core::OutputTransformIntent::mondrian_standard()
+            mondrian_core::OutputTransformIntent::Colorimetric
         );
 
         let runtime_library = root.join("runtime-library");
@@ -512,7 +512,7 @@ mod tests {
             loaded.document.sequences.active().expect("active sequence after archive load");
         assert_eq!(
             loaded_sequence.settings.color_management.workflow,
-            mondrian_timeline::sequence::ColorWorkflow::SceneReferred
+            mondrian_timeline::sequence::ColorWorkflow::DisplayReferred
         );
         assert_eq!(
             fs::read(runtime_library.join("index.db")).expect("read extracted db"),

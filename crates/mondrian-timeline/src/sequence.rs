@@ -117,10 +117,10 @@ pub enum SequenceRole {
 /// View participates at the output boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ColorWorkflow {
-    /// Explicit technical bypass using a direct colorimetric output processor.
-    DisplayReferred,
-    /// Scene-linear program rendering followed by the selected engine's View.
+    /// Conventional video workflow using a direct colorimetric output processor.
     #[default]
+    DisplayReferred,
+    /// Scene-linear program rendering followed by the selected engine's rendering View.
     SceneReferred,
 }
 
@@ -587,7 +587,7 @@ fn validate_ocio_display_view(
 impl Default for SequenceColorManagement {
     fn default() -> Self {
         Self {
-            workflow: ColorWorkflow::SceneReferred,
+            workflow: ColorWorkflow::DisplayReferred,
             inherit: default_inherit_color_management(),
             engine: ColorEngine::default(),
             missing_metadata_policy: MissingColorMetadataPolicy::AssumeRec709,
@@ -2151,6 +2151,31 @@ mod tests {
     }
 
     #[test]
+    fn default_standard_video_workflow_resolves_colorimetric_rec709_output() {
+        let settings = SequenceSettings::default();
+        let context = settings.root_program_color_context(&ProjectColorManagement::default());
+
+        assert_eq!(
+            settings.color_management.workflow,
+            ColorWorkflow::DisplayReferred
+        );
+        assert_eq!(context.workflow, ColorWorkflow::DisplayReferred);
+        assert_eq!(
+            context.output_color_space,
+            OcioColorSpaceIdentity::Color(ColorSpace::Rec709)
+        );
+        assert!(!context.tone_map);
+        assert_eq!(
+            context.output_transform,
+            mondrian_core::OutputTransformIntent::Colorimetric
+        );
+        assert!(matches!(
+            context.engine,
+            ColorEngine::MondrianStandard { .. }
+        ));
+    }
+
+    #[test]
     fn preview_monitor_and_program_output_contexts_are_explicitly_distinct() {
         let settings = SequenceSettings {
             working_color_space: WorkingColorSpace::LinearRec2020,
@@ -2349,6 +2374,7 @@ mod tests {
     fn aces_scene_output_uses_preset_pinned_display_view() {
         let mut settings = SequenceSettings::default();
         settings.color_management.inherit = false;
+        settings.color_management.workflow = ColorWorkflow::SceneReferred;
         settings.color_management.engine = ColorEngine::Aces {
             preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
         };
@@ -2367,8 +2393,14 @@ mod tests {
     }
 
     #[test]
-    fn mondrian_standard_default_program_context_uses_standard_view() {
-        let settings = SequenceSettings::default();
+    fn mondrian_standard_scene_program_context_uses_standard_view() {
+        let settings = SequenceSettings {
+            color_management: SequenceColorManagement {
+                workflow: ColorWorkflow::SceneReferred,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let ctx = settings.root_program_color_context(&ProjectColorManagement::default());
         assert_eq!(ctx.engine, ColorEngine::mondrian_standard());
         assert!(ctx.tone_map);
@@ -2379,8 +2411,14 @@ mod tests {
     }
 
     #[test]
-    fn mondrian_standard_default_preview_context_uses_standard_view() {
-        let settings = SequenceSettings::default();
+    fn mondrian_standard_scene_preview_context_uses_standard_view() {
+        let settings = SequenceSettings {
+            color_management: SequenceColorManagement {
+                workflow: ColorWorkflow::SceneReferred,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let ctx = settings
             .root_preview_color_context(&ProjectColorManagement::default(), ColorSpace::Rec709);
 
@@ -2525,6 +2563,7 @@ mod tests {
     fn resolve_delivery_view_config_default_resolves_when_ocio_available() {
         let settings = SequenceSettings {
             color_management: SequenceColorManagement {
+                workflow: ColorWorkflow::SceneReferred,
                 inherit: false,
                 display_management: DisplayManagementPolicy {
                     export_delivery_view: ExportDeliveryViewPolicy::OcioConfigDefault,
@@ -2652,6 +2691,7 @@ mod tests {
         };
         let settings = SequenceSettings {
             color_management: SequenceColorManagement {
+                workflow: ColorWorkflow::SceneReferred,
                 inherit: false,
                 display_management: DisplayManagementPolicy {
                     export_delivery_view: ExportDeliveryViewPolicy::None,
@@ -2707,14 +2747,14 @@ mod tests {
     }
 
     #[test]
-    fn default_program_context_without_delivery_override_uses_product_view_without_issue() {
+    fn default_program_context_without_delivery_override_is_colorimetric_without_issue() {
         let settings = SequenceSettings::default();
         let project_cm = ProjectColorManagement::default();
         let ctx = settings.root_program_color_context(&project_cm);
-        assert!(ctx.tone_map);
+        assert!(!ctx.tone_map);
         assert_eq!(
             ctx.output_transform,
-            mondrian_core::OutputTransformIntent::mondrian_standard()
+            mondrian_core::OutputTransformIntent::Colorimetric
         );
         assert_eq!(ctx.export_delivery_view_error, None);
     }

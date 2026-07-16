@@ -1931,7 +1931,7 @@ mod tests {
 
     #[test]
     fn workflow_picker_exposes_rendering_domain_without_duplicating_project_color_modes() {
-        assert_eq!(ColorWorkflow::default(), ColorWorkflow::SceneReferred);
+        assert_eq!(ColorWorkflow::default(), ColorWorkflow::DisplayReferred);
         assert_eq!(
             COLOR_WORKFLOW_OPTIONS,
             [ColorWorkflow::DisplayReferred, ColorWorkflow::SceneReferred]

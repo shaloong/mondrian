@@ -64,11 +64,14 @@ P3-D65-limited HDR View. Display/view lookup delegates to this contract so
 rendering, validation, and delivery metadata cannot maintain parallel string or
 luminance tables.
 
-An explicitly DisplayReferred technical workflow does not invoke this scene
-View: its output boundary remains direct colorimetric OCIO conversion. New
-projects are SceneReferred and select the Standard View by default; its SDR
-design is responsible for preserving ordinary Rec.709 appearance without an
-unnecessary filmic reshape.
+The default DisplayReferred workflow is the conventional NLE path for finished
+video. It still uses the selected engine's stock OCIO input and output
+processors, but its output boundary is a direct colorimetric conversion and
+does not invoke a picture-formation View. A SceneReferred workflow is an
+explicit project/sequence choice for log, HDR scene-light, CG, or grading work;
+it selects the Standard SDR or HDR View for the target. `Mondrian Standard`
+therefore names the versioned engine/package contract, not one mandatory look
+applied to every project.
 `mondrian-core::mondrian_default_ocio_contract()` is the Rust-level product
 contract for that package. It lists the Standard package version, pinned config
 name, exact config and whole-package SHA-256 digests, resource digests, virtual
@@ -281,7 +284,7 @@ validated fail-closed after the preset is applied.
 
 Important fields:
 
-- `workflow`: SceneReferred (default) or explicit DisplayReferred technical bypass
+- `workflow`: DisplayReferred (default) or explicit SceneReferred picture formation
 - `display_management`: monitor/profile reference, viewer SDR/HDR mode, and tone-map policy
 - `missing_metadata_policy`
 - `nested_processing`
@@ -293,11 +296,11 @@ Important fields:
 `DisplayToneMapPolicy` controls the final working-to-display/export boundary.
 Its `Automatic` mode follows the effective scene-referred workflow; the
 per-sequence `auto_tone_map_media` authoring preference remains attached to
-individual media render plans. New sequences are scene-referred and therefore
-execute the selected engine's product View by default. `ColorEngine` is the sole
-Standard/ACES/Custom mode selector; workflow deliberately has no ACES-branded
-variant. DisplayReferred remains an explicit technical bypass that selects a
-direct colorimetric OCIO processor.
+individual media render plans. New conventional-video sequences are
+display-referred and select a direct colorimetric OCIO processor. Explicit
+SceneReferred sequences execute the selected engine's product View.
+`ColorEngine` is the sole Standard/ACES/Custom mode selector; workflow
+deliberately has no ACES-branded variant.
 
 Media probing keeps automatic interpretation evidence separate from user
 overrides. CICP/container tags, camera/log metadata hints, complete

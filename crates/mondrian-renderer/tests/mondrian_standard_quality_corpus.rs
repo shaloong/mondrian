@@ -3,8 +3,9 @@ use mondrian_core::{
     OutputTransformIntent, WorkingColorSpace, WorkingRgbaF32Frame,
 };
 use mondrian_renderer::{
-    execute_cpu_output_boundary_float, CpuColorFrame, RenderOutputColorBoundary,
-    RenderOutputColorBoundaryTarget,
+    execute_cpu_output_boundary_float, execute_cpu_output_boundary_rgba8,
+    execute_cpu_source_input_stage, CpuColorFrame, CpuEncodedColorFrame, CpuSourceColorFrame,
+    RenderInputTransform, RenderOutputColorBoundary, RenderOutputColorBoundaryTarget,
 };
 use std::collections::BTreeSet;
 
@@ -190,6 +191,80 @@ fn production_standard_views_satisfy_objective_corpus_invariants() {
     for output in STANDARD_OUTPUT_TARGETS {
         assert_ten_bit_gradient_resolution(&corpus, ten_bit, output);
     }
+}
+
+#[test]
+fn standard_display_referred_rec709_round_trip_stays_within_one_code_value() {
+    ensure_mondrian_default_ocio_loaded().expect("Mondrian Standard OCIO package");
+
+    let source_rgba = normal_rec709_stimulus();
+    let source = CpuSourceColorFrame::from(CpuEncodedColorFrame::source_rgba8(
+        u32::try_from(source_rgba.len() / 4).expect("normal Rec.709 stimulus width"),
+        1,
+        ColorSpace::Rec709,
+        source_rgba.clone(),
+    ));
+    let working = execute_cpu_source_input_stage(
+        &source,
+        &RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec2020,
+            false,
+            ColorEngine::mondrian_standard(),
+        ),
+    )
+    .expect("production Rec.709 input boundary")
+    .result
+    .frame;
+    let boundary = RenderOutputColorBoundary::from_intent(
+        RenderOutputColorBoundaryTarget::Display,
+        ColorSpace::Rec709,
+        &OutputTransformIntent::Colorimetric,
+        false,
+        ColorEngine::mondrian_standard(),
+    )
+    .expect("default display-referred output intent");
+    let observed = execute_cpu_output_boundary_rgba8(&working, &boundary)
+        .expect("production colorimetric Rec.709 output boundary")
+        .rgba;
+
+    let mut max_code_delta = 0_u8;
+    let mut worst_pixel = 0_usize;
+    for (pixel_index, (expected, observed)) in
+        source_rgba.chunks_exact(4).zip(observed.chunks_exact(4)).enumerate()
+    {
+        assert_eq!(
+            expected[3], observed[3],
+            "alpha changed at pixel {pixel_index}"
+        );
+        for channel in 0..3 {
+            let delta = expected[channel].abs_diff(observed[channel]);
+            if delta > max_code_delta {
+                max_code_delta = delta;
+                worst_pixel = pixel_index;
+            }
+        }
+    }
+    assert!(
+        max_code_delta <= 1,
+        "Rec.709 round trip exceeded one code value: max={max_code_delta}, pixel={worst_pixel}, source={:?}, observed={:?}",
+        &source_rgba[worst_pixel * 4..worst_pixel * 4 + 4],
+        &observed[worst_pixel * 4..worst_pixel * 4 + 4]
+    );
+}
+
+fn normal_rec709_stimulus() -> Vec<u8> {
+    let mut rgba = Vec::new();
+    for code in 0..=u8::MAX {
+        rgba.extend_from_slice(&[code, code, code, u8::MAX]);
+    }
+    for red in [0, 32, 64, 96, 128, 160, 192, 224, 255] {
+        for green in [0, 32, 64, 96, 128, 160, 192, 224, 255] {
+            for blue in [0, 32, 64, 96, 128, 160, 192, 224, 255] {
+                rgba.extend_from_slice(&[red, green, blue, u8::MAX]);
+            }
+        }
+    }
+    rgba
 }
 
 fn parse_corpus() -> QualityCorpus {

@@ -4647,7 +4647,7 @@ mod tests {
         );
         assert_eq!(
             sequence.settings.color_management.workflow,
-            mondrian_timeline::sequence::ColorWorkflow::SceneReferred
+            mondrian_timeline::sequence::ColorWorkflow::DisplayReferred
         );
         let context = sequence
             .settings
@@ -4658,7 +4658,7 @@ mod tests {
         );
         assert_eq!(
             context.output_transform,
-            mondrian_core::OutputTransformIntent::mondrian_standard()
+            mondrian_core::OutputTransformIntent::Colorimetric
         );
         assert!(!state.project_settings.proxy_enabled);
         assert!(state.asset_library.is_some());

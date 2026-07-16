@@ -47,8 +47,10 @@ Opening the archive must reload and validate the selected external config; a
 missing config, edited LUT, changed role, or changed default resource is an
 open diagnostic, never a silent substitution. Schemas v5 and v6 are
 deliberately not migrated during Alpha: v6 made project `ColorEngine` the sole
-color-mode selector and changed the new-sequence workflow default to
-SceneReferred, while v7 completes the Standard View identity.
+color-mode selector, while v7 completes the Standard View identity. Current
+new sequences default to the DisplayReferred conventional-video workflow;
+SceneReferred is persisted explicitly when the selected engine's rendering
+View must participate.
 
 ## Runtime Directory
 
