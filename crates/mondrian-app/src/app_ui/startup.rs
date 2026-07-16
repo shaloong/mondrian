@@ -1178,7 +1178,7 @@ mod tests {
     #[test]
     fn startup_new_project_modal_routes_custom_ocio_selection() {
         let config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../mondrian-core/assets/ocio/mondrian_default_ocio_v1.ocio");
+            .join("../mondrian-core/assets/ocio/mondrian_default_ocio_v2.ocio");
         let platform = SaveProjectPlatform {
             project_file: PathBuf::from("E:/projects/custom.mdp"),
             open_file: Some(config_path),

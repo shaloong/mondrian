@@ -12,7 +12,7 @@ normal application builds exercise the real OpenColorIO bridge rather than a
 stub runtime.
 
 The bundled endpoint/input config is packaged as
-`crates/mondrian-core/assets/ocio/mondrian_default_ocio_v1.ocio`. Standard mode
+`crates/mondrian-core/assets/ocio/mondrian_default_ocio_v2.ocio`. Standard mode
 parses that immutable base and assembles its versioned product View in memory
 with stock OCIO transforms; it never resolves an upstream `latest` alias or a
 machine-local LUT. The base retains pinned OCIO Studio input definitions and
@@ -31,9 +31,11 @@ and BSD-3-Clause notice are recorded in
 `assets/ocio/MONDRIAN_STANDARD_SDR_V1_NOTICE.md`.
 
 The same Standard SDR formation is registered against sRGB, Rec.1886 Rec.709,
-Gamma 2.2 Rec.709, and Display P3 display color spaces. Output-target resolution
-is explicit: sRGB, Rec.709, and P3 select their matching display rather than the
-config's global default.
+Gamma 2.2 Rec.709, Rec.2020 SDR, and Display P3 display color spaces.
+Output-target resolution is explicit: sRGB, Rec.709, Rec.2020 SDR, and P3 select
+their matching display rather than the config's global default. Rec.2020 SDR
+uses a display-reference CIE XYZ D65 to BT.2020 matrix followed by the BT.2020
+SDR OETF; it does not reuse the scene-reference `Camera Rec.2020` endpoint.
 
 `Mondrian Standard HDR 1000 nits v1` uses the same AP0-reference to XYZ D65,
 FilmLight E-Gamut, and log2 allocation stages, followed by a pinned 57-cube AgX
@@ -166,7 +168,7 @@ than being hidden in optional display/view strings.
 Explicit OCIO mode must load its selected config successfully. It must not
 silently fall back to a different color science. Mondrian Standard follows the
 same rule whenever an input or endpoint node requires the embedded
-`mondrian_default_ocio_v1` asset. Failure of that provider does not authorize
+`mondrian_default_ocio_v2` asset. Failure of that provider does not authorize
 substitution of another config, approximate LUT, or non-conformant native conversion.
 The `$OCIO` environment source is intentionally fail-closed: if the variable is
 unset or points to a missing file, Mondrian reports that selected source as
@@ -370,7 +372,7 @@ display-encoded and Log values require an OCIO processor.
 Project files and sequence-setting actions do not accept encoded acquisition or
 delivery identities in this field.
 
-Mondrian Standard v1 pins `WorkingColorSpace::LinearRec2020`; the bundled OCIO
+Mondrian Standard v2 pins `WorkingColorSpace::LinearRec2020`; the bundled OCIO
 config pins its `scene_linear` role to `Linear Rec.2020`, and the package
 contract validates the same mapping. The working values are unbounded
 scene-linear floats, not a 0..1 display signal and not a request to clip colors
@@ -1214,9 +1216,9 @@ texture for presentation or encoding.
   compatibility before recording.
 
 The renderer's real-wgpu parity gate executes one varied Linear Rec.2020 float
-stimulus through every Mondrian Standard target (sRGB, Rec.709, Display P3,
-HLG, and PQ), reads the production RGBA16F boundary, and compares it with the
-stock-OCIO CPU float result under a 0.001 maximum channel-error budget. The five
+stimulus through every Mondrian Standard target (sRGB, Rec.709, Rec.2020 SDR,
+Display P3, HLG, and PQ), reads the production RGBA16F boundary, and compares it with the
+stock-OCIO CPU float result under a 0.001 maximum channel-error budget. The six
 targets share one device/runtime during the test, matching production cache
 reuse instead of hiding target-specific shader drift behind separate setup.
 

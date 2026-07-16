@@ -2437,6 +2437,18 @@ mod tests {
             ))
         );
 
+        let rec2020 = settings.root_preview_color_context(&project_cm, ColorSpace::Rec2020);
+        assert_eq!(
+            rec2020
+                .output_transform
+                .resolve_display_view(ColorSpace::Rec2020, &rec2020.engine)
+                .expect("Rec.2020 SDR intent"),
+            Some((
+                "Rec.2020 SDR - Display".to_owned(),
+                "Mondrian Standard SDR v1".to_owned(),
+            ))
+        );
+
         let pq = settings.root_preview_color_context(&project_cm, ColorSpace::Rec2100Pq);
         assert_eq!(
             pq.output_transform

@@ -3011,7 +3011,7 @@ mod tests {
     #[test]
     fn app_root_pins_selected_custom_ocio_before_updating_new_project() {
         let config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../mondrian-core/assets/ocio/mondrian_default_ocio_v1.ocio");
+            .join("../mondrian-core/assets/ocio/mondrian_default_ocio_v2.ocio");
         let platform = FakePlatform {
             open_paths: Some(vec![config_path.clone()]),
             ..FakePlatform::default()
@@ -3112,7 +3112,7 @@ mod tests {
     #[test]
     fn app_root_project_settings_pins_selected_custom_ocio() {
         let config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../mondrian-core/assets/ocio/mondrian_default_ocio_v1.ocio");
+            .join("../mondrian-core/assets/ocio/mondrian_default_ocio_v2.ocio");
         let platform = FakePlatform {
             open_paths: Some(vec![config_path]),
             ..FakePlatform::default()

@@ -32,7 +32,7 @@ pub enum OutputTransformIntent {
 impl OutputTransformIntent {
     /// Select the current Mondrian Standard output-transform contract.
     pub const fn mondrian_standard() -> Self {
-        Self::MondrianStandard { package: MondrianStandardPackageIdentity::V1 }
+        Self::MondrianStandard { package: MondrianStandardPackageIdentity::V2 }
     }
 
     /// Resolve this product intent into the optional OCIO display/view pair

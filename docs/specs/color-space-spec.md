@@ -15,7 +15,7 @@ Supported color spaces currently include:
 ## Engine
 
 `ColorEngine` is either MondrianStandard or OCIO. OCIO requires a loaded config.
-MondrianStandard loads Mondrian's embedded `mondrian_default_ocio_v1` config and
+MondrianStandard loads Mondrian's embedded `mondrian_default_ocio_v2` config and
 must fail closed if that asset cannot parse or cannot produce the requested
 OCIO processor.
 Explicit OCIO sources must not fall back to another source. In particular,
@@ -26,6 +26,9 @@ The embedded Standard config is also exposed through
 `mondrian_default_ocio_contract()`. That contract is the authoritative list of
 Mondrian `ColorSpace` to OCIO name mappings plus the default and supported
 display/view pairs for product UI and renderer integration.
+Rec.2020 resolves to `Camera Rec.2020` at source/input boundaries and to the
+display-referred `Rec.2020 SDR - Display` endpoint for a Mondrian Standard
+program output; these reference-domain roles must not be aliased.
 
 ## Pipeline
 

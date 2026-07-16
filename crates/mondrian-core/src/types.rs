@@ -435,6 +435,8 @@ impl From<WorkingColorSpace> for OcioColorSpaceIdentity {
 pub enum MondrianStandardVersion {
     /// First immutable Mondrian Standard OCIO package contract.
     V1,
+    /// Second package contract adding a display-referred Rec.2020 SDR output.
+    V2,
 }
 
 /// Stable product identifier for the bundled Mondrian Standard package.
@@ -448,25 +450,25 @@ pub enum MondrianStandardPackageId {
 /// Stable identity for the OCIO config contained in a Standard package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MondrianStandardConfigId {
-    /// Mondrian Standard v1's embedded OCIO configuration.
-    #[serde(rename = "mondrian_default_ocio_v1")]
-    V1,
+    /// Mondrian Standard v2's embedded OCIO configuration.
+    #[serde(rename = "mondrian_default_ocio_v2")]
+    V2,
 }
 
 /// Exact SHA-256 identity of the OCIO config text in a Standard package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MondrianStandardConfigDigest {
-    /// Digest of `mondrian_default_ocio_v1.ocio`.
-    #[serde(rename = "741fa8942e2b1f97878c2baff3b7e0c33759237afef257a3cd4d7e8e812b68d1")]
-    V1,
+    /// Digest of `mondrian_default_ocio_v2.ocio`.
+    #[serde(rename = "99416ff04d756a3d490778d4a6e3df32a24b5adbea1c7fa890c5c7caa31a78f6")]
+    V2,
 }
 
 /// Exact SHA-256 identity of a complete Standard config-and-resource package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MondrianStandardPackageDigest {
-    /// Digest of Standard v1's config plus every embedded resource.
-    #[serde(rename = "dcd694126ac1a1fa55f64870774d9428e2da737ceaae6623c8ff2b23df48b52e")]
-    V1,
+    /// Digest of Standard v2's config plus every embedded resource.
+    #[serde(rename = "3f8bd02e4c79f081c9c09fba3053161c4af14de6effcf6d76b78e2339b9c2881")]
+    V2,
 }
 
 /// Stable versioned identity of the Standard compositing working space.
@@ -754,13 +756,13 @@ impl CustomOcioProjectIdentity {
 }
 
 impl MondrianStandardPackageIdentity {
-    /// Exact identity of the only package supported by this alpha schema.
-    pub const V1: Self = Self {
+    /// Exact identity of the current package supported by this schema.
+    pub const V2: Self = Self {
         package_id: MondrianStandardPackageId::MondrianStandard,
-        package_version: MondrianStandardVersion::V1,
-        config_id: MondrianStandardConfigId::V1,
-        config_sha256: MondrianStandardConfigDigest::V1,
-        package_sha256: MondrianStandardPackageDigest::V1,
+        package_version: MondrianStandardVersion::V2,
+        config_id: MondrianStandardConfigId::V2,
+        config_sha256: MondrianStandardConfigDigest::V2,
+        package_sha256: MondrianStandardPackageDigest::V2,
         working_space_id: MondrianStandardWorkingSpaceId::LinearRec2020V1,
         working_space_version: MondrianStandardVersion::V1,
         sdr_view_transform_id: MondrianStandardSdrViewTransformId::V1,
@@ -776,17 +778,17 @@ impl MondrianStandardPackageIdentity {
 
     /// Stable embedded OCIO config identifier.
     pub const fn config_id(self) -> &'static str {
-        "mondrian_default_ocio_v1"
+        "mondrian_default_ocio_v2"
     }
 
     /// Exact SHA-256 digest of the embedded OCIO config text.
     pub const fn config_sha256(self) -> &'static str {
-        "741fa8942e2b1f97878c2baff3b7e0c33759237afef257a3cd4d7e8e812b68d1"
+        "99416ff04d756a3d490778d4a6e3df32a24b5adbea1c7fa890c5c7caa31a78f6"
     }
 
     /// Exact SHA-256 digest of the config and all embedded resources.
     pub const fn package_sha256(self) -> &'static str {
-        "dcd694126ac1a1fa55f64870774d9428e2da737ceaae6623c8ff2b23df48b52e"
+        "3f8bd02e4c79f081c9c09fba3053161c4af14de6effcf6d76b78e2339b9c2881"
     }
 
     /// Versioned working-space identity pinned by this package.
@@ -844,7 +846,7 @@ pub enum ColorEngine {
 impl ColorEngine {
     /// Select the exact Mondrian Standard package supported by this schema.
     pub const fn mondrian_standard() -> Self {
-        Self::MondrianStandard { package: MondrianStandardPackageIdentity::V1 }
+        Self::MondrianStandard { package: MondrianStandardPackageIdentity::V2 }
     }
 
     /// Return the pinned Standard package identity when this is Standard mode.
@@ -1037,8 +1039,8 @@ mod tests {
             serde_json::from_str(&json2).expect("deserialize MondrianStandard");
         assert_eq!(back2, smart);
         assert!(json2.contains("\"package_id\":\"mondrian_standard\""));
-        assert!(json2.contains(MondrianStandardPackageIdentity::V1.config_sha256()));
-        assert!(json2.contains(MondrianStandardPackageIdentity::V1.package_sha256()));
+        assert!(json2.contains(MondrianStandardPackageIdentity::V2.config_sha256()));
+        assert!(json2.contains(MondrianStandardPackageIdentity::V2.package_sha256()));
         assert!(json2.contains("\"working_space_id\":\"linear_rec2020_v1\""));
         assert!(json2.contains("\"sdr_view_transform_id\":\"mondrian_standard_sdr_v1\""));
         assert!(json2.contains("\"hdr_view_transform_id\":\"mondrian_standard_hdr_1000_nits_v1\""));

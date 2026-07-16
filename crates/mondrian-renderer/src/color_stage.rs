@@ -5590,6 +5590,7 @@ mod tests {
         for output in [
             ColorSpace::Srgb,
             ColorSpace::Rec709,
+            ColorSpace::Rec2020,
             ColorSpace::DisplayP3,
             ColorSpace::Rec2100Hlg,
             ColorSpace::Rec2100Pq,

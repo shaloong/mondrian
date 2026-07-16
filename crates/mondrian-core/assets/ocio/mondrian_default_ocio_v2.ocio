@@ -5,9 +5,9 @@ environment:
 search_path: ""
 strictparsing: true
 luma: [0.2126, 0.7152, 0.0722]
-name: mondrian_default_ocio_v1
+name: mondrian_default_ocio_v2
 description: |
-  Mondrian default OCIO config v1.
+  Mondrian default OCIO config v2.
 
   This product asset is derived from the OpenColorIO built-in Studio Config
   [COLORSPACES v4.0.0] [ACES v2.0] [OCIO v2.5] and is intentionally pinned so
@@ -70,6 +70,9 @@ displays:
   Rec.1886 Rec.709 - Display:
     - !<View> {name: Raw, colorspace: Raw}
     - !<Views> [ACES 2.0 - SDR 100 nits (Rec.709), Un-tone-mapped, Video (colorimetric)]
+  Rec.2020 SDR - Display:
+    - !<View> {name: Raw, colorspace: Raw}
+    - !<Views> [Un-tone-mapped, Video (colorimetric)]
   Rec.2100-HLG - Display:
     - !<View> {name: Raw, colorspace: Raw}
     - !<Views> [ACES 2.0 - HDR 1000 nits (P3 D65), Un-tone-mapped, Video (colorimetric)]
@@ -84,7 +87,7 @@ virtual_display:
   - !<View> {name: Raw, colorspace: Raw}
   - !<Views> [ACES 2.0 - SDR 100 nits (Rec.709), Un-tone-mapped, Video (colorimetric), ACES 2.0 - SDR 100 nits (P3 D65)]
 
-active_displays: [sRGB - Display, Display P3 - Display, Display P3 HDR - Display, Gamma 2.2 Rec.709 - Display, P3-D65 - Display, Rec.1886 Rec.709 - Display, Rec.2100-HLG - Display, Rec.2100-PQ - Display, ST2084-P3-D65 - Display]
+active_displays: [sRGB - Display, Display P3 - Display, Display P3 HDR - Display, Gamma 2.2 Rec.709 - Display, P3-D65 - Display, Rec.1886 Rec.709 - Display, Rec.2020 SDR - Display, Rec.2100-HLG - Display, Rec.2100-PQ - Display, ST2084-P3-D65 - Display]
 active_views: [ACES 2.0 - HDR 1000 nits (P3 D65), ACES 2.0 - HDR 1000 nits (Rec.2020), ACES 2.0 - HDR 2000 nits (P3 D65), ACES 2.0 - HDR 2000 nits (Rec.2020), ACES 2.0 - HDR 4000 nits (P3 D65), ACES 2.0 - HDR 4000 nits (Rec.2020), ACES 2.0 - HDR 500 nits (P3 D65), ACES 2.0 - HDR 500 nits (Rec.2020), ACES 2.0 - HDR 108 nits (P3 D65), ACES 2.0 - SDR 100 nits (P3 D65), ACES 2.0 - SDR 100 nits (Rec.709), Un-tone-mapped, Video (colorimetric), Raw]
 inactive_colorspaces: [CIE XYZ-D65 - Display-referred, CIE XYZ-D65 - Scene-referred]
 
@@ -362,6 +365,24 @@ display_colorspaces:
         urn:ampas:aces:transformId:v2.0:Output.Academy.Rec709-D65_100nit_in_Rec709-D65_BT1886.a2.v1
     allocation: uniform
     from_display_reference: !<BuiltinTransform> {style: DISPLAY - CIE-XYZ-D65_to_REC.1886-REC.709 - MIRROR NEGS}
+
+  - !<ColorSpace>
+    name: Rec.2020 SDR - Display
+    aliases: [rec2020_sdr_display, bt2020_sdr_display]
+    interop_id: rec2020_sdr_display
+    family: Display
+    equalitygroup: ""
+    bitdepth: 32f
+    description: Convert CIE XYZ (D65 white) to BT.2020 primaries with the BT.2020 SDR camera transfer
+    isdata: false
+    categories: [file-io]
+    encoding: sdr-video
+    allocation: uniform
+    from_display_reference: !<GroupTransform>
+      name: CIE XYZ-D65 to Rec.2020 SDR
+      children:
+        - !<MatrixTransform> {matrix: [1.71665118797127, -0.355670783776392, -0.25336628137366, 0, -0.666684351832489, 1.61648123663494, 0.0157685458139111, 0, 0.0176398574453108, -0.0427706132578085, 0.942103121235474, 0, 0, 0, 0, 1]}
+        - !<ExponentWithLinearTransform> {gamma: 2.22222222222222, offset: 0.099, direction: inverse}
 
   - !<ColorSpace>
     name: Rec.2100-HLG - Display

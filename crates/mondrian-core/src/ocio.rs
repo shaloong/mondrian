@@ -187,18 +187,18 @@ pub(crate) fn ocio_engine_is_validated(engine: &ColorEngine) -> bool {
 }
 
 /// Intended name for Mondrian's bundled default OCIO config.
-pub const MONDRIAN_DEFAULT_OCIO_CONFIG_NAME: &str = "mondrian_default_ocio_v1";
+pub const MONDRIAN_DEFAULT_OCIO_CONFIG_NAME: &str = "mondrian_default_ocio_v2";
 
-/// SHA-256 digest pinned to the exact OCIO text shipped by Mondrian Standard v1.
+/// SHA-256 digest pinned to the exact OCIO text shipped by Mondrian Standard v2.
 pub const MONDRIAN_DEFAULT_OCIO_CONFIG_SHA256: &str =
-    MondrianStandardPackageIdentity::V1.config_sha256();
+    MondrianStandardPackageIdentity::V2.config_sha256();
 /// SHA-256 over the versioned config text and every embedded Standard resource.
 pub const MONDRIAN_DEFAULT_OCIO_PACKAGE_SHA256: &str =
-    MondrianStandardPackageIdentity::V1.package_sha256();
+    MondrianStandardPackageIdentity::V2.package_sha256();
 
-const MONDRIAN_DEFAULT_OCIO_VIRTUAL_PATH: &str = "embedded:mondrian_default_ocio_v1";
+const MONDRIAN_DEFAULT_OCIO_VIRTUAL_PATH: &str = "embedded:mondrian_default_ocio_v2";
 const MONDRIAN_DEFAULT_OCIO_CONFIG: &str =
-    include_str!("../assets/ocio/mondrian_default_ocio_v1.ocio");
+    include_str!("../assets/ocio/mondrian_default_ocio_v2.ocio");
 
 const MONDRIAN_STANDARD_SDR_VIEW_NAME: &str = "Mondrian Standard SDR v1";
 const MONDRIAN_STANDARD_HDR_1000_VIEW_NAME: &str = "Mondrian Standard HDR 1000 nits v1";
@@ -215,7 +215,7 @@ const MONDRIAN_STANDARD_HDR_1000_LUT: &str =
     include_str!("../assets/ocio/mondrian_standard_hdr_1000_p3_v1.cube");
 const MONDRIAN_STANDARD_HDR_1000_LUT_EDGE: usize = 57;
 const MONDRIAN_STANDARD_ASSEMBLY_MANIFEST: &str = concat!(
-    "mondrian-standard-assembly-v1\n",
+    "mondrian-standard-assembly-v2\n",
     "working=Linear Rec.2020\n",
     "view=Mondrian Standard SDR v1\n",
     "scene_reference=UTILITY - ACES-AP0_to_CIE-XYZ-D65_BFD\n",
@@ -225,7 +225,7 @@ const MONDRIAN_STANDARD_ASSEMBLY_MANIFEST: &str = concat!(
     "hdr_view=Mondrian Standard HDR 1000 nits v1\n",
     "hdr_formation_lut=mondrian_standard_hdr_1000_p3_v1.cube;edge=57;interpolation=tetrahedral;peak_nits=1000;reference_white_nits=100;limit=P3-D65\n",
     "display_reference=CIE XYZ-D65 - Display-referred\n",
-    "displays=sRGB - Display,Gamma 2.2 Rec.709 - Display,Rec.1886 Rec.709 - Display,Display P3 - Display,Rec.2100-HLG - Display,Rec.2100-PQ - Display\n",
+    "displays=sRGB - Display,Gamma 2.2 Rec.709 - Display,Rec.1886 Rec.709 - Display,Rec.2020 SDR - Display,Display P3 - Display,Rec.2100-HLG - Display,Rec.2100-PQ - Display\n",
 );
 const MONDRIAN_STANDARD_SDR_ALLOCATION_VARS: [f32; 2] = [-12.47393, 12.526_069];
 
@@ -507,7 +507,7 @@ const MONDRIAN_DEFAULT_OCIO_COLOR_SPACES: [MondrianDefaultOcioColorSpace; 27] = 
     },
 ];
 
-const MONDRIAN_DEFAULT_OCIO_DISPLAY_VIEWS: [MondrianDefaultOcioDisplayView; 6] = [
+const MONDRIAN_DEFAULT_OCIO_DISPLAY_VIEWS: [MondrianDefaultOcioDisplayView; 7] = [
     MondrianDefaultOcioDisplayView {
         display: "sRGB - Display",
         view: MONDRIAN_STANDARD_SDR_VIEW_NAME,
@@ -518,6 +518,10 @@ const MONDRIAN_DEFAULT_OCIO_DISPLAY_VIEWS: [MondrianDefaultOcioDisplayView; 6] =
     },
     MondrianDefaultOcioDisplayView {
         display: "Rec.1886 Rec.709 - Display",
+        view: MONDRIAN_STANDARD_SDR_VIEW_NAME,
+    },
+    MondrianDefaultOcioDisplayView {
+        display: "Rec.2020 SDR - Display",
         view: MONDRIAN_STANDARD_SDR_VIEW_NAME,
     },
     MondrianDefaultOcioDisplayView {
@@ -564,7 +568,7 @@ pub fn mondrian_default_ocio_config_text() -> &'static str {
 /// Return the product contract for Mondrian Standard mode's embedded OCIO config.
 pub fn mondrian_default_ocio_contract() -> MondrianDefaultOcioContract {
     MondrianDefaultOcioContract {
-        standard_version: MondrianStandardVersion::V1,
+        standard_version: MondrianStandardVersion::V2,
         config_name: MONDRIAN_DEFAULT_OCIO_CONFIG_NAME,
         content_sha256: MONDRIAN_DEFAULT_OCIO_CONFIG_SHA256,
         package_sha256: MONDRIAN_DEFAULT_OCIO_PACKAGE_SHA256,
@@ -581,7 +585,7 @@ pub fn mondrian_default_ocio_contract() -> MondrianDefaultOcioContract {
 
 /// Validate the embedded Mondrian default OCIO config against its product contract.
 ///
-/// This is the production gate for `mondrian_default_ocio_v1`: it parses the
+/// This is the production gate for `mondrian_default_ocio_v2`: it parses the
 /// embedded asset, verifies pinned names/roles/display views, and proves that
 /// every contract color-space pair can build a CPU processor while every
 /// non-identity pair and display/view transform can extract a GPU shader.
@@ -1024,6 +1028,7 @@ fn build_mondrian_standard_sdr_view(config: &Config) -> Result<(), String> {
         "sRGB - Display",
         "Gamma 2.2 Rec.709 - Display",
         "Rec.1886 Rec.709 - Display",
+        "Rec.2020 SDR - Display",
         "Display P3 - Display",
     ] {
         config
@@ -2039,7 +2044,7 @@ pub fn builtin_config_entries() -> Vec<(String, String)> {
 /// Map a Mondrian [`ColorSpace`] to its pinned OCIO color-space name.
 ///
 /// These names are part of Mondrian's color-space contract and are validated
-/// against the embedded `mondrian_default_ocio_v1` config. Custom OCIO configs
+/// against the embedded `mondrian_default_ocio_v2` config. Custom OCIO configs
 /// should provide the same names or aliases if they want to use Mondrian's
 /// built-in `ColorSpace` enum directly.
 pub fn ocio_color_space_name(cs: ColorSpace) -> &'static str {
@@ -3003,7 +3008,7 @@ pub fn mondrian_standard_output_display_name(output: ColorSpace) -> Result<&'sta
 }
 
 /// Resolve the immutable luminance, gamut, encoding, and OCIO View contract
-/// for one Mondrian Standard v1 program-output target.
+/// for one Mondrian Standard v2 program-output target.
 pub fn mondrian_standard_output_target_contract(
     output: ColorSpace,
 ) -> Result<MondrianStandardOutputTargetContract, String> {
@@ -3018,7 +3023,7 @@ pub fn mondrian_standard_output_target_contract(
         ColorSpace::Srgb => (
             "sRGB - Display",
             MONDRIAN_STANDARD_SDR_VIEW_NAME,
-            MondrianStandardPackageIdentity::V1.sdr_view_transform_id(),
+            MondrianStandardPackageIdentity::V2.sdr_view_transform_id(),
             crate::ColorPrimaries::Bt709,
             100,
             100,
@@ -3026,7 +3031,7 @@ pub fn mondrian_standard_output_target_contract(
         ColorSpace::Rec709 => (
             "Rec.1886 Rec.709 - Display",
             MONDRIAN_STANDARD_SDR_VIEW_NAME,
-            MondrianStandardPackageIdentity::V1.sdr_view_transform_id(),
+            MondrianStandardPackageIdentity::V2.sdr_view_transform_id(),
             crate::ColorPrimaries::Bt709,
             100,
             100,
@@ -3034,15 +3039,23 @@ pub fn mondrian_standard_output_target_contract(
         ColorSpace::DisplayP3 => (
             "Display P3 - Display",
             MONDRIAN_STANDARD_SDR_VIEW_NAME,
-            MondrianStandardPackageIdentity::V1.sdr_view_transform_id(),
+            MondrianStandardPackageIdentity::V2.sdr_view_transform_id(),
             crate::ColorPrimaries::P3D65,
+            100,
+            100,
+        ),
+        ColorSpace::Rec2020 => (
+            "Rec.2020 SDR - Display",
+            MONDRIAN_STANDARD_SDR_VIEW_NAME,
+            MondrianStandardPackageIdentity::V2.sdr_view_transform_id(),
+            crate::ColorPrimaries::Bt2020,
             100,
             100,
         ),
         ColorSpace::Rec2100Hlg => (
             "Rec.2100-HLG - Display",
             MONDRIAN_STANDARD_HDR_1000_VIEW_NAME,
-            MondrianStandardPackageIdentity::V1.hdr_view_transform_id(),
+            MondrianStandardPackageIdentity::V2.hdr_view_transform_id(),
             crate::ColorPrimaries::P3D65,
             100,
             1000,
@@ -3050,7 +3063,7 @@ pub fn mondrian_standard_output_target_contract(
         ColorSpace::Rec2100Pq => (
             "Rec.2100-PQ - Display",
             MONDRIAN_STANDARD_HDR_1000_VIEW_NAME,
-            MondrianStandardPackageIdentity::V1.hdr_view_transform_id(),
+            MondrianStandardPackageIdentity::V2.hdr_view_transform_id(),
             crate::ColorPrimaries::P3D65,
             100,
             1000,
@@ -3969,6 +3982,14 @@ colorspaces:
             )
         );
         assert_eq!(
+            mondrian_standard_output_display_view(ColorSpace::Rec2020)
+                .expect("Rec.2020 SDR target"),
+            (
+                "Rec.2020 SDR - Display".to_owned(),
+                MONDRIAN_STANDARD_SDR_VIEW_NAME.to_owned()
+            )
+        );
+        assert_eq!(
             mondrian_standard_display_view("Display P3 - Display").expect("explicit P3 display"),
             (
                 "Display P3 - Display".to_owned(),
@@ -4024,7 +4045,12 @@ colorspaces:
         assert_eq!(rec709.view_transform_id, "mondrian_standard_sdr_v1");
         assert_eq!(rec709.reference_white_nits, 100);
         assert_eq!(rec709.nominal_peak_nits, 100);
-        assert!(mondrian_standard_output_target_contract(ColorSpace::Rec2020).is_err());
+        let rec2020 = mondrian_standard_output_target_contract(ColorSpace::Rec2020)
+            .expect("Rec.2020 SDR output contract");
+        assert_eq!(rec2020.rendering_gamut_limit, crate::ColorPrimaries::Bt2020);
+        assert_eq!(rec2020.encoding.primaries, crate::ColorPrimaries::Bt2020);
+        assert_eq!(rec2020.reference_white_nits, 100);
+        assert_eq!(rec2020.nominal_peak_nits, 100);
     }
 
     #[test]

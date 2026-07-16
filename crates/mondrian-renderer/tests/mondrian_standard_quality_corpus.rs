@@ -14,9 +14,10 @@ mod quality_corpus;
 use quality_corpus::{QualityCase, QualityCorpus};
 
 const NORMALIZED_SIGNAL_EPSILON: f32 = 1.0 / 4_095.0;
-const STANDARD_OUTPUT_TARGETS: [ColorSpace; 5] = [
+const STANDARD_OUTPUT_TARGETS: [ColorSpace; 6] = [
     ColorSpace::Srgb,
     ColorSpace::Rec709,
+    ColorSpace::Rec2020,
     ColorSpace::DisplayP3,
     ColorSpace::Rec2100Hlg,
     ColorSpace::Rec2100Pq,
@@ -32,7 +33,7 @@ fn quality_corpus_contract_is_complete_independently_sourced_and_package_pinned(
     assert_eq!(corpus.corpus_id, "mondrian-standard-quality-v1");
     assert_eq!(
         corpus.package_sha256,
-        MondrianStandardPackageIdentity::V1.package_sha256()
+        MondrianStandardPackageIdentity::V2.package_sha256()
     );
 
     let required = corpus.required_categories.iter().map(String::as_str).collect::<BTreeSet<_>>();
