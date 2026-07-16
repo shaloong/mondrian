@@ -4496,7 +4496,7 @@ fn resolve_cpu_rgba_contract(
 fn resolve_cpu_rgba_contract_from_metadata(
     pixel_format: ffmpeg::util::format::pixel::Pixel,
     decoded_color_space: ffmpeg::util::color::Space,
-    decoded_color_range: ffmpeg::util::color::Range,
+    _decoded_color_range: ffmpeg::util::color::Range,
     source: PreviewSourceColorContract,
     path: &Path,
 ) -> Result<DecodedRgbaFrameContract> {
@@ -4526,12 +4526,10 @@ fn resolve_cpu_rgba_contract_from_metadata(
             source.color_space
         ),
     })?;
-    let decoded_range = decoded_video_range_from_ffmpeg(decoded_color_range);
-    let range = if decoded_range == DecodedVideoRange::Unknown {
-        source.range
-    } else {
-        decoded_range
-    };
+    // `source` is resolved by the app from either current probe facts or an
+    // explicit Interpret Footage override. It is therefore authoritative at
+    // this boundary, including when a frame repeats incorrect container tags.
+    let range = source.range;
     if range == DecodedVideoRange::Unknown {
         return Err(MondrianError::DecodeFailed {
             asset_id: path.display().to_string(),
@@ -4539,19 +4537,6 @@ fn resolve_cpu_rgba_contract_from_metadata(
                 .to_owned(),
         });
     }
-    if decoded_range != DecodedVideoRange::Unknown
-        && source.range != DecodedVideoRange::Unknown
-        && decoded_range != source.range
-    {
-        return Err(MondrianError::DecodeFailed {
-            asset_id: path.display().to_string(),
-            reason: format!(
-                "decoded YUV range {decoded_range:?} conflicts with ingest range {:?}",
-                source.range
-            ),
-        });
-    }
-
     Ok(DecodedRgbaFrameContract::source_encoded(
         source, matrix, range,
     ))
@@ -4915,7 +4900,7 @@ fn materialize_decoded_frame(
 ) -> Result<PreviewDecodedFramePayload> {
     if hardware_decode_plan.request.prefers_gpu_residency() {
         if preview_hardware_frame_format(decoded.format()) {
-            match materialize_native_decoded_frame(decoded) {
+            match materialize_native_decoded_frame(decoded, source_color) {
                 Ok(frame) => {
                     hardware_decode_plan.mark_gpu_resident_native_observed(frame.handle_kind());
                     return Ok(PreviewDecodedFramePayload::NativeGpu(frame));
@@ -4963,6 +4948,7 @@ fn materialize_decoded_frame(
 
 fn materialize_native_decoded_frame(
     decoded: &ffmpeg::util::frame::video::Video,
+    source_color: PreviewSourceColorContract,
 ) -> std::result::Result<PreviewNativeDecodedFrame, PreviewNativeFrameMaterializationError> {
     if decoded.format() != ffmpeg::util::format::pixel::Pixel::D3D11 {
         return Err(
@@ -4975,7 +4961,10 @@ fn materialize_native_decoded_frame(
     // Hardware AVFrames expose a hardware pixel format (for example D3D11),
     // while `surface_format` is the retained texture's software layout. Use
     // the latter for coded depth instead of re-inferring it from AVFrame::format.
-    let sampling = decoded_video_sampling_from_frame_and_surface(decoded, surface_format);
+    let mut sampling = decoded_video_sampling_from_frame_and_surface(decoded, surface_format);
+    // Native D3D11 frames bypass swscale, so apply the same resolved range
+    // contract consumed by the CPU conversion path before renderer import.
+    sampling.range = source_color.range;
     let resource = FfmpegNativeDecodedFrameResource::retain(decoded)?;
     resource.d3d11_texture()?;
     let handle = PreviewNativeDecodedFrameHandle::new(resource);
@@ -6172,6 +6161,26 @@ mod tests {
         )
         .expect("decoded YUV matrix remains authoritative for an RGB-defined source space");
         assert_eq!(srgb_contract.applied_matrix, DecodedVideoMatrix::Bt709);
+    }
+
+    #[test]
+    fn cpu_rgba_contract_honors_resolved_source_range_over_frame_tag() {
+        let mut frame = ffmpeg::util::frame::video::Video::new(
+            ffmpeg::util::format::pixel::Pixel::YUV420P,
+            16,
+            16,
+        );
+        frame.set_color_space(ffmpeg::util::color::Space::BT709);
+        frame.set_color_range(ffmpeg::util::color::Range::MPEG);
+
+        let contract = resolve_cpu_rgba_contract(
+            &frame,
+            PreviewSourceColorContract::new(ColorSpace::Rec709, DecodedVideoRange::Full),
+            Path::new("incorrect-limited-tag.mov"),
+        )
+        .expect("resolved app contract must override an incorrect frame range tag");
+
+        assert_eq!(contract.applied_range, DecodedVideoRange::Full);
     }
 
     #[test]

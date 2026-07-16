@@ -24,13 +24,13 @@ use mondrian_effects::{
     get_or_lower_effect_graph_to_gpu_plan, CompiledEffectGraph, EffectCachePolicy,
 };
 use mondrian_media::{
-    decode_preview_frame_cancellable, preview_decode_cpu_budget, DecodedFrameResidency,
-    DecodedGpuFrameHandleKind, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
-    HwAccelBackend, HwAccelDeviceSelector, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
-    PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodeExecutionPath,
-    PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
-    PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
-    PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
+    decode_preview_frame_cancellable, preview_decode_cpu_budget, resolve_decoded_video_range,
+    DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoRange, DecodedVideoSampling,
+    DecodedVideoSurfaceFormat, HwAccelBackend, HwAccelDeviceSelector, PreviewDecodeAccessMode,
+    PreviewDecodeAdaptiveHints, PreviewDecodeCpuBudget, PreviewDecodeDiagnostics,
+    PreviewDecodeExecutionPath, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest,
+    PreviewDecodeSeekStrategy, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
+    PreviewFileFingerprint, PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
     PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest, PreviewNativeDecodedFrame,
     PreviewScrubAdaptiveClass, PreviewSeekIndexSource, PreviewSourceColorContract,
     VideoColorDiagnostic, VideoColorDiagnosticIssueSummary,
@@ -8163,11 +8163,14 @@ impl AppUiPreviewService {
                 target_width,
                 target_height,
                 input_color_space,
-                input_video_range: asset
-                    .media_info
-                    .primary_video()
-                    .map(|video| video.color_range)
-                    .unwrap_or(DecodedVideoRange::Unknown),
+                input_video_range: resolve_decoded_video_range(
+                    asset.interpretation.range,
+                    asset
+                        .media_info
+                        .primary_video()
+                        .map(|video| video.color_range)
+                        .unwrap_or(DecodedVideoRange::Unknown),
+                ),
                 working_color_space: color_context.working_color_space,
                 tone_map: color_context.tone_map,
                 engine: color_context.engine.clone(),
@@ -17267,6 +17270,57 @@ mod tests {
             !service.current_frame_pending.get(),
             "a cached decode failure is terminal evidence, not pending work"
         );
+        service.shutdown();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn media_preview_cache_identity_changes_with_range_override() {
+        let (state, asset_id, root) = state_with_invalid_video_asset();
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let sequence = state.sequence.as_ref().expect("sequence");
+        let (width, height) = preview_dimensions_for_sequence(sequence);
+        let color_context = sequence.settings.root_preview_color_context(
+            &state.project_settings.color_management,
+            ColorSpace::Rec709,
+        );
+        let key_for_state = || {
+            service
+                .media_preview_key_for_asset(
+                    &state,
+                    &asset_id,
+                    None,
+                    0,
+                    0.0,
+                    width,
+                    height,
+                    &color_context,
+                    false,
+                    false,
+                )
+                .expect("media preview key")
+                .0
+        };
+
+        let auto_key = key_for_state();
+        assert_eq!(auto_key.input_video_range, DecodedVideoRange::Limited);
+        let library = state.asset_library.as_ref().expect("asset library");
+        let mut interpretation = library
+            .get_asset(asset_id)
+            .expect("read asset")
+            .expect("asset exists")
+            .interpretation;
+        interpretation.range = mondrian_core::timeline_data::MediaRangeInterpretation::Override {
+            range: mondrian_core::timeline_data::MediaSignalRange::Full,
+        };
+        library
+            .set_asset_interpretation(asset_id, interpretation)
+            .expect("persist range override");
+
+        let override_key = key_for_state();
+        assert_eq!(override_key.input_video_range, DecodedVideoRange::Full);
+        assert_ne!(auto_key, override_key);
+
         service.shutdown();
         let _ = std::fs::remove_dir_all(root);
     }

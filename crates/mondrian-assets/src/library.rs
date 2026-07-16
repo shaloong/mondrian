@@ -943,6 +943,9 @@ mod tests {
         let id = lib.create_solid_color_asset(Some("Plate")).expect("create");
         let interpretation = AssetMediaInterpretation {
             color: MediaColorInterpretation::Override { color_space: ColorSpace::Rec2100Pq },
+            range: mondrian_core::timeline_data::MediaRangeInterpretation::Override {
+                range: mondrian_core::timeline_data::MediaSignalRange::Full,
+            },
             ..AssetMediaInterpretation::default()
         };
 
@@ -953,6 +956,10 @@ mod tests {
         assert_eq!(
             record.interpretation.color.override_color_space(),
             Some(ColorSpace::Rec2100Pq)
+        );
+        assert_eq!(
+            record.interpretation.range.override_range(),
+            Some(mondrian_core::timeline_data::MediaSignalRange::Full)
         );
     }
 

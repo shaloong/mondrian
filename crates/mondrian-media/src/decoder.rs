@@ -111,6 +111,28 @@ pub enum DecodedVideoRange {
     Full,
 }
 
+/// Resolve the decoder-facing range from persistent asset interpretation and
+/// the latest probe result.
+///
+/// A user override is authoritative so incorrectly tagged media can be
+/// corrected consistently by preview, thumbnails, proxies, and export.
+pub fn resolve_decoded_video_range(
+    interpretation: mondrian_core::timeline_data::MediaRangeInterpretation,
+    detected: DecodedVideoRange,
+) -> DecodedVideoRange {
+    use mondrian_core::timeline_data::{MediaRangeInterpretation, MediaSignalRange};
+
+    match interpretation {
+        MediaRangeInterpretation::Auto => detected,
+        MediaRangeInterpretation::Override { range: MediaSignalRange::Limited } => {
+            DecodedVideoRange::Limited
+        }
+        MediaRangeInterpretation::Override { range: MediaSignalRange::Full } => {
+            DecodedVideoRange::Full
+        }
+    }
+}
+
 pub(crate) fn decoded_video_range_from_ffmpeg(
     range: ffmpeg_next::util::color::Range,
 ) -> DecodedVideoRange {
@@ -916,6 +938,23 @@ fn ffmpeg_hwdevice_type_available(device_type: ffmpeg::ffi::AVHWDeviceType) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoded_video_range_resolution_keeps_auto_and_honors_override() {
+        use mondrian_core::timeline_data::{MediaRangeInterpretation, MediaSignalRange};
+
+        assert_eq!(
+            resolve_decoded_video_range(MediaRangeInterpretation::Auto, DecodedVideoRange::Limited),
+            DecodedVideoRange::Limited
+        );
+        assert_eq!(
+            resolve_decoded_video_range(
+                MediaRangeInterpretation::Override { range: MediaSignalRange::Full },
+                DecodedVideoRange::Unknown
+            ),
+            DecodedVideoRange::Full
+        );
+    }
 
     #[test]
     fn hw_accel_probe_fails_closed_until_texture_residency_exists() {

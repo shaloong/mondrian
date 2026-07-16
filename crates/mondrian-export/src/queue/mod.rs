@@ -15,9 +15,9 @@ use mondrian_media::audio::{
     AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData,
 };
 use mondrian_media::{
-    decode_preview_frame_cancellable, DecodedVideoRange, PreviewDecodeAccessMode,
-    PreviewDecodeOutcome, PreviewDecodeRequest, PreviewSourceColorContract,
-    VideoColorDiagnosticIssueAggregate,
+    decode_preview_frame_cancellable, resolve_decoded_video_range, DecodedVideoRange,
+    PreviewDecodeAccessMode, PreviewDecodeOutcome, PreviewDecodeRequest,
+    PreviewSourceColorContract, VideoColorDiagnosticIssueAggregate,
 };
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
@@ -2547,11 +2547,8 @@ fn render_sequence_frame_into(
                 })
             }
         };
-        let input_video_range = timeline
-            .asset_color_diagnostics
-            .get(&media.asset_id)
-            .map(|diagnostic| diagnostic.color_range)
-            .unwrap_or(DecodedVideoRange::Unknown);
+        let input_video_range =
+            resolve_export_input_video_range(timeline, media.asset_id, asset_interpretation);
         let cache_key = (
             media.asset_id,
             media.source_frame,
@@ -2827,6 +2824,19 @@ fn render_sequence_frame_into(
     canvas.clear();
     canvas.extend_from_slice(&final_bytes);
     Ok(())
+}
+
+fn resolve_export_input_video_range(
+    timeline: &TimelineExportInput,
+    asset_id: AssetId,
+    interpretation: mondrian_core::timeline_data::AssetMediaInterpretation,
+) -> DecodedVideoRange {
+    let detected = timeline
+        .asset_color_diagnostics
+        .get(&asset_id)
+        .map(|diagnostic| diagnostic.color_range)
+        .unwrap_or(DecodedVideoRange::Unknown);
+    resolve_decoded_video_range(interpretation.range, detected)
 }
 
 fn finish_empty_sequence_target(
@@ -3208,6 +3218,7 @@ mod tests {
     use super::*;
     use mondrian_core::timeline_data::{
         AssetColorPayload, AssetMediaInterpretation, MediaColorInterpretation,
+        MediaRangeInterpretation, MediaSignalRange,
     };
     use mondrian_core::types::{AssetId, BlendMode, FramePosition};
     use mondrian_core::{VideoContentLightMetadata, VideoMasteringDisplayMetadata};
@@ -4478,6 +4489,36 @@ mod tests {
             1
         );
         assert_eq!(counts.count(InputColorResolutionSource::DataTexture), 1);
+    }
+
+    #[test]
+    fn export_input_range_honors_asset_override_over_probe_diagnostic() {
+        let asset_id = AssetId::new();
+        let mut timeline = timeline_input_with_output_color(ColorSpace::Srgb);
+        let mut diagnostic = test_color_diagnostic(
+            mondrian_media::VideoColorSpaceSource::Metadata,
+            mondrian_media::VideoColorDetectionMethod::CicpTags,
+            None,
+        );
+        diagnostic.color_range = DecodedVideoRange::Limited;
+        timeline.asset_color_diagnostics.insert(asset_id, diagnostic);
+        let interpretation = AssetMediaInterpretation {
+            range: MediaRangeInterpretation::Override { range: MediaSignalRange::Full },
+            ..AssetMediaInterpretation::default()
+        };
+
+        assert_eq!(
+            resolve_export_input_video_range(&timeline, asset_id, interpretation),
+            DecodedVideoRange::Full
+        );
+        assert_eq!(
+            resolve_export_input_video_range(
+                &timeline,
+                asset_id,
+                AssetMediaInterpretation::default()
+            ),
+            DecodedVideoRange::Limited
+        );
     }
 
     #[test]

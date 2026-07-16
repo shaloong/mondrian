@@ -15,8 +15,9 @@ use mondrian_assets::{AssetKind, AssetRecord};
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
 use mondrian_core::{OutputTransformIntent, WorkingColorSpace};
 use mondrian_media::{
-    decode_preview_frame_cancellable, DecodedVideoRange, PreviewDecodeAccessMode,
-    PreviewDecodeOutcome, PreviewDecodeRequest, PreviewFileFingerprint, PreviewSourceColorContract,
+    decode_preview_frame_cancellable, resolve_decoded_video_range, DecodedVideoRange,
+    PreviewDecodeAccessMode, PreviewDecodeOutcome, PreviewDecodeRequest, PreviewFileFingerprint,
+    PreviewSourceColorContract,
 };
 use mondrian_renderer::{
     execute_cpu_input_stage, execute_cpu_input_stage_float, execute_cpu_output_boundary_rgba8,
@@ -83,7 +84,9 @@ impl ThumbnailColorContract {
                 ));
             }
         };
-        if primary_video.color_range == DecodedVideoRange::Unknown {
+        let source_range =
+            resolve_decoded_video_range(asset.interpretation.range, primary_video.color_range);
+        if source_range == DecodedVideoRange::Unknown {
             return Err(thumbnail_failure(
                 AssetThumbnailFailureReason::UnresolvedSourceRange,
                 "thumbnail decode requires an explicit full or limited source range",
@@ -108,7 +111,7 @@ impl ThumbnailColorContract {
         };
         Ok(Self {
             source_color_space,
-            source_range: primary_video.color_range,
+            source_range,
             working_color_space: context.working_color_space,
             output_color_space,
             tone_map: context.tone_map,
@@ -857,6 +860,17 @@ mod tests {
                 .expect_err("unknown range is unsupported")
                 .reason,
             AssetThumbnailFailureReason::UnresolvedSourceRange
+        );
+
+        asset.interpretation.range =
+            mondrian_core::timeline_data::MediaRangeInterpretation::Override {
+                range: mondrian_core::timeline_data::MediaSignalRange::Full,
+            };
+        assert_eq!(
+            ThumbnailColorContract::resolve(&asset, &context)
+                .expect("explicit range resolves missing probe metadata")
+                .source_range,
+            DecodedVideoRange::Full
         );
 
         asset.media_info.video_streams[0].color_range = DecodedVideoRange::Limited;

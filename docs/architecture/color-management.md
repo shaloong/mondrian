@@ -392,6 +392,13 @@ matrix/range actually applied. Renderer input processing then performs the
 single source -> working OCIO transform. Preview, thumbnail, and export callers
 must provide the same input color/range contract, and media must fail closed
 rather than accept an implicit swscale Rec.601/limited-range assumption.
+The app resolves that range contract before entering media: an explicit
+`MediaRangeInterpretation` override is authoritative over repeated container or
+frame tags, while Auto supplies the current probe result. CPU swscale and native
+GPU NV12/P010 sampling consume the same resolved value. Preview-frame,
+thumbnail, proxy, and export decode/cache identities include it, so changing a
+range override cannot reuse pixels or derived media created under the old
+sampling contract.
 
 The typed frame graph distinguishes `EncodedFloat` from `LinearFloat`.
 `EncodedFloat` is used for precision-preserving nonlinear samples at source,

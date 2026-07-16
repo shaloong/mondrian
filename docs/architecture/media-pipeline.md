@@ -844,7 +844,10 @@ supported 8-16 bit source precision; deserialized contracts are revalidated at
 every generator entry point. Proxy generation therefore fails closed instead
 of allowing FFmpeg to infer range.
 Ingest persists decoder `color_range()` on `VideoStreamInfo`, so ordinary
-probed assets propagate `Limited` or `Full` into the proxy contract. `Unknown`
+probed assets propagate `Limited` or `Full` into the proxy contract unless an
+asset range override replaces that probe fact. Because range is part of the
+proxy contract and sidecar identity, changing the override selects a distinct
+proxy path and invalidates reuse of the old artifact. `Unknown`
 is reserved for genuinely unspecified metadata, decoder-unavailable records,
 and older serialized asset records loaded through the explicit serde default.
 The FFmpeg proxy filter graph declares frame metadata with `setparams`, then
@@ -1327,11 +1330,14 @@ per-stream diagnostics into one report surface.
 Clip-level `MediaInterpretation` can override color space, frame rate, pixel aspect ratio, field order, and alpha interpretation.
 
 Asset library records store persistent user intent separately as
-`AssetMediaInterpretation`. Imported media defaults to `Auto`; Auto means "resolve
-from current metadata, detector, and project color policy" and must not persist
-the currently resolved color space. User changes from the asset-library
-Interpret Footage dialog are stored as `Override { color_space }` and must
-remain stable across metadata re-probes, relinks, and detector upgrades.
+`AssetMediaInterpretation`. Imported media defaults to `Auto` for both color
+identity and encoded signal range. Color Auto means "resolve from current
+metadata, detector, and project color policy" and must not persist the currently
+resolved color space. Range Auto follows the current probe result. User changes
+from the asset-library Interpret Footage dialog are stored independently as
+`MediaColorInterpretation::Override { color_space }` and
+`MediaRangeInterpretation::Override { Full | Limited }`; both remain stable
+across metadata re-probes, relinks, and detector upgrades.
 Non-color data is represented as asset payload classification, not as an
 Interpret Footage color-space mode. It is reserved for masks, mattes, technical
 textures, and advanced utility-channel workflows, not the primary input
@@ -1342,5 +1348,9 @@ Preview and export resolve input color with the same precedence: non-color
 asset payload classification first, then clip-level override, then
 asset-library interpretation, then detected metadata, then the sequence
 missing-metadata policy.
+Preview, thumbnail, proxy, and export decode contracts resolve encoded range
+with one separate precedence rule: explicit asset range override, then probed
+range, otherwise `Unknown`. `Unknown` continues to fail closed at YUV conversion
+or proxy-generation boundaries.
 
 Unknown/missing metadata policy is resolved at sequence color-management time, not by UI panels.

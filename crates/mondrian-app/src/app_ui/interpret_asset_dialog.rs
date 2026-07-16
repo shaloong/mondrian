@@ -1,7 +1,9 @@
 //! Interpret Footage dialog for asset-library media records.
 
 use mondrian_core::display_labels::color_space_label;
-use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
+use mondrian_core::timeline_data::{
+    AssetMediaInterpretation, MediaColorInterpretation, MediaRangeInterpretation, MediaSignalRange,
+};
 use mondrian_core::types::{AssetId, ColorSpace, OcioColorSpaceIdentity};
 use mondrian_media::{
     DecodedVideoRange, DetectedColorInterpretation, VideoColorDetectionMethod,
@@ -110,6 +112,8 @@ pub struct InterpretAssetDialog {
     status_value_label: Label,
     color_space_label: Label,
     color_space_dropdown: Dropdown,
+    range_label: Label,
+    range_dropdown: Dropdown,
     diagnostics_label: Label,
     apply_button: Button,
     cancel_button: Button,
@@ -147,6 +151,8 @@ impl InterpretAssetDialog {
                 AssetMediaInterpretation::default(),
                 None,
             ),
+            range_label: row_label("信号范围"),
+            range_dropdown: range_dropdown_for(AssetMediaInterpretation::default(), None),
             diagnostics_label: Label::new(String::new())
                 .muted()
                 .with_font_size(BODY_FONT_SIZE)
@@ -179,6 +185,8 @@ impl InterpretAssetDialog {
             self.draft.interpretation,
             self.draft.auto_interpretation.as_ref(),
         );
+        self.range_dropdown =
+            range_dropdown_for(self.draft.interpretation, self.draft.video_signal.as_ref());
         self.diagnostics_label.set_text(input_color_diagnostics_text(&self.draft));
     }
 }
@@ -238,6 +246,77 @@ fn draft_update_action(
     app_shell_interpret_asset_draft_changed_action(InterpretAssetDraftUpdatePayload {
         interpretation: AssetMediaInterpretation { color, ..interpretation },
     })
+}
+
+fn range_dropdown_for(
+    interpretation: AssetMediaInterpretation,
+    signal: Option<&AppShellVideoSignalDiagnostics>,
+) -> Dropdown {
+    let auto_label = range_auto_option_label(signal);
+    let items = vec![
+        MenuItem::new(
+            auto_label.clone(),
+            range_draft_update_action(interpretation, MediaRangeInterpretation::Auto),
+        )
+        .checked(matches!(
+            interpretation.range,
+            MediaRangeInterpretation::Auto
+        )),
+        MenuItem::new(
+            "Full（全范围）",
+            range_draft_update_action(
+                interpretation,
+                MediaRangeInterpretation::Override { range: MediaSignalRange::Full },
+            ),
+        )
+        .checked(matches!(
+            interpretation.range,
+            MediaRangeInterpretation::Override { range: MediaSignalRange::Full }
+        )),
+        MenuItem::new(
+            "Limited（视频范围）",
+            range_draft_update_action(
+                interpretation,
+                MediaRangeInterpretation::Override { range: MediaSignalRange::Limited },
+            ),
+        )
+        .checked(matches!(
+            interpretation.range,
+            MediaRangeInterpretation::Override { range: MediaSignalRange::Limited }
+        )),
+    ];
+    let label = match interpretation.range {
+        MediaRangeInterpretation::Auto => auto_label,
+        MediaRangeInterpretation::Override { range: MediaSignalRange::Full } => {
+            "Full（全范围）".to_owned()
+        }
+        MediaRangeInterpretation::Override { range: MediaSignalRange::Limited } => {
+            "Limited（视频范围）".to_owned()
+        }
+    };
+    Dropdown::new(label, items)
+}
+
+fn range_draft_update_action(
+    interpretation: AssetMediaInterpretation,
+    range: MediaRangeInterpretation,
+) -> mondrian_editor_state::Action {
+    app_shell_interpret_asset_draft_changed_action(InterpretAssetDraftUpdatePayload {
+        interpretation: AssetMediaInterpretation { range, ..interpretation },
+    })
+}
+
+fn range_auto_option_label(signal: Option<&AppShellVideoSignalDiagnostics>) -> String {
+    let detected = signal.map(|signal| range_label_text(signal.range)).unwrap_or("Unknown");
+    format!("自动 — {detected}")
+}
+
+fn range_label_text(range: DecodedVideoRange) -> &'static str {
+    match range {
+        DecodedVideoRange::Full => "Full",
+        DecodedVideoRange::Limited => "Limited",
+        DecodedVideoRange::Unknown => "Unknown",
+    }
 }
 
 fn selected_override_color_space(
@@ -336,11 +415,7 @@ fn input_color_diagnostics_text(draft: &AppUiInterpretAssetDraft) -> String {
             })
             .unwrap_or_else(|| "自动 · 未探测".to_owned()),
     };
-    let signal = draft
-        .video_signal
-        .as_ref()
-        .map(video_signal_summary)
-        .unwrap_or_else(|| "Range/Primaries/Transfer/Matrix：无视频信号".to_owned());
+    let signal = video_signal_summary(draft);
     let evidence = interpretation
         .map(|value| summarize_entries(&value.evidence, evidence_summary, 3))
         .filter(|value| !value.is_empty())
@@ -370,11 +445,19 @@ fn input_color_diagnostics_text(draft: &AppUiInterpretAssetDraft) -> String {
     )
 }
 
-fn video_signal_summary(signal: &AppShellVideoSignalDiagnostics) -> String {
-    let range = match signal.range {
-        DecodedVideoRange::Full => "Full",
-        DecodedVideoRange::Limited => "Limited",
-        DecodedVideoRange::Unknown => "Unknown",
+fn video_signal_summary(draft: &AppUiInterpretAssetDraft) -> String {
+    let Some(signal) = draft.video_signal.as_ref() else {
+        return "Range/Primaries/Transfer/Matrix：无视频信号".to_owned();
+    };
+    let detected_range = range_label_text(signal.range);
+    let range = match draft.interpretation.range {
+        MediaRangeInterpretation::Auto => format!("{detected_range}（自动/探测）"),
+        MediaRangeInterpretation::Override { range: MediaSignalRange::Full } => {
+            format!("Full（用户覆盖；探测为 {detected_range}）")
+        }
+        MediaRangeInterpretation::Override { range: MediaSignalRange::Limited } => {
+            format!("Limited（用户覆盖；探测为 {detected_range}）")
+        }
     };
     signal.color_metadata.as_ref().map_or_else(
         || format!("Range：{range} · Primaries/Transfer/Matrix：未提供"),
@@ -537,6 +620,16 @@ impl Widget for InterpretAssetDialog {
         ));
 
         row_y += ROW_HEIGHT + ROW_GAP;
+        self.range_label
+            .layout(Rect::new(content.x, row_y, LABEL_COLUMN_WIDTH, ROW_HEIGHT));
+        self.range_dropdown.layout(Rect::new(
+            control_x,
+            row_y,
+            control_width.min(360.0),
+            ROW_HEIGHT,
+        ));
+
+        row_y += ROW_HEIGHT + ROW_GAP;
         self.diagnostics_label.layout(Rect::new(
             content.x,
             row_y,
@@ -572,6 +665,9 @@ impl Widget for InterpretAssetDialog {
                 if self.color_space_dropdown.event(event, ctx) == EventResult::Handled {
                     return EventResult::Handled;
                 }
+                if self.range_dropdown.event(event, ctx) == EventResult::Handled {
+                    return EventResult::Handled;
+                }
                 for button in [&mut self.apply_button, &mut self.cancel_button] {
                     if button.event(event, ctx) == EventResult::Handled {
                         return EventResult::Handled;
@@ -589,10 +685,12 @@ impl Widget for InterpretAssetDialog {
         self.status_label.paint(ctx);
         self.status_value_label.paint(ctx);
         self.color_space_label.paint(ctx);
+        self.range_label.paint(ctx);
         self.diagnostics_label.paint(ctx);
         self.apply_button.paint(ctx);
         self.cancel_button.paint(ctx);
         self.color_space_dropdown.paint(ctx);
+        self.range_dropdown.paint(ctx);
     }
 
     fn hit_test(&self, point: Point) -> bool {
@@ -600,7 +698,7 @@ impl Widget for InterpretAssetDialog {
     }
 
     fn child_count(&self) -> usize {
-        9
+        11
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
@@ -611,9 +709,11 @@ impl Widget for InterpretAssetDialog {
             3 => Some(&self.status_value_label),
             4 => Some(&self.color_space_label),
             5 => Some(&self.color_space_dropdown),
-            6 => Some(&self.diagnostics_label),
-            7 => Some(&self.apply_button),
-            8 => Some(&self.cancel_button),
+            6 => Some(&self.range_label),
+            7 => Some(&self.range_dropdown),
+            8 => Some(&self.diagnostics_label),
+            9 => Some(&self.apply_button),
+            10 => Some(&self.cancel_button),
             _ => None,
         }
     }
@@ -626,9 +726,11 @@ impl Widget for InterpretAssetDialog {
             3 => Some(&mut self.status_value_label),
             4 => Some(&mut self.color_space_label),
             5 => Some(&mut self.color_space_dropdown),
-            6 => Some(&mut self.diagnostics_label),
-            7 => Some(&mut self.apply_button),
-            8 => Some(&mut self.cancel_button),
+            6 => Some(&mut self.range_label),
+            7 => Some(&mut self.range_dropdown),
+            8 => Some(&mut self.diagnostics_label),
+            9 => Some(&mut self.apply_button),
+            10 => Some(&mut self.cancel_button),
             _ => None,
         }
     }
@@ -759,6 +861,40 @@ mod tests {
             Some(false)
         );
         assert_eq!(interpretation.payload, AssetColorPayload::NonColorData);
+    }
+
+    #[test]
+    fn range_dropdown_preserves_color_and_payload_interpretation() {
+        let interpretation = AssetMediaInterpretation {
+            color: MediaColorInterpretation::Override { color_space: ColorSpace::Rec2100Pq },
+            payload: AssetColorPayload::NonColorData,
+            ..AssetMediaInterpretation::default()
+        };
+        let dialog = InterpretAssetDialog::new(AppUiInterpretAssetDraft::new(
+            AssetId::new(),
+            "Tagged incorrectly",
+            interpretation,
+            Some(detected_interpretation(ColorSpace::Rec709)),
+        ));
+        let action = range_draft_update_action(
+            interpretation,
+            MediaRangeInterpretation::Override { range: MediaSignalRange::Full },
+        );
+        let payload = draft_update_payload_from_action(&action);
+
+        assert_eq!(
+            dialog.range_dropdown.checked_for_action(&action),
+            Some(false)
+        );
+        assert_eq!(payload.interpretation.color, interpretation.color);
+        assert_eq!(
+            payload.interpretation.payload,
+            AssetColorPayload::NonColorData
+        );
+        assert_eq!(
+            payload.interpretation.range.override_range(),
+            Some(MediaSignalRange::Full)
+        );
     }
 
     #[test]

@@ -66,6 +66,46 @@ impl MediaColorInterpretation {
     }
 }
 
+/// User-authored quantization range for encoded video samples.
+///
+/// This core-owned enum deliberately does not depend on FFmpeg or a decoder
+/// representation. Media adapters translate it at their decode boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaSignalRange {
+    /// Studio/legal-range encoded samples.
+    Limited,
+    /// Full-range encoded samples.
+    Full,
+}
+
+/// User-selected range interpretation mode for a media asset.
+///
+/// `Auto` follows the current probe result. `Override` is authoritative when
+/// media carries absent or incorrect range metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum MediaRangeInterpretation {
+    /// Follow the range resolved by media probing.
+    #[default]
+    Auto,
+    /// Use an explicit quantization range instead of probed metadata.
+    Override {
+        /// The range selected by the user.
+        range: MediaSignalRange,
+    },
+}
+
+impl MediaRangeInterpretation {
+    /// Returns the user override range when this interpretation pins one.
+    pub fn override_range(self) -> Option<MediaSignalRange> {
+        match self {
+            Self::Override { range } => Some(range),
+            Self::Auto => None,
+        }
+    }
+}
+
 /// Whether an asset payload represents color-managed picture data.
 ///
 /// This is intentionally separate from `MediaColorInterpretation`: "non-color
@@ -92,14 +132,17 @@ impl AssetColorPayload {
 /// Persistent media interpretation stored on an asset library record.
 ///
 /// This is deliberately separated from probe results. Asset records keep the
-/// user's color mode (`Auto` or `Override`) plus payload kind; resolved diagnostics remain
-/// runtime data so detector/config upgrades can improve Auto behavior without
-/// rewriting library state.
+/// user's color and signal-range modes (`Auto` or `Override`) plus payload
+/// kind; resolved diagnostics remain runtime data so detector/config upgrades
+/// can improve Auto behavior without rewriting library state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AssetMediaInterpretation {
     /// Color interpretation intent for the asset.
     #[serde(default)]
     pub color: MediaColorInterpretation,
+    /// Encoded video quantization-range intent for the asset.
+    #[serde(default)]
+    pub range: MediaRangeInterpretation,
     /// Payload kind that decides whether color management applies at all.
     #[serde(default)]
     pub payload: AssetColorPayload,

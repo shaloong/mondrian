@@ -5,7 +5,7 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use mondrian_assets::AssetRecord;
 use mondrian_core::types::{AssetId, ColorSpace};
-use mondrian_media::ProxyColorContract;
+use mondrian_media::{resolve_decoded_video_range, ProxyColorContract};
 use mondrian_timeline::sequence::{ColorContext, ResolvedInputColor};
 
 use super::AppState;
@@ -38,7 +38,8 @@ pub(crate) fn resolve_asset_proxy_color_contract(
         .media_info
         .primary_video()
         .ok_or_else(|| "proxy generation requires a probed primary video stream".to_owned())?;
-    ProxyColorContract::try_new(source_color_space, video.bit_depth, video.color_range)
+    let source_range = resolve_decoded_video_range(asset.interpretation.range, video.color_range);
+    ProxyColorContract::try_new(source_color_space, video.bit_depth, source_range)
         .map_err(|error| error.to_string())
 }
 

@@ -52,9 +52,11 @@ not the undoable domain model. The dialog's committed payload must flow through 
 domain/app action owned by the target subsystem. For example, Asset Library →
 Interpret Footage opens an app-shell modal, but applying Auto/Override is
 an asset-library mutation that persists `AssetMediaInterpretation`.
-The modal keeps the input color-space dropdown compact while retaining a
-read-only diagnostic body: Auto is the default option, explicit color spaces
-persist as overrides, and Auto displays the current resolved/detected result.
+The modal keeps the input color-space and encoded signal-range dropdowns compact
+while retaining a read-only diagnostic body. Auto is the default for both;
+explicit color spaces and Full/Limited range selections persist independently,
+and Auto displays the current resolved/detected result. Changing either control
+must preserve the other control and the asset payload classification.
 The action that opens the modal must preserve decoder range, raw CICP
 primaries/transfer/matrix, detector evidence and warnings, plus the effective
 engine and working identity; reducing this payload to the final color-space
@@ -74,8 +76,8 @@ camera Log identities cannot appear as presentation targets.
 Non-color data is an asset payload classification for advanced utility-channel
 workflows, not an option in the primary color-space picker. A future payload or
 channel-role control may edit that classification, but the Interpret Footage
-color-space dropdown must preserve the existing payload value while changing
-only `MediaColorInterpretation`; it must never create or clear
+color-space and range dropdowns must preserve the existing payload value while
+changing only their owned interpretation field; they must never create or clear
 `AssetColorPayload::NonColorData`.
 
 ## Playback Tick Ownership
