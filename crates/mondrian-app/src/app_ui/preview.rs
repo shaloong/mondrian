@@ -19,7 +19,7 @@ use mondrian_core::timeline_data::{AlphaInterpretation, AssetMediaInterpretation
 #[cfg(test)]
 use mondrian_core::types::ColorEngine;
 use mondrian_core::types::{AssetId, BlendMode, ColorSpace, Rational, SequenceId};
-use mondrian_core::{MondrianError, WorkingColorSpace};
+use mondrian_core::{MondrianError, Resolution, WorkingColorSpace};
 use mondrian_effects::{
     get_or_lower_effect_graph_to_gpu_plan, CompiledEffectGraph, EffectCachePolicy,
 };
@@ -40,16 +40,17 @@ use mondrian_media::{DecodedVideoChromaLocation, PreviewNativeDecodedFrameHandle
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
     evaluate_timeline_render_plan, execute_cpu_program_monitor_boundary_rgba8,
-    execute_cpu_source_input_stage, execute_cpu_working_transform, CpuColorFrame,
-    CpuEncodedColorFrame, CpuSourceColorFrame, GpuCompositingBlockerReason,
-    GpuCompositingDiagnostics, LinearFloatSource, RenderColorStageDiagnostics,
-    RenderColorStageGpuBlockerBreakdown, RenderColorTransformDiagnostics,
-    RenderColorTransformDirection, RenderInputTransform, RenderMonitorAdaptation,
-    RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
-    TimelineCompositeDiagnostics, TimelineCompositeDomainBlockerBreakdown,
-    TimelineCompositeElement, TimelineCompositeLegacyBreakdown, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineEffectColorRuntime, TimelineEvaluationRequest,
-    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
+    execute_cpu_source_input_stage, execute_cpu_working_transform,
+    project_affine_to_sampled_extents, CpuColorFrame, CpuEncodedColorFrame, CpuSourceColorFrame,
+    GpuCompositingBlockerReason, GpuCompositingDiagnostics, LinearFloatSource,
+    RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
+    RenderColorTransformDiagnostics, RenderColorTransformDirection, RenderInputTransform,
+    RenderMonitorAdaptation, RenderOutputColorBoundary, TimelineAdjustmentLayer,
+    TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
+    TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement,
+    TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineEffectColorRuntime, TimelineEvaluationRequest, TimelineMediaLayer,
+    TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 #[cfg(test)]
 use mondrian_renderer::{
@@ -70,6 +71,7 @@ use mondrian_ui_widgets::{
 use super::preview_access_mode::MediaPreviewJobEnqueueStatus;
 use crate::app::proxy_generation::{request_proxy_generation, resolve_asset_proxy_color_contract};
 use crate::app::AppState;
+use crate::app_ui::native_video_import::AppUiPlaybackHardwareDecodeAdmission;
 use crate::app_ui::panels::{
     ViewerColorPipelineStatus, ViewerPreviewColorRejectionModel, ViewerPreviewSource,
     ViewerPreviewState,
@@ -78,9 +80,9 @@ use crate::app_ui::preview_access_mode::{
     media_preview_access_mode_for_intent, media_preview_viewer_access_intent,
     media_preview_worker_count, media_preview_worker_lane, MediaPreviewJob,
     MediaPreviewJobQueueDiagnostics, MediaPreviewJobQueueReceive, MediaPreviewJobQueueReceiver,
-    MediaPreviewJobQueueSender, MediaPreviewKey, MediaPreviewRequestPriority,
-    MediaPreviewRequestStatus, MediaPreviewScheduler, MediaPreviewSchedulerDiagnostics,
-    MediaPreviewWorkerLane,
+    MediaPreviewJobQueueSender, MediaPreviewKey, MediaPreviewNativeSurfaceHint,
+    MediaPreviewRequestPriority, MediaPreviewRequestStatus, MediaPreviewScheduler,
+    MediaPreviewSchedulerDiagnostics, MediaPreviewWorkerLane,
 };
 use crate::app_ui::preview_frame_store::PreviewCpuFrameStore;
 #[cfg(test)]
@@ -167,6 +169,8 @@ pub struct AppUiPreviewService {
     playback_hardware_decode_platform_low_copy_fallback_supported: Cell<bool>,
     playback_hardware_decode_renderer_supported_handle_kinds: Cell<u8>,
     playback_hardware_decode_renderer_supported_source_texture_formats: Cell<u8>,
+    playback_hardware_decode_renderer_supports_nv12: Cell<bool>,
+    playback_hardware_decode_renderer_supports_p010: Cell<bool>,
     decode_cpu_budget: PreviewDecodeCpuBudget,
     decode_worker_count: usize,
     metrics: AppUiPreviewMetrics,
@@ -258,6 +262,8 @@ impl AppUiPreviewService {
             playback_hardware_decode_platform_low_copy_fallback_supported: Cell::new(false),
             playback_hardware_decode_renderer_supported_handle_kinds: Cell::new(0),
             playback_hardware_decode_renderer_supported_source_texture_formats: Cell::new(0),
+            playback_hardware_decode_renderer_supports_nv12: Cell::new(false),
+            playback_hardware_decode_renderer_supports_p010: Cell::new(false),
             decode_cpu_budget,
             decode_worker_count,
             metrics: AppUiPreviewMetrics::default(),
@@ -272,38 +278,33 @@ impl AppUiPreviewService {
     /// support is actually ready.
     pub(crate) fn set_playback_hardware_decode_admission(
         &self,
-        request: PreviewHardwareDecodeRequest,
-        device_selector: Option<HwAccelDeviceSelector>,
-        renderer_native_import_ready: bool,
-        platform_native_import_ready: bool,
-        native_import_admission_ready: bool,
-        admission_blocker: Option<AppUiPreviewHardwareDecodeAdmissionBlocker>,
-        platform_discovery_available: bool,
-        platform_zero_copy_supported: bool,
-        platform_low_copy_fallback_supported: bool,
-        renderer_supported_handle_kinds: u8,
-        renderer_supported_source_texture_formats: u8,
+        admission: AppUiPlaybackHardwareDecodeAdmission,
     ) {
-        self.playback_hardware_decode_request.set(request);
-        self.playback_hardware_decode_device_selector.set(device_selector);
+        self.playback_hardware_decode_request.set(admission.request);
+        self.playback_hardware_decode_device_selector
+            .set(admission.hardware_decode_device_selector);
         self.playback_hardware_decode_renderer_import_known.set(true);
         self.playback_hardware_decode_renderer_import_ready
-            .set(renderer_native_import_ready);
+            .set(admission.renderer_native_import_ready);
         self.playback_hardware_decode_platform_import_ready
-            .set(platform_native_import_ready);
+            .set(admission.platform_native_import_ready);
         self.playback_hardware_decode_native_import_admission_ready
-            .set(native_import_admission_ready);
-        self.playback_hardware_decode_admission_blocker.set(admission_blocker);
+            .set(admission.native_import_admission_ready);
+        self.playback_hardware_decode_admission_blocker.set(admission.admission_blocker);
         self.playback_hardware_decode_platform_discovery_available
-            .set(platform_discovery_available);
+            .set(admission.platform_discovery_available);
         self.playback_hardware_decode_platform_zero_copy_supported
-            .set(platform_zero_copy_supported);
+            .set(admission.platform_zero_copy_supported);
         self.playback_hardware_decode_platform_low_copy_fallback_supported
-            .set(platform_low_copy_fallback_supported);
+            .set(admission.platform_low_copy_fallback_supported);
         self.playback_hardware_decode_renderer_supported_handle_kinds
-            .set(renderer_supported_handle_kinds);
+            .set(admission.renderer_supported_handle_kinds);
         self.playback_hardware_decode_renderer_supported_source_texture_formats
-            .set(renderer_supported_source_texture_formats);
+            .set(admission.renderer_supported_source_texture_formats);
+        self.playback_hardware_decode_renderer_supports_nv12
+            .set(admission.renderer_supports_nv12);
+        self.playback_hardware_decode_renderer_supports_p010
+            .set(admission.renderer_supports_p010);
     }
 
     #[cfg(test)]
@@ -348,6 +349,31 @@ impl AppUiPreviewService {
         _access_mode: PreviewDecodeAccessMode,
     ) -> PreviewHardwareDecodeRequest {
         self.playback_hardware_decode_request.get()
+    }
+
+    fn hardware_decode_request_for_key(
+        &self,
+        access_mode: PreviewDecodeAccessMode,
+        key: &MediaPreviewKey,
+    ) -> PreviewHardwareDecodeRequest {
+        let request = self.hardware_decode_request_for_access_mode(access_mode);
+        if request != PreviewHardwareDecodeRequest::PreferGpuResident {
+            return request;
+        }
+        let supported = match key.native_surface_hint {
+            Some(MediaPreviewNativeSurfaceHint::Nv12) => {
+                self.playback_hardware_decode_renderer_supports_nv12.get()
+            }
+            Some(MediaPreviewNativeSurfaceHint::P010) => {
+                self.playback_hardware_decode_renderer_supports_p010.get()
+            }
+            None => true,
+        };
+        if supported {
+            request
+        } else {
+            PreviewHardwareDecodeRequest::PreferHardwareDecode
+        }
     }
 
     fn hardware_decode_device_selector_for_access_mode(
@@ -403,8 +429,11 @@ impl AppUiPreviewService {
             source_micros: 0,
             target_width: 1920,
             target_height: 1080,
+            source_width: 1920,
+            source_height: 1080,
             input_color_space: ColorSpace::Srgb,
             input_video_range: DecodedVideoRange::Full,
+            native_surface_hint: None,
             source_has_alpha: false,
             alpha_interpretation: AlphaInterpretation::Straight,
             working_color_space: WorkingColorSpace::LinearRec709,
@@ -420,6 +449,7 @@ impl AppUiPreviewService {
             access_mode,
             demand_identity,
         );
+        let hardware_decode_request = self.hardware_decode_request_for_key(access_mode, &key);
         let _ = self.jobs.enqueue(MediaPreviewJob {
             key,
             source_secs: 0.0,
@@ -427,7 +457,7 @@ impl AppUiPreviewService {
             priority: MediaPreviewRequestPriority::Current,
             access_mode,
             adaptive_hints: PreviewDecodeAdaptiveHints::default(),
-            hardware_decode_request: self.hardware_decode_request_for_access_mode(access_mode),
+            hardware_decode_request,
             hardware_decode_device_selector: self
                 .hardware_decode_device_selector_for_access_mode(access_mode),
             enqueued_at: Instant::now(),
@@ -1175,8 +1205,22 @@ impl AppUiPreviewService {
                 self.current_presentation_quality
                     .set(resolved_preview_presentation_quality(&resolved.elements));
                 let final_cache_lookup_started_at = Instant::now();
-                if let Some(frame) = resolved
-                    .cache_key
+                // GPU viewer outputs are display-referred resources. Keep the
+                // raster cache identity independent of the monitor contract,
+                // but compare external textures with the same adapted identity
+                // used when the GPU candidate was registered.
+                let external_cache_key = resolved.cache_key.as_ref().and_then(|cache_key| {
+                    let program_output_color_space =
+                        resolved.color_context.output_color_space.color()?;
+                    RenderMonitorAdaptation::new(
+                        program_output_color_space,
+                        display_color_space,
+                        resolved.color_context.engine.clone(),
+                    )
+                    .ok()
+                    .map(|adaptation| cache_key.with_monitor_adaptation(&adaptation))
+                });
+                if let Some(frame) = external_cache_key
                     .as_ref()
                     .and_then(|cache_key| self.external_viewer_frame_for_key(cache_key))
                 {
@@ -1214,8 +1258,8 @@ impl AppUiPreviewService {
                         app_duration_us(render_started_at.elapsed()),
                         render_stage_durations,
                     );
-                    self.stale_frame_for_sequence(sequence, width, height)
-                        .map(|frame| ViewerPreviewState::Stale(ViewerFrameContent::Raster(frame)))
+                    self.stale_viewer_content_for_sequence(sequence, width, height)
+                        .map(ViewerPreviewState::Stale)
                         .unwrap_or(ViewerPreviewState::Loading)
                 } else {
                     render_stage_durations.final_cache_lookup_us =
@@ -1290,8 +1334,8 @@ impl AppUiPreviewService {
                 }
             }
             None if self.current_frame_pending.get() => self
-                .stale_frame_for_sequence(sequence, width, height)
-                .map(|frame| ViewerPreviewState::Stale(ViewerFrameContent::Raster(frame)))
+                .stale_viewer_content_for_sequence(sequence, width, height)
+                .map(ViewerPreviewState::Stale)
                 .unwrap_or(ViewerPreviewState::Loading),
             None => ViewerPreviewState::Unavailable,
         };
@@ -1582,6 +1626,23 @@ impl AppUiPreviewService {
         let frame = self.external_viewer_frame.borrow();
         let frame = frame.as_ref()?;
         (&frame.cache_key == key).then(|| frame.content.clone())
+    }
+
+    fn stale_viewer_content_for_sequence(
+        &self,
+        sequence: &Sequence,
+        width: u32,
+        height: u32,
+    ) -> Option<ViewerFrameContent> {
+        self.external_viewer_frame
+            .borrow()
+            .as_ref()
+            .filter(|frame| frame.cache_key.sequence_id == sequence.id)
+            .map(|frame| ViewerFrameContent::ExternalTexture(frame.content.clone()))
+            .or_else(|| {
+                self.stale_frame_for_sequence(sequence, width, height)
+                    .map(ViewerFrameContent::Raster)
+            })
     }
 
     fn record_preview_state(&self, state: &ViewerPreviewState) {
@@ -2280,6 +2341,8 @@ impl AppUiPreviewService {
         Some(MediaPreviewFrame {
             width,
             height,
+            logical_width: sequence.settings.resolution.width,
+            logical_height: sequence.settings.resolution.height,
             frame: Some(working_frame),
             gpu_source: None,
             native_source: None,
@@ -2339,11 +2402,17 @@ impl AppUiPreviewService {
                         &color_context,
                         sequence.settings.frame_rate,
                     )?;
+                    let transform = project_preview_media_transform(
+                        media.transform,
+                        &frame,
+                        sequence.settings.resolution,
+                        Resolution { width, height },
+                    )?;
                     resolved.push(ResolvedPreviewElement::Media {
                         frame,
                         opacity: media.opacity,
                         blend_mode: media.blend_mode,
-                        transform: media.transform,
+                        transform,
                         effect_graph: media.effect_graph,
                         frame_seed: media.frame_seed,
                     });
@@ -2367,11 +2436,17 @@ impl AppUiPreviewService {
                         depth + 1,
                         color_context.clone(),
                     )?;
+                    let transform = project_preview_media_transform(
+                        nested.transform,
+                        &frame,
+                        sequence.settings.resolution,
+                        Resolution { width, height },
+                    )?;
                     resolved.push(ResolvedPreviewElement::Media {
                         frame,
                         opacity: nested.opacity,
                         blend_mode: nested.blend_mode,
-                        transform: nested.transform,
+                        transform,
                         effect_graph: nested.effect_graph,
                         frame_seed: nested.frame_seed,
                     });
@@ -7221,6 +7296,8 @@ pub(crate) struct MediaPreviewFrame {
     native_source: Option<MediaPreviewNativeSourceFrame>,
     width: u32,
     height: u32,
+    logical_width: u32,
+    logical_height: u32,
     signature: u64,
     presentation_quality: mondrian_playback::FramePresentationQuality,
     decode_execution: AppUiPreviewDecodeExecutionSummary,
@@ -7304,6 +7381,13 @@ impl MediaPreviewFrame {
         self.height
     }
 
+    fn logical_resolution(&self) -> Resolution {
+        Resolution {
+            width: self.logical_width,
+            height: self.logical_height,
+        }
+    }
+
     fn presentation_quality(&self) -> mondrian_playback::FramePresentationQuality {
         self.presentation_quality
     }
@@ -7377,6 +7461,21 @@ impl MediaPreviewFrame {
             },
         })
     }
+}
+
+fn project_preview_media_transform(
+    transform: [f32; 6],
+    frame: &MediaPreviewFrame,
+    output_authoring: Resolution,
+    output_sampled: Resolution,
+) -> Option<[f32; 6]> {
+    project_affine_to_sampled_extents(
+        transform,
+        frame.logical_resolution(),
+        Resolution { width: frame.width(), height: frame.height() },
+        output_authoring,
+        output_sampled,
+    )
 }
 
 struct MediaPreviewWorkingFrame {
@@ -8173,6 +8272,14 @@ impl AppUiPreviewService {
                 source_micros: source_micros(source_secs),
                 target_width,
                 target_height,
+                source_width: asset
+                    .media_info
+                    .primary_video()
+                    .map_or(target_width, |video| video.width.max(1)),
+                source_height: asset
+                    .media_info
+                    .primary_video()
+                    .map_or(target_height, |video| video.height.max(1)),
                 input_color_space,
                 input_video_range: resolve_decoded_video_range(
                     asset.interpretation.range,
@@ -8182,6 +8289,19 @@ impl AppUiPreviewService {
                         .map(|video| video.color_range)
                         .unwrap_or(DecodedVideoRange::Unknown),
                 ),
+                native_surface_hint: asset.media_info.primary_video().and_then(|video| match video
+                    .pixel_format
+                {
+                    mondrian_media::info::PixelFormat::Yuv420p
+                    | mondrian_media::info::PixelFormat::Nv12 => {
+                        Some(MediaPreviewNativeSurfaceHint::Nv12)
+                    }
+                    mondrian_media::info::PixelFormat::Yuv420p10le
+                    | mondrian_media::info::PixelFormat::P010 => {
+                        Some(MediaPreviewNativeSurfaceHint::P010)
+                    }
+                    _ => None,
+                }),
                 source_has_alpha,
                 alpha_interpretation,
                 working_color_space: color_context.working_color_space,
@@ -8291,7 +8411,7 @@ impl AppUiPreviewService {
                 playback_current_deadline_at,
             ));
         }
-        let hardware_decode_request = self.hardware_decode_request_for_access_mode(access_mode);
+        let hardware_decode_request = self.hardware_decode_request_for_key(access_mode, &key);
         let hardware_decode_device_selector =
             self.hardware_decode_device_selector_for_access_mode(access_mode);
         let submission = self.scheduler.submit_job(MediaPreviewJob {
@@ -9719,6 +9839,8 @@ fn decode_media_preview(
 ) -> MediaPreviewResult {
     let decode_started_at = Instant::now();
     let signature = media_preview_frame_signature(&job.key);
+    let logical_width = job.key.source_width;
+    let logical_height = job.key.source_height;
     let priority = job.priority;
     let access_mode = job.access_mode;
     let deadline_at = job.deadline_at;
@@ -9787,6 +9909,8 @@ fn decode_media_preview(
                 frame: Some(MediaPreviewFrame {
                     width,
                     height,
+                    logical_width,
+                    logical_height,
                     frame: None,
                     gpu_source: Some(gpu_source),
                     native_source: None,
@@ -9857,6 +9981,8 @@ fn decode_media_preview(
                 frame: Some(MediaPreviewFrame {
                     width,
                     height,
+                    logical_width,
+                    logical_height,
                     frame: None,
                     gpu_source: Some(gpu_source),
                     native_source: None,
@@ -9916,6 +10042,8 @@ fn decode_media_preview(
                 frame: Some(MediaPreviewFrame {
                     width,
                     height,
+                    logical_width,
+                    logical_height,
                     frame: None,
                     gpu_source: None,
                     native_source: Some(native_source),
@@ -10623,6 +10751,23 @@ mod tests {
     }
 
     #[test]
+    fn preview_transform_projection_does_not_double_apply_resolution_scale() {
+        let mut media = test_media_frame_with_size(180, 960, 540, 42);
+        media.logical_width = 3840;
+        media.logical_height = 2160;
+
+        let projected = project_preview_media_transform(
+            [0.5, 0.0, 0.0, 0.0, 0.5, 0.0],
+            &media,
+            Resolution { width: 1920, height: 1080 },
+            Resolution { width: 960, height: 540 },
+        )
+        .expect("valid preview projection");
+
+        assert_eq!(projected, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+    }
+
+    #[test]
     fn gpu_composite_layers_lower_supported_working_effects() {
         let media = test_media_frame_with_size(180, 320, 180, 43);
         let mut graph = mondrian_effects::EffectGraphBuilderState::new();
@@ -10770,6 +10915,8 @@ mod tests {
         let media = MediaPreviewFrame {
             width: 320,
             height: 180,
+            logical_width: 320,
+            logical_height: 180,
             frame: None,
             gpu_source: Some(MediaPreviewGpuSourceFrame::new(source, input_transform)),
             native_source: None,
@@ -10814,6 +10961,8 @@ mod tests {
         let media = MediaPreviewFrame {
             width: 320,
             height: 180,
+            logical_width: 320,
+            logical_height: 180,
             frame: None,
             gpu_source: None,
             native_source: Some(test_native_source_frame(320, 180)),
@@ -10891,6 +11040,8 @@ mod tests {
         let frame = MediaPreviewFrame {
             width: 320,
             height: 180,
+            logical_width: 320,
+            logical_height: 180,
             frame: None,
             gpu_source: None,
             native_source: Some(test_native_source_frame(320, 180)),
@@ -10985,6 +11136,30 @@ mod tests {
             _ => panic!("expected new ready GPU preview candidate after external frame clear"),
         };
         assert!(second_frame.preview_candidate_id() > first_candidate_id);
+    }
+
+    #[test]
+    fn pending_replacement_prefers_last_presented_gpu_frame() {
+        let service = AppUiPreviewService::new();
+        let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+        let frame = match service.gpu_preview_frame_for_state(&state) {
+            AppUiGpuPreviewFrameState::Ready(frame) => frame,
+            _ => panic!("expected ready GPU preview candidate"),
+        };
+        assert!(service.set_external_viewer_frame(
+            &frame,
+            "viewer:last-presented",
+            ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
+                .expect("full-frame presentation"),
+        ));
+        let sequence = state.sequence.as_ref().expect("test sequence");
+
+        match service.stale_viewer_content_for_sequence(sequence, frame.width, frame.height) {
+            Some(ViewerFrameContent::ExternalTexture(stale)) => {
+                assert_eq!(stale.key, "viewer:last-presented");
+            }
+            other => panic!("expected retained external frame, got {other:?}"),
+        }
     }
 
     #[test]
@@ -12134,19 +12309,23 @@ mod tests {
     #[test]
     fn preview_playback_schedule_counts_native_import_unavailable_current_frames() {
         let service = AppUiPreviewService::new();
-        service.set_playback_hardware_decode_admission(
-            PreviewHardwareDecodeRequest::PreferHardwareDecode,
-            None,
-            false,
-            false,
-            false,
-            Some(AppUiPreviewHardwareDecodeAdmissionBlocker::RendererImportUnavailable),
-            true,
-            false,
-            false,
-            0,
-            0,
-        );
+        service.set_playback_hardware_decode_admission(AppUiPlaybackHardwareDecodeAdmission {
+            request: PreviewHardwareDecodeRequest::PreferHardwareDecode,
+            hardware_decode_device_selector: None,
+            renderer_native_import_ready: false,
+            platform_native_import_ready: false,
+            native_import_admission_ready: false,
+            admission_blocker: Some(
+                AppUiPreviewHardwareDecodeAdmissionBlocker::RendererImportUnavailable,
+            ),
+            platform_discovery_available: true,
+            platform_zero_copy_supported: false,
+            platform_low_copy_fallback_supported: false,
+            renderer_supported_handle_kinds: 0,
+            renderer_supported_source_texture_formats: 0,
+            renderer_supports_nv12: false,
+            renderer_supports_p010: false,
+        });
 
         service.record_preview_decode(
             test_preview_decode_diagnostics(
@@ -15809,6 +15988,8 @@ mod tests {
         let media = MediaPreviewFrame {
             width: 2,
             height: 2,
+            logical_width: 2,
+            logical_height: 2,
             frame: None,
             gpu_source: Some(MediaPreviewGpuSourceFrame::new(
                 source.clone(),
@@ -15925,6 +16106,8 @@ mod tests {
         let media = MediaPreviewFrame {
             width: frame.descriptor().width,
             height: frame.descriptor().height,
+            logical_width: frame.descriptor().width,
+            logical_height: frame.descriptor().height,
             frame: Some(frame),
             gpu_source: None,
             native_source: None,
@@ -16734,8 +16917,11 @@ mod tests {
             source_micros: source_micros(0.5),
             target_width: 320,
             target_height: 180,
+            source_width: 320,
+            source_height: 180,
             input_color_space: ColorSpace::Rec709,
             input_video_range: DecodedVideoRange::Limited,
+            native_surface_hint: None,
             source_has_alpha: false,
             alpha_interpretation: AlphaInterpretation::Straight,
             working_color_space: WorkingColorSpace::LinearRec709,
@@ -16785,8 +16971,11 @@ mod tests {
             source_micros: source_micros(0.5),
             target_width: 320,
             target_height: 180,
+            source_width: 320,
+            source_height: 180,
             input_color_space: ColorSpace::Rec709,
             input_video_range: DecodedVideoRange::Limited,
+            native_surface_hint: None,
             source_has_alpha: false,
             alpha_interpretation: AlphaInterpretation::Straight,
             working_color_space: WorkingColorSpace::LinearRec709,
@@ -17485,8 +17674,11 @@ mod tests {
             source_micros: source_micros(source_frame as f64),
             target_width: 320,
             target_height: 180,
+            source_width: 320,
+            source_height: 180,
             input_color_space: ColorSpace::Rec709,
             input_video_range: DecodedVideoRange::Limited,
+            native_surface_hint: None,
             source_has_alpha: false,
             alpha_interpretation: AlphaInterpretation::Straight,
             working_color_space: WorkingColorSpace::LinearRec709,
@@ -17585,6 +17777,8 @@ mod tests {
         MediaPreviewFrame {
             width,
             height,
+            logical_width: width,
+            logical_height: height,
             frame: Some(frame),
             gpu_source: Some(MediaPreviewGpuSourceFrame::new(source, input_transform)),
             native_source: None,
@@ -17687,6 +17881,8 @@ mod tests {
         let frame = MediaPreviewFrame {
             width: 1,
             height: 1,
+            logical_width: 1,
+            logical_height: 1,
             frame: None,
             gpu_source: Some(MediaPreviewGpuSourceFrame::new(source, input_transform)),
             native_source: None,
@@ -17727,6 +17923,8 @@ mod tests {
         let frame = MediaPreviewFrame {
             width: 2,
             height: 1,
+            logical_width: 2,
+            logical_height: 1,
             frame: None,
             gpu_source: Some(MediaPreviewGpuSourceFrame::new(source, input_transform)),
             native_source: None,
@@ -17984,19 +18182,21 @@ mod tests {
                 .hardware_decode_request_for_access_mode(PreviewDecodeAccessMode::PlaybackCursor),
             PreviewHardwareDecodeRequest::Auto
         );
-        service.set_playback_hardware_decode_admission(
-            PreviewHardwareDecodeRequest::PreferGpuResident,
-            Some(HwAccelDeviceSelector::D3D11VaAdapterIndex(1)),
-            true,
-            true,
-            true,
-            None,
-            true,
-            true,
-            false,
-            1,
-            1,
-        );
+        service.set_playback_hardware_decode_admission(AppUiPlaybackHardwareDecodeAdmission {
+            request: PreviewHardwareDecodeRequest::PreferGpuResident,
+            hardware_decode_device_selector: Some(HwAccelDeviceSelector::D3D11VaAdapterIndex(1)),
+            renderer_native_import_ready: true,
+            platform_native_import_ready: true,
+            native_import_admission_ready: true,
+            admission_blocker: None,
+            platform_discovery_available: true,
+            platform_zero_copy_supported: true,
+            platform_low_copy_fallback_supported: false,
+            renderer_supported_handle_kinds: 1,
+            renderer_supported_source_texture_formats: 1,
+            renderer_supports_nv12: true,
+            renderer_supports_p010: true,
+        });
         assert_eq!(
             service
                 .hardware_decode_request_for_access_mode(PreviewDecodeAccessMode::PlaybackCursor),
@@ -18029,6 +18229,39 @@ mod tests {
                 PreviewDecodeAccessMode::RandomAccessStillFrame
             ),
             Some(HwAccelDeviceSelector::D3D11VaAdapterIndex(1))
+        );
+    }
+
+    #[test]
+    fn gpu_viewer_hardware_decode_admission_is_scoped_to_native_surface_format() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        service.set_playback_hardware_decode_admission(AppUiPlaybackHardwareDecodeAdmission {
+            request: PreviewHardwareDecodeRequest::PreferGpuResident,
+            hardware_decode_device_selector: Some(HwAccelDeviceSelector::D3D11VaAdapterIndex(1)),
+            renderer_native_import_ready: true,
+            platform_native_import_ready: true,
+            native_import_admission_ready: true,
+            admission_blocker: None,
+            platform_discovery_available: true,
+            platform_zero_copy_supported: true,
+            platform_low_copy_fallback_supported: false,
+            renderer_supported_handle_kinds: 1,
+            renderer_supported_source_texture_formats: 1,
+            renderer_supports_nv12: true,
+            renderer_supports_p010: false,
+        });
+        let mut key = test_media_key(0);
+
+        key.native_surface_hint = Some(MediaPreviewNativeSurfaceHint::Nv12);
+        assert_eq!(
+            service.hardware_decode_request_for_key(PreviewDecodeAccessMode::PlaybackCursor, &key),
+            PreviewHardwareDecodeRequest::PreferGpuResident
+        );
+
+        key.native_surface_hint = Some(MediaPreviewNativeSurfaceHint::P010);
+        assert_eq!(
+            service.hardware_decode_request_for_key(PreviewDecodeAccessMode::PlaybackCursor, &key),
+            PreviewHardwareDecodeRequest::PreferHardwareDecode
         );
     }
 

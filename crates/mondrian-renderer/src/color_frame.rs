@@ -9,6 +9,7 @@ use mondrian_media::{
 };
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Semantic role of a frame in the color-managed render graph.
@@ -427,9 +428,19 @@ pub struct GpuColorFrameWgpuResource {
 }
 
 const MAX_CACHED_BIND_GROUPS_PER_GPU_COLOR_FRAME: usize = 8;
+static NEXT_GPU_COLOR_FRAME_BIND_GROUP_CACHE_KEY: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GpuColorFrameBindGroupCacheKey(u64);
+
+impl GpuColorFrameBindGroupCacheKey {
+    pub(crate) fn allocate() -> Self {
+        Self(NEXT_GPU_COLOR_FRAME_BIND_GROUP_CACHE_KEY.fetch_add(1, Ordering::Relaxed))
+    }
+}
 
 struct CachedGpuColorFrameBindGroup {
-    key: u64,
+    key: GpuColorFrameBindGroupCacheKey,
     bind_group: wgpu::BindGroup,
 }
 
@@ -449,7 +460,7 @@ impl GpuColorFrameWgpuResource {
 
     pub(crate) fn cached_bind_group(
         &self,
-        key: u64,
+        key: GpuColorFrameBindGroupCacheKey,
         create: impl FnOnce(&wgpu::TextureView) -> wgpu::BindGroup,
     ) -> (wgpu::BindGroup, bool) {
         let mut cache = self.cached_bind_groups.lock();

@@ -1,4 +1,4 @@
-use crate::color_frame::GpuColorFrameWgpuResource;
+use crate::color_frame::{GpuColorFrameBindGroupCacheKey, GpuColorFrameWgpuResource};
 use lru::LruCache;
 #[cfg(test)]
 use mondrian_core::ColorSpace;
@@ -16,8 +16,6 @@ use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-
-static NEXT_OCIO_WRAPPER_BINDING_CACHE_KEY: AtomicU64 = AtomicU64::new(1);
 
 /// Shader stage used when translating OCIO GPU shader text for wgpu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -3717,7 +3715,7 @@ pub struct OcioGpuWgpuPreparedWrapperInputLayout {
     pub layout_hash: u64,
     /// Concrete wgpu bind-group layout reused for per-frame wrapper bind groups.
     pub layout: wgpu::BindGroupLayout,
-    binding_cache_key: u64,
+    binding_cache_key: GpuColorFrameBindGroupCacheKey,
     bind_group_creations: AtomicU64,
     cache_hits: AtomicU64,
 }
@@ -3969,7 +3967,7 @@ impl OcioGpuWgpuBackendObjectRuntime {
             bind_group: static_pipeline.wrapper_binding.bind_group,
             layout_hash: wrapper_descriptor.layout_hash,
             layout: wrapper_layout,
-            binding_cache_key: NEXT_OCIO_WRAPPER_BINDING_CACHE_KEY.fetch_add(1, Ordering::Relaxed),
+            binding_cache_key: GpuColorFrameBindGroupCacheKey::allocate(),
             bind_group_creations: AtomicU64::new(0),
             cache_hits: AtomicU64::new(0),
         };

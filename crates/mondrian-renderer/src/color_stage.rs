@@ -5442,7 +5442,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gpu_input_stage_output_can_feed_gpu_compositor_on_real_wgpu_device() {
+    async fn gpu_input_composite_chain_reuses_pooled_resources_without_layout_collisions_on_real_wgpu_device(
+    ) {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let Ok(context) = GpuContext::new().await else {
             eprintln!("skipping real wgpu input-to-composite test: no GPU adapter available");
@@ -5468,61 +5469,70 @@ mod tests {
         let effect_plan = mondrian_effects::lower_effect_graph_to_gpu_plan(&compiled_effect_graph)
             .expect("supported GPU effect graph");
         let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_400);
-        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("mondrian-test-gpu-input-to-composite"),
-        });
+        for frame in 0..3 {
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian-test-gpu-input-to-composite-resource-reuse"),
+                });
+            let input_record = runtime
+                .record_wgpu_input_stage_owned_backend(
+                    &transform,
+                    &source,
+                    RenderColorTransformGpuOptions::default(),
+                    RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                        device: &context.device,
+                        queue: &context.queue,
+                        encoder: &mut encoder,
+                        load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    },
+                )
+                .expect("runtime-owned GPU input stage should record");
+            let media_handle = input_record.materialized.output.clone();
+            let layers = [crate::GpuCompositeLayer {
+                source: crate::GpuCompositeLayerSource::GpuFrame(&media_handle),
+                opacity: 1.0,
+                blend_mode: mondrian_core::types::BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&effect_plan),
+                frame_seed: frame,
+            }];
 
-        let input_record = runtime
-            .record_wgpu_input_stage_owned_backend(
-                &transform,
-                &source,
-                RenderColorTransformGpuOptions::default(),
-                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
-                    device: &context.device,
-                    queue: &context.queue,
-                    encoder: &mut encoder,
-                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                },
-            )
-            .expect("runtime-owned GPU input stage should record");
-        let media_handle = input_record.materialized.output.clone();
-        let layers = [crate::GpuCompositeLayer {
-            source: crate::GpuCompositeLayerSource::GpuFrame(&media_handle),
-            opacity: 1.0,
-            blend_mode: mondrian_core::types::BlendMode::Normal,
-            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            effect_plan: Some(&effect_plan),
-            frame_seed: 17,
-        }];
+            let composite = runtime
+                .record_wgpu_working_composite(
+                    &compositor,
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    GpuCompositeRequest {
+                        width: source.descriptor().width,
+                        height: source.descriptor().height,
+                        working_color_space: WorkingColorSpace::LinearRec709,
+                        layers: &layers,
+                    },
+                )
+                .expect("GPU input output should feed GPU compositor");
+            context.queue.submit(std::iter::once(encoder.finish()));
 
-        let composite = runtime
-            .record_wgpu_working_composite(
-                &compositor,
-                &context.device,
-                &context.queue,
-                &mut encoder,
-                GpuCompositeRequest {
-                    width: source.descriptor().width,
-                    height: source.descriptor().height,
-                    working_color_space: WorkingColorSpace::LinearRec709,
-                    layers: &layers,
-                },
-            )
-            .expect("GPU input output should feed GPU compositor");
-        context.queue.submit(std::iter::once(encoder.finish()));
+            assert_eq!(composite.diagnostics.gpu_native_composites, 1);
+            assert_eq!(composite.diagnostics.gpu_with_upload_composites, 0);
+            assert_eq!(composite.diagnostics.cpu_fallback_composites, 0);
+            assert_eq!(
+                composite.output.descriptor().domain,
+                ColorFrameDomain::Working
+            );
+            assert_eq!(
+                composite.output.descriptor().residency,
+                ColorFrameResidency::Gpu
+            );
+            runtime.clear_frame_resources();
+        }
 
-        assert_eq!(composite.diagnostics.gpu_native_composites, 1);
-        assert_eq!(composite.diagnostics.gpu_with_upload_composites, 0);
-        assert_eq!(composite.diagnostics.cpu_fallback_composites, 0);
-        assert_eq!(
-            composite.output.descriptor().domain,
-            ColorFrameDomain::Working
+        let diagnostics = runtime.diagnostics().resource_pool;
+        assert!(
+            diagnostics.hits > 0,
+            "the test must exercise pooled resources"
         );
-        assert_eq!(
-            composite.output.descriptor().residency,
-            ColorFrameResidency::Gpu
-        );
-        assert_eq!(runtime.diagnostics().frame_table_entries, 4);
+        assert_eq!(runtime.diagnostics().frame_table_entries, 0);
     }
 
     #[tokio::test]
@@ -5662,6 +5672,62 @@ mod tests {
             assert_eq!(record.stage_diagnostics.readback_stages, 1);
             runtime.clear_frame_resources();
         }
+    }
+
+    #[tokio::test]
+    async fn gpu_standard_rec709_view_matches_cpu_rgba8_on_real_wgpu_device() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping real wgpu Standard Rec.709 RGBA8 parity test: no GPU adapter");
+            return;
+        };
+        let frame = standard_view_parity_working_frame();
+        let boundary = RenderOutputColorBoundary::from_intent(
+            RenderOutputColorBoundaryTarget::Display,
+            ColorSpace::Rec709,
+            &OutputTransformIntent::mondrian_standard(),
+            true,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("Standard Rec.709 display/view boundary");
+        let expected = execute_cpu_output_boundary_rgba8(&frame, &boundary)
+            .expect("CPU Standard Rec.709 RGBA8 boundary");
+        let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_250);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-gpu-standard-rec709-rgba8-parity"),
+        });
+
+        let record = runtime
+            .record_wgpu_output_boundary_owned_backend(
+                &boundary,
+                &frame,
+                GpuColorFrameTextureFormat::Rgba8Unorm,
+                RenderColorTransformGpuOptions {
+                    output_residency: ColorFrameResidency::Cpu,
+                    ..RenderColorTransformGpuOptions::default()
+                },
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &context.device,
+                    queue: &context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                },
+            )
+            .expect("GPU Standard Rec.709 RGBA8 boundary");
+        let readback_buffer = record.readback_buffer.expect("RGBA8 readback buffer");
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let readback_plan = GpuColorFrameReadbackPlan::encoded_rgba8(record.materialized.output)
+            .expect("Standard Rec.709 output should be readable as RGBA8");
+        let mapped = map_readback_buffer(&context.device, &readback_buffer);
+        let actual = readback_plan
+            .unpack_mapped_rgba8(&mapped)
+            .expect("Standard Rec.709 readback should unpack");
+        readback_buffer.unmap();
+
+        assert!(
+            max_rgba_delta(&expected.rgba, actual.rgba()) <= 1,
+            "Standard Rec.709 GPU RGBA8 output diverged from CPU reference"
+        );
     }
 
     async fn assert_gpu_pq_view_meets_delta_e_itp_budget(

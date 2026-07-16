@@ -15,8 +15,8 @@ use windows::core::{Interface, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, GENERIC_ALL, HANDLE};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device5, ID3D11DeviceContext4, ID3D11Fence, ID3D11Texture2D, D3D11_BIND_SHADER_RESOURCE,
-    D3D11_FENCE_FLAG_SHARED, D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX,
-    D3D11_RESOURCE_MISC_SHARED_NTHANDLE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11_FENCE_FLAG_SHARED, D3D11_RESOURCE_MISC_SHARED_NTHANDLE, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT,
 };
 use windows::Win32::Graphics::Direct3D12::{
     ID3D12CommandAllocator, ID3D12CommandList, ID3D12Device, ID3D12Fence,
@@ -518,8 +518,11 @@ fn create_shared_d3d11_texture(
         Usage: D3D11_USAGE_DEFAULT,
         BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
         CPUAccessFlags: 0,
-        MiscFlags: (D3D11_RESOURCE_MISC_SHARED_NTHANDLE.0 | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX.0)
-            as u32,
+        // Ownership is transferred with the shared timeline fence below.
+        // A keyed mutex is a separate synchronization protocol; advertising
+        // one without acquiring/releasing it leaves cross-API visibility
+        // undefined on some drivers and has produced zero-filled NV12 reads.
+        MiscFlags: D3D11_RESOURCE_MISC_SHARED_NTHANDLE.0 as u32,
     };
     let mut texture = None;
     // SAFETY: descriptor is fully initialized; output receives an owned interface.

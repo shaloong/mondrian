@@ -262,19 +262,7 @@ impl AppUiHost {
             &support,
             &SystemPlatformService.native_video_texture_import(),
         );
-        self.preview_service.set_playback_hardware_decode_admission(
-            admission.request,
-            admission.hardware_decode_device_selector,
-            admission.renderer_native_import_ready,
-            admission.platform_native_import_ready,
-            admission.native_import_admission_ready,
-            admission.admission_blocker,
-            admission.platform_discovery_available,
-            admission.platform_zero_copy_supported,
-            admission.platform_low_copy_fallback_supported,
-            admission.renderer_supported_handle_kinds,
-            admission.renderer_supported_source_texture_formats,
-        );
+        self.preview_service.set_playback_hardware_decode_admission(admission);
     }
 
     /// Advertise a registered GPU preview texture as the viewer frame for its resolved plan.
@@ -451,8 +439,9 @@ impl AppUiHost {
     pub fn advance_playback_clock(&mut self, elapsed: Duration, bounds: Rect) -> bool {
         let playback_changed = {
             let mut state = self.app_state.borrow_mut();
+            let changed = state.advance_playback_clock(elapsed).requires_refresh();
             state.pump_audio_output();
-            state.advance_playback_clock(elapsed).requires_refresh()
+            changed
         };
         if !playback_changed {
             return false;
@@ -953,7 +942,8 @@ impl AppUiHost {
         };
         self.preview_service.cancel_interactive_work();
 
-        if self.app_state.borrow().has_unsaved_project_changes() {
+        let has_unsaved_changes = self.app_state.borrow().has_unsaved_project_changes();
+        if has_unsaved_changes {
             self.pending_close_action = Some(pending);
             self.root.show_pending_close_dialog(pending.dialog_action());
             return true;
@@ -1598,6 +1588,27 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn workspace_layout_exposes_viewer_gpu_presentation_geometry() {
+        let mut host = AppUiHost::new_with_preferences_path(
+            workspace_app_state(),
+            AppUiPreferences::default(),
+            temp_preferences_path("viewer-presentation-geometry"),
+        );
+        let bounds = Rect::new(0.0, 0.0, 1408.0, 736.0);
+        host.refresh_if_dirty(bounds);
+        TreeWalker::layout(host.active_root_mut(), bounds);
+
+        let geometry = host
+            .viewer_presentation_geometry()
+            .expect("laid out workspace Viewer should expose GPU presentation geometry");
+
+        assert!(geometry.presentation.output_width > 0);
+        assert!(geometry.presentation.output_height > 0);
+        assert!(geometry.visible_rect.width > 0.0);
+        assert!(geometry.visible_rect.height > 0.0);
     }
 
     #[test]

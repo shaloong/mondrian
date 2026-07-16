@@ -150,6 +150,15 @@ shared, synchronized, adopted by the active wgpu device, sampled, or transformed
 Readiness therefore remains fail-closed until backend construction validates
 the complete platform import bridge. Diagnostics distinguish missing device
 format features, non-DX12 adapters, and backend construction failures.
+Current Windows production admission intentionally rejects both NV12 and P010
+GPU-resident decoder surfaces. A synthetic single-slice shared texture can pass
+while FFmpeg's decoder-owned D3D11 array surface produces zero-filled planes or
+loses the graphics device, so feature bits, handle creation, fence completion,
+and synthetic sampling are not sufficient evidence. Admission may be enabled
+only by a repeated-use content conformance test that exercises the exact
+decoder-array-slice ABI and validates sampled pixels. Until then the scheduler
+uses hardware decode with a safe transfer to renderer-owned memory; this is a
+performance fallback, not a software-decode downgrade.
 Adapter selection enumerates the backends enabled on the wgpu instance. On
 Windows it prefers a DX12 adapter exposing native NV12/P010 formats, so the
 D3D11/DX12 bridge is not accidentally disabled by selecting a Vulkan
@@ -421,6 +430,14 @@ pool reuse but is dropped with the texture when the pool evicts it. Procedural
 dummy bindings are constructed once with the compositor. Hot-frame recording
 clones lightweight wgpu handles and never extends a global cache that could keep
 otherwise-evicted textures alive.
+
+Every layout identity stored in that resource-owned LRU is allocated from one
+renderer-global, strongly typed key namespace. OCIO wrappers, the working
+compositor, spatial processing, and future consumers must not maintain separate
+numeric counters: equal integers from different subsystems can otherwise return
+a cached bind group created for an incompatible `BindGroupLayout` after pooled
+texture reuse. The key identifies the concrete layout lifetime, not a frame,
+texture, pass, or subsystem-local ordinal.
 
 OCIO fullscreen wrapper inputs use the same resource-owned cache rather than
 creating a texture/sampler bind group for every color stage on every frame.
@@ -786,6 +803,15 @@ selected surface color-space change follows the same rebuild path. The preview
 service may keep a CPU `RasterImage` as the correctness/fallback path, but it
 does not own wgpu objects and must not create short-lived GPU output runtimes
 inside CPU media workers.
+Preview resolution is sampling density, not timeline geometry. Source and
+sequence transforms are evaluated in their full authoring extents, then
+`project_affine_to_sampled_extents` projects that affine into the decoded and
+output sample extents (`S_output * T_authoring * inverse(S_source)`). A half-size
+decode therefore preserves the authored fit instead of applying scale twice;
+non-uniform sampled extents project both axes and translation independently.
+CPU composition, nested sequences, and the GPU candidate handoff share this
+contract. Code that changes preview scale must not rewrite clip transforms or
+pretend sampled pixels are the source's logical dimensions.
 The persisted `display_issue_summary` is not just a reason string: it carries
 the active display target fingerprint plus current/selected/desired surface
 format, color space, encoding, HDR mode, payload blocker, and support evidence

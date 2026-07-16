@@ -1407,26 +1407,6 @@ mod tests {
         let source = Arc::new(CpuSourceColorFrame::from(
             CpuEncodedColorFrame::source_rgba8(4, 4, ColorSpace::Rec709, vec![96; 4 * 4 * 4]),
         ));
-        let layer = ViewerGpuExecutionLayer::Media {
-            frame: None,
-            gpu_source: Some(ViewerGpuMediaSource {
-                source,
-                input_transform: RenderInputTransform::to_working_gpu(
-                    WorkingColorSpace::LinearRec709,
-                    false,
-                    ColorEngine::mondrian_standard(),
-                ),
-                decoder_residency: DecodedFrameResidency::CpuRgba,
-                decoder_handle_kind: None,
-                decoded_surface_format: DecodedVideoSurfaceFormat::Rgba8,
-                decoded_video_sampling: DecodedVideoSampling::default(),
-            }),
-            native_source: None,
-            opacity: 1.0,
-            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            effect_plan,
-            frame_seed: 7,
-        };
         let output_boundary = RenderOutputColorBoundary::display(
             ColorSpace::Rec709,
             false,
@@ -1440,45 +1420,69 @@ mod tests {
         .expect("matching monitor adaptation");
         let mut runtime =
             ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
-        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("viewer-effect-domain-integration"),
-        });
+        for timeline_frame in 7..10 {
+            let layer = ViewerGpuExecutionLayer::Media {
+                frame: None,
+                gpu_source: Some(ViewerGpuMediaSource {
+                    source: Arc::clone(&source),
+                    input_transform: RenderInputTransform::to_working_gpu(
+                        WorkingColorSpace::LinearRec709,
+                        false,
+                        ColorEngine::mondrian_standard(),
+                    ),
+                    decoder_residency: DecodedFrameResidency::CpuRgba,
+                    decoder_handle_kind: None,
+                    decoded_surface_format: DecodedVideoSurfaceFormat::Rgba8,
+                    decoded_video_sampling: DecodedVideoSampling::default(),
+                }),
+                native_source: None,
+                opacity: 1.0,
+                transform: [0.5, 0.0, 1.0, 0.0, 0.5, 1.0],
+                effect_plan: Arc::clone(&effect_plan),
+                frame_seed: timeline_frame,
+            };
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("viewer-effect-domain-integration-resource-reuse"),
+                });
 
-        let record = runtime
-            .record(
-                &context.device,
-                &context.queue,
-                &mut encoder,
-                ViewerGpuExecutionRequest {
-                    sequence_id: SequenceId::new(),
-                    timeline_frame: 7,
-                    width: 4,
-                    height: 4,
-                    working_color_space: WorkingColorSpace::LinearRec709,
-                    layers: &[layer],
-                    program_output_boundary: &output_boundary,
-                    monitor_adaptation: &monitor_adaptation,
-                    source_rect: ViewerSourceRect::FULL,
-                    output_width: 4,
-                    output_height: 4,
-                    output_precision: ViewerGpuOutputPrecision::Encoded8,
-                    display_calibration: None,
-                    program_scopes: None,
-                },
-            )
-            .expect("Viewer GPU effect-domain frame");
-        context.queue.submit(std::iter::once(encoder.finish()));
+            let record = runtime
+                .record(
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    ViewerGpuExecutionRequest {
+                        sequence_id: SequenceId::new(),
+                        timeline_frame,
+                        width: 4,
+                        height: 4,
+                        working_color_space: WorkingColorSpace::LinearRec709,
+                        layers: &[layer],
+                        program_output_boundary: &output_boundary,
+                        monitor_adaptation: &monitor_adaptation,
+                        source_rect: ViewerSourceRect::FULL,
+                        output_width: 4,
+                        output_height: 4,
+                        output_precision: ViewerGpuOutputPrecision::Encoded8,
+                        display_calibration: None,
+                        program_scopes: None,
+                    },
+                )
+                .expect("Viewer GPU effect-domain frame");
+            context.queue.submit(std::iter::once(encoder.finish()));
 
-        assert_eq!(record.stage_diagnostics.gpu_color_stages, 4);
-        assert_eq!(record.stage_diagnostics.upload_stages, 1);
-        assert_eq!(record.stage_diagnostics.readback_stages, 0);
-        assert_eq!(record.compositing_diagnostics.gpu_passthrough_frames, 1);
-        assert_eq!(record.compositing_diagnostics.gpu_native_composites, 0);
-        assert_eq!(runtime.program_scopes_diagnostics().frames_recorded, 0);
-        assert_eq!(
-            record.output.descriptor().domain,
-            crate::ColorFrameDomain::Display
-        );
+            assert_eq!(record.stage_diagnostics.gpu_color_stages, 4);
+            assert_eq!(record.stage_diagnostics.upload_stages, 1);
+            assert_eq!(record.stage_diagnostics.readback_stages, 0);
+            assert_eq!(record.compositing_diagnostics.gpu_passthrough_frames, 0);
+            assert_eq!(record.compositing_diagnostics.gpu_native_composites, 1);
+            assert_eq!(runtime.program_scopes_diagnostics().frames_recorded, 0);
+            assert_eq!(
+                record.output.descriptor().domain,
+                crate::ColorFrameDomain::Display
+            );
+            runtime.clear_frame_resources();
+        }
     }
 
     #[tokio::test]
@@ -1808,6 +1812,139 @@ mod tests {
         assert_eq!(
             record.output.texture_format(),
             GpuColorFrameTextureFormat::Rgba16Float
+        );
+    }
+
+    #[tokio::test]
+    async fn viewer_composite_to_program_output_matches_cpu_on_real_wgpu_device() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping Viewer composite-to-output parity test: no GPU adapter");
+            return;
+        };
+        let graph = get_or_compile_scheduled_render_graph(EffectGraphBuilderState::new().finish())
+            .expect("valid scene-linear identity graph");
+        let source = Arc::new(CpuSourceColorFrame::from(
+            CpuEncodedColorFrame::source_rgba8(
+                4,
+                4,
+                ColorSpace::Rec2100Hlg,
+                [64_u8, 96, 128, 255].repeat(16),
+            ),
+        ));
+        let gpu_input_transform = RenderInputTransform::to_working_gpu(
+            WorkingColorSpace::LinearRec2020,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let layer = ViewerGpuExecutionLayer::Media {
+            frame: None,
+            gpu_source: Some(ViewerGpuMediaSource {
+                source: Arc::clone(&source),
+                input_transform: gpu_input_transform,
+                decoder_residency: DecodedFrameResidency::CpuRgba,
+                decoder_handle_kind: None,
+                decoded_surface_format: DecodedVideoSurfaceFormat::Rgba8,
+                decoded_video_sampling: DecodedVideoSampling::default(),
+            }),
+            native_source: None,
+            opacity: 1.0,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Arc::new(
+                lower_effect_graph_to_gpu_plan(&graph).expect("GPU identity plan"),
+            ),
+            frame_seed: 0,
+        };
+        let boundary = RenderOutputColorBoundary::from_intent(
+            crate::RenderOutputColorBoundaryTarget::Display,
+            ColorSpace::Rec709,
+            &mondrian_core::OutputTransformIntent::mondrian_standard(),
+            true,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("Standard Rec.709 display boundary");
+        let monitor_adaptation = RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::Rec709,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("matching monitor adaptation");
+        let cpu_input_transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec2020,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let working = crate::execute_cpu_source_input_stage(&source, &cpu_input_transform)
+            .expect("CPU HLG input reference");
+        let expected = crate::execute_cpu_output_boundary_rgba8(&working.result.frame, &boundary)
+            .expect("CPU Program Output reference");
+        let mut runtime =
+            ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue);
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("viewer-composite-to-program-output-parity"),
+        });
+
+        let record = runtime
+            .record(
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                ViewerGpuExecutionRequest {
+                    sequence_id: SequenceId::new(),
+                    timeline_frame: 0,
+                    width: 4,
+                    height: 4,
+                    working_color_space: WorkingColorSpace::LinearRec2020,
+                    layers: &[layer],
+                    program_output_boundary: &boundary,
+                    monitor_adaptation: &monitor_adaptation,
+                    source_rect: ViewerSourceRect::FULL,
+                    output_width: 4,
+                    output_height: 4,
+                    output_precision: ViewerGpuOutputPrecision::Encoded8,
+                    display_calibration: None,
+                    program_scopes: None,
+                },
+            )
+            .expect("Viewer composite-to-output frame");
+        let output = runtime
+            .color_output
+            .frame_table()
+            .get(&record.output)
+            .expect("Viewer output resource");
+        let readback_plan = crate::GpuColorFrameReadbackPlan::encoded_rgba8(record.output.clone())
+            .expect("Viewer output should be RGBA8");
+        let readback = crate::GpuColorFrameReadback::record_copy(
+            &context.device,
+            &mut encoder,
+            &readback_plan,
+            output.resource(),
+        );
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        let _ = context
+            .device
+            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        receiver.recv().expect("Viewer readback callback").expect("Viewer readback map");
+        let mapped = slice.get_mapped_range().expect("Viewer mapped readback");
+        let actual = readback_plan.unpack_mapped_rgba8(&mapped).expect("Viewer RGBA8 readback");
+        drop(mapped);
+        readback.unmap();
+
+        let max_delta = expected
+            .rgba
+            .iter()
+            .zip(actual.rgba())
+            .map(|(&expected, &actual)| expected.abs_diff(actual))
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_delta <= 1,
+            "Viewer Program Output max RGBA delta {max_delta}"
         );
     }
 

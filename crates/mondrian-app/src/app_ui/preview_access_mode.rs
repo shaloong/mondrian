@@ -20,6 +20,13 @@ pub(crate) const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
 const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 3;
 const MEDIA_PREVIEW_MAX_PENDING_REQUESTS: usize = MEDIA_PREVIEW_JOB_QUEUE_CAPACITY;
 
+/// Decoder-native surface family inferred from probed source bit depth/layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MediaPreviewNativeSurfaceHint {
+    Nv12,
+    P010,
+}
+
 /// Stable identity for one decoded media preview request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct MediaPreviewKey {
@@ -30,8 +37,13 @@ pub(crate) struct MediaPreviewKey {
     pub(crate) source_micros: i64,
     pub(crate) target_width: u32,
     pub(crate) target_height: u32,
+    /// Full-resolution source width represented by the decoded sample.
+    pub(crate) source_width: u32,
+    /// Full-resolution source height represented by the decoded sample.
+    pub(crate) source_height: u32,
     pub(crate) input_color_space: ColorSpace,
     pub(crate) input_video_range: DecodedVideoRange,
+    pub(crate) native_surface_hint: Option<MediaPreviewNativeSurfaceHint>,
     pub(crate) source_has_alpha: bool,
     pub(crate) alpha_interpretation: AlphaInterpretation,
     pub(crate) working_color_space: WorkingColorSpace,
@@ -981,8 +993,11 @@ mod tests {
             source_micros: source_micros(source_frame as f64),
             target_width: 320,
             target_height: 180,
+            source_width: 320,
+            source_height: 180,
             input_color_space: ColorSpace::Rec709,
             input_video_range: DecodedVideoRange::Limited,
+            native_surface_hint: None,
             source_has_alpha: false,
             alpha_interpretation: AlphaInterpretation::Straight,
             working_color_space: WorkingColorSpace::LinearRec709,

@@ -313,6 +313,8 @@ pub(crate) struct AppUiPlaybackHardwareDecodeAdmission {
     pub(crate) platform_low_copy_fallback_supported: bool,
     pub(crate) renderer_supported_handle_kinds: u8,
     pub(crate) renderer_supported_source_texture_formats: u8,
+    pub(crate) renderer_supports_nv12: bool,
+    pub(crate) renderer_supports_p010: bool,
 }
 
 /// Resolve one hardware-decode request from the actual renderer and platform
@@ -326,6 +328,12 @@ pub(crate) fn resolve_playback_hardware_decode_admission(
         saturated_u8_len(renderer_support.supported_handle_kinds.len());
     let renderer_supported_source_texture_formats =
         saturated_u8_len(renderer_support.supported_source_texture_formats.len());
+    let renderer_supports_nv12 = renderer_support
+        .supported_source_texture_formats
+        .contains(&GpuNativeDecodedFrameTextureFormat::Nv12);
+    let renderer_supports_p010 = renderer_support
+        .supported_source_texture_formats
+        .contains(&GpuNativeDecodedFrameTextureFormat::P010);
     let platform_copy_path_ready =
         platform_probe.zero_copy_supported || platform_probe.low_copy_fallback_supported;
     let platform_supports_renderer_handle =
@@ -372,6 +380,8 @@ pub(crate) fn resolve_playback_hardware_decode_admission(
         platform_low_copy_fallback_supported: platform_probe.low_copy_fallback_supported,
         renderer_supported_handle_kinds,
         renderer_supported_source_texture_formats,
+        renderer_supports_nv12,
+        renderer_supports_p010,
     }
 }
 
@@ -415,6 +425,8 @@ mod tests {
         assert!(admission.platform_low_copy_fallback_supported);
         assert_eq!(admission.renderer_supported_handle_kinds, 1);
         assert_eq!(admission.renderer_supported_source_texture_formats, 1);
+        assert!(!admission.renderer_supports_nv12);
+        assert!(admission.renderer_supports_p010);
     }
 
     #[test]

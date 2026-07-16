@@ -210,11 +210,11 @@ pub use timeline_composite::{
 };
 pub use timeline_render_plan::{
     collect_timeline_color_diagnostics, collect_timeline_color_diagnostics_with_display_view,
-    evaluate_timeline_render_plan, mat3_to_affine, TimelineAdjustmentPlan, TimelineColorDiagnostic,
-    TimelineEvaluationDiagnostics, TimelineEvaluationRequest, TimelineMediaPlan,
-    TimelineNestedSequencePlan, TimelineRenderColorTarget, TimelineRenderIntent,
-    TimelineRenderPlan, TimelineRenderPlanElement, TimelineRenderQuality, TimelineRenderSettings,
-    TimelineSolidColorPlan,
+    evaluate_timeline_render_plan, mat3_to_affine, project_affine_to_sampled_extents,
+    TimelineAdjustmentPlan, TimelineColorDiagnostic, TimelineEvaluationDiagnostics,
+    TimelineEvaluationRequest, TimelineMediaPlan, TimelineNestedSequencePlan,
+    TimelineRenderColorTarget, TimelineRenderIntent, TimelineRenderPlan, TimelineRenderPlanElement,
+    TimelineRenderQuality, TimelineRenderSettings, TimelineSolidColorPlan,
 };
 pub use viewer_execution::{
     native_source_texture_format_from_decoded, native_video_sampling_from_decoded,

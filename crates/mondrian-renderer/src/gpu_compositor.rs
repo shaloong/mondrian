@@ -6,6 +6,7 @@
 //! Unsupported layer shapes are rejected with typed blockers so callers can
 //! fall back to the CPU reference compositor without losing diagnostic evidence.
 
+use crate::color_frame::GpuColorFrameBindGroupCacheKey;
 use crate::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
     GpuColorFrameAllocationPlan, GpuColorFrameHandle, GpuColorFrameIdAllocator,
@@ -24,7 +25,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_GPU_COMPOSITE_LAYERS: usize = 5;
 const GPU_COMPOSITOR_UNIFORM_ARENA_SLOTS: u32 = 128;
-static NEXT_GPU_COMPOSITOR_BINDING_CACHE_KEY: AtomicU64 = AtomicU64::new(1);
 const GPU_COMPOSITOR_SHADER: &str = r#"
 struct VsOut {
     @builtin(position) position: vec4<f32>,
@@ -498,8 +498,8 @@ pub struct GpuFrameCompositor {
     pipeline: wgpu::RenderPipeline,
     layer_texture_layout: wgpu::BindGroupLayout,
     accum_texture_layout: wgpu::BindGroupLayout,
-    layer_texture_cache_key: u64,
-    accum_texture_cache_key: u64,
+    layer_texture_cache_key: GpuColorFrameBindGroupCacheKey,
+    accum_texture_cache_key: GpuColorFrameBindGroupCacheKey,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
     uniform_stride: u64,
@@ -689,14 +689,14 @@ impl GpuFrameCompositor {
                 resource: wgpu::BindingResource::TextureView(&procedural_dummy_view),
             }],
         });
-        let layer_texture_cache_key =
-            NEXT_GPU_COMPOSITOR_BINDING_CACHE_KEY.fetch_add(2, Ordering::Relaxed);
+        let layer_texture_cache_key = GpuColorFrameBindGroupCacheKey::allocate();
+        let accum_texture_cache_key = GpuColorFrameBindGroupCacheKey::allocate();
         Self {
             pipeline,
             layer_texture_layout,
             accum_texture_layout,
             layer_texture_cache_key,
-            accum_texture_cache_key: layer_texture_cache_key.saturating_add(1),
+            accum_texture_cache_key,
             uniform_buffer,
             uniform_bind_group,
             uniform_stride,

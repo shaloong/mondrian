@@ -440,6 +440,47 @@ pub fn mat3_to_affine(cols: [f32; 9]) -> [f32; 6] {
     [cols[0], cols[3], cols[6], cols[1], cols[4], cols[7]]
 }
 
+/// Project an authoring-space affine transform into reduced-resolution render extents.
+///
+/// Timeline transforms map full-resolution source pixel coordinates into the
+/// full-resolution sequence canvas. Preview samples and proxy frames may use
+/// fewer pixels on either side of that mapping; those sampling-density changes
+/// must not alter the authored spatial result.
+pub fn project_affine_to_sampled_extents(
+    transform: [f32; 6],
+    source_authoring: mondrian_core::Resolution,
+    source_sampled: mondrian_core::Resolution,
+    output_authoring: mondrian_core::Resolution,
+    output_sampled: mondrian_core::Resolution,
+) -> Option<[f32; 6]> {
+    if source_authoring.width == 0
+        || source_authoring.height == 0
+        || source_sampled.width == 0
+        || source_sampled.height == 0
+        || output_authoring.width == 0
+        || output_authoring.height == 0
+        || output_sampled.width == 0
+        || output_sampled.height == 0
+        || transform.iter().any(|value| !value.is_finite())
+    {
+        return None;
+    }
+
+    let source_x = source_authoring.width as f32 / source_sampled.width as f32;
+    let source_y = source_authoring.height as f32 / source_sampled.height as f32;
+    let output_x = output_sampled.width as f32 / output_authoring.width as f32;
+    let output_y = output_sampled.height as f32 / output_authoring.height as f32;
+    let projected = [
+        output_x * transform[0] * source_x,
+        output_x * transform[1] * source_y,
+        output_x * transform[2],
+        output_y * transform[3] * source_x,
+        output_y * transform[4] * source_y,
+        output_y * transform[5],
+    ];
+    projected.iter().all(|value| value.is_finite()).then_some(projected)
+}
+
 fn apply_pixel_aspect_to_affine(
     mut transform: [f32; 6],
     pixel_aspect_ratio: Option<PixelAspectRatio>,
@@ -512,6 +553,34 @@ mod tests {
         );
         assert!(!request.settings.allow_frame_drop);
         assert_eq!(request.settings.resolution_scale, 1.0);
+    }
+
+    #[test]
+    fn sampled_extent_projection_preserves_authored_fit() {
+        let projected = project_affine_to_sampled_extents(
+            [0.5, 0.0, 0.0, 0.0, 0.5, 0.0],
+            Resolution { width: 3840, height: 2160 },
+            Resolution { width: 960, height: 540 },
+            Resolution { width: 1920, height: 1080 },
+            Resolution { width: 960, height: 540 },
+        )
+        .expect("valid sampled extents");
+
+        assert_eq!(projected, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn sampled_extent_projection_scales_axes_and_translation_independently() {
+        let projected = project_affine_to_sampled_extents(
+            [0.0, -1.0, 120.0, 1.0, 0.0, 80.0],
+            Resolution { width: 4000, height: 2000 },
+            Resolution { width: 1000, height: 1000 },
+            Resolution { width: 2000, height: 1000 },
+            Resolution { width: 1000, height: 250 },
+        )
+        .expect("valid sampled extents");
+
+        assert_eq!(projected, [0.0, -1.0, 60.0, 1.0, 0.0, 20.0]);
     }
 
     #[test]

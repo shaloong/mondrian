@@ -1245,7 +1245,18 @@ fn run_preview_media_access_mode_probe_with_media_info(
         cache_threshold_ms,
         || {
             for _ in 0..cache_iterations {
-                assert_preview_ready(&preview_service, &state)?;
+                // A cache lookup may concurrently schedule fresher media work.
+                // The retained frame is deliberately reported as Stale while
+                // that replacement is pending, so keep it visible and wait for
+                // the exact requested frame instead of treating Stale as a
+                // render failure.
+                wait_for_preview_ready_until(
+                    &preview_service,
+                    &state,
+                    ready_timeout,
+                    overall_deadline,
+                    scenario,
+                )?;
             }
             Ok(())
         },
@@ -2321,19 +2332,7 @@ fn configure_headless_gpu_decode_admission(
         &gpu_adapter.native_import_support(),
         &SystemPlatformService.native_video_texture_import(),
     );
-    preview_service.set_playback_hardware_decode_admission(
-        admission.request,
-        admission.hardware_decode_device_selector,
-        admission.renderer_native_import_ready,
-        admission.platform_native_import_ready,
-        admission.native_import_admission_ready,
-        admission.admission_blocker,
-        admission.platform_discovery_available,
-        admission.platform_zero_copy_supported,
-        admission.platform_low_copy_fallback_supported,
-        admission.renderer_supported_handle_kinds,
-        admission.renderer_supported_source_texture_formats,
-    );
+    preview_service.set_playback_hardware_decode_admission(admission);
 }
 
 struct HeadlessPreviewSample {
@@ -2767,20 +2766,6 @@ fn wait_for_preview_ready_until(
             );
         }
         thread::sleep(Duration::from_millis(8));
-    }
-}
-
-fn assert_preview_ready(
-    preview_service: &AppUiPreviewService,
-    state: &AppState,
-) -> anyhow::Result<()> {
-    match preview_service.viewer_preview_for_state(state) {
-        ViewerPreviewState::Ready(_) => Ok(()),
-        other => anyhow::bail!(
-            "expected ready preview frame, got {:?}; diagnostics: {:?}",
-            other,
-            preview_service.diagnostics()
-        ),
     }
 }
 

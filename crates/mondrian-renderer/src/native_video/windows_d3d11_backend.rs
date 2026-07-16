@@ -35,6 +35,11 @@ pub enum D3D11Dx12NativeVideoImportBackendCreateError {
     /// The wgpu device enabled neither native two-plane format.
     #[error("wgpu device enabled neither TEXTURE_FORMAT_NV12 nor TEXTURE_FORMAT_P010")]
     NoNativeYuvTextureFormats,
+    /// No decoder-array-surface content contract has passed conformance yet.
+    #[error(
+        "native decoder-array-surface content conformance is unavailable; refusing GPU-resident import"
+    )]
+    NativeDecoderSurfaceConformanceUnavailable,
     /// A zero-sized in-flight pool could never import a frame.
     #[error("native video bridge pool limit must be greater than zero")]
     ZeroBridgePoolLimit,
@@ -144,18 +149,9 @@ impl D3D11Dx12NativeVideoImportBackend {
         if options.max_contract_pools == 0 {
             return Err(D3D11Dx12NativeVideoImportBackendCreateError::ZeroContractPoolLimit);
         }
+        let formats = conformed_decoder_surface_formats(device.features())?;
         let renderer_adapter_luid = renderer_adapter_luid(adapter)?;
         let decoder_adapter_index = renderer_adapter_dxgi_index(adapter)?;
-        let mut formats = Vec::with_capacity(2);
-        if device.features().contains(wgpu::Features::TEXTURE_FORMAT_NV12) {
-            formats.push(GpuNativeDecodedFrameTextureFormat::Nv12);
-        }
-        if device.features().contains(wgpu::Features::TEXTURE_FORMAT_P010) {
-            formats.push(GpuNativeDecodedFrameTextureFormat::P010);
-        }
-        if formats.is_empty() {
-            return Err(D3D11Dx12NativeVideoImportBackendCreateError::NoNativeYuvTextureFormats);
-        }
         let support = GpuNativeDecodedFrameImportSupport::ready(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             formats,
@@ -435,6 +431,26 @@ impl D3D11Dx12NativeVideoImportBackend {
     }
 }
 
+/// Return formats whose complete FFmpeg decoder-array-surface import contract
+/// has passed content and repeated-use conformance on the active stack.
+///
+/// Texture feature bits and a successful synthetic single-slice share are
+/// insufficient: real D3D11VA output is an array resource with decoder-owned
+/// lifetime and synchronization. Until that exact ABI is proven, native
+/// surfaces remain unavailable and playback keeps hardware decode with a safe
+/// transfer rather than risking green frames or a lost graphics device.
+fn conformed_decoder_surface_formats(
+    features: wgpu::Features,
+) -> Result<Vec<GpuNativeDecodedFrameTextureFormat>, D3D11Dx12NativeVideoImportBackendCreateError> {
+    if features
+        .intersects(wgpu::Features::TEXTURE_FORMAT_NV12 | wgpu::Features::TEXTURE_FORMAT_P010)
+    {
+        Err(D3D11Dx12NativeVideoImportBackendCreateError::NativeDecoderSurfaceConformanceUnavailable)
+    } else {
+        Err(D3D11Dx12NativeVideoImportBackendCreateError::NoNativeYuvTextureFormats)
+    }
+}
+
 fn elapsed_us(started: Instant) -> u64 {
     started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
 }
@@ -641,5 +657,21 @@ mod tests {
 
         assert_eq!(options.max_frames_in_flight_per_contract, 4);
         assert_eq!(options.max_contract_pools, 8);
+    }
+
+    #[test]
+    fn native_decoder_surfaces_fail_closed_without_real_array_surface_conformance() {
+        let error = conformed_decoder_surface_formats(wgpu::Features::TEXTURE_FORMAT_NV12)
+            .expect_err("feature bits alone must not admit native decoder surfaces");
+
+        assert_eq!(
+            error,
+            D3D11Dx12NativeVideoImportBackendCreateError::NativeDecoderSurfaceConformanceUnavailable
+        );
+        assert_eq!(
+            conformed_decoder_surface_formats(wgpu::Features::empty())
+                .expect_err("missing formats must remain distinguishable"),
+            D3D11Dx12NativeVideoImportBackendCreateError::NoNativeYuvTextureFormats
+        );
     }
 }
