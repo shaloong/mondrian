@@ -98,19 +98,21 @@ is written with that field explicitly.
 
 Archive and document JSON pass through separate version registries before typed
 deserialization. During Alpha there are deliberately no legacy document steps:
-schema v6 is the sole accepted author schema, and older/future versions fail
+schema v7 is the sole accepted author schema, and older/future versions fail
 instead of being guessed. Version 5 introduced the explicit tagged
 `mondrian_standard` / `aces` / `custom_ocio` project contract and makes every
 Mondrian Standard package-identity field mandatory: product ID/version, config
-ID/SHA-256, complete package SHA-256, working-space ID/version, and default View
-Transform ID/version. Custom OCIO likewise requires config and processor-graph
+ID/SHA-256, complete package SHA-256, and working-space ID/version. Custom OCIO
+likewise requires config and processor-graph
 digests, working/display/view/look identities, roles, and an explicit dynamic
 property list; a mutable source path alone is not a project color definition.
 Version 6 removes the redundant persisted `ColorWorkflow::Aces`, makes
 SceneReferred the new-sequence default, and reserves Standard/ACES/Custom mode
-selection for `ProjectColorManagement.engine`. The Alpha format intentionally
-provides no alias, fallback, or migration from v5; a missing or edited identity
-or retired workflow fails closed. The registry remains the
+selection for `ProjectColorManagement.engine`. Version 7 replaces the ambiguous
+single default-View identity with mandatory, independently typed SDR and
+1000-nit HDR View Transform IDs/versions. The Alpha format intentionally
+provides no alias, fallback, or migration from v5/v6; a missing or edited
+identity or retired workflow fails closed. The registry remains the
 explicit seam for adding a real migration policy only when compatibility
 becomes a product promise.
 

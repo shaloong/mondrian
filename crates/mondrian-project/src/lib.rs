@@ -22,7 +22,7 @@ use migration::JsonMigrationRegistry;
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 6;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 7;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 1;
 
@@ -595,18 +595,19 @@ mod tests {
     }
 
     #[test]
-    fn schema_v5_is_rejected_without_an_alpha_compatibility_migration() {
+    fn older_schemas_are_rejected_without_an_alpha_compatibility_migration() {
         let mut legacy = serde_json::to_value(test_document()).expect("serialize document");
-        legacy["schema_version"] = serde_json::json!(5);
-
-        let err = DOCUMENT_MIGRATIONS
-            .migrate(legacy)
-            .expect_err("schema v5 must not migrate implicitly");
-        assert!(err.to_string().contains("missing project document migration"));
+        for version in [5, 6] {
+            legacy["schema_version"] = serde_json::json!(version);
+            let err = DOCUMENT_MIGRATIONS
+                .migrate(legacy.clone())
+                .expect_err("older schemas must not migrate implicitly");
+            assert!(err.to_string().contains("missing project document migration"));
+        }
     }
 
     #[test]
-    fn schema_v6_requires_explicit_project_color_identity() {
+    fn schema_v7_requires_complete_project_color_identity() {
         let value = serde_json::to_value(test_document()).expect("serialize document");
 
         let mut missing_engine = value.clone();
@@ -622,10 +623,18 @@ mod tests {
             .expect("settings object")
             .remove("color_management");
         assert!(serde_json::from_value::<ProjectDocument>(missing_color_management).is_err());
+
+        let mut missing_hdr_view =
+            serde_json::to_value(test_document()).expect("serialize document");
+        missing_hdr_view["settings"]["color_management"]["engine"]["package"]
+            .as_object_mut()
+            .expect("Standard package identity")
+            .remove("hdr_view_transform_id");
+        assert!(serde_json::from_value::<ProjectDocument>(missing_hdr_view).is_err());
     }
 
     #[test]
-    fn schema_v6_rejects_removed_aces_sequence_workflow() {
+    fn current_schema_rejects_removed_aces_sequence_workflow() {
         let mut value = serde_json::to_value(test_document()).expect("serialize document");
         value["sequences"]["sequences"][0]["settings"]["color_management"]["workflow"] =
             serde_json::json!("Aces");

@@ -1,5 +1,5 @@
 {
-  "schema_version": 6,
+  "schema_version": 7,
   "project_id": "97f12455-ec34-4b5d-a696-3da93cd914d7",
   "document_revision": 1,
   "meta": {
@@ -28,8 +28,10 @@
           "package_sha256": "dcd694126ac1a1fa55f64870774d9428e2da737ceaae6623c8ff2b23df48b52e",
           "working_space_id": "linear_rec2020_v1",
           "working_space_version": "v1",
-          "default_view_transform_id": "mondrian_standard_sdr_v1",
-          "default_view_transform_version": "v1"
+          "sdr_view_transform_id": "mondrian_standard_sdr_v1",
+          "sdr_view_transform_version": "v1",
+          "hdr_view_transform_id": "mondrian_standard_hdr_1000_nits_v1",
+          "hdr_view_transform_version": "v1"
         }
       },
       "display_management": {
@@ -86,8 +88,10 @@
                 "package_sha256": "dcd694126ac1a1fa55f64870774d9428e2da737ceaae6623c8ff2b23df48b52e",
                 "working_space_id": "linear_rec2020_v1",
                 "working_space_version": "v1",
-                "default_view_transform_id": "mondrian_standard_sdr_v1",
-                "default_view_transform_version": "v1"
+                "sdr_view_transform_id": "mondrian_standard_sdr_v1",
+                "sdr_view_transform_version": "v1",
+                "hdr_view_transform_id": "mondrian_standard_hdr_1000_nits_v1",
+                "hdr_view_transform_version": "v1"
               }
             },
             "missing_metadata_policy": "AssumeRec709",

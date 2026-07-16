@@ -144,7 +144,9 @@ rather than silently clamped.
 - `ColorEngine::MondrianStandard { package }`: productized policy selecting the
   bundled, version-pinned Mondrian OCIO package. The persisted package identity
   requires its product ID/version, config ID/SHA-256, full package SHA-256,
-  working-space ID/version, and default View Transform ID/version.
+  working-space ID/version, and separate SDR plus 1000-nit HDR View Transform
+  IDs/versions. Distinct single-variant identity types prevent a tampered
+  project from swapping the SDR and HDR identities while still deserializing.
 - `ColorEngine::Aces`: an explicit official ACES mode whose project payload
   stores a versioned Studio or CG Config preset. Presets resolve to exact OCIO
   built-in registry identifiers; they never follow an upstream `latest` alias.

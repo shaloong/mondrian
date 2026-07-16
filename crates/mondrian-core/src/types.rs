@@ -477,12 +477,20 @@ pub enum MondrianStandardWorkingSpaceId {
     LinearRec2020V1,
 }
 
-/// Stable versioned identity of Standard v1's default SDR rendering transform.
+/// Stable versioned identity of Standard v1's SDR rendering transform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum MondrianStandardViewTransformId {
+pub enum MondrianStandardSdrViewTransformId {
     /// Mondrian Standard SDR scene-to-display rendering transform v1.
     #[serde(rename = "mondrian_standard_sdr_v1")]
-    SdrV1,
+    V1,
+}
+
+/// Stable versioned identity of Standard v1's 1000-nit HDR rendering transform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MondrianStandardHdrViewTransformId {
+    /// Mondrian Standard 1000-nit scene-to-display rendering transform v1.
+    #[serde(rename = "mondrian_standard_hdr_1000_nits_v1")]
+    Hdr1000V1,
 }
 
 /// Fully pinned identity persisted for a Mondrian Standard project mode.
@@ -500,8 +508,10 @@ pub struct MondrianStandardPackageIdentity {
     package_sha256: MondrianStandardPackageDigest,
     working_space_id: MondrianStandardWorkingSpaceId,
     working_space_version: MondrianStandardVersion,
-    default_view_transform_id: MondrianStandardViewTransformId,
-    default_view_transform_version: MondrianStandardVersion,
+    sdr_view_transform_id: MondrianStandardSdrViewTransformId,
+    sdr_view_transform_version: MondrianStandardVersion,
+    hdr_view_transform_id: MondrianStandardHdrViewTransformId,
+    hdr_view_transform_version: MondrianStandardVersion,
 }
 
 /// One OCIO role binding pinned by a Custom OCIO project.
@@ -753,8 +763,10 @@ impl MondrianStandardPackageIdentity {
         package_sha256: MondrianStandardPackageDigest::V1,
         working_space_id: MondrianStandardWorkingSpaceId::LinearRec2020V1,
         working_space_version: MondrianStandardVersion::V1,
-        default_view_transform_id: MondrianStandardViewTransformId::SdrV1,
-        default_view_transform_version: MondrianStandardVersion::V1,
+        sdr_view_transform_id: MondrianStandardSdrViewTransformId::V1,
+        sdr_view_transform_version: MondrianStandardVersion::V1,
+        hdr_view_transform_id: MondrianStandardHdrViewTransformId::Hdr1000V1,
+        hdr_view_transform_version: MondrianStandardVersion::V1,
     };
 
     /// Stable package identifier used by diagnostics and fingerprints.
@@ -789,9 +801,14 @@ impl MondrianStandardPackageIdentity {
         }
     }
 
-    /// Versioned default view-transform identity pinned by this package.
-    pub const fn default_view_transform_id(self) -> &'static str {
+    /// Versioned SDR view-transform identity pinned by this package.
+    pub const fn sdr_view_transform_id(self) -> &'static str {
         "mondrian_standard_sdr_v1"
+    }
+
+    /// Versioned 1000-nit HDR view-transform identity pinned by this package.
+    pub const fn hdr_view_transform_id(self) -> &'static str {
+        "mondrian_standard_hdr_1000_nits_v1"
     }
 }
 
@@ -1023,7 +1040,8 @@ mod tests {
         assert!(json2.contains(MondrianStandardPackageIdentity::V1.config_sha256()));
         assert!(json2.contains(MondrianStandardPackageIdentity::V1.package_sha256()));
         assert!(json2.contains("\"working_space_id\":\"linear_rec2020_v1\""));
-        assert!(json2.contains("\"default_view_transform_id\":\"mondrian_standard_sdr_v1\""));
+        assert!(json2.contains("\"sdr_view_transform_id\":\"mondrian_standard_sdr_v1\""));
+        assert!(json2.contains("\"hdr_view_transform_id\":\"mondrian_standard_hdr_1000_nits_v1\""));
 
         let aces = ColorEngine::Aces { preset: AcesConfigPreset::StudioV4Aces2Ocio25 };
         let json3 = serde_json::to_string(&aces).expect("serialize ACES mode");
@@ -1047,12 +1065,18 @@ mod tests {
         tampered["package"]["package_sha256"] = serde_json::Value::String("0".repeat(64));
         assert!(serde_json::from_value::<ColorEngine>(tampered).is_err());
 
+        let mut swapped_view =
+            serde_json::to_value(ColorEngine::mondrian_standard()).expect("serialize Standard");
+        swapped_view["package"]["sdr_view_transform_id"] =
+            serde_json::Value::String("mondrian_standard_hdr_1000_nits_v1".to_owned());
+        assert!(serde_json::from_value::<ColorEngine>(swapped_view).is_err());
+
         let mut incomplete =
             serde_json::to_value(ColorEngine::mondrian_standard()).expect("serialize Standard");
         incomplete["package"]
             .as_object_mut()
             .expect("package object")
-            .remove("working_space_version");
+            .remove("hdr_view_transform_version");
         assert!(serde_json::from_value::<ColorEngine>(incomplete).is_err());
     }
 }

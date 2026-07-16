@@ -319,6 +319,8 @@ pub struct MondrianStandardOutputTargetContract {
     pub display: &'static str,
     /// Pinned OCIO View Transform.
     pub view: &'static str,
+    /// Stable versioned identity of the rendering transform behind the View.
+    pub view_transform_id: &'static str,
     /// Canonical encoded primaries/transfer/matrix contract.
     pub encoding: crate::ColorEncodingSpec,
     /// Gamut limit authored into the rendering transform.
@@ -3005,53 +3007,65 @@ pub fn mondrian_standard_output_display_name(output: ColorSpace) -> Result<&'sta
 pub fn mondrian_standard_output_target_contract(
     output: ColorSpace,
 ) -> Result<MondrianStandardOutputTargetContract, String> {
-    let (display, view, rendering_gamut_limit, reference_white_nits, nominal_peak_nits) =
-        match output {
-            ColorSpace::Srgb => (
-                "sRGB - Display",
-                MONDRIAN_STANDARD_SDR_VIEW_NAME,
-                crate::ColorPrimaries::Bt709,
-                100,
-                100,
-            ),
-            ColorSpace::Rec709 => (
-                "Rec.1886 Rec.709 - Display",
-                MONDRIAN_STANDARD_SDR_VIEW_NAME,
-                crate::ColorPrimaries::Bt709,
-                100,
-                100,
-            ),
-            ColorSpace::DisplayP3 => (
-                "Display P3 - Display",
-                MONDRIAN_STANDARD_SDR_VIEW_NAME,
-                crate::ColorPrimaries::P3D65,
-                100,
-                100,
-            ),
-            ColorSpace::Rec2100Hlg => (
-                "Rec.2100-HLG - Display",
-                MONDRIAN_STANDARD_HDR_1000_VIEW_NAME,
-                crate::ColorPrimaries::P3D65,
-                100,
-                1000,
-            ),
-            ColorSpace::Rec2100Pq => (
-                "Rec.2100-PQ - Display",
-                MONDRIAN_STANDARD_HDR_1000_VIEW_NAME,
-                crate::ColorPrimaries::P3D65,
-                100,
-                1000,
-            ),
-            unsupported => {
-                return Err(format!(
-                    "Mondrian Standard has no rendering View for output target {unsupported:?}"
-                ));
-            }
-        };
+    let (
+        display,
+        view,
+        view_transform_id,
+        rendering_gamut_limit,
+        reference_white_nits,
+        nominal_peak_nits,
+    ) = match output {
+        ColorSpace::Srgb => (
+            "sRGB - Display",
+            MONDRIAN_STANDARD_SDR_VIEW_NAME,
+            MondrianStandardPackageIdentity::V1.sdr_view_transform_id(),
+            crate::ColorPrimaries::Bt709,
+            100,
+            100,
+        ),
+        ColorSpace::Rec709 => (
+            "Rec.1886 Rec.709 - Display",
+            MONDRIAN_STANDARD_SDR_VIEW_NAME,
+            MondrianStandardPackageIdentity::V1.sdr_view_transform_id(),
+            crate::ColorPrimaries::Bt709,
+            100,
+            100,
+        ),
+        ColorSpace::DisplayP3 => (
+            "Display P3 - Display",
+            MONDRIAN_STANDARD_SDR_VIEW_NAME,
+            MondrianStandardPackageIdentity::V1.sdr_view_transform_id(),
+            crate::ColorPrimaries::P3D65,
+            100,
+            100,
+        ),
+        ColorSpace::Rec2100Hlg => (
+            "Rec.2100-HLG - Display",
+            MONDRIAN_STANDARD_HDR_1000_VIEW_NAME,
+            MondrianStandardPackageIdentity::V1.hdr_view_transform_id(),
+            crate::ColorPrimaries::P3D65,
+            100,
+            1000,
+        ),
+        ColorSpace::Rec2100Pq => (
+            "Rec.2100-PQ - Display",
+            MONDRIAN_STANDARD_HDR_1000_VIEW_NAME,
+            MondrianStandardPackageIdentity::V1.hdr_view_transform_id(),
+            crate::ColorPrimaries::P3D65,
+            100,
+            1000,
+        ),
+        unsupported => {
+            return Err(format!(
+                "Mondrian Standard has no rendering View for output target {unsupported:?}"
+            ));
+        }
+    };
     Ok(MondrianStandardOutputTargetContract {
         output_color_space: output,
         display,
         view,
+        view_transform_id,
         encoding: output.encoding(),
         rendering_gamut_limit,
         reference_white_nits,
@@ -3997,6 +4011,7 @@ colorspaces:
             .expect("PQ output contract");
         assert!(pq.is_hdr());
         assert_eq!(pq.output_color_space, ColorSpace::Rec2100Pq);
+        assert_eq!(pq.view_transform_id, "mondrian_standard_hdr_1000_nits_v1");
         assert_eq!(pq.encoding.primaries, crate::ColorPrimaries::Bt2020);
         assert_eq!(pq.rendering_gamut_limit, crate::ColorPrimaries::P3D65);
         assert_eq!(pq.reference_white_nits, 100);
@@ -4006,6 +4021,7 @@ colorspaces:
         let rec709 = mondrian_standard_output_target_contract(ColorSpace::Rec709)
             .expect("Rec.709 output contract");
         assert!(!rec709.is_hdr());
+        assert_eq!(rec709.view_transform_id, "mondrian_standard_sdr_v1");
         assert_eq!(rec709.reference_white_nits, 100);
         assert_eq!(rec709.nominal_peak_nits, 100);
         assert!(mondrian_standard_output_target_contract(ColorSpace::Rec2020).is_err());

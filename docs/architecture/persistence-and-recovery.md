@@ -36,15 +36,19 @@ invalidates that fixture until it is regenerated for the new current contract;
 unknown/retired digests are rejected rather than accepted through an implicit
 color migration or substituted with the latest package.
 
-Document schema v6 retains the v5 Custom OCIO reproducibility contract and
-removes the redundant sequence-level ACES workflow selector. A Custom project
+Document schema v7 retains the v5 Custom OCIO reproducibility contract and the
+v6 removal of the redundant sequence-level ACES workflow selector. It also
+requires the Mondrian Standard package identity to pin both the SDR and
+1000-nit HDR View Transform IDs and versions; the old single default-View field
+cannot fully describe HDR project semantics. A Custom project
 stores its config/content and executable processor graph identities together
 with working/display/view/look/role selections.
 Opening the archive must reload and validate the selected external config; a
 missing config, edited LUT, changed role, or changed default resource is an
-open diagnostic, never a silent substitution. Schema v5 is deliberately not
-migrated during Alpha: v6 makes project `ColorEngine` the sole color-mode
-selector and changes the new-sequence workflow default to SceneReferred.
+open diagnostic, never a silent substitution. Schemas v5 and v6 are
+deliberately not migrated during Alpha: v6 made project `ColorEngine` the sole
+color-mode selector and changed the new-sequence workflow default to
+SceneReferred, while v7 completes the Standard View identity.
 
 ## Runtime Directory
 
