@@ -21,7 +21,7 @@ use crate::app::ui_actions::{
     AppShellOpenRecentProjectPayload, NewProjectDraftUpdatePayload,
     ProjectRecoverFromAutosavePayload, APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
     APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
-    APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
+    APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_SELECT_CUSTOM_OCIO_CONFIG,
 };
 use crate::app_ui::icons::AppIcon;
 use crate::app_ui::modal::ShellModal;
@@ -168,6 +168,15 @@ impl AppUiStartupScreen {
                     })?;
                 if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_new_project_mut) {
                     dialog.apply_update(update);
+                }
+                Ok(None)
+            }
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == APP_SHELL_SELECT_CUSTOM_OCIO_CONFIG =>
+            {
+                if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_new_project_mut) {
+                    dialog.choose_custom_ocio(platform);
                 }
                 Ok(None)
             }
@@ -806,6 +815,7 @@ mod tests {
 
     struct SaveProjectPlatform {
         project_file: PathBuf,
+        open_file: Option<PathBuf>,
     }
 
     impl PlatformService for SaveProjectPlatform {
@@ -818,7 +828,7 @@ mod tests {
         }
 
         fn open_file_dialog(&self, _title: &str, _filters: &[FileFilter]) -> Option<Vec<PathBuf>> {
-            None
+            self.open_file.clone().map(|path| vec![path])
         }
 
         fn save_file_dialog(
@@ -1127,6 +1137,7 @@ mod tests {
         let mut screen = AppUiStartupScreen::new();
         let platform = SaveProjectPlatform {
             project_file: PathBuf::from("E:/projects/modal-create.mdp"),
+            open_file: None,
         };
         screen.layout(Rect::new(
             0.0,
@@ -1162,5 +1173,40 @@ mod tests {
             payload.project_file,
             PathBuf::from("E:/projects/modal-create.mdp")
         );
+    }
+
+    #[test]
+    fn startup_new_project_modal_routes_custom_ocio_selection() {
+        let config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../mondrian-core/assets/ocio/mondrian_default_ocio_v1.ocio");
+        let platform = SaveProjectPlatform {
+            project_file: PathBuf::from("E:/projects/custom.mdp"),
+            open_file: Some(config_path),
+        };
+        let mut screen = AppUiStartupScreen::new();
+
+        screen
+            .try_handle_shell_action(app_shell_new_project_dialog_action(), &platform)
+            .expect("open new-project modal");
+        screen
+            .try_handle_shell_action(
+                crate::app::ui_actions::app_shell_select_custom_ocio_config_action(),
+                &platform,
+            )
+            .expect("select Custom OCIO");
+
+        let identity = screen
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_new_project)
+            .expect("new-project modal")
+            .draft()
+            .project_settings
+            .color_management
+            .engine
+            .custom_ocio_identity()
+            .expect("pinned Custom OCIO identity");
+        assert_eq!(identity.display(), "sRGB - Display");
+        assert!(!identity.processor_graph_sha256().is_empty());
     }
 }

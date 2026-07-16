@@ -41,9 +41,9 @@ use crate::app::ui_actions::{
     APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES,
     APP_SHELL_PREFERENCES_TAB_CHANGED, APP_SHELL_RECOVER_PROJECT, APP_SHELL_RELINK_ASSET_DIALOG,
     APP_SHELL_RELOCATE_PANEL, APP_SHELL_REVEAL_IN_FILE_MANAGER, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
-    APP_SHELL_SEQUENCE_SETTINGS, APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED,
-    APP_SHELL_SEQUENCE_SETTINGS_TAB_CHANGED, VIEWER_CYCLE_ZOOM, VIEWER_NAMESPACE,
-    VIEWER_SET_ZOOM_SCALE,
+    APP_SHELL_SELECT_CUSTOM_OCIO_CONFIG, APP_SHELL_SEQUENCE_SETTINGS,
+    APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED, APP_SHELL_SEQUENCE_SETTINGS_TAB_CHANGED,
+    VIEWER_CYCLE_ZOOM, VIEWER_NAMESPACE, VIEWER_SET_ZOOM_SCALE,
 };
 use crate::app::AppState;
 use crate::app_ui::interpret_asset_dialog::AppUiInterpretAssetDraft;
@@ -1183,6 +1183,15 @@ impl AppUiAppRoot {
             }
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE
+                    && name == APP_SHELL_SELECT_CUSTOM_OCIO_CONFIG =>
+            {
+                if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_new_project_mut) {
+                    dialog.choose_custom_ocio(platform);
+                }
+                Ok(None)
+            }
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE
                     && name == APP_SHELL_CANCEL_NEW_PROJECT_DIALOG =>
             {
                 self.modal = None;
@@ -1877,7 +1886,8 @@ mod tests {
         app_shell_preferences_tab_changed_action, app_shell_recover_project_action,
         app_shell_relink_asset_dialog_action, app_shell_relocate_panel_action,
         app_shell_reveal_in_file_manager_action, app_shell_save_project_as_dialog_action,
-        app_shell_sequence_settings_action, app_shell_sequence_settings_draft_changed_action,
+        app_shell_select_custom_ocio_config_action, app_shell_sequence_settings_action,
+        app_shell_sequence_settings_draft_changed_action,
         app_shell_sequence_settings_tab_changed_action, viewer_cycle_zoom_action,
         viewer_set_zoom_scale_action, AppShellInterpretAssetDialogPayload,
         AppShellOpenRecentProjectPayload, AppShellRelinkAssetDialogPayload,
@@ -2890,6 +2900,116 @@ mod tests {
         assert_eq!(payload.sequence_settings.audio_sample_rate, 96_000);
         assert!(!payload.project_settings.proxy_enabled);
         assert!(!payload.sequence_settings.preview.cache_enabled);
+    }
+
+    #[test]
+    fn app_root_applies_new_project_color_engine_to_payload() {
+        let platform = FakePlatform {
+            save_path: Some(PathBuf::from("E:/projects/ACES.mdp")),
+            ..FakePlatform::default()
+        };
+        let mut root = AppUiAppRoot::demo();
+        let engine = mondrian_core::ColorEngine::Aces {
+            preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+        };
+
+        root.handle_shell_action(app_shell_new_project_dialog_action(), &platform, None);
+        root.handle_shell_action(
+            app_shell_new_project_draft_changed_action(NewProjectDraftUpdatePayload::ColorEngine(
+                engine.clone(),
+            )),
+            &platform,
+            None,
+        );
+
+        let action = root
+            .handle_shell_action(
+                app_shell_confirm_new_project_dialog_action(),
+                &platform,
+                None,
+            )
+            .expect("confirm action");
+        let Action::Custom { payload, .. } = action else {
+            panic!("expected project create action");
+        };
+        let payload: ProjectCreateWithSettingsPayload =
+            serde_json::from_value(payload).expect("project create payload");
+
+        assert_eq!(payload.project_settings.color_management.engine, engine);
+        assert_eq!(
+            payload
+                .sequence_settings
+                .root_program_color_context(&payload.project_settings.color_management)
+                .engine,
+            engine
+        );
+    }
+
+    #[test]
+    fn app_root_pins_selected_custom_ocio_before_updating_new_project() {
+        let config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../mondrian-core/assets/ocio/mondrian_default_ocio_v1.ocio");
+        let platform = FakePlatform {
+            open_paths: Some(vec![config_path.clone()]),
+            ..FakePlatform::default()
+        };
+        let mut root = AppUiAppRoot::demo();
+
+        root.handle_shell_action(app_shell_new_project_dialog_action(), &platform, None);
+        root.handle_shell_action(
+            app_shell_select_custom_ocio_config_action(),
+            &platform,
+            None,
+        );
+
+        let dialog = root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_new_project)
+            .expect("new-project dialog");
+        let identity = dialog
+            .draft()
+            .project_settings
+            .color_management
+            .engine
+            .custom_ocio_identity()
+            .expect("complete Custom OCIO identity");
+        assert_eq!(
+            identity.source(),
+            &mondrian_core::OcioConfigSource::Path { path: config_path }
+        );
+        assert_eq!(identity.display(), "sRGB - Display");
+        assert_eq!(identity.view(), "ACES 2.0 - SDR 100 nits (Rec.709)");
+        assert!(!identity.config_sha256().is_empty());
+        assert!(!identity.processor_graph_sha256().is_empty());
+        assert!(dialog.error_text().is_empty());
+    }
+
+    #[test]
+    fn app_root_rejects_invalid_custom_ocio_without_partial_mode() {
+        let platform = FakePlatform {
+            open_paths: Some(vec![PathBuf::from("E:/missing/config.ocio")]),
+            ..FakePlatform::default()
+        };
+        let mut root = AppUiAppRoot::demo();
+
+        root.handle_shell_action(app_shell_new_project_dialog_action(), &platform, None);
+        root.handle_shell_action(
+            app_shell_select_custom_ocio_config_action(),
+            &platform,
+            None,
+        );
+
+        let dialog = root
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_new_project)
+            .expect("new-project dialog remains open");
+        assert_eq!(
+            dialog.draft().project_settings.color_management.engine,
+            mondrian_core::ColorEngine::mondrian_standard()
+        );
+        assert!(dialog.error_text().contains("not found"));
     }
 
     #[test]

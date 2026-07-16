@@ -27,6 +27,11 @@ only the rendering-domain choice (SceneReferred by default, or explicit
 DisplayReferred technical bypass); it must not duplicate an ACES mode flag.
 Archive round-trip tests resolve the reopened root program context and require
 the default Standard project to retain its version-pinned Standard View intent.
+The new-project draft edits this same `ProjectSettings` value directly and
+offers Mondrian Standard, the two version-pinned ACES 2.0 presets, and Custom
+OCIO. Custom file selection must validate the config and pin its complete
+identity before replacing the draft engine; cancellation or validation failure
+leaves the previous engine intact.
 
 ## Runtime State
 

@@ -182,6 +182,8 @@ pub const APP_SHELL_NAMESPACE: &str = "app.shell";
 pub const APP_SHELL_NEW_PROJECT_DIALOG: &str = "new_project_dialog";
 /// App-shell request to update one app UI new-project draft setting.
 pub const APP_SHELL_NEW_PROJECT_DRAFT_CHANGED: &str = "new_project_draft_changed";
+/// App-shell request to choose and validate a Custom OCIO config for a new project.
+pub const APP_SHELL_SELECT_CUSTOM_OCIO_CONFIG: &str = "select_custom_ocio_config";
 /// App-shell request to confirm the app UI new-project dialog.
 pub const APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG: &str = "confirm_new_project_dialog";
 /// App-shell request to cancel the app UI new-project dialog.
@@ -958,6 +960,8 @@ pub enum NewProjectDraftUpdatePayload {
     FrameRate(Rational),
     /// Initial sequence audio sample rate in Hz.
     AudioSampleRate(u32),
+    /// Complete project color engine; Custom OCIO values are already pinned.
+    ColorEngine(ColorEngine),
     /// Whether project proxy generation is enabled.
     ProxyEnabled(bool),
     /// Whether preview rendering cache is enabled.
@@ -1346,6 +1350,11 @@ pub fn app_shell_new_project_dialog_action() -> Action {
 /// Build an app-shell request for changing one new-project draft setting.
 pub fn app_shell_new_project_draft_changed_action(payload: NewProjectDraftUpdatePayload) -> Action {
     custom_app_shell_action_with_payload(APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, payload)
+}
+
+/// Build an app-shell request for selecting a Custom OCIO config.
+pub fn app_shell_select_custom_ocio_config_action() -> Action {
+    custom_app_shell_action(APP_SHELL_SELECT_CUSTOM_OCIO_CONFIG)
 }
 
 /// Build an app-shell request for confirming the new-project dialog.
