@@ -1,7 +1,8 @@
 use crate::color_transform::{RenderColorTransformBackend, RenderInputTransform};
 use mondrian_core::{
-    display_calibration::DisplayCalibrationKey, types::ColorSpace, ColorMatrixCoefficients,
-    ColorTransferCharacteristic, WorkingColorSpace, WorkingRgbaF32Frame,
+    display_calibration::DisplayCalibrationKey, timeline_data::AlphaInterpretation,
+    types::ColorSpace, ColorMatrixCoefficients, ColorTransferCharacteristic, WorkingColorSpace,
+    WorkingRgbaF32Frame,
 };
 use mondrian_media::{
     DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, PreviewNativeDecodedFrame,
@@ -2247,6 +2248,21 @@ pub enum CpuSourceColorFrame {
     LinearFloat(LinearFloatSource),
 }
 
+/// Failure while normalizing decoded source alpha to straight coverage.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum SourceAlphaInterpretationError {
+    /// A floating-point decoder returned invalid coverage.
+    #[error(
+        "invalid decoded alpha {value} at pixel {pixel_index}; expected finite coverage in [0, 1]"
+    )]
+    InvalidFloatCoverage {
+        /// Pixel containing invalid coverage.
+        pixel_index: usize,
+        /// Invalid decoded value.
+        value: f32,
+    },
+}
+
 impl CpuSourceColorFrame {
     /// Return the exact source-boundary descriptor.
     pub fn descriptor(&self) -> ColorFrameDescriptor {
@@ -2265,6 +2281,85 @@ impl CpuSourceColorFrame {
             }
         }
     }
+
+    /// Apply the user/source alpha interpretation before any RGB color transform.
+    ///
+    /// The renderer's working contract is straight coverage. Premultiplied
+    /// stored RGB is therefore unassociated in its source encoding, while
+    /// `Ignore` makes the source fully opaque. Straight sources retain their
+    /// shared payload without a copy.
+    pub fn normalize_alpha(
+        self,
+        interpretation: AlphaInterpretation,
+    ) -> Result<Self, SourceAlphaInterpretationError> {
+        match (self, interpretation) {
+            (frame, AlphaInterpretation::Straight) => Ok(frame),
+            (Self::EncodedRgba8(frame), interpretation) => {
+                let descriptor = frame.descriptor;
+                let mut rgba = frame.into_rgba();
+                normalize_rgba8_alpha(&mut rgba, interpretation);
+                let frame = CpuEncodedColorFrame { descriptor, rgba: Arc::new(rgba) };
+                Ok(Self::EncodedRgba8(frame))
+            }
+            (Self::LinearFloat(frame), interpretation) => {
+                let descriptor = frame.descriptor;
+                let mut rgba = frame.into_data();
+                normalize_rgba_f32_alpha(&mut rgba, interpretation)?;
+                let frame = LinearFloatSource { descriptor, data: Arc::new(rgba) };
+                Ok(Self::LinearFloat(frame))
+            }
+        }
+    }
+}
+
+fn normalize_rgba8_alpha(rgba: &mut [u8], interpretation: AlphaInterpretation) {
+    for pixel in rgba.chunks_exact_mut(4) {
+        match interpretation {
+            AlphaInterpretation::Straight => {}
+            AlphaInterpretation::Ignore => pixel[3] = u8::MAX,
+            AlphaInterpretation::Premultiplied => {
+                let alpha = u32::from(pixel[3]);
+                if alpha == 0 {
+                    pixel[..3].fill(0);
+                } else if alpha < u32::from(u8::MAX) {
+                    for channel in &mut pixel[..3] {
+                        let straight =
+                            (u32::from(*channel) * u32::from(u8::MAX) + alpha / 2) / alpha;
+                        *channel = straight.min(u32::from(u8::MAX)) as u8;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn normalize_rgba_f32_alpha(
+    rgba: &mut [f32],
+    interpretation: AlphaInterpretation,
+) -> Result<(), SourceAlphaInterpretationError> {
+    for (pixel_index, pixel) in rgba.chunks_exact_mut(4).enumerate() {
+        match interpretation {
+            AlphaInterpretation::Straight => {}
+            AlphaInterpretation::Ignore => pixel[3] = 1.0,
+            AlphaInterpretation::Premultiplied => {
+                let alpha = pixel[3];
+                if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
+                    return Err(SourceAlphaInterpretationError::InvalidFloatCoverage {
+                        pixel_index,
+                        value: alpha,
+                    });
+                }
+                if alpha <= f32::EPSILON {
+                    pixel[..3].fill(0.0);
+                } else if alpha < 1.0 {
+                    for channel in &mut pixel[..3] {
+                        *channel /= alpha;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 impl From<CpuEncodedColorFrame> for CpuSourceColorFrame {
@@ -2397,6 +2492,63 @@ fn create_color_frame_view_and_sampler(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_alpha_normalization_unassociates_encoded_premultiplied_rgb() {
+        let source = CpuSourceColorFrame::from(CpuEncodedColorFrame::source_rgba8(
+            1,
+            1,
+            ColorSpace::Rec709,
+            vec![64, 32, 16, 128],
+        ));
+
+        let normalized = source
+            .normalize_alpha(AlphaInterpretation::Premultiplied)
+            .expect("valid premultiplied source");
+        let CpuSourceColorFrame::EncodedRgba8(normalized) = normalized else {
+            panic!("encoded source must stay encoded");
+        };
+
+        assert_eq!(normalized.rgba(), &[128, 64, 32, 128]);
+    }
+
+    #[test]
+    fn source_alpha_normalization_preserves_extended_float_rgb_and_coverage() {
+        let source = CpuSourceColorFrame::from(LinearFloatSource::new(
+            1,
+            1,
+            ColorSpace::LinearRec2020,
+            vec![0.5, -0.125, 0.0625, 0.25],
+        ));
+
+        let normalized = source
+            .normalize_alpha(AlphaInterpretation::Premultiplied)
+            .expect("valid premultiplied float source");
+        let CpuSourceColorFrame::LinearFloat(normalized) = normalized else {
+            panic!("float source must stay float");
+        };
+
+        assert_eq!(normalized.data(), &[2.0, -0.5, 0.25, 0.25]);
+    }
+
+    #[test]
+    fn source_alpha_ignore_makes_coverage_opaque_without_changing_rgb() {
+        let source = CpuSourceColorFrame::from(CpuEncodedColorFrame::source_rgba8(
+            1,
+            1,
+            ColorSpace::Rec709,
+            vec![12, 34, 56, 78],
+        ));
+
+        let normalized = source
+            .normalize_alpha(AlphaInterpretation::Ignore)
+            .expect("encoded coverage is always valid");
+        let CpuSourceColorFrame::EncodedRgba8(normalized) = normalized else {
+            panic!("encoded source must stay encoded");
+        };
+
+        assert_eq!(normalized.rgba(), &[12, 34, 56, 255]);
+    }
 
     #[test]
     fn color_frame_space_stays_compact_for_hot_frame_handles() {

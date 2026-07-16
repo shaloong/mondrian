@@ -103,7 +103,7 @@ fn composite_single_layer(w: u32, h: u32, rgba: &[u8], opacity: f32, blend: Blen
         w,
         h,
         &elements,
-        TimelineCompositeOptions { empty_canvas_transparent: true },
+        TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
     );
@@ -174,7 +174,7 @@ fn golden_transparent_canvas() {
         w,
         h,
         &elements,
-        TimelineCompositeOptions { empty_canvas_transparent: true },
+        TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
     );
@@ -240,7 +240,7 @@ fn golden_two_layers_normal() {
         w,
         h,
         &elements,
-        TimelineCompositeOptions { empty_canvas_transparent: true },
+        TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
     );
@@ -277,7 +277,7 @@ fn preview_display_and_export_delivery_boundaries_match_with_stable_hash() {
         w,
         h,
         &elements,
-        TimelineCompositeOptions { empty_canvas_transparent: true },
+        TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
     );
@@ -391,7 +391,7 @@ fn golden_multilayer_float_linear_blend() {
         w,
         h,
         &elements,
-        TimelineCompositeOptions { empty_canvas_transparent: true },
+        TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
     );
@@ -417,7 +417,7 @@ fn golden_non_identity_transform_float_path() {
         w,
         h,
         &elements,
-        TimelineCompositeOptions { empty_canvas_transparent: true },
+        TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
     );
@@ -454,7 +454,7 @@ fn golden_preview_export_parity_across_color_spaces() {
         w,
         h,
         &elements,
-        TimelineCompositeOptions { empty_canvas_transparent: true },
+        TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
     );

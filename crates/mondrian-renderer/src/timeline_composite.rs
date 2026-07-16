@@ -53,9 +53,33 @@ pub enum TimelineCompositeElement<'a> {
     SolidColor(TimelineSolidColorLayer),
 }
 
+/// Initial coverage behind a timeline composite.
+///
+/// Program and nested-sequence working frames use [`Self::Transparent`].
+/// [`Self::OpaqueBlack`] is an explicit delivery adapter for formats that
+/// cannot carry alpha; it must not be used as a viewer background.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TimelineCompositeBackground {
+    /// Preserve uncovered and partially covered program pixels.
+    #[default]
+    Transparent,
+    /// Composite the program over scene-linear black and return opaque pixels.
+    OpaqueBlack,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TimelineCompositeOptions {
-    pub empty_canvas_transparent: bool,
+    /// Coverage behind the bottom-most timeline layer.
+    pub background: TimelineCompositeBackground,
+}
+
+impl TimelineCompositeOptions {
+    /// Build options for an explicit opaque-black delivery composite.
+    pub const fn opaque_black() -> Self {
+        Self {
+            background: TimelineCompositeBackground::OpaqueBlack,
+        }
+    }
 }
 
 /// Renderer-owned runtime for resolving effect RGB domains through stock OCIO.
@@ -483,7 +507,11 @@ fn composite_supported_elements_to_working_frame(
         });
     }
 
-    let mut canvas = vec![[0.0, 0.0, 0.0, 1.0]; pixel_count];
+    let initial_pixel = match options.background {
+        TimelineCompositeBackground::Transparent => [0.0, 0.0, 0.0, 0.0],
+        TimelineCompositeBackground::OpaqueBlack => [0.0, 0.0, 0.0, 1.0],
+    };
+    let mut canvas = vec![initial_pixel; pixel_count];
     let mut has_composited_layer = false;
 
     for element in elements {
@@ -579,10 +607,6 @@ fn composite_supported_elements_to_working_frame(
                 )?;
             }
         }
-    }
-
-    if !has_composited_layer && options.empty_canvas_transparent {
-        canvas.fill([0.0, 0.0, 0.0, 0.0]);
     }
 
     Ok(WorkingRgbaF32Frame {
@@ -915,7 +939,10 @@ pub fn composite_timeline_elements_into(
         return Ok(());
     }
 
-    clear_canvas_black_opaque(out);
+    match options.background {
+        TimelineCompositeBackground::Transparent => out.fill(0),
+        TimelineCompositeBackground::OpaqueBlack => clear_canvas_black_opaque(out),
+    }
     let mut has_composited_media = false;
 
     for element in elements {
@@ -1010,9 +1037,6 @@ pub fn composite_timeline_elements_into(
         }
     }
 
-    if !has_composited_media && options.empty_canvas_transparent {
-        out.fill(0);
-    }
     Ok(())
 }
 
@@ -1278,7 +1302,7 @@ mod tests {
                 .expect("compile effect graph"),
                 frame_seed: 0,
             })],
-            TimelineCompositeOptions { empty_canvas_transparent: true },
+            TimelineCompositeOptions::default(),
             &mut scratch,
         )
         .expect("composite media effect");
@@ -1323,7 +1347,7 @@ mod tests {
                 .expect("compile custom graph"),
                 frame_seed: 0,
             })],
-            TimelineCompositeOptions { empty_canvas_transparent: true },
+            TimelineCompositeOptions::default(),
             &mut scratch,
         )
         .expect("composite custom effect");
@@ -1429,6 +1453,27 @@ mod tests {
         assert!((output[2] as i16 - 192).abs() <= 1);
         assert!(scratch.media_source.is_empty());
         assert!(scratch.media_effect.is_empty());
+    }
+
+    #[test]
+    fn transparent_program_canvas_preserves_partial_coverage_and_uncovered_pixels() {
+        let mut scratch = TimelineCompositeScratch::default();
+        let media = working_frame(&[255, 0, 0, 128], 1, 1);
+        let frame = composite_timeline_elements_color_frame(
+            2,
+            1,
+            &[identity_media(&media)],
+            TimelineCompositeOptions::default(),
+            test_color_runtime(WorkingColorSpace::LinearRec709),
+            &mut scratch,
+        );
+        let pixels = &frame.rgba_f32().data;
+
+        assert!((pixels[0][0] - 1.0).abs() <= 1.0 / 255.0);
+        assert_eq!(pixels[0][1], 0.0);
+        assert_eq!(pixels[0][2], 0.0);
+        assert!((pixels[0][3] - 128.0 / 255.0).abs() <= 1.0 / 255.0);
+        assert_eq!(pixels[1], [0.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -1731,7 +1776,7 @@ mod tests {
             1,
             1,
             &elements,
-            TimelineCompositeOptions { empty_canvas_transparent: true },
+            TimelineCompositeOptions::default(),
             test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch,
         );
@@ -1740,9 +1785,9 @@ mod tests {
         assert_eq!(output.diagnostics.float_linear_composites, 1);
         assert_eq!(output.diagnostics.legacy_rgba8_composites, 0);
         assert_eq!(output.diagnostics.legacy_solid_effect, 0);
-        assert!((pixel[0] - 0.5).abs() <= 1.0e-6);
-        assert!((pixel[1] + 0.0625).abs() <= 1.0e-6);
-        assert!((pixel[3] - 1.0).abs() <= f32::EPSILON);
+        assert!((pixel[0] - 2.0).abs() <= 1.0e-6);
+        assert!((pixel[1] + 0.25).abs() <= 1.0e-6);
+        assert!((pixel[3] - 0.25).abs() <= f32::EPSILON);
     }
 
     #[test]
@@ -1771,7 +1816,7 @@ mod tests {
         );
         let pixels = &output.rgba_f32().data;
 
-        assert_eq!(pixels[0], [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(pixels[0], [0.0, 0.0, 0.0, 0.0]);
         assert_eq!(pixels[1], [2.0, 0.25, 0.125, 1.0]);
     }
 

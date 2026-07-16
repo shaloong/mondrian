@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::app::ui_actions::TimelineSeekSource;
+use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
 use mondrian_core::WorkingColorSpace;
 use mondrian_media::{
@@ -31,6 +32,8 @@ pub(crate) struct MediaPreviewKey {
     pub(crate) target_height: u32,
     pub(crate) input_color_space: ColorSpace,
     pub(crate) input_video_range: DecodedVideoRange,
+    pub(crate) source_has_alpha: bool,
+    pub(crate) alpha_interpretation: AlphaInterpretation,
     pub(crate) working_color_space: WorkingColorSpace,
     pub(crate) tone_map: bool,
     pub(crate) engine: ColorEngine,
@@ -980,6 +983,8 @@ mod tests {
             target_height: 180,
             input_color_space: ColorSpace::Rec709,
             input_video_range: DecodedVideoRange::Limited,
+            source_has_alpha: false,
+            alpha_interpretation: AlphaInterpretation::Straight,
             working_color_space: WorkingColorSpace::LinearRec709,
             tone_map: false,
             engine: ColorEngine::mondrian_standard(),

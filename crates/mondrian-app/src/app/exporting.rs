@@ -66,6 +66,10 @@ pub fn builtin_export_presets() -> Vec<ExportPresetOption> {
             label: "代理文件 720p".to_owned(),
             preset: ExportPreset::proxy_720p(),
         },
+        ExportPresetOption {
+            label: "ProRes 4444 XQ + Alpha（12-bit）".to_owned(),
+            preset: ExportPreset::prores_4444_alpha(),
+        },
     ]
 }
 

@@ -437,6 +437,16 @@ thumbnail, proxy, and export decode/cache identities include it, so changing a
 range override cannot reuse pixels or derived media created under the old
 sampling contract.
 
+Alpha is coverage, not color, and never passes through an OCIO RGB processor.
+Decoded source frames are normalized to the renderer's straight-alpha working
+contract before the source-to-working transform: straight input is shared
+without copying, premultiplied input is unassociated at the typed source
+boundary, and `Ignore` forces opaque coverage. Unassociation preserves extended
+and negative float RGB values and treats zero-alpha RGB as transparent black.
+Preview and export cache identities include `AlphaInterpretation`, so changing
+the interpretation cannot reuse pixels produced under a different coverage
+contract.
+
 The typed frame graph distinguishes `EncodedFloat` from `LinearFloat`.
 `EncodedFloat` is used for precision-preserving nonlinear samples at source,
 display, and export boundaries. Native NV12/P010 sampling produces it before

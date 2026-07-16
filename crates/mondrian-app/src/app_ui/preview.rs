@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use mondrian_assets::AssetKind;
 use mondrian_core::display_contract::{DisplayOutputSnapshot, MonitorProfileStatus};
-use mondrian_core::timeline_data::AssetMediaInterpretation;
+use mondrian_core::timeline_data::{AlphaInterpretation, AssetMediaInterpretation};
 #[cfg(test)]
 use mondrian_core::types::ColorEngine;
 use mondrian_core::types::{AssetId, BlendMode, ColorSpace, Rational, SequenceId};
@@ -405,6 +405,8 @@ impl AppUiPreviewService {
             target_height: 1080,
             input_color_space: ColorSpace::Srgb,
             input_video_range: DecodedVideoRange::Full,
+            source_has_alpha: false,
+            alpha_interpretation: AlphaInterpretation::Straight,
             working_color_space: WorkingColorSpace::LinearRec709,
             tone_map: false,
             engine: ColorEngine::mondrian_standard(),
@@ -2329,6 +2331,7 @@ impl AppUiPreviewService {
                         state,
                         &media.asset_id,
                         media.color_space_override,
+                        media.alpha_interpretation,
                         media.source_frame,
                         media.source_secs,
                         width,
@@ -7791,6 +7794,7 @@ impl AppUiPreviewService {
                         state,
                         &media.asset_id,
                         media.color_space_override,
+                        media.alpha_interpretation,
                         media.source_frame,
                         media.source_secs,
                         target_width,
@@ -7930,6 +7934,7 @@ impl AppUiPreviewService {
                             state,
                             &media.asset_id,
                             media.color_space_override,
+                            media.alpha_interpretation,
                             media.source_frame,
                             media.source_secs,
                             target_width,
@@ -7973,6 +7978,7 @@ impl AppUiPreviewService {
         state: &AppState,
         asset_id: &AssetId,
         color_space_override: Option<ColorSpace>,
+        alpha_interpretation: AlphaInterpretation,
         source_frame: i64,
         source_secs: f64,
         target_width: u32,
@@ -7988,6 +7994,7 @@ impl AppUiPreviewService {
             state,
             asset_id,
             color_space_override,
+            alpha_interpretation,
             source_frame,
             source_secs,
             target_width,
@@ -8043,6 +8050,7 @@ impl AppUiPreviewService {
         state: &AppState,
         asset_id: &AssetId,
         color_space_override: Option<ColorSpace>,
+        alpha_interpretation: AlphaInterpretation,
         source_frame: i64,
         source_secs: f64,
         target_width: u32,
@@ -8061,9 +8069,12 @@ impl AppUiPreviewService {
             }
         };
         let proxy_config = state.proxy_config();
+        let source_has_alpha =
+            asset.media_info.primary_video().is_some_and(|video| video.has_alpha);
         let proxy_color = resolve_asset_proxy_color_contract(&asset, color_context).ok();
         let resolved_path = resolve_preview_media_decode_path(
             state.project_settings.proxy_enabled && state.is_asset_proxy_mode(*asset_id),
+            source_has_alpha,
             &asset.path,
             &proxy_config,
             proxy_color,
@@ -8171,6 +8182,8 @@ impl AppUiPreviewService {
                         .map(|video| video.color_range)
                         .unwrap_or(DecodedVideoRange::Unknown),
                 ),
+                source_has_alpha,
+                alpha_interpretation,
                 working_color_space: color_context.working_color_space,
                 tone_map: color_context.tone_map,
                 engine: color_context.engine.clone(),
@@ -9311,12 +9324,13 @@ fn should_request_preview_proxy_generation(
 
 fn resolve_preview_media_decode_path(
     prefer_proxy: bool,
+    source_has_alpha: bool,
     source_path: &Path,
     proxy_config: &mondrian_media::ProxyConfig,
     proxy_color: Option<mondrian_media::ProxyColorContract>,
 ) -> Option<PreviewMediaDecodePath> {
     let source_metadata = media_path_metadata(source_path)?;
-    if !prefer_proxy {
+    if !prefer_proxy || source_has_alpha {
         return Some(PreviewMediaDecodePath {
             path: source_path.to_path_buf(),
             resolution: PreviewMediaDecodePathResolution::Source,
@@ -9710,6 +9724,11 @@ fn decode_media_preview(
     let deadline_at = job.deadline_at;
     let demand_identity = job.demand_identity;
     let execution_id = job.execution_id;
+    let hardware_decode_request = if job.key.source_has_alpha {
+        PreviewHardwareDecodeRequest::Auto
+    } else {
+        job.hardware_decode_request
+    };
     let decode_outcome = decode_media_preview_for_access_mode(
         job.key.path.as_path(),
         job.source_secs,
@@ -9718,7 +9737,7 @@ fn decode_media_preview(
         access_mode,
         job.key.fingerprint,
         job.adaptive_hints,
-        job.hardware_decode_request,
+        hardware_decode_request,
         job.hardware_decode_device_selector,
         PreviewSourceColorContract::new(job.key.input_color_space, job.key.input_video_range),
         should_cancel,
@@ -9738,6 +9757,21 @@ fn decode_media_preview(
                 job.key.input_color_space,
                 frame.into_shared_data(),
             );
+            let source = match CpuSourceColorFrame::from(source)
+                .normalize_alpha(job.key.alpha_interpretation)
+            {
+                Ok(source) => source,
+                Err(error) => {
+                    return media_preview_alpha_failure(
+                        job,
+                        queue_wait_us,
+                        decode_elapsed_us,
+                        completed_at,
+                        decode_diagnostics,
+                        error.to_string(),
+                    );
+                }
+            };
             let input_transform = RenderInputTransform::to_working(
                 job.key.working_color_space,
                 job.key.tone_map,
@@ -9793,6 +9827,21 @@ fn decode_media_preview(
                 job.key.input_color_space,
                 frame.into_shared_data(),
             );
+            let source = match CpuSourceColorFrame::from(source)
+                .normalize_alpha(job.key.alpha_interpretation)
+            {
+                Ok(source) => source,
+                Err(error) => {
+                    return media_preview_alpha_failure(
+                        job,
+                        queue_wait_us,
+                        decode_elapsed_us,
+                        completed_at,
+                        decode_diagnostics,
+                        error.to_string(),
+                    );
+                }
+            };
             let input_transform = RenderInputTransform::to_working(
                 job.key.working_color_space,
                 job.key.tone_map,
@@ -9838,6 +9887,16 @@ fn decode_media_preview(
         }
         Ok(PreviewDecodeOutcome::NativeGpuFrame(frame)) => {
             let decode_diagnostics = frame.diagnostics;
+            if job.key.source_has_alpha {
+                return media_preview_alpha_failure(
+                    job,
+                    queue_wait_us,
+                    decode_elapsed_us,
+                    completed_at,
+                    decode_diagnostics,
+                    "alpha-bearing media reached an opaque native GPU preview surface".to_owned(),
+                );
+            }
             let decode_execution = decode_diagnostics.execution_path();
             let presentation_quality = preview_decode_presentation_quality(&decode_diagnostics);
             let width = frame.width;
@@ -9930,6 +9989,37 @@ fn decode_media_preview(
                 execution_id,
             }
         }
+    }
+}
+
+fn media_preview_alpha_failure(
+    job: MediaPreviewJob,
+    queue_wait_us: u64,
+    decode_elapsed_us: u64,
+    completed_at: Instant,
+    decode_diagnostics: PreviewDecodeDiagnostics,
+    error: String,
+) -> MediaPreviewResult {
+    MediaPreviewResult {
+        key: job.key,
+        frame: None,
+        error: Some(error),
+        failure_reason: Some(MediaPreviewFailureReason::DecodeError),
+        generation: job.generation,
+        priority: job.priority,
+        access_mode: job.access_mode,
+        queue_wait_us,
+        decode_elapsed_us,
+        completed_at,
+        deadline_at: job.deadline_at,
+        cancel_observed_elapsed_us: None,
+        canceled: false,
+        cancel_reason: None,
+        decode_diagnostics: Some(decode_diagnostics),
+        color_diagnostics: None,
+        color_stage_diagnostics: None,
+        demand_identity: job.demand_identity,
+        execution_id: job.execution_id,
     }
 }
 
@@ -12001,6 +12091,7 @@ mod tests {
                 &state,
                 &media.asset_id,
                 media.color_space_override,
+                media.alpha_interpretation,
                 media.source_frame,
                 media.source_secs,
                 width,
@@ -16645,6 +16736,8 @@ mod tests {
             target_height: 180,
             input_color_space: ColorSpace::Rec709,
             input_video_range: DecodedVideoRange::Limited,
+            source_has_alpha: false,
+            alpha_interpretation: AlphaInterpretation::Straight,
             working_color_space: WorkingColorSpace::LinearRec709,
             tone_map: false,
             engine: ColorEngine::mondrian_standard(),
@@ -16694,6 +16787,8 @@ mod tests {
             target_height: 180,
             input_color_space: ColorSpace::Rec709,
             input_video_range: DecodedVideoRange::Limited,
+            source_has_alpha: false,
+            alpha_interpretation: AlphaInterpretation::Straight,
             working_color_space: WorkingColorSpace::LinearRec709,
             tone_map: false,
             engine: ColorEngine::mondrian_standard(),
@@ -17255,6 +17350,7 @@ mod tests {
                 &state,
                 &asset_id,
                 None,
+                AlphaInterpretation::Straight,
                 0,
                 0.0,
                 width,
@@ -17293,6 +17389,7 @@ mod tests {
                     &state,
                     &asset_id,
                     None,
+                    AlphaInterpretation::Straight,
                     0,
                     0.0,
                     width,
@@ -17343,6 +17440,7 @@ mod tests {
                 &state,
                 &asset_id,
                 None,
+                AlphaInterpretation::Straight,
                 0,
                 0.0,
                 width,
@@ -17389,6 +17487,8 @@ mod tests {
             target_height: 180,
             input_color_space: ColorSpace::Rec709,
             input_video_range: DecodedVideoRange::Limited,
+            source_has_alpha: false,
+            alpha_interpretation: AlphaInterpretation::Straight,
             working_color_space: WorkingColorSpace::LinearRec709,
             tone_map: false,
             engine: ColorEngine::mondrian_standard(),
@@ -17702,6 +17802,7 @@ mod tests {
 
         let resolved = resolve_preview_media_decode_path(
             true,
+            false,
             &source,
             &proxy_config,
             Some(test_proxy_color()),
@@ -17711,6 +17812,20 @@ mod tests {
         assert_eq!(resolved.path, proxy_path);
         assert_eq!(resolved.resolution, PreviewMediaDecodePathResolution::Proxy);
         assert_eq!(resolved.fingerprint.len, Some(5));
+
+        let alpha_resolved = resolve_preview_media_decode_path(
+            true,
+            true,
+            &source,
+            &proxy_config,
+            Some(test_proxy_color()),
+        )
+        .expect("alpha source path");
+        assert_eq!(alpha_resolved.path, source);
+        assert_eq!(
+            alpha_resolved.resolution,
+            PreviewMediaDecodePathResolution::Source
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -17730,6 +17845,7 @@ mod tests {
 
         let resolved = resolve_preview_media_decode_path(
             true,
+            false,
             &source,
             &proxy_config,
             Some(test_proxy_color()),
@@ -17767,6 +17883,7 @@ mod tests {
 
         let resolved = resolve_preview_media_decode_path(
             true,
+            false,
             &source,
             &proxy_config,
             Some(test_proxy_color()),
@@ -17796,6 +17913,7 @@ mod tests {
 
         assert!(resolve_preview_media_decode_path(
             false,
+            false,
             &source,
             &proxy_config,
             Some(test_proxy_color())
@@ -17803,6 +17921,7 @@ mod tests {
         .is_none());
         assert!(resolve_preview_media_decode_path(
             true,
+            false,
             &source,
             &proxy_config,
             Some(test_proxy_color())

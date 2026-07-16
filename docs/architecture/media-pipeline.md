@@ -807,6 +807,13 @@ falls back to the source path and records proxy hit/miss/stale counters in
 `AppUiPreviewDiagnostics`. Export continues to use the source/export contract;
 proxy selection is a preview playback scheduling decision, not media color
 interpretation.
+Alpha-bearing sources bypass the current opaque proxy profiles and GPU-native
+YUV preview surfaces. They decode from the source into the typed RGBA input
+boundary until a proxy/native format has an explicit alpha-capable contract;
+the app must not generate or reuse an opaque proxy for such an asset. Hardware
+decode preference is downgraded to the CPU RGBA path for these requests, and an
+unexpected opaque native surface fails closed instead of silently discarding
+coverage.
 Newly imported video assets enter proxy playback and start background proxy
 generation only when the project `ProjectSettings.proxy_enabled` policy is on.
 The project policy is the scheduling source of truth; app/UI preferences must

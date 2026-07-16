@@ -57,7 +57,7 @@ pub use color_frame::{
     GpuNativeDecodedFrameImportSource, GpuNativeDecodedFrameImportSupport,
     GpuNativeDecodedFrameSourceDescriptor, GpuNativeDecodedFrameSourceFormatError,
     GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation,
-    GpuVideoRange, LinearFloatSource,
+    GpuVideoRange, LinearFloatSource, SourceAlphaInterpretationError,
 };
 pub use color_reference::{
     import_external_color_reference, ColorReferenceAlpha, ColorReferenceDecoder,
@@ -202,10 +202,11 @@ pub use timeline_composite::{
     composite_timeline_elements_color_frame,
     composite_timeline_elements_color_frame_with_diagnostics, composite_timeline_elements_into,
     is_identity_transform, quantize_transform_signature, TimelineAdjustmentLayer,
-    TimelineCompositeColorPath, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
-    TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement, TimelineCompositeFrame,
-    TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineEffectColorRuntime, TimelineMediaLayer, TimelineSolidColorLayer,
+    TimelineCompositeBackground, TimelineCompositeColorPath, TimelineCompositeColorPathSummary,
+    TimelineCompositeDiagnostics, TimelineCompositeDomainBlockerBreakdown,
+    TimelineCompositeElement, TimelineCompositeFrame, TimelineCompositeLegacyBreakdown,
+    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEffectColorRuntime,
+    TimelineMediaLayer, TimelineSolidColorLayer,
 };
 pub use timeline_render_plan::{
     collect_timeline_color_diagnostics, collect_timeline_color_diagnostics_with_display_view,

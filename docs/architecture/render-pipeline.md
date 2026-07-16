@@ -67,6 +67,16 @@ Bare RGBA8 buffers are valid only at source import, debug/golden snapshot, UI
 presentation readback, and CPU encoder boundaries. They are not a renderer-stage
 exchange format.
 
+Program and nested-sequence working canvases use transparent black as their
+initial value and retain straight coverage alpha through CPU and GPU
+compositing. Viewer background/checkerboard treatment is presentation-only and
+must not mutate the Program frame. Export selects an explicit
+`ExportAlphaMode`: `Preserve` keeps straight alpha only for a validated
+alpha-capable codec/container contract, while `FlattenBlack` composites over
+scene-linear black before the final output transform. Codec selection alone
+must never imply alpha preservation, and setting alpha opaque after an encoded
+output transform is not a valid flatten operation.
+
 `LinearFloatSource` accepts either an external scene-linear `ColorSpace` or an
 internal `WorkingColorSpace`. Its frame descriptor preserves that role through
 `ColorFrameSpace::Color` versus `ColorFrameSpace::Working`, and the CPU input

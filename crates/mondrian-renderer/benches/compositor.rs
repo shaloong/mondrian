@@ -79,7 +79,7 @@ fn bench_layers(c: &mut Criterion, name: &str, w: u32, h: u32, n: usize) {
                 black_box(w),
                 black_box(h),
                 black_box(&elements),
-                TimelineCompositeOptions { empty_canvas_transparent: true },
+                TimelineCompositeOptions::default(),
                 TimelineEffectColorRuntime::new(&color_engine, WorkingColorSpace::LinearRec709),
                 &mut scratch,
             );

@@ -208,7 +208,11 @@ struct ExportVideoSignalContract {
 }
 
 impl ExportVideoSignalContract {
-    fn resolve(settings: &SequenceSettings, codec: &VideoCodecConfig) -> Self {
+    fn resolve(
+        settings: &SequenceSettings,
+        codec: &VideoCodecConfig,
+        alpha_mode: ExportAlphaMode,
+    ) -> Self {
         let color_space = settings.color_management.output_color_space;
         if matches!(codec, VideoCodecConfig::Gif { .. }) {
             return Self {
@@ -220,8 +224,13 @@ impl ExportVideoSignalContract {
             };
         }
         let pixel_format = match codec {
-            VideoCodecConfig::ProRes { variant } if prores_variant_is_4444(variant) => {
+            VideoCodecConfig::ProRes { variant }
+                if prores_variant_is_4444(variant) && alpha_mode == ExportAlphaMode::Preserve =>
+            {
                 "yuva444p12le"
+            }
+            VideoCodecConfig::ProRes { variant } if prores_variant_is_4444(variant) => {
+                "yuv444p12le"
             }
             VideoCodecConfig::ProRes { .. } => "yuv422p10le",
             _ => match settings.color_management.delivery_bit_depth {
@@ -277,16 +286,18 @@ impl ExportVideoSignalContract {
 pub(crate) fn expected_export_video_signal(
     settings: &SequenceSettings,
     codec: &VideoCodecConfig,
+    alpha_mode: ExportAlphaMode,
 ) -> crate::validator::ExpectedVideoSignalConstraints {
-    ExportVideoSignalContract::resolve(settings, codec).validation_constraints()
+    ExportVideoSignalContract::resolve(settings, codec, alpha_mode).validation_constraints()
 }
 
 pub(crate) fn apply_export_video_signal_args(
     cmd: &mut Command,
     settings: &SequenceSettings,
     codec: &VideoCodecConfig,
+    alpha_mode: ExportAlphaMode,
 ) {
-    let contract = ExportVideoSignalContract::resolve(settings, codec);
+    let contract = ExportVideoSignalContract::resolve(settings, codec, alpha_mode);
     if let (Some(range), Some(matrix)) = (contract.scale_range, contract.yuv_matrix) {
         cmd.arg("-vf").arg(format!(
             "scale=iw:ih:in_range=full:out_range={range}:out_color_matrix={}",
@@ -368,6 +379,19 @@ pub(crate) fn validate_timeline_export_color_compatibility(
     let output_encoding = output.encoding();
     let bit_depth = settings.color_management.delivery_bit_depth;
     let preserve_hdr = settings.color_management.preserve_hdr_metadata;
+
+    if config.preset.alpha_mode == ExportAlphaMode::Preserve
+        && !matches!(
+            (&config.preset.container, &config.preset.video),
+            (Container::Mov, VideoCodecConfig::ProRes { variant })
+                if prores_variant_is_4444(variant)
+        )
+    {
+        return Err(
+            "保留 Alpha 当前仅支持 MOV + ProRes 4444/4444 XQ；请选择专用 RGB+Alpha 交付预设"
+                .to_string(),
+        );
+    }
 
     if output_encoding.is_scene_log() {
         if bit_depth == DeliveryBitDepth::Eight {

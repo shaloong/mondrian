@@ -1,7 +1,7 @@
 //! 后台渲染队列
 
 use crate::preset::{
-    AudioCodecConfig, Container, ExportConfig, ExportInput, TimelineExportInput,
+    AudioCodecConfig, Container, ExportAlphaMode, ExportConfig, ExportInput, TimelineExportInput,
     TimelineExportRange, VideoCodecConfig,
 };
 use crate::validator::{
@@ -9,6 +9,7 @@ use crate::validator::{
     ExportValidationExpectations,
 };
 use chrono::{DateTime, Utc};
+use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace, FramePosition, JobId, Rational};
 use mondrian_core::{FrameRounding, TimelineTime, WorkingColorSpace, WorkingRgbaF32Frame};
 use mondrian_media::audio::{
@@ -21,11 +22,11 @@ use mondrian_media::{
 };
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
-    evaluate_timeline_render_plan, execute_cpu_input_stage, execute_cpu_input_stage_float,
-    execute_cpu_output_boundary_float, execute_cpu_output_boundary_rgba8,
+    evaluate_timeline_render_plan, execute_cpu_output_boundary_float,
+    execute_cpu_output_boundary_rgba8, execute_cpu_source_input_stage,
     execute_cpu_working_transform, ColorFrameResidency, CpuColorFrame, CpuEncodedColorFrame,
-    GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat, GpuContext, LinearFloatSource,
-    RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
+    CpuSourceColorFrame, GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat, GpuContext,
+    LinearFloatSource, RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
     RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
     RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderInputTransform,
     RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
@@ -1531,6 +1532,7 @@ fn execute_timeline_export(
                 signal: Some(expected_export_video_signal(
                     &timeline.sequence.settings,
                     &job.config.preset.video,
+                    job.config.preset.alpha_mode,
                 )),
             }),
             expected_duration_secs: Some(
@@ -1594,6 +1596,7 @@ fn execute_timeline_export(
             &mut cmd,
             &timeline.sequence.settings,
             &job.config.preset.video,
+            job.config.preset.alpha_mode,
         );
         if timeline.sequence.settings.color_management.preserve_hdr_metadata {
             if let Err(err) = apply_h265_hdr_metadata_args(&mut cmd, &timeline.sequence.settings) {
@@ -1629,6 +1632,7 @@ fn execute_timeline_export(
             range,
             width,
             height,
+            job.config.preset.alpha_mode,
             cancel,
             report,
             report_diagnostics,
@@ -2109,6 +2113,7 @@ fn write_timeline_frames(
     range: TimelineRenderRange,
     width: u32,
     height: u32,
+    alpha_mode: ExportAlphaMode,
     cancel: &AtomicBool,
     report: &mut dyn FnMut(JobStatus, f32),
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
@@ -2120,6 +2125,7 @@ fn write_timeline_frames(
         range,
         width,
         height,
+        alpha_mode,
         cancel,
         report,
         report_diagnostics,
@@ -2132,6 +2138,7 @@ fn write_timeline_frames_to_writer<W: Write>(
     range: TimelineRenderRange,
     width: u32,
     height: u32,
+    alpha_mode: ExportAlphaMode,
     cancel: &AtomicBool,
     report: &mut dyn FnMut(JobStatus, f32),
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
@@ -2158,6 +2165,7 @@ fn write_timeline_frames_to_writer<W: Write>(
             timeline_frame,
             width,
             height,
+            alpha_mode,
             &mut canvas,
             Some(&mut frame_color_counts),
             Some(&mut frame_stage_diagnostics),
@@ -2226,6 +2234,7 @@ fn render_timeline_frame_into(
     timeline_frame: i64,
     width: u32,
     height: u32,
+    alpha_mode: ExportAlphaMode,
     canvas: &mut Vec<u8>,
     input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
     stage_diagnostics: Option<&mut RenderColorStageDiagnostics>,
@@ -2250,6 +2259,7 @@ fn render_timeline_frame_into(
         width,
         height,
         color_context,
+        alpha_mode,
         SequenceRenderTarget::Deliverable(canvas),
         0,
         input_color_counts,
@@ -2303,6 +2313,7 @@ pub fn export_composite_diagnostics_for_frame(
         timeline_frame,
         width,
         height,
+        ExportAlphaMode::FlattenBlack,
         &mut canvas,
         None,
         None,
@@ -2329,6 +2340,7 @@ pub fn export_color_stage_diagnostics_for_frame(
         timeline_frame,
         width,
         height,
+        ExportAlphaMode::FlattenBlack,
         &mut canvas,
         None,
         Some(&mut stage_diagnostics),
@@ -2457,6 +2469,7 @@ fn render_sequence_frame_into(
     width: u32,
     height: u32,
     color_context: ColorContext,
+    alpha_mode: ExportAlphaMode,
     mut target: SequenceRenderTarget<'_>,
     depth: usize,
     mut input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
@@ -2486,12 +2499,23 @@ fn render_sequence_frame_into(
             width,
             height,
             color_context.working_color_space,
+            alpha_mode,
         );
         return Ok(());
     }
 
     let mut decode_cache = (render_plan.len() > 1).then(|| {
-        HashMap::<(AssetId, i64, Rational, ColorSpace, DecodedVideoRange), Arc<DecodedVideoLayer>>::with_capacity(render_plan.len())
+        HashMap::<
+            (
+                AssetId,
+                i64,
+                Rational,
+                ColorSpace,
+                DecodedVideoRange,
+                AlphaInterpretation,
+            ),
+            Arc<DecodedVideoLayer>,
+        >::with_capacity(render_plan.len())
     });
     let mut decoded_media =
         std::iter::repeat_with(|| None).take(render_plan.len()).collect::<Vec<_>>();
@@ -2550,6 +2574,7 @@ fn render_sequence_frame_into(
             media.source_time_base,
             input_color_space,
             input_video_range,
+            media.alpha_interpretation,
         );
         let decoded = if let Some(cache) = decode_cache.as_mut() {
             if let Some(hit) = cache.get(&cache_key) {
@@ -2560,6 +2585,7 @@ fn render_sequence_frame_into(
                     path.as_path(),
                     input_color_space,
                     input_video_range,
+                    media.alpha_interpretation,
                     color_context.working_color_space,
                     &color_context.engine,
                     color_context.tone_map,
@@ -2579,6 +2605,7 @@ fn render_sequence_frame_into(
                 path.as_path(),
                 input_color_space,
                 input_video_range,
+                media.alpha_interpretation,
                 color_context.working_color_space,
                 &color_context.engine,
                 color_context.tone_map,
@@ -2621,6 +2648,7 @@ fn render_sequence_frame_into(
             nested_width,
             nested_height,
             nested_context,
+            alpha_mode,
             SequenceRenderTarget::Working(&mut nested_frame_output),
             depth + 1,
             input_color_counts.as_deref_mut(),
@@ -2712,16 +2740,24 @@ fn render_sequence_frame_into(
             width,
             height,
             color_context.working_color_space,
+            alpha_mode,
         );
         return Ok(());
     }
 
     let mut scratch = TimelineCompositeScratch::default();
+    let composite_options = if matches!(&target, SequenceRenderTarget::Deliverable(_))
+        && alpha_mode == ExportAlphaMode::FlattenBlack
+    {
+        TimelineCompositeOptions::opaque_black()
+    } else {
+        TimelineCompositeOptions::default()
+    };
     let rendered = composite_timeline_elements_color_frame_with_diagnostics(
         width,
         height,
         &composite_elements,
-        TimelineCompositeOptions::default(),
+        composite_options,
         TimelineEffectColorRuntime::new(&color_context.engine, color_context.working_color_space),
         &mut scratch,
     );
@@ -2842,19 +2878,23 @@ fn finish_empty_sequence_target(
     width: u32,
     height: u32,
     working_color_space: WorkingColorSpace,
+    alpha_mode: ExportAlphaMode,
 ) {
     match target {
         SequenceRenderTarget::Working(output) => {
             **output = Some(CpuColorFrame::working(WorkingRgbaF32Frame {
                 width,
                 height,
-                data: vec![[0.0, 0.0, 0.0, 1.0]; width as usize * height as usize],
+                data: vec![[0.0, 0.0, 0.0, 0.0]; width as usize * height as usize],
                 color_space: working_color_space,
             }));
         }
-        SequenceRenderTarget::Deliverable(canvas) => {
-            fill_canvas_black_opaque(canvas, frame_contract, width, height);
-        }
+        SequenceRenderTarget::Deliverable(canvas) => match alpha_mode {
+            ExportAlphaMode::FlattenBlack => {
+                fill_canvas_black_opaque(canvas, frame_contract, width, height);
+            }
+            ExportAlphaMode::Preserve => canvas.fill(0),
+        },
     }
 }
 
@@ -2863,6 +2903,7 @@ fn decode_video_layer_scaled(
     path: &Path,
     input_color_space: ColorSpace,
     input_video_range: DecodedVideoRange,
+    alpha_interpretation: AlphaInterpretation,
     working_color_space: WorkingColorSpace,
     engine: &ColorEngine,
     tone_map: bool,
@@ -2879,25 +2920,21 @@ fn decode_video_layer_scaled(
     .with_max_size(Some(width), Some(height));
     let input_transform =
         RenderInputTransform::to_working(working_color_space, tone_map, engine.clone());
-    let execution = match decode_preview_frame_cancellable(request, || false) {
-        Ok(PreviewDecodeOutcome::Frame(frame)) => {
-            let source = CpuEncodedColorFrame::source_rgba8_shared(
-                frame.width,
-                frame.height,
-                input_color_space,
-                frame.into_shared_data(),
-            );
-            execute_cpu_input_stage(&source, &input_transform)
-        }
-        Ok(PreviewDecodeOutcome::FloatFrame(frame)) => {
-            let source = LinearFloatSource::new(
-                frame.width,
-                frame.height,
-                input_color_space,
-                frame.into_data(),
-            );
-            execute_cpu_input_stage_float(&source, &input_transform)
-        }
+    let source: CpuSourceColorFrame = match decode_preview_frame_cancellable(request, || false) {
+        Ok(PreviewDecodeOutcome::Frame(frame)) => CpuEncodedColorFrame::source_rgba8_shared(
+            frame.width,
+            frame.height,
+            input_color_space,
+            frame.into_shared_data(),
+        )
+        .into(),
+        Ok(PreviewDecodeOutcome::FloatFrame(frame)) => LinearFloatSource::new(
+            frame.width,
+            frame.height,
+            input_color_space,
+            frame.into_data(),
+        )
+        .into(),
         Ok(PreviewDecodeOutcome::Canceled) => {
             return Err(format!(
                 "asset={} path={} err=export still-frame decode canceled unexpectedly",
@@ -2922,8 +2959,17 @@ fn decode_video_layer_scaled(
                 err
             ));
         }
-    }
-    .map_err(|err| format!("asset={asset_id} color transform failed: {err}"))?;
+    };
+    let source = source.normalize_alpha(alpha_interpretation).map_err(|err| {
+        format!(
+            "asset={} path={} alpha interpretation failed: {}",
+            asset_id,
+            path.display(),
+            err
+        )
+    })?;
+    let execution = execute_cpu_source_input_stage(&source, &input_transform)
+        .map_err(|err| format!("asset={asset_id} color transform failed: {err}"))?;
     Ok(Arc::new(DecodedVideoLayer {
         frame: execution.result.frame,
         stage_diagnostics: execution.stage_diagnostics,
@@ -3765,6 +3811,7 @@ mod tests {
             0,
             2,
             2,
+            ExportAlphaMode::FlattenBlack,
             &mut canvas,
             None,
             None,
@@ -4018,6 +4065,7 @@ mod tests {
             2,
             2,
             ctx,
+            ExportAlphaMode::FlattenBlack,
             SequenceRenderTarget::Deliverable(&mut canvas),
             0,
             None,
@@ -4082,6 +4130,7 @@ mod tests {
             2,
             2,
             ctx,
+            ExportAlphaMode::FlattenBlack,
             SequenceRenderTarget::Deliverable(&mut canvas),
             0,
             None,
@@ -4272,6 +4321,31 @@ mod tests {
 
         validate_timeline_export_color_compatibility(&config, &timeline)
             .expect("camera log ProRes intermediate should pass");
+    }
+
+    #[test]
+    fn export_alpha_validation_rejects_opaque_delivery_codec() {
+        let timeline = timeline_input_with_output_color(ColorSpace::Rec709);
+        let mut config = dummy_config("alpha.mp4");
+        config.preset.alpha_mode = ExportAlphaMode::Preserve;
+
+        let err = validate_timeline_export_color_compatibility(&config, &timeline)
+            .expect_err("H.264 must not pretend to preserve alpha");
+
+        assert!(err.contains("ProRes 4444"));
+    }
+
+    #[test]
+    fn export_alpha_validation_allows_mov_prores_4444_xq() {
+        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec709);
+        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Twelve;
+        let mut config = dummy_config("alpha.mov");
+        config.preset.container = Container::Mov;
+        config.preset.video = VideoCodecConfig::ProRes { variant: "4444xq".to_owned() };
+        config.preset.alpha_mode = ExportAlphaMode::Preserve;
+
+        validate_timeline_export_color_compatibility(&config, &timeline)
+            .expect("MOV ProRes 4444 XQ should preserve alpha");
     }
 
     #[test]
@@ -4589,7 +4663,7 @@ mod tests {
         let codec = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
 
         let mut cmd = Command::new("ffmpeg");
-        apply_export_video_signal_args(&mut cmd, &settings, &codec);
+        apply_export_video_signal_args(&mut cmd, &settings, &codec, ExportAlphaMode::FlattenBlack);
         let args = cmd.get_args().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>();
 
         assert!(args.windows(2).any(|pair| pair == ["-pix_fmt", "yuv420p10le"]));
@@ -4606,7 +4680,7 @@ mod tests {
         settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
         let codec = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
         let mut cmd = Command::new("ffmpeg");
-        apply_export_video_signal_args(&mut cmd, &settings, &codec);
+        apply_export_video_signal_args(&mut cmd, &settings, &codec, ExportAlphaMode::FlattenBlack);
         let args = cmd.get_args().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>();
 
         assert!(args.windows(2).any(|pair| pair == ["-color_primaries", "bt2020"]));
@@ -4635,7 +4709,12 @@ mod tests {
             settings.color_management.output_color_space = color_space;
             settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
             let mut cmd = Command::new("ffmpeg");
-            apply_export_video_signal_args(&mut cmd, &settings, &codec);
+            apply_export_video_signal_args(
+                &mut cmd,
+                &settings,
+                &codec,
+                ExportAlphaMode::FlattenBlack,
+            );
 
             let args =
                 cmd.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
@@ -4656,7 +4735,7 @@ mod tests {
         let codec = VideoCodecConfig::H264 { crf: 20, bitrate_kbps: None };
         let mut cmd = Command::new("ffmpeg");
 
-        apply_export_video_signal_args(&mut cmd, &settings, &codec);
+        apply_export_video_signal_args(&mut cmd, &settings, &codec, ExportAlphaMode::FlattenBlack);
 
         let args = cmd.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
         assert!(args.windows(2).any(|pair| pair == ["-color_trc", "iec61966-2-1"]));
@@ -4674,7 +4753,8 @@ mod tests {
         settings.color_management.video_range = VideoRange::Legal;
         let codec = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
 
-        let expected = expected_export_video_signal(&settings, &codec);
+        let expected =
+            expected_export_video_signal(&settings, &codec, ExportAlphaMode::FlattenBlack);
 
         assert_eq!(expected.pixel_format.as_deref(), Some("yuv420p10le"));
         assert_eq!(expected.color_range.as_deref(), Some("tv"));
@@ -4686,8 +4766,12 @@ mod tests {
         settings.color_management.output_color_space = ColorSpace::AppleLogBt2020;
         settings.color_management.delivery_bit_depth = DeliveryBitDepth::Twelve;
         let prores = VideoCodecConfig::ProRes { variant: "4444xq".to_owned() };
-        let expected = expected_export_video_signal(&settings, &prores);
-        assert_eq!(expected.pixel_format.as_deref(), Some("yuva444p12le"));
+        let expected =
+            expected_export_video_signal(&settings, &prores, ExportAlphaMode::FlattenBlack);
+        assert_eq!(expected.pixel_format.as_deref(), Some("yuv444p12le"));
+        let alpha_expected =
+            expected_export_video_signal(&settings, &prores, ExportAlphaMode::Preserve);
+        assert_eq!(alpha_expected.pixel_format.as_deref(), Some("yuva444p12le"));
         assert!(expected.require_color_tags_absent);
     }
 
@@ -4705,13 +4789,19 @@ mod tests {
         ] {
             let mut settings = SequenceSettings::default();
             settings.color_management.output_color_space = color_space;
-            let expected = expected_export_video_signal(&settings, &codec);
+            let expected =
+                expected_export_video_signal(&settings, &codec, ExportAlphaMode::FlattenBlack);
             assert_eq!(expected.color_primaries.as_deref(), Some(primaries));
             assert_eq!(expected.color_transfer.as_deref(), Some(transfer));
             assert_eq!(expected.color_matrix.as_deref(), Some(matrix));
 
             let mut cmd = Command::new("ffmpeg");
-            apply_export_video_signal_args(&mut cmd, &settings, &codec);
+            apply_export_video_signal_args(
+                &mut cmd,
+                &settings,
+                &codec,
+                ExportAlphaMode::FlattenBlack,
+            );
             let args =
                 cmd.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
             assert!(args.windows(2).any(|pair| {
@@ -4739,12 +4829,85 @@ mod tests {
         };
 
         let mut canvas = vec![77u8; 4 * 2 * 4];
-        render_timeline_frame_into(&timeline, 0, 4, 2, &mut canvas, None, None, None, None)
-            .expect("render should pass");
+        render_timeline_frame_into(
+            &timeline,
+            0,
+            4,
+            2,
+            ExportAlphaMode::FlattenBlack,
+            &mut canvas,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("render should pass");
 
         for px in canvas.chunks_exact(4) {
             assert_eq!(px, &[0, 0, 0, 255]);
         }
+    }
+
+    #[test]
+    fn render_timeline_frame_into_preserves_or_flattens_alpha_explicitly() {
+        let mut seq = Sequence::new("alpha-delivery");
+        seq.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Eight;
+        let tb = seq.time_base();
+        seq.video_tracks[0]
+            .add_clip(
+                Clip::new_solid_color(
+                    AssetId::new(),
+                    mondrian_core::Color::from_rgba8(255, 0, 0, 128),
+                    tt(0, tb),
+                    tt(1, tb),
+                )
+                .expect("alpha solid"),
+            )
+            .expect("add alpha solid");
+        seq.in_point = Some(tt(0, tb));
+        seq.out_point = Some(tt(1, tb));
+        let timeline = TimelineExportInput {
+            sequence: seq,
+            sequences: Vec::new(),
+            asset_paths: HashMap::new(),
+            asset_color_spaces: HashMap::new(),
+            asset_interpretations: HashMap::new(),
+            asset_color_diagnostics: HashMap::new(),
+            range: TimelineExportRange::SequenceInOut,
+            project_color_management: mondrian_core::ProjectColorManagement::default(),
+        };
+
+        let mut preserved = Vec::new();
+        render_timeline_frame_into(
+            &timeline,
+            0,
+            2,
+            2,
+            ExportAlphaMode::Preserve,
+            &mut preserved,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("preserve alpha render");
+        assert!(preserved.chunks_exact(4).all(|pixel| pixel[3] == 128));
+
+        let mut flattened = Vec::new();
+        render_timeline_frame_into(
+            &timeline,
+            0,
+            2,
+            2,
+            ExportAlphaMode::FlattenBlack,
+            &mut flattened,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("flatten alpha render");
+        assert!(flattened.chunks_exact(4).all(|pixel| pixel[3] == 255));
     }
 
     #[test]
@@ -4766,8 +4929,19 @@ mod tests {
         };
 
         let mut canvas = vec![77u8; 4 * 2 * 4];
-        render_timeline_frame_into(&timeline, 0, 4, 2, &mut canvas, None, None, None, None)
-            .expect("render should pass");
+        render_timeline_frame_into(
+            &timeline,
+            0,
+            4,
+            2,
+            ExportAlphaMode::FlattenBlack,
+            &mut canvas,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("render should pass");
 
         assert_eq!(canvas.len(), 4 * 2 * 8);
         for px in canvas.chunks_exact(8) {
@@ -4926,6 +5100,7 @@ mod tests {
             0,
             1,
             1,
+            ExportAlphaMode::FlattenBlack,
             &mut canvas,
             Some(&mut counts),
             None,
@@ -5113,6 +5288,7 @@ mod tests {
             0,
             2,
             2,
+            ExportAlphaMode::FlattenBlack,
             &mut canvas,
             None,
             None,
@@ -5161,8 +5337,19 @@ mod tests {
         };
 
         let mut canvas = vec![0u8; 2 * 2 * 8];
-        render_timeline_frame_into(&timeline, 0, 2, 2, &mut canvas, None, None, None, None)
-            .expect("render high-bit canvas");
+        render_timeline_frame_into(
+            &timeline,
+            0,
+            2,
+            2,
+            ExportAlphaMode::FlattenBlack,
+            &mut canvas,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("render high-bit canvas");
 
         assert_eq!(canvas.len(), 2 * 2 * 8);
         for px in canvas.chunks_exact(8) {

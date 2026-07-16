@@ -784,7 +784,7 @@ impl GpuFrameCompositor {
         clear_working_texture(
             encoder,
             &target_a.resource().texture_view,
-            wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+            wgpu::Color::TRANSPARENT,
         );
 
         let mut transient_uploads = Vec::new();
@@ -1880,16 +1880,11 @@ mod tests {
             17,
         )
         .expect("CPU float procedural-solid reference");
-        let mut expected = vec![[0.0, 0.0, 0.0, 1.0]; 16];
+        let mut expected = vec![[0.0, 0.0, 0.0, 0.0]; 16];
         for y in 0..4 {
             for x in 1..4 {
                 let source = effected_source[y * 4 + (x - 1)];
-                expected[y * 4 + x] = [
-                    source[0] * source[3],
-                    source[1] * source[3],
-                    source[2] * source[3],
-                    1.0,
-                ];
+                expected[y * 4 + x] = source;
             }
         }
         let layer = GpuCompositeLayer {

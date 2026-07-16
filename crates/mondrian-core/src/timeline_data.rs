@@ -27,7 +27,7 @@ pub enum ClipKind {
 }
 
 /// How to interpret alpha channel in media assets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum AlphaInterpretation {
     #[default]
     Straight,

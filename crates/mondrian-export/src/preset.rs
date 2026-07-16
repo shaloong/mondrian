@@ -40,6 +40,17 @@ pub enum AudioCodecConfig {
     Mp3 { bitrate_kbps: u32 },
 }
 
+/// How timeline coverage is delivered by an export preset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportAlphaMode {
+    /// Composite over scene-linear black before the output transform.
+    #[default]
+    FlattenBlack,
+    /// Preserve straight coverage alpha in an explicitly supported codec.
+    Preserve,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportPreset {
     pub name: String,
@@ -47,6 +58,9 @@ pub struct ExportPreset {
     pub video: VideoCodecConfig,
     pub audio: AudioCodecConfig,
     pub resolution: Option<Resolution>,
+    /// Explicit alpha delivery policy; codec choice alone never implies transparency.
+    #[serde(default)]
+    pub alpha_mode: ExportAlphaMode,
 }
 
 impl ExportPreset {
@@ -57,6 +71,7 @@ impl ExportPreset {
             video: VideoCodecConfig::H264 { crf: 18, bitrate_kbps: Some(8000) },
             audio: AudioCodecConfig::Aac { bitrate_kbps: 192 },
             resolution: Some(Resolution { width: 1920, height: 1080 }),
+            alpha_mode: ExportAlphaMode::FlattenBlack,
         }
     }
 
@@ -67,6 +82,7 @@ impl ExportPreset {
             video: VideoCodecConfig::H264 { crf: 20, bitrate_kbps: Some(6000) },
             audio: AudioCodecConfig::Aac { bitrate_kbps: 128 },
             resolution: Some(Resolution { width: 1080, height: 1920 }),
+            alpha_mode: ExportAlphaMode::FlattenBlack,
         }
     }
 
@@ -77,6 +93,19 @@ impl ExportPreset {
             video: VideoCodecConfig::H264 { crf: 23, bitrate_kbps: None },
             audio: AudioCodecConfig::Aac { bitrate_kbps: 128 },
             resolution: Some(Resolution { width: 1280, height: 720 }),
+            alpha_mode: ExportAlphaMode::FlattenBlack,
+        }
+    }
+
+    /// MOV/ProRes 4444 XQ intermediate that preserves straight alpha.
+    pub fn prores_4444_alpha() -> Self {
+        Self {
+            name: "ProRes 4444 XQ + Alpha".into(),
+            container: Container::Mov,
+            video: VideoCodecConfig::ProRes { variant: "4444xq".into() },
+            audio: AudioCodecConfig::Pcm { bit_depth: 24 },
+            resolution: None,
+            alpha_mode: ExportAlphaMode::Preserve,
         }
     }
 }

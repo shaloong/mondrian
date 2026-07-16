@@ -2,6 +2,10 @@
 
 This document describes the target direction. The codebase is currently transitional: `FrameCompositor` and UI rendering are GPU-backed, but timeline compositing/effects still have CPU RGBA paths.
 
+The working compositor clears its accumulation target to transparent black.
+Opaque viewer or export backgrounds are explicit downstream presentation or
+delivery operations; they are never baked into the shared GPU Program frame.
+
 ## Target Principle
 
 Old model:
