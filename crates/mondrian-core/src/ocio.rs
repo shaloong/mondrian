@@ -4160,6 +4160,61 @@ mod tests {
     }
 
     #[test]
+    fn pinned_aces_output_views_match_the_bundled_ocio_registry() {
+        const PROGRAM_OUTPUTS: [ColorSpace; 6] = [
+            ColorSpace::Srgb,
+            ColorSpace::Rec709,
+            ColorSpace::DisplayP3,
+            ColorSpace::Rec2020,
+            ColorSpace::Rec2100Hlg,
+            ColorSpace::Rec2100Pq,
+        ];
+
+        for preset in [
+            crate::types::AcesConfigPreset::StudioV4Aces2Ocio25,
+            crate::types::AcesConfigPreset::CgV4Aces2Ocio25,
+        ] {
+            let expected_supported: &[ColorSpace] = match preset {
+                crate::types::AcesConfigPreset::StudioV4Aces2Ocio25 => &[
+                    ColorSpace::Srgb,
+                    ColorSpace::Rec709,
+                    ColorSpace::DisplayP3,
+                    ColorSpace::Rec2100Hlg,
+                    ColorSpace::Rec2100Pq,
+                ],
+                crate::types::AcesConfigPreset::CgV4Aces2Ocio25 => &[
+                    ColorSpace::Srgb,
+                    ColorSpace::Rec709,
+                    ColorSpace::DisplayP3,
+                    ColorSpace::Rec2100Pq,
+                ],
+            };
+
+            for output in PROGRAM_OUTPUTS {
+                let resolved = preset.output_display_view(output);
+                assert_eq!(
+                    resolved.is_some(),
+                    expected_supported.contains(&output),
+                    "preset={preset:?}, output={output:?}"
+                );
+                let Some((display, view)) = resolved else {
+                    continue;
+                };
+                with_ocio_config_for_source(&preset.ocio_source(), |config, _generation| {
+                    if config_has_display_view(config, display, view) {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "preset {preset:?} output {output:?} resolved missing display/view '{display}/{view}'"
+                        ))
+                    }
+                })
+                .expect("target-specific ACES display/view must exist");
+            }
+        }
+    }
+
+    #[test]
     fn cpu_processor_cache_reuses_engine_qualified_processor() {
         clear_ocio_cpu_processor_cache_for_current_thread();
         let before = ocio_cpu_processor_cache_diagnostics();

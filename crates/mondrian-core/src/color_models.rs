@@ -1,7 +1,8 @@
 //! UI-facing color models and parsing helpers.
 
 use crate::types::{
-    Color, ColorEngine, ColorSpace, MondrianStandardPackageIdentity, WorkingColorSpace,
+    AcesConfigPreset, Color, ColorEngine, ColorSpace, MondrianStandardPackageIdentity,
+    WorkingColorSpace,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -17,6 +18,12 @@ pub enum OutputTransformIntent {
     MondrianStandard {
         /// Full Standard package identity stored in project/cache contracts.
         package: MondrianStandardPackageIdentity,
+    },
+    /// An official, immutable ACES config preset whose exact View is resolved
+    /// from the requested encoded output target.
+    Aces {
+        /// Exact ACES/OCIO package release selected by the project.
+        preset: AcesConfigPreset,
     },
     /// A direct working-space to encoded-output conversion without a view transform.
     Colorimetric,
@@ -40,12 +47,18 @@ impl OutputTransformIntent {
         Self::MondrianStandard { package }
     }
 
+    /// Select an exact immutable ACES config preset.
+    pub const fn aces_preset(preset: AcesConfigPreset) -> Self {
+        Self::Aces { preset }
+    }
+
     /// Resolve this product intent into the optional OCIO display/view pair
     /// consumed by a renderer output boundary.
     ///
-    /// `Colorimetric` deliberately returns no view. Mondrian Standard resolves
-    /// the output-target-specific view from its immutable package and rejects
-    /// an engine/package mismatch instead of silently executing another config.
+    /// `Colorimetric` deliberately returns no view. Mondrian Standard and ACES
+    /// resolve output-target-specific Views from their immutable package or
+    /// preset and reject identity drift instead of silently executing another
+    /// config or relabeling a default View.
     pub fn resolve_display_view(
         &self,
         output_color_space: ColorSpace,
@@ -54,6 +67,30 @@ impl OutputTransformIntent {
         match self {
             Self::Colorimetric => Ok(None),
             Self::OcioDisplayView { display, view } => Ok(Some((display.clone(), view.clone()))),
+            Self::Aces { preset } => {
+                let ColorEngine::Aces { preset: engine_preset } = engine else {
+                    return Err(OutputTransformIntentResolutionError::EngineMismatch {
+                        intent: format!("ACES preset '{}'", preset.builtin_name()),
+                        engine: engine.name().to_owned(),
+                    });
+                };
+                if preset != engine_preset {
+                    return Err(OutputTransformIntentResolutionError::AcesPresetMismatch {
+                        intent_preset: preset.builtin_name().to_owned(),
+                        engine_preset: engine_preset.builtin_name().to_owned(),
+                    });
+                }
+                preset
+                    .output_display_view(output_color_space)
+                    .map(|(display, view)| (display.to_owned(), view.to_owned()))
+                    .map(Some)
+                    .ok_or_else(
+                        || OutputTransformIntentResolutionError::UnsupportedAcesOutput {
+                            preset: preset.builtin_name().to_owned(),
+                            output_color_space,
+                        },
+                    )
+            }
             Self::MondrianStandard { package } => {
                 let ColorEngine::MondrianStandard { package: engine_package } = engine else {
                     return Err(OutputTransformIntentResolutionError::EngineMismatch {
@@ -104,6 +141,16 @@ pub enum OutputTransformIntentResolutionError {
         /// Package digest pinned by the engine.
         engine_sha256: String,
     },
+    /// The intent and engine pin different immutable ACES config releases.
+    #[error(
+        "ACES preset mismatch: intent preset='{intent_preset}', engine preset='{engine_preset}'"
+    )]
+    AcesPresetMismatch {
+        /// Built-in config identifier pinned by the intent.
+        intent_preset: String,
+        /// Built-in config identifier pinned by the engine.
+        engine_preset: String,
+    },
     /// Mondrian Standard has no view for the requested encoded output target.
     #[error("Mondrian Standard cannot resolve {output_color_space:?}: {reason}")]
     UnsupportedStandardOutput {
@@ -111,6 +158,16 @@ pub enum OutputTransformIntentResolutionError {
         output_color_space: ColorSpace,
         /// Resolution failure from the package registry.
         reason: String,
+    },
+    /// The selected ACES config has no rendering View for this output target.
+    #[error(
+        "ACES preset '{preset}' has no rendering View for output target {output_color_space:?}"
+    )]
+    UnsupportedAcesOutput {
+        /// Built-in config identifier pinned by the intent.
+        preset: String,
+        /// Requested encoded output target.
+        output_color_space: ColorSpace,
     },
 }
 
@@ -799,6 +856,58 @@ mod tests {
         assert!(matches!(
             error,
             OutputTransformIntentResolutionError::EngineMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn output_transform_intent_resolves_target_specific_aces_view() {
+        let preset = crate::AcesConfigPreset::StudioV4Aces2Ocio25;
+        let intent = OutputTransformIntent::aces_preset(preset);
+
+        assert_eq!(
+            intent
+                .resolve_display_view(ColorSpace::DisplayP3, &ColorEngine::Aces { preset })
+                .expect("ACES Display P3 target")
+                .expect("display/view"),
+            (
+                "Display P3 - Display".to_owned(),
+                "ACES 2.0 - SDR 100 nits (P3 D65)".to_owned(),
+            )
+        );
+        assert_eq!(
+            intent
+                .resolve_display_view(ColorSpace::Rec2100Pq, &ColorEngine::Aces { preset })
+                .expect("ACES PQ target")
+                .expect("display/view"),
+            (
+                "Rec.2100-PQ - Display".to_owned(),
+                "ACES 2.0 - HDR 1000 nits (Rec.2020)".to_owned(),
+            )
+        );
+    }
+
+    #[test]
+    fn output_transform_intent_rejects_unsupported_aces_target_and_preset_drift() {
+        let studio = crate::AcesConfigPreset::StudioV4Aces2Ocio25;
+        let intent = OutputTransformIntent::aces_preset(studio);
+
+        let unsupported = intent
+            .resolve_display_view(ColorSpace::Rec2020, &ColorEngine::Aces { preset: studio })
+            .expect_err("official ACES 2.0 presets have no Rec.2020 SDR View");
+        assert!(matches!(
+            unsupported,
+            OutputTransformIntentResolutionError::UnsupportedAcesOutput { .. }
+        ));
+
+        let drift = intent
+            .resolve_display_view(
+                ColorSpace::Srgb,
+                &ColorEngine::Aces { preset: crate::AcesConfigPreset::CgV4Aces2Ocio25 },
+            )
+            .expect_err("intent must not execute through another ACES preset");
+        assert!(matches!(
+            drift,
+            OutputTransformIntentResolutionError::AcesPresetMismatch { .. }
         ));
     }
 }

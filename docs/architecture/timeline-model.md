@@ -99,6 +99,14 @@ misrepresented as Standard rendering Views. Domain validation resolves the
 effective typed output intent against the selected package, so an externally
 authored unsupported Standard target fails before render planning.
 
+ACES uses the same typed-intent validation boundary. A sequence carries the
+immutable ACES preset until its requested output target is resolved, rather
+than materializing the preset's default Rec.709 View for every target. The
+official Studio preset supports sRGB, Rec.709, Display P3, HLG, and PQ; the CG
+preset omits HLG, and both omit Rec.2020 SDR. Unsupported combinations fail
+sequence validation instead of producing a differently encoded signal with
+contradictory delivery metadata.
+
 ## Track
 
 `Track` owns an ordered `Vec<Clip>` and track-level state:

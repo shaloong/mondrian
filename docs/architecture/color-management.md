@@ -198,6 +198,20 @@ without selecting process-global state. A missing preset or processor fails at
 the explicit load/planning boundary; it must never rewrite that intent to
 `Colorimetric`.
 
+ACES Program Output is represented by a typed `Aces { preset }` intent rather
+than an eagerly copied default display/view. At the output boundary, the pinned
+preset resolves the requested encoded target to an exact View from that
+immutable config: both current presets support sRGB, Rec.709, Display P3, and
+1000-nit Rec.2100 PQ; the Studio preset additionally supports Rec.2100 HLG.
+Neither official preset has an ACES Rec.2020 SDR rendering View. Unsupported
+target/preset combinations and preset drift fail before render planning; the
+implementation must never run the default Rec.709 View and relabel its pixels
+as another output. A registry test validates every declared mapping against the
+real OCIO built-in config.
+The existing real-wgpu ACES PQ accuracy gate now enters through this typed
+intent and the production `RenderOutputColorBoundary::from_intent` path before
+comparing GPU output with the stock-OCIO CPU result.
+
 Custom OCIO is persisted as a complete `CustomOcioProjectIdentity`, not a bare
 locator. It requires the source, primary config SHA-256, parsed OCIO cache-id,
 a SHA-256 over every executable colorspace-to/from-working route plus the

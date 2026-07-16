@@ -905,11 +905,7 @@ impl SequenceSettings {
                 mondrian_core::OutputTransformIntent::mondrian_standard_package(*package)
             }
             (ColorEngine::Aces { preset }, true) => {
-                let (display, view) = preset.default_display_view();
-                mondrian_core::OutputTransformIntent::OcioDisplayView {
-                    display: display.to_owned(),
-                    view: view.to_owned(),
-                }
+                mondrian_core::OutputTransformIntent::aces_preset(*preset)
             }
             (ColorEngine::CustomOcio { identity }, true) => {
                 mondrian_core::OutputTransformIntent::OcioDisplayView {
@@ -2415,11 +2411,38 @@ mod tests {
         assert!(ctx.tone_map);
         assert_eq!(
             ctx.output_transform,
-            mondrian_core::OutputTransformIntent::OcioDisplayView {
-                display: "sRGB - Display".to_owned(),
-                view: "ACES 2.0 - SDR 100 nits (Rec.709)".to_owned(),
-            }
+            mondrian_core::OutputTransformIntent::aces_preset(
+                mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+            )
         );
+    }
+
+    #[test]
+    fn aces_scene_output_resolves_the_requested_target_or_fails_closed() {
+        let preset = mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25;
+        let project_cm = ProjectColorManagement::default();
+        let mut settings = SequenceSettings::default();
+        settings.color_management.inherit = false;
+        settings.color_management.engine = ColorEngine::Aces { preset };
+        settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
+
+        let pq = settings.root_program_color_context(&project_cm);
+        assert_eq!(
+            pq.output_transform
+                .resolve_display_view(ColorSpace::Rec2100Pq, &pq.engine)
+                .expect("target-specific ACES PQ View")
+                .expect("display/view"),
+            (
+                "Rec.2100-PQ - Display".to_owned(),
+                "ACES 2.0 - HDR 1000 nits (Rec.2020)".to_owned(),
+            )
+        );
+
+        settings.color_management.output_color_space = ColorSpace::Rec2020;
+        let error = settings
+            .validate_with_project_color_management(&project_cm)
+            .expect_err("ACES must not relabel its default Rec.709 View as Rec.2020 SDR");
+        assert!(error.to_string().contains("no rendering View"), "{error:#}");
     }
 
     #[test]

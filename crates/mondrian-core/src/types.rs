@@ -977,6 +977,36 @@ impl AcesConfigPreset {
         (self.default_display(), self.default_view())
     }
 
+    /// Resolve an encoded Program Output target to the exact rendering View
+    /// shipped by this immutable ACES config preset.
+    ///
+    /// `None` means the preset has no rendering View for that target. Callers
+    /// must not substitute the preset default and relabel the resulting signal.
+    pub const fn output_display_view(
+        self,
+        output_color_space: ColorSpace,
+    ) -> Option<(&'static str, &'static str)> {
+        match (self, output_color_space) {
+            (_, ColorSpace::Srgb) => Some(("sRGB - Display", "ACES 2.0 - SDR 100 nits (Rec.709)")),
+            (_, ColorSpace::Rec709) => Some((
+                "Rec.1886 Rec.709 - Display",
+                "ACES 2.0 - SDR 100 nits (Rec.709)",
+            )),
+            (_, ColorSpace::DisplayP3) => {
+                Some(("Display P3 - Display", "ACES 2.0 - SDR 100 nits (P3 D65)"))
+            }
+            (Self::StudioV4Aces2Ocio25, ColorSpace::Rec2100Hlg) => Some((
+                "Rec.2100-HLG - Display",
+                "ACES 2.0 - HDR 1000 nits (P3 D65)",
+            )),
+            (_, ColorSpace::Rec2100Pq) => Some((
+                "Rec.2100-PQ - Display",
+                "ACES 2.0 - HDR 1000 nits (Rec.2020)",
+            )),
+            _ => None,
+        }
+    }
+
     /// Exact built-in OCIO registry identifier for this immutable preset.
     pub const fn builtin_name(self) -> &'static str {
         match self {

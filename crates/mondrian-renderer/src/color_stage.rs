@@ -5732,7 +5732,7 @@ mod tests {
 
     async fn assert_gpu_pq_view_meets_delta_e_itp_budget(
         engine: ColorEngine,
-        view: &str,
+        intent: OutputTransformIntent,
         first_frame_id: u64,
     ) {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
@@ -5741,13 +5741,14 @@ mod tests {
             return;
         };
         let frame = pq_accuracy_working_frame();
-        let boundary = RenderOutputColorBoundary::display_view(
+        let boundary = RenderOutputColorBoundary::from_intent(
+            RenderOutputColorBoundaryTarget::Display,
             ColorSpace::Rec2100Pq,
-            "Rec.2100-PQ - Display",
-            view,
-            false,
+            &intent,
+            true,
             engine,
-        );
+        )
+        .expect("typed PQ output intent");
         let expected = execute_cpu_output_boundary_float(&frame, &boundary)
             .expect("CPU PQ display/view boundary");
         let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(first_frame_id);
@@ -5817,19 +5818,18 @@ mod tests {
     async fn gpu_standard_pq_view_meets_delta_e_itp_budget_on_real_wgpu_device() {
         assert_gpu_pq_view_meets_delta_e_itp_budget(
             ColorEngine::mondrian_standard(),
-            "Mondrian Standard HDR 1000 nits v1",
+            OutputTransformIntent::mondrian_standard(),
             1_250,
         )
         .await;
     }
 
     #[tokio::test]
-    async fn gpu_explicit_aces_pq_view_meets_delta_e_itp_budget_on_real_wgpu_device() {
-        // This remains a generic OCIO CPU/GPU parity reference for the separate
-        // ACES mode; it is not the Mondrian Standard HDR product contract.
+    async fn gpu_aces_pq_intent_meets_delta_e_itp_budget_on_real_wgpu_device() {
+        let preset = AcesConfigPreset::StudioV4Aces2Ocio25;
         assert_gpu_pq_view_meets_delta_e_itp_budget(
-            ColorEngine::Aces { preset: AcesConfigPreset::StudioV4Aces2Ocio25 },
-            "ACES 2.0 - HDR 1000 nits (Rec.2020)",
+            ColorEngine::Aces { preset },
+            OutputTransformIntent::aces_preset(preset),
             1_251,
         )
         .await;
