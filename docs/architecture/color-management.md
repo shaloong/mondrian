@@ -53,10 +53,11 @@ View. Display probing and timeline output planning share this target-aware
 resolver so diagnostics cannot report a different View than the render
 boundary.
 
-Display-referred SDR projects do not invoke this scene View merely because it
-exists: their output boundary remains direct colorimetric OCIO conversion.
-Scene-referred workflows or an explicit tone-map policy select the Standard
-View, so ordinary Rec.709-to-Rec.709 editing is not needlessly filmicized.
+An explicitly DisplayReferred technical workflow does not invoke this scene
+View: its output boundary remains direct colorimetric OCIO conversion. New
+projects are SceneReferred and select the Standard View by default; its SDR
+design is responsible for preserving ordinary Rec.709 appearance without an
+unnecessary filmic reshape.
 `mondrian-core::mondrian_default_ocio_contract()` is the Rust-level product
 contract for that package. It lists the Standard package version, pinned config
 name, exact config and whole-package SHA-256 digests, resource digests, virtual
@@ -247,7 +248,7 @@ validated fail-closed after the preset is applied.
 
 Important fields:
 
-- `workflow`: DisplayReferred, SceneReferred, Aces
+- `workflow`: SceneReferred (default) or explicit DisplayReferred technical bypass
 - `display_management`: monitor/profile reference, viewer SDR/HDR mode, and tone-map policy
 - `missing_metadata_policy`
 - `nested_processing`
@@ -258,12 +259,12 @@ Important fields:
 
 `DisplayToneMapPolicy` controls the final working-to-display/export boundary.
 Its `Automatic` mode follows the effective scene-referred workflow; the
-per-sequence `auto_tone_map_media` authoring preference does not implicitly
-turn every display-referred Rec.709 output into a View transform. That media
-preference remains attached to individual media render plans, while final
-output tone mapping is selected explicitly by workflow or policy. This keeps a
-normal SDR sequence on the direct colorimetric OCIO processor and prevents a
-configured-but-inactive display/view from changing preview or export pixels.
+per-sequence `auto_tone_map_media` authoring preference remains attached to
+individual media render plans. New sequences are scene-referred and therefore
+execute the selected engine's product View by default. `ColorEngine` is the sole
+Standard/ACES/Custom mode selector; workflow deliberately has no ACES-branded
+variant. DisplayReferred remains an explicit technical bypass that selects a
+direct colorimetric OCIO processor.
 
 Media probing keeps automatic interpretation evidence separate from user
 overrides. CICP/container tags, camera/log metadata hints, complete

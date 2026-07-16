@@ -22,7 +22,7 @@ use migration::JsonMigrationRegistry;
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 5;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 6;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 1;
 
@@ -475,6 +475,22 @@ mod tests {
         assert_eq!(opened.project_id, document.project_id);
         assert_eq!(opened.meta.name, "Main");
         assert_eq!(opened.sequences.sequences.len(), 1);
+        let opened_sequence = opened.sequences.active().expect("active sequence after reopen");
+        assert_eq!(
+            opened_sequence.settings.color_management.workflow,
+            mondrian_timeline::sequence::ColorWorkflow::SceneReferred
+        );
+        let opened_context = opened_sequence
+            .settings
+            .root_program_color_context(&opened.settings.color_management);
+        assert_eq!(
+            opened_context.engine,
+            mondrian_core::ColorEngine::mondrian_standard()
+        );
+        assert_eq!(
+            opened_context.output_transform,
+            mondrian_core::OutputTransformIntent::mondrian_standard()
+        );
 
         let runtime_library = root.join("runtime-library");
         let loaded =
@@ -483,6 +499,12 @@ mod tests {
         assert_eq!(
             loaded.library_schema_version,
             PROJECT_LIBRARY_SCHEMA_VERSION
+        );
+        let loaded_sequence =
+            loaded.document.sequences.active().expect("active sequence after archive load");
+        assert_eq!(
+            loaded_sequence.settings.color_management.workflow,
+            mondrian_timeline::sequence::ColorWorkflow::SceneReferred
         );
         assert_eq!(
             fs::read(runtime_library.join("index.db")).expect("read extracted db"),
@@ -565,18 +587,18 @@ mod tests {
     }
 
     #[test]
-    fn schema_v4_is_rejected_without_an_alpha_compatibility_migration() {
+    fn schema_v5_is_rejected_without_an_alpha_compatibility_migration() {
         let mut legacy = serde_json::to_value(test_document()).expect("serialize document");
-        legacy["schema_version"] = serde_json::json!(4);
+        legacy["schema_version"] = serde_json::json!(5);
 
         let err = DOCUMENT_MIGRATIONS
             .migrate(legacy)
-            .expect_err("schema v4 must not migrate implicitly");
+            .expect_err("schema v5 must not migrate implicitly");
         assert!(err.to_string().contains("missing project document migration"));
     }
 
     #[test]
-    fn schema_v5_requires_explicit_project_color_identity() {
+    fn schema_v6_requires_explicit_project_color_identity() {
         let value = serde_json::to_value(test_document()).expect("serialize document");
 
         let mut missing_engine = value.clone();
@@ -592,6 +614,17 @@ mod tests {
             .expect("settings object")
             .remove("color_management");
         assert!(serde_json::from_value::<ProjectDocument>(missing_color_management).is_err());
+    }
+
+    #[test]
+    fn schema_v6_rejects_removed_aces_sequence_workflow() {
+        let mut value = serde_json::to_value(test_document()).expect("serialize document");
+        value["sequences"]["sequences"][0]["settings"]["color_management"]["workflow"] =
+            serde_json::json!("Aces");
+
+        let error = serde_json::from_value::<ProjectDocument>(value)
+            .expect_err("project mode must not be duplicated by an ACES sequence workflow");
+        assert!(error.to_string().contains("unknown variant"));
     }
 
     #[test]

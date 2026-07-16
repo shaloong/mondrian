@@ -262,11 +262,8 @@ const WORKING_COLOR_SPACE_OPTIONS: [WorkingColorSpace; 4] = [
     WorkingColorSpace::AcesCg,
 ];
 
-const COLOR_WORKFLOW_OPTIONS: [ColorWorkflow; 3] = [
-    ColorWorkflow::DisplayReferred,
-    ColorWorkflow::SceneReferred,
-    ColorWorkflow::Aces,
-];
+const COLOR_WORKFLOW_OPTIONS: [ColorWorkflow; 2] =
+    [ColorWorkflow::DisplayReferred, ColorWorkflow::SceneReferred];
 
 const MISSING_COLOR_METADATA_OPTIONS: [MissingColorMetadataPolicy; 2] = [
     MissingColorMetadataPolicy::AssumeRec709,
@@ -400,7 +397,6 @@ fn color_workflow_label(value: ColorWorkflow) -> &'static str {
     match value {
         ColorWorkflow::DisplayReferred => "显示参考",
         ColorWorkflow::SceneReferred => "场景参考",
-        ColorWorkflow::Aces => "ACES",
     }
 }
 
@@ -1919,5 +1915,23 @@ impl Widget for SequenceSettingsDialog {
             43 => Some(&mut self.apply_button),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workflow_picker_exposes_rendering_domain_without_duplicating_project_color_modes() {
+        assert_eq!(ColorWorkflow::default(), ColorWorkflow::SceneReferred);
+        assert_eq!(
+            COLOR_WORKFLOW_OPTIONS,
+            [ColorWorkflow::DisplayReferred, ColorWorkflow::SceneReferred]
+        );
+        assert!(COLOR_WORKFLOW_OPTIONS
+            .iter()
+            .map(|workflow| color_workflow_label(*workflow))
+            .all(|label| !label.contains("ACES") && !label.contains("OpenColorIO")));
     }
 }

@@ -38,10 +38,11 @@ sequence output must be one of the display-referred SDR/HDR identities. This
 does not remove export's separate, explicit professional Log intermediate path.
 
 New sequences default to the Mondrian Standard v1 working identity, unbounded
-scene-linear Rec.2020. Their initial SDR workflow remains display-referred at
-the program boundary, so ordinary Rec.709 editing uses a direct colorimetric
-OCIO conversion instead of applying the scene View without an explicit
-scene-referred or tone-map request.
+scene-linear Rec.2020, and a scene-referred workflow. Their initial SDR program
+boundary therefore executes the version-pinned Mondrian Standard View. An
+explicit DisplayReferred workflow remains available as a technical colorimetric
+bypass. Project `ColorEngine` alone selects Mondrian Standard, ACES, or Custom
+OCIO; the sequence workflow does not duplicate that mode selection.
 
 `SequenceColorManagement.delivery_bit_depth` is the encoded deliverable sample
 depth and currently permits 8-bit, 10-bit, or 12-bit output. Twelve-bit output

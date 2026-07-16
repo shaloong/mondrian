@@ -21,6 +21,13 @@ must live outside `.mdp`.
 `mondrian-core` keeps only shared project metadata and settings types. It does
 not define a second top-level project container.
 
+`ProjectSettings.color_management.engine` is the sole persisted product-mode
+selector for Mondrian Standard, ACES, or Custom OCIO. Sequence workflow stores
+only the rendering-domain choice (SceneReferred by default, or explicit
+DisplayReferred technical bypass); it must not duplicate an ACES mode flag.
+Archive round-trip tests resolve the reopened root program context and require
+the default Standard project to retain its version-pinned Standard View intent.
+
 ## Runtime State
 
 `AppState` owns:
@@ -68,16 +75,19 @@ is written with that field explicitly.
 
 Archive and document JSON pass through separate version registries before typed
 deserialization. During Alpha there are deliberately no legacy document steps:
-schema v5 is the sole accepted author schema, and older/future versions fail
-instead of being guessed. Version 5 keeps the explicit tagged
+schema v6 is the sole accepted author schema, and older/future versions fail
+instead of being guessed. Version 5 introduced the explicit tagged
 `mondrian_standard` / `aces` / `custom_ocio` project contract and makes every
 Mondrian Standard package-identity field mandatory: product ID/version, config
 ID/SHA-256, complete package SHA-256, working-space ID/version, and default View
 Transform ID/version. Custom OCIO likewise requires config and processor-graph
 digests, working/display/view/look identities, roles, and an explicit dynamic
 property list; a mutable source path alone is not a project color definition.
-The Alpha format intentionally provides no alias, fallback, or migration from
-v4; a missing or edited identity fails closed. The registry remains the
+Version 6 removes the redundant persisted `ColorWorkflow::Aces`, makes
+SceneReferred the new-sequence default, and reserves Standard/ACES/Custom mode
+selection for `ProjectColorManagement.engine`. The Alpha format intentionally
+provides no alias, fallback, or migration from v5; a missing or edited identity
+or retired workflow fails closed. The registry remains the
 explicit seam for adding a real migration policy only when compatibility
 becomes a product promise.
 

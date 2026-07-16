@@ -15985,7 +15985,10 @@ mod tests {
         };
         let preview_health =
             preview_diagnostics.color_health_summary().expect("preview color health");
-        assert_eq!(preview_health.rgba8_boundary_calls, 1);
+        assert_eq!(
+            preview_health.rgba8_boundary_calls, 0,
+            "float OCIO Program Output must quantize only after optional monitor adaptation"
+        );
 
         let mut export_diagnostics = mondrian_export::queue::ExportJobColorDiagnostics::default();
         export_diagnostics.record_frame_diagnostics(

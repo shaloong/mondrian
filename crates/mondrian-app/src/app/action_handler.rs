@@ -4538,6 +4538,21 @@ mod tests {
             sequence.settings.preview.format,
             PreviewRenderFormat::ProResProxy
         );
+        assert_eq!(
+            sequence.settings.color_management.workflow,
+            mondrian_timeline::sequence::ColorWorkflow::SceneReferred
+        );
+        let context = sequence
+            .settings
+            .root_program_color_context(&state.project_settings.color_management);
+        assert_eq!(
+            context.engine,
+            mondrian_core::ColorEngine::mondrian_standard()
+        );
+        assert_eq!(
+            context.output_transform,
+            mondrian_core::OutputTransformIntent::mondrian_standard()
+        );
         assert!(!state.project_settings.proxy_enabled);
         assert!(state.asset_library.is_some());
         assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| !*is_error));

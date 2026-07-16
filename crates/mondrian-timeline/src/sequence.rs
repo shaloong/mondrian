@@ -110,12 +110,18 @@ pub enum SequenceRole {
     NestedComposition,
 }
 
+/// Program rendering domain independently of the project OCIO engine.
+///
+/// The project `ColorEngine` is the sole Mondrian Standard / ACES / Custom OCIO
+/// mode selector. This enum only decides whether the selected engine's product
+/// View participates at the output boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ColorWorkflow {
-    #[default]
+    /// Explicit technical bypass using a direct colorimetric output processor.
     DisplayReferred,
+    /// Scene-linear program rendering followed by the selected engine's View.
+    #[default]
     SceneReferred,
-    Aces,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -581,7 +587,7 @@ fn validate_ocio_display_view(
 impl Default for SequenceColorManagement {
     fn default() -> Self {
         Self {
-            workflow: ColorWorkflow::DisplayReferred,
+            workflow: ColorWorkflow::SceneReferred,
             inherit: default_inherit_color_management(),
             engine: ColorEngine::default(),
             missing_metadata_policy: MissingColorMetadataPolicy::AssumeRec709,
@@ -735,19 +741,6 @@ impl SequenceSettings {
                     .to_string(),
             });
         }
-        if self.color_management.workflow == ColorWorkflow::Aces
-            && !matches!(
-                self.working_color_space,
-                WorkingColorSpace::LinearRec2020
-                    | WorkingColorSpace::LinearP3D65
-                    | WorkingColorSpace::AcesCg
-            )
-        {
-            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                step_id: "sequence_settings_validate".to_string(),
-                reason: "ACES 工作流需要宽色域或 HDR 工作色彩空间".to_string(),
-            });
-        }
         if self.color_management.preserve_hdr_metadata
             && !self.color_management.output_color_space.is_hdr()
         {
@@ -848,13 +841,11 @@ impl SequenceSettings {
             self.color_management.display_management.clone()
         };
 
-        // SceneReferred and Aces workflows always need a view transform
-        // (tone map) when output is display-referred (SDR).
+        // Scene-referred workflows need the selected project engine's view
+        // transform at a display-referred output. The engine alone decides
+        // whether that view is Mondrian Standard, ACES, or Custom OCIO.
         let tone_map = display_management.tone_map_policy.resolve(
-            matches!(
-                self.color_management.workflow,
-                ColorWorkflow::SceneReferred | ColorWorkflow::Aces
-            ),
+            self.color_management.workflow == ColorWorkflow::SceneReferred,
             self.working_color_space,
             output_color_space,
         );
@@ -2074,17 +2065,6 @@ mod tests {
             "SceneReferred should always enable tone mapping"
         );
 
-        let aces_settings = SequenceSettings {
-            auto_tone_map_media: false,
-            color_management: SequenceColorManagement {
-                workflow: ColorWorkflow::Aces,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let ctx2 = aces_settings.root_program_color_context(&ProjectColorManagement::default());
-        assert!(ctx2.tone_map, "ACES should always enable tone mapping");
-
         let display_settings = SequenceSettings {
             auto_tone_map_media: false,
             color_management: SequenceColorManagement {
@@ -2266,7 +2246,6 @@ mod tests {
     fn aces_scene_output_uses_preset_pinned_display_view() {
         let mut settings = SequenceSettings::default();
         settings.color_management.inherit = false;
-        settings.color_management.workflow = ColorWorkflow::Aces;
         settings.color_management.engine = ColorEngine::Aces {
             preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
         };
@@ -2285,28 +2264,28 @@ mod tests {
     }
 
     #[test]
-    fn mondrian_standard_default_program_context_is_colorimetric() {
+    fn mondrian_standard_default_program_context_uses_standard_view() {
         let settings = SequenceSettings::default();
         let ctx = settings.root_program_color_context(&ProjectColorManagement::default());
         assert_eq!(ctx.engine, ColorEngine::mondrian_standard());
-        assert!(!ctx.tone_map);
+        assert!(ctx.tone_map);
         assert_eq!(
             ctx.output_transform,
-            mondrian_core::OutputTransformIntent::Colorimetric
+            mondrian_core::OutputTransformIntent::mondrian_standard()
         );
     }
 
     #[test]
-    fn mondrian_standard_default_preview_context_is_colorimetric() {
+    fn mondrian_standard_default_preview_context_uses_standard_view() {
         let settings = SequenceSettings::default();
         let ctx = settings
             .root_preview_color_context(&ProjectColorManagement::default(), ColorSpace::Rec709);
 
         assert_eq!(ctx.engine, ColorEngine::mondrian_standard());
-        assert!(!ctx.tone_map);
+        assert!(ctx.tone_map);
         assert_eq!(
             ctx.output_transform,
-            mondrian_core::OutputTransformIntent::Colorimetric
+            mondrian_core::OutputTransformIntent::mondrian_standard()
         );
     }
 
@@ -2548,7 +2527,7 @@ mod tests {
     }
 
     #[test]
-    fn sequence_override_none_prevents_project_delivery_view() {
+    fn sequence_override_none_keeps_engine_product_view() {
         let project_cm = ProjectColorManagement {
             engine: ColorEngine::mondrian_standard(),
             display_management: DisplayManagementPolicy {
@@ -2568,10 +2547,11 @@ mod tests {
             ..Default::default()
         };
         let ctx = settings.root_program_color_context(&project_cm);
-        // Sequence override to None should prevent project delivery view.
+        // None prevents an explicit project delivery-view override but keeps
+        // the selected engine's product View for a scene-referred sequence.
         assert_eq!(
             ctx.output_transform,
-            mondrian_core::OutputTransformIntent::Colorimetric
+            mondrian_core::OutputTransformIntent::mondrian_standard()
         );
     }
 
@@ -2612,17 +2592,15 @@ mod tests {
     }
 
     #[test]
-    fn program_context_without_delivery_view_has_no_issue_when_tone_map_is_disabled() {
+    fn default_program_context_without_delivery_override_uses_product_view_without_issue() {
         let settings = SequenceSettings::default();
         let project_cm = ProjectColorManagement::default();
         let ctx = settings.root_program_color_context(&project_cm);
-        // Default policy is None, tone_map depends on workflow/output.
-        // If tone_map is false, no issue should be recorded.
-        if !ctx.tone_map {
-            assert_eq!(
-                ctx.output_transform,
-                mondrian_core::OutputTransformIntent::Colorimetric
-            );
-        }
+        assert!(ctx.tone_map);
+        assert_eq!(
+            ctx.output_transform,
+            mondrian_core::OutputTransformIntent::mondrian_standard()
+        );
+        assert_eq!(ctx.export_delivery_view_error, None);
     }
 }

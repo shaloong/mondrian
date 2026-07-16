@@ -2758,6 +2758,21 @@ mod tests {
         );
         assert_eq!(payload.name, "My Cut");
         assert!(payload.sequence_settings.validate().is_ok());
+        assert_eq!(
+            payload.sequence_settings.color_management.workflow,
+            ColorWorkflow::SceneReferred
+        );
+        let context = payload
+            .sequence_settings
+            .root_program_color_context(&payload.project_settings.color_management);
+        assert_eq!(
+            context.engine,
+            mondrian_core::ColorEngine::mondrian_standard()
+        );
+        assert_eq!(
+            context.output_transform,
+            mondrian_core::OutputTransformIntent::mondrian_standard()
+        );
     }
 
     #[test]
@@ -3006,7 +3021,7 @@ mod tests {
         );
         root.handle_shell_action(
             app_shell_sequence_settings_draft_changed_action(
-                SequenceSettingsDraftUpdatePayload::ColorWorkflow(ColorWorkflow::Aces),
+                SequenceSettingsDraftUpdatePayload::ColorWorkflow(ColorWorkflow::SceneReferred),
             ),
             &platform,
             None,
@@ -3160,7 +3175,7 @@ mod tests {
         assert!(!payload.settings.color_management.inherit);
         assert_eq!(
             payload.settings.color_management.workflow,
-            ColorWorkflow::Aces
+            ColorWorkflow::SceneReferred
         );
         assert_eq!(
             payload.settings.color_management.missing_metadata_policy,

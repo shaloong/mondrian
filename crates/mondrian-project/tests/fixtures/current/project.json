@@ -1,5 +1,5 @@
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "project_id": "97f12455-ec34-4b5d-a696-3da93cd914d7",
   "document_revision": 1,
   "meta": {
@@ -74,7 +74,7 @@
           "action_safe_margin": 0.1,
           "title_safe_margin": 0.2,
           "color_management": {
-            "workflow": "DisplayReferred",
+            "workflow": "SceneReferred",
             "inherit": true,
             "engine": {
               "mode": "mondrian_standard",
