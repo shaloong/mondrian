@@ -1635,6 +1635,7 @@ fn validate_mondrian_default_color_spaces(
     report: &mut MondrianDefaultOcioValidationReport,
     errors: &mut Vec<String>,
 ) {
+    validate_mondrian_default_color_space_catalog(contract, errors);
     for mapped in contract.color_spaces {
         if mapped.ocio_name != ocio_color_space_name(mapped.color_space) {
             errors.push(format!(
@@ -1652,6 +1653,28 @@ fn validate_mondrian_default_color_spaces(
                 "{:?} maps to missing OCIO color space '{}'",
                 mapped.color_space, mapped.ocio_name
             ));
+        }
+    }
+}
+
+fn validate_mondrian_default_color_space_catalog(
+    contract: MondrianDefaultOcioContract,
+    errors: &mut Vec<String>,
+) {
+    for color_space in ColorSpace::ALL {
+        match contract
+            .color_spaces
+            .iter()
+            .filter(|mapped| mapped.color_space == color_space)
+            .count()
+        {
+            0 => errors.push(format!(
+                "product color space {color_space:?} is missing from the Mondrian Standard OCIO contract"
+            )),
+            1 => {}
+            count => errors.push(format!(
+                "product color space {color_space:?} appears {count} times in the Mondrian Standard OCIO contract"
+            )),
         }
     }
 }
@@ -4275,6 +4298,21 @@ mod tests {
         assert_eq!(
             report.display_gpu_processors_checked,
             contract.color_spaces.len() * contract.display_views.len()
+        );
+    }
+
+    #[test]
+    fn standard_contract_validation_rejects_an_incomplete_product_color_space_catalog() {
+        let mut contract = mondrian_default_ocio_contract();
+        contract.color_spaces =
+            &MONDRIAN_DEFAULT_OCIO_COLOR_SPACES[..MONDRIAN_DEFAULT_OCIO_COLOR_SPACES.len() - 1];
+        let mut errors = Vec::new();
+
+        validate_mondrian_default_color_space_catalog(contract, &mut errors);
+
+        assert!(
+            errors.iter().any(|error| error.contains("DavinciIntermediateWideGamut")),
+            "missing public product color space was not diagnosed: {errors:#?}"
         );
     }
 

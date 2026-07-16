@@ -340,7 +340,11 @@ override supplies the gamut. The same rule applies to file names: `Slog3` or
 `Log3G10` alone is not enough to infer primaries. ICC display-profile names are
 not camera metadata and must not be used to guess these acquisition identities.
 The Interpret Footage UI exposes the precise pairs; program/display output
-selectors expose delivery spaces only.
+selectors expose delivery spaces only. Package validation treats
+`ColorSpace::ALL` as the product catalog: every entry must occur exactly once in
+the immutable Standard mapping table before the full CPU/GPU processor matrix is
+accepted. This prevents a UI-visible input identity from outrunning the bundled
+OCIO package.
 
 External scene-referred image identities are first-class `ColorSpace` values:
 linear Rec.709, linear Rec.2020, linear P3-D65, ACES2065-1, ACEScg, and ACEScct.
