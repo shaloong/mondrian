@@ -378,7 +378,7 @@ impl BatchedCompositor {
                         self.record_composite_pass(&mut encoder, src, dst, refs[0], 1.0);
                     }
                     for t in batch.drain(..) {
-                        self.texture_pool.release(t, width, height);
+                        self.texture_pool.release(t);
                     }
                     src_is_a = !src_is_a;
                 }
@@ -386,7 +386,7 @@ impl BatchedCompositor {
                 let src = if src_is_a { &accum_a } else { &accum_b };
                 let dst = if src_is_a { &accum_b } else { &accum_a };
                 self.record_composite_pass(&mut encoder, src, dst, &layer_tex, layer.opacity);
-                self.texture_pool.release(layer_tex, width, height);
+                self.texture_pool.release(layer_tex);
                 src_is_a = !src_is_a;
             }
         }
@@ -401,7 +401,7 @@ impl BatchedCompositor {
                 self.record_composite_pass(&mut encoder, src, dst, refs[0], 1.0);
             }
             for t in batch {
-                self.texture_pool.release(t, width, height);
+                self.texture_pool.release(t);
             }
             src_is_a = !src_is_a;
         }
@@ -415,8 +415,8 @@ impl BatchedCompositor {
         self.gpu.queue.submit([encoder.finish()]);
 
         // Return render targets to pool
-        self.texture_pool.release(accum_a, width, height);
-        self.texture_pool.release(accum_b, width, height);
+        self.texture_pool.release(accum_a);
+        self.texture_pool.release(accum_b);
 
         // Wait for GPU and map readback
         self.wait_and_map_readback(readback_data, width, height)
@@ -543,14 +543,14 @@ impl BatchedCompositor {
                         self.record_composite_pass(&mut encoder, s, d, refs[0], 1.0);
                     }
                     for t in batch.drain(..) {
-                        self.texture_pool.release(t, width, height);
+                        self.texture_pool.release(t);
                     }
                     src_is_a = !src_is_a;
                 }
                 let s = if src_is_a { &accum_a } else { &accum_b };
                 let d = if src_is_a { &accum_b } else { &accum_a };
                 self.record_composite_pass(&mut encoder, s, d, &layer_tex, layer.opacity);
-                self.texture_pool.release(layer_tex, width, height);
+                self.texture_pool.release(layer_tex);
                 src_is_a = !src_is_a;
             }
         }
@@ -564,7 +564,7 @@ impl BatchedCompositor {
                 self.record_composite_pass(&mut encoder, s, d, refs[0], 1.0);
             }
             for t in batch {
-                self.texture_pool.release(t, width, height);
+                self.texture_pool.release(t);
             }
             src_is_a = !src_is_a;
         }
@@ -591,8 +591,8 @@ impl BatchedCompositor {
         self.gpu.queue.submit([encoder.finish()]);
 
         // Return pool textures
-        self.texture_pool.release(accum_a, width, height);
-        self.texture_pool.release(accum_b, width, height);
+        self.texture_pool.release(accum_a);
+        self.texture_pool.release(accum_b);
 
         Ok(output_tex)
     }

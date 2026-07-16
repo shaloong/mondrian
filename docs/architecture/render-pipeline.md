@@ -898,8 +898,11 @@ the renderer contract is covered by `from_gpu_working_frame()`.
 
 ### Texture Pool
 
-`TexturePool` supports `Rgba8Unorm`, `Rgba16Float`, and `Rgba32Float`
-formats with size-class-based LRU reuse (8 per key, 64 total default).
+`TexturePool` retains its fixed 2D, single-mip, single-sample textures by the
+exact `(width, height, TextureFormat, TextureUsages)` contract with
+size-class-based LRU reuse (8 per key, 64 total default). Release derives this
+contract from the texture itself. Unsupported formats are never collapsed onto
+an `Rgba8Unorm` key, and resources with different usage flags cannot alias.
 
 ### GPU execution timing
 

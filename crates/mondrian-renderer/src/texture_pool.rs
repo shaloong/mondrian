@@ -13,31 +13,27 @@ use wgpu;
 struct TextureKey {
     width: u32,
     height: u32,
-    format: TexturePoolFormat,
+    format: wgpu::TextureFormat,
+    usage: wgpu::TextureUsages,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum TexturePoolFormat {
-    Rgba8Unorm,
-    Rgba16Float,
-    Rgba32Float,
-}
+impl TextureKey {
+    fn new(
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        usage: wgpu::TextureUsages,
+    ) -> Self {
+        Self { width, height, format, usage }
+    }
 
-impl From<wgpu::TextureFormat> for TexturePoolFormat {
-    fn from(f: wgpu::TextureFormat) -> Self {
-        match f {
-            wgpu::TextureFormat::Rgba8Unorm => Self::Rgba8Unorm,
-            wgpu::TextureFormat::Rgba16Float => Self::Rgba16Float,
-            wgpu::TextureFormat::Rgba32Float => Self::Rgba32Float,
-            other => {
-                debug_assert!(
-                    false,
-                    "TexturePool: unsupported format {:?}, defaulting to Rgba8Unorm",
-                    other
-                );
-                Self::Rgba8Unorm
-            }
-        }
+    fn from_texture(texture: &wgpu::Texture) -> Self {
+        Self::new(
+            texture.width(),
+            texture.height(),
+            texture.format(),
+            texture.usage(),
+        )
     }
 }
 
@@ -89,7 +85,7 @@ impl TexturePool {
         format: wgpu::TextureFormat,
         usage: wgpu::TextureUsages,
     ) -> wgpu::Texture {
-        let key = TextureKey { width, height, format: format.into() };
+        let key = TextureKey::new(width, height, format, usage);
 
         {
             let mut pool = self.pool.lock();
@@ -116,9 +112,8 @@ impl TexturePool {
     }
 
     /// Return a texture to the pool for future reuse.
-    pub fn release(&self, texture: wgpu::Texture, width: u32, height: u32) {
-        let format = TexturePoolFormat::from(texture.format());
-        let key = TextureKey { width, height, format };
+    pub fn release(&self, texture: wgpu::Texture) {
+        let key = TextureKey::from_texture(&texture);
         let frame = *self.frame_counter.lock();
 
         let mut pool = self.pool.lock();
@@ -158,5 +153,27 @@ impl TexturePool {
     /// Returns true if no textures are currently pooled.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TextureKey;
+
+    #[test]
+    fn texture_pool_keys_preserve_exact_texture_contract() {
+        let render_sample =
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+        let render_copy = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
+        let rgba = TextureKey::new(1920, 1080, wgpu::TextureFormat::Rgba8Unorm, render_sample);
+        let bgra = TextureKey::new(1920, 1080, wgpu::TextureFormat::Bgra8Unorm, render_sample);
+        let hdr = TextureKey::new(1920, 1080, wgpu::TextureFormat::Rgb10a2Unorm, render_sample);
+        let different_usage =
+            TextureKey::new(1920, 1080, wgpu::TextureFormat::Rgba8Unorm, render_copy);
+
+        assert_ne!(rgba, bgra);
+        assert_ne!(rgba, hdr);
+        assert_ne!(bgra, hdr);
+        assert_ne!(rgba, different_usage);
     }
 }
