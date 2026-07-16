@@ -1470,7 +1470,7 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                 match event {
                     WindowEvent::CloseRequested => {
                         pending_actions.push(native_close_request_action());
-                        drain_actions_and_sync_window_session(
+                        let should_redraw = drain_actions_and_sync_window_session(
                             &mut host,
                             &pending_actions,
                             &platform,
@@ -1480,7 +1480,9 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             &device,
                             &mut session,
                         );
-                        session.window.request_redraw();
+                        if should_redraw {
+                            session.window.request_redraw();
+                        }
                     }
 
                     WindowEvent::ModifiersChanged(modifiers) => {
@@ -1893,25 +1895,6 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                 session
                     .ui_runtime
                     .drive_timers(&session.window, &mut session.router, elwt);
-                let poll_started = Instant::now();
-                let background_tasks_changed =
-                    host.poll_background_tasks(session.current_bounds.get());
-                session.event_loop_telemetry.record_stage_duration(
-                    AppUiEventLoopStage::PollBackgroundTasks,
-                    poll_started.elapsed(),
-                );
-                if background_tasks_changed {
-                    sync_window_session_role(
-                        &mut host,
-                        elwt,
-                        &instance,
-                        &adapter,
-                        &device,
-                        &mut session,
-                    );
-                    session.window.request_redraw();
-                    elwt.set_control_flow(ControlFlow::Poll);
-                }
                 let playback_now = Instant::now();
                 let playback_is_running = host.is_playback_running();
                 let playback_elapsed = continuous_playback_elapsed(
@@ -1929,7 +1912,14 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                     AppUiEventLoopStage::AdvancePlaybackClock,
                     playback_clock_started.elapsed(),
                 );
-                if playback_changed {
+                let poll_started = Instant::now();
+                let background_tasks_changed =
+                    host.poll_background_tasks(session.current_bounds.get());
+                session.event_loop_telemetry.record_stage_duration(
+                    AppUiEventLoopStage::PollBackgroundTasks,
+                    poll_started.elapsed(),
+                );
+                if playback_changed || background_tasks_changed {
                     sync_window_session_role(
                         &mut host,
                         elwt,
@@ -1939,6 +1929,9 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                         &mut session,
                     );
                     session.window.request_redraw();
+                }
+                if background_tasks_changed {
+                    elwt.set_control_flow(ControlFlow::Poll);
                 }
                 if let Some(delay) = host.playback_next_frame_delay() {
                     elwt.set_control_flow(ControlFlow::WaitUntil(
@@ -1988,9 +1981,40 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(not(test))]
 pub(crate) fn arm_process_exit_watchdog() {
     let _ = std::thread::Builder::new().name("mondrian-exit-watchdog".to_owned()).spawn(|| {
-        std::thread::sleep(Duration::from_millis(750));
-        std::process::exit(0);
+        // The UI has already completed its guarded close and initiated
+        // event-loop shutdown before this watchdog is armed. Give winit,
+        // audio, media, and GPU resources a bounded grace period, then
+        // bypass process-wide DLL/destructor teardown: std::process::exit
+        // can itself deadlock when a third-party detach hook needs a lock
+        // held by another terminating thread.
+        std::thread::sleep(Duration::from_secs(2));
+        terminate_process_without_cleanup();
     });
+}
+
+#[cfg(all(not(test), target_os = "windows"))]
+fn terminate_process_without_cleanup() -> ! {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+
+    // SAFETY: the pseudo-handle always refers to this process. This is the
+    // final fallback after the application-level close contract has completed;
+    // skipping DLL detach is intentional to avoid third-party teardown locks.
+    unsafe {
+        let _ = TerminateProcess(GetCurrentProcess(), 0);
+    }
+    std::process::abort()
+}
+
+#[cfg(all(not(test), unix))]
+fn terminate_process_without_cleanup() -> ! {
+    // SAFETY: application-level shutdown has completed. `_exit` deliberately
+    // skips process-wide destructors that may be blocked in media/GPU drivers.
+    unsafe { libc::_exit(0) }
+}
+
+#[cfg(all(not(test), not(any(target_os = "windows", unix))))]
+fn terminate_process_without_cleanup() -> ! {
+    std::process::abort()
 }
 
 fn init_app_ui_tracing() {
@@ -4232,7 +4256,7 @@ fn drain_actions_and_sync_window_session(
     adapter: &wgpu::Adapter,
     device: &wgpu::Device,
     session: &mut AppUiWindowSession,
-) {
+) -> bool {
     let stage_started = Instant::now();
     let previous_color_engine = session.color_engine.clone();
     let previous_display_policy = session.display_management_policy.clone();
@@ -4264,6 +4288,7 @@ fn drain_actions_and_sync_window_session(
     session
         .event_loop_telemetry
         .record_stage_duration(AppUiEventLoopStage::DrainActions, stage_started.elapsed());
+    should_sync_window
 }
 
 fn display_color_management_changed(
@@ -6645,7 +6670,7 @@ mod tests {
     }
 
     #[test]
-    fn quit_shell_command_skips_window_role_sync() {
+    fn quit_shell_command_skips_window_role_sync_and_redraw() {
         assert!(!shell_commands_should_sync_window_session(
             AppUiShellCommands { quit: true, ..AppUiShellCommands::default() }
         ));

@@ -2653,6 +2653,7 @@ dependencies = [
  "bytemuck",
  "glam",
  "image",
+ "libc",
  "mondrian-assets",
  "mondrian-core",
  "mondrian-editor-state",

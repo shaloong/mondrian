@@ -237,6 +237,12 @@ processing; widgets never own a wgpu resource or choose a reconstruction
 filter. Spatial external textures render only when their presentation identity
 matches current layout exactly, so dock resize and zoom changes cannot stretch
 old display/device code values while a replacement frame is prepared.
+External GPU frame identity also includes the resolved monitor adaptation.
+The preview model derives that display-referred identity when it looks up a
+registered external texture while retaining the unadapted identity for CPU
+raster caches. This prevents valid GPU output from being silently replaced by
+a raster frame and prevents display-specific textures from crossing monitor
+contracts.
 The startup/default window contract remains SDR sRGB unless an explicit display
 output intent asks for a different presentation contract. The surface resolver
 can choose Display P3, Rec.2100 PQ, or Rec.2100 HLG only when wgpu reports the
@@ -347,6 +353,13 @@ retains that output without blocking the UI thread; subsequent event-loop turns
 may retry the current candidate, while superseded candidates are discarded by
 normal preview identity rules. This prevents transient native bridge or GPU
 queue pressure from producing a blank Viewer.
+The same rule applies while a pause, seek, or exact-still request replaces the
+current frame: `Stale` prefers the last presented external GPU frame for the
+same sequence and output extent, then falls back to the pinned CPU raster. A
+pending replacement must never demote an already visible GPU frame to an empty
+or gray Viewer. Display-contract, sequence, and geometry changes still clear
+the external frame explicitly, so stale reuse cannot cross presentation
+semantics.
 Preview diagnostics keep decode-stage timings separate from post-decode viewer
 render timings. Decode reports classify session open, cache lookup, seek,
 packet/decode, software scale, RGBA copy, and external-process wait cost;
@@ -440,7 +453,15 @@ Once action draining produces a quit command, the host returns it immediately;
 it must not refresh or lay out the widget tree after the preview service and
 project state have already begun shutdown.
 When the host begins a confirmed quit (after any unsaved-work decision), a
-short process-exit watchdog gives preview, project, runtime, and GPU resource
-destruction a final bounded opportunity to finish.
-If a platform driver blocks closure destruction, the watchdog terminates the
-already-cleaned process instead of leaving a ghost or unresponsive window.
+two-second process-exit watchdog gives preview, project, runtime, and GPU
+resource destruction a final bounded opportunity to finish. A quit command is
+not followed by another native redraw or window-role synchronization, avoiding
+a redraw/destruction race on the exiting window. If a platform media, audio, or
+GPU driver blocks closure destruction, the watchdog uses the platform's
+no-destructor termination primitive (`TerminateProcess` on Windows, `_exit` on
+Unix) if application-level cleanup does not return in time;
+`std::process::exit` is deliberately not used because DLL detach hooks can
+deadlock on locks held by terminating worker threads. The watchdog is armed
+only after the guarded unsaved-work decision and immediately before bounded
+preview/project cleanup begins, so it cannot bypass save/discard/cancel
+semantics but still bounds a cleanup call blocked in a third-party runtime.
