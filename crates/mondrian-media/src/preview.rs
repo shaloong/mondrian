@@ -5,9 +5,10 @@
 
 use crate::decoder::{
     decoded_video_range_from_ffmpeg, DecodedFrameResidency, DecodedGpuFrameHandleKind,
-    DecodedVideoChromaLocation, DecodedVideoMatrix, DecodedVideoRange, DecodedVideoSampling,
-    DecodedVideoSurfaceFormat, HwAccelBackend, HwAccelCodecConfigProbe, HwAccelDeviceContext,
-    HwAccelDeviceContextProbe, HwAccelDeviceSelector, HwAccelPixelFormat, HwAccelProbe,
+    DecodedVideoChromaLocation, DecodedVideoMatrix, DecodedVideoRange, DecodedVideoRangeContract,
+    DecodedVideoSampling, DecodedVideoSurfaceFormat, HwAccelBackend, HwAccelCodecConfigProbe,
+    HwAccelDeviceContext, HwAccelDeviceContextProbe, HwAccelDeviceSelector, HwAccelPixelFormat,
+    HwAccelProbe,
 };
 use ffmpeg_next as ffmpeg;
 use mondrian_core::types::ColorSpace;
@@ -323,14 +324,34 @@ pub struct PreviewDecodeRequest<'a> {
 pub struct PreviewSourceColorContract {
     /// Effective input/source color space after interpretation policy.
     pub color_space: ColorSpace,
-    /// Encoded quantization range from ingest, or explicit `Unknown`.
-    pub range: DecodedVideoRange,
+    /// Authority-aware encoded quantization-range interpretation.
+    pub range: DecodedVideoRangeContract,
 }
 
 impl PreviewSourceColorContract {
-    /// Build a source color contract from resolved input color and ingest range.
-    pub fn new(color_space: ColorSpace, range: DecodedVideoRange) -> Self {
+    /// Build a source color contract from resolved input color and range authority.
+    pub const fn new(color_space: ColorSpace, range: DecodedVideoRangeContract) -> Self {
         Self { color_space, range }
+    }
+
+    /// Build an automatic contract with a stream-probe fallback.
+    pub const fn automatic(color_space: ColorSpace, probed_range: DecodedVideoRange) -> Self {
+        Self::new(
+            color_space,
+            DecodedVideoRangeContract::Automatic { probed_range },
+        )
+    }
+
+    /// Build a source contract directly from persistent asset interpretation and probe facts.
+    pub const fn from_interpretation(
+        color_space: ColorSpace,
+        interpretation: mondrian_core::timeline_data::MediaRangeInterpretation,
+        probed_range: DecodedVideoRange,
+    ) -> Self {
+        Self::new(
+            color_space,
+            DecodedVideoRangeContract::from_interpretation(interpretation, probed_range),
+        )
     }
 }
 
@@ -4496,7 +4517,7 @@ fn resolve_cpu_rgba_contract(
 fn resolve_cpu_rgba_contract_from_metadata(
     pixel_format: ffmpeg::util::format::pixel::Pixel,
     decoded_color_space: ffmpeg::util::color::Space,
-    _decoded_color_range: ffmpeg::util::color::Range,
+    decoded_color_range: ffmpeg::util::color::Range,
     source: PreviewSourceColorContract,
     path: &Path,
 ) -> Result<DecodedRgbaFrameContract> {
@@ -4526,10 +4547,12 @@ fn resolve_cpu_rgba_contract_from_metadata(
             source.color_space
         ),
     })?;
-    // `source` is resolved by the app from either current probe facts or an
-    // explicit Interpret Footage override. It is therefore authoritative at
-    // this boundary, including when a frame repeats incorrect container tags.
-    let range = source.range;
+    // Preserve the distinction between automatic probe fallback and an
+    // explicit Interpret Footage override. Auto accepts a more local frame
+    // fact; an authored override remains authoritative over incorrect tags.
+    let range = source
+        .range
+        .resolve_for_frame(decoded_video_range_from_ffmpeg(decoded_color_range));
     if range == DecodedVideoRange::Unknown {
         return Err(MondrianError::DecodeFailed {
             asset_id: path.display().to_string(),
@@ -4964,7 +4987,7 @@ fn materialize_native_decoded_frame(
     let mut sampling = decoded_video_sampling_from_frame_and_surface(decoded, surface_format);
     // Native D3D11 frames bypass swscale, so apply the same resolved range
     // contract consumed by the CPU conversion path before renderer import.
-    sampling.range = source_color.range;
+    sampling.range = source_color.range.resolve_for_frame(sampling.range);
     let resource = FfmpegNativeDecodedFrameResource::retain(decoded)?;
     resource.d3d11_texture()?;
     let handle = PreviewNativeDecodedFrameHandle::new(resource);
@@ -5193,11 +5216,11 @@ mod tests {
     }
 
     fn test_source_color() -> PreviewSourceColorContract {
-        PreviewSourceColorContract::new(ColorSpace::Rec709, DecodedVideoRange::Limited)
+        PreviewSourceColorContract::automatic(ColorSpace::Rec709, DecodedVideoRange::Limited)
     }
 
     fn test_linear_source_color() -> PreviewSourceColorContract {
-        PreviewSourceColorContract::new(ColorSpace::Aces2065_1, DecodedVideoRange::Full)
+        PreviewSourceColorContract::automatic(ColorSpace::Aces2065_1, DecodedVideoRange::Full)
     }
 
     fn test_rgba_contract() -> DecodedRgbaFrameContract {
@@ -6121,7 +6144,10 @@ mod tests {
 
         let contract = resolve_cpu_rgba_contract(
             &frame,
-            PreviewSourceColorContract::new(ColorSpace::Rec2100Pq, DecodedVideoRange::Limited),
+            PreviewSourceColorContract::automatic(
+                ColorSpace::Rec2100Pq,
+                DecodedVideoRange::Limited,
+            ),
             Path::new("bt2020-pq.mov"),
         )
         .expect("BT.2020 NCL must resolve exactly");
@@ -6144,7 +6170,7 @@ mod tests {
 
         let contract = resolve_cpu_rgba_contract(
             &frame,
-            PreviewSourceColorContract::new(ColorSpace::Rec709, DecodedVideoRange::Limited),
+            PreviewSourceColorContract::automatic(ColorSpace::Rec709, DecodedVideoRange::Limited),
             Path::new("untagged-rec709.mov"),
         )
         .expect("explicit app contract must resolve missing frame tags");
@@ -6156,7 +6182,7 @@ mod tests {
         tagged_yuv.set_color_space(ffmpeg::util::color::Space::BT709);
         let srgb_contract = resolve_cpu_rgba_contract(
             &tagged_yuv,
-            PreviewSourceColorContract::new(ColorSpace::Srgb, DecodedVideoRange::Limited),
+            PreviewSourceColorContract::automatic(ColorSpace::Srgb, DecodedVideoRange::Limited),
             Path::new("srgb-transfer-yuv.mov"),
         )
         .expect("decoded YUV matrix remains authoritative for an RGB-defined source space");
@@ -6175,10 +6201,36 @@ mod tests {
 
         let contract = resolve_cpu_rgba_contract(
             &frame,
-            PreviewSourceColorContract::new(ColorSpace::Rec709, DecodedVideoRange::Full),
+            PreviewSourceColorContract::from_interpretation(
+                ColorSpace::Rec709,
+                mondrian_core::timeline_data::MediaRangeInterpretation::Override {
+                    range: mondrian_core::timeline_data::MediaSignalRange::Full,
+                },
+                DecodedVideoRange::Limited,
+            ),
             Path::new("incorrect-limited-tag.mov"),
         )
         .expect("resolved app contract must override an incorrect frame range tag");
+
+        assert_eq!(contract.applied_range, DecodedVideoRange::Full);
+    }
+
+    #[test]
+    fn cpu_rgba_contract_auto_prefers_frame_range_over_probe_fallback() {
+        let mut frame = ffmpeg::util::frame::video::Video::new(
+            ffmpeg::util::format::pixel::Pixel::YUV420P,
+            16,
+            16,
+        );
+        frame.set_color_space(ffmpeg::util::color::Space::BT709);
+        frame.set_color_range(ffmpeg::util::color::Range::JPEG);
+
+        let contract = resolve_cpu_rgba_contract(
+            &frame,
+            PreviewSourceColorContract::automatic(ColorSpace::Rec709, DecodedVideoRange::Limited),
+            Path::new("frame-full-probe-limited.mov"),
+        )
+        .expect("automatic range must prefer the decoded frame fact");
 
         assert_eq!(contract.applied_range, DecodedVideoRange::Full);
     }
@@ -6194,7 +6246,7 @@ mod tests {
         conflict.set_color_range(ffmpeg::util::color::Range::MPEG);
         let contract = resolve_cpu_rgba_contract(
             &conflict,
-            PreviewSourceColorContract::new(ColorSpace::Rec2020, DecodedVideoRange::Limited),
+            PreviewSourceColorContract::automatic(ColorSpace::Rec2020, DecodedVideoRange::Limited),
             Path::new("conflict.mov"),
         )
         .expect("explicit decoded matrix remains authoritative");
@@ -6203,7 +6255,7 @@ mod tests {
         conflict.set_color_space(ffmpeg::util::color::Space::BT2020CL);
         let error = resolve_cpu_rgba_contract(
             &conflict,
-            PreviewSourceColorContract::new(ColorSpace::Rec2020, DecodedVideoRange::Limited),
+            PreviewSourceColorContract::automatic(ColorSpace::Rec2020, DecodedVideoRange::Limited),
             Path::new("bt2020-cl.mov"),
         )
         .expect_err("constant-luminance BT.2020 needs a dedicated conversion");
@@ -7127,7 +7179,7 @@ mod tests {
         preview_cache_put_with_fingerprint(&path, fingerprint, 2, 1, 100, frame);
 
         let rec2020 =
-            PreviewSourceColorContract::new(ColorSpace::Rec2020, DecodedVideoRange::Limited);
+            PreviewSourceColorContract::automatic(ColorSpace::Rec2020, DecodedVideoRange::Limited);
         assert!(preview_cache_get(&path, fingerprint, rec709, 2, 1, 100, 1).is_some());
         assert!(preview_cache_get(&path, fingerprint, rec2020, 2, 1, 100, 1).is_none());
         clear_global_preview_frame_cache();

@@ -204,8 +204,6 @@ pub enum AssetThumbnailFailureReason {
     NonColorDataUnsupported,
     /// Missing-metadata policy rejected the input identity.
     InputColorRejected,
-    /// Ingest did not resolve full versus limited encoded range.
-    UnresolvedSourceRange,
     /// An internal working identity reached a presentation-only boundary.
     InternalOutputIdentity,
     /// UI raster atlas cannot represent the requested encoded output.
@@ -234,7 +232,6 @@ impl AssetThumbnailFailureReason {
             Self::MissingVideoStreamContract => "missing_video_stream_contract",
             Self::NonColorDataUnsupported => "non_color_data_unsupported",
             Self::InputColorRejected => "input_color_rejected",
-            Self::UnresolvedSourceRange => "unresolved_source_range",
             Self::InternalOutputIdentity => "internal_output_identity",
             Self::UnsupportedRasterOutput => "unsupported_raster_output",
             Self::WorkerUnavailable => "worker_unavailable",

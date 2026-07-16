@@ -30,9 +30,10 @@ pub use audio_playback::{
 };
 pub use decoder::{
     resolve_decoded_video_range, DecodedFrameResidency, DecodedGpuFrameHandleKind,
-    DecodedVideoChromaLocation, DecodedVideoMatrix, DecodedVideoRange, DecodedVideoSampling,
-    DecodedVideoSurfaceFormat, HwAccelBackend, HwAccelCodecConfigMethods, HwAccelCodecConfigProbe,
-    HwAccelDeviceContextProbe, HwAccelDeviceSelector, HwAccelPixelFormat, HwAccelProbe,
+    DecodedVideoChromaLocation, DecodedVideoMatrix, DecodedVideoRange, DecodedVideoRangeContract,
+    DecodedVideoSampling, DecodedVideoSurfaceFormat, HwAccelBackend, HwAccelCodecConfigMethods,
+    HwAccelCodecConfigProbe, HwAccelDeviceContextProbe, HwAccelDeviceSelector, HwAccelPixelFormat,
+    HwAccelProbe,
 };
 pub use ffmpeg_runtime::verify_ffmpeg_runtime;
 pub use info::{

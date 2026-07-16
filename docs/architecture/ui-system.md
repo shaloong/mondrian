@@ -76,6 +76,10 @@ while retaining a read-only diagnostic body. Auto is the default for both;
 explicit color spaces and Full/Limited range selections persist independently,
 and Auto displays the current resolved/detected result. Changing either control
 must preserve the other control and the asset payload classification.
+Preview and thumbnail work keys preserve that Auto/Override authority through
+`DecodedVideoRangeContract`; the UI must not flatten it to the currently shown
+probe value before decode, because an explicit frame tag may refine Auto while
+an authored override must continue to win.
 The action that opens the modal must preserve decoder range, raw CICP
 primaries/transfer/matrix, detector evidence and warnings, plus the effective
 engine and working identity; reducing this payload to the final color-space

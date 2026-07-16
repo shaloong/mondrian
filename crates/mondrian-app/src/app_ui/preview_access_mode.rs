@@ -12,8 +12,9 @@ use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
 use mondrian_core::WorkingColorSpace;
 use mondrian_media::{
-    preview_decode_cpu_budget, DecodedVideoRange, HwAccelDeviceSelector, PreviewDecodeAccessMode,
-    PreviewDecodeAdaptiveHints, PreviewFileFingerprint, PreviewHardwareDecodeRequest,
+    preview_decode_cpu_budget, DecodedVideoRangeContract, HwAccelDeviceSelector,
+    PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewFileFingerprint,
+    PreviewHardwareDecodeRequest,
 };
 
 pub(crate) const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
@@ -42,7 +43,7 @@ pub(crate) struct MediaPreviewKey {
     /// Full-resolution source height represented by the decoded sample.
     pub(crate) source_height: u32,
     pub(crate) input_color_space: ColorSpace,
-    pub(crate) input_video_range: DecodedVideoRange,
+    pub(crate) input_video_range: DecodedVideoRangeContract,
     pub(crate) native_surface_hint: Option<MediaPreviewNativeSurfaceHint>,
     pub(crate) source_has_alpha: bool,
     pub(crate) alpha_interpretation: AlphaInterpretation,
@@ -996,7 +997,9 @@ mod tests {
             source_width: 320,
             source_height: 180,
             input_color_space: ColorSpace::Rec709,
-            input_video_range: DecodedVideoRange::Limited,
+            input_video_range: mondrian_media::DecodedVideoRangeContract::Automatic {
+                probed_range: mondrian_media::DecodedVideoRange::Limited,
+            },
             native_surface_hint: None,
             source_has_alpha: false,
             alpha_interpretation: AlphaInterpretation::Straight,

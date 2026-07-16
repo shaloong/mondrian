@@ -14,10 +14,11 @@ use crate::app_ui::preview_access_mode::{
 use mondrian_assets::{AssetKind, AssetRecord};
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
 use mondrian_core::{OutputTransformIntent, WorkingColorSpace};
+#[cfg(test)]
+use mondrian_media::DecodedVideoRange;
 use mondrian_media::{
-    decode_preview_frame_cancellable, resolve_decoded_video_range, DecodedVideoRange,
-    PreviewDecodeAccessMode, PreviewDecodeOutcome, PreviewDecodeRequest, PreviewFileFingerprint,
-    PreviewSourceColorContract,
+    decode_preview_frame_cancellable, DecodedVideoRangeContract, PreviewDecodeAccessMode,
+    PreviewDecodeOutcome, PreviewDecodeRequest, PreviewFileFingerprint, PreviewSourceColorContract,
 };
 use mondrian_renderer::{
     execute_cpu_input_stage, execute_cpu_input_stage_float, execute_cpu_output_boundary_rgba8,
@@ -41,7 +42,7 @@ const THUMBNAIL_COMPLETED_RESULTS_POLL_BUDGET_US: u64 = 2_000;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ThumbnailColorContract {
     source_color_space: ColorSpace,
-    source_range: DecodedVideoRange,
+    source_range: DecodedVideoRangeContract,
     working_color_space: WorkingColorSpace,
     output_color_space: ColorSpace,
     tone_map: bool,
@@ -84,14 +85,10 @@ impl ThumbnailColorContract {
                 ));
             }
         };
-        let source_range =
-            resolve_decoded_video_range(asset.interpretation.range, primary_video.color_range);
-        if source_range == DecodedVideoRange::Unknown {
-            return Err(thumbnail_failure(
-                AssetThumbnailFailureReason::UnresolvedSourceRange,
-                "thumbnail decode requires an explicit full or limited source range",
-            ));
-        }
+        let source_range = DecodedVideoRangeContract::from_interpretation(
+            asset.interpretation.range,
+            primary_video.color_range,
+        );
         let output_color_space = context.output_color_space.color().ok_or_else(|| {
             thumbnail_failure(
                 AssetThumbnailFailureReason::InternalOutputIdentity,
@@ -716,7 +713,9 @@ mod tests {
     fn thumbnail_color_contract() -> ThumbnailColorContract {
         ThumbnailColorContract {
             source_color_space: ColorSpace::Rec709,
-            source_range: DecodedVideoRange::Limited,
+            source_range: DecodedVideoRangeContract::Automatic {
+                probed_range: DecodedVideoRange::Limited,
+            },
             working_color_space: WorkingColorSpace::LinearRec709,
             output_color_space: ColorSpace::Srgb,
             tone_map: true,
@@ -857,9 +856,9 @@ mod tests {
         asset.media_info.video_streams[0].color_range = DecodedVideoRange::Unknown;
         assert_eq!(
             ThumbnailColorContract::resolve(&asset, &context)
-                .expect_err("unknown range is unsupported")
-                .reason,
-            AssetThumbnailFailureReason::UnresolvedSourceRange
+                .expect("frame decode may resolve an unknown probe range")
+                .source_range,
+            DecodedVideoRangeContract::Automatic { probed_range: DecodedVideoRange::Unknown }
         );
 
         asset.interpretation.range =
@@ -870,7 +869,7 @@ mod tests {
             ThumbnailColorContract::resolve(&asset, &context)
                 .expect("explicit range resolves missing probe metadata")
                 .source_range,
-            DecodedVideoRange::Full
+            DecodedVideoRangeContract::OverrideFull
         );
 
         asset.media_info.video_streams[0].color_range = DecodedVideoRange::Limited;

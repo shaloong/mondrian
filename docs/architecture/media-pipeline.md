@@ -91,12 +91,13 @@ NLEs separate playback, interactive navigation, and precise still extraction:
   working-to-sRGB display boundary before constructing a UI raster.
 
 Every request also carries a required `PreviewSourceColorContract`: the
-app-resolved input/source color space plus the ingest quantization range. CPU
-decode resolves each YUV frame's matrix and range from decoder metadata, using
-the request contract only for explicitly missing facts. An explicit decoded
-matrix is authoritative for YCbCr-to-RGB sampling even when it differs from the
-resolved RGB source color space; those are independent CICP facts. Decode still
-rejects unknown facts and unsupported matrices such as BT.2020 constant luminance.
+app-resolved input/source color space plus an authority-aware
+`DecodedVideoRangeContract`. In Auto mode CPU/native decode prefers each YUV
+frame's explicit range and falls back to the stream probe only when the frame
+omits it; Full/Limited user overrides remain authoritative. Matrix is resolved
+independently: an explicit decoded matrix controls YCbCr-to-RGB sampling even
+when it differs from the resolved RGB source color space. Decode still rejects
+unknown facts and unsupported matrices such as BT.2020 constant luminance.
 Before `sws_scale`, media configures `sws_setColorspaceDetails` with the exact
 matrix, input range, and full-range RGBA output. FFmpeg/swscale defaults are not
 part of Mondrian's color contract.

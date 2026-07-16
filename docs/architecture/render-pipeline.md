@@ -146,6 +146,10 @@ enters as `LinearFloatSource`, so app preview, thumbnails, and export bypass
 RGBA8 quantization while preserving the external source color identity.
 Synthetic float data and effect graph intermediates use the same typed float
 entry point.
+Preview and export decode keys retain `DecodedVideoRangeContract`, not only an
+already-flattened range value. Auto work can therefore consume a frame-level
+range and fall back to the probe, while user Full/Limited overrides remain
+distinct cache identities and authoritative sampling policy.
 CPU preview/export fallbacks use `RenderInputTransform` plus
 `execute_cpu_source_input_stage(...)` to dispatch the typed source to the
 RGBA8 or float executor. GPU preview retains that same `CpuSourceColorFrame`

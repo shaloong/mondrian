@@ -111,6 +111,62 @@ pub enum DecodedVideoRange {
     Full,
 }
 
+/// Authority-aware quantization-range contract carried into frame decode.
+///
+/// Automatic interpretation prefers an explicit frame-level decoder fact and
+/// uses the probe result only when that frame omits range metadata. A user
+/// override remains authoritative even when the frame repeats an incorrect tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "authority", rename_all = "snake_case")]
+pub enum DecodedVideoRangeContract {
+    /// Follow frame metadata, falling back to the latest stream probe.
+    Automatic {
+        /// Stream-level range reported while probing the asset.
+        probed_range: DecodedVideoRange,
+    },
+    /// Force studio/legal range.
+    OverrideLimited,
+    /// Force full range.
+    OverrideFull,
+}
+
+impl DecodedVideoRangeContract {
+    /// Build the decode contract from persistent asset interpretation and probe facts.
+    pub const fn from_interpretation(
+        interpretation: mondrian_core::timeline_data::MediaRangeInterpretation,
+        probed_range: DecodedVideoRange,
+    ) -> Self {
+        use mondrian_core::timeline_data::{MediaRangeInterpretation, MediaSignalRange};
+
+        match interpretation {
+            MediaRangeInterpretation::Auto => Self::Automatic { probed_range },
+            MediaRangeInterpretation::Override { range: MediaSignalRange::Limited } => {
+                Self::OverrideLimited
+            }
+            MediaRangeInterpretation::Override { range: MediaSignalRange::Full } => {
+                Self::OverrideFull
+            }
+        }
+    }
+
+    /// Resolve the range to apply to one decoded frame.
+    pub const fn resolve_for_frame(self, frame_range: DecodedVideoRange) -> DecodedVideoRange {
+        match self {
+            Self::Automatic { probed_range } => match frame_range {
+                DecodedVideoRange::Unknown => probed_range,
+                explicit => explicit,
+            },
+            Self::OverrideLimited => DecodedVideoRange::Limited,
+            Self::OverrideFull => DecodedVideoRange::Full,
+        }
+    }
+
+    /// Return the range available before a frame has been decoded.
+    pub const fn baseline(self) -> DecodedVideoRange {
+        self.resolve_for_frame(DecodedVideoRange::Unknown)
+    }
+}
+
 /// Resolve the decoder-facing range from persistent asset interpretation and
 /// the latest probe result.
 ///
@@ -120,17 +176,7 @@ pub fn resolve_decoded_video_range(
     interpretation: mondrian_core::timeline_data::MediaRangeInterpretation,
     detected: DecodedVideoRange,
 ) -> DecodedVideoRange {
-    use mondrian_core::timeline_data::{MediaRangeInterpretation, MediaSignalRange};
-
-    match interpretation {
-        MediaRangeInterpretation::Auto => detected,
-        MediaRangeInterpretation::Override { range: MediaSignalRange::Limited } => {
-            DecodedVideoRange::Limited
-        }
-        MediaRangeInterpretation::Override { range: MediaSignalRange::Full } => {
-            DecodedVideoRange::Full
-        }
-    }
+    DecodedVideoRangeContract::from_interpretation(interpretation, detected).baseline()
 }
 
 pub(crate) fn decoded_video_range_from_ffmpeg(
@@ -942,6 +988,27 @@ mod tests {
     #[test]
     fn decoded_video_range_resolution_keeps_auto_and_honors_override() {
         use mondrian_core::timeline_data::{MediaRangeInterpretation, MediaSignalRange};
+
+        let automatic = DecodedVideoRangeContract::from_interpretation(
+            MediaRangeInterpretation::Auto,
+            DecodedVideoRange::Limited,
+        );
+        assert_eq!(
+            automatic.resolve_for_frame(DecodedVideoRange::Full),
+            DecodedVideoRange::Full
+        );
+        assert_eq!(
+            automatic.resolve_for_frame(DecodedVideoRange::Unknown),
+            DecodedVideoRange::Limited
+        );
+        let override_full = DecodedVideoRangeContract::from_interpretation(
+            MediaRangeInterpretation::Override { range: MediaSignalRange::Full },
+            DecodedVideoRange::Limited,
+        );
+        assert_eq!(
+            override_full.resolve_for_frame(DecodedVideoRange::Limited),
+            DecodedVideoRange::Full
+        );
 
         assert_eq!(
             resolve_decoded_video_range(MediaRangeInterpretation::Auto, DecodedVideoRange::Limited),

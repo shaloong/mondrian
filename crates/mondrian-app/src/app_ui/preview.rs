@@ -24,8 +24,8 @@ use mondrian_effects::{
     get_or_lower_effect_graph_to_gpu_plan, CompiledEffectGraph, EffectCachePolicy,
 };
 use mondrian_media::{
-    decode_preview_frame_cancellable, preview_decode_cpu_budget, resolve_decoded_video_range,
-    DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoRange, DecodedVideoSampling,
+    decode_preview_frame_cancellable, preview_decode_cpu_budget, DecodedFrameResidency,
+    DecodedGpuFrameHandleKind, DecodedVideoRange, DecodedVideoRangeContract, DecodedVideoSampling,
     DecodedVideoSurfaceFormat, HwAccelBackend, HwAccelDeviceSelector, PreviewDecodeAccessMode,
     PreviewDecodeAdaptiveHints, PreviewDecodeCpuBudget, PreviewDecodeDiagnostics,
     PreviewDecodeExecutionPath, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest,
@@ -432,7 +432,9 @@ impl AppUiPreviewService {
             source_width: 1920,
             source_height: 1080,
             input_color_space: ColorSpace::Srgb,
-            input_video_range: DecodedVideoRange::Full,
+            input_video_range: DecodedVideoRangeContract::Automatic {
+                probed_range: DecodedVideoRange::Full,
+            },
             native_surface_hint: None,
             source_has_alpha: false,
             alpha_interpretation: AlphaInterpretation::Straight,
@@ -8261,7 +8263,7 @@ impl AppUiPreviewService {
                     .primary_video()
                     .map_or(target_height, |video| video.height.max(1)),
                 input_color_space,
-                input_video_range: resolve_decoded_video_range(
+                input_video_range: DecodedVideoRangeContract::from_interpretation(
                     asset.interpretation.range,
                     asset
                         .media_info
@@ -16906,7 +16908,9 @@ mod tests {
             source_width: 320,
             source_height: 180,
             input_color_space: ColorSpace::Rec709,
-            input_video_range: DecodedVideoRange::Limited,
+            input_video_range: DecodedVideoRangeContract::Automatic {
+                probed_range: DecodedVideoRange::Limited,
+            },
             native_surface_hint: None,
             source_has_alpha: false,
             alpha_interpretation: AlphaInterpretation::Straight,
@@ -16960,7 +16964,9 @@ mod tests {
             source_width: 320,
             source_height: 180,
             input_color_space: ColorSpace::Rec709,
-            input_video_range: DecodedVideoRange::Limited,
+            input_video_range: DecodedVideoRangeContract::Automatic {
+                probed_range: DecodedVideoRange::Limited,
+            },
             native_surface_hint: None,
             source_has_alpha: false,
             alpha_interpretation: AlphaInterpretation::Straight,
@@ -17578,7 +17584,10 @@ mod tests {
         };
 
         let auto_key = key_for_state();
-        assert_eq!(auto_key.input_video_range, DecodedVideoRange::Limited);
+        assert_eq!(
+            auto_key.input_video_range.baseline(),
+            DecodedVideoRange::Limited
+        );
         let library = state.asset_library.as_ref().expect("asset library");
         let mut interpretation = library
             .get_asset(asset_id)
@@ -17593,7 +17602,14 @@ mod tests {
             .expect("persist range override");
 
         let override_key = key_for_state();
-        assert_eq!(override_key.input_video_range, DecodedVideoRange::Full);
+        assert_eq!(
+            override_key.input_video_range.baseline(),
+            DecodedVideoRange::Full
+        );
+        assert_eq!(
+            override_key.input_video_range,
+            DecodedVideoRangeContract::OverrideFull
+        );
         assert_ne!(auto_key, override_key);
 
         service.shutdown();
@@ -17663,7 +17679,9 @@ mod tests {
             source_width: 320,
             source_height: 180,
             input_color_space: ColorSpace::Rec709,
-            input_video_range: DecodedVideoRange::Limited,
+            input_video_range: DecodedVideoRangeContract::Automatic {
+                probed_range: DecodedVideoRange::Limited,
+            },
             native_surface_hint: None,
             source_has_alpha: false,
             alpha_interpretation: AlphaInterpretation::Straight,

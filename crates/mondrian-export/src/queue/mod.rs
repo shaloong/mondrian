@@ -16,7 +16,7 @@ use mondrian_media::audio::{
     AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData,
 };
 use mondrian_media::{
-    decode_preview_frame_cancellable, resolve_decoded_video_range, DecodedVideoRange,
+    decode_preview_frame_cancellable, DecodedVideoRange, DecodedVideoRangeContract,
     PreviewDecodeAccessMode, PreviewDecodeOutcome, PreviewDecodeRequest,
     PreviewSourceColorContract, VideoColorDiagnosticIssueAggregate,
 };
@@ -2496,7 +2496,7 @@ fn render_sequence_frame_into(
                 i64,
                 Rational,
                 ColorSpace,
-                DecodedVideoRange,
+                DecodedVideoRangeContract,
                 AlphaInterpretation,
             ),
             Arc<DecodedVideoLayer>,
@@ -2843,13 +2843,13 @@ fn resolve_export_input_video_range(
     timeline: &TimelineExportInput,
     asset_id: AssetId,
     interpretation: mondrian_core::timeline_data::AssetMediaInterpretation,
-) -> DecodedVideoRange {
+) -> DecodedVideoRangeContract {
     let detected = timeline
         .asset_color_diagnostics
         .get(&asset_id)
         .map(|diagnostic| diagnostic.color_range)
         .unwrap_or(DecodedVideoRange::Unknown);
-    resolve_decoded_video_range(interpretation.range, detected)
+    DecodedVideoRangeContract::from_interpretation(interpretation.range, detected)
 }
 
 fn finish_empty_sequence_target(
@@ -2882,7 +2882,7 @@ fn decode_video_layer_scaled(
     asset_id: AssetId,
     path: &Path,
     input_color_space: ColorSpace,
-    input_video_range: DecodedVideoRange,
+    input_video_range: DecodedVideoRangeContract,
     alpha_interpretation: AlphaInterpretation,
     working_color_space: WorkingColorSpace,
     engine: &ColorEngine,
@@ -4480,7 +4480,7 @@ mod tests {
 
         assert_eq!(
             resolve_export_input_video_range(&timeline, asset_id, interpretation),
-            DecodedVideoRange::Full
+            DecodedVideoRangeContract::OverrideFull
         );
         assert_eq!(
             resolve_export_input_video_range(
@@ -4488,7 +4488,7 @@ mod tests {
                 asset_id,
                 AssetMediaInterpretation::default()
             ),
-            DecodedVideoRange::Limited
+            DecodedVideoRangeContract::Automatic { probed_range: DecodedVideoRange::Limited }
         );
     }
 
