@@ -37,6 +37,12 @@ to its working-space setting. A Custom OCIO mismatch fails before archive save
 or open, while the application performs the same check before project creation
 and before atomically recording a sequence-settings command. This keeps invalid
 processor routes out of both persistent documents and undo history.
+Project color-mode replacement is a narrow project action carrying one complete
+`ColorEngine`. `AppState` first validates every inheriting sequence against a
+candidate `ProjectColorManagement`, then loads the exact OCIO config, replaces
+the engine, stops playback, refreshes preview access identity, and saves. A
+validation/load/save failure leaves or restores the previous project engine;
+the UI never mutates renderer state directly.
 
 ## Runtime State
 

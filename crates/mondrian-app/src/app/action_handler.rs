@@ -26,32 +26,33 @@ use crate::app::ui_actions::{
     InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
-    ProjectRecoverFromAutosavePayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
-    TimelineAddTrackKind, TimelineAddTrackPayload, TimelineDropAssetPayload,
-    TimelineInOutPointPayloadKind, TimelineMoveClipPayload, TimelineMoveTrackPayload,
-    TimelineOpenNestedSequencePayload, TimelineSeekPayload, TimelineSelectClipPayload,
-    TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
-    TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
-    TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
-    ViewerSetClipTransformPayload, ViewerSetPreviewResolutionScalePayload,
-    ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
-    ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
-    ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
-    ASSETS_PREPARE_DRAG, ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET, ASSETS_RENAME_FOLDER,
-    ASSETS_SET_INTERPRETATION, ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE,
-    EXPORT_CANCEL_JOB, EXPORT_CLEAR_COMPLETED, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT,
-    INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT,
+    ProjectRecoverFromAutosavePayload, ProjectSetColorEnginePayload, SequenceTargetPayload,
+    SequenceUpdateSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
+    TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineMoveClipPayload,
+    TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload, TimelineSeekPayload,
+    TimelineSelectClipPayload, TimelineSetInOutPointPayload,
+    TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
+    TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+    TimelineTrimSelectedClipsToPlayheadPayload, ViewerSetClipTransformPayload,
+    ViewerSetPreviewResolutionScalePayload, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
+    ASSETS_CREATE_SOLID_COLOR, ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION,
+    ASSETS_IMPORT_FILES, ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION,
+    ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET,
+    ASSETS_RENAME_FOLDER, ASSETS_SET_INTERPRETATION, ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP,
+    EFFECTS_NAMESPACE, EXPORT_CANCEL_JOB, EXPORT_CLEAR_COMPLETED, EXPORT_ENQUEUE, EXPORT_NAMESPACE,
+    EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT,
     INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
     INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
     INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
-    PROJECT_RECOVER_FROM_AUTOSAVE, SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE,
-    SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
-    SEQUENCE_UPDATE_SETTINGS, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
-    TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
-    TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK,
-    TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED,
-    TIMELINE_SET_TRACK_CONTROL, TIMELINE_TRIM_CLIPS, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
-    VIEWER_NAMESPACE, VIEWER_SET_CLIP_TRANSFORM, VIEWER_SET_PREVIEW_RESOLUTION_SCALE,
+    PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_SET_COLOR_ENGINE, SEQUENCE_DELETE, SEQUENCE_DUPLICATE,
+    SEQUENCE_NAMESPACE, SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT,
+    SEQUENCE_SWITCH_ACTIVE, SEQUENCE_UPDATE_SETTINGS, TIMELINE_ADD_TRACK,
+    TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK,
+    TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD,
+    TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT,
+    TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL, TIMELINE_TRIM_CLIPS,
+    TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, VIEWER_NAMESPACE, VIEWER_SET_CLIP_TRANSFORM,
+    VIEWER_SET_PREVIEW_RESOLUTION_SCALE,
 };
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
@@ -1538,6 +1539,14 @@ impl AppState {
                 )?;
                 self.recover_project_from_autosave_ui(payload)
             }
+            PROJECT_SET_COLOR_ENGINE => {
+                let payload = parse_ui_payload::<ProjectSetColorEnginePayload>(
+                    "project_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.set_project_color_engine(payload.engine)
+            }
             _ => Err(unknown_ui_action_error("project_ui_action", name)),
         }
     }
@@ -2439,8 +2448,9 @@ mod tests {
         inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
         inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
         inspector_set_effect_property_action, project_create_with_settings_action,
-        project_recover_from_autosave_action, sequence_delete_action, sequence_duplicate_action,
-        sequence_new_action, sequence_return_to_parent_action, sequence_set_active_default_action,
+        project_recover_from_autosave_action, project_set_color_engine_action,
+        sequence_delete_action, sequence_duplicate_action, sequence_new_action,
+        sequence_return_to_parent_action, sequence_set_active_default_action,
         sequence_switch_active_action, sequence_update_settings_action, timeline_add_track_action,
         timeline_clear_in_out_points_action, timeline_drop_asset_action, timeline_move_clip_action,
         timeline_move_track_action, timeline_open_nested_sequence_action,
@@ -2461,14 +2471,15 @@ mod tests {
         InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
         InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
         InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
-        ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload, SequenceTargetPayload,
-        SequenceUpdateSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-        TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineMoveTrackPayload,
-        TimelineOpenNestedSequencePayload, TimelineSeekSource, TimelineSetInOutPointPayload,
-        TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
-        TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
-        TimelineTrimSelectedClipsToPlayheadPayload, ViewerSetClipTransformPayload,
-        ViewerSetPreviewResolutionScalePayload, ViewerTransformPositionPayload,
+        ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
+        ProjectSetColorEnginePayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
+        TimelineAddTrackKind, TimelineAddTrackPayload, TimelineDropAssetPayload,
+        TimelineInOutPointPayloadKind, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
+        TimelineSeekSource, TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
+        TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
+        TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
+        ViewerSetClipTransformPayload, ViewerSetPreviewResolutionScalePayload,
+        ViewerTransformPositionPayload,
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
@@ -4628,6 +4639,55 @@ mod tests {
         assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| !*is_error));
 
         remove_temp_path(&root);
+    }
+
+    #[test]
+    fn dispatch_project_color_engine_update_changes_inherited_program_context() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Program");
+        state.active_sequence_id = Some(sequence.id);
+        state.sequence = Some(sequence.clone());
+        state.sequences.push(sequence);
+        let engine = mondrian_core::ColorEngine::Aces {
+            preset: mondrian_core::AcesConfigPreset::CgV4Aces2Ocio25,
+        };
+
+        state
+            .dispatch_action(project_set_color_engine_action(
+                ProjectSetColorEnginePayload { engine: engine.clone() },
+            ))
+            .expect("set project color engine");
+
+        assert_eq!(state.project_settings.color_management.engine, engine);
+        assert_eq!(
+            state
+                .sequence
+                .as_ref()
+                .expect("active sequence")
+                .settings
+                .root_program_color_context(&state.project_settings.color_management)
+                .engine,
+            engine
+        );
+    }
+
+    #[test]
+    fn dispatch_project_color_engine_update_rejects_inherited_working_mismatch_atomically() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Program");
+        state.active_sequence_id = Some(sequence.id);
+        state.sequence = Some(sequence.clone());
+        state.sequences.push(sequence);
+        let previous = state.project_settings.color_management.engine.clone();
+
+        let error = state
+            .dispatch_action(project_set_color_engine_action(
+                ProjectSetColorEnginePayload { engine: pinned_test_custom_engine("ACEScg") },
+            ))
+            .expect_err("mismatched Custom OCIO must not replace project mode");
+
+        assert!(error.to_string().contains("pins working space 'ACEScg'"));
+        assert_eq!(state.project_settings.color_management.engine, previous);
     }
 
     #[test]

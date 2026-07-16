@@ -430,4 +430,44 @@ impl AppState {
     pub fn save_project(&mut self) -> anyhow::Result<()> {
         self.save_project_file()
     }
+
+    /// Atomically replace the project color engine after validating every
+    /// inheriting sequence against the proposed project color contract.
+    pub fn set_project_color_engine(
+        &mut self,
+        engine: mondrian_core::ColorEngine,
+    ) -> mondrian_core::Result<()> {
+        if self.project_settings.color_management.engine == engine {
+            return Ok(());
+        }
+
+        self.sync_current_sequence_into_collection();
+        let mut next_color_management = self.project_settings.color_management.clone();
+        next_color_management.engine = engine.clone();
+        for sequence in self.export_sequences_snapshot() {
+            sequence
+                .settings
+                .validate_with_project_color_management(&next_color_management)?;
+        }
+        engine.ensure_loaded().map_err(|reason| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "set_project_color_engine".to_owned(),
+                reason,
+            }
+        })?;
+
+        let previous =
+            std::mem::replace(&mut self.project_settings.color_management.engine, engine);
+        self.stop();
+        self.settle_preview_access_source();
+        if let Err(error) = self.save_project_file() {
+            self.project_settings.color_management.engine = previous;
+            self.settle_preview_access_source();
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "set_project_color_engine".to_owned(),
+                reason: format!("项目颜色模式保存失败: {error:#}"),
+            });
+        }
+        Ok(())
+    }
 }

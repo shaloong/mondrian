@@ -154,6 +154,8 @@ pub const PROJECT_NAMESPACE: &str = "ui.project";
 
 /// Action name for creating a project with explicit settings.
 pub const PROJECT_CREATE_WITH_SETTINGS: &str = "create_with_settings";
+/// Action name for replacing the project-level color engine.
+pub const PROJECT_SET_COLOR_ENGINE: &str = "set_color_engine";
 /// Action name for recovering a project from an autosave snapshot.
 pub const PROJECT_RECOVER_FROM_AUTOSAVE: &str = "recover_from_autosave";
 
@@ -949,6 +951,13 @@ pub struct ProjectCreateWithSettingsPayload {
     pub project_settings: ProjectSettings,
 }
 
+/// Replace the project-level product color mode with a complete engine identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectSetColorEnginePayload {
+    /// Mondrian Standard, pinned ACES preset, or fully pinned Custom OCIO engine.
+    pub engine: ColorEngine,
+}
+
 /// One mutation to the shell-local new-project draft.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NewProjectDraftUpdatePayload {
@@ -1300,6 +1309,11 @@ pub fn viewer_set_zoom_scale_action(payload: ViewerSetZoomScalePayload) -> Actio
 /// Build an action that creates a project from shell UI.
 pub fn project_create_with_settings_action(payload: ProjectCreateWithSettingsPayload) -> Action {
     custom_project_action(PROJECT_CREATE_WITH_SETTINGS, payload)
+}
+
+/// Build a project action that atomically replaces the project color engine.
+pub fn project_set_color_engine_action(payload: ProjectSetColorEnginePayload) -> Action {
+    custom_project_action(PROJECT_SET_COLOR_ENGINE, payload)
 }
 
 /// Build an action that recovers a project from an autosave snapshot.
