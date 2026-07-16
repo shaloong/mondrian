@@ -15306,13 +15306,13 @@ mod tests {
         let asset_id = AssetId::new();
         let path = PathBuf::from("E:/media/missing-color-tags.mov");
         let diagnostic =
-            "source=MissingMetadata,method=MissingMetadata,warnings=missing_or_unsupported_cicp"
-                .to_string();
+            "source=MissingMetadata,method=MissingMetadata,warnings=missing_cicp".to_string();
         let issue_summary = VideoColorDiagnosticIssueSummary {
             source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
             method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
             confidence: mondrian_media::VideoColorInterpretationConfidence::None,
-            missing_or_unsupported_cicp_tags: 1,
+            missing_cicp_tags: 1,
+            unsupported_cicp_tags: 0,
             has_user_visible_warnings: true,
             ..VideoColorDiagnosticIssueSummary {
                 detected_color_space: None,
@@ -15329,7 +15329,8 @@ mod tests {
                 lower_priority_metadata_hints: 0,
                 ignored_lower_priority_metadata_hints: 0,
                 partial_cicp_tags: 0,
-                missing_or_unsupported_cicp_tags: 0,
+                missing_cicp_tags: 0,
+                unsupported_cicp_tags: 0,
                 decoder_unavailable: 0,
                 hdr_side_data_count: 0,
                 has_mastering_display_metadata: false,
@@ -15401,7 +15402,8 @@ mod tests {
                 lower_priority_metadata_hints: 0,
                 ignored_lower_priority_metadata_hints: 0,
                 partial_cicp_tags: 0,
-                missing_or_unsupported_cicp_tags: 0,
+                missing_cicp_tags: 0,
+                unsupported_cicp_tags: 0,
                 decoder_unavailable: 0,
                 hdr_side_data_count: 0,
                 has_mastering_display_metadata: false,
@@ -15694,7 +15696,7 @@ mod tests {
                     method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
                     evidence: Vec::new(),
                     warnings: vec![
-                        mondrian_media::VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags,
+                        mondrian_media::VideoColorInterpretationWarning::MissingCicpTags,
                     ],
                     user_overridable: true,
                 },

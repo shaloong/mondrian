@@ -6400,8 +6400,7 @@ mod tests {
             override_color_space: None,
             detected_color_space: None,
             working_color_space: WorkingColorSpace::LinearRec2020,
-            diagnostic_summary: "source=MissingMetadata,warnings=missing_or_unsupported_cicp"
-                .to_string(),
+            diagnostic_summary: "source=MissingMetadata,warnings=missing_cicp".to_string(),
             diagnostic_issue_summary: mondrian_media::VideoColorDiagnosticIssueSummary {
                 detected_color_space: None,
                 source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
@@ -6417,7 +6416,8 @@ mod tests {
                 lower_priority_metadata_hints: 0,
                 ignored_lower_priority_metadata_hints: 0,
                 partial_cicp_tags: 0,
-                missing_or_unsupported_cicp_tags: 1,
+                missing_cicp_tags: 1,
+                unsupported_cicp_tags: 0,
                 decoder_unavailable: 0,
                 hdr_side_data_count: 0,
                 has_mastering_display_metadata: false,
@@ -6512,8 +6512,7 @@ mod tests {
             1
         );
         assert_eq!(
-            json["last_color_rejection"]["diagnostic_issue_summary"]
-                ["missing_or_unsupported_cicp_tags"],
+            json["last_color_rejection"]["diagnostic_issue_summary"]["missing_cicp_tags"],
             1
         );
         assert_eq!(

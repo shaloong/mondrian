@@ -3581,11 +3581,8 @@ fn export_job_color_diagnostics_label(diagnostics: ExportJobColorDiagnostics) ->
 
 fn color_issue_summary_tags(summary: &VideoColorDiagnosticIssueSummary) -> Vec<String> {
     let mut tags = Vec::new();
-    push_issue_metric(
-        &mut tags,
-        "missing-cicp",
-        summary.missing_or_unsupported_cicp_tags,
-    );
+    push_issue_metric(&mut tags, "missing-cicp", summary.missing_cicp_tags);
+    push_issue_metric(&mut tags, "unsupported-cicp", summary.unsupported_cicp_tags);
     push_issue_metric(&mut tags, "decoder", summary.decoder_unavailable);
     push_issue_metric(&mut tags, "partial-cicp", summary.partial_cicp_tags);
     push_issue_metric(
@@ -3609,11 +3606,8 @@ fn color_issue_summary_tags(summary: &VideoColorDiagnosticIssueSummary) -> Vec<S
 fn color_issue_aggregate_tags(summary: &VideoColorDiagnosticIssueAggregate) -> Vec<String> {
     let mut tags = Vec::new();
     push_issue_metric(&mut tags, "warn", summary.diagnostics_with_warnings);
-    push_issue_metric(
-        &mut tags,
-        "missing-cicp",
-        summary.missing_or_unsupported_cicp_tags,
-    );
+    push_issue_metric(&mut tags, "missing-cicp", summary.missing_cicp_tags);
+    push_issue_metric(&mut tags, "unsupported-cicp", summary.unsupported_cicp_tags);
     push_issue_metric(&mut tags, "decoder", summary.decoder_unavailable);
     push_issue_metric(
         &mut tags,
@@ -5145,7 +5139,8 @@ mod tests {
             .record_asset_issue_summary(VideoColorDiagnosticIssueAggregate {
                 diagnostics: 2,
                 diagnostics_with_warnings: 2,
-                missing_or_unsupported_cicp_tags: 1,
+                missing_cicp_tags: 1,
+                unsupported_cicp_tags: 0,
                 decoder_unavailable: 1,
                 ..VideoColorDiagnosticIssueAggregate::default()
             });
@@ -7209,8 +7204,7 @@ mod tests {
                     override_color_space: None,
                     detected_color_space: None,
                     working_color_space: WorkingColorSpace::LinearRec2020,
-                    diagnostic_summary:
-                        "source=MissingMetadata,warnings=missing_or_unsupported_cicp".to_string(),
+                    diagnostic_summary: "source=MissingMetadata,warnings=missing_cicp".to_string(),
                     diagnostic_issue_summary: VideoColorDiagnosticIssueSummary {
                         detected_color_space: None,
                         source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
@@ -7226,7 +7220,8 @@ mod tests {
                         lower_priority_metadata_hints: 0,
                         ignored_lower_priority_metadata_hints: 0,
                         partial_cicp_tags: 0,
-                        missing_or_unsupported_cicp_tags: 1,
+                        missing_cicp_tags: 1,
+                        unsupported_cicp_tags: 0,
                         decoder_unavailable: 0,
                         hdr_side_data_count: 0,
                         has_mastering_display_metadata: false,
@@ -7262,7 +7257,7 @@ mod tests {
         assert!(empty.contains("MissingPolicyRejectMedia"));
         assert!(empty.contains("检测：MissingMetadata / None / warnings 1"));
         assert!(empty.contains("问题：missing-cicp 1"));
-        assert!(empty.contains("missing_or_unsupported_cicp"));
+        assert!(empty.contains("missing_cicp"));
     }
 
     #[test]

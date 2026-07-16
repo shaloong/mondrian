@@ -106,8 +106,10 @@ impl PixelFormat {
 pub enum VideoColorSpaceSource {
     /// Media evidence identified or inferred the color space.
     Metadata,
-    /// Metadata was missing or unsupported; callers must apply missing-metadata policy.
+    /// No color metadata was present; callers must apply missing-metadata policy.
     MissingMetadata,
+    /// Color metadata was present but did not describe a supported product color space.
+    UnsupportedMetadata,
     /// FFmpeg could not open a decoder; callers must apply missing-metadata policy.
     DecoderUnavailable,
 }
@@ -123,6 +125,8 @@ pub enum VideoColorDetectionMethod {
     CicpTags,
     /// No supported color metadata was found.
     MissingMetadata,
+    /// CICP tags were present but did not resolve to one supported product color space.
+    UnsupportedCicpTags,
     /// Decoder could not be opened, so no color metadata could be inspected.
     DecoderUnavailable,
 }
@@ -262,8 +266,10 @@ pub enum VideoColorInterpretationWarning {
         /// Color space inferred from partial tags.
         detected_color_space: ColorSpace,
     },
-    /// No supported CICP metadata was available.
-    MissingOrUnsupportedCicpTags,
+    /// No CICP tags were present.
+    MissingCicpTags,
+    /// CICP tags were present but did not resolve to a supported product color space.
+    UnsupportedCicpTags,
     /// Decoder metadata was unavailable.
     DecoderUnavailable,
     /// ICC profile parsed but could not be mapped to a supported OCIO identity.
@@ -409,8 +415,10 @@ pub struct VideoColorDiagnosticIssueSummary {
     pub ignored_lower_priority_metadata_hints: u64,
     /// Number of partial CICP inference warnings.
     pub partial_cicp_tags: u64,
-    /// Number of missing or unsupported CICP warnings.
-    pub missing_or_unsupported_cicp_tags: u64,
+    /// Number of missing CICP warnings.
+    pub missing_cicp_tags: u64,
+    /// Number of unsupported CICP warnings.
+    pub unsupported_cicp_tags: u64,
     /// Number of decoder-unavailable warnings.
     pub decoder_unavailable: u64,
     /// Number of HDR side-data records captured.
@@ -459,6 +467,8 @@ pub struct VideoColorDiagnosticIssueAggregate {
     pub method_cicp_tags: u64,
     /// Diagnostics that fell through to missing-metadata handling.
     pub method_missing_metadata: u64,
+    /// Diagnostics whose CICP tags were present but unsupported.
+    pub method_unsupported_cicp_tags: u64,
     /// Diagnostics that could not probe due to decoder unavailability.
     pub method_decoder_unavailable: u64,
     /// Diagnostics reported with high confidence.
@@ -487,8 +497,10 @@ pub struct VideoColorDiagnosticIssueAggregate {
     pub ignored_lower_priority_metadata_hints: u64,
     /// Total partial CICP inference warnings.
     pub partial_cicp_tags: u64,
-    /// Total missing or unsupported CICP warnings.
-    pub missing_or_unsupported_cicp_tags: u64,
+    /// Total missing CICP warnings.
+    pub missing_cicp_tags: u64,
+    /// Total unsupported CICP warnings.
+    pub unsupported_cicp_tags: u64,
     /// Total decoder-unavailable warnings.
     pub decoder_unavailable: u64,
     /// Total HDR side-data records observed across all diagnostics.
@@ -617,7 +629,8 @@ impl VideoColorDiagnostic {
             lower_priority_metadata_hints: 0,
             ignored_lower_priority_metadata_hints: 0,
             partial_cicp_tags: 0,
-            missing_or_unsupported_cicp_tags: 0,
+            missing_cicp_tags: 0,
+            unsupported_cicp_tags: 0,
             decoder_unavailable: 0,
             hdr_side_data_count: self.hdr_metadata.len() as u64,
             has_mastering_display_metadata: false,
@@ -653,9 +666,11 @@ impl VideoColorDiagnostic {
                 VideoColorInterpretationWarning::PartialCicpTags { .. } => {
                     summary.partial_cicp_tags = summary.partial_cicp_tags.saturating_add(1);
                 }
-                VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags => {
-                    summary.missing_or_unsupported_cicp_tags =
-                        summary.missing_or_unsupported_cicp_tags.saturating_add(1);
+                VideoColorInterpretationWarning::MissingCicpTags => {
+                    summary.missing_cicp_tags = summary.missing_cicp_tags.saturating_add(1);
+                }
+                VideoColorInterpretationWarning::UnsupportedCicpTags => {
+                    summary.unsupported_cicp_tags = summary.unsupported_cicp_tags.saturating_add(1);
                 }
                 VideoColorInterpretationWarning::DecoderUnavailable => {
                     summary.decoder_unavailable = summary.decoder_unavailable.saturating_add(1);
@@ -730,9 +745,9 @@ impl VideoColorDiagnosticIssueAggregate {
             .ignored_lower_priority_metadata_hints
             .saturating_add(summary.ignored_lower_priority_metadata_hints);
         self.partial_cicp_tags = self.partial_cicp_tags.saturating_add(summary.partial_cicp_tags);
-        self.missing_or_unsupported_cicp_tags = self
-            .missing_or_unsupported_cicp_tags
-            .saturating_add(summary.missing_or_unsupported_cicp_tags);
+        self.missing_cicp_tags = self.missing_cicp_tags.saturating_add(summary.missing_cicp_tags);
+        self.unsupported_cicp_tags =
+            self.unsupported_cicp_tags.saturating_add(summary.unsupported_cicp_tags);
         self.decoder_unavailable =
             self.decoder_unavailable.saturating_add(summary.decoder_unavailable);
         self.hdr_side_data_count =
@@ -771,6 +786,10 @@ impl VideoColorDiagnosticIssueAggregate {
             }
             VideoColorDetectionMethod::MissingMetadata => {
                 self.method_missing_metadata = self.method_missing_metadata.saturating_add(1);
+            }
+            VideoColorDetectionMethod::UnsupportedCicpTags => {
+                self.method_unsupported_cicp_tags =
+                    self.method_unsupported_cicp_tags.saturating_add(1);
             }
             VideoColorDetectionMethod::DecoderUnavailable => {
                 self.method_decoder_unavailable = self.method_decoder_unavailable.saturating_add(1);
@@ -868,7 +887,8 @@ impl VideoColorInterpretationWarning {
             Self::PartialCicpTags { detected_color_space } => {
                 format!("partial_cicp(detected={detected_color_space:?})")
             }
-            Self::MissingOrUnsupportedCicpTags => "missing_or_unsupported_cicp".to_string(),
+            Self::MissingCicpTags => "missing_cicp".to_string(),
+            Self::UnsupportedCicpTags => "unsupported_cicp".to_string(),
             Self::DecoderUnavailable => "decoder_unavailable".to_string(),
             Self::IccCicpMismatch { icc_color_space, cicp_color_space } => {
                 format!("icc_cicp_mismatch(icc={icc_color_space:?},cicp={cicp_color_space:?})")
@@ -1264,6 +1284,7 @@ fn detect_color_space_from_metadata(
         metadata.matrix.name.as_deref(),
     );
     let cicp_color_space = exact_cicp.or(hinted_cicp);
+    let unresolved_cicp = UnresolvedCicpMetadata::from_metadata(metadata);
 
     if let Some((selected_index, selected_hint)) = metadata_hints
         .iter()
@@ -1310,6 +1331,10 @@ fn detect_color_space_from_metadata(
                     cicp_metadata: metadata.clone(),
                 },
             );
+        }
+        if cicp_color_space.is_none() && unresolved_cicp == UnresolvedCicpMetadata::Unsupported {
+            unresolved_cicp.append_evidence(&mut interpretation.evidence, metadata);
+            interpretation.warnings.push(unresolved_cicp.warning());
         }
         return interpretation;
     }
@@ -1386,6 +1411,7 @@ fn detect_color_space_from_metadata(
                 mapped_color_space: Some(color_space),
                 profile_name: icc_profile.profile_name.clone(),
             }];
+            unresolved_cicp.append_evidence(&mut evidence, metadata);
             evidence.extend(metadata_hints.iter().map(metadata_hint_evidence));
             let mut interpretation = DetectedColorInterpretation {
                 color_space: Some(color_space),
@@ -1393,7 +1419,7 @@ fn detect_color_space_from_metadata(
                 source: VideoColorSpaceSource::Metadata,
                 method: VideoColorDetectionMethod::IccProfile,
                 evidence,
-                warnings: vec![VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags],
+                warnings: vec![unresolved_cicp.warning()],
                 user_overridable: true,
             };
             if let Some(warning) = lower_priority_metadata_hints_warning(
@@ -1406,13 +1432,15 @@ fn detect_color_space_from_metadata(
             return interpretation;
         }
         if metadata_hints.is_empty() {
+            let mut evidence = vec![icc_profile_evidence(icc_profile)];
+            unresolved_cicp.append_evidence(&mut evidence, metadata);
             let mut interpretation = DetectedColorInterpretation {
                 color_space: None,
                 confidence: VideoColorInterpretationConfidence::None,
-                source: VideoColorSpaceSource::MissingMetadata,
-                method: VideoColorDetectionMethod::MissingMetadata,
-                evidence: vec![icc_profile_evidence(icc_profile)],
-                warnings: vec![VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags],
+                source: unresolved_cicp.source(),
+                method: unresolved_cicp.method(),
+                evidence,
+                warnings: vec![unresolved_cicp.warning()],
                 user_overridable: true,
             };
             append_unmapped_icc_warning(&mut interpretation, icc_profile);
@@ -1429,20 +1457,20 @@ fn detect_color_space_from_metadata(
             selected_hint,
             metadata_hints,
             icc_profile,
+            metadata,
+            unresolved_cicp,
         );
     }
 
+    let mut evidence = Vec::new();
+    unresolved_cicp.append_evidence(&mut evidence, metadata);
     let mut interpretation = DetectedColorInterpretation {
         color_space: None,
         confidence: VideoColorInterpretationConfidence::None,
-        source: VideoColorSpaceSource::MissingMetadata,
-        method: VideoColorDetectionMethod::MissingMetadata,
-        evidence: vec![VideoColorInterpretationEvidence::UnsupportedCicpTags {
-            primaries: metadata.primaries.clone(),
-            transfer: metadata.transfer.clone(),
-            matrix: metadata.matrix.clone(),
-        }],
-        warnings: vec![VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags],
+        source: unresolved_cicp.source(),
+        method: unresolved_cicp.method(),
+        evidence,
+        warnings: vec![unresolved_cicp.warning()],
         user_overridable: true,
     };
     append_icc_profile_evidence_and_warnings(&mut interpretation, icc_profile, None);
@@ -1453,18 +1481,22 @@ fn descriptive_metadata_hint_interpretation(
     selected_hint: &VideoColorMetadataHint,
     metadata_hints: &[VideoColorMetadataHint],
     icc_profile: Option<&IccColorProfileHint>,
+    metadata: &VideoColorMetadata,
+    unresolved_cicp: UnresolvedCicpMetadata,
 ) -> DetectedColorInterpretation {
+    let mut evidence = metadata_hints.iter().map(metadata_hint_evidence).collect::<Vec<_>>();
+    unresolved_cicp.append_evidence(&mut evidence, metadata);
     let mut interpretation = DetectedColorInterpretation {
         color_space: Some(selected_hint.detected_color_space),
         confidence: VideoColorInterpretationConfidence::Low,
         source: VideoColorSpaceSource::Metadata,
         method: VideoColorDetectionMethod::MetadataHint,
-        evidence: metadata_hints.iter().map(metadata_hint_evidence).collect(),
+        evidence,
         warnings: vec![
             VideoColorInterpretationWarning::DescriptiveMetadataHintInference {
                 selected: selected_hint.clone(),
             },
-            VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags,
+            unresolved_cicp.warning(),
         ],
         user_overridable: true,
     };
@@ -1490,6 +1522,58 @@ fn descriptive_metadata_hint_interpretation(
         Some(selected_hint.detected_color_space),
     );
     interpretation
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnresolvedCicpMetadata {
+    Missing,
+    Unsupported,
+}
+
+impl UnresolvedCicpMetadata {
+    fn from_metadata(metadata: &VideoColorMetadata) -> Self {
+        if metadata.primaries.specified || metadata.transfer.specified || metadata.matrix.specified
+        {
+            Self::Unsupported
+        } else {
+            Self::Missing
+        }
+    }
+
+    fn source(self) -> VideoColorSpaceSource {
+        match self {
+            Self::Missing => VideoColorSpaceSource::MissingMetadata,
+            Self::Unsupported => VideoColorSpaceSource::UnsupportedMetadata,
+        }
+    }
+
+    fn method(self) -> VideoColorDetectionMethod {
+        match self {
+            Self::Missing => VideoColorDetectionMethod::MissingMetadata,
+            Self::Unsupported => VideoColorDetectionMethod::UnsupportedCicpTags,
+        }
+    }
+
+    fn warning(self) -> VideoColorInterpretationWarning {
+        match self {
+            Self::Missing => VideoColorInterpretationWarning::MissingCicpTags,
+            Self::Unsupported => VideoColorInterpretationWarning::UnsupportedCicpTags,
+        }
+    }
+
+    fn append_evidence(
+        self,
+        evidence: &mut Vec<VideoColorInterpretationEvidence>,
+        metadata: &VideoColorMetadata,
+    ) {
+        if self == Self::Unsupported {
+            evidence.push(VideoColorInterpretationEvidence::UnsupportedCicpTags {
+                primaries: metadata.primaries.clone(),
+                transfer: metadata.transfer.clone(),
+                matrix: metadata.matrix.clone(),
+            });
+        }
+    }
 }
 
 /// Interpret structured video color metadata without applying project policy.
@@ -2087,19 +2171,23 @@ mod tests {
 
     #[test]
     fn unsupported_cicp_combination_remains_unknown_with_raw_evidence() {
-        let detection = detect_color_space(
+        let metadata = capture_color_metadata(
             Primaries::SMPTE432,
             TransferCharacteristic::SMPTE2084,
             Space::RGB,
         );
+        let detection = detect_color_space_from_metadata(&metadata, &[], None);
 
         assert_eq!(detection.color_space, None);
         assert_eq!(
             detection.confidence,
             VideoColorInterpretationConfidence::None
         );
-        assert_eq!(detection.source, VideoColorSpaceSource::MissingMetadata);
-        assert_eq!(detection.method, VideoColorDetectionMethod::MissingMetadata);
+        assert_eq!(detection.source, VideoColorSpaceSource::UnsupportedMetadata);
+        assert_eq!(
+            detection.method,
+            VideoColorDetectionMethod::UnsupportedCicpTags
+        );
         assert!(matches!(
             detection.evidence.first(),
             Some(VideoColorInterpretationEvidence::UnsupportedCicpTags {
@@ -2112,10 +2200,59 @@ mod tests {
         ));
         assert!(detection
             .warnings
-            .contains(&VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags));
+            .contains(&VideoColorInterpretationWarning::UnsupportedCicpTags));
         assert!(!detection.warnings.iter().any(|warning| matches!(
             warning,
             VideoColorInterpretationWarning::PartialCicpTags { .. }
+        )));
+
+        let diagnostic = VideoColorDiagnostic {
+            detected_color_space: detection.color_space,
+            color_range: DecodedVideoRange::Full,
+            source: detection.source,
+            method: detection.method,
+            interpretation: detection,
+            metadata: Some(metadata),
+            metadata_hints: Vec::new(),
+            hdr_metadata: Vec::new(),
+        };
+        let summary = diagnostic.issue_summary();
+        assert_eq!(summary.missing_cicp_tags, 0);
+        assert_eq!(summary.unsupported_cicp_tags, 1);
+
+        let mut aggregate = VideoColorDiagnosticIssueAggregate::default();
+        aggregate.observe(&diagnostic);
+        assert_eq!(aggregate.method_missing_metadata, 0);
+        assert_eq!(aggregate.method_unsupported_cicp_tags, 1);
+        assert_eq!(aggregate.missing_cicp_tags, 0);
+        assert_eq!(aggregate.unsupported_cicp_tags, 1);
+    }
+
+    #[test]
+    fn declared_camera_metadata_preserves_unsupported_cicp_as_a_warning() {
+        let metadata = capture_color_metadata(
+            Primaries::SMPTE432,
+            TransferCharacteristic::SMPTE2084,
+            Space::RGB,
+        );
+        let hint = parse_video_color_metadata_hint(
+            VideoColorMetadataHintScope::Stream,
+            "camera_profile",
+            "ARRI LogC4 / AWG4",
+        )
+        .expect("declared camera profile");
+
+        let detection = interpret_video_color_metadata(&metadata, std::slice::from_ref(&hint));
+
+        assert_eq!(detection.color_space, Some(ColorSpace::ArriLogC4WideGamut4));
+        assert_eq!(detection.source, VideoColorSpaceSource::Metadata);
+        assert_eq!(detection.method, VideoColorDetectionMethod::MetadataHint);
+        assert!(detection
+            .warnings
+            .contains(&VideoColorInterpretationWarning::UnsupportedCicpTags));
+        assert!(detection.evidence.iter().any(|evidence| matches!(
+            evidence,
+            VideoColorInterpretationEvidence::UnsupportedCicpTags { .. }
         )));
     }
 
@@ -2192,9 +2329,7 @@ mod tests {
         );
         assert_eq!(detection.source, VideoColorSpaceSource::MissingMetadata);
         assert_eq!(detection.method, VideoColorDetectionMethod::MissingMetadata);
-        assert!(detection
-            .warnings
-            .contains(&VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags));
+        assert!(detection.warnings.contains(&VideoColorInterpretationWarning::MissingCicpTags));
     }
 
     #[test]
@@ -2227,9 +2362,7 @@ mod tests {
                 profile_name: Some("Display P3".to_owned()),
             })
         );
-        assert!(detection
-            .warnings
-            .contains(&VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags));
+        assert!(detection.warnings.contains(&VideoColorInterpretationWarning::MissingCicpTags));
     }
 
     #[test]
@@ -2922,7 +3055,8 @@ mod tests {
                 lower_priority_metadata_hints: 0,
                 ignored_lower_priority_metadata_hints: 0,
                 partial_cicp_tags: 0,
-                missing_or_unsupported_cicp_tags: 0,
+                missing_cicp_tags: 0,
+                unsupported_cicp_tags: 0,
                 decoder_unavailable: 0,
                 hdr_side_data_count: 3,
                 has_mastering_display_metadata: true,
@@ -2962,7 +3096,8 @@ mod tests {
             VideoColorInterpretationConfidence::None
         );
         assert!(!missing_summary.has_raw_cicp_metadata);
-        assert_eq!(missing_summary.missing_or_unsupported_cicp_tags, 1);
+        assert_eq!(missing_summary.missing_cicp_tags, 1);
+        assert_eq!(missing_summary.unsupported_cicp_tags, 0);
         assert_eq!(missing_summary.decoder_unavailable, 0);
         assert!(missing_summary.has_user_visible_warnings);
 
@@ -2984,7 +3119,8 @@ mod tests {
             VideoColorDetectionMethod::DecoderUnavailable
         );
         assert_eq!(unavailable_summary.decoder_unavailable, 1);
-        assert_eq!(unavailable_summary.missing_or_unsupported_cicp_tags, 0);
+        assert_eq!(unavailable_summary.missing_cicp_tags, 0);
+        assert_eq!(unavailable_summary.unsupported_cicp_tags, 0);
         assert!(unavailable_summary.has_user_visible_warnings);
     }
 
@@ -3065,6 +3201,7 @@ mod tests {
                 method_icc_profile: 0,
                 method_cicp_tags: 0,
                 method_missing_metadata: 0,
+                method_unsupported_cicp_tags: 0,
                 method_decoder_unavailable: 1,
                 confidence_high: 1,
                 confidence_medium: 0,
@@ -3079,7 +3216,8 @@ mod tests {
                 lower_priority_metadata_hints: 0,
                 ignored_lower_priority_metadata_hints: 0,
                 partial_cicp_tags: 0,
-                missing_or_unsupported_cicp_tags: 0,
+                missing_cicp_tags: 0,
+                unsupported_cicp_tags: 0,
                 decoder_unavailable: 1,
                 hdr_side_data_count: 3,
                 diagnostics_with_mastering_display_metadata: 1,

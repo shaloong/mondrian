@@ -859,9 +859,9 @@ LogC4 names and take precedence over generic CICP delivery tags. Future
 container-specific side-data parsers should feed the same hint model instead of
 adding another color-space decision path.
 `VideoColorDetectionMethod` records whether the final media decision came from
-a metadata hint, CICP tags, missing metadata, or decoder unavailability; UI,
-logs, and export reports should surface that method instead of asking users to
-infer provenance from raw tags.
+a metadata hint, an ICC profile, supported CICP tags, unsupported CICP tags,
+missing metadata, or decoder unavailability; UI, logs, and export reports
+surface that method instead of asking users to infer provenance from raw tags.
 HDR stream side-data is captured as `VideoHdrMetadataSummary` entries on
 `VideoStreamInfo` and copied into `VideoColorDiagnostic`. The summary records
 side-data kind, payload size, and a typed `mondrian-core` payload when FFmpeg
@@ -903,9 +903,12 @@ carriage is implemented.
 Media probing must preserve the distinction between explicit metadata and
 policy assumptions. `mondrian-media::VideoStreamInfo.detected_color_space` is
 the only field that means container/codec metadata identified a color space.
-`VideoColorSpaceSource::MissingMetadata` and
-`VideoColorSpaceSource::DecoderUnavailable` are diagnostic source states, not
-permission for callers to bypass missing-metadata policy.
+`VideoColorSpaceSource::{MissingMetadata, UnsupportedMetadata,
+DecoderUnavailable}` are distinct diagnostic source states, not permission for
+callers to bypass missing-metadata policy. `MissingMetadata` means that no CICP
+field was specified. Any specified but unresolved, ambiguous, contradictory, or
+unsupported CICP combination is `UnsupportedMetadata`; it must not be reported
+as absent metadata or silently guessed as a familiar product space.
 `VideoStreamInfo.color_metadata` stores the raw CICP-style primaries, transfer,
 and matrix tags that FFmpeg reported, including numeric code, tag name, and
 specified/unspecified state. Diagnostics, future UI warnings, and camera-log
@@ -926,9 +929,11 @@ matches, unsupported CICP tags, mapped/unmapped ICC profiles, and decoder
 unavailability. An ICC `RGB`/`GRAY` signature identifies only the ICC channel
 model; it is never evidence for Rec.709 or sRGB. Only an explicitly identified
 supported standard produces a managed `ColorSpace`. An ICC-only unmapped stream
-remains `MissingMetadata`, preserves the profile as evidence, and emits
-`IccProfileUnmapped` so normal missing-input policy can reject or diagnose its
-fallback. Warnings must
+with no CICP tags remains `MissingMetadata`, preserves the profile as evidence,
+and emits `IccProfileUnmapped` so normal missing-input policy can reject or
+diagnose its fallback. If specified but unsupported CICP tags accompany that
+ICC profile, the source and method remain the unsupported-CICP state and both
+pieces of evidence survive. Warnings must
 surface ambiguity such as multiple camera metadata hints, hint-vs-CICP
 conflicts, partial CICP inference, missing/unsupported tags, or decoder
 unavailability. Warning payloads must preserve the original metadata source:
@@ -939,9 +944,10 @@ this provenance remains visible without duplicating formatter logic.
 Machine-readable surfaces should consume `VideoColorDiagnostic::issue_summary()`
 instead. The issue summary carries stable counts and flags for multiple
 metadata hints, ignored hints, hint-vs-CICP conflicts, partial CICP inference,
-missing/unsupported CICP tags, decoder unavailability, raw CICP presence, and
-HDR side-data presence, so UI panels, perf JSONL, and export reports do not
-parse diagnostic text.
+decoder unavailability, raw CICP presence, and HDR side-data presence. It keeps
+separate counters for missing and unsupported CICP tags, so UI panels, perf
+JSONL, and export reports do not parse diagnostic text. Aggregates likewise
+count `method_missing_metadata` and `method_unsupported_cicp_tags` independently.
 Preview rejection logs and export failures must include the media asset id,
 path, missing-metadata policy, and `VideoColorDiagnostic` summary so users can
 identify whether the problem was missing tags, unsupported tags, or decoder

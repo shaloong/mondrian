@@ -369,6 +369,7 @@ fn method_label(method: VideoColorDetectionMethod) -> &'static str {
         VideoColorDetectionMethod::IccProfile => "ICC 配置文件",
         VideoColorDetectionMethod::CicpTags => "CICP",
         VideoColorDetectionMethod::MissingMetadata => "无元数据",
+        VideoColorDetectionMethod::UnsupportedCicpTags => "CICP 不支持",
         VideoColorDetectionMethod::DecoderUnavailable => "解码器不可用",
     }
 }
@@ -550,7 +551,8 @@ fn warning_summary(warning: &VideoColorInterpretationWarning) -> String {
             "已忽略冲突的低优先级 hint"
         }
         VideoColorInterpretationWarning::PartialCicpTags { .. } => "仅有部分 CICP",
-        VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags => "CICP 缺失或不支持",
+        VideoColorInterpretationWarning::MissingCicpTags => "CICP 缺失",
+        VideoColorInterpretationWarning::UnsupportedCicpTags => "CICP 不支持或冲突",
         VideoColorInterpretationWarning::DecoderUnavailable => "解码器不可用",
         VideoColorInterpretationWarning::IccProfileUnmapped { .. } => "ICC 无法映射",
         VideoColorInterpretationWarning::IccCicpMismatch { .. } => "ICC 与 CICP 冲突",

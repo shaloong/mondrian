@@ -847,7 +847,7 @@ mod tests {
                     source: VideoColorSpaceSource::MissingMetadata,
                     method: VideoColorDetectionMethod::MissingMetadata,
                     evidence: Vec::new(),
-                    warnings: vec![VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags],
+                    warnings: vec![VideoColorInterpretationWarning::MissingCicpTags],
                     user_overridable: true,
                 },
                 color_space_source: VideoColorSpaceSource::MissingMetadata,

@@ -3633,7 +3633,8 @@ mod tests {
             method_decoder_unavailable: 1,
             confidence_none: 1,
             confidence_medium: 1,
-            missing_or_unsupported_cicp_tags: 1,
+            missing_cicp_tags: 1,
+            unsupported_cicp_tags: 0,
             decoder_unavailable: 1,
             ..VideoColorDiagnosticIssueAggregate::default()
         });
@@ -3672,7 +3673,8 @@ mod tests {
                 method_decoder_unavailable: 1,
                 confidence_none: 1,
                 confidence_medium: 1,
-                missing_or_unsupported_cicp_tags: 1,
+                missing_cicp_tags: 1,
+                unsupported_cicp_tags: 0,
                 decoder_unavailable: 1,
                 ..VideoColorDiagnosticIssueAggregate::default()
             },
@@ -4161,7 +4163,8 @@ mod tests {
             diagnostics: 1,
             method_missing_metadata: 1,
             confidence_none: 1,
-            missing_or_unsupported_cicp_tags: 1,
+            missing_cicp_tags: 1,
+            unsupported_cicp_tags: 0,
             ..VideoColorDiagnosticIssueAggregate::default()
         });
 
@@ -4186,7 +4189,8 @@ mod tests {
             diagnostics: 1,
             method_missing_metadata: 1,
             confidence_none: 1,
-            missing_or_unsupported_cicp_tags: 1,
+            missing_cicp_tags: 1,
+            unsupported_cicp_tags: 0,
             ..VideoColorDiagnosticIssueAggregate::default()
         });
 
@@ -4197,7 +4201,8 @@ mod tests {
                     diagnostics: 1,
                     method_missing_metadata: 1,
                     confidence_none: 1,
-                    missing_or_unsupported_cicp_tags: 1,
+                    missing_cicp_tags: 1,
+                    unsupported_cicp_tags: 0,
                     ..VideoColorDiagnosticIssueAggregate::default()
                 },
                 gpu_path_ready: true,
@@ -4247,7 +4252,7 @@ mod tests {
             test_color_diagnostic(
                 mondrian_media::VideoColorSpaceSource::MissingMetadata,
                 mondrian_media::VideoColorDetectionMethod::MissingMetadata,
-                Some(mondrian_media::VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags),
+                Some(mondrian_media::VideoColorInterpretationWarning::MissingCicpTags),
             ),
         );
         asset_color_diagnostics.insert(
@@ -4291,7 +4296,8 @@ mod tests {
                 method_decoder_unavailable: 1,
                 confidence_none: 2,
                 warning_count: 2,
-                missing_or_unsupported_cicp_tags: 1,
+                missing_cicp_tags: 1,
+                unsupported_cicp_tags: 0,
                 decoder_unavailable: 1,
                 ..VideoColorDiagnosticIssueAggregate::default()
             }
@@ -5041,25 +5047,9 @@ mod tests {
                     confidence: mondrian_media::VideoColorInterpretationConfidence::None,
                     source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
                     method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
-                    evidence: vec![mondrian_media::VideoColorInterpretationEvidence::UnsupportedCicpTags {
-                        primaries: mondrian_media::VideoColorTag {
-                            code: 2,
-                            name: None,
-                            specified: false,
-                        },
-                        transfer: mondrian_media::VideoColorTag {
-                            code: 2,
-                            name: None,
-                            specified: false,
-                        },
-                        matrix: mondrian_media::VideoColorTag {
-                            code: 2,
-                            name: None,
-                            specified: false,
-                        },
-                    }],
+                    evidence: Vec::new(),
                     warnings: vec![
-                        mondrian_media::VideoColorInterpretationWarning::MissingOrUnsupportedCicpTags,
+                        mondrian_media::VideoColorInterpretationWarning::MissingCicpTags,
                     ],
                     user_overridable: true,
                 },
