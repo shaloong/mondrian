@@ -225,6 +225,7 @@ impl AppState {
         &mut self,
         settings: mondrian_timeline::sequence::SequenceSettings,
     ) -> mondrian_core::Result<()> {
+        settings.validate_with_project_color_management(&self.project_settings.color_management)?;
         let (sequence_id, before, after) = {
             let seq = self.sequence.as_mut().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
@@ -258,6 +259,7 @@ impl AppState {
                 reason: "序列名称不能为空".to_string(),
             });
         }
+        settings.validate_with_project_color_management(&self.project_settings.color_management)?;
 
         self.sync_current_sequence_into_collection();
         let before = self
@@ -1290,7 +1292,12 @@ impl AppState {
 
     /// 创建新序列并替换当前序列
     pub fn new_sequence(&mut self, name: &str) {
-        let sequence = Sequence::new(name);
+        let mut sequence = Sequence::new(name);
+        if let Some(working_space) =
+            self.project_settings.color_management.engine.pinned_working_space()
+        {
+            sequence.settings.working_color_space = working_space;
+        }
         let sequence_id = sequence.id;
         self.sequence = Some(sequence.clone());
         self.sequences.push(sequence);

@@ -188,6 +188,13 @@ persists the resolved names in the identity. It does not defer default lookup
 until project reopen or frame rendering. Advanced callers may instead pin an
 explicit display/view through `custom_ocio`; both paths produce the same complete
 identity contract.
+The current Custom identity also pins exactly one Mondrian working-space name;
+its processor-graph digest is defined around that space. Sequence/project
+validation therefore rejects a Custom engine paired with any other sequence
+working space before render planning or persistence. CPU/GPU processor creation
+retains the same check as a defense-in-depth boundary. Standard and ACES modes
+may continue to use any supported typed working space from their immutable
+configs.
 
 ## OCIO Global State Management
 

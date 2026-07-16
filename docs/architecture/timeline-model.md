@@ -27,6 +27,11 @@ A `Sequence` contains:
 - a Sequence-owned `AudioProgram`
 
 Default sequences create `V1..V3` and `A1..A3`. `SequenceSettings` validates resolution, frame rate, audio sample rate/layout, preview settings, and color-management constraints.
+`validate_with_project_color_management` additionally validates the effective
+inherited/overridden `ColorEngine`. A Custom OCIO sequence must use the exact
+working space pinned by its project identity; application mutation boundaries
+call this validator before replacing a sequence snapshot, and new sequences in
+a Custom project adopt that pinned working space.
 The persisted `working_color_space` is a `WorkingColorSpace`, distinct from
 external input and output `ColorSpace` values. Root color contexts carry a
 display-referred output identity, while nested contexts carry their parent working

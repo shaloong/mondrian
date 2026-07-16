@@ -32,6 +32,11 @@ offers Mondrian Standard, the two version-pinned ACES 2.0 presets, and Custom
 OCIO. Custom file selection must validate the config and pin its complete
 identity before replacing the draft engine; cancellation or validation failure
 leaves the previous engine intact.
+Document validation applies each sequence's effective project/sequence engine
+to its working-space setting. A Custom OCIO mismatch fails before archive save
+or open, while the application performs the same check before project creation
+and before atomically recording a sequence-settings command. This keeps invalid
+processor routes out of both persistent documents and undo history.
 
 ## Runtime State
 

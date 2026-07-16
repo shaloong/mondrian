@@ -768,6 +768,28 @@ impl SequenceSettings {
         Ok(())
     }
 
+    /// Validate sequence settings together with the effective project color mode.
+    ///
+    /// This catches Custom OCIO working-space mismatches before a render plan can
+    /// request a processor route outside the identity saved with the project.
+    pub fn validate_with_project_color_management(
+        &self,
+        project_cm: &mondrian_core::ProjectColorManagement,
+    ) -> mondrian_core::Result<()> {
+        self.validate()?;
+        let engine = if self.color_management.inherit {
+            &project_cm.engine
+        } else {
+            &self.color_management.engine
+        };
+        engine.validate_working_space(self.working_color_space).map_err(|reason| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "sequence_color_management_validate".to_owned(),
+                reason,
+            }
+        })
+    }
+
     /// Build the Program Output color context shared by preview, scopes, and export.
     ///
     /// Program Output uses the sequence output color space because these pixels
@@ -2240,6 +2262,24 @@ mod tests {
                 view: "Test View".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn inherited_custom_ocio_rejects_unpinned_sequence_working_space() {
+        let project_cm = ProjectColorManagement {
+            engine: pinned_custom_engine(OcioConfigSource::Environment),
+            ..ProjectColorManagement::default()
+        };
+        let settings = SequenceSettings {
+            working_color_space: WorkingColorSpace::AcesCg,
+            ..SequenceSettings::default()
+        };
+
+        let error = settings
+            .validate_with_project_color_management(&project_cm)
+            .expect_err("Custom OCIO must reject an unpinned sequence working space");
+
+        assert!(error.to_string().contains("pins working space 'Linear Rec.2020'"));
     }
 
     #[test]

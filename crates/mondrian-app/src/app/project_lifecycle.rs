@@ -386,7 +386,7 @@ impl AppState {
         if project_file.exists() {
             anyhow::bail!("项目文件已存在：{}", project_file.display());
         }
-        settings.validate()?;
+        settings.validate_with_project_color_management(&project_settings.color_management)?;
 
         if let Some(parent) = project_file.parent() {
             fs::create_dir_all(parent)?;

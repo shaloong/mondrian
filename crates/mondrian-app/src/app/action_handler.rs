@@ -2474,12 +2474,32 @@ mod tests {
     use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
     use mondrian_core::types::{AssetId, EffectId, FramePosition, MaskId, TrackId};
     use mondrian_core::{Color, ColorSpace};
-    use mondrian_core::{ProjectSettings, Rational, Resolution};
+    use mondrian_core::{ProjectSettings, Rational, Resolution, WorkingColorSpace};
     use mondrian_effects::EffectType;
     use mondrian_timeline::clip::Clip;
     use mondrian_timeline::sequence::{
         PreviewRenderFormat, Sequence, SequencePreviewSettings, SequenceSettings,
     };
+
+    fn pinned_test_custom_engine(working_space: &str) -> mondrian_core::ColorEngine {
+        mondrian_core::ColorEngine::CustomOcio {
+            identity: Box::new(
+                mondrian_core::CustomOcioProjectIdentity::from_pinned_parts(
+                    mondrian_core::OcioConfigSource::Environment,
+                    "0".repeat(64),
+                    "test-config".to_owned(),
+                    "0".repeat(64),
+                    working_space.to_owned(),
+                    "Test Display".to_owned(),
+                    "Test View".to_owned(),
+                    mondrian_core::CustomOcioLookIdentity::None,
+                    Vec::new(),
+                    Vec::new(),
+                )
+                .expect("structurally valid Custom OCIO identity"),
+            ),
+        }
+    }
 
     fn state_with_two_video_tracks() -> (
         AppState,
@@ -3009,6 +3029,56 @@ mod tests {
         assert_eq!(active.name, "original");
         assert_eq!(active.settings, SequenceSettings::default());
         assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_sequence_ui_rejects_custom_ocio_working_space_mismatch_atomically() {
+        let mut state = AppState::new();
+        state.project_settings.color_management.engine =
+            pinned_test_custom_engine("Linear Rec.2020");
+        let sequence = Sequence::new("original");
+        let sequence_id = sequence.id;
+        state.active_sequence_id = Some(sequence_id);
+        state.sequence = Some(sequence.clone());
+        state.sequences.push(sequence);
+        let settings = SequenceSettings {
+            working_color_space: WorkingColorSpace::AcesCg,
+            ..SequenceSettings::default()
+        };
+
+        let error = state
+            .dispatch_action(sequence_update_settings_action(
+                SequenceUpdateSettingsPayload {
+                    sequence_id,
+                    name: "Must Not Stick".to_owned(),
+                    settings,
+                },
+            ))
+            .expect_err("Custom OCIO working mismatch must fail before mutation");
+
+        assert!(error.to_string().contains("pins working space 'Linear Rec.2020'"));
+        let active = state.sequence.as_ref().expect("active sequence");
+        assert_eq!(active.name, "original");
+        assert_eq!(active.settings, SequenceSettings::default());
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn new_sequence_adopts_custom_ocio_pinned_working_space() {
+        let mut state = AppState::new();
+        state.project_settings.color_management.engine = pinned_test_custom_engine("ACEScg");
+
+        state.new_sequence("Custom Working");
+
+        assert_eq!(
+            state
+                .sequence
+                .as_ref()
+                .expect("new active sequence")
+                .settings
+                .working_color_space,
+            WorkingColorSpace::AcesCg
+        );
     }
 
     #[test]

@@ -164,6 +164,14 @@ impl ProjectDocument {
         if self.sequences.active().is_none() {
             anyhow::bail!("project document has no active sequence");
         }
+        for sequence in &self.sequences.sequences {
+            sequence
+                .settings
+                .validate_with_project_color_management(&self.settings.color_management)
+                .with_context(|| {
+                    format!("sequence '{}' color management is invalid", sequence.name)
+                })?;
+        }
         Ok(())
     }
 
@@ -644,6 +652,25 @@ mod tests {
             format!("{error:#}").contains("OCIO config file not found"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn document_validation_rejects_custom_ocio_working_space_mismatch() {
+        let mut document = test_document();
+        document.settings.color_management.engine =
+            missing_custom_engine(PathBuf::from("E:/studio/config.ocio"));
+        document
+            .sequences
+            .active_mut()
+            .expect("active sequence")
+            .settings
+            .working_color_space = mondrian_core::WorkingColorSpace::AcesCg;
+
+        let error = document
+            .validate()
+            .expect_err("document must reject an unpinned Custom OCIO working space");
+
+        assert!(format!("{error:#}").contains("pins working space 'Linear Rec.2020'"));
     }
 
     #[test]

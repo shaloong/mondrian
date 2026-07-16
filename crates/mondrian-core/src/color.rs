@@ -115,6 +115,43 @@ impl ColorEngine {
     ) -> Result<Self, String> {
         crate::ocio::pin_custom_ocio_project_default(source, working_space)
     }
+
+    /// Return the single working space pinned by Custom OCIO project identity.
+    /// Standard and ACES configs do not impose a single project working space.
+    pub fn pinned_working_space(&self) -> Option<WorkingColorSpace> {
+        let Self::CustomOcio { identity } = self else {
+            return None;
+        };
+        [
+            WorkingColorSpace::LinearRec709,
+            WorkingColorSpace::LinearRec2020,
+            WorkingColorSpace::LinearP3D65,
+            WorkingColorSpace::AcesCg,
+        ]
+        .into_iter()
+        .find(|working| {
+            crate::ocio::ocio_working_color_space_name(*working) == identity.working_space()
+        })
+    }
+
+    /// Validate a sequence working space against this engine's project identity.
+    ///
+    /// Custom OCIO identities cover exactly one working-space processor graph;
+    /// allowing a different sequence space would execute an unpinned route.
+    pub fn validate_working_space(&self, working_space: WorkingColorSpace) -> Result<(), String> {
+        let Self::CustomOcio { identity } = self else {
+            return Ok(());
+        };
+        let actual = crate::ocio::ocio_working_color_space_name(working_space);
+        if actual == identity.working_space() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Custom OCIO project pins working space '{}', not '{actual}'",
+                identity.working_space()
+            ))
+        }
+    }
 }
 
 /// Broad encoding category used by validation, preview diagnostics and export tagging.
