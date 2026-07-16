@@ -116,40 +116,60 @@ impl ColorEngine {
         crate::ocio::pin_custom_ocio_project_default(source, working_space)
     }
 
-    /// Return the single working space pinned by Custom OCIO project identity.
-    /// Standard and ACES configs do not impose a single project working space.
+    /// Return the single working space pinned by this product mode, if any.
+    ///
+    /// Mondrian Standard pins the space declared by its immutable package.
+    /// Custom OCIO pins the space covered by its saved processor graph. ACES
+    /// keeps working-space selection explicit because its official config
+    /// exposes multiple supported scene-linear routes.
     pub fn pinned_working_space(&self) -> Option<WorkingColorSpace> {
-        let Self::CustomOcio { identity } = self else {
-            return None;
-        };
-        [
-            WorkingColorSpace::LinearRec709,
-            WorkingColorSpace::LinearRec2020,
-            WorkingColorSpace::LinearP3D65,
-            WorkingColorSpace::AcesCg,
-        ]
-        .into_iter()
-        .find(|working| {
-            crate::ocio::ocio_working_color_space_name(*working) == identity.working_space()
-        })
+        match self {
+            Self::MondrianStandard { package } => Some(package.working_color_space()),
+            Self::Aces { .. } => None,
+            Self::CustomOcio { identity } => [
+                WorkingColorSpace::LinearRec709,
+                WorkingColorSpace::LinearRec2020,
+                WorkingColorSpace::LinearP3D65,
+                WorkingColorSpace::AcesCg,
+            ]
+            .into_iter()
+            .find(|working| {
+                crate::ocio::ocio_working_color_space_name(*working) == identity.working_space()
+            }),
+        }
     }
 
     /// Validate a sequence working space against this engine's project identity.
     ///
-    /// Custom OCIO identities cover exactly one working-space processor graph;
-    /// allowing a different sequence space would execute an unpinned route.
+    /// Standard packages and Custom OCIO identities cover exactly one
+    /// project working-space contract; allowing a different sequence space
+    /// would execute semantics outside the persisted identity.
     pub fn validate_working_space(&self, working_space: WorkingColorSpace) -> Result<(), String> {
-        let Self::CustomOcio { identity } = self else {
-            return Ok(());
-        };
         let actual = crate::ocio::ocio_working_color_space_name(working_space);
-        if actual == identity.working_space() {
-            Ok(())
-        } else {
-            Err(format!(
-                "Custom OCIO project pins working space '{}', not '{actual}'",
-                identity.working_space()
-            ))
+        match self {
+            Self::MondrianStandard { package } => {
+                let expected =
+                    crate::ocio::ocio_working_color_space_name(package.working_color_space());
+                if actual == expected {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "Mondrian Standard package '{}' pins working space '{expected}', not '{actual}'",
+                        package.working_space_id()
+                    ))
+                }
+            }
+            Self::Aces { .. } => Ok(()),
+            Self::CustomOcio { identity } => {
+                if actual == identity.working_space() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "Custom OCIO project pins working space '{}', not '{actual}'",
+                        identity.working_space()
+                    ))
+                }
+            }
         }
     }
 }
@@ -1104,6 +1124,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn standard_engine_pins_its_versioned_working_space() {
+        let engine = ColorEngine::mondrian_standard();
+
+        assert_eq!(
+            engine.pinned_working_space(),
+            Some(WorkingColorSpace::LinearRec2020)
+        );
+        engine
+            .validate_working_space(WorkingColorSpace::LinearRec2020)
+            .expect("Standard v1 working space");
+        let error = engine
+            .validate_working_space(WorkingColorSpace::LinearP3D65)
+            .expect_err("Standard v1 must reject a different working space");
+        assert!(error.contains("Mondrian Standard"));
+        assert!(error.contains("Linear Rec.2020"));
+    }
+
+    #[test]
+    fn aces_engine_keeps_working_space_selection_explicit() {
+        let engine = ColorEngine::Aces {
+            preset: crate::AcesConfigPreset::StudioV4Aces2Ocio25,
+        };
+
+        assert_eq!(engine.pinned_working_space(), None);
+        for working_space in [
+            WorkingColorSpace::LinearRec709,
+            WorkingColorSpace::LinearRec2020,
+            WorkingColorSpace::LinearP3D65,
+            WorkingColorSpace::AcesCg,
+        ] {
+            engine
+                .validate_working_space(working_space)
+                .expect("official ACES config exposes supported working routes");
+        }
+    }
+
+    #[test]
     fn color_space_encoding_contract_covers_delivery_and_log_spaces() {
         let rec709 = ColorSpace::Rec709.encoding();
         assert_eq!(rec709.primaries, ColorPrimaries::Bt709);
@@ -1271,7 +1328,8 @@ mod tests {
                 "0".repeat(64),
                 "missing-config".to_owned(),
                 "0".repeat(64),
-                "Linear Rec.709".to_owned(),
+                crate::ocio::ocio_working_color_space_name(WorkingColorSpace::LinearRec709)
+                    .to_owned(),
                 "missing-display".to_owned(),
                 "missing-view".to_owned(),
                 crate::types::CustomOcioLookIdentity::None,
@@ -1289,7 +1347,7 @@ mod tests {
             )
             .expect_err("explicit missing OCIO source must fail closed");
 
-        assert!(err.contains("OCIO config file not found"));
+        assert!(err.contains("OCIO config file not found"), "{err}");
         assert_eq!(rgba, original);
     }
 

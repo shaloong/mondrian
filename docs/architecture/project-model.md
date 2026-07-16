@@ -37,6 +37,9 @@ to its working-space setting. A Custom OCIO mismatch fails before archive save
 or open, while the application performs the same check before project creation
 and before atomically recording a sequence-settings command. This keeps invalid
 processor routes out of both persistent documents and undo history.
+The same rule applies to Mondrian Standard: v1 fixes Linear Rec.2020 in its
+persisted package identity, so a Standard document with another sequence
+working space is invalid rather than an undocumented alternate Standard path.
 Project color-mode replacement is a narrow project action carrying one complete
 `ColorEngine`. `AppState` first validates every inheriting sequence against a
 candidate `ProjectColorManagement`, then loads the exact OCIO config, replaces

@@ -62,6 +62,11 @@ impl AppUiSequenceSettingsDraft {
         self.settings.validate()
     }
 
+    fn can_edit_working_color_space(&self) -> bool {
+        !self.settings.color_management.inherit
+            && self.settings.color_management.engine.pinned_working_space().is_none()
+    }
+
     /// Apply one shell-local form update to the real sequence settings.
     pub fn apply_update(&mut self, update: SequenceSettingsDraftUpdatePayload) {
         match update {
@@ -98,7 +103,9 @@ impl AppUiSequenceSettingsDraft {
                 self.settings.start_timecode_frame = frame.max(0);
             }
             SequenceSettingsDraftUpdatePayload::WorkingColorSpace(color_space) => {
-                self.settings.working_color_space = color_space;
+                if self.can_edit_working_color_space() {
+                    self.settings.working_color_space = color_space;
+                }
             }
             SequenceSettingsDraftUpdatePayload::AutoToneMapMedia(enabled) => {
                 self.settings.auto_tone_map_media = enabled;
@@ -848,7 +855,7 @@ fn color_space_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
             working_color_space_items(SequenceSettingsDraftUpdatePayload::WorkingColorSpace),
         )
         .with_max_visible_items(6),
-        draft.settings.color_management.inherit,
+        !draft.can_edit_working_color_space(),
     )
 }
 
@@ -1933,5 +1940,34 @@ mod tests {
             .iter()
             .map(|workflow| color_workflow_label(*workflow))
             .all(|label| !label.contains("ACES") && !label.contains("OpenColorIO")));
+    }
+
+    #[test]
+    fn working_space_control_respects_the_local_engine_contract() {
+        let mut standard_sequence = Sequence::new("Standard");
+        standard_sequence.settings.color_management.inherit = false;
+        let mut standard = AppUiSequenceSettingsDraft::from_sequence(&standard_sequence);
+
+        assert!(!color_space_dropdown_for(&standard).is_enabled());
+        standard.apply_update(SequenceSettingsDraftUpdatePayload::WorkingColorSpace(
+            WorkingColorSpace::LinearP3D65,
+        ));
+        assert_eq!(
+            standard.settings.working_color_space,
+            WorkingColorSpace::LinearRec2020
+        );
+
+        let mut aces_sequence = Sequence::new("ACES");
+        aces_sequence.settings.color_management.inherit = false;
+        aces_sequence.settings.color_management.engine = mondrian_core::ColorEngine::Aces {
+            preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+        };
+        let mut aces = AppUiSequenceSettingsDraft::from_sequence(&aces_sequence);
+
+        assert!(color_space_dropdown_for(&aces).is_enabled());
+        aces.apply_update(SequenceSettingsDraftUpdatePayload::WorkingColorSpace(
+            WorkingColorSpace::AcesCg,
+        ));
+        assert_eq!(aces.settings.working_color_space, WorkingColorSpace::AcesCg);
     }
 }

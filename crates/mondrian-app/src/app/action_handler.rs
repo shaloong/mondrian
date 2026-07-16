@@ -3075,6 +3075,32 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_sequence_ui_rejects_standard_working_space_mismatch_atomically() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("original");
+        let sequence_id = sequence.id;
+        state.active_sequence_id = Some(sequence_id);
+        state.sequence = Some(sequence.clone());
+        state.sequences.push(sequence);
+        let settings = SequenceSettings {
+            working_color_space: WorkingColorSpace::LinearP3D65,
+            ..SequenceSettings::default()
+        };
+
+        let error = state
+            .dispatch_action(sequence_update_settings_action(
+                SequenceUpdateSettingsPayload { sequence_id, name: "changed".to_owned(), settings },
+            ))
+            .expect_err("Standard working mismatch must fail before mutation");
+
+        assert!(error.to_string().contains("Mondrian Standard"));
+        let active = state.sequence.as_ref().expect("active sequence");
+        assert_eq!(active.name, "original");
+        assert_eq!(active.settings, SequenceSettings::default());
+        assert!(!state.can_undo_action());
+    }
+
+    #[test]
     fn new_sequence_adopts_custom_ocio_pinned_working_space() {
         let mut state = AppState::new();
         state.project_settings.color_management.engine = pinned_test_custom_engine("ACEScg");
@@ -4688,6 +4714,35 @@ mod tests {
 
         assert!(error.to_string().contains("pins working space 'ACEScg'"));
         assert_eq!(state.project_settings.color_management.engine, previous);
+    }
+
+    #[test]
+    fn dispatch_project_color_engine_update_rejects_standard_working_mismatch_atomically() {
+        let mut state = AppState::new();
+        state.project_settings.color_management.engine = mondrian_core::ColorEngine::Aces {
+            preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+        };
+        let mut sequence = Sequence::new("P3 Program");
+        sequence.settings.working_color_space = WorkingColorSpace::LinearP3D65;
+        state.active_sequence_id = Some(sequence.id);
+        state.sequence = Some(sequence.clone());
+        state.sequences.push(sequence);
+        let previous = state.project_settings.color_management.engine.clone();
+
+        let error = state
+            .dispatch_action(project_set_color_engine_action(
+                ProjectSetColorEnginePayload {
+                    engine: mondrian_core::ColorEngine::mondrian_standard(),
+                },
+            ))
+            .expect_err("Standard must reject a sequence outside its pinned working space");
+
+        assert!(error.to_string().contains("Mondrian Standard"));
+        assert_eq!(state.project_settings.color_management.engine, previous);
+        assert_eq!(
+            state.sequence.as_ref().expect("active sequence").settings.working_color_space,
+            WorkingColorSpace::LinearP3D65
+        );
     }
 
     #[test]

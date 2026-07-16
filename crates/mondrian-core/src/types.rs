@@ -782,6 +782,13 @@ impl MondrianStandardPackageIdentity {
         "linear_rec2020_v1"
     }
 
+    /// Runtime working-space value defined by this immutable package.
+    pub const fn working_color_space(self) -> WorkingColorSpace {
+        match self.working_space_id {
+            MondrianStandardWorkingSpaceId::LinearRec2020V1 => WorkingColorSpace::LinearRec2020,
+        }
+    }
+
     /// Versioned default view-transform identity pinned by this package.
     pub const fn default_view_transform_id(self) -> &'static str {
         "mondrian_standard_sdr_v1"

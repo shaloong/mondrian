@@ -674,6 +674,24 @@ mod tests {
     }
 
     #[test]
+    fn document_validation_rejects_standard_working_space_mismatch() {
+        let mut document = test_document();
+        document
+            .sequences
+            .active_mut()
+            .expect("active sequence")
+            .settings
+            .working_color_space = mondrian_core::WorkingColorSpace::LinearP3D65;
+
+        let error = document
+            .validate()
+            .expect_err("Standard project must reject a non-versioned working space");
+
+        assert!(format!("{error:#}").contains("Mondrian Standard"));
+        assert!(format!("{error:#}").contains("Linear Rec.2020"));
+    }
+
+    #[test]
     fn failed_file_replacement_restores_original() {
         let root = unique_temp_dir("replace-restore");
         let target = root.join("project.mdp");

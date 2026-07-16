@@ -770,8 +770,8 @@ impl SequenceSettings {
 
     /// Validate sequence settings together with the effective project color mode.
     ///
-    /// This catches Custom OCIO working-space mismatches before a render plan can
-    /// request a processor route outside the identity saved with the project.
+    /// This catches Standard or Custom OCIO working-space mismatches before a
+    /// render plan can request semantics outside the identity saved with the project.
     pub fn validate_with_project_color_management(
         &self,
         project_cm: &mondrian_core::ProjectColorManagement,
@@ -994,7 +994,6 @@ impl SequenceSettings {
             EditingMode::DigitalCinema4k => {
                 settings.resolution = Resolution::DCI4K;
                 settings.frame_rate = Rational::FPS_24;
-                settings.working_color_space = WorkingColorSpace::LinearP3D65;
                 settings
             }
             EditingMode::SocialVertical1080p => {
@@ -1013,6 +1012,7 @@ impl SequenceSettings {
         let audio_channel_layout = self.audio_channel_layout;
         let start_timecode_frame = self.start_timecode_frame;
         let preview = self.preview.clone();
+        let working_color_space = self.working_color_space;
         let color_management = self.color_management.clone();
         let auto_tone_map_media = self.auto_tone_map_media;
         *self = Self::from_editing_mode(mode);
@@ -1022,6 +1022,7 @@ impl SequenceSettings {
         self.audio_channel_layout = audio_channel_layout;
         self.start_timecode_frame = start_timecode_frame;
         self.preview = preview;
+        self.working_color_space = working_color_space;
         self.color_management = color_management;
         self.auto_tone_map_media = auto_tone_map_media;
     }
@@ -1808,7 +1809,7 @@ mod tests {
         let cinema = SequenceSettings::from_editing_mode(EditingMode::DigitalCinema4k);
         assert_eq!(cinema.resolution, Resolution::DCI4K);
         assert_eq!(cinema.frame_rate, Rational::FPS_24);
-        assert_eq!(cinema.working_color_space, WorkingColorSpace::LinearP3D65);
+        assert_eq!(cinema.working_color_space, WorkingColorSpace::LinearRec2020);
     }
 
     #[test]
@@ -1892,7 +1893,7 @@ mod tests {
     #[test]
     fn editing_mode_preserves_color_management_policy() {
         let mut settings = SequenceSettings {
-            working_color_space: WorkingColorSpace::LinearRec2020,
+            working_color_space: WorkingColorSpace::AcesCg,
             color_management: SequenceColorManagement {
                 workflow: ColorWorkflow::SceneReferred,
                 output_color_space: ColorSpace::Rec2100Pq,
@@ -1909,6 +1910,7 @@ mod tests {
 
         settings.apply_editing_mode_preset(EditingMode::Custom);
 
+        assert_eq!(settings.working_color_space, WorkingColorSpace::AcesCg);
         assert_eq!(
             settings.color_management.workflow,
             ColorWorkflow::SceneReferred
@@ -2280,6 +2282,21 @@ mod tests {
             .expect_err("Custom OCIO must reject an unpinned sequence working space");
 
         assert!(error.to_string().contains("pins working space 'Linear Rec.2020'"));
+    }
+
+    #[test]
+    fn inherited_standard_rejects_non_versioned_working_space() {
+        let settings = SequenceSettings {
+            working_color_space: WorkingColorSpace::LinearP3D65,
+            ..SequenceSettings::default()
+        };
+
+        let error = settings
+            .validate_with_project_color_management(&ProjectColorManagement::default())
+            .expect_err("Standard v1 must reject a non-versioned working space");
+
+        assert!(error.to_string().contains("Mondrian Standard"));
+        assert!(error.to_string().contains("Linear Rec.2020"));
     }
 
     #[test]

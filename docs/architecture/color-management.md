@@ -254,8 +254,8 @@ source-aware idempotency.
 
 `ProjectColorManagement` stores the project-level engine. `SequenceColorManagement` can inherit from the project or override its own engine and policies.
 Sequence editing-mode presets may update editing format defaults such as
-resolution, frame rate, display format, and working color space, but they must
-not reset `SequenceColorManagement`, HDR metadata preservation payloads, or
+resolution, frame rate, and display format, but they preserve working color
+space, `SequenceColorManagement`, HDR metadata preservation payloads, and
 tone-map policy. Color-management state is explicit user/project intent and is
 validated fail-closed after the preset is applied.
 
@@ -357,6 +357,11 @@ config pins its `scene_linear` role to `Linear Rec.2020`, and the package
 contract validates the same mapping. The working values are unbounded
 scene-linear floats, not a 0..1 display signal and not a request to clip colors
 to the BT.2020 triangle. Negative components and values above one are preserved.
+The package identity is also an authoring constraint: inherited or local
+Standard sequence settings must use Linear Rec.2020, and project validation,
+sequence actions, and project-mode replacement reject any mismatch before
+mutation. Official ACES configs remain the only built-in mode that permits an
+explicit choice among Mondrian's supported working identities.
 An OCIO round-trip regression test crosses Linear Rec.2020 and ACEScg using
 negative and extended-range samples and enforces a scale-aware `2e-5` tolerance.
 The Linear Rec.2020 to SDR endpoint processor is also required to remain an

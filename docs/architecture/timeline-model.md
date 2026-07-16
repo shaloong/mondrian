@@ -28,10 +28,13 @@ A `Sequence` contains:
 
 Default sequences create `V1..V3` and `A1..A3`. `SequenceSettings` validates resolution, frame rate, audio sample rate/layout, preview settings, and color-management constraints.
 `validate_with_project_color_management` additionally validates the effective
-inherited/overridden `ColorEngine`. A Custom OCIO sequence must use the exact
-working space pinned by its project identity; application mutation boundaries
-call this validator before replacing a sequence snapshot, and new sequences in
-a Custom project adopt that pinned working space.
+inherited/overridden `ColorEngine`. Mondrian Standard v1 sequences use the exact
+Linear Rec.2020 working identity pinned by the immutable package; Custom OCIO
+sequences use the exact working space pinned by their project identity.
+Application mutation boundaries call this validator before replacing a
+sequence snapshot, and new sequences adopt the selected engine's pinned space.
+Editing-mode presets preserve that space: DCI raster dimensions do not imply a
+P3 working-space change.
 The persisted `working_color_space` is a `WorkingColorSpace`, distinct from
 external input and output `ColorSpace` values. Root color contexts carry a
 display-referred output identity, while nested contexts carry their parent working
