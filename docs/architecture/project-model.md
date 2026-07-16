@@ -23,12 +23,12 @@ not define a second top-level project container.
 
 `ProjectSettings.color_management.engine` is the sole persisted product-mode
 selector for Mondrian Standard, ACES, or Custom OCIO. Sequence workflow stores
-only the rendering-domain choice (DisplayReferred by default for conventional
-finished video, or explicit SceneReferred picture formation); it must not
+only the rendering-domain choice (SceneReferred by default for Standard picture
+formation, or an explicit DisplayReferred colorimetric bypass); it must not
 duplicate an ACES mode flag.
 Archive round-trip tests resolve the reopened root program context and require
-the default Standard project to retain a direct colorimetric Rec.709 output
-intent. SceneReferred projects retain the version-pinned Standard View intent.
+the default Standard project to retain the version-pinned Standard View intent.
+An explicitly DisplayReferred project retains its direct colorimetric intent.
 The new-project draft edits this same `ProjectSettings` value directly and
 offers Mondrian Standard, the two version-pinned ACES 2.0 presets, and Custom
 OCIO. Custom file selection must validate the config and pin its complete
@@ -110,9 +110,9 @@ digests, working/display/view/look identities, roles, and an explicit dynamic
 property list; a mutable source path alone is not a project color definition.
 Version 6 removes the redundant persisted `ColorWorkflow::Aces` and reserves
 Standard/ACES/Custom mode selection for `ProjectColorManagement.engine`.
-The current application creates conventional sequences as DisplayReferred;
-SceneReferred remains explicit and the persisted enum keeps the two concerns
-separate. Version 7 replaces the ambiguous
+The current application creates sequences as SceneReferred so Mondrian Standard
+is the default Program Output View; DisplayReferred remains an explicit bypass
+and the persisted enum keeps workflow separate from engine selection. Version 7 replaces the ambiguous
 single default-View identity with mandatory, independently typed SDR and
 1000-nit HDR View Transform IDs/versions. The Alpha format intentionally
 provides no alias, fallback, or migration from v5/v6; a missing or edited

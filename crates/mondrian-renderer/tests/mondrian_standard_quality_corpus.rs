@@ -34,7 +34,7 @@ fn quality_corpus_contract_is_complete_independently_sourced_and_package_pinned(
     assert_eq!(corpus.corpus_id, "mondrian-standard-quality-v1");
     assert_eq!(
         corpus.package_sha256,
-        MondrianStandardPackageIdentity::V2.package_sha256()
+        MondrianStandardPackageIdentity::V3.package_sha256()
     );
 
     let required = corpus.required_categories.iter().map(String::as_str).collect::<BTreeSet<_>>();
@@ -194,7 +194,7 @@ fn production_standard_views_satisfy_objective_corpus_invariants() {
 }
 
 #[test]
-fn standard_display_referred_rec709_round_trip_stays_within_one_code_value() {
+fn standard_sdr_view_preserves_normal_rec709_within_one_code_value() {
     ensure_mondrian_default_ocio_loaded().expect("Mondrian Standard OCIO package");
 
     let source_rgba = normal_rec709_stimulus();
@@ -218,11 +218,11 @@ fn standard_display_referred_rec709_round_trip_stays_within_one_code_value() {
     let boundary = RenderOutputColorBoundary::from_intent(
         RenderOutputColorBoundaryTarget::Display,
         ColorSpace::Rec709,
-        &OutputTransformIntent::Colorimetric,
+        &OutputTransformIntent::mondrian_standard(),
         false,
         ColorEngine::mondrian_standard(),
     )
-    .expect("default display-referred output intent");
+    .expect("default Mondrian Standard output intent");
     let observed = execute_cpu_output_boundary_rgba8(&working, &boundary)
         .expect("production colorimetric Rec.709 output boundary")
         .rgba;

@@ -634,7 +634,7 @@ distinguish color arithmetic from alpha corruption. Real-wgpu point-effect
 tests include negative and above-one working values and fail closed on NaN or
 infinity.
 
-Mondrian Standard v1 additionally has a package-digest-pinned numeric quality
+The current Mondrian Standard package additionally has a digest-pinned numeric quality
 corpus. The same generated working-space samples execute through the production
 CPU OCIO SDR and PQ output boundaries; a separate implementation of the View is
 not used as the oracle. The corpus enforces objective invariants rather than
@@ -980,6 +980,15 @@ backend object, creates an OCIO wrapper input binding, allocates an output
 texture, or evicts a pooled texture. Wrapper-binding and exact-contract texture
 pool hits must cover every rotated View sample, so the timestamp budget cannot
 mask recurring per-frame GPU object churn.
+
+The July 2026 RTX 3050 Laptop/DX12 production-path smoke run used 20 warm
+hardware-timestamp samples per View. The current segmented SDR v2 graph measured
+1.094/1.109/1.381 ms p50/p95/p99 at 4K; Standard PQ measured p95 1.395 ms and
+HLG p95 0.984 ms. All measured samples reused shader, static pipeline, backend
+objects, wrapper bind groups, and output textures without upload or readback.
+An earlier direct per-pixel OCIO `GradingRGBCurve` graph measured about 175 ms
+and was rejected; the shipping graph bakes that same curve to a 4096-entry OCIO
+1D LUT and retains the separate 61-cube gamut surface.
 
 The same ignored integration target retains a separate schema-1 input and
 primitive-transform gate. It rotates OCIO identity, Linear Rec.2020 to encoded

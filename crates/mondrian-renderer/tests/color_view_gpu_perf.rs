@@ -487,7 +487,7 @@ async fn standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2() -> Result<
         engine: ColorEngine::mondrian_standard(),
         output_color_space: ColorSpace::Srgb,
         display: "sRGB - Display",
-        view: "Mondrian Standard SDR v1",
+        view: "Mondrian Standard SDR v2",
     };
     let standard_pq_case = ViewCase {
         mode: "mondrian_standard_pq",

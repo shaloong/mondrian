@@ -14,10 +14,13 @@ Supported color spaces currently include:
 
 ## Engine
 
-`ColorEngine` is either MondrianStandard or OCIO. OCIO requires a loaded config.
-MondrianStandard loads Mondrian's embedded `mondrian_default_ocio_v2` config and
-must fail closed if that asset cannot parse or cannot produce the requested
-OCIO processor.
+`ColorEngine` selects exactly one Mondrian Standard package, pinned ACES preset,
+or Custom OCIO identity. All three execute through stock OCIO processors.
+Mondrian Standard loads the immutable base config plus the exact package-pinned
+assembly graph and must fail closed if its config, package digest, resource, or
+requested processor does not match. The current v3 package uses the target-aware
+`Mondrian Standard SDR v2` View; a persisted v2 package identity continues to
+resolve its legacy `Mondrian Standard SDR v1` graph.
 Explicit OCIO sources must not fall back to another source. In particular,
 `OcioConfigSource::Environment` means the `OCIO` environment variable itself;
 if it is unset or points to a missing file, the selected source is invalid.

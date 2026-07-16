@@ -49,7 +49,7 @@ execution, validating real display behavior, and expanding dirty-media coverage.
 
 2. Stock OCIO is the single default execution infrastructure.
 
-   Per proposed ADR-0005, Mondrian Standard is a bundled, immutable, versioned
+   Per accepted ADR-0005, Mondrian Standard is a bundled, immutable, versioned
    OCIO package. ACES and Custom OCIO are parallel product modes over the same
    integration. Do not build a native color engine speculatively. A native
    specialization requires a same-math comparison proving a documented

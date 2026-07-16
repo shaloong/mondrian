@@ -436,8 +436,10 @@ pub(crate) fn validate_timeline_export_color_compatibility(
         } else {
             &settings.color_management.engine
         };
-        if matches!(engine, mondrian_core::ColorEngine::MondrianStandard { .. }) {
-            let target = mondrian_core::mondrian_standard_output_target_contract(output)?;
+        if let mondrian_core::ColorEngine::MondrianStandard { package } = engine {
+            let target = mondrian_core::mondrian_standard_output_target_contract_for_package(
+                *package, output,
+            )?;
             if content_light.max_content_light_level > target.nominal_peak_nits {
                 return Err(format!(
                     "Mondrian Standard {:?} View 峰值为 {} nit，但 MaxCLL 声明 {} nit",

@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Use stock OCIO as the default Mondrian Standard execution infrastructure
@@ -34,7 +34,8 @@ one processor or one GPU pass:
 5. display or delivery encoding;
 6. monitor adaptation for presentation only.
 
-Mondrian Standard v1 uses unbounded, scene-referred Linear Rec.2020 with a D65
+Mondrian Standard uses its v1 working-space contract: unbounded, scene-referred
+Linear Rec.2020 with a D65
 white point as its working RGB space. This is a video-first working identity:
 it contains the Rec.709 and P3-D65 primaries, aligns directly with BT.2020 HLG
 and PQ delivery primaries, and avoids making the Standard project model depend
@@ -64,16 +65,18 @@ and resources, but may not replace their color math. If stock OCIO cannot
 express a required transform, the gap is documented and remains fail-closed;
 it does not authorize a second MDRT or a maintained OCIO fork.
 
-The Standard SDR candidate is assembled entirely in stock OCIO as AP0-reference
-to XYZ D65 adaptation, a FilmLight E-Gamut matrix, log2 Allocation shaper, a
-pinned 57-cube AgX formation resource, and display-reference conversion. It is
-the active/default scene View inside the Standard package, while ordinary
-display-referred SDR boundaries remain colorimetric and do not invoke a View.
-The legacy ACES Output Transform is no longer the Standard default. This ADR
-also defines the 1000-nit HDR View as the same stock-OCIO assembly with a pinned
-AgX HDR formation resource, conversion to display-reference XYZ, and one HLG or
-PQ display encoding. HLG and PQ therefore share picture formation instead of
-duplicating or borrowing an ACES Rendering Transform. This ADR remains proposed
-until the complete SDR/P3/HLG/PQ corpus, preview/export parity,
-version-pinned identity, packaging, and realtime GPU performance gates are all
-recorded.
+The current Standard v3 package assembles SDR v2 entirely in stock OCIO as a
+target-linear conversion, HSV domain transform, a deterministic 61-cube gamut
+surface, a 4096-entry 1D value-shoulder LUT baked from an OCIO grading curve,
+range safety, target signal encoding, and display-reference conversion. New
+sequences execute this package-pinned View by default; DisplayReferred remains
+an explicit direct-colorimetric bypass. The legacy v2 package and its SDR v1
+AgX formation graph remain addressable only through their exact persisted
+identity. The legacy ACES Output Transform is not the Standard default.
+
+The 1000-nit HDR View remains the stock-OCIO assembly with a pinned AgX HDR
+formation resource, conversion to display-reference XYZ, and one HLG or PQ
+display encoding. HLG and PQ share picture formation instead of duplicating or
+borrowing an ACES Rendering Transform. The accepted implementation is protected
+by package digests, SDR/P3/HLG/PQ quality corpus, CPU/GPU parity, preview/export
+intent sharing, and a hardware-timestamp 4K performance gate.

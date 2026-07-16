@@ -28,7 +28,7 @@ A `Sequence` contains:
 
 Default sequences create `V1..V3` and `A1..A3`. `SequenceSettings` validates resolution, frame rate, audio sample rate/layout, preview settings, and color-management constraints.
 `validate_with_project_color_management` additionally validates the effective
-inherited/overridden `ColorEngine`. Mondrian Standard v1 sequences use the exact
+inherited/overridden `ColorEngine`. Mondrian Standard sequences use the exact
 Linear Rec.2020 working identity pinned by the immutable package; Custom OCIO
 sequences use the exact working space pinned by their project identity.
 Application mutation boundaries call this validator before replacing a
@@ -81,8 +81,10 @@ intent, so contradictory context state is unrepresentable. This selection is
 independent from the renderer's CPU/GPU execution backend so a backend change
 cannot silently change project color science.
 
-Standard output resolution is target-specific. SDR sRGB/Rec.709/P3 contexts
-select `Mondrian Standard SDR v1`; Rec.2100 HLG and PQ contexts select
+Standard output resolution is target- and package-specific. Current-package SDR
+sRGB/Rec.709/P3/Rec.2020 contexts select `Mondrian Standard SDR v2`; a project
+that explicitly pins the legacy v2 package continues to select
+`Mondrian Standard SDR v1`. Rec.2100 HLG and PQ contexts select
 `Mondrian Standard HDR 1000 nits v1` under their respective OCIO displays.
 Core resolves that target-specific view from the typed intent when renderer
 constructs a Program Output boundary, so the target transfer function

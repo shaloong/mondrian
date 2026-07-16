@@ -32,7 +32,12 @@ pub enum OutputTransformIntent {
 impl OutputTransformIntent {
     /// Select the current Mondrian Standard output-transform contract.
     pub const fn mondrian_standard() -> Self {
-        Self::MondrianStandard { package: MondrianStandardPackageIdentity::V2 }
+        Self::MondrianStandard { package: MondrianStandardPackageIdentity::V3 }
+    }
+
+    /// Select an exact immutable Mondrian Standard package.
+    pub const fn mondrian_standard_package(package: MondrianStandardPackageIdentity) -> Self {
+        Self::MondrianStandard { package }
     }
 
     /// Resolve this product intent into the optional OCIO display/view pair
@@ -62,14 +67,17 @@ impl OutputTransformIntent {
                         engine_sha256: engine_package.package_sha256().to_owned(),
                     });
                 }
-                crate::mondrian_standard_output_display_view(output_color_space)
-                    .map(Some)
-                    .map_err(|reason| {
-                        OutputTransformIntentResolutionError::UnsupportedStandardOutput {
-                            output_color_space,
-                            reason,
-                        }
-                    })
+                crate::mondrian_standard_output_display_view_for_package(
+                    *package,
+                    output_color_space,
+                )
+                .map(Some)
+                .map_err(|reason| {
+                    OutputTransformIntentResolutionError::UnsupportedStandardOutput {
+                        output_color_space,
+                        reason,
+                    }
+                })
             }
         }
     }

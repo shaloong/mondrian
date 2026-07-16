@@ -2833,7 +2833,7 @@ mod tests {
         assert!(payload.sequence_settings.validate().is_ok());
         assert_eq!(
             payload.sequence_settings.color_management.workflow,
-            ColorWorkflow::DisplayReferred
+            ColorWorkflow::SceneReferred
         );
         let context = payload
             .sequence_settings
@@ -2844,7 +2844,7 @@ mod tests {
         );
         assert_eq!(
             context.output_transform,
-            mondrian_core::OutputTransformIntent::Colorimetric
+            mondrian_core::OutputTransformIntent::mondrian_standard()
         );
     }
 

@@ -733,7 +733,7 @@ mod tests {
         let display_view = boundary.display_view.expect("Standard display/view");
 
         assert_eq!(display_view.display, "sRGB - Display");
-        assert_eq!(display_view.view, "Mondrian Standard SDR v1");
+        assert_eq!(display_view.view, "Mondrian Standard SDR v2");
     }
 
     fn configured_cache() -> AssetThumbnailCache {

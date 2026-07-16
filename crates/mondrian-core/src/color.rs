@@ -11,7 +11,9 @@ impl ColorEngine {
     /// Resolve the exact OCIO config source owned by this product mode.
     pub fn ocio_source(&self) -> crate::types::OcioConfigSource {
         match self {
-            Self::MondrianStandard { .. } => crate::types::OcioConfigSource::MondrianDefault,
+            Self::MondrianStandard { package } => {
+                crate::types::OcioConfigSource::MondrianStandard { package: *package }
+            }
             Self::Aces { preset } => preset.ocio_source(),
             Self::CustomOcio { identity } => identity.source().clone(),
         }
@@ -46,7 +48,7 @@ impl ColorEngine {
     /// Ensure any required external config is loaded.
     pub fn ensure_loaded(&self) -> Result<(), String> {
         match self {
-            Self::MondrianStandard { .. } => crate::ocio::ensure_mondrian_default_ocio_loaded(),
+            Self::MondrianStandard { .. } => crate::ocio::ensure_color_engine_ocio_loaded(self),
             Self::Aces { preset } => crate::ocio::ensure_ocio_loaded(&preset.ocio_source()),
             Self::CustomOcio { .. } => crate::ocio::ensure_color_engine_ocio_loaded(self),
         }

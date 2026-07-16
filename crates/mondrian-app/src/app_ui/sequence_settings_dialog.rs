@@ -270,7 +270,7 @@ const WORKING_COLOR_SPACE_OPTIONS: [WorkingColorSpace; 4] = [
 ];
 
 const COLOR_WORKFLOW_OPTIONS: [ColorWorkflow; 2] =
-    [ColorWorkflow::DisplayReferred, ColorWorkflow::SceneReferred];
+    [ColorWorkflow::SceneReferred, ColorWorkflow::DisplayReferred];
 
 const MISSING_COLOR_METADATA_OPTIONS: [MissingColorMetadataPolicy; 2] = [
     MissingColorMetadataPolicy::AssumeRec709,
@@ -1931,10 +1931,10 @@ mod tests {
 
     #[test]
     fn workflow_picker_exposes_rendering_domain_without_duplicating_project_color_modes() {
-        assert_eq!(ColorWorkflow::default(), ColorWorkflow::DisplayReferred);
+        assert_eq!(ColorWorkflow::default(), ColorWorkflow::SceneReferred);
         assert_eq!(
             COLOR_WORKFLOW_OPTIONS,
-            [ColorWorkflow::DisplayReferred, ColorWorkflow::SceneReferred]
+            [ColorWorkflow::SceneReferred, ColorWorkflow::DisplayReferred]
         );
         assert!(COLOR_WORKFLOW_OPTIONS
             .iter()

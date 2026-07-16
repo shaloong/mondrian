@@ -61,6 +61,10 @@ Sequence settings disables its working-space control when color management is
 inherited or the local engine pins one immutable working identity. The shell
 draft also ignores forged changes through that disabled control; app-domain
 validation remains the final authority for persisted actions.
+The workflow control presents SceneReferred first because new Standard
+sequences use the package-pinned product View by default. DisplayReferred remains
+an explicit direct-colorimetric bypass; the UI must not relabel it as the normal
+Standard path.
 
 Opening an editor dialog is a shell action because it mutates transient UI state,
 not the undoable domain model. The dialog's committed payload must flow through a

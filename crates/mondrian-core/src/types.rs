@@ -437,6 +437,8 @@ pub enum MondrianStandardVersion {
     V1,
     /// Second package contract adding a display-referred Rec.2020 SDR output.
     V2,
+    /// Third package contract adding the target-aware segmented Standard SDR View.
+    V3,
 }
 
 /// Stable product identifier for the bundled Mondrian Standard package.
@@ -469,6 +471,9 @@ pub enum MondrianStandardPackageDigest {
     /// Digest of Standard v2's config plus every embedded resource.
     #[serde(rename = "3f8bd02e4c79f081c9c09fba3053161c4af14de6effcf6d76b78e2339b9c2881")]
     V2,
+    /// Digest of Standard v3's config, segmented SDR graph, and HDR resource.
+    #[serde(rename = "462bea568f3babcd76030fd219a54dcde8a6fa2acece31e20883a9ba98501e61")]
+    V3,
 }
 
 /// Stable versioned identity of the Standard compositing working space.
@@ -485,6 +490,9 @@ pub enum MondrianStandardSdrViewTransformId {
     /// Mondrian Standard SDR scene-to-display rendering transform v1.
     #[serde(rename = "mondrian_standard_sdr_v1")]
     V1,
+    /// Target-aware, SDR-preserving segmented rendering transform v2.
+    #[serde(rename = "mondrian_standard_sdr_v2")]
+    V2,
 }
 
 /// Stable versioned identity of Standard v1's 1000-nit HDR rendering transform.
@@ -497,9 +505,9 @@ pub enum MondrianStandardHdrViewTransformId {
 
 /// Fully pinned identity persisted for a Mondrian Standard project mode.
 ///
-/// Every field is intentionally required. The single-variant identity types
-/// make mismatched or partially edited alpha project files fail to deserialize
-/// instead of silently resolving to the current bundled package.
+/// Every field is intentionally required. Runtime package resolution accepts
+/// only one complete declared identity and rejects mismatched or partially
+/// edited project payloads instead of resolving them to the current package.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MondrianStandardPackageIdentity {
@@ -644,7 +652,7 @@ impl CustomOcioProjectIdentity {
         mut roles: Vec<CustomOcioRoleIdentity>,
         dynamic_properties: Vec<CustomOcioDynamicPropertyIdentity>,
     ) -> Result<Self, String> {
-        if matches!(source, OcioConfigSource::MondrianDefault) {
+        if matches!(source, OcioConfigSource::MondrianStandard { .. }) {
             return Err("Custom OCIO cannot claim the Mondrian Standard config source".to_owned());
         }
         if config_sha256.len() != 64 || !config_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -756,7 +764,7 @@ impl CustomOcioProjectIdentity {
 }
 
 impl MondrianStandardPackageIdentity {
-    /// Exact identity of the current package supported by this schema.
+    /// Exact identity of the legacy Standard v2 package.
     pub const V2: Self = Self {
         package_id: MondrianStandardPackageId::MondrianStandard,
         package_version: MondrianStandardVersion::V2,
@@ -767,6 +775,21 @@ impl MondrianStandardPackageIdentity {
         working_space_version: MondrianStandardVersion::V1,
         sdr_view_transform_id: MondrianStandardSdrViewTransformId::V1,
         sdr_view_transform_version: MondrianStandardVersion::V1,
+        hdr_view_transform_id: MondrianStandardHdrViewTransformId::Hdr1000V1,
+        hdr_view_transform_version: MondrianStandardVersion::V1,
+    };
+
+    /// Exact identity of the current Standard v3 package.
+    pub const V3: Self = Self {
+        package_id: MondrianStandardPackageId::MondrianStandard,
+        package_version: MondrianStandardVersion::V3,
+        config_id: MondrianStandardConfigId::V2,
+        config_sha256: MondrianStandardConfigDigest::V2,
+        package_sha256: MondrianStandardPackageDigest::V3,
+        working_space_id: MondrianStandardWorkingSpaceId::LinearRec2020V1,
+        working_space_version: MondrianStandardVersion::V1,
+        sdr_view_transform_id: MondrianStandardSdrViewTransformId::V2,
+        sdr_view_transform_version: MondrianStandardVersion::V2,
         hdr_view_transform_id: MondrianStandardHdrViewTransformId::Hdr1000V1,
         hdr_view_transform_version: MondrianStandardVersion::V1,
     };
@@ -788,7 +811,14 @@ impl MondrianStandardPackageIdentity {
 
     /// Exact SHA-256 digest of the config and all embedded resources.
     pub const fn package_sha256(self) -> &'static str {
-        "3f8bd02e4c79f081c9c09fba3053161c4af14de6effcf6d76b78e2339b9c2881"
+        match self.package_sha256 {
+            MondrianStandardPackageDigest::V2 => {
+                "3f8bd02e4c79f081c9c09fba3053161c4af14de6effcf6d76b78e2339b9c2881"
+            }
+            MondrianStandardPackageDigest::V3 => {
+                "462bea568f3babcd76030fd219a54dcde8a6fa2acece31e20883a9ba98501e61"
+            }
+        }
     }
 
     /// Versioned working-space identity pinned by this package.
@@ -805,7 +835,10 @@ impl MondrianStandardPackageIdentity {
 
     /// Versioned SDR view-transform identity pinned by this package.
     pub const fn sdr_view_transform_id(self) -> &'static str {
-        "mondrian_standard_sdr_v1"
+        match self.sdr_view_transform_id {
+            MondrianStandardSdrViewTransformId::V1 => "mondrian_standard_sdr_v1",
+            MondrianStandardSdrViewTransformId::V2 => "mondrian_standard_sdr_v2",
+        }
     }
 
     /// Versioned 1000-nit HDR view-transform identity pinned by this package.
@@ -846,7 +879,7 @@ pub enum ColorEngine {
 impl ColorEngine {
     /// Select the exact Mondrian Standard package supported by this schema.
     pub const fn mondrian_standard() -> Self {
-        Self::MondrianStandard { package: MondrianStandardPackageIdentity::V2 }
+        Self::MondrianStandard { package: MondrianStandardPackageIdentity::V3 }
     }
 
     /// Return the pinned Standard package identity when this is Standard mode.
@@ -924,8 +957,11 @@ pub enum OcioConfigSource {
     ///
     /// 这是 Standard / Simple 模式使用的固定 OCIO package 来源。UI 可以隐藏
     /// OCIO 细节，但外部 config 不能覆盖该版本的定义。
-    #[serde(rename = "mondrian_default")]
-    MondrianDefault,
+    #[serde(rename = "mondrian_standard")]
+    MondrianStandard {
+        /// Exact immutable Standard package whose OCIO graph must be assembled.
+        package: MondrianStandardPackageIdentity,
+    },
     /// 使用 `OCIO` 环境变量（行业标准）。
     /// 未设置或指向缺失文件时必须显式报错，不能扫描系统路径回退。
     #[default]
@@ -943,7 +979,9 @@ pub enum OcioConfigSource {
 impl fmt::Display for OcioConfigSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MondrianDefault => write!(f, "Mondrian Default OCIO"),
+            Self::MondrianStandard { package } => {
+                write!(f, "Mondrian Standard ({})", package.package_sha256())
+            }
             Self::Environment => write!(f, "$OCIO"),
             Self::Builtin { name } => write!(f, "内置: {name}"),
             Self::Path { path } => write!(f, "{}", path.display()),
@@ -984,7 +1022,7 @@ mod tests {
     #[test]
     fn ocio_config_source_round_trip() {
         let sources = vec![
-            OcioConfigSource::MondrianDefault,
+            OcioConfigSource::MondrianStandard { package: MondrianStandardPackageIdentity::V3 },
             OcioConfigSource::Environment,
             OcioConfigSource::Builtin { name: "aces_1.2".into() },
             OcioConfigSource::Path { path: PathBuf::from("/tmp/config.ocio") },
@@ -1039,10 +1077,10 @@ mod tests {
             serde_json::from_str(&json2).expect("deserialize MondrianStandard");
         assert_eq!(back2, smart);
         assert!(json2.contains("\"package_id\":\"mondrian_standard\""));
-        assert!(json2.contains(MondrianStandardPackageIdentity::V2.config_sha256()));
-        assert!(json2.contains(MondrianStandardPackageIdentity::V2.package_sha256()));
+        assert!(json2.contains(MondrianStandardPackageIdentity::V3.config_sha256()));
+        assert!(json2.contains(MondrianStandardPackageIdentity::V3.package_sha256()));
         assert!(json2.contains("\"working_space_id\":\"linear_rec2020_v1\""));
-        assert!(json2.contains("\"sdr_view_transform_id\":\"mondrian_standard_sdr_v1\""));
+        assert!(json2.contains("\"sdr_view_transform_id\":\"mondrian_standard_sdr_v2\""));
         assert!(json2.contains("\"hdr_view_transform_id\":\"mondrian_standard_hdr_1000_nits_v1\""));
 
         let aces = ColorEngine::Aces { preset: AcesConfigPreset::StudioV4Aces2Ocio25 };

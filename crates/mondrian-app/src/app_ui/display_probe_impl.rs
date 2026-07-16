@@ -389,8 +389,8 @@ fn resolve_ocio_display_view(
 ) -> (Option<String>, Option<String>, Option<DisplayOutputBlocker>) {
     match &policy.monitor_profile {
         MonitorProfileReference::OcioDisplay { display } => match engine {
-            ColorEngine::MondrianStandard { .. } => {
-                match mondrian_core::mondrian_standard_display_view(display) {
+            ColorEngine::MondrianStandard { package } => {
+                match mondrian_core::mondrian_standard_display_view_for_package(*package, display) {
                     Ok((display, view)) => (Some(display), Some(view), None),
                     Err(_) => unresolved_ocio_display_view(Some(display.clone())),
                 }
@@ -403,8 +403,11 @@ fn resolve_ocio_display_view(
             }
         },
         _ => match engine {
-            ColorEngine::MondrianStandard { .. } => {
-                match mondrian_core::mondrian_standard_output_display_view(output_color_space) {
+            ColorEngine::MondrianStandard { package } => {
+                match mondrian_core::mondrian_standard_output_display_view_for_package(
+                    *package,
+                    output_color_space,
+                ) {
                     Ok((display, view)) => (Some(display), Some(view), None),
                     Err(_) => {
                         let display = mondrian_core::mondrian_standard_output_display_name(
@@ -609,7 +612,7 @@ mod tests {
         );
 
         assert_eq!(display.as_deref(), Some("Display P3 - Display"));
-        assert_eq!(view.as_deref(), Some("Mondrian Standard SDR v1"));
+        assert_eq!(view.as_deref(), Some("Mondrian Standard SDR v2"));
         assert!(blocker.is_none());
     }
 
@@ -628,7 +631,7 @@ mod tests {
         );
 
         assert_eq!(display.as_deref(), Some("Display P3 - Display"));
-        assert_eq!(view.as_deref(), Some("Mondrian Standard SDR v1"));
+        assert_eq!(view.as_deref(), Some("Mondrian Standard SDR v2"));
         assert!(blocker.is_none());
     }
 

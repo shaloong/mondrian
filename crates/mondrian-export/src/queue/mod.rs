@@ -3910,7 +3910,7 @@ mod tests {
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
             output_transform: mondrian_core::OutputTransformIntent::OcioDisplayView {
                 display: "sRGB - Display".to_string(),
-                view: "Mondrian Standard SDR v1".to_string(),
+                view: "Mondrian Standard SDR v2".to_string(),
             },
             export_delivery_view_error: None,
         };
@@ -3921,7 +3921,7 @@ mod tests {
         assert!(boundary.tone_map);
         let dv = boundary.display_view.as_ref().unwrap();
         assert_eq!(dv.display, "sRGB - Display");
-        assert_eq!(dv.view, "Mondrian Standard SDR v1");
+        assert_eq!(dv.view, "Mondrian Standard SDR v2");
     }
 
     #[test]
@@ -3962,7 +3962,7 @@ mod tests {
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
             output_transform: mondrian_core::OutputTransformIntent::OcioDisplayView {
                 display: "sRGB - Display".to_string(),
-                view: "Mondrian Standard SDR v1".to_string(),
+                view: "Mondrian Standard SDR v2".to_string(),
             },
             export_delivery_view_error: None,
         };
@@ -4047,7 +4047,7 @@ mod tests {
             display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
             output_transform: mondrian_core::OutputTransformIntent::OcioDisplayView {
                 display: "Rec.1886 Rec.709 - Display".to_string(),
-                view: "Mondrian Standard SDR v1".to_string(),
+                view: "Mondrian Standard SDR v2".to_string(),
             },
             export_delivery_view_error: None,
         };

@@ -1,6 +1,6 @@
 # Color Management
 
-Mondrian has one typed color-management pipeline. Proposed ADR-0005 defines
+Mondrian has one typed color-management pipeline. Accepted ADR-0005 defines
 Mondrian Standard as a Mondrian-owned, immutable, versioned OCIO package and
 uses stock OCIO as the default execution infrastructure. Mondrian Standard,
 ACES, and Custom OCIO are product-level modes over that shared integration, not
@@ -19,23 +19,26 @@ machine-local LUT. The base retains pinned OCIO Studio input definitions and
 explicit ACES transforms for the separate ACES-facing capability surface, but
 the Standard active/default View is not an ACES Output Transform.
 
-`Mondrian Standard SDR v1` is a five-stage OCIO `GroupTransform`: the AP0 scene
-reference is adapted to CIE XYZ D65 by an OCIO `BuiltinTransform`, converted to
-FilmLight E-Gamut by a matrix, distributed through an OCIO log2
-`AllocationTransform` covering -10 through +15 stops, formed by the pinned
-57-cube AgX Base resource using tetrahedral reconstruction, and converted to
-the display-reference connection space before display encoding. The resource
-is the authored picture-formation transform, not a low-resolution bake of an
-ACES processor. Its exact upstream commit, byte digest, domain, resolution,
-and BSD-3-Clause notice are recorded in
-`assets/ocio/MONDRIAN_STANDARD_SDR_V1_NOTICE.md`.
+The current package, Mondrian Standard v3, exposes `Mondrian Standard SDR v2`.
+It creates a separate stock-OCIO scene View Transform for sRGB, Rec.709,
+Display P3, and Rec.2020 SDR. Each graph converts the AP0 scene reference to the
+target's linear primaries, enters HSV, normalizes H/S/V to a declared
+`[0,1] x [0,1.25] x [0,4]` domain, and applies a deterministic 61-cube
+tetrahedral surface that preserves hue and contains only high-value saturation
+excursions. A 4096-entry OCIO 1D LUT then applies the pinned value shoulder;
+its samples are generated from the documented OCIO `GradingRGBCurve` during
+package assembly so the per-pixel GPU program does not execute the expensive
+B-spline evaluator. After HSV inversion, an OCIO `RangeTransform` provides the
+declared output safety boundary, followed by exactly one target signal encoding
+and one display-reference bridge. Normal Rec.709 remains within one 8-bit code
+value through the complete input-to-working-to-View path.
 
-The same Standard SDR formation is registered against sRGB, Rec.1886 Rec.709,
-Gamma 2.2 Rec.709, Rec.2020 SDR, and Display P3 display color spaces.
-Output-target resolution is explicit: sRGB, Rec.709, Rec.2020 SDR, and P3 select
-their matching display rather than the config's global default. Rec.2020 SDR
-uses a display-reference CIE XYZ D65 to BT.2020 matrix followed by the BT.2020
-SDR OETF; it does not reuse the scene-reference `Camera Rec.2020` endpoint.
+The immutable v2 package remains available for projects that explicitly pin it.
+Its `Mondrian Standard SDR v1` is the earlier AP0-to-XYZ, FilmLight E-Gamut,
+log2 allocation, pinned 57-cube AgX Base formation graph documented in
+`assets/ocio/MONDRIAN_STANDARD_SDR_V1_NOTICE.md`. Runtime source identity and
+output intent both carry the package identity, so reopening v2 cannot silently
+select the v3 graph. New projects never select the legacy graph by alias.
 
 `Mondrian Standard HDR 1000 nits v1` uses the same AP0-reference to XYZ D65,
 FilmLight E-Gamut, and log2 allocation stages, followed by a pinned 57-cube AgX
@@ -64,14 +67,14 @@ P3-D65-limited HDR View. Display/view lookup delegates to this contract so
 rendering, validation, and delivery metadata cannot maintain parallel string or
 luminance tables.
 
-The default DisplayReferred workflow is the conventional NLE path for finished
-video. It still uses the selected engine's stock OCIO input and output
-processors, but its output boundary is a direct colorimetric conversion and
-does not invoke a picture-formation View. A SceneReferred workflow is an
-explicit project/sequence choice for log, HDR scene-light, CG, or grading work;
-it selects the Standard SDR or HDR View for the target. `Mondrian Standard`
-therefore names the versioned engine/package contract, not one mandatory look
-applied to every project.
+New projects and sequences default to the SceneReferred workflow and therefore
+execute the exact package-pinned Standard SDR or HDR View for Program Output.
+This is the normal product path for finished SDR video as well as log, HDR,
+scene-light, CG, and grading work; the SDR View is specifically constrained to
+preserve normal Rec.709 rather than impose an unconditional filmic reshape.
+An explicit DisplayReferred workflow remains available as a technical direct
+colorimetric bypass. `Mondrian Standard` names the immutable engine/package
+contract, while workflow controls whether its rendering View participates.
 `mondrian-core::mondrian_default_ocio_contract()` is the Rust-level product
 contract for that package. It lists the Standard package version, pinned config
 name, exact config and whole-package SHA-256 digests, resource digests, virtual
@@ -284,7 +287,7 @@ validated fail-closed after the preset is applied.
 
 Important fields:
 
-- `workflow`: DisplayReferred (default) or explicit SceneReferred picture formation
+- `workflow`: SceneReferred (default Standard picture formation) or explicit DisplayReferred colorimetric bypass
 - `display_management`: monitor/profile reference, viewer SDR/HDR mode, and tone-map policy
 - `missing_metadata_policy`
 - `nested_processing`
@@ -294,11 +297,10 @@ Important fields:
 - HDR metadata preservation fields
 
 `DisplayToneMapPolicy` controls the final working-to-display/export boundary.
-Its `Automatic` mode follows the effective scene-referred workflow; the
-per-sequence `auto_tone_map_media` authoring preference remains attached to
-individual media render plans. New conventional-video sequences are
-display-referred and select a direct colorimetric OCIO processor. Explicit
-SceneReferred sequences execute the selected engine's product View.
+Its `Automatic` mode follows the effective workflow; the per-sequence
+`auto_tone_map_media` authoring preference remains attached to individual media
+render plans. New sequences are scene-referred and execute the selected
+engine's product View. DisplayReferred is an explicit direct-colorimetric bypass.
 `ColorEngine` is the sole Standard/ACES/Custom mode selector; workflow
 deliberately has no ACES-branded variant.
 
@@ -582,6 +584,12 @@ the adapter advertises it. A filtering plan on a device without that feature
 fails as a typed backend-object error before bind-group creation rather than
 silently changing the LUT to nearest sampling. Real-wgpu coverage builds a
 filtering Apple Log -> Rec.709 OCIO pipeline on the selected production device.
+OCIO `GradingRGBCurve` may emit legal nested component l-values such as
+`pixel.rgb.r`; Naga 30 parses that form but rejects the resulting store pointer.
+The renderer's semantic-preserving GLSL lowering flattens identity nested
+swizzles to `pixel.r` before Naga validation. Parse and validation failures emit
+the generated GLSL source span and complete error chain, rather than only the
+invalid function name.
 
 Preview and export final transforms are renderer execution concerns.
 `ColorContext::output_transform` is the only product-level transform truth;

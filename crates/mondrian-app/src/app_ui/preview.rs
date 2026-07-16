@@ -15078,7 +15078,7 @@ mod tests {
         let mut rec709_view = test_color_context(ColorSpace::Rec709);
         rec709_view.output_transform = mondrian_core::OutputTransformIntent::OcioDisplayView {
             display: "sRGB - Display".to_owned(),
-            view: "Mondrian Standard SDR v1".to_owned(),
+            view: "Mondrian Standard SDR v2".to_owned(),
         };
         let mut colorimetric_view = rec709_view.clone();
         colorimetric_view.output_transform =
@@ -15142,7 +15142,7 @@ mod tests {
         color_context.tone_map = true;
         color_context.output_transform = mondrian_core::OutputTransformIntent::OcioDisplayView {
             display: "sRGB - Display".to_owned(),
-            view: "Mondrian Standard SDR v1".to_owned(),
+            view: "Mondrian Standard SDR v2".to_owned(),
         };
         let mut scratch = TimelineCompositeScratch::default();
 
@@ -15154,7 +15154,7 @@ mod tests {
             .display_view
             .expect("resolved display/view");
         assert_eq!(display_view.display, "sRGB - Display");
-        assert_eq!(display_view.view, "Mondrian Standard SDR v1");
+        assert_eq!(display_view.view, "Mondrian Standard SDR v2");
     }
 
     #[test]
