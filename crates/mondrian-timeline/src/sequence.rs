@@ -781,8 +781,8 @@ impl SequenceSettings {
 
     /// Validate sequence settings together with the effective project color mode.
     ///
-    /// This catches Standard or Custom OCIO working-space mismatches before a
-    /// render plan can request semantics outside the identity saved with the project.
+    /// This catches working-space mismatches and output intents that the exact
+    /// selected engine/package cannot resolve before render planning.
     pub fn validate_with_project_color_management(
         &self,
         project_cm: &mondrian_core::ProjectColorManagement,
@@ -798,7 +798,21 @@ impl SequenceSettings {
                 step_id: "sequence_color_management_validate".to_owned(),
                 reason,
             }
-        })
+        })?;
+
+        let output_context = self
+            .root_color_context_for_output(project_cm, self.color_management.output_color_space);
+        output_context
+            .output_transform
+            .resolve_display_view(
+                self.color_management.output_color_space,
+                &output_context.engine,
+            )
+            .map(|_| ())
+            .map_err(|reason| mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "sequence_color_output_validate".to_owned(),
+                reason: reason.to_string(),
+            })
     }
 
     /// Build the Program Output color context shared by preview, scopes, and export.
@@ -2368,6 +2382,22 @@ mod tests {
 
         assert!(error.to_string().contains("Mondrian Standard"));
         assert!(error.to_string().contains("Linear Rec.2020"));
+    }
+
+    #[test]
+    fn standard_scene_referred_output_requires_a_versioned_rendering_view() {
+        let mut settings = SequenceSettings::default();
+        settings.color_management.output_color_space = ColorSpace::Rec601Pal;
+
+        let error = settings
+            .validate_with_project_color_management(&ProjectColorManagement::default())
+            .expect_err("Scene-referred Standard must reject an output without a product View");
+        assert!(error.to_string().contains("no rendering View"), "{error:#}");
+
+        settings.color_management.workflow = ColorWorkflow::DisplayReferred;
+        settings
+            .validate_with_project_color_management(&ProjectColorManagement::default())
+            .expect("explicit display-referred colorimetric output remains valid");
     }
 
     #[test]

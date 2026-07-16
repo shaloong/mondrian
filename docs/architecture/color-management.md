@@ -75,6 +75,11 @@ preserve normal Rec.709 rather than impose an unconditional filmic reshape.
 An explicit DisplayReferred workflow remains available as a technical direct
 colorimetric bypass. `Mondrian Standard` names the immutable engine/package
 contract, while workflow controls whether its rendering View participates.
+The Standard Program Output contract currently has six exact View targets:
+sRGB, Rec.709, Display P3, Rec.2020 SDR, Rec.2100 HLG, and Rec.2100 PQ. Rec.601
+PAL/NTSC remain valid input identities and explicit DisplayReferred
+colorimetric outputs, but are not offered or accepted as SceneReferred Standard
+targets until the immutable package defines corresponding Views.
 `mondrian-core::mondrian_default_ocio_contract()` is the Rust-level product
 contract for that package. It lists the Standard package version, pinned config
 name, exact config and whole-package SHA-256 digests, resource digests, virtual

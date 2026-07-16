@@ -91,6 +91,14 @@ constructs a Program Output boundary, so the target transfer function
 changes only the display encoding and never selects a second HDR picture
 formation.
 
+The SceneReferred Standard Program Output selector exposes only the six targets
+with exact versioned package Views: sRGB, Rec.709, Display P3, Rec.2020 SDR,
+Rec.2100 HLG, and Rec.2100 PQ. Rec.601 PAL/NTSC remain supported source
+interpretations and explicit DisplayReferred colorimetric outputs; they are not
+misrepresented as Standard rendering Views. Domain validation resolves the
+effective typed output intent against the selected package, so an externally
+authored unsupported Standard target fails before render planning.
+
 ## Track
 
 `Track` owns an ordered `Vec<Clip>` and track-level state:

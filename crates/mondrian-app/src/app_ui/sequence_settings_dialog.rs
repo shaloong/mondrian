@@ -251,10 +251,8 @@ const PREVIEW_RENDER_FORMAT_OPTIONS: [PreviewRenderFormat; 4] = [
     PreviewRenderFormat::LosslessRgba,
 ];
 
-const COLOR_SPACE_OPTIONS: [ColorSpace; 8] = [
+const PROGRAM_OUTPUT_COLOR_SPACE_OPTIONS: [ColorSpace; 6] = [
     ColorSpace::Rec709,
-    ColorSpace::Rec601Pal,
-    ColorSpace::Rec601Ntsc,
     ColorSpace::Rec2100Hlg,
     ColorSpace::Rec2100Pq,
     ColorSpace::Srgb,
@@ -584,7 +582,7 @@ fn preview_render_format_items() -> Vec<MenuItem> {
 fn color_space_items(
     update: fn(ColorSpace) -> SequenceSettingsDraftUpdatePayload,
 ) -> Vec<MenuItem> {
-    COLOR_SPACE_OPTIONS
+    PROGRAM_OUTPUT_COLOR_SPACE_OPTIONS
         .into_iter()
         .map(|color_space| {
             MenuItem::new(
@@ -1940,6 +1938,21 @@ mod tests {
             .iter()
             .map(|workflow| color_workflow_label(*workflow))
             .all(|label| !label.contains("ACES") && !label.contains("OpenColorIO")));
+    }
+
+    #[test]
+    fn program_output_picker_only_offers_versioned_standard_targets() {
+        assert_eq!(
+            PROGRAM_OUTPUT_COLOR_SPACE_OPTIONS,
+            [
+                ColorSpace::Rec709,
+                ColorSpace::Rec2100Hlg,
+                ColorSpace::Rec2100Pq,
+                ColorSpace::Srgb,
+                ColorSpace::Rec2020,
+                ColorSpace::DisplayP3,
+            ]
+        );
     }
 
     #[test]
