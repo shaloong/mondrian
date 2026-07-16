@@ -776,6 +776,7 @@ mod tests {
             callback_count: 0,
             underrun_frames: 0,
             last_callback_frames: 10,
+            last_callback_playback_delay: Some(Duration::from_millis(10)),
             last_callback_age: None,
             buffered_frames: 0,
             stream_failed: false,

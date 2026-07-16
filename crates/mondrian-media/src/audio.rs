@@ -126,6 +126,8 @@ pub struct RealtimeAudioOutputSnapshot {
     pub underrun_frames: u64,
     /// Frame count requested by the latest callback.
     pub last_callback_frames: u32,
+    /// Predicted callback-to-device playback delay reported by the audio host.
+    pub last_callback_playback_delay: Option<Duration>,
     /// Runtime age of the latest callback, or `None` before the first callback.
     pub last_callback_age: Option<Duration>,
     /// PCM frames currently waiting in the output queue.
@@ -143,6 +145,7 @@ struct RealtimeAudioOutputTelemetry {
     callback_count: AtomicU64,
     underrun_frames: AtomicU64,
     last_callback_frames: AtomicU64,
+    last_callback_playback_delay_ns: AtomicU64,
     last_callback_elapsed_ns: AtomicU64,
     stream_failed: AtomicBool,
 }
@@ -157,16 +160,21 @@ impl RealtimeAudioOutputTelemetry {
             callback_count: AtomicU64::new(0),
             underrun_frames: AtomicU64::new(0),
             last_callback_frames: AtomicU64::new(0),
+            last_callback_playback_delay_ns: AtomicU64::new(0),
             last_callback_elapsed_ns: AtomicU64::new(0),
             stream_failed: AtomicBool::new(false),
         }
     }
 
-    fn record_callback(&self, frames: usize, underrun_frames: usize) {
+    fn record_callback(&self, frames: usize, underrun_frames: usize, playback_delay: Duration) {
         self.callback_consumed_frames.fetch_add(frames as u64, Ordering::Relaxed);
         self.callback_count.fetch_add(1, Ordering::Relaxed);
         self.underrun_frames.fetch_add(underrun_frames as u64, Ordering::Relaxed);
         self.last_callback_frames.store(frames as u64, Ordering::Relaxed);
+        self.last_callback_playback_delay_ns.store(
+            playback_delay.as_nanos().min(u64::MAX as u128) as u64,
+            Ordering::Relaxed,
+        );
         let elapsed_ns = self.origin.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         self.last_callback_elapsed_ns.store(elapsed_ns, Ordering::Release);
     }
@@ -335,13 +343,14 @@ impl RealtimeAudioOutput {
                 device
                     .build_output_stream(
                         &config,
-                        move |data: &mut [i16], _| {
+                        move |data: &mut [i16], info| {
                             let frames = data.len() / channels.max(1) as usize;
+                            let playback_delay = callback_playback_delay(info);
                             if muted_for_cb.load(Ordering::Relaxed)
                                 || !active_for_cb.load(Ordering::Relaxed)
                             {
                                 data.fill(0);
-                                telemetry_for_cb.record_callback(frames, 0);
+                                telemetry_for_cb.record_callback(frames, 0, playback_delay);
                                 return;
                             }
                             let mut missing_samples = 0usize;
@@ -358,6 +367,7 @@ impl RealtimeAudioOutput {
                             telemetry_for_cb.record_callback(
                                 frames,
                                 missing_samples / channels.max(1) as usize,
+                                playback_delay,
                             );
                         },
                         err_fn,
@@ -375,13 +385,14 @@ impl RealtimeAudioOutput {
                 device
                     .build_output_stream(
                         &config,
-                        move |data: &mut [u16], _| {
+                        move |data: &mut [u16], info| {
                             let frames = data.len() / channels.max(1) as usize;
+                            let playback_delay = callback_playback_delay(info);
                             if muted_for_cb.load(Ordering::Relaxed)
                                 || !active_for_cb.load(Ordering::Relaxed)
                             {
                                 data.fill(u16::MAX / 2);
-                                telemetry_for_cb.record_callback(frames, 0);
+                                telemetry_for_cb.record_callback(frames, 0, playback_delay);
                                 return;
                             }
                             let mut missing_samples = 0usize;
@@ -398,6 +409,7 @@ impl RealtimeAudioOutput {
                             telemetry_for_cb.record_callback(
                                 frames,
                                 missing_samples / channels.max(1) as usize,
+                                playback_delay,
                             );
                         },
                         err_fn,
@@ -514,6 +526,11 @@ impl RealtimeAudioOutput {
                 .last_callback_frames
                 .load(Ordering::Relaxed)
                 .min(u32::MAX as u64) as u32,
+            last_callback_playback_delay: (last_elapsed_ns > 0).then(|| {
+                Duration::from_nanos(
+                    self.telemetry.last_callback_playback_delay_ns.load(Ordering::Relaxed),
+                )
+            }),
             last_callback_age: (last_elapsed_ns > 0)
                 .then(|| Duration::from_nanos(now_ns.saturating_sub(last_elapsed_ns))),
             buffered_frames: self.buffered_frames(),
@@ -589,6 +606,11 @@ impl RealtimeAudioOutputHandle {
                 .last_callback_frames
                 .load(Ordering::Relaxed)
                 .min(u32::MAX as u64) as u32,
+            last_callback_playback_delay: (last_elapsed_ns > 0).then(|| {
+                Duration::from_nanos(
+                    self.telemetry.last_callback_playback_delay_ns.load(Ordering::Relaxed),
+                )
+            }),
             last_callback_age: (last_elapsed_ns > 0)
                 .then(|| Duration::from_nanos(now_ns.saturating_sub(last_elapsed_ns))),
             buffered_frames: self.buffered_frames(),
@@ -643,11 +665,12 @@ fn build_f32_stream(
     let channels = config.channels.max(1) as usize;
     device.build_output_stream(
         config,
-        move |data: &mut [f32], _| {
+        move |data: &mut [f32], info| {
             let frames = data.len() / channels;
+            let playback_delay = callback_playback_delay(info);
             if muted.load(Ordering::Relaxed) || !active.load(Ordering::Relaxed) {
                 data.fill(0.0);
-                telemetry.record_callback(frames, 0);
+                telemetry.record_callback(frames, 0, playback_delay);
                 return;
             }
             let mut missing_samples = 0usize;
@@ -657,11 +680,16 @@ fn build_f32_stream(
                     0.0
                 });
             }
-            telemetry.record_callback(frames, missing_samples / channels);
+            telemetry.record_callback(frames, missing_samples / channels, playback_delay);
         },
         err_fn,
         None,
     )
+}
+
+fn callback_playback_delay(info: &cpal::OutputCallbackInfo) -> Duration {
+    let timestamp = info.timestamp();
+    timestamp.playback.duration_since(&timestamp.callback).unwrap_or(Duration::ZERO)
 }
 
 pub fn decode_audio_file_with_ffmpeg_cli(
@@ -746,8 +774,8 @@ mod tests {
     fn callback_telemetry_accumulates_consumption_and_underrun_without_locking() {
         let telemetry = RealtimeAudioOutputTelemetry::new();
 
-        telemetry.record_callback(480, 0);
-        telemetry.record_callback(480, 32);
+        telemetry.record_callback(480, 0, Duration::from_millis(10));
+        telemetry.record_callback(480, 32, Duration::from_millis(12));
 
         assert_eq!(
             telemetry.callback_consumed_frames.load(Ordering::Relaxed),
@@ -756,6 +784,10 @@ mod tests {
         assert_eq!(telemetry.callback_count.load(Ordering::Relaxed), 2);
         assert_eq!(telemetry.underrun_frames.load(Ordering::Relaxed), 32);
         assert_eq!(telemetry.last_callback_frames.load(Ordering::Relaxed), 480);
+        assert_eq!(
+            telemetry.last_callback_playback_delay_ns.load(Ordering::Relaxed),
+            12_000_000
+        );
     }
 }
 

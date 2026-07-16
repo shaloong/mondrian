@@ -226,6 +226,13 @@ Synthetic → Audio requires:
 4. at least one reliable consumed-sample observation;
 5. phase error within the hard handoff budget.
 
+Phase qualification compares the audio candidate with the continuous
+Synthetic Clock position at the observation timestamp, not with the published
+integer video-frame start. The latter is quantized by as much as one frame
+(40 ms at 25 fps) and can falsely reject a correctly aligned audio stream when
+the handoff budget is smaller. Published video position remains frame-based;
+only the cross-clock qualification reference preserves subframe monotonic time.
+
 Small phase error is removed by bounded audio resampling/slew. Error outside the
 hard budget keeps Synthetic Master active and reprimes audio; it must not jump
 the timeline or duplicate/drop an arbitrary video interval.
@@ -820,12 +827,15 @@ the former contended `Mutex<VecDeque<_>>`. The Audio Playback Module requires
 120 ms PCM preroll,
 a callback no older than 100 ms, and at least one active-interval callback
 before offering Audio Device Master. The Engine accepts callback estimates only
-within its versioned 20 ms uncertainty budget, anchors the first qualified
-observation without a position jump, advances exact timeline frames from integer
-sample deltas, and ignores monotonic UI ticks while Audio Device Master is
-active. Stream failure, stale evidence, excessive uncertainty, or decreasing
-sample position hands off continuously to Synthetic Master; repeated unavailable
-observations while already Synthetic do not reanchor or freeze transport.
+within its versioned 50 ms uncertainty budget. This admits common host callback
+quanta such as 1024 samples at 44.1/48 kHz while still rejecting stale or
+coarsely buffered observations. The Engine anchors the first qualified
+observation without a position jump, advances exact callback observations from
+integer sample deltas, and interpolates the continuous audio phase from the
+monotonic interval between callbacks. Stream failure, stale evidence, excessive
+uncertainty, an impossible consumed-sample slope, or decreasing sample position
+hands off continuously to Synthetic Master; repeated unavailable observations
+while already Synthetic do not reanchor or freeze transport.
 
 The grade remains explicitly `CallbackConsumptionEstimate`, not exact hardware
 `DevicePosition`. The former app-owned `AudioClock`/`AudioRenderCursor` no
@@ -841,8 +851,9 @@ and only then offers callback evidence.
 
 Synthetic-to-Audio qualification is phase-controlled. An observation carries
 the exact media `TimelineTime` at active-consumption frame zero; the Engine compares
-latency-adjusted integer consumption with the published timeline. Error beyond
-the versioned 20 ms budget records `PhaseRejected`, keeps Synthetic authoritative
+latency-adjusted integer consumption with the continuous active Clock Master
+phase at the same monotonic timestamp. Error beyond the independent versioned
+20 ms handoff budget records `PhaseRejected`, keeps Synthetic authoritative
 without reanchoring, and asks the app Adapter to reprime. Accepted/rejected
 generation and signed phase error are immutable snapshot evidence. Small-error
 resampling/slew and backend-native hardware position remain Phase 3 work.

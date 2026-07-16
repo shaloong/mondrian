@@ -328,7 +328,12 @@ impl AppState {
             Ok(engine_snapshot)
                 if observation.state == AudioDeviceClockState::Running
                     && !already_audio_master
-                    && engine_snapshot.clock_master != Some(ClockMaster::AudioDevice) =>
+                    && engine_snapshot.clock_master != Some(ClockMaster::AudioDevice)
+                    && engine_snapshot.audio_handoff.is_some_and(|handoff| {
+                        handoff.stream_generation == observation.stream_generation
+                            && handoff.status
+                                == mondrian_playback::AudioClockHandoffStatus::PhaseRejected
+                    }) =>
             {
                 self.audio_playback.reprime(engine_snapshot.position);
             }
@@ -774,11 +779,14 @@ fn audio_device_clock_observation(
     media_anchor: Option<FramePosition>,
     activation_preroll_satisfied: bool,
 ) -> AudioDeviceClockObservation {
-    let callback_fresh =
-        snapshot.last_callback_age.is_some_and(|age| age <= AUDIO_CALLBACK_STALE_AFTER);
+    let callback_age = snapshot.last_callback_age.unwrap_or(Duration::MAX);
+    let callback_period_frames = u64::from(snapshot.last_callback_frames);
+    let callback_age_frames = duration_sample_frames(callback_age, snapshot.sample_rate);
+    let callback_fresh = callback_age <= AUDIO_CALLBACK_STALE_AFTER
+        && callback_age_frames <= callback_period_frames.saturating_mul(3);
     let callback_position_plausible = snapshot.active_duration.is_some_and(|active_duration| {
         let maximum_consumed_frames = duration_sample_frames(
-            active_duration.saturating_add(AUDIO_CALLBACK_STALE_AFTER),
+            active_duration.saturating_add(callback_age.min(AUDIO_CALLBACK_STALE_AFTER)),
             snapshot.sample_rate,
         )
         .saturating_add(u64::from(snapshot.last_callback_frames));
@@ -791,13 +799,20 @@ fn audio_device_clock_observation(
         && callback_position_plausible
         && media_anchor.is_some()
         && (already_audio_master || activation_preroll_satisfied);
-    let callback_age_frames = snapshot
-        .last_callback_age
-        .map(|age| duration_sample_frames(age, snapshot.sample_rate))
-        .unwrap_or(u64::MAX);
-    let uncertainty_frames = callback_age_frames
-        .saturating_add(snapshot.last_callback_frames as u64)
-        .min(u32::MAX as u64) as u32;
+    let playback_delay = snapshot.last_callback_playback_delay.unwrap_or_else(|| {
+        Duration::from_nanos(
+            callback_period_frames
+                .saturating_mul(1_000_000_000)
+                .checked_div(u64::from(snapshot.sample_rate.max(1)))
+                .unwrap_or(u64::MAX),
+        )
+    });
+    let remaining_playback_delay = playback_delay.saturating_sub(callback_age);
+    let estimated_latency_frames =
+        duration_sample_frames(remaining_playback_delay, snapshot.sample_rate).min(u32::MAX as u64)
+            as u32;
+    let uncertainty_frames =
+        callback_age_frames.max(callback_period_frames).min(u32::MAX as u64) as u32;
     AudioDeviceClockObservation {
         epoch,
         stream_generation: snapshot.stream_generation,
@@ -808,7 +823,7 @@ fn audio_device_clock_observation(
         }),
         observed_at,
         grade: AudioClockObservationGrade::CallbackConsumptionEstimate,
-        estimated_latency_frames: snapshot.last_callback_frames,
+        estimated_latency_frames,
         uncertainty_frames,
         underrun_frames: snapshot.underrun_frames,
         state: if usable {
@@ -864,6 +879,7 @@ mod tests {
             callback_count: 2,
             underrun_frames: 0,
             last_callback_frames: 480,
+            last_callback_playback_delay: Some(Duration::from_millis(10)),
             last_callback_age: Some(Duration::from_millis(1)),
             buffered_frames: 5_760,
             stream_failed: false,
@@ -889,6 +905,8 @@ mod tests {
             ready.grade,
             AudioClockObservationGrade::CallbackConsumptionEstimate
         );
+        assert_eq!(ready.estimated_latency_frames, 432);
+        assert_eq!(ready.uncertainty_frames, 480);
 
         let mut stale = audio_snapshot();
         stale.last_callback_age = Some(Duration::from_millis(101));
@@ -951,10 +969,14 @@ mod tests {
             true,
         );
         state.playback_engine.observe_audio_device_clock(initial).expect("audio master");
+        state.advance_playback_clock(Duration::from_millis(30));
+        assert_eq!(state.current_frame(), 0);
 
         let mut final_output = audio_snapshot();
         final_output.callback_consumed_frames = 2_880;
         final_output.active_callback_consumed_frames = 2_400;
+        final_output.active_duration = Some(Duration::from_millis(50));
+        final_output.callback_count = 6;
         final_output.underrun_frames = 960;
         state.observe_final_audio_clock_before_recovery(
             final_output,
