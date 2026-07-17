@@ -1624,7 +1624,13 @@ fn execute_timeline_export(
             &job.config.preset.video,
             job.config.preset.alpha_mode,
         );
-        if timeline.sequence.settings.color_management.preserve_hdr_metadata {
+        if timeline
+            .sequence
+            .settings
+            .color_management
+            .static_hdr_metadata_policy
+            .writes_authored_metadata()
+        {
             if let Err(err) = apply_h265_hdr_metadata_args(&mut cmd, &timeline.sequence.settings) {
                 return JobExecutionResult::Failed(err);
             }
@@ -3290,7 +3296,7 @@ mod tests {
     use mondrian_renderer::RenderOutputColorBoundaryTarget;
     use mondrian_timeline::clip::Clip;
     use mondrian_timeline::sequence::{
-        InputColorResolutionSource, MissingColorMetadataPolicy, Sequence,
+        InputColorResolutionSource, MissingColorMetadataPolicy, Sequence, StaticHdrMetadataPolicy,
     };
     use mondrian_timeline::track::Track;
     use std::path::PathBuf;
@@ -4320,27 +4326,29 @@ mod tests {
     }
 
     #[test]
-    fn export_color_validation_rejects_preserve_hdr_without_typed_metadata() {
+    fn export_color_validation_rejects_static_hdr_write_without_typed_metadata() {
         let mut timeline = timeline_input_with_output_color(ColorSpace::Rec2100Pq);
         timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
-        timeline.sequence.settings.color_management.preserve_hdr_metadata = true;
+        timeline.sequence.settings.color_management.static_hdr_metadata_policy =
+            StaticHdrMetadataPolicy::WriteAuthored;
         let mut config = dummy_config("hdr-missing-metadata.mp4");
         config.preset.video = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
 
         let err = validate_timeline_export_color_compatibility(&config, &timeline)
-            .expect_err("preserve HDR should require typed metadata");
+            .expect_err("static HDR writing should require typed metadata");
         assert!(err.contains("SMPTE ST 2086"));
     }
 
     #[test]
-    fn export_color_validation_allows_preserve_hdr_with_typed_metadata() {
+    fn export_color_validation_allows_static_hdr_write_with_typed_metadata() {
         let mut timeline = timeline_input_with_output_color(ColorSpace::Rec2100Pq);
         timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
-        timeline.sequence.settings.color_management.preserve_hdr_metadata = true;
+        timeline.sequence.settings.color_management.static_hdr_metadata_policy =
+            StaticHdrMetadataPolicy::WriteAuthored;
         timeline.sequence.settings.color_management.hdr_mastering_display =
-            Some(VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference());
+            Some(VideoMasteringDisplayMetadata::rec2100_1000_nit_reference());
         timeline.sequence.settings.color_management.hdr_content_light =
-            Some(VideoContentLightMetadata::hdr10_1000_nit_reference());
+            Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
         let mut config = dummy_config("hdr-with-metadata.mp4");
         config.preset.video = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
 
@@ -4352,13 +4360,14 @@ mod tests {
     fn export_color_validation_binds_content_light_to_standard_view_peak() {
         let mut timeline = timeline_input_with_output_color(ColorSpace::Rec2100Pq);
         timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
-        timeline.sequence.settings.color_management.preserve_hdr_metadata = true;
-        let mut mastering = VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference();
+        timeline.sequence.settings.color_management.static_hdr_metadata_policy =
+            StaticHdrMetadataPolicy::WriteAuthored;
+        let mut mastering = VideoMasteringDisplayMetadata::rec2100_1000_nit_reference();
         mastering.luminance.as_mut().expect("reference luminance").max =
             mondrian_core::VideoHdrRational::new(4000, 1);
         timeline.sequence.settings.color_management.hdr_mastering_display = Some(mastering);
         timeline.sequence.settings.color_management.hdr_content_light =
-            Some(VideoContentLightMetadata::hdr10_1000_nit_reference());
+            Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
         let mut config = dummy_config("hdr-content-light-contract.mp4");
         config.preset.video = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
 
@@ -4366,7 +4375,7 @@ mod tests {
             .expect("mastering-display capability may exceed the Standard View's content peak");
 
         timeline.sequence.settings.color_management.hdr_mastering_display =
-            Some(VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference());
+            Some(VideoMasteringDisplayMetadata::rec2100_1000_nit_reference());
         timeline.sequence.settings.color_management.hdr_content_light =
             Some(VideoContentLightMetadata {
                 max_content_light_level: 1200,
@@ -4382,11 +4391,12 @@ mod tests {
     fn export_color_validation_rejects_unimplemented_hdr_metadata_backends() {
         let mut timeline = timeline_input_with_output_color(ColorSpace::Rec2100Pq);
         timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
-        timeline.sequence.settings.color_management.preserve_hdr_metadata = true;
+        timeline.sequence.settings.color_management.static_hdr_metadata_policy =
+            StaticHdrMetadataPolicy::WriteAuthored;
         timeline.sequence.settings.color_management.hdr_mastering_display =
-            Some(VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference());
+            Some(VideoMasteringDisplayMetadata::rec2100_1000_nit_reference());
         timeline.sequence.settings.color_management.hdr_content_light =
-            Some(VideoContentLightMetadata::hdr10_1000_nit_reference());
+            Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
 
         for codec in [
             VideoCodecConfig::Av1 { crf: 24 },
@@ -4407,11 +4417,12 @@ mod tests {
     fn export_color_validation_rejects_dynamic_hdr_passthrough_claim() {
         let mut timeline = timeline_input_with_output_color(ColorSpace::Rec2100Pq);
         timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
-        timeline.sequence.settings.color_management.preserve_hdr_metadata = true;
+        timeline.sequence.settings.color_management.static_hdr_metadata_policy =
+            StaticHdrMetadataPolicy::WriteAuthored;
         timeline.sequence.settings.color_management.hdr_mastering_display =
-            Some(VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference());
+            Some(VideoMasteringDisplayMetadata::rec2100_1000_nit_reference());
         timeline.sequence.settings.color_management.hdr_content_light =
-            Some(VideoContentLightMetadata::hdr10_1000_nit_reference());
+            Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
         let asset_id = AssetId::new();
         let tb = timeline.sequence.time_base();
         timeline.sequence.video_tracks[0]
@@ -4750,24 +4761,25 @@ mod tests {
         assert_eq!(expected.color_transfer.as_deref(), Some("smpte2084"));
         assert_eq!(expected.color_matrix.as_deref(), Some("bt2020nc"));
         assert!(!expected.require_color_tags_absent);
-        assert!(expected.static_hdr10_metadata.is_none());
+        assert!(expected.static_hdr_metadata.is_none());
 
-        settings.color_management.preserve_hdr_metadata = true;
+        settings.color_management.static_hdr_metadata_policy =
+            StaticHdrMetadataPolicy::WriteAuthored;
         settings.color_management.hdr_mastering_display =
-            Some(VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference());
+            Some(VideoMasteringDisplayMetadata::rec2100_1000_nit_reference());
         settings.color_management.hdr_content_light =
-            Some(VideoContentLightMetadata::hdr10_1000_nit_reference());
+            Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
         let expected =
             expected_export_video_signal(&settings, &codec, ExportAlphaMode::FlattenBlack)
-                .expect("valid HDR10 metadata contract");
-        let expected_hdr10 = expected
-            .static_hdr10_metadata
-            .expect("post-encode contract must retain authored HDR10 metadata");
+                .expect("valid static HDR metadata contract");
+        let expected_static_hdr = expected
+            .static_hdr_metadata
+            .expect("post-encode contract must retain authored static HDR metadata");
         assert_eq!(
-            expected_hdr10.content_light,
-            VideoContentLightMetadata::hdr10_1000_nit_reference()
+            expected_static_hdr.content_light,
+            VideoContentLightMetadata::rec2100_1000_nit_reference()
         );
-        settings.color_management.preserve_hdr_metadata = false;
+        settings.color_management.static_hdr_metadata_policy = StaticHdrMetadataPolicy::Omit;
 
         settings.color_management.output_color_space = ColorSpace::AppleLogBt2020;
         settings.color_management.delivery_bit_depth = DeliveryBitDepth::Twelve;

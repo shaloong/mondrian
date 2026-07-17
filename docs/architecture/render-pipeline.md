@@ -711,15 +711,15 @@ resolved boundary has no view, export records
 
 HDR metadata validation occurs before encoder launch, again before libx265
 parameter construction, and after encoding against the finished bitstream. The
-post-encode contract probes only the first decoded video frame when static HDR
-preservation was requested, because FFmpeg exposes libx265 ST 2086 and
+post-encode contract probes only the first decoded video frame when
+`StaticHdrMetadataPolicy::WriteAuthored` was selected, because FFmpeg exposes libx265 ST 2086 and
 MaxCLL/MaxFALL SEI as frame side data rather than stream fields. It compares the
 encoded values at the x265 chromaticity/luminance quantization scales and fails
 closed on missing, malformed, or changed metadata. Exports that do not request
-static HDR preservation incur no frame-side-data probe. Source HDR10+ and Dolby
+`Omit` deliveries incur no frame-side-data probe. Source HDR10+ and Dolby
 Vision metadata is never claimed as passthrough across rendered pixels: health
 reports warn on referenced dynamic-HDR sources, and enabling the current
-metadata-preservation request fails before encoding until a validated dynamic
+`WriteAuthored` request fails before encoding until a validated dynamic
 metadata authoring backend exists. The effective
 inherited/overridden engine determines whether a Standard output-target
 contract applies. For Standard HLG/PQ, MaxCLL cannot exceed the View's fixed

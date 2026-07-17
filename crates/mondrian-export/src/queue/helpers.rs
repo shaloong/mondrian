@@ -279,7 +279,7 @@ impl ExportVideoSignalContract {
             color_transfer: tags.map(|tags| tags.color_trc.to_owned()),
             color_matrix: self.yuv_matrix.map(|matrix| matrix.tag_name().to_owned()),
             require_color_tags_absent: tags.is_none(),
-            static_hdr10_metadata: None,
+            static_hdr_metadata: None,
         }
     }
 }
@@ -291,25 +291,24 @@ pub(crate) fn expected_export_video_signal(
 ) -> Result<crate::validator::ExpectedVideoSignalConstraints, String> {
     let mut constraints =
         ExportVideoSignalContract::resolve(settings, codec, alpha_mode).validation_constraints();
-    if settings.color_management.preserve_hdr_metadata {
+    if settings.color_management.static_hdr_metadata_policy.writes_authored_metadata() {
         let mastering_display = settings
             .color_management
             .hdr_mastering_display
             .as_ref()
-            .ok_or_else(|| "保留 HDR metadata 需要 SMPTE ST 2086 母版显示元数据".to_string())?
+            .ok_or_else(|| "写入静态 HDR metadata 需要 SMPTE ST 2086 母版显示元数据".to_string())?
             .clone();
         mastering_display
             .validate()
             .map_err(|error| format!("SMPTE ST 2086 母版显示元数据无效: {error}"))?;
-        let content_light = settings
-            .color_management
-            .hdr_content_light
-            .ok_or_else(|| "保留 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string())?;
+        let content_light = settings.color_management.hdr_content_light.ok_or_else(|| {
+            "写入静态 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string()
+        })?;
         content_light
             .validate()
             .map_err(|error| format!("MaxCLL/MaxFALL 内容光级别元数据无效: {error}"))?;
-        constraints.static_hdr10_metadata =
-            Some(crate::validator::ExpectedHdr10StaticMetadataConstraints {
+        constraints.static_hdr_metadata =
+            Some(crate::validator::ExpectedStaticHdrMetadataConstraints {
                 mastering_display,
                 content_light,
             });
@@ -344,7 +343,7 @@ pub(crate) fn apply_export_video_signal_args(
     }
 }
 
-/// Write HDR10 static metadata through the libx265 encoder contract.
+/// Write authored static HDR metadata through the libx265 encoder contract.
 ///
 /// Validation must reject other encoders before this boundary is reached.
 pub(crate) fn apply_h265_hdr_metadata_args(
@@ -360,7 +359,7 @@ fn h265_hdr_metadata_params(settings: &SequenceSettings) -> Result<String, Strin
     let mastering_metadata = cm
         .hdr_mastering_display
         .as_ref()
-        .ok_or_else(|| "保留 HDR metadata 需要 SMPTE ST 2086 母版显示元数据".to_string())?;
+        .ok_or_else(|| "写入静态 HDR metadata 需要 SMPTE ST 2086 母版显示元数据".to_string())?;
     mastering_metadata
         .validate()
         .map_err(|error| format!("SMPTE ST 2086 母版显示元数据无效: {error}"))?;
@@ -369,7 +368,7 @@ fn h265_hdr_metadata_params(settings: &SequenceSettings) -> Result<String, Strin
         .ok_or_else(|| "SMPTE ST 2086 母版显示元数据不完整".to_string())?;
     let content_light = cm
         .hdr_content_light
-        .ok_or_else(|| "保留 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string())?;
+        .ok_or_else(|| "写入静态 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string())?;
     content_light
         .validate()
         .map_err(|error| format!("MaxCLL/MaxFALL 内容光级别元数据无效: {error}"))?;
@@ -404,7 +403,8 @@ pub(crate) fn validate_timeline_export_color_compatibility(
     let output = settings.color_management.output_color_space;
     let output_encoding = output.encoding();
     let bit_depth = settings.color_management.delivery_bit_depth;
-    let preserve_hdr = settings.color_management.preserve_hdr_metadata;
+    let write_static_hdr =
+        settings.color_management.static_hdr_metadata_policy.writes_authored_metadata();
 
     if config.preset.alpha_mode == ExportAlphaMode::Preserve
         && !matches!(
@@ -434,25 +434,23 @@ pub(crate) fn validate_timeline_export_color_compatibility(
     if output.is_hdr() && bit_depth == DeliveryBitDepth::Eight {
         return Err("HDR 输出不能使用 8-bit 导出位深".to_string());
     }
-    if preserve_hdr && !output.is_hdr() {
-        return Err("只有 HDR 输出色彩空间可以保留 HDR metadata".to_string());
+    if write_static_hdr && !output.is_hdr() {
+        return Err("只有 HDR 输出色彩空间可以写入静态 HDR metadata".to_string());
     }
-    if preserve_hdr && bit_depth == DeliveryBitDepth::Eight {
-        return Err("保留 HDR metadata 需要 10-bit 或更高位深".to_string());
+    if write_static_hdr && bit_depth == DeliveryBitDepth::Eight {
+        return Err("写入静态 HDR metadata 需要 10-bit 或更高位深".to_string());
     }
-    if preserve_hdr {
-        let mastering = settings
-            .color_management
-            .hdr_mastering_display
-            .as_ref()
-            .ok_or_else(|| "保留 HDR metadata 需要 SMPTE ST 2086 母版显示元数据".to_string())?;
+    if write_static_hdr {
+        let mastering =
+            settings.color_management.hdr_mastering_display.as_ref().ok_or_else(|| {
+                "写入静态 HDR metadata 需要 SMPTE ST 2086 母版显示元数据".to_string()
+            })?;
         mastering
             .validate()
             .map_err(|error| format!("HDR mastering metadata 无效: {error}"))?;
-        let content_light = settings
-            .color_management
-            .hdr_content_light
-            .ok_or_else(|| "保留 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string())?;
+        let content_light = settings.color_management.hdr_content_light.ok_or_else(|| {
+            "写入静态 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string()
+        })?;
         content_light
             .validate()
             .map_err(|error| format!("HDR content-light metadata 无效: {error}"))?;
@@ -485,7 +483,7 @@ pub(crate) fn validate_timeline_export_color_compatibility(
             ));
         }
     }
-    if preserve_hdr && !matches!(&config.preset.video, VideoCodecConfig::H265 { .. }) {
+    if write_static_hdr && !matches!(&config.preset.video, VideoCodecConfig::H265 { .. }) {
         return Err(
             "HDR metadata 写入当前仅由 H.265/libx265 编码后端支持；AV1/ProRes 尚无已验证的 metadata backend"
                 .to_string(),
@@ -516,7 +514,7 @@ pub(crate) fn validate_timeline_export_color_compatibility(
 
     match (&config.preset.container, &config.preset.video) {
         (Container::Gif, _) | (_, VideoCodecConfig::Gif { .. }) => {
-            if output.is_hdr() || preserve_hdr || bit_depth != DeliveryBitDepth::Eight {
+            if output.is_hdr() || write_static_hdr || bit_depth != DeliveryBitDepth::Eight {
                 return Err("GIF 导出仅支持 8-bit SDR 输出".to_string());
             }
             if output != ColorSpace::Srgb {
@@ -529,7 +527,7 @@ pub(crate) fn validate_timeline_export_color_compatibility(
         (Container::Mp4, VideoCodecConfig::ProRes { .. }) => {
             return Err("ProRes 应使用 MOV/MXF 等专业容器导出".to_string());
         }
-        (_, VideoCodecConfig::H264 { .. }) if output.is_hdr() || preserve_hdr => {
+        (_, VideoCodecConfig::H264 { .. }) if output.is_hdr() || write_static_hdr => {
             return Err("HDR 输出建议使用 H.265、AV1 或 ProRes，当前 H.264 配置已拒绝".to_string());
         }
         _ => {}
@@ -662,12 +660,12 @@ mod hdr_metadata_tests {
     fn h265_hdr_metadata_is_one_atomic_encoder_parameter() {
         let mut settings = SequenceSettings::default();
         settings.color_management.hdr_mastering_display =
-            Some(VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference());
+            Some(VideoMasteringDisplayMetadata::rec2100_1000_nit_reference());
         settings.color_management.hdr_content_light =
-            Some(VideoContentLightMetadata::hdr10_1000_nit_reference());
+            Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
         let mut command = Command::new("ffmpeg");
 
-        apply_h265_hdr_metadata_args(&mut command, &settings).expect("valid HDR10 metadata");
+        apply_h265_hdr_metadata_args(&mut command, &settings).expect("valid static HDR metadata");
 
         let args = command
             .get_args()

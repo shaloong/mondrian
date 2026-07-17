@@ -312,7 +312,7 @@ source-aware idempotency.
 `ProjectColorManagement` stores the project-level engine. `SequenceColorManagement` can inherit from the project or override its own engine and policies.
 Sequence editing-mode presets may update editing format defaults such as
 resolution, frame rate, and display format, but they preserve working color
-space, `SequenceColorManagement`, HDR metadata preservation payloads, and
+space, `SequenceColorManagement`, authored static HDR payloads, and
 tone-map policy. Color-management state is explicit user/project intent and is
 validated fail-closed after the preset is applied.
 
@@ -325,7 +325,7 @@ Important fields:
 - `output_color_space`
 - `video_range`
 - `delivery_bit_depth`: actual 8-bit or 10-bit encoded sample depth
-- HDR metadata preservation fields
+- static HDR metadata authoring policy and payloads
 
 `DisplayToneMapPolicy` controls the final working-to-display/export boundary.
 Its `Automatic` mode follows the effective workflow; the per-sequence
@@ -817,14 +817,14 @@ tag contract and is therefore accepted only with an explicit sRGB output.
 Static HDR metadata is currently supported only by the H.265/libx265
 backend. SMPTE ST 2086 mastering-display and MaxCLL/MaxFALL values are emitted
 through one atomic `x265-params` value so neither field can override the other.
-AV1 and ProRes requests with metadata preservation fail validation until they
+AV1 and ProRes requests with static metadata writing fail validation until they
 have independently implemented and verified bitstream/container backends.
 ST 2086/CLLI are descriptive HEVC HDR SEI and are not artificially restricted to
 PQ; HLG delivery may carry them when the authored delivery contract requires
 it. Source HDR10+ and Dolby Vision data is not copied across a rendered edit:
 the export health report emits `dynamic_hdr_metadata_sources` and
-`dynamic_hdr_metadata_not_preserved`, and a request that claims HDR metadata
-preservation fails before encoder launch when referenced sources contain either
+`dynamic_hdr_metadata_not_preserved`, and a `WriteAuthored` request fails before
+encoder launch when referenced sources contain either
 dynamic format. Dynamic delivery requires a separately validated re-authoring
 workflow because source frame/scene metadata no longer describes edited pixels.
 
@@ -832,13 +832,13 @@ Successful encoder exit is not proof of a correct deliverable. Timeline export
 derives `ExpectedVideoSignalConstraints` from the same
 `ExportVideoSignalContract` used to build FFmpeg arguments, then probes the
 finished file. Validation fails on mismatched pixel format, range, primaries,
-transfer, or matrix. When static HDR metadata preservation is requested, the expected
+transfer, or matrix. When `StaticHdrMetadataPolicy::WriteAuthored` is selected, the expected
 ST 2086 and MaxCLL/MaxFALL payloads travel in the same validation contract. A
 bounded second FFprobe call decodes only the first video frame, where libx265
 exposes those SEI messages, and compares every mastering chromaticity,
 luminance, MaxCLL, and MaxFALL value after encoder-scale quantization. Missing
 or changed side data therefore fails the export even after a successful encoder
-exit. Non-HDR and HDR exports without preservation do not pay this extra probe.
+exit. `Omit` deliveries do not pay this extra probe.
 Camera-log and GIF contracts additionally require color tags to be absent, so
 an encoder cannot silently replace an intentionally untagged signal with
 guessed metadata. ProRes 422 profiles are verified as 10-bit 4:2:2, while
@@ -942,15 +942,17 @@ parsed into a profile name plus an explicit
 `IccColorSpaceMapping::{Mapped, Unmapped}` result. First-frame HDR10+ and stream
 Dolby Vision configuration remain presence/diagnostic records until dedicated
 parsers are introduced.
-Sequence/export HDR preservation stores these typed core payloads directly and
-fails closed when either ST 2086 mastering-display metadata or MaxCLL/MaxFALL
-content-light metadata is missing; export must not synthesize hidden defaults.
+Sequence/export static HDR authoring stores these typed core payloads directly.
+`StaticHdrMetadataPolicy::{Omit, WriteAuthored}` is explicit and never denotes
+source passthrough. `WriteAuthored` fails closed when either ST 2086
+mastering-display metadata or MaxCLL/MaxFALL content-light metadata is missing;
+export must not synthesize hidden defaults.
 Core validates positive rational denominators, physical CIE xy coordinates,
 ordered mastering luminance bounds, and `0 < MaxFALL <= MaxCLL` before an
 encoder string can be formed. ST 2086 mastering luminance describes the display
 used while authoring, so it is deliberately not required to equal Standard's
 content peak. MaxCLL describes the brightest content pixel and therefore must
-not exceed the fixed Standard View peak when metadata preservation is enabled.
+not exceed the fixed Standard View peak when `WriteAuthored` is selected.
 Preview/export parity is protected by frame-level contracts: app preview tests
 compare multilayer preview compositing against the export output boundary with a
 stable RGBA hash, compare the shared preview/export color-health fields for the
@@ -1384,7 +1386,7 @@ the taxonomy.
 
 ## HDR/SDR
 
-HDR output spaces include Rec.2100 PQ/HLG. Tone mapping is required when scene/HDR working data targets SDR output. HDR metadata can only be preserved for HDR output spaces.
+HDR output spaces include Rec.2100 PQ/HLG. Tone mapping is required when scene/HDR working data targets SDR output. Authored static HDR metadata can only be written for HDR output spaces.
 ## OCIO Cache Revision Contract
 
 Mondrian Standard and pinned builtin ACES packages are immutable and use cache

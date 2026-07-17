@@ -411,6 +411,7 @@ pub enum DeliveryBitDepth {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct SequenceColorManagement {
     #[serde(default)]
     pub workflow: ColorWorkflow,
@@ -435,14 +436,36 @@ pub struct SequenceColorManagement {
     #[serde(default)]
     /// Actual encoded sample depth of the deliverable.
     pub delivery_bit_depth: DeliveryBitDepth,
-    #[serde(default = "default_preserve_hdr_metadata")]
-    pub preserve_hdr_metadata: bool,
+    /// Whether export omits static HDR metadata or writes the explicitly
+    /// authored delivery values below.
+    #[serde(default)]
+    pub static_hdr_metadata_policy: StaticHdrMetadataPolicy,
     /// HDR mastering-display color volume (SMPTE ST 2086).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hdr_mastering_display: Option<VideoMasteringDisplayMetadata>,
     /// HDR content light level metadata (MaxCLL / MaxFALL).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hdr_content_light: Option<VideoContentLightMetadata>,
+}
+
+/// Project-level policy for static HDR delivery metadata.
+///
+/// This policy never means source passthrough. Rendered output may only write
+/// metadata explicitly authored for the finished sequence.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StaticHdrMetadataPolicy {
+    /// Do not write SMPTE ST 2086 or MaxCLL/MaxFALL metadata.
+    #[default]
+    Omit,
+    /// Write the sequence's explicitly authored static HDR values.
+    WriteAuthored,
+}
+
+impl StaticHdrMetadataPolicy {
+    /// Whether the finished delivery must contain authored static HDR metadata.
+    pub const fn writes_authored_metadata(self) -> bool {
+        matches!(self, Self::WriteAuthored)
+    }
 }
 
 /// 渲染色彩上下文 —— 单帧渲染所需的全部色彩信息。
@@ -475,7 +498,7 @@ impl Default for SequenceColorManagement {
             output_color_space: ColorSpace::Rec709,
             video_range: VideoRange::Full,
             delivery_bit_depth: DeliveryBitDepth::Ten,
-            preserve_hdr_metadata: false,
+            static_hdr_metadata_policy: StaticHdrMetadataPolicy::Omit,
             hdr_mastering_display: None,
             hdr_content_light: None,
         }
@@ -488,10 +511,6 @@ const fn default_inherit_color_management() -> bool {
 
 const fn default_output_color_space() -> ColorSpace {
     ColorSpace::Rec709
-}
-
-const fn default_preserve_hdr_metadata() -> bool {
-    false
 }
 
 /// 序列设置（帧率/分辨率/音频配置）
@@ -620,20 +639,21 @@ impl SequenceSettings {
                     .to_string(),
             });
         }
-        if self.color_management.preserve_hdr_metadata
+        if self.color_management.static_hdr_metadata_policy.writes_authored_metadata()
             && !self.color_management.output_color_space.is_hdr()
         {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "sequence_settings_validate".to_string(),
-                reason: "只有 HDR 输出色彩空间可以保留 HDR metadata".to_string(),
+                reason: "只有 HDR 输出色彩空间可以写入静态 HDR metadata".to_string(),
             });
         }
-        if self.color_management.preserve_hdr_metadata {
+        if self.color_management.static_hdr_metadata_policy.writes_authored_metadata() {
             let mastering =
                 self.color_management.hdr_mastering_display.as_ref().ok_or_else(|| {
                     mondrian_core::MondrianError::WorkflowStepFailed {
                         step_id: "sequence_settings_validate".to_string(),
-                        reason: "保留 HDR metadata 需要 SMPTE ST 2086 母版显示元数据".to_string(),
+                        reason: "写入静态 HDR metadata 需要 SMPTE ST 2086 母版显示元数据"
+                            .to_string(),
                     }
                 })?;
             mastering.validate().map_err(|error| {
@@ -645,7 +665,8 @@ impl SequenceSettings {
             let content_light = self.color_management.hdr_content_light.ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "sequence_settings_validate".to_string(),
-                    reason: "保留 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string(),
+                    reason: "写入静态 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据"
+                        .to_string(),
                 }
             })?;
             content_light.validate().map_err(|error| {
@@ -1722,7 +1743,7 @@ mod tests {
         let settings = SequenceSettings {
             color_management: SequenceColorManagement {
                 output_color_space: ColorSpace::Rec709,
-                preserve_hdr_metadata: true,
+                static_hdr_metadata_policy: StaticHdrMetadataPolicy::WriteAuthored,
                 ..Default::default()
             },
             ..Default::default()
@@ -1749,11 +1770,11 @@ mod tests {
             working_color_space: WorkingColorSpace::LinearRec2020,
             color_management: SequenceColorManagement {
                 output_color_space: ColorSpace::Rec2100Pq,
-                preserve_hdr_metadata: true,
+                static_hdr_metadata_policy: StaticHdrMetadataPolicy::WriteAuthored,
                 hdr_mastering_display: Some(
-                    VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference(),
+                    VideoMasteringDisplayMetadata::rec2100_1000_nit_reference(),
                 ),
-                hdr_content_light: Some(VideoContentLightMetadata::hdr10_1000_nit_reference()),
+                hdr_content_light: Some(VideoContentLightMetadata::rec2100_1000_nit_reference()),
                 ..Default::default()
             },
             ..Default::default()
@@ -1762,16 +1783,34 @@ mod tests {
     }
 
     #[test]
+    fn static_hdr_metadata_policy_serialization_is_explicit_and_breaking() {
+        let color_management = SequenceColorManagement {
+            static_hdr_metadata_policy: StaticHdrMetadataPolicy::WriteAuthored,
+            ..SequenceColorManagement::default()
+        };
+        let json = serde_json::to_value(&color_management).expect("serialize color management");
+        assert_eq!(
+            json.get("static_hdr_metadata_policy"),
+            Some(&serde_json::Value::String("WriteAuthored".to_owned()))
+        );
+
+        let old_shape = serde_json::json!({ "preserve_hdr_metadata": true });
+        let error = serde_json::from_value::<SequenceColorManagement>(old_shape)
+            .expect_err("removed preservation flag must not silently become Omit");
+        assert!(error.to_string().contains("preserve_hdr_metadata"));
+    }
+
+    #[test]
     fn sequence_color_management_rejects_numerically_invalid_hdr_metadata() {
-        let mut mastering = VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference();
+        let mut mastering = VideoMasteringDisplayMetadata::rec2100_1000_nit_reference();
         mastering.luminance.as_mut().expect("reference luminance").max =
             mondrian_core::VideoHdrRational::new(1000, 0);
         let invalid_mastering = SequenceSettings {
             color_management: SequenceColorManagement {
                 output_color_space: ColorSpace::Rec2100Pq,
-                preserve_hdr_metadata: true,
+                static_hdr_metadata_policy: StaticHdrMetadataPolicy::WriteAuthored,
                 hdr_mastering_display: Some(mastering),
-                hdr_content_light: Some(VideoContentLightMetadata::hdr10_1000_nit_reference()),
+                hdr_content_light: Some(VideoContentLightMetadata::rec2100_1000_nit_reference()),
                 ..Default::default()
             },
             ..Default::default()
@@ -1781,9 +1820,9 @@ mod tests {
         let invalid_content_light = SequenceSettings {
             color_management: SequenceColorManagement {
                 output_color_space: ColorSpace::Rec2100Pq,
-                preserve_hdr_metadata: true,
+                static_hdr_metadata_policy: StaticHdrMetadataPolicy::WriteAuthored,
                 hdr_mastering_display: Some(
-                    VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference(),
+                    VideoMasteringDisplayMetadata::rec2100_1000_nit_reference(),
                 ),
                 hdr_content_light: Some(VideoContentLightMetadata {
                     max_content_light_level: 400,
@@ -1803,11 +1842,11 @@ mod tests {
             color_management: SequenceColorManagement {
                 workflow: ColorWorkflow::SceneReferred,
                 output_color_space: ColorSpace::Rec2100Pq,
-                preserve_hdr_metadata: true,
+                static_hdr_metadata_policy: StaticHdrMetadataPolicy::WriteAuthored,
                 hdr_mastering_display: Some(
-                    VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference(),
+                    VideoMasteringDisplayMetadata::rec2100_1000_nit_reference(),
                 ),
-                hdr_content_light: Some(VideoContentLightMetadata::hdr10_1000_nit_reference()),
+                hdr_content_light: Some(VideoContentLightMetadata::rec2100_1000_nit_reference()),
                 ..Default::default()
             },
             auto_tone_map_media: false,
@@ -1825,7 +1864,10 @@ mod tests {
             settings.color_management.output_color_space,
             ColorSpace::Rec2100Pq
         );
-        assert!(settings.color_management.preserve_hdr_metadata);
+        assert_eq!(
+            settings.color_management.static_hdr_metadata_policy,
+            StaticHdrMetadataPolicy::WriteAuthored
+        );
         assert!(settings.color_management.hdr_mastering_display.is_some());
         assert!(settings.color_management.hdr_content_light.is_some());
         assert!(!settings.auto_tone_map_media);

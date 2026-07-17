@@ -8,7 +8,7 @@ use mondrian_core::{ColorSpace, Rational, Resolution, WorkingColorSpace};
 use mondrian_timeline::{
     sequence::{
         ColorWorkflow, DeliveryBitDepth, MissingColorMetadataPolicy, NestedColorProcessing,
-        VideoRange,
+        StaticHdrMetadataPolicy, VideoRange,
     },
     AudioChannelLayout, AudioDisplayFormat, EditingMode, FieldOrder, PixelAspectRatio,
     PreviewRenderFormat, Sequence, SequenceSettings, VideoDisplayFormat,
@@ -129,8 +129,12 @@ impl AppUiSequenceSettingsDraft {
             SequenceSettingsDraftUpdatePayload::DeliveryBitDepth(bit_depth) => {
                 self.settings.color_management.delivery_bit_depth = bit_depth;
             }
-            SequenceSettingsDraftUpdatePayload::PreserveHdrMetadata(enabled) => {
-                self.settings.color_management.preserve_hdr_metadata = enabled;
+            SequenceSettingsDraftUpdatePayload::WriteStaticHdrMetadata(enabled) => {
+                self.settings.color_management.static_hdr_metadata_policy = if enabled {
+                    StaticHdrMetadataPolicy::WriteAuthored
+                } else {
+                    StaticHdrMetadataPolicy::Omit
+                };
             }
             SequenceSettingsDraftUpdatePayload::AudioSampleRate(sample_rate) => {
                 if SequenceSettings::AUDIO_SAMPLE_RATES.contains(&sample_rate) {
@@ -953,15 +957,19 @@ fn auto_tone_map_checkbox_for(draft: &AppUiSequenceSettingsDraft) -> Checkbox {
     )
 }
 
-fn preserve_hdr_metadata_checkbox_for(draft: &AppUiSequenceSettingsDraft) -> Checkbox {
+fn static_hdr_metadata_policy_checkbox_for(draft: &AppUiSequenceSettingsDraft) -> Checkbox {
     maybe_disable_checkbox(
         Checkbox::new(
-            "保留 HDR 元数据",
-            draft.settings.color_management.preserve_hdr_metadata,
+            "写入静态 HDR 元数据",
+            draft
+                .settings
+                .color_management
+                .static_hdr_metadata_policy
+                .writes_authored_metadata(),
         )
         .on_change(|enabled| {
             app_shell_sequence_settings_draft_changed_action(
-                SequenceSettingsDraftUpdatePayload::PreserveHdrMetadata(enabled),
+                SequenceSettingsDraftUpdatePayload::WriteStaticHdrMetadata(enabled),
             )
         }),
         draft.settings.color_management.inherit,
@@ -1040,7 +1048,7 @@ pub struct SequenceSettingsDialog {
     video_range_dropdown: Dropdown,
     delivery_bit_depth_dropdown: Dropdown,
     auto_tone_map_checkbox: Checkbox,
-    preserve_hdr_metadata_checkbox: Checkbox,
+    static_hdr_metadata_policy_checkbox: Checkbox,
     audio_sample_rate_dropdown: Dropdown,
     audio_channel_layout_dropdown: Dropdown,
     audio_display_format_dropdown: Dropdown,
@@ -1128,7 +1136,7 @@ impl SequenceSettingsDialog {
         let video_range_dropdown = video_range_dropdown_for(&draft);
         let delivery_bit_depth_dropdown = delivery_bit_depth_dropdown_for(&draft);
         let auto_tone_map_checkbox = auto_tone_map_checkbox_for(&draft);
-        let preserve_hdr_metadata_checkbox = preserve_hdr_metadata_checkbox_for(&draft);
+        let static_hdr_metadata_policy_checkbox = static_hdr_metadata_policy_checkbox_for(&draft);
         let audio_sample_rate_dropdown = audio_sample_rate_dropdown_for(&draft);
         let audio_channel_layout_dropdown = audio_channel_layout_dropdown_for(&draft);
         let audio_display_format_dropdown = audio_display_format_dropdown_for(&draft);
@@ -1176,7 +1184,7 @@ impl SequenceSettingsDialog {
             video_range_dropdown,
             delivery_bit_depth_dropdown,
             auto_tone_map_checkbox,
-            preserve_hdr_metadata_checkbox,
+            static_hdr_metadata_policy_checkbox,
             audio_sample_rate_dropdown,
             audio_channel_layout_dropdown,
             audio_display_format_dropdown,
@@ -1215,7 +1223,8 @@ impl SequenceSettingsDialog {
             self.video_range_dropdown = video_range_dropdown_for(&self.draft);
             self.delivery_bit_depth_dropdown = delivery_bit_depth_dropdown_for(&self.draft);
             self.auto_tone_map_checkbox = auto_tone_map_checkbox_for(&self.draft);
-            self.preserve_hdr_metadata_checkbox = preserve_hdr_metadata_checkbox_for(&self.draft);
+            self.static_hdr_metadata_policy_checkbox =
+                static_hdr_metadata_policy_checkbox_for(&self.draft);
             self.audio_sample_rate_dropdown = audio_sample_rate_dropdown_for(&self.draft);
             self.audio_channel_layout_dropdown = audio_channel_layout_dropdown_for(&self.draft);
             self.audio_display_format_dropdown = audio_display_format_dropdown_for(&self.draft);
@@ -1459,7 +1468,7 @@ impl Widget for SequenceSettingsDialog {
                     DROPDOWN_HEIGHT,
                 ));
                 row_y += 48.0;
-                self.preserve_hdr_metadata_checkbox.layout(Rect::new(
+                self.static_hdr_metadata_policy_checkbox.layout(Rect::new(
                     content.x,
                     row_y,
                     half,
@@ -1575,7 +1584,8 @@ impl Widget for SequenceSettingsDialog {
                     || self.video_range_dropdown.event(event, ctx) == EventResult::Handled
                     || self.delivery_bit_depth_dropdown.event(event, ctx) == EventResult::Handled
                     || self.auto_tone_map_checkbox.event(event, ctx) == EventResult::Handled
-                    || self.preserve_hdr_metadata_checkbox.event(event, ctx) == EventResult::Handled
+                    || self.static_hdr_metadata_policy_checkbox.event(event, ctx)
+                        == EventResult::Handled
                 {
                     return EventResult::Handled;
                 }
@@ -1631,7 +1641,7 @@ impl Widget for SequenceSettingsDialog {
                 self.video_range_dropdown.paint(ctx);
                 self.delivery_bit_depth_dropdown.paint(ctx);
                 self.auto_tone_map_checkbox.paint(ctx);
-                self.preserve_hdr_metadata_checkbox.paint(ctx);
+                self.static_hdr_metadata_policy_checkbox.paint(ctx);
             }
             SequenceSettingsTabPayload::Preview => {
                 self.preview_label.paint(ctx);
@@ -1685,7 +1695,7 @@ impl Widget for SequenceSettingsDialog {
             29 => Some(&self.video_range_dropdown),
             30 => Some(&self.delivery_bit_depth_dropdown),
             31 => Some(&self.auto_tone_map_checkbox),
-            32 => Some(&self.preserve_hdr_metadata_checkbox),
+            32 => Some(&self.static_hdr_metadata_policy_checkbox),
             33 => Some(&self.audio_sample_rate_dropdown),
             34 => Some(&self.audio_channel_layout_dropdown),
             35 => Some(&self.audio_display_format_dropdown),
@@ -1730,7 +1740,7 @@ impl Widget for SequenceSettingsDialog {
             29 => Some(&mut self.video_range_dropdown),
             30 => Some(&mut self.delivery_bit_depth_dropdown),
             31 => Some(&mut self.auto_tone_map_checkbox),
-            32 => Some(&mut self.preserve_hdr_metadata_checkbox),
+            32 => Some(&mut self.static_hdr_metadata_policy_checkbox),
             33 => Some(&mut self.audio_sample_rate_dropdown),
             34 => Some(&mut self.audio_channel_layout_dropdown),
             35 => Some(&mut self.audio_display_format_dropdown),

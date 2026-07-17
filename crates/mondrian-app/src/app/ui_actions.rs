@@ -1030,8 +1030,8 @@ pub enum SequenceSettingsDraftUpdatePayload {
     VideoRange(VideoRange),
     /// Export bit depth preference.
     DeliveryBitDepth(DeliveryBitDepth),
-    /// Whether HDR metadata should be preserved for HDR output spaces.
-    PreserveHdrMetadata(bool),
+    /// Whether explicitly authored static HDR metadata should be written.
+    WriteStaticHdrMetadata(bool),
     /// Active sequence audio sample rate in Hz.
     AudioSampleRate(u32),
     /// Active sequence audio channel layout.

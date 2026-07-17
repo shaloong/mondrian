@@ -60,8 +60,10 @@ the float working space or the renderer-to-encoder pipe precision. Those are
 renderer/export implementation contracts and are not persisted as editorial
 intent.
 
-When `preserve_hdr_metadata` is enabled, `SequenceSettings` requires complete
-typed ST 2086 mastering-display and CTA-861.3 content-light payloads. Validation
+When `static_hdr_metadata_policy` is `WriteAuthored`, `SequenceSettings`
+requires complete typed ST 2086 mastering-display and CTA-861.3 content-light
+payloads. `Omit` is the default. The policy never means source passthrough;
+these values describe the finished sequence delivery. Validation
 rejects invalid rationals, impossible CIE xy coordinates, unordered mastering
 luminance, and non-positive or unordered MaxCLL/MaxFALL values at the persisted
 domain boundary. Output-View-specific content-peak checks remain an export

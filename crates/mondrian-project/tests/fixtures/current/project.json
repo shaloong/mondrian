@@ -105,7 +105,7 @@
             "output_color_space": "Rec709",
             "video_range": "Full",
             "delivery_bit_depth": "Ten",
-            "preserve_hdr_metadata": false
+            "static_hdr_metadata_policy": "Omit"
           }
         },
         "video_tracks": [

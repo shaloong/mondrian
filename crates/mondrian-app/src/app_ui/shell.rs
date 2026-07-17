@@ -1979,7 +1979,7 @@ mod tests {
     use mondrian_timeline::sequence::{
         AudioChannelLayout, AudioDisplayFormat, ColorWorkflow, DeliveryBitDepth, EditingMode,
         FieldOrder, MissingColorMetadataPolicy, NestedColorProcessing, PixelAspectRatio,
-        PreviewRenderFormat, Sequence, VideoDisplayFormat, VideoRange,
+        PreviewRenderFormat, Sequence, StaticHdrMetadataPolicy, VideoDisplayFormat, VideoRange,
     };
     use mondrian_ui_core::tree::WidgetTreeView;
     use mondrian_ui_core::widget::{DrawCommandEncoder, PaintContext};
@@ -3155,9 +3155,9 @@ mod tests {
         let mut state = AppState::new();
         let mut sequence = Sequence::new("Scene 01");
         sequence.settings.color_management.hdr_mastering_display =
-            Some(VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference());
+            Some(VideoMasteringDisplayMetadata::rec2100_1000_nit_reference());
         sequence.settings.color_management.hdr_content_light =
-            Some(VideoContentLightMetadata::hdr10_1000_nit_reference());
+            Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
         let sequence_id = sequence.id;
         state.active_sequence_id = Some(sequence_id);
         state.sequence = Some(sequence.clone());
@@ -3324,7 +3324,7 @@ mod tests {
         );
         root.handle_shell_action(
             app_shell_sequence_settings_draft_changed_action(
-                SequenceSettingsDraftUpdatePayload::PreserveHdrMetadata(true),
+                SequenceSettingsDraftUpdatePayload::WriteStaticHdrMetadata(true),
             ),
             &platform,
             None,
@@ -3442,7 +3442,10 @@ mod tests {
             payload.settings.color_management.delivery_bit_depth,
             DeliveryBitDepth::Ten
         );
-        assert!(payload.settings.color_management.preserve_hdr_metadata);
+        assert_eq!(
+            payload.settings.color_management.static_hdr_metadata_policy,
+            StaticHdrMetadataPolicy::WriteAuthored
+        );
         assert_eq!(payload.settings.audio_sample_rate, 96_000);
         assert_eq!(
             payload.settings.audio_channel_layout,

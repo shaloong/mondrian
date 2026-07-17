@@ -171,8 +171,8 @@ impl VideoHdrRational {
 }
 
 impl VideoMasteringDisplayMetadata {
-    /// Rec.2100 PQ reference mastering metadata commonly used for 1000-nit HDR10 delivery.
-    pub fn rec2100_pq_1000_nit_reference() -> Self {
+    /// Rec.2100 reference mastering metadata for a 1000-nit display.
+    pub fn rec2100_1000_nit_reference() -> Self {
         Self {
             primaries: Some(VideoMasteringDisplayPrimaries {
                 red: chromaticity_50000(34_000, 16_000),
@@ -246,8 +246,8 @@ impl VideoMasteringDisplayMetadata {
 }
 
 impl VideoContentLightMetadata {
-    /// HDR10 1000-nit reference MaxCLL / MaxFALL metadata.
-    pub const fn hdr10_1000_nit_reference() -> Self {
+    /// Rec.2100 1000-nit reference MaxCLL / MaxFALL metadata.
+    pub const fn rec2100_1000_nit_reference() -> Self {
         Self {
             max_content_light_level: 1000,
             max_frame_average_light_level: 400,
@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn mastering_display_formats_x265_metadata() {
-        let metadata = VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference();
+        let metadata = VideoMasteringDisplayMetadata::rec2100_1000_nit_reference();
 
         assert_eq!(
             metadata.to_x265_master_display().as_deref(),
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn content_light_formats_x265_metadata() {
-        let metadata = VideoContentLightMetadata::hdr10_1000_nit_reference();
+        let metadata = VideoContentLightMetadata::rec2100_1000_nit_reference();
 
         assert_eq!(metadata.to_x265_max_cll(), "1000,400");
     }
@@ -371,8 +371,7 @@ mod tests {
 
     #[test]
     fn mastering_metadata_rejects_invalid_rationals_and_luminance_order() {
-        let mut invalid_denominator =
-            VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference();
+        let mut invalid_denominator = VideoMasteringDisplayMetadata::rec2100_1000_nit_reference();
         invalid_denominator.luminance.as_mut().expect("reference luminance").max =
             VideoHdrRational::new(1000, 0);
         assert!(matches!(
@@ -384,7 +383,7 @@ mod tests {
         ));
         assert_eq!(invalid_denominator.to_x265_master_display(), None);
 
-        let mut reversed = VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference();
+        let mut reversed = VideoMasteringDisplayMetadata::rec2100_1000_nit_reference();
         let luminance = reversed.luminance.as_mut().expect("reference luminance");
         luminance.min = VideoHdrRational::new(1000, 1);
         luminance.max = VideoHdrRational::new(100, 1);
@@ -396,7 +395,7 @@ mod tests {
 
     #[test]
     fn mastering_metadata_rejects_impossible_chromaticity() {
-        let mut invalid = VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference();
+        let mut invalid = VideoMasteringDisplayMetadata::rec2100_1000_nit_reference();
         invalid.primaries.as_mut().expect("reference primaries").red = VideoHdrChromaticity {
             x: VideoHdrRational::new(4, 5),
             y: VideoHdrRational::new(3, 5),
@@ -410,7 +409,7 @@ mod tests {
 
     #[test]
     fn content_light_requires_positive_ordered_levels() {
-        VideoContentLightMetadata::hdr10_1000_nit_reference()
+        VideoContentLightMetadata::rec2100_1000_nit_reference()
             .validate()
             .expect("valid reference metadata");
         assert!(matches!(

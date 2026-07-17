@@ -46,13 +46,13 @@ pub struct ExpectedVideoSignalConstraints {
     pub color_matrix: Option<String>,
     /// Require primaries, transfer, and matrix tags to be absent.
     pub require_color_tags_absent: bool,
-    /// Exact HDR10 static metadata that must survive encoding and muxing.
-    pub static_hdr10_metadata: Option<ExpectedHdr10StaticMetadataConstraints>,
+    /// Exact authored static HDR metadata that must survive encoding and muxing.
+    pub static_hdr_metadata: Option<ExpectedStaticHdrMetadataConstraints>,
 }
 
-/// Expected SMPTE ST 2086 and CTA-861.3 metadata on the finished HDR10 stream.
+/// Expected SMPTE ST 2086 and CTA-861.3 metadata on the finished HDR stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExpectedHdr10StaticMetadataConstraints {
+pub struct ExpectedStaticHdrMetadataConstraints {
     /// Mastering-display primaries, white point, and luminance bounds.
     pub mastering_display: VideoMasteringDisplayMetadata,
     /// MaxCLL and MaxFALL content-light levels.
@@ -128,14 +128,14 @@ pub fn validate_export_output(
     let report = ffprobe_report(output_path)?;
     validate_report(&report, expectations)?;
 
-    let expected_hdr10 = expectations
+    let expected_static_hdr = expectations
         .expected_video
         .as_ref()
         .and_then(|video| video.signal.as_ref())
-        .and_then(|signal| signal.static_hdr10_metadata.as_ref());
-    if let Some(expected_hdr10) = expected_hdr10 {
+        .and_then(|signal| signal.static_hdr_metadata.as_ref());
+    if let Some(expected_static_hdr) = expected_static_hdr {
         let side_data = ffprobe_first_video_frame_side_data(output_path)?;
-        validate_hdr10_static_metadata(&side_data, expected_hdr10)?;
+        validate_static_hdr_metadata(&side_data, expected_static_hdr)?;
     }
     Ok(())
 }
@@ -203,7 +203,7 @@ fn ffprobe_first_video_frame_side_data(path: &Path) -> Result<Vec<FfprobeFrameSi
         .into_iter()
         .next()
         .map(|frame| frame.side_data_list)
-        .ok_or_else(|| "ffprobe 未能解码导出视频的首帧，无法校验 HDR10 metadata".to_string())
+        .ok_or_else(|| "ffprobe 未能解码导出视频的首帧，无法校验静态 HDR metadata".to_string())
 }
 
 fn validate_report(
@@ -343,9 +343,9 @@ fn validate_video_signal(
     )
 }
 
-fn validate_hdr10_static_metadata(
+fn validate_static_hdr_metadata(
     side_data: &[FfprobeFrameSideData],
-    expected: &ExpectedHdr10StaticMetadataConstraints,
+    expected: &ExpectedStaticHdrMetadataConstraints,
 ) -> Result<(), String> {
     expected
         .mastering_display
@@ -393,7 +393,7 @@ fn validate_hdr10_static_metadata(
         .map_err(|error| format!("导出成品 CTA-861.3 metadata 无效: {error}"))?;
     if actual_content_light != expected.content_light {
         return Err(format!(
-            "导出 HDR10 Content light level metadata 不匹配：期望 MaxCLL/MaxFALL={}/{}, 实际 {}/{}",
+            "导出静态 HDR Content light level metadata 不匹配：期望 MaxCLL/MaxFALL={}/{}, 实际 {}/{}",
             expected.content_light.max_content_light_level,
             expected.content_light.max_frame_average_light_level,
             actual_content_light.max_content_light_level,
@@ -532,7 +532,7 @@ fn validate_quantized_hdr_rational(
 ) -> Result<(), String> {
     let expected_numerator = expected
         .scaled_i64(encoder_scale)
-        .ok_or_else(|| format!("期望的 HDR10 metadata 字段 {field} 不能量化到编码器尺度"))?;
+        .ok_or_else(|| format!("期望的静态 HDR metadata 字段 {field} 不能量化到编码器尺度"))?;
     let matches = actual.denominator > 0
         && i64::from(actual.numerator) * encoder_scale
             == expected_numerator * i64::from(actual.denominator);
@@ -540,7 +540,7 @@ fn validate_quantized_hdr_rational(
         return Ok(());
     }
     Err(format!(
-        "导出 HDR10 metadata 字段 {field} 不匹配：期望编码值 {expected_numerator}/{encoder_scale}，实际 {}/{}",
+        "导出静态 HDR metadata 字段 {field} 不匹配：期望编码值 {expected_numerator}/{encoder_scale}，实际 {}/{}",
         actual.numerator, actual.denominator
     ))
 }
@@ -734,7 +734,7 @@ mod tests {
                     color_transfer: Some("smpte2084".to_owned()),
                     color_matrix: Some("bt2020nc".to_owned()),
                     require_color_tags_absent: false,
-                    static_hdr10_metadata: None,
+                    static_hdr_metadata: None,
                 }),
                 ..ExpectedVideoConstraints::default()
             }),
@@ -815,48 +815,48 @@ mod tests {
     }
 
     #[test]
-    fn validate_hdr10_static_metadata_rejects_missing_side_data() {
-        let expected = ExpectedHdr10StaticMetadataConstraints {
-            mastering_display: VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference(),
-            content_light: VideoContentLightMetadata::hdr10_1000_nit_reference(),
+    fn validate_static_hdr_metadata_rejects_missing_side_data() {
+        let expected = ExpectedStaticHdrMetadataConstraints {
+            mastering_display: VideoMasteringDisplayMetadata::rec2100_1000_nit_reference(),
+            content_light: VideoContentLightMetadata::rec2100_1000_nit_reference(),
         };
 
-        let error = validate_hdr10_static_metadata(&[], &expected)
-            .expect_err("missing encoded HDR10 metadata must fail closed");
+        let error = validate_static_hdr_metadata(&[], &expected)
+            .expect_err("missing encoded static HDR metadata must fail closed");
         assert!(error.contains("Mastering display metadata"));
     }
 
     #[test]
-    fn validate_hdr10_static_metadata_accepts_ffprobe_frame_payload() {
-        let expected = ExpectedHdr10StaticMetadataConstraints {
-            mastering_display: VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference(),
-            content_light: VideoContentLightMetadata::hdr10_1000_nit_reference(),
+    fn validate_static_hdr_metadata_accepts_ffprobe_frame_payload() {
+        let expected = ExpectedStaticHdrMetadataConstraints {
+            mastering_display: VideoMasteringDisplayMetadata::rec2100_1000_nit_reference(),
+            content_light: VideoContentLightMetadata::rec2100_1000_nit_reference(),
         };
 
-        validate_hdr10_static_metadata(&reference_hdr10_side_data(), &expected)
+        validate_static_hdr_metadata(&reference_static_hdr_side_data(), &expected)
             .expect("encoded reference metadata should match its delivery contract");
     }
 
     #[test]
-    fn validate_hdr10_static_metadata_rejects_content_light_mismatch() {
-        let expected = ExpectedHdr10StaticMetadataConstraints {
-            mastering_display: VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference(),
-            content_light: VideoContentLightMetadata::hdr10_1000_nit_reference(),
+    fn validate_static_hdr_metadata_rejects_content_light_mismatch() {
+        let expected = ExpectedStaticHdrMetadataConstraints {
+            mastering_display: VideoMasteringDisplayMetadata::rec2100_1000_nit_reference(),
+            content_light: VideoContentLightMetadata::rec2100_1000_nit_reference(),
         };
-        let mut side_data = reference_hdr10_side_data();
+        let mut side_data = reference_static_hdr_side_data();
         side_data
             .iter_mut()
             .find(|data| data.side_data_type.as_deref() == Some("Content light level metadata"))
             .expect("content-light fixture")
             .max_content = Some(900);
 
-        let error = validate_hdr10_static_metadata(&side_data, &expected)
+        let error = validate_static_hdr_metadata(&side_data, &expected)
             .expect_err("changed encoded MaxCLL must fail");
         assert!(error.contains("期望 MaxCLL/MaxFALL=1000/400"));
         assert!(error.contains("实际 900/400"));
     }
 
-    fn reference_hdr10_side_data() -> Vec<FfprobeFrameSideData> {
+    fn reference_static_hdr_side_data() -> Vec<FfprobeFrameSideData> {
         vec![
             FfprobeFrameSideData {
                 side_data_type: Some("Mastering display metadata".to_string()),
@@ -943,7 +943,7 @@ mod tests {
                     color_transfer: Some("iec61966-2-1".to_owned()),
                     color_matrix: Some("bt709".to_owned()),
                     require_color_tags_absent: false,
-                    static_hdr10_metadata: None,
+                    static_hdr_metadata: None,
                 }),
                 ..ExpectedVideoConstraints::default()
             }),
@@ -1009,10 +1009,10 @@ mod tests {
                     color_transfer: Some("smpte2084".to_owned()),
                     color_matrix: Some("bt2020nc".to_owned()),
                     require_color_tags_absent: false,
-                    static_hdr10_metadata: Some(ExpectedHdr10StaticMetadataConstraints {
+                    static_hdr_metadata: Some(ExpectedStaticHdrMetadataConstraints {
                         mastering_display:
-                            VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference(),
-                        content_light: VideoContentLightMetadata::hdr10_1000_nit_reference(),
+                            VideoMasteringDisplayMetadata::rec2100_1000_nit_reference(),
+                        content_light: VideoContentLightMetadata::rec2100_1000_nit_reference(),
                     }),
                 }),
                 ..ExpectedVideoConstraints::default()
@@ -1026,7 +1026,7 @@ mod tests {
             .expected_video
             .as_mut()
             .and_then(|video| video.signal.as_mut())
-            .and_then(|signal| signal.static_hdr10_metadata.as_mut())
+            .and_then(|signal| signal.static_hdr_metadata.as_mut())
             .expect("HDR10 expectation")
             .content_light
             .max_content_light_level = 900;
