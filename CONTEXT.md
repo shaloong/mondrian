@@ -64,6 +64,10 @@ _Avoid_: Filename-based fixture label, capability-only hardware claim
 The bounded runtime store for decoded CPU preview payloads, final Viewer rasters, failure memory, the explicitly pinned current/stale Viewer frame, and an oversize current-media exception that remains visible in evidence.
 _Avoid_: Entry-count-only cache, unbounded last frame, dropped oversize current delivery
 
+**Playback Preview Pump**:
+The UI-independent App Module coordinator that samples one pending Frame Demand, applies bounded preview-work completions and expirations, submits their exact terminal Frame Deliveries, then observes current-epoch video preroll in that order.
+_Avoid_: Window-owned result policy, Headless-only orchestration, separately sampled demand identities for completion and expiration
+
 **Viewer GPU Preview Runtime**:
 The device-scoped owner of native video import, working-linear compositing, spatial processing, display output, calibration, and current external-texture presentation resources for Viewer execution.
 _Avoid_: Window-owned GPU grab bag, separate headless rendering semantics
@@ -204,6 +208,8 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - A **Frame Work Deadline** is lowered exactly once at Broker admission. Rebinding the same in-flight key replaces its deadline with the latest binding, while cancellation reports the earliest applicable deadline, invalidation, or preemption request.
 - A worker records completion in the **Frame Work Broker** before crossing its result channel. Later UI polling resolves freshness against the latest binding but cannot change the recorded on-time/missed deadline result.
 - A media **Adapter** contributes execution-start, first-checkpoint, and return timestamps exactly once to **Frame Cancellation Evidence**. The Playback Module alone aggregates causes and work classes and evaluates request-to-checkpoint plus class-specific checkpoint-to-return budgets; UI reports may project this evidence but cannot reinterpret it.
+- The **Playback Preview Pump** samples the still-pending Frame Demand identity once per runtime turn. A Preview Adapter reports execution facts against that sample but cannot apply Frame Deliveries or mutate Transport State; Window and Headless consumers receive the same pump outcome.
+- The **Playback Preview Pump** applies terminal Frame Deliveries before observing video preroll. A delivery that ends or replaces a demand cannot be followed in the same turn by readiness attributed to that superseded demand.
 - Successful decode/cache completion is nonterminal readiness. A CPU or GPU **Presentation Adapter** must complete the exact **Frame Presentation Ticket** only after it has produced a usable Viewer output; the Playback Module compares the real completion timestamp with the ticket deadline and emits `Ready`, `Degraded`, or `Late`. Cancellation/failure paths may terminate earlier without presentation.
 - A Viewer stale lifecycle state does not terminate a **Frame Demand**; only a deadline/policy decision may emit `StaleAvailable`, while an in-flight worker retains the chance to deliver `Ready`.
 - A **Playback Quality Policy** constrains every **Frame Demand** in its Playback Session.

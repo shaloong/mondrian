@@ -454,6 +454,14 @@ When background preview completion changes Viewer lifecycle, the app host may
 perform one preview-aware model refresh, then adapt its payload-free feedback
 without requesting preview again. A feedback transition must not trigger a
 second full root refresh or layout pass that re-enters preview interpretation.
+Completion policy itself is not Window-owned. `app::playback_preview` samples
+the pending Frame Demand once, asks the production Preview Adapter to combine
+bounded completion drain with stalled-current expiration, applies exact terminal
+Frame Deliveries, and only then observes video preroll. The Window host and real
+Headless GPU harness call this same pump; neither may reproduce this ordering or
+interpret worker results independently. The Window still owns repaint/layout,
+and the Preview Adapter still owns decode/cache facts, so this seam does not move
+Widget or codec responsibilities into the Playback Engine.
 The native app event loop also records stage-level responsiveness telemetry for
 action draining, redraw, GPU preview preparation, UI refresh, paint/render,
 background-task polling, and playback-clock advancement. Any stage that exceeds

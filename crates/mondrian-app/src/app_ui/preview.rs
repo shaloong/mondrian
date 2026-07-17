@@ -69,6 +69,7 @@ use mondrian_ui_widgets::{
 
 #[cfg(test)]
 use super::preview_access_mode::MediaPreviewJobEnqueueStatus;
+use crate::app::playback_preview::{PlaybackPreviewAdapter, PreviewVideoPreroll, PreviewWorkPoll};
 use crate::app::proxy_generation::{request_proxy_generation, resolve_asset_proxy_color_contract};
 use crate::app::AppState;
 use crate::app_ui::native_video_import::AppUiPlaybackHardwareDecodeAdmission;
@@ -102,35 +103,6 @@ const MEDIA_PREVIEW_PLAYBACK_BUFFERING_STALL_TIMEOUT_US: u64 = 250_000;
 const MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD: u64 = 2;
 const MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
 const MEDIA_PREVIEW_COMPLETED_RESULTS_POLL_BUDGET_US: u64 = 2_000;
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct AppUiPreviewPollOutcome {
-    /// A decoded frame or terminal decode failure changed visible viewer state.
-    pub visible_change: bool,
-    /// Transport/pending feedback changed without requiring Viewer reconstruction.
-    pub transport_change: bool,
-    /// More completed decode results should be drained on a follow-up event-loop tick.
-    pub needs_follow_up_poll: bool,
-    /// Exact late/canceled/failed terminal deliveries returned by workers.
-    /// Successful readiness terminates only through a Presentation Adapter.
-    pub frame_deliveries: Vec<mondrian_playback::FrameDelivery>,
-}
-
-/// Immediate media lookahead reported to the Playback Engine during Priming.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AppUiVideoPrerollReadiness {
-    pub(crate) ready_media_frames: usize,
-    pub(crate) available_media_frames: usize,
-}
-
-impl AppUiPreviewPollOutcome {
-    pub(crate) fn merge(&mut self, mut other: Self) {
-        self.visible_change |= other.visible_change;
-        self.transport_change |= other.transport_change;
-        self.needs_follow_up_poll |= other.needs_follow_up_poll;
-        self.frame_deliveries.append(&mut other.frame_deliveries);
-    }
-}
 
 /// Host-owned preview renderer used by the app UI viewer panel.
 ///
@@ -858,10 +830,10 @@ impl AppUiPreviewService {
         self.poll_finished_outcome(pending_playback_demand).visible_change
     }
 
-    pub(crate) fn poll_finished_outcome(
+    fn poll_finished_outcome(
         &self,
         pending_playback_demand: Option<mondrian_playback::FrameDemandIdentity>,
-    ) -> AppUiPreviewPollOutcome {
+    ) -> PreviewWorkPoll {
         self.poll_finished_outcome_with_budget(
             MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL,
             Duration::from_micros(MEDIA_PREVIEW_COMPLETED_RESULTS_POLL_BUDGET_US),
@@ -869,10 +841,10 @@ impl AppUiPreviewService {
         )
     }
 
-    pub(crate) fn expire_stalled_realtime_current(
+    fn expire_stalled_realtime_current(
         &self,
         pending_playback_demand: Option<mondrian_playback::FrameDemandIdentity>,
-    ) -> AppUiPreviewPollOutcome {
+    ) -> PreviewWorkPoll {
         self.expire_stalled_realtime_current_with_timeout(
             Duration::from_micros(MEDIA_PREVIEW_PLAYBACK_BUFFERING_STALL_TIMEOUT_US),
             pending_playback_demand,
@@ -883,10 +855,10 @@ impl AppUiPreviewService {
         &self,
         timeout: Duration,
         pending_playback_demand: Option<mondrian_playback::FrameDemandIdentity>,
-    ) -> AppUiPreviewPollOutcome {
+    ) -> PreviewWorkPoll {
         let expired = self.scheduler.expire_realtime_current_older_than(timeout);
         if expired.is_empty() {
-            return AppUiPreviewPollOutcome::default();
+            return PreviewWorkPoll::default();
         }
         let canceled_queued_jobs = expired.len() as u64;
         // Scheduler-current work can outlive the Playback Session demand that
@@ -916,7 +888,7 @@ impl AppUiPreviewService {
         self.record_playback_current_late_drop(frame_deliveries.len() as u64);
         add_cell(&self.metrics.queue_canceled_jobs, canceled_queued_jobs);
         self.current_frame_pending.set(false);
-        AppUiPreviewPollOutcome {
+        PreviewWorkPoll {
             visible_change: false,
             transport_change: true,
             needs_follow_up_poll: false,
@@ -940,13 +912,13 @@ impl AppUiPreviewService {
         max_results: usize,
         time_budget: Duration,
         pending_playback_demand: Option<mondrian_playback::FrameDemandIdentity>,
-    ) -> AppUiPreviewPollOutcome {
+    ) -> PreviewWorkPoll {
         let poll_started = Instant::now();
         bump(&self.metrics.completion_poll_calls);
         self.metrics
             .completion_poll_max_results_per_poll
             .set(self.metrics.completion_poll_max_results_per_poll.get().max(max_results as u64));
-        let mut outcome = AppUiPreviewPollOutcome::default();
+        let mut outcome = PreviewWorkPoll::default();
         let mut drained = 0usize;
         while drained < max_results {
             if drained > 0 && poll_started.elapsed() >= time_budget {
@@ -7175,6 +7147,21 @@ impl ViewerPreviewSource for AppUiPreviewService {
     }
 }
 
+impl PlaybackPreviewAdapter for AppUiPreviewService {
+    fn poll_playback_work(
+        &self,
+        pending_demand: Option<mondrian_playback::FrameDemandIdentity>,
+    ) -> PreviewWorkPoll {
+        let mut outcome = self.poll_finished_outcome(pending_demand);
+        outcome.merge(self.expire_stalled_realtime_current(pending_demand));
+        outcome
+    }
+
+    fn video_preroll(&self, state: &AppState) -> Option<PreviewVideoPreroll> {
+        self.playback_video_preroll_readiness(state)
+    }
+}
+
 impl Default for AppUiPreviewService {
     fn default() -> Self {
         Self::new()
@@ -7744,10 +7731,7 @@ impl AppUiPreviewService {
     /// whether the immediate future frame has media payloads and whether all of
     /// them are resident; the Playback Engine separately requires current-frame
     /// presentation before releasing its clock anchor.
-    pub(crate) fn playback_video_preroll_readiness(
-        &self,
-        state: &AppState,
-    ) -> Option<AppUiVideoPrerollReadiness> {
+    fn playback_video_preroll_readiness(&self, state: &AppState) -> Option<PreviewVideoPreroll> {
         if !state.is_playback_priming() {
             return None;
         }
@@ -7755,10 +7739,7 @@ impl AppUiPreviewService {
         let current_frame = state.current_frame().max(0);
         let end_frame = state.last_content_frame().ok()?.max(0);
         if current_frame >= end_frame {
-            return Some(AppUiVideoPrerollReadiness {
-                ready_media_frames: 0,
-                available_media_frames: 0,
-            });
+            return Some(PreviewVideoPreroll { ready_media_frames: 0, available_media_frames: 0 });
         }
         let (width, height) = preview_dimensions_for_state(state, sequence);
         let display_snapshot = self.display_snapshot.borrow();
@@ -7782,12 +7763,9 @@ impl AppUiPreviewService {
             color_context,
         );
         if !readiness.has_media {
-            return Some(AppUiVideoPrerollReadiness {
-                ready_media_frames: 0,
-                available_media_frames: 0,
-            });
+            return Some(PreviewVideoPreroll { ready_media_frames: 0, available_media_frames: 0 });
         }
-        Some(AppUiVideoPrerollReadiness {
+        Some(PreviewVideoPreroll {
             ready_media_frames: usize::from(readiness.ready),
             available_media_frames: 1,
         })
@@ -12102,7 +12080,7 @@ mod tests {
 
         assert_eq!(
             service.playback_video_preroll_readiness(&state),
-            Some(AppUiVideoPrerollReadiness { ready_media_frames: 0, available_media_frames: 1 })
+            Some(PreviewVideoPreroll { ready_media_frames: 0, available_media_frames: 1 })
         );
 
         let sequence = state.sequence.as_ref().expect("media sequence");
@@ -12154,7 +12132,7 @@ mod tests {
 
         assert_eq!(
             service.playback_video_preroll_readiness(&state),
-            Some(AppUiVideoPrerollReadiness { ready_media_frames: 1, available_media_frames: 1 })
+            Some(PreviewVideoPreroll { ready_media_frames: 1, available_media_frames: 1 })
         );
 
         service.shutdown();
@@ -12171,7 +12149,7 @@ mod tests {
 
         assert_eq!(
             service.playback_video_preroll_readiness(&state),
-            Some(AppUiVideoPrerollReadiness { ready_media_frames: 0, available_media_frames: 0 })
+            Some(PreviewVideoPreroll { ready_media_frames: 0, available_media_frames: 0 })
         );
 
         service.shutdown();

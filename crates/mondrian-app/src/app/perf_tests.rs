@@ -4,6 +4,7 @@ use super::playback_acceptance::{
     PROFESSIONAL_MIN_ACCURATE_SEEKS, PROFESSIONAL_MIN_OBSERVED_DURATION_US,
     PROFESSIONAL_MIN_SUPERSEDED_SEEKS, PROFESSIONAL_MIN_WARM_SEEKS,
 };
+use super::playback_preview::{observe_playback_video_preroll, pump_playback_preview};
 use super::*;
 use crate::app::ui_actions::TimelineSeekSource;
 use crate::app_ui::native_video_import::resolve_playback_hardware_decode_admission;
@@ -2453,14 +2454,14 @@ fn execute_headless_gpu_candidate(
             if let Some(ticket) = frame.presentation_ticket() {
                 state.complete_frame_presentation(ticket, Instant::now());
             }
-            observe_headless_video_preroll(preview_service, state);
+            observe_playback_video_preroll(state, preview_service);
             Ok(HeadlessGpuCandidateStatus::Ready)
         }
         crate::app_ui::preview::AppUiGpuPreviewFrameState::Current => {
             if let Some(ticket) = preview_service.playback_presentation_ticket(state) {
                 state.complete_frame_presentation(ticket, Instant::now());
             }
-            observe_headless_video_preroll(preview_service, state);
+            observe_playback_video_preroll(state, preview_service);
             Ok(HeadlessGpuCandidateStatus::Ready)
         }
         crate::app_ui::preview::AppUiGpuPreviewFrameState::Loading => {
@@ -2490,28 +2491,7 @@ fn apply_headless_preview_outcome(
     preview_service: &AppUiPreviewService,
     state: &mut AppState,
 ) -> bool {
-    let pending_playback_demand = state.pending_playback_frame_demand_identity();
-    let mut outcome = preview_service.poll_finished_outcome(pending_playback_demand);
-    outcome.merge(preview_service.expire_stalled_realtime_current(pending_playback_demand));
-    for delivery in outcome.frame_deliveries.iter().copied() {
-        state.observe_frame_delivery(delivery);
-    }
-    observe_headless_video_preroll(preview_service, state);
-    outcome.visible_change
-}
-
-fn observe_headless_video_preroll(
-    preview_service: &AppUiPreviewService,
-    state: &mut AppState,
-) -> bool {
-    preview_service
-        .playback_video_preroll_readiness(state)
-        .is_some_and(|readiness| {
-            state.observe_video_preroll(
-                readiness.ready_media_frames,
-                readiness.available_media_frames,
-            )
-        })
+    pump_playback_preview(state, preview_service).visible_change
 }
 
 fn build_app_ui_perf_state(

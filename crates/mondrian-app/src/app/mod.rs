@@ -61,6 +61,7 @@ mod media_import;
 mod playback;
 #[cfg(test)]
 mod playback_acceptance;
+pub(crate) mod playback_preview;
 mod project_lifecycle;
 pub(crate) mod proxy_generation;
 mod selection;

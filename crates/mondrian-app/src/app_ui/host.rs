@@ -16,6 +16,9 @@ use mondrian_ui_core::types::{Point, Rect};
 use mondrian_ui_core::{TreeWalker, Widget};
 use mondrian_ui_theme::{set_theme_preset, ThemePreset};
 
+use crate::app::playback_preview::{
+    observe_playback_video_preroll as observe_preview_preroll, pump_playback_preview,
+};
 use crate::app::ui_actions::{
     AssetsOpenFolderPayload, PreferencesShortcutPayload, PreferencesShortcutReboundPayload,
     PreferencesThemePayload, PreferencesWaveformDisplayPayload,
@@ -288,16 +291,7 @@ impl AppUiHost {
     }
 
     fn observe_playback_video_preroll(&self) -> bool {
-        let readiness = {
-            let state = self.app_state.borrow();
-            self.preview_service.playback_video_preroll_readiness(&state)
-        };
-        readiness.is_some_and(|readiness| {
-            self.app_state.borrow_mut().observe_video_preroll(
-                readiness.ready_media_frames,
-                readiness.available_media_frames,
-            )
-        })
+        observe_preview_preroll(&mut self.app_state.borrow_mut(), &self.preview_service)
     }
 
     /// Clear any advertised GPU viewer frame.
@@ -401,24 +395,10 @@ impl AppUiHost {
         }
         let media_imports_changed = self.app_state.borrow_mut().poll_media_imports();
         let thumbnails_changed = self.asset_thumbnails.poll_finished();
-        let pending_playback_demand =
-            self.app_state.borrow().pending_playback_frame_demand_identity();
-        let mut preview_outcome =
-            self.preview_service.poll_finished_outcome(pending_playback_demand);
+        let preview_outcome =
+            pump_playback_preview(&mut self.app_state.borrow_mut(), &self.preview_service);
         let waveform_changed = self.waveform_cache.poll_finished();
-        preview_outcome
-            .merge(self.preview_service.expire_stalled_realtime_current(pending_playback_demand));
-        let playback_delivery_changed =
-            preview_outcome
-                .frame_deliveries
-                .iter()
-                .copied()
-                .fold(false, |changed, delivery| {
-                    self.app_state.borrow_mut().observe_frame_delivery(delivery) || changed
-                });
-        let video_preroll_changed = self.observe_playback_video_preroll();
-        let transport_model_changed =
-            preview_outcome.transport_change || playback_delivery_changed || video_preroll_changed;
+        let transport_model_changed = preview_outcome.transport_change;
         if transport_model_changed {
             self.refresh_transport_state_without_preview();
         }

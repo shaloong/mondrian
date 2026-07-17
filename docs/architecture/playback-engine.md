@@ -43,6 +43,7 @@ the new seams.
 | Monotonic Runtime Clock | process-local lifecycle-age, expiration, and evidence timestamp sampling | Playback Session advancement, authored/media time, wall-clock identity |
 | Frame Cancellation Evidence | exact all-run cause/timing aggregates and the shared cancellation acceptance policy | cancellation authority, codec checkpoints, UI presentation |
 | Preview Frame Store | ready/stale/in-flight identity, source revision, color contract, memory budgets | deadline policy or proxy selection |
+| Playback Preview Pump | one pending-demand sample, ordered completion/expiration delivery application, current-epoch video-preroll observation, Window/Headless-neutral pump outcome | decode/render implementation, Widget refresh, GPU resources |
 | Presentation Adapter | GPU import/composite/display, Viewer handoff, presentation evidence | timeline advancement |
 | Playback Evidence | immutable events, aggregates, reports | policy decisions |
 
@@ -514,6 +515,28 @@ stale frame or explicit loading presentation until a current delivery arrives.
 Blocked color, unsupported required format, or invalid timeline contracts do not
 use this timeout escape.
 
+### Production preview execution pump
+
+`app::playback_preview` is the App Module's UI-independent coordinator between
+the Playback Engine and the production Preview Adapter. One pump turn:
+
+1. samples `pending_frame_demand` exactly once;
+2. asks the Adapter for bounded completion and stalled-current expiration facts
+   bound to that identity;
+3. applies every exact terminal Frame Delivery through `AppState`;
+4. only then samples current-epoch video lookahead and submits one
+   `VideoPrerollObservation`;
+5. returns visible-change, transport-change, and follow-up-poll facts without
+   performing Widget refresh or GPU presentation.
+
+This order prevents completion and expiration from binding against different
+demand samples, and prevents a terminal delivery from being followed by
+preroll for the demand it just consumed. `AppUiHost` decides only how the pump
+outcome affects layout/repaint. The real Headless GPU gate drives the same pump
+and therefore cannot maintain a test-only Delivery or preroll policy. The
+Preview Adapter still owns decode scheduling, caches, result diagnostics, and
+lookahead calculation; it does not own Playback state transitions.
+
 All thresholds live in one Playback Policy value, appear in evidence, and may be
 tuned by measured reference-machine data. Tests must pass an explicit policy;
 environment variables cannot silently redefine product semantics.
@@ -756,8 +779,11 @@ controlled handoff.
 ### Phase 4 — Preview deepening
 
 Consolidate frame-work scheduling in the Frame Work Broker; extract Frame Store
-and Evidence from `app_ui::preview` by behavioral ownership, not file size.
-Retain one public request seam into media.
+and Evidence from `app_ui::preview` by behavioral ownership, not file size. The
+Playback Preview Pump is already extracted and Window/Headless duplicate
+orchestration is deleted; timeline evaluation, media execution, and color
+diagnostics remain the next large ownership split. Retain one public request
+seam into media.
 
 ### Phase 5 — Realtime policy
 
@@ -792,6 +818,13 @@ cannot mutate recovery twice. The former
 Viewer-owned `playback_buffering` state and its audio mute/clock hold have been
 removed. Window redraw may still defer duplicate GPU candidate preparation while
 Loading, but that presentation guard has no transport authority.
+
+`app::playback_preview` now owns the production result-to-Playback pump used by
+both `AppUiHost` and the real Headless GPU harness. The Preview Adapter returns
+only bounded work/preroll facts; it no longer exposes completion, expiration,
+and preroll operations for each consumer to compose independently. Window code
+retains repaint/layout policy, while Delivery ordering and Transport mutation
+are shared and covered by UI-free tests.
 
 The Engine now emits a Frame Demand containing epoch, quality revision, demand
 sequence, sequence/timeline revision, exact target, preview scale, and an
@@ -1031,6 +1064,16 @@ not contain the licensed/reference 4K Main10 fixture, so a successful
 reference-machine execution of this enforced 30-minute contract and the Golden
 Project identity still remain to be supplied before professional playback
 acceptance can be claimed.
+
+On 2026-07-18, a 2.88-second decoder-proven 3840×2160 25 fps HEVC Main10 HLG
+sample completed the external continuous-playback smoke on an NVIDIA RTX 3050
+Laptop GPU: 60/60 current frames were Ready, all 60 media layers used retained
+D3D12VA P010 hardware surfaces, all 60 Viewer composites remained native GPU
+work, and upload/readback/fallback counts were zero. GPU execution p95 was about
+1.8 ms and the real-media gate passed. This proves the short production
+decode→native-import→GPU-presentation path on that machine; it does not satisfy
+the 30-minute duration, repeated seek, physical audio-device, driver-matrix, or
+bounded whole-process-memory acceptance requirements.
 
 The generated-media gate additionally requires execution—not merely policy
 state—when at least two pressure thresholds of requested-but-unengaged hardware

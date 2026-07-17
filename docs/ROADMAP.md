@@ -1,6 +1,6 @@
 # Mondrian 产品路线图
 
-> 更新日期：2026-07-11
+> 更新日期：2026-07-18
 >
 > 当前主目标：Windows 优先，在不牺牲项目、时间、帧、色彩、音频与任务契约的前提下，完成可验证的真实项目制作闭环。
 >
@@ -64,8 +64,8 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 | Undo/Redo | UI 外的时间线命令历史可工作，主要编辑动作有回归测试 | 主要依赖完整 `Sequence` 快照，内存上限、跨序列事务和命令级不变量仍需收敛 | L1- |
 | 素材管理 | 文件夹/Bin 层级、移动/重命名/删除、缩略图、离线提示、单文件/目录重连、代理模式已接入产品 UI | tags/metadata 字段尚未形成检索产品；素材使用位置反查和批量诊断不足 | L1- |
 | 时间线编辑 | 多轨、移动、分割、普通 Trim、Ripple Delete、Insert/Overwrite、Roll/Slip/Slide、跨轨移动、链接片段跟随、锁定、吸附、多选和嵌套序列已有实现与测试 | Lift/Extract、显式 Link/Unlink、Track Targeting、转场 handles、反向/冻结/完整 time remap、VFR/混合帧率边界和复杂 ripple 传播未形成完整验收 | L1- |
-| 播放与缓存 | UI 无关 `PlaybackEngine`、`FrameWorkBroker`、`PreviewFrameStore`、Evidence v2、Headless GPU Adapter，以及播放/拖动/静帧三种访问语义、FFmpeg session/ring/seek index、原子 generation/抢占/取消 disposition、deadline、预取和代理已接入；Broker 的请求龄期、失效龄期、deadline 与 worker 完成时刻已统一到可注入的 Monotonic Runtime Clock：Adapter 只在准入前提交不透明绝对 deadline 与剩余时长，Broker 单次降低、同键 rebind 更新并在 worker 发结果前一次性盖完成戳，因而排队不会续期、UI 延迟轮询不会制造虚假 Late；deadline/generation/抢占按最早权威时刻统一裁决，时钟回退会钳制、按回退事件计数并令门禁失败；取消原因与 request→checkpoint→return 证据已由播放域统一聚合并以 Playback/Interactive/Still 固定策略供诊断、Headless 与专业验收共用；加速 Headless 门禁已证明 30 分钟 48 kHz/29.97、Audio→Synthetic→Audio 连续切换、Frame Demand 一致性和证据内存有界 | 大量时间线渲染/色彩媒体适配仍集中在超大的 `app_ui::preview`；FFmpeg open/seek/I/O interrupt 与外部 still 子进程回收已有实现和单测，但仍缺固定参考机上的真实 4K、真实声卡 30 分钟、频繁 seek、取消延迟和整进程内存平台门禁 | L1-，执行地基较强，产品证据未闭环 |
-| Windows 硬解/低拷贝 | FFmpeg 硬件设备/codec 探测、D3D11 native frame 保留、D3D11→D3D12 导入、NV12/P010 GPU YUV 采样、准入与失败原因已有实现 | 必须以真实 GPU/驱动/素材证明主路径启用、同步正确和长时间稳定；不以 capability probe 或 shader 创建代替实际帧执行 | L0/L1 之间 |
+| 播放与缓存 | UI 无关 `PlaybackEngine`、`FrameWorkBroker`、`PreviewFrameStore`、Evidence v2、Headless GPU Adapter，以及播放/拖动/静帧三种访问语义、FFmpeg session/ring/seek index、原子 generation/抢占/取消 disposition、deadline、预取和代理已接入；Broker 的请求龄期、失效龄期、deadline 与 worker 完成时刻已统一到可注入的 Monotonic Runtime Clock：Adapter 只在准入前提交不透明绝对 deadline 与剩余时长，Broker 单次降低、同键 rebind 更新并在 worker 发结果前一次性盖完成戳，因而排队不会续期、UI 延迟轮询不会制造虚假 Late；deadline/generation/抢占按最早权威时刻统一裁决，时钟回退会钳制、按回退事件计数并令门禁失败；取消原因与 request→checkpoint→return 证据已由播放域统一聚合并以 Playback/Interactive/Still 固定策略供诊断、Headless 与专业验收共用；Window/Headless 的完成、过期、终态 Delivery 与预卷顺序已统一到 `app::playback_preview`；加速 Headless 门禁已证明 30 分钟 48 kHz/29.97、Audio→Synthetic→Audio 连续切换、Frame Demand 一致性和证据内存有界 | 大量时间线渲染/色彩媒体适配仍集中在超大的 `app_ui::preview`；FFmpeg open/seek/I/O interrupt 与外部 still 子进程回收已有实现和单测，短时真实 4K Main10 主路径已有本机证据，但仍缺许可/参考 30 分钟素材、真实声卡 30 分钟、频繁 seek、取消延迟和整进程内存平台门禁 | L1-，执行地基较强，产品证据未闭环 |
+| Windows 硬解/低拷贝 | FFmpeg 硬件设备/codec 探测、D3D11/D3D12 native frame 保留、D3D11→D3D12 导入、NV12/P010 GPU YUV 采样、准入与失败原因已有实现；2026-07-18 本地 2.88 秒 4K25 HEVC Main10 HLG 连续播放已取得 60/60 Ready、60/60 D3D12VA P010 原生 GPU 合成、零上传/回读/回退和约 1.8 ms GPU 执行 p95 的真实帧证据 | 短素材只证明该参考机上的主路径可执行；仍须以许可/参考 30 分钟素材、频繁 seek、整进程内存、真实音频设备和多驱动证据证明长期稳定，不以本次 smoke 代替专业门禁 | L1- 主路径已实证，长期验收未闭环 |
 | 渲染与色彩 | working-space 合成、OCIO CPU/GPU 路径、结构化色彩/显示诊断、golden 测试、预览/导出报告对比、Windows 显示探测和 fail-closed 逻辑较深入 | 仍有 legacy/CPU/读回路径与真实显示 payload 限制；常见 Log/HDR 必须补齐参考样片端到端证明；Windows HDR 监看不能提前宣称稳定 | L1+ 架构，继续符合性收敛 |
 | 效果与动画 | 稳定 `EffectId`、属性路径、`PropertyBag`/`AnimatedProperty`、多种插值、曲线编辑器、效果 DAG、mask、缓存策略和插件式 definition/DSL 已存在 | `PropertyDescriptor` 缺独立稳定 `ParameterId`、单位和完整能力契约；只有部分声明效果生成真实 render op；文字和转场类型尚未接入时间线/渲染主路径 | L0/L1 之间 |
 | 音频 | Track→Clip 已是 placement SSOT；Clip 持有 Component Edit，Sequence 持有 Processing Scope/Track Channel/Bus/Output/typed Route/Transition；播放与导出已共用 `AudioProgramRuntime`、decoder Adapter、嵌套公共输出、sample-accurate Gain/pan/fade/Transition、无隐式 clipping，并删除旧 flat `AudioMixer`/`tanh` | 真实 VST3/CLAP host、channel layout/组件选流、重采样、通用 PDC/状态重入、send/sidechain、meter/loudness/limiter、完整编辑 UI/undo 命令和长时间同步/负载门禁仍未完成 | L1 主路地基；不宣称 DAW 完成度 |
@@ -78,7 +78,7 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 ### 2.1 当前最重要的结构性风险
 
 1. **产品证据弱于代码广度。** 测试数量很多，但 CI 主测试排除了完整 `mondrian-app`，真实 GPU、真实硬解、真实音频设备和长项目主要依赖手动/ignored smoke。
-2. **关键复杂度的 Locality 不够。** 预览服务、调度、渲染适配、色彩诊断和缓存逻辑大量聚集在 `mondrian-app::app_ui::preview`；导出执行也集中在大型 queue 模块。UI 适配器承担过多引擎复杂度，会妨碍第二消费者和跨平台后端。
+2. **关键复杂度的 Locality 不够。** Window/Headless 的完成收割、终态 Delivery 与预卷顺序已统一到 UI 无关 `app::playback_preview`，但预览时间线求值、媒体执行、渲染适配、色彩诊断和缓存逻辑仍大量聚集在 `mondrian-app::app_ui::preview`；导出执行也集中在大型 queue 模块。后续按行为所有权迁出，不能只按文件大小机械拆分。
 3. **项目版本化只有“拒绝”，没有“迁移”。** 这在 Alpha 继续变更数据结构时会快速成为真实项目风险。
 4. **声明能力和视觉执行能力可能分离。** 某些效果、文字和转场已有类型或属性，却没有主路径 render op；路线图不得把它们列为已完成。
 5. **音频/视频运行许可必须持续分离。** 当前 `Priming` 已可预填 PCM 但禁止设备提前消费，普通视频 Late/Recovering 也不会旋转音频 generation；仍需用真实音频设备、慢首帧/seek、持续视频压力和 30 分钟 A/V drift 门禁证明该不变量长期成立。
@@ -345,7 +345,7 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 **播放与任务**
 
-- [ ] `PlaybackEngine`、`FrameWorkBroker`、`PreviewFrameStore`、Monotonic Runtime Clock、Playback/Frame Cancellation Evidence 与 Headless GPU Adapter 已从 UI 收敛；Broker execution lease 已成为优先级/访问类/worker lane 驻留证据的单一事实来源并删除 App activity 原子计数；继续迁出 `app_ui::preview` 中的时间线求值/媒体执行编排，使 `app_ui` 最终只保留意图、窗口资源与呈现状态适配。
+- [ ] `PlaybackEngine`、`FrameWorkBroker`、`PreviewFrameStore`、Monotonic Runtime Clock、Playback/Frame Cancellation Evidence 与 Headless GPU Adapter 已从 UI 收敛；Broker execution lease 已成为优先级/访问类/worker lane 驻留证据的单一事实来源并删除 App activity 原子计数；Window 与 Headless 的“单次 Demand 采样→完成/过期→终态 Delivery→预卷”已统一到 `app::playback_preview`，且 Adapter 不能直接修改 Transport；继续按行为所有权迁出 `app_ui::preview` 中的时间线求值、媒体执行和色彩诊断，使 `app_ui` 最终只保留意图、窗口资源与呈现状态适配。
 - [ ] 帧工作已统一 generation、priority、deadline、原子取消 disposition、请求龄期、资源预算和诊断所有权；deadline 在 Adapter 准入边界以“不透明绝对值 + 当前剩余时长”提交，由 Broker 单次降低、同键 rebind 更新，并在 worker 发布前一次性记录完成时刻；首次 Broker close 同样以 Monotonic Runtime Clock 固定取消时刻，重复 close 不续期，App stop flag 不再拥有计时权；精确 Headless 测试覆盖截止边界、最早取消原因、rebind、close age 和晚轮询不制造 Late，时钟回退会钳制并使性能/专业门禁失败；继续让缩略图、波形、代理、导出使用同一语言而不强并执行池。
 - [ ] FFmpeg open/stream-info/seek/packet I/O 已接入 request-scoped interrupt，外部 still 子进程可 kill/wait/join；播放域已统一 5 ms request→checkpoint、50 ms Playback/Interactive return、500 ms Still return 的 fail-closed 门禁，仍须在固定参考机用 pause/seek/close/quit、真实长 GOP、阻塞 I/O 与驱动路径取得最坏延迟证据，且 UI 线程不得 join worker。
 
