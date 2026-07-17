@@ -722,7 +722,7 @@ pub struct ExportJobColorDiagnosticsSummary {
 }
 
 /// Schema version for export color health reports.
-pub const EXPORT_COLOR_HEALTH_REPORT_SCHEMA_VERSION: u32 = 3;
+pub const EXPORT_COLOR_HEALTH_REPORT_SCHEMA_VERSION: u32 = 4;
 
 /// Versioned export color health report for UI, telemetry, perf, and job artifacts.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -911,6 +911,21 @@ impl ExportJobColorDiagnosticsSummary {
             observed: warning_count,
             limit: Some(0),
         });
+        let dynamic_hdr_sources = self
+            .asset_issue_summary
+            .diagnostics_with_dynamic_hdr10_plus
+            .saturating_add(self.asset_issue_summary.diagnostics_with_dolby_vision_config);
+        checks.push(ExportColorHealthCheck {
+            area: ExportColorHealthArea::InputColorPolicy,
+            code: "dynamic_hdr_metadata_sources",
+            severity: if dynamic_hdr_sources > 0 {
+                ExportColorHealthSeverity::Warn
+            } else {
+                ExportColorHealthSeverity::Pass
+            },
+            observed: dynamic_hdr_sources,
+            limit: Some(0),
+        });
 
         push_export_root_causes_and_actions(self, &mut root_causes, &mut actions);
 
@@ -1027,6 +1042,28 @@ fn push_export_root_causes_and_actions(
             ),
             "inspect_asset_color_warning_evidence",
             "Inspect source media color diagnostic warnings before trusting export color policy.",
+        );
+    }
+    if summary.asset_issue_summary.diagnostics_with_dynamic_hdr10_plus > 0
+        || summary.asset_issue_summary.diagnostics_with_dolby_vision_config > 0
+    {
+        push_export_root_cause_with_action(
+            root_causes,
+            actions,
+            ExportColorHealthArea::InputColorPolicy,
+            "dynamic_hdr_metadata_not_preserved",
+            ExportColorHealthSeverity::Warn,
+            format!(
+                "hdr10_plus_sources={} dolby_vision_sources={}",
+                summary
+                    .asset_issue_summary
+                    .diagnostics_with_dynamic_hdr10_plus,
+                summary
+                    .asset_issue_summary
+                    .diagnostics_with_dolby_vision_config
+            ),
+            "use_validated_dynamic_hdr_authoring",
+            "Rendered export strips source HDR10+/Dolby Vision metadata; use a validated dynamic-HDR authoring workflow for dynamic delivery.",
         );
     }
     if summary.policy_rejections > 0 {
@@ -3707,6 +3744,41 @@ mod tests {
     }
 
     #[test]
+    fn export_color_health_warns_when_dynamic_hdr_metadata_will_be_stripped() {
+        let summary = ExportJobColorDiagnosticsSummary {
+            asset_issue_summary: VideoColorDiagnosticIssueAggregate {
+                diagnostics: 2,
+                diagnostics_with_hdr_metadata: 2,
+                hdr_side_data_count: 2,
+                diagnostics_with_dynamic_hdr10_plus: 1,
+                diagnostics_with_dolby_vision_config: 1,
+                ..VideoColorDiagnosticIssueAggregate::default()
+            },
+            diagnosed_frames: 1,
+            fully_float_linear: true,
+            gpu_path_ready: true,
+            ..ExportJobColorDiagnosticsSummary::default()
+        };
+
+        let report = summary.health_report("dynamic-hdr-source");
+
+        assert_eq!(report.verdict, ExportColorHealthVerdict::Warn);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "dynamic_hdr_metadata_sources"
+                && check.severity == ExportColorHealthSeverity::Warn
+                && check.observed == 2
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "dynamic_hdr_metadata_not_preserved"
+                && root.severity == ExportColorHealthSeverity::Warn
+        }));
+        assert!(report
+            .actions
+            .iter()
+            .any(|action| action.code == "use_validated_dynamic_hdr_authoring"));
+    }
+
+    #[test]
     fn unresolved_effect_domain_is_a_distinct_fail_closed_export_failure() {
         let mut diagnostics = ExportJobColorDiagnostics::default();
         diagnostics.record_frame_diagnostics(
@@ -4329,6 +4401,41 @@ mod tests {
             assert!(err.contains("H.265/libx265"));
             assert!(err.contains("metadata backend"));
         }
+    }
+
+    #[test]
+    fn export_color_validation_rejects_dynamic_hdr_passthrough_claim() {
+        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec2100Pq);
+        timeline.sequence.settings.color_management.delivery_bit_depth = DeliveryBitDepth::Ten;
+        timeline.sequence.settings.color_management.preserve_hdr_metadata = true;
+        timeline.sequence.settings.color_management.hdr_mastering_display =
+            Some(VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference());
+        timeline.sequence.settings.color_management.hdr_content_light =
+            Some(VideoContentLightMetadata::hdr10_1000_nit_reference());
+        let asset_id = AssetId::new();
+        let tb = timeline.sequence.time_base();
+        timeline.sequence.video_tracks[0]
+            .add_clip(Clip::new(asset_id, tt(0, tb), tt(10, tb)).expect("valid HDR clip"))
+            .expect("add HDR clip");
+        let mut diagnostic = test_color_diagnostic(
+            mondrian_media::VideoColorSpaceSource::Metadata,
+            mondrian_media::VideoColorDetectionMethod::CicpTags,
+            None,
+        );
+        diagnostic.hdr_metadata.push(mondrian_media::VideoHdrMetadataSummary {
+            kind: mondrian_media::VideoHdrSideDataKind::DynamicHdr10Plus,
+            payload_size: 32,
+            payload: None,
+        });
+        timeline.asset_color_diagnostics.insert(asset_id, diagnostic);
+        let mut config = dummy_config("hdr-dynamic-passthrough.mp4");
+        config.preset.video = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
+
+        let error = validate_timeline_export_color_compatibility(&config, &timeline)
+            .expect_err("rendered export must not claim dynamic HDR passthrough");
+        assert!(error.contains("HDR10+ 动态 metadata（1 个）"));
+        assert!(error.contains("不能安全透传"));
+        assert!(error.contains("动态 HDR 重新制作流程"));
     }
 
     #[test]

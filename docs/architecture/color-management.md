@@ -814,17 +814,25 @@ copied onto YUV media. Camera-log outputs still omit unverified delivery tags,
 but their RGB-to-YUV matrix and range are explicit. GIF has no reliable color
 tag contract and is therefore accepted only with an explicit sRGB output.
 
-Static HDR10 metadata is currently supported only by the H.265/libx265
+Static HDR metadata is currently supported only by the H.265/libx265
 backend. SMPTE ST 2086 mastering-display and MaxCLL/MaxFALL values are emitted
 through one atomic `x265-params` value so neither field can override the other.
 AV1 and ProRes requests with metadata preservation fail validation until they
 have independently implemented and verified bitstream/container backends.
+ST 2086/CLLI are descriptive HEVC HDR SEI and are not artificially restricted to
+PQ; HLG delivery may carry them when the authored delivery contract requires
+it. Source HDR10+ and Dolby Vision data is not copied across a rendered edit:
+the export health report emits `dynamic_hdr_metadata_sources` and
+`dynamic_hdr_metadata_not_preserved`, and a request that claims HDR metadata
+preservation fails before encoder launch when referenced sources contain either
+dynamic format. Dynamic delivery requires a separately validated re-authoring
+workflow because source frame/scene metadata no longer describes edited pixels.
 
 Successful encoder exit is not proof of a correct deliverable. Timeline export
 derives `ExpectedVideoSignalConstraints` from the same
 `ExportVideoSignalContract` used to build FFmpeg arguments, then probes the
 finished file. Validation fails on mismatched pixel format, range, primaries,
-transfer, or matrix. When static HDR10 preservation is requested, the expected
+transfer, or matrix. When static HDR metadata preservation is requested, the expected
 ST 2086 and MaxCLL/MaxFALL payloads travel in the same validation contract. A
 bounded second FFprobe call decodes only the first video frame, where libx265
 exposes those SEI messages, and compares every mastering chromaticity,

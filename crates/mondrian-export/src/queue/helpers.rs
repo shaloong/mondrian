@@ -473,6 +473,17 @@ pub(crate) fn validate_timeline_export_color_compatibility(
                 ));
             }
         }
+
+        let source_issues = export_asset_issue_summary(timeline);
+        if source_issues.diagnostics_with_dynamic_hdr10_plus > 0
+            || source_issues.diagnostics_with_dolby_vision_config > 0
+        {
+            return Err(format!(
+                "当前 HDR metadata 后端只写入项目级 ST 2086/MaxCLL/MaxFALL；引用素材包含 HDR10+ 动态 metadata（{} 个）或 Dolby Vision 配置（{} 个），渲染后不能安全透传，请使用经过验证的动态 HDR 重新制作流程",
+                source_issues.diagnostics_with_dynamic_hdr10_plus,
+                source_issues.diagnostics_with_dolby_vision_config
+            ));
+        }
     }
     if preserve_hdr && !matches!(&config.preset.video, VideoCodecConfig::H265 { .. }) {
         return Err(
