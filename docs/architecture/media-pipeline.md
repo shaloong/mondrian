@@ -355,8 +355,9 @@ Current playback worker deadlines originate in the Playback Engine Frame Demand.
 The app Adapter converts its remaining monotonic lifetime to an `Instant` budget
 at enqueue/promotion time. `app_ui::preview_scheduler_policy` owns the pure
 worker-deadline eligibility and bounded frame-rate-to-prefetch-window policy;
-`app_ui::preview` owns execution and evidence aggregation, not duplicated clock
-math.
+`app::preview_access_mode` owns Broker admission/job transport, while
+`app_ui::preview` still owns decode execution and evidence aggregation. None of
+them duplicate clock math.
 
 The same current request carries an opaque Frame Demand identity end-to-end.
 The preview queue and worker may transport but must not interpret that identity;
@@ -515,11 +516,13 @@ The app preview scheduler stores access mode alongside the media-frame key for
 pending/in-flight work. A later scrub/current request for the same media frame
 must supersede an older playback/prefetch request instead of letting the older
 job complete and remove the pending scrub work.
-In the app layer this contract lives in the `preview_access_mode` module:
+In the app layer this contract lives in `app::preview_access_mode`:
 request admission, latest-generation tracking, access-mode promotion, and
 completion classification are localized there. The same module owns the bounded
 preview decode job queue and worker-lane selection, because those policies are
-defined by access mode. The module must not own render plan evaluation, decode
+defined by access mode. It has no dependency on `app_ui`; thumbnail, Viewer,
+frame-store, and scheduler-policy Adapters all depend inward on this one module.
+The module must not own render plan evaluation, decode
 execution, color interpretation, or GPU/CPU frame conversion; those remain in
 the preview orchestrator and media/renderer layers.
 Worker-lane selection reserves CPU capacity instead of maximizing raw decode

@@ -67,23 +67,23 @@ use mondrian_ui_widgets::{
     ViewerFrameImage,
 };
 
-#[cfg(test)]
-use super::preview_access_mode::MediaPreviewJobEnqueueStatus;
 use crate::app::playback_preview::{PlaybackPreviewAdapter, PreviewVideoPreroll, PreviewWorkPoll};
-use crate::app::proxy_generation::{request_proxy_generation, resolve_asset_proxy_color_contract};
-use crate::app::AppState;
-use crate::app_ui::native_video_import::AppUiPlaybackHardwareDecodeAdmission;
-use crate::app_ui::panels::{
-    ViewerColorPipelineStatus, ViewerPreviewColorRejectionModel, ViewerPreviewSource,
-    ViewerPreviewState,
-};
-use crate::app_ui::preview_access_mode::{
+#[cfg(test)]
+use crate::app::preview_access_mode::MediaPreviewJobEnqueueStatus;
+use crate::app::preview_access_mode::{
     media_preview_access_mode_for_intent, media_preview_viewer_access_intent,
     media_preview_worker_count, media_preview_worker_lane, MediaPreviewJob,
     MediaPreviewJobQueueDiagnostics, MediaPreviewJobQueueReceive, MediaPreviewJobQueueReceiver,
     MediaPreviewJobQueueSender, MediaPreviewKey, MediaPreviewNativeSurfaceHint,
     MediaPreviewRequestPriority, MediaPreviewRequestStatus, MediaPreviewScheduler,
     MediaPreviewSchedulerDiagnostics, MediaPreviewWorkerLane,
+};
+use crate::app::proxy_generation::{request_proxy_generation, resolve_asset_proxy_color_contract};
+use crate::app::AppState;
+use crate::app_ui::native_video_import::AppUiPlaybackHardwareDecodeAdmission;
+use crate::app_ui::panels::{
+    ViewerColorPipelineStatus, ViewerPreviewColorRejectionModel, ViewerPreviewSource,
+    ViewerPreviewState,
 };
 use crate::app_ui::preview_frame_store::PreviewCpuFrameStore;
 #[cfg(test)]

@@ -1,4 +1,4 @@
-//! Access-mode request admission for app viewer media preview.
+//! Access-mode request admission for application media preview.
 //!
 //! This module owns the app-layer scheduling contract for playback, scrub, and
 //! random-access preview work. It deliberately does not decode media, evaluate

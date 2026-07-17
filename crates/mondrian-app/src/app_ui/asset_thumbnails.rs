@@ -5,11 +5,11 @@
 //! `AssetThumbnailSource`; missing video thumbnails are decoded on a background
 //! worker and picked up by the host on the next event-loop wake.
 
+use crate::app::preview_access_mode::{
+    media_preview_access_mode_for_intent, MediaPreviewAccessIntent,
+};
 use crate::app_ui::panels::{
     AssetThumbnailFailure, AssetThumbnailFailureReason, AssetThumbnailSource, AssetThumbnailState,
-};
-use crate::app_ui::preview_access_mode::{
-    media_preview_access_mode_for_intent, MediaPreviewAccessIntent,
 };
 use mondrian_assets::{AssetKind, AssetRecord};
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};

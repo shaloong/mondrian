@@ -860,8 +860,11 @@ Phase 4 now uses one `FrameWorkBroker` in `mondrian-playback`. It atomically own
 semantic class validation, pending and queued capacity, generation invalidation,
 current-over-prefetch and realtime-over-still preemption, worker-lane dequeue,
 in-flight execution leases, deadline dequeue, completion freshness,
-cancellation/expiration, and stable diagnostics. App UI retains only the media
-key/payload plus explicit media-access and wall-deadline Adapter mappings. The
+cancellation/expiration, and stable diagnostics. `app::preview_access_mode` is
+the UI-independent application Adapter that owns the media key, explicit access
+intent, bounded job transport, worker-lane mapping, and wall-deadline projection.
+Thumbnail, Viewer, frame-store, and scheduler-policy code depend on this module;
+it has no dependency back on `app_ui`. The
 former `FrameRequestScheduler` and App-local Condvar queue authorities were
 deleted rather than retained as compatibility paths. App-local worker-activity
 atomics were also deleted: windowed reports and Headless verification share the

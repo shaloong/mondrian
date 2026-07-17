@@ -8,7 +8,7 @@ use mondrian_core::types::SequenceId;
 use mondrian_ui_widgets::ViewerFrameImage;
 
 use super::preview::{MediaPreviewFrame, ScopedViewerFrame, ViewerPreviewCacheKey};
-use super::preview_access_mode::MediaPreviewKey;
+use crate::app::preview_access_mode::MediaPreviewKey;
 
 #[cfg(test)]
 pub(crate) type PreviewCpuFrameStoreConfig = mondrian_playback::PreviewFrameStoreConfig;
