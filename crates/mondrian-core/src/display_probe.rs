@@ -30,7 +30,7 @@ pub trait PlatformDisplayProbe {
     /// - winit window's current monitor for display identity/position/size
     /// - wgpu surface capabilities for format/color-space support
     /// - wgpu display_hdr_info for HDR metadata
-    /// - OS ICC profile status (currently always unsupported on all platforms)
+    /// - OS ICC profile status from the active platform adapter
     /// - The user's display management policy for viewer mode / monitor profile
     ///
     /// Returns a complete `DisplayOutputSnapshot` with validation status,
@@ -271,6 +271,45 @@ pub fn resolve_hdr_status(
     monitor_hdr_known: bool,
     monitor_hdr_supported: bool,
 ) -> HdrStatus {
+    let monitor = if !monitor_hdr_known {
+        MonitorHdrReadiness::Unknown {
+            reason: "display HDR state not available from OS".to_owned(),
+        }
+    } else if monitor_hdr_supported {
+        MonitorHdrReadiness::Ready { evidence: "monitor reports HDR ready".to_owned() }
+    } else {
+        MonitorHdrReadiness::Unsupported {
+            evidence: "monitor reports no HDR support or HDR is disabled".to_owned(),
+        }
+    };
+    resolve_hdr_status_with_monitor_evidence(
+        viewer_mode,
+        output_color_space,
+        surface_supports_hdr,
+        surface_hdr_mode,
+        monitor,
+    )
+}
+
+/// Monitor-side readiness state with native probe evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonitorHdrReadiness {
+    /// The monitor, OS compositor, and active output path are HDR/EDR ready.
+    Ready { evidence: String },
+    /// The native API explicitly reports that HDR is unsupported or disabled.
+    Unsupported { evidence: String },
+    /// Hardware support or current compositor state cannot be confirmed.
+    Unknown { reason: String },
+}
+
+/// Resolve HDR status while preserving platform-native capability evidence.
+pub fn resolve_hdr_status_with_monitor_evidence(
+    viewer_mode: ViewerDisplayMode,
+    output_color_space: ColorSpace,
+    surface_supports_hdr: bool,
+    surface_hdr_mode: &str,
+    monitor: MonitorHdrReadiness,
+) -> HdrStatus {
     let resolved = viewer_mode.resolve(output_color_space);
     if !resolved.is_hdr() {
         return HdrStatus::NotRequested;
@@ -294,25 +333,17 @@ pub fn resolve_hdr_status(
         };
     }
 
-    if !monitor_hdr_known {
-        return HdrStatus::RequestedMonitorUnknown {
+    match monitor {
+        MonitorHdrReadiness::Ready { evidence } => HdrStatus::RequestedSupported {
             mode: mode.to_owned(),
-            reason: "display_hdr_info not available from OS".to_owned(),
-        };
-    }
-
-    if !monitor_hdr_supported {
-        return HdrStatus::RequestedMonitorUnsupported {
-            mode: mode.to_owned(),
-            evidence: "monitor reports no HDR support".to_owned(),
-        };
-    }
-
-    HdrStatus::RequestedSupported {
-        mode: mode.to_owned(),
-        evidence: format!(
-            "surface={surface_hdr_mode} monitor_hdr_known={monitor_hdr_known} monitor_hdr_supported={monitor_hdr_supported}"
-        ),
+            evidence: format!("surface={surface_hdr_mode} {evidence}"),
+        },
+        MonitorHdrReadiness::Unsupported { evidence } => {
+            HdrStatus::RequestedMonitorUnsupported { mode: mode.to_owned(), evidence }
+        }
+        MonitorHdrReadiness::Unknown { reason } => {
+            HdrStatus::RequestedMonitorUnknown { mode: mode.to_owned(), reason }
+        }
     }
 }
 
@@ -553,6 +584,26 @@ mod tests {
             true,
         );
         assert!(matches!(status, HdrStatus::RequestedSupported { .. }));
+    }
+
+    #[test]
+    fn resolve_hdr_keeps_native_monitor_evidence() {
+        let status = resolve_hdr_status_with_monitor_evidence(
+            ViewerDisplayMode::HdrPq,
+            ColorSpace::Rec2100Pq,
+            true,
+            "Bt2100Pq",
+            MonitorHdrReadiness::Ready {
+                evidence: "backend=macos-app-kit current_headroom_ppm=1600000".to_owned(),
+            },
+        );
+
+        assert!(matches!(
+            status,
+            HdrStatus::RequestedSupported { ref evidence, .. }
+                if evidence.contains("macos-app-kit")
+                    && evidence.contains("current_headroom_ppm=1600000")
+        ));
     }
 
     #[test]

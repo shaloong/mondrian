@@ -97,7 +97,7 @@ pub enum PreviewGpuOutputBlocker {
         /// Human-readable explanation.
         reason: String,
     },
-    /// OS ICC profile discovery is not implemented on this platform.
+    /// OS ICC profile discovery or a usable profile payload is unavailable.
     ///
     /// When the user configures `MonitorProfileReference::IccProfile` and
     /// the OS cannot provide ICC data, this blocker is emitted. The contract
@@ -328,7 +328,7 @@ impl PreviewGpuOutputBlocker {
                 "Document the unsupported feature limitation and track for future implementation."
             }
             Self::MonitorIccProfileUnsupported { .. } => {
-                "OS ICC profile discovery is not implemented. Display management cannot guarantee \
+                "OS ICC profile discovery did not provide a usable profile. Display management cannot guarantee \
                  correct color presentation with ICC profiles on this platform."
             }
             Self::MonitorIccProfileInvalid { .. } => {

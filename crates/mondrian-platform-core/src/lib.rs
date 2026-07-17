@@ -55,38 +55,101 @@ impl DisplayProfileProbeTarget {
 pub struct DisplayIccProfileProbeResult {
     /// Whether the current platform adapter has an OS ICC discovery mechanism.
     pub discovery_available: bool,
+    /// Native API or protocol that produced the result.
+    pub backend: Option<DisplayProbeBackend>,
     /// OS display-device identifier used by the platform API, if known.
     pub display_device_name: Option<String>,
     /// Resolved ICC/ICM profile path, if the OS reported one.
     pub profile_path: Option<PathBuf>,
+    /// ICC payload returned directly by APIs that do not expose a stable path.
+    pub profile_bytes: Option<Vec<u8>>,
     /// Structured human-readable failure reason when discovery did not produce
     /// a usable profile path.
     pub error: Option<String>,
 }
 
-/// OS HDR / Advanced Color discovery result for a display target.
+/// Native backend used to discover display color-management state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayProbeBackend {
+    /// Windows Color System default-profile lookup.
+    WindowsWcs,
+    /// Windows DisplayConfig Advanced Color query.
+    WindowsDisplayConfig,
+    /// macOS CoreGraphics display color-space query.
+    MacOsCoreGraphics,
+    /// macOS AppKit Extended Dynamic Range query.
+    MacOsAppKit,
+    /// Wayland `color-management-v1` output image description.
+    WaylandColorManagementV1,
+    /// X11 root-window `_ICC_PROFILE` property.
+    X11RootProperty,
+    /// Linux DRM connector/EDID metadata.
+    LinuxDrmSysfs,
+}
+
+impl DisplayProbeBackend {
+    /// Stable backend label for diagnostics and cache evidence.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WindowsWcs => "windows-wcs",
+            Self::WindowsDisplayConfig => "windows-display-config",
+            Self::MacOsCoreGraphics => "macos-core-graphics",
+            Self::MacOsAppKit => "macos-app-kit",
+            Self::WaylandColorManagementV1 => "wayland-color-management-v1",
+            Self::X11RootProperty => "x11-root-property",
+            Self::LinuxDrmSysfs => "linux-drm-sysfs",
+        }
+    }
+}
+
+/// Platform-neutral HDR/EDR evidence reported by a native display API.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DisplayHdrProbeDetails {
+    /// Whether the physical display and active link support HDR/EDR.
+    pub hdr_supported: Option<bool>,
+    /// Whether the desktop compositor currently exposes HDR/EDR output.
+    pub hdr_enabled: Option<bool>,
+    /// Whether the display or active link advertises a wider-than-sRGB gamut.
+    pub wide_color_supported: Option<bool>,
+    /// Whether the current desktop output encoding is wider than sRGB.
+    pub wide_color_active: Option<bool>,
+    /// Whether OS or driver policy explicitly disables HDR.
+    pub force_disabled: Option<bool>,
+    /// Reported output bits per color channel, if available.
+    pub bits_per_color_channel: Option<u32>,
+    /// Native display color encoding label, if available.
+    pub color_encoding: Option<String>,
+    /// Active output transfer function such as `PQ` or `HLG`, if reported.
+    pub active_transfer_function: Option<String>,
+    /// Transfer functions the display/link advertises independently of active mode.
+    pub supported_transfer_functions: Vec<String>,
+    /// SDR reference white in nits, if reported or normatively derived.
+    pub sdr_reference_white_nits: Option<u32>,
+    /// Minimum display luminance in milli-nits, if reported.
+    pub min_luminance_millinits: Option<u32>,
+    /// Maximum display luminance in nits, if reported.
+    pub max_luminance_nits: Option<u32>,
+    /// EDR headroom currently available, encoded as parts per million.
+    pub current_headroom_ppm: Option<u32>,
+    /// Maximum EDR headroom potentially available, in parts per million.
+    pub potential_headroom_ppm: Option<u32>,
+    /// Reference EDR headroom used by the platform, in parts per million.
+    pub reference_headroom_ppm: Option<u32>,
+}
+
+/// OS HDR / EDR discovery result for a display target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplayHdrProbeResult {
     /// Whether the current platform adapter has an OS HDR discovery mechanism.
     pub discovery_available: bool,
+    /// Native API or protocol that produced the result.
+    pub backend: Option<DisplayProbeBackend>,
     /// OS display-device identifier used by the platform API, if known.
     pub display_device_name: Option<String>,
-    /// Whether the OS reports HDR / Advanced Color support for this display.
-    pub advanced_color_supported: Option<bool>,
-    /// Whether the OS currently has HDR / Advanced Color enabled for this display.
-    pub advanced_color_enabled: Option<bool>,
-    /// Whether wide color is enforced by the OS.
-    pub wide_color_enforced: Option<bool>,
-    /// Whether Advanced Color is force-disabled by the OS or driver policy.
-    pub advanced_color_force_disabled: Option<bool>,
-    /// Reported output bits per color channel, if available.
-    pub bits_per_color_channel: Option<u32>,
-    /// OS display color encoding label, if available.
-    pub color_encoding: Option<String>,
-    /// Windows SDR white level raw value reported by DisplayConfig, if available.
-    pub sdr_white_level: Option<u32>,
+    /// Platform-neutral HDR/EDR capability and active-state evidence.
+    pub details: DisplayHdrProbeDetails,
     /// Structured human-readable failure reason when discovery did not produce
-    /// a usable Advanced Color result.
+    /// a usable HDR/EDR result.
     pub error: Option<String>,
 }
 
@@ -204,109 +267,162 @@ impl NativeVideoTextureImportProbeResult {
 }
 
 impl DisplayHdrProbeResult {
-    /// Build a successful HDR / Advanced Color probe result.
-    #[allow(clippy::too_many_arguments)]
+    /// Build a successful HDR / EDR probe result.
     pub fn found(
+        backend: DisplayProbeBackend,
         display_device_name: Option<String>,
-        advanced_color_supported: bool,
-        advanced_color_enabled: bool,
-        wide_color_enforced: bool,
-        advanced_color_force_disabled: bool,
-        bits_per_color_channel: u32,
-        color_encoding: Option<String>,
-        sdr_white_level: Option<u32>,
+        details: DisplayHdrProbeDetails,
     ) -> Self {
         Self {
             discovery_available: true,
+            backend: Some(backend),
             display_device_name,
-            advanced_color_supported: Some(advanced_color_supported),
-            advanced_color_enabled: Some(advanced_color_enabled),
-            wide_color_enforced: Some(wide_color_enforced),
-            advanced_color_force_disabled: Some(advanced_color_force_disabled),
-            bits_per_color_channel: Some(bits_per_color_channel),
-            color_encoding,
-            sdr_white_level,
+            details,
             error: None,
         }
     }
 
     /// Build a result for a supported probe that could not resolve this display.
-    pub fn missing(display_device_name: Option<String>, reason: impl Into<String>) -> Self {
+    pub fn missing(
+        backend: DisplayProbeBackend,
+        display_device_name: Option<String>,
+        reason: impl Into<String>,
+    ) -> Self {
         Self {
             discovery_available: true,
+            backend: Some(backend),
             display_device_name,
-            advanced_color_supported: None,
-            advanced_color_enabled: None,
-            wide_color_enforced: None,
-            advanced_color_force_disabled: None,
-            bits_per_color_channel: None,
-            color_encoding: None,
-            sdr_white_level: None,
+            details: DisplayHdrProbeDetails::default(),
             error: Some(reason.into()),
         }
     }
 
     /// Build a result for a supported probe that failed.
-    pub fn failed(display_device_name: Option<String>, reason: impl Into<String>) -> Self {
-        Self::missing(display_device_name, reason)
+    pub fn failed(
+        backend: DisplayProbeBackend,
+        display_device_name: Option<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self::missing(backend, display_device_name, reason)
     }
 
     /// Build a result for a platform with no HDR / Advanced Color discovery adapter.
     pub fn unsupported(reason: impl Into<String>) -> Self {
         Self {
             discovery_available: false,
+            backend: None,
             display_device_name: None,
-            advanced_color_supported: None,
-            advanced_color_enabled: None,
-            wide_color_enforced: None,
-            advanced_color_force_disabled: None,
-            bits_per_color_channel: None,
-            color_encoding: None,
-            sdr_white_level: None,
+            details: DisplayHdrProbeDetails::default(),
             error: Some(reason.into()),
         }
+    }
+
+    /// Produce stable, human-readable evidence for display-contract diagnostics.
+    pub fn evidence(&self) -> String {
+        let backend = self.backend.map(DisplayProbeBackend::as_str).unwrap_or("unavailable");
+        let device = self.display_device_name.as_deref().unwrap_or("unknown-display");
+        let details = &self.details;
+        format!(
+            "backend={backend} display={device} supported={:?} enabled={:?} force_disabled={:?} wide_supported={:?} wide_active={:?} active_transfer={:?} supported_transfers={:?} bpc={:?} sdr_white_nits={:?} min_millinits={:?} max_nits={:?} current_headroom_ppm={:?} potential_headroom_ppm={:?}",
+            details.hdr_supported,
+            details.hdr_enabled,
+            details.force_disabled,
+            details.wide_color_supported,
+            details.wide_color_active,
+            details.active_transfer_function,
+            details.supported_transfer_functions,
+            details.bits_per_color_channel,
+            details.sdr_reference_white_nits,
+            details.min_luminance_millinits,
+            details.max_luminance_nits,
+            details.current_headroom_ppm,
+            details.potential_headroom_ppm,
+        )
     }
 }
 
 impl DisplayIccProfileProbeResult {
-    /// Build a successful ICC profile probe result.
-    pub fn found(display_device_name: Option<String>, profile_path: PathBuf) -> Self {
+    /// Build a successful path-backed ICC profile probe result.
+    pub fn found_path(
+        backend: DisplayProbeBackend,
+        display_device_name: Option<String>,
+        profile_path: PathBuf,
+    ) -> Self {
         Self {
             discovery_available: true,
+            backend: Some(backend),
             display_device_name,
             profile_path: Some(profile_path),
+            profile_bytes: None,
+            error: None,
+        }
+    }
+
+    /// Build a successful in-memory ICC profile probe result.
+    pub fn found_bytes(
+        backend: DisplayProbeBackend,
+        display_device_name: Option<String>,
+        profile_bytes: Vec<u8>,
+    ) -> Self {
+        Self {
+            discovery_available: true,
+            backend: Some(backend),
+            display_device_name,
+            profile_path: None,
+            profile_bytes: Some(profile_bytes),
             error: None,
         }
     }
 
     /// Build a result for a supported probe that found no default profile.
-    pub fn missing(display_device_name: Option<String>, reason: impl Into<String>) -> Self {
+    pub fn missing(
+        backend: DisplayProbeBackend,
+        display_device_name: Option<String>,
+        reason: impl Into<String>,
+    ) -> Self {
         Self {
             discovery_available: true,
+            backend: Some(backend),
             display_device_name,
             profile_path: None,
+            profile_bytes: None,
             error: Some(reason.into()),
         }
     }
 
     /// Build a result for a supported probe that failed.
-    pub fn failed(display_device_name: Option<String>, reason: impl Into<String>) -> Self {
-        Self {
-            discovery_available: true,
-            display_device_name,
-            profile_path: None,
-            error: Some(reason.into()),
-        }
+    pub fn failed(
+        backend: DisplayProbeBackend,
+        display_device_name: Option<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self::missing(backend, display_device_name, reason)
     }
 
     /// Build a result for a platform with no ICC profile discovery adapter.
     pub fn unsupported(reason: impl Into<String>) -> Self {
         Self {
             discovery_available: false,
+            backend: None,
             display_device_name: None,
             profile_path: None,
+            profile_bytes: None,
             error: Some(reason.into()),
         }
+    }
+
+    /// Stable source reference for diagnostics when no filesystem path exists.
+    pub fn source_reference(&self) -> Option<String> {
+        if let Some(path) = &self.profile_path {
+            return Some(path.display().to_string());
+        }
+        self.backend.map(|backend| {
+            format!(
+                "{}:{}",
+                backend.as_str(),
+                self.display_device_name.as_deref().unwrap_or("unknown-display")
+            )
+        })
     }
 }
 
@@ -512,6 +628,40 @@ mod tests {
         let result = svc.display_icc_profile(DisplayProfileProbeTarget::new((0, 0), (1920, 1080)));
         assert!(!result.discovery_available);
         assert!(result.profile_path.is_none());
+        assert!(result.profile_bytes.is_none());
+    }
+
+    #[test]
+    fn in_memory_icc_profile_keeps_backend_identity() {
+        let result = DisplayIccProfileProbeResult::found_bytes(
+            DisplayProbeBackend::MacOsCoreGraphics,
+            Some("Studio Display".to_owned()),
+            vec![1, 2, 3],
+        );
+
+        assert_eq!(result.profile_bytes.as_deref(), Some(&[1, 2, 3][..]));
+        assert_eq!(
+            result.source_reference().as_deref(),
+            Some("macos-core-graphics:Studio Display")
+        );
+    }
+
+    #[test]
+    fn hdr_evidence_preserves_unknown_active_state() {
+        let result = DisplayHdrProbeResult::found(
+            DisplayProbeBackend::LinuxDrmSysfs,
+            Some("card0-HDMI-A-1".to_owned()),
+            DisplayHdrProbeDetails {
+                hdr_supported: Some(true),
+                hdr_enabled: None,
+                max_luminance_nits: Some(1000),
+                ..DisplayHdrProbeDetails::default()
+            },
+        );
+
+        assert_eq!(result.details.hdr_supported, Some(true));
+        assert_eq!(result.details.hdr_enabled, None);
+        assert!(result.evidence().contains("enabled=None"));
     }
 
     #[test]

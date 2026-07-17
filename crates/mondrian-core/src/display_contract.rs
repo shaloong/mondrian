@@ -116,7 +116,7 @@ pub enum MonitorProfileStatus {
         /// Full destination ICC payload identity verified by the runtime LUT.
         profile_fingerprint: crate::display_calibration::IccProfileFingerprint,
     },
-    /// OS ICC profile discovery is not implemented on this platform.
+    /// OS ICC profile discovery or a usable profile payload is unavailable.
     IccProfileUnsupported {
         /// Stable feature code (e.g. `os_icc_profile`).
         feature_code: String,

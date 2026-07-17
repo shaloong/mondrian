@@ -2847,8 +2847,15 @@ dependencies = [
  "arboard",
  "mondrian-core",
  "mondrian-platform-core",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
  "rfd",
+ "wayland-client",
+ "wayland-protocols",
  "windows-sys 0.61.2",
+ "x11rb",
  "xcap",
 ]
 

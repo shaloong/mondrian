@@ -7,9 +7,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use mondrian_core::Color;
+mod display;
 pub use mondrian_platform_core::{
-    ClipboardError, DisplayHdrProbe, DisplayHdrProbeResult, DisplayIccProfileProbeResult,
-    DisplayProfileProbe, DisplayProfileProbeTarget, FileFilter, NativeVideoTextureHandleKind,
+    ClipboardError, DisplayHdrProbe, DisplayHdrProbeDetails, DisplayHdrProbeResult,
+    DisplayIccProfileProbeResult, DisplayProbeBackend, DisplayProfileProbe,
+    DisplayProfileProbeTarget, FileFilter, NativeVideoTextureHandleKind,
     NativeVideoTextureImportProbe, NativeVideoTextureImportProbeResult, NoopPlatformService,
     PlatformService,
 };
@@ -88,7 +90,17 @@ fn system_display_icc_profile(target: DisplayProfileProbeTarget) -> DisplayIccPr
     windows_display_profile::display_icc_profile(target)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+fn system_display_icc_profile(target: DisplayProfileProbeTarget) -> DisplayIccProfileProbeResult {
+    display::macos::display_icc_profile(target)
+}
+
+#[cfg(target_os = "linux")]
+fn system_display_icc_profile(target: DisplayProfileProbeTarget) -> DisplayIccProfileProbeResult {
+    display::linux::display_icc_profile(target)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 fn system_display_icc_profile(_target: DisplayProfileProbeTarget) -> DisplayIccProfileProbeResult {
     DisplayIccProfileProbeResult::unsupported(
         "OS ICC profile discovery is not implemented for this platform",
@@ -100,7 +112,17 @@ fn system_display_hdr_state(target: DisplayProfileProbeTarget) -> DisplayHdrProb
     windows_display_profile::display_hdr_state(target)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+fn system_display_hdr_state(target: DisplayProfileProbeTarget) -> DisplayHdrProbeResult {
+    display::macos::display_hdr_state(target)
+}
+
+#[cfg(target_os = "linux")]
+fn system_display_hdr_state(target: DisplayProfileProbeTarget) -> DisplayHdrProbeResult {
+    display::linux::display_hdr_state(target)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 fn system_display_hdr_state(_target: DisplayProfileProbeTarget) -> DisplayHdrProbeResult {
     DisplayHdrProbeResult::unsupported(
         "OS HDR / Advanced Color discovery is not implemented for this platform",
@@ -391,7 +413,8 @@ mod windows_display_profile {
     use std::ptr;
 
     use mondrian_platform_core::{
-        DisplayHdrProbeResult, DisplayIccProfileProbeResult, DisplayProfileProbeTarget,
+        DisplayHdrProbeDetails, DisplayHdrProbeResult, DisplayIccProfileProbeResult,
+        DisplayProbeBackend, DisplayProfileProbeTarget,
     };
     use windows_sys::Win32::Devices::Display::{
         DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
@@ -421,16 +444,31 @@ mod windows_display_profile {
             Ok(Some(name)) => name,
             Ok(None) => {
                 return DisplayIccProfileProbeResult::missing(
+                    DisplayProbeBackend::WindowsWcs,
                     None,
                     "no Windows monitor matched the winit display rectangle",
                 );
             }
-            Err(reason) => return DisplayIccProfileProbeResult::failed(None, reason),
+            Err(reason) => {
+                return DisplayIccProfileProbeResult::failed(
+                    DisplayProbeBackend::WindowsWcs,
+                    None,
+                    reason,
+                );
+            }
         };
 
         match default_icc_profile_for_device(&display_device_name) {
-            Ok(path) => DisplayIccProfileProbeResult::found(Some(display_device_name), path),
-            Err(reason) => DisplayIccProfileProbeResult::missing(Some(display_device_name), reason),
+            Ok(path) => DisplayIccProfileProbeResult::found_path(
+                DisplayProbeBackend::WindowsWcs,
+                Some(display_device_name),
+                path,
+            ),
+            Err(reason) => DisplayIccProfileProbeResult::missing(
+                DisplayProbeBackend::WindowsWcs,
+                Some(display_device_name),
+                reason,
+            ),
         }
     }
 
@@ -439,25 +477,40 @@ mod windows_display_profile {
             Ok(Some(name)) => name,
             Ok(None) => {
                 return DisplayHdrProbeResult::missing(
+                    DisplayProbeBackend::WindowsDisplayConfig,
                     None,
                     "no Windows monitor matched the winit display rectangle",
                 );
             }
-            Err(reason) => return DisplayHdrProbeResult::failed(None, reason),
+            Err(reason) => {
+                return DisplayHdrProbeResult::failed(
+                    DisplayProbeBackend::WindowsDisplayConfig,
+                    None,
+                    reason,
+                );
+            }
         };
 
         match advanced_color_for_device(&display_device_name) {
             Ok(state) => DisplayHdrProbeResult::found(
+                DisplayProbeBackend::WindowsDisplayConfig,
                 Some(display_device_name),
-                state.advanced_color_supported,
-                state.advanced_color_enabled,
-                state.wide_color_enforced,
-                state.advanced_color_force_disabled,
-                state.bits_per_color_channel,
-                state.color_encoding,
-                state.sdr_white_level,
+                DisplayHdrProbeDetails {
+                    hdr_supported: Some(state.advanced_color_supported),
+                    hdr_enabled: Some(state.advanced_color_enabled),
+                    wide_color_active: Some(state.wide_color_enforced),
+                    force_disabled: Some(state.advanced_color_force_disabled),
+                    bits_per_color_channel: Some(state.bits_per_color_channel),
+                    color_encoding: state.color_encoding,
+                    sdr_reference_white_nits: state.sdr_white_level.map(sdr_white_level_to_nits),
+                    ..DisplayHdrProbeDetails::default()
+                },
             ),
-            Err(reason) => DisplayHdrProbeResult::failed(Some(display_device_name), reason),
+            Err(reason) => DisplayHdrProbeResult::failed(
+                DisplayProbeBackend::WindowsDisplayConfig,
+                Some(display_device_name),
+                reason,
+            ),
         }
     }
 
@@ -708,6 +761,11 @@ mod windows_display_profile {
         Ok(packet.SDRWhiteLevel)
     }
 
+    fn sdr_white_level_to_nits(raw_level: u32) -> u32 {
+        // DISPLAYCONFIG_SDR_WHITE_LEVEL is an 80-nit multiplier scaled by 1000.
+        raw_level.saturating_mul(80).saturating_add(500) / 1000
+    }
+
     fn display_config_header(
         packet_type: i32,
         packet_size: usize,
@@ -798,6 +856,18 @@ mod windows_display_profile {
 
     fn wide_null(text: &str) -> Vec<u16> {
         text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::sdr_white_level_to_nits;
+
+        #[test]
+        fn windows_sdr_white_level_uses_normative_80_nit_scale() {
+            assert_eq!(sdr_white_level_to_nits(1_000), 80);
+            assert_eq!(sdr_white_level_to_nits(2_000), 160);
+            assert_eq!(sdr_white_level_to_nits(2_537), 203);
+        }
     }
 }
 

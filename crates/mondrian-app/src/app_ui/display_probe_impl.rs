@@ -10,10 +10,14 @@ use std::sync::Arc;
 use mondrian_core::color_models::{DisplayManagementPolicy, MonitorProfileReference};
 use mondrian_core::display_calibration::DisplayCalibrationLut3d;
 use mondrian_core::display_contract::*;
-use mondrian_core::display_probe::{compute_display_blockers, resolve_hdr_status};
+use mondrian_core::display_probe::{
+    compute_display_blockers, resolve_hdr_status_with_monitor_evidence, MonitorHdrReadiness,
+};
 use mondrian_core::types::{ColorEngine, ColorSpace};
 #[cfg(not(test))]
 use mondrian_platform::{DisplayHdrProbe, DisplayProfileProbe, SystemPlatformService};
+#[cfg(test)]
+use mondrian_platform::{DisplayHdrProbeDetails, DisplayProbeBackend};
 use mondrian_platform::{
     DisplayHdrProbeResult, DisplayIccProfileProbeResult, DisplayProfileProbeTarget,
 };
@@ -77,16 +81,14 @@ pub fn resolve_display_snapshot(
 
     let surface_supports_hdr = matches!(surface_hdr_mode_str, "HdrPq" | "HdrHlg");
 
-    let (monitor_hdr_known, monitor_hdr_supported) =
-        resolve_monitor_hdr_capability(&hdr_probe, display_hdr_info);
+    let monitor_hdr = resolve_monitor_hdr_capability(&hdr_probe, display_hdr_info);
 
-    let hdr_status = resolve_hdr_status(
+    let hdr_status = resolve_hdr_status_with_monitor_evidence(
         policy.viewer_mode,
         output_color_space,
         surface_supports_hdr,
         hdr_mode_str,
-        monitor_hdr_known,
-        monitor_hdr_supported,
+        monitor_hdr,
     );
 
     let (ocio_display, ocio_view, ocio_blocker) =
@@ -200,22 +202,47 @@ fn display_hdr_state_probe(_target: DisplayProfileProbeTarget) -> DisplayHdrProb
 fn resolve_monitor_hdr_capability(
     hdr_probe: &DisplayHdrProbeResult,
     display_hdr_info: wgpu::DisplayHdrInfo,
-) -> (bool, bool) {
+) -> MonitorHdrReadiness {
+    let details = &hdr_probe.details;
     let os_hdr_known = hdr_probe.discovery_available
-        && (hdr_probe.advanced_color_supported.is_some()
-            || hdr_probe.advanced_color_enabled.is_some()
-            || hdr_probe.advanced_color_force_disabled.is_some());
+        && (details.hdr_supported.is_some()
+            || details.hdr_enabled.is_some()
+            || details.force_disabled.is_some()
+            || details.current_headroom_ppm.is_some()
+            || details.potential_headroom_ppm.is_some()
+            || details.active_transfer_function.is_some());
     if os_hdr_known {
-        let supported = hdr_probe.advanced_color_supported == Some(true);
-        let enabled = hdr_probe.advanced_color_enabled == Some(true);
-        let force_disabled = hdr_probe.advanced_color_force_disabled == Some(true);
-        return (true, supported && enabled && !force_disabled);
+        let evidence = hdr_probe.evidence();
+        if details.force_disabled == Some(true) || details.hdr_supported == Some(false) {
+            return MonitorHdrReadiness::Unsupported { evidence };
+        }
+        if details.hdr_supported == Some(true) && details.hdr_enabled == Some(true) {
+            return MonitorHdrReadiness::Ready { evidence };
+        }
+        if details.hdr_enabled == Some(false) {
+            return MonitorHdrReadiness::Unsupported { evidence };
+        }
+        return MonitorHdrReadiness::Unknown {
+            reason: format!(
+                "HDR hardware capability found but active compositor state is unknown: {evidence}"
+            ),
+        };
     }
 
-    (
-        display_hdr_info.tone_map_headroom().is_some(),
-        display_hdr_info.tone_map_headroom().is_some_and(|h| h > 1.0),
-    )
+    match display_hdr_info.tone_map_headroom() {
+        Some(headroom) if headroom > 1.0 => MonitorHdrReadiness::Ready {
+            evidence: format!("wgpu current tone-map headroom={headroom:.4}"),
+        },
+        Some(headroom) => MonitorHdrReadiness::Unsupported {
+            evidence: format!("wgpu current tone-map headroom={headroom:.4}"),
+        },
+        None => MonitorHdrReadiness::Unknown {
+            reason: hdr_probe
+                .error
+                .clone()
+                .unwrap_or_else(|| "display HDR state not available from OS or wgpu".to_owned()),
+        },
+    }
 }
 
 fn should_probe_os_icc_profile(policy: &DisplayManagementPolicy) -> bool {
@@ -251,9 +278,60 @@ fn resolve_monitor_profile_status(
             None,
         ),
         MonitorProfileReference::IccProfile { profile_id } => {
-            let profile_path = match explicit_profile_path(profile_id) {
-                ExplicitProfilePath::Path(path) => Some(path),
-                ExplicitProfilePath::UseOsDefault => profile_probe.profile_path.clone(),
+            let (profile_reference, profile_bytes) = match explicit_profile_path(profile_id) {
+                ExplicitProfilePath::Path(path) => {
+                    let reference = path.display().to_string();
+                    let bytes = match std::fs::read(&path) {
+                        Ok(bytes) => bytes,
+                        Err(reason) => {
+                            return (
+                                MonitorProfileStatus::IccProfileReadError {
+                                    profile_path: Some(reference),
+                                    reason: format!("failed to read ICC profile: {reason}"),
+                                },
+                                None,
+                            );
+                        }
+                    };
+                    (reference, bytes)
+                }
+                ExplicitProfilePath::UseOsDefault => {
+                    let reference =
+                        profile_probe.source_reference().unwrap_or_else(|| profile_id.clone());
+                    let bytes = if let Some(bytes) = &profile_probe.profile_bytes {
+                        bytes.clone()
+                    } else if let Some(path) = &profile_probe.profile_path {
+                        match std::fs::read(path) {
+                            Ok(bytes) => bytes,
+                            Err(reason) => {
+                                return (
+                                    MonitorProfileStatus::IccProfileReadError {
+                                        profile_path: Some(reference),
+                                        reason: format!("failed to read ICC profile: {reason}"),
+                                    },
+                                    None,
+                                );
+                            }
+                        }
+                    } else {
+                        return (
+                            MonitorProfileStatus::IccProfileUnsupported {
+                                feature_code: "os_icc_profile".to_owned(),
+                                profile_path: Some(reference),
+                                reason: profile_probe.error.clone().unwrap_or_else(|| {
+                                    if profile_probe.discovery_available {
+                                        "OS ICC profile discovery did not return a profile"
+                                            .to_owned()
+                                    } else {
+                                        "OS ICC profile discovery is not available".to_owned()
+                                    }
+                                }),
+                            },
+                            None,
+                        );
+                    };
+                    (reference, bytes)
+                }
                 ExplicitProfilePath::UnresolvedId => {
                     return (MonitorProfileStatus::IccProfileUnsupported {
                         feature_code: "icc_profile_registry".to_owned(),
@@ -262,42 +340,12 @@ fn resolve_monitor_profile_status(
                     }, None);
                 }
             };
-
-            let Some(profile_path) = profile_path else {
-                return (
-                    MonitorProfileStatus::IccProfileUnsupported {
-                        feature_code: "os_icc_profile".to_owned(),
-                        profile_path: Some(profile_id.clone()),
-                        reason: profile_probe.error.clone().unwrap_or_else(|| {
-                            if profile_probe.discovery_available {
-                                "OS ICC profile discovery did not return a profile".to_owned()
-                            } else {
-                                "OS ICC profile discovery is not available".to_owned()
-                            }
-                        }),
-                    },
-                    None,
-                );
-            };
-
-            let profile_bytes = match std::fs::read(&profile_path) {
-                Ok(bytes) => bytes,
-                Err(reason) => {
-                    return (
-                        MonitorProfileStatus::IccProfileReadError {
-                            profile_path: Some(profile_path.display().to_string()),
-                            reason: format!("failed to read ICC profile: {reason}"),
-                        },
-                        None,
-                    );
-                }
-            };
             let parsed = match mondrian_core::icc::parse_icc_display_profile(&profile_bytes) {
                 Ok(parsed) => parsed,
                 Err(reason) => {
                     return (
                         MonitorProfileStatus::IccProfileReadError {
-                            profile_path: Some(profile_path.display().to_string()),
+                            profile_path: Some(profile_reference.clone()),
                             reason,
                         },
                         None,
@@ -318,7 +366,7 @@ fn resolve_monitor_profile_status(
                 }
                 Err(error) => (
                     MonitorProfileStatus::IccProfileUnmapped {
-                        profile_path: Some(profile_path.display().to_string()),
+                        profile_path: Some(profile_reference),
                         parsed_color_space: parsed.mapping.color_space(),
                         reason: format!(
                             "ICC profile '{}' could not produce a {source_color_space:?} device calibration processor: {error}",
@@ -749,7 +797,8 @@ mod tests {
                 },
                 ..default_policy()
             },
-            &DisplayIccProfileProbeResult::found(
+            &DisplayIccProfileProbeResult::found_path(
+                DisplayProbeBackend::WindowsWcs,
                 Some(r"\\.\DISPLAY1".to_owned()),
                 PathBuf::from(
                     r"C:\Windows\System32\spool\drivers\color\sRGB Color Space Profile.icm",
@@ -829,39 +878,67 @@ mod tests {
     #[test]
     fn monitor_hdr_capability_uses_os_advanced_color_when_known() {
         let probe = DisplayHdrProbeResult::found(
+            DisplayProbeBackend::WindowsDisplayConfig,
             Some(r"\\.\DISPLAY1".to_owned()),
-            true,
-            true,
-            false,
-            false,
-            10,
-            Some("Rgb".to_owned()),
-            Some(203),
+            DisplayHdrProbeDetails {
+                hdr_supported: Some(true),
+                hdr_enabled: Some(true),
+                force_disabled: Some(false),
+                bits_per_color_channel: Some(10),
+                color_encoding: Some("Rgb".to_owned()),
+                sdr_reference_white_nits: Some(203),
+                ..DisplayHdrProbeDetails::default()
+            },
         );
 
-        assert_eq!(
+        assert!(matches!(
             resolve_monitor_hdr_capability(&probe, no_hdr_info()),
-            (true, true)
-        );
+            MonitorHdrReadiness::Ready { ref evidence }
+                if evidence.contains("windows-display-config")
+        ));
     }
 
     #[test]
     fn monitor_hdr_capability_does_not_override_os_disabled_state() {
         let probe = DisplayHdrProbeResult::found(
+            DisplayProbeBackend::WindowsDisplayConfig,
             Some(r"\\.\DISPLAY1".to_owned()),
-            true,
-            false,
-            false,
-            false,
-            10,
-            Some("Rgb".to_owned()),
-            Some(203),
+            DisplayHdrProbeDetails {
+                hdr_supported: Some(true),
+                hdr_enabled: Some(false),
+                force_disabled: Some(false),
+                bits_per_color_channel: Some(10),
+                color_encoding: Some("Rgb".to_owned()),
+                sdr_reference_white_nits: Some(203),
+                ..DisplayHdrProbeDetails::default()
+            },
         );
 
-        assert_eq!(
+        assert!(matches!(
             resolve_monitor_hdr_capability(&probe, no_hdr_info()),
-            (true, false)
+            MonitorHdrReadiness::Unsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn hardware_only_hdr_evidence_does_not_claim_compositor_readiness() {
+        let probe = DisplayHdrProbeResult::found(
+            DisplayProbeBackend::LinuxDrmSysfs,
+            Some("card0-DP-1".to_owned()),
+            DisplayHdrProbeDetails {
+                hdr_supported: Some(true),
+                hdr_enabled: None,
+                supported_transfer_functions: vec!["PQ".to_owned(), "HLG".to_owned()],
+                max_luminance_nits: Some(1000),
+                ..DisplayHdrProbeDetails::default()
+            },
         );
+
+        assert!(matches!(
+            resolve_monitor_hdr_capability(&probe, no_hdr_info()),
+            MonitorHdrReadiness::Unknown { ref reason }
+                if reason.contains("active compositor state is unknown")
+        ));
     }
 
     #[test]
