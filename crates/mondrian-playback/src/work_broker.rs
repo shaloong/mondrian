@@ -2,7 +2,8 @@
 //!
 //! This Module owns admission, queued transport, in-flight execution leases,
 //! latest-wins invalidation, preemption, and completion binding under one lock.
-//! Payloads, keys, and deadline values remain opaque Adapter data.
+//! Payloads, keys, and absolute Adapter deadline values remain opaque. The
+//! Broker owns the lowered monotonic deadline used for lifecycle decisions.
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
@@ -11,8 +12,8 @@ use std::time::Duration;
 
 use crate::{
     FrameDemandIdentity, FrameExecutionCancellation, FrameRequestBinding, FrameRequestCompletion,
-    FrameRequestResolution, FrameWorkClass, FrameWorkPriority, MonotonicRuntimeClock,
-    MonotonicTimestamp, SystemMonotonicRuntimeClock,
+    FrameRequestResolution, FrameWorkClass, FrameWorkDeadline, FrameWorkDeadlineStatus,
+    FrameWorkPriority, MonotonicRuntimeClock, MonotonicTimestamp, SystemMonotonicRuntimeClock,
 };
 
 /// Stable identity for one dequeued execution attempt.
@@ -67,8 +68,8 @@ pub struct FrameWorkRequest<K, D, P> {
     pub work_class: FrameWorkClass,
     /// Playback demand identity when demand-backed.
     pub demand_identity: Option<FrameDemandIdentity>,
-    /// Adapter deadline carried without clock comparison by the Module.
-    pub deadline: Option<D>,
+    /// Adapter deadline plus remaining budget lowered by the Broker at admission.
+    pub deadline: Option<FrameWorkDeadline<D>>,
     /// Opaque Adapter execution payload.
     pub payload: P,
 }
@@ -146,7 +147,7 @@ pub struct ExpiredFrameWork<K, D> {
 pub struct FrameWorkBrokerDiagnostics {
     /// Latest generation observed.
     pub latest_generation: u64,
-    /// Runtime-clock samples that regressed and were clamped to the last observation.
+    /// Runtime-clock regression episodes clamped to the last observation.
     pub clock_regressions: u64,
     /// Semantic keys awaiting a terminal resolution.
     pub pending_requests: usize,
@@ -176,8 +177,12 @@ pub struct FrameWorkBrokerDiagnostics {
     pub queued_still: usize,
     /// Playback-current work already expired while queued.
     pub queued_expired_playback_current: usize,
+    /// All work whose lowered deadline has expired while queued.
+    pub queued_expired_work: usize,
     /// Expired playback-current executions returned to workers.
     pub dropped_expired_playback_current: u64,
+    /// All expired executions returned to workers.
+    pub dropped_expired_work: u64,
     /// Accepted new queued requests.
     pub submitted_queued: u64,
     /// Existing queued requests updated atomically.
@@ -230,11 +235,13 @@ pub struct FrameWorkBrokerDiagnostics {
 struct PendingBinding<D> {
     binding: FrameRequestBinding<D>,
     requested_at: MonotonicTimestamp,
+    deadline_at: Option<MonotonicTimestamp>,
 }
 
 #[derive(Debug)]
 struct QueuedWork<K, D, P> {
     request: FrameWorkRequest<K, D, P>,
+    deadline_at: Option<MonotonicTimestamp>,
 }
 
 #[derive(Debug, Clone)]
@@ -244,6 +251,9 @@ struct InFlightWork<K> {
     priority: FrameWorkPriority,
     work_class: FrameWorkClass,
     demand_identity: Option<FrameDemandIdentity>,
+    deadline_at: Option<MonotonicTimestamp>,
+    completed_at: Option<MonotonicTimestamp>,
+    preempted_at: Option<MonotonicTimestamp>,
     invalidated_at: Option<MonotonicTimestamp>,
 }
 
@@ -254,6 +264,7 @@ struct BrokerState<K, D, P> {
     queue: VecDeque<QueuedWork<K, D, P>>,
     in_flight: HashMap<FrameExecutionId, InFlightWork<K>>,
     last_observed_at: MonotonicTimestamp,
+    clock_regression_active: bool,
     closed: bool,
     metrics: FrameWorkBrokerMetrics,
 }
@@ -261,6 +272,7 @@ struct BrokerState<K, D, P> {
 #[derive(Default)]
 struct FrameWorkBrokerMetrics {
     clock_regressions: u64,
+    dropped_expired_work: u64,
     dropped_expired_playback_current: u64,
     submitted_queued: u64,
     submitted_updated_queued: u64,
@@ -333,6 +345,7 @@ where
                     queue: VecDeque::new(),
                     in_flight: HashMap::new(),
                     last_observed_at: MonotonicTimestamp::ZERO,
+                    clock_regression_active: false,
                     closed: false,
                     metrics: FrameWorkBrokerMetrics::default(),
                 }),
@@ -382,6 +395,7 @@ where
             return FrameWorkSubmission::DroppedBackpressure;
         }
         let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
+        let deadline_at = lowered_deadline_at(request.deadline, now);
 
         if let Some(previous) = state.pending.get(&request.key).copied() {
             let previous_binding = previous.binding;
@@ -410,9 +424,10 @@ where
                         } else {
                             previous.requested_at
                         },
+                        deadline_at,
                     },
                 );
-                state.queue[index] = QueuedWork { request };
+                state.queue[index] = QueuedWork { request, deadline_at };
                 refresh_in_flight_invalidations_locked(&mut state, now);
                 bump(&mut state.metrics.submitted_updated_queued);
                 if work_class_changed {
@@ -436,6 +451,7 @@ where
                         } else {
                             previous.requested_at
                         },
+                        deadline_at,
                     },
                 );
                 refresh_in_flight_invalidations_locked(&mut state, now);
@@ -451,10 +467,10 @@ where
             let (evicted_prefetch, evicted_still) = apply_eviction(&mut state, eviction);
             state.pending.insert(
                 request.key.clone(),
-                PendingBinding { binding, requested_at: now },
+                PendingBinding { binding, requested_at: now, deadline_at },
             );
             bump(&mut state.metrics.submitted_work_class_changes);
-            state.queue.push_back(QueuedWork { request });
+            state.queue.push_back(QueuedWork { request, deadline_at });
             refresh_in_flight_invalidations_locked(&mut state, now);
             bump(&mut state.metrics.submitted_queued);
             self.shared.changed.notify_all();
@@ -475,9 +491,13 @@ where
         let (evicted_prefetch, evicted_still) = apply_eviction(&mut state, eviction);
         state.pending.insert(
             request.key.clone(),
-            PendingBinding { binding: binding_for(&request), requested_at: now },
+            PendingBinding {
+                binding: binding_for(&request),
+                requested_at: now,
+                deadline_at,
+            },
         );
-        state.queue.push_back(QueuedWork { request });
+        state.queue.push_back(QueuedWork { request, deadline_at });
         refresh_in_flight_invalidations_locked(&mut state, now);
         bump(&mut state.metrics.submitted_queued);
         self.shared.changed.notify_all();
@@ -485,14 +505,11 @@ where
     }
 
     /// Block until eligible work or closure, then create one execution lease.
-    pub fn receive(
-        &self,
-        lane: FrameWorkerLane,
-        deadline_expired: impl Fn(Option<D>) -> bool,
-    ) -> Option<FrameWorkReceive<K, D, P>> {
+    pub fn receive(&self, lane: FrameWorkerLane) -> Option<FrameWorkReceive<K, D, P>> {
         let mut state = lock_state(&self.shared.state);
         loop {
-            if let Some(index) = next_work_index(&state.queue, lane, &deadline_expired) {
+            let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
+            if let Some(index) = next_work_index(&state.queue, lane, now) {
                 let queued = state.queue.remove(index)?;
                 let request = queued.request;
                 let id = FrameExecutionId(state.next_execution_id);
@@ -505,14 +522,21 @@ where
                         priority: request.priority,
                         work_class: request.work_class,
                         demand_identity: request.demand_identity,
+                        deadline_at: queued.deadline_at,
+                        completed_at: None,
+                        preempted_at: None,
                         invalidated_at: None,
                     },
                 );
-                let expired = request.priority == FrameWorkPriority::Current
-                    && request.work_class == FrameWorkClass::Playback
-                    && deadline_expired(request.deadline);
+                refresh_in_flight_invalidations_locked(&mut state, now);
+                let expired = deadline_expired(queued.deadline_at, now);
                 if expired {
-                    bump(&mut state.metrics.dropped_expired_playback_current);
+                    bump(&mut state.metrics.dropped_expired_work);
+                    if request.priority == FrameWorkPriority::Current
+                        && request.work_class == FrameWorkClass::Playback
+                    {
+                        bump(&mut state.metrics.dropped_expired_playback_current);
+                    }
                 }
                 let execution = FrameWorkExecution {
                     id,
@@ -521,7 +545,7 @@ where
                     priority: request.priority,
                     work_class: request.work_class,
                     demand_identity: request.demand_identity,
-                    deadline: request.deadline,
+                    deadline: request.deadline.map(FrameWorkDeadline::adapter_deadline),
                     payload: request.payload,
                 };
                 return Some(if expired {
@@ -551,29 +575,54 @@ where
         let Some(execution) = state.in_flight.get(&id) else {
             return Some(FrameExecutionCancellation::Superseded { age: None });
         };
-        if !execution_current_locked(state.latest_generation, &state.pending, execution) {
-            return Some(FrameExecutionCancellation::Superseded {
-                age: execution
-                    .invalidated_at
-                    .map(|invalidated_at| elapsed_since(now, invalidated_at)),
+        let mut candidate = None;
+        if current_pending_binding(state.latest_generation, &state.pending, execution).is_none() {
+            let Some(invalidated_at) = execution.invalidated_at else {
+                return Some(FrameExecutionCancellation::Superseded { age: None });
+            };
+            candidate = Some(ExecutionCancellationCandidate {
+                requested_at: invalidated_at,
+                cause: ExecutionCancellationCause::Superseded,
             });
         }
-        if execution.priority == FrameWorkPriority::Prefetch {
-            if let Some(requested_at) = oldest_other_current_request(&state, execution, false) {
-                return Some(FrameExecutionCancellation::PrefetchPreemptedByCurrent {
-                    request_age: elapsed_since(now, requested_at),
-                });
-            }
-        } else if execution.work_class == FrameWorkClass::Still {
-            if let Some(requested_at) = oldest_other_current_request(&state, execution, true) {
-                return Some(
-                    FrameExecutionCancellation::StillPreemptedByRealtimeCurrent {
-                        request_age: elapsed_since(now, requested_at),
-                    },
-                );
-            }
+        if let Some(requested_at) = execution.preempted_at {
+            let cause = if execution.priority == FrameWorkPriority::Prefetch {
+                ExecutionCancellationCause::PrefetchPreemptedByCurrent
+            } else {
+                ExecutionCancellationCause::StillPreemptedByRealtimeCurrent
+            };
+            candidate = earlier_cancellation(
+                candidate,
+                ExecutionCancellationCandidate { requested_at, cause },
+            );
         }
-        None
+        if let Some(deadline_at) = execution.deadline_at.filter(|deadline| *deadline <= now) {
+            candidate = earlier_cancellation(
+                candidate,
+                ExecutionCancellationCandidate {
+                    requested_at: deadline_at,
+                    cause: ExecutionCancellationCause::DeadlineExpired,
+                },
+            );
+        }
+        candidate.map(|candidate| candidate.into_cancellation(now))
+    }
+
+    /// Record the worker-return instant without resolving its latest binding.
+    ///
+    /// Completion is stamped once so later UI/event-loop latency cannot turn
+    /// on-time work into a false miss. The lease remains in flight until
+    /// [`Self::resolve_execution`] atomically evaluates the latest binding.
+    pub fn mark_execution_completed(&self, id: FrameExecutionId) -> bool {
+        let mut state = lock_state(&self.shared.state);
+        let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
+        let Some(execution) = state.in_flight.get_mut(&id) else {
+            return false;
+        };
+        if execution.completed_at.is_none() {
+            execution.completed_at = Some(now);
+        }
+        true
     }
 
     /// Resolve one execution lease atomically against the latest binding.
@@ -587,11 +636,14 @@ where
             return FrameRequestResolution {
                 completion: FrameRequestCompletion::Stale,
                 binding: None,
+                deadline: FrameWorkDeadlineStatus::NotApplicable,
             };
         };
         let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
+        let deadline =
+            deadline_status(execution.deadline_at, execution.completed_at.unwrap_or(now));
         let cause = completion_cause(&state, &execution, reusable);
-        let resolution = resolve_locked(&mut state, execution, reusable);
+        let resolution = resolve_locked(&mut state, execution, reusable, deadline);
         refresh_in_flight_invalidations_locked(&mut state, now);
         record_completion(&mut state.metrics, resolution.completion, cause);
         resolution
@@ -608,16 +660,25 @@ where
     ) -> FrameRequestResolution<D> {
         let mut state = lock_state(&self.shared.state);
         let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
-        let execution = InFlightWork {
+        let mut execution = InFlightWork {
             key,
             generation,
             priority: FrameWorkPriority::Current,
             work_class,
             demand_identity,
+            deadline_at: None,
+            completed_at: Some(now),
+            preempted_at: None,
             invalidated_at: None,
         };
+        if let Some(current) =
+            current_pending_binding(state.latest_generation, &state.pending, &execution)
+        {
+            execution.deadline_at = current.deadline_at;
+        }
+        let deadline = deadline_status(execution.deadline_at, now);
         let cause = completion_cause(&state, &execution, reusable);
-        let resolution = resolve_locked(&mut state, execution, reusable);
+        let resolution = resolve_locked(&mut state, execution, reusable, deadline);
         refresh_in_flight_invalidations_locked(&mut state, now);
         record_completion(&mut state.metrics, resolution.completion, cause);
         resolution
@@ -788,17 +849,16 @@ where
     }
 
     /// Return stable lifecycle and queue evidence.
-    pub fn diagnostics(
-        &self,
-        deadline_expired: impl Fn(Option<D>) -> bool,
-    ) -> FrameWorkBrokerDiagnostics {
-        let state = lock_state(&self.shared.state);
+    pub fn diagnostics(&self) -> FrameWorkBrokerDiagnostics {
+        let mut state = lock_state(&self.shared.state);
+        let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
         let mut diagnostics = FrameWorkBrokerDiagnostics {
             latest_generation: state.latest_generation,
             clock_regressions: state.metrics.clock_regressions,
             pending_requests: state.pending.len(),
             queued_work: state.queue.len(),
             in_flight_work: state.in_flight.len(),
+            dropped_expired_work: state.metrics.dropped_expired_work,
             dropped_expired_playback_current: state.metrics.dropped_expired_playback_current,
             submitted_queued: state.metrics.submitted_queued,
             submitted_updated_queued: state.metrics.submitted_updated_queued,
@@ -837,9 +897,12 @@ where
             }
             if queued.request.priority == FrameWorkPriority::Current
                 && queued.request.work_class == FrameWorkClass::Playback
-                && deadline_expired(queued.request.deadline)
+                && deadline_expired(queued.deadline_at, now)
             {
                 diagnostics.queued_expired_playback_current += 1;
+            }
+            if deadline_expired(queued.deadline_at, now) {
+                diagnostics.queued_expired_work += 1;
             }
         }
         for execution in state.in_flight.values() {
@@ -863,8 +926,19 @@ fn binding_for<K, D: Copy, P>(request: &FrameWorkRequest<K, D, P>) -> FrameReque
         priority: request.priority,
         work_class: request.work_class,
         demand_identity: request.demand_identity,
-        deadline: request.deadline,
+        deadline: request.deadline.map(FrameWorkDeadline::adapter_deadline),
     }
+}
+
+fn lowered_deadline_at<D: Copy>(
+    deadline: Option<FrameWorkDeadline<D>>,
+    now: MonotonicTimestamp,
+) -> Option<MonotonicTimestamp> {
+    deadline.map(|deadline| now.saturating_add(deadline.remaining_at_admission()))
+}
+
+fn deadline_expired(deadline_at: Option<MonotonicTimestamp>, now: MonotonicTimestamp) -> bool {
+    deadline_at.is_some_and(|deadline| deadline <= now)
 }
 
 fn priority_accepts(priority: FrameWorkPriority, class: FrameWorkClass) -> bool {
@@ -1058,40 +1132,84 @@ fn prune_obsolete_locked<K, D, P>(state: &mut BrokerState<K, D, P>) {
     state.queue.retain(|queued| queued.request.generation >= latest);
 }
 
-fn execution_current_locked<K, D>(
+fn current_pending_binding<'a, K, D>(
     latest_generation: u64,
-    pending: &HashMap<K, PendingBinding<D>>,
+    pending: &'a HashMap<K, PendingBinding<D>>,
     execution: &InFlightWork<K>,
-) -> bool
+) -> Option<&'a PendingBinding<D>>
 where
     K: Eq + Hash,
 {
-    pending.get(&execution.key).is_some_and(|pending| {
+    pending.get(&execution.key).filter(|pending| {
         pending.binding.work_class == execution.work_class
             && pending.binding.generation >= execution.generation
             && pending.binding.generation >= latest_generation
     })
 }
 
-fn oldest_other_current_request<K, D, P>(
-    state: &BrokerState<K, D, P>,
+fn oldest_other_current_request<K, D>(
+    latest_generation: u64,
+    pending: &HashMap<K, PendingBinding<D>>,
     execution: &InFlightWork<K>,
     realtime_only: bool,
 ) -> Option<MonotonicTimestamp>
 where
     K: Eq,
 {
-    state
-        .pending
+    pending
         .iter()
         .filter(|(key, pending)| {
             *key != &execution.key
                 && pending.binding.priority == FrameWorkPriority::Current
                 && (!realtime_only || pending.binding.work_class != FrameWorkClass::Still)
-                && pending.binding.generation >= state.latest_generation
+                && pending.binding.generation >= latest_generation
         })
         .map(|(_, pending)| pending.requested_at)
         .min()
+}
+
+#[derive(Clone, Copy)]
+enum ExecutionCancellationCause {
+    Superseded,
+    PrefetchPreemptedByCurrent,
+    StillPreemptedByRealtimeCurrent,
+    DeadlineExpired,
+}
+
+#[derive(Clone, Copy)]
+struct ExecutionCancellationCandidate {
+    requested_at: MonotonicTimestamp,
+    cause: ExecutionCancellationCause,
+}
+
+impl ExecutionCancellationCandidate {
+    fn into_cancellation(self, now: MonotonicTimestamp) -> FrameExecutionCancellation {
+        let age = elapsed_since(now, self.requested_at);
+        match self.cause {
+            ExecutionCancellationCause::Superseded => {
+                FrameExecutionCancellation::Superseded { age: Some(age) }
+            }
+            ExecutionCancellationCause::PrefetchPreemptedByCurrent => {
+                FrameExecutionCancellation::PrefetchPreemptedByCurrent { request_age: age }
+            }
+            ExecutionCancellationCause::StillPreemptedByRealtimeCurrent => {
+                FrameExecutionCancellation::StillPreemptedByRealtimeCurrent { request_age: age }
+            }
+            ExecutionCancellationCause::DeadlineExpired => {
+                FrameExecutionCancellation::DeadlineExpired { age }
+            }
+        }
+    }
+}
+
+fn earlier_cancellation(
+    current: Option<ExecutionCancellationCandidate>,
+    candidate: ExecutionCancellationCandidate,
+) -> Option<ExecutionCancellationCandidate> {
+    match current {
+        Some(current) if current.requested_at <= candidate.requested_at => Some(current),
+        _ => Some(candidate),
+    }
 }
 
 fn refresh_in_flight_invalidations_locked<K, D, P>(
@@ -1102,10 +1220,25 @@ fn refresh_in_flight_invalidations_locked<K, D, P>(
 {
     let BrokerState { latest_generation, pending, in_flight, .. } = state;
     for execution in in_flight.values_mut() {
-        if execution_current_locked(*latest_generation, pending, execution) {
+        if let Some(current) = current_pending_binding(*latest_generation, pending, execution) {
+            execution.deadline_at = current.deadline_at;
             execution.invalidated_at = None;
         } else if execution.invalidated_at.is_none() {
             execution.invalidated_at = Some(now);
+        }
+        let preempted_at = if execution.priority == FrameWorkPriority::Prefetch {
+            oldest_other_current_request(*latest_generation, pending, execution, false)
+        } else if execution.work_class == FrameWorkClass::Still {
+            oldest_other_current_request(*latest_generation, pending, execution, true)
+        } else {
+            None
+        };
+        if let Some(preempted_at) = preempted_at {
+            execution.preempted_at = Some(
+                execution
+                    .preempted_at
+                    .map_or(preempted_at, |existing| existing.min(preempted_at)),
+            );
         }
     }
 }
@@ -1113,11 +1246,8 @@ fn refresh_in_flight_invalidations_locked<K, D, P>(
 fn next_work_index<K, D, P>(
     queue: &VecDeque<QueuedWork<K, D, P>>,
     lane: FrameWorkerLane,
-    deadline_expired: &impl Fn(Option<D>) -> bool,
-) -> Option<usize>
-where
-    D: Copy,
-{
+    now: MonotonicTimestamp,
+) -> Option<usize> {
     queue
         .iter()
         .enumerate()
@@ -1127,17 +1257,22 @@ where
         })
         .min_by_key(|(_, queued)| {
             (
-                deadline_expired(queued.request.deadline),
+                deadline_expired(queued.deadline_at, now),
                 !lane.accepts(queued.request.work_class),
                 work_rank(queued.request.work_class),
             )
         })
         .map(|(index, _)| index)
         .or_else(|| {
-            queue.iter().position(|queued| {
-                queued.request.priority == FrameWorkPriority::Prefetch
-                    && lane.accepts(queued.request.work_class)
-            })
+            queue
+                .iter()
+                .enumerate()
+                .filter(|(_, queued)| {
+                    queued.request.priority == FrameWorkPriority::Prefetch
+                        && lane.accepts(queued.request.work_class)
+                })
+                .min_by_key(|(_, queued)| deadline_expired(queued.deadline_at, now))
+                .map(|(index, _)| index)
         })
 }
 
@@ -1216,6 +1351,7 @@ fn resolve_locked<K, D, P>(
     state: &mut BrokerState<K, D, P>,
     execution: InFlightWork<K>,
     reusable: bool,
+    deadline: FrameWorkDeadlineStatus,
 ) -> FrameRequestResolution<D>
 where
     K: Eq + Hash,
@@ -1229,6 +1365,7 @@ where
                 FrameRequestCompletion::Stale
             },
             binding: None,
+            deadline,
         };
     };
     if pending.binding.work_class != execution.work_class {
@@ -1239,6 +1376,7 @@ where
                 FrameRequestCompletion::Stale
             },
             binding: None,
+            deadline,
         };
     }
     let changed = pending.binding.generation != execution.generation
@@ -1247,6 +1385,7 @@ where
         return FrameRequestResolution {
             completion: FrameRequestCompletion::Stale,
             binding: None,
+            deadline,
         };
     }
     state.pending.remove(&execution.key);
@@ -1256,12 +1395,28 @@ where
         FrameRequestResolution {
             completion: FrameRequestCompletion::Current,
             binding: Some(pending.binding),
+            deadline,
         }
     } else {
         FrameRequestResolution {
             completion: FrameRequestCompletion::Stale,
             binding: None,
+            deadline,
         }
+    }
+}
+
+fn deadline_status(
+    deadline_at: Option<MonotonicTimestamp>,
+    completed_at: MonotonicTimestamp,
+) -> FrameWorkDeadlineStatus {
+    let Some(deadline_at) = deadline_at else {
+        return FrameWorkDeadlineStatus::NotApplicable;
+    };
+    if completed_at < deadline_at {
+        FrameWorkDeadlineStatus::OnTime
+    } else {
+        FrameWorkDeadlineStatus::Missed { late_by: elapsed_since(completed_at, deadline_at) }
     }
 }
 
@@ -1275,9 +1430,13 @@ fn observe_now_locked<K, D, P>(
 ) -> MonotonicTimestamp {
     let sampled = clock.now();
     if sampled < state.last_observed_at {
-        bump(&mut state.metrics.clock_regressions);
+        if !state.clock_regression_active {
+            bump(&mut state.metrics.clock_regressions);
+            state.clock_regression_active = true;
+        }
         state.last_observed_at
     } else {
+        state.clock_regression_active = false;
         state.last_observed_at = sampled;
         sampled
     }
@@ -1345,7 +1504,7 @@ mod tests {
             priority: FrameWorkPriority::Current,
             work_class: class,
             demand_identity: None,
-            deadline: Some(100),
+            deadline: None,
             payload: key,
         }
     }
@@ -1358,14 +1517,14 @@ mod tests {
             broker.submit(request(1, generation, FrameWorkClass::Playback)),
             FrameWorkSubmission::Queued { .. }
         ));
-        let execution = match broker.receive(FrameWorkerLane::Playback, |_| false) {
+        let execution = match broker.receive(FrameWorkerLane::Playback) {
             Some(FrameWorkReceive::Ready(execution)) => execution,
             other => panic!("unexpected receive: {other:?}"),
         };
         assert_eq!(broker.execution_cancellation(execution.id), None);
         let resolution = broker.resolve_execution(execution.id, true);
         assert_eq!(resolution.completion, FrameRequestCompletion::Current);
-        let diagnostics = broker.diagnostics(|_| false);
+        let diagnostics = broker.diagnostics();
         assert_eq!(diagnostics.pending_requests, 0);
         assert_eq!(diagnostics.queued_work, 0);
         assert_eq!(diagnostics.in_flight_work, 0);
@@ -1373,26 +1532,37 @@ mod tests {
 
     #[test]
     fn current_still_work_preserves_decoder_lane_affinity() {
-        let queue = VecDeque::from([QueuedWork { request: request(1, 1, FrameWorkClass::Still) }]);
+        let queue = VecDeque::from([QueuedWork {
+            request: request(1, 1, FrameWorkClass::Still),
+            deadline_at: None,
+        }]);
 
         assert_eq!(
-            next_work_index(&queue, FrameWorkerLane::Playback, &|_| false),
+            next_work_index(&queue, FrameWorkerLane::Playback, MonotonicTimestamp::ZERO),
             None
         );
         assert_eq!(
-            next_work_index(&queue, FrameWorkerLane::Interactive, &|_| false),
+            next_work_index(
+                &queue,
+                FrameWorkerLane::Interactive,
+                MonotonicTimestamp::ZERO
+            ),
             None
         );
         assert_eq!(
-            next_work_index(&queue, FrameWorkerLane::Still, &|_| false),
+            next_work_index(&queue, FrameWorkerLane::Still, MonotonicTimestamp::ZERO),
             Some(0)
         );
         assert_eq!(
-            next_work_index(&queue, FrameWorkerLane::NonPlayback, &|_| false),
+            next_work_index(
+                &queue,
+                FrameWorkerLane::NonPlayback,
+                MonotonicTimestamp::ZERO
+            ),
             Some(0)
         );
         assert_eq!(
-            next_work_index(&queue, FrameWorkerLane::Any, &|_| false),
+            next_work_index(&queue, FrameWorkerLane::Any, MonotonicTimestamp::ZERO),
             Some(0)
         );
     }
@@ -1402,13 +1572,16 @@ mod tests {
         let broker = FrameWorkBroker::new(2, 2);
         let first = broker.begin_generation();
         broker.submit(request(1, first, FrameWorkClass::Playback));
-        let execution = match broker.receive(FrameWorkerLane::Playback, |_| false) {
+        let execution = match broker.receive(FrameWorkerLane::Playback) {
             Some(FrameWorkReceive::Ready(execution)) => execution,
             other => panic!("unexpected receive: {other:?}"),
         };
         let latest = broker.begin_generation();
         let mut latest_request = request(1, latest, FrameWorkClass::Playback);
-        latest_request.deadline = Some(200);
+        latest_request.deadline = Some(FrameWorkDeadline::from_remaining(
+            200,
+            Duration::from_secs(1),
+        ));
         assert_eq!(
             broker.submit(latest_request),
             FrameWorkSubmission::ReusedInFlight
@@ -1423,7 +1596,7 @@ mod tests {
         let broker = FrameWorkBroker::new(2, 2);
         let first = broker.begin_generation();
         broker.submit(request(1, first, FrameWorkClass::Playback));
-        let execution = match broker.receive(FrameWorkerLane::Playback, |_| false) {
+        let execution = match broker.receive(FrameWorkerLane::Playback) {
             Some(FrameWorkReceive::Ready(execution)) => execution,
             other => panic!("unexpected receive: {other:?}"),
         };
@@ -1453,7 +1626,7 @@ mod tests {
         let broker = FrameWorkBroker::new_with_clock(2, 2, clock.clone());
         let generation = broker.begin_generation();
         broker.submit(request(1, generation, FrameWorkClass::Playback));
-        let execution = match broker.receive(FrameWorkerLane::Playback, |_| false) {
+        let execution = match broker.receive(FrameWorkerLane::Playback) {
             Some(FrameWorkReceive::Ready(execution)) => execution,
             other => panic!("unexpected receive: {other:?}"),
         };
@@ -1471,7 +1644,7 @@ mod tests {
             broker.execution_cancellation(execution.id),
             Some(FrameExecutionCancellation::Superseded { age: Some(Duration::from_millis(7)) })
         );
-        assert_eq!(broker.diagnostics(|_| false).clock_regressions, 1);
+        assert_eq!(broker.diagnostics().clock_regressions, 1);
     }
 
     #[test]
@@ -1495,7 +1668,7 @@ mod tests {
         let broker = FrameWorkBroker::new(2, 2);
         let generation = broker.begin_generation();
         broker.submit(request(1, generation, FrameWorkClass::Playback));
-        let execution = match broker.receive(FrameWorkerLane::Playback, |_| false) {
+        let execution = match broker.receive(FrameWorkerLane::Playback) {
             Some(FrameWorkReceive::Ready(execution)) => execution,
             other => panic!("unexpected receive: {other:?}"),
         };
@@ -1514,7 +1687,7 @@ mod tests {
         let broker = FrameWorkBroker::new_with_clock(2, 2, clock.clone());
         let generation = broker.begin_generation();
         broker.submit(request(1, generation, FrameWorkClass::Still));
-        let execution = match broker.receive(FrameWorkerLane::Still, |_| false) {
+        let execution = match broker.receive(FrameWorkerLane::Still) {
             Some(FrameWorkReceive::Ready(execution)) => execution,
             other => panic!("unexpected receive: {other:?}"),
         };
@@ -1550,7 +1723,7 @@ mod tests {
             }
         ));
 
-        let execution = match broker.receive(FrameWorkerLane::Interactive, |_| false) {
+        let execution = match broker.receive(FrameWorkerLane::Interactive) {
             Some(FrameWorkReceive::Ready(execution)) => execution,
             other => panic!("unexpected receive: {other:?}"),
         };
@@ -1563,7 +1736,7 @@ mod tests {
         let broker = FrameWorkBroker::new(2, 2);
         let generation = broker.begin_generation();
         broker.submit(request(1, generation, FrameWorkClass::Interactive));
-        let old = match broker.receive(FrameWorkerLane::Interactive, |_| false) {
+        let old = match broker.receive(FrameWorkerLane::Interactive) {
             Some(FrameWorkReceive::Ready(execution)) => execution,
             other => panic!("unexpected receive: {other:?}"),
         };
@@ -1579,7 +1752,7 @@ mod tests {
             broker.resolve_execution(old.id, true).completion,
             FrameRequestCompletion::CacheOnly
         );
-        assert_eq!(broker.diagnostics(|_| false).queued_work, 1);
+        assert_eq!(broker.diagnostics().queued_work, 1);
     }
 
     #[test]
@@ -1587,7 +1760,7 @@ mod tests {
         let broker = FrameWorkBroker::new(2, 2);
         let first = broker.begin_generation();
         broker.submit(request(1, first, FrameWorkClass::Playback));
-        let execution = match broker.receive(FrameWorkerLane::Playback, |_| false) {
+        let execution = match broker.receive(FrameWorkerLane::Playback) {
             Some(FrameWorkReceive::Ready(execution)) => execution,
             other => panic!("unexpected receive: {other:?}"),
         };
@@ -1597,24 +1770,175 @@ mod tests {
             broker.resolve_execution(execution.id, false).completion,
             FrameRequestCompletion::Stale
         );
-        assert_eq!(broker.diagnostics(|_| false).pending_requests, 1);
+        assert_eq!(broker.diagnostics().pending_requests, 1);
     }
 
     #[test]
     fn playback_deadline_expires_at_dequeue_without_losing_lease_identity() {
-        let broker = FrameWorkBroker::new(1, 1);
+        let clock = ManualRuntimeClock::at(Duration::from_millis(10));
+        let broker = FrameWorkBroker::new_with_clock(1, 1, clock.clone());
         let generation = broker.begin_generation();
-        broker.submit(request(1, generation, FrameWorkClass::Playback));
-        let execution = match broker.receive(FrameWorkerLane::Playback, |deadline| {
-            deadline.is_some_and(|value| value <= 100)
-        }) {
+        let mut request = request(1, generation, FrameWorkClass::Playback);
+        request.deadline = Some(FrameWorkDeadline::from_remaining(
+            100,
+            Duration::from_millis(20),
+        ));
+        broker.submit(request);
+        clock.set(Duration::from_millis(29));
+        assert_eq!(broker.diagnostics().queued_expired_work, 0);
+        clock.set(Duration::from_millis(30));
+        assert_eq!(broker.diagnostics().queued_expired_work, 1);
+        let execution = match broker.receive(FrameWorkerLane::Playback) {
             Some(FrameWorkReceive::Expired(execution)) => execution,
             other => panic!("unexpected receive: {other:?}"),
         };
         assert_eq!(execution.key, 1);
+        assert_eq!(execution.deadline, Some(100));
+        assert_eq!(broker.diagnostics().dropped_expired_work, 1);
+        assert_eq!(broker.diagnostics().dropped_expired_playback_current, 1);
         assert_eq!(
             broker.resolve_execution(execution.id, false).completion,
             FrameRequestCompletion::Current
+        );
+    }
+
+    #[test]
+    fn expired_prefetch_uses_generic_deadline_evidence() {
+        let clock = ManualRuntimeClock::at(Duration::from_millis(10));
+        let broker = FrameWorkBroker::new_with_clock(1, 1, clock.clone());
+        let generation = broker.begin_generation();
+        let mut request = request(1, generation, FrameWorkClass::Playback);
+        request.priority = FrameWorkPriority::Prefetch;
+        request.deadline = Some(FrameWorkDeadline::from_remaining(
+            100,
+            Duration::from_millis(20),
+        ));
+        broker.submit(request);
+        clock.set(Duration::from_millis(30));
+
+        assert!(matches!(
+            broker.receive(FrameWorkerLane::Playback),
+            Some(FrameWorkReceive::Expired(_))
+        ));
+        let diagnostics = broker.diagnostics();
+        assert_eq!(diagnostics.dropped_expired_work, 1);
+        assert_eq!(diagnostics.dropped_expired_playback_current, 0);
+    }
+
+    #[test]
+    fn worker_completion_stamp_prevents_poll_delay_false_miss() {
+        let clock = ManualRuntimeClock::at(Duration::from_millis(10));
+        let broker = FrameWorkBroker::new_with_clock(1, 1, clock.clone());
+        let generation = broker.begin_generation();
+        let mut request = request(1, generation, FrameWorkClass::Playback);
+        request.deadline = Some(FrameWorkDeadline::from_remaining(
+            100,
+            Duration::from_millis(20),
+        ));
+        broker.submit(request);
+        let execution = match broker.receive(FrameWorkerLane::Playback) {
+            Some(FrameWorkReceive::Ready(execution)) => execution,
+            other => panic!("unexpected receive: {other:?}"),
+        };
+
+        clock.set(Duration::from_millis(29));
+        assert!(broker.mark_execution_completed(execution.id));
+        clock.set(Duration::from_millis(40));
+        let resolution = broker.resolve_execution(execution.id, true);
+
+        assert_eq!(resolution.deadline, FrameWorkDeadlineStatus::OnTime);
+    }
+
+    #[test]
+    fn in_flight_deadline_rebind_uses_latest_binding_and_exact_age() {
+        let clock = ManualRuntimeClock::at(Duration::from_millis(10));
+        let broker = FrameWorkBroker::new_with_clock(1, 1, clock.clone());
+        let first = broker.begin_generation();
+        let mut first_request = request(1, first, FrameWorkClass::Playback);
+        first_request.deadline = Some(FrameWorkDeadline::from_remaining(
+            100,
+            Duration::from_millis(40),
+        ));
+        broker.submit(first_request);
+        let execution = match broker.receive(FrameWorkerLane::Playback) {
+            Some(FrameWorkReceive::Ready(execution)) => execution,
+            other => panic!("unexpected receive: {other:?}"),
+        };
+
+        clock.set(Duration::from_millis(20));
+        let latest = broker.begin_generation();
+        let mut rebound = request(1, latest, FrameWorkClass::Playback);
+        rebound.deadline = Some(FrameWorkDeadline::from_remaining(
+            200,
+            Duration::from_millis(100),
+        ));
+        assert_eq!(broker.submit(rebound), FrameWorkSubmission::ReusedInFlight);
+
+        clock.set(Duration::from_millis(50));
+        assert_eq!(broker.execution_cancellation(execution.id), None);
+        clock.set(Duration::from_millis(125));
+        assert_eq!(
+            broker.execution_cancellation(execution.id),
+            Some(FrameExecutionCancellation::DeadlineExpired { age: Duration::from_millis(5) })
+        );
+        let resolution = broker.resolve_execution(execution.id, true);
+        assert_eq!(
+            resolution.binding.expect("latest binding").deadline,
+            Some(200)
+        );
+    }
+
+    #[test]
+    fn earliest_deadline_wins_over_later_preemption_request() {
+        let clock = ManualRuntimeClock::at(Duration::from_millis(10));
+        let broker = FrameWorkBroker::new_with_clock(2, 2, clock.clone());
+        let generation = broker.begin_generation();
+        let mut prefetch = request(1, generation, FrameWorkClass::Playback);
+        prefetch.priority = FrameWorkPriority::Prefetch;
+        prefetch.deadline = Some(FrameWorkDeadline::from_remaining(
+            100,
+            Duration::from_millis(20),
+        ));
+        broker.submit(prefetch);
+        let execution = match broker.receive(FrameWorkerLane::Playback) {
+            Some(FrameWorkReceive::Ready(execution)) => execution,
+            other => panic!("unexpected receive: {other:?}"),
+        };
+
+        clock.set(Duration::from_millis(35));
+        broker.submit(request(2, generation, FrameWorkClass::Playback));
+        clock.set(Duration::from_millis(40));
+
+        assert_eq!(
+            broker.execution_cancellation(execution.id),
+            Some(FrameExecutionCancellation::DeadlineExpired { age: Duration::from_millis(10) })
+        );
+    }
+
+    #[test]
+    fn earliest_preemption_survives_later_generation_invalidation() {
+        let clock = ManualRuntimeClock::at(Duration::from_millis(10));
+        let broker = FrameWorkBroker::new_with_clock(2, 2, clock.clone());
+        let generation = broker.begin_generation();
+        let mut prefetch = request(1, generation, FrameWorkClass::Playback);
+        prefetch.priority = FrameWorkPriority::Prefetch;
+        broker.submit(prefetch);
+        let execution = match broker.receive(FrameWorkerLane::Playback) {
+            Some(FrameWorkReceive::Ready(execution)) => execution,
+            other => panic!("unexpected receive: {other:?}"),
+        };
+
+        clock.set(Duration::from_millis(20));
+        broker.submit(request(2, generation, FrameWorkClass::Playback));
+        clock.set(Duration::from_millis(30));
+        broker.begin_generation();
+        clock.set(Duration::from_millis(40));
+
+        assert_eq!(
+            broker.execution_cancellation(execution.id),
+            Some(FrameExecutionCancellation::PrefetchPreemptedByCurrent {
+                request_age: Duration::from_millis(20),
+            })
         );
     }
 
@@ -1627,7 +1951,7 @@ mod tests {
         assert_eq!(broker.prune_obsolete(), 1);
         broker.submit(request(2, latest, FrameWorkClass::Playback));
         assert_eq!(broker.cancel_key(&2), 1);
-        let diagnostics = broker.diagnostics(|_| false);
+        let diagnostics = broker.diagnostics();
         assert_eq!(diagnostics.pending_requests, 0);
         assert_eq!(diagnostics.queued_work, 0);
     }
@@ -1639,7 +1963,7 @@ mod tests {
         let mut in_flight_prefetch = request(1, generation, FrameWorkClass::Playback);
         in_flight_prefetch.priority = FrameWorkPriority::Prefetch;
         broker.submit(in_flight_prefetch);
-        let prefetch_execution = match broker.receive(FrameWorkerLane::Playback, |_| false) {
+        let prefetch_execution = match broker.receive(FrameWorkerLane::Playback) {
             Some(FrameWorkReceive::Ready(execution)) => execution,
             other => panic!("unexpected receive: {other:?}"),
         };
@@ -1655,7 +1979,7 @@ mod tests {
             broker.execution_cancellation(prefetch_execution.id),
             Some(FrameExecutionCancellation::PrefetchPreemptedByCurrent { .. })
         ));
-        let queued = match broker.receive(FrameWorkerLane::Playback, |_| false) {
+        let queued = match broker.receive(FrameWorkerLane::Playback) {
             Some(FrameWorkReceive::Ready(execution)) => execution,
             other => panic!("unexpected receive: {other:?}"),
         };
@@ -1667,7 +1991,7 @@ mod tests {
         let broker = FrameWorkBroker::new(2, 1);
         let generation = broker.begin_generation();
         broker.submit(request(1, generation, FrameWorkClass::Playback));
-        let _current = match broker.receive(FrameWorkerLane::Playback, |_| false) {
+        let _current = match broker.receive(FrameWorkerLane::Playback) {
             Some(FrameWorkReceive::Ready(execution)) => execution,
             other => panic!("unexpected receive: {other:?}"),
         };
@@ -1688,7 +2012,7 @@ mod tests {
         let broker = FrameWorkBroker::new(2, 1);
         let generation = broker.begin_generation();
         broker.submit(request(1, generation, FrameWorkClass::Playback));
-        let original = match broker.receive(FrameWorkerLane::Playback, |_| false) {
+        let original = match broker.receive(FrameWorkerLane::Playback) {
             Some(FrameWorkReceive::Ready(execution)) => execution,
             other => panic!("unexpected receive: {other:?}"),
         };
@@ -1699,6 +2023,6 @@ mod tests {
             FrameWorkSubmission::DroppedBackpressure
         );
         assert_eq!(broker.execution_cancellation(original.id), None);
-        assert_eq!(broker.diagnostics(|_| false).pending_requests, 2);
+        assert_eq!(broker.diagnostics().pending_requests, 2);
     }
 }

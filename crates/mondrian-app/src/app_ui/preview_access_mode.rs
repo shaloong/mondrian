@@ -108,7 +108,7 @@ pub(crate) enum MediaPreviewCompletionStatus {
 pub(crate) struct MediaPreviewCompletionResolution {
     pub(crate) status: MediaPreviewCompletionStatus,
     pub(crate) demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
-    pub(crate) deadline_at: Option<Instant>,
+    pub(crate) deadline_status: mondrian_playback::FrameWorkDeadlineStatus,
 }
 
 impl MediaPreviewCompletionStatus {
@@ -126,7 +126,7 @@ impl MediaPreviewCompletionStatus {
 pub struct MediaPreviewSchedulerDiagnostics {
     /// Latest render generation observed by the scheduler.
     pub latest_generation: u64,
-    /// Playback runtime-clock regressions rejected by the Frame Work Broker.
+    /// Playback runtime-clock regression episodes rejected by the Frame Work Broker.
     pub clock_regressions: u64,
     /// Requests currently waiting to decode or complete.
     pub pending_requests: usize,
@@ -231,8 +231,12 @@ pub struct MediaPreviewJobQueueDiagnostics {
     pub in_flight_playback_cursor_jobs: usize,
     /// Current playback jobs whose Adapter deadline has expired while queued.
     pub queued_expired_playback_current_jobs: usize,
+    /// All queued jobs whose Broker-owned lowered deadline has expired.
+    pub queued_expired_jobs: usize,
     /// Current playback jobs rejected at dequeue after their Adapter deadline.
     pub dropped_expired_playback_current_jobs: u64,
+    /// All jobs rejected at dequeue after their Broker-owned lowered deadline.
+    pub dropped_expired_jobs: u64,
     /// Interactive scrub jobs waiting for a worker lease.
     pub queued_scrub_cursor_jobs: usize,
     /// Interactive scrub worker execution leases.
@@ -279,7 +283,7 @@ pub(crate) struct MediaPreviewJobPromoteStatus {
 #[derive(Debug)]
 pub(crate) enum MediaPreviewJobQueueReceive {
     Job(MediaPreviewJob),
-    DroppedExpiredPlaybackCurrent(MediaPreviewJob),
+    DroppedExpired(MediaPreviewJob),
 }
 
 #[cfg(test)]
@@ -396,7 +400,7 @@ impl MediaPreviewJobQueueReceiver {
     pub(crate) fn recv_for_worker(&self, lane: MediaPreviewWorkerLane) -> Option<MediaPreviewJob> {
         match self.recv_for_worker_outcome(lane)? {
             MediaPreviewJobQueueReceive::Job(job) => Some(job),
-            MediaPreviewJobQueueReceive::DroppedExpiredPlaybackCurrent(_) => None,
+            MediaPreviewJobQueueReceive::DroppedExpired(_) => None,
         }
     }
 
@@ -404,12 +408,12 @@ impl MediaPreviewJobQueueReceiver {
         &self,
         lane: MediaPreviewWorkerLane,
     ) -> Option<MediaPreviewJobQueueReceive> {
-        match self.broker.receive(frame_worker_lane(lane), media_preview_deadline_expired) {
+        match self.broker.receive(frame_worker_lane(lane)) {
             Some(mondrian_playback::FrameWorkReceive::Ready(execution)) => Some(
                 MediaPreviewJobQueueReceive::Job(media_preview_job_from_execution(execution)),
             ),
             Some(mondrian_playback::FrameWorkReceive::Expired(execution)) => {
-                Some(MediaPreviewJobQueueReceive::DroppedExpiredPlaybackCurrent(
+                Some(MediaPreviewJobQueueReceive::DroppedExpired(
                     media_preview_job_from_execution(execution),
                 ))
             }
@@ -421,13 +425,20 @@ impl MediaPreviewJobQueueReceiver {
 fn frame_work_request(
     job: MediaPreviewJob,
 ) -> mondrian_playback::FrameWorkRequest<MediaPreviewKey, Instant, MediaPreviewJob> {
+    let deadline = job.deadline_at.map(|deadline_at| {
+        let sampled_at = Instant::now();
+        mondrian_playback::FrameWorkDeadline::from_remaining(
+            deadline_at,
+            deadline_at.saturating_duration_since(sampled_at),
+        )
+    });
     mondrian_playback::FrameWorkRequest {
         key: job.key.clone(),
         generation: job.generation,
         priority: frame_work_priority(job.priority),
         work_class: frame_work_class(job.access_mode),
         demand_identity: job.demand_identity,
-        deadline: job.deadline_at,
+        deadline,
         payload: job,
     }
 }
@@ -474,7 +485,7 @@ fn map_enqueue_submission(
 fn media_preview_job_queue_diagnostics(
     broker: &MediaPreviewWorkBroker,
 ) -> MediaPreviewJobQueueDiagnostics {
-    let state = broker.diagnostics(media_preview_deadline_expired);
+    let state = broker.diagnostics();
     MediaPreviewJobQueueDiagnostics {
         queued_jobs: state.queued_work,
         in_flight_jobs: state.in_flight_work,
@@ -485,7 +496,9 @@ fn media_preview_job_queue_diagnostics(
         queued_playback_cursor_jobs: state.queued_playback,
         in_flight_playback_cursor_jobs: state.in_flight_playback,
         queued_expired_playback_current_jobs: state.queued_expired_playback_current,
+        queued_expired_jobs: state.queued_expired_work,
         dropped_expired_playback_current_jobs: state.dropped_expired_playback_current,
+        dropped_expired_jobs: state.dropped_expired_work,
         queued_scrub_cursor_jobs: state.queued_interactive,
         in_flight_scrub_cursor_jobs: state.in_flight_interactive,
         queued_random_access_still_jobs: state.queued_still,
@@ -520,9 +533,6 @@ fn frame_worker_lane(lane: MediaPreviewWorkerLane) -> mondrian_playback::FrameWo
     }
 }
 
-fn media_preview_deadline_expired(deadline_at: Option<Instant>) -> bool {
-    deadline_at.is_some_and(|deadline| Instant::now() >= deadline)
-}
 /// App-layer preview workload intent before it is lowered to a media access mode.
 ///
 /// This keeps UI state interpretation out of the media crate. Callers should
@@ -738,6 +748,10 @@ impl MediaPreviewScheduler {
         self.broker.execution_cancellation(id)
     }
 
+    pub(crate) fn mark_execution_completed(&self, id: mondrian_playback::FrameExecutionId) -> bool {
+        self.broker.mark_execution_completed(id)
+    }
+
     #[cfg(test)]
     pub(crate) fn should_decode(
         &self,
@@ -803,7 +817,7 @@ impl MediaPreviewScheduler {
         MediaPreviewCompletionResolution {
             status: map_completion(resolution.completion),
             demand_identity: resolution.binding.and_then(|binding| binding.demand_identity),
-            deadline_at: resolution.binding.and_then(|binding| binding.deadline),
+            deadline_status: resolution.deadline,
         }
     }
 
@@ -825,7 +839,7 @@ impl MediaPreviewScheduler {
         MediaPreviewCompletionResolution {
             status: map_completion(resolution.completion),
             demand_identity: resolution.binding.and_then(|binding| binding.demand_identity),
-            deadline_at: resolution.binding.and_then(|binding| binding.deadline),
+            deadline_status: resolution.deadline,
         }
     }
 
@@ -878,7 +892,7 @@ impl MediaPreviewScheduler {
     }
 
     pub(crate) fn diagnostics(&self) -> MediaPreviewSchedulerDiagnostics {
-        let state = self.broker.diagnostics(media_preview_deadline_expired);
+        let state = self.broker.diagnostics();
         MediaPreviewSchedulerDiagnostics {
             latest_generation: state.latest_generation,
             clock_regressions: state.clock_regressions,
@@ -931,7 +945,7 @@ impl MediaPreviewScheduler {
         &self,
         lane: MediaPreviewWorkerLane,
     ) -> Option<mondrian_playback::FrameExecutionId> {
-        let receive = self.broker.receive(frame_worker_lane(lane), |_| false)?;
+        let receive = self.broker.receive(frame_worker_lane(lane))?;
         Some(match receive {
             mondrian_playback::FrameWorkReceive::Ready(execution)
             | mondrian_playback::FrameWorkReceive::Expired(execution) => execution.id,
@@ -1415,7 +1429,10 @@ mod tests {
         );
         assert_eq!(resolution.status, MediaPreviewCompletionStatus::Current);
         assert_eq!(resolution.demand_identity, Some(second));
-        assert_eq!(resolution.deadline_at, Some(second_deadline));
+        assert_eq!(
+            resolution.deadline_status,
+            mondrian_playback::FrameWorkDeadlineStatus::OnTime
+        );
         assert_eq!(scheduler.pending_len(), 0);
     }
 
@@ -2221,7 +2238,7 @@ mod tests {
             .recv_for_worker_outcome(MediaPreviewWorkerLane::Playback)
             .expect("expired playback job should produce a structured queue outcome")
         {
-            MediaPreviewJobQueueReceive::DroppedExpiredPlaybackCurrent(expired_job) => {
+            MediaPreviewJobQueueReceive::DroppedExpired(expired_job) => {
                 assert_eq!(expired_job.key, expired_playback);
                 assert_eq!(
                     expired_job.access_mode,
@@ -2239,7 +2256,9 @@ mod tests {
         assert_eq!(scrub_job.access_mode, PreviewDecodeAccessMode::ScrubCursor);
         let diagnostics = sender.diagnostics();
         assert_eq!(diagnostics.queued_expired_playback_current_jobs, 0);
+        assert_eq!(diagnostics.queued_expired_jobs, 0);
         assert_eq!(diagnostics.dropped_expired_playback_current_jobs, 1);
+        assert_eq!(diagnostics.dropped_expired_jobs, 1);
     }
 
     #[test]
@@ -2275,6 +2294,7 @@ mod tests {
         assert_eq!(diagnostics.queued_current_jobs, 3);
         assert_eq!(diagnostics.queued_playback_cursor_jobs, 2);
         assert_eq!(diagnostics.queued_expired_playback_current_jobs, 1);
+        assert_eq!(diagnostics.queued_expired_jobs, 1);
     }
 
     #[test]
@@ -2417,7 +2437,7 @@ mod tests {
         );
 
         let refreshed_at = Instant::now();
-        let refreshed_deadline = Some(refreshed_at);
+        let refreshed_deadline = Some(refreshed_at + Duration::from_secs(1));
         let status = sender.promote(
             &key,
             MediaPreviewRequestPriority::Current,
@@ -2624,7 +2644,9 @@ mod tests {
                 queued_playback_cursor_jobs: 1,
                 in_flight_playback_cursor_jobs: 0,
                 queued_expired_playback_current_jobs: 0,
+                queued_expired_jobs: 0,
                 dropped_expired_playback_current_jobs: 0,
+                dropped_expired_jobs: 0,
                 queued_scrub_cursor_jobs: 1,
                 in_flight_scrub_cursor_jobs: 0,
                 queued_random_access_still_jobs: 1,

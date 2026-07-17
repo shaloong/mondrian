@@ -593,18 +593,18 @@ backpressure. Diagnostics must also expose the current worker transport queue
 depth split by priority and access mode (`queued_current_jobs`,
 `queued_prefetch_jobs`, `queued_playback_cursor_jobs`,
 `queued_scrub_cursor_jobs`, and `queued_random_access_still_jobs`) plus queued
-expired playback-current work (`queued_expired_playback_current_jobs`) so a
-slow preview report can distinguish active queue backlog, missed display
-deadlines, and codec/decode cost without inspecting private queue internals.
-Queued expired playback-current work is an active scheduling warning, not just
-passive evidence: if a playback frame has already missed its display deadline
-while still sitting in the worker queue, the report must point at the
-clock-driven decode/drop/proxy decision boundary rather than blaming generic
-decode latency. Worker dequeue must not dispatch such expired playback-current
-jobs into normal decode; it should emit a structured dropped-expired outcome so
-the app can complete the scheduler request as `PlaybackDeadline` while avoiding
-decode/session work. Diagnostics must expose both queued expired work and
-cumulative dropped-expired work.
+expired work (`queued_expired_jobs`) and its playback-current subset
+(`queued_expired_playback_current_jobs`) so a slow preview report can
+distinguish active queue backlog, missed display deadlines, and codec/decode
+cost without inspecting private queue internals. Expired queued work is an
+active scheduling warning, not just passive evidence: dequeue must not dispatch
+it into normal decode. The Broker emits one structured `DroppedExpired`
+outcome, and the media Adapter maps the binding's priority and work class to the
+appropriate cancellation vocabulary without re-evaluating the deadline;
+unsupported combinations fail closed as unattributed cancellation evidence.
+Diagnostics expose generic and playback-current queued totals plus cumulative
+dropped totals; this preserves visibility for prefetch and still work without
+misreporting every expiration as a missed playback presentation.
 The app preview layer must also expose worker-lane eligibility for the same queued jobs
 (`queued_playback_lane_eligible_jobs`, `queued_scrub_lane_eligible_jobs`,
 `queued_still_lane_eligible_jobs`, and
@@ -689,13 +689,16 @@ If playback source decodes repeatedly open sessions or never hit forward reuse,
 ring reuse, or cache reuse, the report should flag playback locality separately
 from generic codec/GOP pressure.
 Decode cancellation crosses the media boundary as a structured Adapter result,
-but its authority and policy do not live in the App. Generation invalidation
-and current-work preemption arrive from `FrameWorkBroker` as one atomic
-disposition carrying monotonic request age; deadline and shutdown Adapters
-likewise preserve their authoritative request instant. FFmpeg continues to see
-only a boolean cooperative predicate. When the worker returns, the App media
-Adapter contributes one `FrameCancellationObservation` to the playback-owned
-collector: semantic work class, structured cause, total execution lifetime,
+but its authority and policy do not live in the App. Deadline, generation
+invalidation, and preemption arrive from `FrameWorkBroker` as one atomic
+disposition carrying the earliest applicable monotonic request instant and its
+age. Process shutdown remains a separate media-runtime Adapter concern. FFmpeg
+continues to see only a boolean cooperative predicate. Before sending a worker
+result through the App channel, the Adapter stamps completion in the Broker;
+the UI may resolve freshness later but cannot change whether execution met its
+deadline. When the worker returns, the Adapter contributes one
+`FrameCancellationObservation` to the playback-owned collector: semantic work
+class, structured cause, total execution lifetime,
 worker-start-to-first-checkpoint, and request-to-first-checkpoint.
 
 The Playback Module derives checkpoint-to-return and owns exact all-run
@@ -711,14 +714,17 @@ slow cancellation. This separation keeps authority propagation, codec
 checkpoint placement, and cleanup/return independently diagnosable without
 teaching the media layer UI intent.
 
-The Broker obtains request ages and expiration time from playback's injected
-`MonotonicRuntimeClock`, with one sample per atomic lifecycle operation. The
-media Adapter does not resample or reconstruct those ages. Its remaining
-wall-`Instant` comparison is limited to the opaque absolute worker deadline it
-created for FFmpeg interruption; that Adapter detail neither advances the
-Playback Session nor becomes cancellation-age authority. Broker clock
-regressions are clamped, counted, projected by UI diagnostics, and rejected by
-both decode-performance and professional playback gates.
+The Broker obtains request ages, expiration, and completion timestamps from
+playback's injected `MonotonicRuntimeClock`, with one sample per atomic
+lifecycle operation. Immediately before admission the media Adapter pairs its
+opaque absolute wall deadline with the remaining duration. The Broker lowers
+that duration into its clock once; queueing does not renew it, and the App does
+not compare or reconstruct it afterward. Rebinding the same in-flight key
+replaces the lowered deadline with the latest binding, while the once-only
+worker completion stamp prevents delayed UI polling from inventing lateness.
+Broker clock regressions are clamped, counted by regression episode, projected
+by UI diagnostics, and rejected by both decode-performance and professional
+playback gates.
 Process-global decoded-frame cache hits are capped to the same strict frame-hit
 tolerance for every access mode. Playback performance must come from the
 playback cursor's decoder/session locality, ring buffers, hardware decode, and

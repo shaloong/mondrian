@@ -20,6 +20,10 @@ _Avoid_: Current video frame, UI timer
 A process-local nondecreasing elapsed-time source used for lifecycle ages, expiration, and execution evidence. It is never authored/media time and never advances a Playback Session.
 _Avoid_: Clock Master, Timeline Time, wall-clock timestamp, UI event-loop timer
 
+**Frame Work Deadline**:
+An opaque Adapter deadline paired with its remaining duration at admission, then lowered once into the Frame Work Broker's Monotonic Runtime Clock for queue, cancellation, and completion decisions.
+_Avoid_: UI comparison closure, decode-completion `Instant`, renewed timeout after queueing
+
 **Frame Demand**:
 A versioned request for the best frame needed at a timeline position before a presentation deadline.
 _Avoid_: Render request, preview refresh
@@ -37,7 +41,7 @@ The latest Frame Demand identity and Adapter deadline atomically attached to one
 _Avoid_: Worker-captured demand identity as final authority, separate pending and completion ownership
 
 **Frame Work Broker**:
-The Playback Module that atomically owns frame-work admission, queued transport, in-flight execution leases, generation invalidation, preemption, deadline dequeue, cancellation, and completion binding while treating media payloads and clock values as opaque Adapter data.
+The Playback Module that atomically owns frame-work admission, queued transport, in-flight execution leases, generation invalidation, preemption, lowered deadlines, cancellation, worker-completion stamps, and completion binding while treating media payloads and absolute Adapter clock values as opaque data.
 _Avoid_: Independent scheduler and worker queue, key-only worker completion, UI-owned priority rollback, Adapter-composed freshness/preemption queries
 
 **Frame Cancellation Evidence**:
@@ -195,6 +199,8 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - Every queued or executing frame request belongs to exactly one **Frame Work Broker** lifecycle. Admission and queue capacity cannot disagree, and only an execution lease or explicit synchronous Adapter completion may resolve its Frame Request Binding.
 - The **Frame Work Broker** derives each execution's cancellation disposition and request age under one lifecycle lock. Adapters may translate that disposition into domain-specific diagnostics, but cannot reconstruct it from separate freshness, competing-work, or timestamp queries.
 - The **Frame Work Broker** samples one **Monotonic Runtime Clock** Adapter exactly once for each atomic lifecycle operation that establishes or compares time. A regressing Adapter sample is clamped to the last observation and recorded as fail-closed evidence; it can never move an age backward or masquerade as valid timing proof.
+- A **Frame Work Deadline** is lowered exactly once at Broker admission. Rebinding the same in-flight key replaces its deadline with the latest binding, while cancellation reports the earliest applicable deadline, invalidation, or preemption request.
+- A worker records completion in the **Frame Work Broker** before crossing its result channel. Later UI polling resolves freshness against the latest binding but cannot change the recorded on-time/missed deadline result.
 - A media **Adapter** contributes execution-start, first-checkpoint, and return timestamps exactly once to **Frame Cancellation Evidence**. The Playback Module alone aggregates causes and work classes and evaluates request-to-checkpoint plus class-specific checkpoint-to-return budgets; UI reports may project this evidence but cannot reinterpret it.
 - Successful decode/cache completion is nonterminal readiness. A CPU or GPU **Presentation Adapter** must complete the exact **Frame Presentation Ticket** only after it has produced a usable Viewer output; the Playback Module compares the real completion timestamp with the ticket deadline and emits `Ready`, `Degraded`, or `Late`. Cancellation/failure paths may terminate earlier without presentation.
 - A Viewer stale lifecycle state does not terminate a **Frame Demand**; only a deadline/policy decision may emit `StaleAvailable`, while an in-flight worker retains the chance to deliver `Ready`.

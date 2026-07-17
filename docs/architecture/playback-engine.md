@@ -39,7 +39,7 @@ the new seams.
 | --- | --- | --- |
 | Playback Engine | session epoch, transport state, timeline anchor, rate/direction, Clock Master selection, priming/recovery, deadlines, drop decisions | decode sessions, GPU resources, audio callback buffers, UI state |
 | Audio Playback Engine | device/stream lifecycle, rendered PCM queue, consumed-sample observation, preroll, underrun/device evidence | timeline transport decisions |
-| Frame Work Broker | bounded semantic admission, queued transport, execution leases, latest generation, current/prefetch priority, still preemption, deadline dequeue, cancellation, completion freshness | codec payload interpretation, Clock Master or transport state |
+| Frame Work Broker | bounded semantic admission, queued transport, execution leases, latest generation, current/prefetch priority, still preemption, lowered deadlines, completion stamps, cancellation and freshness resolution | codec payload interpretation, Clock Master or transport state |
 | Monotonic Runtime Clock | process-local lifecycle-age, expiration, and evidence timestamp sampling | Playback Session advancement, authored/media time, wall-clock identity |
 | Frame Cancellation Evidence | exact all-run cause/timing aggregates and the shared cancellation acceptance policy | cancellation authority, codec checkpoints, UI presentation |
 | Preview Frame Store | ready/stale/in-flight identity, source revision, color contract, memory budgets | deadline policy or proxy selection |
@@ -840,9 +840,11 @@ Clock Master, Timeline Time, device-consumption clock, or displayed position.
 
 Worker cancellation now crosses that same Interface as one atomic
 `FrameExecutionCancellation` disposition. The media Adapter maps it to report
-vocabulary and combines it only with codec-local shutdown/decode-budget and
-wall-deadline checks; it no longer performs multiple Broker queries whose
-answers could describe different lifecycle instants.
+vocabulary and combines it only with codec-local shutdown and the separate
+steady-state prefetch decode budget; absolute Frame Work Deadline comparison is
+not repeated in the App. The Broker evaluates deadline, generation invalidation,
+and preemption together and returns the earliest applicable request instant, so
+one cause cannot hide slower observation of an earlier cause.
 
 `FrameCancellationEvidenceCollector` is the single aggregation Module after
 that seam. The App media Adapter records one completed observation containing
@@ -859,12 +861,15 @@ Total execution lifetime remains diagnostic because work performed before the
 authority request is not cancellation latency.
 
 Frame completion now resolves an atomic Frame Request Binding. The App Adapter
-stores its absolute wall deadline as the opaque deadline value and replaces a
-worker-captured demand identity only when the Playback Module authorizes reuse.
-Canceled old work cannot remove a newer same-key binding. Decode deadline
-classification uses the worker's captured completion `Instant`, not the later
-UI poll time, so main-thread load cannot turn an on-time decode into false Late
-evidence.
+submits an absolute wall deadline together with the remaining duration sampled
+immediately before admission. The Broker lowers that duration into its own
+Monotonic Runtime Clock without interpreting the absolute value. Rebinding the
+same in-flight key refreshes the latest demand identity and lowered deadline.
+Before a worker publishes its result channel message, it stamps completion in
+the Broker exactly once; a later UI poll atomically resolves freshness against
+the latest binding while deadline status remains tied to worker return. Canceled
+old work cannot remove a newer binding, and main-thread load cannot turn an
+on-time decode into false Late evidence.
 
 The playback-owned `PreviewFrameStore` now also contains the CPU residency
 Implementation formerly local to App UI. Count and byte budgets, LRU eviction,
@@ -874,8 +879,10 @@ Adapters. App UI retains only payload sizing and presentation-scope mapping.
 
 The app Clock Adapter maintains a wall-`Instant` to Playback
 `MonotonicTimestamp` mapping. Worker deadlines are projected as one absolute
-wall deadline at the actual sampling instant; queueing no longer adds a stale
-remaining budget to a later enqueue time. Presentation completion uses the same
+wall deadline at the actual sampling instant. Immediately before Broker
+admission the Adapter pairs that value with its then-current remaining duration;
+the Broker lowers it once, so queueing cannot renew time or ask UI code to
+compare clocks. Presentation completion uses the same
 mapping, and Playback Evidence records that completion timestamp behind a
 monotonic high-water mark. Demand latency therefore includes final CPU/GPU
 presentation work rather than stopping at decode readiness.

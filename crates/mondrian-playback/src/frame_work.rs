@@ -23,6 +23,35 @@ pub enum FrameWorkPriority {
     Current,
 }
 
+/// One Adapter deadline lowered to a Broker-owned remaining-time budget.
+///
+/// The Adapter samples its own clock once immediately before submission and
+/// supplies both the opaque absolute value needed by execution code and the
+/// remaining duration to that same instant. The Broker compares only the
+/// duration after converting it to its injected [`crate::MonotonicRuntimeClock`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameWorkDeadline<D> {
+    adapter_deadline: D,
+    remaining_at_admission: Duration,
+}
+
+impl<D: Copy> FrameWorkDeadline<D> {
+    /// Bind an opaque Adapter deadline to its remaining duration at admission.
+    pub const fn from_remaining(adapter_deadline: D, remaining_at_admission: Duration) -> Self {
+        Self { adapter_deadline, remaining_at_admission }
+    }
+
+    /// Return the opaque absolute deadline for the execution Adapter.
+    pub const fn adapter_deadline(self) -> D {
+        self.adapter_deadline
+    }
+
+    /// Return the remaining budget sampled immediately before admission.
+    pub const fn remaining_at_admission(self) -> Duration {
+        self.remaining_at_admission
+    }
+}
+
 /// Freshness disposition for completed Adapter work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameRequestCompletion {
@@ -32,6 +61,27 @@ pub enum FrameRequestCompletion {
     CacheOnly,
     /// The completion is obsolete and must not affect visible state.
     Stale,
+}
+
+/// Broker-owned deadline classification at the worker's completion timestamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameWorkDeadlineStatus {
+    /// The latest binding has no execution deadline.
+    NotApplicable,
+    /// The worker completed strictly before the latest binding deadline.
+    OnTime,
+    /// The worker completed at or after the latest binding deadline.
+    Missed {
+        /// Elapsed time past the deadline; zero means completion at the boundary.
+        late_by: Duration,
+    },
+}
+
+impl FrameWorkDeadlineStatus {
+    /// Return whether the worker missed the latest binding deadline.
+    pub const fn is_missed(self) -> bool {
+        matches!(self, Self::Missed { .. })
+    }
 }
 
 /// Atomic reason why one in-flight execution should stop producing visible work.
@@ -58,6 +108,11 @@ pub enum FrameExecutionCancellation {
         /// Age of the oldest competing realtime request.
         request_age: Duration,
     },
+    /// The latest binding's lowered execution deadline has elapsed.
+    DeadlineExpired {
+        /// Elapsed time since the Broker-owned deadline instant.
+        age: Duration,
+    },
 }
 
 impl FrameExecutionCancellation {
@@ -68,6 +123,7 @@ impl FrameExecutionCancellation {
             Self::Superseded { age } => age,
             Self::PrefetchPreemptedByCurrent { request_age }
             | Self::StillPreemptedByRealtimeCurrent { request_age } => Some(request_age),
+            Self::DeadlineExpired { age } => Some(age),
         }
     }
 }
@@ -95,7 +151,7 @@ pub struct FrameRequestBinding<D> {
     pub work_class: FrameWorkClass,
     /// Playback demand identity, when the request is demand-backed.
     pub demand_identity: Option<FrameDemandIdentity>,
-    /// Adapter-owned deadline; the Playback Module carries but never compares it.
+    /// Opaque Adapter deadline associated with the Broker-compared budget.
     pub deadline: Option<D>,
 }
 
@@ -106,4 +162,6 @@ pub struct FrameRequestResolution<D> {
     pub completion: FrameRequestCompletion,
     /// Exact latest binding satisfied by a current reusable completion.
     pub binding: Option<FrameRequestBinding<D>>,
+    /// Deadline result at the Broker-recorded worker completion instant.
+    pub deadline: FrameWorkDeadlineStatus,
 }
