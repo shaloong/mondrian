@@ -174,9 +174,9 @@ Codec-aligned storage dimensions may exceed the visible frame; smaller storage
 is invalid. App, core, and generic platform probes must not duplicate or weaken
 these renderer resource invariants.
 Backend construction also resolves the active DX12 adapter LUID to the same
-DXGI enumeration index consumed by FFmpeg's D3D11VA device creator. That typed
-selector travels through renderer support, app playback admission, and media
-session creation. It keeps decode surfaces on the renderer's physical adapter
+DXGI enumeration index consumed by FFmpeg's selected D3D12VA or D3D11VA device
+creator. That typed selector travels through renderer support, app playback
+admission, and media session creation. It keeps decode surfaces on the renderer's physical adapter
 on hybrid-GPU systems; the per-frame LUID check remains the final fail-closed
 guard against stale, ignored, or incorrectly enumerated device selection.
 Validated D3D11 sources can enter a reusable low-copy bridge entry. Each entry

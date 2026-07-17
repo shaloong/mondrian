@@ -42,18 +42,28 @@ pub enum HwAccelBackend {
 /// resulting native frame's physical adapter identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum HwAccelDeviceSelector {
-    /// DXGI adapter index passed to FFmpeg's D3D11VA device creator.
-    D3D11VaAdapterIndex(u32),
+    /// DXGI adapter index passed to FFmpeg's D3D12VA/D3D11VA device creator.
+    DxgiAdapterIndex(u32),
 }
 
 impl HwAccelDeviceSelector {
     fn device_name_for(self, backend: HwAccelBackend) -> Option<CString> {
         match (self, backend) {
-            (Self::D3D11VaAdapterIndex(index), HwAccelBackend::D3D11VA) => {
+            (Self::DxgiAdapterIndex(index), HwAccelBackend::D3D12VA | HwAccelBackend::D3D11VA) => {
                 CString::new(index.to_string()).ok()
             }
             _ => None,
         }
+    }
+
+    pub(crate) fn selects_backend(self, backend: HwAccelBackend) -> bool {
+        matches!(
+            (self, backend),
+            (
+                Self::DxgiAdapterIndex(_),
+                HwAccelBackend::D3D12VA | HwAccelBackend::D3D11VA
+            )
+        )
     }
 }
 
@@ -1144,15 +1154,21 @@ mod tests {
     }
 
     #[test]
-    fn d3d11va_device_selector_maps_only_to_its_ffmpeg_device_name() {
-        let selector = HwAccelDeviceSelector::D3D11VaAdapterIndex(7);
+    fn dxgi_device_selector_maps_to_modern_ffmpeg_windows_backends() {
+        let selector = HwAccelDeviceSelector::DxgiAdapterIndex(7);
 
         assert_eq!(
             selector.device_name_for(HwAccelBackend::D3D11VA).as_deref(),
             Some(c"7")
         );
-        assert_eq!(selector.device_name_for(HwAccelBackend::D3D12VA), None);
+        assert_eq!(
+            selector.device_name_for(HwAccelBackend::D3D12VA).as_deref(),
+            Some(c"7")
+        );
+        assert!(selector.selects_backend(HwAccelBackend::D3D12VA));
+        assert!(selector.selects_backend(HwAccelBackend::D3D11VA));
         assert_eq!(selector.device_name_for(HwAccelBackend::Cuda), None);
+        assert!(!selector.selects_backend(HwAccelBackend::Cuda));
     }
 
     #[test]

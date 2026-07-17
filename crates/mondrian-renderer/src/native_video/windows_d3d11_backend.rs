@@ -157,7 +157,7 @@ impl D3D11Dx12NativeVideoImportBackend {
             formats,
         )
         .with_hardware_decode_device_selector(
-            mondrian_media::HwAccelDeviceSelector::D3D11VaAdapterIndex(decoder_adapter_index),
+            mondrian_media::HwAccelDeviceSelector::DxgiAdapterIndex(decoder_adapter_index),
         )
         .with_renderer_backend_label("wgpu Dx12 D3D11 shared YUV + OCIO");
         Ok(Self {

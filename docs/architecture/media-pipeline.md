@@ -162,7 +162,7 @@ lanes. When more than one preview decode worker exists, worker 0 has playback
 affinity and the remaining workers are assigned scrub/still or shared
 non-playback affinity according to the CPU budget. A worker may dequeue current
 work only when its lane accepts that work class; allowing an idle Playback or
-Scrub worker to steal an exact Still request cold-opens additional FFmpeg/D3D11
+Scrub worker to steal an exact Still request cold-opens additional FFmpeg hardware
 sessions, churns decoder surfaces, and can block realtime work behind a
 deterministic seek. `Prefetch` remains playback-only and lower priority than
 every eligible current-frame request. With only one worker, the lane is `Any`;
@@ -719,8 +719,8 @@ GPU-resident frame delivery, not from silently reusing adjacent timestamp
 requests as if they were the requested frame.
 
 Current decode residency is intentionally explicit and fail-closed. CPU paths
-produce `RgbaFrame`; admitted in-process FFmpeg D3D11 playback may instead
-produce `PreviewNativeDecodedFrame`. Legacy unowned YUV preview surfaces remain
+produce `RgbaFrame`; admitted in-process FFmpeg D3D12VA or D3D11VA playback may
+instead produce `PreviewNativeDecodedFrame`. Legacy unowned YUV preview surfaces remain
 removed: native output is an owned decoder-resource lease, not a raw plane
 container or a handle-kind diagnostic.
 `PreviewHardwareDecodeDecision` records the media-layer selection for each
@@ -752,16 +752,17 @@ may fall through to D3D11VA and then DXVA2. On macOS the candidate is
 VideoToolbox/CVPixelBuffer. On Linux the ordered list must prefer
 VA-API/DMABUF-style surfaces before legacy VDPAU. Until D3D12VA/D3D11VA,
 VideoToolbox, VA-API, VDPAU, DXVA2, or CUDA/NVDEC hardware frames are actually
-exported/imported through the renderer native decoded-frame import contract,
+exported through a concrete media adapter and imported through the renderer
+native decoded-frame import contract,
 `HwAccelBackend::probe()` must keep `selected_backend=None`,
 `decoder_adapter_available=false`, `hardware_decode_active=false`,
 `zero_copy_active=false`, `DecodedFrameResidency::CpuRgba`, no active GPU
 handle kind. Platform preference alone is
-not a valid hardware decode signal. The first concrete media adapter supports
-FFmpeg's preferred `AV_PIX_FMT_D3D11` frame ABI. It does not make D3D12VA,
+not a valid hardware decode signal. The Windows media adapter supports FFmpeg's
+`AV_PIX_FMT_D3D12` and preferred `AV_PIX_FMT_D3D11` frame ABIs. It does not make
 legacy `AV_PIX_FMT_D3D11VA_VLD`, DXVA2, VideoToolbox, VA-API, VDPAU, or CUDA
-native automatically; GPU-resident planning skips backend candidates without
-a matching concrete media adapter.
+native automatically; GPU-resident planning skips backend candidates without a
+matching concrete media adapter.
 For a concrete video stream, media may also run a read-only FFmpeg hardware
 codec config probe with `avcodec_get_hw_config`. That probe records whether the
 linked FFmpeg build lists the candidate hardware device type, whether the
@@ -952,8 +953,12 @@ lease object identity so recycled diagnostic ids cannot alias live resources.
 The in-process FFmpeg lease is `FfmpegNativeDecodedFrameResource`. It retains
 the decoder frame with `av_frame_clone`, thereby retaining the frame's
 `AVBufferRef`-owned hardware surface, and releases that reference with
-`av_frame_free` when the final lease drops. Preferred D3D11 import reads only
-FFmpeg's documented `AV_PIX_FMT_D3D11` ABI: `AVFrame::data[0]` is the borrowed
+`av_frame_free` when the final lease drops. D3D12 residency reads FFmpeg's
+documented `AVD3D12VAFrame` descriptor from `AVFrame::data[0]`: its borrowed
+`ID3D12Resource`, decode-completion `ID3D12Fence`, and fence value remain owned
+by the retained AVFrame. A renderer must wait for that value before reading the
+resource; media never performs a CPU fence wait. Preferred D3D11 residency
+reads only FFmpeg's documented `AV_PIX_FMT_D3D11` ABI: `AVFrame::data[0]` is the borrowed
 `ID3D11Texture2D` pointer and `data[1]` is the array-texture slice. Legacy
 `AV_PIX_FMT_D3D11VA_VLD`, missing texture pointers, and slice-width overflow
 must fail with structured resource errors rather than being reinterpreted as
@@ -976,8 +981,8 @@ subsampled NV12/P010 payloads must have explicit chroma location. This remains
 media payload evidence, not color interpretation; unsupported-but-explicit
 chroma siting can be rejected later by the app/renderer admission boundary, but
 missing sampling facts must not escape the media native-frame constructor.
-For D3D11 frames, media reads `AVFrame::hw_frames_ctx` and accepts only explicit
-`AV_PIX_FMT_NV12` or `AV_PIX_FMT_P010LE` software layouts. Planar
+For D3D12 and preferred D3D11 frames, media reads `AVFrame::hw_frames_ctx` and
+accepts only explicit `AV_PIX_FMT_NV12` or `AV_PIX_FMT_P010LE` software layouts. Planar
 `AV_PIX_FMT_YUV420P` / `AV_PIX_FMT_YUV420P10LE` descriptions are not silently
 reinterpreted as two-plane GPU textures. A GPU-preferred CPU fallback records
 `PreviewNativeDecodeFallback` as `SoftwareFrame`,
@@ -985,10 +990,11 @@ reinterpreted as two-plane GPU textures. A GPU-preferred CPU fallback records
 `SamplingMetadataIncomplete`, or `ResourceRetentionFailed`. A required-GPU
 request returns a decode error for the same condition instead.
 On multi-adapter Windows systems, a native-import admission may attach a typed
-`D3D11VaAdapterIndex` selector derived from the renderer's physical DXGI
+`DxgiAdapterIndex` selector derived from the renderer's physical DXGI
 adapter. The app carries that selector only on playback decode work; media
 includes it in decoder-session identity and passes its decimal index to
-FFmpeg's D3D11VA `av_hwdevice_ctx_create` device argument. Device probes are
+FFmpeg's D3D12VA or D3D11VA `av_hwdevice_ctx_create` device argument. D3D12VA
+remains the first candidate and D3D11VA is the fallback. Device probes are
 cached by backend plus selector. The renderer still validates every decoded
 surface's LUID, so this selection prevents accidental cross-adapter creation
 without weakening the native resource boundary.

@@ -1347,6 +1347,13 @@ impl FfmpegNativeDecodedFrameResource {
         parse_ffmpeg_d3d11_texture(self.frame, self.pixel_format)
     }
 
+    /// Borrow FFmpeg's D3D12 resource and decode-completion fence ABI.
+    pub fn d3d12_texture(
+        &self,
+    ) -> std::result::Result<FfmpegD3D12TextureView, FfmpegNativeDecodedFrameResourceError> {
+        parse_ffmpeg_d3d12_texture(self.frame, self.pixel_format)
+    }
+
     /// Hardware pixel format retained by this frame.
     pub fn pixel_format(&self) -> ffmpeg::util::format::pixel::Pixel {
         self.pixel_format
@@ -1394,6 +1401,31 @@ pub struct FfmpegD3D11TextureView {
     array_slice: u32,
 }
 
+/// Borrowed view of FFmpeg's `AVD3D12VAFrame` resource and sync contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FfmpegD3D12TextureView {
+    texture: NonNull<c_void>,
+    fence: NonNull<c_void>,
+    fence_value: u64,
+}
+
+impl FfmpegD3D12TextureView {
+    /// Borrowed `ID3D12Resource` pointer owned by the retained AVFrame.
+    pub fn texture_ptr(self) -> *mut c_void {
+        self.texture.as_ptr()
+    }
+
+    /// Borrowed `ID3D12Fence` pointer signaling decode completion.
+    pub fn fence_ptr(self) -> *mut c_void {
+        self.fence.as_ptr()
+    }
+
+    /// Fence value that must complete before the resource is read.
+    pub fn fence_value(self) -> u64 {
+        self.fence_value
+    }
+}
+
 impl FfmpegD3D11TextureView {
     /// Borrowed `ID3D11Texture2D` pointer stored in `AVFrame::data[0]`.
     pub fn texture_ptr(self) -> *mut c_void {
@@ -1436,6 +1468,18 @@ pub enum FfmpegNativeDecodedFrameResourceError {
         /// FFmpeg `intptr_t` value interpreted as an unsigned index.
         array_slice: usize,
     },
+    /// Only AV_PIX_FMT_D3D12 uses the `AVD3D12VAFrame` ABI.
+    #[error("FFmpeg frame format {pixel_format:?} does not use the D3D12 resource ABI")]
+    NotD3D12Frame {
+        /// Actual retained hardware pixel format.
+        pixel_format: ffmpeg::util::format::pixel::Pixel,
+    },
+    /// A D3D12 hardware frame did not carry its decoded texture.
+    #[error("FFmpeg D3D12 frame is missing its ID3D12Resource pointer")]
+    MissingD3D12Texture,
+    /// A D3D12 hardware frame did not carry its decode-completion fence.
+    #[error("FFmpeg D3D12 frame is missing its ID3D12Fence pointer")]
+    MissingD3D12Fence,
 }
 
 fn next_ffmpeg_native_frame_id(
@@ -1482,6 +1526,44 @@ fn parse_ffmpeg_d3d11_texture(
         FfmpegNativeDecodedFrameResourceError::D3D11ArraySliceOverflow { array_slice }
     })?;
     Ok(FfmpegD3D11TextureView { texture, array_slice })
+}
+
+#[repr(C)]
+struct FfmpegAvD3D12VaSyncContext {
+    fence: *mut c_void,
+    event: *mut c_void,
+    fence_value: u64,
+}
+
+#[repr(C)]
+struct FfmpegAvD3D12VaFrame {
+    texture: *mut c_void,
+    sync_ctx: FfmpegAvD3D12VaSyncContext,
+}
+
+fn parse_ffmpeg_d3d12_texture(
+    frame: NonNull<ffmpeg::ffi::AVFrame>,
+    pixel_format: ffmpeg::util::format::pixel::Pixel,
+) -> std::result::Result<FfmpegD3D12TextureView, FfmpegNativeDecodedFrameResourceError> {
+    if pixel_format != ffmpeg::util::format::pixel::Pixel::D3D12 {
+        return Err(FfmpegNativeDecodedFrameResourceError::NotD3D12Frame { pixel_format });
+    }
+    // SAFETY: the retained AVFrame owns data[0] for this borrow. FFmpeg 7.x+
+    // defines AV_PIX_FMT_D3D12 data[0] as `AVD3D12VAFrame*`.
+    let raw_frame = unsafe { frame.as_ref() };
+    let native = NonNull::new(raw_frame.data[0].cast::<FfmpegAvD3D12VaFrame>())
+        .ok_or(FfmpegNativeDecodedFrameResourceError::MissingD3D12Texture)?;
+    // SAFETY: the data[0] ABI was validated above and remains AVFrame-owned.
+    let native = unsafe { native.as_ref() };
+    let texture = NonNull::new(native.texture)
+        .ok_or(FfmpegNativeDecodedFrameResourceError::MissingD3D12Texture)?;
+    let fence = NonNull::new(native.sync_ctx.fence)
+        .ok_or(FfmpegNativeDecodedFrameResourceError::MissingD3D12Fence)?;
+    Ok(FfmpegD3D12TextureView {
+        texture,
+        fence,
+        fence_value: native.sync_ctx.fence_value,
+    })
 }
 
 /// Shared lease for one backend-owned native decoder resource.
@@ -2081,6 +2163,11 @@ impl PreviewHardwareDecodePlan {
             {
                 continue;
             }
+            if request.prefers_gpu_residency()
+                && device_selector.is_some_and(|selector| !selector.selects_backend(candidate))
+            {
+                continue;
+            }
             if Self::plan_requires_device_context(request, access_mode, backend)
                 && !device_context.device_context_created
             {
@@ -2314,7 +2401,10 @@ fn preview_hardware_frame_format(format: ffmpeg::util::format::pixel::Pixel) -> 
 }
 
 fn ffmpeg_native_resource_adapter_available(config: &HwAccelCodecConfigProbe) -> bool {
-    config.hw_pixel_format == Some(HwAccelPixelFormat::D3D11)
+    matches!(
+        config.hw_pixel_format,
+        Some(HwAccelPixelFormat::D3D12 | HwAccelPixelFormat::D3D11)
+    )
 }
 
 struct PreviewDecodeSession {
@@ -4973,7 +5063,9 @@ fn materialize_native_decoded_frame(
     decoded: &ffmpeg::util::frame::video::Video,
     source_color: PreviewSourceColorContract,
 ) -> std::result::Result<PreviewNativeDecodedFrame, PreviewNativeFrameMaterializationError> {
-    if decoded.format() != ffmpeg::util::format::pixel::Pixel::D3D11 {
+    use ffmpeg::util::format::pixel::Pixel;
+
+    if !matches!(decoded.format(), Pixel::D3D12 | Pixel::D3D11) {
         return Err(
             PreviewNativeFrameMaterializationError::UnsupportedHardwarePixelFormat {
                 pixel_format: decoded.format(),
@@ -4985,11 +5077,19 @@ fn materialize_native_decoded_frame(
     // while `surface_format` is the retained texture's software layout. Use
     // the latter for coded depth instead of re-inferring it from AVFrame::format.
     let mut sampling = decoded_video_sampling_from_frame_and_surface(decoded, surface_format);
-    // Native D3D11 frames bypass swscale, so apply the same resolved range
+    // Native D3D12/D3D11 frames bypass swscale, so apply the same resolved range
     // contract consumed by the CPU conversion path before renderer import.
     sampling.range = source_color.range.resolve_for_frame(sampling.range);
     let resource = FfmpegNativeDecodedFrameResource::retain(decoded)?;
-    resource.d3d11_texture()?;
+    match decoded.format() {
+        Pixel::D3D12 => {
+            resource.d3d12_texture()?;
+        }
+        Pixel::D3D11 => {
+            resource.d3d11_texture()?;
+        }
+        _ => unreachable!("native frame pixel format was validated above"),
+    }
     let handle = PreviewNativeDecodedFrameHandle::new(resource);
     Ok(PreviewNativeDecodedFrame::new(
         decoded.width(),
@@ -5162,7 +5262,8 @@ mod tests {
         materialize_decoded_frame, preview_cache_get, preview_cache_put_with_fingerprint,
         preview_create_rgba_scaler, preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode,
         preview_hardware_extra_frames, preview_seek_index_cache_get, preview_seek_index_cache_put,
-        resolve_cpu_rgba_contract, DecodedRgbaFrameContract, FfmpegNativeDecodedFrameResource,
+        resolve_cpu_rgba_contract, DecodedRgbaFrameContract, FfmpegAvD3D12VaFrame,
+        FfmpegAvD3D12VaSyncContext, FfmpegNativeDecodedFrameResource,
         FfmpegNativeDecodedFrameResourceError, PreviewDecodeAccessMode, PreviewDecodeAccessPolicy,
         PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeDiagnostics,
         PreviewDecodeExecutionPath, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest,
@@ -5189,6 +5290,7 @@ mod tests {
     use mondrian_core::types::ColorSpace;
     use serde::Serialize;
     use std::any::Any;
+    use std::ffi::c_void;
     use std::num::NonZeroU64;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -5313,6 +5415,56 @@ mod tests {
         frame
     }
 
+    fn synthetic_d3d12_frame(
+        software_format: ffmpeg::ffi::AVPixelFormat,
+    ) -> ffmpeg::util::frame::video::Video {
+        let mut frame = ffmpeg::util::frame::video::Video::empty();
+        frame.set_format(ffmpeg::util::format::pixel::Pixel::D3D12);
+        frame.set_width(3840);
+        frame.set_height(2160);
+        frame.set_color_range(ffmpeg::util::color::Range::MPEG);
+        // SAFETY: Both AVBufferRefs are owned by the frame. data[0] points into
+        // buf[0], so cloning the AVFrame also retains the synthetic descriptor.
+        // The fake COM pointers are only checked for non-null and never called.
+        unsafe {
+            let raw = frame.as_mut_ptr();
+            let descriptor =
+                ffmpeg::ffi::av_buffer_alloc(std::mem::size_of::<FfmpegAvD3D12VaFrame>());
+            assert!(
+                !descriptor.is_null(),
+                "test D3D12 descriptor allocation must succeed"
+            );
+            let native = (*descriptor).data.cast::<FfmpegAvD3D12VaFrame>();
+            native.write(FfmpegAvD3D12VaFrame {
+                texture: std::ptr::NonNull::<u8>::dangling().as_ptr().cast::<c_void>(),
+                sync_ctx: FfmpegAvD3D12VaSyncContext {
+                    fence: std::ptr::NonNull::<u16>::dangling().as_ptr().cast::<c_void>(),
+                    event: std::ptr::null_mut(),
+                    fence_value: 9,
+                },
+            });
+            (*raw).buf[0] = descriptor;
+            (*raw).data[0] = native.cast::<u8>();
+
+            let context =
+                ffmpeg::ffi::av_buffer_alloc(std::mem::size_of::<ffmpeg::ffi::AVHWFramesContext>());
+            assert!(
+                !context.is_null(),
+                "test hardware context allocation must succeed"
+            );
+            std::ptr::write_bytes(
+                (*context).data,
+                0,
+                std::mem::size_of::<ffmpeg::ffi::AVHWFramesContext>(),
+            );
+            (*((*context).data.cast::<ffmpeg::ffi::AVHWFramesContext>())).sw_format =
+                software_format;
+            (*raw).hw_frames_ctx = context;
+            (*raw).chroma_location = ffmpeg::util::chroma::Location::Left.into();
+        }
+        frame
+    }
+
     #[test]
     fn preview_decode_backend_codes_are_explicit_and_cpu_resident() {
         assert_eq!(PreviewDecodeBackend::from_u8(0), PreviewDecodeBackend::Auto);
@@ -5396,8 +5548,13 @@ mod tests {
         assert!(!plan.probe.zero_copy_active);
         assert_eq!(
             plan.probe.decoder_adapter_available,
-            plan.ffmpeg_codec_config.hw_pixel_format
-                == Some(crate::decoder::HwAccelPixelFormat::D3D11)
+            matches!(
+                plan.ffmpeg_codec_config.hw_pixel_format,
+                Some(
+                    crate::decoder::HwAccelPixelFormat::D3D12
+                        | crate::decoder::HwAccelPixelFormat::D3D11
+                )
+            )
         );
     }
 
@@ -6665,6 +6822,62 @@ mod tests {
     }
 
     #[test]
+    fn ffmpeg_native_resource_retains_d3d12_resource_and_fence_abi() {
+        let mut frame = ffmpeg::util::frame::video::Video::empty();
+        frame.set_format(ffmpeg::util::format::pixel::Pixel::D3D12);
+        frame.set_width(3840);
+        frame.set_height(2160);
+        let texture = std::ptr::NonNull::<u8>::dangling().as_ptr().cast::<c_void>();
+        let fence = std::ptr::NonNull::<u16>::dangling().as_ptr().cast::<c_void>();
+        let native = Box::new(FfmpegAvD3D12VaFrame {
+            texture,
+            sync_ctx: FfmpegAvD3D12VaSyncContext {
+                fence,
+                event: std::ptr::null_mut(),
+                fence_value: 42,
+            },
+        });
+        // SAFETY: the synthetic native descriptor remains alive until after
+        // every parsed view is consumed. The AVBufferRef only exercises the
+        // retained AVFrame ownership path and no COM pointer is dereferenced.
+        let source_buffer = unsafe {
+            let raw = frame.as_mut_ptr();
+            let buffer = ffmpeg::ffi::av_buffer_alloc(1);
+            assert!(
+                !buffer.is_null(),
+                "test AVBufferRef allocation must succeed"
+            );
+            (*raw).buf[0] = buffer;
+            (*raw).data[0] = (&*native as *const FfmpegAvD3D12VaFrame).cast_mut().cast();
+            buffer
+        };
+        // SAFETY: source_buffer remains owned by frame.
+        assert_eq!(
+            unsafe { ffmpeg::ffi::av_buffer_get_ref_count(source_buffer) },
+            1
+        );
+
+        let resource = FfmpegNativeDecodedFrameResource::retain(&frame)
+            .expect("D3D12 frame with a ref-counted resource must be retained");
+        // SAFETY: source_buffer remains owned by frame and resource.
+        assert_eq!(
+            unsafe { ffmpeg::ffi::av_buffer_get_ref_count(source_buffer) },
+            2
+        );
+        let handle = PreviewNativeDecodedFrameHandle::new(resource);
+        drop(frame);
+
+        let retained = handle
+            .resource::<FfmpegNativeDecodedFrameResource>()
+            .expect("native handle must preserve the concrete FFmpeg resource");
+        let view = retained.d3d12_texture().expect("D3D12 ABI view");
+        assert_eq!(view.texture_ptr(), texture);
+        assert_eq!(view.fence_ptr(), fence);
+        assert_eq!(view.fence_value(), 42);
+        drop(native);
+    }
+
+    #[test]
     fn ffmpeg_native_resource_rejects_software_frames() {
         let mut frame = ffmpeg::util::frame::video::Video::empty();
         frame.set_format(ffmpeg::util::format::pixel::Pixel::RGBA);
@@ -6913,6 +7126,55 @@ mod tests {
         assert!(
             preview_cache_get(&path, fingerprint, test_source_color(), 960, 540, 42, 1).is_none()
         );
+    }
+
+    #[test]
+    fn explicit_d3d12_p010_frame_materializes_native_with_decode_fence() {
+        let decoded = synthetic_d3d12_frame(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P010LE);
+        let mut plan = PreviewHardwareDecodePlan::resolve(
+            PreviewHardwareDecodeRequest::Auto,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewDecodeBackend::Software,
+            ffmpeg::codec::Id::HEVC,
+            None,
+        );
+        plan.request = PreviewHardwareDecodeRequest::RequireGpuResident;
+        let payload = materialize_decoded_frame(
+            &decoded,
+            &mut plan,
+            &mut None,
+            &mut None,
+            1920,
+            1080,
+            Path::new("synthetic-d3d12"),
+            PreviewSourceColorContract::automatic(
+                ColorSpace::Rec2100Pq,
+                DecodedVideoRange::Limited,
+            ),
+        )
+        .expect("explicit D3D12 P010 frame must remain native");
+
+        let PreviewDecodedFramePayload::NativeGpu(frame) = payload else {
+            panic!("explicit D3D12 P010 frame must not transfer to CPU");
+        };
+        assert_eq!(frame.width, 3840);
+        assert_eq!(frame.height, 2160);
+        assert_eq!(frame.surface_format, DecodedVideoSurfaceFormat::P010);
+        assert_eq!(
+            frame.handle_kind(),
+            DecodedGpuFrameHandleKind::D3D12Resource
+        );
+        let resource = frame
+            .handle
+            .resource::<FfmpegNativeDecodedFrameResource>()
+            .expect("native frame must retain FFmpeg's D3D12 resource");
+        let view = resource.d3d12_texture().expect("D3D12 ABI view");
+        assert_eq!(view.fence_value(), 9);
+        assert_eq!(
+            plan.decision,
+            PreviewHardwareDecodeDecision::GpuResidentNative
+        );
+        assert_eq!(plan.native_decode_fallback, None);
     }
 
     #[test]
