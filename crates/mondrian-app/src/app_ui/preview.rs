@@ -8,7 +8,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -149,7 +149,6 @@ pub struct AppUiPreviewService {
     current_presentation_quality: Cell<mondrian_playback::FramePresentationQuality>,
     next_gpu_preview_candidate_id: Cell<u64>,
     scheduler: MediaPreviewScheduler,
-    worker_activity: Arc<PreviewWorkerActivity>,
     scratch: RefCell<TimelineCompositeScratch>,
     current_generation: Cell<u64>,
     current_frame_pending: Cell<bool>,
@@ -193,7 +192,6 @@ impl AppUiPreviewService {
         let scheduler = MediaPreviewScheduler::default();
         let (job_tx, job_rx) = scheduler.job_queue();
         let (result_tx, result_rx) = mpsc::channel::<MediaPreviewResult>();
-        let worker_activity = Arc::new(PreviewWorkerActivity::default());
         let shutdown = Arc::new(PreviewShutdownSignal::default());
         let mut decode_worker_count = 0;
         let mut workers = Vec::new();
@@ -201,7 +199,6 @@ impl AppUiPreviewService {
             let worker_jobs = job_rx.clone();
             let worker_results = result_tx.clone();
             let worker_scheduler = scheduler.clone();
-            let worker_activity = Arc::clone(&worker_activity);
             let worker_shutdown = Arc::clone(&shutdown);
             let worker_lane = media_preview_worker_lane(worker_index, worker_count);
             match std::thread::Builder::new()
@@ -212,7 +209,6 @@ impl AppUiPreviewService {
                         worker_jobs,
                         worker_results,
                         worker_scheduler,
-                        worker_activity,
                         worker_shutdown,
                     )
                 }) {
@@ -243,7 +239,6 @@ impl AppUiPreviewService {
             ),
             next_gpu_preview_candidate_id: Cell::new(0),
             scheduler,
-            worker_activity,
             scratch: RefCell::new(TimelineCompositeScratch::default()),
             current_generation: Cell::new(0),
             current_frame_pending: Cell::new(false),
@@ -656,7 +651,7 @@ impl AppUiPreviewService {
                 .get(),
             enqueued_jobs: self.metrics.enqueued_jobs.get(),
             prefetch_skipped_current_pending: self.metrics.prefetch_skipped_current_pending.get(),
-            prefetch_skipped_worker_busy: self.metrics.prefetch_skipped_worker_busy.get(),
+            prefetch_skipped_current_work: self.metrics.prefetch_skipped_current_work.get(),
             prefetch_skipped_prefetch_backlog: self.metrics.prefetch_skipped_prefetch_backlog.get(),
             queue_full_drops: self.metrics.queue_full_drops.get(),
             queue_invalid_access_mode_drops: self.metrics.queue_invalid_access_mode_drops.get(),
@@ -673,7 +668,6 @@ impl AppUiPreviewService {
             queue_promoted_current_jobs: self.metrics.queue_promoted_current_jobs.get(),
             worker_disconnected_drops: self.metrics.worker_disconnected_drops.get(),
             worker_queue: self.jobs.diagnostics(),
-            worker_activity: self.worker_activity.snapshot(),
             scheduler,
             playback_schedule: self.playback_schedule_diagnostics(),
             viewer_frame_cache_hits: self.metrics.viewer_frame_cache_hits.get(),
@@ -2832,7 +2826,7 @@ pub struct AppUiPreviewDiagnostics {
     /// Playback prefetch passes skipped because visible current-frame media was pending.
     pub prefetch_skipped_current_pending: u64,
     /// Playback prefetch passes skipped because current-frame work was queued or running.
-    pub prefetch_skipped_worker_busy: u64,
+    pub prefetch_skipped_current_work: u64,
     /// Playback prefetch passes skipped because queued/running prefetch already held the window.
     pub prefetch_skipped_prefetch_backlog: u64,
     /// Media preview jobs dropped because the bounded worker queue was full.
@@ -2859,8 +2853,6 @@ pub struct AppUiPreviewDiagnostics {
     pub worker_disconnected_drops: u64,
     /// Current worker transport queue depth grouped by scheduling contract.
     pub worker_queue: MediaPreviewJobQueueDiagnostics,
-    /// Current preview worker in-flight decode activity grouped by scheduling contract.
-    pub worker_activity: PreviewWorkerActivityDiagnostics,
     /// Scheduler-side request, drop, completion, and pruning counters.
     pub scheduler: MediaPreviewSchedulerDiagnostics,
     /// Playback-clock deadline and forward-prefetch scheduling contract.
@@ -2990,37 +2982,6 @@ pub struct AppUiPreviewDiagnostics {
         crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlockerBreakdown,
     /// GPU compositing capability diagnostics.
     pub gpu_compositing: mondrian_renderer::GpuCompositingDiagnostics,
-}
-
-/// Point-in-time preview worker decode activity grouped by scheduling contract.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
-pub struct PreviewWorkerActivityDiagnostics {
-    /// Decode jobs currently running in preview workers.
-    pub in_flight_jobs: usize,
-    /// Current-frame decode jobs currently running in preview workers.
-    pub in_flight_current_jobs: usize,
-    /// Prefetch decode jobs currently running in preview workers.
-    pub in_flight_prefetch_jobs: usize,
-    /// Playback cursor decode jobs currently running in preview workers.
-    pub in_flight_playback_cursor_jobs: usize,
-    /// Scrub cursor decode jobs currently running in preview workers.
-    pub in_flight_scrub_cursor_jobs: usize,
-    /// Random-access still-frame decode jobs currently running in preview workers.
-    pub in_flight_random_access_still_jobs: usize,
-    /// Jobs currently running on the single-worker fallback lane.
-    pub in_flight_any_lane_jobs: usize,
-    /// Jobs currently running on the playback-reserved worker lane.
-    pub in_flight_playback_lane_jobs: usize,
-    /// Jobs currently running on the scrub-reserved worker lane.
-    pub in_flight_scrub_lane_jobs: usize,
-    /// Jobs currently running on the still-frame-reserved worker lane.
-    pub in_flight_still_lane_jobs: usize,
-    /// Jobs currently running on the shared non-playback interactive lane.
-    pub in_flight_interactive_lane_jobs: usize,
-    /// Current-frame jobs running on a worker lane that would not normally
-    /// accept their access mode. This is allowed as overflow for visible work,
-    /// but persistent counts mean the lane split or worker budget is too tight.
-    pub in_flight_cross_lane_current_jobs: usize,
 }
 
 /// Structured color-management rejection captured from the viewer preview path.
@@ -3857,7 +3818,7 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     /// Playback prefetch passes skipped while visible current-frame work was pending.
     pub prefetch_skipped_current_pending: u64,
     /// Playback prefetch passes skipped while current-frame worker work was queued or running.
-    pub prefetch_skipped_worker_busy: u64,
+    pub prefetch_skipped_current_work: u64,
     /// Playback prefetch passes skipped because queued/running prefetch already covered the window.
     pub prefetch_skipped_prefetch_backlog: u64,
     /// Jobs dropped because the bounded worker queue was full.
@@ -3886,8 +3847,6 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     pub worker_disconnected_drops: u64,
     /// Current worker transport queue depth grouped by scheduling contract.
     pub worker_queue: MediaPreviewJobQueueDiagnostics,
-    /// Current preview worker in-flight decode activity grouped by scheduling contract.
-    pub worker_activity: PreviewWorkerActivityDiagnostics,
     /// Decode requests that required a seek.
     pub seeked_frames: u64,
     /// Total decoded frames consumed before frame selection.
@@ -3937,7 +3896,7 @@ pub enum AppUiPreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 30;
+pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 31;
 
 /// Default preview slow-frame budget: one frame should complete in tens of ms.
 pub const APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
@@ -5338,8 +5297,8 @@ fn push_preview_decode_root_causes_and_actions(
                 summary.worker_queue.queued_current_jobs,
                 summary.worker_queue.queued_playback_cursor_jobs,
                 summary.worker_queue.queued_prefetch_jobs,
-                summary.worker_activity.in_flight_jobs,
-                summary.worker_activity.in_flight_playback_cursor_jobs,
+                summary.worker_queue.in_flight_jobs,
+                summary.worker_queue.in_flight_playback_cursor_jobs,
                 summary.canceled_playback_deadline_jobs,
                 summary.playback_schedule.current_deadline_assignments,
                 summary.playback_schedule.current_decode_decisions,
@@ -5367,8 +5326,8 @@ fn push_preview_decode_root_causes_and_actions(
                 summary.scheduler.canceled_requests,
                 summary.worker_queue.queued_jobs,
                 summary.worker_queue.queued_current_jobs,
-                summary.worker_activity.in_flight_jobs,
-                summary.worker_activity.in_flight_current_jobs,
+                summary.worker_queue.in_flight_jobs,
+                summary.worker_queue.in_flight_current_jobs,
                 summary.canceled_jobs,
                 summary.canceled_obsolete_jobs,
                 summary.canceled_playback_deadline_jobs
@@ -5388,7 +5347,7 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_playback_sustained_pressure",
             format!(
-                "sustained_pressure_active={} sustained_pressure_events={} sustained_pressure_recoveries={} current_late_streak={} current_drop_late_decisions={} current_proxy_or_hardware_recommended_decisions={} prefetch_skipped_sustained_pressure={} prefetch_skipped_current_pending={} prefetch_skipped_worker_busy={} queued_current_jobs={} queued_prefetch_jobs={} in_flight_current_jobs={} in_flight_prefetch_jobs={}",
+                "sustained_pressure_active={} sustained_pressure_events={} sustained_pressure_recoveries={} current_late_streak={} current_drop_late_decisions={} current_proxy_or_hardware_recommended_decisions={} prefetch_skipped_sustained_pressure={} prefetch_skipped_current_pending={} prefetch_skipped_current_work={} queued_current_jobs={} queued_prefetch_jobs={} in_flight_current_jobs={} in_flight_prefetch_jobs={}",
                 summary.playback_schedule.sustained_pressure_active,
                 summary.playback_schedule.sustained_pressure_events,
                 summary.playback_schedule.sustained_pressure_recoveries,
@@ -5401,11 +5360,11 @@ fn push_preview_decode_root_causes_and_actions(
                     .playback_schedule
                     .prefetch_skipped_sustained_pressure,
                 summary.prefetch_skipped_current_pending,
-                summary.prefetch_skipped_worker_busy,
+                summary.prefetch_skipped_current_work,
                 summary.worker_queue.queued_current_jobs,
                 summary.worker_queue.queued_prefetch_jobs,
-                summary.worker_activity.in_flight_current_jobs,
-                summary.worker_activity.in_flight_prefetch_jobs
+                summary.worker_queue.in_flight_current_jobs,
+                summary.worker_queue.in_flight_prefetch_jobs
             ),
             "recover_playback_scheduler_pressure",
             "Suppress forward prefetch while sustained playback pressure is active, then resume only after a current playback frame succeeds; use proxy or hardware decode when late frames continue.",
@@ -5560,13 +5519,13 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_queue_wait_bound",
             format!(
-            "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={} enqueued_jobs={} prefetch_skipped_current_pending={} prefetch_skipped_worker_busy={} prefetch_skipped_prefetch_backlog={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_expired_playback_current_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queued_any_lane_eligible_jobs={} queued_playback_lane_eligible_jobs={} queued_scrub_lane_eligible_jobs={} queued_still_lane_eligible_jobs={} queued_interactive_lane_eligible_jobs={} in_flight_jobs={} in_flight_current_jobs={} in_flight_prefetch_jobs={} in_flight_playback_cursor_jobs={} in_flight_scrub_cursor_jobs={} in_flight_random_access_still_jobs={} in_flight_playback_lane_jobs={} in_flight_scrub_lane_jobs={} in_flight_still_lane_jobs={} in_flight_interactive_lane_jobs={} in_flight_cross_lane_current_jobs={} queue_full_drops={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} interactive_cancel_requests={} interactive_cancel_scheduler_requests={} interactive_cancel_queued_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={}",
+            "queue_wait_max_us={} current_queue_wait_max_us={} prefetch_queue_wait_max_us={} enqueued_jobs={} prefetch_skipped_current_pending={} prefetch_skipped_current_work={} prefetch_skipped_prefetch_backlog={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_expired_playback_current_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queued_any_lane_eligible_jobs={} queued_playback_lane_eligible_jobs={} queued_scrub_lane_eligible_jobs={} queued_still_lane_eligible_jobs={} queued_non_playback_lane_eligible_jobs={} in_flight_jobs={} in_flight_current_jobs={} in_flight_prefetch_jobs={} in_flight_playback_cursor_jobs={} in_flight_scrub_cursor_jobs={} in_flight_random_access_still_jobs={} in_flight_playback_lane_jobs={} in_flight_scrub_lane_jobs={} in_flight_still_lane_jobs={} in_flight_non_playback_lane_jobs={} in_flight_cross_lane_current_jobs={} queue_full_drops={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} interactive_cancel_requests={} interactive_cancel_scheduler_requests={} interactive_cancel_queued_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={}",
                 summary.queue_wait_max_us,
                 summary.current_queue_wait_max_us,
                 summary.prefetch_queue_wait_max_us,
                 summary.enqueued_jobs,
                 summary.prefetch_skipped_current_pending,
-                summary.prefetch_skipped_worker_busy,
+                summary.prefetch_skipped_current_work,
                 summary.prefetch_skipped_prefetch_backlog,
                 summary.worker_queue.queued_jobs,
                 summary.worker_queue.queued_current_jobs,
@@ -5579,18 +5538,18 @@ fn push_preview_decode_root_causes_and_actions(
                 summary.worker_queue.queued_playback_lane_eligible_jobs,
                 summary.worker_queue.queued_scrub_lane_eligible_jobs,
                 summary.worker_queue.queued_still_lane_eligible_jobs,
-                summary.worker_queue.queued_interactive_lane_eligible_jobs,
-                summary.worker_activity.in_flight_jobs,
-                summary.worker_activity.in_flight_current_jobs,
-                summary.worker_activity.in_flight_prefetch_jobs,
-                summary.worker_activity.in_flight_playback_cursor_jobs,
-                summary.worker_activity.in_flight_scrub_cursor_jobs,
-                summary.worker_activity.in_flight_random_access_still_jobs,
-                summary.worker_activity.in_flight_playback_lane_jobs,
-                summary.worker_activity.in_flight_scrub_lane_jobs,
-                summary.worker_activity.in_flight_still_lane_jobs,
-                summary.worker_activity.in_flight_interactive_lane_jobs,
-                summary.worker_activity.in_flight_cross_lane_current_jobs,
+                summary.worker_queue.queued_non_playback_lane_eligible_jobs,
+                summary.worker_queue.in_flight_jobs,
+                summary.worker_queue.in_flight_current_jobs,
+                summary.worker_queue.in_flight_prefetch_jobs,
+                summary.worker_queue.in_flight_playback_cursor_jobs,
+                summary.worker_queue.in_flight_scrub_cursor_jobs,
+                summary.worker_queue.in_flight_random_access_still_jobs,
+                summary.worker_queue.in_flight_playback_lane_jobs,
+                summary.worker_queue.in_flight_scrub_lane_jobs,
+                summary.worker_queue.in_flight_still_lane_jobs,
+                summary.worker_queue.in_flight_non_playback_lane_jobs,
+                summary.worker_queue.in_flight_cross_lane_current_jobs,
                 summary.queue_full_drops,
                 summary.queue_evicted_prefetch_jobs,
                 summary.queue_evicted_still_jobs,
@@ -5839,9 +5798,9 @@ fn push_preview_decode_root_causes_and_actions(
                     .canceled_prefetch_preempted_jobs,
                 summary.worker_queue.queued_current_jobs,
                 summary.worker_queue.queued_prefetch_jobs,
-                summary.worker_activity.in_flight_jobs,
-                summary.worker_activity.in_flight_prefetch_jobs,
-                summary.worker_activity.in_flight_playback_cursor_jobs
+                summary.worker_queue.in_flight_jobs,
+                summary.worker_queue.in_flight_prefetch_jobs,
+                summary.worker_queue.in_flight_playback_cursor_jobs
             ),
             "reduce_speculative_prefetch_pressure",
             "Throttle playback prefetch when visible current-frame work is waiting; prefetch should yield before it consumes the only interactive decode opportunity.",
@@ -5865,11 +5824,11 @@ fn push_preview_decode_root_causes_and_actions(
                 summary.worker_queue.queued_scrub_cursor_jobs,
                 summary.worker_queue.queued_playback_cursor_jobs,
                 summary.worker_queue.queued_random_access_still_jobs,
-                summary.worker_activity.in_flight_jobs,
-                summary.worker_activity.in_flight_current_jobs,
-                summary.worker_activity.in_flight_scrub_cursor_jobs,
-                summary.worker_activity.in_flight_playback_cursor_jobs,
-                summary.worker_activity.in_flight_random_access_still_jobs
+                summary.worker_queue.in_flight_jobs,
+                summary.worker_queue.in_flight_current_jobs,
+                summary.worker_queue.in_flight_scrub_cursor_jobs,
+                summary.worker_queue.in_flight_playback_cursor_jobs,
+                summary.worker_queue.in_flight_random_access_still_jobs
             ),
             "preempt_still_decode_for_realtime_preview",
             "Keep random-access still decode from occupying the only interactive lane when playback or scrub current-frame work is waiting.",
@@ -5981,11 +5940,11 @@ fn push_preview_decode_root_causes_and_actions(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_worker_queue_full_drops",
             format!(
-                "queue_full_drops={} enqueued_jobs={} prefetch_skipped_current_pending={} prefetch_skipped_worker_busy={} prefetch_skipped_prefetch_backlog={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_expired_playback_current_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queued_any_lane_eligible_jobs={} queued_playback_lane_eligible_jobs={} queued_scrub_lane_eligible_jobs={} queued_still_lane_eligible_jobs={} queued_interactive_lane_eligible_jobs={} in_flight_jobs={} in_flight_current_jobs={} in_flight_prefetch_jobs={} in_flight_playback_cursor_jobs={} in_flight_scrub_cursor_jobs={} in_flight_random_access_still_jobs={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} interactive_cancel_requests={} interactive_cancel_scheduler_requests={} interactive_cancel_queued_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={} scheduler_dropped_pending_window_requests={} scheduler_evicted_still_requests={}",
+                "queue_full_drops={} enqueued_jobs={} prefetch_skipped_current_pending={} prefetch_skipped_current_work={} prefetch_skipped_prefetch_backlog={} queued_jobs={} queued_current_jobs={} queued_prefetch_jobs={} queued_playback_cursor_jobs={} queued_expired_playback_current_jobs={} queued_scrub_cursor_jobs={} queued_random_access_still_jobs={} queued_any_lane_eligible_jobs={} queued_playback_lane_eligible_jobs={} queued_scrub_lane_eligible_jobs={} queued_still_lane_eligible_jobs={} queued_non_playback_lane_eligible_jobs={} in_flight_jobs={} in_flight_current_jobs={} in_flight_prefetch_jobs={} in_flight_playback_cursor_jobs={} in_flight_scrub_cursor_jobs={} in_flight_random_access_still_jobs={} queue_evicted_prefetch_jobs={} queue_evicted_still_jobs={} interactive_cancel_requests={} interactive_cancel_scheduler_requests={} interactive_cancel_queued_jobs={} queue_canceled_jobs={} queue_pruned_obsolete_jobs={} queue_promoted_current_jobs={} scheduler_dropped_pending_window_requests={} scheduler_evicted_still_requests={}",
                 summary.queue_full_drops,
                 summary.enqueued_jobs,
                 summary.prefetch_skipped_current_pending,
-                summary.prefetch_skipped_worker_busy,
+                summary.prefetch_skipped_current_work,
                 summary.prefetch_skipped_prefetch_backlog,
                 summary.worker_queue.queued_jobs,
                 summary.worker_queue.queued_current_jobs,
@@ -5998,13 +5957,13 @@ fn push_preview_decode_root_causes_and_actions(
                 summary.worker_queue.queued_playback_lane_eligible_jobs,
                 summary.worker_queue.queued_scrub_lane_eligible_jobs,
                 summary.worker_queue.queued_still_lane_eligible_jobs,
-                summary.worker_queue.queued_interactive_lane_eligible_jobs,
-                summary.worker_activity.in_flight_jobs,
-                summary.worker_activity.in_flight_current_jobs,
-                summary.worker_activity.in_flight_prefetch_jobs,
-                summary.worker_activity.in_flight_playback_cursor_jobs,
-                summary.worker_activity.in_flight_scrub_cursor_jobs,
-                summary.worker_activity.in_flight_random_access_still_jobs,
+                summary.worker_queue.queued_non_playback_lane_eligible_jobs,
+                summary.worker_queue.in_flight_jobs,
+                summary.worker_queue.in_flight_current_jobs,
+                summary.worker_queue.in_flight_prefetch_jobs,
+                summary.worker_queue.in_flight_playback_cursor_jobs,
+                summary.worker_queue.in_flight_scrub_cursor_jobs,
+                summary.worker_queue.in_flight_random_access_still_jobs,
                 summary.queue_evicted_prefetch_jobs,
                 summary.queue_evicted_still_jobs,
                 summary.interactive_cancel_requests,
@@ -6917,7 +6876,7 @@ impl AppUiPreviewDiagnostics {
             prefetch_queue_wait_max_us: self.decode_prefetch_queue_wait_max_us,
             enqueued_jobs: self.enqueued_jobs,
             prefetch_skipped_current_pending: self.prefetch_skipped_current_pending,
-            prefetch_skipped_worker_busy: self.prefetch_skipped_worker_busy,
+            prefetch_skipped_current_work: self.prefetch_skipped_current_work,
             prefetch_skipped_prefetch_backlog: self.prefetch_skipped_prefetch_backlog,
             queue_full_drops: self.queue_full_drops,
             queue_invalid_access_mode_drops: self.queue_invalid_access_mode_drops,
@@ -6932,7 +6891,6 @@ impl AppUiPreviewDiagnostics {
             queue_promoted_current_jobs: self.queue_promoted_current_jobs,
             worker_disconnected_drops: self.worker_disconnected_drops,
             worker_queue: self.worker_queue,
-            worker_activity: self.worker_activity,
             seeked_frames: self.decode_seeked_frames,
             decoded_frame_count: self.decode_decoded_frame_count,
             max_decoded_frame_count: self.decode_max_decoded_frame_count,
@@ -7639,157 +7597,6 @@ impl PreviewShutdownSignal {
     }
 }
 
-#[derive(Default)]
-struct PreviewWorkerActivity {
-    in_flight_jobs: AtomicUsize,
-    in_flight_current_jobs: AtomicUsize,
-    in_flight_prefetch_jobs: AtomicUsize,
-    in_flight_playback_cursor_jobs: AtomicUsize,
-    in_flight_scrub_cursor_jobs: AtomicUsize,
-    in_flight_random_access_still_jobs: AtomicUsize,
-    in_flight_any_lane_jobs: AtomicUsize,
-    in_flight_playback_lane_jobs: AtomicUsize,
-    in_flight_scrub_lane_jobs: AtomicUsize,
-    in_flight_still_lane_jobs: AtomicUsize,
-    in_flight_interactive_lane_jobs: AtomicUsize,
-    in_flight_cross_lane_current_jobs: AtomicUsize,
-}
-
-impl PreviewWorkerActivity {
-    fn begin(
-        self: &Arc<Self>,
-        lane: MediaPreviewWorkerLane,
-        priority: MediaPreviewRequestPriority,
-        access_mode: PreviewDecodeAccessMode,
-    ) -> PreviewWorkerActivityLease {
-        self.in_flight_jobs.fetch_add(1, Ordering::AcqRel);
-        match priority {
-            MediaPreviewRequestPriority::Current => {
-                self.in_flight_current_jobs.fetch_add(1, Ordering::AcqRel);
-            }
-            MediaPreviewRequestPriority::Prefetch => {
-                self.in_flight_prefetch_jobs.fetch_add(1, Ordering::AcqRel);
-            }
-        }
-        match access_mode {
-            PreviewDecodeAccessMode::PlaybackCursor => {
-                self.in_flight_playback_cursor_jobs.fetch_add(1, Ordering::AcqRel);
-            }
-            PreviewDecodeAccessMode::ScrubCursor => {
-                self.in_flight_scrub_cursor_jobs.fetch_add(1, Ordering::AcqRel);
-            }
-            PreviewDecodeAccessMode::RandomAccessStillFrame => {
-                self.in_flight_random_access_still_jobs.fetch_add(1, Ordering::AcqRel);
-            }
-        }
-        match lane {
-            MediaPreviewWorkerLane::Any => {
-                self.in_flight_any_lane_jobs.fetch_add(1, Ordering::AcqRel);
-            }
-            MediaPreviewWorkerLane::Playback => {
-                self.in_flight_playback_lane_jobs.fetch_add(1, Ordering::AcqRel);
-            }
-            MediaPreviewWorkerLane::Scrub => {
-                self.in_flight_scrub_lane_jobs.fetch_add(1, Ordering::AcqRel);
-            }
-            MediaPreviewWorkerLane::Still => {
-                self.in_flight_still_lane_jobs.fetch_add(1, Ordering::AcqRel);
-            }
-            MediaPreviewWorkerLane::Interactive => {
-                self.in_flight_interactive_lane_jobs.fetch_add(1, Ordering::AcqRel);
-            }
-        }
-        if priority == MediaPreviewRequestPriority::Current && !lane.accepts(access_mode) {
-            self.in_flight_cross_lane_current_jobs.fetch_add(1, Ordering::AcqRel);
-        }
-        PreviewWorkerActivityLease {
-            activity: Arc::clone(self),
-            lane,
-            priority,
-            access_mode,
-        }
-    }
-
-    fn snapshot(&self) -> PreviewWorkerActivityDiagnostics {
-        PreviewWorkerActivityDiagnostics {
-            in_flight_jobs: self.in_flight_jobs.load(Ordering::Acquire),
-            in_flight_current_jobs: self.in_flight_current_jobs.load(Ordering::Acquire),
-            in_flight_prefetch_jobs: self.in_flight_prefetch_jobs.load(Ordering::Acquire),
-            in_flight_playback_cursor_jobs: self
-                .in_flight_playback_cursor_jobs
-                .load(Ordering::Acquire),
-            in_flight_scrub_cursor_jobs: self.in_flight_scrub_cursor_jobs.load(Ordering::Acquire),
-            in_flight_random_access_still_jobs: self
-                .in_flight_random_access_still_jobs
-                .load(Ordering::Acquire),
-            in_flight_any_lane_jobs: self.in_flight_any_lane_jobs.load(Ordering::Acquire),
-            in_flight_playback_lane_jobs: self.in_flight_playback_lane_jobs.load(Ordering::Acquire),
-            in_flight_scrub_lane_jobs: self.in_flight_scrub_lane_jobs.load(Ordering::Acquire),
-            in_flight_still_lane_jobs: self.in_flight_still_lane_jobs.load(Ordering::Acquire),
-            in_flight_interactive_lane_jobs: self
-                .in_flight_interactive_lane_jobs
-                .load(Ordering::Acquire),
-            in_flight_cross_lane_current_jobs: self
-                .in_flight_cross_lane_current_jobs
-                .load(Ordering::Acquire),
-        }
-    }
-}
-
-struct PreviewWorkerActivityLease {
-    activity: Arc<PreviewWorkerActivity>,
-    lane: MediaPreviewWorkerLane,
-    priority: MediaPreviewRequestPriority,
-    access_mode: PreviewDecodeAccessMode,
-}
-
-impl Drop for PreviewWorkerActivityLease {
-    fn drop(&mut self) {
-        self.activity.in_flight_jobs.fetch_sub(1, Ordering::AcqRel);
-        match self.priority {
-            MediaPreviewRequestPriority::Current => {
-                self.activity.in_flight_current_jobs.fetch_sub(1, Ordering::AcqRel);
-            }
-            MediaPreviewRequestPriority::Prefetch => {
-                self.activity.in_flight_prefetch_jobs.fetch_sub(1, Ordering::AcqRel);
-            }
-        }
-        match self.access_mode {
-            PreviewDecodeAccessMode::PlaybackCursor => {
-                self.activity.in_flight_playback_cursor_jobs.fetch_sub(1, Ordering::AcqRel);
-            }
-            PreviewDecodeAccessMode::ScrubCursor => {
-                self.activity.in_flight_scrub_cursor_jobs.fetch_sub(1, Ordering::AcqRel);
-            }
-            PreviewDecodeAccessMode::RandomAccessStillFrame => {
-                self.activity.in_flight_random_access_still_jobs.fetch_sub(1, Ordering::AcqRel);
-            }
-        }
-        match self.lane {
-            MediaPreviewWorkerLane::Any => {
-                self.activity.in_flight_any_lane_jobs.fetch_sub(1, Ordering::AcqRel);
-            }
-            MediaPreviewWorkerLane::Playback => {
-                self.activity.in_flight_playback_lane_jobs.fetch_sub(1, Ordering::AcqRel);
-            }
-            MediaPreviewWorkerLane::Scrub => {
-                self.activity.in_flight_scrub_lane_jobs.fetch_sub(1, Ordering::AcqRel);
-            }
-            MediaPreviewWorkerLane::Still => {
-                self.activity.in_flight_still_lane_jobs.fetch_sub(1, Ordering::AcqRel);
-            }
-            MediaPreviewWorkerLane::Interactive => {
-                self.activity.in_flight_interactive_lane_jobs.fetch_sub(1, Ordering::AcqRel);
-            }
-        }
-        if self.priority == MediaPreviewRequestPriority::Current
-            && !self.lane.accepts(self.access_mode)
-        {
-            self.activity.in_flight_cross_lane_current_jobs.fetch_sub(1, Ordering::AcqRel);
-        }
-    }
-}
-
 impl AppUiPreviewService {
     fn schedule_media_prefetches(
         &self,
@@ -7811,14 +7618,13 @@ impl AppUiPreviewService {
             return;
         }
         let worker_queue = self.jobs.diagnostics();
-        let worker_activity = self.worker_activity.snapshot();
-        if worker_queue.queued_current_jobs > 0 || worker_activity.in_flight_current_jobs > 0 {
-            bump(&self.metrics.prefetch_skipped_worker_busy);
+        if worker_queue.queued_current_jobs > 0 || worker_queue.in_flight_current_jobs > 0 {
+            bump(&self.metrics.prefetch_skipped_current_work);
             return;
         }
         let prefetch_pressure = worker_queue
             .queued_prefetch_jobs
-            .saturating_add(worker_activity.in_flight_prefetch_jobs);
+            .saturating_add(worker_queue.in_flight_prefetch_jobs);
         let prefetch_window_frames =
             media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate);
         self.record_playback_forward_prefetch_window(prefetch_window_frames);
@@ -8695,7 +8501,7 @@ struct AppUiPreviewMetrics {
     completion_poll_time_budget_exhaustions: Cell<u64>,
     enqueued_jobs: Cell<u64>,
     prefetch_skipped_current_pending: Cell<u64>,
-    prefetch_skipped_worker_busy: Cell<u64>,
+    prefetch_skipped_current_work: Cell<u64>,
     prefetch_skipped_prefetch_backlog: Cell<u64>,
     queue_full_drops: Cell<u64>,
     queue_invalid_access_mode_drops: Cell<u64>,
@@ -9599,7 +9405,6 @@ fn media_preview_worker(
     jobs: MediaPreviewJobQueueReceiver,
     results: mpsc::Sender<MediaPreviewResult>,
     scheduler: MediaPreviewScheduler,
-    worker_activity: Arc<PreviewWorkerActivity>,
     shutdown: Arc<PreviewShutdownSignal>,
 ) {
     while let Some(outcome) = jobs.recv_for_worker_outcome(lane) {
@@ -9667,7 +9472,6 @@ fn media_preview_worker(
             }
             continue;
         }
-        let _activity_lease = worker_activity.begin(lane, job.priority, job.access_mode);
         let cancel_priority = job.priority;
         let cancel_access_mode = job.access_mode;
         let cancel_deadline_at = job.deadline_at;
@@ -13122,35 +12926,33 @@ mod tests {
             queue_promoted_current_jobs: 1,
             worker_queue: MediaPreviewJobQueueDiagnostics {
                 queued_jobs: 3,
-                in_flight_jobs: 0,
+                in_flight_jobs: 2,
                 queued_current_jobs: 2,
-                in_flight_current_jobs: 0,
+                in_flight_current_jobs: 1,
                 queued_prefetch_jobs: 1,
-                in_flight_prefetch_jobs: 0,
+                in_flight_prefetch_jobs: 1,
                 queued_playback_cursor_jobs: 1,
-                in_flight_playback_cursor_jobs: 0,
+                in_flight_playback_cursor_jobs: 1,
                 queued_expired_playback_current_jobs: 1,
                 queued_expired_jobs: 1,
                 dropped_expired_playback_current_jobs: 0,
                 dropped_expired_jobs: 0,
                 queued_scrub_cursor_jobs: 1,
-                in_flight_scrub_cursor_jobs: 0,
+                in_flight_scrub_cursor_jobs: 1,
                 queued_random_access_still_jobs: 1,
                 in_flight_random_access_still_jobs: 0,
+                in_flight_any_lane_jobs: 0,
+                in_flight_playback_lane_jobs: 1,
+                in_flight_scrub_lane_jobs: 1,
+                in_flight_still_lane_jobs: 0,
+                in_flight_non_playback_lane_jobs: 0,
+                in_flight_cross_lane_current_jobs: 0,
                 queued_any_lane_eligible_jobs: 3,
                 queued_playback_lane_eligible_jobs: 1,
                 queued_scrub_lane_eligible_jobs: 1,
                 queued_still_lane_eligible_jobs: 1,
-                queued_interactive_lane_eligible_jobs: 2,
+                queued_non_playback_lane_eligible_jobs: 2,
                 closed: false,
-            },
-            worker_activity: PreviewWorkerActivityDiagnostics {
-                in_flight_jobs: 2,
-                in_flight_current_jobs: 1,
-                in_flight_prefetch_jobs: 1,
-                in_flight_playback_cursor_jobs: 1,
-                in_flight_scrub_cursor_jobs: 1,
-                ..PreviewWorkerActivityDiagnostics::default()
             },
             decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
                 scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
@@ -13237,14 +13039,14 @@ mod tests {
         assert_eq!(summary.worker_queue.queued_scrub_lane_eligible_jobs, 1);
         assert_eq!(summary.worker_queue.queued_still_lane_eligible_jobs, 1);
         assert_eq!(
-            summary.worker_queue.queued_interactive_lane_eligible_jobs,
+            summary.worker_queue.queued_non_playback_lane_eligible_jobs,
             2
         );
-        assert_eq!(summary.worker_activity.in_flight_jobs, 2);
-        assert_eq!(summary.worker_activity.in_flight_current_jobs, 1);
-        assert_eq!(summary.worker_activity.in_flight_prefetch_jobs, 1);
-        assert_eq!(summary.worker_activity.in_flight_playback_cursor_jobs, 1);
-        assert_eq!(summary.worker_activity.in_flight_scrub_cursor_jobs, 1);
+        assert_eq!(summary.worker_queue.in_flight_jobs, 2);
+        assert_eq!(summary.worker_queue.in_flight_current_jobs, 1);
+        assert_eq!(summary.worker_queue.in_flight_prefetch_jobs, 1);
+        assert_eq!(summary.worker_queue.in_flight_playback_cursor_jobs, 1);
+        assert_eq!(summary.worker_queue.in_flight_scrub_cursor_jobs, 1);
         assert_eq!(summary.scheduler.dropped_pending_window_requests, 2);
         assert!(report.root_causes.iter().any(|root| root.code
             == "preview_decode_queue_wait_bound"
@@ -13259,7 +13061,7 @@ mod tests {
             && root.evidence.contains("queued_playback_lane_eligible_jobs=1")
             && root.evidence.contains("queued_scrub_lane_eligible_jobs=1")
             && root.evidence.contains("queued_still_lane_eligible_jobs=1")
-            && root.evidence.contains("queued_interactive_lane_eligible_jobs=2")
+            && root.evidence.contains("queued_non_playback_lane_eligible_jobs=2")
             && root.evidence.contains("in_flight_jobs=2")
             && root.evidence.contains("in_flight_current_jobs=1")
             && root.evidence.contains("in_flight_prefetch_jobs=1")
@@ -13318,18 +13120,15 @@ mod tests {
                 queued_current_jobs: 2,
                 queued_prefetch_jobs: 1,
                 queued_playback_cursor_jobs: 2,
+                in_flight_jobs: 1,
+                in_flight_playback_cursor_jobs: 1,
                 queued_expired_playback_current_jobs: 2,
                 dropped_expired_playback_current_jobs: 1,
                 queued_any_lane_eligible_jobs: 3,
                 queued_playback_lane_eligible_jobs: 2,
-                queued_interactive_lane_eligible_jobs: 2,
+                queued_non_playback_lane_eligible_jobs: 2,
                 closed: false,
                 ..MediaPreviewJobQueueDiagnostics::default()
-            },
-            worker_activity: PreviewWorkerActivityDiagnostics {
-                in_flight_jobs: 1,
-                in_flight_playback_cursor_jobs: 1,
-                ..PreviewWorkerActivityDiagnostics::default()
             },
             playback_schedule: AppUiPreviewPlaybackScheduleDiagnostics {
                 current_deadline_assignments: 4,
@@ -13386,10 +13185,10 @@ mod tests {
                 canceled_requests: 1,
                 ..MediaPreviewSchedulerDiagnostics::default()
             },
-            worker_activity: PreviewWorkerActivityDiagnostics {
+            worker_queue: MediaPreviewJobQueueDiagnostics {
                 in_flight_jobs: 1,
                 in_flight_current_jobs: 1,
-                ..PreviewWorkerActivityDiagnostics::default()
+                ..MediaPreviewJobQueueDiagnostics::default()
             },
             ..AppUiPreviewDiagnostics::default()
         };
@@ -13444,11 +13243,8 @@ mod tests {
             },
             worker_queue: MediaPreviewJobQueueDiagnostics {
                 queued_prefetch_jobs: 1,
-                ..MediaPreviewJobQueueDiagnostics::default()
-            },
-            worker_activity: PreviewWorkerActivityDiagnostics {
                 in_flight_prefetch_jobs: 1,
-                ..PreviewWorkerActivityDiagnostics::default()
+                ..MediaPreviewJobQueueDiagnostics::default()
             },
             ..AppUiPreviewDiagnostics::default()
         };
@@ -16849,7 +16645,7 @@ mod tests {
             1
         );
         assert_eq!(diagnostics.prefetch_skipped_current_pending, 0);
-        assert_eq!(diagnostics.prefetch_skipped_worker_busy, 0);
+        assert_eq!(diagnostics.prefetch_skipped_current_work, 0);
         assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 0);
 
         service.record_playback_current_success(
@@ -16896,7 +16692,7 @@ mod tests {
 
         let diagnostics = service.diagnostics();
         assert_eq!(diagnostics.prefetch_skipped_current_pending, 0);
-        assert_eq!(diagnostics.prefetch_skipped_worker_busy, 1);
+        assert_eq!(diagnostics.prefetch_skipped_current_work, 1);
         assert_eq!(diagnostics.prefetch_skipped_prefetch_backlog, 0);
         assert_eq!(diagnostics.worker_queue.queued_current_jobs, 1);
         assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 0);
@@ -16909,21 +16705,25 @@ mod tests {
         state.play();
         let sequence = state.sequence.as_ref().expect("sequence");
         let (width, height) = preview_dimensions_for_sequence(sequence);
-        let _current = service.worker_activity.begin(
-            MediaPreviewWorkerLane::Scrub,
+        let generation = service.scheduler.begin_generation();
+        let _current = begin_test_media_execution(
+            &service,
+            test_media_key(150),
+            generation,
             MediaPreviewRequestPriority::Current,
             PreviewDecodeAccessMode::ScrubCursor,
+            MediaPreviewWorkerLane::Scrub,
         );
 
         service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
 
         let diagnostics = service.diagnostics();
         assert_eq!(diagnostics.prefetch_skipped_current_pending, 0);
-        assert_eq!(diagnostics.prefetch_skipped_worker_busy, 1);
+        assert_eq!(diagnostics.prefetch_skipped_current_work, 1);
         assert_eq!(diagnostics.prefetch_skipped_prefetch_backlog, 0);
         assert_eq!(diagnostics.enqueued_jobs, 0);
         assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 0);
-        assert_eq!(diagnostics.worker_activity.in_flight_current_jobs, 1);
+        assert_eq!(diagnostics.worker_queue.in_flight_current_jobs, 1);
     }
 
     #[test]
@@ -16964,7 +16764,7 @@ mod tests {
 
         let diagnostics = service.diagnostics();
         assert_eq!(diagnostics.prefetch_skipped_current_pending, 0);
-        assert_eq!(diagnostics.prefetch_skipped_worker_busy, 0);
+        assert_eq!(diagnostics.prefetch_skipped_current_work, 0);
         assert_eq!(diagnostics.prefetch_skipped_prefetch_backlog, 1);
         assert_eq!(
             diagnostics.worker_queue.queued_prefetch_jobs,
@@ -16982,27 +16782,30 @@ mod tests {
         let prefetch_window =
             media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
                 .expect("valid sequence frame rate");
-        let _first = service.worker_activity.begin(
-            MediaPreviewWorkerLane::Playback,
-            MediaPreviewRequestPriority::Prefetch,
-            PreviewDecodeAccessMode::PlaybackCursor,
-        );
-        let _second = service.worker_activity.begin(
-            MediaPreviewWorkerLane::Playback,
-            MediaPreviewRequestPriority::Prefetch,
-            PreviewDecodeAccessMode::PlaybackCursor,
-        );
+        let generation = service.scheduler.begin_generation();
+        let _executions = (0..prefetch_window)
+            .map(|offset| {
+                begin_test_media_execution(
+                    &service,
+                    test_media_key(250 + offset as i64),
+                    generation,
+                    MediaPreviewRequestPriority::Prefetch,
+                    PreviewDecodeAccessMode::PlaybackCursor,
+                    MediaPreviewWorkerLane::Playback,
+                )
+            })
+            .collect::<Vec<_>>();
 
         service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
 
         let diagnostics = service.diagnostics();
         assert_eq!(diagnostics.prefetch_skipped_current_pending, 0);
-        assert_eq!(diagnostics.prefetch_skipped_worker_busy, 0);
+        assert_eq!(diagnostics.prefetch_skipped_current_work, 0);
         assert_eq!(diagnostics.prefetch_skipped_prefetch_backlog, 1);
         assert_eq!(diagnostics.enqueued_jobs, 0);
         assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 0);
         assert_eq!(
-            diagnostics.worker_activity.in_flight_prefetch_jobs,
+            diagnostics.worker_queue.in_flight_prefetch_jobs,
             prefetch_window
         );
     }
@@ -17059,10 +16862,15 @@ mod tests {
         let prefetch_window =
             media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
                 .expect("valid sequence frame rate");
-        let _prefetch = service.worker_activity.begin(
-            MediaPreviewWorkerLane::Playback,
+        let generation = service.scheduler.begin_generation();
+        service.current_generation.set(generation);
+        let _prefetch = begin_test_media_execution(
+            &service,
+            test_media_key(350),
+            generation,
             MediaPreviewRequestPriority::Prefetch,
             PreviewDecodeAccessMode::PlaybackCursor,
+            MediaPreviewWorkerLane::Playback,
         );
 
         service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
@@ -17073,7 +16881,7 @@ mod tests {
             diagnostics.worker_queue.queued_prefetch_jobs,
             prefetch_window.saturating_sub(1)
         );
-        assert_eq!(diagnostics.worker_activity.in_flight_prefetch_jobs, 1);
+        assert_eq!(diagnostics.worker_queue.in_flight_prefetch_jobs, 1);
         assert_eq!(
             diagnostics.enqueued_jobs,
             prefetch_window.saturating_sub(1) as u64
@@ -17243,7 +17051,6 @@ mod tests {
         let (result_tx, result_rx) = mpsc::channel();
         let scheduler = MediaPreviewScheduler::default();
         let (job_tx, job_rx) = scheduler.job_queue();
-        let worker_activity = Arc::new(PreviewWorkerActivity::default());
         let shutdown = Arc::new(PreviewShutdownSignal::default());
         let key = test_media_key(42);
         let generation = scheduler.begin_generation();
@@ -17266,7 +17073,6 @@ mod tests {
         );
 
         let worker_scheduler = scheduler.clone();
-        let worker_activity_for_thread = Arc::clone(&worker_activity);
         let worker_shutdown = Arc::clone(&shutdown);
         let worker = thread::spawn(move || {
             media_preview_worker(
@@ -17274,15 +17080,12 @@ mod tests {
                 job_rx,
                 result_tx,
                 worker_scheduler,
-                worker_activity_for_thread,
                 worker_shutdown,
             );
         });
         let result = result_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("expired playback current should produce a canceled result");
-        job_tx.close();
-        worker.join().expect("preview worker should stop after queue close");
 
         assert_eq!(result.key, key);
         assert!(result.canceled);
@@ -17298,7 +17101,13 @@ mod tests {
             job_tx.diagnostics().dropped_expired_playback_current_jobs,
             1
         );
-        assert_eq!(worker_activity.snapshot().in_flight_jobs, 0);
+        assert_eq!(job_tx.diagnostics().in_flight_jobs, 1);
+        let execution_id = result.execution_id.expect("expired execution lease");
+        assert!(scheduler.resolve_execution(execution_id, false).status.is_current());
+        assert_eq!(job_tx.diagnostics().in_flight_jobs, 0);
+
+        job_tx.close();
+        worker.join().expect("preview worker should stop after queue close");
     }
 
     #[test]
@@ -17936,6 +17745,35 @@ mod tests {
             engine: ColorEngine::mondrian_standard(),
             ocio_generation: mondrian_core::ocio_config_generation(),
         }
+    }
+
+    fn begin_test_media_execution(
+        service: &AppUiPreviewService,
+        key: MediaPreviewKey,
+        generation: u64,
+        priority: MediaPreviewRequestPriority,
+        access_mode: PreviewDecodeAccessMode,
+        lane: MediaPreviewWorkerLane,
+    ) -> mondrian_playback::FrameExecutionId {
+        let source_secs = key.source_micros as f64 / 1_000_000.0;
+        assert_eq!(
+            service.jobs.enqueue(MediaPreviewJob {
+                key,
+                source_secs,
+                generation,
+                priority,
+                access_mode,
+                adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                hardware_decode_device_selector: None,
+                enqueued_at: Instant::now(),
+                deadline_at: None,
+                demand_identity: None,
+                execution_id: None,
+            }),
+            MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
+        );
+        service.scheduler.begin_test_execution(lane).expect("test execution lease")
     }
 
     fn test_cpu_frame_store(
@@ -18962,63 +18800,6 @@ mod tests {
         assert_eq!(diagnostics.completion_poll_time_budget_exhaustions, 1);
         assert_eq!(service.scheduler.pending_len(), 1);
         service.shutdown();
-    }
-
-    #[test]
-    fn preview_worker_activity_tracks_in_flight_jobs_by_access_mode() {
-        let activity = Arc::new(PreviewWorkerActivity::default());
-        {
-            let _playback = activity.begin(
-                MediaPreviewWorkerLane::Playback,
-                MediaPreviewRequestPriority::Prefetch,
-                PreviewDecodeAccessMode::PlaybackCursor,
-            );
-            let _scrub = activity.begin(
-                MediaPreviewWorkerLane::Scrub,
-                MediaPreviewRequestPriority::Current,
-                PreviewDecodeAccessMode::ScrubCursor,
-            );
-            let snapshot = activity.snapshot();
-            assert_eq!(snapshot.in_flight_jobs, 2);
-            assert_eq!(snapshot.in_flight_current_jobs, 1);
-            assert_eq!(snapshot.in_flight_prefetch_jobs, 1);
-            assert_eq!(snapshot.in_flight_playback_cursor_jobs, 1);
-            assert_eq!(snapshot.in_flight_scrub_cursor_jobs, 1);
-            assert_eq!(snapshot.in_flight_random_access_still_jobs, 0);
-            assert_eq!(snapshot.in_flight_playback_lane_jobs, 1);
-            assert_eq!(snapshot.in_flight_scrub_lane_jobs, 1);
-            assert_eq!(snapshot.in_flight_still_lane_jobs, 0);
-            assert_eq!(snapshot.in_flight_interactive_lane_jobs, 0);
-            assert_eq!(snapshot.in_flight_cross_lane_current_jobs, 0);
-        }
-
-        assert_eq!(
-            activity.snapshot(),
-            PreviewWorkerActivityDiagnostics::default()
-        );
-    }
-
-    #[test]
-    fn preview_worker_activity_tracks_cross_lane_current_overflow() {
-        let activity = Arc::new(PreviewWorkerActivity::default());
-        {
-            let _scrub_on_playback_lane = activity.begin(
-                MediaPreviewWorkerLane::Playback,
-                MediaPreviewRequestPriority::Current,
-                PreviewDecodeAccessMode::ScrubCursor,
-            );
-            let snapshot = activity.snapshot();
-            assert_eq!(snapshot.in_flight_jobs, 1);
-            assert_eq!(snapshot.in_flight_current_jobs, 1);
-            assert_eq!(snapshot.in_flight_scrub_cursor_jobs, 1);
-            assert_eq!(snapshot.in_flight_playback_lane_jobs, 1);
-            assert_eq!(snapshot.in_flight_cross_lane_current_jobs, 1);
-        }
-
-        assert_eq!(
-            activity.snapshot(),
-            PreviewWorkerActivityDiagnostics::default()
-        );
     }
 
     #[test]

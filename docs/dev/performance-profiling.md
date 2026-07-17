@@ -315,7 +315,7 @@ two-frame constant.
 The decode performance report also carries worker-transport counters. Treat
 `queue_full_drops` and `worker_disconnected_drops` as hard failures: they mean
 work accepted by scheduler policy did not reach a live preview worker. Treat
-`prefetch_skipped_current_pending`, `prefetch_skipped_worker_busy`,
+`prefetch_skipped_current_pending`, `prefetch_skipped_current_work`,
 `prefetch_skipped_prefetch_backlog`, `queue_pruned_obsolete_jobs`,
 `queue_evicted_prefetch_jobs`, `queue_canceled_jobs`, and
 `queue_promoted_current_jobs` as scheduling evidence that explains whether the
@@ -336,19 +336,20 @@ from codec, seek, or CPU RGBA boundary cost before tuning worker counts. Schema
 v20 also includes worker-lane eligibility for queued jobs
 (`queued_playback_lane_eligible_jobs`, `queued_scrub_lane_eligible_jobs`,
 `queued_still_lane_eligible_jobs`, and
-`queued_interactive_lane_eligible_jobs`) so a slow report can distinguish
+`queued_non_playback_lane_eligible_jobs`) so a slow report can distinguish
 generic queue depth from work that a particular lane is allowed to take. It also
-includes in-flight worker activity (`in_flight_current_jobs`,
+includes Broker-owned in-flight execution-lease residency (`in_flight_current_jobs`,
 `in_flight_prefetch_jobs`, `in_flight_playback_cursor_jobs`,
 `in_flight_scrub_cursor_jobs`, and `in_flight_random_access_still_jobs`) so a
 slow report can distinguish jobs waiting for a lane from workers currently
 occupied by playback, scrub, or still-frame decode.
-Lane-level in-flight fields (`in_flight_playback_lane_jobs`,
+Schema v31 places lane-level in-flight fields in that same `worker_queue`
+snapshot (`in_flight_playback_lane_jobs`,
 `in_flight_scrub_lane_jobs`, `in_flight_still_lane_jobs`,
-`in_flight_interactive_lane_jobs`, and `in_flight_cross_lane_current_jobs`)
-separate healthy visible-work overflow from a worker split that is too tight.
-Repeated cross-lane current work is a scheduling-capacity signal, not proof that
-the codec, color transform, or GPU upload stage is the primary bottleneck.
+`in_flight_non_playback_lane_jobs`, and `in_flight_cross_lane_current_jobs`)
+and removes the App-local worker-activity counter family. Repeated cross-lane
+current work is a Broker/Adapter contract violation, not healthy overflow or
+proof that the codec, color transform, or GPU upload stage is the bottleneck.
 
 Viewer GPU-output sessions can persist live health records from the app window:
 

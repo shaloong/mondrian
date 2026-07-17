@@ -41,8 +41,8 @@ The latest Frame Demand identity and Adapter deadline atomically attached to one
 _Avoid_: Worker-captured demand identity as final authority, separate pending and completion ownership
 
 **Frame Work Broker**:
-The Playback Module that atomically owns frame-work admission, queued transport, in-flight execution leases, generation invalidation, preemption, lowered deadlines, cancellation, worker-completion stamps, and completion binding while treating media payloads and absolute Adapter clock values as opaque data.
-_Avoid_: Independent scheduler and worker queue, key-only worker completion, UI-owned priority rollback, Adapter-composed freshness/preemption queries
+The Playback Module that atomically owns frame-work admission, queued transport, worker-lane-bound in-flight execution leases, generation invalidation, preemption, lowered deadlines, cancellation, worker-completion stamps, and completion binding while treating media payloads and absolute Adapter clock values as opaque data.
+_Avoid_: Independent scheduler and worker queue, Adapter-owned worker-activity counters, key-only worker completion, UI-owned priority rollback, Adapter-composed freshness/preemption queries
 
 **Frame Cancellation Evidence**:
 Playback-owned, all-run evidence from an authoritative cancellation request through the first cooperative execution checkpoint to worker return, partitioned by Playback, Interactive, and Still frame-work class.
@@ -197,6 +197,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - Each **Frame Demand** produces at most one terminal **Frame Delivery**.
 - A **Frame Request Binding** is resolved atomically at completion. If the same semantic frame key is rebound while work is in flight, a reusable result adopts the latest binding; a canceled or incompatible old execution leaves the newer binding pending.
 - Every queued or executing frame request belongs to exactly one **Frame Work Broker** lifecycle. Admission and queue capacity cannot disagree, and only an execution lease or explicit synchronous Adapter completion may resolve its Frame Request Binding.
+- The **Frame Work Broker** records the selected worker lane on the execution lease at dequeue and derives priority, class, lane residency, and cross-lane evidence from that same lifecycle state. Adapters may rename fields for their report schema but cannot maintain parallel activity counters.
 - The **Frame Work Broker** derives each execution's cancellation disposition and request age under one lifecycle lock. Adapters may translate that disposition into domain-specific diagnostics, but cannot reconstruct it from separate freshness, competing-work, or timestamp queries.
 - The **Frame Work Broker** samples one **Monotonic Runtime Clock** Adapter exactly once for each atomic lifecycle operation that establishes or compares time. A regressing Adapter sample is clamped to the last observation and recorded as fail-closed evidence; it can never move an age backward or masquerade as valid timing proof.
 - A **Frame Work Deadline** is lowered exactly once at Broker admission. Rebinding the same in-flight key replaces its deadline with the latest binding, while cancellation reports the earliest applicable deadline, invalidation, or preemption request.

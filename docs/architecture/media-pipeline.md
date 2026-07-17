@@ -186,7 +186,7 @@ pending, current-frame work is waiting in the worker queue or already running,
 or queued plus in-flight prefetch already covers the configured forward window,
 the app must skip that prefetch pass instead of adding more speculative jobs.
 Diagnostics report these as `prefetch_skipped_current_pending`,
-`prefetch_skipped_worker_busy`, and `prefetch_skipped_prefetch_backlog`. This
+`prefetch_skipped_current_work`, and `prefetch_skipped_prefetch_backlog`. This
 keeps first-frame display and dropped-frame recovery ahead of cache warming on
 slow or long-GOP media. The configured forward window is derived from a
 wall-clock horizon and the active sequence frame rate, then capped before
@@ -608,21 +608,28 @@ misreporting every expiration as a missed playback presentation.
 The app preview layer must also expose worker-lane eligibility for the same queued jobs
 (`queued_playback_lane_eligible_jobs`, `queued_scrub_lane_eligible_jobs`,
 `queued_still_lane_eligible_jobs`, and
-`queued_interactive_lane_eligible_jobs`) so reports can distinguish a backlog
+`queued_non_playback_lane_eligible_jobs`) so reports can distinguish a backlog
 that has an idle compatible lane from one waiting behind an occupied or missing
 lane. The UI/report layer must consume these queue diagnostics rather than
 recomputing lane acceptance from access-mode conditionals.
-In-flight worker activity is exposed separately and split by the same priority and access-mode
-contracts (`in_flight_current_jobs`, `in_flight_prefetch_jobs`,
+In-flight execution-lease residency is exposed in the same Broker diagnostic
+snapshot and split by priority and access-mode contracts
+(`in_flight_current_jobs`, `in_flight_prefetch_jobs`,
 `in_flight_playback_cursor_jobs`, `in_flight_scrub_cursor_jobs`, and
 `in_flight_random_access_still_jobs`) so diagnostics can separate queued backlog
-from workers actively occupied by playback, scrub, or exact still-frame decode.
-The same activity snapshot must include worker-lane occupancy and
+from work already owned by playback, scrub, or exact still-frame workers. The
+Broker records the selected lane when it creates the execution lease; the App
+Adapter must not mirror this lifecycle with atomic activity counters. The same
+snapshot includes worker-lane residency and
 `in_flight_cross_lane_current_jobs`. In normal multi-lane operation cross-lane
 current work is an invariant violation; only lanes whose declared acceptance
 already spans a class (`Any` or `NonPlayback`) may share it. Persistent
 cross-lane evidence therefore points at an Adapter mapping bug, not spare
 capacity that should be exploited before codec, color, or GPU analysis.
+An execution remains in flight after the worker sends its result and is released
+only when the result consumer resolves freshness/terminal ownership (or the
+execution is explicitly abandoned). Worker return alone is not lifecycle
+completion and must not make residency evidence disappear early.
 It also carries per-access-mode decode profiles for playback, scrub, and
 random-access still requests: frame counts, cache/ring/source path counts,
 end-to-end duration totals/maxima, worker-queue wait totals/maxima, seek counts,

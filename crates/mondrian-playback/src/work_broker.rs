@@ -165,6 +165,18 @@ pub struct FrameWorkBrokerDiagnostics {
     pub in_flight_interactive: usize,
     /// In-flight still execution leases.
     pub in_flight_still: usize,
+    /// In-flight leases on the unrestricted single-worker lane.
+    pub in_flight_any_lane: usize,
+    /// In-flight leases on the playback-reserved lane.
+    pub in_flight_playback_lane: usize,
+    /// In-flight leases on the interactive-scrub lane.
+    pub in_flight_interactive_lane: usize,
+    /// In-flight leases on the deterministic-still lane.
+    pub in_flight_still_lane: usize,
+    /// In-flight leases on the shared non-playback lane.
+    pub in_flight_non_playback_lane: usize,
+    /// Current leases whose recorded lane does not accept their work class.
+    pub in_flight_cross_lane_current: usize,
     /// Queued current work.
     pub queued_current: usize,
     /// Queued speculative work.
@@ -250,6 +262,7 @@ struct InFlightWork<K> {
     generation: u64,
     priority: FrameWorkPriority,
     work_class: FrameWorkClass,
+    worker_lane: Option<FrameWorkerLane>,
     demand_identity: Option<FrameDemandIdentity>,
     deadline_at: Option<MonotonicTimestamp>,
     completed_at: Option<MonotonicTimestamp>,
@@ -521,6 +534,7 @@ where
                         generation: request.generation,
                         priority: request.priority,
                         work_class: request.work_class,
+                        worker_lane: Some(lane),
                         demand_identity: request.demand_identity,
                         deadline_at: queued.deadline_at,
                         completed_at: None,
@@ -665,6 +679,7 @@ where
             generation,
             priority: FrameWorkPriority::Current,
             work_class,
+            worker_lane: None,
             demand_identity,
             deadline_at: None,
             completed_at: Some(now),
@@ -914,6 +929,22 @@ where
                 FrameWorkClass::Playback => diagnostics.in_flight_playback += 1,
                 FrameWorkClass::Interactive => diagnostics.in_flight_interactive += 1,
                 FrameWorkClass::Still => diagnostics.in_flight_still += 1,
+            }
+            if let Some(lane) = execution.worker_lane {
+                match lane {
+                    FrameWorkerLane::Any => diagnostics.in_flight_any_lane += 1,
+                    FrameWorkerLane::Playback => diagnostics.in_flight_playback_lane += 1,
+                    FrameWorkerLane::Interactive => diagnostics.in_flight_interactive_lane += 1,
+                    FrameWorkerLane::Still => diagnostics.in_flight_still_lane += 1,
+                    FrameWorkerLane::NonPlayback => {
+                        diagnostics.in_flight_non_playback_lane += 1;
+                    }
+                }
+                if execution.priority == FrameWorkPriority::Current
+                    && !lane.accepts(execution.work_class)
+                {
+                    diagnostics.in_flight_cross_lane_current += 1;
+                }
             }
         }
         diagnostics
@@ -1954,6 +1985,57 @@ mod tests {
         let diagnostics = broker.diagnostics();
         assert_eq!(diagnostics.pending_requests, 0);
         assert_eq!(diagnostics.queued_work, 0);
+    }
+
+    #[test]
+    fn diagnostics_derive_worker_lane_residency_from_execution_leases() {
+        let broker = FrameWorkBroker::new(5, 5);
+        let generation = broker.begin_generation();
+        let cases = [
+            (1, FrameWorkClass::Playback, FrameWorkerLane::Playback),
+            (2, FrameWorkClass::Interactive, FrameWorkerLane::Interactive),
+            (3, FrameWorkClass::Still, FrameWorkerLane::Still),
+            (4, FrameWorkClass::Interactive, FrameWorkerLane::NonPlayback),
+            (5, FrameWorkClass::Playback, FrameWorkerLane::Any),
+        ];
+        let mut execution_ids = Vec::with_capacity(cases.len());
+
+        for (key, work_class, worker_lane) in cases {
+            assert!(matches!(
+                broker.submit(request(key, generation, work_class)),
+                FrameWorkSubmission::Queued { .. }
+            ));
+            let execution = match broker.receive(worker_lane) {
+                Some(FrameWorkReceive::Ready(execution)) => execution,
+                other => panic!("unexpected receive for {worker_lane:?}: {other:?}"),
+            };
+            execution_ids.push(execution.id);
+        }
+
+        let diagnostics = broker.diagnostics();
+        assert_eq!(diagnostics.in_flight_work, 5);
+        assert_eq!(diagnostics.in_flight_current, 5);
+        assert_eq!(diagnostics.in_flight_playback, 2);
+        assert_eq!(diagnostics.in_flight_interactive, 2);
+        assert_eq!(diagnostics.in_flight_still, 1);
+        assert_eq!(diagnostics.in_flight_any_lane, 1);
+        assert_eq!(diagnostics.in_flight_playback_lane, 1);
+        assert_eq!(diagnostics.in_flight_interactive_lane, 1);
+        assert_eq!(diagnostics.in_flight_still_lane, 1);
+        assert_eq!(diagnostics.in_flight_non_playback_lane, 1);
+        assert_eq!(diagnostics.in_flight_cross_lane_current, 0);
+
+        for execution_id in execution_ids {
+            assert!(broker.abandon_execution(execution_id));
+        }
+        let diagnostics = broker.diagnostics();
+        assert_eq!(diagnostics.in_flight_work, 0);
+        assert_eq!(diagnostics.in_flight_any_lane, 0);
+        assert_eq!(diagnostics.in_flight_playback_lane, 0);
+        assert_eq!(diagnostics.in_flight_interactive_lane, 0);
+        assert_eq!(diagnostics.in_flight_still_lane, 0);
+        assert_eq!(diagnostics.in_flight_non_playback_lane, 0);
+        assert_eq!(diagnostics.in_flight_cross_lane_current, 0);
     }
 
     #[test]

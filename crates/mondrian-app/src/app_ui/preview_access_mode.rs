@@ -245,6 +245,18 @@ pub struct MediaPreviewJobQueueDiagnostics {
     pub queued_random_access_still_jobs: usize,
     /// Deterministic still worker execution leases.
     pub in_flight_random_access_still_jobs: usize,
+    /// Execution leases on the unrestricted single-worker lane.
+    pub in_flight_any_lane_jobs: usize,
+    /// Execution leases on the playback-reserved lane.
+    pub in_flight_playback_lane_jobs: usize,
+    /// Execution leases on the scrub-reserved lane.
+    pub in_flight_scrub_lane_jobs: usize,
+    /// Execution leases on the still-frame-reserved lane.
+    pub in_flight_still_lane_jobs: usize,
+    /// Execution leases on the shared non-playback lane.
+    pub in_flight_non_playback_lane_jobs: usize,
+    /// Current execution leases whose lane does not accept their work class.
+    pub in_flight_cross_lane_current_jobs: usize,
     /// Jobs eligible for an unrestricted worker lane.
     pub queued_any_lane_eligible_jobs: usize,
     /// Jobs directly eligible for a playback worker lane.
@@ -254,7 +266,7 @@ pub struct MediaPreviewJobQueueDiagnostics {
     /// Jobs directly eligible for a deterministic still worker lane.
     pub queued_still_lane_eligible_jobs: usize,
     /// Jobs eligible for a shared non-playback worker lane.
-    pub queued_interactive_lane_eligible_jobs: usize,
+    pub queued_non_playback_lane_eligible_jobs: usize,
     /// Whether the broker has closed worker transport.
     pub closed: bool,
 }
@@ -503,11 +515,17 @@ fn media_preview_job_queue_diagnostics(
         in_flight_scrub_cursor_jobs: state.in_flight_interactive,
         queued_random_access_still_jobs: state.queued_still,
         in_flight_random_access_still_jobs: state.in_flight_still,
+        in_flight_any_lane_jobs: state.in_flight_any_lane,
+        in_flight_playback_lane_jobs: state.in_flight_playback_lane,
+        in_flight_scrub_lane_jobs: state.in_flight_interactive_lane,
+        in_flight_still_lane_jobs: state.in_flight_still_lane,
+        in_flight_non_playback_lane_jobs: state.in_flight_non_playback_lane,
+        in_flight_cross_lane_current_jobs: state.in_flight_cross_lane_current,
         queued_any_lane_eligible_jobs: state.queued_work,
         queued_playback_lane_eligible_jobs: state.queued_playback,
         queued_scrub_lane_eligible_jobs: state.queued_interactive,
         queued_still_lane_eligible_jobs: state.queued_still,
-        queued_interactive_lane_eligible_jobs: state
+        queued_non_playback_lane_eligible_jobs: state
             .queued_interactive
             .saturating_add(state.queued_still),
         closed: state.closed,
@@ -529,7 +547,7 @@ fn frame_worker_lane(lane: MediaPreviewWorkerLane) -> mondrian_playback::FrameWo
         MediaPreviewWorkerLane::Playback => mondrian_playback::FrameWorkerLane::Playback,
         MediaPreviewWorkerLane::Scrub => mondrian_playback::FrameWorkerLane::Interactive,
         MediaPreviewWorkerLane::Still => mondrian_playback::FrameWorkerLane::Still,
-        MediaPreviewWorkerLane::Interactive => mondrian_playback::FrameWorkerLane::NonPlayback,
+        MediaPreviewWorkerLane::NonPlayback => mondrian_playback::FrameWorkerLane::NonPlayback,
     }
 }
 
@@ -590,19 +608,7 @@ pub(crate) enum MediaPreviewWorkerLane {
     Playback,
     Scrub,
     Still,
-    Interactive,
-}
-
-impl MediaPreviewWorkerLane {
-    pub(crate) fn accepts(self, access_mode: PreviewDecodeAccessMode) -> bool {
-        match self {
-            Self::Any => true,
-            Self::Playback => access_mode == PreviewDecodeAccessMode::PlaybackCursor,
-            Self::Scrub => access_mode == PreviewDecodeAccessMode::ScrubCursor,
-            Self::Still => access_mode == PreviewDecodeAccessMode::RandomAccessStillFrame,
-            Self::Interactive => access_mode != PreviewDecodeAccessMode::PlaybackCursor,
-        }
-    }
+    NonPlayback,
 }
 
 pub(crate) fn media_preview_worker_lane(
@@ -616,7 +622,7 @@ pub(crate) fn media_preview_worker_lane(
             0 => MediaPreviewWorkerLane::Playback,
             1 if worker_count >= 3 => MediaPreviewWorkerLane::Scrub,
             2 if worker_count >= 3 => MediaPreviewWorkerLane::Still,
-            _ => MediaPreviewWorkerLane::Interactive,
+            _ => MediaPreviewWorkerLane::NonPlayback,
         }
     }
 }
@@ -2072,7 +2078,7 @@ mod tests {
         );
 
         let scrub_job = receiver
-            .recv_for_worker(MediaPreviewWorkerLane::Interactive)
+            .recv_for_worker(MediaPreviewWorkerLane::NonPlayback)
             .expect("interactive lane should prefer scrub over still");
         assert_eq!(scrub_job.key, scrub);
         assert_eq!(scrub_job.access_mode, PreviewDecodeAccessMode::ScrubCursor);
@@ -2157,7 +2163,7 @@ mod tests {
         );
 
         let interactive_job = receiver
-            .recv_for_worker(MediaPreviewWorkerLane::Interactive)
+            .recv_for_worker(MediaPreviewWorkerLane::NonPlayback)
             .expect("non-playback worker should skip playback cursor work");
         assert_eq!(interactive_job.key, still);
 
@@ -2165,6 +2171,14 @@ mod tests {
             .recv_for_worker(MediaPreviewWorkerLane::Playback)
             .expect("playback worker should retain playback cursor work");
         assert_eq!(playback_job.key, playback);
+
+        let diagnostics = sender.diagnostics();
+        assert_eq!(diagnostics.in_flight_jobs, 2);
+        assert_eq!(diagnostics.in_flight_playback_cursor_jobs, 1);
+        assert_eq!(diagnostics.in_flight_random_access_still_jobs, 1);
+        assert_eq!(diagnostics.in_flight_playback_lane_jobs, 1);
+        assert_eq!(diagnostics.in_flight_non_playback_lane_jobs, 1);
+        assert_eq!(diagnostics.in_flight_cross_lane_current_jobs, 0);
     }
 
     #[test]
@@ -2199,7 +2213,7 @@ mod tests {
         );
 
         let scrub_job = receiver
-            .recv_for_worker(MediaPreviewWorkerLane::Interactive)
+            .recv_for_worker(MediaPreviewWorkerLane::NonPlayback)
             .expect("interactive lane should own current scrub work");
         assert_eq!(scrub_job.key, scrub);
         assert_eq!(scrub_job.access_mode, PreviewDecodeAccessMode::ScrubCursor);
@@ -2250,7 +2264,7 @@ mod tests {
             }
         }
         let scrub_job = receiver
-            .recv_for_worker(MediaPreviewWorkerLane::Interactive)
+            .recv_for_worker(MediaPreviewWorkerLane::NonPlayback)
             .expect("fresh current scrub should retain interactive lane affinity");
         assert_eq!(scrub_job.key, fresh_scrub);
         assert_eq!(scrub_job.access_mode, PreviewDecodeAccessMode::ScrubCursor);
@@ -2332,6 +2346,14 @@ mod tests {
             still_job.access_mode,
             PreviewDecodeAccessMode::RandomAccessStillFrame
         );
+
+        let diagnostics = sender.diagnostics();
+        assert_eq!(diagnostics.in_flight_jobs, 2);
+        assert_eq!(diagnostics.in_flight_scrub_cursor_jobs, 1);
+        assert_eq!(diagnostics.in_flight_random_access_still_jobs, 1);
+        assert_eq!(diagnostics.in_flight_scrub_lane_jobs, 1);
+        assert_eq!(diagnostics.in_flight_still_lane_jobs, 1);
+        assert_eq!(diagnostics.in_flight_cross_lane_current_jobs, 0);
     }
 
     #[test]
@@ -2651,11 +2673,17 @@ mod tests {
                 in_flight_scrub_cursor_jobs: 0,
                 queued_random_access_still_jobs: 1,
                 in_flight_random_access_still_jobs: 0,
+                in_flight_any_lane_jobs: 0,
+                in_flight_playback_lane_jobs: 0,
+                in_flight_scrub_lane_jobs: 0,
+                in_flight_still_lane_jobs: 0,
+                in_flight_non_playback_lane_jobs: 0,
+                in_flight_cross_lane_current_jobs: 0,
                 queued_any_lane_eligible_jobs: 3,
                 queued_playback_lane_eligible_jobs: 1,
                 queued_scrub_lane_eligible_jobs: 1,
                 queued_still_lane_eligible_jobs: 1,
-                queued_interactive_lane_eligible_jobs: 2,
+                queued_non_playback_lane_eligible_jobs: 2,
                 closed: false,
             }
         );
@@ -2768,7 +2796,7 @@ mod tests {
         );
         assert_eq!(
             media_preview_worker_lane(1, 2),
-            MediaPreviewWorkerLane::Interactive
+            MediaPreviewWorkerLane::NonPlayback
         );
         assert_eq!(
             media_preview_worker_lane(0, 3),

@@ -345,7 +345,7 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 **播放与任务**
 
-- [ ] `PlaybackEngine`、`FrameWorkBroker`、`PreviewFrameStore`、Monotonic Runtime Clock、Playback/Frame Cancellation Evidence 与 Headless GPU Adapter 已从 UI 收敛；继续迁出 `app_ui::preview` 中的时间线求值/媒体执行编排，使 `app_ui` 最终只保留意图、窗口资源与呈现状态适配。
+- [ ] `PlaybackEngine`、`FrameWorkBroker`、`PreviewFrameStore`、Monotonic Runtime Clock、Playback/Frame Cancellation Evidence 与 Headless GPU Adapter 已从 UI 收敛；Broker execution lease 已成为优先级/访问类/worker lane 驻留证据的单一事实来源并删除 App activity 原子计数；继续迁出 `app_ui::preview` 中的时间线求值/媒体执行编排，使 `app_ui` 最终只保留意图、窗口资源与呈现状态适配。
 - [ ] 帧工作已统一 generation、priority、deadline、原子取消 disposition、请求龄期、资源预算和诊断所有权；deadline 在 Adapter 准入边界以“不透明绝对值 + 当前剩余时长”提交，由 Broker 单次降低、同键 rebind 更新，并在 worker 发布前一次性记录完成时刻；精确 Headless 测试覆盖截止边界、最早取消原因、rebind 和晚轮询不制造 Late，时钟回退会钳制并使性能/专业门禁失败；继续让缩略图、波形、代理、导出使用同一语言而不强并执行池。
 - [ ] FFmpeg open/stream-info/seek/packet I/O 已接入 request-scoped interrupt，外部 still 子进程可 kill/wait/join；播放域已统一 5 ms request→checkpoint、50 ms Playback/Interactive return、500 ms Still return 的 fail-closed 门禁，仍须在固定参考机用 pause/seek/close/quit、真实长 GOP、阻塞 I/O 与驱动路径取得最坏延迟证据，且 UI 线程不得 join worker。
 

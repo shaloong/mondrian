@@ -39,7 +39,7 @@ the new seams.
 | --- | --- | --- |
 | Playback Engine | session epoch, transport state, timeline anchor, rate/direction, Clock Master selection, priming/recovery, deadlines, drop decisions | decode sessions, GPU resources, audio callback buffers, UI state |
 | Audio Playback Engine | device/stream lifecycle, rendered PCM queue, consumed-sample observation, preroll, underrun/device evidence | timeline transport decisions |
-| Frame Work Broker | bounded semantic admission, queued transport, execution leases, latest generation, current/prefetch priority, still preemption, lowered deadlines, completion stamps, cancellation and freshness resolution | codec payload interpretation, Clock Master or transport state |
+| Frame Work Broker | bounded semantic admission, queued transport, worker-lane-bound execution leases, latest generation, current/prefetch priority, still preemption, lowered deadlines, completion stamps, cancellation, freshness, and class/priority/lane evidence | codec payload interpretation, Clock Master or transport state |
 | Monotonic Runtime Clock | process-local lifecycle-age, expiration, and evidence timestamp sampling | Playback Session advancement, authored/media time, wall-clock identity |
 | Frame Cancellation Evidence | exact all-run cause/timing aggregates and the shared cancellation acceptance policy | cancellation authority, codec checkpoints, UI presentation |
 | Preview Frame Store | ready/stale/in-flight identity, source revision, color contract, memory budgets | deadline policy or proxy selection |
@@ -352,6 +352,11 @@ the three semantic classes and projects generic diagnostics into its report
 schema. The Condvar queue, semantic lane selection, capacity reservation, and
 deadline dequeue now live behind the playback-owned Interface without importing
 FFmpeg types.
+The selected worker lane is captured on the execution lease at dequeue. Broker
+diagnostics derive in-flight priority, class, lane residency, and cross-lane
+invariant evidence from the same locked registry. The App Adapter may rename
+those fields for its report schema, but cannot reconstruct worker activity with
+atomics or access-mode conditionals.
 Every current work class retains semantic lane affinity. Playback runs on
 Playback/Any, scrub on Interactive/NonPlayback/Any, and exact still work on
 Still/NonPlayback/Any. This prevents one request stream from cold-opening a
@@ -825,7 +830,9 @@ in-flight execution leases, deadline dequeue, completion freshness,
 cancellation/expiration, and stable diagnostics. App UI retains only the media
 key/payload plus explicit media-access and wall-deadline Adapter mappings. The
 former `FrameRequestScheduler` and App-local Condvar queue authorities were
-deleted rather than retained as compatibility paths.
+deleted rather than retained as compatibility paths. App-local worker-activity
+atomics were also deleted: windowed reports and Headless verification share the
+Broker diagnostics Interface for execution-lane residency.
 
 Time-sensitive Broker transitions use the `MonotonicRuntimeClock` Interface.
 Production adapts Rust's monotonic `Instant`; Headless tests inject an exact
