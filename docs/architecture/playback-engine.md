@@ -782,8 +782,11 @@ Consolidate frame-work scheduling in the Frame Work Broker; extract Frame Store
 and Evidence from `app_ui::preview` by behavioral ownership, not file size. The
 Playback Preview Pump is already extracted and Window/Headless duplicate
 orchestration is deleted; timeline evaluation, media execution, and color
-diagnostics remain the next large ownership split. Retain one public request
-seam into media.
+diagnostics remain the next large ownership split. The concrete media worker,
+cooperative cancellation, result publication, and FFmpeg Adapter have been
+isolated in `app_ui::preview::media_execution`; it still uses parent payload
+types and therefore is not yet presented as a cross-layer public seam. Retain
+one public request seam into media.
 
 ### Phase 5 — Realtime policy
 

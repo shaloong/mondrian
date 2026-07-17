@@ -78,7 +78,7 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 ### 2.1 当前最重要的结构性风险
 
 1. **产品证据弱于代码广度。** 测试数量很多，但 CI 主测试排除了完整 `mondrian-app`，真实 GPU、真实硬解、真实音频设备和长项目主要依赖手动/ignored smoke。
-2. **关键复杂度的 Locality 不够。** Window/Headless 的完成收割、终态 Delivery 与预卷顺序已统一到 UI 无关 `app::playback_preview`，但预览时间线求值、媒体执行、渲染适配、色彩诊断和缓存逻辑仍大量聚集在 `mondrian-app::app_ui::preview`；导出执行也集中在大型 queue 模块。后续按行为所有权迁出，不能只按文件大小机械拆分。
+2. **关键复杂度的 Locality 不够。** Window/Headless 的完成收割、终态 Delivery 与预卷顺序已统一到 UI 无关 `app::playback_preview`，访问模式与纯策略也已迁入 `app`；具体 decode worker/取消检查点/结果发布/FFmpeg Adapter 已按行为隔离到 `app_ui::preview::media_execution`，但它仍复用父模块 payload，预览时间线求值、渲染适配、色彩诊断和缓存逻辑仍大量聚集在 `mondrian-app::app_ui::preview`。导出执行也集中在大型 queue 模块；后续继续按所有权迁出，不能只按文件大小机械拆分或用大量 `pub(crate)` 伪造边界。
 3. **项目版本化只有“拒绝”，没有“迁移”。** 这在 Alpha 继续变更数据结构时会快速成为真实项目风险。
 4. **声明能力和视觉执行能力可能分离。** 某些效果、文字和转场已有类型或属性，却没有主路径 render op；路线图不得把它们列为已完成。
 5. **音频/视频运行许可必须持续分离。** 当前 `Priming` 已可预填 PCM 但禁止设备提前消费，普通视频 Late/Recovering 也不会旋转音频 generation；仍需用真实音频设备、慢首帧/seek、持续视频压力和 30 分钟 A/V drift 门禁证明该不变量长期成立。

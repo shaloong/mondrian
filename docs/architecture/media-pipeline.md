@@ -345,6 +345,13 @@ prefetch workers pass a cooperative cancellation predicate into
 `PreviewDecodeRequest`, and the media loop checks that predicate before
 open, seek, packet decode, frame receive, EOF drain, and RGBA conversion. Do
 not depend on thread abort to preempt synchronous packet decode.
+The concrete worker loop, cancellation checkpoints, result publication, and
+FFmpeg Preview Adapter now live together in
+`app_ui::preview::media_execution`; render-plan evaluation, frame caches, and
+diagnostic aggregation remain in the parent Preview Adapter. This is a
+behavioral module boundary, not a second scheduler: all admission, deadline,
+generation, and worker-lane authority still comes from `app::preview_access_mode`
+and `mondrian-playback::FrameWorkBroker`.
 Viewer lifecycle is adapted through `app_ui::playback_feedback` into typed Frame
 Deliveries. `Ready`, `StaleAvailable`, and `Blocked` are terminal observations;
 `Loading` is non-terminal pending work. Loading or stale presentation does not
