@@ -76,24 +76,23 @@ pub use yuv_decode::{
 mod sync_timeline;
 
 #[cfg(target_os = "windows")]
-mod windows_d3d11;
+mod windows_adapter;
 #[cfg(target_os = "windows")]
-mod windows_d3d11_backend;
+mod windows_d3d12;
 #[cfg(target_os = "windows")]
-mod windows_d3d11_bridge;
+mod windows_d3d12_backend;
+#[cfg(target_os = "windows")]
+mod windows_d3d12_bridge;
 
 #[cfg(target_os = "windows")]
-pub use windows_d3d11::{
-    inspect_d3d11_native_decoded_frame, D3D11NativeDecodedFrameInspection,
-    D3D11NativeDecodedFrameInspectionError, NativeVideoAdapterLuid,
+pub use windows_adapter::{NativeVideoAdapterError, NativeVideoAdapterLuid};
+#[cfg(target_os = "windows")]
+pub use windows_d3d12::{
+    inspect_d3d12_native_decoded_frame, D3D12NativeDecodedFrameInspection,
+    D3D12NativeDecodedFrameInspectionError,
 };
 #[cfg(target_os = "windows")]
-pub use windows_d3d11_backend::{
-    D3D11Dx12NativeVideoImportBackend, D3D11Dx12NativeVideoImportBackendCreateError,
-    D3D11Dx12NativeVideoImportBackendOptions,
-};
-#[cfg(target_os = "windows")]
-pub use windows_d3d11_bridge::{
-    D3D11Dx12PreparedVideoFrame, D3D11Dx12SharedVideoTexture, D3D11Dx12SharedVideoTextureError,
-    D3D11Dx12VideoPlaneViews,
+pub use windows_d3d12_backend::{
+    D3D12NativeVideoImportBackend, D3D12NativeVideoImportBackendCreateError,
+    D3D12NativeVideoImportBackendOptions,
 };

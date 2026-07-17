@@ -18188,7 +18188,7 @@ mod tests {
         );
         service.set_playback_hardware_decode_admission(AppUiPlaybackHardwareDecodeAdmission {
             request: PreviewHardwareDecodeRequest::PreferGpuResident,
-            hardware_decode_device_selector: Some(HwAccelDeviceSelector::DxgiAdapterIndex(1)),
+            hardware_decode_device_selector: Some(HwAccelDeviceSelector::D3D12VaAdapterIndex(1)),
             renderer_native_import_ready: true,
             platform_native_import_ready: true,
             native_import_admission_ready: true,
@@ -18210,7 +18210,7 @@ mod tests {
             service.hardware_decode_device_selector_for_access_mode(
                 PreviewDecodeAccessMode::PlaybackCursor
             ),
-            Some(HwAccelDeviceSelector::DxgiAdapterIndex(1))
+            Some(HwAccelDeviceSelector::D3D12VaAdapterIndex(1))
         );
         assert_eq!(
             service.hardware_decode_request_for_access_mode(PreviewDecodeAccessMode::ScrubCursor),
@@ -18220,7 +18220,7 @@ mod tests {
             service.hardware_decode_device_selector_for_access_mode(
                 PreviewDecodeAccessMode::ScrubCursor
             ),
-            Some(HwAccelDeviceSelector::DxgiAdapterIndex(1))
+            Some(HwAccelDeviceSelector::D3D12VaAdapterIndex(1))
         );
         assert_eq!(
             service.hardware_decode_request_for_access_mode(
@@ -18232,7 +18232,7 @@ mod tests {
             service.hardware_decode_device_selector_for_access_mode(
                 PreviewDecodeAccessMode::RandomAccessStillFrame
             ),
-            Some(HwAccelDeviceSelector::DxgiAdapterIndex(1))
+            Some(HwAccelDeviceSelector::D3D12VaAdapterIndex(1))
         );
     }
 
@@ -18241,7 +18241,7 @@ mod tests {
         let service = AppUiPreviewService::new_without_workers_for_test();
         service.set_playback_hardware_decode_admission(AppUiPlaybackHardwareDecodeAdmission {
             request: PreviewHardwareDecodeRequest::PreferGpuResident,
-            hardware_decode_device_selector: Some(HwAccelDeviceSelector::DxgiAdapterIndex(1)),
+            hardware_decode_device_selector: Some(HwAccelDeviceSelector::D3D12VaAdapterIndex(1)),
             renderer_native_import_ready: true,
             platform_native_import_ready: true,
             native_import_admission_ready: true,

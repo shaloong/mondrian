@@ -16,7 +16,7 @@ use mondrian_media::{
 
 #[cfg(target_os = "windows")]
 use crate::{
-    execute_native_decoded_frame_import, D3D11Dx12NativeVideoImportBackend,
+    execute_native_decoded_frame_import, D3D12NativeVideoImportBackend,
     GpuNativeDecodedFrameImportBackend,
 };
 use crate::{
@@ -98,7 +98,7 @@ pub struct ViewerGpuNativeSource {
 pub struct ViewerNativeVideoImportRuntime {
     support: GpuNativeDecodedFrameImportSupport,
     #[cfg(target_os = "windows")]
-    backend: Option<D3D11Dx12NativeVideoImportBackend>,
+    backend: Option<D3D12NativeVideoImportBackend>,
 }
 
 impl ViewerNativeVideoImportRuntime {
@@ -121,7 +121,7 @@ impl ViewerNativeVideoImportRuntime {
     ) -> Self {
         #[cfg(target_os = "windows")]
         {
-            match D3D11Dx12NativeVideoImportBackend::new_with_resource_pool(
+            match D3D12NativeVideoImportBackend::new_with_resource_pool(
                 adapter,
                 device,
                 queue,
@@ -134,7 +134,7 @@ impl ViewerNativeVideoImportRuntime {
                 Err(error) => Self {
                     support: GpuNativeDecodedFrameImportSupport::unavailable_with_reason(
                         format!("{:?}", adapter.get_info().backend),
-                        format!("native D3D11/DX12 YUV + OCIO backend unavailable: {error}"),
+                        format!("native D3D12VA YUV + OCIO backend unavailable: {error}"),
                     ),
                     backend: None,
                 },

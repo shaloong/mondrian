@@ -42,14 +42,17 @@ pub enum HwAccelBackend {
 /// resulting native frame's physical adapter identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum HwAccelDeviceSelector {
-    /// DXGI adapter index passed to FFmpeg's D3D12VA/D3D11VA device creator.
-    DxgiAdapterIndex(u32),
+    /// DXGI adapter index passed only to FFmpeg's D3D12VA device creator.
+    D3D12VaAdapterIndex(u32),
+    /// DXGI adapter index passed only to FFmpeg's D3D11VA device creator.
+    D3D11VaAdapterIndex(u32),
 }
 
 impl HwAccelDeviceSelector {
     fn device_name_for(self, backend: HwAccelBackend) -> Option<CString> {
         match (self, backend) {
-            (Self::DxgiAdapterIndex(index), HwAccelBackend::D3D12VA | HwAccelBackend::D3D11VA) => {
+            (Self::D3D12VaAdapterIndex(index), HwAccelBackend::D3D12VA)
+            | (Self::D3D11VaAdapterIndex(index), HwAccelBackend::D3D11VA) => {
                 CString::new(index.to_string()).ok()
             }
             _ => None,
@@ -59,10 +62,8 @@ impl HwAccelDeviceSelector {
     pub(crate) fn selects_backend(self, backend: HwAccelBackend) -> bool {
         matches!(
             (self, backend),
-            (
-                Self::DxgiAdapterIndex(_),
-                HwAccelBackend::D3D12VA | HwAccelBackend::D3D11VA
-            )
+            (Self::D3D12VaAdapterIndex(_), HwAccelBackend::D3D12VA)
+                | (Self::D3D11VaAdapterIndex(_), HwAccelBackend::D3D11VA)
         )
     }
 }
@@ -1155,20 +1156,25 @@ mod tests {
 
     #[test]
     fn dxgi_device_selector_maps_to_modern_ffmpeg_windows_backends() {
-        let selector = HwAccelDeviceSelector::DxgiAdapterIndex(7);
+        let d3d12 = HwAccelDeviceSelector::D3D12VaAdapterIndex(7);
+        let d3d11 = HwAccelDeviceSelector::D3D11VaAdapterIndex(7);
 
         assert_eq!(
-            selector.device_name_for(HwAccelBackend::D3D11VA).as_deref(),
+            d3d11.device_name_for(HwAccelBackend::D3D11VA).as_deref(),
             Some(c"7")
         );
         assert_eq!(
-            selector.device_name_for(HwAccelBackend::D3D12VA).as_deref(),
+            d3d12.device_name_for(HwAccelBackend::D3D12VA).as_deref(),
             Some(c"7")
         );
-        assert!(selector.selects_backend(HwAccelBackend::D3D12VA));
-        assert!(selector.selects_backend(HwAccelBackend::D3D11VA));
-        assert_eq!(selector.device_name_for(HwAccelBackend::Cuda), None);
-        assert!(!selector.selects_backend(HwAccelBackend::Cuda));
+        assert_eq!(d3d12.device_name_for(HwAccelBackend::D3D11VA), None);
+        assert_eq!(d3d11.device_name_for(HwAccelBackend::D3D12VA), None);
+        assert!(d3d12.selects_backend(HwAccelBackend::D3D12VA));
+        assert!(d3d11.selects_backend(HwAccelBackend::D3D11VA));
+        assert!(!d3d12.selects_backend(HwAccelBackend::D3D11VA));
+        assert!(!d3d11.selects_backend(HwAccelBackend::D3D12VA));
+        assert_eq!(d3d12.device_name_for(HwAccelBackend::Cuda), None);
+        assert!(!d3d12.selects_backend(HwAccelBackend::Cuda));
     }
 
     #[test]

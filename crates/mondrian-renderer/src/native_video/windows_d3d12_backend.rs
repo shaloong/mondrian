@@ -1,12 +1,14 @@
-//! Complete D3D11 decoder-surface to OCIO working-frame backend.
+//! Complete D3D12VA decoder-surface to OCIO working-frame backend.
 
-use super::windows_d3d11::{
-    renderer_adapter_dxgi_index, renderer_adapter_luid,
-    validated_d3d11_native_decoded_frame_for_luid, D3D11NativeDecodedFrameInspectionError,
-    NativeVideoAdapterLuid, ValidatedD3D11NativeDecodedFrame,
+use super::windows_adapter::{
+    renderer_adapter_dxgi_index, renderer_adapter_luid, NativeVideoAdapterError,
+    NativeVideoAdapterLuid,
 };
-use super::windows_d3d11_bridge::{
-    D3D11Dx12PreparedVideoFrame, D3D11Dx12SharedVideoTexture, D3D11Dx12SharedVideoTextureError,
+use super::windows_d3d12::{
+    validated_d3d12_native_decoded_frame_for_luid, ValidatedD3D12NativeDecodedFrame,
+};
+use super::windows_d3d12_bridge::{
+    D3D12PreparedVideoFrame, D3D12SharedVideoTexture, D3D12SharedVideoTextureError,
 };
 use crate::{
     ColorFrameResidency, GpuColorFrameResource, GpuColorFrameTextureFormat,
@@ -28,18 +30,13 @@ use windows::core::Interface;
 
 /// Error creating the complete Windows native decoded-frame renderer backend.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
-pub enum D3D11Dx12NativeVideoImportBackendCreateError {
+pub enum D3D12NativeVideoImportBackendCreateError {
     /// The active renderer adapter cannot provide a stable DX12 LUID contract.
     #[error(transparent)]
-    RendererAdapter(#[from] D3D11NativeDecodedFrameInspectionError),
+    RendererAdapter(#[from] NativeVideoAdapterError),
     /// The wgpu device enabled neither native two-plane format.
     #[error("wgpu device enabled neither TEXTURE_FORMAT_NV12 nor TEXTURE_FORMAT_P010")]
     NoNativeYuvTextureFormats,
-    /// No decoder-array-surface content contract has passed conformance yet.
-    #[error(
-        "native decoder-array-surface content conformance is unavailable; refusing GPU-resident import"
-    )]
-    NativeDecoderSurfaceConformanceUnavailable,
     /// A zero-sized in-flight pool could never import a frame.
     #[error("native video bridge pool limit must be greater than zero")]
     ZeroBridgePoolLimit,
@@ -50,7 +47,7 @@ pub enum D3D11Dx12NativeVideoImportBackendCreateError {
 
 /// Resource-pool policy for the Windows native video import backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct D3D11Dx12NativeVideoImportBackendOptions {
+pub struct D3D12NativeVideoImportBackendOptions {
     /// Maximum bridge entries for one immutable source/sampling contract.
     /// Reaching the limit returns busy without a CPU wait.
     pub max_frames_in_flight_per_contract: usize,
@@ -59,7 +56,7 @@ pub struct D3D11Dx12NativeVideoImportBackendOptions {
     pub max_contract_pools: usize,
 }
 
-impl Default for D3D11Dx12NativeVideoImportBackendOptions {
+impl Default for D3D12NativeVideoImportBackendOptions {
     fn default() -> Self {
         Self {
             max_frames_in_flight_per_contract: 4,
@@ -68,38 +65,38 @@ impl Default for D3D11Dx12NativeVideoImportBackendOptions {
     }
 }
 
-/// Complete low-copy D3D11 decoder-surface import backend.
+/// Complete low-copy D3D12VA decoder-surface import backend.
 ///
 /// The backend pools bridge entries per source device and immutable video
 /// sampling contract. Each entry reuses its shared native texture, timeline
 /// fence, plane bind group, and encoded RGB intermediate. Entries expand only
 /// when every matching entry is still in flight; CPU waits are never used for
 /// normal playback concurrency.
-pub struct D3D11Dx12NativeVideoImportBackend {
+pub struct D3D12NativeVideoImportBackend {
     renderer_adapter_luid: NativeVideoAdapterLuid,
     device: wgpu::Device,
     queue: wgpu::Queue,
     support: GpuNativeDecodedFrameImportSupport,
     yuv_decoder: GpuNativeYuvDecoder,
     color_runtime: RenderGpuOutputBoundaryRuntime,
-    pools: HashMap<D3D11BridgePoolKey, D3D11NativeVideoPipelinePool>,
-    options: D3D11Dx12NativeVideoImportBackendOptions,
+    pools: HashMap<D3D12BridgePoolKey, D3D12NativeVideoPipelinePool>,
+    options: D3D12NativeVideoImportBackendOptions,
     contract_use_sequence: u64,
     frame_cpu_timings: NativeVideoImportCpuTimings,
 }
 
-impl D3D11Dx12NativeVideoImportBackend {
+impl D3D12NativeVideoImportBackend {
     /// Create a backend bound to one wgpu DX12 device/queue.
     pub fn new(
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> Result<Self, D3D11Dx12NativeVideoImportBackendCreateError> {
+    ) -> Result<Self, D3D12NativeVideoImportBackendCreateError> {
         Self::new_with_options(
             adapter,
             device,
             queue,
-            D3D11Dx12NativeVideoImportBackendOptions::default(),
+            D3D12NativeVideoImportBackendOptions::default(),
         )
     }
 
@@ -108,8 +105,8 @@ impl D3D11Dx12NativeVideoImportBackend {
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        options: D3D11Dx12NativeVideoImportBackendOptions,
-    ) -> Result<Self, D3D11Dx12NativeVideoImportBackendCreateError> {
+        options: D3D12NativeVideoImportBackendOptions,
+    ) -> Result<Self, D3D12NativeVideoImportBackendCreateError> {
         Self::new_with_options_and_resource_pool(
             adapter,
             device,
@@ -125,12 +122,12 @@ impl D3D11Dx12NativeVideoImportBackend {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
-    ) -> Result<Self, D3D11Dx12NativeVideoImportBackendCreateError> {
+    ) -> Result<Self, D3D12NativeVideoImportBackendCreateError> {
         Self::new_with_options_and_resource_pool(
             adapter,
             device,
             queue,
-            D3D11Dx12NativeVideoImportBackendOptions::default(),
+            D3D12NativeVideoImportBackendOptions::default(),
             resource_pool,
         )
     }
@@ -140,26 +137,26 @@ impl D3D11Dx12NativeVideoImportBackend {
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        options: D3D11Dx12NativeVideoImportBackendOptions,
+        options: D3D12NativeVideoImportBackendOptions,
         resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
-    ) -> Result<Self, D3D11Dx12NativeVideoImportBackendCreateError> {
+    ) -> Result<Self, D3D12NativeVideoImportBackendCreateError> {
         if options.max_frames_in_flight_per_contract == 0 {
-            return Err(D3D11Dx12NativeVideoImportBackendCreateError::ZeroBridgePoolLimit);
+            return Err(D3D12NativeVideoImportBackendCreateError::ZeroBridgePoolLimit);
         }
         if options.max_contract_pools == 0 {
-            return Err(D3D11Dx12NativeVideoImportBackendCreateError::ZeroContractPoolLimit);
+            return Err(D3D12NativeVideoImportBackendCreateError::ZeroContractPoolLimit);
         }
         let formats = conformed_decoder_surface_formats(device.features())?;
         let renderer_adapter_luid = renderer_adapter_luid(adapter)?;
         let decoder_adapter_index = renderer_adapter_dxgi_index(adapter)?;
         let support = GpuNativeDecodedFrameImportSupport::ready(
-            vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
+            vec![DecodedGpuFrameHandleKind::D3D12Resource],
             formats,
         )
         .with_hardware_decode_device_selector(
-            mondrian_media::HwAccelDeviceSelector::DxgiAdapterIndex(decoder_adapter_index),
+            mondrian_media::HwAccelDeviceSelector::D3D12VaAdapterIndex(decoder_adapter_index),
         )
-        .with_renderer_backend_label("wgpu Dx12 D3D11 shared YUV + OCIO");
+        .with_renderer_backend_label("wgpu Dx12 D3D12VA shared YUV + OCIO");
         Ok(Self {
             renderer_adapter_luid,
             device: device.clone(),
@@ -208,9 +205,9 @@ impl D3D11Dx12NativeVideoImportBackend {
         let total_started = Instant::now();
         let source_validation_started = Instant::now();
         let source =
-            validated_d3d11_native_decoded_frame_for_luid(self.renderer_adapter_luid, native_frame)
+            validated_d3d12_native_decoded_frame_for_luid(self.renderer_adapter_luid, native_frame)
                 .map_err(|error| backend_rejected(error.to_string()))?;
-        let key = D3D11BridgePoolKey::new(&source, plan);
+        let key = D3D12BridgePoolKey::new(&source, plan);
         let source_validation_us = elapsed_us(source_validation_started);
         self.ensure_contract_pool(key)?;
         let Self {
@@ -289,7 +286,7 @@ impl D3D11Dx12NativeVideoImportBackend {
         let encoded_resource =
             GpuColorFrameResource::new(plan.encoded_source_frame.clone(), encoded_payload);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("mondrian.native-video.d3d11-import"),
+            label: Some("mondrian.native-video.d3d12-import"),
         });
         let pipeline_prepare_us = elapsed_us(pipeline_prepare_started);
 
@@ -389,7 +386,7 @@ impl D3D11Dx12NativeVideoImportBackend {
 
     fn ensure_contract_pool(
         &mut self,
-        key: D3D11BridgePoolKey,
+        key: D3D12BridgePoolKey,
     ) -> Result<(), GpuNativeDecodedFrameImportError> {
         if self.pools.contains_key(&key) {
             return Ok(());
@@ -422,7 +419,7 @@ impl D3D11Dx12NativeVideoImportBackend {
         }
         self.pools.insert(
             key,
-            D3D11NativeVideoPipelinePool {
+            D3D12NativeVideoPipelinePool {
                 entries: Vec::new(),
                 last_used_sequence: self.contract_use_sequence,
             },
@@ -431,31 +428,33 @@ impl D3D11Dx12NativeVideoImportBackend {
     }
 }
 
-/// Return formats whose complete FFmpeg decoder-array-surface import contract
-/// has passed content and repeated-use conformance on the active stack.
+/// Return native formats enabled on the concrete wgpu DX12 device.
 ///
-/// Texture feature bits and a successful synthetic single-slice share are
-/// insufficient: real D3D11VA output is an array resource with decoder-owned
-/// lifetime and synchronization. Until that exact ABI is proven, native
-/// surfaces remain unavailable and playback keeps hardware decode with a safe
-/// transfer rather than risking green frames or a lost graphics device.
+/// D3D12VA admission still validates every real resource descriptor, adapter,
+/// and fence before it allocates or submits a bridge entry.
 fn conformed_decoder_surface_formats(
     features: wgpu::Features,
-) -> Result<Vec<GpuNativeDecodedFrameTextureFormat>, D3D11Dx12NativeVideoImportBackendCreateError> {
-    if features
-        .intersects(wgpu::Features::TEXTURE_FORMAT_NV12 | wgpu::Features::TEXTURE_FORMAT_P010)
-    {
-        Err(D3D11Dx12NativeVideoImportBackendCreateError::NativeDecoderSurfaceConformanceUnavailable)
-    } else {
-        Err(D3D11Dx12NativeVideoImportBackendCreateError::NoNativeYuvTextureFormats)
+) -> Result<Vec<GpuNativeDecodedFrameTextureFormat>, D3D12NativeVideoImportBackendCreateError> {
+    let mut formats = Vec::with_capacity(2);
+    if features.contains(wgpu::Features::TEXTURE_FORMAT_NV12) {
+        formats.push(GpuNativeDecodedFrameTextureFormat::Nv12);
     }
+    if features
+        .contains(wgpu::Features::TEXTURE_FORMAT_P010 | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM)
+    {
+        formats.push(GpuNativeDecodedFrameTextureFormat::P010);
+    }
+    if formats.is_empty() {
+        return Err(D3D12NativeVideoImportBackendCreateError::NoNativeYuvTextureFormats);
+    }
+    Ok(formats)
 }
 
 fn elapsed_us(started: Instant) -> u64 {
     started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
 }
 
-impl GpuNativeDecodedFrameImportBackend for D3D11Dx12NativeVideoImportBackend {
+impl GpuNativeDecodedFrameImportBackend for D3D12NativeVideoImportBackend {
     type NativeFrame = PreviewNativeDecodedFrame;
     type Resource = GpuColorFrameWgpuResource;
 
@@ -473,10 +472,10 @@ impl GpuNativeDecodedFrameImportBackend for D3D11Dx12NativeVideoImportBackend {
 }
 
 fn native_bridge_import_error(
-    error: D3D11Dx12SharedVideoTextureError,
+    error: D3D12SharedVideoTextureError,
 ) -> GpuNativeDecodedFrameImportError {
     match error {
-        D3D11Dx12SharedVideoTextureError::EntryBusy { required, completed } => {
+        D3D12SharedVideoTextureError::EntryBusy { required, completed } => {
             GpuNativeDecodedFrameImportError::Backpressure {
                 reason: format!(
                     "shared native video texture is busy until fence {required}, completed {completed}"
@@ -492,7 +491,7 @@ fn backend_rejected(reason: String) -> GpuNativeDecodedFrameImportError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct D3D11BridgePoolKey {
+struct D3D12BridgePoolKey {
     source_device_identity: usize,
     visible_extent: GpuNativeVideoExtent,
     storage_extent: GpuNativeVideoExtent,
@@ -503,9 +502,9 @@ struct D3D11BridgePoolKey {
     working_texture_format: GpuColorFrameTextureFormat,
 }
 
-impl D3D11BridgePoolKey {
+impl D3D12BridgePoolKey {
     fn new(
-        source: &ValidatedD3D11NativeDecodedFrame,
+        source: &ValidatedD3D12NativeDecodedFrame,
         plan: &GpuNativeDecodedFrameImportPlan,
     ) -> Self {
         Self {
@@ -527,14 +526,14 @@ impl D3D11BridgePoolKey {
     }
 }
 
-struct D3D11NativeVideoPipelineEntry {
-    bridge: D3D11Dx12SharedVideoTexture,
+struct D3D12NativeVideoPipelineEntry {
+    bridge: D3D12SharedVideoTexture,
     prepared_yuv: Option<GpuNativeYuvPreparedPass>,
     encoded_source: Option<GpuColorFrameWgpuResource>,
 }
 
-struct D3D11NativeVideoPipelinePool {
-    entries: Vec<D3D11NativeVideoPipelineEntry>,
+struct D3D12NativeVideoPipelinePool {
+    entries: Vec<D3D12NativeVideoPipelineEntry>,
     last_used_sequence: u64,
 }
 
@@ -549,18 +548,20 @@ fn select_oldest_reclaimable_contract<K: Copy>(
 }
 
 fn acquire_or_grow_entry(
-    pool: &mut Vec<D3D11NativeVideoPipelineEntry>,
+    pool: &mut Vec<D3D12NativeVideoPipelineEntry>,
     max_entries: usize,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    source: &ValidatedD3D11NativeDecodedFrame,
-) -> Result<(usize, D3D11Dx12PreparedVideoFrame), D3D11Dx12SharedVideoTextureError> {
-    pool.retain(|entry| entry.bridge.sync_phase() != "poisoned");
+    source: &ValidatedD3D12NativeDecodedFrame,
+) -> Result<(usize, D3D12PreparedVideoFrame), D3D12SharedVideoTextureError> {
     let mut last_busy = None;
     for (index, entry) in pool.iter_mut().enumerate() {
+        if !bridge_sync_phase_is_eligible(entry.bridge.sync_phase()) {
+            continue;
+        }
         match entry.bridge.begin_validated_frame(source) {
             Ok(prepared) => return Ok((index, prepared)),
-            Err(error @ D3D11Dx12SharedVideoTextureError::EntryBusy { .. }) => {
+            Err(error @ D3D12SharedVideoTextureError::EntryBusy { .. }) => {
                 last_busy = Some(error);
             }
             Err(error) => return Err(error),
@@ -568,20 +569,24 @@ fn acquire_or_grow_entry(
     }
     if pool.len() >= max_entries {
         return Err(
-            last_busy.unwrap_or(D3D11Dx12SharedVideoTextureError::SyncProtocol {
+            last_busy.unwrap_or(D3D12SharedVideoTextureError::SyncProtocol {
                 reason: "native video bridge pool reached its configured limit".to_owned(),
             }),
         );
     }
-    let mut bridge = D3D11Dx12SharedVideoTexture::new_from_validated_source(device, queue, source)?;
+    let mut bridge = D3D12SharedVideoTexture::new_from_validated_source(device, queue, source)?;
     let prepared = bridge.begin_validated_frame(source)?;
-    pool.push(D3D11NativeVideoPipelineEntry { bridge, prepared_yuv: None, encoded_source: None });
+    pool.push(D3D12NativeVideoPipelineEntry { bridge, prepared_yuv: None, encoded_source: None });
     Ok((pool.len() - 1, prepared))
+}
+
+fn bridge_sync_phase_is_eligible(sync_phase: &str) -> bool {
+    sync_phase != "poisoned"
 }
 
 fn restore_encoded_source(
     runtime: &mut RenderGpuOutputBoundaryRuntime,
-    entry: &mut D3D11NativeVideoPipelineEntry,
+    entry: &mut D3D12NativeVideoPipelineEntry,
     plan: &GpuNativeDecodedFrameImportPlan,
 ) {
     runtime.frame_table_mut().remove(plan.working_frame.id());
@@ -591,8 +596,8 @@ fn restore_encoded_source(
 }
 
 fn discard_with_reason(
-    entry: &mut D3D11NativeVideoPipelineEntry,
-    prepared: D3D11Dx12PreparedVideoFrame,
+    entry: &mut D3D12NativeVideoPipelineEntry,
+    prepared: D3D12PreparedVideoFrame,
     reason: String,
 ) -> String {
     match entry.bridge.discard_prepared_frame(prepared) {
@@ -613,7 +618,7 @@ mod tests {
 
     #[test]
     fn exhausted_bridge_pool_is_retryable_backpressure() {
-        let error = native_bridge_import_error(D3D11Dx12SharedVideoTextureError::EntryBusy {
+        let error = native_bridge_import_error(D3D12SharedVideoTextureError::EntryBusy {
             required: 8,
             completed: 6,
         });
@@ -624,7 +629,7 @@ mod tests {
 
     #[test]
     fn bridge_protocol_failure_remains_terminal() {
-        let error = native_bridge_import_error(D3D11Dx12SharedVideoTextureError::SyncProtocol {
+        let error = native_bridge_import_error(D3D12SharedVideoTextureError::SyncProtocol {
             reason: "foreign frame token".to_owned(),
         });
 
@@ -633,6 +638,13 @@ mod tests {
             error,
             GpuNativeDecodedFrameImportError::BackendRejected { .. }
         ));
+    }
+
+    #[test]
+    fn poisoned_bridge_entry_does_not_block_other_pool_entries() {
+        assert!(!bridge_sync_phase_is_eligible("poisoned"));
+        assert!(bridge_sync_phase_is_eligible("available"));
+        assert!(bridge_sync_phase_is_eligible("renderer_in_flight"));
     }
 
     #[test]
@@ -653,25 +665,35 @@ mod tests {
 
     #[test]
     fn default_native_pool_policy_is_bounded_in_both_dimensions() {
-        let options = D3D11Dx12NativeVideoImportBackendOptions::default();
+        let options = D3D12NativeVideoImportBackendOptions::default();
 
         assert_eq!(options.max_frames_in_flight_per_contract, 4);
         assert_eq!(options.max_contract_pools, 8);
     }
 
     #[test]
-    fn native_decoder_surfaces_fail_closed_without_real_array_surface_conformance() {
-        let error = conformed_decoder_surface_formats(wgpu::Features::TEXTURE_FORMAT_NV12)
-            .expect_err("feature bits alone must not admit native decoder surfaces");
-
+    fn d3d12_native_formats_require_complete_device_feature_contracts() {
         assert_eq!(
-            error,
-            D3D11Dx12NativeVideoImportBackendCreateError::NativeDecoderSurfaceConformanceUnavailable
+            conformed_decoder_surface_formats(wgpu::Features::TEXTURE_FORMAT_NV12)
+                .expect("NV12 device feature"),
+            vec![GpuNativeDecodedFrameTextureFormat::Nv12]
+        );
+        assert_eq!(
+            conformed_decoder_surface_formats(wgpu::Features::TEXTURE_FORMAT_P010)
+                .expect_err("P010 also requires 16-bit normalized texture support"),
+            D3D12NativeVideoImportBackendCreateError::NoNativeYuvTextureFormats
+        );
+        assert_eq!(
+            conformed_decoder_surface_formats(
+                wgpu::Features::TEXTURE_FORMAT_P010 | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM,
+            )
+            .expect("complete P010 device feature contract"),
+            vec![GpuNativeDecodedFrameTextureFormat::P010]
         );
         assert_eq!(
             conformed_decoder_surface_formats(wgpu::Features::empty())
                 .expect_err("missing formats must remain distinguishable"),
-            D3D11Dx12NativeVideoImportBackendCreateError::NoNativeYuvTextureFormats
+            D3D12NativeVideoImportBackendCreateError::NoNativeYuvTextureFormats
         );
     }
 }

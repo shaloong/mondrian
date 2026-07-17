@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn playback_hardware_decode_admission_requires_renderer_and_platform_import() {
-        let selector = HwAccelDeviceSelector::DxgiAdapterIndex(2);
+        let selector = HwAccelDeviceSelector::D3D12VaAdapterIndex(2);
         let renderer_support = GpuNativeDecodedFrameImportSupport::ready(
             vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
             vec![GpuNativeDecodedFrameTextureFormat::P010],

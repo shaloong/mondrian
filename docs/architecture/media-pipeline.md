@@ -717,6 +717,13 @@ tolerance for every access mode. Playback performance must come from the
 playback cursor's decoder/session locality, ring buffers, hardware decode, and
 GPU-resident frame delivery, not from silently reusing adjacent timestamp
 requests as if they were the requested frame.
+Container PTS quantization is not itself temporal degradation. Exact playback
+and still decode treat a selected frame inside the session's half-frame hit
+tolerance as the requested frame; many valid CFR files cannot represent every
+ideal rational frame timestamp exactly in their stream time base. A selected
+frame outside that tolerance remains degraded. Keyframe-only scrub policy is
+stricter: any non-exact keyframe selection is an intentional temporal
+approximation and must retain degraded presentation quality.
 
 Current decode residency is intentionally explicit and fail-closed. CPU paths
 produce `RgbaFrame`; admitted in-process FFmpeg D3D12VA or D3D11VA playback may
@@ -989,15 +996,16 @@ reinterpreted as two-plane GPU textures. A GPU-preferred CPU fallback records
 `ResourceAdapterUnavailable`, `SurfaceFormatUnavailable`,
 `SamplingMetadataIncomplete`, or `ResourceRetentionFailed`. A required-GPU
 request returns a decode error for the same condition instead.
-On multi-adapter Windows systems, a native-import admission may attach a typed
-`DxgiAdapterIndex` selector derived from the renderer's physical DXGI
-adapter. The app carries that selector only on playback decode work; media
-includes it in decoder-session identity and passes its decimal index to
-FFmpeg's D3D12VA or D3D11VA `av_hwdevice_ctx_create` device argument. D3D12VA
-remains the first candidate and D3D11VA is the fallback. Device probes are
-cached by backend plus selector. The renderer still validates every decoded
-surface's LUID, so this selection prevents accidental cross-adapter creation
-without weakening the native resource boundary.
+On multi-adapter Windows systems, a native-import admission attaches the typed
+`D3D12VaAdapterIndex` selector derived from the renderer's physical DXGI
+adapter. Media includes it in decoder-session identity and passes its decimal
+index only to FFmpeg's D3D12VA `av_hwdevice_ctx_create` call; backend-specific
+selectors cannot silently select a different hardware API. D3D11VA remains
+available when no renderer-native selector is installed, primarily as a safe
+hardware-decode CPU-transfer fallback. Device probes are cached by backend plus
+selector. The renderer still validates every decoded D3D12 resource's LUID, so
+selection prevents accidental cross-adapter creation without weakening the
+native resource boundary.
 GPU-resident decoder setup reserves eight FFmpeg `extra_hw_frames` before
 `avcodec_open2` because native frames remain leased after the receive call.
 This is decoder-pool headroom, not application cache capacity; CPU-transfer
@@ -1011,12 +1019,15 @@ cache policy.
 CPU consumers such as thumbnails and current RGBA fallback paths must explicitly
 match `Frame(RgbaFrame)` and fail closed on `NativeGpuFrame`; they must not
 reinterpret a native decoder surface as RGBA or silently force a CPU transfer.
-The app viewer preview path may preserve `NativeGpuFrame` as a native source
-payload and pass the complete frame, including its opaque handle token and
+The app viewer preview path preserves `NativeGpuFrame` as a native source
+payload and passes the complete frame, including its opaque handle token and
 residency/sampling facts, into GPU preview admission. App adapters must not
-flatten that payload into diagnostics and discard the token. Until renderer
-native import execution is connected, the retained payload is a renderer
-readiness blocker, not a media decode failure and not a CPU fallback frame.
+flatten that payload into diagnostics and discard the token. On Windows DX12,
+admitted D3D12VA NV12/P010 resources remain GPU-resident through the renderer's
+same-API shared-texture bridge and OCIO input stage. Other native handle
+families remain renderer-readiness blockers unless their concrete backend is
+implemented; they are not media decode failures or implicit CPU fallback
+frames.
 The renderer owns the fallible mapping from media `DecodedVideoSurfaceFormat`
 to its native texture-format contract and implements its source-descriptor
 trait for `PreviewNativeDecodedFrame`. App readiness code delegates to that

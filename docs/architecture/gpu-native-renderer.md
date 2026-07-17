@@ -107,7 +107,7 @@ The default support contract is fail-closed. A platform without a complete
 native-surface sampling and OCIO input backend must use
 `GpuNativeDecodedFrameImportSupport::unavailable()` and planning must return
 `RendererBackendUnavailable`. Windows DX12 is the first concrete backend: it
-advertises D3D11Texture2D plus only the NV12/P010 formats enabled on the actual
+advertises `D3D12Resource` plus only the NV12/P010 formats enabled on the actual
 wgpu device. A decoder reporting a GPU handle kind, or a platform probe reporting
 a potentially importable OS family, is not enough by itself to claim hardware
 decode playback, zero-copy, or low-copy frame residency.
@@ -122,23 +122,25 @@ that can see media decode facts, platform probes, and renderer backend support
 together. `app_ui::native_video_import` evaluates those facts into a stable
 viewer telemetry payload without giving media a renderer dependency or giving
 the renderer a platform dependency. CPU-decoded frames remain
-`CpuDecodedMedia`; retained D3D11 decoder surfaces can report `ReadyLowCopy`
-only when platform probing, renderer support, sampling metadata, and actual
-backend construction all agree.
+`CpuDecodedMedia`; retained D3D12VA resources can report `ReadyLowCopy` only
+when platform probing, renderer support, sampling metadata, and actual backend
+construction all agree. D3D11VA remains a media hardware-decode CPU-transfer
+fallback; the renderer does not advertise the rejected D3D11-to-D3D12
+cross-API sharing experiment.
 On Windows, `mondrian-platform` performs lightweight D3D12 and D3D11 device
 probes by loading `d3d12.dll`/`d3d11.dll` and calling
 `D3D12CreateDevice`/`D3D11CreateDevice`. Successful results prove only that the
 OS/device layer can support the `ID3D12Resource` and/or `ID3D11Texture2D`
-handle families and a declared low-copy staging path; it still reports
-zero-copy as unsupported until the renderer backend can import and sample the
-decoder surface directly.
+handle families. The current D3D12 renderer bridge is GPU-resident low-copy:
+it performs one GPU resource copy into a shareable renderer-owned texture and
+does not claim strict end-to-end zero-copy.
 Media may report a platform-preferred hardware decode candidate such as
 D3D12VA, D3D11VA, VideoToolbox, or VA-API plus expected NV12/P010 surface
 formats, but a candidate is not renderer readiness. Windows candidates must be
 ordered D3D12VA, D3D11VA, then legacy DXVA2; Linux candidates must be ordered
 VA-API, then legacy VDPAU. Runtime FFmpeg/codec/device failure may fall through
 to the next backend. Windows support becomes ready only after
-`D3D11Dx12NativeVideoImportBackend` binds the active adapter/device/queue;
+`D3D12NativeVideoImportBackend` binds the active adapter/device/queue;
 unimplemented platform backends remain unavailable.
 Renderer and product-window device creation request the adapter-supported subset
 of wgpu `TEXTURE_FORMAT_NV12` and `TEXTURE_FORMAT_P010` through the shared
@@ -150,48 +152,42 @@ shared, synchronized, adopted by the active wgpu device, sampled, or transformed
 Readiness therefore remains fail-closed until backend construction validates
 the complete platform import bridge. Diagnostics distinguish missing device
 format features, non-DX12 adapters, and backend construction failures.
-Current Windows production admission intentionally rejects both NV12 and P010
-GPU-resident decoder surfaces. A synthetic single-slice shared texture can pass
-while FFmpeg's decoder-owned D3D11 array surface produces zero-filled planes or
-loses the graphics device, so feature bits, handle creation, fence completion,
-and synthetic sampling are not sufficient evidence. Admission may be enabled
-only by a repeated-use content conformance test that exercises the exact
-decoder-array-slice ABI and validates sampled pixels. Until then the scheduler
-uses hardware decode with a safe transfer to renderer-owned memory; this is a
-performance fallback, not a software-decode downgrade.
 Adapter selection enumerates the backends enabled on the wgpu instance. On
 Windows it prefers a DX12 adapter exposing native NV12/P010 formats, so the
-D3D11/DX12 bridge is not accidentally disabled by selecting a Vulkan
+D3D12VA bridge is not accidentally disabled by selecting a Vulkan
 representation of the same GPU. An explicit `WGPU_BACKEND` restriction remains
 authoritative because excluded backends are absent from instance enumeration;
 if enumeration yields no usable adapter, selection falls back to wgpu's normal
 request path.
-The Windows renderer backend owns D3D11 source admission. Before any resource
-sharing, it verifies the retained FFmpeg texture ABI, actual DXGI NV12/P010
-format, visible-versus-storage extent, array-slice bounds, single mip/sample
-layout, and exact adapter LUID equality with the active wgpu DX12 adapter.
+The Windows renderer backend owns D3D12VA source admission. Before any resource
+sharing, it verifies FFmpeg's retained `AVD3D12VAFrame` ABI, the actual D3D12
+NV12/P010 resource descriptor, visible-versus-storage extent, single-resource,
+single-mip/sample layout, decode-fence device ownership, and exact adapter LUID
+equality with the active wgpu DX12 adapter.
 Codec-aligned storage dimensions may exceed the visible frame; smaller storage
 is invalid. App, core, and generic platform probes must not duplicate or weaken
 these renderer resource invariants.
 Backend construction also resolves the active DX12 adapter LUID to the same
-DXGI enumeration index consumed by FFmpeg's selected D3D12VA or D3D11VA device
-creator. That typed selector travels through renderer support, app playback
+DXGI enumeration index consumed by FFmpeg's D3D12VA device creator. The
+backend-specific `D3D12VaAdapterIndex` selector travels through renderer support, app playback
 admission, and media session creation. It keeps decode surfaces on the renderer's physical adapter
 on hybrid-GPU systems; the per-frame LUID check remains the final fail-closed
 guard against stale, ignored, or incorrectly enumerated device selection.
-Validated D3D11 sources can enter a reusable low-copy bridge entry. Each entry
-owns a single-slice NV12/P010 texture created with the Windows NT-handle sharing
-contract, a D3D11/D3D12 shared timeline fence, two reusable DX12 barrier command
-lists, and one wgpu multi-plane texture with explicit luma/chroma views. D3D11
-waits for the prior renderer completion before overwriting, copies the decoder
-array slice, and signals `copy_ready`; DX12 waits, transitions `COMMON ->
-RESOURCE`, and only then exposes plane views. The renderer submit is followed by
-`RESOURCE -> COMMON` and `renderer_complete`. Fence values are strictly
+Validated D3D12VA sources can enter a reusable same-API low-copy bridge entry.
+Each entry owns a renderer-created shareable NV12/P010 texture, a shared D3D12
+timeline fence, reusable direct command allocators/lists on both devices, and
+one wgpu multi-plane texture with explicit luma/chroma views. A decoder-device
+queue waits on FFmpeg's per-frame decode fence entirely on the GPU, transitions
+the source and shared destination, copies the resource, returns both to
+`COMMON`, and signals `copy_ready`. The renderer queue waits on `copy_ready`,
+transitions `COMMON -> RESOURCE`, and only then exposes the plane views. The
+renderer submit is followed by `RESOURCE -> COMMON` and `renderer_complete`.
+Fence values are strictly
 monotonic, command allocators are reset only after completion, busy entries fail
 without a CPU wait, and any partially submitted failure permanently poisons the
 entry. The complete import backend pools entries by source device, storage,
 color, and sampling contract; it grows the pool for bounded in-flight work,
-returns busy at the configured limit, and evicts poisoned entries before reuse.
+returns busy at the configured limit, and never reuses poisoned entries.
 Pool exhaustion is exposed as typed `GpuNativeDecodedFrameImportError::Backpressure`,
 not flattened into a terminal backend rejection. The shared Viewer runtime
 propagates that retryable state as `ViewerGpuExecutionError::Backpressure` so
@@ -202,15 +198,16 @@ backpressure must never trigger a surprise CPU transfer or an unbounded pool.
 Decoder device identities are also bounded: the backend retains at most eight
 source-contract pools and evicts the least-recently-used pool only after every
 bridge fence in it has completed. This prevents playback/scrub/still session
-churn from retaining one D3D11 context, shared texture, and NT handle set per
+churn from retaining one D3D12 decoder context, shared texture, and NT handle set per
 historical decoder. If every contract pool is still in flight, admission returns
 typed backpressure instead of waiting or allocating a ninth pool. Headless GPU
 evidence records peak contract-pool and bridge-entry residency so long-run gates
 can distinguish bounded reuse from handle accumulation.
-The bridge never relies on `Flush`, implicit sRGB, or an undocumented
-resource-state assumption. A real-GPU ignored smoke test exercises NT-handle
-creation/opening, both API devices on the same adapter, fence transfer, resource
-barriers, wgpu adoption, and completion.
+The bridge never relies on a CPU fence wait, `Flush`, implicit sRGB, or an
+undocumented resource-state assumption. Production-path real-media gates must
+prove decoded D3D12VA/P010 residency, native import execution, GPU timestamp
+coverage, absence of readback/fallback, and bounded pool reuse; one-off machine
+diagnostic tests are removed after that evidence is collected.
 The media layer's FFmpeg hardware codec config probe is also only planning
 evidence. It can prove that the linked FFmpeg decoder advertises a backend
 config for H.264/HEVC/etc., but it does not create an OS device, expose a
@@ -274,14 +271,15 @@ to its concrete resource type while the frame is borrowed; app/platform
 schedulers may inspect kind/id diagnostics but must not reinterpret them as OS
 handles. This keeps native resource release tied to the last frame/handle clone
 instead of cache or window timing.
-The first concrete media lease is `FfmpegNativeDecodedFrameResource` for the
-preferred FFmpeg D3D11 ABI. It retains the source `AVFrame`/`AVBufferRef` and
-exposes a borrowed `ID3D11Texture2D` pointer plus array slice only to the
-matching renderer import backend. Media can now return this payload as
-`InProcessFfmpegNative` after app admission; this does not make renderer support
-ready. `AppUiFrameRenderer` must continue reporting native import unavailable
-until its D3D11 bridge can import and sample that exact lease into the planned
-float working-space resource.
+The first production media lease is `FfmpegNativeDecodedFrameResource` for
+FFmpeg's D3D12VA ABI. It retains the source `AVFrame`/`AVBufferRef` and exposes
+the borrowed `ID3D12Resource`, decode fence, and fence value only to the
+matching renderer import backend. Media returns this payload as
+`InProcessFfmpegNative` after app admission; renderer support becomes ready only
+after `D3D12NativeVideoImportBackend` validates and imports that exact lease
+into the planned float working-space resource. Media also understands FFmpeg's
+preferred D3D11 frame ABI for ownership and CPU-transfer fallback diagnostics,
+but no D3D11 native renderer backend is advertised.
 The shared
 `execute_native_decoded_frame_import(...)` helper owns support validation,
 working-frame plan creation, backend invocation, and returned-resource contract
