@@ -19,8 +19,8 @@ pub mod proxy;
 pub mod waveform;
 
 pub use audio::{
-    AudioBuffer, AudioMixer, AudioRenderCursor, AudioSourceCache, AudioTrackConfig, AudioTrackData,
-    RealtimeAudioOutput, RealtimeAudioOutputSnapshot,
+    AudioBuffer, AudioRenderCursor, AudioSourceCache, RealtimeAudioOutput,
+    RealtimeAudioOutputSnapshot,
 };
 pub use audio_output::{RealtimeAudioOutputEvent, RealtimeAudioOutputManager};
 pub use audio_playback::{

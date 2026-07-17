@@ -365,14 +365,21 @@ impl AppState {
             .as_ref()
             .filter(|sequence| sequence_has_audible_audio(sequence))
             .zip(self.asset_library.as_ref())
-            .map(|(sequence, library)| -> Arc<dyn AudioPcmRenderer> {
-                Arc::new(TimelineAudioPcmRenderer::new(
+            .and_then(|(sequence, library)| {
+                match TimelineAudioPcmRenderer::new(
                     sequence.clone(),
+                    self.sequences.clone(),
                     Arc::clone(library),
                     Arc::clone(&self.audio_source_cache),
                     self.audio_sample_rate,
                     AUDIO_OUTPUT_CHANNELS,
-                ))
+                ) {
+                    Ok(renderer) => Some(Arc::new(renderer) as Arc<dyn AudioPcmRenderer>),
+                    Err(error) => {
+                        tracing::error!(%error, "audio Program preparation failed closed");
+                        None
+                    }
+                }
             });
         if let Some(renderer) = renderer {
             self.audio_playback.prepare(anchor, renderer);
@@ -419,34 +426,30 @@ impl AppState {
         let chunk_frames = (chunk_frames as usize).max(1);
         let before = center.sample().saturating_sub(chunk_frames as i64).max(0);
 
-        let _ = self.render_audio_chunk(seq, library.as_ref(), center.sample(), chunk_frames);
-        let _ = self.render_audio_chunk(seq, library.as_ref(), before, chunk_frames);
-        let _ = self.render_audio_chunk(
-            seq,
-            library.as_ref(),
-            center.sample().saturating_add(chunk_frames as i64),
-            chunk_frames,
-        );
-
-        self.audio_idle_warmup_last = Some(now);
-    }
-
-    fn render_audio_chunk(
-        &self,
-        seq: &Sequence,
-        library: &AssetLibrary,
-        window_start_sample: i64,
-        frame_count: usize,
-    ) -> mondrian_core::Result<AudioBuffer> {
-        render_audio_chunk_with_cache(
-            seq,
-            library,
-            self.audio_source_cache.as_ref(),
+        let Ok(renderer) = TimelineAudioPcmRenderer::new(
+            seq.clone(),
+            self.sequences.clone(),
+            Arc::clone(library),
+            Arc::clone(&self.audio_source_cache),
             self.audio_sample_rate,
             AUDIO_OUTPUT_CHANNELS,
-            window_start_sample,
-            frame_count,
-        )
+        ) else {
+            return;
+        };
+        for start_sample in [
+            center.sample(),
+            before,
+            center.sample().saturating_add(chunk_frames as i64),
+        ] {
+            let _ = renderer.render(AudioPcmRenderRequest {
+                start_sample,
+                frame_count: chunk_frames,
+                sample_rate: self.audio_sample_rate,
+                channels: AUDIO_OUTPUT_CHANNELS,
+            });
+        }
+
+        self.audio_idle_warmup_last = Some(now);
     }
 
     pub fn audio_developer_metrics_summary(&self) -> String {
@@ -745,11 +748,11 @@ impl AppState {
 }
 
 fn sequence_has_audible_audio(sequence: &Sequence) -> bool {
-    let has_solo = sequence.audio_tracks.iter().any(|track| track.is_solo && !track.is_muted);
     sequence.audio_tracks.iter().any(|track| {
         !track.is_muted
-            && (!has_solo || track.is_solo)
-            && track.clips.iter().any(|clip| !clip.is_disabled)
+            && track.clips.iter().any(|clip| {
+                !clip.is_disabled && clip.audio_components.iter().any(|edit| edit.enabled)
+            })
     })
 }
 

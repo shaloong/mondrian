@@ -116,7 +116,6 @@
             "height": 80.0,
             "is_muted": false,
             "is_locked": false,
-            "is_solo": false,
             "is_visible": true,
             "blend_mode": "Normal",
             "opacity": {
@@ -160,7 +159,6 @@
             "height": 80.0,
             "is_muted": false,
             "is_locked": false,
-            "is_solo": false,
             "is_visible": true,
             "blend_mode": "Normal",
             "opacity": {
@@ -204,7 +202,6 @@
             "height": 80.0,
             "is_muted": false,
             "is_locked": false,
-            "is_solo": false,
             "is_visible": true,
             "blend_mode": "Normal",
             "opacity": {
@@ -250,7 +247,6 @@
             "height": 50.0,
             "is_muted": false,
             "is_locked": false,
-            "is_solo": false,
             "is_visible": true,
             "blend_mode": "Normal",
             "opacity": {
@@ -294,7 +290,6 @@
             "height": 50.0,
             "is_muted": false,
             "is_locked": false,
-            "is_solo": false,
             "is_visible": true,
             "blend_mode": "Normal",
             "opacity": {
@@ -338,7 +333,6 @@
             "height": 50.0,
             "is_muted": false,
             "is_locked": false,
-            "is_solo": false,
             "is_visible": true,
             "blend_mode": "Normal",
             "opacity": {
@@ -378,7 +372,7 @@
         ],
         "audio_roles": [],
         "audio_program": {
-          "contributions": [],
+          "processing_scopes": [],
           "transitions": [],
           "track_channels": {
             "40ef8ee3-66cb-4512-b5e0-3f4e9779923a": {
@@ -444,7 +438,10 @@
             {
               "id": "52e43eb5-96d7-4705-9cea-6b6e42996762",
               "source": {
-                "Track": "ef4ed27f-1a1f-4337-b08a-0ec3844168ec"
+                "Track": {
+                  "track_id": "ef4ed27f-1a1f-4337-b08a-0ec3844168ec",
+                  "port": "PostMute"
+                }
               },
               "destination": {
                 "Output": "afdda4ee-152b-4fab-9527-b91121d56393"
@@ -453,7 +450,10 @@
             {
               "id": "a8e58d56-6eca-4339-9a14-bf9748e4ffa5",
               "source": {
-                "Track": "40ef8ee3-66cb-4512-b5e0-3f4e9779923a"
+                "Track": {
+                  "track_id": "40ef8ee3-66cb-4512-b5e0-3f4e9779923a",
+                  "port": "PostMute"
+                }
               },
               "destination": {
                 "Output": "afdda4ee-152b-4fab-9527-b91121d56393"
@@ -462,7 +462,10 @@
             {
               "id": "4b4efa4b-3c0c-47c5-a7f1-166fa8a2b608",
               "source": {
-                "Track": "f3b03bce-75a4-4218-ac54-607002a245fc"
+                "Track": {
+                  "track_id": "f3b03bce-75a4-4218-ac54-607002a245fc",
+                  "port": "PostMute"
+                }
               },
               "destination": {
                 "Output": "afdda4ee-152b-4fab-9527-b91121d56393"

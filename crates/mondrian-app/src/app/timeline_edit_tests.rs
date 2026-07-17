@@ -184,10 +184,27 @@ fn sequence_management_duplicate_rename_delete_updates_collection() {
     state.default_sequence_id = Some(first);
     state.sync_current_sequence_into_collection();
 
+    let source_output = state.sequence.as_ref().expect("sequence").audio_program.outputs[0].id;
+    let source_routes = state
+        .sequence
+        .as_ref()
+        .expect("sequence")
+        .audio_program
+        .routes
+        .iter()
+        .map(|route| route.id)
+        .collect::<Vec<_>>();
     let duplicate = state.duplicate_sequence(first, "Duplicate").expect("duplicate sequence");
     assert_ne!(duplicate, first);
     assert_eq!(state.active_sequence_id, Some(duplicate));
     assert_eq!(state.sequence.as_ref().expect("active").name, "Duplicate");
+    let duplicated = state.sequence.as_ref().expect("active");
+    assert_ne!(duplicated.audio_program.outputs[0].id, source_output);
+    assert!(duplicated
+        .audio_program
+        .routes
+        .iter()
+        .all(|route| !source_routes.contains(&route.id)));
 
     state.rename_sequence(duplicate, "Renamed").expect("rename");
     assert_eq!(state.sequence.as_ref().expect("active").name, "Renamed");

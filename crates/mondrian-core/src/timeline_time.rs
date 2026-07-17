@@ -1,6 +1,9 @@
 //! Exact authoring time, domains, and checked mappings.
 
-use crate::{AssetId, AudioContributionId, AudioTransitionId, FramePosition, Rational, SequenceId};
+use crate::{
+    AssetId, AudioComponentEditId, AudioProcessingScopeId, AudioTransitionId, FramePosition,
+    Rational, SequenceId,
+};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
@@ -270,8 +273,10 @@ impl From<TimeScale> for TimelineTime {
 pub enum AuthoringTimeDomain {
     /// Sequence-local author time.
     Sequence(SequenceId),
-    /// Audio-contribution-local author time.
-    AudioContribution(AudioContributionId),
+    /// Placement-local audio component author time.
+    AudioComponentEdit(AudioComponentEditId),
+    /// Non-placement processing-scope-local author time.
+    AudioProcessingScope(AudioProcessingScopeId),
     /// Audio-transition-local author time.
     AudioTransition(AudioTransitionId),
     /// Source-media-local author time.
@@ -495,7 +500,7 @@ mod tests {
     #[test]
     fn cross_domain_arithmetic_is_rejected_and_transform_is_invertible() {
         let sequence = AuthoringTimeDomain::Sequence(SequenceId::new());
-        let contribution = AuthoringTimeDomain::AudioContribution(AudioContributionId::new());
+        let contribution = AuthoringTimeDomain::AudioComponentEdit(AudioComponentEditId::new());
         let transform = TimeTransform {
             source_domain: contribution,
             target_domain: sequence,

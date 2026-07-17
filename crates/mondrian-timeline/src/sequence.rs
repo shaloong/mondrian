@@ -946,7 +946,7 @@ pub struct Sequence {
     pub audio_tracks: Vec<Track>,
     /// Sequence semantic catalog for audio classification and output projection.
     pub audio_roles: Vec<crate::audio::AudioRole>,
-    /// Sequence-owned audio contributions, processing, routing, and public outputs.
+    /// Sequence-owned audio processing, routing, transitions, and public outputs.
     pub audio_program: crate::audio::AudioProgram,
     pub playhead: TimelineTime,
     pub in_point: Option<TimelineTime>,
@@ -1104,6 +1104,212 @@ impl Sequence {
         id
     }
 
+    /// Add one media Clip to an audio Track with explicit default audio authoring.
+    ///
+    /// This is the canonical mutation seam for new audio placements. Callers
+    /// cannot create a playable audio Clip without also registering its
+    /// non-placement processing scope.
+    pub fn add_media_audio_clip(
+        &mut self,
+        track_id: TrackId,
+        mut clip: crate::clip::Clip,
+        component_id: AudioSourceComponentId,
+    ) -> mondrian_core::Result<ClipId> {
+        if clip.is_nested_sequence() {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "add_media_audio_clip".to_owned(),
+                reason: "nested Sequence audio requires an explicit output binding".to_owned(),
+            });
+        }
+        if !clip.audio_components.is_empty() {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "add_media_audio_clip".to_owned(),
+                reason: "audio Clip already contains audio component authoring".to_owned(),
+            });
+        }
+        let scope = crate::audio::AudioProcessingScope::identity();
+        clip.audio_components.push(crate::audio::AudioComponentEdit::media(
+            component_id,
+            scope.id,
+        ));
+        let clip_id = clip.id;
+        self.audio_program.add_processing_scope(scope);
+        self.audio_track_mut(track_id)
+            .ok_or_else(|| mondrian_core::MondrianError::TrackNotFound {
+                track_id: track_id.to_string(),
+            })?
+            .add_clip(clip)?;
+        Ok(clip_id)
+    }
+
+    /// Add one nested-Sequence public output as an audio placement.
+    pub fn add_nested_audio_clip(
+        &mut self,
+        track_id: TrackId,
+        mut clip: crate::clip::Clip,
+        output_id: ProgramOutputId,
+    ) -> mondrian_core::Result<ClipId> {
+        if !clip.is_nested_sequence() || !clip.audio_components.is_empty() {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "add_nested_audio_clip".to_owned(),
+                reason: "nested audio placement requires a clean nested Sequence Clip".to_owned(),
+            });
+        }
+        let scope = crate::audio::AudioProcessingScope::identity();
+        clip.audio_components.push(crate::audio::AudioComponentEdit::nested(
+            output_id, scope.id,
+        ));
+        let clip_id = clip.id;
+        self.audio_program.add_processing_scope(scope);
+        self.audio_track_mut(track_id)
+            .ok_or_else(|| mondrian_core::MondrianError::TrackNotFound {
+                track_id: track_id.to_string(),
+            })?
+            .add_clip(clip)?;
+        Ok(clip_id)
+    }
+
+    /// Fork copied/moved audio authoring into this Sequence aggregate.
+    ///
+    /// Scope sharing within the Clip is preserved, but all aggregate-local
+    /// entity identities are fresh. The returned mapping allows callers to
+    /// recreate Transitions only when both strong endpoints were imported.
+    pub fn fork_audio_clip_authoring(
+        &mut self,
+        clip: &mut crate::clip::Clip,
+        source_scopes: &[crate::audio::AudioProcessingScope],
+    ) -> mondrian_core::Result<HashMap<AudioComponentEditId, AudioComponentEditId>> {
+        let mut scope_ids = HashMap::<AudioProcessingScopeId, AudioProcessingScopeId>::new();
+        let mut edit_ids = HashMap::new();
+        for edit in &mut clip.audio_components {
+            let new_scope_id = if let Some(id) = scope_ids.get(&edit.processing.scope_id) {
+                *id
+            } else {
+                let mut scope = source_scopes
+                    .iter()
+                    .find(|scope| scope.id == edit.processing.scope_id)
+                    .cloned()
+                    .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+                        step_id: "fork_audio_clip_authoring".to_owned(),
+                        reason: format!(
+                            "audio processing scope {} is unavailable",
+                            edit.processing.scope_id
+                        ),
+                    })?;
+                let old_id = scope.id;
+                scope.id = AudioProcessingScopeId::new();
+                rekey_audio_scope(&mut scope);
+                let new_id = scope.id;
+                self.audio_program.add_processing_scope(scope);
+                scope_ids.insert(old_id, new_id);
+                new_id
+            };
+            let old_edit_id = edit.id;
+            edit.id = AudioComponentEditId::new();
+            edit.processing.scope_id = new_scope_id;
+            rekey_optional_exact_curve(&mut edit.volume_automation);
+            rekey_optional_exact_curve(&mut edit.pan_automation);
+            edit_ids.insert(old_edit_id, edit.id);
+        }
+        Ok(edit_ids)
+    }
+
+    /// Fork every Sequence-local audio identity after duplicating a Sequence.
+    ///
+    /// A duplicated Sequence is an independent author aggregate: later edits,
+    /// processor state, automation, routing, and public-output bindings must not
+    /// alias the source Sequence. References to a child Sequence's public output
+    /// are deliberately not rewritten because they cross this aggregate boundary.
+    pub fn fork_audio_identities_for_sequence_duplicate(&mut self) {
+        use crate::audio::{AudioRouteDestination, AudioRouteSource, ProgramOutputMainSource};
+
+        let role_ids = self
+            .audio_roles
+            .iter()
+            .map(|role| (role.id, AudioRoleId::new()))
+            .collect::<HashMap<_, _>>();
+        for role in &mut self.audio_roles {
+            role.id = role_ids[&role.id];
+            role.parent_id = role.parent_id.map(|id| role_ids[&id]);
+        }
+
+        let scope_ids = self
+            .audio_program
+            .processing_scopes
+            .iter()
+            .map(|scope| (scope.id, AudioProcessingScopeId::new()))
+            .collect::<HashMap<_, _>>();
+        for scope in &mut self.audio_program.processing_scopes {
+            scope.id = scope_ids[&scope.id];
+            rekey_audio_scope(scope);
+        }
+
+        let mut edit_ids = HashMap::new();
+        for clip in self.audio_tracks.iter_mut().flat_map(|track| &mut track.clips) {
+            for edit in &mut clip.audio_components {
+                let old_id = edit.id;
+                edit.id = AudioComponentEditId::new();
+                edit.processing.scope_id = scope_ids[&edit.processing.scope_id];
+                edit.role_id = edit.role_id.map(|id| role_ids[&id]);
+                rekey_optional_exact_curve(&mut edit.volume_automation);
+                rekey_optional_exact_curve(&mut edit.pan_automation);
+                edit_ids.insert(old_id, edit.id);
+            }
+        }
+
+        let bus_ids = self
+            .audio_program
+            .buses
+            .iter()
+            .map(|bus| (bus.id, MixBusId::new()))
+            .collect::<HashMap<_, _>>();
+        for bus in &mut self.audio_program.buses {
+            bus.id = bus_ids[&bus.id];
+            rekey_audio_channel_strip(&mut bus.strip);
+        }
+
+        let output_ids = self
+            .audio_program
+            .outputs
+            .iter()
+            .map(|output| (output.id, ProgramOutputId::new()))
+            .collect::<HashMap<_, _>>();
+        for output in &mut self.audio_program.outputs {
+            output.id = output_ids[&output.id];
+            if let ProgramOutputMainSource::SemanticProjection { role_id } = &mut output.main_source
+            {
+                *role_id = role_ids[role_id];
+            }
+            rekey_audio_channel_strip(&mut output.strip);
+        }
+
+        for channel in self.audio_program.track_channels.values_mut() {
+            rekey_audio_channel_strip(&mut channel.strip);
+        }
+        for route in &mut self.audio_program.routes {
+            route.id = AudioRouteId::new();
+            if let AudioRouteSource::Bus { bus_id, .. } = &mut route.source {
+                *bus_id = bus_ids[bus_id];
+            }
+            match &mut route.destination {
+                AudioRouteDestination::Bus(bus_id) => *bus_id = bus_ids[bus_id],
+                AudioRouteDestination::Output(output_id) => {
+                    *output_id = output_ids[output_id];
+                }
+            }
+        }
+        for transition in &mut self.audio_program.transitions {
+            transition.id = AudioTransitionId::new();
+            transition.left = edit_ids[&transition.left];
+            transition.right = edit_ids[&transition.right];
+        }
+    }
+
+    /// Drop unreferenced processing definitions and invalidated Transition references.
+    pub fn compact_audio_program(&mut self) {
+        self.audio_program.compact_for_tracks(&self.audio_tracks);
+    }
+
     pub fn remove_video_track(&mut self, id: TrackId) -> mondrian_core::Result<()> {
         if self.video_tracks.len() <= 1 {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
@@ -1132,6 +1338,7 @@ impl Sequence {
         if let Some(index) = self.audio_tracks.iter().position(|track| track.id == id) {
             self.audio_tracks.remove(index);
             self.audio_program.remove_track(id);
+            self.compact_audio_program();
             self.normalize_track_names();
             Ok(())
         } else {
@@ -1154,6 +1361,40 @@ impl Sequence {
     pub fn normalize_track_names(&mut self) {
         renumber_tracks(&mut self.video_tracks, "V");
         renumber_tracks(&mut self.audio_tracks, "A");
+    }
+}
+
+fn rekey_audio_scope(scope: &mut crate::audio::AudioProcessingScope) {
+    rekey_optional_exact_curve(&mut scope.input_gain_automation);
+    for processor in &mut scope.processors.processors {
+        processor.id = AudioProcessorInstanceId::new();
+        for curve in processor.parameters.values_mut() {
+            rekey_exact_curve(curve);
+        }
+    }
+}
+
+fn rekey_audio_channel_strip(strip: &mut crate::audio::AudioChannelStrip) {
+    rekey_optional_exact_curve(&mut strip.fader_automation);
+    for rack in [&mut strip.pre_fader, &mut strip.post_fader] {
+        for processor in &mut rack.processors {
+            processor.id = AudioProcessorInstanceId::new();
+            for curve in processor.parameters.values_mut() {
+                rekey_exact_curve(curve);
+            }
+        }
+    }
+}
+
+fn rekey_optional_exact_curve(curve: &mut Option<mondrian_core::ExactAutomationCurve>) {
+    if let Some(curve) = curve {
+        rekey_exact_curve(curve);
+    }
+}
+
+fn rekey_exact_curve(curve: &mut mondrian_core::ExactAutomationCurve) {
+    for keyframe in &mut curve.keyframes {
+        keyframe.id = KeyframeId::new();
     }
 }
 
@@ -1267,11 +1508,9 @@ impl SequenceCollection {
     pub fn validate_nested_sequences(&self) -> mondrian_core::Result<()> {
         let sequence_ids: HashSet<SequenceId> = self.sequences.iter().map(|seq| seq.id).collect();
         for sequence in &self.sequences {
-            let audio_track_ids =
-                sequence.audio_tracks.iter().map(|track| track.id).collect::<Vec<_>>();
             sequence
                 .audio_program
-                .validate(&audio_track_ids, &sequence.audio_roles)
+                .validate(&sequence.audio_tracks, &sequence.audio_roles)
                 .map_err(|error| mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "validate_audio_program".to_owned(),
                     reason: format!(
@@ -1279,12 +1518,19 @@ impl SequenceCollection {
                         sequence.id
                     ),
                 })?;
-            for contribution in &sequence.audio_program.contributions {
-                if let crate::audio::AudioContributionSource::NestedOutput {
-                    sequence_id,
-                    output_id,
-                } = contribution.source
-                {
+            for clip in sequence.audio_tracks.iter().flat_map(|track| &track.clips) {
+                for edit in &clip.audio_components {
+                    let crate::audio::AudioComponentSource::NestedOutput { output_id } =
+                        edit.source
+                    else {
+                        continue;
+                    };
+                    let Some(sequence_id) = clip.nested_sequence_id else {
+                        return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                            step_id: "validate_audio_program".to_owned(),
+                            reason: format!("nested audio edit {} has no owning Sequence", edit.id),
+                        });
+                    };
                     let Some(child) = self.sequence(sequence_id) else {
                         return Err(mondrian_core::MondrianError::WorkflowStepFailed {
                             step_id: "validate_audio_program".to_owned(),

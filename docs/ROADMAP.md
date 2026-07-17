@@ -55,7 +55,7 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 
 ## 2. 代码现状审查结论
 
-本节是 2026-07-11 的代码基线，不是目标清单。状态区分“模型/算法存在”“已接入主路径”“已有真实项目证据”，避免从类型或单元测试推断产品完成度。
+本节是 2026-07-17 的代码基线，不是目标清单。状态区分“模型/算法存在”“已接入主路径”“已有真实项目证据”，避免从类型或单元测试推断产品完成度。
 
 | 能力域 | 已有事实 | 仍不足以宣称完成的部分 | 当前判断 |
 | --- | --- | --- | --- |
@@ -68,7 +68,7 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 | Windows 硬解/低拷贝 | FFmpeg 硬件设备/codec 探测、D3D11 native frame 保留、D3D11→D3D12 导入、NV12/P010 GPU YUV 采样、准入与失败原因已有实现 | 必须以真实 GPU/驱动/素材证明主路径启用、同步正确和长时间稳定；不以 capability probe 或 shader 创建代替实际帧执行 | L0/L1 之间 |
 | 渲染与色彩 | working-space 合成、OCIO CPU/GPU 路径、结构化色彩/显示诊断、golden 测试、预览/导出报告对比、Windows 显示探测和 fail-closed 逻辑较深入 | 仍有 legacy/CPU/读回路径与真实显示 payload 限制；常见 Log/HDR 必须补齐参考样片端到端证明；Windows HDR 监看不能提前宣称稳定 | L1+ 架构，继续符合性收敛 |
 | 效果与动画 | 稳定 `EffectId`、属性路径、`PropertyBag`/`AnimatedProperty`、多种插值、曲线编辑器、效果 DAG、mask、缓存策略和插件式 definition/DSL 已存在 | `PropertyDescriptor` 缺独立稳定 `ParameterId`、单位和完整能力契约；只有部分声明效果生成真实 render op；文字和转场类型尚未接入时间线/渲染主路径 | L0/L1 之间 |
-| 音频 | 除既有输出/时钟能力外，Sequence 已持有 Contribution/Track Channel/Bus/Output/typed Route/Processor author model；`mondrian-audio` 已有统一编译、Bus 路由、sample-accurate Gain reference DSP、无隐式 clipping 与未解析插件 fail-closed 测试 | 真实 decoder/sink/export 尚未切到 compiled plan；Transition/nesting/latency/state/demand/plugin host、pan/fade/meter/limiter、重采样/声道策略和长时间同步门禁仍未完成 | L1- 地基，产品主路仍 L0/L1 |
+| 音频 | Track→Clip 已是 placement SSOT；Clip 持有 Component Edit，Sequence 持有 Processing Scope/Track Channel/Bus/Output/typed Route/Transition；播放与导出已共用 `AudioProgramRuntime`、decoder Adapter、嵌套公共输出、sample-accurate Gain/pan/fade/Transition、无隐式 clipping，并删除旧 flat `AudioMixer`/`tanh` | 真实 VST3/CLAP host、channel layout/组件选流、重采样、通用 PDC/状态重入、send/sidechain、meter/loudness/limiter、完整编辑 UI/undo 命令和长时间同步/负载门禁仍未完成 | L1 主路地基；不宣称 DAW 完成度 |
 | 导出 | 后台队列、取消、时间线逐帧合成、音频混编、FFmpeg 编码、色彩标签/HDR 元数据约束、结果 probe/校验和诊断已存在 | 产品 UI 主要暴露 H.264 预设；Windows 硬编检测未落地主路径；HEVC Main10、专业中间格式和长项目需真实 roundtrip，不以 enum/FFmpeg 参数单测视为交付 | L1- |
 | 自研 UI | winit/wgpu 产品入口、retained widget、主题 token、事件/焦点/IME、Dock、面板和大量组件测试已建立 | 交互一致性和无障碍仍需真实工作流验证；产品字符串大量硬编码，中英文混用，尚无 message ID/pseudo-locale 基础 | L1-；i18n 为 L0 |
 | 插件 | 内部效果 definition、graph DSL、能力/缓存/失败隔离契约已有 | 尚无稳定外部 ABI、包加载/权限/隔离/兼容矩阵；当前只能称内部扩展接缝 | L0 |
@@ -174,9 +174,10 @@ Platform Capability Contract
 ### 3.6 音频图
 
 - 项目/序列明确采样率和 channel layout；所有内部混音使用 float，输入统一重采样后进入图。
-- 建立 Audio Contribution → Track Mixer Channel → Mix Bus → Program Output 的类型化求值顺序；Clip/Track/Bus/Output 复用同一 Processor Rack/Instance 作者模型，gain、pan、fade、mute/solo、meter、limiter、路由和延迟信息属于图契约。
-- 作者数据归 Sequence/`mondrian-timeline`；首个最小作者→IR 纵向切片创建一个真实 `mondrian-audio` crate，负责编译、处理器协议、状态、延迟和执行协调，但不依赖 FFmpeg、CPAL、平台 UI 或 App。暂不拆更多音频/plugin crate。
-- 预览、实时播放、分析和导出消费同一不可变编译语义；旧 flat mixer 只能作为迁移桥接，不能与新图长期并存或保留隐式 `tanh`/limiter。
+- 以 Track→Clip 为唯一 placement authority；Clip-local Component Edit 与 Sequence-owned Processing Scope 分离，通过受限 `{scope_id, scope_in}` 绑定，避免第二套范围/速度模型。
+- 建立 Compiled Contribution → Track Mixer Channel → Mix Bus → Program Output 的类型化求值顺序；Scope/Track/Bus/Output 复用 Processor Rack/Instance 作者模型，gain、pan、fade、mute、Transition、路由和延迟能力属于同一图契约；solo 仅是 audition overlay。
+- 作者数据归 Sequence/`mondrian-timeline`；`mondrian-audio` 负责验证后编译、Render Contract、独占 Session、公共 DSP、嵌套 Runtime 和媒体源接口，但不依赖 FFmpeg、CPAL、平台 UI 或 App。暂不拆格式占位 crate。
+- 播放、导出、分析和 audition 消费同一不可变编译语义；旧 flat mixer 已删除，禁止恢复消费方私有混音或隐式 `tanh`/limiter。
 - 实时 callback 禁止分配、文件 I/O、格式化日志、等待 decode worker 或锁住项目/UI 状态。
 - 播放以实际提交/消费的音频 sample position 为主时钟；视频来不及时丢帧、重复或降质。只有启动预卷、设备切换或无法维持音频时才进入明确 buffering。
 
@@ -352,7 +353,8 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 - [ ] 冻结 Frame/Color/Alpha contract，给所有 CPU/GPU/legacy boundary 分配结构化原因和能力状态。
 - [ ] 扩展参数 schema：稳定 ParameterId、精确跨音视频曲线时间、单位、enum/resource 类型、hard/soft range、能力/缓存/颜色域、schema version 与 message ID。
-- [ ] Contribution → Track/Bus → Program Output、Gain automation、headless compiler 与 reference PCM 已进入 `mondrian-audio`；仍须贯通 undo、实时 demand、decoder/sink 与离线导出，再实现 Transition/Nested、latency/state，明确 callback 实时安全和 underrun/A/V drift 来源。
+- [x] Track/Clip placement → Component Edit/Scope → Track/Bus/Program Output、Gain/pan/fade/Transition、headless compiler、recursive nested Runtime 和 reference PCM 已进入 `mondrian-audio`；播放/导出共用 decoder Adapter 和执行语义，旧 flat mixer 已删除。
+- [ ] 补齐 channel layout/组件选流/重采样、通用 latency/PDC 与 discontinuity state entry，再实现隔离的 VST3/CLAP host、send/sidechain、meter/loudness 和编辑 UI/命令；callback 实时安全、underrun 与 A/V drift 继续由真实门禁证明。
 
 **验证基础**
 
@@ -395,8 +397,8 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 ### 音频最低闭环
 
-- [ ] Clip gain、pan、fade in/out 成为持久化、可 Undo、可导出的时间线参数。
-- [ ] Track mute/solo、master meter、基础 limiter 可用；波形与缩放/代理/relink 后保持正确。
+- [ ] Clip gain、pan、fade in/out 已有持久化作者语义和公共执行；补齐产品 UI、细粒度命令/Undo、保存重开与 Golden Project 操作验收。
+- [ ] Track mute 已进入公共执行；实现 transient solo audition、master meter、显式基础 limiter，波形与缩放/代理/relink 后保持正确。
 - [ ] 输入重采样和 channel mapping 有明确策略；unsupported layout 明确降级/拒绝。
 - [ ] 30 分钟 48 kHz 播放达到 underrun 和 A/V drift 门槛。
 

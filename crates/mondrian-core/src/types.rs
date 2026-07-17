@@ -47,7 +47,8 @@ define_id!(SceneId, "场景 ID");
 define_id!(EffectId, "效果节点 ID");
 define_id!(AnimationTrackId, "动画轨道 ID");
 define_id!(KeyframeId, "关键帧 ID");
-define_id!(AudioContributionId, "音频贡献 ID");
+define_id!(AudioComponentEditId, "音频组件编辑 ID");
+define_id!(AudioProcessingScopeId, "音频处理作用域 ID");
 define_id!(AudioSourceComponentId, "音频源组件 ID");
 define_id!(AudioTransitionId, "音频转场 ID");
 define_id!(AudioRouteId, "音频路由 ID");
@@ -57,6 +58,14 @@ define_id!(ProgramOutputId, "节目输出 ID");
 define_id!(AudioRoleId, "音频角色 ID");
 define_id!(JobId, "渲染任务 ID");
 define_id!(MaskId, "蒙版 ID");
+
+impl AudioSourceComponentId {
+    /// Stable logical identity for the asset's explicitly selected primary
+    /// audio component. Adapters must reject, not reinterpret, unknown IDs.
+    pub const fn primary() -> Self {
+        Self(Uuid::from_u128(0x8f43_8809_9067_4d17_90ec_2bb7_b172_462e))
+    }
+}
 
 // ─── 时间码（帧精确，有理数）──────────────────────────────────────────────────
 

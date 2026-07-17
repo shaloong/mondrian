@@ -1,5 +1,6 @@
 //! Clip（时间线剪辑片段）
 
+use crate::audio::AudioComponentEdit;
 use glam::Vec2;
 use mondrian_core::{
     automation::{
@@ -314,6 +315,10 @@ pub struct Clip {
     pub masks: Vec<MaskComponent>,
     /// 关联的音频/视频 Clip（保持同步）
     pub linked_clip: Option<ClipId>,
+    /// Placement-local audio authoring. Track membership and temporal placement
+    /// remain owned exclusively by the containing Track and this Clip.
+    #[serde(default)]
+    pub audio_components: Vec<AudioComponentEdit>,
     /// 是否禁用
     pub is_disabled: bool,
     /// 混合模式（覆盖轨道设置）
@@ -348,6 +353,7 @@ impl Clip {
             effects: vec![],
             masks: vec![],
             linked_clip: None,
+            audio_components: Vec::new(),
             is_disabled: false,
             blend_mode: None,
             label: None,
@@ -425,6 +431,47 @@ impl Clip {
         let local = timeline_time.checked_sub(self.position)?;
         let source_local = self.speed.map_time(local)?;
         Ok(self.source_in.checked_add(source_local)?)
+    }
+
+    /// Fork placement-local audio edit identities for the right side of a razor.
+    ///
+    /// Processing definitions remain shared through their Scope IDs, while
+    /// exact edit/scope-local coordinates advance by the split offset. This
+    /// preserves authored automation without duplicating placement or retime.
+    pub fn fork_audio_components_for_split(&mut self, split_offset: TimelineTime) -> Result<()> {
+        if split_offset.is_negative() || split_offset > self.duration {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: "split_audio_components".to_owned(),
+                reason: "audio split offset is outside the Clip".to_owned(),
+            });
+        }
+        for edit in &mut self.audio_components {
+            edit.id = AudioComponentEditId::new();
+            edit.local_time_in = edit.local_time_in.checked_add(split_offset)?;
+            edit.processing.scope_in = edit.processing.scope_in.checked_add(split_offset)?;
+        }
+        Ok(())
+    }
+
+    /// Shift edit/scope-local origins when the Clip's in edge moves.
+    ///
+    /// A positive delta trims authored time from the front; a negative delta
+    /// restores previously trimmed time. Placement-only moves must not call
+    /// this method.
+    pub fn shift_audio_component_in(&mut self, delta: TimelineTime) -> Result<()> {
+        for edit in &mut self.audio_components {
+            let local_time_in = edit.local_time_in.checked_add(delta)?;
+            let scope_in = edit.processing.scope_in.checked_add(delta)?;
+            if local_time_in.is_negative() || scope_in.is_negative() {
+                return Err(MondrianError::WorkflowStepFailed {
+                    step_id: "trim_audio_components".to_owned(),
+                    reason: "audio trim would move before authored local time zero".to_owned(),
+                });
+            }
+            edit.local_time_in = local_time_in;
+            edit.processing.scope_in = scope_in;
+        }
+        Ok(())
     }
 
     pub fn add_effect(&mut self, effect_type: EffectType) -> EffectId {
@@ -911,5 +958,30 @@ mod tests {
         let m = t.evaluate_matrix(tt(0));
         assert!((m.col(2).x - 100.0).abs() < 0.01, "tx={}", m.col(2).x);
         assert!((m.col(2).y - 100.0).abs() < 0.01, "ty={}", m.col(2).y);
+    }
+
+    #[test]
+    fn razor_forks_edit_identity_but_preserves_processing_scope_and_time() {
+        let scope_id = AudioProcessingScopeId::new();
+        let mut left = Clip::new(AssetId::new(), TimelineTime::ZERO, tt(100)).expect("audio clip");
+        left.audio_components.push(AudioComponentEdit::media(
+            AudioSourceComponentId::primary(),
+            scope_id,
+        ));
+        let original_edit_id = left.audio_components[0].id;
+
+        let split_offset = tt(40);
+        let mut right = left.clone();
+        right.fork_audio_components_for_split(split_offset).expect("fork authoring");
+
+        assert_ne!(right.audio_components[0].id, original_edit_id);
+        assert_eq!(right.audio_components[0].processing.scope_id, scope_id);
+        assert_eq!(right.audio_components[0].local_time_in, split_offset);
+        assert_eq!(right.audio_components[0].processing.scope_in, split_offset);
+        assert_eq!(left.audio_components[0].local_time_in, TimelineTime::ZERO);
+        assert_eq!(
+            left.audio_components[0].processing.scope_in,
+            TimelineTime::ZERO
+        );
     }
 }

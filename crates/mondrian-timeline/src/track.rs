@@ -28,7 +28,6 @@ pub struct Track {
     pub height: f32,
     pub is_muted: bool,
     pub is_locked: bool,
-    pub is_solo: bool,
     pub is_visible: bool,
     pub blend_mode: BlendMode,
     /// 轨道不透明度关键帧（仅视频轨有效）
@@ -48,7 +47,6 @@ impl Track {
             height: 80.0,
             is_muted: false,
             is_locked: false,
-            is_solo: false,
             is_visible: true,
             blend_mode: BlendMode::Normal,
             opacity: AnimatedProperty::from_descriptor(PropertyDescriptor::new(
@@ -68,7 +66,6 @@ impl Track {
             height: 50.0,
             is_muted: false,
             is_locked: false,
-            is_solo: false,
             is_visible: true,
             blend_mode: BlendMode::Normal,
             opacity: AnimatedProperty::from_descriptor(PropertyDescriptor::new(

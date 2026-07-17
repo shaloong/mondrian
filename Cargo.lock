@@ -2655,6 +2655,7 @@ dependencies = [
  "image",
  "libc",
  "mondrian-assets",
+ "mondrian-audio",
  "mondrian-core",
  "mondrian-editor-state",
  "mondrian-editor-ui",
@@ -2798,6 +2799,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "mondrian-audio",
  "mondrian-core",
  "mondrian-effects",
  "mondrian-media",

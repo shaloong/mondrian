@@ -41,7 +41,8 @@
 | Crate               | 职责                                  | 关键依赖               |
 | ------------------- | ------------------------------------- | ---------------------- |
 | `mondrian-core`     | 公共类型、错误、事件总线、项目模型    | serde, uuid, thiserror |
-| `mondrian-media`    | FFmpeg 解码、音频处理、Proxy 代理缓存 | ffmpeg-next, cpal      |
+| `mondrian-media`    | FFmpeg 解码、音频源缓存、物理输出、Proxy 缓存 | ffmpeg-next, cpal      |
+| `mondrian-audio`    | 音频作者模型编译、路由/DSP、嵌套输出与执行 Session | mondrian-core, mondrian-timeline |
 | `mondrian-timeline` | 多轨时间线、关键帧、贝塞尔曲线、变速  | mondrian-core          |
 | `mondrian-renderer` | wgpu GPU 渲染管线、实时帧合成         | wgpu, bytemuck, glam   |
 | `mondrian-assets`   | 素材库、角色/场景/模板、跨项目复用    | serde, sqlite          |

@@ -60,10 +60,11 @@ impl AppState {
             .map(|selection| selection.clip_id)
             .collect::<Vec<_>>();
         let entries = collect_clip_clipboard_entries(seq, &selected_ids)?;
+        let audio_transitions = collect_clipboard_audio_transitions(seq, &entries)?;
         self.clip_clipboard = if entries.is_empty() {
             None
         } else {
-            Some(ClipClipboard { entries })
+            Some(ClipClipboard { entries, audio_transitions })
         };
         if self.has_clip_clipboard() {
             self.active_clipboard_kind = Some(AppClipboardKind::Clips);
@@ -120,7 +121,8 @@ impl AppState {
                 )
             })
             .collect::<Vec<_>>();
-        self.clip_clipboard = Some(ClipClipboard { entries });
+        let audio_transitions = collect_clipboard_audio_transitions(seq, &entries)?;
+        self.clip_clipboard = Some(ClipClipboard { entries, audio_transitions });
         self.active_clipboard_kind = Some(AppClipboardKind::Clips);
 
         let removed = self.remove_clips_bulk(&selections, false)?;
@@ -152,7 +154,12 @@ impl AppState {
             timeline_frame.max(0),
             sequence.time_base(),
         ))?;
-        self.paste_clip_entries_at_time(clipboard.entries, destination, "粘贴片段")
+        self.paste_clip_entries_at_time(
+            clipboard.entries,
+            clipboard.audio_transitions,
+            destination,
+            "粘贴片段",
+        )
     }
 
     pub fn duplicate_selected_clips_after_selection(&mut self) -> mondrian_core::Result<usize> {
@@ -177,12 +184,14 @@ impl AppState {
             .into_iter()
             .max()
             .unwrap_or(seq.playhead);
-        self.paste_clip_entries_at_time(entries, destination, "复制片段")
+        let audio_transitions = collect_clipboard_audio_transitions(seq, &entries)?;
+        self.paste_clip_entries_at_time(entries, audio_transitions, destination, "复制片段")
     }
 
     fn paste_clip_entries_at_time(
         &mut self,
         entries: Vec<ClipClipboardEntry>,
+        audio_transitions: Vec<mondrian_timeline::audio::AudioTransition>,
         destination: TimelineTime,
         description: &'static str,
     ) -> mondrian_core::Result<usize> {
@@ -208,6 +217,7 @@ impl AppState {
             }
 
             let mut focus_by_track = HashMap::<(TrackId, bool), HashSet<ClipId>>::new();
+            let mut audio_edit_ids = HashMap::new();
             for entry in entries {
                 let new_id = id_map
                     .get(&entry.original_clip_id)
@@ -218,6 +228,11 @@ impl AppState {
                 clip.position =
                     destination.checked_add(entry.relative_start)?.max(TimelineTime::ZERO);
                 clip.linked_clip = clip.linked_clip.and_then(|linked| id_map.get(&linked).copied());
+                if !entry.is_video_track {
+                    audio_edit_ids.extend(
+                        seq.fork_audio_clip_authoring(&mut clip, &entry.audio_processing_scopes)?,
+                    );
+                }
 
                 if entry.is_video_track {
                     let track = seq.video_track_mut(entry.track_id).ok_or_else(|| {
@@ -245,6 +260,23 @@ impl AppState {
                 });
             }
 
+            for mut transition in audio_transitions {
+                let (Some(left), Some(right)) = (
+                    audio_edit_ids.get(&transition.left).copied(),
+                    audio_edit_ids.get(&transition.right).copied(),
+                ) else {
+                    continue;
+                };
+                transition.id = mondrian_core::AudioTransitionId::new();
+                transition.left = left;
+                transition.right = right;
+                transition.sequence_range = mondrian_core::TimelineTimeRange::new(
+                    destination.checked_add(transition.sequence_range.start)?,
+                    transition.sequence_range.duration,
+                )?;
+                seq.audio_program.transitions.push(transition);
+            }
+
             for ((track_id, is_video_track), focus_ids) in &focus_by_track {
                 let track = if *is_video_track {
                     seq.video_track_mut(*track_id)
@@ -261,6 +293,7 @@ impl AppState {
                 )?;
             }
             clear_broken_links(seq);
+            seq.compact_audio_program();
             let sequence_id = seq.id;
             let after = seq.clone();
             let pasted_count = pasted_selection.len();
@@ -319,12 +352,28 @@ fn collect_clip_clipboard_entries(
                 clip_id: clip_id.to_string(),
             })?
             .clone();
+        let audio_processing_scopes = if is_video_track {
+            Vec::new()
+        } else {
+            let scope_ids = clip
+                .audio_components
+                .iter()
+                .map(|edit| edit.processing.scope_id)
+                .collect::<HashSet<_>>();
+            seq.audio_program
+                .processing_scopes
+                .iter()
+                .filter(|scope| scope_ids.contains(&scope.id))
+                .cloned()
+                .collect()
+        };
         entries.push(ClipClipboardEntry {
             original_clip_id: clip_id,
             track_id,
             is_video_track,
             relative_start: clip.position.checked_sub(anchor)?,
             clip,
+            audio_processing_scopes,
         });
     }
 
@@ -337,6 +386,37 @@ fn collect_clip_clipboard_entries(
         )
     });
     Ok(entries)
+}
+
+fn collect_clipboard_audio_transitions(
+    seq: &Sequence,
+    entries: &[ClipClipboardEntry],
+) -> mondrian_core::Result<Vec<mondrian_timeline::audio::AudioTransition>> {
+    let edit_ids = entries
+        .iter()
+        .flat_map(|entry| &entry.clip.audio_components)
+        .map(|edit| edit.id)
+        .collect::<HashSet<_>>();
+    let anchor = entries
+        .iter()
+        .map(|entry| entry.clip.position)
+        .min()
+        .unwrap_or(TimelineTime::ZERO);
+    seq.audio_program
+        .transitions
+        .iter()
+        .filter(|transition| {
+            edit_ids.contains(&transition.left) && edit_ids.contains(&transition.right)
+        })
+        .cloned()
+        .map(|mut transition| {
+            transition.sequence_range = mondrian_core::TimelineTimeRange::new(
+                transition.sequence_range.start.checked_sub(anchor)?,
+                transition.sequence_range.duration,
+            )?;
+            Ok(transition)
+        })
+        .collect()
 }
 
 fn validate_clip_clipboard_targets(

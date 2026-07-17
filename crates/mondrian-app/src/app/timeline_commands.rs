@@ -156,6 +156,7 @@ impl AppState {
             })?;
         let fallback_name = format!("{} 副本", duplicated.name);
         duplicated.id = SequenceId::new();
+        duplicated.fork_audio_identities_for_sequence_duplicate();
         duplicated.name = name.into();
         if duplicated.name.trim().is_empty() {
             duplicated.name = fallback_name;
@@ -1060,6 +1061,7 @@ impl AppState {
             if let Some(linked_id) = removed_clip.linked_clip {
                 let _ = remove_clip_from_sequence(seq, linked_id);
             }
+            seq.compact_audio_program();
 
             (seq.id, before, seq.clone())
         };
@@ -1157,6 +1159,7 @@ impl AppState {
             }
 
             clear_broken_links(seq);
+            seq.compact_audio_program();
 
             if removed_count > 0 {
                 history_snapshot = Some((seq.id, before, seq.clone()));
@@ -1347,6 +1350,7 @@ impl AppState {
             let mut min_time: Option<TimelineTime> = None;
             let mut max_time = TimelineTime::ZERO;
             let mut target_video_track_index = None;
+            let mut target_audio_track_index = None;
             for (track_index, track) in parent.video_tracks.iter().enumerate() {
                 if track.is_locked && track.clips.iter().any(|clip| selected_ids.contains(&clip.id))
                 {
@@ -1363,7 +1367,7 @@ impl AppState {
                     }
                 }
             }
-            for track in &parent.audio_tracks {
+            for (track_index, track) in parent.audio_tracks.iter().enumerate() {
                 if track.is_locked && track.clips.iter().any(|clip| selected_ids.contains(&clip.id))
                 {
                     return Err(mondrian_core::MondrianError::TrackLocked {
@@ -1375,6 +1379,7 @@ impl AppState {
                         min_time =
                             Some(min_time.map_or(clip.position, |time| time.min(clip.position)));
                         max_time = max_time.max(clip.end_position()?);
+                        target_audio_track_index.get_or_insert(track_index);
                     }
                 }
             }
@@ -1404,6 +1409,9 @@ impl AppState {
             while nested_sequence.audio_tracks.len() < parent.audio_tracks.len() {
                 nested_sequence.add_audio_track();
             }
+            let source_audio_scopes = parent.audio_program.processing_scopes.clone();
+            let source_audio_transitions = parent.audio_program.transitions.clone();
+            let mut audio_edit_ids = HashMap::new();
 
             for (track_index, track) in parent.video_tracks.iter().enumerate() {
                 for clip in track.clips.iter().filter(|clip| selected_ids.contains(&clip.id)) {
@@ -1424,8 +1432,28 @@ impl AppState {
                     {
                         nested_clip.linked_clip = None;
                     }
+                    audio_edit_ids.extend(
+                        nested_sequence
+                            .fork_audio_clip_authoring(&mut nested_clip, &source_audio_scopes)?,
+                    );
                     nested_sequence.audio_tracks[track_index].add_clip(nested_clip)?;
                 }
+            }
+            for mut transition in source_audio_transitions {
+                let (Some(left), Some(right)) = (
+                    audio_edit_ids.get(&transition.left).copied(),
+                    audio_edit_ids.get(&transition.right).copied(),
+                ) else {
+                    continue;
+                };
+                transition.id = mondrian_core::AudioTransitionId::new();
+                transition.left = left;
+                transition.right = right;
+                transition.sequence_range = mondrian_core::TimelineTimeRange::new(
+                    transition.sequence_range.start.checked_sub(min_time)?,
+                    transition.sequence_range.duration,
+                )?;
+                nested_sequence.audio_program.transitions.push(transition);
             }
 
             for track in &mut parent.video_tracks {
@@ -1434,17 +1462,46 @@ impl AppState {
             for track in &mut parent.audio_tracks {
                 track.clips.retain(|clip| !selected_ids.contains(&clip.id));
             }
+            parent.compact_audio_program();
 
             let target_video_track_index = target_video_track_index.unwrap_or(0);
             let duration = max_time.checked_sub(min_time)?;
-            let nested_clip = Clip::new_nested_sequence(
+            let mut nested_clip = Clip::new_nested_sequence(
                 nested_sequence.id,
                 min_time,
                 duration,
                 Some(nested_sequence.name.clone()),
             )?;
             let nested_clip_id = nested_clip.id;
+            let has_nested_audio =
+                nested_sequence.audio_tracks.iter().any(|track| !track.clips.is_empty());
+            let nested_audio = if has_nested_audio {
+                let mut audio_clip = Clip::new_nested_sequence(
+                    nested_sequence.id,
+                    min_time,
+                    duration,
+                    Some(nested_sequence.name.clone()),
+                )?;
+                nested_clip.linked_clip = Some(audio_clip.id);
+                audio_clip.linked_clip = Some(nested_clip_id);
+                Some(audio_clip)
+            } else {
+                None
+            };
             parent.video_tracks[target_video_track_index].add_clip(nested_clip)?;
+            if let Some(audio_clip) = nested_audio {
+                let output_id = nested_sequence
+                    .audio_program
+                    .outputs
+                    .first()
+                    .map(|output| output.id)
+                    .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+                        step_id: "precompose_clips_as_sequence".to_owned(),
+                        reason: "嵌套序列缺少音频 Program Output".to_owned(),
+                    })?;
+                let audio_track_id = parent.audio_tracks[target_audio_track_index.unwrap_or(0)].id;
+                parent.add_nested_audio_clip(audio_track_id, audio_clip, output_id)?;
+            }
 
             (parent.id, before, parent, nested_sequence, nested_clip_id)
         };
@@ -2095,9 +2152,19 @@ impl AppState {
                         }
                     })?;
                 ensure_audio_track_index(seq, target_video_index);
-                if let Some(audio_track) = seq.audio_tracks.get_mut(target_video_index) {
-                    audio_track.add_clip(audio_clip)?;
+                if let Some(audio_track_id) =
+                    seq.audio_tracks.get(target_video_index).map(|track| track.id)
+                {
+                    seq.add_media_audio_clip(
+                        audio_track_id,
+                        audio_clip,
+                        AudioSourceComponentId::primary(),
+                    )?;
+                    let audio_track = seq
+                        .audio_track_mut(audio_track_id)
+                        .expect("newly resolved audio Track must remain present");
                     resolve_track_conflicts(audio_track, audio_clip_id, overlap_mode)?;
+                    seq.compact_audio_program();
                 }
             }
             clear_broken_links(seq);
@@ -2162,11 +2229,12 @@ impl AppState {
             clip.label = Some(dragging.name.clone());
             let clip_id = clip.id;
 
+            seq.add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())?;
             let track = seq.audio_track_mut(track_id).ok_or_else(|| {
                 mondrian_core::MondrianError::TrackNotFound { track_id: track_id.to_string() }
             })?;
-            track.add_clip(clip)?;
             resolve_track_conflicts(track, clip_id, overlap_mode)?;
+            seq.compact_audio_program();
             clear_broken_links(seq);
 
             (seq.id, clip_id, start_frame, before, seq.clone())

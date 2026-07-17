@@ -37,13 +37,14 @@ foundation:
 - `mondrian-app`: product shell, app state, command/action handling, project lifecycle, window/runtime wiring, panel adapters.
 - `mondrian-assets`: SQLite-backed project asset library and virtual asset records.
 - `mondrian-timeline`: sequence/track/clip domain model and editing commands.
-- `mondrian-media`: FFmpeg probing/decoding plus media source, waveform,
-  proxy, and cache adapters. Its current audio scheduling/mixing code is an
-  implementation bridge, not the long-term Audio Program compiler.
-- target `mondrian-audio`: typed audio compilation, processor hosting,
-  latency/state management, and execution coordination. Create this one real
-  crate with the first author-to-IR vertical slice after the common time
-  foundation lands; do not create empty format-specific plugin crates.
+- `mondrian-media`: FFmpeg probing/decoding plus media source, waveform, proxy,
+  cache, Audio Playback, and physical output adapters. It does not interpret
+  Timeline audio routing or processor order.
+- `mondrian-audio`: validated author-to-IR compilation, Render Contract
+  preparation, common float DSP, exclusive render Sessions, recursive nested
+  Program Runtime, and media source interfaces. Real plugin hosts, general PDC,
+  and execution coordination deepen this crate; format-only placeholder crates
+  are not created.
 - `mondrian-playback`: headless Playback Session state machine, Synthetic Clock
   Master, epoch/revision invalidation, frame-delivery recovery policy, and
   transport snapshots. It has no UI, codec, GPU, device, asset-library, or
@@ -65,15 +66,15 @@ Lower layers cannot depend on higher layers:
 - UI widgets dispatch `Action`; app decides what actions mean.
 - Platform services are injected into event/app layers; widgets never call OS APIs directly.
 
-The target audio dependency direction is one-way:
+The audio dependency direction is one-way:
 
 ```text
 mondrian-timeline ──depends on──> mondrian-core
 mondrian-playback ──depends on──> mondrian-core
-mondrian-audio ─────depends on──> mondrian-core + mondrian-timeline + mondrian-playback
-mondrian-media ─────depends on──> mondrian-audio interfaces for audio adapters
-platform audio ─────implements──> mondrian-audio sink interfaces
-mondrian-export/app ─submits to─> mondrian-audio; never interprets its graph
+mondrian-audio ─────depends on──> mondrian-core + mondrian-timeline
+mondrian-media ─────implements──> decode/cache and physical output adapters
+mondrian-export/app ─depends on─> mondrian-audio + mondrian-media
+mondrian-playback ──owns────────> Transport/Clock/epoch/recovery policy
 ```
 
 ## Cross-Cutting Principles

@@ -69,6 +69,7 @@ pub(super) fn split_clip_in_track(
     }
 
     let split_time = author_time_from_frame(split_frame, time_base).ok()?;
+    let split_offset = split_time.checked_sub(clip.position).ok()?;
     let new_source_in = clip.timeline_to_source_time(split_time).ok()?;
 
     let mut left = clip.clone();
@@ -77,6 +78,7 @@ pub(super) fn split_clip_in_track(
 
     let mut right = clip;
     right.id = ClipId::new();
+    right.fork_audio_components_for_split(split_offset).ok()?;
     right.position = split_time;
     right.duration = author_time_from_frame(right_duration, time_base).ok()?;
     right.source_in = new_source_in;
@@ -225,6 +227,7 @@ pub(super) fn roll_cut_in_track(
     left_updated.source_out = new_left_source_out;
 
     let mut right_updated = right_original;
+    right_updated.shift_audio_component_in(new_cut_time.checked_sub(right_updated.position)?)?;
     right_updated.position = new_cut_time;
     right_updated.duration = author_time_from_frame(new_right_duration, time_base)?;
     right_updated.source_in = new_right_source_in;
@@ -464,7 +467,9 @@ pub(super) fn slide_clip_in_track(
     center_updated.position = author_time_from_frame(new_center_start, time_base)?;
 
     let mut right_updated = right_original;
-    right_updated.position = author_time_from_frame(new_center_end, time_base)?;
+    let right_position = author_time_from_frame(new_center_end, time_base)?;
+    right_updated.shift_audio_component_in(right_position.checked_sub(right_updated.position)?)?;
+    right_updated.position = right_position;
     right_updated.duration = author_time_from_frame(new_right_duration, time_base)?;
     right_updated.source_in = new_right_source_in;
 
@@ -532,7 +537,9 @@ pub(super) fn trim_clip_in_track(
             }
             let new_in =
                 original.timeline_to_source_time(author_time_from_frame(new_start, time_base)?)?;
-            updated.position = author_time_from_frame(new_start, time_base)?;
+            let new_position = author_time_from_frame(new_start, time_base)?;
+            updated.shift_audio_component_in(new_position.checked_sub(updated.position)?)?;
+            updated.position = new_position;
             updated.duration = author_time_from_frame(end - new_start, time_base)?;
             updated.source_in = new_in;
         }
@@ -799,6 +806,7 @@ pub(super) fn subtract_overwrite_range_from_clip(
         let mut right = clip;
         let new_start = cut_end.max(clip_start);
         let new_source_in = right.timeline_to_source_time(new_start)?;
+        right.shift_audio_component_in(new_start.checked_sub(clip_start)?)?;
         right.position = new_start;
         right.duration = clip_end.checked_sub(new_start)?.max(TimelineTime::ZERO);
         right.source_in = new_source_in;
@@ -832,6 +840,7 @@ pub(super) fn subtract_overwrite_range_from_clip(
     let right_new_start = cut_end;
     let right_new_source_in = right.timeline_to_source_time(right_new_start)?;
     right.id = ClipId::new();
+    right.fork_audio_components_for_split(right_new_start.checked_sub(clip_start)?)?;
     right.position = right_new_start;
     right.duration = clip_end.checked_sub(right_new_start)?.max(TimelineTime::ZERO);
     right.source_in = right_new_source_in;

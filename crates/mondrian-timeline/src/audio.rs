@@ -1,21 +1,28 @@
-//! Persistent audio authoring owned by a [`Sequence`](crate::Sequence).
+//! Persistent Sequence-owned audio authoring.
 //!
-//! This module records user intent only. Runtime plugin objects, scheduler
-//! state, device handles, decoded PCM, and compiler-generated nodes belong in
-//! the audio execution layer.
+//! Timeline placement remains owned by `Track -> Clip`. This module owns only
+//! non-placement audio intent: per-placement component edits, shareable
+//! processing scopes, mixer state, routing, transitions, and public outputs.
 
+use crate::{clip::Clip, track::Track};
 use mondrian_core::{
-    AudioContributionId, AudioProcessorInstanceId, AudioRoleId, AudioRouteId,
-    AudioSourceComponentId, AudioTransitionId, ClipId, ExactAutomationCurve, MixBusId, ParameterId,
-    ProgramOutputId, SequenceId, TimelineTimeRange, TrackId,
+    AudioComponentEditId, AudioProcessingScopeId, AudioProcessorInstanceId, AudioRoleId,
+    AudioRouteId, AudioSourceComponentId, AudioTransitionId, ClipId, ExactAutomationCurve,
+    MixBusId, ParameterId, ProgramOutputId, TimelineTime, TimelineTimeRange, TrackId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Stable built-in definition identity for a gain processor.
 pub const BUILTIN_GAIN_DEFINITION_ID: &str = "mondrian.audio.gain";
-/// Stable parameter identity for gain in decibels.
+/// Stable parameter identity for a gain processor in decibels.
 pub const GAIN_DB_PARAMETER_ID: &str = "mondrian.audio.gain.db";
+/// Stable parameter identity for processing-scope input trim.
+pub const INPUT_GAIN_DB_PARAMETER_ID: &str = "mondrian.audio.input_gain.db";
+/// Stable parameter identity for placement-local volume.
+pub const CLIP_VOLUME_DB_PARAMETER_ID: &str = "mondrian.audio.clip_volume.db";
+/// Stable parameter identity for placement-local stereo pan/balance.
+pub const CLIP_PAN_PARAMETER_ID: &str = "mondrian.audio.clip_pan";
 /// Stable parameter identity for a channel-strip fader in decibels.
 pub const FADER_DB_PARAMETER_ID: &str = "mondrian.audio.fader.db";
 
@@ -49,9 +56,9 @@ pub struct AudioProcessorInstance {
     pub definition: AudioProcessorDefinitionRef,
     /// Explicit user bypass state.
     pub bypassed: bool,
-    /// Parameter curves keyed by the same stable identity stored in each curve.
+    /// Parameter curves keyed by stable parameter identity.
     pub parameters: BTreeMap<ParameterId, ExactAutomationCurve>,
-    /// Opaque, versioned plugin state preserved even when the dependency is unavailable.
+    /// Opaque, versioned plugin state preserved while a dependency is unavailable.
     pub opaque_state: Option<Vec<u8>>,
 }
 
@@ -70,21 +77,18 @@ impl AudioProcessorInstance {
         }
     }
 
-    /// Validate persistent parameter identity and curves.
-    pub fn validate(&self) -> Result<(), AudioAuthoringError> {
+    fn validate(&self) -> Result<(), AudioAuthoringError> {
         for (parameter_id, curve) in &self.parameters {
             if parameter_id != &curve.parameter_id {
                 return Err(AudioAuthoringError::ParameterKeyMismatch);
             }
-            curve.validate().map_err(|error| AudioAuthoringError::InvalidAutomation {
-                reason: error.to_string(),
-            })?;
+            validate_curve(curve)?;
         }
         Ok(())
     }
 }
 
-/// An ordered processor chain. Order is author intent, not a UI presentation detail.
+/// An ordered processor chain. Order is author intent.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AudioProcessorRack {
     /// Processors in signal-flow order.
@@ -92,8 +96,7 @@ pub struct AudioProcessorRack {
 }
 
 impl AudioProcessorRack {
-    /// Validate every instance and reject duplicate instance identities.
-    pub fn validate(&self) -> Result<(), AudioAuthoringError> {
+    fn validate(&self) -> Result<(), AudioAuthoringError> {
         let mut identities = BTreeSet::new();
         for processor in &self.processors {
             if !identities.insert(processor.id) {
@@ -135,80 +138,164 @@ impl Default for AudioChannelStrip {
 }
 
 impl AudioChannelStrip {
-    /// Validate numeric values, racks, and the fader parameter contract.
-    pub fn validate(&self) -> Result<(), AudioAuthoringError> {
-        if !self.input_trim_db.is_finite() || !self.fader_db.is_finite() {
-            return Err(AudioAuthoringError::NonFiniteGain);
-        }
+    fn validate(&self) -> Result<(), AudioAuthoringError> {
+        validate_finite(self.input_trim_db)?;
+        validate_finite(self.fader_db)?;
         self.pre_fader.validate()?;
         self.post_fader.validate()?;
-        if let Some(curve) = &self.fader_automation {
-            if curve.parameter_id.as_str() != FADER_DB_PARAMETER_ID {
-                return Err(AudioAuthoringError::WrongFaderParameter);
+        validate_optional_curve(&self.fader_automation, FADER_DB_PARAMETER_ID)
+    }
+}
+
+/// Source selected by one placement-local audio edit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudioComponentSource {
+    /// A stable audio component of the owning media Clip's Asset.
+    Media {
+        component_id: AudioSourceComponentId,
+    },
+    /// A stable public output of the owning nested Sequence Clip.
+    NestedOutput { output_id: ProgramOutputId },
+}
+
+/// The deliberately restricted mapping into a non-placement processing scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioProcessingBinding {
+    /// Shared author processing definition.
+    pub scope_id: AudioProcessingScopeId,
+    /// Exact scope-local coordinate corresponding to component-local zero.
+    pub scope_in: TimelineTime,
+}
+
+/// Curve used by one unary Clip fade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudioFadeCurve {
+    /// Linear amplitude ramp.
+    ConstantGain,
+    /// Sin/cos equal-power ramp.
+    EqualPower,
+}
+
+/// One exact unary fade at a Clip edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioFade {
+    /// Exact component-local fade duration.
+    pub duration: TimelineTime,
+    /// Versioned curve mathematics.
+    pub curve: AudioFadeCurve,
+}
+
+/// Independent fade envelopes at the audible Clip edges.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioClipFades {
+    /// Optional fade beginning at the Clip in edge.
+    pub fade_in: Option<AudioFade>,
+    /// Optional fade ending at the Clip out edge.
+    pub fade_out: Option<AudioFade>,
+}
+
+/// Placement-local audio behavior attached to exactly one Clip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioComponentEdit {
+    /// Stable edit identity used by transitions and diagnostics.
+    pub id: AudioComponentEditId,
+    /// Media component or nested public output selected from the owning Clip.
+    pub source: AudioComponentSource,
+    /// Optional Sequence-local semantic Role.
+    pub role_id: Option<AudioRoleId>,
+    /// Whether this component contributes signal.
+    pub enabled: bool,
+    /// Exact edit-local coordinate corresponding to the owning Clip's in edge.
+    /// This is a restricted offset, never an independent speed or placement map.
+    pub local_time_in: TimelineTime,
+    /// Non-placement processing definition and scope-local origin.
+    pub processing: AudioProcessingBinding,
+    /// Static post-processing placement volume in dB.
+    pub volume_db: f64,
+    /// Optional component-local volume automation.
+    pub volume_automation: Option<ExactAutomationCurve>,
+    /// Static stereo pan/balance in the inclusive range `[-1, 1]`.
+    pub pan: f64,
+    /// Optional component-local pan automation.
+    pub pan_automation: Option<ExactAutomationCurve>,
+    /// Unary edge fades evaluated after Clip processing.
+    pub fades: AudioClipFades,
+}
+
+impl AudioComponentEdit {
+    /// Create a default media-component edit using one registered scope.
+    pub fn media(component_id: AudioSourceComponentId, scope_id: AudioProcessingScopeId) -> Self {
+        Self::new(AudioComponentSource::Media { component_id }, scope_id)
+    }
+
+    /// Create a default nested-output edit using one registered scope.
+    pub fn nested(output_id: ProgramOutputId, scope_id: AudioProcessingScopeId) -> Self {
+        Self::new(AudioComponentSource::NestedOutput { output_id }, scope_id)
+    }
+
+    fn new(source: AudioComponentSource, scope_id: AudioProcessingScopeId) -> Self {
+        Self {
+            id: AudioComponentEditId::new(),
+            source,
+            role_id: None,
+            enabled: true,
+            local_time_in: TimelineTime::ZERO,
+            processing: AudioProcessingBinding { scope_id, scope_in: TimelineTime::ZERO },
+            volume_db: 0.0,
+            volume_automation: None,
+            pan: 0.0,
+            pan_automation: None,
+            fades: AudioClipFades::default(),
+        }
+    }
+
+    fn validate(&self, clip: &Clip) -> Result<(), AudioAuthoringError> {
+        if self.processing.scope_in.is_negative() || self.local_time_in.is_negative() {
+            return Err(AudioAuthoringError::NegativeProcessingScopeIn(self.id));
+        }
+        validate_finite(self.volume_db)?;
+        if !self.pan.is_finite() || !(-1.0..=1.0).contains(&self.pan) {
+            return Err(AudioAuthoringError::InvalidPan(self.id));
+        }
+        validate_optional_curve(&self.volume_automation, CLIP_VOLUME_DB_PARAMETER_ID)?;
+        validate_optional_curve(&self.pan_automation, CLIP_PAN_PARAMETER_ID)?;
+        for fade in [self.fades.fade_in, self.fades.fade_out].into_iter().flatten() {
+            if fade.duration.is_negative() || fade.duration > clip.duration {
+                return Err(AudioAuthoringError::InvalidFade(self.id));
             }
-            curve.validate().map_err(|error| AudioAuthoringError::InvalidAutomation {
-                reason: error.to_string(),
-            })?;
         }
         Ok(())
     }
 }
 
-/// The stable origin of one independently processable PCM contribution.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AudioContributionSource {
-    /// One stable audio component exposed by an audiovisual Clip.
-    ClipComponent {
-        clip_id: ClipId,
-        component_id: AudioSourceComponentId,
-    },
-    /// One public output of a nested Sequence instance.
-    NestedOutput {
-        sequence_id: SequenceId,
-        output_id: ProgramOutputId,
-    },
-}
-
-/// One independently processable PCM-bearing timeline component.
+/// Non-placement Clip processing definition, shared only through explicit bindings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AudioContribution {
-    /// Stable contribution identity.
-    pub id: AudioContributionId,
-    /// Media component or nested output that supplies PCM.
-    pub source: AudioContributionSource,
-    /// Editorial audio Track receiving this contribution.
-    pub track_id: TrackId,
-    /// Optional Sequence-owned semantic Role assignment.
-    pub role_id: Option<AudioRoleId>,
-    /// Sequence-time audible interval; source mapping remains owned by the Clip/nesting transform.
-    pub sequence_range: TimelineTimeRange,
-    /// Contribution-local ordered processor rack.
+pub struct AudioProcessingScope {
+    /// Stable author identity and continuity candidate key.
+    pub id: AudioProcessingScopeId,
+    /// Static input trim before the processor rack.
+    pub input_gain_db: f64,
+    /// Optional scope-local input trim automation.
+    pub input_gain_automation: Option<ExactAutomationCurve>,
+    /// Ordered Clip processor rack.
     pub processors: AudioProcessorRack,
-    /// Static contribution gain in dB.
-    pub gain_db: f64,
-    /// Optional contribution-local gain automation.
-    pub gain_automation: Option<ExactAutomationCurve>,
 }
 
-impl AudioContribution {
-    /// Validate the contribution without resolving external dependencies.
-    pub fn validate(&self) -> Result<(), AudioAuthoringError> {
-        if self.sequence_range.is_empty() {
-            return Err(AudioAuthoringError::EmptyContributionRange(self.id));
+impl AudioProcessingScope {
+    /// Create an identity processing definition.
+    pub fn identity() -> Self {
+        Self {
+            id: AudioProcessingScopeId::new(),
+            input_gain_db: 0.0,
+            input_gain_automation: None,
+            processors: AudioProcessorRack::default(),
         }
-        if !self.gain_db.is_finite() {
-            return Err(AudioAuthoringError::NonFiniteGain);
-        }
-        self.processors.validate()?;
-        if let Some(curve) = &self.gain_automation {
-            if curve.parameter_id.as_str() != GAIN_DB_PARAMETER_ID {
-                return Err(AudioAuthoringError::WrongGainParameter);
-            }
-            curve.validate().map_err(|error| AudioAuthoringError::InvalidAutomation {
-                reason: error.to_string(),
-            })?;
-        }
-        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), AudioAuthoringError> {
+        validate_finite(self.input_gain_db)?;
+        validate_optional_curve(&self.input_gain_automation, INPUT_GAIN_DB_PARAMETER_ID)?;
+        self.processors.validate()
     }
 }
 
@@ -219,7 +306,7 @@ pub struct AudioTrackMixerChannel {
     pub strip: AudioChannelStrip,
 }
 
-/// A user-created mix bus with an independent lifetime.
+/// A user-created mix Bus with an independent lifetime.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioMixBus {
     /// Stable Bus identity.
@@ -233,7 +320,7 @@ pub struct AudioMixBus {
 /// Closed choice of how a public output obtains its main signal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProgramOutputMainSource {
-    /// Sum only explicit routes targeting this output.
+    /// Sum only explicit Routes targeting this output.
     RoutedInputs,
     /// Compile a semantic projection rooted at one Sequence-owned Role.
     SemanticProjection { role_id: AudioRoleId },
@@ -248,12 +335,11 @@ pub struct AudioProgramOutput {
     pub name: String,
     /// Exclusive source contract.
     pub main_source: ProgramOutputMainSource,
-    /// Output-local processing before publication.
+    /// Output-local creative processing before publication.
     pub strip: AudioChannelStrip,
 }
 
-/// Sequence-owned semantic audio Role. Project templates may suggest keys but
-/// cannot own or silently rebind this identity.
+/// Sequence-owned semantic audio Role.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioRole {
     /// Stable local Role identity.
@@ -266,16 +352,49 @@ pub struct AudioRole {
     pub standard_semantic_key: Option<String>,
 }
 
-/// Typed route source; compiler-generated operations are never routable.
+/// Versioned output port of a Track or Bus channel strip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum AudioRouteSource {
-    /// Output of one Track mixer channel.
-    Track(TrackId),
-    /// Output of one authored Mix Bus.
-    Bus(MixBusId),
+pub enum AudioChannelStripOutputPort {
+    /// Signal after input trim and pre-fader processors, before the fader.
+    PreFader,
+    /// Signal after the fader/post-fader processors but before Track mute.
+    PostFaderPreMute,
+    /// Signal after the Track mute gate. This is the ordinary main-route port.
+    PostMute,
 }
 
-/// Typed route destination.
+/// Typed Route source; generated operations are never routable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum AudioRouteSource {
+    /// One explicit output port of a Track Mixer Channel.
+    Track {
+        track_id: TrackId,
+        port: AudioChannelStripOutputPort,
+    },
+    /// One explicit output port of an authored Mix Bus.
+    Bus {
+        bus_id: MixBusId,
+        port: AudioChannelStripOutputPort,
+    },
+}
+
+impl AudioRouteSource {
+    fn track_id(self) -> Option<TrackId> {
+        match self {
+            Self::Track { track_id, .. } => Some(track_id),
+            Self::Bus { .. } => None,
+        }
+    }
+
+    fn bus_id(self) -> Option<MixBusId> {
+        match self {
+            Self::Bus { bus_id, .. } => Some(bus_id),
+            Self::Track { .. } => None,
+        }
+    }
+}
+
+/// Typed Route destination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum AudioRouteDestination {
     /// Main input of one Mix Bus.
@@ -284,20 +403,19 @@ pub enum AudioRouteDestination {
     Output(ProgramOutputId),
 }
 
-/// Explicit signal route. Sends and sidechains will extend the tap/port contract,
-/// not masquerade as main-input routes.
+/// Explicit signal Route.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioRoute {
-    /// Stable route identity.
+    /// Stable Route identity.
     pub id: AudioRouteId,
-    /// Typed author source.
+    /// Typed author source and tap point.
     pub source: AudioRouteSource,
     /// Typed author destination.
     pub destination: AudioRouteDestination,
 }
 
 /// Transition curve contract for a two-input crossfade.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AudioTransitionCurve {
     /// Linear amplitude ramps whose sum is one.
     ConstantGain,
@@ -305,35 +423,35 @@ pub enum AudioTransitionCurve {
     EqualPower,
 }
 
-/// An explicit crossfade between exactly two contributions.
+/// An explicit crossfade between exactly two placement-local audio edits.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioTransition {
-    /// Stable transition identity.
+    /// Stable Transition identity.
     pub id: AudioTransitionId,
-    /// First contribution.
-    pub left: AudioContributionId,
-    /// Second contribution.
-    pub right: AudioContributionId,
-    /// Exact Sequence-time transition interval.
+    /// First endpoint.
+    pub left: AudioComponentEditId,
+    /// Second endpoint.
+    pub right: AudioComponentEditId,
+    /// Sole authoritative Sequence-time Transition interval.
     pub sequence_range: TimelineTimeRange,
-    /// Paired transition curve policy.
+    /// Paired Transition curve policy.
     pub curve: AudioTransitionCurve,
 }
 
 /// Sequence-owned audio author aggregate.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioProgram {
-    /// Independently processable timeline contributions.
-    pub contributions: Vec<AudioContribution>,
-    /// Explicit two-input transitions.
+    /// Non-placement Clip processing definitions.
+    pub processing_scopes: Vec<AudioProcessingScope>,
+    /// Explicit two-input Transitions.
     pub transitions: Vec<AudioTransition>,
     /// Mixer state for every and only audio Track in the owning Sequence.
     pub track_channels: BTreeMap<TrackId, AudioTrackMixerChannel>,
-    /// User-created intermediate buses.
+    /// User-created intermediate Buses.
     pub buses: Vec<AudioMixBus>,
     /// Stable public outputs.
     pub outputs: Vec<AudioProgramOutput>,
-    /// Explicit typed routes.
+    /// Explicit typed Routes.
     pub routes: Vec<AudioRoute>,
 }
 
@@ -352,12 +470,15 @@ impl AudioProgram {
             track_channels.insert(track_id, AudioTrackMixerChannel::default());
             routes.push(AudioRoute {
                 id: AudioRouteId::new(),
-                source: AudioRouteSource::Track(track_id),
+                source: AudioRouteSource::Track {
+                    track_id,
+                    port: AudioChannelStripOutputPort::PostMute,
+                },
                 destination: AudioRouteDestination::Output(output.id),
             });
         }
         Self {
-            contributions: Vec::new(),
+            processing_scopes: Vec::new(),
             transitions: Vec::new(),
             track_channels,
             buses: Vec::new(),
@@ -366,32 +487,88 @@ impl AudioProgram {
         }
     }
 
-    /// Add the mixer channel and default main-output route for a new Track.
+    /// Register a processing definition and return its stable identity.
+    pub fn add_processing_scope(&mut self, scope: AudioProcessingScope) -> AudioProcessingScopeId {
+        let id = scope.id;
+        self.processing_scopes.push(scope);
+        id
+    }
+
+    /// Add the mixer channel and default main-output Route for a new Track.
     pub fn add_track(&mut self, track_id: TrackId) {
         self.track_channels.entry(track_id).or_default();
         if let Some(output) = self.outputs.first() {
-            self.routes.push(AudioRoute {
-                id: AudioRouteId::new(),
-                source: AudioRouteSource::Track(track_id),
-                destination: AudioRouteDestination::Output(output.id),
-            });
+            if !self.routes.iter().any(|route| route.source.track_id() == Some(track_id)) {
+                self.routes.push(AudioRoute {
+                    id: AudioRouteId::new(),
+                    source: AudioRouteSource::Track {
+                        track_id,
+                        port: AudioChannelStripOutputPort::PostMute,
+                    },
+                    destination: AudioRouteDestination::Output(output.id),
+                });
+            }
         }
     }
 
-    /// Remove a Track's mixer state, routes, and contributions.
+    /// Remove a Track's mixer state and Routes. Clip-local authoring is owned by the removed Track.
     pub fn remove_track(&mut self, track_id: TrackId) {
         self.track_channels.remove(&track_id);
-        self.contributions.retain(|contribution| contribution.track_id != track_id);
-        self.routes.retain(|route| route.source != AudioRouteSource::Track(track_id));
+        self.routes.retain(|route| route.source.track_id() != Some(track_id));
     }
 
-    /// Validate closed references, unique identities, legal route endpoints, and cycles.
+    /// Remove Transitions whose strong endpoint no longer exists and discard unused scopes.
+    pub fn compact_for_tracks(&mut self, audio_tracks: &[Track]) {
+        let edit_ranges = audio_tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .flat_map(|clip| {
+                clip.audio_components.iter().map(move |edit| {
+                    (
+                        edit.id,
+                        TimelineTimeRange::new(clip.position, clip.duration),
+                    )
+                })
+            })
+            .filter_map(|(edit_id, range)| range.ok().map(|range| (edit_id, range)))
+            .collect::<BTreeMap<_, _>>();
+        let scope_ids = audio_tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .flat_map(|clip| &clip.audio_components)
+            .map(|edit| edit.processing.scope_id)
+            .collect::<BTreeSet<_>>();
+        self.transitions.retain(|transition| {
+            let (Some(left), Some(right)) = (
+                edit_ranges.get(&transition.left),
+                edit_ranges.get(&transition.right),
+            ) else {
+                return false;
+            };
+            let Ok(transition_end) = transition.sequence_range.end() else {
+                return false;
+            };
+            let Ok(left_end) = left.end() else {
+                return false;
+            };
+            let Ok(right_end) = right.end() else {
+                return false;
+            };
+            transition.sequence_range.start >= left.start
+                && transition_end <= left_end
+                && transition.sequence_range.start >= right.start
+                && transition_end <= right_end
+        });
+        self.processing_scopes.retain(|scope| scope_ids.contains(&scope.id));
+    }
+
+    /// Validate the complete Sequence-local author closure against real Track/Clip placement.
     pub fn validate(
         &self,
-        audio_track_ids: &[TrackId],
+        audio_tracks: &[Track],
         audio_roles: &[AudioRole],
     ) -> Result<(), AudioAuthoringError> {
-        let expected_tracks = audio_track_ids.iter().copied().collect::<BTreeSet<_>>();
+        let expected_tracks = audio_tracks.iter().map(|track| track.id).collect::<BTreeSet<_>>();
         let actual_tracks = self.track_channels.keys().copied().collect::<BTreeSet<_>>();
         if actual_tracks != expected_tracks {
             return Err(AudioAuthoringError::TrackChannelSetMismatch);
@@ -401,14 +578,17 @@ impl AudioProgram {
             .ok_or(AudioAuthoringError::DuplicateBus)?;
         let output_ids = unique_ids(self.outputs.iter().map(|output| output.id))
             .ok_or(AudioAuthoringError::DuplicateOutput)?;
-        let contribution_ids = unique_ids(self.contributions.iter().map(|item| item.id))
-            .ok_or(AudioAuthoringError::DuplicateContribution)?;
+        let scope_ids = unique_ids(self.processing_scopes.iter().map(|scope| scope.id))
+            .ok_or(AudioAuthoringError::DuplicateProcessingScope)?;
         let role_ids = unique_ids(audio_roles.iter().map(|role| role.id))
             .ok_or(AudioAuthoringError::DuplicateRole)?;
         if self.outputs.is_empty() {
             return Err(AudioAuthoringError::MissingProgramOutput);
         }
 
+        for scope in &self.processing_scopes {
+            scope.validate()?;
+        }
         for channel in self.track_channels.values() {
             channel.strip.validate()?;
         }
@@ -430,17 +610,38 @@ impl AudioProgram {
             }
         }
         validate_roles(audio_roles, &role_ids)?;
-        for contribution in &self.contributions {
-            contribution.validate()?;
-            if !expected_tracks.contains(&contribution.track_id) {
-                return Err(AudioAuthoringError::UnknownContributionTrack(
-                    contribution.track_id,
-                ));
-            }
-            if contribution.role_id.is_some_and(|role_id| !role_ids.contains(&role_id)) {
-                return Err(AudioAuthoringError::UnknownContributionRole(
-                    contribution.id,
-                ));
+
+        let mut edits = BTreeMap::<AudioComponentEditId, (&Clip, TrackId)>::new();
+        for track in audio_tracks {
+            for clip in &track.clips {
+                if clip.audio_components.is_empty() {
+                    return Err(AudioAuthoringError::MissingAudioComponents(clip.id));
+                }
+                let mut source_ids = BTreeSet::new();
+                for edit in &clip.audio_components {
+                    if edits.insert(edit.id, (clip, track.id)).is_some() {
+                        return Err(AudioAuthoringError::DuplicateComponentEdit);
+                    }
+                    if !scope_ids.contains(&edit.processing.scope_id) {
+                        return Err(AudioAuthoringError::UnknownProcessingScope(edit.id));
+                    }
+                    if edit.role_id.is_some_and(|role_id| !role_ids.contains(&role_id)) {
+                        return Err(AudioAuthoringError::UnknownComponentRole(edit.id));
+                    }
+                    match edit.source {
+                        AudioComponentSource::Media { component_id } => {
+                            if clip.is_nested_sequence() || !source_ids.insert(component_id) {
+                                return Err(AudioAuthoringError::InvalidComponentSource(edit.id));
+                            }
+                        }
+                        AudioComponentSource::NestedOutput { .. } => {
+                            if !clip.is_nested_sequence() {
+                                return Err(AudioAuthoringError::InvalidComponentSource(edit.id));
+                            }
+                        }
+                    }
+                    edit.validate(clip)?;
+                }
             }
         }
 
@@ -448,47 +649,89 @@ impl AudioProgram {
             .ok_or(AudioAuthoringError::DuplicateRoute)?;
         let _ = route_ids;
         for route in &self.routes {
-            match route.source {
-                AudioRouteSource::Track(id) if !expected_tracks.contains(&id) => {
-                    return Err(AudioAuthoringError::UnknownRouteSource)
-                }
-                AudioRouteSource::Bus(id) if !bus_ids.contains(&id) => {
-                    return Err(AudioAuthoringError::UnknownRouteSource)
-                }
-                _ => {}
+            if route.source.track_id().is_some_and(|id| !expected_tracks.contains(&id))
+                || route.source.bus_id().is_some_and(|id| !bus_ids.contains(&id))
+            {
+                return Err(AudioAuthoringError::UnknownRouteSource);
             }
             match route.destination {
                 AudioRouteDestination::Bus(id) if !bus_ids.contains(&id) => {
-                    return Err(AudioAuthoringError::UnknownRouteDestination)
+                    return Err(AudioAuthoringError::UnknownRouteDestination);
                 }
                 AudioRouteDestination::Output(id) if !output_ids.contains(&id) => {
-                    return Err(AudioAuthoringError::UnknownRouteDestination)
+                    return Err(AudioAuthoringError::UnknownRouteDestination);
                 }
                 _ => {}
             }
             if matches!(
-                (route.source, route.destination),
-                (AudioRouteSource::Bus(source), AudioRouteDestination::Bus(destination)) if source == destination
+                (route.source.bus_id(), route.destination),
+                (Some(source), AudioRouteDestination::Bus(destination)) if source == destination
             ) {
                 return Err(AudioAuthoringError::RouteCycle);
             }
         }
         validate_bus_cycles(&self.routes, &bus_ids)?;
 
-        let mut transition_ids = BTreeSet::new();
+        let transition_ids = unique_ids(self.transitions.iter().map(|transition| transition.id))
+            .ok_or(AudioAuthoringError::DuplicateTransition)?;
+        let _ = transition_ids;
         for transition in &self.transitions {
-            if !transition_ids.insert(transition.id) {
-                return Err(AudioAuthoringError::DuplicateTransition);
-            }
+            let Some((left_clip, _)) = edits.get(&transition.left).copied() else {
+                return Err(AudioAuthoringError::InvalidTransition(transition.id));
+            };
+            let Some((right_clip, _)) = edits.get(&transition.right).copied() else {
+                return Err(AudioAuthoringError::InvalidTransition(transition.id));
+            };
+            let transition_end = transition
+                .sequence_range
+                .end()
+                .map_err(|_| AudioAuthoringError::InvalidTransition(transition.id))?;
+            let left_end = left_clip
+                .end_position()
+                .map_err(|_| AudioAuthoringError::InvalidTransition(transition.id))?;
+            let right_end = right_clip
+                .end_position()
+                .map_err(|_| AudioAuthoringError::InvalidTransition(transition.id))?;
             if transition.left == transition.right
-                || !contribution_ids.contains(&transition.left)
-                || !contribution_ids.contains(&transition.right)
                 || transition.sequence_range.is_empty()
+                || transition.sequence_range.start < left_clip.position
+                || transition.sequence_range.start < right_clip.position
+                || transition_end > left_end
+                || transition_end > right_end
             {
                 return Err(AudioAuthoringError::InvalidTransition(transition.id));
             }
         }
         Ok(())
+    }
+}
+
+fn validate_curve(curve: &ExactAutomationCurve) -> Result<(), AudioAuthoringError> {
+    curve
+        .validate()
+        .map_err(|error| AudioAuthoringError::InvalidAutomation { reason: error.to_string() })
+}
+
+fn validate_optional_curve(
+    curve: &Option<ExactAutomationCurve>,
+    expected_parameter: &str,
+) -> Result<(), AudioAuthoringError> {
+    if let Some(curve) = curve {
+        if curve.parameter_id.as_str() != expected_parameter {
+            return Err(AudioAuthoringError::WrongAutomationParameter {
+                expected: expected_parameter.to_owned(),
+            });
+        }
+        validate_curve(curve)?;
+    }
+    Ok(())
+}
+
+fn validate_finite(value: f64) -> Result<(), AudioAuthoringError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(AudioAuthoringError::NonFiniteGain)
     }
 }
 
@@ -545,7 +788,7 @@ fn validate_bus_cycles(
             return Err(AudioAuthoringError::RouteCycle);
         }
         for route in routes {
-            if route.source == AudioRouteSource::Bus(bus) {
+            if route.source.bus_id() == Some(bus) {
                 if let AudioRouteDestination::Bus(next) = route.destination {
                     visit(next, routes, visiting, visited)?;
                 }
@@ -564,7 +807,7 @@ fn validate_bus_cycles(
     Ok(())
 }
 
-/// Invalid author state. Such state must not enter an immutable execution snapshot.
+/// Invalid author state. Such state cannot enter an immutable execution snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AudioAuthoringError {
     /// Track mixer state does not exactly match the Sequence audio Tracks.
@@ -576,24 +819,42 @@ pub enum AudioAuthoringError {
     /// A persisted automation curve is invalid.
     #[error("invalid audio automation: {reason}")]
     InvalidAutomation { reason: String },
+    /// An automation curve used the wrong stable parameter identity.
+    #[error("audio automation must use parameter {expected}")]
+    WrongAutomationParameter { expected: String },
     /// Static gain values must be finite.
     #[error("audio gain must be finite")]
     NonFiniteGain,
-    /// Channel fader automation used a different parameter identity.
-    #[error("channel fader automation must use {FADER_DB_PARAMETER_ID}")]
-    WrongFaderParameter,
-    /// Contribution gain automation used a different parameter identity.
-    #[error("contribution gain automation must use {GAIN_DB_PARAMETER_ID}")]
-    WrongGainParameter,
     /// Rack contains one processor identity more than once.
     #[error("duplicate audio processor instance {0}")]
     DuplicateProcessorInstance(AudioProcessorInstanceId),
-    /// Contribution interval is empty.
-    #[error("audio contribution {0} has an empty interval")]
-    EmptyContributionRange(AudioContributionId),
-    /// Contribution identities must be unique.
-    #[error("duplicate audio contribution identity")]
-    DuplicateContribution,
+    /// Processing-scope identities must be unique.
+    #[error("duplicate audio processing-scope identity")]
+    DuplicateProcessingScope,
+    /// Audio Clip has no explicit audio component authoring.
+    #[error("audio Clip {0} has no audio component edits")]
+    MissingAudioComponents(ClipId),
+    /// Component-edit identities must be unique in one Sequence.
+    #[error("duplicate audio component-edit identity")]
+    DuplicateComponentEdit,
+    /// Component references an absent processing scope.
+    #[error("audio component edit {0} references an unknown processing scope")]
+    UnknownProcessingScope(AudioComponentEditId),
+    /// Component source is incompatible with its owning Clip.
+    #[error("audio component edit {0} has an invalid source for its owning Clip")]
+    InvalidComponentSource(AudioComponentEditId),
+    /// Component names a Role absent from this Sequence.
+    #[error("audio component edit {0} targets an unknown Role")]
+    UnknownComponentRole(AudioComponentEditId),
+    /// Scope-local origin cannot precede the processing scope origin.
+    #[error("audio component edit {0} has a negative processing scope offset")]
+    NegativeProcessingScopeIn(AudioComponentEditId),
+    /// Pan must be finite and lie in the supported range.
+    #[error("audio component edit {0} has an invalid pan value")]
+    InvalidPan(AudioComponentEditId),
+    /// Fade duration must be non-negative and fit the owning Clip.
+    #[error("audio component edit {0} has an invalid fade")]
+    InvalidFade(AudioComponentEditId),
     /// Role identities must be unique.
     #[error("duplicate audio Role identity")]
     DuplicateRole,
@@ -612,15 +873,9 @@ pub enum AudioAuthoringError {
     /// At least one explicit public output is required.
     #[error("audio Program has no public output")]
     MissingProgramOutput,
-    /// User-facing Bus and Output labels cannot be blank.
-    #[error("audio Bus or Program Output name cannot be empty")]
+    /// User-facing Role, Bus, and Output labels cannot be blank.
+    #[error("audio Role, Bus, or Program Output name cannot be empty")]
     EmptyName,
-    /// Contribution targets an absent audio Track.
-    #[error("audio contribution targets unknown Track {0}")]
-    UnknownContributionTrack(TrackId),
-    /// Contribution names a Role absent from this Sequence.
-    #[error("audio contribution {0} targets an unknown Role")]
-    UnknownContributionRole(AudioContributionId),
     /// Output projection names a Role absent from this Sequence.
     #[error("audio Program Output targets unknown Role {0}")]
     UnknownOutputRole(AudioRoleId),
@@ -649,19 +904,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_program_has_one_channel_and_route_per_track() {
+    fn default_program_has_one_channel_and_post_mute_route_per_track() {
         let tracks = [TrackId::new(), TrackId::new()];
         let program = AudioProgram::for_tracks(tracks);
-        program.validate(&tracks, &[]).expect("valid program");
+        let authored_tracks = tracks.map(|id| {
+            let mut track = Track::new_audio("Audio");
+            track.id = id;
+            track
+        });
+        program.validate(&authored_tracks, &[]).expect("valid program");
         assert_eq!(program.track_channels.len(), 2);
-        assert_eq!(program.routes.len(), 2);
-        assert_eq!(program.outputs.len(), 1);
+        assert!(program.routes.iter().all(|route| matches!(
+            route.source,
+            AudioRouteSource::Track { port: AudioChannelStripOutputPort::PostMute, .. }
+        )));
+    }
+
+    #[test]
+    fn nonexistent_or_unscoped_clip_audio_cannot_validate() {
+        let mut track = Track::new_audio("Audio");
+        let clip = Clip::new(
+            mondrian_core::AssetId::new(),
+            TimelineTime::ZERO,
+            TimelineTime::new(1, 1).expect("duration"),
+        )
+        .expect("clip");
+        let clip_id = clip.id;
+        track.add_clip(clip).expect("add clip");
+        let program = AudioProgram::for_tracks([track.id]);
+        assert_eq!(
+            program.validate(&[track], &[]),
+            Err(AudioAuthoringError::MissingAudioComponents(clip_id))
+        );
+    }
+
+    #[test]
+    fn component_track_and_range_are_derived_from_owning_clip() {
+        let mut track = Track::new_audio("Audio");
+        let scope = AudioProcessingScope::identity();
+        let mut clip = Clip::new(
+            mondrian_core::AssetId::new(),
+            TimelineTime::new(3, 1).expect("position"),
+            TimelineTime::new(2, 1).expect("duration"),
+        )
+        .expect("clip");
+        clip.audio_components.push(AudioComponentEdit::media(
+            AudioSourceComponentId::primary(),
+            scope.id,
+        ));
+        track.add_clip(clip).expect("add clip");
+        let mut program = AudioProgram::for_tracks([track.id]);
+        program.add_processing_scope(scope);
+        program.validate(&[track], &[]).expect("closed authoring");
     }
 
     #[test]
     fn instantaneous_bus_cycle_is_rejected() {
-        let track = TrackId::new();
-        let mut program = AudioProgram::for_tracks([track]);
+        let track = Track::new_audio("Audio");
+        let mut program = AudioProgram::for_tracks([track.id]);
         let first = MixBusId::new();
         let second = MixBusId::new();
         program.buses.extend([
@@ -679,44 +979,24 @@ mod tests {
         program.routes.extend([
             AudioRoute {
                 id: AudioRouteId::new(),
-                source: AudioRouteSource::Bus(first),
+                source: AudioRouteSource::Bus {
+                    bus_id: first,
+                    port: AudioChannelStripOutputPort::PostMute,
+                },
                 destination: AudioRouteDestination::Bus(second),
             },
             AudioRoute {
                 id: AudioRouteId::new(),
-                source: AudioRouteSource::Bus(second),
+                source: AudioRouteSource::Bus {
+                    bus_id: second,
+                    port: AudioChannelStripOutputPort::PostMute,
+                },
                 destination: AudioRouteDestination::Bus(first),
             },
         ]);
         assert_eq!(
             program.validate(&[track], &[]),
             Err(AudioAuthoringError::RouteCycle)
-        );
-    }
-
-    #[test]
-    fn role_hierarchy_must_be_closed_and_acyclic() {
-        let track = TrackId::new();
-        let program = AudioProgram::for_tracks([track]);
-        let first = AudioRoleId::new();
-        let second = AudioRoleId::new();
-        let roles = [
-            AudioRole {
-                id: first,
-                parent_id: Some(second),
-                name: "Dialog".to_owned(),
-                standard_semantic_key: Some("dialog".to_owned()),
-            },
-            AudioRole {
-                id: second,
-                parent_id: Some(first),
-                name: "Principal".to_owned(),
-                standard_semantic_key: None,
-            },
-        ];
-        assert_eq!(
-            program.validate(&[track], &roles),
-            Err(AudioAuthoringError::RoleCycle)
         );
     }
 }

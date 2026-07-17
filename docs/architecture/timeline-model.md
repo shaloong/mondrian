@@ -118,23 +118,30 @@ contradictory delivery metadata.
 
 - `track_type`: Video, Audio, Subtitle
 - `height`
-- `is_muted`, `is_locked`, `is_solo`, `is_visible`
+- `is_muted`, `is_locked`, `is_visible`
 - `blend_mode`
 - animatable `track.opacity`
 
-Video tracks use visibility and opacity. Audio tracks use mute/solo semantics. UI must not show speaker controls for video tracks or visibility controls for audio tracks unless a future explicit domain feature is added.
+Video tracks use visibility and opacity. Audio tracks persist mute; solo is a
+transient audition overlay outside the canonical author snapshot. UI must not
+show speaker controls for video tracks or visibility controls for audio tracks
+unless a future explicit domain feature is added.
 
 Audio authoring keeps the Timeline Track as the editorial container and keys
 its Track Mixer Channel state by the same `TrackId` inside the Sequence-owned
-Audio Program. Clip audio components are independently processable Audio
-Contributions; the visual `Clip.effects` vector is not the audio processor rack.
+Audio Program. An audio Clip owns placement-local `AudioComponentEdit` values;
+their Track and Sequence range are always derived from the owning Track/Clip.
+They bind to Sequence-owned `AudioProcessingScope` values for Clip-level
+processor continuity. The visual `Clip.effects` vector is not an audio rack.
 Track creation/removal updates the keyed mixer state and default route in the
 same Sequence mutation. Validation rejects a snapshot when the two sets differ.
 See [Audio Pipeline](audio-pipeline.md) for the author/compiler boundary.
 
 ## Clip
 
-`Clip` is the timeline instance, not the asset itself. It references `asset_id`, carries timeline/source ranges, transform, speed, effects, masks, linked clip, blend mode, and kind-specific data.
+`Clip` is the timeline instance, not the asset itself. It references `asset_id`,
+carries timeline/source ranges, transform, speed, effects, masks, linked clip,
+blend mode, kind-specific data, and placement-local audio component edits.
 
 Supported `ClipKind`:
 

@@ -69,7 +69,7 @@ A normalized exact rational offset interpreted within its owner's declared Autho
 _Avoid_: Frame number as universal time, floating-point seconds, fixed subframe ticks
 
 **Authoring Time Domain**:
-The coordinate origin and mapping owned by a Sequence, Audio Contribution, Transition, source, or other time-bearing author entity.
+The coordinate origin and mapping owned by a Sequence, Audio Component Edit, Audio Processing Scope, Transition, source, or other time-bearing author entity.
 _Avoid_: Renderer frame grid, audio block, implicit clip-local flag
 
 **Time Transform**:
@@ -84,9 +84,17 @@ _Avoid_: Persisted authoring time base, UI snap setting
 A presentation contract for formatting timeline positions with a start offset, nominal rate, and drop/non-drop-frame rules.
 _Avoid_: Timeline storage coordinate, arithmetic duration, Clock Master
 
-**Audio Contribution**:
-One independently processable PCM-bearing component placed by a Timeline Clip or nested output instance before it enters a Track Mixer Channel.
-_Avoid_: Entire audiovisual Clip treated as one audio stream, routing Bus
+**Audio Component Edit**:
+One persistent, placement-local selection and edit of a media audio component or nested Sequence Output, owned by exactly one Timeline Clip. It owns enable/Role, edit-local gain/pan/fades/automation, and a restricted binding into an Audio Processing Scope; Track and Sequence range are always derived from the owning Clip.
+_Avoid_: Duplicated Track/range placement, entire audiovisual Clip treated as one audio stream, routing Bus
+
+**Audio Processing Scope**:
+One Sequence-owned shareable audio processing definition containing input trim/automation and an ordered Processor Rack. Multiple Audio Component Edits may bind to it with only a Scope ID and exact `scope_in`; it never owns placement, speed, source selection, or output routing.
+_Avoid_: Second Clip, arbitrary time transform, implicit copy-on-write
+
+**Compiled Audio Contribution**:
+One non-persistent PCM-bearing execution branch derived from an owning Track/Clip plus one Audio Component Edit and its Audio Processing Scope.
+_Avoid_: Persisted placement authority, user-routable graph node
 
 **Audio Program**:
 The Sequence-owned persistent authoring model for mixer channels, mix buses, typed routes, processors, automation, and exposed outputs.
@@ -105,15 +113,15 @@ A persistent built-in or external audio effect instance identified by a stable d
 _Avoid_: Video EffectNode, plugin file path, registry index, opaque JSON effect
 
 **Audio Processor Rack**:
-An ordered collection of Audio Processor Instances at one explicit insertion point of an Audio Contribution, Track Mixer Channel, Mix Bus, or Program Output.
+An ordered collection of Audio Processor Instances at one explicit insertion point of an Audio Processing Scope, Track Mixer Channel, Mix Bus, or Program Output.
 _Avoid_: Unordered effect set, format-specific VST chain, hidden master effect
 
 **Audio Transition**:
-An explicit time-bounded relationship between two Audio Contributions that applies a declared pair of sample-domain gain curves after their clip-local processing.
+An explicit Sequence-time-bounded relationship between two Audio Component Edits that applies a declared pair of sample-domain gain curves after their component/scope-local processing.
 _Avoid_: Overlap inferred as crossfade, unary fade plugin, Track-wide dissolve
 
 **Audio Role**:
-A Sequence-owned single-valued semantic classification for a separable audio contribution, optionally parented to another local Audio Role; “role” and “subrole” describe hierarchy position rather than different entity types.
+A Sequence-owned single-valued semantic classification for an Audio Component Edit, optionally parented to another local Audio Role; “role” and “subrole” describe hierarchy position rather than different entity types.
 _Avoid_: Project-global role object, routing node, display name as identity
 
 **Standard Semantic Key**:
@@ -200,16 +208,16 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - Each Sequence exclusively owns one **Audio Program**; ordinary PCM routes cannot cross Sequence ownership.
 - An **Audio Program** presents one typed routing graph of **Audio Routing Nodes** without forcing Track, Bus, and Output to share an untyped identity or lifecycle; a Track Mixer Channel uses its owning audio Track identity.
 - An **Audio Route** connects stable typed endpoints and can never target a **Generated Audio Stage**.
-- Every independently processable **Audio Contribution** and every **Audio Routing Node** may own explicitly placed **Audio Processor Racks** using the same **Audio Processor Instance** author model for built-ins, VST3, CLAP, and future host adapters.
+- Every independently processable **Audio Processing Scope** and every **Audio Routing Node** may own explicitly placed **Audio Processor Racks** using the same **Audio Processor Instance** author model for built-ins, VST3, CLAP, and future host adapters.
 - An **Audio Processor Instance** addresses automation by stable instance and parameter identity; display names, property-path suffixes, plugin file paths, and parameter indexes are never authoritative.
-- Clip-local automation uses contribution-local rational time, Track/Bus/Output automation uses Sequence-local rational time, and **Audio Transition** automation uses transition-local rational time; compilation maps each domain once to exact sample offsets.
-- An **Audio Transition** names exactly two contributions and does not affect other overlapping material; overlap without a Transition remains ordinary summing.
+- Component automation uses Audio Component Edit-local rational time, Scope automation uses Audio Processing Scope-local rational time, Track/Bus/Output automation uses Sequence-local rational time, and an **Audio Transition** interval is Sequence-local; compilation maps each domain once to exact sample offsets.
+- An **Audio Transition** names exactly two Audio Component Edits and does not affect other overlapping material; overlap without a Transition remains ordinary summing.
 - Every parallel input to a sum or Transition is delay-compensated from declared processor and nested latency; internal floating-point mixing neither normalizes, soft-clips, nor limits without an explicit authored processor.
 - Each **Audio Role** belongs to exactly one **Sequence Semantic Catalog**; its optional parent is a **Strong Entity Reference** in the same catalog, and the resulting hierarchy must be acyclic.
-- Each separable audio contribution has zero or one authoritative **Audio Role**; ancestors are implied by hierarchy, while independent tags and routing duplication cannot masquerade as additional Role assignments.
-- A Track may materialize a default **Audio Role** when authoring an otherwise unclassified contribution, but moving that contribution does not silently reclassify it; a mixed Bus has no authoritative single Role.
+- Each separable Audio Component Edit has zero or one authoritative **Audio Role**; ancestors are implied by hierarchy, while independent tags and routing duplication cannot masquerade as additional Role assignments.
+- A Track may materialize a default **Audio Role** when authoring an otherwise unclassified Audio Component Edit, but moving that edit does not silently reclassify it; a mixed Bus has no authoritative single Role.
 - A **Standard Semantic Key** may suggest matches between Audio Roles in different Sequences but never establishes a reference or changes existing authoring semantics.
-- Timeline contributions, semantic projections, and output-family selectors use local **Audio Role** identities; a Project may derive indexes and coordinate atomic edits across Sequence snapshots but owns no live role graph referenced by them.
+- Audio Component Edits, semantic projections, and output-family selectors use local **Audio Role** identities; a Project may derive indexes and coordinate atomic edits across Sequence snapshots but owns no live role graph referenced by them.
 - Every **Strong Entity Reference** resolves before an authoring transaction commits; only a **Recoverable Dependency Reference** can produce a runtime resolution issue.
 - Every **Generated Audio Stage** retains a deterministic origin reference for diagnostics, caching, and per-instance DSP state allocation.
 - Preview, playback, audition, analysis, and export compile the same author semantics into generated operations; they may schedule differently but cannot reinterpret processor order, automation, transitions, latency, or nesting.

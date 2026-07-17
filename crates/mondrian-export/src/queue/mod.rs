@@ -9,12 +9,17 @@ use crate::validator::{
     ExportValidationExpectations,
 };
 use chrono::{DateTime, Utc};
+use mondrian_audio::{
+    compile_audio_program, AudioCompileRequest, AudioDecodedSource, AudioMediaResolver,
+    AudioProcessingMode, AudioProgramRuntime, AudioRenderContract, AudioRenderRequest,
+};
 use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace, FramePosition, JobId, Rational};
-use mondrian_core::{FrameRounding, TimelineTime, WorkingColorSpace, WorkingRgbaF32Frame};
-use mondrian_media::audio::{
-    AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData,
+use mondrian_core::{
+    AudioSamplePosition, AudioSampleRate, AudioSampleRounding, AudioSourceComponentId,
+    FrameRounding, TimelineTime, WorkingColorSpace, WorkingRgbaF32Frame,
 };
+use mondrian_media::audio::{AudioBuffer, AudioSourceCache};
 use mondrian_media::{
     decode_preview_frame_cancellable, DecodedVideoRange, DecodedVideoRangeContract,
     PreviewDecodeAccessMode, PreviewDecodeOutcome, PreviewDecodeRequest,
@@ -1771,79 +1776,22 @@ fn timeline_has_audio_content(
         time_base,
     ))
     .map_err(|error| error.to_string())?;
-    sequence_has_audio_content(timeline, &timeline.sequence, start, end, 0)
-}
-
-fn sequence_has_audio_content(
-    timeline: &TimelineExportInput,
-    seq: &mondrian_timeline::sequence::Sequence,
-    start: TimelineTime,
-    end_exclusive: TimelineTime,
-    depth: usize,
-) -> Result<bool, String> {
-    if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
-        return Ok(false);
-    }
-
-    let has_solo = seq.audio_tracks.iter().any(|t| t.is_solo && !t.is_muted);
-    for track in &seq.audio_tracks {
-        if track.is_muted || (has_solo && !track.is_solo) {
-            continue;
-        }
-        for clip in &track.clips {
-            if clip.is_disabled {
-                continue;
-            }
-            if !timeline.asset_paths.contains_key(&clip.asset_id) {
-                continue;
-            }
-
-            let clip_start = clip.position;
-            let clip_end = clip.end_position().map_err(|error| error.to_string())?;
-            if clip_end > start && clip_start < end_exclusive {
-                return Ok(true);
-            }
-        }
-    }
-
-    for track in seq.video_tracks.iter().chain(seq.audio_tracks.iter()) {
-        for clip in &track.clips {
-            if clip.is_disabled || !clip.is_nested_sequence() {
-                continue;
-            }
-            let clip_start = clip.position;
-            let clip_end = clip.end_position().map_err(|error| error.to_string())?;
-            if clip_end <= start || clip_start >= end_exclusive {
-                continue;
-            }
-            let Some(nested_sequence_id) = clip.nested_sequence_id else {
-                continue;
-            };
-            let Some(nested_sequence) =
-                timeline.sequences.iter().find(|sequence| sequence.id == nested_sequence_id)
-            else {
-                continue;
-            };
-            let nested_start = start
-                .checked_sub(clip_start)
-                .map_err(|error| error.to_string())?
-                .max(TimelineTime::ZERO);
-            let nested_end = end_exclusive
-                .checked_sub(clip_start)
-                .map_err(|error| error.to_string())?
-                .max(nested_start);
-            if sequence_has_audio_content(
-                timeline,
-                nested_sequence,
-                nested_start,
-                nested_end,
-                depth + 1,
-            )? {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
+    let output_id = timeline
+        .sequence
+        .audio_program
+        .outputs
+        .first()
+        .map(|output| output.id)
+        .ok_or_else(|| "Sequence has no audio Program Output".to_owned())?;
+    let program =
+        compile_audio_program(&timeline.sequence, AudioCompileRequest::program(output_id))
+            .map_err(|error| error.to_string())?;
+    Ok(program.contributions().iter().any(|contribution| {
+        contribution
+            .sequence_range
+            .end()
+            .is_ok_and(|clip_end| clip_end > start && contribution.sequence_range.start < end)
+    }))
 }
 
 fn render_timeline_audio_to_pcm_f32(
@@ -1865,21 +1813,42 @@ fn render_timeline_audio_to_pcm_f32(
             ));
         }
     };
-    let mut writer = BufWriter::new(file);
     let cache = AudioSourceCache::new(sample_rate, channels);
-    let mixer = AudioMixer::new(sample_rate, channels);
+    let resolver = ExportAudioMediaResolver { timeline, cache: &cache };
+    let contract = AudioRenderContract {
+        sample_rate,
+        channels: usize::from(channels),
+        max_block_frames: 16_384,
+        processing_mode: AudioProcessingMode::Offline,
+    };
+    let mut runtime = match AudioProgramRuntime::build(
+        &timeline.sequence,
+        &timeline.sequences,
+        &resolver,
+        contract,
+        None,
+    ) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return JobExecutionResult::Failed(format!(
+                "编译导出音频 Program 失败（未使用降级混音）: {error}"
+            ));
+        }
+    };
 
-    let total_samples = timeline_total_audio_samples(range, sample_rate);
+    let (start_sample, total_samples) = match timeline_audio_sample_range(range, sample_rate) {
+        Ok(sample_range) => sample_range,
+        Err(error) => return JobExecutionResult::Failed(error),
+    };
     if total_samples == 0 {
         return JobExecutionResult::Completed;
     }
 
     let chunk_frames_target = (sample_rate as usize / 5).clamp(1024, 16_384);
-    let timeline_start_secs =
-        range.start_frame.max(0) as f64 * range.fps_den as f64 / range.fps_num.max(1) as f64;
-
+    let mut writer = BufWriter::new(file);
     let mut rendered_samples = 0usize;
     let mut sample_bytes = Vec::<u8>::with_capacity(chunk_frames_target * channels as usize * 4);
+    let mut pcm = vec![0.0_f32; chunk_frames_target * usize::from(channels)];
 
     while rendered_samples < total_samples {
         if cancel.load(Ordering::Relaxed) {
@@ -1888,23 +1857,29 @@ fn render_timeline_audio_to_pcm_f32(
 
         let remaining = total_samples - rendered_samples;
         let chunk_frames = remaining.min(chunk_frames_target).max(1);
-        let chunk_start_secs = timeline_start_secs + rendered_samples as f64 / sample_rate as f64;
-        let chunk = match render_timeline_audio_chunk(
-            timeline,
-            &cache,
-            &mixer,
-            chunk_start_secs,
-            chunk_frames,
-            sample_rate,
-            channels,
-        ) {
-            Ok(buffer) => buffer,
-            Err(err) => return JobExecutionResult::Failed(err),
+        let rendered_samples_i64 = match i64::try_from(rendered_samples) {
+            Ok(value) => value,
+            Err(_) => {
+                return JobExecutionResult::Failed("导出音频样本位置超出支持范围".to_owned());
+            }
         };
+        let chunk_start = match start_sample.checked_add(rendered_samples_i64) {
+            Some(value) => value,
+            None => {
+                return JobExecutionResult::Failed("导出音频样本位置超出支持范围".to_owned());
+            }
+        };
+        let chunk_samples = chunk_frames * usize::from(channels);
+        if let Err(error) = runtime.render_into(
+            AudioRenderRequest { start_sample: chunk_start, frames: chunk_frames },
+            &mut pcm[..chunk_samples],
+        ) {
+            return JobExecutionResult::Failed(format!("执行导出音频 Program 失败: {error}"));
+        }
 
         sample_bytes.clear();
-        sample_bytes.reserve(chunk.samples.len() * 4);
-        for sample in &chunk.samples {
+        sample_bytes.reserve(chunk_samples * 4);
+        for sample in &pcm[..chunk_samples] {
             sample_bytes.extend_from_slice(&sample.to_le_bytes());
         }
         if let Err(err) = writer.write_all(&sample_bytes) {
@@ -1923,220 +1898,84 @@ fn render_timeline_audio_to_pcm_f32(
     JobExecutionResult::Completed
 }
 
-fn timeline_total_audio_samples(range: TimelineRenderRange, sample_rate: u32) -> usize {
+fn timeline_audio_sample_range(
+    range: TimelineRenderRange,
+    sample_rate: u32,
+) -> Result<(i64, usize), String> {
     if range.total_frames == 0 || sample_rate == 0 {
-        return 0;
+        return Ok((0, 0));
     }
-    let seconds = range.total_frames as f64 * range.fps_den as f64 / range.fps_num.max(1) as f64;
-    (seconds * sample_rate as f64).round().max(0.0) as usize
+    let time_base = Rational::new(range.fps_den, range.fps_num);
+    let rate = AudioSampleRate::new(sample_rate).map_err(|error| error.to_string())?;
+    let start_time =
+        TimelineTime::from_frame_position(FramePosition::new(range.start_frame, time_base))
+            .map_err(|error| error.to_string())?;
+    let frame_count =
+        i64::try_from(range.total_frames).map_err(|_| "导出音频帧范围超出支持范围".to_owned())?;
+    let end_time = TimelineTime::from_frame_position(FramePosition::new(
+        range.start_frame.saturating_add(frame_count),
+        time_base,
+    ))
+    .map_err(|error| error.to_string())?;
+    let start =
+        AudioSamplePosition::from_timeline_time(start_time, rate, AudioSampleRounding::Nearest)
+            .map_err(|error| error.to_string())?;
+    let end = AudioSamplePosition::from_timeline_time(end_time, rate, AudioSampleRounding::Nearest)
+        .map_err(|error| error.to_string())?;
+    let samples = end.samples_since(start).map_err(|error| error.to_string())?;
+    Ok((
+        start.sample(),
+        usize::try_from(samples.max(0)).map_err(|_| "导出音频样本范围超出支持范围".to_owned())?,
+    ))
 }
 
-fn render_timeline_audio_chunk(
-    timeline: &TimelineExportInput,
-    cache: &AudioSourceCache,
-    mixer: &AudioMixer,
-    window_start_secs: f64,
-    chunk_frames: usize,
-    sample_rate: u32,
-    channels: u8,
-) -> Result<AudioBuffer, String> {
-    render_sequence_audio_chunk(
-        timeline,
-        &timeline.sequence,
-        cache,
-        mixer,
-        window_start_secs,
-        chunk_frames,
-        sample_rate,
-        channels,
-        0,
-    )
+struct ExportAudioMediaResolver<'a> {
+    timeline: &'a TimelineExportInput,
+    cache: &'a AudioSourceCache,
 }
 
-fn render_sequence_audio_chunk(
-    timeline: &TimelineExportInput,
-    seq: &mondrian_timeline::sequence::Sequence,
-    cache: &AudioSourceCache,
-    mixer: &AudioMixer,
-    window_start_secs: f64,
-    chunk_frames: usize,
-    sample_rate: u32,
-    channels: u8,
-    depth: usize,
-) -> Result<AudioBuffer, String> {
-    if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
-        return Ok(AudioBuffer::silent(sample_rate, channels, chunk_frames));
-    }
-
-    let chunk_duration_secs = chunk_frames as f64 / sample_rate.max(1) as f64;
-    let window_end_secs = window_start_secs + chunk_duration_secs;
-    let has_solo = seq.audio_tracks.iter().any(|t| t.is_solo && !t.is_muted);
-    let mut tracks = Vec::<AudioTrackData>::new();
-
-    for track in &seq.audio_tracks {
-        if track.is_muted || (has_solo && !track.is_solo) {
-            continue;
+impl AudioMediaResolver for ExportAudioMediaResolver<'_> {
+    fn resolve(
+        &self,
+        asset_id: AssetId,
+        component_id: AudioSourceComponentId,
+        _contract: AudioRenderContract,
+    ) -> Result<Arc<dyn AudioDecodedSource>, String> {
+        if component_id != AudioSourceComponentId::primary() {
+            return Err(format!(
+                "audio component {component_id} is not bound to an export media stream"
+            ));
         }
-
-        for clip in &track.clips {
-            if clip.is_disabled {
-                continue;
-            }
-
-            let Some(path) = timeline.asset_paths.get(&clip.asset_id) else {
-                continue;
-            };
-            let clip_start_secs = clip.position.to_f64();
-            let clip_end_secs = clip.end_position().map_err(|error| error.to_string())?.to_f64();
-            let overlap_start = window_start_secs.max(clip_start_secs);
-            let overlap_end = window_end_secs.min(clip_end_secs);
-            if overlap_end <= overlap_start {
-                continue;
-            }
-
-            let decoded = cache.get_or_decode(path.as_path()).map_err(|err| {
-                format!(
-                    "解码音频失败 asset={} path={} err={}",
-                    clip.asset_id,
-                    path.display(),
-                    err
-                )
-            })?;
-
-            let overlap_time = TimelineTime::from_f64_quantized(overlap_start, sample_rate)
-                .map_err(|error| error.to_string())?;
-            let source_start_secs = clip
-                .timeline_to_source_time(overlap_time)
-                .map_err(|error| error.to_string())?
-                .to_f64()
-                .max(0.0);
-            let source_start_frame = (source_start_secs * sample_rate as f64).floor() as usize;
-            let segment_frames =
-                ((overlap_end - overlap_start) * sample_rate as f64).ceil().max(1.0) as usize;
-            let segment = decoded.slice_frames(source_start_frame, segment_frames);
-            if segment.samples.is_empty() {
-                continue;
-            }
-
-            let place_offset = ((overlap_start - window_start_secs) * sample_rate as f64)
-                .round()
-                .max(0.0) as usize;
-            let mut placed = AudioBuffer::silent(sample_rate, channels, chunk_frames);
-            let max_place_frames = chunk_frames.saturating_sub(place_offset);
-            let copy_frames = segment.frame_count().min(max_place_frames);
-
-            let dst_channels = channels as usize;
-            let src_channels = segment.channels as usize;
-            for frame in 0..copy_frames {
-                let dst_base = (place_offset + frame) * dst_channels;
-                let src_base = frame * src_channels;
-                for ch in 0..dst_channels {
-                    let src_ch = ch.min(src_channels.saturating_sub(1));
-                    let sample = segment.samples.get(src_base + src_ch).copied().unwrap_or(0.0);
-                    placed.samples[dst_base + ch] = sample;
-                }
-            }
-
-            tracks.push(AudioTrackData {
-                buffer: placed,
-                config: AudioTrackConfig {
-                    volume: 1.0,
-                    pan: 0.0,
-                    is_muted: false,
-                    is_solo: false,
-                },
-            });
-        }
+        let path = self
+            .timeline
+            .asset_paths
+            .get(&asset_id)
+            .ok_or_else(|| format!("Asset {asset_id} has no export source path"))?;
+        let buffer = self.cache.get_or_decode(path.as_path()).map_err(|error| {
+            format!(
+                "failed to decode Asset {asset_id} at {}: {error}",
+                path.display()
+            )
+        })?;
+        Ok(Arc::new(ExportDecodedAudioBuffer(buffer)))
     }
+}
 
-    for track in seq.video_tracks.iter().chain(seq.audio_tracks.iter()) {
-        for clip in &track.clips {
-            if clip.is_disabled || !clip.is_nested_sequence() {
-                continue;
-            }
+struct ExportDecodedAudioBuffer(Arc<AudioBuffer>);
 
-            let Some(nested_sequence_id) = clip.nested_sequence_id else {
-                continue;
-            };
-            let Some(nested_sequence) =
-                timeline.sequences.iter().find(|sequence| sequence.id == nested_sequence_id)
-            else {
-                continue;
-            };
-
-            let clip_start_secs = clip.position.to_f64();
-            let clip_end_secs = clip.end_position().map_err(|error| error.to_string())?.to_f64();
-            let overlap_start = window_start_secs.max(clip_start_secs);
-            let overlap_end = window_end_secs.min(clip_end_secs);
-            if overlap_end <= overlap_start {
-                continue;
-            }
-
-            let nested_start_secs = clip
-                .timeline_to_source_time(
-                    TimelineTime::from_f64_quantized(overlap_start, sample_rate)
-                        .map_err(|error| error.to_string())?,
-                )
-                .map_err(|error| error.to_string())?
-                .to_f64()
-                .max(0.0);
-            let nested_frames =
-                ((overlap_end - overlap_start) * sample_rate as f64).ceil().max(1.0) as usize;
-            let nested_chunk = render_sequence_audio_chunk(
-                timeline,
-                nested_sequence,
-                cache,
-                mixer,
-                nested_start_secs,
-                nested_frames,
-                sample_rate,
-                channels,
-                depth + 1,
-            )?;
-            if nested_chunk.samples.is_empty() {
-                continue;
-            }
-
-            let place_offset = ((overlap_start - window_start_secs) * sample_rate as f64)
-                .round()
-                .max(0.0) as usize;
-            let mut placed = AudioBuffer::silent(sample_rate, channels, chunk_frames);
-            let max_place_frames = chunk_frames.saturating_sub(place_offset);
-            let copy_frames = nested_chunk.frame_count().min(max_place_frames);
-            let channel_count = channels as usize;
-            for frame in 0..copy_frames {
-                let dst_base = (place_offset + frame) * channel_count;
-                let src_base = frame * channel_count;
-                for ch in 0..channel_count {
-                    placed.samples[dst_base + ch] =
-                        nested_chunk.samples.get(src_base + ch).copied().unwrap_or(0.0);
-                }
-            }
-
-            tracks.push(AudioTrackData {
-                buffer: placed,
-                config: AudioTrackConfig {
-                    volume: 1.0,
-                    pan: 0.0,
-                    is_muted: false,
-                    is_solo: false,
-                },
-            });
-        }
+impl AudioDecodedSource for ExportDecodedAudioBuffer {
+    fn sample(&self, frame: i64, channel: usize) -> f32 {
+        let Ok(frame) = usize::try_from(frame) else {
+            return 0.0;
+        };
+        let channels = usize::from(self.0.channels);
+        let source_channel = channel.min(channels.saturating_sub(1));
+        self.0
+            .samples
+            .get(frame.saturating_mul(channels).saturating_add(source_channel))
+            .copied()
+            .unwrap_or(0.0)
     }
-
-    if tracks.is_empty() {
-        return Ok(AudioBuffer::silent(sample_rate, channels, chunk_frames));
-    }
-
-    let mut mixed = mixer.mix(&tracks);
-    let mixed_frames = mixed.frame_count();
-    if mixed_frames < chunk_frames {
-        mixed.samples.resize(chunk_frames * channels as usize, 0.0);
-    } else if mixed_frames > chunk_frames {
-        mixed.samples.truncate(chunk_frames.saturating_mul(channels as usize));
-    }
-    Ok(mixed)
 }
 
 fn write_timeline_frames(
@@ -4620,7 +4459,9 @@ mod tests {
         let tb = seq.time_base();
         let asset_id = AssetId::new();
         let clip = Clip::new(asset_id, tt(25, tb), tt(20, tb)).expect("valid clip");
-        seq.audio_tracks[0].add_clip(clip).expect("add audio clip");
+        let track_id = seq.audio_tracks[0].id;
+        seq.add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
+            .expect("add audio clip");
         seq.in_point = Some(tt(30, tb));
         seq.out_point = Some(tt(40, tb));
 
@@ -4642,14 +4483,14 @@ mod tests {
     }
 
     #[test]
-    fn timeline_total_audio_samples_matches_frame_duration() {
+    fn timeline_audio_sample_range_matches_frame_duration() {
         let range = TimelineRenderRange {
             start_frame: 0,
             total_frames: 50,
             fps_num: 25,
             fps_den: 1,
         };
-        assert_eq!(timeline_total_audio_samples(range, 48_000), 96_000);
+        assert_eq!(timeline_audio_sample_range(range, 48_000), Ok((0, 96_000)));
     }
 
     #[test]

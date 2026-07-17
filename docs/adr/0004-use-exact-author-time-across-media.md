@@ -7,18 +7,20 @@ status: accepted
 Mondrian persists timeline positions, durations, edit boundaries, automation
 keys, and temporal curve handles as one normalized exact rational Timeline Time
 interpreted in an explicit owner domain such as Sequence-local,
-contribution-local, transition-local, or source-local time. The canonical value
+Component-Edit-local, Processing-Scope-local, Transition-local, or source-local
+time. The canonical value
 is a checked reduced numerator with a positive denominator; comparison and
 arithmetic use checked wide intermediates rather than derived field ordering,
 floating-point seconds, a universal fixed tick rate, or assumptions that two
 operands share a time base.
 
 The shared value representation does not erase domains. Sequence-local,
-contribution-local, transition-local, source-local, and nested-instance times
-cannot be compared or combined directly; placement, trimming, speed maps, and
-nesting provide explicit checked Time Transforms between them. A Time Transform
-may be affine or piecewise, but its mapping and inverse/ambiguity contract are
-part of author semantics rather than a caller convention.
+Component-Edit-local, Processing-Scope-local, Transition-local, source-local,
+and nested-instance times cannot be compared or combined directly; placement,
+trimming, speed maps, and nesting provide explicit checked Time Transforms
+between them. A Time Transform may be affine or piecewise, but its mapping and
+inverse/ambiguity contract are part of author semantics rather than a caller
+convention.
 
 Video frame positions, audio sample positions, shutter samples, and plugin
 parameter-event offsets are derived evaluation coordinates. Conversion happens

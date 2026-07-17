@@ -1,9 +1,15 @@
 use super::*;
+use mondrian_audio::{
+    AudioDecodedSource, AudioMediaResolver, AudioProcessingMode, AudioProgramRuntime,
+    AudioRenderContract, AudioRenderRequest,
+};
+use mondrian_core::{AudioSourceComponentId, ProgramOutputId};
+use parking_lot::Mutex;
+
+const MAX_AUDIO_RENDER_BLOCK_FRAMES: usize = 16_384;
 
 pub(super) struct TimelineAudioPcmRenderer {
-    sequence: Sequence,
-    library: Arc<AssetLibrary>,
-    source_cache: Arc<AudioSourceCache>,
+    runtime: Mutex<AudioProgramRuntime>,
     sample_rate: u32,
     channels: u8,
 }
@@ -11,182 +17,134 @@ pub(super) struct TimelineAudioPcmRenderer {
 impl TimelineAudioPcmRenderer {
     pub(super) fn new(
         sequence: Sequence,
+        sequences: Vec<Sequence>,
         library: Arc<AssetLibrary>,
         source_cache: Arc<AudioSourceCache>,
         sample_rate: u32,
         channels: u8,
-    ) -> Self {
-        Self {
-            sequence,
-            library,
-            source_cache,
+    ) -> mondrian_core::Result<Self> {
+        let contract = AudioRenderContract {
+            sample_rate,
+            channels: usize::from(channels),
+            max_block_frames: MAX_AUDIO_RENDER_BLOCK_FRAMES,
+            processing_mode: AudioProcessingMode::Realtime,
+        };
+        let resolver = PlaybackMediaResolver { library, source_cache };
+        let runtime = AudioProgramRuntime::build(
+            &sequence,
+            &sequences,
+            &resolver,
+            contract,
+            None::<ProgramOutputId>,
+        )
+        .map_err(|error| audio_render_error("timeline_audio_prepare", error.to_string()))?;
+        Ok(Self {
+            runtime: Mutex::new(runtime),
             sample_rate,
             channels,
-        }
+        })
     }
 }
 
 impl AudioPcmRenderer for TimelineAudioPcmRenderer {
     fn render(&self, request: AudioPcmRenderRequest) -> mondrian_core::Result<AudioBuffer> {
         if request.sample_rate != self.sample_rate || request.channels != self.channels {
-            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                step_id: "timeline_audio_render_contract".to_string(),
-                reason: format!(
+            return Err(audio_render_error(
+                "timeline_audio_render_contract",
+                format!(
                     "requested {} Hz/{} ch but Adapter is configured for {} Hz/{} ch",
                     request.sample_rate, request.channels, self.sample_rate, self.channels
                 ),
-            });
+            ));
         }
-        render_audio_chunk_with_cache(
-            &self.sequence,
-            self.library.as_ref(),
-            self.source_cache.as_ref(),
-            self.sample_rate,
-            self.channels,
-            request.start_sample,
-            request.frame_count,
-        )
-    }
-}
-
-pub(super) fn render_audio_chunk_with_cache(
-    seq: &Sequence,
-    library: &AssetLibrary,
-    audio_source_cache: &AudioSourceCache,
-    sample_rate: u32,
-    channels: u8,
-    window_start_sample: i64,
-    chunk_frames: usize,
-) -> mondrian_core::Result<AudioBuffer> {
-    let chunk_frames = chunk_frames.max(1);
-    let sample_rate = AudioSampleRate::new(sample_rate).map_err(|error| {
-        mondrian_core::MondrianError::WorkflowStepFailed {
-            step_id: "timeline_audio_sample_rate".to_string(),
-            reason: error.to_string(),
+        if request.frame_count > MAX_AUDIO_RENDER_BLOCK_FRAMES {
+            return Err(audio_render_error(
+                "timeline_audio_render_contract",
+                format!(
+                    "requested {} frames but the prepared maximum is {}",
+                    request.frame_count, MAX_AUDIO_RENDER_BLOCK_FRAMES
+                ),
+            ));
         }
-    })?;
-    let chunk_frames_i64 = i64::try_from(chunk_frames).map_err(|_| audio_sample_range_error())?;
-    let window_end_sample = window_start_sample
-        .checked_add(chunk_frames_i64)
-        .ok_or_else(audio_sample_range_error)?;
-
-    let has_solo = seq.audio_tracks.iter().any(|t| t.is_solo && !t.is_muted);
-    let mut tracks = Vec::new();
-
-    for track in &seq.audio_tracks {
-        if track.is_muted || (has_solo && !track.is_solo) {
-            continue;
-        }
-
-        for clip in &track.clips {
-            if clip.is_disabled {
-                continue;
-            }
-
-            let clip_start_sample = AudioSamplePosition::from_timeline_time(
-                clip.position,
-                sample_rate,
-                AudioSampleRounding::Nearest,
-            )
-            .map_err(audio_time_error)?
-            .sample();
-            let clip_end_sample = AudioSamplePosition::from_timeline_time(
-                clip.end_position()?,
-                sample_rate,
-                AudioSampleRounding::Nearest,
-            )
-            .map_err(audio_time_error)?
-            .sample();
-            let overlap_start = window_start_sample.max(clip_start_sample);
-            let overlap_end = window_end_sample.min(clip_end_sample);
-            if overlap_end <= overlap_start {
-                continue;
-            }
-
-            let Some(asset) = library.get_asset(clip.asset_id)? else {
-                continue;
-            };
-
-            let source = match audio_source_cache.get_or_decode(asset.path.as_path()) {
-                Ok(decoded) => decoded,
-                Err(err) => {
-                    tracing::debug!("音频解码失败，已跳过素材 {}: {}", asset.id, err);
-                    continue;
-                }
-            };
-
-            let overlap_time = TimelineTime::new(overlap_start, i64::from(sample_rate.hz()))?;
-            let source_time = clip.timeline_to_source_time(overlap_time)?;
-            let source_start_frame = AudioSamplePosition::from_timeline_time(
-                source_time,
-                sample_rate,
-                AudioSampleRounding::Floor,
-            )
-            .map_err(audio_time_error)?
-            .sample();
-            let source_start_frame = usize::try_from(source_start_frame.max(0))
-                .map_err(|_| audio_sample_range_error())?;
-            let segment_frames = usize::try_from(overlap_end - overlap_start)
-                .map_err(|_| audio_sample_range_error())?;
-            let segment = source.slice_frames(source_start_frame, segment_frames.max(1));
-            if segment.samples.is_empty() {
-                continue;
-            }
-
-            let place_offset = usize::try_from(overlap_start - window_start_sample)
-                .map_err(|_| audio_sample_range_error())?;
-            let mut placed = AudioBuffer::silent(sample_rate.hz(), channels, chunk_frames);
-            let max_place_frames = chunk_frames.saturating_sub(place_offset);
-            let copy_frames = segment.frame_count().min(max_place_frames);
-
-            let dst_channels = channels as usize;
-            let src_channels = segment.channels as usize;
-            for frame in 0..copy_frames {
-                let dst_base = (place_offset + frame) * dst_channels;
-                let src_base = frame * src_channels;
-                for ch in 0..dst_channels {
-                    let v = segment
-                        .samples
-                        .get(src_base + ch.min(src_channels.saturating_sub(1)))
-                        .copied()
-                        .unwrap_or(0.0);
-                    placed.samples[dst_base + ch] = v;
-                }
-            }
-
-            tracks.push(AudioTrackData {
-                buffer: placed,
-                config: AudioTrackConfig {
-                    volume: 1.0,
-                    pan: 0.0,
-                    is_muted: false,
-                    is_solo: false,
+        let samples =
+            request.frame_count.checked_mul(usize::from(self.channels)).ok_or_else(|| {
+                audio_render_error("timeline_audio_sample_range", "audio window is too large")
+            })?;
+        let mut output = vec![0.0; samples];
+        self.runtime
+            .lock()
+            .render_into(
+                AudioRenderRequest {
+                    start_sample: request.start_sample,
+                    frames: request.frame_count,
                 },
-            });
+                &mut output,
+            )
+            .map_err(|error| audio_render_error("timeline_audio_execute", error.to_string()))?;
+        Ok(AudioBuffer {
+            samples: output,
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+        })
+    }
+}
+
+struct PlaybackMediaResolver {
+    library: Arc<AssetLibrary>,
+    source_cache: Arc<AudioSourceCache>,
+}
+
+impl AudioMediaResolver for PlaybackMediaResolver {
+    fn resolve(
+        &self,
+        asset_id: AssetId,
+        component_id: AudioSourceComponentId,
+        _contract: AudioRenderContract,
+    ) -> Result<Arc<dyn AudioDecodedSource>, String> {
+        if component_id != AudioSourceComponentId::primary() {
+            return Err(format!(
+                "audio component {component_id} is not bound to a decoded media stream"
+            ));
         }
-    }
-
-    if tracks.is_empty() {
-        return Ok(AudioBuffer::silent(
-            sample_rate.hz(),
-            channels,
-            chunk_frames,
-        ));
-    }
-    let mixer = AudioMixer::new(sample_rate.hz(), channels);
-    Ok(mixer.mix(&tracks))
-}
-
-fn audio_time_error(error: mondrian_core::AudioTimeError) -> mondrian_core::MondrianError {
-    mondrian_core::MondrianError::WorkflowStepFailed {
-        step_id: "timeline_audio_time_mapping".to_string(),
-        reason: error.to_string(),
+        let asset = self
+            .library
+            .get_asset(asset_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("Asset {asset_id} is unavailable"))?;
+        let buffer = self.source_cache.get_or_decode(asset.path.as_path()).map_err(|error| {
+            format!(
+                "failed to decode {} at {}: {error}",
+                asset.id,
+                asset.path.display()
+            )
+        })?;
+        Ok(Arc::new(DecodedAudioBuffer(buffer)))
     }
 }
 
-fn audio_sample_range_error() -> mondrian_core::MondrianError {
+struct DecodedAudioBuffer(Arc<AudioBuffer>);
+
+impl AudioDecodedSource for DecodedAudioBuffer {
+    fn sample(&self, frame: i64, channel: usize) -> f32 {
+        let Ok(frame) = usize::try_from(frame) else {
+            return 0.0;
+        };
+        let channels = usize::from(self.0.channels);
+        let source_channel = channel.min(channels.saturating_sub(1));
+        self.0
+            .samples
+            .get(frame.saturating_mul(channels).saturating_add(source_channel))
+            .copied()
+            .unwrap_or(0.0)
+    }
+}
+
+fn audio_render_error(
+    step_id: &'static str,
+    reason: impl Into<String>,
+) -> mondrian_core::MondrianError {
     mondrian_core::MondrianError::WorkflowStepFailed {
-        step_id: "timeline_audio_sample_range".to_string(),
-        reason: "audio sample window is outside the supported platform range".to_string(),
+        step_id: step_id.to_owned(),
+        reason: reason.into(),
     }
 }

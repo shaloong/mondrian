@@ -14,8 +14,8 @@ use mondrian_core::{
     },
     events::{AppEvent, EventBus},
     types::{
-        AssetId, ClipId, Color, EffectId, FramePosition, KeyframeId, Rational, Resolution,
-        SequenceId, TrackId,
+        AssetId, AudioSourceComponentId, ClipId, Color, EffectId, FramePosition, KeyframeId,
+        Rational, Resolution, SequenceId, TrackId,
     },
     AudioSamplePosition, AudioSampleRate, AudioSampleRounding, FrameRounding, ProjectId,
     ProjectMeta, ProjectSettings, TimelineTime,
@@ -24,10 +24,7 @@ use mondrian_effects::{
     EffectNode, EffectNodeExt, EffectType, MaskComponent, MaskId, MaskKeyframe, MaskShape,
 };
 use mondrian_export::queue::RenderQueue;
-use mondrian_media::audio::{
-    AudioBuffer, AudioMixer, AudioSourceCache, AudioTrackConfig, AudioTrackData,
-    RealtimeAudioOutputSnapshot,
-};
+use mondrian_media::audio::{AudioBuffer, AudioSourceCache, RealtimeAudioOutputSnapshot};
 use mondrian_media::{
     AudioPcmRenderRequest, AudioPcmRenderer, AudioPlayback, AudioPlaybackEvent, AudioPlaybackMode,
     AudioPlaybackSnapshot,
@@ -146,6 +143,7 @@ pub struct AnimationClipboard {
 #[derive(Debug, Clone, Default)]
 pub struct ClipClipboard {
     entries: Vec<ClipClipboardEntry>,
+    audio_transitions: Vec<mondrian_timeline::audio::AudioTransition>,
 }
 
 /// One copied clip plus enough context to paste it back into the active sequence.
@@ -156,6 +154,7 @@ struct ClipClipboardEntry {
     is_video_track: bool,
     relative_start: TimelineTime,
     clip: Clip,
+    audio_processing_scopes: Vec<mondrian_timeline::audio::AudioProcessingScope>,
 }
 
 /// Active app clipboard payload kind.
