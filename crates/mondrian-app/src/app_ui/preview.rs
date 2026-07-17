@@ -2985,9 +2985,9 @@ pub struct AppUiPreviewDiagnostics {
     pub color_output_transform_calls: u64,
     /// Pixels processed by timeline working-space transforms into preview/output encoding.
     pub color_output_transform_pixels: u64,
-    /// GPU-resident OCIO transforms between internal render-graph nodes.
+    /// Internal color transforms such as program-output to monitor adaptation.
     pub color_intermediate_transform_calls: u64,
-    /// Pixels processed by GPU-resident internal OCIO transforms.
+    /// Pixels processed by internal color transforms.
     pub color_intermediate_transform_pixels: u64,
     /// Color transforms that crossed the temporary RGBA8 CPU boundary.
     pub color_rgba8_boundary_calls: u64,
@@ -11414,11 +11414,16 @@ mod tests {
         assert_eq!(diagnostics.color_input_transform_pixels, 0);
         assert_eq!(diagnostics.color_output_transform_calls, 1);
         assert_eq!(diagnostics.color_output_transform_pixels, 960_u64 * 540);
-        assert_eq!(diagnostics.color_rgba8_boundary_calls, 1);
+        assert_eq!(diagnostics.color_intermediate_transform_calls, 1);
+        assert_eq!(
+            diagnostics.color_intermediate_transform_pixels,
+            960_u64 * 540
+        );
+        assert_eq!(diagnostics.color_rgba8_boundary_calls, 0);
         assert_eq!(diagnostics.color_stage_plans, 1);
-        assert_eq!(diagnostics.color_stage_total_stages, 1);
+        assert_eq!(diagnostics.color_stage_total_stages, 2);
         assert_eq!(diagnostics.color_stage_cpu_input_stages, 0);
-        assert_eq!(diagnostics.color_stage_cpu_output_stages, 1);
+        assert_eq!(diagnostics.color_stage_cpu_output_stages, 2);
         assert_eq!(diagnostics.color_stage_gpu_color_stages, 0);
         assert_eq!(diagnostics.color_stage_upload_stages, 0);
         assert_eq!(diagnostics.color_stage_readback_stages, 0);
@@ -11427,7 +11432,7 @@ mod tests {
         assert_eq!(diagnostics.color_stage_gpu_ocio_resource_blockers, 0);
         assert_eq!(diagnostics.color_stage_gpu_wrapper_blockers, 0);
         assert_eq!(diagnostics.color_stage_gpu_render_pipeline_blockers, 0);
-        assert_eq!(diagnostics.color_stage_pixels, 960_u64 * 540);
+        assert_eq!(diagnostics.color_stage_pixels, 2 * 960_u64 * 540);
         assert_eq!(diagnostics.color_composite_plans, 1);
         assert_eq!(diagnostics.color_composite_elements, 1);
         assert_eq!(diagnostics.color_composite_float_linear, 1);
