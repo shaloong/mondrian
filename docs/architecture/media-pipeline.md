@@ -702,16 +702,23 @@ arrives quickly but only returns after an expensive FFmpeg open/seek/decode/copy
 step is still a user-visible scheduling failure. Preview reports therefore keep
 total/max/last canceled-worker duration globally and per access mode, and emit a
 slow-cancellation root cause when the full canceled worker duration exceeds the
-slow-frame budget. Workers must also record the elapsed time of the first
-observed cooperative-cancellation checkpoint and report the return latency from
-that checkpoint to the completed worker result. This is not the true external
-request timestamp; it is the first point where decode code proved that the
-cancel predicate was observed. A separate slow-cancel-return root cause fires
-when this post-observation return latency exceeds the slow-frame budget, which
-keeps FFmpeg open/seek/decode work, frame copy work, and cleanup/return work
-diagnosable as different scheduling failures. This evidence belongs in the app
-scheduler/worker layer because the media layer only owns cooperative
-cancellation checkpoints, not UI intent or cancel reasons.
+slow-frame budget. Workers must also report two separate intervals: external
+cancellation request to the first observed cooperative checkpoint, and that
+checkpoint to the completed worker result. Generation invalidation/cancel time
+comes from the Playback Broker's execution lease; current-frame preemption time
+comes from the competing pending request; deadline cancellation time comes from
+the authored deadline or prefetch budget; process shutdown time comes from a
+dedicated timestamped signal published before its atomic requested flag.
+Unknown/unattributable cancellation
+does not manufacture a zero-duration sample. Reports expose attributed sample
+count plus total/max/last latency globally and per access mode, warn when sample
+coverage is incomplete, and apply a 5 ms request-to-checkpoint budget. A
+separate slow-cancel-return root cause uses the slow-frame budget for cleanup
+after the checkpoint. This keeps scheduler propagation, FFmpeg
+open/seek/decode/copy work, and cleanup/return work diagnosable as different
+failures. The evidence belongs in the app scheduler/worker layer because the
+media layer owns only boolean cooperative checkpoints, not UI intent or cancel
+reasons.
 Process-global decoded-frame cache hits are capped to the same strict frame-hit
 tolerance for every access mode. Playback performance must come from the
 playback cursor's decoder/session locality, ring buffers, hardware decode, and

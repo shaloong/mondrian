@@ -311,6 +311,17 @@ ineligible, but late results are still classified explicitly as `CacheOnly` or
 expiration remove pending ownership synchronously; an already executing Adapter
 must still recheck `is_execution_current` before publication.
 
+The Broker timestamps pending admission and execution invalidation under that
+same lifecycle lock. An execution lease exposes elapsed invalidation age, while
+competing-current lookup exposes the age of the oldest qualifying current
+request. Starting a generation, canceling/expiring a binding, changing semantic
+class, eviction, and completion-driven binding removal all refresh this state.
+A compatible same-key request that rebinds in-flight work clears the temporary
+invalidation timestamp, so latest-wins reuse is not mislabeled as cancellation.
+Adapters may project these monotonic ages into request-to-checkpoint telemetry;
+the Broker does not assign app-specific cancellation reasons or performance
+budgets.
+
 Completion resolves against the latest binding in the same lock operation that
 removes pending ownership. A reusable result for the same opaque key may adopt
 a newer demand identity/deadline; this is required when a seek or refreshed

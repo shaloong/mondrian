@@ -21,6 +21,7 @@ use crate::app_ui::preview::{
     AppUiPreviewRenderPerformanceReport, AppUiPreviewRenderPerformanceSeverity,
     AppUiPreviewRenderPerformanceVerdict, AppUiPreviewService,
     APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
+    APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION,
     APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
 };
 use crate::app_ui::shell::AppUiAppRoot;
@@ -4013,7 +4014,7 @@ fn preview_decode_report_with_playback_p95(
     playback_queue_wait_p95_us: u64,
 ) -> AppUiPreviewDecodePerformanceReport {
     AppUiPreviewDecodePerformanceReport {
-        schema_version: 26,
+        schema_version: APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION,
         profile: "test".to_owned(),
         verdict: AppUiPreviewDecodePerformanceVerdict::Pass,
         required_access_modes: vec![PreviewDecodeAccessMode::PlaybackCursor],
