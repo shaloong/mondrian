@@ -122,6 +122,7 @@ struct HeadlessViewerGpuExtent {
 struct HeadlessViewerGpuExecutionSummary {
     adapter: Option<HeadlessViewerGpuAdapterInfo>,
     rendered_frames: usize,
+    gpu_completion_observed_frames: usize,
     cached_frames: usize,
     output_extents: Vec<HeadlessViewerGpuExtent>,
     wall_duration_samples_us: Vec<u64>,
@@ -181,6 +182,10 @@ impl HeadlessViewerGpuExecutionSummary {
             self.cached_frames = self.cached_frames.saturating_add(1);
         } else {
             self.rendered_frames = self.rendered_frames.saturating_add(1);
+            if execution.gpu_completion_observed {
+                self.gpu_completion_observed_frames =
+                    self.gpu_completion_observed_frames.saturating_add(1);
+            }
             self.rendered_decode_execution.accumulate(execution.decode_execution);
             self.wall_duration_samples_us.push(execution.duration_us);
             self.record_submit_samples_us.push(execution.record_submit_us);
@@ -328,6 +333,7 @@ fn headless_gpu_summary_records_distinct_executed_extents() {
             duration_us: 1,
             record_submit_us: 1,
             completion_wait_us: 1,
+            gpu_completion_observed: true,
             gpu_timestamp_token: Some(u64::from(width) << 32 | u64::from(height)),
             cpu_stage_timings: Some(ViewerGpuExecutionCpuStageTimings::default()),
             compositing_diagnostics: None,
@@ -403,6 +409,7 @@ struct PreviewExternalPlaybackGateReport {
     min_ready_basis_points: usize,
     ready_basis_points: usize,
     gpu_rendered_frames: usize,
+    gpu_completion_observed_frames: usize,
     gpu_cached_frames: usize,
     gpu_timestamped_frames: usize,
     gpu_missing_timestamp_frames: usize,
@@ -1860,6 +1867,9 @@ fn evaluate_external_playback_gates(
     {
         failures.push("viewer_gpu_execution_coverage");
     }
+    if headless_gpu.gpu_completion_observed_frames != headless_gpu.rendered_frames {
+        failures.push("viewer_gpu_completion_coverage");
+    }
     if headless_gpu.stage_diagnostics.readback_stages > 0 {
         failures.push("viewer_gpu_readback");
     }
@@ -1924,6 +1934,7 @@ fn evaluate_external_playback_gates(
         min_ready_basis_points,
         ready_basis_points,
         gpu_rendered_frames: headless_gpu.rendered_frames,
+        gpu_completion_observed_frames: headless_gpu.gpu_completion_observed_frames,
         gpu_cached_frames: headless_gpu.cached_frames,
         gpu_timestamped_frames: headless_gpu.gpu_duration_samples_us.len(),
         gpu_missing_timestamp_frames: headless_gpu.missing_gpu_timestamp_frames,
@@ -3844,6 +3855,33 @@ fn external_playback_gates_pass_when_real_media_thresholds_hold() {
 }
 
 #[test]
+fn external_playback_gates_require_observed_gpu_completion_for_every_render() {
+    let readiness = PreviewReadinessCounts { ready: 20, stale: 0, loading: 0, unavailable: 0 };
+    let decode = preview_decode_report_with_playback_p95(25_000, 4_000);
+    let diagnostics = AppUiPreviewDiagnostics::default();
+    let evidence = PlaybackEvidenceCollector::default().report();
+    let mut gpu = passing_headless_gpu_summary(20);
+    gpu.gpu_completion_observed_frames = 19;
+
+    let gates = evaluate_external_playback_gates(
+        &readiness,
+        &gpu,
+        20,
+        33_000,
+        &decode,
+        &diagnostics,
+        &evidence,
+        40_000,
+        10_000,
+        95,
+        9_000,
+    );
+
+    assert_eq!(gates.failures, vec!["viewer_gpu_completion_coverage"]);
+    assert!(!gates.passed);
+}
+
+#[test]
 fn external_playback_gates_do_not_treat_repeated_stale_frames_as_current_ready() {
     let readiness = PreviewReadinessCounts { ready: 2, stale: 18, loading: 0, unavailable: 0 };
     let decode = preview_decode_report_with_playback_p95(25_000, 4_000);
@@ -3995,6 +4033,7 @@ fn external_playback_gates_fail_on_cpu_frame_store_budget_or_admission() {
 fn passing_headless_gpu_summary(frames: usize) -> HeadlessViewerGpuExecutionSummary {
     HeadlessViewerGpuExecutionSummary {
         rendered_frames: frames,
+        gpu_completion_observed_frames: frames,
         wall_duration_samples_us: vec![1_000; frames],
         record_submit_samples_us: vec![400; frames],
         completion_wait_samples_us: vec![600; frames],

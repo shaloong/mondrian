@@ -411,7 +411,12 @@ impl AppUiPreviewService {
         )
         .expect("playback engine");
         engine
-            .play(10, mondrian_playback::MonotonicTimestamp::ZERO)
+            .play_timeline(
+                mondrian_playback::PlaybackTimelineBinding::new(None, 0, Rational::new(1, 25), 10)
+                    .expect("timeline binding"),
+                mondrian_core::FramePosition::new(0, Rational::new(1, 25)),
+                mondrian_playback::MonotonicTimestamp::ZERO,
+            )
             .expect("playback demand");
         engine.frame_demand().expect("frame demand").identity()
     }
@@ -16667,7 +16672,12 @@ mod tests {
         )
         .expect("playback engine");
         engine
-            .play(10, mondrian_playback::MonotonicTimestamp::ZERO)
+            .play_timeline(
+                mondrian_playback::PlaybackTimelineBinding::new(None, 0, Rational::new(1, 25), 10)
+                    .expect("timeline binding"),
+                mondrian_core::FramePosition::new(0, Rational::new(1, 25)),
+                mondrian_playback::MonotonicTimestamp::ZERO,
+            )
             .expect("priming demand");
         engine
             .complete_priming(

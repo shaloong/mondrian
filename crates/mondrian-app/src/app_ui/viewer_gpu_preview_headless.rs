@@ -36,12 +36,14 @@ pub(crate) struct HeadlessViewerGpuExecution {
     pub output_height: u32,
     /// Whether the runtime already retained this exact output.
     pub cached: bool,
-    /// Wall time spent recording and submitting without a per-frame GPU wait.
+    /// Wall time through recording, submission, and observed GPU completion.
     pub duration_us: u64,
     /// CPU wall time through command recording and queue submission.
     pub record_submit_us: u64,
-    /// CPU wall time waiting for submitted work; always zero on this async path.
+    /// CPU wall time waiting for the submitted presentation work to complete.
     pub completion_wait_us: u64,
+    /// Whether completion of this exact output was observed before returning.
+    pub gpu_completion_observed: bool,
     /// Deferred timestamp token, absent if unsupported or the bounded ring discarded it.
     pub gpu_timestamp_token: Option<u64>,
     /// CPU attribution inside the renderer record call.
@@ -216,6 +218,7 @@ impl HeadlessViewerGpuAdapter {
                 duration_us: elapsed_us(started),
                 record_submit_us: elapsed_us(started),
                 completion_wait_us: 0,
+                gpu_completion_observed: true,
                 gpu_timestamp_token: None,
                 cpu_stage_timings: None,
                 compositing_diagnostics: None,
@@ -313,12 +316,17 @@ impl HeadlessViewerGpuAdapter {
             ring.finish_frame(&mut encoder, token)
                 .map_err(|error| HeadlessViewerGpuError::Timestamp(error.to_string()))?;
         }
-        self.queue.submit(std::iter::once(encoder.finish()));
+        let submission = self.queue.submit(std::iter::once(encoder.finish()));
         let record_submit_us = elapsed_us(started);
         if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token) {
             ring.after_submit(token)
                 .map_err(|error| HeadlessViewerGpuError::Timestamp(error.to_string()))?;
         }
+        let completion_started = Instant::now();
+        self.device
+            .poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None })
+            .map_err(|error| HeadlessViewerGpuError::Completion(error.to_string()))?;
+        let completion_wait_us = elapsed_us(completion_started);
         self.current_output_key = Some(output_key);
         let (native_import_contract_pools, native_import_bridge_entries) =
             self.runtime.native_import_pool_residency();
@@ -328,7 +336,8 @@ impl HeadlessViewerGpuAdapter {
             cached: false,
             duration_us: elapsed_us(started),
             record_submit_us,
-            completion_wait_us: 0,
+            completion_wait_us,
+            gpu_completion_observed: true,
             gpu_timestamp_token: timestamp_token.map(|token| token.id()),
             cpu_stage_timings: Some(record.cpu_stage_timings),
             compositing_diagnostics: Some(record.compositing_diagnostics),
@@ -358,6 +367,8 @@ pub(crate) enum HeadlessViewerGpuError {
     Backpressure(String),
     #[error("headless Viewer GPU recording failed: {0}")]
     Record(String),
+    #[error("headless Viewer GPU completion wait failed: {0}")]
+    Completion(String),
     #[error("headless Viewer GPU timestamp query failed: {0}")]
     Timestamp(String),
 }

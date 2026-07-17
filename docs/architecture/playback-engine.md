@@ -117,6 +117,16 @@ the quality-policy revision, invalidating incompatible demands.
 Commands are synchronous state transitions. They may emit directives but must
 not decode, render, block on a device, or wait for a worker.
 
+An App Adapter applies Sequence identity, semantic revision, evaluation time
+base, content end, and the requested position as one validated
+`PlaybackTimelineBinding`. `play_timeline` and `seek_timeline` commit that
+binding and the transport transition atomically. One user Play or Seek intent
+rotates exactly one epoch: the Adapter must not compose a public timeline reset,
+seek, and play sequence. A seek received during Priming, Playing, or Recovering
+preserves play intent and publishes the new bounded Priming demand immediately;
+a paused or stopped seek publishes one untimed demand. Binding and position time
+bases must match or the complete transition fails without partial mutation.
+
 ### Observations
 
 - monotonic tick with a nondecreasing timestamp;
@@ -905,13 +915,18 @@ External-media gates consume the same report and fail on delivery-clock drift
 above 20 ms, any sustained-underrun recovery, evidence retention overflow, or
 fewer than 90% current Ready samples even when stale frames keep 95% of samples
 visible. The headless harness now pre-rolls and executes only through the real
-GPU Adapter; it no longer invokes the CPU raster Viewer in parallel. Its report
-contains per-output GPU completion latency, cache reuse, color-stage evidence,
-explicit fallback reasons, and the distinct extents actually submitted to the
-shared runtime. External gates also fail when real GPU execution
-coverage is missing, playback GPU completion p95 exceeds one frame interval, a
-readback appears, or a GPU blocker is reported. Pre-roll pipeline warm-up is
-reported separately and cannot contaminate the steady-playback p95.
+GPU Adapter; it no longer invokes the CPU raster Viewer in parallel. For every
+fresh output, the Adapter retains the exact submission index and waits until
+that submission completes before it marks the output presentable or completes
+the Frame Presentation Ticket. Cached outputs may reuse only an output whose
+original submission was already observed complete. Its report contains both
+the count of completion-observed fresh outputs and per-output GPU completion
+latency, cache reuse, color-stage evidence, explicit fallback reasons, and the
+distinct extents actually submitted to the shared runtime. External gates fail
+when real GPU execution coverage or exact completion coverage is missing,
+playback GPU completion p95 exceeds one frame interval, a readback appears, or
+a GPU blocker is reported. Pre-roll pipeline warm-up is reported separately
+and cannot contaminate the steady-playback p95.
 The professional 4K HEVC Main10 gate now has a fail-closed input and execution
 contract. It uses real FFmpeg decoder profile/format/rate evidence, the probed
 rational cadence, frame-local decode provenance carried through caches and

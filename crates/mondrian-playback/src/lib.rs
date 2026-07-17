@@ -56,6 +56,45 @@ impl PlaybackEpoch {
     }
 }
 
+/// Immutable timeline facts applied atomically with a transport transition.
+///
+/// Keeping identity, semantic revision, evaluation grid, and content boundary
+/// together prevents App Adapters from exposing a transient reset between one
+/// user intent and its resulting play or seek state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaybackTimelineBinding {
+    sequence_id: Option<SequenceId>,
+    timeline_revision: u64,
+    time_base: Rational,
+    end_frame: i64,
+}
+
+impl PlaybackTimelineBinding {
+    /// Create a validated binding for one Sequence revision.
+    pub fn new(
+        sequence_id: Option<SequenceId>,
+        timeline_revision: u64,
+        time_base: Rational,
+        end_frame: i64,
+    ) -> Result<Self, PlaybackError> {
+        validate_time_base(time_base)?;
+        Ok(Self {
+            sequence_id,
+            timeline_revision,
+            time_base,
+            end_frame: end_frame.max(0),
+        })
+    }
+
+    fn validate_position(self, position: FramePosition) -> Result<(), PlaybackError> {
+        validate_time_base(position.time_base)?;
+        if position.time_base != self.time_base {
+            return Err(PlaybackError::MismatchedTimelineTimeBase);
+        }
+        Ok(())
+    }
+}
+
 /// Identity of one current-frame demand inside a Playback Session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FrameDemandSequence(u64);
@@ -430,6 +469,9 @@ pub enum PlaybackError {
     /// Timeline time base is zero or negative.
     #[error("timeline time base must be positive")]
     InvalidTimeBase,
+    /// A transport position was expressed on a different grid than its binding.
+    #[error("transport position time base does not match its timeline binding")]
+    MismatchedTimelineTimeBase,
     /// A delivery targeted a different timeline frame than the current demand.
     #[error("frame delivery does not match the active target")]
     MismatchedFrameDelivery,
@@ -533,31 +575,50 @@ impl PlaybackEngine {
         }
     }
 
-    /// Configure the timeline identity and reset transport to a stable position.
-    pub fn reset_timeline(
+    /// Atomically bind a Sequence revision and begin bounded playback priming.
+    pub fn play_timeline(
         &mut self,
-        sequence_id: Option<SequenceId>,
-        timeline_revision: u64,
+        binding: PlaybackTimelineBinding,
         position: FramePosition,
-        end_frame: i64,
         now: MonotonicTimestamp,
     ) -> Result<PlaybackSnapshot, PlaybackError> {
+        binding.validate_position(position)?;
         self.accept_timestamp(now)?;
-        validate_time_base(position.time_base)?;
-        self.bump_epoch();
-        self.sequence_id = sequence_id;
-        self.timeline_revision = timeline_revision;
+        self.apply_timeline_binding(binding);
         self.position = nonnegative_frame(position);
-        self.end_frame = end_frame.max(0);
-        self.state = TransportState::Stopped;
-        self.clock_master = None;
+        if self.position.frame > self.end_frame {
+            self.position.frame = 0;
+        }
+        self.bump_epoch();
+        self.state = TransportState::Priming;
+        self.clock_master = Some(ClockMaster::Synthetic);
+        self.active_target_frame = Some(self.position.frame);
         self.reset_runtime_policy();
+        self.refresh_frame_demand_with_duration(now, self.policy.priming_limit)?;
         self.reanchor(now);
         Ok(self.snapshot())
     }
 
-    /// Start bounded priming at the current position.
-    pub fn play(
+    /// Atomically bind a Sequence revision, seek, and preserve play intent.
+    ///
+    /// Priming, Playing, and Recovering all count as active play intent. An
+    /// active seek publishes a bounded current-frame demand in the new epoch;
+    /// an inactive seek publishes an untimed demand and remains paused.
+    pub fn seek_timeline(
+        &mut self,
+        binding: PlaybackTimelineBinding,
+        position: FramePosition,
+        now: MonotonicTimestamp,
+    ) -> Result<PlaybackSnapshot, PlaybackError> {
+        binding.validate_position(position)?;
+        self.accept_timestamp(now)?;
+        let was_running = self.transport_intends_playback();
+        self.apply_timeline_binding(binding);
+        self.seek_after_timestamp(position, was_running, now)
+    }
+
+    #[cfg(test)]
+    fn play(
         &mut self,
         end_frame: i64,
         now: MonotonicTimestamp,
@@ -615,18 +676,24 @@ impl PlaybackEngine {
         Ok(self.snapshot())
     }
 
-    /// Seek exactly and invalidate all prior epoch work.
-    pub fn seek(
+    #[cfg(test)]
+    fn seek(
         &mut self,
         position: FramePosition,
         now: MonotonicTimestamp,
     ) -> Result<PlaybackSnapshot, PlaybackError> {
         self.accept_timestamp(now)?;
         validate_time_base(position.time_base)?;
-        let was_running = matches!(
-            self.state,
-            TransportState::Playing | TransportState::Recovering
-        );
+        let was_running = self.transport_intends_playback();
+        self.seek_after_timestamp(position, was_running, now)
+    }
+
+    fn seek_after_timestamp(
+        &mut self,
+        position: FramePosition,
+        was_running: bool,
+        now: MonotonicTimestamp,
+    ) -> Result<PlaybackSnapshot, PlaybackError> {
         self.bump_epoch();
         self.position = nonnegative_frame(position);
         self.state = if was_running {
@@ -638,7 +705,9 @@ impl PlaybackEngine {
         self.active_target_frame = Some(self.position.frame);
         self.reset_runtime_policy();
         self.reanchor(now);
-        if !was_running {
+        if was_running {
+            self.refresh_frame_demand_with_duration(now, self.policy.priming_limit)?;
+        } else {
             self.refresh_untimed_frame_demand()?;
         }
         Ok(self.snapshot())
@@ -1054,6 +1123,19 @@ impl PlaybackEngine {
         now.checked_elapsed_since(self.last_timestamp)?;
         self.last_timestamp = now;
         Ok(())
+    }
+
+    fn apply_timeline_binding(&mut self, binding: PlaybackTimelineBinding) {
+        self.sequence_id = binding.sequence_id;
+        self.timeline_revision = binding.timeline_revision;
+        self.end_frame = binding.end_frame;
+    }
+
+    fn transport_intends_playback(&self) -> bool {
+        matches!(
+            self.state,
+            TransportState::Priming | TransportState::Playing | TransportState::Recovering
+        )
     }
 
     fn bump_epoch(&mut self) {
@@ -1581,6 +1663,10 @@ mod tests {
         PlaybackEngine::new(Rational::new(1, 25), PlaybackPolicy::default()).unwrap()
     }
 
+    fn timeline_binding(end_frame: i64) -> PlaybackTimelineBinding {
+        PlaybackTimelineBinding::new(None, 1, Rational::new(1, 25), end_frame).unwrap()
+    }
+
     fn current_delivery(engine: &PlaybackEngine, kind: FrameDeliveryKind) -> FrameDelivery {
         let demand = engine.frame_demand().expect("active frame demand");
         FrameDelivery {
@@ -1710,6 +1796,57 @@ mod tests {
             .unwrap();
         assert!(!accepted);
         assert_eq!(engine.snapshot(), current);
+    }
+
+    #[test]
+    fn atomic_running_seek_rotates_one_epoch_and_publishes_priming_demand() {
+        let mut engine = engine();
+        engine
+            .play_timeline(
+                timeline_binding(100),
+                FramePosition::new(0, Rational::new(1, 25)),
+                ts(0),
+            )
+            .unwrap();
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+        let prior_epoch = engine.snapshot().epoch;
+
+        let snapshot = engine
+            .seek_timeline(
+                timeline_binding(100),
+                FramePosition::new(50, Rational::new(1, 25)),
+                ts(10),
+            )
+            .unwrap();
+        let demand = engine.pending_frame_demand().expect("running seek demand");
+
+        assert_eq!(snapshot.epoch.get(), prior_epoch.get() + 1);
+        assert_eq!(snapshot.state, TransportState::Priming);
+        assert_eq!(snapshot.clock_master, Some(ClockMaster::Synthetic));
+        assert_eq!(demand.target, snapshot.position);
+        assert!(demand.deadline.is_some());
+    }
+
+    #[test]
+    fn rejected_atomic_binding_does_not_consume_time_or_mutate_transport() {
+        let mut engine = engine();
+        let before = engine.snapshot();
+
+        let rejected = engine.play_timeline(
+            timeline_binding(100),
+            FramePosition::new(0, Rational::new(1, 30)),
+            ts(10),
+        );
+
+        assert_eq!(rejected, Err(PlaybackError::MismatchedTimelineTimeBase));
+        assert_eq!(engine.snapshot(), before);
+        engine
+            .play_timeline(
+                timeline_binding(100),
+                FramePosition::new(0, Rational::new(1, 25)),
+                ts(5),
+            )
+            .expect("rejected binding must not consume monotonic time");
     }
 
     #[test]
@@ -1868,11 +2005,9 @@ mod tests {
     fn paused_playhead_may_seek_beyond_current_content_end() {
         let mut engine = engine();
         engine
-            .reset_timeline(
-                None,
-                1,
+            .seek_timeline(
+                timeline_binding(20),
                 FramePosition::new(120, Rational::new(1, 25)),
-                20,
                 ts(0),
             )
             .unwrap();

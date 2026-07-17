@@ -172,6 +172,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 
 - A **Playback Session** has exactly one active **Clock Master**.
 - A **Playback Session** has exactly one **Transport State** at a time.
+- One user Play or Seek intent applies its Sequence identity, semantic revision, evaluation grid, content boundary, position, and resulting Transport State atomically and rotates exactly one playback epoch; an App Adapter cannot expose intermediate reset/seek/play states.
 - A **Playback Session** produces zero or more **Frame Demands**.
 - Each **Frame Demand** produces at most one terminal **Frame Delivery**.
 - A **Frame Request Binding** is resolved atomically at completion. If the same semantic frame key is rebound while work is in flight, a reusable result adopts the latest binding; a canceled or incompatible old execution leaves the newer binding pending.

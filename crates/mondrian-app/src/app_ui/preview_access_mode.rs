@@ -1369,11 +1369,31 @@ mod tests {
         )
         .expect("playback engine");
         engine
-            .play(10, mondrian_playback::MonotonicTimestamp::ZERO)
+            .play_timeline(
+                mondrian_playback::PlaybackTimelineBinding::new(
+                    None,
+                    0,
+                    mondrian_core::Rational::new(1, 25),
+                    10,
+                )
+                .expect("timeline binding"),
+                mondrian_core::FramePosition::new(0, mondrian_core::Rational::new(1, 25)),
+                mondrian_playback::MonotonicTimestamp::ZERO,
+            )
             .expect("first demand");
         let first = engine.frame_demand().expect("first frame demand").identity();
         engine
-            .play(10, mondrian_playback::MonotonicTimestamp::ZERO)
+            .play_timeline(
+                mondrian_playback::PlaybackTimelineBinding::new(
+                    None,
+                    0,
+                    mondrian_core::Rational::new(1, 25),
+                    10,
+                )
+                .expect("timeline binding"),
+                mondrian_core::FramePosition::new(0, mondrian_core::Rational::new(1, 25)),
+                mondrian_playback::MonotonicTimestamp::ZERO,
+            )
             .expect("second demand");
         let second = engine.frame_demand().expect("second frame demand").identity();
         assert_ne!(first, second);
@@ -2341,7 +2361,17 @@ mod tests {
         )
         .expect("playback engine");
         playback_engine
-            .play(10, mondrian_playback::MonotonicTimestamp::ZERO)
+            .play_timeline(
+                mondrian_playback::PlaybackTimelineBinding::new(
+                    None,
+                    0,
+                    mondrian_core::Rational::new(1, 25),
+                    10,
+                )
+                .expect("timeline binding"),
+                mondrian_core::FramePosition::new(0, mondrian_core::Rational::new(1, 25)),
+                mondrian_playback::MonotonicTimestamp::ZERO,
+            )
             .expect("playback demand");
         let demand_identity = playback_engine.frame_demand().expect("frame demand").identity();
         let status = sender.promote(

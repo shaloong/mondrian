@@ -95,15 +95,24 @@ impl AppState {
         if prior_state == TransportState::Ended || (end_frame >= 0 && frames > end_frame) {
             frames = 0;
         }
-        if !self.reset_playback_timeline(frames, end_frame) {
-            return;
-        }
-        if let Err(error) = self.playback_engine.play(end_frame, self.playback_now) {
+        let time_base = self.playback_time_base();
+        let binding = match self.playback_timeline_binding(end_frame) {
+            Ok(binding) => binding,
+            Err(error) => {
+                tracing::error!(%error, "failed to bind Playback Session timeline");
+                return;
+            }
+        };
+        if let Err(error) = self.playback_engine.play_timeline(
+            binding,
+            FramePosition::new(frames, time_base),
+            self.playback_now,
+        ) {
             tracing::error!(%error, "failed to start Playback Session");
             return;
         }
         self.reanchor_playback_presentation_clock(Instant::now());
-        self.prepare_audio_playback(FramePosition::new(frames, self.playback_time_base()));
+        self.prepare_audio_playback(FramePosition::new(frames, time_base));
         self.capture_playback_evidence();
     }
 
@@ -145,23 +154,21 @@ impl AppState {
             tracing::error!("failed to resolve exact Sequence duration onto playback frame grid");
             return;
         };
-        if !self.reset_playback_timeline(frame, end_frame) {
-            return;
-        }
-        let time_base =
-            self.sequence.as_ref().map(Sequence::time_base).unwrap_or(Rational::new(1, 25));
-        if let Err(error) = self
-            .playback_engine
-            .seek(FramePosition::new(frame, time_base), self.playback_now)
-        {
-            tracing::error!(%error, "failed to seek Playback Session");
-            return;
-        }
-        if was_running {
-            if let Err(error) = self.playback_engine.play(end_frame, self.playback_now) {
-                tracing::error!(%error, "failed to resume Playback Session after seek");
+        let time_base = self.playback_time_base();
+        let binding = match self.playback_timeline_binding(end_frame) {
+            Ok(binding) => binding,
+            Err(error) => {
+                tracing::error!(%error, "failed to bind Playback Session timeline");
                 return;
             }
+        };
+        if let Err(error) = self.playback_engine.seek_timeline(
+            binding,
+            FramePosition::new(frame, time_base),
+            self.playback_now,
+        ) {
+            tracing::error!(%error, "failed to seek Playback Session");
+            return;
         }
         self.reanchor_playback_presentation_clock(Instant::now());
         if was_running {
@@ -186,10 +193,19 @@ impl AppState {
     pub fn set_playback_frame_running(&mut self, frame: i64) {
         let frame = frame.max(0);
         let end_frame = self.last_content_frame().map_or(frame, |end| end.max(frame));
-        if !self.reset_playback_timeline(frame, end_frame) {
-            return;
-        }
-        if let Err(error) = self.playback_engine.play(end_frame, self.playback_now) {
+        let time_base = self.playback_time_base();
+        let binding = match self.playback_timeline_binding(end_frame) {
+            Ok(binding) => binding,
+            Err(error) => {
+                tracing::error!(%error, "failed to bind simulated Playback Session timeline");
+                return;
+            }
+        };
+        if let Err(error) = self.playback_engine.play_timeline(
+            binding,
+            FramePosition::new(frame, time_base),
+            self.playback_now,
+        ) {
             tracing::error!(%error, "failed to start simulated Playback Session");
         }
     }
@@ -691,26 +707,16 @@ impl AppState {
         changed || self.playback_engine.snapshot() != before
     }
 
-    fn reset_playback_timeline(&mut self, frame: i64, end_frame: i64) -> bool {
-        let time_base =
-            self.sequence.as_ref().map(Sequence::time_base).unwrap_or(Rational::new(1, 25));
-        let sequence_id = self.sequence.as_ref().map(|sequence| sequence.id);
-        match self.playback_engine.reset_timeline(
-            sequence_id,
+    fn playback_timeline_binding(
+        &self,
+        end_frame: i64,
+    ) -> Result<mondrian_playback::PlaybackTimelineBinding, mondrian_playback::PlaybackError> {
+        mondrian_playback::PlaybackTimelineBinding::new(
+            self.sequence.as_ref().map(|sequence| sequence.id),
             self.project_document_revision,
-            FramePosition::new(frame, time_base),
+            self.playback_time_base(),
             end_frame,
-            self.playback_now,
-        ) {
-            Ok(_) => {
-                self.capture_playback_evidence();
-                true
-            }
-            Err(error) => {
-                tracing::error!(%error, "failed to reset Playback Session timeline");
-                false
-            }
-        }
+        )
     }
 
     pub fn in_point_frame(&self) -> mondrian_core::Result<i64> {
@@ -866,6 +872,19 @@ mod tests {
         state.play();
         assert!(!state.observe_viewer_frame_delivery(FrameDeliveryKind::Ready));
         assert!(state.observe_video_preroll(0, 0));
+    }
+
+    #[test]
+    fn play_binds_timeline_and_starts_one_epoch() {
+        let mut state = state_with_sequence(20);
+        let before = state.playback_engine.snapshot().epoch;
+
+        state.play();
+
+        let after = state.playback_engine.snapshot();
+        assert_eq!(after.epoch.get(), before.get() + 1);
+        assert_eq!(after.state, TransportState::Priming);
+        assert!(state.pending_playback_frame_demand_identity().is_some());
     }
 
     fn audio_snapshot() -> RealtimeAudioOutputSnapshot {
@@ -1203,7 +1222,11 @@ mod tests {
 
         assert_eq!(outcome.status, PlaybackAdvanceStatus::WaitingForFrame);
         assert_eq!(state.current_frame(), 10);
-        assert_ne!(state.playback_engine.snapshot().epoch, old_epoch);
+        assert_eq!(
+            state.playback_engine.snapshot().epoch.get(),
+            old_epoch.get() + 1
+        );
+        assert!(state.playback_engine.pending_frame_demand().is_some());
     }
 
     #[test]
