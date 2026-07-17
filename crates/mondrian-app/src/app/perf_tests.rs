@@ -427,7 +427,7 @@ struct PreviewExternalPlaybackGateReport {
     delivery_clock_drift_limit_us: u64,
     delivery_clock_drift_observed_us: u64,
     audio_underrun_recoveries: u64,
-    dropped_playback_evidence_events: u64,
+    evicted_playback_evidence_events: u64,
     cpu_frame_store_within_budget: bool,
     decoder_resource_store_within_budget: bool,
     cpu_frame_store_oversize_rejections: u64,
@@ -1895,9 +1895,6 @@ fn evaluate_external_playback_gates(
     if playback_evidence.audio_underrun_recoveries > 0 {
         failures.push("audio_underrun_recovery");
     }
-    if playback_evidence.dropped_event_count > 0 {
-        failures.push("playback_evidence_overflow");
-    }
     let cpu_frame_store_within_budget = preview_diagnostics.media_cache_reserved_bytes
         <= preview_diagnostics.media_cache_byte_budget
         && preview_diagnostics.pinned_media_frame_bytes
@@ -1952,7 +1949,7 @@ fn evaluate_external_playback_gates(
         delivery_clock_drift_limit_us,
         delivery_clock_drift_observed_us,
         audio_underrun_recoveries: playback_evidence.audio_underrun_recoveries,
-        dropped_playback_evidence_events: playback_evidence.dropped_event_count,
+        evicted_playback_evidence_events: playback_evidence.evicted_event_count,
         cpu_frame_store_within_budget,
         decoder_resource_store_within_budget,
         cpu_frame_store_oversize_rejections,
@@ -1994,13 +1991,7 @@ fn run_preview_media_continuous_playback_probe(
         Some(media_info),
         frame_count,
     )?;
-    state.begin_playback_evidence_run(mondrian_playback::PlaybackEvidenceConfig {
-        event_capacity: frame_count
-            .saturating_mul(6)
-            .saturating_add(seek_probe_count.saturating_mul(8))
-            .saturating_add(1_024),
-        sample_capacity: frame_count.saturating_add(seek_probe_count).saturating_add(1_024),
-    })?;
+    state.begin_playback_evidence_run(mondrian_playback::PlaybackEvidenceConfig::default())?;
     let preview_service = AppUiPreviewService::new();
     let mut gpu_adapter =
         HeadlessViewerGpuAdapter::new().context("create real headless Viewer GPU Adapter")?;
@@ -3952,13 +3943,13 @@ fn external_playback_gates_require_real_gpu_execution_without_readback_or_blocke
 }
 
 #[test]
-fn external_playback_gates_fail_on_clock_audio_or_evidence_integrity() {
+fn external_playback_gates_fail_on_clock_or_audio_but_allow_bounded_event_eviction() {
     let readiness = PreviewReadinessCounts { ready: 20, stale: 0, loading: 0, unavailable: 0 };
     let decode = preview_decode_report_with_playback_p95(25_000, 4_000);
     let mut evidence = PlaybackEvidenceCollector::default().report();
     evidence.delivery_clock_drift.max_us = 25_000;
     evidence.audio_underrun_recoveries = 1;
-    evidence.dropped_event_count = 1;
+    evidence.evicted_event_count = 1;
 
     let diagnostics = AppUiPreviewDiagnostics::default();
     let gpu = passing_headless_gpu_summary(20);
@@ -3978,11 +3969,7 @@ fn external_playback_gates_fail_on_clock_audio_or_evidence_integrity() {
 
     assert_eq!(
         gates.failures,
-        vec![
-            "delivery_clock_drift",
-            "audio_underrun_recovery",
-            "playback_evidence_overflow",
-        ]
+        vec!["delivery_clock_drift", "audio_underrun_recovery"]
     );
     assert!(!gates.passed);
 }

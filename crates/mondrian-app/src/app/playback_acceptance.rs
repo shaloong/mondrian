@@ -150,8 +150,7 @@ pub(crate) struct PreviewProfessionalPlaybackGateReport {
     min_superseded_seeks: u64,
     superseded_seek_count: u64,
     rejected_terminal_deliveries: u64,
-    dropped_evidence_events: u64,
-    dropped_evidence_samples: u64,
+    evicted_detailed_events: u64,
     broker_pending_requests: usize,
     broker_queued_jobs: usize,
     broker_in_flight_jobs: usize,
@@ -327,18 +326,6 @@ pub(crate) fn evaluate_professional_playback(
             "Playback Evidence terminal delivery acceptance",
         );
     }
-    if evidence.dropped_event_count > 0 || evidence.dropped_sample_count > 0 {
-        push_failure(
-            &mut failures,
-            "playback_evidence_overflow",
-            "0 dropped evidence events and samples",
-            format!(
-                "events={}, samples={}",
-                evidence.dropped_event_count, evidence.dropped_sample_count
-            ),
-            "Playback Evidence retention diagnostics",
-        );
-    }
     let diagnostics = observation.preview_diagnostics;
     if diagnostics.scheduler.pending_requests > 0
         || diagnostics.worker_queue.queued_jobs > 0
@@ -484,8 +471,7 @@ pub(crate) fn evaluate_professional_playback(
         min_superseded_seeks: PROFESSIONAL_MIN_SUPERSEDED_SEEKS,
         superseded_seek_count: evidence.seek_superseded_count,
         rejected_terminal_deliveries: evidence.deliveries.rejected,
-        dropped_evidence_events: evidence.dropped_event_count,
-        dropped_evidence_samples: evidence.dropped_sample_count,
+        evicted_detailed_events: evidence.evicted_event_count,
         broker_pending_requests: diagnostics.scheduler.pending_requests,
         broker_queued_jobs: diagnostics.worker_queue.queued_jobs,
         broker_in_flight_jobs: diagnostics.worker_queue.in_flight_jobs,
@@ -709,6 +695,7 @@ mod tests {
         evidence.observed_duration_us = PROFESSIONAL_MIN_OBSERVED_DURATION_US;
         evidence.warm_seek_latency = mondrian_playback::PlaybackLatencySummary {
             count: PROFESSIONAL_MIN_WARM_SEEKS,
+            sampled_count: PROFESSIONAL_MIN_WARM_SEEKS,
             p50_us: 100_000,
             p95_us: PROFESSIONAL_WARM_SEEK_P95_LIMIT_US,
             p99_us: PROFESSIONAL_WARM_SEEK_P95_LIMIT_US,
@@ -716,6 +703,7 @@ mod tests {
         };
         evidence.accurate_seek_latency = mondrian_playback::PlaybackLatencySummary {
             count: PROFESSIONAL_MIN_ACCURATE_SEEKS,
+            sampled_count: PROFESSIONAL_MIN_ACCURATE_SEEKS,
             p50_us: 250_000,
             p95_us: PROFESSIONAL_ACCURATE_SEEK_P95_LIMIT_US,
             p99_us: PROFESSIONAL_ACCURATE_SEEK_P95_LIMIT_US,

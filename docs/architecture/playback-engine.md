@@ -598,12 +598,26 @@ residency, handoff phase error, audio underruns, A/V drift, cache budgets, and
 reason-code counts. Logging alone is not evidence.
 
 `PlaybackEvidenceCollector` is the shared bounded Interface for production UI
-and headless/perf Adapters. Schema v1 retains at most 4,096 detailed events and
-4,096 samples per latency/drift metric while aggregating Clock Master and
-Transport State residency, demand issue-to-terminal p50/p95/p99, warm and
-accurate seek latency, accepted delivery counts, superseded demand/seek totals,
-delivery-clock drift, and underrun recovery. Event/sample eviction is itself
-reported; a reference gate cannot silently pass after evidence overflow.
+and headless/perf Adapters. Schema v2 retains at most 4,096 detailed tail events
+and a deterministic 4,096-sample whole-run reservoir per latency/drift metric.
+Each metric separately keeps its exact population count and exact all-run
+maximum; p50/p95/p99 are explicitly reservoir estimates. Clock Master and
+Transport State residency, delivery counts, superseded demand/seek totals, and
+underrun totals are streaming aggregates and do not depend on retained detail.
+Detailed-event eviction is expected bounded retention, remains reported, and is
+not reclassified as observation loss. A gate may use the exact maximum, a
+declared reservoir percentile, or aggregate counters, but cannot infer failure
+merely because old diagnostic events were intentionally evicted.
+
+The accelerated headless continuity gate drives the public Engine and Evidence
+Interfaces for 30 minutes of exact 48 kHz callback time against a 30000/1001
+video grid. It completes current Frame Demands, injects one Audio Device to
+Synthetic to Audio Device transition, and requires zero delivery-clock drift,
+no underrun recovery, exact final rational position, and fixed evidence
+residency despite more than 100,000 detailed-event evictions. This proves clock,
+demand, and bounded-aggregation semantics; it does not prove CPAL hardware,
+codec/GPU throughput, operating-system callback jitter, or reference-machine
+memory behavior.
 
 `PreviewFrameStore<MK, M, VK, V, S>` is the Playback Module's payload-opaque CPU
 storage Interface. It owns decoded-media payloads, final Viewer payloads,
@@ -921,8 +935,8 @@ can close cache-hit outcomes, Viewer Blocked closes correctness outcomes, and
 Viewer Stale remains nonterminal. The harness no
 longer fakes continuous playback by seeking and restarting every frame.
 External-media gates consume the same report and fail on delivery-clock drift
-above 20 ms, any sustained-underrun recovery, evidence retention overflow, or
-fewer than 90% current Ready samples even when stale frames keep 95% of samples
+above 20 ms, any sustained-underrun recovery, or fewer than 90% current Ready
+samples even when stale frames keep 95% of samples
 visible. The headless harness now pre-rolls and executes only through the real
 GPU Adapter; it no longer invokes the CPU raster Viewer in parallel. For every
 fresh output, the Adapter retains the exact submission index and waits until
@@ -941,13 +955,13 @@ contract. It uses real FFmpeg decoder profile/format/rate evidence, the probed
 rational cadence, frame-local decode provenance carried through caches and
 prefetch, the exact Viewer candidate, and a completed headless GPU submission.
 Its Adapter derives a non-overridable minimum frame count from 30 minutes and
-the probed rational cadence, sizes Playback Evidence retention for the complete
-run, pauses transport, completes 50 approximate warm plus 50 exact
+the probed rational cadence, uses Playback Evidence's bounded whole-run
+aggregates, pauses transport, completes 50 approximate warm plus 50 exact
 cross-region seeks through the same GPU presentation path, and then schedules a
 100-seek latest-wins burst. The gate
 requires warm p95 at or below 200 ms, accurate p95 at or below 500 ms, at least
-99 superseded-seek observations, no rejected old terminal delivery, no evidence
-overflow, and zero Broker pending/queued/in-flight residency after the burst.
+99 superseded-seek observations, no rejected old terminal delivery, and zero
+Broker pending/queued/in-flight residency after the burst.
 The report preserves cancellation return-latency evidence separately for
 playback, scrub, and exact-still lanes. Realtime cancellation is not allowed to
 hide a slower deterministic still decoder. In-process FFmpeg sessions now keep

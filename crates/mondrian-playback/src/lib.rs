@@ -862,6 +862,7 @@ impl PlaybackEngine {
             });
             self.clock_master = Some(ClockMaster::AudioDevice);
             self.reanchor_at_phase(observation.observed_at, candidate_ns);
+            self.refresh_frame_demand_if_target_changed(observation.observed_at)?;
             return Ok(self.snapshot());
         };
 
@@ -890,20 +891,13 @@ impl PlaybackEngine {
             last_uncertainty_frames: observation.uncertainty_frames,
         });
         self.clock_master = Some(ClockMaster::AudioDevice);
-        let target_changed = self.active_target_frame != Some(self.position.frame);
-        if target_changed {
-            self.active_target_frame = Some(self.position.frame);
-            self.terminal_delivery = None;
-        }
         if self.position.frame >= self.end_frame {
             self.state = TransportState::Ended;
             self.clock_master = None;
             self.audio_device_anchor = None;
-            if target_changed {
-                self.refresh_untimed_frame_demand()?;
-            }
-        } else if target_changed {
-            self.refresh_frame_demand(observation.observed_at)?;
+            self.refresh_untimed_frame_demand_if_target_changed()?;
+        } else {
+            self.refresh_frame_demand_if_target_changed(observation.observed_at)?;
         }
         Ok(self.snapshot())
     }
@@ -1165,6 +1159,12 @@ impl PlaybackEngine {
             self.reanchor_at_phase(now, phase_ns);
         }
         self.audio_device_anchor = None;
+        if matches!(
+            self.state,
+            TransportState::Playing | TransportState::Recovering
+        ) {
+            self.refresh_frame_demand_if_target_changed(now)?;
+        }
         Ok(())
     }
 
@@ -1453,6 +1453,26 @@ mod tests {
     }
 
     #[test]
+    fn audio_clock_advance_refreshes_the_published_frame_demand() {
+        let mut engine = engine();
+        engine.play(100, ts(0)).unwrap();
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+        engine
+            .observe_audio_device_clock(audio_observation(&engine, 1_000, ts(0)))
+            .unwrap();
+        let previous_sequence = engine.frame_demand().unwrap().sequence;
+
+        let advanced = engine
+            .observe_audio_device_clock(audio_observation(&engine, 2_920, ts(40)))
+            .unwrap();
+        let demand = engine.frame_demand().expect("audio-clock demand");
+
+        assert_eq!(advanced.position.frame, 1);
+        assert_eq!(demand.target, advanced.position);
+        assert_ne!(demand.sequence, previous_sequence);
+    }
+
+    #[test]
     fn audio_clock_natural_end_publishes_an_untimed_final_demand() {
         let mut engine = engine();
         engine.play(1, ts(0)).unwrap();
@@ -1490,6 +1510,24 @@ mod tests {
 
         let continued = engine.tick(ts(90)).unwrap();
         assert_eq!(continued.position.frame, 2);
+    }
+
+    #[test]
+    fn audio_device_loss_refreshes_demand_when_handoff_crosses_a_frame_boundary() {
+        let mut engine = engine();
+        engine.play(100, ts(0)).unwrap();
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+        engine
+            .observe_audio_device_clock(audio_observation(&engine, 1_000, ts(0)))
+            .unwrap();
+        let previous_sequence = engine.frame_demand().unwrap().sequence;
+
+        let handoff = engine.audio_device_lost(ts(80)).unwrap();
+        let demand = engine.frame_demand().expect("handoff demand");
+
+        assert_eq!(handoff.position.frame, 2);
+        assert_eq!(demand.target, handoff.position);
+        assert_ne!(demand.sequence, previous_sequence);
     }
 
     #[test]

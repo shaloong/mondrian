@@ -9,14 +9,14 @@ use std::collections::VecDeque;
 use thiserror::Error;
 
 /// Current serialized Playback Evidence schema.
-pub const PLAYBACK_EVIDENCE_SCHEMA_VERSION: u32 = 1;
+pub const PLAYBACK_EVIDENCE_SCHEMA_VERSION: u32 = 2;
 
 /// Bounded retention policy for one evidence collector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaybackEvidenceConfig {
     /// Maximum detailed events retained in memory.
     pub event_capacity: usize,
-    /// Maximum latency/drift samples retained per metric.
+    /// Maximum deterministic reservoir samples retained per metric.
     pub sample_capacity: usize,
 }
 
@@ -105,15 +105,17 @@ pub struct PlaybackEvidenceEvent {
 /// Stable percentile summary in microseconds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaybackLatencySummary {
-    /// Retained samples contributing to percentiles.
+    /// All observations contributing to the aggregate and exact maximum.
     pub count: u64,
-    /// Nearest-rank 50th percentile.
+    /// Reservoir samples contributing to percentile estimates.
+    pub sampled_count: u64,
+    /// Nearest-rank 50th percentile of the deterministic reservoir.
     pub p50_us: u64,
-    /// Nearest-rank 95th percentile.
+    /// Nearest-rank 95th percentile of the deterministic reservoir.
     pub p95_us: u64,
-    /// Nearest-rank 99th percentile.
+    /// Nearest-rank 99th percentile of the deterministic reservoir.
     pub p99_us: u64,
-    /// Maximum retained sample.
+    /// Exact maximum across all observations, including unretained samples.
     pub max_us: u64,
 }
 
@@ -207,10 +209,8 @@ pub struct PlaybackEvidenceReport {
     pub audio_underrun_recoveries: u64,
     /// Detailed events currently retained.
     pub retained_event_count: usize,
-    /// Old detailed events evicted by the memory budget.
-    pub dropped_event_count: u64,
-    /// Old metric samples evicted by the memory budget.
-    pub dropped_sample_count: u64,
+    /// Old detailed events intentionally evicted by the retention budget.
+    pub evicted_event_count: u64,
     /// Bounded detailed event tail.
     pub events: Vec<PlaybackEvidenceEvent>,
 }
@@ -233,8 +233,7 @@ pub struct PlaybackEvidenceCollector {
     config: PlaybackEvidenceConfig,
     events: VecDeque<PlaybackEvidenceEvent>,
     next_event_sequence: u64,
-    dropped_event_count: u64,
-    dropped_sample_count: u64,
+    evicted_event_count: u64,
     first_epoch: Option<PlaybackEpoch>,
     latest_epoch: Option<PlaybackEpoch>,
     last_observed_at: Option<MonotonicTimestamp>,
@@ -251,12 +250,71 @@ pub struct PlaybackEvidenceCollector {
     active_demand: Option<ActiveDemand>,
     last_demand_identity: Option<FrameDemandIdentity>,
     pending_seek: Option<PendingSeek>,
-    demand_latencies: VecDeque<u64>,
-    warm_seek_latencies: VecDeque<u64>,
-    accurate_seek_latencies: VecDeque<u64>,
-    delivery_clock_drifts: VecDeque<u64>,
+    demand_latencies: BoundedMetric,
+    warm_seek_latencies: BoundedMetric,
+    accurate_seek_latencies: BoundedMetric,
+    delivery_clock_drifts: BoundedMetric,
     audio_underrun_frames: u64,
     audio_underrun_recoveries: u64,
+}
+
+/// Constant-memory metric accumulator with exact population count/maximum and
+/// deterministic whole-run percentile sampling.
+struct BoundedMetric {
+    capacity: usize,
+    samples: Vec<u64>,
+    count: u64,
+    max: u64,
+}
+
+impl BoundedMetric {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            samples: Vec::with_capacity(capacity),
+            count: 0,
+            max: 0,
+        }
+    }
+
+    fn observe(&mut self, sample: u64) {
+        self.count = self.count.saturating_add(1);
+        self.max = self.max.max(sample);
+        if self.samples.len() < self.capacity {
+            self.samples.push(sample);
+            return;
+        }
+
+        // Algorithm R with a stable SplitMix64 draw keeps the reservoir
+        // representative of the complete run without a runtime RNG or growth.
+        let candidate = splitmix64(self.count) % self.count;
+        if candidate < self.capacity as u64 {
+            self.samples[candidate as usize] = sample;
+        }
+    }
+
+    fn summary(&self) -> PlaybackLatencySummary {
+        if self.count == 0 {
+            return PlaybackLatencySummary::default();
+        }
+        let mut sorted = self.samples.clone();
+        sorted.sort_unstable();
+        PlaybackLatencySummary {
+            count: self.count,
+            sampled_count: sorted.len() as u64,
+            p50_us: nearest_rank(&sorted, 50),
+            p95_us: nearest_rank(&sorted, 95),
+            p99_us: nearest_rank(&sorted, 99),
+            max_us: self.max,
+        }
+    }
+}
+
+fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
 }
 
 impl Default for PlaybackEvidenceCollector {
@@ -279,8 +337,7 @@ impl PlaybackEvidenceCollector {
             config,
             events: VecDeque::with_capacity(config.event_capacity),
             next_event_sequence: 1,
-            dropped_event_count: 0,
-            dropped_sample_count: 0,
+            evicted_event_count: 0,
             first_epoch: None,
             latest_epoch: None,
             last_observed_at: None,
@@ -297,10 +354,10 @@ impl PlaybackEvidenceCollector {
             active_demand: None,
             last_demand_identity: None,
             pending_seek: None,
-            demand_latencies: VecDeque::with_capacity(config.sample_capacity),
-            warm_seek_latencies: VecDeque::with_capacity(config.sample_capacity),
-            accurate_seek_latencies: VecDeque::with_capacity(config.sample_capacity),
-            delivery_clock_drifts: VecDeque::with_capacity(config.sample_capacity),
+            demand_latencies: BoundedMetric::new(config.sample_capacity),
+            warm_seek_latencies: BoundedMetric::new(config.sample_capacity),
+            accurate_seek_latencies: BoundedMetric::new(config.sample_capacity),
+            delivery_clock_drifts: BoundedMetric::new(config.sample_capacity),
             audio_underrun_frames: 0,
             audio_underrun_recoveries: 0,
         }
@@ -412,12 +469,7 @@ impl PlaybackEvidenceCollector {
         if let Some(active) = matching_active {
             self.active_demand = None;
             let latency = elapsed_us(observed_at, active.issued_at);
-            push_sample(
-                &mut self.demand_latencies,
-                latency,
-                self.config.sample_capacity,
-                &mut self.dropped_sample_count,
-            );
+            self.demand_latencies.observe(latency);
         }
         if accepted
             && matches!(
@@ -430,25 +482,15 @@ impl PlaybackEvidenceCollector {
                 delivery.target_frame,
                 snapshot.position.time_base,
             );
-            push_sample(
-                &mut self.delivery_clock_drifts,
-                drift_us,
-                self.config.sample_capacity,
-                &mut self.dropped_sample_count,
-            );
+            self.delivery_clock_drifts.observe(drift_us);
             if let Some(seek) = self.pending_seek.filter(|seek| seek.epoch == delivery.epoch) {
                 self.pending_seek = None;
                 let latency = elapsed_us(observed_at, seek.started_at);
-                let samples = match seek.kind {
+                let metric = match seek.kind {
                     PlaybackSeekKind::Warm => &mut self.warm_seek_latencies,
                     PlaybackSeekKind::Accurate => &mut self.accurate_seek_latencies,
                 };
-                push_sample(
-                    samples,
-                    latency,
-                    self.config.sample_capacity,
-                    &mut self.dropped_sample_count,
-                );
+                metric.observe(latency);
                 self.push_event(
                     observed_at,
                     snapshot.epoch,
@@ -497,15 +539,14 @@ impl PlaybackEvidenceCollector {
             clock_residency: self.clock_residency,
             state_residency: self.state_residency,
             deliveries: self.deliveries,
-            demand_latency: summarize(&self.demand_latencies),
-            warm_seek_latency: summarize(&self.warm_seek_latencies),
-            accurate_seek_latency: summarize(&self.accurate_seek_latencies),
-            delivery_clock_drift: summarize(&self.delivery_clock_drifts),
+            demand_latency: self.demand_latencies.summary(),
+            warm_seek_latency: self.warm_seek_latencies.summary(),
+            accurate_seek_latency: self.accurate_seek_latencies.summary(),
+            delivery_clock_drift: self.delivery_clock_drifts.summary(),
             audio_underrun_frames: self.audio_underrun_frames,
             audio_underrun_recoveries: self.audio_underrun_recoveries,
             retained_event_count: self.events.len(),
-            dropped_event_count: self.dropped_event_count,
-            dropped_sample_count: self.dropped_sample_count,
+            evicted_event_count: self.evicted_event_count,
             events: self.events.iter().copied().collect(),
         }
     }
@@ -607,7 +648,7 @@ impl PlaybackEvidenceCollector {
     ) {
         if self.events.len() == self.config.event_capacity {
             self.events.pop_front();
-            self.dropped_event_count = self.dropped_event_count.saturating_add(1);
+            self.evicted_event_count = self.evicted_event_count.saturating_add(1);
         }
         self.events.push_back(PlaybackEvidenceEvent {
             sequence: self.next_event_sequence,
@@ -630,29 +671,6 @@ fn increment_delivery(counts: &mut PlaybackDeliveryCounts, kind: FrameDeliveryKi
         FrameDeliveryKind::Failed => &mut counts.failed,
     };
     *target = target.saturating_add(1);
-}
-
-fn push_sample(samples: &mut VecDeque<u64>, sample: u64, capacity: usize, dropped: &mut u64) {
-    if samples.len() == capacity {
-        samples.pop_front();
-        *dropped = dropped.saturating_add(1);
-    }
-    samples.push_back(sample);
-}
-
-fn summarize(samples: &VecDeque<u64>) -> PlaybackLatencySummary {
-    if samples.is_empty() {
-        return PlaybackLatencySummary::default();
-    }
-    let mut sorted: Vec<_> = samples.iter().copied().collect();
-    sorted.sort_unstable();
-    PlaybackLatencySummary {
-        count: sorted.len() as u64,
-        p50_us: nearest_rank(&sorted, 50),
-        p95_us: nearest_rank(&sorted, 95),
-        p99_us: nearest_rank(&sorted, 99),
-        max_us: sorted.last().copied().unwrap_or(0),
-    }
 }
 
 fn nearest_rank(sorted: &[u64], percentile: usize) -> u64 {
@@ -797,11 +815,26 @@ mod tests {
 
         let report = collector.report();
         assert_eq!(report.retained_event_count, 2);
-        assert!(report.dropped_event_count >= 1);
+        assert!(report.evicted_event_count >= 1);
         assert_eq!(
             collector.observe_snapshot(at(29), playing, None),
             Err(PlaybackEvidenceError::NonMonotonicTimestamp)
         );
+    }
+
+    #[test]
+    fn metric_reservoir_is_bounded_while_population_max_remains_exact() {
+        let mut metric = BoundedMetric::new(16);
+        for sample in 1..=10_000 {
+            metric.observe(sample);
+        }
+
+        let summary = metric.summary();
+        assert_eq!(summary.count, 10_000);
+        assert_eq!(summary.sampled_count, 16);
+        assert_eq!(summary.max_us, 10_000);
+        assert!(summary.p50_us > 0);
+        assert!(summary.p99_us <= summary.max_us);
     }
 
     #[test]

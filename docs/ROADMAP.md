@@ -64,7 +64,7 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 | Undo/Redo | UI 外的时间线命令历史可工作，主要编辑动作有回归测试 | 主要依赖完整 `Sequence` 快照，内存上限、跨序列事务和命令级不变量仍需收敛 | L1- |
 | 素材管理 | 文件夹/Bin 层级、移动/重命名/删除、缩略图、离线提示、单文件/目录重连、代理模式已接入产品 UI | tags/metadata 字段尚未形成检索产品；素材使用位置反查和批量诊断不足 | L1- |
 | 时间线编辑 | 多轨、移动、分割、普通 Trim、Ripple Delete、Insert/Overwrite、Roll/Slip/Slide、跨轨移动、链接片段跟随、锁定、吸附、多选和嵌套序列已有实现与测试 | Lift/Extract、显式 Link/Unlink、Track Targeting、转场 handles、反向/冻结/完整 time remap、VFR/混合帧率边界和复杂 ripple 传播未形成完整验收 | L1- |
-| 播放与缓存 | UI 无关 `PlaybackEngine`、`FrameWorkBroker`、`PreviewFrameStore`、`PlaybackEvidenceCollector`、Headless GPU Adapter，以及播放/拖动/静帧三种访问语义、FFmpeg session/ring/seek index、原子 generation/抢占/取消 disposition、deadline、预取和代理已接入 | 大量时间线渲染/色彩媒体适配仍集中在超大的 `app_ui::preview`；FFmpeg open/seek/I/O interrupt 与外部 still 子进程回收已有实现和单测，但仍缺固定参考机上的真实 4K、30 分钟、频繁 seek、取消延迟和内存平台门禁 | L1-，执行地基较强，产品证据未闭环 |
+| 播放与缓存 | UI 无关 `PlaybackEngine`、`FrameWorkBroker`、`PreviewFrameStore`、Evidence v2、Headless GPU Adapter，以及播放/拖动/静帧三种访问语义、FFmpeg session/ring/seek index、原子 generation/抢占/取消 disposition、deadline、预取和代理已接入；加速 Headless 门禁已证明 30 分钟 48 kHz/29.97、Audio→Synthetic→Audio 连续切换、Frame Demand 一致性和证据内存有界 | 大量时间线渲染/色彩媒体适配仍集中在超大的 `app_ui::preview`；FFmpeg open/seek/I/O interrupt 与外部 still 子进程回收已有实现和单测，但仍缺固定参考机上的真实 4K、真实声卡 30 分钟、频繁 seek、取消延迟和整进程内存平台门禁 | L1-，执行地基较强，产品证据未闭环 |
 | Windows 硬解/低拷贝 | FFmpeg 硬件设备/codec 探测、D3D11 native frame 保留、D3D11→D3D12 导入、NV12/P010 GPU YUV 采样、准入与失败原因已有实现 | 必须以真实 GPU/驱动/素材证明主路径启用、同步正确和长时间稳定；不以 capability probe 或 shader 创建代替实际帧执行 | L0/L1 之间 |
 | 渲染与色彩 | working-space 合成、OCIO CPU/GPU 路径、结构化色彩/显示诊断、golden 测试、预览/导出报告对比、Windows 显示探测和 fail-closed 逻辑较深入 | 仍有 legacy/CPU/读回路径与真实显示 payload 限制；常见 Log/HDR 必须补齐参考样片端到端证明；Windows HDR 监看不能提前宣称稳定 | L1+ 架构，继续符合性收敛 |
 | 效果与动画 | 稳定 `EffectId`、属性路径、`PropertyBag`/`AnimatedProperty`、多种插值、曲线编辑器、效果 DAG、mask、缓存策略和插件式 definition/DSL 已存在 | `PropertyDescriptor` 缺独立稳定 `ParameterId`、单位和完整能力契约；只有部分声明效果生成真实 render op；文字和转场类型尚未接入时间线/渲染主路径 | L0/L1 之间 |
@@ -400,7 +400,8 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 - [ ] Clip gain、pan、fade in/out 已有持久化作者语义和公共执行；补齐产品 UI、细粒度命令/Undo、保存重开与 Golden Project 操作验收。
 - [ ] Track mute 已进入公共执行；实现 transient solo audition、master meter、显式基础 limiter，波形与缩放/代理/relink 后保持正确。
 - [ ] 输入重采样和 channel mapping 有明确策略；unsupported layout 明确降级/拒绝。
-- [ ] 30 分钟 48 kHz 播放达到 underrun 和 A/V drift 门槛。
+- [x] 加速 Headless 30 分钟 48 kHz/29.97 门禁通过：精确最终位置、Audio→Synthetic→Audio 连续切换、零交付时钟漂移、零 underrun recovery，Evidence 固定容量且全程最大值不因淘汰丢失。
+- [ ] 固定参考机真实 CPAL/loopback 30 分钟播放达到无持续 underrun、A/V drift 绝对值 ≤ 20 ms 和整进程内存平台门槛；不得用上述加速门禁替代。
 
 ### 效果、动画、标题与转场
 
