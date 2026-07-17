@@ -92,7 +92,10 @@ impl FrameWorkDeadlineStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameExecutionCancellation {
     /// The Broker is closed and no execution may publish.
-    BrokerClosed,
+    BrokerClosed {
+        /// Elapsed time since the Broker first closed.
+        age: Duration,
+    },
     /// The lease no longer matches the latest generation/binding.
     Superseded {
         /// Elapsed time since the Broker first observed invalidation.
@@ -119,7 +122,7 @@ impl FrameExecutionCancellation {
     /// Return the cancellation request age carried by Broker evidence.
     pub const fn request_age(self) -> Option<Duration> {
         match self {
-            Self::BrokerClosed => None,
+            Self::BrokerClosed { age } => Some(age),
             Self::Superseded { age } => age,
             Self::PrefetchPreemptedByCurrent { request_age }
             | Self::StillPreemptedByRealtimeCurrent { request_age } => Some(request_age),

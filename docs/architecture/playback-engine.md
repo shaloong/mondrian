@@ -39,7 +39,7 @@ the new seams.
 | --- | --- | --- |
 | Playback Engine | session epoch, transport state, timeline anchor, rate/direction, Clock Master selection, priming/recovery, deadlines, drop decisions | decode sessions, GPU resources, audio callback buffers, UI state |
 | Audio Playback Engine | device/stream lifecycle, rendered PCM queue, consumed-sample observation, preroll, underrun/device evidence | timeline transport decisions |
-| Frame Work Broker | bounded semantic admission, queued transport, worker-lane-bound execution leases, latest generation, current/prefetch priority, still preemption, lowered deadlines, completion stamps, cancellation, freshness, and class/priority/lane evidence | codec payload interpretation, Clock Master or transport state |
+| Frame Work Broker | bounded semantic admission, queued transport, worker-lane-bound execution leases, latest generation, current/prefetch priority, still preemption, lowered deadlines, first-close timestamp, completion stamps, cancellation, freshness, and class/priority/lane evidence | codec payload interpretation, Clock Master or transport state |
 | Monotonic Runtime Clock | process-local lifecycle-age, expiration, and evidence timestamp sampling | Playback Session advancement, authored/media time, wall-clock identity |
 | Frame Cancellation Evidence | exact all-run cause/timing aggregates and the shared cancellation acceptance policy | cancellation authority, codec checkpoints, UI presentation |
 | Preview Frame Store | ready/stale/in-flight identity, source revision, color contract, memory budgets | deadline policy or proxy selection |
@@ -847,11 +847,14 @@ Clock Master, Timeline Time, device-consumption clock, or displayed position.
 
 Worker cancellation now crosses that same Interface as one atomic
 `FrameExecutionCancellation` disposition. The media Adapter maps it to report
-vocabulary and combines it only with codec-local shutdown and the separate
+vocabulary and combines it only with the separate
 steady-state prefetch decode budget; absolute Frame Work Deadline comparison is
 not repeated in the App. The Broker evaluates deadline, generation invalidation,
-and preemption together and returns the earliest applicable request instant, so
-one cause cannot hide slower observation of an earlier cause.
+preemption, and closure together and returns the authoritative request age, so
+one cause cannot hide slower observation of an earlier cause. The first close
+records an immutable Broker-clock instant; repeated close cannot renew it.
+App worker-stop flags remain lifecycle signals only and cannot timestamp or
+classify cancellation.
 
 `FrameCancellationEvidenceCollector` is the single aggregation Module after
 that seam. The App media Adapter records one completed observation containing

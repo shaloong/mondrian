@@ -202,8 +202,9 @@ only the remaining queued-plus-in-flight prefetch job budget across the
 evaluated tracks and nested sequences, not enqueue a full new prefetch window
 for each future frame offset.
 The app preview service owns worker thread lifetimes. Service shutdown must be
-non-blocking on the UI/event thread: it sets the shutdown flag, cancels queued
-and in-flight scheduler generations, closes the job queue, and moves worker
+non-blocking on the UI/event thread: it first closes the Frame Work Broker to
+establish the authoritative cancellation instant, sets the timestamp-free local
+stop flag, clears queued/UI generation state, and moves worker
 handles to a background reaper that joins them after FFmpeg exits. A codec,
 filesystem, or driver stall inside a preview worker must not prevent pause,
 window close, or app quit from being processed. Each worker still explicitly
@@ -699,8 +700,11 @@ Decode cancellation crosses the media boundary as a structured Adapter result,
 but its authority and policy do not live in the App. Deadline, generation
 invalidation, and preemption arrive from `FrameWorkBroker` as one atomic
 disposition carrying the earliest applicable monotonic request instant and its
-age. Process shutdown remains a separate media-runtime Adapter concern. FFmpeg
-continues to see only a boolean cooperative predicate. Before sending a worker
+age. Broker closure follows the same rule: the first close instant is immutable
+and `BrokerClosed` carries its age. Process worker-stop/join remains a
+media-runtime Adapter concern, but its boolean flag cannot classify or timestamp
+cancellation. FFmpeg continues to see only a boolean cooperative predicate derived
+from the Broker disposition. Before sending a worker
 result through the App channel, the Adapter stamps completion in the Broker;
 the UI may resolve freshness later but cannot change whether execution met its
 deadline. When the worker returns, the Adapter contributes one

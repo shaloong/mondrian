@@ -826,9 +826,9 @@ impl AppUiPreviewService {
 
     /// Shut down preview workers for application exit.
     pub fn shutdown(&self) {
+        self.jobs.close();
         let already_shutdown = self.shutdown.request();
         self.cancel_interactive_work();
-        self.jobs.close();
         if !already_shutdown {
             self.reap_workers_async();
         }
@@ -7564,36 +7564,15 @@ struct MediaPreviewResult {
 #[derive(Default)]
 struct PreviewShutdownSignal {
     requested: AtomicBool,
-    requested_at: Mutex<Option<Instant>>,
 }
 
 impl PreviewShutdownSignal {
     fn request(&self) -> bool {
-        let mut requested_at =
-            self.requested_at.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let already_requested = self.requested.load(Ordering::Acquire);
-        if !already_requested {
-            *requested_at = Some(Instant::now());
-            self.requested.store(true, Ordering::Release);
-        }
-        already_requested
+        self.requested.swap(true, Ordering::AcqRel)
     }
 
     fn is_requested(&self) -> bool {
         self.requested.load(Ordering::Acquire)
-    }
-
-    fn request_age(&self) -> Option<Duration> {
-        if !self.is_requested() {
-            return None;
-        }
-        let requested_at = self
-            .requested_at
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_ref()
-            .copied()?;
-        Some(Instant::now().saturating_duration_since(requested_at))
     }
 }
 
@@ -9412,6 +9391,9 @@ fn media_preview_worker(
             MediaPreviewJobQueueReceive::Job(job) => job,
             MediaPreviewJobQueueReceive::DroppedExpired(job) => {
                 if shutdown.is_requested() {
+                    if let Some(execution_id) = job.execution_id {
+                        scheduler.abandon_execution(execution_id);
+                    }
                     break;
                 }
                 let queue_wait_us = app_duration_us(job.enqueued_at.elapsed());
@@ -9476,14 +9458,12 @@ fn media_preview_worker(
         let cancel_access_mode = job.access_mode;
         let cancel_deadline_at = job.deadline_at;
         let cancel_scheduler = scheduler.clone();
-        let cancel_shutdown = Arc::clone(&shutdown);
         let decode_started_at = Instant::now();
         let cancel_observation = Arc::new(Mutex::new(MediaPreviewCancelObservation::default()));
         let worker_cancel_observation = Arc::clone(&cancel_observation);
         let mut result = decode_media_preview(job, queue_wait_us, move || {
             let scheduler_cancellation = cancel_scheduler.execution_cancellation(execution_id);
             let reason = media_preview_cancel_reason_at_checkpoint(
-                cancel_shutdown.is_requested(),
                 scheduler_cancellation,
                 cancel_priority,
                 cancel_access_mode,
@@ -9502,7 +9482,6 @@ fn media_preview_worker(
                         media_preview_cancel_request_to_observed_us(
                             reason,
                             scheduler_cancellation,
-                            &cancel_shutdown,
                             decode_started_at,
                             observed_at,
                         );
@@ -9567,7 +9546,7 @@ fn media_preview_scheduler_cancel_reason(
     access_mode: PreviewDecodeAccessMode,
 ) -> MediaPreviewCancelReason {
     match cancellation {
-        mondrian_playback::FrameExecutionCancellation::BrokerClosed => {
+        mondrian_playback::FrameExecutionCancellation::BrokerClosed { .. } => {
             MediaPreviewCancelReason::Shutdown
         }
         mondrian_playback::FrameExecutionCancellation::Superseded { .. } => {
@@ -9592,7 +9571,6 @@ fn media_preview_scheduler_cancel_reason(
 }
 
 fn media_preview_cancel_reason_at_checkpoint(
-    shutdown: bool,
     scheduler_cancellation: Option<mondrian_playback::FrameExecutionCancellation>,
     priority: MediaPreviewRequestPriority,
     access_mode: PreviewDecodeAccessMode,
@@ -9600,7 +9578,6 @@ fn media_preview_cancel_reason_at_checkpoint(
     deadline_at: Option<Instant>,
 ) -> Option<MediaPreviewCancelReason> {
     media_preview_cancel_reason(
-        shutdown,
         scheduler_cancellation,
         priority,
         access_mode,
@@ -9610,16 +9587,12 @@ fn media_preview_cancel_reason_at_checkpoint(
 }
 
 fn media_preview_cancel_reason(
-    shutdown: bool,
     scheduler_cancellation: Option<mondrian_playback::FrameExecutionCancellation>,
     priority: MediaPreviewRequestPriority,
     access_mode: PreviewDecodeAccessMode,
     elapsed: Duration,
     broker_deadline_present: bool,
 ) -> Option<MediaPreviewCancelReason> {
-    if shutdown {
-        return Some(MediaPreviewCancelReason::Shutdown);
-    }
     if let Some(cancellation) = scheduler_cancellation {
         return Some(media_preview_scheduler_cancel_reason(
             cancellation,
@@ -9640,13 +9613,12 @@ fn media_preview_cancel_reason(
 fn media_preview_cancel_request_to_observed_us(
     reason: MediaPreviewCancelReason,
     scheduler_cancellation: Option<mondrian_playback::FrameExecutionCancellation>,
-    shutdown: &PreviewShutdownSignal,
     decode_started_at: Instant,
     observed_at: Instant,
 ) -> Option<u64> {
     let age = match reason {
-        MediaPreviewCancelReason::Shutdown => shutdown.request_age(),
-        MediaPreviewCancelReason::Obsolete
+        MediaPreviewCancelReason::Shutdown
+        | MediaPreviewCancelReason::Obsolete
         | MediaPreviewCancelReason::PrefetchPreemptedByCurrent
         | MediaPreviewCancelReason::StillPreemptedByRealtimeCurrent
         | MediaPreviewCancelReason::PlaybackDeadline => {
@@ -16614,7 +16586,6 @@ mod tests {
         assert!(service.scheduler.has_pending_key(&scrub_key));
         assert_eq!(
             media_preview_cancel_reason(
-                false,
                 service.scheduler.execution_cancellation(still_execution),
                 MediaPreviewRequestPriority::Current,
                 PreviewDecodeAccessMode::RandomAccessStillFrame,
@@ -18838,7 +18809,6 @@ mod tests {
     fn media_preview_decode_cancellation_keeps_current_frame_unbudgeted() {
         assert_eq!(
             media_preview_cancel_reason(
-                false,
                 None,
                 MediaPreviewRequestPriority::Current,
                 PreviewDecodeAccessMode::ScrubCursor,
@@ -18853,8 +18823,11 @@ mod tests {
     fn media_preview_decode_cancellation_reports_shutdown() {
         assert_eq!(
             media_preview_cancel_reason(
-                true,
-                None,
+                Some(
+                    mondrian_playback::FrameExecutionCancellation::BrokerClosed {
+                        age: Duration::ZERO,
+                    }
+                ),
                 MediaPreviewRequestPriority::Current,
                 PreviewDecodeAccessMode::ScrubCursor,
                 Duration::ZERO,
@@ -18865,15 +18838,54 @@ mod tests {
     }
 
     #[test]
-    fn preview_shutdown_signal_preserves_external_request_timestamp() {
+    fn preview_shutdown_signal_is_idempotent_without_timing_authority() {
         let shutdown = PreviewShutdownSignal::default();
         assert!(!shutdown.is_requested());
-        assert_eq!(shutdown.request_age(), None);
 
         assert!(!shutdown.request());
         assert!(shutdown.is_requested());
-        assert!(shutdown.request_age().is_some());
         assert!(shutdown.request());
+    }
+
+    #[test]
+    fn media_preview_shutdown_observation_uses_broker_close_timestamp() {
+        let scheduler = MediaPreviewScheduler::with_max_pending(1);
+        let (sender, receiver) = scheduler.job_queue();
+        let generation = scheduler.begin_generation();
+        assert!(matches!(
+            scheduler.request(
+                test_media_key(500),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::PlaybackCursor,
+            ),
+            MediaPreviewRequestStatus::Scheduled { .. }
+        ));
+        let execution_id = receiver
+            .recv_for_worker(MediaPreviewWorkerLane::Playback)
+            .and_then(|job| job.execution_id)
+            .expect("worker execution lease");
+
+        sender.close();
+        let scheduler_cancellation = scheduler.execution_cancellation(execution_id);
+        assert!(matches!(
+            scheduler_cancellation,
+            Some(mondrian_playback::FrameExecutionCancellation::BrokerClosed { .. })
+        ));
+        let observed_at = Instant::now();
+        let latency = media_preview_cancel_request_to_observed_us(
+            MediaPreviewCancelReason::Shutdown,
+            scheduler_cancellation,
+            observed_at,
+            observed_at,
+        );
+
+        assert_eq!(
+            latency,
+            scheduler_cancellation
+                .and_then(mondrian_playback::FrameExecutionCancellation::request_age)
+                .map(app_duration_us)
+        );
     }
 
     #[test]
@@ -18897,12 +18909,10 @@ mod tests {
 
         scheduler.begin_generation();
         let scheduler_cancellation = scheduler.execution_cancellation(execution_id);
-        let shutdown = PreviewShutdownSignal::default();
         let observed_at = Instant::now();
         let latency = media_preview_cancel_request_to_observed_us(
             MediaPreviewCancelReason::Obsolete,
             scheduler_cancellation,
-            &shutdown,
             observed_at,
             observed_at,
         );
@@ -18938,12 +18948,10 @@ mod tests {
             MediaPreviewRequestStatus::Scheduled { .. }
         ));
         let scheduler_cancellation = scheduler.execution_cancellation(execution_id);
-        let shutdown = PreviewShutdownSignal::default();
         let observed_at = Instant::now();
         let latency = media_preview_cancel_request_to_observed_us(
             MediaPreviewCancelReason::StillPreemptedByRealtimeCurrent,
             scheduler_cancellation,
-            &shutdown,
             observed_at,
             observed_at,
         );
@@ -18978,7 +18986,6 @@ mod tests {
     fn media_preview_decode_cancellation_budgets_prefetch_work() {
         assert_eq!(
             media_preview_cancel_reason(
-                false,
                 None,
                 MediaPreviewRequestPriority::Prefetch,
                 PreviewDecodeAccessMode::PlaybackCursor,
@@ -18989,7 +18996,6 @@ mod tests {
         );
         assert_eq!(
             media_preview_cancel_reason(
-                false,
                 None,
                 MediaPreviewRequestPriority::Prefetch,
                 PreviewDecodeAccessMode::PlaybackCursor,
@@ -19000,7 +19006,6 @@ mod tests {
         );
         assert_eq!(
             media_preview_cancel_reason(
-                false,
                 None,
                 MediaPreviewRequestPriority::Prefetch,
                 PreviewDecodeAccessMode::ScrubCursor,
@@ -19016,7 +19021,6 @@ mod tests {
         let future_deadline = Instant::now() + Duration::from_millis(500);
         assert_eq!(
             media_preview_cancel_reason_at_checkpoint(
-                false,
                 None,
                 MediaPreviewRequestPriority::Prefetch,
                 PreviewDecodeAccessMode::PlaybackCursor,
@@ -19027,7 +19031,6 @@ mod tests {
         );
         assert_eq!(
             media_preview_cancel_reason_at_checkpoint(
-                false,
                 Some(
                     mondrian_playback::FrameExecutionCancellation::DeadlineExpired {
                         age: Duration::from_millis(1),
@@ -19046,7 +19049,6 @@ mod tests {
     fn media_preview_decode_cancellation_preempts_prefetch_for_current_work() {
         assert_eq!(
             media_preview_cancel_reason(
-                false,
                 Some(
                     mondrian_playback::FrameExecutionCancellation::PrefetchPreemptedByCurrent {
                         request_age: Duration::ZERO,
@@ -19061,7 +19063,6 @@ mod tests {
         );
         assert_eq!(
             media_preview_cancel_reason(
-                false,
                 None,
                 MediaPreviewRequestPriority::Prefetch,
                 PreviewDecodeAccessMode::PlaybackCursor,
@@ -19076,7 +19077,6 @@ mod tests {
     fn media_preview_decode_cancellation_preempts_still_for_realtime_current_work() {
         assert_eq!(
             media_preview_cancel_reason(
-                false,
                 Some(
                     mondrian_playback::FrameExecutionCancellation::StillPreemptedByRealtimeCurrent {
                         request_age: Duration::ZERO,
@@ -19091,7 +19091,6 @@ mod tests {
         );
         assert_eq!(
             media_preview_cancel_reason(
-                false,
                 None,
                 MediaPreviewRequestPriority::Current,
                 PreviewDecodeAccessMode::RandomAccessStillFrame,
@@ -19106,7 +19105,6 @@ mod tests {
     fn media_preview_decode_cancellation_stops_stale_work() {
         assert_eq!(
             media_preview_cancel_reason(
-                false,
                 Some(mondrian_playback::FrameExecutionCancellation::Superseded {
                     age: Some(Duration::ZERO),
                 }),
@@ -19119,7 +19117,6 @@ mod tests {
         );
         assert_eq!(
             media_preview_cancel_reason(
-                false,
                 Some(mondrian_playback::FrameExecutionCancellation::Superseded {
                     age: Some(Duration::ZERO),
                 }),
@@ -19136,7 +19133,6 @@ mod tests {
     fn media_preview_decode_cancellation_drops_late_playback_current_work() {
         assert_eq!(
             media_preview_cancel_reason(
-                false,
                 Some(
                     mondrian_playback::FrameExecutionCancellation::DeadlineExpired {
                         age: Duration::ZERO,
@@ -19151,7 +19147,6 @@ mod tests {
         );
         assert_eq!(
             media_preview_cancel_reason(
-                false,
                 None,
                 MediaPreviewRequestPriority::Current,
                 PreviewDecodeAccessMode::PlaybackCursor,
@@ -19162,7 +19157,6 @@ mod tests {
         );
         assert_eq!(
             media_preview_cancel_reason(
-                false,
                 Some(
                     mondrian_playback::FrameExecutionCancellation::DeadlineExpired {
                         age: Duration::ZERO,

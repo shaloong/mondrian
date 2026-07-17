@@ -278,7 +278,7 @@ struct BrokerState<K, D, P> {
     in_flight: HashMap<FrameExecutionId, InFlightWork<K>>,
     last_observed_at: MonotonicTimestamp,
     clock_regression_active: bool,
-    closed: bool,
+    closed_at: Option<MonotonicTimestamp>,
     metrics: FrameWorkBrokerMetrics,
 }
 
@@ -359,7 +359,7 @@ where
                     in_flight: HashMap::new(),
                     last_observed_at: MonotonicTimestamp::ZERO,
                     clock_regression_active: false,
-                    closed: false,
+                    closed_at: None,
                     metrics: FrameWorkBrokerMetrics::default(),
                 }),
                 changed: Condvar::new(),
@@ -395,7 +395,7 @@ where
     /// Atomically admit, queue, update, or bind one request to in-flight work.
     pub fn submit(&self, mut request: FrameWorkRequest<K, D, P>) -> FrameWorkSubmission<K> {
         let mut state = lock_state(&self.shared.state);
-        if state.closed {
+        if state.closed_at.is_some() {
             return FrameWorkSubmission::Closed;
         }
         if !priority_accepts(request.priority, request.work_class) {
@@ -568,7 +568,7 @@ where
                     FrameWorkReceive::Ready(execution)
                 });
             }
-            if state.closed {
+            if state.closed_at.is_some() {
                 return None;
             }
             state = wait_state(&self.shared.changed, state);
@@ -582,10 +582,12 @@ where
         id: FrameExecutionId,
     ) -> Option<FrameExecutionCancellation> {
         let mut state = lock_state(&self.shared.state);
-        if state.closed {
-            return Some(FrameExecutionCancellation::BrokerClosed);
-        }
         let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
+        if let Some(closed_at) = state.closed_at {
+            return Some(FrameExecutionCancellation::BrokerClosed {
+                age: elapsed_since(now, closed_at),
+            });
+        }
         let Some(execution) = state.in_flight.get(&id) else {
             return Some(FrameExecutionCancellation::Superseded { age: None });
         };
@@ -783,7 +785,9 @@ where
     pub fn close(&self) {
         let mut state = lock_state(&self.shared.state);
         let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
-        state.closed = true;
+        if state.closed_at.is_none() {
+            state.closed_at = Some(now);
+        }
         state.pending.clear();
         state.queue.clear();
         refresh_in_flight_invalidations_locked(&mut state, now);
@@ -897,7 +901,7 @@ where
             skipped_missing: state.metrics.skipped_missing,
             skipped_class_mismatch: state.metrics.skipped_class_mismatch,
             skipped_obsolete: state.metrics.skipped_obsolete,
-            closed: state.closed,
+            closed: state.closed_at.is_some(),
             ..FrameWorkBrokerDiagnostics::default()
         };
         for queued in &state.queue {
@@ -1696,7 +1700,8 @@ mod tests {
 
     #[test]
     fn closing_broker_cancels_every_in_flight_execution() {
-        let broker = FrameWorkBroker::new(2, 2);
+        let clock = ManualRuntimeClock::at(Duration::from_millis(10));
+        let broker = FrameWorkBroker::new_with_clock(2, 2, clock.clone());
         let generation = broker.begin_generation();
         broker.submit(request(1, generation, FrameWorkClass::Playback));
         let execution = match broker.receive(FrameWorkerLane::Playback) {
@@ -1704,11 +1709,20 @@ mod tests {
             other => panic!("unexpected receive: {other:?}"),
         };
 
+        clock.set(Duration::from_millis(20));
         broker.close();
+        clock.set(Duration::from_millis(27));
 
         assert_eq!(
             broker.execution_cancellation(execution.id),
-            Some(FrameExecutionCancellation::BrokerClosed)
+            Some(FrameExecutionCancellation::BrokerClosed { age: Duration::from_millis(7) })
+        );
+
+        clock.set(Duration::from_millis(30));
+        broker.close();
+        assert_eq!(
+            broker.execution_cancellation(execution.id),
+            Some(FrameExecutionCancellation::BrokerClosed { age: Duration::from_millis(10) })
         );
     }
 
