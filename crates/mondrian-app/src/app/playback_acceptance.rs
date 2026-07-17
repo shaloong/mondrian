@@ -154,6 +154,7 @@ pub(crate) struct PreviewProfessionalPlaybackGateReport {
     broker_pending_requests: usize,
     broker_queued_jobs: usize,
     broker_in_flight_jobs: usize,
+    broker_clock_regressions: u64,
     cpu_frame_store_within_budget: bool,
     cpu_frame_store_oversize_rejections: u64,
     cancellation_gate: mondrian_playback::FrameCancellationGateReport,
@@ -345,6 +346,15 @@ pub(crate) fn evaluate_professional_playback(
             "Frame Work Broker structured diagnostics after latest-wins seek burst",
         );
     }
+    if diagnostics.scheduler.clock_regressions > 0 {
+        push_failure(
+            &mut failures,
+            "frame_work_clock_regression",
+            "0 monotonic runtime-clock regressions",
+            diagnostics.scheduler.clock_regressions.to_string(),
+            "Frame Work Broker runtime-clock evidence",
+        );
+    }
     let cpu_frame_store_within_budget = diagnostics.media_cache_reserved_bytes
         <= diagnostics.media_cache_byte_budget
         && diagnostics.pinned_media_frame_bytes <= diagnostics.media_cache_byte_budget
@@ -470,7 +480,7 @@ pub(crate) fn evaluate_professional_playback(
         .saturating_add(playback.hardware_decode_prefer_gpu_requested_frames)
         .saturating_add(playback.hardware_decode_require_gpu_requested_frames);
     PreviewProfessionalPlaybackGateReport {
-        profile: "uhd_hevc_main10_hardware_1x_v1",
+        profile: "uhd_hevc_main10_hardware_1x_v2",
         required_hardware_execution_percent,
         presented_media_layers,
         presented_hardware_layers,
@@ -509,6 +519,7 @@ pub(crate) fn evaluate_professional_playback(
         broker_pending_requests: diagnostics.scheduler.pending_requests,
         broker_queued_jobs: diagnostics.worker_queue.queued_jobs,
         broker_in_flight_jobs: diagnostics.worker_queue.in_flight_jobs,
+        broker_clock_regressions: diagnostics.scheduler.clock_regressions,
         cpu_frame_store_within_budget,
         cpu_frame_store_oversize_rejections,
         cancellation_gate,
@@ -707,6 +718,7 @@ mod tests {
         let mut evidence = mondrian_playback::PlaybackEvidenceCollector::default().report();
         let mut diagnostics = AppUiPreviewDiagnostics::default();
         diagnostics.scheduler.pending_requests = 1;
+        diagnostics.scheduler.clock_regressions = 1;
         diagnostics.worker_queue.queued_jobs = 1;
         diagnostics.worker_queue.in_flight_jobs = 1;
         evidence.observed_duration_us = 10_000_000;
@@ -736,6 +748,7 @@ mod tests {
         assert!(codes.contains(&"latest_wins_seek_coverage_below_minimum"));
         assert!(codes.contains(&"rejected_terminal_delivery_observed"));
         assert!(codes.contains(&"frame_work_not_quiescent"));
+        assert!(codes.contains(&"frame_work_clock_regression"));
     }
 
     #[test]

@@ -40,6 +40,7 @@ the new seams.
 | Playback Engine | session epoch, transport state, timeline anchor, rate/direction, Clock Master selection, priming/recovery, deadlines, drop decisions | decode sessions, GPU resources, audio callback buffers, UI state |
 | Audio Playback Engine | device/stream lifecycle, rendered PCM queue, consumed-sample observation, preroll, underrun/device evidence | timeline transport decisions |
 | Frame Work Broker | bounded semantic admission, queued transport, execution leases, latest generation, current/prefetch priority, still preemption, deadline dequeue, cancellation, completion freshness | codec payload interpretation, Clock Master or transport state |
+| Monotonic Runtime Clock | process-local lifecycle-age, expiration, and evidence timestamp sampling | Playback Session advancement, authored/media time, wall-clock identity |
 | Frame Cancellation Evidence | exact all-run cause/timing aggregates and the shared cancellation acceptance policy | cancellation authority, codec checkpoints, UI presentation |
 | Preview Frame Store | ready/stale/in-flight identity, source revision, color contract, memory budgets | deadline policy or proxy selection |
 | Presentation Adapter | GPU import/composite/display, Viewer handoff, presentation evidence | timeline advancement |
@@ -826,6 +827,17 @@ key/payload plus explicit media-access and wall-deadline Adapter mappings. The
 former `FrameRequestScheduler` and App-local Condvar queue authorities were
 deleted rather than retained as compatibility paths.
 
+Time-sensitive Broker transitions use the `MonotonicRuntimeClock` Interface.
+Production adapts Rust's monotonic `Instant`; Headless tests inject an exact
+manual clock. The Broker samples it under the lifecycle lock exactly once per
+atomic operation, so every mutation in that operation observes one instant and
+concurrent lock-acquisition order cannot manufacture a regression. An Adapter
+must therefore be non-blocking and may not perform I/O or re-enter the Broker.
+If a sample still moves backward, the Broker clamps it to the last observation,
+increments structured regression evidence, and every preview/professional gate
+fails closed. This runtime clock measures lifecycle intervals only: it is not a
+Clock Master, Timeline Time, device-consumption clock, or displayed position.
+
 Worker cancellation now crosses that same Interface as one atomic
 `FrameExecutionCancellation` disposition. The media Adapter maps it to report
 vocabulary and combines it only with codec-local shutdown/decode-budget and
@@ -966,7 +978,8 @@ playback GPU completion p95 exceeds one frame interval, a readback appears, or
 a GPU blocker is reported. Pre-roll pipeline warm-up is reported separately
 and cannot contaminate the steady-playback p95.
 The professional 4K HEVC Main10 gate now has a fail-closed input and execution
-contract. It uses real FFmpeg decoder profile/format/rate evidence, the probed
+contract (`uhd_hevc_main10_hardware_1x_v2`). It uses real FFmpeg decoder
+profile/format/rate evidence, the probed
 rational cadence, frame-local decode provenance carried through caches and
 prefetch, the exact Viewer candidate, and a completed headless GPU submission.
 Its Adapter derives a non-overridable minimum frame count from 30 minutes and
@@ -980,7 +993,9 @@ Broker pending/queued/in-flight residency after the burst.
 The report projects playback-owned cancellation evidence separately for
 Playback, Interactive, and Still work and the professional gate evaluates the
 same shared policy directly. Realtime cancellation is not allowed to hide a
-slower deterministic still decoder. In-process FFmpeg sessions now keep
+slower deterministic still decoder. Any Broker runtime-clock regression also
+fails the gate because clamped timing remains diagnosable but is not valid proof.
+In-process FFmpeg sessions now keep
 the request probe installed as an `AVIOInterruptCB` across open, stream-info,
 seek, and packet I/O; the optional external still backend kills and reaps its
 child while draining both pipes. The product gate therefore evaluates each

@@ -16,6 +16,10 @@ _Avoid_: Playback boolean
 The single authoritative elapsed-media-time source for a running Playback Session.
 _Avoid_: Current video frame, UI timer
 
+**Monotonic Runtime Clock**:
+A process-local nondecreasing elapsed-time source used for lifecycle ages, expiration, and execution evidence. It is never authored/media time and never advances a Playback Session.
+_Avoid_: Clock Master, Timeline Time, wall-clock timestamp, UI event-loop timer
+
 **Frame Demand**:
 A versioned request for the best frame needed at a timeline position before a presentation deadline.
 _Avoid_: Render request, preview refresh
@@ -190,6 +194,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - A **Frame Request Binding** is resolved atomically at completion. If the same semantic frame key is rebound while work is in flight, a reusable result adopts the latest binding; a canceled or incompatible old execution leaves the newer binding pending.
 - Every queued or executing frame request belongs to exactly one **Frame Work Broker** lifecycle. Admission and queue capacity cannot disagree, and only an execution lease or explicit synchronous Adapter completion may resolve its Frame Request Binding.
 - The **Frame Work Broker** derives each execution's cancellation disposition and request age under one lifecycle lock. Adapters may translate that disposition into domain-specific diagnostics, but cannot reconstruct it from separate freshness, competing-work, or timestamp queries.
+- The **Frame Work Broker** samples one **Monotonic Runtime Clock** Adapter exactly once for each atomic lifecycle operation that establishes or compares time. A regressing Adapter sample is clamped to the last observation and recorded as fail-closed evidence; it can never move an age backward or masquerade as valid timing proof.
 - A media **Adapter** contributes execution-start, first-checkpoint, and return timestamps exactly once to **Frame Cancellation Evidence**. The Playback Module alone aggregates causes and work classes and evaluates request-to-checkpoint plus class-specific checkpoint-to-return budgets; UI reports may project this evidence but cannot reinterpret it.
 - Successful decode/cache completion is nonterminal readiness. A CPU or GPU **Presentation Adapter** must complete the exact **Frame Presentation Ticket** only after it has produced a usable Viewer output; the Playback Module compares the real completion timestamp with the ticket deadline and emits `Ready`, `Degraded`, or `Late`. Cancellation/failure paths may terminate earlier without presentation.
 - A Viewer stale lifecycle state does not terminate a **Frame Demand**; only a deadline/policy decision may emit `StaleAvailable`, while an in-flight worker retains the chance to deliver `Ready`.

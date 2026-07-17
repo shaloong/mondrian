@@ -7,11 +7,12 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::{
     FrameDemandIdentity, FrameExecutionCancellation, FrameRequestBinding, FrameRequestCompletion,
-    FrameRequestResolution, FrameWorkClass, FrameWorkPriority,
+    FrameRequestResolution, FrameWorkClass, FrameWorkPriority, MonotonicRuntimeClock,
+    MonotonicTimestamp, SystemMonotonicRuntimeClock,
 };
 
 /// Stable identity for one dequeued execution attempt.
@@ -145,6 +146,8 @@ pub struct ExpiredFrameWork<K, D> {
 pub struct FrameWorkBrokerDiagnostics {
     /// Latest generation observed.
     pub latest_generation: u64,
+    /// Runtime-clock samples that regressed and were clamped to the last observation.
+    pub clock_regressions: u64,
     /// Semantic keys awaiting a terminal resolution.
     pub pending_requests: usize,
     /// Payloads waiting for a worker.
@@ -226,7 +229,7 @@ pub struct FrameWorkBrokerDiagnostics {
 #[derive(Debug, Clone, Copy)]
 struct PendingBinding<D> {
     binding: FrameRequestBinding<D>,
-    requested_at: Instant,
+    requested_at: MonotonicTimestamp,
 }
 
 #[derive(Debug)]
@@ -241,7 +244,7 @@ struct InFlightWork<K> {
     priority: FrameWorkPriority,
     work_class: FrameWorkClass,
     demand_identity: Option<FrameDemandIdentity>,
-    invalidated_at: Option<Instant>,
+    invalidated_at: Option<MonotonicTimestamp>,
 }
 
 struct BrokerState<K, D, P> {
@@ -250,12 +253,14 @@ struct BrokerState<K, D, P> {
     pending: HashMap<K, PendingBinding<D>>,
     queue: VecDeque<QueuedWork<K, D, P>>,
     in_flight: HashMap<FrameExecutionId, InFlightWork<K>>,
+    last_observed_at: MonotonicTimestamp,
     closed: bool,
     metrics: FrameWorkBrokerMetrics,
 }
 
 #[derive(Default)]
 struct FrameWorkBrokerMetrics {
+    clock_regressions: u64,
     dropped_expired_playback_current: u64,
     submitted_queued: u64,
     submitted_updated_queued: u64,
@@ -284,6 +289,7 @@ struct FrameWorkBrokerMetrics {
 struct BrokerShared<K, D, P> {
     state: Mutex<BrokerState<K, D, P>>,
     changed: Condvar,
+    clock: Arc<dyn MonotonicRuntimeClock>,
     max_pending: usize,
     max_queued: usize,
 }
@@ -306,6 +312,18 @@ where
 {
     /// Construct a broker with strict nonzero pending and queued budgets.
     pub fn new(max_pending: usize, max_queued: usize) -> Self {
+        Self::new_with_clock(
+            max_pending,
+            max_queued,
+            SystemMonotonicRuntimeClock::default(),
+        )
+    }
+
+    /// Construct a broker with an explicit production or Headless clock Adapter.
+    pub fn new_with_clock<C>(max_pending: usize, max_queued: usize, clock: C) -> Self
+    where
+        C: MonotonicRuntimeClock,
+    {
         Self {
             shared: Arc::new(BrokerShared {
                 state: Mutex::new(BrokerState {
@@ -314,10 +332,12 @@ where
                     pending: HashMap::new(),
                     queue: VecDeque::new(),
                     in_flight: HashMap::new(),
+                    last_observed_at: MonotonicTimestamp::ZERO,
                     closed: false,
                     metrics: FrameWorkBrokerMetrics::default(),
                 }),
                 changed: Condvar::new(),
+                clock: Arc::new(clock),
                 max_pending: max_pending.max(1),
                 max_queued: max_queued.max(1),
             }),
@@ -327,18 +347,20 @@ where
     /// Begin a new latest-wins generation.
     pub fn begin_generation(&self) -> u64 {
         let mut state = lock_state(&self.shared.state);
+        let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
         state.latest_generation = state.latest_generation.saturating_add(1);
-        refresh_in_flight_invalidations_locked(&mut state, Instant::now());
+        refresh_in_flight_invalidations_locked(&mut state, now);
         state.latest_generation
     }
 
     /// Observe an externally allocated generation and prune older queued bindings.
     pub fn prune_before(&self, generation: u64) -> usize {
         let mut state = lock_state(&self.shared.state);
+        let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
         state.latest_generation = state.latest_generation.max(generation);
         let before = state.queue.len();
         prune_obsolete_locked(&mut state);
-        refresh_in_flight_invalidations_locked(&mut state, Instant::now());
+        refresh_in_flight_invalidations_locked(&mut state, now);
         let pruned = before.saturating_sub(state.queue.len());
         state.metrics.pruned_queued = state.metrics.pruned_queued.saturating_add(pruned as u64);
         pruned
@@ -359,6 +381,7 @@ where
             bump(&mut state.metrics.dropped_obsolete_generation);
             return FrameWorkSubmission::DroppedBackpressure;
         }
+        let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
 
         if let Some(previous) = state.pending.get(&request.key).copied() {
             let previous_binding = previous.binding;
@@ -383,14 +406,14 @@ where
                     PendingBinding {
                         binding,
                         requested_at: if previous_binding != binding {
-                            Instant::now()
+                            now
                         } else {
                             previous.requested_at
                         },
                     },
                 );
                 state.queue[index] = QueuedWork { request };
-                refresh_in_flight_invalidations_locked(&mut state, Instant::now());
+                refresh_in_flight_invalidations_locked(&mut state, now);
                 bump(&mut state.metrics.submitted_updated_queued);
                 if work_class_changed {
                     bump(&mut state.metrics.submitted_work_class_changes);
@@ -409,13 +432,13 @@ where
                     PendingBinding {
                         binding,
                         requested_at: if previous_binding != binding {
-                            Instant::now()
+                            now
                         } else {
                             previous.requested_at
                         },
                     },
                 );
-                refresh_in_flight_invalidations_locked(&mut state, Instant::now());
+                refresh_in_flight_invalidations_locked(&mut state, now);
                 bump(&mut state.metrics.submitted_reused_in_flight);
                 return FrameWorkSubmission::ReusedInFlight;
             }
@@ -428,18 +451,18 @@ where
             let (evicted_prefetch, evicted_still) = apply_eviction(&mut state, eviction);
             state.pending.insert(
                 request.key.clone(),
-                PendingBinding { binding, requested_at: Instant::now() },
+                PendingBinding { binding, requested_at: now },
             );
             bump(&mut state.metrics.submitted_work_class_changes);
             state.queue.push_back(QueuedWork { request });
-            refresh_in_flight_invalidations_locked(&mut state, Instant::now());
+            refresh_in_flight_invalidations_locked(&mut state, now);
             bump(&mut state.metrics.submitted_queued);
             self.shared.changed.notify_all();
             return FrameWorkSubmission::Queued { evicted_prefetch, evicted_still };
         }
 
         prune_obsolete_locked(&mut state);
-        refresh_in_flight_invalidations_locked(&mut state, Instant::now());
+        refresh_in_flight_invalidations_locked(&mut state, now);
         let Some(eviction) = plan_new_admission_eviction(
             &state,
             self.shared.max_pending,
@@ -452,13 +475,10 @@ where
         let (evicted_prefetch, evicted_still) = apply_eviction(&mut state, eviction);
         state.pending.insert(
             request.key.clone(),
-            PendingBinding {
-                binding: binding_for(&request),
-                requested_at: Instant::now(),
-            },
+            PendingBinding { binding: binding_for(&request), requested_at: now },
         );
         state.queue.push_back(QueuedWork { request });
-        refresh_in_flight_invalidations_locked(&mut state, Instant::now());
+        refresh_in_flight_invalidations_locked(&mut state, now);
         bump(&mut state.metrics.submitted_queued);
         self.shared.changed.notify_all();
         FrameWorkSubmission::Queued { evicted_prefetch, evicted_still }
@@ -523,11 +543,11 @@ where
         &self,
         id: FrameExecutionId,
     ) -> Option<FrameExecutionCancellation> {
-        let state = lock_state(&self.shared.state);
+        let mut state = lock_state(&self.shared.state);
         if state.closed {
             return Some(FrameExecutionCancellation::BrokerClosed);
         }
-        let now = Instant::now();
+        let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
         let Some(execution) = state.in_flight.get(&id) else {
             return Some(FrameExecutionCancellation::Superseded { age: None });
         };
@@ -535,20 +555,20 @@ where
             return Some(FrameExecutionCancellation::Superseded {
                 age: execution
                     .invalidated_at
-                    .map(|invalidated_at| now.saturating_duration_since(invalidated_at)),
+                    .map(|invalidated_at| elapsed_since(now, invalidated_at)),
             });
         }
         if execution.priority == FrameWorkPriority::Prefetch {
             if let Some(requested_at) = oldest_other_current_request(&state, execution, false) {
                 return Some(FrameExecutionCancellation::PrefetchPreemptedByCurrent {
-                    request_age: now.saturating_duration_since(requested_at),
+                    request_age: elapsed_since(now, requested_at),
                 });
             }
         } else if execution.work_class == FrameWorkClass::Still {
             if let Some(requested_at) = oldest_other_current_request(&state, execution, true) {
                 return Some(
                     FrameExecutionCancellation::StillPreemptedByRealtimeCurrent {
-                        request_age: now.saturating_duration_since(requested_at),
+                        request_age: elapsed_since(now, requested_at),
                     },
                 );
             }
@@ -569,9 +589,10 @@ where
                 binding: None,
             };
         };
+        let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
         let cause = completion_cause(&state, &execution, reusable);
         let resolution = resolve_locked(&mut state, execution, reusable);
-        refresh_in_flight_invalidations_locked(&mut state, Instant::now());
+        refresh_in_flight_invalidations_locked(&mut state, now);
         record_completion(&mut state.metrics, resolution.completion, cause);
         resolution
     }
@@ -586,6 +607,7 @@ where
         reusable: bool,
     ) -> FrameRequestResolution<D> {
         let mut state = lock_state(&self.shared.state);
+        let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
         let execution = InFlightWork {
             key,
             generation,
@@ -596,7 +618,7 @@ where
         };
         let cause = completion_cause(&state, &execution, reusable);
         let resolution = resolve_locked(&mut state, execution, reusable);
-        refresh_in_flight_invalidations_locked(&mut state, Instant::now());
+        refresh_in_flight_invalidations_locked(&mut state, now);
         record_completion(&mut state.metrics, resolution.completion, cause);
         resolution
     }
@@ -609,13 +631,14 @@ where
     /// Cancel one key across pending and queued state; in-flight leases become stale.
     pub fn cancel_key(&self, key: &K) -> usize {
         let mut state = lock_state(&self.shared.state);
+        let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
         let pending = usize::from(state.pending.remove(key).is_some());
         let before = state.queue.len();
         state.queue.retain(|queued| &queued.request.key != key);
         let queued = before.saturating_sub(state.queue.len());
         state.metrics.canceled_requests =
             state.metrics.canceled_requests.saturating_add(pending as u64);
-        refresh_in_flight_invalidations_locked(&mut state, Instant::now());
+        refresh_in_flight_invalidations_locked(&mut state, now);
         if queued > 0 {
             self.shared.changed.notify_all();
         }
@@ -625,12 +648,13 @@ where
     /// Cancel all pending/queued work and start a new generation.
     pub fn cancel_all(&self) -> (u64, usize) {
         let mut state = lock_state(&self.shared.state);
+        let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
         let canceled = state.pending.len() as u64;
         let queued = state.queue.len();
         state.pending.clear();
         state.queue.clear();
         state.latest_generation = state.latest_generation.saturating_add(1);
-        refresh_in_flight_invalidations_locked(&mut state, Instant::now());
+        refresh_in_flight_invalidations_locked(&mut state, now);
         state.metrics.canceled_requests = state.metrics.canceled_requests.saturating_add(canceled);
         self.shared.changed.notify_all();
         (state.latest_generation, queued)
@@ -639,9 +663,10 @@ where
     /// Remove obsolete pending/queued work under the same lifecycle lock.
     pub fn prune_obsolete(&self) -> usize {
         let mut state = lock_state(&self.shared.state);
+        let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
         let before = state.queue.len();
         prune_obsolete_locked(&mut state);
-        refresh_in_flight_invalidations_locked(&mut state, Instant::now());
+        refresh_in_flight_invalidations_locked(&mut state, now);
         let pruned = before.saturating_sub(state.queue.len());
         state.metrics.pruned_queued = state.metrics.pruned_queued.saturating_add(pruned as u64);
         pruned
@@ -653,7 +678,7 @@ where
         max_age: Duration,
     ) -> Vec<ExpiredFrameWork<K, D>> {
         let mut state = lock_state(&self.shared.state);
-        let now = Instant::now();
+        let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
         let latest = state.latest_generation;
         let expired = state
             .pending
@@ -662,7 +687,7 @@ where
                 pending.binding.priority == FrameWorkPriority::Current
                     && pending.binding.work_class != FrameWorkClass::Still
                     && pending.binding.generation >= latest
-                    && now.saturating_duration_since(pending.requested_at) >= max_age
+                    && elapsed_since(now, pending.requested_at) >= max_age
             })
             .map(|(key, pending)| ExpiredFrameWork { key: key.clone(), binding: pending.binding })
             .collect::<Vec<_>>();
@@ -681,10 +706,11 @@ where
     /// Close the broker, clear pending/queued work, and wake every worker.
     pub fn close(&self) {
         let mut state = lock_state(&self.shared.state);
+        let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
         state.closed = true;
         state.pending.clear();
         state.queue.clear();
-        refresh_in_flight_invalidations_locked(&mut state, Instant::now());
+        refresh_in_flight_invalidations_locked(&mut state, now);
         self.shared.changed.notify_all();
     }
 
@@ -709,8 +735,9 @@ where
         {
             return true;
         }
+        let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
         remove_key_locked(&mut state, key);
-        refresh_in_flight_invalidations_locked(&mut state, Instant::now());
+        refresh_in_flight_invalidations_locked(&mut state, now);
         bump(&mut state.metrics.skipped_obsolete);
         false
     }
@@ -753,8 +780,9 @@ where
         if !eligible {
             return false;
         }
+        let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
         remove_key_locked(&mut state, key);
-        refresh_in_flight_invalidations_locked(&mut state, Instant::now());
+        refresh_in_flight_invalidations_locked(&mut state, now);
         bump(&mut state.metrics.evicted_still);
         true
     }
@@ -767,6 +795,7 @@ where
         let state = lock_state(&self.shared.state);
         let mut diagnostics = FrameWorkBrokerDiagnostics {
             latest_generation: state.latest_generation,
+            clock_regressions: state.metrics.clock_regressions,
             pending_requests: state.pending.len(),
             queued_work: state.queue.len(),
             in_flight_work: state.in_flight.len(),
@@ -1048,7 +1077,7 @@ fn oldest_other_current_request<K, D, P>(
     state: &BrokerState<K, D, P>,
     execution: &InFlightWork<K>,
     realtime_only: bool,
-) -> Option<Instant>
+) -> Option<MonotonicTimestamp>
 where
     K: Eq,
 {
@@ -1065,8 +1094,10 @@ where
         .min()
 }
 
-fn refresh_in_flight_invalidations_locked<K, D, P>(state: &mut BrokerState<K, D, P>, now: Instant)
-where
+fn refresh_in_flight_invalidations_locked<K, D, P>(
+    state: &mut BrokerState<K, D, P>,
+    now: MonotonicTimestamp,
+) where
     K: Eq + Hash,
 {
     let BrokerState { latest_generation, pending, in_flight, .. } = state;
@@ -1238,6 +1269,24 @@ fn bump(value: &mut u64) {
     *value = value.saturating_add(1);
 }
 
+fn observe_now_locked<K, D, P>(
+    clock: &dyn MonotonicRuntimeClock,
+    state: &mut BrokerState<K, D, P>,
+) -> MonotonicTimestamp {
+    let sampled = clock.now();
+    if sampled < state.last_observed_at {
+        bump(&mut state.metrics.clock_regressions);
+        state.last_observed_at
+    } else {
+        state.last_observed_at = sampled;
+        sampled
+    }
+}
+
+fn elapsed_since(now: MonotonicTimestamp, earlier: MonotonicTimestamp) -> Duration {
+    now.duration_since_origin().saturating_sub(earlier.duration_since_origin())
+}
+
 fn lock_state<K, D, P>(
     state: &Mutex<BrokerState<K, D, P>>,
 ) -> MutexGuard<'_, BrokerState<K, D, P>> {
@@ -1254,6 +1303,36 @@ fn wait_state<'a, K, D, P>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[derive(Clone)]
+    struct ManualRuntimeClock {
+        now_nanos: Arc<AtomicU64>,
+    }
+
+    impl ManualRuntimeClock {
+        fn at(duration: Duration) -> Self {
+            Self {
+                now_nanos: Arc::new(AtomicU64::new(duration_nanos(duration))),
+            }
+        }
+
+        fn set(&self, duration: Duration) {
+            self.now_nanos.store(duration_nanos(duration), Ordering::Release);
+        }
+    }
+
+    impl MonotonicRuntimeClock for ManualRuntimeClock {
+        fn now(&self) -> MonotonicTimestamp {
+            MonotonicTimestamp::from_duration(Duration::from_nanos(
+                self.now_nanos.load(Ordering::Acquire),
+            ))
+        }
+    }
+
+    fn duration_nanos(duration: Duration) -> u64 {
+        u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+    }
 
     fn request(
         key: u64,
@@ -1369,6 +1448,49 @@ mod tests {
     }
 
     #[test]
+    fn injected_clock_controls_cancellation_age_and_reports_regression() {
+        let clock = ManualRuntimeClock::at(Duration::from_millis(10));
+        let broker = FrameWorkBroker::new_with_clock(2, 2, clock.clone());
+        let generation = broker.begin_generation();
+        broker.submit(request(1, generation, FrameWorkClass::Playback));
+        let execution = match broker.receive(FrameWorkerLane::Playback, |_| false) {
+            Some(FrameWorkReceive::Ready(execution)) => execution,
+            other => panic!("unexpected receive: {other:?}"),
+        };
+
+        clock.set(Duration::from_millis(20));
+        broker.begin_generation();
+        clock.set(Duration::from_millis(27));
+        assert_eq!(
+            broker.execution_cancellation(execution.id),
+            Some(FrameExecutionCancellation::Superseded { age: Some(Duration::from_millis(7)) })
+        );
+
+        clock.set(Duration::from_millis(25));
+        assert_eq!(
+            broker.execution_cancellation(execution.id),
+            Some(FrameExecutionCancellation::Superseded { age: Some(Duration::from_millis(7)) })
+        );
+        assert_eq!(broker.diagnostics(|_| false).clock_regressions, 1);
+    }
+
+    #[test]
+    fn injected_clock_makes_realtime_expiration_exact() {
+        let clock = ManualRuntimeClock::at(Duration::from_millis(100));
+        let broker = FrameWorkBroker::new_with_clock(2, 2, clock.clone());
+        let generation = broker.begin_generation();
+        broker.submit(request(1, generation, FrameWorkClass::Interactive));
+
+        clock.set(Duration::from_millis(149));
+        assert!(broker.expire_realtime_current_older_than(Duration::from_millis(50)).is_empty());
+        clock.set(Duration::from_millis(150));
+        let expired = broker.expire_realtime_current_older_than(Duration::from_millis(50));
+
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].key, 1);
+    }
+
+    #[test]
     fn closing_broker_cancels_every_in_flight_execution() {
         let broker = FrameWorkBroker::new(2, 2);
         let generation = broker.begin_generation();
@@ -1388,7 +1510,8 @@ mod tests {
 
     #[test]
     fn still_preemption_age_starts_at_competing_request_admission() {
-        let broker = FrameWorkBroker::new(2, 2);
+        let clock = ManualRuntimeClock::at(Duration::from_millis(10));
+        let broker = FrameWorkBroker::new_with_clock(2, 2, clock.clone());
         let generation = broker.begin_generation();
         broker.submit(request(1, generation, FrameWorkClass::Still));
         let execution = match broker.receive(FrameWorkerLane::Still, |_| false) {
@@ -1397,11 +1520,17 @@ mod tests {
         };
         assert_eq!(broker.execution_cancellation(execution.id), None);
 
+        clock.set(Duration::from_millis(30));
         broker.submit(request(2, generation, FrameWorkClass::Playback));
-        assert!(matches!(
+        clock.set(Duration::from_millis(35));
+        assert_eq!(
             broker.execution_cancellation(execution.id),
-            Some(FrameExecutionCancellation::StillPreemptedByRealtimeCurrent { request_age: _ })
-        ));
+            Some(
+                FrameExecutionCancellation::StillPreemptedByRealtimeCurrent {
+                    request_age: Duration::from_millis(5)
+                }
+            )
+        );
     }
 
     #[test]

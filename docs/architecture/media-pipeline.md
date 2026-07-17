@@ -710,6 +710,15 @@ expensive work completed before cancellation was requested is not evidence of
 slow cancellation. This separation keeps authority propagation, codec
 checkpoint placement, and cleanup/return independently diagnosable without
 teaching the media layer UI intent.
+
+The Broker obtains request ages and expiration time from playback's injected
+`MonotonicRuntimeClock`, with one sample per atomic lifecycle operation. The
+media Adapter does not resample or reconstruct those ages. Its remaining
+wall-`Instant` comparison is limited to the opaque absolute worker deadline it
+created for FFmpeg interruption; that Adapter detail neither advances the
+Playback Session nor becomes cancellation-age authority. Broker clock
+regressions are clamped, counted, projected by UI diagnostics, and rejected by
+both decode-performance and professional playback gates.
 Process-global decoded-frame cache hits are capped to the same strict frame-hit
 tolerance for every access mode. Playback performance must come from the
 playback cursor's decoder/session locality, ring buffers, hardware decode, and

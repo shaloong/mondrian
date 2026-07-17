@@ -126,6 +126,8 @@ impl MediaPreviewCompletionStatus {
 pub struct MediaPreviewSchedulerDiagnostics {
     /// Latest render generation observed by the scheduler.
     pub latest_generation: u64,
+    /// Playback runtime-clock regressions rejected by the Frame Work Broker.
+    pub clock_regressions: u64,
     /// Requests currently waiting to decode or complete.
     pub pending_requests: usize,
     /// New requests accepted into the pending set.
@@ -879,6 +881,7 @@ impl MediaPreviewScheduler {
         let state = self.broker.diagnostics(media_preview_deadline_expired);
         MediaPreviewSchedulerDiagnostics {
             latest_generation: state.latest_generation,
+            clock_regressions: state.clock_regressions,
             pending_requests: state.pending_requests,
             scheduled_requests: state.submitted_queued,
             already_pending_requests: state

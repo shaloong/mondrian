@@ -3938,7 +3938,7 @@ pub enum AppUiPreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 28;
+pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 29;
 
 /// Default preview slow-frame budget: one frame should complete in tens of ms.
 pub const APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
@@ -4566,6 +4566,13 @@ pub fn build_preview_decode_performance_report_with_required_access_modes(
             AppUiPreviewDecodePerformanceArea::Scheduling,
             "preview_decode_invalid_access_mode_requests",
             summary.scheduler.dropped_invalid_access_mode_requests,
+            0,
+        );
+        push_decode_max_check(
+            &mut checks,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_broker_clock_regressions",
+            summary.scheduler.clock_regressions,
             0,
         );
 
@@ -6063,6 +6070,18 @@ fn push_preview_decode_root_causes_and_actions(
             ),
             "fix_preview_access_mode_admission",
             "Route speculative media work through PlaybackCursor prefetch only; scrub and still-frame requests must be current-frame work.",
+            AppUiPreviewDecodePerformanceSeverity::Fail,
+        );
+    }
+    if scheduler.clock_regressions > 0 {
+        push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            AppUiPreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_broker_clock_regression",
+            format!("clock_regressions={}", scheduler.clock_regressions),
+            "inspect_preview_monotonic_clock_adapter",
+            "Inspect the Monotonic Runtime Clock Adapter; the Frame Work Broker clamps regressions but cannot accept their timing evidence.",
             AppUiPreviewDecodePerformanceSeverity::Fail,
         );
     }
@@ -13809,6 +13828,35 @@ mod tests {
             .actions
             .iter()
             .any(|action| action.code == "restore_preview_worker_lifecycle"));
+    }
+
+    #[test]
+    fn preview_decode_performance_report_fails_broker_clock_regression() {
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_successes: 1,
+            scheduler: MediaPreviewSchedulerDiagnostics {
+                clock_regressions: 1,
+                ..MediaPreviewSchedulerDiagnostics::default()
+            },
+            ..AppUiPreviewDiagnostics::default()
+        };
+
+        let report = build_preview_decode_performance_report(
+            diagnostics.decode_performance_summary(50_000),
+            "preview-decode-clock-regression-test",
+            50_000,
+        );
+
+        assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+        assert!(report.checks.iter().any(|check| {
+            check.code == "preview_decode_broker_clock_regressions"
+                && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+                && check.observed == 1
+        }));
+        assert!(report.root_causes.iter().any(|root| {
+            root.code == "preview_decode_broker_clock_regression"
+                && root.evidence.contains("clock_regressions=1")
+        }));
     }
 
     #[test]
