@@ -84,6 +84,10 @@ _Avoid_: Audio clock, UI-owned output stream
 One signed integer position on an explicitly identified sample-rate timeline, resolved once from rational timeline time using a declared rounding policy.
 _Avoid_: Floating-point seconds passed between audio render stages, sample index without rate
 
+**Decoded Audio Source Window**:
+One exact interleaved PCM block for a fingerprinted media component on a prepared Audio Render Contract. Runtime hot windows and media LRU windows may differ in size but preserve the same integer sample coordinates.
+_Avoid_: Whole-file PCM as the source Interface, per-sample decoder virtual call, path-only cache identity
+
 **Timeline Time**:
 A normalized exact rational offset interpreted within its owner's declared Authoring Time Domain, independent of frame, sample, or display grids.
 _Avoid_: Frame number as universal time, floating-point seconds, fixed subframe ticks
@@ -235,6 +239,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - Window presentation becomes usable after external-texture registration and ordered submission to the same GPU queue used by the subsequent Viewer draw; it does not claim fence completion. Headless validation credits readiness only after the real GPU submission completes. Both complete the same **Frame Presentation Ticket**, and device capability alone is not execution evidence.
 - **Audio Playback** may offer an Audio Device Clock Master only after stream health, PCM preroll, and media phase satisfy Playback Policy.
 - Every **Audio Sample Position** carries its sample rate. Positions at different rates cannot be compared or subtracted without an explicit resampling Adapter.
+- An **AudioDecodedSource** fills exact interleaved **Decoded Audio Source Windows** and may fail the whole block; it cannot publish a partial shifted block. `mondrian-audio` owns only a small aligned hot window, while the media Adapter owns fingerprinting, decode, weighted LRU residency, and failure memory.
 - Persisted timeline positions, ranges, automation keys, and temporal handles use **Timeline Time** in an explicit **Authoring Time Domain**; video frames and audio samples are derived **Evaluation Grids**, not competing author time systems.
 - **Timeline Time** equality, ordering, arithmetic, and hashing use checked canonical rational semantics; serialized numerator/denominator field order can never define chronology.
 - Timeline Times from different **Authoring Time Domains** cannot be compared or combined until an explicit **Time Transform** maps one domain into the other.

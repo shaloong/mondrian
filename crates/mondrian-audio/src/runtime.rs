@@ -11,12 +11,22 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 const NESTED_SOURCE_CACHE_FRAMES: usize = 4_096;
+const MEDIA_SOURCE_CACHE_FRAMES: usize = 4_096;
 
 /// Consumer-owned decoded PCM exposed at the media/source Adapter Seam.
 pub trait AudioDecodedSource: Send + Sync + 'static {
-    /// Return one sample from the contract's Evaluation Grid.
-    /// Out-of-range frames must produce silence.
-    fn sample(&self, frame: i64, channel: usize) -> f32;
+    /// Fill one exact interleaved block on the prepared contract's Evaluation Grid.
+    ///
+    /// `destination` is pre-zeroed and has exactly `frames * channels` samples.
+    /// Implementations must preserve silence outside the source range and return
+    /// an error rather than publish a partial or shifted block.
+    fn read_interleaved(
+        &self,
+        start_frame: i64,
+        frames: usize,
+        channels: usize,
+        destination: &mut [f32],
+    ) -> Result<(), String>;
 }
 
 /// Resolve stable authoring source identities into decoded PCM.
@@ -85,11 +95,24 @@ impl AudioProgramRuntime {
             let mut entries = BTreeMap::new();
             for contribution in program.contributions() {
                 let source = match contribution.source {
-                    CompiledAudioSource::Media { asset_id, component_id } => RuntimeSource::Media(
-                        resolver.resolve(asset_id, component_id, contract).map_err(|reason| {
-                            AudioRuntimeBuildError::Media { asset_id, component_id, reason }
-                        })?,
-                    ),
+                    CompiledAudioSource::Media { asset_id, component_id } => {
+                        let source = resolver.resolve(asset_id, component_id, contract).map_err(
+                            |reason| AudioRuntimeBuildError::Media {
+                                asset_id,
+                                component_id,
+                                reason,
+                            },
+                        )?;
+                        let cache_frames =
+                            contract.max_block_frames.clamp(1, MEDIA_SOURCE_CACHE_FRAMES);
+                        RuntimeSource::Media(MediaRuntimeSource {
+                            source,
+                            cache_start: i64::MIN,
+                            cache_frames,
+                            cache: vec![0.0; cache_frames * contract.channels],
+                            channels: contract.channels,
+                        })
+                    }
                     CompiledAudioSource::NestedOutput { sequence_id, output_id } => {
                         let child = sequences
                             .iter()
@@ -139,8 +162,16 @@ struct RuntimeSources {
 }
 
 enum RuntimeSource {
-    Media(Arc<dyn AudioDecodedSource>),
+    Media(MediaRuntimeSource),
     Nested(NestedRuntimeSource),
+}
+
+struct MediaRuntimeSource {
+    source: Arc<dyn AudioDecodedSource>,
+    cache_start: i64,
+    cache_frames: usize,
+    cache: Vec<f32>,
+    channels: usize,
 }
 
 struct NestedRuntimeSource {
@@ -165,7 +196,35 @@ impl AudioPcmSource for RuntimeSources {
             AudioExecutionError::SourceUnavailable(format!("component edit {edit}"))
         })?;
         match source {
-            RuntimeSource::Media(source) => Ok(source.sample(source_frame, channel)),
+            RuntimeSource::Media(media) => {
+                let cache_frames_i64 = i64::try_from(media.cache_frames).unwrap_or(i64::MAX);
+                let cache_end = media.cache_start.saturating_add(cache_frames_i64);
+                if source_frame < media.cache_start || source_frame >= cache_end {
+                    media.cache_start =
+                        source_frame.div_euclid(cache_frames_i64).saturating_mul(cache_frames_i64);
+                    media.cache.fill(0.0);
+                    media
+                        .source
+                        .read_interleaved(
+                            media.cache_start,
+                            media.cache_frames,
+                            media.channels,
+                            &mut media.cache,
+                        )
+                        .map_err(AudioExecutionError::SourceUnavailable)?;
+                }
+                let local_frame =
+                    usize::try_from(source_frame - media.cache_start).map_err(|_| {
+                        AudioExecutionError::SourceUnavailable(
+                            "decoded media cache coordinate overflow".to_owned(),
+                        )
+                    })?;
+                Ok(media
+                    .cache
+                    .get(local_frame.saturating_mul(media.channels).saturating_add(channel))
+                    .copied()
+                    .unwrap_or(0.0))
+            }
             RuntimeSource::Nested(nested) => {
                 let cache_end = nested
                     .cache_start

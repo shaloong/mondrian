@@ -3,9 +3,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_queue::ArrayQueue;
 use mondrian_core::{MondrianError, Result};
-use parking_lot::Mutex;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -171,12 +169,6 @@ impl RealtimeAudioOutputTelemetry {
         let elapsed_ns = self.origin.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         self.last_callback_elapsed_ns.store(elapsed_ns, Ordering::Release);
     }
-}
-
-pub struct AudioSourceCache {
-    sample_rate: u32,
-    channels: u8,
-    decoded: Mutex<HashMap<PathBuf, Arc<AudioBuffer>>>,
 }
 
 /// Monotonic cursor used to choose audio render windows; never a Clock Master.
@@ -538,39 +530,6 @@ impl RealtimeAudioOutputHandle {
     }
 }
 
-impl AudioSourceCache {
-    pub fn new(sample_rate: u32, channels: u8) -> Self {
-        Self {
-            sample_rate,
-            channels: channels.max(1),
-            decoded: Mutex::new(HashMap::new()),
-        }
-    }
-
-    pub fn get_or_decode(&self, path: &Path) -> Result<Arc<AudioBuffer>> {
-        if let Some(hit) = self.decoded.lock().get(path).cloned() {
-            return Ok(hit);
-        }
-
-        let decoded = Arc::new(decode_audio_file_with_ffmpeg_cli(
-            path,
-            self.sample_rate,
-            self.channels,
-        )?);
-
-        self.decoded.lock().insert(path.to_path_buf(), Arc::clone(&decoded));
-        Ok(decoded)
-    }
-
-    pub fn cache_entry_count(&self) -> usize {
-        self.decoded.lock().len()
-    }
-
-    pub fn clear(&self) {
-        self.decoded.lock().clear();
-    }
-}
-
 fn build_f32_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -661,7 +620,6 @@ pub fn decode_audio_file_with_ffmpeg_cli(
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn callback_telemetry_accumulates_consumption_and_underrun_without_locking() {
         let telemetry = RealtimeAudioOutputTelemetry::new();

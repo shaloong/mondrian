@@ -1000,6 +1000,17 @@ substitution, synchronous cancellation of queued old work, and rejection of the
 at-most-one executing completion from an invalidated generation.
 Environment variables no longer alter realtime audio watermark semantics.
 
+The product `AudioPcmRenderer` and Export now bind the same block-oriented
+`AudioDecodedSource` Interface. `mondrian-audio` keeps only an aligned
+4,096-frame hot window; `mondrian-media` owns ten-second FFmpeg decode windows
+in a cross-source 128-entry/256 MiB weighted LRU keyed by file fingerprint.
+This removes whole-file PCM residency from playback and makes arbitrary seek
+memory independent of source duration. A manual 2.88-second AAC product-path
+smoke rendered three noncontiguous windows with one decode miss, three reuse
+hits, one 1,105,920-byte resident entry, and zero eviction. This is source-path
+evidence only: persistent cancelable decode Sessions and the physical-device
+30-minute gate remain required.
+
 Audio transport permission is now explicit. Priming renders into the bounded
 queue under `AudioPlaybackMode::Preroll` without enabling consumption;
 Playing/Recovering switches to `Consume` and activates that same generation.

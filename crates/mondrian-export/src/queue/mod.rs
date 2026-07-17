@@ -19,7 +19,7 @@ use mondrian_core::{
     AudioSamplePosition, AudioSampleRate, AudioSampleRounding, AudioSourceComponentId,
     FrameRounding, TimelineTime, WorkingColorSpace, WorkingRgbaF32Frame,
 };
-use mondrian_media::audio::{AudioBuffer, AudioSourceCache};
+use mondrian_media::AudioSourceCache;
 use mondrian_media::{
     decode_preview_frame_cancellable, DecodedVideoRange, DecodedVideoRangeContract,
     PreviewDecodeAccessMode, PreviewDecodeOutcome, PreviewDecodeRequest,
@@ -1813,8 +1813,8 @@ fn render_timeline_audio_to_pcm_f32(
             ));
         }
     };
-    let cache = AudioSourceCache::new(sample_rate, channels);
-    let resolver = ExportAudioMediaResolver { timeline, cache: &cache };
+    let cache = Arc::new(AudioSourceCache::new(sample_rate, channels));
+    let resolver = ExportAudioMediaResolver { timeline, cache: Arc::clone(&cache) };
     let contract = AudioRenderContract {
         sample_rate,
         channels: usize::from(channels),
@@ -1931,7 +1931,7 @@ fn timeline_audio_sample_range(
 
 struct ExportAudioMediaResolver<'a> {
     timeline: &'a TimelineExportInput,
-    cache: &'a AudioSourceCache,
+    cache: Arc<AudioSourceCache>,
 }
 
 impl AudioMediaResolver for ExportAudioMediaResolver<'_> {
@@ -1951,30 +1951,29 @@ impl AudioMediaResolver for ExportAudioMediaResolver<'_> {
             .asset_paths
             .get(&asset_id)
             .ok_or_else(|| format!("Asset {asset_id} has no export source path"))?;
-        let buffer = self.cache.get_or_decode(path.as_path()).map_err(|error| {
+        let source = self.cache.open(path.as_path()).map_err(|error| {
             format!(
-                "failed to decode Asset {asset_id} at {}: {error}",
+                "failed to open bounded audio source Asset {asset_id} at {}: {error}",
                 path.display()
             )
         })?;
-        Ok(Arc::new(ExportDecodedAudioBuffer(buffer)))
+        Ok(Arc::new(ExportDecodedAudioSource(source)))
     }
 }
 
-struct ExportDecodedAudioBuffer(Arc<AudioBuffer>);
+struct ExportDecodedAudioSource(mondrian_media::AudioSourceReader);
 
-impl AudioDecodedSource for ExportDecodedAudioBuffer {
-    fn sample(&self, frame: i64, channel: usize) -> f32 {
-        let Ok(frame) = usize::try_from(frame) else {
-            return 0.0;
-        };
-        let channels = usize::from(self.0.channels);
-        let source_channel = channel.min(channels.saturating_sub(1));
+impl AudioDecodedSource for ExportDecodedAudioSource {
+    fn read_interleaved(
+        &self,
+        start_frame: i64,
+        frames: usize,
+        channels: usize,
+        destination: &mut [f32],
+    ) -> Result<(), String> {
         self.0
-            .samples
-            .get(frame.saturating_mul(channels).saturating_add(source_channel))
-            .copied()
-            .unwrap_or(0.0)
+            .read_interleaved(start_frame, frames, channels, destination)
+            .map_err(|error| error.to_string())
     }
 }
 

@@ -68,7 +68,7 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 | Windows 硬解/低拷贝 | FFmpeg 硬件设备/codec 探测、D3D11/D3D12 native frame 保留、D3D11→D3D12 导入、NV12/P010 GPU YUV 采样、准入与失败原因已有实现；2026-07-18 本地 2.88 秒 4K25 HEVC Main10 HLG 连续播放已取得 60/60 Ready、60/60 D3D12VA P010 原生 GPU 合成、零上传/回读/回退和约 1.8 ms GPU 执行 p95 的真实帧证据；专业门禁已把整进程 Private Commit 稳定窗、绝对上限和 seek 后收敛纳入 v3 合约 | 短素材只证明该参考机上的主路径可执行；仍须以许可/参考 30 分钟素材完整执行连续播放、频繁 seek、取消与整进程内存合约，并补充真实音频设备和多驱动证据，不以本次 smoke 代替专业门禁 | L1- 主路径已实证，长期验收未闭环 |
 | 渲染与色彩 | working-space 合成、OCIO CPU/GPU 路径、结构化色彩/显示诊断、golden 测试、预览/导出报告对比、Windows 显示探测和 fail-closed 逻辑较深入 | 仍有 legacy/CPU/读回路径与真实显示 payload 限制；常见 Log/HDR 必须补齐参考样片端到端证明；Windows HDR 监看不能提前宣称稳定 | L1+ 架构，继续符合性收敛 |
 | 效果与动画 | 稳定 `EffectId`、属性路径、`PropertyBag`/`AnimatedProperty`、多种插值、曲线编辑器、效果 DAG、mask、缓存策略和插件式 definition/DSL 已存在 | `PropertyDescriptor` 缺独立稳定 `ParameterId`、单位和完整能力契约；只有部分声明效果生成真实 render op；文字和转场类型尚未接入时间线/渲染主路径 | L0/L1 之间 |
-| 音频 | Track→Clip 已是 placement SSOT；Clip 持有 Component Edit，Sequence 持有 Processing Scope/Track Channel/Bus/Output/typed Route/Transition；播放与导出已共用 `AudioProgramRuntime`、decoder Adapter、嵌套公共输出、sample-accurate Gain/pan/fade/Transition、无隐式 clipping，并删除旧 flat `AudioMixer`/`tanh` | 真实 VST3/CLAP host、channel layout/组件选流、重采样、通用 PDC/状态重入、send/sidechain、meter/loudness/limiter、完整编辑 UI/undo 命令和长时间同步/负载门禁仍未完成 | L1 主路地基；不宣称 DAW 完成度 |
+| 音频 | Track→Clip 已是 placement SSOT；Clip 持有 Component Edit，Sequence 持有 Processing Scope/Track Channel/Bus/Output/typed Route/Transition；播放与导出已共用 `AudioProgramRuntime`、块式 decoder Adapter、嵌套公共输出、sample-accurate Gain/pan/fade/Transition、无隐式 clipping，并删除旧 flat `AudioMixer`/`tanh`；产品 PCM 源已从整文件无界驻留改为文件指纹 + 10 秒窗口 + 128 项/256 MiB 加权 LRU，Runtime 仅保留 4096 帧热窗 | 当前窗口 miss 仍由专用 render worker 调 FFmpeg CLI，须换成可取消持久 decoder Session/预读；真实 VST3/CLAP host、channel layout/组件选流、重采样、通用 PDC/状态重入、send/sidechain、meter/loudness/limiter、完整编辑 UI/undo 命令和长时间同步/负载门禁仍未完成 | L1 主路地基；不宣称 DAW 完成度 |
 | 导出 | 后台队列、取消、时间线逐帧合成、音频混编、FFmpeg 编码、色彩标签/HDR 元数据约束、结果 probe/校验和诊断已存在 | 产品 UI 主要暴露 H.264 预设；Windows 硬编检测未落地主路径；HEVC Main10、专业中间格式和长项目需真实 roundtrip，不以 enum/FFmpeg 参数单测视为交付 | L1- |
 | 自研 UI | winit/wgpu 产品入口、retained widget、主题 token、事件/焦点/IME、Dock、面板和大量组件测试已建立 | 交互一致性和无障碍仍需真实工作流验证；产品字符串大量硬编码，中英文混用，尚无 message ID/pseudo-locale 基础 | L1-；i18n 为 L0 |
 | 插件 | 内部效果 definition、graph DSL、能力/缓存/失败隔离契约已有 | 尚无稳定外部 ABI、包加载/权限/隔离/兼容矩阵；当前只能称内部扩展接缝 | L0 |
@@ -355,6 +355,7 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 - [ ] 冻结 Frame/Color/Alpha contract，给所有 CPU/GPU/legacy boundary 分配结构化原因和能力状态。
 - [ ] 扩展参数 schema：稳定 ParameterId、精确跨音视频曲线时间、单位、enum/resource 类型、hard/soft range、能力/缓存/颜色域、schema version 与 message ID。
 - [x] Track/Clip placement → Component Edit/Scope → Track/Bus/Program Output、Gain/pan/fade/Transition、headless compiler、recursive nested Runtime 和 reference PCM 已进入 `mondrian-audio`；播放/导出共用 decoder Adapter 和执行语义，旧 flat mixer 已删除。
+- [x] `AudioDecodedSource` 已改为可失败的精确 interleaved block Interface；播放/导出共用文件指纹与 128 项/256 MiB 加权 LRU 的十秒 PCM 窗口，Runtime 仅保留对齐 4096 帧热窗，不再以整文件 PCM 作为产品执行源。
 - [ ] 补齐 channel layout/组件选流/重采样、通用 latency/PDC 与 discontinuity state entry，再实现隔离的 VST3/CLAP host、send/sidechain、meter/loudness 和编辑 UI/命令；callback 实时安全、underrun 与 A/V drift 继续由真实门禁证明。
 
 **验证基础**
@@ -401,6 +402,7 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 - [ ] Clip gain、pan、fade in/out 已有持久化作者语义和公共执行；补齐产品 UI、细粒度命令/Undo、保存重开与 Golden Project 操作验收。
 - [ ] Track mute 已进入公共执行；实现 transient solo audition、master meter、显式基础 limiter，波形与缩放/代理/relink 后保持正确。
 - [ ] 输入重采样和 channel mapping 有明确策略；unsupported layout 明确降级/拒绝。
+- [ ] 将窗口 miss 的 FFmpeg CLI Adapter 换成可合作取消的持久 decoder Session 与有界预读；固定参考机证明 compressed-audio 随机 seek 和窗口边界不会耗尽 460 ms high watermark，且源缓存始终不超过 256 MiB。
 - [x] 加速 Headless 30 分钟 48 kHz/29.97 门禁通过：精确最终位置、Audio→Synthetic→Audio 连续切换、零交付时钟漂移、零 underrun recovery，Evidence 固定容量且全程最大值不因淘汰丢失。
 - [ ] 固定参考机真实 CPAL/loopback 30 分钟播放达到无持续 underrun、A/V drift 绝对值 ≤ 20 ms 和整进程内存平台门槛；不得用上述加速门禁替代。
 

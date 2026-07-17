@@ -24,10 +24,10 @@ use mondrian_effects::{
     EffectNode, EffectNodeExt, EffectType, MaskComponent, MaskId, MaskKeyframe, MaskShape,
 };
 use mondrian_export::queue::RenderQueue;
-use mondrian_media::audio::{AudioBuffer, AudioSourceCache, RealtimeAudioOutputSnapshot};
+use mondrian_media::audio::{AudioBuffer, RealtimeAudioOutputSnapshot};
 use mondrian_media::{
     AudioPcmRenderRequest, AudioPcmRenderer, AudioPlayback, AudioPlaybackEvent, AudioPlaybackMode,
-    AudioPlaybackSnapshot,
+    AudioPlaybackSnapshot, AudioSourceCache, AudioSourceCacheDiagnostics,
 };
 use mondrian_playback::{
     AudioClockObservationGrade, AudioDeviceClockObservation, AudioDeviceClockState, ClockMaster,

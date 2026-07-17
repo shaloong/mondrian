@@ -456,11 +456,23 @@ impl AppState {
         let snapshot = self.audio_playback.snapshot(self.audio_playback_mode());
         let buffered_frames = snapshot.output.map_or(0, |output| output.buffered_frames);
         let buffered_ms = buffered_frames as f64 / self.audio_sample_rate as f64 * 1000.0;
-        let source_cache_entries = self.audio_source_cache.cache_entry_count();
+        let source_cache = self.audio_source_cache.diagnostics();
         format!(
-            "Aud out:{:.0}ms inflight:{} srcCache:{}",
-            buffered_ms, snapshot.in_flight, source_cache_entries
+            "Aud out:{:.0}ms inflight:{} srcCache:{}/{}MiB win:{} missMax:{}ms evict:{} fail:{}",
+            buffered_ms,
+            snapshot.in_flight,
+            source_cache.reserved_bytes / (1024 * 1024),
+            source_cache.byte_budget / (1024 * 1024),
+            source_cache.entries,
+            source_cache.decode_max_duration_us / 1_000,
+            source_cache.evictions,
+            source_cache.decode_failures,
         )
+    }
+
+    /// Return bounded decoded-audio source residency and execution evidence.
+    pub fn audio_source_cache_diagnostics(&self) -> AudioSourceCacheDiagnostics {
+        self.audio_source_cache.diagnostics()
     }
 
     /// Advance playback using the active clock source.

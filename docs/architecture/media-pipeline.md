@@ -24,6 +24,26 @@ interpretation of Frame Deliveries belong to the app Playback Engine described
 in [Playback Engine](playback-engine.md). `mondrian-media` executes bounded
 decode requests and reports facts; it does not pause or advance transport.
 
+## Bounded audio source windows
+
+Playback and Export do not decode complete audio sources into resident memory.
+`AudioSourceCache` opens fingerprinted source readers and supplies exact
+interleaved PCM through aligned ten-second windows. One weighted LRU spans all
+readers at the prepared sample-rate/channel contract: 128 entries, 256 MiB
+payload, and 64 bounded terminal failures. Path + file length + modification
+timestamp is the current source revision boundary. Cache diagnostics expose
+bytes, entry pressure, hits/misses, decode results, oversize windows, and
+evictions; an entry-count-only claim is insufficient.
+
+The current miss Adapter invokes FFmpeg with accurate input seek and a bounded
+duration, then truncates to the exact requested window extent. It may block the
+dedicated audio render worker but never the CPAL callback or UI thread. This is
+the correctness and memory baseline, not the final latency design: persistent
+in-process decoder Sessions, cooperative cancellation, and look-ahead must
+replace the process-per-miss Adapter without changing the media-source block
+contract. The older whole-file helper remains only for waveform/reference
+jobs and is not the playback/export PCM source path.
+
 ## Probe
 
 `MediaInfo::probe(path)` uses FFmpeg format/codec metadata without decoding full

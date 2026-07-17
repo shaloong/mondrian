@@ -4,6 +4,7 @@ use mondrian_audio::{
     AudioRenderContract, AudioRenderRequest,
 };
 use mondrian_core::{AudioSourceComponentId, ProgramOutputId};
+use mondrian_media::AudioSourceReader;
 use parking_lot::Mutex;
 
 const MAX_AUDIO_RENDER_BLOCK_FRAMES: usize = 16_384;
@@ -111,31 +112,30 @@ impl AudioMediaResolver for PlaybackMediaResolver {
             .get_asset(asset_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("Asset {asset_id} is unavailable"))?;
-        let buffer = self.source_cache.get_or_decode(asset.path.as_path()).map_err(|error| {
+        let source = self.source_cache.open(asset.path.as_path()).map_err(|error| {
             format!(
-                "failed to decode {} at {}: {error}",
+                "failed to open bounded audio source {} at {}: {error}",
                 asset.id,
                 asset.path.display()
             )
         })?;
-        Ok(Arc::new(DecodedAudioBuffer(buffer)))
+        Ok(Arc::new(PlaybackDecodedAudioSource(source)))
     }
 }
 
-struct DecodedAudioBuffer(Arc<AudioBuffer>);
+struct PlaybackDecodedAudioSource(AudioSourceReader);
 
-impl AudioDecodedSource for DecodedAudioBuffer {
-    fn sample(&self, frame: i64, channel: usize) -> f32 {
-        let Ok(frame) = usize::try_from(frame) else {
-            return 0.0;
-        };
-        let channels = usize::from(self.0.channels);
-        let source_channel = channel.min(channels.saturating_sub(1));
+impl AudioDecodedSource for PlaybackDecodedAudioSource {
+    fn read_interleaved(
+        &self,
+        start_frame: i64,
+        frames: usize,
+        channels: usize,
+        destination: &mut [f32],
+    ) -> Result<(), String> {
         self.0
-            .samples
-            .get(frame.saturating_mul(channels).saturating_add(source_channel))
-            .copied()
-            .unwrap_or(0.0)
+            .read_interleaved(start_frame, frames, channels, destination)
+            .map_err(|error| error.to_string())
     }
 }
 

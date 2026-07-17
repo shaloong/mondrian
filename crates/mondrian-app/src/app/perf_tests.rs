@@ -1610,6 +1610,94 @@ fn preview_media_external_continuous_playback_smoke() -> anyhow::Result<()> {
 }
 
 #[test]
+#[ignore = "manual bounded product-audio source smoke; requires real external media"]
+fn audio_bounded_source_external_render_smoke() -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("perf lock poisoned");
+    let Some(media_path) =
+        std::env::var_os("MONDRIAN_AUDIO_EXTERNAL_MEDIA_PATH").map(std::path::PathBuf::from)
+    else {
+        eprintln!(
+            "MONDRIAN_PERF_JSON={{\"scenario\":\"audio_bounded_source_external_render\",\"skipped\":\"MONDRIAN_AUDIO_EXTERNAL_MEDIA_PATH not set\"}}"
+        );
+        return Ok(());
+    };
+    let media_info = MediaInfo::probe(&media_path)?;
+    anyhow::ensure!(
+        !media_info.audio_streams.is_empty(),
+        "external bounded-audio smoke source has no audio stream"
+    );
+    let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let root_dir = std::env::temp_dir().join(format!("mondrian_audio_source_smoke_{uniq}"));
+    fs::create_dir_all(&root_dir)?;
+    let result = (|| {
+        let library = AssetLibrary::open(root_dir.join("library"))?;
+        let asset_id = library.upsert_media_file_with_info(&media_path, media_info)?;
+        let mut sequence = Sequence::new("Bounded audio source smoke");
+        let duration = TimelineTime::new(3, 1)?;
+        let track_id = sequence.audio_tracks[0].id;
+        sequence.add_media_audio_clip(
+            track_id,
+            Clip::new(asset_id, TimelineTime::ZERO, duration)?,
+            AudioSourceComponentId::primary(),
+        )?;
+        let cache = Arc::new(AudioSourceCache::new(48_000, 2));
+        let renderer = TimelineAudioPcmRenderer::new(
+            sequence.clone(),
+            vec![sequence],
+            library,
+            Arc::clone(&cache),
+            48_000,
+            2,
+        )?;
+        for start_sample in [0, 24_000, 96_000] {
+            let rendered = renderer.render(AudioPcmRenderRequest {
+                start_sample,
+                frame_count: 2_048,
+                sample_rate: 48_000,
+                channels: 2,
+            })?;
+            anyhow::ensure!(
+                rendered.frame_count() == 2_048,
+                "audio render extent shifted"
+            );
+            anyhow::ensure!(
+                rendered.samples.iter().all(|sample| sample.is_finite()),
+                "audio render produced non-finite PCM"
+            );
+        }
+        let diagnostics = cache.diagnostics();
+        anyhow::ensure!(
+            diagnostics.entries == 1,
+            "unexpected source residency: {diagnostics:?}"
+        );
+        anyhow::ensure!(
+            diagnostics.reserved_bytes <= diagnostics.byte_budget,
+            "audio source cache exceeded byte budget: {diagnostics:?}"
+        );
+        anyhow::ensure!(diagnostics.decode_successes == 1, "{diagnostics:?}");
+        anyhow::ensure!(diagnostics.hits >= 2, "{diagnostics:?}");
+        eprintln!(
+            "MONDRIAN_PERF_JSON={}",
+            serde_json::json!({
+                "scenario": "audio_bounded_source_external_render",
+                "entries": diagnostics.entries,
+                "reserved_bytes": diagnostics.reserved_bytes,
+                "byte_budget": diagnostics.byte_budget,
+                "hits": diagnostics.hits,
+                "misses": diagnostics.misses,
+                "decode_successes": diagnostics.decode_successes,
+                "decode_max_duration_us": diagnostics.decode_max_duration_us,
+                "evictions": diagnostics.evictions,
+                "passed": true,
+            })
+        );
+        Ok(())
+    })();
+    let _ = fs::remove_dir_all(&root_dir);
+    result
+}
+
+#[test]
 #[ignore = "professional 4K HEVC Main10 hardware playback gate; requires real media and GPU"]
 fn preview_media_professional_4k_hevc_main10_hardware_playback_gate() -> anyhow::Result<()> {
     let _guard = perf_lock().lock().expect("perf lock poisoned");

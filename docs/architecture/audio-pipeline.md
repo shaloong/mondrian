@@ -30,7 +30,9 @@ media decode/cache     media decode/cache + file encoder
 
 `mondrian-audio` deliberately does not depend on FFmpeg, CPAL, asset databases,
 UI, or export containers. Consumers implement `AudioMediaResolver` and return
-`AudioDecodedSource` objects on the requested Render Contract. The compiler is
+`AudioDecodedSource` objects on the requested Render Contract. A source fills
+fallible exact interleaved blocks; the Runtime never calls a decoder once per
+sample and never requires whole-file PCM ownership. The compiler is
 therefore testable without hardware or media files, and media/platform code
 cannot acquire authority over Timeline routing.
 
@@ -217,6 +219,26 @@ Each nested instance owns an independent child Session and a
 bounded PCM window cache. The parent cannot inspect child Tracks, Buses, Roles,
 or private Routes.
 
+Media sources use the same block principle. Each bound source has one aligned
+4,096-frame Runtime hot window, so ordinary forward, reverse, and speed-mapped
+sample access crosses the trait boundary once per block rather than once per
+sample. A source failure rejects the entire requested block; Playback may then
+substitute exact-duration silence at its downstream scheduling boundary, while
+Export fails the job. Partial decoded data can never shift later media time.
+
+The current playback and export media Adapter is a shared
+`AudioSourceCache`. It opens a stable source identity from path, byte length,
+and modification timestamp, decodes only aligned ten-second PCM windows, and
+retains them in one cross-source weighted LRU capped at 128 entries and 256 MiB.
+Terminal decode failure memory is separately capped at 64 identities. A new
+file fingerprint cannot reuse old PCM. Negative and post-EOF coordinates are
+silence; arbitrary seeks request the containing window. Resident bytes, hits,
+misses, decodes, failures, oversize windows, and evictions are structured
+diagnostics. The current concrete decoder is an accurate-seek FFmpeg CLI
+Adapter; replacing it with a persistent in-process Session must not alter the
+block Interface, sample coordinates, or cache policy. It runs only on the audio
+render worker, never on the callback or UI thread.
+
 Playback and export both use this Runtime. Their only differences are Render
 Contract mode, scheduling, error handling, and downstream sink:
 
@@ -253,6 +275,8 @@ Clock Master; video presentation is never Clock Master. See
 - Internal summing has no implicit nonlinear operation.
 - Playback and export compile and execute the same Program semantics.
 - Nested instances do not share mutable Session state.
+- Playback and Export media sources are bounded by bytes and source revision;
+  neither may retain whole-file PCM as its execution Interface.
 
 ## Verification already present
 
@@ -266,6 +290,10 @@ Automated tests currently prove:
 - unresolved VST3/CLAP instances fail closed;
 - timeline/audio crates compile and test independently;
 - app playback and export compile against the shared Runtime.
+- decoded-media block reads cross aligned windows exactly, reuse hits, evict by
+  global PCM bytes, and invalidate after file replacement;
+- a manual external AAC parity gate compares arbitrary bounded windows against
+  a sequential reference decode at start, middle, and tail positions.
 
 ## Required depth before professional audio completion
 
@@ -291,6 +319,10 @@ gates rather than implied support:
 7. Add reference PCM fixtures for fades/Transitions/nesting/PDC, long 29.97 and
    59.94 projects, block-size matrices, seek/discontinuity, plugin failure,
    export parity, and reference-machine realtime load/drift gates.
+8. Replace the per-window FFmpeg CLI decoder Adapter with persistent,
+   cooperatively cancelable decoder Sessions plus bounded look-ahead. Prove
+   worst-case window-miss latency under long-GOP/compressed audio and keep
+   source cache bytes inside the same long-run evidence report.
 
 No item may be closed by adding only schema, an effect enum, a disconnected UI,
 or a consumer-specific fallback mixer.

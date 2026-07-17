@@ -10,6 +10,7 @@
 pub mod audio;
 mod audio_output;
 mod audio_playback;
+pub mod audio_source;
 pub mod decoder;
 mod ffmpeg_runtime;
 pub mod info;
@@ -18,16 +19,14 @@ pub mod preview;
 pub mod proxy;
 pub mod waveform;
 
-pub use audio::{
-    AudioBuffer, AudioRenderCursor, AudioSourceCache, RealtimeAudioOutput,
-    RealtimeAudioOutputSnapshot,
-};
+pub use audio::{AudioBuffer, AudioRenderCursor, RealtimeAudioOutput, RealtimeAudioOutputSnapshot};
 pub use audio_output::{RealtimeAudioOutputEvent, RealtimeAudioOutputManager};
 pub use audio_playback::{
     AudioPcmRenderRequest, AudioPcmRenderer, AudioPlayback, AudioPlaybackConfig,
     AudioPlaybackConfigError, AudioPlaybackEvent, AudioPlaybackMode, AudioPlaybackPoll,
     AudioPlaybackSnapshot, AudioPlaybackState,
 };
+pub use audio_source::{AudioSourceCache, AudioSourceCacheDiagnostics, AudioSourceReader};
 pub use decoder::{
     resolve_decoded_video_range, DecodedFrameResidency, DecodedGpuFrameHandleKind,
     DecodedVideoChromaLocation, DecodedVideoMatrix, DecodedVideoRange, DecodedVideoRangeContract,

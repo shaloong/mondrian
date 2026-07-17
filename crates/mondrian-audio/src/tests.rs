@@ -27,8 +27,21 @@ impl AudioPcmSource for RampSource {
 struct RampDecodedSource;
 
 impl AudioDecodedSource for RampDecodedSource {
-    fn sample(&self, frame: i64, _channel: usize) -> f32 {
-        frame.max(0) as f32 + 1.0
+    fn read_interleaved(
+        &self,
+        start_frame: i64,
+        frames: usize,
+        channels: usize,
+        destination: &mut [f32],
+    ) -> Result<(), String> {
+        if destination.len() != frames.saturating_mul(channels) {
+            return Err("invalid destination extent".to_owned());
+        }
+        for frame in 0..frames {
+            let value = start_frame.saturating_add(frame as i64).max(0) as f32 + 1.0;
+            destination[frame * channels..(frame + 1) * channels].fill(value);
+        }
+        Ok(())
     }
 }
 
