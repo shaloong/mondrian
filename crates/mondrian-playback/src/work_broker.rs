@@ -10,8 +10,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::{
-    FrameDemandIdentity, FrameRequestBinding, FrameRequestCompletion, FrameRequestResolution,
-    FrameWorkClass, FrameWorkPriority,
+    FrameDemandIdentity, FrameExecutionCancellation, FrameRequestBinding, FrameRequestCompletion,
+    FrameRequestResolution, FrameWorkClass, FrameWorkPriority,
 };
 
 /// Stable identity for one dequeued execution attempt.
@@ -517,56 +517,43 @@ where
         }
     }
 
-    /// Return whether an execution lease remains compatible with latest work.
-    pub fn execution_current(&self, id: FrameExecutionId) -> bool {
-        let state = lock_state(&self.shared.state);
-        let Some(execution) = state.in_flight.get(&id) else {
-            return false;
-        };
-        execution_current_locked(state.latest_generation, &state.pending, execution)
-    }
-
-    /// Return elapsed time since an execution lease became obsolete.
-    pub fn execution_invalidation_age(&self, id: FrameExecutionId) -> Option<Duration> {
-        let state = lock_state(&self.shared.state);
-        let invalidated_at = state.in_flight.get(&id)?.invalidated_at?;
-        Some(Instant::now().saturating_duration_since(invalidated_at))
-    }
-
-    /// Return whether other latest current work is pending.
-    pub fn has_other_current(&self, id: FrameExecutionId, realtime_only: bool) -> bool {
-        let state = lock_state(&self.shared.state);
-        let Some(execution) = state.in_flight.get(&id) else {
-            return false;
-        };
-        state.pending.iter().any(|(key, pending)| {
-            key != &execution.key
-                && pending.binding.priority == FrameWorkPriority::Current
-                && (!realtime_only || pending.binding.work_class != FrameWorkClass::Still)
-                && pending.binding.generation >= state.latest_generation
-        })
-    }
-
-    /// Return the age of the oldest other latest current request visible to an execution.
-    pub fn other_current_request_age(
+    /// Decide atomically whether an execution must stop for lifecycle or
+    /// preemption reasons.
+    pub fn execution_cancellation(
         &self,
         id: FrameExecutionId,
-        realtime_only: bool,
-    ) -> Option<Duration> {
+    ) -> Option<FrameExecutionCancellation> {
         let state = lock_state(&self.shared.state);
-        let execution = state.in_flight.get(&id)?;
-        let requested_at = state
-            .pending
-            .iter()
-            .filter(|(key, pending)| {
-                *key != &execution.key
-                    && pending.binding.priority == FrameWorkPriority::Current
-                    && (!realtime_only || pending.binding.work_class != FrameWorkClass::Still)
-                    && pending.binding.generation >= state.latest_generation
-            })
-            .map(|(_, pending)| pending.requested_at)
-            .min()?;
-        Some(Instant::now().saturating_duration_since(requested_at))
+        if state.closed {
+            return Some(FrameExecutionCancellation::BrokerClosed);
+        }
+        let now = Instant::now();
+        let Some(execution) = state.in_flight.get(&id) else {
+            return Some(FrameExecutionCancellation::Superseded { age: None });
+        };
+        if !execution_current_locked(state.latest_generation, &state.pending, execution) {
+            return Some(FrameExecutionCancellation::Superseded {
+                age: execution
+                    .invalidated_at
+                    .map(|invalidated_at| now.saturating_duration_since(invalidated_at)),
+            });
+        }
+        if execution.priority == FrameWorkPriority::Prefetch {
+            if let Some(requested_at) = oldest_other_current_request(&state, execution, false) {
+                return Some(FrameExecutionCancellation::PrefetchPreemptedByCurrent {
+                    request_age: now.saturating_duration_since(requested_at),
+                });
+            }
+        } else if execution.work_class == FrameWorkClass::Still {
+            if let Some(requested_at) = oldest_other_current_request(&state, execution, true) {
+                return Some(
+                    FrameExecutionCancellation::StillPreemptedByRealtimeCurrent {
+                        request_age: now.saturating_duration_since(requested_at),
+                    },
+                );
+            }
+        }
+        None
     }
 
     /// Resolve one execution lease atomically against the latest binding.
@@ -1057,6 +1044,27 @@ where
     })
 }
 
+fn oldest_other_current_request<K, D, P>(
+    state: &BrokerState<K, D, P>,
+    execution: &InFlightWork<K>,
+    realtime_only: bool,
+) -> Option<Instant>
+where
+    K: Eq,
+{
+    state
+        .pending
+        .iter()
+        .filter(|(key, pending)| {
+            *key != &execution.key
+                && pending.binding.priority == FrameWorkPriority::Current
+                && (!realtime_only || pending.binding.work_class != FrameWorkClass::Still)
+                && pending.binding.generation >= state.latest_generation
+        })
+        .map(|(_, pending)| pending.requested_at)
+        .min()
+}
+
 fn refresh_in_flight_invalidations_locked<K, D, P>(state: &mut BrokerState<K, D, P>, now: Instant)
 where
     K: Eq + Hash,
@@ -1275,7 +1283,7 @@ mod tests {
             Some(FrameWorkReceive::Ready(execution)) => execution,
             other => panic!("unexpected receive: {other:?}"),
         };
-        assert!(broker.execution_current(execution.id));
+        assert_eq!(broker.execution_cancellation(execution.id), None);
         let resolution = broker.resolve_execution(execution.id, true);
         assert_eq!(resolution.completion, FrameRequestCompletion::Current);
         let diagnostics = broker.diagnostics(|_| false);
@@ -1332,7 +1340,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_invalidation_age_tracks_obsolescence_and_rebinding() {
+    fn execution_cancellation_tracks_obsolescence_and_rebinding() {
         let broker = FrameWorkBroker::new(2, 2);
         let first = broker.begin_generation();
         broker.submit(request(1, first, FrameWorkClass::Playback));
@@ -1340,22 +1348,46 @@ mod tests {
             Some(FrameWorkReceive::Ready(execution)) => execution,
             other => panic!("unexpected receive: {other:?}"),
         };
-        assert_eq!(broker.execution_invalidation_age(execution.id), None);
+        assert_eq!(broker.execution_cancellation(execution.id), None);
 
         let latest = broker.begin_generation();
-        assert!(broker.execution_invalidation_age(execution.id).is_some());
+        assert!(matches!(
+            broker.execution_cancellation(execution.id),
+            Some(FrameExecutionCancellation::Superseded { age: Some(_) })
+        ));
         assert_eq!(
             broker.submit(request(1, latest, FrameWorkClass::Playback)),
             FrameWorkSubmission::ReusedInFlight
         );
-        assert_eq!(broker.execution_invalidation_age(execution.id), None);
+        assert_eq!(broker.execution_cancellation(execution.id), None);
 
         broker.cancel_all();
-        assert!(broker.execution_invalidation_age(execution.id).is_some());
+        assert!(matches!(
+            broker.execution_cancellation(execution.id),
+            Some(FrameExecutionCancellation::Superseded { age: Some(_) })
+        ));
     }
 
     #[test]
-    fn other_current_request_age_starts_at_competing_request_admission() {
+    fn closing_broker_cancels_every_in_flight_execution() {
+        let broker = FrameWorkBroker::new(2, 2);
+        let generation = broker.begin_generation();
+        broker.submit(request(1, generation, FrameWorkClass::Playback));
+        let execution = match broker.receive(FrameWorkerLane::Playback, |_| false) {
+            Some(FrameWorkReceive::Ready(execution)) => execution,
+            other => panic!("unexpected receive: {other:?}"),
+        };
+
+        broker.close();
+
+        assert_eq!(
+            broker.execution_cancellation(execution.id),
+            Some(FrameExecutionCancellation::BrokerClosed)
+        );
+    }
+
+    #[test]
+    fn still_preemption_age_starts_at_competing_request_admission() {
         let broker = FrameWorkBroker::new(2, 2);
         let generation = broker.begin_generation();
         broker.submit(request(1, generation, FrameWorkClass::Still));
@@ -1363,10 +1395,13 @@ mod tests {
             Some(FrameWorkReceive::Ready(execution)) => execution,
             other => panic!("unexpected receive: {other:?}"),
         };
-        assert_eq!(broker.other_current_request_age(execution.id, true), None);
+        assert_eq!(broker.execution_cancellation(execution.id), None);
 
         broker.submit(request(2, generation, FrameWorkClass::Playback));
-        assert!(broker.other_current_request_age(execution.id, true).is_some());
+        assert!(matches!(
+            broker.execution_cancellation(execution.id),
+            Some(FrameExecutionCancellation::StillPreemptedByRealtimeCurrent { request_age: _ })
+        ));
     }
 
     #[test]
@@ -1407,7 +1442,10 @@ mod tests {
             broker.submit(request(1, generation, FrameWorkClass::Playback)),
             FrameWorkSubmission::Queued { .. }
         ));
-        assert!(!broker.execution_current(old.id));
+        assert!(matches!(
+            broker.execution_cancellation(old.id),
+            Some(FrameExecutionCancellation::Superseded { .. })
+        ));
         assert_eq!(
             broker.resolve_execution(old.id, true).completion,
             FrameRequestCompletion::CacheOnly
@@ -1484,7 +1522,10 @@ mod tests {
         );
         assert!(broker.has_pending_key(&1));
         assert!(broker.has_pending_key(&2));
-        assert!(broker.execution_current(prefetch_execution.id));
+        assert!(matches!(
+            broker.execution_cancellation(prefetch_execution.id),
+            Some(FrameExecutionCancellation::PrefetchPreemptedByCurrent { .. })
+        ));
         let queued = match broker.receive(FrameWorkerLane::Playback, |_| false) {
             Some(FrameWorkReceive::Ready(execution)) => execution,
             other => panic!("unexpected receive: {other:?}"),
@@ -1528,7 +1569,7 @@ mod tests {
             broker.submit(request(1, generation, FrameWorkClass::Interactive)),
             FrameWorkSubmission::DroppedBackpressure
         );
-        assert!(broker.execution_current(original.id));
+        assert_eq!(broker.execution_cancellation(original.id), None);
         assert_eq!(broker.diagnostics(|_| false).pending_requests, 2);
     }
 }

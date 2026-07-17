@@ -18,16 +18,19 @@ use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::ffi::c_void;
+use std::ffi::{c_void, CString};
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::io::{self, Read};
 use std::num::NonZeroU64;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 /// Exact still/playback safety limit for forward decode from a keyframe.
@@ -2031,8 +2034,9 @@ impl FloatRgbaFrame {
 /// future hardware-backed decode selection.
 pub fn decode_preview_frame_cancellable(
     request: PreviewDecodeRequest<'_>,
-    should_cancel: impl Fn() -> bool,
+    should_cancel: impl Fn() -> bool + Send + Sync + 'static,
 ) -> Result<PreviewDecodeOutcome> {
+    let should_cancel: PreviewDecodeCancelProbe = Arc::new(should_cancel);
     decode_preview_frame_outcome(
         request.path,
         request.timestamp_secs,
@@ -2454,6 +2458,9 @@ struct PreviewDecodeSession {
     source_color: PreviewSourceColorContract,
     codec_id: ffmpeg::codec::Id,
     input: ffmpeg::format::context::Input,
+    // Declared after `input` so the AVFormatContext releases its callback use
+    // before the callback state is dropped.
+    interrupt_state: Arc<PreviewDecodeInterruptState>,
     decoder: ffmpeg::decoder::Video,
     scaler: Option<ffmpeg::software::scaling::Context>,
     scaler_source_format: Option<ffmpeg::util::format::pixel::Pixel>,
@@ -2472,6 +2479,57 @@ struct PreviewDecodeSession {
     reached_eof: bool,
     playback_ring: PreviewPlaybackRing,
     seek_index: PreviewSeekIndex,
+}
+
+type PreviewDecodeCancelProbe = Arc<dyn Fn() -> bool + Send + Sync>;
+
+struct PreviewDecodeInterruptState {
+    active_probe: Mutex<Option<PreviewDecodeCancelProbe>>,
+}
+
+impl PreviewDecodeInterruptState {
+    fn new() -> Self {
+        Self { active_probe: Mutex::new(None) }
+    }
+
+    fn install(self: &Arc<Self>, probe: PreviewDecodeCancelProbe) -> PreviewDecodeInterruptGuard {
+        match self.active_probe.lock() {
+            Ok(mut active_probe) => *active_probe = Some(probe),
+            Err(poisoned) => *poisoned.into_inner() = Some(probe),
+        }
+        PreviewDecodeInterruptGuard { state: Arc::clone(self) }
+    }
+
+    fn should_cancel(&self) -> bool {
+        let probe = match self.active_probe.lock() {
+            Ok(active_probe) => active_probe.clone(),
+            Err(_) => return true,
+        };
+        probe.is_some_and(|probe| panic::catch_unwind(AssertUnwindSafe(|| probe())).unwrap_or(true))
+    }
+}
+
+struct PreviewDecodeInterruptGuard {
+    state: Arc<PreviewDecodeInterruptState>,
+}
+
+impl Drop for PreviewDecodeInterruptGuard {
+    fn drop(&mut self) {
+        match self.state.active_probe.lock() {
+            Ok(mut active_probe) => *active_probe = None,
+            Err(poisoned) => *poisoned.into_inner() = None,
+        }
+    }
+}
+
+unsafe extern "C" fn preview_decode_interrupt_callback(opaque: *mut c_void) -> i32 {
+    if opaque.is_null() {
+        return 1;
+    }
+    // SAFETY: every session owns the Arc allocation referenced by the format
+    // context until after the input context is dropped.
+    let state = unsafe { &*(opaque.cast::<PreviewDecodeInterruptState>()) };
+    i32::from(state.should_cancel())
 }
 
 struct PreviewDecodeForwardResult {
@@ -3025,6 +3083,63 @@ fn preview_create_rgba_scaler(
     })
 }
 
+fn open_preview_input(
+    path: &Path,
+    interrupt_state: &Arc<PreviewDecodeInterruptState>,
+) -> Result<ffmpeg::format::context::Input> {
+    let path_string = path.to_string_lossy();
+    let path_c =
+        CString::new(path_string.as_bytes()).map_err(|error| MondrianError::MediaOpen {
+            path: path.display().to_string(),
+            reason: format!("media path contains an interior NUL byte: {error}"),
+        })?;
+
+    // SAFETY: the allocated context is either transferred into the safe
+    // ffmpeg-next Input wrapper or closed on every error path. The callback
+    // opaque pointer targets an Arc allocation owned by the resulting session.
+    unsafe {
+        let mut input = ffmpeg::ffi::avformat_alloc_context();
+        if input.is_null() {
+            return Err(MondrianError::MediaOpen {
+                path: path.display().to_string(),
+                reason: "FFmpeg could not allocate an input context".to_string(),
+            });
+        }
+        (*input).interrupt_callback = ffmpeg::ffi::AVIOInterruptCB {
+            callback: Some(preview_decode_interrupt_callback),
+            opaque: Arc::as_ptr(interrupt_state).cast_mut().cast(),
+        };
+
+        let open_result = ffmpeg::ffi::avformat_open_input(
+            &mut input,
+            path_c.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        if open_result < 0 {
+            if !input.is_null() {
+                ffmpeg::ffi::avformat_close_input(&mut input);
+            }
+            return Err(MondrianError::MediaOpen {
+                path: path.display().to_string(),
+                reason: ffmpeg::Error::from(open_result).to_string(),
+            });
+        }
+
+        let stream_info_result =
+            ffmpeg::ffi::avformat_find_stream_info(input, std::ptr::null_mut());
+        if stream_info_result < 0 {
+            ffmpeg::ffi::avformat_close_input(&mut input);
+            return Err(MondrianError::MediaOpen {
+                path: path.display().to_string(),
+                reason: ffmpeg::Error::from(stream_info_result).to_string(),
+            });
+        }
+
+        Ok(ffmpeg::format::context::Input::wrap(input))
+    }
+}
+
 impl PreviewDecodeSession {
     fn open(
         path: &Path,
@@ -3036,13 +3151,14 @@ impl PreviewDecodeSession {
         hardware_decode_request: PreviewHardwareDecodeRequest,
         hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
         source_color: PreviewSourceColorContract,
+        should_cancel: PreviewDecodeCancelProbe,
     ) -> Result<Self> {
-        let input = ffmpeg::format::input(path).map_err(|e| MondrianError::MediaOpen {
-            path: path.display().to_string(),
-            reason: e.to_string(),
-        })?;
+        let interrupt_state = Arc::new(PreviewDecodeInterruptState::new());
+        let _interrupt_guard = interrupt_state.install(should_cancel);
+        let input = open_preview_input(path, &interrupt_state)?;
         Self::from_input(
             input,
+            interrupt_state,
             path,
             fingerprint,
             max_width,
@@ -3057,6 +3173,7 @@ impl PreviewDecodeSession {
 
     fn from_input(
         input: ffmpeg::format::context::Input,
+        interrupt_state: Arc<PreviewDecodeInterruptState>,
         path: &Path,
         fingerprint: PreviewFileFingerprint,
         max_width: Option<u32>,
@@ -3212,6 +3329,7 @@ impl PreviewDecodeSession {
             source_color,
             codec_id,
             input,
+            interrupt_state,
             decoder,
             scaler,
             scaler_source_format,
@@ -3259,7 +3377,7 @@ impl PreviewDecodeSession {
         timestamp_secs: f64,
         access_mode: PreviewDecodeAccessMode,
         adaptive_hints: PreviewDecodeAdaptiveHints,
-        should_cancel: &impl Fn() -> bool,
+        should_cancel: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<PreviewDecodeOutcome> {
         if should_cancel() {
             return Ok(PreviewDecodeOutcome::Canceled);
@@ -3360,7 +3478,11 @@ impl PreviewDecodeSession {
                 return Ok(PreviewDecodeOutcome::Canceled);
             }
             let seek_started_at = Instant::now();
-            seek_resolution = self.seek_to_target(decode_target_pts, policy)?;
+            seek_resolution = match self.seek_to_target(decode_target_pts, policy) {
+                Ok(resolution) => resolution,
+                Err(_) if should_cancel() => return Ok(PreviewDecodeOutcome::Canceled),
+                Err(error) => return Err(error),
+            };
             seek_us = duration_us(seek_started_at.elapsed());
         }
 
@@ -3601,7 +3723,7 @@ impl PreviewDecodeSession {
         &mut self,
         target_pts: i64,
         policy: PreviewDecodeAccessPolicy,
-        should_cancel: &impl Fn() -> bool,
+        should_cancel: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<PreviewDecodeForwardResult> {
         let mut best_before: Option<(i64, RetainedDecodedFrame)> = None;
         let mut best_after: Option<(i64, RetainedDecodedFrame)> = None;
@@ -4001,6 +4123,9 @@ impl PreviewDecodeSession {
             ));
         }
 
+        if should_cancel() {
+            return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+        }
         if policy.forward_decode_budget_exhausted(frames_decoded) {
             return Err(MondrianError::DecodeBudgetExhausted {
                 asset_id: self.path.display().to_string(),
@@ -4026,7 +4151,7 @@ fn decode_preview_frame_outcome(
     hardware_decode_request: PreviewHardwareDecodeRequest,
     hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
     source_color: PreviewSourceColorContract,
-    should_cancel: impl Fn() -> bool,
+    should_cancel: PreviewDecodeCancelProbe,
 ) -> Result<PreviewDecodeOutcome> {
     let started_at = Instant::now();
     if should_cancel() {
@@ -4061,7 +4186,7 @@ fn decode_preview_frame_outcome(
 
         if !current_match {
             let open_started_at = Instant::now();
-            *slot = Some(PreviewDecodeSession::open(
+            let opened = PreviewDecodeSession::open(
                 path,
                 fingerprint,
                 max_width,
@@ -4071,11 +4196,19 @@ fn decode_preview_frame_outcome(
                 hardware_decode_request,
                 hardware_decode_device_selector,
                 source_color,
-            )?);
+                Arc::clone(&should_cancel),
+            );
+            *slot = match opened {
+                Ok(session) => Some(session),
+                Err(_) if should_cancel() => return Ok(PreviewDecodeOutcome::Canceled),
+                Err(error) => return Err(error),
+            };
             session_open_us = duration_us(open_started_at.elapsed());
         }
 
         let session = slot.as_mut().expect("preview decode session must exist");
+        let interrupt_state = Arc::clone(&session.interrupt_state);
+        let _interrupt_guard = interrupt_state.install(Arc::clone(&should_cancel));
         let mut external_process_us = 0;
         let external_hardware_decode_plan = PreviewHardwareDecodePlan::resolve(
             hardware_decode_request,
@@ -4099,10 +4232,11 @@ fn decode_preview_frame_outcome(
                 session.decoder.format(),
                 session.decoder.color_space(),
                 session.decoder.color_range(),
+                should_cancel.as_ref(),
             ) {
                 external_process_us = duration_us(external_started_at.elapsed());
                 match result {
-                    Ok(frame) => {
+                    Ok(Some(frame)) => {
                         if should_cancel() {
                             if !access_mode.preserves_session_on_cancel() {
                                 *slot = None;
@@ -4124,6 +4258,12 @@ fn decode_preview_frame_outcome(
                             .with_hardware_decode_plan(&external_hardware_decode_plan)
                             .with_elapsed(started_at.elapsed())));
                     }
+                    Ok(None) => {
+                        if !access_mode.preserves_session_on_cancel() {
+                            *slot = None;
+                        }
+                        return Ok(PreviewDecodeOutcome::Canceled);
+                    }
                     Err(err) => {
                         preview_trace(format!(
                             "[preview] external ffmpeg CPU RGBA decode failed, fallback software: {err}"
@@ -4133,8 +4273,12 @@ fn decode_preview_frame_outcome(
             }
         }
 
-        let outcome =
-            session.decode_at(timestamp_secs, access_mode, adaptive_hints, &should_cancel)?;
+        let outcome = session.decode_at(
+            timestamp_secs,
+            access_mode,
+            adaptive_hints,
+            should_cancel.as_ref(),
+        )?;
         match outcome {
             PreviewDecodeOutcome::Frame(frame) => Ok(PreviewDecodeOutcome::Frame(
                 frame
@@ -4425,7 +4569,8 @@ fn try_decode_with_external_ffmpeg_cpu_rgba(
     source_format: ffmpeg::util::format::pixel::Pixel,
     decoded_color_space: ffmpeg::util::color::Space,
     decoded_color_range: ffmpeg::util::color::Range,
-) -> Option<Result<RgbaFrame>> {
+    should_cancel: &(dyn Fn() -> bool + Send + Sync),
+) -> Option<Result<Option<RgbaFrame>>> {
     if width == 0 || height == 0 {
         return None;
     }
@@ -4467,7 +4612,8 @@ fn try_decode_with_external_ffmpeg_cpu_rgba(
         "scale={width}:{height}:flags=fast_bilinear:in_color_matrix={matrix_name}:out_color_matrix={matrix_name}:in_range={range_name}:out_range=pc"
     );
 
-    let output = Command::new("ffmpeg")
+    let mut command = Command::new("ffmpeg");
+    command
         .arg("-v")
         .arg("error")
         .arg("-hwaccel")
@@ -4485,8 +4631,13 @@ fn try_decode_with_external_ffmpeg_cpu_rgba(
         .arg("-f")
         .arg("rawvideo")
         .arg("pipe:1")
-        .output()
-        .ok()?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = match run_external_decode_command_cancellable(&mut command, should_cancel) {
+        Ok(Some(output)) => output,
+        Ok(None) => return Some(Ok(None)),
+        Err(_) => return None,
+    };
 
     if !output.status.success() {
         return Some(Err(MondrianError::DecodeFailed {
@@ -4510,13 +4661,73 @@ fn try_decode_with_external_ffmpeg_cpu_rgba(
         }));
     }
 
-    Some(Ok(RgbaFrame::new(
+    Some(Ok(Some(RgbaFrame::new(
         width,
         height,
         output.stdout.into_iter().take(expected).collect(),
         color_contract,
         PreviewDecodePath::ExternalFfmpegCpuRgba,
-    )))
+    ))))
+}
+
+fn run_external_decode_command_cancellable(
+    command: &mut Command,
+    should_cancel: &(dyn Fn() -> bool + Send + Sync),
+) -> io::Result<Option<Output>> {
+    let mut child = command.spawn()?;
+    let Some(stdout) = child.stdout.take() else {
+        terminate_external_decode_child(&mut child);
+        return Err(io::Error::other("external decoder stdout was not piped"));
+    };
+    let Some(stderr) = child.stderr.take() else {
+        terminate_external_decode_child(&mut child);
+        return Err(io::Error::other("external decoder stderr was not piped"));
+    };
+    let stdout_reader = thread::spawn(move || read_external_decode_pipe(stdout));
+    let stderr_reader = thread::spawn(move || read_external_decode_pipe(stderr));
+
+    let status = loop {
+        if should_cancel() {
+            terminate_external_decode_child(&mut child);
+            let _ = join_external_decode_reader(stdout_reader);
+            let _ = join_external_decode_reader(stderr_reader);
+            return Ok(None);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => {
+                terminate_external_decode_child(&mut child);
+                let _ = join_external_decode_reader(stdout_reader);
+                let _ = join_external_decode_reader(stderr_reader);
+                return Err(error);
+            }
+        }
+        thread::sleep(Duration::from_millis(1));
+    };
+
+    let stdout = join_external_decode_reader(stdout_reader)?;
+    let stderr = join_external_decode_reader(stderr_reader)?;
+    Ok(Some(Output { status, stdout, stderr }))
+}
+
+fn terminate_external_decode_child(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn read_external_decode_pipe(mut pipe: impl Read) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    pipe.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn join_external_decode_reader(
+    reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+) -> io::Result<Vec<u8>> {
+    reader
+        .join()
+        .map_err(|_| io::Error::other("external decoder pipe reader panicked"))?
 }
 
 fn fit_target_size(
@@ -5310,13 +5521,15 @@ mod tests {
         decode_preview_frame_cancellable, decoded_native_surface_format_from_software_format,
         decoded_surface_format_from_pixel, decoded_video_sampling_from_frame, duration_us,
         materialize_decoded_frame, preview_cache_get, preview_cache_put_with_fingerprint,
-        preview_create_rgba_scaler, preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode,
-        preview_hardware_extra_frames, preview_seek_index_cache_get, preview_seek_index_cache_put,
-        resolve_cpu_rgba_contract, temporal_selection_is_approximate, DecodedRgbaFrameContract,
-        FfmpegAvD3D12VaFrame, FfmpegAvD3D12VaSyncContext, FfmpegNativeDecodedFrameResource,
-        FfmpegNativeDecodedFrameResourceError, PreviewDecodeAccessMode, PreviewDecodeAccessPolicy,
-        PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeDiagnostics,
-        PreviewDecodeExecutionPath, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest,
+        preview_create_rgba_scaler, preview_decode_interrupt_callback,
+        preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_hardware_extra_frames,
+        preview_seek_index_cache_get, preview_seek_index_cache_put, resolve_cpu_rgba_contract,
+        run_external_decode_command_cancellable, temporal_selection_is_approximate,
+        DecodedRgbaFrameContract, FfmpegAvD3D12VaFrame, FfmpegAvD3D12VaSyncContext,
+        FfmpegNativeDecodedFrameResource, FfmpegNativeDecodedFrameResourceError,
+        PreviewDecodeAccessMode, PreviewDecodeAccessPolicy, PreviewDecodeAdaptiveHints,
+        PreviewDecodeBackend, PreviewDecodeDiagnostics, PreviewDecodeExecutionPath,
+        PreviewDecodeInterruptState, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest,
         PreviewDecodeSeekStrategy, PreviewDecodeStageDurations, PreviewDecodeThreadingConfig,
         PreviewDecodeThreadingKind, PreviewDecodedFramePayload, PreviewFileFingerprint,
         PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
@@ -5343,6 +5556,7 @@ mod tests {
     use std::ffi::c_void;
     use std::num::NonZeroU64;
     use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -7405,6 +7619,30 @@ mod tests {
             .expect("canceled decode should not fail missing media");
 
         assert!(matches!(outcome, PreviewDecodeOutcome::Canceled));
+    }
+
+    #[test]
+    fn format_interrupt_callback_uses_only_the_active_request_probe() {
+        let state = Arc::new(PreviewDecodeInterruptState::new());
+        let opaque = Arc::as_ptr(&state).cast_mut().cast::<c_void>();
+        assert_eq!(unsafe { preview_decode_interrupt_callback(opaque) }, 0);
+
+        let guard = state.install(Arc::new(|| true));
+        assert_eq!(unsafe { preview_decode_interrupt_callback(opaque) }, 1);
+        drop(guard);
+
+        assert_eq!(unsafe { preview_decode_interrupt_callback(opaque) }, 0);
+    }
+
+    #[test]
+    fn external_decode_process_is_reaped_when_cancellation_is_observed() {
+        let mut command = Command::new("rustc");
+        command.arg("--version").stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let outcome = run_external_decode_command_cancellable(&mut command, &|| true)
+            .expect("cancellation should reap the external process");
+
+        assert!(outcome.is_none());
     }
 
     #[test]

@@ -704,9 +704,10 @@ total/max/last canceled-worker duration globally and per access mode, and emit a
 slow-cancellation root cause when the full canceled worker duration exceeds the
 slow-frame budget. Workers must also report two separate intervals: external
 cancellation request to the first observed cooperative checkpoint, and that
-checkpoint to the completed worker result. Generation invalidation/cancel time
-comes from the Playback Broker's execution lease; current-frame preemption time
-comes from the competing pending request; deadline cancellation time comes from
+checkpoint to the completed worker result. Generation invalidation and
+current-work preemption arrive as one atomic Playback Broker
+execution-cancellation disposition carrying its monotonic request age; deadline
+cancellation time comes from
 the authored deadline or prefetch budget; process shutdown time comes from a
 dedicated timestamped signal published before its atomic requested flag.
 Unknown/unattributable cancellation
@@ -935,11 +936,12 @@ It may ask the `ffmpeg` CLI for platform hwaccel, but its contract is still
 `rawvideo` RGBA over stdout, so it is CPU-resident and cannot be reported as
 Mondrian hardware decode, zero-copy, low-copy texture residency, or GPU frame
 delivery. The previous "GPU assist" terminology is intentionally not used.
-Because the CLI process boundary is not cooperatively cancellable, this path is
-limited to `RandomAccessStillFrame` requests. `PlaybackCursor` and `ScrubCursor`
-must stay on in-process decode/session paths where scheduler cancellation can be
-observed between open, seek, packet/decode, hardware-frame transfer, scale, and
-copy stages.
+This path remains limited to `RandomAccessStillFrame` requests. It runs the
+child with independently drained stdout/stderr pipes, polls the request probe,
+and kills, waits for, and joins pipe readers on cancellation; a 4K rawvideo pipe
+therefore cannot hide an unbounded child-process wait. `PlaybackCursor` and
+`ScrubCursor` stay on in-process decode/session paths for locality and native
+residency rather than using the process boundary as a realtime shortcut.
 Every frame returned by the preview decode boundary is a
 `PreviewDecodeOutcome`: `Frame(RgbaFrame)` for CPU encoded RGBA8 payloads,
 `FloatFrame(FloatRgbaFrame)` for CPU scene-linear RGBA f32 payloads, or
@@ -1139,21 +1141,23 @@ job is already queued or running, and queued plus in-flight prefetch is below
 the forward window. It then tops up only the unfilled queued-plus-in-flight
 prefetch budget while traversing tracks and nested sequences. That lets playback
 warm nearby frames without stealing first-frame or recovery budget. This worker
-pool and pruning are scheduling guardrails only; they are not a substitute for
-future cancellable decode sessions or hardware-resident decode.
-Preview decode also exposes a cooperative cancellation boundary for interactive
-work: app workers pass a generation-aware predicate to the media decoder, and
-the media loop checks it before opening, seeking, packet decode, frame receive,
-EOF draining, and RGBA conversion. If cancellation fires, the decoder returns a
+pool and pruning are scheduling guardrails; hardware-resident decode remains a
+separate execution concern.
+Preview decode exposes a cooperative cancellation boundary for every access
+mode: app workers pass a generation-aware request probe to the media decoder.
+Each thread-local FFmpeg session installs that probe as an
+`AVIOInterruptCB`, including before input open and stream discovery, and keeps
+it active across seek and packet I/O. The media loop also checks it before
+opening, seeking, packet decode, frame receive, EOF draining, hardware transfer,
+and RGBA conversion. If cancellation fires, the decoder returns a
 typed canceled outcome rather than a media failure. `PlaybackCursor` and
 `ScrubCursor` cancellation preserve their thread-local FFmpeg sessions so
 sustained playback, forward prefetch, and pointer dragging retain decoder/device
 residency; `RandomAccessStillFrame` cancellation discards only its mode-specific
-session. The experimental external-process
-CPU RGBA path must follow the same session-retention policy even though the
-child process itself cannot be interrupted mid-run. This keeps stale work from
-being cached or marked as a failed source while preserving independent playback,
-scrub, and still-frame session state for subsequent requests.
+session. The experimental external-process CPU RGBA path follows the same
+policy and terminates/reaps its child when the probe fires. This keeps stale
+work from being cached or marked as a failed source while preserving independent
+playback, scrub, and still-frame session state for subsequent requests.
 Speculative prefetch decode is also bounded by a short app-level wall-clock
 budget. Current-frame decode is not canceled by this budget, and the deadline
 applies only to playback prefetch work. Scrub and still-frame requests are

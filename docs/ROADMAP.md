@@ -64,7 +64,7 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 | Undo/Redo | UI 外的时间线命令历史可工作，主要编辑动作有回归测试 | 主要依赖完整 `Sequence` 快照，内存上限、跨序列事务和命令级不变量仍需收敛 | L1- |
 | 素材管理 | 文件夹/Bin 层级、移动/重命名/删除、缩略图、离线提示、单文件/目录重连、代理模式已接入产品 UI | tags/metadata 字段尚未形成检索产品；素材使用位置反查和批量诊断不足 | L1- |
 | 时间线编辑 | 多轨、移动、分割、普通 Trim、Ripple Delete、Insert/Overwrite、Roll/Slip/Slide、跨轨移动、链接片段跟随、锁定、吸附、多选和嵌套序列已有实现与测试 | Lift/Extract、显式 Link/Unlink、Track Targeting、转场 handles、反向/冻结/完整 time remap、VFR/混合帧率边界和复杂 ripple 传播未形成完整验收 | L1- |
-| 播放与缓存 | 播放/拖动/静帧三种访问语义、FFmpeg session 复用、seek index、播放 ring、LRU、优先级、generation 取消、deadline、预取、代理、完成轮询预算和大量结构化诊断已存在 | 调度与大量渲染/色彩适配仍集中在超大的 `app_ui::preview`；缺固定参考机上的真实 4K、30 分钟、频繁 seek 和内存平台门禁 | L1-，基础较强 |
+| 播放与缓存 | UI 无关 `PlaybackEngine`、`FrameWorkBroker`、`PreviewFrameStore`、`PlaybackEvidenceCollector`、Headless GPU Adapter，以及播放/拖动/静帧三种访问语义、FFmpeg session/ring/seek index、原子 generation/抢占/取消 disposition、deadline、预取和代理已接入 | 大量时间线渲染/色彩媒体适配仍集中在超大的 `app_ui::preview`；FFmpeg open/seek/I/O interrupt 与外部 still 子进程回收已有实现和单测，但仍缺固定参考机上的真实 4K、30 分钟、频繁 seek、取消延迟和内存平台门禁 | L1-，执行地基较强，产品证据未闭环 |
 | Windows 硬解/低拷贝 | FFmpeg 硬件设备/codec 探测、D3D11 native frame 保留、D3D11→D3D12 导入、NV12/P010 GPU YUV 采样、准入与失败原因已有实现 | 必须以真实 GPU/驱动/素材证明主路径启用、同步正确和长时间稳定；不以 capability probe 或 shader 创建代替实际帧执行 | L0/L1 之间 |
 | 渲染与色彩 | working-space 合成、OCIO CPU/GPU 路径、结构化色彩/显示诊断、golden 测试、预览/导出报告对比、Windows 显示探测和 fail-closed 逻辑较深入 | 仍有 legacy/CPU/读回路径与真实显示 payload 限制；常见 Log/HDR 必须补齐参考样片端到端证明；Windows HDR 监看不能提前宣称稳定 | L1+ 架构，继续符合性收敛 |
 | 效果与动画 | 稳定 `EffectId`、属性路径、`PropertyBag`/`AnimatedProperty`、多种插值、曲线编辑器、效果 DAG、mask、缓存策略和插件式 definition/DSL 已存在 | `PropertyDescriptor` 缺独立稳定 `ParameterId`、单位和完整能力契约；只有部分声明效果生成真实 render op；文字和转场类型尚未接入时间线/渲染主路径 | L0/L1 之间 |
@@ -345,9 +345,9 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 **播放与任务**
 
-- [ ] 把播放调度/媒体任务核心从 UI 适配器中收敛为可被 headless integration test 驱动的深模块；`app_ui` 只保留意图与呈现状态适配。
-- [ ] 统一 generation、取消、priority、deadline、资源预算和诊断语言；保留现有各执行池，不做无收益的“大一统线程池”。
-- [ ] 将 pause/seek/close/quit 的取消延迟纳入测试；UI 线程不 join 可能卡在 codec/driver 的 worker。
+- [ ] `PlaybackEngine`、`FrameWorkBroker`、`PreviewFrameStore`、Evidence 与 Headless GPU Adapter 已从 UI 收敛；继续迁出 `app_ui::preview` 中的时间线求值/媒体执行编排，使 `app_ui` 最终只保留意图、窗口资源与呈现状态适配。
+- [ ] 帧工作已统一 generation、priority、deadline、原子取消 disposition、请求龄期、资源预算和诊断所有权；继续让缩略图、波形、代理、导出使用同一语言而不强并执行池。
+- [ ] FFmpeg open/stream-info/seek/packet I/O 已接入 request-scoped interrupt，外部 still 子进程可 kill/wait/join；仍须把 pause/seek/close/quit 的每类真实后端取消延迟纳入固定参考机门禁，且 UI 线程不得 join worker。
 
 **帧、参数与音频**
 
@@ -391,7 +391,7 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 - [ ] Windows 支持硬解的 4K23.976-60 HEVC Main10 进入真实 FFmpeg hardware → native surface → GPU YUV/working path；不支持时自动低分辨率/代理。
 - [ ] seek/scrub 为 latest-wins；旧 generation 在预算内观察取消且不能发布旧帧。
-- [ ] 固定参考机门禁要求 playback/scrub 与 exact-still 的协作式取消返回均稳定在 5 ms 内；当前实时 lane 已达标，exact-still 的最坏延迟仍需收敛。
+- [ ] 固定参考机门禁要求 playback/scrub 与 exact-still 的请求观察和完整返回分别满足固定预算；exact-still 已覆盖 in-process FFmpeg interrupt 与外部子进程回收，但尚缺真实长 GOP/阻塞 I/O/驱动上的最坏延迟证据。
 - [ ] CPU decoded cache、GPU/working cache、proxy index 都有字节预算、LRU/eviction、source revision 和颜色解释 key。
 - [ ] 播放开始后音频保持主时钟；视频迟到采用 drop/repeat/降质，不能把常态播放变成反复静音等待视频。
 

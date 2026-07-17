@@ -1,6 +1,7 @@
 //! Semantic frame-work value types shared by the Playback Engine and Broker.
 
 use crate::FrameDemandIdentity;
+use std::time::Duration;
 
 /// Semantic class of frame-producing work at the Playback seam.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -31,6 +32,44 @@ pub enum FrameRequestCompletion {
     CacheOnly,
     /// The completion is obsolete and must not affect visible state.
     Stale,
+}
+
+/// Atomic reason why one in-flight execution should stop producing visible work.
+///
+/// The Frame Work Broker derives this under the same lifecycle lock that owns
+/// pending bindings and execution leases. Adapters must not reconstruct the
+/// decision from separate freshness and competing-work queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameExecutionCancellation {
+    /// The Broker is closed and no execution may publish.
+    BrokerClosed,
+    /// The lease no longer matches the latest generation/binding.
+    Superseded {
+        /// Elapsed time since the Broker first observed invalidation.
+        age: Option<Duration>,
+    },
+    /// Speculative work yielded to another current request.
+    PrefetchPreemptedByCurrent {
+        /// Age of the oldest competing current request.
+        request_age: Duration,
+    },
+    /// Deterministic still work yielded to current realtime work.
+    StillPreemptedByRealtimeCurrent {
+        /// Age of the oldest competing realtime request.
+        request_age: Duration,
+    },
+}
+
+impl FrameExecutionCancellation {
+    /// Return the cancellation request age carried by Broker evidence.
+    pub const fn request_age(self) -> Option<Duration> {
+        match self {
+            Self::BrokerClosed => None,
+            Self::Superseded { age } => age,
+            Self::PrefetchPreemptedByCurrent { request_age }
+            | Self::StillPreemptedByRealtimeCurrent { request_age } => Some(request_age),
+        }
+    }
 }
 
 impl FrameRequestCompletion {

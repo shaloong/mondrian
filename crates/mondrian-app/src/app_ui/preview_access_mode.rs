@@ -729,31 +729,11 @@ impl MediaPreviewScheduler {
         }
     }
 
-    pub(crate) fn execution_current(&self, id: mondrian_playback::FrameExecutionId) -> bool {
-        self.broker.execution_current(id)
-    }
-
-    pub(crate) fn execution_invalidation_age(
+    pub(crate) fn execution_cancellation(
         &self,
         id: mondrian_playback::FrameExecutionId,
-    ) -> Option<std::time::Duration> {
-        self.broker.execution_invalidation_age(id)
-    }
-
-    pub(crate) fn has_other_current_execution(
-        &self,
-        id: mondrian_playback::FrameExecutionId,
-        realtime_only: bool,
-    ) -> bool {
-        self.broker.has_other_current(id, realtime_only)
-    }
-
-    pub(crate) fn other_current_request_age(
-        &self,
-        id: mondrian_playback::FrameExecutionId,
-        realtime_only: bool,
-    ) -> Option<std::time::Duration> {
-        self.broker.other_current_request_age(id, realtime_only)
+    ) -> Option<mondrian_playback::FrameExecutionCancellation> {
+        self.broker.execution_cancellation(id)
     }
 
     #[cfg(test)]
