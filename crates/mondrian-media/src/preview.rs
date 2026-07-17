@@ -591,6 +591,22 @@ fn pts_distance_to_frames(distance_pts: i64, frame_duration_pts: i64) -> usize {
         .min(usize::MAX as u128) as usize
 }
 
+fn temporal_selection_is_approximate(
+    requested_pts: i64,
+    selected_pts: Option<i64>,
+    hit_tolerance_pts: i64,
+    policy: PreviewDecodeAccessPolicy,
+) -> bool {
+    selected_pts.is_some_and(|selected_pts| {
+        let distance = selected_pts.saturating_sub(requested_pts).abs();
+        if policy.keyframe_only {
+            distance > 0
+        } else {
+            distance > hit_tolerance_pts.max(0)
+        }
+    })
+}
+
 /// FFmpeg decoder threading mode requested for preview software decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PreviewDecodeThreadingKind {
@@ -1739,11 +1755,21 @@ impl RgbaFrame {
         self
     }
 
-    fn with_temporal_selection(mut self, requested_pts: i64, selected_pts: Option<i64>) -> Self {
+    fn with_temporal_selection(
+        mut self,
+        requested_pts: i64,
+        selected_pts: Option<i64>,
+        hit_tolerance_pts: i64,
+        policy: PreviewDecodeAccessPolicy,
+    ) -> Self {
         self.diagnostics.requested_pts = Some(requested_pts);
         self.diagnostics.selected_pts = selected_pts;
-        self.diagnostics.temporal_approximation =
-            selected_pts.is_some_and(|selected_pts| selected_pts != requested_pts);
+        self.diagnostics.temporal_approximation = temporal_selection_is_approximate(
+            requested_pts,
+            selected_pts,
+            hit_tolerance_pts,
+            policy,
+        );
         self
     }
 
@@ -1895,11 +1921,21 @@ impl FloatRgbaFrame {
         self
     }
 
-    fn with_temporal_selection(mut self, requested_pts: i64, selected_pts: Option<i64>) -> Self {
+    fn with_temporal_selection(
+        mut self,
+        requested_pts: i64,
+        selected_pts: Option<i64>,
+        hit_tolerance_pts: i64,
+        policy: PreviewDecodeAccessPolicy,
+    ) -> Self {
         self.diagnostics.requested_pts = Some(requested_pts);
         self.diagnostics.selected_pts = selected_pts;
-        self.diagnostics.temporal_approximation =
-            selected_pts.is_some_and(|selected_pts| selected_pts != requested_pts);
+        self.diagnostics.temporal_approximation = temporal_selection_is_approximate(
+            requested_pts,
+            selected_pts,
+            hit_tolerance_pts,
+            policy,
+        );
         self
     }
 
@@ -3356,7 +3392,12 @@ impl PreviewDecodeSession {
                             ..PreviewDecodeStageDurations::default()
                         })
                         .with_decode_work(seek_performed, result.decoded_frame_count)
-                        .with_temporal_selection(target_pts, result.selected_pts)
+                        .with_temporal_selection(
+                            target_pts,
+                            result.selected_pts,
+                            self.hit_tolerance_pts,
+                            policy,
+                        )
                         .with_access_policy(policy)
                         .with_forward_reused(should_continue_forward)
                         .with_seek_index_diagnostics(self.seek_index.diagnostics(), seek_resolution)
@@ -3392,7 +3433,12 @@ impl PreviewDecodeSession {
                             ..PreviewDecodeStageDurations::default()
                         })
                         .with_decode_work(seek_performed, result.decoded_frame_count)
-                        .with_temporal_selection(target_pts, result.selected_pts)
+                        .with_temporal_selection(
+                            target_pts,
+                            result.selected_pts,
+                            self.hit_tolerance_pts,
+                            policy,
+                        )
                         .with_access_policy(policy)
                         .with_forward_reused(should_continue_forward)
                         .with_seek_index_diagnostics(self.seek_index.diagnostics(), seek_resolution)
@@ -3421,8 +3467,12 @@ impl PreviewDecodeSession {
                     diagnostics.seek_performed = seek_performed;
                     diagnostics.requested_pts = Some(target_pts);
                     diagnostics.selected_pts = result.selected_pts;
-                    diagnostics.temporal_approximation =
-                        result.selected_pts.is_some_and(|selected_pts| selected_pts != target_pts);
+                    diagnostics.temporal_approximation = temporal_selection_is_approximate(
+                        target_pts,
+                        result.selected_pts,
+                        self.hit_tolerance_pts,
+                        policy,
+                    );
                     diagnostics.decoded_frame_count =
                         result.decoded_frame_count.min(u32::MAX as usize) as u32;
                     diagnostics = diagnostics.with_access_policy(policy);
@@ -5262,8 +5312,8 @@ mod tests {
         materialize_decoded_frame, preview_cache_get, preview_cache_put_with_fingerprint,
         preview_create_rgba_scaler, preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode,
         preview_hardware_extra_frames, preview_seek_index_cache_get, preview_seek_index_cache_put,
-        resolve_cpu_rgba_contract, DecodedRgbaFrameContract, FfmpegAvD3D12VaFrame,
-        FfmpegAvD3D12VaSyncContext, FfmpegNativeDecodedFrameResource,
+        resolve_cpu_rgba_contract, temporal_selection_is_approximate, DecodedRgbaFrameContract,
+        FfmpegAvD3D12VaFrame, FfmpegAvD3D12VaSyncContext, FfmpegNativeDecodedFrameResource,
         FfmpegNativeDecodedFrameResourceError, PreviewDecodeAccessMode, PreviewDecodeAccessPolicy,
         PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeDiagnostics,
         PreviewDecodeExecutionPath, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest,
@@ -5315,6 +5365,52 @@ mod tests {
             preview_hardware_extra_frames(PreviewHardwareDecodeRequest::Auto),
             0
         );
+    }
+
+    #[test]
+    fn exact_decode_accepts_container_pts_quantization_within_frame_tolerance() {
+        let policy =
+            PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::PlaybackCursor);
+
+        assert!(!temporal_selection_is_approximate(
+            667,
+            Some(672),
+            336,
+            policy
+        ));
+        assert!(!temporal_selection_is_approximate(
+            667,
+            Some(667),
+            336,
+            policy
+        ));
+        assert!(!temporal_selection_is_approximate(667, None, 336, policy));
+        assert!(temporal_selection_is_approximate(
+            667,
+            Some(1_004),
+            336,
+            policy
+        ));
+    }
+
+    #[test]
+    fn keyframe_only_decode_reports_any_non_exact_temporal_selection() {
+        let policy =
+            PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::ScrubCursor);
+
+        assert!(policy.keyframe_only);
+        assert!(temporal_selection_is_approximate(
+            667,
+            Some(672),
+            336,
+            policy
+        ));
+        assert!(!temporal_selection_is_approximate(
+            667,
+            Some(667),
+            336,
+            policy
+        ));
     }
 
     fn test_source_color() -> PreviewSourceColorContract {
