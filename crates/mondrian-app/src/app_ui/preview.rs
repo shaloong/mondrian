@@ -16272,7 +16272,7 @@ mod tests {
 
     #[test]
     fn preview_camera_log_input_matches_export_frame_hash() {
-        const SLOG3_TO_STANDARD_SDR_GOLDEN_HASH: u64 = 53_462_908_396_589_755;
+        const SLOG3_TO_STANDARD_V3_SDR_V2_GOLDEN_HASH: u64 = 2_504_953_508_210_442_961;
 
         let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
             .expect("default effect graph");
@@ -16377,14 +16377,15 @@ mod tests {
         assert_eq!(preview.composite_diagnostics.legacy_rgba8_composites, 0);
         let hash = stable_rgba_hash(&preview.rgba);
         assert_eq!(
-            hash, SLOG3_TO_STANDARD_SDR_GOLDEN_HASH,
+            hash, SLOG3_TO_STANDARD_V3_SDR_V2_GOLDEN_HASH,
             "actual hash={hash}"
         );
     }
 
     #[test]
     fn preview_multilayer_color_output_matches_export_frame_hash() {
-        const REC2020_TO_SRGB_DISPLAY_VIEW_MULTILAYER_GOLDEN_HASH: u64 = 8_673_714_717_310_354_893;
+        const REC2020_TO_STANDARD_V3_SDR_V2_SRGB_MULTILAYER_GOLDEN_HASH: u64 =
+            16_678_535_327_707_552_965;
 
         let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
             .expect("default effect graph");
@@ -16500,7 +16501,7 @@ mod tests {
         assert_eq!(preview_export_hash, stable_rgba_hash(&export));
         assert_eq!(
             preview_export_hash,
-            REC2020_TO_SRGB_DISPLAY_VIEW_MULTILAYER_GOLDEN_HASH
+            REC2020_TO_STANDARD_V3_SDR_V2_SRGB_MULTILAYER_GOLDEN_HASH
         );
         assert_eq!(preview.composite_diagnostics.legacy_rgba8_composites, 0);
         assert_eq!(preview.composite_diagnostics.legacy_media_blend_mode, 0);

@@ -960,7 +960,10 @@ same frame, and compare normalized report verdict/check/root-cause/action
 signatures. A separate camera-log golden begins with encoded Sony
 S-Log3/S-Gamut3.Cine bytes, exercises the preview lazy input transform into
 Linear Rec.2020, and compares the resulting Standard sRGB frame pixel-for-pixel
-with an independently executed export input/composite/output chain. Renderer
+with an independently executed export input/composite/output chain. These app
+goldens name and pin the current Standard package and SDR View generation, so a
+new immutable package cannot inherit the prior package's expected hash by
+accident. Renderer
 golden tests cover lower-level compositing fixtures. GPU and float-pipeline
 changes must keep these contracts green or update them only with intentional
 visual-reference and diagnostics-contract changes.
