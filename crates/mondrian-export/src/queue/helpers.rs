@@ -279,6 +279,7 @@ impl ExportVideoSignalContract {
             color_transfer: tags.map(|tags| tags.color_trc.to_owned()),
             color_matrix: self.yuv_matrix.map(|matrix| matrix.tag_name().to_owned()),
             require_color_tags_absent: tags.is_none(),
+            static_hdr10_metadata: None,
         }
     }
 }
@@ -287,8 +288,33 @@ pub(crate) fn expected_export_video_signal(
     settings: &SequenceSettings,
     codec: &VideoCodecConfig,
     alpha_mode: ExportAlphaMode,
-) -> crate::validator::ExpectedVideoSignalConstraints {
-    ExportVideoSignalContract::resolve(settings, codec, alpha_mode).validation_constraints()
+) -> Result<crate::validator::ExpectedVideoSignalConstraints, String> {
+    let mut constraints =
+        ExportVideoSignalContract::resolve(settings, codec, alpha_mode).validation_constraints();
+    if settings.color_management.preserve_hdr_metadata {
+        let mastering_display = settings
+            .color_management
+            .hdr_mastering_display
+            .as_ref()
+            .ok_or_else(|| "保留 HDR metadata 需要 SMPTE ST 2086 母版显示元数据".to_string())?
+            .clone();
+        mastering_display
+            .validate()
+            .map_err(|error| format!("SMPTE ST 2086 母版显示元数据无效: {error}"))?;
+        let content_light = settings
+            .color_management
+            .hdr_content_light
+            .ok_or_else(|| "保留 HDR metadata 需要 MaxCLL/MaxFALL 内容光级别元数据".to_string())?;
+        content_light
+            .validate()
+            .map_err(|error| format!("MaxCLL/MaxFALL 内容光级别元数据无效: {error}"))?;
+        constraints.static_hdr10_metadata =
+            Some(crate::validator::ExpectedHdr10StaticMetadataConstraints {
+                mastering_display,
+                content_light,
+            });
+    }
+    Ok(constraints)
 }
 
 pub(crate) fn apply_export_video_signal_args(

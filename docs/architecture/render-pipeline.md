@@ -709,13 +709,20 @@ colorimetric intent carries no view. If tone mapping is requested but the
 resolved boundary has no view, export records
 `ToneMapRequestedWithoutExportViewTransform`.
 
-HDR metadata validation occurs before encoder launch and again before libx265
-parameter construction. The effective inherited/overridden engine determines
-whether a Standard output-target contract applies. For Standard HLG/PQ, MaxCLL
-cannot exceed the View's fixed 1000-nit content peak. ST 2086 mastering-display
-peak remains independent because it describes the authoring monitor, not the
-brightest content pixel; a valid 4000-nit mastering display can therefore
-describe content formed by the 1000-nit Standard View.
+HDR metadata validation occurs before encoder launch, again before libx265
+parameter construction, and after encoding against the finished bitstream. The
+post-encode contract probes only the first decoded video frame when static HDR10
+preservation was requested, because FFmpeg exposes libx265 ST 2086 and
+MaxCLL/MaxFALL SEI as frame side data rather than stream fields. It compares the
+encoded values at the x265 chromaticity/luminance quantization scales and fails
+closed on missing, malformed, or changed metadata. Exports that do not request
+static HDR10 preservation incur no frame-side-data probe. The effective
+inherited/overridden engine determines whether a Standard output-target
+contract applies. For Standard HLG/PQ, MaxCLL cannot exceed the View's fixed
+1000-nit content peak. ST 2086 mastering-display peak remains independent
+because it describes the authoring monitor, not the brightest content pixel; a
+valid 4000-nit mastering display can therefore describe content formed by the
+1000-nit Standard View.
 
 Health reports distinguish export output-View availability from preview
 display/view: `output_transform_issues` records when tone mapping was requested

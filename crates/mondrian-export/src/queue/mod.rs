@@ -1506,6 +1506,14 @@ fn execute_timeline_export(
         }
 
         let (width, height) = timeline_output_resolution(job, timeline);
+        let expected_video_signal = match expected_export_video_signal(
+            &timeline.sequence.settings,
+            &job.config.preset.video,
+            job.config.preset.alpha_mode,
+        ) {
+            Ok(signal) => signal,
+            Err(error) => return JobExecutionResult::Failed(error),
+        };
         let validation_expectations = ExportValidationExpectations {
             require_video_stream: true,
             require_audio_stream: !matches!(&audio_input, TimelineAudioInput::Disabled),
@@ -1514,11 +1522,7 @@ fn execute_timeline_export(
                 height: Some(height),
                 fps_num: Some(range.fps_num),
                 fps_den: Some(range.fps_den),
-                signal: Some(expected_export_video_signal(
-                    &timeline.sequence.settings,
-                    &job.config.preset.video,
-                    job.config.preset.alpha_mode,
-                )),
+                signal: Some(expected_video_signal),
             }),
             expected_duration_secs: Some(
                 range.total_frames as f64 * range.fps_den as f64 / range.fps_num.max(1) as f64,
@@ -4630,7 +4634,8 @@ mod tests {
         let codec = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
 
         let expected =
-            expected_export_video_signal(&settings, &codec, ExportAlphaMode::FlattenBlack);
+            expected_export_video_signal(&settings, &codec, ExportAlphaMode::FlattenBlack)
+                .expect("valid PQ signal contract");
 
         assert_eq!(expected.pixel_format.as_deref(), Some("yuv420p10le"));
         assert_eq!(expected.color_range.as_deref(), Some("tv"));
@@ -4638,15 +4643,35 @@ mod tests {
         assert_eq!(expected.color_transfer.as_deref(), Some("smpte2084"));
         assert_eq!(expected.color_matrix.as_deref(), Some("bt2020nc"));
         assert!(!expected.require_color_tags_absent);
+        assert!(expected.static_hdr10_metadata.is_none());
+
+        settings.color_management.preserve_hdr_metadata = true;
+        settings.color_management.hdr_mastering_display =
+            Some(VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference());
+        settings.color_management.hdr_content_light =
+            Some(VideoContentLightMetadata::hdr10_1000_nit_reference());
+        let expected =
+            expected_export_video_signal(&settings, &codec, ExportAlphaMode::FlattenBlack)
+                .expect("valid HDR10 metadata contract");
+        let expected_hdr10 = expected
+            .static_hdr10_metadata
+            .expect("post-encode contract must retain authored HDR10 metadata");
+        assert_eq!(
+            expected_hdr10.content_light,
+            VideoContentLightMetadata::hdr10_1000_nit_reference()
+        );
+        settings.color_management.preserve_hdr_metadata = false;
 
         settings.color_management.output_color_space = ColorSpace::AppleLogBt2020;
         settings.color_management.delivery_bit_depth = DeliveryBitDepth::Twelve;
         let prores = VideoCodecConfig::ProRes { variant: "4444xq".to_owned() };
         let expected =
-            expected_export_video_signal(&settings, &prores, ExportAlphaMode::FlattenBlack);
+            expected_export_video_signal(&settings, &prores, ExportAlphaMode::FlattenBlack)
+                .expect("valid ProRes signal contract");
         assert_eq!(expected.pixel_format.as_deref(), Some("yuv444p12le"));
         let alpha_expected =
-            expected_export_video_signal(&settings, &prores, ExportAlphaMode::Preserve);
+            expected_export_video_signal(&settings, &prores, ExportAlphaMode::Preserve)
+                .expect("valid ProRes alpha signal contract");
         assert_eq!(alpha_expected.pixel_format.as_deref(), Some("yuva444p12le"));
         assert!(expected.require_color_tags_absent);
     }
@@ -4666,7 +4691,8 @@ mod tests {
             let mut settings = SequenceSettings::default();
             settings.color_management.output_color_space = color_space;
             let expected =
-                expected_export_video_signal(&settings, &codec, ExportAlphaMode::FlattenBlack);
+                expected_export_video_signal(&settings, &codec, ExportAlphaMode::FlattenBlack)
+                    .expect("valid Rec.601 signal contract");
             assert_eq!(expected.color_primaries.as_deref(), Some(primaries));
             assert_eq!(expected.color_transfer.as_deref(), Some(transfer));
             assert_eq!(expected.color_matrix.as_deref(), Some(matrix));

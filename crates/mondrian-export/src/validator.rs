@@ -1,3 +1,7 @@
+use mondrian_core::{
+    VideoContentLightMetadata, VideoHdrChromaticity, VideoHdrRational,
+    VideoMasteringDisplayLuminance, VideoMasteringDisplayMetadata, VideoMasteringDisplayPrimaries,
+};
 use serde::Deserialize;
 use std::path::Path;
 use std::process::Command;
@@ -42,6 +46,34 @@ pub struct ExpectedVideoSignalConstraints {
     pub color_matrix: Option<String>,
     /// Require primaries, transfer, and matrix tags to be absent.
     pub require_color_tags_absent: bool,
+    /// Exact HDR10 static metadata that must survive encoding and muxing.
+    pub static_hdr10_metadata: Option<ExpectedHdr10StaticMetadataConstraints>,
+}
+
+/// Expected SMPTE ST 2086 and CTA-861.3 metadata on the finished HDR10 stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpectedHdr10StaticMetadataConstraints {
+    /// Mastering-display primaries, white point, and luminance bounds.
+    pub mastering_display: VideoMasteringDisplayMetadata,
+    /// MaxCLL and MaxFALL content-light levels.
+    pub content_light: VideoContentLightMetadata,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct FfprobeFrameSideData {
+    side_data_type: Option<String>,
+    red_x: Option<String>,
+    red_y: Option<String>,
+    green_x: Option<String>,
+    green_y: Option<String>,
+    blue_x: Option<String>,
+    blue_y: Option<String>,
+    white_point_x: Option<String>,
+    white_point_y: Option<String>,
+    min_luminance: Option<String>,
+    max_luminance: Option<String>,
+    max_content: Option<u32>,
+    max_average: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -49,6 +81,18 @@ struct FfprobeReport {
     #[serde(default)]
     streams: Vec<FfprobeStream>,
     format: Option<FfprobeFormat>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct FfprobeFrameReport {
+    #[serde(default)]
+    frames: Vec<FfprobeFrame>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct FfprobeFrame {
+    #[serde(default)]
+    side_data_list: Vec<FfprobeFrameSideData>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -82,7 +126,18 @@ pub fn validate_export_output(
     }
 
     let report = ffprobe_report(output_path)?;
-    validate_report(&report, expectations)
+    validate_report(&report, expectations)?;
+
+    let expected_hdr10 = expectations
+        .expected_video
+        .as_ref()
+        .and_then(|video| video.signal.as_ref())
+        .and_then(|signal| signal.static_hdr10_metadata.as_ref());
+    if let Some(expected_hdr10) = expected_hdr10 {
+        let side_data = ffprobe_first_video_frame_side_data(output_path)?;
+        validate_hdr10_static_metadata(&side_data, expected_hdr10)?;
+    }
+    Ok(())
 }
 
 pub fn probe_media_summary(path: &Path) -> Result<MediaStreamSummary, String> {
@@ -113,6 +168,42 @@ fn ffprobe_report(path: &Path) -> Result<FfprobeReport, String> {
 
     serde_json::from_slice::<FfprobeReport>(&output.stdout)
         .map_err(|err| format!("解析 ffprobe 结果失败: {}", err))
+}
+
+fn ffprobe_first_video_frame_side_data(path: &Path) -> Result<Vec<FfprobeFrameSideData>, String> {
+    let output = Command::new("ffprobe")
+        .arg("-v")
+        .arg("error")
+        .arg("-select_streams")
+        .arg("v:0")
+        .arg("-read_intervals")
+        .arg("%+#1")
+        .arg("-show_frames")
+        .arg("-show_entries")
+        .arg("frame=side_data_list")
+        .arg("-print_format")
+        .arg("json")
+        .arg(path)
+        .output()
+        .map_err(|err| format!("启动 ffprobe HDR metadata 校验失败: {err}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "ffprobe HDR metadata 校验失败（{}）: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+
+    let report = serde_json::from_slice::<FfprobeFrameReport>(&output.stdout)
+        .map_err(|err| format!("解析 ffprobe 首帧 HDR metadata 失败: {err}"))?;
+    report
+        .frames
+        .into_iter()
+        .next()
+        .map(|frame| frame.side_data_list)
+        .ok_or_else(|| "ffprobe 未能解码导出视频的首帧，无法校验 HDR10 metadata".to_string())
 }
 
 fn validate_report(
@@ -250,6 +341,208 @@ fn validate_video_signal(
         expected.color_matrix.as_deref(),
         stream.color_space.as_deref(),
     )
+}
+
+fn validate_hdr10_static_metadata(
+    side_data: &[FfprobeFrameSideData],
+    expected: &ExpectedHdr10StaticMetadataConstraints,
+) -> Result<(), String> {
+    expected
+        .mastering_display
+        .validate()
+        .map_err(|error| format!("期望的 SMPTE ST 2086 metadata 无效: {error}"))?;
+    expected
+        .content_light
+        .validate()
+        .map_err(|error| format!("期望的 CTA-861.3 metadata 无效: {error}"))?;
+
+    let mastering_side_data = side_data
+        .iter()
+        .find(|data| {
+            data.side_data_type
+                .as_deref()
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("Mastering display metadata"))
+        })
+        .ok_or_else(|| "导出成品首帧缺少 Mastering display metadata (SMPTE ST 2086)".to_string())?;
+    let actual_mastering = parse_mastering_display_metadata(mastering_side_data)?;
+    actual_mastering
+        .validate()
+        .map_err(|error| format!("导出成品 SMPTE ST 2086 metadata 无效: {error}"))?;
+    validate_mastering_display_matches(&actual_mastering, &expected.mastering_display)?;
+
+    let content_light_side_data = side_data
+        .iter()
+        .find(|data| {
+            data.side_data_type
+                .as_deref()
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("Content light level metadata"))
+        })
+        .ok_or_else(|| {
+            "导出成品首帧缺少 Content light level metadata (MaxCLL/MaxFALL)".to_string()
+        })?;
+    let actual_content_light = VideoContentLightMetadata {
+        max_content_light_level: content_light_side_data
+            .max_content
+            .ok_or_else(|| "导出成品 Content light level metadata 缺少 max_content".to_string())?,
+        max_frame_average_light_level: content_light_side_data
+            .max_average
+            .ok_or_else(|| "导出成品 Content light level metadata 缺少 max_average".to_string())?,
+    };
+    actual_content_light
+        .validate()
+        .map_err(|error| format!("导出成品 CTA-861.3 metadata 无效: {error}"))?;
+    if actual_content_light != expected.content_light {
+        return Err(format!(
+            "导出 HDR10 Content light level metadata 不匹配：期望 MaxCLL/MaxFALL={}/{}, 实际 {}/{}",
+            expected.content_light.max_content_light_level,
+            expected.content_light.max_frame_average_light_level,
+            actual_content_light.max_content_light_level,
+            actual_content_light.max_frame_average_light_level
+        ));
+    }
+    Ok(())
+}
+
+fn parse_mastering_display_metadata(
+    data: &FfprobeFrameSideData,
+) -> Result<VideoMasteringDisplayMetadata, String> {
+    let rational = |field: &'static str, value: Option<&str>| {
+        let raw =
+            value.ok_or_else(|| format!("导出成品 Mastering display metadata 缺少 {field}"))?;
+        parse_hdr_rational(raw).ok_or_else(|| {
+            format!("导出成品 Mastering display metadata 的 {field} 不是有效有理数: {raw}")
+        })
+    };
+    let chromaticity = |x_field: &'static str,
+                        x: Option<&str>,
+                        y_field: &'static str,
+                        y: Option<&str>| {
+        Ok::<_, String>(VideoHdrChromaticity { x: rational(x_field, x)?, y: rational(y_field, y)? })
+    };
+
+    Ok(VideoMasteringDisplayMetadata {
+        primaries: Some(VideoMasteringDisplayPrimaries {
+            red: chromaticity(
+                "red_x",
+                data.red_x.as_deref(),
+                "red_y",
+                data.red_y.as_deref(),
+            )?,
+            green: chromaticity(
+                "green_x",
+                data.green_x.as_deref(),
+                "green_y",
+                data.green_y.as_deref(),
+            )?,
+            blue: chromaticity(
+                "blue_x",
+                data.blue_x.as_deref(),
+                "blue_y",
+                data.blue_y.as_deref(),
+            )?,
+            white_point: chromaticity(
+                "white_point_x",
+                data.white_point_x.as_deref(),
+                "white_point_y",
+                data.white_point_y.as_deref(),
+            )?,
+        }),
+        luminance: Some(VideoMasteringDisplayLuminance {
+            min: rational("min_luminance", data.min_luminance.as_deref())?,
+            max: rational("max_luminance", data.max_luminance.as_deref())?,
+        }),
+    })
+}
+
+fn parse_hdr_rational(raw: &str) -> Option<VideoHdrRational> {
+    let trimmed = raw.trim();
+    let (numerator, denominator) = trimmed.split_once('/').unwrap_or((trimmed, "1"));
+    Some(VideoHdrRational::new(
+        numerator.trim().parse::<i32>().ok()?,
+        denominator.trim().parse::<i32>().ok()?,
+    ))
+}
+
+fn validate_mastering_display_matches(
+    actual: &VideoMasteringDisplayMetadata,
+    expected: &VideoMasteringDisplayMetadata,
+) -> Result<(), String> {
+    let actual_primaries = actual
+        .primaries
+        .as_ref()
+        .ok_or_else(|| "导出成品 SMPTE ST 2086 metadata 缺少 primaries".to_string())?;
+    let expected_primaries = expected
+        .primaries
+        .as_ref()
+        .ok_or_else(|| "期望的 SMPTE ST 2086 metadata 缺少 primaries".to_string())?;
+    for (field, actual, expected) in [
+        ("red_x", actual_primaries.red.x, expected_primaries.red.x),
+        ("red_y", actual_primaries.red.y, expected_primaries.red.y),
+        (
+            "green_x",
+            actual_primaries.green.x,
+            expected_primaries.green.x,
+        ),
+        (
+            "green_y",
+            actual_primaries.green.y,
+            expected_primaries.green.y,
+        ),
+        ("blue_x", actual_primaries.blue.x, expected_primaries.blue.x),
+        ("blue_y", actual_primaries.blue.y, expected_primaries.blue.y),
+        (
+            "white_point_x",
+            actual_primaries.white_point.x,
+            expected_primaries.white_point.x,
+        ),
+        (
+            "white_point_y",
+            actual_primaries.white_point.y,
+            expected_primaries.white_point.y,
+        ),
+    ] {
+        validate_quantized_hdr_rational(field, actual, expected, 50_000)?;
+    }
+
+    let actual_luminance = actual
+        .luminance
+        .ok_or_else(|| "导出成品 SMPTE ST 2086 metadata 缺少 luminance".to_string())?;
+    let expected_luminance = expected
+        .luminance
+        .ok_or_else(|| "期望的 SMPTE ST 2086 metadata 缺少 luminance".to_string())?;
+    validate_quantized_hdr_rational(
+        "min_luminance",
+        actual_luminance.min,
+        expected_luminance.min,
+        10_000,
+    )?;
+    validate_quantized_hdr_rational(
+        "max_luminance",
+        actual_luminance.max,
+        expected_luminance.max,
+        10_000,
+    )
+}
+
+fn validate_quantized_hdr_rational(
+    field: &str,
+    actual: VideoHdrRational,
+    expected: VideoHdrRational,
+    encoder_scale: i64,
+) -> Result<(), String> {
+    let expected_numerator = expected
+        .scaled_i64(encoder_scale)
+        .ok_or_else(|| format!("期望的 HDR10 metadata 字段 {field} 不能量化到编码器尺度"))?;
+    let matches = actual.denominator > 0
+        && i64::from(actual.numerator) * encoder_scale
+            == expected_numerator * i64::from(actual.denominator);
+    if matches {
+        return Ok(());
+    }
+    Err(format!(
+        "导出 HDR10 metadata 字段 {field} 不匹配：期望编码值 {expected_numerator}/{encoder_scale}，实际 {}/{}",
+        actual.numerator, actual.denominator
+    ))
 }
 
 fn validate_exact_video_field(
@@ -441,6 +734,7 @@ mod tests {
                     color_transfer: Some("smpte2084".to_owned()),
                     color_matrix: Some("bt2020nc".to_owned()),
                     require_color_tags_absent: false,
+                    static_hdr10_metadata: None,
                 }),
                 ..ExpectedVideoConstraints::default()
             }),
@@ -521,6 +815,73 @@ mod tests {
     }
 
     #[test]
+    fn validate_hdr10_static_metadata_rejects_missing_side_data() {
+        let expected = ExpectedHdr10StaticMetadataConstraints {
+            mastering_display: VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference(),
+            content_light: VideoContentLightMetadata::hdr10_1000_nit_reference(),
+        };
+
+        let error = validate_hdr10_static_metadata(&[], &expected)
+            .expect_err("missing encoded HDR10 metadata must fail closed");
+        assert!(error.contains("Mastering display metadata"));
+    }
+
+    #[test]
+    fn validate_hdr10_static_metadata_accepts_ffprobe_frame_payload() {
+        let expected = ExpectedHdr10StaticMetadataConstraints {
+            mastering_display: VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference(),
+            content_light: VideoContentLightMetadata::hdr10_1000_nit_reference(),
+        };
+
+        validate_hdr10_static_metadata(&reference_hdr10_side_data(), &expected)
+            .expect("encoded reference metadata should match its delivery contract");
+    }
+
+    #[test]
+    fn validate_hdr10_static_metadata_rejects_content_light_mismatch() {
+        let expected = ExpectedHdr10StaticMetadataConstraints {
+            mastering_display: VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference(),
+            content_light: VideoContentLightMetadata::hdr10_1000_nit_reference(),
+        };
+        let mut side_data = reference_hdr10_side_data();
+        side_data
+            .iter_mut()
+            .find(|data| data.side_data_type.as_deref() == Some("Content light level metadata"))
+            .expect("content-light fixture")
+            .max_content = Some(900);
+
+        let error = validate_hdr10_static_metadata(&side_data, &expected)
+            .expect_err("changed encoded MaxCLL must fail");
+        assert!(error.contains("期望 MaxCLL/MaxFALL=1000/400"));
+        assert!(error.contains("实际 900/400"));
+    }
+
+    fn reference_hdr10_side_data() -> Vec<FfprobeFrameSideData> {
+        vec![
+            FfprobeFrameSideData {
+                side_data_type: Some("Mastering display metadata".to_string()),
+                red_x: Some("34000/50000".to_string()),
+                red_y: Some("16000/50000".to_string()),
+                green_x: Some("13250/50000".to_string()),
+                green_y: Some("34500/50000".to_string()),
+                blue_x: Some("7500/50000".to_string()),
+                blue_y: Some("3000/50000".to_string()),
+                white_point_x: Some("15635/50000".to_string()),
+                white_point_y: Some("16450/50000".to_string()),
+                min_luminance: Some("1/10000".to_string()),
+                max_luminance: Some("10000000/10000".to_string()),
+                ..FfprobeFrameSideData::default()
+            },
+            FfprobeFrameSideData {
+                side_data_type: Some("Content light level metadata".to_string()),
+                max_content: Some(1000),
+                max_average: Some(400),
+                ..FfprobeFrameSideData::default()
+            },
+        ]
+    }
+
+    #[test]
     fn summarize_report_detects_streams_and_duration() {
         let report = base_report();
         let summary = summarize_report(&report);
@@ -582,6 +943,7 @@ mod tests {
                     color_transfer: Some("iec61966-2-1".to_owned()),
                     color_matrix: Some("bt709".to_owned()),
                     require_color_tags_absent: false,
+                    static_hdr10_metadata: None,
                 }),
                 ..ExpectedVideoConstraints::default()
             }),
@@ -591,5 +953,86 @@ mod tests {
         let result = validate_export_output(&path, &expectations);
         let _ = std::fs::remove_file(path);
         result.expect("real encoded signal should satisfy its contract");
+    }
+
+    #[test]
+    fn validate_export_output_reads_real_hdr10_static_metadata() {
+        let path = std::env::temp_dir().join(format!(
+            "mondrian-export-hdr10-validation-{}.mp4",
+            std::process::id()
+        ));
+        let output = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:s=16x16:r=1:d=1",
+                "-frames:v",
+                "1",
+                "-c:v",
+                "libx265",
+                "-pix_fmt",
+                "yuv420p10le",
+                "-color_range",
+                "tv",
+                "-color_primaries",
+                "bt2020",
+                "-color_trc",
+                "smpte2084",
+                "-colorspace",
+                "bt2020nc",
+                "-x265-params",
+                "master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400",
+            ])
+            .arg(&path)
+            .output()
+            .expect("launch ffmpeg HDR10 fixture");
+        assert!(
+            output.status.success(),
+            "ffmpeg HDR10 fixture failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut expectations = ExportValidationExpectations {
+            require_video_stream: true,
+            require_audio_stream: false,
+            expected_video: Some(ExpectedVideoConstraints {
+                width: Some(16),
+                height: Some(16),
+                signal: Some(ExpectedVideoSignalConstraints {
+                    pixel_format: Some("yuv420p10le".to_owned()),
+                    color_range: Some("tv".to_owned()),
+                    color_primaries: Some("bt2020".to_owned()),
+                    color_transfer: Some("smpte2084".to_owned()),
+                    color_matrix: Some("bt2020nc".to_owned()),
+                    require_color_tags_absent: false,
+                    static_hdr10_metadata: Some(ExpectedHdr10StaticMetadataConstraints {
+                        mastering_display:
+                            VideoMasteringDisplayMetadata::rec2100_pq_1000_nit_reference(),
+                        content_light: VideoContentLightMetadata::hdr10_1000_nit_reference(),
+                    }),
+                }),
+                ..ExpectedVideoConstraints::default()
+            }),
+            expected_duration_secs: None,
+        };
+
+        validate_export_output(&path, &expectations)
+            .expect("real encoded HDR10 metadata should satisfy its contract");
+        expectations
+            .expected_video
+            .as_mut()
+            .and_then(|video| video.signal.as_mut())
+            .and_then(|signal| signal.static_hdr10_metadata.as_mut())
+            .expect("HDR10 expectation")
+            .content_light
+            .max_content_light_level = 900;
+        let mismatch = validate_export_output(&path, &expectations)
+            .expect_err("a mismatched post-encode MaxCLL contract must fail");
+        let _ = std::fs::remove_file(path);
+        assert!(mismatch.contains("实际 1000/400"));
     }
 }

@@ -824,10 +824,17 @@ Successful encoder exit is not proof of a correct deliverable. Timeline export
 derives `ExpectedVideoSignalConstraints` from the same
 `ExportVideoSignalContract` used to build FFmpeg arguments, then probes the
 finished file. Validation fails on mismatched pixel format, range, primaries,
-transfer, or matrix. Camera-log and GIF contracts additionally require color
-tags to be absent, so an encoder cannot silently replace an intentionally
-untagged signal with guessed metadata. ProRes 422 profiles are verified as
-10-bit 4:2:2, while ProRes 4444/4444 XQ are verified as 12-bit 4:4:4:4.
+transfer, or matrix. When static HDR10 preservation is requested, the expected
+ST 2086 and MaxCLL/MaxFALL payloads travel in the same validation contract. A
+bounded second FFprobe call decodes only the first video frame, where libx265
+exposes those SEI messages, and compares every mastering chromaticity,
+luminance, MaxCLL, and MaxFALL value after encoder-scale quantization. Missing
+or changed side data therefore fails the export even after a successful encoder
+exit. Non-HDR and HDR exports without preservation do not pay this extra probe.
+Camera-log and GIF contracts additionally require color tags to be absent, so
+an encoder cannot silently replace an intentionally untagged signal with
+guessed metadata. ProRes 422 profiles are verified as 10-bit 4:2:2, while
+ProRes 4444/4444 XQ are verified as 12-bit 4:4:4:4.
 
 Delivery sample depth and renderer transport precision are separate contracts.
 `DeliveryBitDepth` exposes only the 8-bit, 10-bit, and 12-bit formats implemented
