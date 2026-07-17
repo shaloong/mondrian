@@ -1347,20 +1347,23 @@ use `PreviewGpuOutputBlocker::UnsupportedFeature` with stable `feature` codes
 and `document_unsupported_feature` action code.
 
 - **`MonitorProfileReference::IccProfile` outside a resolved Display Output
-  Contract** — Windows OS default ICC profile discovery is available through
+  Contract** — Windows WCS, macOS CoreGraphics, Wayland color-management-v1,
+  and X11 root properties provide platform-native default ICC discovery through
   `mondrian-platform`, and preview scheduling consumes the resolved Display
   Output Contract when it maps the ICC profile to a managed monitor color
   space. If the contract is missing, invalid, unreadable, or unmapped, preview
   fails closed with `icc_preview_color_space_resolution` or the structured
   display-contract blocker. It must not silently fall back to Rec.709, sRGB, or
   the sequence output color space.
-- **Real OS HDR/EDR detection** — `ViewerDisplayMode::HdrPq` /
+- **HDR presentation without complete native evidence** — `ViewerDisplayMode::HdrPq` /
   `ViewerDisplayMode::HdrHlg` are explicit user selections. On Windows the app
   probes DisplayConfig Advanced Color support/enabled/force-disabled state, bits
   per channel, color encoding, and SDR white level through `mondrian-platform`;
   known disabled or unsupported state blocks HDR preview. wgpu
   `SurfaceColorSpace` compatibility is still only the swapchain side of the
-  contract. macOS/Linux and unavailable probes record
+  contract. macOS adds AppKit EDR headroom, Wayland consumes the active output
+  image description, and Linux DRM/EDID remains hardware-only fallback evidence.
+  Any unavailable or hardware-only probe records
   `MonitorHdrCapabilityUnknown` / `MonitorHdrCapabilityUnsupported` blockers
   when HDR correctness cannot be confirmed.
 - **GPU compositing** — The `gpu_compositor.rs` module is wired into the

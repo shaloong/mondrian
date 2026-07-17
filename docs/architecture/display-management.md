@@ -113,6 +113,12 @@ Full-chain HDR diagnosis:
 | HDR | supports HDR | unknown | `RequestedMonitorUnknown` |
 | HDR | no HDR support | * | `RequestedSurfaceUnsupported` |
 
+Monitor evidence is explicitly three-state. `Ready` requires both physical
+support and a currently HDR/EDR-capable desktop output. `Unsupported` means a
+native API explicitly reports unsupported or currently disabled. `Unknown`
+includes hardware-only evidence (for example DRM EDID with no compositor mode
+proof). Hardware capability alone never enables HDR presentation.
+
 ### DisplayOutputBlocker
 
 Structured failure categories:
@@ -218,27 +224,37 @@ The display contract produces structured diagnostics for:
 - Fake display probe for testable display contract logic
 - Windows OS default ICC profile discovery via `mondrian-platform`
   (`EnumDisplayMonitors` + WCS default profile lookup)
+- macOS active-display ICC payload discovery via CoreGraphics and real current,
+  potential, and reference EDR headroom via `NSScreen`
+- Linux Wayland `color-management-v1` output image descriptions, including
+  direct ICC file-descriptor payloads, active transfer function, and luminance
+  evidence; X11 `_ICC_PROFILE[_n]` discovery remains the X11-native path
+- Linux DRM/EDID CTA-861 HDR Static Metadata fallback for physical PQ/HLG and
+  luminance capability; this path deliberately leaves active compositor HDR
+  state unknown
+- Platform-neutral probe evidence records native backend, path or in-memory ICC
+  payload, support/enabled state, transfer functions, reference white,
+  luminance, bit depth, encoding, and EDR headroom
 - Preview scheduling consumes the resolved Display Output Contract for
   ICC-backed monitor color-space resolution and invalidates cached preview
   frames when the contract changes
 - Cache invalidation on contract change
 
 ### Not Implemented (Fail-Closed)
-- **macOS/Linux OS ICC profile discovery** — these platform adapters still
-  report `IccProfileUnsupported`.
 - **ICC profile id registry** — `IccProfile { profile_id }` accepts absolute
   paths or `os-default`; arbitrary stable ids fail closed until a registry is
   implemented.
-- **macOS/Linux OS HDR display metadata** — Windows probes DisplayConfig
-  Advanced Color state and SDR white level through `mondrian-platform` before
-  falling back to wgpu headroom. macOS/Linux still cannot confirm real monitor
-  HDR capability and must report `MonitorHdrCapabilityUnknown` or
-  `MonitorHdrCapabilityUnsupported` instead of silently treating HDR as ready.
-- **OS EDR information** — Not available on any platform.
-- **General ICC-to-OCIO mapping** — common explicitly named monitor profiles
-  can resolve to managed Mondrian color spaces, but arbitrary calibrated ICC
-  profiles still emit `IccProfileUnmapped` until OCIO display/view mapping is
-  implemented.
+- **Wayland parametric-profile synthesis** — when an active Wayland output
+  description provides primaries/transfer/luminance but no ICC file, Mondrian
+  records the HDR evidence but does not synthesize an ICC payload. An explicit
+  monitor ICC request therefore fails closed instead of inventing calibration.
+- **Linux compositor HDR proof without color-management-v1** — DRM/EDID proves
+  physical capability only. Compositors without the protocol remain
+  `MonitorHdrCapabilityUnknown` until the active output encoding can be proven.
+- **Unsupported ICC device classes/transforms** — monitor RGB profiles that the
+  calibration processor supports can produce a device LUT without descriptive
+  color-space name mapping. Unsupported device classes or transform structures
+  still emit `IccProfileUnmapped`; they never fall back to a named gamut.
 
 ### Explicitly Unsupported
 - `DataTexture` / `NonColorData` in display colorspace selection
