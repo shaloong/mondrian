@@ -353,8 +353,9 @@ Late video is dropped while authoritative media time continues.
 
 Current playback worker deadlines originate in the Playback Engine Frame Demand.
 The app Adapter converts its remaining monotonic lifetime to an `Instant` budget
-at enqueue/promotion time. `app_ui::preview_scheduler_policy` owns the pure
-worker-deadline eligibility and bounded frame-rate-to-prefetch-window policy;
+at enqueue/promotion time. `app::preview_scheduler_policy` owns the pure
+worker-deadline eligibility, executed decode-quality classification, and bounded
+frame-rate-to-prefetch-window policy;
 `app::preview_access_mode` owns Broker admission/job transport, while
 `app_ui::preview` still owns decode execution and evidence aggregation. None of
 them duplicate clock math.

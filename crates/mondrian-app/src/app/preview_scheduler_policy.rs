@@ -1,4 +1,4 @@
-//! Pure deadline and prefetch-window policy for realtime preview scheduling.
+//! Pure deadline, execution-quality, and prefetch policy for preview scheduling.
 
 use crate::app::preview_access_mode::MediaPreviewRequestPriority;
 use mondrian_core::Rational;

@@ -870,6 +870,11 @@ deleted rather than retained as compatibility paths. App-local worker-activity
 atomics were also deleted: windowed reports and Headless verification share the
 Broker diagnostics Interface for execution-lane residency.
 
+`app::preview_scheduler_policy` owns the corresponding pure decision boundary:
+Frame Demand deadline completion, real decode execution quality, and bounded
+frame-rate-derived prefetch depth. Moving it out of `app_ui` prevents a Viewer
+Adapter from redefining Ready/Degraded/Late or hardware-fallback semantics.
+
 Time-sensitive Broker transitions use the `MonotonicRuntimeClock` Interface.
 Production adapts Rust's monotonic `Instant`; Headless tests inject an exact
 manual clock. The Broker samples it under the lifecycle lock exactly once per

@@ -78,6 +78,13 @@ use crate::app::preview_access_mode::{
     MediaPreviewRequestPriority, MediaPreviewRequestStatus, MediaPreviewScheduler,
     MediaPreviewSchedulerDiagnostics, MediaPreviewWorkerLane,
 };
+use crate::app::preview_scheduler_policy::{
+    media_preview_forward_prefetch_window_frames, playback_frame_delivery_kind,
+    playback_hardware_decode_requested, preview_decode_presentation_quality,
+    preview_hardware_decode_effective, PlaybackDecodeExecution,
+    MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US, MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES,
+    MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
+};
 use crate::app::proxy_generation::{request_proxy_generation, resolve_asset_proxy_color_contract};
 use crate::app::AppState;
 use crate::app_ui::native_video_import::AppUiPlaybackHardwareDecodeAdmission;
@@ -90,13 +97,6 @@ use crate::app_ui::preview_frame_store::PreviewCpuFrameStore;
 use crate::app_ui::preview_frame_store::PreviewCpuFrameStoreConfig;
 use crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
-use crate::app_ui::preview_scheduler_policy::{
-    media_preview_forward_prefetch_window_frames, playback_frame_delivery_kind,
-    playback_hardware_decode_requested, preview_decode_presentation_quality,
-    preview_hardware_decode_effective, PlaybackDecodeExecution,
-    MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US, MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES,
-    MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
-};
 
 const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 50_000;
 const MEDIA_PREVIEW_PLAYBACK_BUFFERING_STALL_TIMEOUT_US: u64 = 250_000;
