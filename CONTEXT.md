@@ -36,6 +36,10 @@ _Avoid_: Worker-captured demand identity as final authority, separate pending an
 The Playback Module that atomically owns frame-work admission, queued transport, in-flight execution leases, generation invalidation, preemption, deadline dequeue, cancellation, and completion binding while treating media payloads and clock values as opaque Adapter data.
 _Avoid_: Independent scheduler and worker queue, key-only worker completion, UI-owned priority rollback, Adapter-composed freshness/preemption queries
 
+**Frame Cancellation Evidence**:
+Playback-owned, all-run evidence from an authoritative cancellation request through the first cooperative execution checkpoint to worker return, partitioned by Playback, Interactive, and Still frame-work class.
+_Avoid_: UI counter families, full worker lifetime as cancellation latency, one cleanup budget for unlike work classes
+
 **Playback Quality Policy**:
 The allowed temporary preview resolution and user-selected proxy/original policy for a Playback Session.
 _Avoid_: Quality flag
@@ -186,6 +190,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - A **Frame Request Binding** is resolved atomically at completion. If the same semantic frame key is rebound while work is in flight, a reusable result adopts the latest binding; a canceled or incompatible old execution leaves the newer binding pending.
 - Every queued or executing frame request belongs to exactly one **Frame Work Broker** lifecycle. Admission and queue capacity cannot disagree, and only an execution lease or explicit synchronous Adapter completion may resolve its Frame Request Binding.
 - The **Frame Work Broker** derives each execution's cancellation disposition and request age under one lifecycle lock. Adapters may translate that disposition into domain-specific diagnostics, but cannot reconstruct it from separate freshness, competing-work, or timestamp queries.
+- A media **Adapter** contributes execution-start, first-checkpoint, and return timestamps exactly once to **Frame Cancellation Evidence**. The Playback Module alone aggregates causes and work classes and evaluates request-to-checkpoint plus class-specific checkpoint-to-return budgets; UI reports may project this evidence but cannot reinterpret it.
 - Successful decode/cache completion is nonterminal readiness. A CPU or GPU **Presentation Adapter** must complete the exact **Frame Presentation Ticket** only after it has produced a usable Viewer output; the Playback Module compares the real completion timestamp with the ticket deadline and emits `Ready`, `Degraded`, or `Late`. Cancellation/failure paths may terminate earlier without presentation.
 - A Viewer stale lifecycle state does not terminate a **Frame Demand**; only a deadline/policy decision may emit `StaleAvailable`, while an in-flight worker retains the chance to deliver `Ready`.
 - A **Playback Quality Policy** constrains every **Frame Demand** in its Playback Session.
@@ -195,6 +200,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - **Playback Evidence** records state and clock transitions without owning them.
 - **Playback Evidence** uses bounded versioned events and aggregates from real Frame Demand, Frame Delivery, Clock Master, seek, and Audio Playback observations; capability probes alone cannot satisfy execution gates.
 - **Playback Evidence** detailed-event eviction is normal bounded retention, not observation loss. Metric population count and maximum cover the entire run exactly; percentile estimates use a declared fixed-capacity deterministic reservoir.
+- **Professional Playback Acceptance** fails closed when observed **Frame Cancellation Evidence** has an unknown cause, lacks request/checkpoint attribution, contains impossible timestamp ordering, observes a request too late, or returns after its work-class budget.
 - Every Clock Master observation or handoff that changes the authoritative timeline frame must publish a matching current **Frame Demand** in the same Engine transition; position, demand target, and delivery identity cannot temporarily diverge.
 - **Professional Playback Acceptance** accepts HEVC Main10 only when FFmpeg proves the codec profile, dimensions, bit depth/pixel format, and 25/30-family frame rate. Unknown probe values remain unknown and fail the contract.
 - Decode execution provenance lives on the decoded frame and survives playback-ring, global preview cache, prefetch, and Preview Frame Store reuse. Acceptance coverage counts only provenance attached to Viewer candidates that complete through the headless GPU Presentation Adapter; aggregate prefetch diagnostics cannot satisfy it.

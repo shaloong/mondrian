@@ -688,38 +688,28 @@ Playback diagnostics must also expose session reuse and forward reuse evidence.
 If playback source decodes repeatedly open sessions or never hit forward reuse,
 ring reuse, or cache reuse, the report should flag playback locality separately
 from generic codec/GOP pressure.
-App-level decode cancellation is also structured before it reaches diagnostics:
-workers classify cancellations as shutdown, obsolete pending work, prefetch
-deadline, or unknown, and aggregate them by requested access mode. The media
-decode predicate remains a boolean so FFmpeg adapters do not learn app/UI
-scheduler semantics, but the worker result must preserve the app-level reason
-for telemetry and performance reports. Access-mode profiles must carry the
-reason breakdown for their own cancellations, so obsolete or unknown cancel
-pressure can be attributed to `PlaybackCursor`, `ScrubCursor`, or
-`RandomAccessStillFrame` without comparing independent totals.
-Canceled decode jobs also carry worker execution duration. A cancellation that
-arrives quickly but only returns after an expensive FFmpeg open/seek/decode/copy
-step is still a user-visible scheduling failure. Preview reports therefore keep
-total/max/last canceled-worker duration globally and per access mode, and emit a
-slow-cancellation root cause when the full canceled worker duration exceeds the
-slow-frame budget. Workers must also report two separate intervals: external
-cancellation request to the first observed cooperative checkpoint, and that
-checkpoint to the completed worker result. Generation invalidation and
-current-work preemption arrive as one atomic Playback Broker
-execution-cancellation disposition carrying its monotonic request age; deadline
-cancellation time comes from
-the authored deadline or prefetch budget; process shutdown time comes from a
-dedicated timestamped signal published before its atomic requested flag.
-Unknown/unattributable cancellation
-does not manufacture a zero-duration sample. Reports expose attributed sample
-count plus total/max/last latency globally and per access mode, warn when sample
-coverage is incomplete, and apply a 5 ms request-to-checkpoint budget. A
-separate slow-cancel-return root cause uses the slow-frame budget for cleanup
-after the checkpoint. This keeps scheduler propagation, FFmpeg
-open/seek/decode/copy work, and cleanup/return work diagnosable as different
-failures. The evidence belongs in the app scheduler/worker layer because the
-media layer owns only boolean cooperative checkpoints, not UI intent or cancel
-reasons.
+Decode cancellation crosses the media boundary as a structured Adapter result,
+but its authority and policy do not live in the App. Generation invalidation
+and current-work preemption arrive from `FrameWorkBroker` as one atomic
+disposition carrying monotonic request age; deadline and shutdown Adapters
+likewise preserve their authoritative request instant. FFmpeg continues to see
+only a boolean cooperative predicate. When the worker returns, the App media
+Adapter contributes one `FrameCancellationObservation` to the playback-owned
+collector: semantic work class, structured cause, total execution lifetime,
+worker-start-to-first-checkpoint, and request-to-first-checkpoint.
+
+The Playback Module derives checkpoint-to-return and owns exact all-run
+aggregation for Playback, Interactive, Still, and their rollup. UI diagnostics
+only project that immutable report into legacy decode fields and access-mode
+views; they do not keep parallel counters or choose thresholds. The shared
+fail-closed policy rejects unknown causes, missing request/checkpoint
+attribution, impossible timestamp ordering, request-to-checkpoint above 5 ms,
+Playback/Interactive return above 50 ms, and
+Still return above 500 ms. Total worker lifetime remains diagnostic only:
+expensive work completed before cancellation was requested is not evidence of
+slow cancellation. This separation keeps authority propagation, codec
+checkpoint placement, and cleanup/return independently diagnosable without
+teaching the media layer UI intent.
 Process-global decoded-frame cache hits are capped to the same strict frame-hit
 tolerance for every access mode. Playback performance must come from the
 playback cursor's decoder/session locality, ring buffers, hardware decode, and

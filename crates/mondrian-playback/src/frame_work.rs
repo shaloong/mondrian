@@ -4,7 +4,7 @@ use crate::FrameDemandIdentity;
 use std::time::Duration;
 
 /// Semantic class of frame-producing work at the Playback seam.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum FrameWorkClass {
     /// Current playback cursor or forward playback prefetch.
     Playback,

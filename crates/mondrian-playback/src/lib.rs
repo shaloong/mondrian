@@ -10,6 +10,8 @@ use thiserror::Error;
 
 mod evidence;
 pub use evidence::*;
+mod cancellation_evidence;
+pub use cancellation_evidence::*;
 mod frame_work;
 pub use frame_work::*;
 mod frame_store;

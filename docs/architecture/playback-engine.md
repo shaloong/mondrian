@@ -40,6 +40,7 @@ the new seams.
 | Playback Engine | session epoch, transport state, timeline anchor, rate/direction, Clock Master selection, priming/recovery, deadlines, drop decisions | decode sessions, GPU resources, audio callback buffers, UI state |
 | Audio Playback Engine | device/stream lifecycle, rendered PCM queue, consumed-sample observation, preroll, underrun/device evidence | timeline transport decisions |
 | Frame Work Broker | bounded semantic admission, queued transport, execution leases, latest generation, current/prefetch priority, still preemption, deadline dequeue, cancellation, completion freshness | codec payload interpretation, Clock Master or transport state |
+| Frame Cancellation Evidence | exact all-run cause/timing aggregates and the shared cancellation acceptance policy | cancellation authority, codec checkpoints, UI presentation |
 | Preview Frame Store | ready/stale/in-flight identity, source revision, color contract, memory budgets | deadline policy or proxy selection |
 | Presentation Adapter | GPU import/composite/display, Viewer handoff, presentation evidence | timeline advancement |
 | Playback Evidence | immutable events, aggregates, reports | policy decisions |
@@ -831,6 +832,20 @@ vocabulary and combines it only with codec-local shutdown/decode-budget and
 wall-deadline checks; it no longer performs multiple Broker queries whose
 answers could describe different lifecycle instants.
 
+`FrameCancellationEvidenceCollector` is the single aggregation Module after
+that seam. The App media Adapter records one completed observation containing
+semantic work class, authoritative cause, total execution lifetime,
+worker-start-to-first-checkpoint, and request-to-first-checkpoint. The Module
+derives checkpoint-to-return, preserves exact all-run counts/maxima, and
+partitions Playback, Interactive, and Still without App-local counter families.
+`FrameCancellationPolicy` is shared by windowed diagnostics, Headless tests,
+and professional acceptance: request-to-checkpoint is at most 5 ms; Playback
+and Interactive checkpoint-to-return are at most 50 ms; deterministic Still is
+at most 500 ms. Unknown causes, missing request/checkpoint attribution, and
+impossible timestamp ordering fail closed.
+Total execution lifetime remains diagnostic because work performed before the
+authority request is not cancellation latency.
+
 Frame completion now resolves an atomic Frame Request Binding. The App Adapter
 stores its absolute wall deadline as the opaque deadline value and replaces a
 worker-captured demand identity only when the Playback Module authorizes reuse.
@@ -962,13 +977,15 @@ cross-region seeks through the same GPU presentation path, and then schedules a
 requires warm p95 at or below 200 ms, accurate p95 at or below 500 ms, at least
 99 superseded-seek observations, no rejected old terminal delivery, and zero
 Broker pending/queued/in-flight residency after the burst.
-The report preserves cancellation return-latency evidence separately for
-playback, scrub, and exact-still lanes. Realtime cancellation is not allowed to
-hide a slower deterministic still decoder. In-process FFmpeg sessions now keep
+The report projects playback-owned cancellation evidence separately for
+Playback, Interactive, and Still work and the professional gate evaluates the
+same shared policy directly. Realtime cancellation is not allowed to hide a
+slower deterministic still decoder. In-process FFmpeg sessions now keep
 the request probe installed as an `AVIOInterruptCB` across open, stream-info,
 seek, and packet I/O; the optional external still backend kills and reaps its
 child while draining both pipes. The product gate therefore evaluates each
-class against its own fixed return budget rather than exempting exact stills.
+class against its fixed return budget rather than deriving a threshold from UI
+slow-frame settings.
 Steady playback is evaluated by p95 plus at least 99.5% current-frame readiness;
 the slowest single decode remains explicit diagnostic evidence but one
 session-open outlier cannot independently fail a 30-minute run whose sustained

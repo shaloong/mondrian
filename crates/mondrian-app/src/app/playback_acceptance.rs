@@ -156,6 +156,7 @@ pub(crate) struct PreviewProfessionalPlaybackGateReport {
     broker_in_flight_jobs: usize,
     cpu_frame_store_within_budget: bool,
     cpu_frame_store_oversize_rejections: u64,
+    cancellation_gate: mondrian_playback::FrameCancellationGateReport,
     pub(crate) passed: bool,
     pub(crate) failures: Vec<PreviewAcceptanceFailure>,
 }
@@ -379,6 +380,39 @@ pub(crate) fn evaluate_professional_playback(
             "Preview Frame Store admission diagnostics",
         );
     }
+    let cancellation_gate = mondrian_playback::evaluate_frame_cancellation(
+        diagnostics.decode_cancellation,
+        mondrian_playback::FrameCancellationPolicy::default(),
+    );
+    for failure in &cancellation_gate.failures {
+        let code = match failure.kind {
+            mondrian_playback::FrameCancellationGateFailureKind::UnknownCause => {
+                "frame_cancellation_unknown_cause"
+            }
+            mondrian_playback::FrameCancellationGateFailureKind::MissingRequestToCheckpoint => {
+                "frame_cancellation_request_evidence_missing"
+            }
+            mondrian_playback::FrameCancellationGateFailureKind::MissingExecutionToCheckpoint => {
+                "frame_cancellation_checkpoint_evidence_missing"
+            }
+            mondrian_playback::FrameCancellationGateFailureKind::InvalidTimingOrder => {
+                "frame_cancellation_timing_invalid"
+            }
+            mondrian_playback::FrameCancellationGateFailureKind::RequestToCheckpointExceeded => {
+                "frame_cancellation_checkpoint_late"
+            }
+            mondrian_playback::FrameCancellationGateFailureKind::CheckpointToReturnExceeded => {
+                "frame_cancellation_return_late"
+            }
+        };
+        push_failure(
+            &mut failures,
+            code,
+            format!("at most {} for {:?}", failure.limit, failure.work_class),
+            failure.observed.to_string(),
+            "Frame Cancellation Evidence evaluated by the playback-owned policy",
+        );
+    }
 
     let execution = observation.rendered_decode_execution;
     let presented_media_layers = u64::from(execution.media_layers);
@@ -477,6 +511,7 @@ pub(crate) fn evaluate_professional_playback(
         broker_in_flight_jobs: diagnostics.worker_queue.in_flight_jobs,
         cpu_frame_store_within_budget,
         cpu_frame_store_oversize_rejections,
+        cancellation_gate,
         passed: failures.is_empty(),
         failures,
     }
@@ -537,6 +572,49 @@ mod tests {
         assert!(report.passed, "{:?}", report.failures);
         assert_eq!(report.presented_hardware_layers, 100);
         assert_eq!(report.hardware_execution_percent, 100);
+    }
+
+    #[test]
+    fn rejects_playback_when_shared_cancellation_policy_fails() {
+        let media = main10_media();
+        let evidence = passing_playback_evidence();
+        let mut cancellation = mondrian_playback::FrameCancellationEvidenceCollector::default();
+        cancellation.observe(mondrian_playback::FrameCancellationObservation {
+            work_class: mondrian_playback::FrameWorkClass::Interactive,
+            cause: mondrian_playback::FrameCancellationCause::Superseded,
+            execution_duration: std::time::Duration::from_millis(90),
+            execution_to_checkpoint: Some(std::time::Duration::from_millis(20)),
+            request_to_checkpoint: Some(std::time::Duration::from_millis(1)),
+        });
+        let diagnostics = AppUiPreviewDiagnostics {
+            decode_cancellation: cancellation.report(),
+            ..AppUiPreviewDiagnostics::default()
+        };
+        let observation = ProfessionalPlaybackObservation {
+            media: &media,
+            rendered_decode_execution: AppUiPreviewDecodeExecutionSummary {
+                media_layers: 100,
+                hardware_native_layers: 100,
+                p010_10_bit_hardware_layers: 100,
+                ..AppUiPreviewDecodeExecutionSummary::default()
+            },
+            viewer_fallback_count: 0,
+            viewer_fallback_reasons: &[],
+            playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
+            playback_evidence: &evidence,
+            preview_diagnostics: &diagnostics,
+            frames: 45_000,
+            frame_interval_ns: 40_000_000,
+        };
+
+        let report = evaluate_professional_playback(observation, 90);
+
+        assert!(!report.passed);
+        assert!(!report.cancellation_gate.passed);
+        assert!(report
+            .failures
+            .iter()
+            .any(|failure| failure.code == "frame_cancellation_return_late"));
     }
 
     #[test]

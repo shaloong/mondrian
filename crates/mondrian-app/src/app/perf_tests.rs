@@ -640,6 +640,7 @@ fn preview_playback_decode_failures(
                 check.code,
                 "preview_decode_timeout_failures"
                     | "preview_decode_forward_budget_exhausted_failures"
+                    | "preview_decode_cancellation_gate"
                     | "preview_decode_worker_queue_full_drops"
                     | "preview_decode_worker_disconnected_drops"
                     | "preview_decode_queue_invalid_access_mode_drops"
