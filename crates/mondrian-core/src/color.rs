@@ -1179,10 +1179,10 @@ mod tests {
         );
         engine
             .validate_working_space(WorkingColorSpace::LinearRec2020)
-            .expect("Standard v1 working space");
+            .expect("Standard working-space identity v1");
         let error = engine
             .validate_working_space(WorkingColorSpace::LinearP3D65)
-            .expect_err("Standard v1 must reject a different working space");
+            .expect_err("Standard working-space identity v1 must reject a different space");
         assert!(error.contains("Mondrian Standard"));
         assert!(error.contains("Linear Rec.2020"));
     }

@@ -192,7 +192,7 @@ pub(crate) fn ocio_engine_is_validated(engine: &ColorEngine) -> bool {
 /// Intended name for Mondrian's bundled default OCIO config.
 pub const MONDRIAN_DEFAULT_OCIO_CONFIG_NAME: &str = "mondrian_default_ocio_v2";
 
-/// SHA-256 digest pinned to the exact OCIO text shipped by Mondrian Standard v2.
+/// SHA-256 digest pinned to the base OCIO text shared by Standard packages v2 and v3.
 pub const MONDRIAN_DEFAULT_OCIO_CONFIG_SHA256: &str =
     MondrianStandardPackageIdentity::V2.config_sha256();
 /// SHA-256 over the versioned config text and every embedded Standard resource.
@@ -297,7 +297,7 @@ pub struct MondrianDefaultOcioContract {
     pub default_view: &'static str,
     /// Scene-linear working role expected by Mondrian's internal compositor.
     pub scene_linear_role: &'static str,
-    /// Scene-linear wide-gamut working space pinned by Standard v1.
+    /// Scene-linear wide-gamut working space pinned by working-space identity v1.
     pub working_space: WorkingColorSpace,
     /// Mondrian color spaces that must be present in the embedded config.
     pub color_spaces: &'static [MondrianDefaultOcioColorSpace],
@@ -3617,7 +3617,7 @@ pub fn mondrian_standard_output_display_name(output: ColorSpace) -> Result<&'sta
 }
 
 /// Resolve the immutable luminance, gamut, encoding, and OCIO View contract
-/// for one Mondrian Standard v2 program-output target.
+/// for one current Mondrian Standard program-output target.
 pub fn mondrian_standard_output_target_contract(
     output: ColorSpace,
 ) -> Result<MondrianStandardOutputTargetContract, String> {

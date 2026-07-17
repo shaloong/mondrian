@@ -2279,7 +2279,7 @@ mod tests {
 
         let error = settings
             .validate_with_project_color_management(&ProjectColorManagement::default())
-            .expect_err("Standard v1 must reject a non-versioned working space");
+            .expect_err("Standard working-space identity v1 must reject a non-versioned space");
 
         assert!(error.to_string().contains("Mondrian Standard"));
         assert!(error.to_string().contains("Linear Rec.2020"));

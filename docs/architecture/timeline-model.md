@@ -46,7 +46,7 @@ presentation outputs even if a project file is authored outside the UI; the
 sequence output must be one of the display-referred SDR/HDR identities. This
 does not remove export's separate, explicit professional Log intermediate path.
 
-New sequences default to the Mondrian Standard v1 working identity, unbounded
+New sequences default to Mondrian Standard working-space identity v1, unbounded
 scene-linear Rec.2020, and a scene-referred workflow. Their initial SDR program
 boundary therefore executes the version-pinned Mondrian Standard View. An
 explicit DisplayReferred workflow remains available as a technical colorimetric

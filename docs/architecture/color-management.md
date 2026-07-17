@@ -422,7 +422,7 @@ display-encoded and Log values require an OCIO processor.
 Project files and sequence-setting actions do not accept encoded acquisition or
 delivery identities in this field.
 
-Mondrian Standard v2 pins `WorkingColorSpace::LinearRec2020`; the bundled OCIO
+Mondrian Standard packages v2 and v3 pin `WorkingColorSpace::LinearRec2020`; the bundled OCIO
 config pins its `scene_linear` role to `Linear Rec.2020`, and the package
 contract validates the same mapping. The working values are unbounded
 scene-linear floats, not a 0..1 display signal and not a request to clip colors
