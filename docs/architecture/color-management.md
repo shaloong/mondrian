@@ -920,16 +920,20 @@ adding another color-space decision path.
 a metadata hint, an ICC profile, supported CICP tags, unsupported CICP tags,
 missing metadata, or decoder unavailability; UI, logs, and export reports
 surface that method instead of asking users to infer provenance from raw tags.
-HDR stream side-data is captured as `VideoHdrMetadataSummary` entries on
-`VideoStreamInfo` and copied into `VideoColorDiagnostic`. The summary records
-side-data kind, payload size, and a typed `mondrian-core` payload when FFmpeg
-exposes a stable stream-side-data ABI. ST 2086 mastering display metadata and
-CTA-861.3 MaxCLL/MaxFALL content-light metadata are parsed into shared core
-value objects that can also format x265-compatible `master-display` and
-`max-cll` strings. ICC payloads are parsed into a profile name plus an explicit
-`IccColorSpaceMapping::{Mapped, Unmapped}` result. HDR10+ and Dolby Vision
-configuration remain presence/diagnostic records until dedicated parsers are
-introduced.
+HDR stream and first-frame side data are captured as
+`VideoHdrMetadataSummary` entries on `VideoStreamInfo` and copied into
+`VideoColorDiagnostic`. The summary records side-data kind, payload size, and a
+typed `mondrian-core` payload when FFmpeg exposes a stable ABI. ST 2086
+mastering display metadata and CTA-861.3 MaxCLL/MaxFALL content-light metadata
+are parsed into shared core value objects that can also format x265-compatible
+`master-display` and `max-cll` strings. Common HEVC files expose those values
+only after decoding, so already identified HDR video receives one bounded
+first-frame metadata decode during the background media probe; SDR imports do
+not. Stream and frame facts are de-duplicated by semantic kind. ICC payloads are
+parsed into a profile name plus an explicit
+`IccColorSpaceMapping::{Mapped, Unmapped}` result. First-frame HDR10+ and stream
+Dolby Vision configuration remain presence/diagnostic records until dedicated
+parsers are introduced.
 Sequence/export HDR preservation stores these typed core payloads directly and
 fails closed when either ST 2086 mastering-display metadata or MaxCLL/MaxFALL
 content-light metadata is missing; export must not synthesize hidden defaults.

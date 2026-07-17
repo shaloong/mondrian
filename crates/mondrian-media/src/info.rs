@@ -1,7 +1,8 @@
 //! 媒体文件元数据探针
 //!
-//! 使用 FFmpeg `avformat_open_input` 读取媒体文件的流信息，
-//! 不进行解码，仅提取元数据。
+//! 使用 FFmpeg `avformat_open_input` 读取媒体文件的流信息。对已经由
+//! CICP/容器信息识别为 HDR 的视频，额外解码首帧以捕获只存在于
+//! `AVFrameSideData` 的静态/动态 HDR 元数据。
 
 use crate::decoder::{decoded_video_range_from_ffmpeg, DecodedVideoRange};
 use ffmpeg_next as ffmpeg;
@@ -1214,6 +1215,25 @@ impl MediaInfo {
             }
         }
 
+        for video in &mut video_streams {
+            if !video_stream_needs_frame_hdr_probe(video) {
+                continue;
+            }
+            match probe_first_frame_hdr_metadata(path, video.index) {
+                Ok(frame_metadata) => {
+                    merge_hdr_metadata(&mut video.hdr_metadata, frame_metadata);
+                }
+                Err(reason) => {
+                    tracing::warn!(
+                        "[media-probe] first-frame HDR metadata unavailable: path={:?} stream={} reason={}",
+                        path,
+                        video.index,
+                        reason
+                    );
+                }
+            }
+        }
+
         let info = Self {
             path: path.to_path_buf(),
             duration,
@@ -1814,6 +1834,114 @@ fn collect_hdr_metadata_summaries(
         .collect()
 }
 
+fn video_stream_needs_frame_hdr_probe(stream: &VideoStreamInfo) -> bool {
+    stream.detected_color_space.is_some_and(ColorSpace::is_hdr)
+        || stream.hdr_metadata.iter().any(|metadata| {
+            matches!(
+                metadata.kind,
+                VideoHdrSideDataKind::DynamicHdr10Plus | VideoHdrSideDataKind::DolbyVisionConfig
+            )
+        })
+}
+
+fn probe_first_frame_hdr_metadata(
+    path: &Path,
+    stream_index: u32,
+) -> Result<Vec<VideoHdrMetadataSummary>, String> {
+    const MAX_VIDEO_PACKETS: usize = 512;
+
+    let mut input = ffmpeg::format::input(path)
+        .map_err(|error| format!("open first-frame HDR probe input: {error}"))?;
+    let parameters = input
+        .streams()
+        .find(|stream| stream.index() == stream_index as usize)
+        .map(|stream| stream.parameters())
+        .ok_or_else(|| format!("video stream {stream_index} is unavailable"))?;
+    let context = ffmpeg::codec::context::Context::from_parameters(parameters)
+        .map_err(|error| format!("create first-frame HDR decoder context: {error}"))?;
+    let mut decoder = context
+        .decoder()
+        .video()
+        .map_err(|error| format!("open first-frame HDR video decoder: {error}"))?;
+
+    let mut target_packets = 0usize;
+    for (stream, packet) in input.packets() {
+        if stream.index() != stream_index as usize {
+            continue;
+        }
+        target_packets = target_packets.saturating_add(1);
+        decoder
+            .send_packet(&packet)
+            .map_err(|error| format!("send first-frame HDR packet: {error}"))?;
+        let mut decoded = ffmpeg::util::frame::video::Video::empty();
+        if decoder.receive_frame(&mut decoded).is_ok() {
+            return Ok(collect_frame_hdr_metadata_summaries(&decoded));
+        }
+        if target_packets >= MAX_VIDEO_PACKETS {
+            return Err(format!(
+                "no decoded frame after {MAX_VIDEO_PACKETS} packets"
+            ));
+        }
+    }
+
+    decoder
+        .send_eof()
+        .map_err(|error| format!("flush first-frame HDR decoder: {error}"))?;
+    let mut decoded = ffmpeg::util::frame::video::Video::empty();
+    decoder
+        .receive_frame(&mut decoded)
+        .map_err(|error| format!("decode first HDR frame at end of stream: {error}"))?;
+    Ok(collect_frame_hdr_metadata_summaries(&decoded))
+}
+
+fn collect_frame_hdr_metadata_summaries(
+    frame: &ffmpeg::util::frame::video::Video,
+) -> Vec<VideoHdrMetadataSummary> {
+    use ffmpeg::util::frame::side_data::Type;
+
+    [
+        (
+            Type::MasteringDisplayMetadata,
+            VideoHdrSideDataKind::MasteringDisplayMetadata,
+        ),
+        (
+            Type::ContentLightLevel,
+            VideoHdrSideDataKind::ContentLightLevel,
+        ),
+        (
+            Type::DYNAMIC_HDR_PLUS,
+            VideoHdrSideDataKind::DynamicHdr10Plus,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(side_data_type, kind)| {
+        let side_data = frame.side_data(side_data_type)?;
+        Some(VideoHdrMetadataSummary {
+            kind,
+            payload_size: side_data.data().len(),
+            payload: parse_hdr_metadata_payload_for_kind(kind, side_data.data()),
+        })
+    })
+    .collect()
+}
+
+fn merge_hdr_metadata(
+    stream_metadata: &mut Vec<VideoHdrMetadataSummary>,
+    frame_metadata: Vec<VideoHdrMetadataSummary>,
+) {
+    for candidate in frame_metadata {
+        if let Some(existing) =
+            stream_metadata.iter_mut().find(|metadata| metadata.kind == candidate.kind)
+        {
+            if existing.payload.is_none() && candidate.payload.is_some() {
+                *existing = candidate;
+            }
+        } else {
+            stream_metadata.push(candidate);
+        }
+    }
+}
+
 fn icc_color_profile_hint(hdr_metadata: &[VideoHdrMetadataSummary]) -> Option<IccColorProfileHint> {
     hdr_metadata.iter().find_map(|summary| {
         let VideoHdrMetadataPayload::IccProfile(profile) = summary.payload.as_ref()? else {
@@ -1845,20 +1973,30 @@ fn parse_hdr_metadata_payload(
     kind: ffmpeg::codec::packet::side_data::Type,
     data: &[u8],
 ) -> Option<VideoHdrMetadataPayload> {
-    use ffmpeg::codec::packet::side_data::Type;
-
-    match kind {
-        Type::MasteringDisplayMetadata => {
-            parse_mastering_display_payload(data).map(VideoHdrMetadataPayload::MasteringDisplay)
-        }
-        Type::ContentLightLevel => {
-            parse_content_light_payload(data).map(VideoHdrMetadataPayload::ContentLightLevel)
-        }
-        Type::ICC_PROFILE => parse_icc_display_profile(data)
+    let summary_kind = map_hdr_side_data_kind(kind)?;
+    if summary_kind == VideoHdrSideDataKind::IccProfile {
+        return parse_icc_display_profile(data)
             .ok()
             .map(|profile| VideoIccProfileMetadata { name: profile.name, mapping: profile.mapping })
-            .map(VideoHdrMetadataPayload::IccProfile),
-        _ => None,
+            .map(VideoHdrMetadataPayload::IccProfile);
+    }
+    parse_hdr_metadata_payload_for_kind(summary_kind, data)
+}
+
+fn parse_hdr_metadata_payload_for_kind(
+    kind: VideoHdrSideDataKind,
+    data: &[u8],
+) -> Option<VideoHdrMetadataPayload> {
+    match kind {
+        VideoHdrSideDataKind::MasteringDisplayMetadata => {
+            parse_mastering_display_payload(data).map(VideoHdrMetadataPayload::MasteringDisplay)
+        }
+        VideoHdrSideDataKind::ContentLightLevel => {
+            parse_content_light_payload(data).map(VideoHdrMetadataPayload::ContentLightLevel)
+        }
+        VideoHdrSideDataKind::DynamicHdr10Plus
+        | VideoHdrSideDataKind::DolbyVisionConfig
+        | VideoHdrSideDataKind::IccProfile => None,
     }
 }
 
@@ -3401,6 +3539,72 @@ mod tests {
         assert!(summary.contains("matrix=bt2020nc"));
         assert!(summary.contains("camera_profile=S-Log3 / S-Gamut3.Cine"));
         assert!(summary.contains("MasteringDisplayMetadata(bytes=88,payload=master_display"));
+    }
+
+    #[test]
+    fn media_probe_reads_static_hdr_metadata_from_first_decoded_frame() {
+        let path = std::env::temp_dir().join(format!(
+            "mondrian-media-frame-hdr-probe-{}.mp4",
+            std::process::id()
+        ));
+        let output = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:s=16x16:r=1:d=1",
+                "-frames:v",
+                "1",
+                "-c:v",
+                "libx265",
+                "-pix_fmt",
+                "yuv420p10le",
+                "-color_range",
+                "tv",
+                "-color_primaries",
+                "bt2020",
+                "-color_trc",
+                "smpte2084",
+                "-colorspace",
+                "bt2020nc",
+                "-x265-params",
+                "master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400",
+            ])
+            .arg(&path)
+            .output()
+            .expect("launch ffmpeg HDR fixture");
+        assert!(
+            output.status.success(),
+            "ffmpeg HDR fixture failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let info = MediaInfo::probe(&path).expect("probe encoded HDR fixture");
+        let video = info.primary_video().expect("video stream");
+        let mastering = video
+            .hdr_metadata
+            .iter()
+            .find(|summary| summary.kind == VideoHdrSideDataKind::MasteringDisplayMetadata)
+            .and_then(|summary| summary.payload.as_ref());
+        let content_light = video
+            .hdr_metadata
+            .iter()
+            .find(|summary| summary.kind == VideoHdrSideDataKind::ContentLightLevel)
+            .and_then(|summary| summary.payload.as_ref());
+        let _ = std::fs::remove_file(path);
+
+        assert!(matches!(
+            mastering,
+            Some(VideoHdrMetadataPayload::MasteringDisplay(_))
+        ));
+        assert!(matches!(
+            content_light,
+            Some(VideoHdrMetadataPayload::ContentLightLevel(_))
+        ));
     }
 
     const fn raw_q(num: i32, den: i32) -> FfmpegRational {

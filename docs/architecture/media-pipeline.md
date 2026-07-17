@@ -26,14 +26,26 @@ decode requests and reports facts; it does not pause or advance transport.
 
 ## Probe
 
-`MediaInfo::probe(path)` uses FFmpeg format/codec metadata without decoding full media. It extracts:
+`MediaInfo::probe(path)` uses FFmpeg format/codec metadata without decoding full
+media. It extracts:
 
 - container and duration
 - file size
-- video streams: codec, decoder-proven codec profile, dimensions, frame rate, pixel format, bit depth, alpha, detected color space, structured color interpretation, frame count
+- video streams: codec, decoder-proven codec profile, dimensions, frame rate,
+  pixel format, bit depth, alpha, detected color space, structured color
+  interpretation, frame count, and HDR side-data summaries
 - audio streams: codec, sample rate, channels, layout, bit depth
 
-The probe runs off the UI thread.
+The probe runs off the UI thread. Once stream/CICP evidence identifies a video
+as HDR (or stream metadata declares dynamic HDR/Dolby Vision), the probe opens a
+short-lived decoder and reads only the first decoded frame, with a hard limit of
+512 target-video packets. This is required because FFmpeg exposes HEVC ST 2086,
+MaxCLL/MaxFALL, and HDR10+ metadata as `AVFrameSideData` for common files even
+when `AVStream`/`codecpar` side data is empty. The frame facts are merged with
+the stream facts by semantic kind; a typed frame payload replaces an unparsed
+stream summary but never creates duplicates. SDR and audio-only imports do not
+open this metadata decoder. Failure to obtain the optional first-frame evidence
+is logged without making otherwise decodable media offline.
 
 Probe absence is explicit. Invalid/zero FFmpeg frame-rate rationals are stored
 as unproven rather than silently replaced with 25 fps. Unsupported or unknown
