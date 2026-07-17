@@ -11,6 +11,13 @@ use mondrian_media::info::{PixelFormat, VideoCodec};
 use mondrian_media::{MediaInfo, VideoCodecProfile};
 use serde::Serialize;
 
+const PROCESS_MEMORY_WARMUP_END_US: u64 = 5 * 60 * 1_000_000;
+const PROCESS_MEMORY_BASELINE_END_US: u64 = 10 * 60 * 1_000_000;
+const PROCESS_MEMORY_FINAL_WINDOW_START_US: u64 = 25 * 60 * 1_000_000;
+const PROCESS_MEMORY_MIN_WINDOW_SAMPLES: u64 = 240;
+const PROCESS_MEMORY_MAX_PRIVATE_COMMITTED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const PROCESS_MEMORY_MAX_SETTLED_GROWTH_BYTES: u64 = 256 * 1024 * 1024;
+
 use crate::app_ui::preview::{
     AppUiPreviewDecodeAccessModeProfile, AppUiPreviewDecodeExecutionSummary,
     AppUiPreviewDiagnostics,
@@ -157,9 +164,142 @@ pub(crate) struct PreviewProfessionalPlaybackGateReport {
     broker_clock_regressions: u64,
     cpu_frame_store_within_budget: bool,
     cpu_frame_store_oversize_rejections: u64,
+    process_memory: PreviewProcessMemoryGateReport,
     cancellation_gate: mondrian_playback::FrameCancellationGateReport,
     pub(crate) passed: bool,
     pub(crate) failures: Vec<PreviewAcceptanceFailure>,
+}
+
+/// Bounded, process-wide memory evidence collected by a native platform Adapter.
+///
+/// The collector keeps only scalar aggregates. It deliberately uses private
+/// committed memory for acceptance and reports the reclaimable resident set as
+/// diagnostics rather than treating it as application ownership.
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct PreviewProcessMemoryEvidenceReport {
+    backend: Option<String>,
+    discovery_available: bool,
+    attempted_samples: u64,
+    observed_samples: u64,
+    probe_errors: u64,
+    last_probe_error: Option<String>,
+    observed_duration_us: u64,
+    peak_private_committed_bytes: u64,
+    peak_resident_bytes: u64,
+    os_peak_resident_bytes: u64,
+    baseline_sample_count: u64,
+    baseline_average_private_committed_bytes: u64,
+    final_sample_count: u64,
+    final_average_private_committed_bytes: u64,
+    post_seek_private_committed_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PreviewProcessMemoryEvidenceCollector {
+    report: PreviewProcessMemoryEvidenceReport,
+    baseline_private_sum: u128,
+    final_private_sum: u128,
+}
+
+impl PreviewProcessMemoryEvidenceCollector {
+    pub(crate) fn observe_playback(
+        &mut self,
+        observed_at_us: u64,
+        sample: mondrian_platform::ProcessMemoryProbeResult,
+    ) {
+        self.report.observed_duration_us = self.report.observed_duration_us.max(observed_at_us);
+        let Some(private_bytes) = self.observe_sample(sample) else {
+            return;
+        };
+        if (PROCESS_MEMORY_WARMUP_END_US..PROCESS_MEMORY_BASELINE_END_US).contains(&observed_at_us)
+        {
+            self.report.baseline_sample_count = self.report.baseline_sample_count.saturating_add(1);
+            self.baseline_private_sum =
+                self.baseline_private_sum.saturating_add(u128::from(private_bytes));
+        }
+        if (PROCESS_MEMORY_FINAL_WINDOW_START_US..=PROFESSIONAL_MIN_OBSERVED_DURATION_US)
+            .contains(&observed_at_us)
+        {
+            self.report.final_sample_count = self.report.final_sample_count.saturating_add(1);
+            self.final_private_sum =
+                self.final_private_sum.saturating_add(u128::from(private_bytes));
+        }
+    }
+
+    pub(crate) fn observe_post_seek(
+        &mut self,
+        sample: mondrian_platform::ProcessMemoryProbeResult,
+    ) {
+        self.report.post_seek_private_committed_bytes = self.observe_sample(sample);
+    }
+
+    pub(crate) fn report(mut self) -> PreviewProcessMemoryEvidenceReport {
+        self.report.baseline_average_private_committed_bytes =
+            average_bytes(self.baseline_private_sum, self.report.baseline_sample_count);
+        self.report.final_average_private_committed_bytes =
+            average_bytes(self.final_private_sum, self.report.final_sample_count);
+        self.report
+    }
+
+    fn observe_sample(
+        &mut self,
+        sample: mondrian_platform::ProcessMemoryProbeResult,
+    ) -> Option<u64> {
+        self.report.attempted_samples = self.report.attempted_samples.saturating_add(1);
+        self.report.discovery_available |= sample.discovery_available;
+        if let Some(backend) = sample.backend {
+            let backend = backend.as_str().to_owned();
+            if self.report.backend.as_ref().is_some_and(|known| known != &backend) {
+                self.report.probe_errors = self.report.probe_errors.saturating_add(1);
+                self.report.last_probe_error =
+                    Some("process-memory backend changed during one acceptance run".to_owned());
+                return None;
+            }
+            self.report.backend = Some(backend);
+        }
+        let Some(private_bytes) = sample.private_committed_bytes else {
+            self.report.probe_errors = self.report.probe_errors.saturating_add(1);
+            self.report.last_probe_error = sample.error.or_else(|| {
+                Some("process-memory sample omitted private committed bytes".to_owned())
+            });
+            return None;
+        };
+        self.report.observed_samples = self.report.observed_samples.saturating_add(1);
+        self.report.peak_private_committed_bytes =
+            self.report.peak_private_committed_bytes.max(private_bytes);
+        if let Some(resident_bytes) = sample.resident_bytes {
+            self.report.peak_resident_bytes = self.report.peak_resident_bytes.max(resident_bytes);
+        }
+        if let Some(peak_resident_bytes) = sample.peak_resident_bytes {
+            self.report.os_peak_resident_bytes =
+                self.report.os_peak_resident_bytes.max(peak_resident_bytes);
+        }
+        Some(private_bytes)
+    }
+}
+
+fn average_bytes(sum: u128, count: u64) -> u64 {
+    if count == 0 {
+        return 0;
+    }
+    sum.checked_div(u128::from(count))
+        .unwrap_or(u128::MAX)
+        .min(u128::from(u64::MAX)) as u64
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PreviewProcessMemoryGateReport {
+    profile: &'static str,
+    max_private_committed_bytes: u64,
+    max_settled_growth_bytes: u64,
+    baseline_sample_count: u64,
+    final_sample_count: u64,
+    baseline_average_private_committed_bytes: u64,
+    final_average_private_committed_bytes: u64,
+    settled_growth_bytes: u64,
+    post_seek_private_committed_bytes: Option<u64>,
+    post_seek_growth_bytes: Option<u64>,
+    passed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -178,6 +318,7 @@ pub(crate) struct ProfessionalPlaybackObservation<'a> {
     pub playback_decode: AppUiPreviewDecodeAccessModeProfile,
     pub playback_evidence: &'a mondrian_playback::PlaybackEvidenceReport,
     pub preview_diagnostics: &'a AppUiPreviewDiagnostics,
+    pub process_memory: &'a PreviewProcessMemoryEvidenceReport,
     pub frames: usize,
     pub frame_interval_ns: u64,
 }
@@ -390,6 +531,7 @@ pub(crate) fn evaluate_professional_playback(
             "Preview Frame Store admission diagnostics",
         );
     }
+    let process_memory = evaluate_process_memory(observation.process_memory, &mut failures);
     let cancellation_gate = mondrian_playback::evaluate_frame_cancellation(
         diagnostics.decode_cancellation,
         mondrian_playback::FrameCancellationPolicy::default(),
@@ -480,7 +622,7 @@ pub(crate) fn evaluate_professional_playback(
         .saturating_add(playback.hardware_decode_prefer_gpu_requested_frames)
         .saturating_add(playback.hardware_decode_require_gpu_requested_frames);
     PreviewProfessionalPlaybackGateReport {
-        profile: "uhd_hevc_main10_hardware_1x_v2",
+        profile: "uhd_hevc_main10_hardware_1x_v3",
         required_hardware_execution_percent,
         presented_media_layers,
         presented_hardware_layers,
@@ -522,9 +664,133 @@ pub(crate) fn evaluate_professional_playback(
         broker_clock_regressions: diagnostics.scheduler.clock_regressions,
         cpu_frame_store_within_budget,
         cpu_frame_store_oversize_rejections,
+        process_memory,
         cancellation_gate,
         passed: failures.is_empty(),
         failures,
+    }
+}
+
+fn evaluate_process_memory(
+    evidence: &PreviewProcessMemoryEvidenceReport,
+    failures: &mut Vec<PreviewAcceptanceFailure>,
+) -> PreviewProcessMemoryGateReport {
+    if !evidence.discovery_available || evidence.backend.is_none() {
+        push_failure(
+            failures,
+            "process_memory_probe_unavailable",
+            "native private-commit process-memory evidence",
+            evidence.backend.as_deref().unwrap_or("unavailable"),
+            evidence.last_probe_error.as_deref().unwrap_or("no native backend"),
+        );
+    }
+    if evidence.probe_errors > 0 {
+        push_failure(
+            failures,
+            "process_memory_probe_error",
+            "0 failed or incomplete samples",
+            evidence.probe_errors.to_string(),
+            evidence.last_probe_error.as_deref().unwrap_or("unknown probe error"),
+        );
+    }
+    if evidence.observed_duration_us < PROFESSIONAL_MIN_OBSERVED_DURATION_US {
+        push_failure(
+            failures,
+            "process_memory_observation_too_short",
+            format!("at least {PROFESSIONAL_MIN_OBSERVED_DURATION_US} us"),
+            format!("{} us", evidence.observed_duration_us),
+            "process-memory evidence observation span",
+        );
+    }
+    if evidence.baseline_sample_count < PROCESS_MEMORY_MIN_WINDOW_SAMPLES {
+        push_failure(
+            failures,
+            "process_memory_baseline_coverage_below_minimum",
+            format!("at least {PROCESS_MEMORY_MIN_WINDOW_SAMPLES} samples from minutes 5-10"),
+            evidence.baseline_sample_count.to_string(),
+            "fixed-cadence private-commit samples",
+        );
+    }
+    if evidence.final_sample_count < PROCESS_MEMORY_MIN_WINDOW_SAMPLES {
+        push_failure(
+            failures,
+            "process_memory_final_coverage_below_minimum",
+            format!("at least {PROCESS_MEMORY_MIN_WINDOW_SAMPLES} samples from minutes 25-30"),
+            evidence.final_sample_count.to_string(),
+            "fixed-cadence private-commit samples",
+        );
+    }
+    if evidence.peak_private_committed_bytes > PROCESS_MEMORY_MAX_PRIVATE_COMMITTED_BYTES {
+        push_failure(
+            failures,
+            "process_memory_private_commit_above_limit",
+            format!("at most {PROCESS_MEMORY_MAX_PRIVATE_COMMITTED_BYTES} bytes"),
+            format!("{} bytes", evidence.peak_private_committed_bytes),
+            "native process private-commit high-water mark",
+        );
+    }
+    let settled_growth_bytes = evidence
+        .final_average_private_committed_bytes
+        .saturating_sub(evidence.baseline_average_private_committed_bytes);
+    if settled_growth_bytes > PROCESS_MEMORY_MAX_SETTLED_GROWTH_BYTES {
+        push_failure(
+            failures,
+            "process_memory_did_not_plateau",
+            format!("at most {PROCESS_MEMORY_MAX_SETTLED_GROWTH_BYTES} bytes average growth"),
+            format!("{settled_growth_bytes} bytes"),
+            "minutes 25-30 average private commit minus minutes 5-10 average",
+        );
+    }
+    let post_seek_growth_bytes = evidence
+        .post_seek_private_committed_bytes
+        .map(|bytes| bytes.saturating_sub(evidence.final_average_private_committed_bytes));
+    match (
+        evidence.post_seek_private_committed_bytes,
+        post_seek_growth_bytes,
+    ) {
+        (None, _) => push_failure(
+            failures,
+            "process_memory_post_seek_sample_missing",
+            "one private-commit sample after seek burst quiescence",
+            "missing",
+            "post-seek process-memory evidence",
+        ),
+        (Some(bytes), Some(growth)) => {
+            if bytes > PROCESS_MEMORY_MAX_PRIVATE_COMMITTED_BYTES {
+                push_failure(
+                    failures,
+                    "process_memory_post_seek_private_commit_above_limit",
+                    format!("at most {PROCESS_MEMORY_MAX_PRIVATE_COMMITTED_BYTES} bytes"),
+                    format!("{bytes} bytes"),
+                    "post-seek native process private commit",
+                );
+            }
+            if growth > PROCESS_MEMORY_MAX_SETTLED_GROWTH_BYTES {
+                push_failure(
+                    failures,
+                    "process_memory_seek_did_not_settle",
+                    format!("at most {PROCESS_MEMORY_MAX_SETTLED_GROWTH_BYTES} bytes above final playback average"),
+                    format!("{growth} bytes"),
+                    "private commit after Broker/worker quiescence",
+                );
+            }
+        }
+        _ => {}
+    }
+
+    let passed = !failures.iter().any(|failure| failure.code.starts_with("process_memory_"));
+    PreviewProcessMemoryGateReport {
+        profile: "whole_process_private_commit_v1",
+        max_private_committed_bytes: PROCESS_MEMORY_MAX_PRIVATE_COMMITTED_BYTES,
+        max_settled_growth_bytes: PROCESS_MEMORY_MAX_SETTLED_GROWTH_BYTES,
+        baseline_sample_count: evidence.baseline_sample_count,
+        final_sample_count: evidence.final_sample_count,
+        baseline_average_private_committed_bytes: evidence.baseline_average_private_committed_bytes,
+        final_average_private_committed_bytes: evidence.final_average_private_committed_bytes,
+        settled_growth_bytes,
+        post_seek_private_committed_bytes: evidence.post_seek_private_committed_bytes,
+        post_seek_growth_bytes,
+        passed,
     }
 }
 
@@ -574,6 +840,7 @@ mod tests {
             playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
             playback_evidence: &evidence,
             preview_diagnostics: &diagnostics,
+            process_memory: &passing_process_memory_evidence(),
             frames: 45_000,
             frame_interval_ns: 40_000_000,
         };
@@ -614,6 +881,7 @@ mod tests {
             playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
             playback_evidence: &evidence,
             preview_diagnostics: &diagnostics,
+            process_memory: &passing_process_memory_evidence(),
             frames: 45_000,
             frame_interval_ns: 40_000_000,
         };
@@ -648,6 +916,7 @@ mod tests {
             playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
             playback_evidence: &evidence,
             preview_diagnostics: &diagnostics,
+            process_memory: &passing_process_memory_evidence(),
             frames: 10,
             frame_interval_ns: 40_000_000,
         };
@@ -702,6 +971,7 @@ mod tests {
                     playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
                     playback_evidence: &evidence,
                     preview_diagnostics: &diagnostics,
+                    process_memory: &passing_process_memory_evidence(),
                     frames: 45_000,
                     frame_interval_ns: 40_000_000,
                 },
@@ -736,6 +1006,7 @@ mod tests {
             playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
             playback_evidence: &evidence,
             preview_diagnostics: &diagnostics,
+            process_memory: &passing_process_memory_evidence(),
             frames: 10,
             frame_interval_ns: 40_000_000,
         };
@@ -771,6 +1042,7 @@ mod tests {
             playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
             playback_evidence: &evidence,
             preview_diagnostics: &diagnostics,
+            process_memory: &passing_process_memory_evidence(),
             frames: 45_000,
             frame_interval_ns: 40_000_000,
         };
@@ -779,6 +1051,86 @@ mod tests {
         let codes: Vec<_> = report.failures.iter().map(|failure| failure.code).collect();
         assert!(codes.contains(&"warm_seek_p95_above_limit"));
         assert!(codes.contains(&"accurate_seek_p95_above_limit"));
+    }
+
+    #[test]
+    fn process_memory_collector_keeps_fixed_window_aggregates() {
+        let mib = 1024 * 1024;
+        let mut collector = PreviewProcessMemoryEvidenceCollector::default();
+        for index in 0..PROCESS_MEMORY_MIN_WINDOW_SAMPLES {
+            collector.observe_playback(
+                PROCESS_MEMORY_WARMUP_END_US + index * 1_000_000,
+                process_memory_sample(500 * mib),
+            );
+            collector.observe_playback(
+                PROCESS_MEMORY_FINAL_WINDOW_START_US + index * 1_000_000,
+                process_memory_sample(540 * mib),
+            );
+        }
+        collector.observe_playback(
+            PROFESSIONAL_MIN_OBSERVED_DURATION_US,
+            process_memory_sample(540 * mib),
+        );
+        collector.observe_post_seek(process_memory_sample(560 * mib));
+
+        let report = collector.report();
+
+        assert_eq!(
+            report.baseline_sample_count,
+            PROCESS_MEMORY_MIN_WINDOW_SAMPLES
+        );
+        assert_eq!(report.baseline_average_private_committed_bytes, 500 * mib);
+        assert_eq!(
+            report.final_sample_count,
+            PROCESS_MEMORY_MIN_WINDOW_SAMPLES + 1
+        );
+        assert_eq!(report.final_average_private_committed_bytes, 540 * mib);
+        assert_eq!(report.post_seek_private_committed_bytes, Some(560 * mib));
+        assert_eq!(
+            report.attempted_samples,
+            PROCESS_MEMORY_MIN_WINDOW_SAMPLES * 2 + 2
+        );
+    }
+
+    #[test]
+    fn rejects_process_memory_growth_that_does_not_plateau() {
+        let media = main10_media();
+        let evidence = passing_playback_evidence();
+        let diagnostics = AppUiPreviewDiagnostics::default();
+        let mut process_memory = passing_process_memory_evidence();
+        process_memory.final_average_private_committed_bytes = process_memory
+            .baseline_average_private_committed_bytes
+            .saturating_add(PROCESS_MEMORY_MAX_SETTLED_GROWTH_BYTES)
+            .saturating_add(1);
+        process_memory.post_seek_private_committed_bytes =
+            Some(process_memory.final_average_private_committed_bytes);
+
+        let report = evaluate_professional_playback(
+            ProfessionalPlaybackObservation {
+                media: &media,
+                rendered_decode_execution: AppUiPreviewDecodeExecutionSummary {
+                    media_layers: 100,
+                    hardware_native_layers: 100,
+                    p010_10_bit_hardware_layers: 100,
+                    ..AppUiPreviewDecodeExecutionSummary::default()
+                },
+                viewer_fallback_count: 0,
+                viewer_fallback_reasons: &[],
+                playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
+                playback_evidence: &evidence,
+                preview_diagnostics: &diagnostics,
+                process_memory: &process_memory,
+                frames: 45_000,
+                frame_interval_ns: 40_000_000,
+            },
+            90,
+        );
+
+        assert!(!report.process_memory.passed);
+        assert!(report
+            .failures
+            .iter()
+            .any(|failure| failure.code == "process_memory_did_not_plateau"));
     }
 
     fn passing_playback_evidence() -> mondrian_playback::PlaybackEvidenceReport {
@@ -802,6 +1154,37 @@ mod tests {
         };
         evidence.seek_superseded_count = PROFESSIONAL_MIN_SUPERSEDED_SEEKS;
         evidence
+    }
+
+    fn passing_process_memory_evidence() -> PreviewProcessMemoryEvidenceReport {
+        PreviewProcessMemoryEvidenceReport {
+            backend: Some("test-private-commit".to_owned()),
+            discovery_available: true,
+            attempted_samples: 601,
+            observed_samples: 601,
+            probe_errors: 0,
+            last_probe_error: None,
+            observed_duration_us: PROFESSIONAL_MIN_OBSERVED_DURATION_US,
+            peak_private_committed_bytes: 768 * 1024 * 1024,
+            peak_resident_bytes: 512 * 1024 * 1024,
+            os_peak_resident_bytes: 512 * 1024 * 1024,
+            baseline_sample_count: PROCESS_MEMORY_MIN_WINDOW_SAMPLES,
+            baseline_average_private_committed_bytes: 512 * 1024 * 1024,
+            final_sample_count: PROCESS_MEMORY_MIN_WINDOW_SAMPLES,
+            final_average_private_committed_bytes: 544 * 1024 * 1024,
+            post_seek_private_committed_bytes: Some(560 * 1024 * 1024),
+        }
+    }
+
+    fn process_memory_sample(
+        private_committed_bytes: u64,
+    ) -> mondrian_platform::ProcessMemoryProbeResult {
+        mondrian_platform::ProcessMemoryProbeResult::observed(
+            mondrian_platform::ProcessMemoryProbeBackend::WindowsProcessStatus,
+            private_committed_bytes,
+            private_committed_bytes.saturating_sub(64 * 1024 * 1024),
+            private_committed_bytes,
+        )
     }
 
     fn main10_media() -> PreviewPlaybackMediaProbeReport {

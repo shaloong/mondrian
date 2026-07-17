@@ -24,8 +24,8 @@ foundation:
 - `mondrian-core`: shared value types, strong IDs, project settings, color primitives, automation/keyframe data, mask/effect data, timeline render-plan data traits. It must not depend on UI, platform, media, renderer, or app crates.
 - `mondrian-editor-state`: editor actions and state enums shared by UI and app code. It should remain UI-toolkit agnostic.
 - `mondrian-editor-ui`: product-level panel/workspace descriptors. It should define editor UI concepts, not render widgets.
-- `mondrian-platform-core`: platform service traits. No OS calls.
-- `mondrian-platform`: desktop platform implementations such as clipboard, dialogs, file reveal, and eyedropper.
+- `mondrian-platform-core`: platform service traits and native-fact result types. No OS calls.
+- `mondrian-platform`: desktop platform implementations such as clipboard, dialogs, file reveal, eyedropper, display discovery, native video import capability, and current-process memory observation.
 - `mondrian-ui-core`: retained widget trait, events, accessibility metadata, focus/shortcut/tooltip traits, tree traversal.
 - `mondrian-ui-theme`: semantic theme tokens. Only Dark and Light are concrete themes; System is a resolver mode.
 - `mondrian-ui-layout`: reusable layout algorithms.
@@ -65,6 +65,7 @@ Lower layers cannot depend on higher layers:
 - Effects own effect evaluation, but pure effect data lives in core so timeline can store effects without depending on the evaluator.
 - UI widgets dispatch `Action`; app decides what actions mean.
 - Platform services are injected into event/app layers; widgets never call OS APIs directly.
+- Native process-memory observation is a separate read-only `ProcessMemoryProbe` seam. Windows reports Private Commit plus current/peak Working Set through the Process Status API; acceptance policy lives above the platform crate. Unsupported operating systems return explicit unavailable evidence rather than fabricated zeros, so future Linux/macOS Adapters can preserve the same contract.
 
 The audio dependency direction is one-way:
 

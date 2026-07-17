@@ -1,5 +1,6 @@
 use super::playback_acceptance::{
     evaluate_professional_playback, PreviewPlaybackMediaProbeReport,
+    PreviewProcessMemoryEvidenceCollector, PreviewProcessMemoryEvidenceReport,
     PreviewProfessionalPlaybackGateReport, ProfessionalPlaybackObservation,
     PROFESSIONAL_MIN_ACCURATE_SEEKS, PROFESSIONAL_MIN_OBSERVED_DURATION_US,
     PROFESSIONAL_MIN_SUPERSEDED_SEEKS, PROFESSIONAL_MIN_WARM_SEEKS,
@@ -49,7 +50,7 @@ use mondrian_media::{
     MediaInfo, PreviewDecodeAccessMode, PreviewDecodeStageDurations, VideoColorDiagnostic,
     VideoColorDiagnosticIssueAggregate,
 };
-use mondrian_platform::{NativeVideoTextureImportProbe, SystemPlatformService};
+use mondrian_platform::{NativeVideoTextureImportProbe, ProcessMemoryProbe, SystemPlatformService};
 use mondrian_renderer::profile::{GpuTimestampSample, GpuTimestampStageDurations};
 use mondrian_renderer::{
     GpuCompositingDiagnostics, GpuCompositorTextureBindingDiagnostics,
@@ -393,6 +394,7 @@ struct PreviewMediaPlaybackPerfReport {
     preview_decode_report: AppUiPreviewDecodePerformanceReport,
     preview_render_report: Option<AppUiPreviewRenderPerformanceReport>,
     playback_evidence: PlaybackEvidenceReport,
+    process_memory_evidence: PreviewProcessMemoryEvidenceReport,
     cases: Vec<PerfCaseReport>,
 }
 
@@ -1767,6 +1769,7 @@ fn run_external_continuous_playback_gate(
                 playback_decode,
                 playback_evidence: &report.playback_evidence,
                 preview_diagnostics: &report.preview_diagnostics,
+                process_memory: &report.process_memory_evidence,
                 frames: report.frames,
                 frame_interval_ns: report.frame_interval_ns,
             },
@@ -2004,6 +2007,10 @@ fn run_preview_media_continuous_playback_probe(
     let mut headless_gpu = HeadlessViewerGpuExecutionSummary::default();
     headless_gpu_preroll.adapter = Some(gpu_adapter.adapter_info().clone());
     headless_gpu.adapter = Some(gpu_adapter.adapter_info().clone());
+    let process_memory_probe = SystemPlatformService;
+    let mut process_memory_evidence = PreviewProcessMemoryEvidenceCollector::default();
+    process_memory_evidence.observe_playback(0, process_memory_probe.current_process_memory());
+    let mut next_process_memory_sample_us = 1_000_000u64;
 
     state.seek(0);
     wait_for_headless_gpu_ready(
@@ -2027,7 +2034,7 @@ fn run_preview_media_continuous_playback_probe(
         1,
         playback_threshold_ms,
         || {
-            for _ in 0..frame_count {
+            for frame_index in 0..frame_count {
                 state.advance_playback_clock(Duration::from_nanos(frame_interval_ns));
                 let sample = run_headless_preview_interval(
                     &preview_service,
@@ -2037,6 +2044,20 @@ fn run_preview_media_continuous_playback_probe(
                     Duration::from_nanos(frame_interval_ns),
                 )?;
                 record_headless_preview_readiness(&mut readiness, sample);
+                let observed_at_us = ((frame_index as u128).saturating_add(1))
+                    .saturating_mul(u128::from(frame_interval_ns))
+                    .saturating_div(1_000)
+                    .min(u128::from(u64::MAX)) as u64;
+                if observed_at_us >= next_process_memory_sample_us {
+                    process_memory_evidence.observe_playback(
+                        observed_at_us,
+                        process_memory_probe.current_process_memory(),
+                    );
+                    next_process_memory_sample_us = observed_at_us
+                        .saturating_div(1_000_000)
+                        .saturating_add(1)
+                        .saturating_mul(1_000_000);
+                }
             }
             apply_headless_preview_outcome(&preview_service, &mut state);
             Ok(())
@@ -2075,6 +2096,7 @@ fn run_preview_media_continuous_playback_probe(
             Ok(())
         },
     )?;
+    process_memory_evidence.observe_post_seek(process_memory_probe.current_process_memory());
     let gpu_timings = gpu_adapter
         .finish_gpu_timings()
         .context("finish deferred headless Viewer GPU timestamp maps")?;
@@ -2153,6 +2175,7 @@ fn run_preview_media_continuous_playback_probe(
         preview_decode_report,
         preview_render_report,
         playback_evidence,
+        process_memory_evidence: process_memory_evidence.report(),
         cases: std::iter::once(playback_case)
             .chain(seek_case)
             .chain(std::iter::once(gpu_candidate_case))

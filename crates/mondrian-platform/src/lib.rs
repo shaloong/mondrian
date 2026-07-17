@@ -13,7 +13,7 @@ pub use mondrian_platform_core::{
     DisplayIccProfileProbeResult, DisplayProbeBackend, DisplayProfileProbe,
     DisplayProfileProbeTarget, FileFilter, NativeVideoTextureHandleKind,
     NativeVideoTextureImportProbe, NativeVideoTextureImportProbeResult, NoopPlatformService,
-    PlatformService,
+    PlatformService, ProcessMemoryProbe, ProcessMemoryProbeBackend, ProcessMemoryProbeResult,
 };
 
 /// Default desktop platform implementation.
@@ -83,6 +83,53 @@ impl NativeVideoTextureImportProbe for SystemPlatformService {
     fn native_video_texture_import(&self) -> NativeVideoTextureImportProbeResult {
         system_native_video_texture_import()
     }
+}
+
+impl ProcessMemoryProbe for SystemPlatformService {
+    fn current_process_memory(&self) -> ProcessMemoryProbeResult {
+        system_process_memory()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn system_process_memory() -> ProcessMemoryProbeResult {
+    use std::mem;
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    let mut counters = PROCESS_MEMORY_COUNTERS_EX::default();
+    let result = unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut counters as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS,
+            mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+        )
+    };
+    if result == 0 {
+        return ProcessMemoryProbeResult::failed(
+            ProcessMemoryProbeBackend::WindowsProcessStatus,
+            format!(
+                "GetProcessMemoryInfo failed with OS error {}",
+                std::io::Error::last_os_error()
+            ),
+        );
+    }
+
+    ProcessMemoryProbeResult::observed(
+        ProcessMemoryProbeBackend::WindowsProcessStatus,
+        counters.PrivateUsage as u64,
+        counters.WorkingSetSize as u64,
+        counters.PeakWorkingSetSize as u64,
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+fn system_process_memory() -> ProcessMemoryProbeResult {
+    ProcessMemoryProbeResult::unsupported(
+        "native current-process memory discovery is not implemented for this platform",
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -1239,6 +1286,22 @@ mod tests {
             assert!(!result.low_copy_fallback_supported);
             assert!(result.error.is_some());
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_process_memory_probe_reports_private_commit() {
+        let result = SystemPlatformService.current_process_memory();
+
+        assert!(result.discovery_available, "{:?}", result.error);
+        assert_eq!(
+            result.backend,
+            Some(ProcessMemoryProbeBackend::WindowsProcessStatus)
+        );
+        assert!(result.private_committed_bytes.is_some_and(|bytes| bytes > 0));
+        assert!(result.resident_bytes.is_some_and(|bytes| bytes > 0));
+        assert!(result.peak_resident_bytes.is_some_and(|bytes| bytes > 0));
+        assert!(result.error.is_none());
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

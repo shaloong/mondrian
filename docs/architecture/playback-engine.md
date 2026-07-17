@@ -1039,7 +1039,7 @@ playback GPU completion p95 exceeds one frame interval, a readback appears, or
 a GPU blocker is reported. Pre-roll pipeline warm-up is reported separately
 and cannot contaminate the steady-playback p95.
 The professional 4K HEVC Main10 gate now has a fail-closed input and execution
-contract (`uhd_hevc_main10_hardware_1x_v2`). It uses real FFmpeg decoder
+contract (`uhd_hevc_main10_hardware_1x_v3`). It uses real FFmpeg decoder
 profile/format/rate evidence, the probed
 rational cadence, frame-local decode provenance carried through caches and
 prefetch, the exact Viewer candidate, and a completed headless GPU submission.
@@ -1051,6 +1051,22 @@ cross-region seeks through the same GPU presentation path, and then schedules a
 requires warm p95 at or below 200 ms, accurate p95 at or below 500 ms, at least
 99 superseded-seek observations, no rejected old terminal delivery, and zero
 Broker pending/queued/in-flight residency after the burst.
+The same Adapter takes a native whole-process memory sample at a fixed one-second
+cadence. `mondrian-platform-core::ProcessMemoryProbe` defines the OS-neutral
+fact boundary and the Windows implementation uses `GetProcessMemoryInfo`.
+Private Commit is the acceptance metric; current/peak Working Set remains
+diagnostic because OS paging is not application ownership. The versioned
+`whole_process_private_commit_v1` profile requires at least 240 valid samples
+in both minutes 5–10 and minutes 25–30, no incomplete/native-probe samples, a
+4 GiB absolute Private Commit high-water limit, and no more than 256 MiB growth
+from the early settled-window average to the final-window average. After 50
+warm seeks, 50 accurate seeks, the 100-request latest-wins burst, and verified
+Broker/worker quiescence, one further sample must remain within the same
+absolute cap and within 256 MiB of the final playback average. The collector
+stores scalar counts/sums/high-water facts only; duration cannot make evidence
+memory grow. Unsupported platform probes fail the professional contract rather
+than reporting zero. These are initial reference-profile thresholds and may be
+changed only by a reviewed profile revision backed by reference-machine data.
 The report projects playback-owned cancellation evidence separately for
 Playback, Interactive, and Still work and the professional gate evaluates the
 same shared policy directly. Realtime cancellation is not allowed to hide a
@@ -1084,7 +1100,7 @@ work, and upload/readback/fallback counts were zero. GPU execution p95 was about
 1.8 ms and the real-media gate passed. This proves the short production
 decode→native-import→GPU-presentation path on that machine; it does not satisfy
 the 30-minute duration, repeated seek, physical audio-device, driver-matrix, or
-bounded whole-process-memory acceptance requirements.
+bounded whole-process-memory acceptance run.
 
 The generated-media gate additionally requires execution—not merely policy
 state—when at least two pressure thresholds of requested-but-unengaged hardware

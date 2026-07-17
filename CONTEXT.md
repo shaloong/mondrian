@@ -56,6 +56,10 @@ _Avoid_: Quality flag
 Structured events and aggregates proving clock, scheduling, delivery, degradation, synchronization, and recovery behavior.
 _Avoid_: Debug log
 
+**Process Memory Evidence**:
+Bounded fixed-cadence observations from a native current-process probe. Private committed bytes are the ownership/plateau metric; resident or working-set bytes are diagnostic because the OS may reclaim them independently.
+_Avoid_: Frame-cache byte totals presented as whole-process memory, one start/end sample, OS peak since process launch as gate-local growth
+
 **Professional Playback Acceptance**:
 A versioned fail-closed contract that binds decoder-proven media identity to frame-local decode provenance, the exact Viewer candidate for a Frame Demand, and completed GPU presentation evidence.
 _Avoid_: Filename-based fixture label, capability-only hardware claim
@@ -221,6 +225,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - **Playback Evidence** records state and clock transitions without owning them.
 - **Playback Evidence** uses bounded versioned events and aggregates from real Frame Demand, Frame Delivery, Clock Master, seek, and Audio Playback observations; capability probes alone cannot satisfy execution gates.
 - **Playback Evidence** detailed-event eviction is normal bounded retention, not observation loss. Metric population count and maximum cover the entire run exactly; percentile estimates use a declared fixed-capacity deterministic reservoir.
+- **Process Memory Evidence** is sampled by a platform Adapter over the same real-cadence observation window as professional playback. Acceptance compares fixed settled windows, enforces a versioned absolute Private Commit cap, and samples again only after the latest-wins seek burst has reached Broker/worker quiescence; an unsupported probe fails closed.
 - **Professional Playback Acceptance** fails closed when observed **Frame Cancellation Evidence** has an unknown cause, lacks request/checkpoint attribution, contains impossible timestamp ordering, observes a request too late, or returns after its work-class budget.
 - Every Clock Master observation or handoff that changes the authoritative timeline frame must publish a matching current **Frame Demand** in the same Engine transition; position, demand target, and delivery identity cannot temporarily diverge.
 - **Professional Playback Acceptance** accepts HEVC Main10 only when FFmpeg proves the codec profile, dimensions, bit depth/pixel format, and 25/30-family frame rate. Unknown probe values remain unknown and fail the contract.

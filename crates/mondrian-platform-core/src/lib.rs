@@ -450,6 +450,93 @@ pub trait NativeVideoTextureImportProbe: Send + Sync {
     fn native_video_texture_import(&self) -> NativeVideoTextureImportProbeResult;
 }
 
+/// Native backend used to observe the current process memory footprint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessMemoryProbeBackend {
+    /// Windows Process Status API (`GetProcessMemoryInfo`).
+    WindowsProcessStatus,
+}
+
+impl ProcessMemoryProbeBackend {
+    /// Stable backend label for structured diagnostics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WindowsProcessStatus => "windows-process-status",
+        }
+    }
+}
+
+/// Point-in-time, process-wide memory facts from a native operating-system API.
+///
+/// `private_committed_bytes` is the acceptance-grade leak/plateau metric when
+/// the backend exposes it. Resident-set values remain diagnostic because the
+/// operating system may reclaim shared or file-backed pages independently of
+/// application lifetime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessMemoryProbeResult {
+    /// Whether this platform has a process-memory implementation.
+    pub discovery_available: bool,
+    /// Native API that produced the sample.
+    pub backend: Option<ProcessMemoryProbeBackend>,
+    /// Bytes privately committed to the current process, when available.
+    pub private_committed_bytes: Option<u64>,
+    /// Current physical resident-set or working-set bytes, when available.
+    pub resident_bytes: Option<u64>,
+    /// Peak resident-set or working-set bytes reported by the OS, when available.
+    pub peak_resident_bytes: Option<u64>,
+    /// Structured failure reason when no complete sample was produced.
+    pub error: Option<String>,
+}
+
+impl ProcessMemoryProbeResult {
+    /// Build a complete native sample.
+    pub fn observed(
+        backend: ProcessMemoryProbeBackend,
+        private_committed_bytes: u64,
+        resident_bytes: u64,
+        peak_resident_bytes: u64,
+    ) -> Self {
+        Self {
+            discovery_available: true,
+            backend: Some(backend),
+            private_committed_bytes: Some(private_committed_bytes),
+            resident_bytes: Some(resident_bytes),
+            peak_resident_bytes: Some(peak_resident_bytes),
+            error: None,
+        }
+    }
+
+    /// Build a supported-backend query failure.
+    pub fn failed(backend: ProcessMemoryProbeBackend, reason: impl Into<String>) -> Self {
+        Self {
+            discovery_available: true,
+            backend: Some(backend),
+            private_committed_bytes: None,
+            resident_bytes: None,
+            peak_resident_bytes: None,
+            error: Some(reason.into()),
+        }
+    }
+
+    /// Build a result for a platform without an implementation.
+    pub fn unsupported(reason: impl Into<String>) -> Self {
+        Self {
+            discovery_available: false,
+            backend: None,
+            private_committed_bytes: None,
+            resident_bytes: None,
+            peak_resident_bytes: None,
+            error: Some(reason.into()),
+        }
+    }
+}
+
+/// Interface for native current-process memory observation.
+pub trait ProcessMemoryProbe: Send + Sync {
+    /// Observe the current process without mutating application policy or state.
+    fn current_process_memory(&self) -> ProcessMemoryProbeResult;
+}
+
 /// Clipboard operation failure reported by the platform boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipboardError {
@@ -560,6 +647,12 @@ impl NativeVideoTextureImportProbe for NoopPlatformService {
         NativeVideoTextureImportProbeResult::unsupported(
             "native video texture import unavailable in noop platform adapter",
         )
+    }
+}
+
+impl ProcessMemoryProbe for NoopPlatformService {
+    fn current_process_memory(&self) -> ProcessMemoryProbeResult {
+        ProcessMemoryProbeResult::unsupported("process-memory discovery is not configured")
     }
 }
 
