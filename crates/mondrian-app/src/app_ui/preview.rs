@@ -68,15 +68,20 @@ use mondrian_ui_widgets::{
 };
 
 use crate::app::playback_preview::{PlaybackPreviewAdapter, PreviewVideoPreroll, PreviewWorkPoll};
-#[cfg(test)]
-use crate::app::preview_access_mode::MediaPreviewJobEnqueueStatus;
 use crate::app::preview_access_mode::{
-    media_preview_access_mode_for_intent, media_preview_viewer_access_intent,
-    media_preview_worker_count, media_preview_worker_lane, MediaPreviewJob,
+    media_preview_access_mode_for_intent, media_preview_cancel_reason_at_checkpoint,
+    media_preview_cancel_reason_from_execution, media_preview_cancel_request_to_observed_us,
+    media_preview_frame_work_class, media_preview_viewer_access_intent, media_preview_worker_count,
+    media_preview_worker_lane, MediaPreviewCancelReason, MediaPreviewJob,
     MediaPreviewJobQueueDiagnostics, MediaPreviewJobQueueReceive, MediaPreviewJobQueueReceiver,
     MediaPreviewJobQueueSender, MediaPreviewKey, MediaPreviewNativeSurfaceHint,
     MediaPreviewRequestPriority, MediaPreviewRequestStatus, MediaPreviewScheduler,
     MediaPreviewSchedulerDiagnostics, MediaPreviewWorkerLane,
+};
+#[cfg(test)]
+use crate::app::preview_access_mode::{
+    media_preview_cancel_reason, MediaPreviewJobEnqueueStatus,
+    MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US,
 };
 use crate::app::preview_scheduler_policy::{
     media_preview_forward_prefetch_window_frames, playback_frame_delivery_kind,
@@ -98,7 +103,6 @@ use crate::app_ui::preview_frame_store::PreviewCpuFrameStoreConfig;
 use crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 
-const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 50_000;
 const MEDIA_PREVIEW_PLAYBACK_BUFFERING_STALL_TIMEOUT_US: u64 = 250_000;
 const MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD: u64 = 2;
 const MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
@@ -1822,8 +1826,8 @@ impl AppUiPreviewService {
         }
         self.metrics.decode_cancellation.borrow_mut().observe(
             mondrian_playback::FrameCancellationObservation {
-                work_class: preview_decode_frame_work_class(access_mode),
-                cause: preview_decode_frame_cancellation_cause(reason),
+                work_class: media_preview_frame_work_class(access_mode),
+                cause: reason.playback_cause(),
                 execution_duration: Duration::from_micros(elapsed_us),
                 execution_to_checkpoint: observed_elapsed_us.map(Duration::from_micros),
                 request_to_checkpoint: request_to_observed_us.map(Duration::from_micros),
@@ -7472,49 +7476,6 @@ impl ViewerPreviewCacheKey {
             height: self.height,
             plan_signature: hasher.finish(),
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MediaPreviewCancelReason {
-    Shutdown,
-    Obsolete,
-    PrefetchDeadline,
-    PlaybackDeadline,
-    PrefetchPreemptedByCurrent,
-    StillPreemptedByRealtimeCurrent,
-    Unknown,
-}
-
-fn preview_decode_frame_work_class(
-    access_mode: PreviewDecodeAccessMode,
-) -> mondrian_playback::FrameWorkClass {
-    match access_mode {
-        PreviewDecodeAccessMode::PlaybackCursor => mondrian_playback::FrameWorkClass::Playback,
-        PreviewDecodeAccessMode::ScrubCursor => mondrian_playback::FrameWorkClass::Interactive,
-        PreviewDecodeAccessMode::RandomAccessStillFrame => mondrian_playback::FrameWorkClass::Still,
-    }
-}
-
-fn preview_decode_frame_cancellation_cause(
-    reason: MediaPreviewCancelReason,
-) -> mondrian_playback::FrameCancellationCause {
-    match reason {
-        MediaPreviewCancelReason::Shutdown => mondrian_playback::FrameCancellationCause::Shutdown,
-        MediaPreviewCancelReason::Obsolete => mondrian_playback::FrameCancellationCause::Superseded,
-        MediaPreviewCancelReason::PrefetchDeadline => {
-            mondrian_playback::FrameCancellationCause::PrefetchDeadline
-        }
-        MediaPreviewCancelReason::PlaybackDeadline => {
-            mondrian_playback::FrameCancellationCause::PlaybackDeadline
-        }
-        MediaPreviewCancelReason::PrefetchPreemptedByCurrent => {
-            mondrian_playback::FrameCancellationCause::PrefetchPreemptedByCurrent
-        }
-        MediaPreviewCancelReason::StillPreemptedByRealtimeCurrent => {
-            mondrian_playback::FrameCancellationCause::StillPreemptedByRealtimeCurrent
-        }
-        MediaPreviewCancelReason::Unknown => mondrian_playback::FrameCancellationCause::Unknown,
     }
 }
 

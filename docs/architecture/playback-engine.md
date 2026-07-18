@@ -890,10 +890,13 @@ fails closed. This runtime clock measures lifecycle intervals only: it is not a
 Clock Master, Timeline Time, device-consumption clock, or displayed position.
 
 Worker cancellation now crosses that same Interface as one atomic
-`FrameExecutionCancellation` disposition. The media Adapter maps it to report
-vocabulary and combines it only with the separate
-steady-state prefetch decode budget; absolute Frame Work Deadline comparison is
-not repeated in the App. The Broker evaluates deadline, generation invalidation,
+`FrameExecutionCancellation` disposition. `app::preview_access_mode` is the
+single application lowering point from that disposition plus request
+priority/access mode into media cancellation reason, Playback work class, and
+request-to-checkpoint attribution. It combines Broker evidence only with the
+separate steady-state prefetch decode budget; the concrete worker polls this
+policy, while `app_ui::preview` only records and projects its result. Absolute
+Frame Work Deadline comparison is not repeated in the App. The Broker evaluates deadline, generation invalidation,
 preemption, and closure together and returns the authoritative request age, so
 one cause cannot hide slower observation of an earlier cause. The first close
 records an immutable Broker-clock instant; repeated close cannot renew it.

@@ -29,7 +29,7 @@ pub(super) fn media_preview_worker(
                 let scheduler_cancellation = scheduler.execution_cancellation(execution_id);
                 let reason = scheduler_cancellation
                     .map(|cancellation| {
-                        media_preview_scheduler_cancel_reason(
+                        media_preview_cancel_reason_from_execution(
                             cancellation,
                             job.priority,
                             job.access_mode,
@@ -65,8 +65,11 @@ pub(super) fn media_preview_worker(
         };
         let scheduler_cancellation = scheduler.execution_cancellation(execution_id);
         if let Some(cancellation) = scheduler_cancellation {
-            let reason =
-                media_preview_scheduler_cancel_reason(cancellation, job.priority, job.access_mode);
+            let reason = media_preview_cancel_reason_from_execution(
+                cancellation,
+                job.priority,
+                job.access_mode,
+            );
             let result = media_preview_canceled_result(
                 job,
                 queue_wait_us,
@@ -164,102 +167,6 @@ fn lock_media_preview_cancel_observation(
     observation: &Mutex<MediaPreviewCancelObservation>,
 ) -> std::sync::MutexGuard<'_, MediaPreviewCancelObservation> {
     observation.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn media_preview_scheduler_cancel_reason(
-    cancellation: mondrian_playback::FrameExecutionCancellation,
-    priority: MediaPreviewRequestPriority,
-    access_mode: PreviewDecodeAccessMode,
-) -> MediaPreviewCancelReason {
-    match cancellation {
-        mondrian_playback::FrameExecutionCancellation::BrokerClosed { .. } => {
-            MediaPreviewCancelReason::Shutdown
-        }
-        mondrian_playback::FrameExecutionCancellation::Superseded { .. } => {
-            MediaPreviewCancelReason::Obsolete
-        }
-        mondrian_playback::FrameExecutionCancellation::PrefetchPreemptedByCurrent { .. } => {
-            MediaPreviewCancelReason::PrefetchPreemptedByCurrent
-        }
-        mondrian_playback::FrameExecutionCancellation::StillPreemptedByRealtimeCurrent {
-            ..
-        } => MediaPreviewCancelReason::StillPreemptedByRealtimeCurrent,
-        mondrian_playback::FrameExecutionCancellation::DeadlineExpired { .. } => {
-            if priority == MediaPreviewRequestPriority::Prefetch {
-                MediaPreviewCancelReason::PrefetchDeadline
-            } else if access_mode == PreviewDecodeAccessMode::PlaybackCursor {
-                MediaPreviewCancelReason::PlaybackDeadline
-            } else {
-                MediaPreviewCancelReason::Unknown
-            }
-        }
-    }
-}
-
-pub(super) fn media_preview_cancel_reason_at_checkpoint(
-    scheduler_cancellation: Option<mondrian_playback::FrameExecutionCancellation>,
-    priority: MediaPreviewRequestPriority,
-    access_mode: PreviewDecodeAccessMode,
-    elapsed: Duration,
-    deadline_at: Option<Instant>,
-) -> Option<MediaPreviewCancelReason> {
-    media_preview_cancel_reason(
-        scheduler_cancellation,
-        priority,
-        access_mode,
-        elapsed,
-        deadline_at.is_some(),
-    )
-}
-
-pub(super) fn media_preview_cancel_reason(
-    scheduler_cancellation: Option<mondrian_playback::FrameExecutionCancellation>,
-    priority: MediaPreviewRequestPriority,
-    access_mode: PreviewDecodeAccessMode,
-    elapsed: Duration,
-    broker_deadline_present: bool,
-) -> Option<MediaPreviewCancelReason> {
-    if let Some(cancellation) = scheduler_cancellation {
-        return Some(media_preview_scheduler_cancel_reason(
-            cancellation,
-            priority,
-            access_mode,
-        ));
-    }
-    if priority == MediaPreviewRequestPriority::Prefetch
-        && access_mode == PreviewDecodeAccessMode::PlaybackCursor
-        && !broker_deadline_present
-        && app_duration_us(elapsed) >= MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US
-    {
-        return Some(MediaPreviewCancelReason::PrefetchDeadline);
-    }
-    None
-}
-
-pub(super) fn media_preview_cancel_request_to_observed_us(
-    reason: MediaPreviewCancelReason,
-    scheduler_cancellation: Option<mondrian_playback::FrameExecutionCancellation>,
-    decode_started_at: Instant,
-    observed_at: Instant,
-) -> Option<u64> {
-    let age = match reason {
-        MediaPreviewCancelReason::Shutdown
-        | MediaPreviewCancelReason::Obsolete
-        | MediaPreviewCancelReason::PrefetchPreemptedByCurrent
-        | MediaPreviewCancelReason::StillPreemptedByRealtimeCurrent
-        | MediaPreviewCancelReason::PlaybackDeadline => {
-            scheduler_cancellation.and_then(|cancellation| cancellation.request_age())
-        }
-        MediaPreviewCancelReason::PrefetchDeadline => scheduler_cancellation
-            .and_then(mondrian_playback::FrameExecutionCancellation::request_age)
-            .or_else(|| {
-                observed_at.saturating_duration_since(decode_started_at).checked_sub(
-                    Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US),
-                )
-            }),
-        MediaPreviewCancelReason::Unknown => None,
-    }?;
-    Some(app_duration_us(age))
 }
 
 pub(super) fn media_preview_canceled_result(

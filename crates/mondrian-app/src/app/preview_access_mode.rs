@@ -18,6 +18,7 @@ use mondrian_media::{
 };
 
 pub(crate) const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
+pub(crate) const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 50_000;
 const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 3;
 const MEDIA_PREVIEW_MAX_PENDING_REQUESTS: usize = MEDIA_PREVIEW_JOB_QUEUE_CAPACITY;
 
@@ -72,6 +73,137 @@ pub(crate) struct ExpiredMediaPreviewRequest {
 pub(crate) enum MediaPreviewRequestPriority {
     Prefetch,
     Current,
+}
+
+/// App-owned reason why concrete preview execution observed cancellation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MediaPreviewCancelReason {
+    Shutdown,
+    Obsolete,
+    PrefetchDeadline,
+    PlaybackDeadline,
+    PrefetchPreemptedByCurrent,
+    StillPreemptedByRealtimeCurrent,
+    Unknown,
+}
+
+impl MediaPreviewCancelReason {
+    /// Lower this Adapter reason into playback-owned evidence vocabulary.
+    pub(crate) const fn playback_cause(self) -> mondrian_playback::FrameCancellationCause {
+        match self {
+            Self::Shutdown => mondrian_playback::FrameCancellationCause::Shutdown,
+            Self::Obsolete => mondrian_playback::FrameCancellationCause::Superseded,
+            Self::PrefetchDeadline => mondrian_playback::FrameCancellationCause::PrefetchDeadline,
+            Self::PlaybackDeadline => mondrian_playback::FrameCancellationCause::PlaybackDeadline,
+            Self::PrefetchPreemptedByCurrent => {
+                mondrian_playback::FrameCancellationCause::PrefetchPreemptedByCurrent
+            }
+            Self::StillPreemptedByRealtimeCurrent => {
+                mondrian_playback::FrameCancellationCause::StillPreemptedByRealtimeCurrent
+            }
+            Self::Unknown => mondrian_playback::FrameCancellationCause::Unknown,
+        }
+    }
+}
+
+/// Translate the Broker's atomic cancellation disposition for a media Adapter.
+pub(crate) fn media_preview_cancel_reason_from_execution(
+    cancellation: mondrian_playback::FrameExecutionCancellation,
+    priority: MediaPreviewRequestPriority,
+    access_mode: PreviewDecodeAccessMode,
+) -> MediaPreviewCancelReason {
+    match cancellation {
+        mondrian_playback::FrameExecutionCancellation::BrokerClosed { .. } => {
+            MediaPreviewCancelReason::Shutdown
+        }
+        mondrian_playback::FrameExecutionCancellation::Superseded { .. } => {
+            MediaPreviewCancelReason::Obsolete
+        }
+        mondrian_playback::FrameExecutionCancellation::PrefetchPreemptedByCurrent { .. } => {
+            MediaPreviewCancelReason::PrefetchPreemptedByCurrent
+        }
+        mondrian_playback::FrameExecutionCancellation::StillPreemptedByRealtimeCurrent {
+            ..
+        } => MediaPreviewCancelReason::StillPreemptedByRealtimeCurrent,
+        mondrian_playback::FrameExecutionCancellation::DeadlineExpired { .. } => {
+            if priority == MediaPreviewRequestPriority::Prefetch {
+                MediaPreviewCancelReason::PrefetchDeadline
+            } else if access_mode == PreviewDecodeAccessMode::PlaybackCursor {
+                MediaPreviewCancelReason::PlaybackDeadline
+            } else {
+                MediaPreviewCancelReason::Unknown
+            }
+        }
+    }
+}
+
+/// Resolve cancellation at a cooperative decoder checkpoint.
+pub(crate) fn media_preview_cancel_reason_at_checkpoint(
+    scheduler_cancellation: Option<mondrian_playback::FrameExecutionCancellation>,
+    priority: MediaPreviewRequestPriority,
+    access_mode: PreviewDecodeAccessMode,
+    elapsed: Duration,
+    deadline_at: Option<Instant>,
+) -> Option<MediaPreviewCancelReason> {
+    media_preview_cancel_reason(
+        scheduler_cancellation,
+        priority,
+        access_mode,
+        elapsed,
+        deadline_at.is_some(),
+    )
+}
+
+/// Resolve Broker-owned or bounded speculative cancellation without UI state.
+pub(crate) fn media_preview_cancel_reason(
+    scheduler_cancellation: Option<mondrian_playback::FrameExecutionCancellation>,
+    priority: MediaPreviewRequestPriority,
+    access_mode: PreviewDecodeAccessMode,
+    elapsed: Duration,
+    broker_deadline_present: bool,
+) -> Option<MediaPreviewCancelReason> {
+    if let Some(cancellation) = scheduler_cancellation {
+        return Some(media_preview_cancel_reason_from_execution(
+            cancellation,
+            priority,
+            access_mode,
+        ));
+    }
+    if priority == MediaPreviewRequestPriority::Prefetch
+        && access_mode == PreviewDecodeAccessMode::PlaybackCursor
+        && !broker_deadline_present
+        && duration_us(elapsed) >= MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US
+    {
+        return Some(MediaPreviewCancelReason::PrefetchDeadline);
+    }
+    None
+}
+
+/// Attribute request-to-checkpoint latency to the original authority instant.
+pub(crate) fn media_preview_cancel_request_to_observed_us(
+    reason: MediaPreviewCancelReason,
+    scheduler_cancellation: Option<mondrian_playback::FrameExecutionCancellation>,
+    decode_started_at: Instant,
+    observed_at: Instant,
+) -> Option<u64> {
+    let age = match reason {
+        MediaPreviewCancelReason::Shutdown
+        | MediaPreviewCancelReason::Obsolete
+        | MediaPreviewCancelReason::PrefetchPreemptedByCurrent
+        | MediaPreviewCancelReason::StillPreemptedByRealtimeCurrent
+        | MediaPreviewCancelReason::PlaybackDeadline => {
+            scheduler_cancellation.and_then(|cancellation| cancellation.request_age())
+        }
+        MediaPreviewCancelReason::PrefetchDeadline => scheduler_cancellation
+            .and_then(mondrian_playback::FrameExecutionCancellation::request_age)
+            .or_else(|| {
+                observed_at.saturating_duration_since(decode_started_at).checked_sub(
+                    Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US),
+                )
+            }),
+        MediaPreviewCancelReason::Unknown => None,
+    }?;
+    Some(duration_us(age))
 }
 
 /// Result of admitting a preview decode request into the scheduler.
@@ -448,7 +580,7 @@ fn frame_work_request(
         key: job.key.clone(),
         generation: job.generation,
         priority: frame_work_priority(job.priority),
-        work_class: frame_work_class(job.access_mode),
+        work_class: media_preview_frame_work_class(job.access_mode),
         demand_identity: job.demand_identity,
         deadline,
         payload: job,
@@ -767,7 +899,7 @@ impl MediaPreviewScheduler {
         self.broker.key_current(
             key,
             self.diagnostics().latest_generation,
-            frame_work_class(access_mode),
+            media_preview_frame_work_class(access_mode),
         )
     }
 
@@ -778,7 +910,8 @@ impl MediaPreviewScheduler {
         generation: u64,
         access_mode: PreviewDecodeAccessMode,
     ) -> bool {
-        self.broker.key_current(key, generation, frame_work_class(access_mode))
+        self.broker
+            .key_current(key, generation, media_preview_frame_work_class(access_mode))
     }
 
     #[cfg(test)]
@@ -806,7 +939,7 @@ impl MediaPreviewScheduler {
                 .resolve_unleased(
                     key.clone(),
                     result_generation,
-                    frame_work_class(access_mode),
+                    media_preview_frame_work_class(access_mode),
                     None,
                     true,
                 )
@@ -838,7 +971,7 @@ impl MediaPreviewScheduler {
         let resolution = self.broker.resolve_unleased(
             key.clone(),
             generation,
-            frame_work_class(access_mode),
+            media_preview_frame_work_class(access_mode),
             demand_identity,
             reusable,
         );
@@ -980,12 +1113,18 @@ fn frame_work_priority(
     }
 }
 
-fn frame_work_class(access_mode: PreviewDecodeAccessMode) -> mondrian_playback::FrameWorkClass {
+pub(crate) fn media_preview_frame_work_class(
+    access_mode: PreviewDecodeAccessMode,
+) -> mondrian_playback::FrameWorkClass {
     match access_mode {
         PreviewDecodeAccessMode::PlaybackCursor => mondrian_playback::FrameWorkClass::Playback,
         PreviewDecodeAccessMode::ScrubCursor => mondrian_playback::FrameWorkClass::Interactive,
         PreviewDecodeAccessMode::RandomAccessStillFrame => mondrian_playback::FrameWorkClass::Still,
     }
+}
+
+fn duration_us(duration: Duration) -> u64 {
+    duration.as_micros().min(u128::from(u64::MAX)) as u64
 }
 
 fn preview_access_mode(work_class: mondrian_playback::FrameWorkClass) -> PreviewDecodeAccessMode {
@@ -998,6 +1137,112 @@ fn preview_access_mode(work_class: mondrian_playback::FrameWorkClass) -> Preview
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_policy_owns_speculative_budget_and_session_deadline() {
+        assert_eq!(
+            media_preview_cancel_reason(
+                None,
+                MediaPreviewRequestPriority::Prefetch,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US - 1),
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            media_preview_cancel_reason(
+                None,
+                MediaPreviewRequestPriority::Prefetch,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US),
+                false,
+            ),
+            Some(MediaPreviewCancelReason::PrefetchDeadline)
+        );
+        assert_eq!(
+            media_preview_cancel_reason_at_checkpoint(
+                None,
+                MediaPreviewRequestPriority::Prefetch,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US * 4),
+                Some(Instant::now() + Duration::from_millis(500)),
+            ),
+            None,
+            "session deadline, not the steady-state speculative budget, owns startup preroll"
+        );
+    }
+
+    #[test]
+    fn cancellation_policy_maps_atomic_broker_dispositions() {
+        let cases = [
+            (
+                mondrian_playback::FrameExecutionCancellation::BrokerClosed { age: Duration::ZERO },
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                MediaPreviewCancelReason::Shutdown,
+            ),
+            (
+                mondrian_playback::FrameExecutionCancellation::Superseded {
+                    age: Some(Duration::ZERO),
+                },
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::ScrubCursor,
+                MediaPreviewCancelReason::Obsolete,
+            ),
+            (
+                mondrian_playback::FrameExecutionCancellation::PrefetchPreemptedByCurrent {
+                    request_age: Duration::ZERO,
+                },
+                MediaPreviewRequestPriority::Prefetch,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                MediaPreviewCancelReason::PrefetchPreemptedByCurrent,
+            ),
+            (
+                mondrian_playback::FrameExecutionCancellation::StillPreemptedByRealtimeCurrent {
+                    request_age: Duration::ZERO,
+                },
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+                MediaPreviewCancelReason::StillPreemptedByRealtimeCurrent,
+            ),
+            (
+                mondrian_playback::FrameExecutionCancellation::DeadlineExpired {
+                    age: Duration::ZERO,
+                },
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                MediaPreviewCancelReason::PlaybackDeadline,
+            ),
+        ];
+        for (disposition, priority, access_mode, expected) in cases {
+            assert_eq!(
+                media_preview_cancel_reason_from_execution(disposition, priority, access_mode),
+                expected
+            );
+        }
+        assert_eq!(
+            MediaPreviewCancelReason::StillPreemptedByRealtimeCurrent.playback_cause(),
+            mondrian_playback::FrameCancellationCause::StillPreemptedByRealtimeCurrent
+        );
+    }
+
+    #[test]
+    fn speculative_cancellation_latency_uses_budget_authority_instant() {
+        let started_at = Instant::now();
+        let observed_at =
+            started_at + Duration::from_micros(MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US + 7);
+
+        assert_eq!(
+            media_preview_cancel_request_to_observed_us(
+                MediaPreviewCancelReason::PrefetchDeadline,
+                None,
+                started_at,
+                observed_at,
+            ),
+            Some(7)
+        );
+    }
 
     fn source_micros(source_secs: f64) -> i64 {
         (source_secs.max(0.0) * 1_000_000.0).round() as i64
