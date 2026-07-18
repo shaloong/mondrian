@@ -1,7 +1,7 @@
 //! Bounded, fingerprinted decoded-audio source windows.
 
 use crate::audio::AudioBuffer;
-use mondrian_core::{MondrianError, Result};
+use mondrian_core::{ExecutionCancellationToken, MondrianError, Result};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::fs::Metadata;
@@ -97,6 +97,7 @@ trait AudioWindowDecoder: Send + Sync {
         frame_count: usize,
         sample_rate: u32,
         channels: u8,
+        cancellation: &ExecutionCancellationToken,
     ) -> Result<AudioBuffer>;
 }
 
@@ -110,8 +111,22 @@ impl AudioWindowDecoder for FfmpegCliAudioWindowDecoder {
         frame_count: usize,
         sample_rate: u32,
         channels: u8,
+        cancellation: &ExecutionCancellationToken,
     ) -> Result<AudioBuffer> {
-        decode_audio_window_with_ffmpeg_cli(path, start_frame, frame_count, sample_rate, channels)
+        if cancellation.is_canceled() {
+            return Err(canceled_audio_decode(path));
+        }
+        let result = decode_audio_window_with_ffmpeg_cli(
+            path,
+            start_frame,
+            frame_count,
+            sample_rate,
+            channels,
+        );
+        if cancellation.is_canceled() {
+            return Err(canceled_audio_decode(path));
+        }
+        result
     }
 }
 
@@ -223,7 +238,14 @@ impl AudioSourceCache {
         *self.state.lock() = AudioSourceCacheState::default();
     }
 
-    fn window(&self, key: AudioSourceWindowKey) -> Result<Arc<AudioBuffer>> {
+    fn window(
+        &self,
+        key: AudioSourceWindowKey,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<Arc<AudioBuffer>> {
+        if cancellation.is_canceled() {
+            return Err(canceled_audio_decode(&key.source.path));
+        }
         {
             let mut state = self.state.lock();
             if let Some(index) = state.entries.iter().position(|entry| entry.key == key) {
@@ -252,9 +274,13 @@ impl AudioSourceCache {
                 self.window_frames,
                 self.sample_rate,
                 self.channels,
+                cancellation,
             )
             .and_then(|buffer| self.validate_window(&key, buffer));
         let decode_duration_us = decode_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        if cancellation.is_canceled() {
+            return Err(canceled_audio_decode(&key.source.path));
+        }
         match decoded {
             Ok(buffer) => {
                 let buffer = Arc::new(buffer);
@@ -352,6 +378,27 @@ impl AudioSourceReader {
         channels: usize,
         destination: &mut [f32],
     ) -> Result<()> {
+        self.read_interleaved_cancellable(
+            start_frame,
+            frames,
+            channels,
+            destination,
+            &ExecutionCancellationToken::new(),
+        )
+    }
+
+    /// Fill one exact interleaved block with generation cancellation authority.
+    pub fn read_interleaved_cancellable(
+        &self,
+        start_frame: i64,
+        frames: usize,
+        channels: usize,
+        destination: &mut [f32],
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<()> {
+        if cancellation.is_canceled() {
+            return Err(canceled_audio_decode(&self.source.path));
+        }
         let expected_samples = frames.checked_mul(channels).ok_or_else(|| {
             MondrianError::Other(anyhow::anyhow!("audio source block extent overflow"))
         })?;
@@ -381,7 +428,7 @@ impl AudioSourceReader {
                 source: self.source.clone(),
                 start_frame: window_start,
             };
-            let window = self.cache.window(key)?;
+            let window = self.cache.window(key, cancellation)?;
             let local_frame =
                 usize::try_from(source_frame.saturating_sub(window_start)).unwrap_or(usize::MAX);
             let available_frames = window.frame_count().saturating_sub(local_frame);
@@ -401,6 +448,13 @@ impl AudioSourceReader {
             }
         }
         Ok(())
+    }
+}
+
+fn canceled_audio_decode(path: &Path) -> MondrianError {
+    MondrianError::DecodeFailed {
+        asset_id: path.display().to_string(),
+        reason: "audio render generation was canceled".to_owned(),
     }
 }
 
@@ -485,7 +539,7 @@ mod tests {
     use super::*;
     use crate::audio::decode_audio_file_with_ffmpeg_cli;
     use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     struct RampWindowDecoder {
         calls: AtomicU64,
@@ -505,6 +559,7 @@ mod tests {
             frame_count: usize,
             sample_rate: u32,
             channels: u8,
+            _cancellation: &ExecutionCancellationToken,
         ) -> Result<AudioBuffer> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             let channels_usize = usize::from(channels);
@@ -523,6 +578,10 @@ mod tests {
         calls: AtomicU64,
     }
 
+    struct BlockingWindowDecoder {
+        entered: AtomicBool,
+    }
+
     impl AudioWindowDecoder for MalformedWindowDecoder {
         fn decode_window(
             &self,
@@ -531,6 +590,7 @@ mod tests {
             frame_count: usize,
             sample_rate: u32,
             _channels: u8,
+            _cancellation: &ExecutionCancellationToken,
         ) -> Result<AudioBuffer> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             Ok(AudioBuffer {
@@ -538,6 +598,24 @@ mod tests {
                 sample_rate,
                 channels: 1,
             })
+        }
+    }
+
+    impl AudioWindowDecoder for BlockingWindowDecoder {
+        fn decode_window(
+            &self,
+            path: &Path,
+            _start_frame: i64,
+            _frame_count: usize,
+            _sample_rate: u32,
+            _channels: u8,
+            cancellation: &ExecutionCancellationToken,
+        ) -> Result<AudioBuffer> {
+            self.entered.store(true, Ordering::Release);
+            while !cancellation.is_canceled() {
+                std::thread::yield_now();
+            }
+            Err(canceled_audio_decode(path))
         }
     }
 
@@ -584,6 +662,48 @@ mod tests {
         );
         assert_eq!(decoder.calls.load(Ordering::Relaxed), 2);
         assert_eq!(cache.diagnostics().entries, 2);
+    }
+
+    #[test]
+    fn source_window_observes_generation_cancellation() {
+        let mut file = tempfile::NamedTempFile::new().expect("temporary source");
+        file.write_all(b"source").expect("source bytes");
+        file.flush().expect("flush source");
+        let decoder = Arc::new(BlockingWindowDecoder { entered: AtomicBool::new(false) });
+        let cache = Arc::new(AudioSourceCache::with_decoder(
+            48_000,
+            2,
+            1,
+            2,
+            1_000_000,
+            decoder.clone(),
+        ));
+        let reader = cache.open(file.path()).expect("open source");
+        let cancellation = ExecutionCancellationToken::new();
+        let worker_cancellation = cancellation.clone();
+        let worker = std::thread::spawn(move || {
+            let mut destination = vec![0.0; 2_048 * 2];
+            reader.read_interleaved_cancellable(0, 2_048, 2, &mut destination, &worker_cancellation)
+        });
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        while Instant::now() < deadline && !decoder.entered.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        assert!(decoder.entered.load(Ordering::Acquire));
+        let canceled_at = Instant::now();
+        cancellation.cancel();
+        let error = worker.join().expect("worker returns").expect_err("canceled source fails");
+        assert!(canceled_at.elapsed() <= std::time::Duration::from_millis(50));
+        assert!(error.to_string().contains("canceled"));
+        assert_eq!(
+            cache.diagnostics(),
+            AudioSourceCacheDiagnostics {
+                byte_budget: 1_000_000,
+                entry_capacity: 2,
+                misses: 1,
+                ..AudioSourceCacheDiagnostics::default()
+            }
+        );
     }
 
     #[test]

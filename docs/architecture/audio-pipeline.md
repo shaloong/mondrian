@@ -256,6 +256,14 @@ underrun recovery, and device-clock evidence. The CPAL callback touches only a
 fixed-capacity queue and atomics; it does not allocate, decode, compile, log,
 inspect the Timeline, or lock a Session.
 
+Each Audio Playback generation also owns a fresh monotonic
+`ExecutionCancellationToken`. Reprime, seek, device recovery, source replacement,
+and shutdown cancel the old token before incrementing generation. The token is
+carried through `AudioPcmRenderer`, `AudioProgramRuntime`, nested Runtime calls,
+`AudioDecodedSource`, and the media window Adapter. A canceled read returns
+without admitting PCM or remembered failure into the shared cache. Export uses
+the same Interface with its own live token; it does not inherit Playback state.
+
 Normal playback may qualify consumed device samples as Audio Device Clock
 Master. Device loss or rejected phase handoff returns authority to Synthetic
 Clock Master; video presentation is never Clock Master. See
@@ -307,6 +315,8 @@ process-per-window Adapter.
 - Internal summing has no implicit nonlinear operation.
 - Playback and export compile and execute the same Program semantics.
 - Nested instances do not share mutable Session state.
+- Old-generation cancellation is observable inside executing source work and
+  cannot poison decoded-window success or failure residency.
 - Playback and Export media sources are bounded by bytes and source revision;
   neither may retain whole-file PCM as its execution Interface.
 

@@ -3,7 +3,7 @@
 use crate::{
     AudioBuffer, RealtimeAudioOutputEvent, RealtimeAudioOutputManager, RealtimeAudioOutputSnapshot,
 };
-use mondrian_core::{FramePosition, Rational};
+use mondrian_core::{ExecutionCancellationToken, FramePosition, Rational};
 use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
 use std::sync::{mpsc, Arc};
@@ -76,7 +76,11 @@ pub struct AudioPcmRenderRequest {
 /// structured evidence so queued media position never shifts.
 pub trait AudioPcmRenderer: Send + Sync + 'static {
     /// Render one exact timeline-media window.
-    fn render(&self, request: AudioPcmRenderRequest) -> mondrian_core::Result<AudioBuffer>;
+    fn render(
+        &self,
+        request: AudioPcmRenderRequest,
+        cancellation: &ExecutionCancellationToken,
+    ) -> mondrian_core::Result<AudioBuffer>;
 }
 
 /// Transport permission presented to the Audio Playback Module on each poll.
@@ -199,6 +203,7 @@ struct RenderWork {
     generation: u64,
     request: AudioPcmRenderRequest,
     renderer: Arc<dyn AudioPcmRenderer>,
+    cancellation: ExecutionCancellationToken,
 }
 
 struct RenderCompletion {
@@ -311,6 +316,7 @@ pub struct AudioPlayback {
     completion_rx: mpsc::Receiver<RenderCompletion>,
     renderer: Option<Arc<dyn AudioPcmRenderer>>,
     generation: u64,
+    generation_cancellation: ExecutionCancellationToken,
     in_flight: usize,
     next_start_sample: i64,
     media_anchor: Option<FramePosition>,
@@ -350,7 +356,7 @@ impl AudioPlayback {
         let (completion_tx, completion_rx) = mpsc::channel::<RenderCompletion>();
         let _ = thread::Builder::new().name("mondrian-audio-render".to_owned()).spawn(move || {
             while let Some(work) = worker_queue.pop() {
-                let result = work.renderer.render(work.request);
+                let result = work.renderer.render(work.request, &work.cancellation);
                 if completion_tx
                     .send(RenderCompletion {
                         generation: work.generation,
@@ -370,6 +376,7 @@ impl AudioPlayback {
             completion_rx,
             renderer: None,
             generation: 1,
+            generation_cancellation: ExecutionCancellationToken::new(),
             in_flight: 0,
             next_start_sample: 0,
             media_anchor: None,
@@ -408,6 +415,8 @@ impl AudioPlayback {
         self.canceled_render_count = self
             .canceled_render_count
             .saturating_add(self.render_queue.clear_pending() as u64);
+        self.generation_cancellation.cancel();
+        self.generation_cancellation = ExecutionCancellationToken::new();
         self.generation = self.generation.saturating_add(1);
         self.in_flight = 0;
         self.next_start_sample = start_sample;
@@ -538,6 +547,7 @@ impl AudioPlayback {
                     generation: self.generation,
                     request,
                     renderer: Arc::clone(renderer),
+                    cancellation: self.generation_cancellation.clone(),
                 };
                 if self.render_queue.push(work).is_err() {
                     break;
@@ -593,6 +603,7 @@ impl AudioPlayback {
 
 impl Drop for AudioPlayback {
     fn drop(&mut self) {
+        self.generation_cancellation.cancel();
         self.render_queue.stop();
     }
 }
@@ -721,12 +732,21 @@ mod tests {
     struct GateRenderer {
         entered: Arc<AtomicBool>,
         released: Arc<AtomicBool>,
+        canceled: Arc<AtomicBool>,
     }
 
     impl AudioPcmRenderer for GateRenderer {
-        fn render(&self, request: AudioPcmRenderRequest) -> mondrian_core::Result<AudioBuffer> {
+        fn render(
+            &self,
+            request: AudioPcmRenderRequest,
+            cancellation: &ExecutionCancellationToken,
+        ) -> mondrian_core::Result<AudioBuffer> {
             self.entered.store(true, Ordering::Release);
             while !self.released.load(Ordering::Acquire) {
+                if cancellation.is_canceled() {
+                    self.canceled.store(true, Ordering::Release);
+                    break;
+                }
                 thread::yield_now();
             }
             Ok(AudioBuffer::silent(
@@ -738,7 +758,11 @@ mod tests {
     }
 
     impl AudioPcmRenderer for RecordingRenderer {
-        fn render(&self, request: AudioPcmRenderRequest) -> mondrian_core::Result<AudioBuffer> {
+        fn render(
+            &self,
+            request: AudioPcmRenderRequest,
+            _cancellation: &ExecutionCancellationToken,
+        ) -> mondrian_core::Result<AudioBuffer> {
             self.requests.lock().push(request);
             let frames = if self.wrong_frame_count {
                 request.frame_count.saturating_sub(1)
@@ -995,11 +1019,13 @@ mod tests {
         let mut playback = AudioPlayback::with_output(config, output);
         let entered = Arc::new(AtomicBool::new(false));
         let released = Arc::new(AtomicBool::new(false));
+        let canceled = Arc::new(AtomicBool::new(false));
         playback.prepare(
             FramePosition::new(0, Rational::new(1, 25)),
             Arc::new(GateRenderer {
                 entered: Arc::clone(&entered),
                 released: Arc::clone(&released),
+                canceled: Arc::clone(&canceled),
             }),
         );
         playback.poll(
@@ -1023,7 +1049,12 @@ mod tests {
                 wrong_frame_count: false,
             }),
         );
+        let cancellation_deadline = Instant::now() + Duration::from_millis(50);
+        while Instant::now() < cancellation_deadline && !canceled.load(Ordering::Acquire) {
+            thread::yield_now();
+        }
         released.store(true, Ordering::Release);
+        assert!(canceled.load(Ordering::Acquire));
 
         let settled_deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < settled_deadline {

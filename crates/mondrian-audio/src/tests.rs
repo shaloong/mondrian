@@ -1,7 +1,7 @@
 use super::*;
 use mondrian_core::{
     AssetId, AudioComponentEditId, AudioRouteId, AudioSourceComponentId, ExactAutomationCurve,
-    ExactAutomationKeyframe, ParameterId, TimelineTime,
+    ExactAutomationKeyframe, ExecutionCancellationToken, ParameterId, TimelineTime,
 };
 use mondrian_timeline::audio::{
     AudioChannelStripOutputPort, AudioMixBus, AudioProcessorInstance, AudioRoute,
@@ -33,6 +33,7 @@ impl AudioDecodedSource for RampDecodedSource {
         frames: usize,
         channels: usize,
         destination: &mut [f32],
+        _cancellation: &ExecutionCancellationToken,
     ) -> Result<(), String> {
         if destination.len() != frames.saturating_mul(channels) {
             return Err("invalid destination extent".to_owned());

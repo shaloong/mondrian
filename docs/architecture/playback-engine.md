@@ -1000,6 +1000,16 @@ substitution, synchronous cancellation of queued old work, and rejection of the
 at-most-one executing completion from an invalidated generation.
 Environment variables no longer alter realtime audio watermark semantics.
 
+Generation invalidation now has one cancellation authority in addition to its
+publication check. Audio Playback cancels a monotonic core token before creating
+the next generation; executing work observes that token through timeline DSP,
+nested audio, decoded-source, and media-window seams. Unit tests hold a render
+and a source decode in flight, reprime/cancel them, require observation within
+50 ms, and verify canceled work creates no cache entry or remembered failure.
+Generation comparison still rejects a completion even if a faulty Adapter
+ignores cancellation; cancellation responsiveness and publication safety are
+independent invariants.
+
 The product `AudioPcmRenderer` and Export now bind the same block-oriented
 `AudioDecodedSource` Interface. `mondrian-audio` keeps only an aligned
 4,096-frame hot window; `mondrian-media` owns ten-second FFmpeg decode windows

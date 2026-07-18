@@ -1653,13 +1653,17 @@ fn audio_bounded_source_external_render_smoke() -> anyhow::Result<()> {
             48_000,
             2,
         )?;
+        let cancellation = mondrian_core::ExecutionCancellationToken::new();
         for start_sample in [0, 24_000, 96_000] {
-            let rendered = renderer.render(AudioPcmRenderRequest {
-                start_sample,
-                frame_count: 2_048,
-                sample_rate: 48_000,
-                channels: 2,
-            })?;
+            let rendered = renderer.render(
+                AudioPcmRenderRequest {
+                    start_sample,
+                    frame_count: 2_048,
+                    sample_rate: 48_000,
+                    channels: 2,
+                },
+                &cancellation,
+            )?;
             anyhow::ensure!(
                 rendered.frame_count() == 2_048,
                 "audio render extent shifted"

@@ -3,7 +3,7 @@ use mondrian_audio::{
     AudioDecodedSource, AudioMediaResolver, AudioProcessingMode, AudioProgramRuntime,
     AudioRenderContract, AudioRenderRequest,
 };
-use mondrian_core::{AudioSourceComponentId, ProgramOutputId};
+use mondrian_core::{AudioSourceComponentId, ExecutionCancellationToken, ProgramOutputId};
 use mondrian_media::AudioSourceReader;
 use parking_lot::Mutex;
 
@@ -48,7 +48,11 @@ impl TimelineAudioPcmRenderer {
 }
 
 impl AudioPcmRenderer for TimelineAudioPcmRenderer {
-    fn render(&self, request: AudioPcmRenderRequest) -> mondrian_core::Result<AudioBuffer> {
+    fn render(
+        &self,
+        request: AudioPcmRenderRequest,
+        cancellation: &ExecutionCancellationToken,
+    ) -> mondrian_core::Result<AudioBuffer> {
         if request.sample_rate != self.sample_rate || request.channels != self.channels {
             return Err(audio_render_error(
                 "timeline_audio_render_contract",
@@ -74,12 +78,13 @@ impl AudioPcmRenderer for TimelineAudioPcmRenderer {
         let mut output = vec![0.0; samples];
         self.runtime
             .lock()
-            .render_into(
+            .render_into_cancellable(
                 AudioRenderRequest {
                     start_sample: request.start_sample,
                     frames: request.frame_count,
                 },
                 &mut output,
+                cancellation,
             )
             .map_err(|error| audio_render_error("timeline_audio_execute", error.to_string()))?;
         Ok(AudioBuffer {
@@ -132,9 +137,10 @@ impl AudioDecodedSource for PlaybackDecodedAudioSource {
         frames: usize,
         channels: usize,
         destination: &mut [f32],
+        cancellation: &ExecutionCancellationToken,
     ) -> Result<(), String> {
         self.0
-            .read_interleaved(start_frame, frames, channels, destination)
+            .read_interleaved_cancellable(start_frame, frames, channels, destination, cancellation)
             .map_err(|error| error.to_string())
     }
 }

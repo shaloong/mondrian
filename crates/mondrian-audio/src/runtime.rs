@@ -4,7 +4,8 @@ use crate::{
     PreparedAudioPlan,
 };
 use mondrian_core::{
-    AssetId, AudioComponentEditId, AudioSourceComponentId, ProgramOutputId, SequenceId,
+    AssetId, AudioComponentEditId, AudioSourceComponentId, ExecutionCancellationToken,
+    ProgramOutputId, SequenceId,
 };
 use mondrian_timeline::{sequence::MAX_NESTED_SEQUENCE_RENDER_DEPTH, Sequence};
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,6 +27,7 @@ pub trait AudioDecodedSource: Send + Sync + 'static {
         frames: usize,
         channels: usize,
         destination: &mut [f32],
+        cancellation: &ExecutionCancellationToken,
     ) -> Result<(), String>;
 }
 
@@ -140,7 +142,10 @@ impl AudioProgramRuntime {
             let plan = Arc::new(PreparedAudioPlan::prepare(program, contract)?);
             Ok(Self {
                 session: AudioRenderSession::new(plan)?,
-                sources: RuntimeSources { entries },
+                sources: RuntimeSources {
+                    entries,
+                    cancellation: ExecutionCancellationToken::new(),
+                },
             })
         })();
         stack.remove(&sequence.id);
@@ -153,12 +158,29 @@ impl AudioProgramRuntime {
         request: AudioRenderRequest,
         destination: &mut [f32],
     ) -> Result<(), AudioExecutionError> {
+        self.render_into_cancellable(request, destination, &ExecutionCancellationToken::new())
+    }
+
+    /// Execute one exact block with consumer-generation cancellation authority.
+    pub fn render_into_cancellable(
+        &mut self,
+        request: AudioRenderRequest,
+        destination: &mut [f32],
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<(), AudioExecutionError> {
+        self.sources.cancellation = cancellation.clone();
+        if cancellation.is_canceled() {
+            return Err(AudioExecutionError::SourceUnavailable(
+                "audio render generation was canceled before execution".to_owned(),
+            ));
+        }
         self.session.render_into(&mut self.sources, request, destination)
     }
 }
 
 struct RuntimeSources {
     entries: BTreeMap<AudioComponentEditId, RuntimeSource>,
+    cancellation: ExecutionCancellationToken,
 }
 
 enum RuntimeSource {
@@ -210,6 +232,7 @@ impl AudioPcmSource for RuntimeSources {
                             media.cache_frames,
                             media.channels,
                             &mut media.cache,
+                            &self.cancellation,
                         )
                         .map_err(AudioExecutionError::SourceUnavailable)?;
                 }
@@ -231,12 +254,13 @@ impl AudioPcmSource for RuntimeSources {
                     .saturating_add(i64::try_from(nested.cache_frames).unwrap_or(i64::MAX));
                 if source_frame < nested.cache_start || source_frame >= cache_end {
                     nested.cache_start = source_frame;
-                    nested.runtime.render_into(
+                    nested.runtime.render_into_cancellable(
                         AudioRenderRequest {
                             start_sample: nested.cache_start,
                             frames: nested.cache_frames,
                         },
                         &mut nested.cache,
+                        &self.cancellation,
                     )?;
                 }
                 let frame = usize::try_from(source_frame - nested.cache_start)

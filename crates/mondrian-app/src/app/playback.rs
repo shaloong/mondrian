@@ -436,17 +436,21 @@ impl AppState {
         ) else {
             return;
         };
+        let cancellation = mondrian_core::ExecutionCancellationToken::new();
         for start_sample in [
             center.sample(),
             before,
             center.sample().saturating_add(chunk_frames as i64),
         ] {
-            let _ = renderer.render(AudioPcmRenderRequest {
-                start_sample,
-                frame_count: chunk_frames,
-                sample_rate: self.audio_sample_rate,
-                channels: AUDIO_OUTPUT_CHANNELS,
-            });
+            let _ = renderer.render(
+                AudioPcmRenderRequest {
+                    start_sample,
+                    frame_count: chunk_frames,
+                    sample_rate: self.audio_sample_rate,
+                    channels: AUDIO_OUTPUT_CHANNELS,
+                },
+                &cancellation,
+            );
         }
 
         self.audio_idle_warmup_last = Some(now);

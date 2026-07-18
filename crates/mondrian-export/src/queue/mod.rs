@@ -1970,6 +1970,7 @@ impl AudioDecodedSource for ExportDecodedAudioSource {
         frames: usize,
         channels: usize,
         destination: &mut [f32],
+        _cancellation: &mondrian_core::ExecutionCancellationToken,
     ) -> Result<(), String> {
         self.0
             .read_interleaved(start_frame, frames, channels, destination)

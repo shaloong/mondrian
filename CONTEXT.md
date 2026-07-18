@@ -48,6 +48,10 @@ _Avoid_: Independent scheduler and worker queue, Adapter-owned worker-activity c
 Playback-owned, all-run evidence from an authoritative cancellation request through the first cooperative execution checkpoint to worker return, partitioned by Playback, Interactive, and Still frame-work class.
 _Avoid_: UI counter families, full worker lifetime as cancellation latency, one cleanup budget for unlike work classes
 
+**Execution Cancellation Token**:
+Monotonic, cloneable generation authority shared by schedulers, runtimes, and concrete media Adapters. Cancellation never resets a token; a new generation receives a new token. Canceled execution may not populate success caches or terminal failure memory.
+_Avoid_: Resettable flags, Adapter-owned generation truth, caching canceled results
+
 **Playback Quality Policy**:
 The allowed temporary preview resolution and user-selected proxy/original policy for a Playback Session.
 _Avoid_: Quality flag

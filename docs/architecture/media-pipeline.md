@@ -44,6 +44,15 @@ replace the process-per-miss Adapter without changing the media-source block
 contract. The older whole-file helper remains only for waveform/reference
 jobs and is not the playback/export PCM source path.
 
+The block contract now carries the generation-owned
+`ExecutionCancellationToken` all the way into `AudioWindowDecoder`. Cancellation
+is checked before lookup, across concrete decode, and before cache admission.
+Canceled results are neither decoded-window entries nor terminal failures, so a
+seek cannot poison the same source coordinate for its successor generation.
+The current CLI call can observe cancellation only before/after its blocking
+child; the persistent Session Adapter must poll/interrupt within the fixed
+return budget.
+
 ## Probe
 
 `MediaInfo::probe(path)` uses FFmpeg format/codec metadata without decoding full
