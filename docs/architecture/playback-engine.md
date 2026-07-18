@@ -601,9 +601,14 @@ residency/eviction remains in the playback-owned `PreviewFrameStore`; GPU/color
 mathematics remain renderer-owned. Within the concrete Adapter, timeline
 traversal and nested Sequence evaluation live in
 `preview::timeline_evaluation`, media-key/path/proxy/decode adaptation lives in
-`preview::media_adapter`, and resolved Viewer identity plus GPU execution-layer
-lowering lives in `preview::viewer_plan`. These are private deep Modules over
-the existing request Interface, not new public seams.
+`preview::media_adapter`, decoded/native payload ownership and the single lazy
+CPU working-frame adaptation live in `preview::media_frame`, resolved Viewer
+identity plus GPU execution-layer lowering lives in `preview::viewer_plan`, and
+working-linear CPU composition plus the encoded raster boundary live in
+`preview::composite`. Final exact GPU/raster/stale/CPU output arbitration remains
+in `preview::presentation`. These are private deep Modules over the existing
+request Interface, not new public seams; the parent coordinates them but no
+longer owns their color execution implementations or payload conversion state.
 
 Deterministic Headless fault sequences cover a seek that retires an in-flight
 presentation, queued cancellation racing the replacement demand, delayed or
