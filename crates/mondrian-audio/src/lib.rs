@@ -7,6 +7,7 @@
 
 mod compiler;
 mod dsp;
+mod latency;
 mod plan;
 mod render;
 mod runtime;

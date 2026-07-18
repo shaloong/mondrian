@@ -88,8 +88,12 @@ Every processor must declare latency and supported layouts/automation cadence.
 Parallel paths are delay-compensated before sums and Transitions. A latency or
 layout capability change causes recompile and controlled re-entry; it cannot
 mutate the live graph inside a block. The current executable processor set is
-zero-latency built-in Gain, so preparation admits no unimplemented non-zero
-latency path.
+zero-latency built-in Gain. Preparation already solves checked Contribution and
+port-specific Route compensation at every sum and propagates child-output
+latency bottom-up; a missing child preparation dependency fails closed. It does
+not admit an unimplemented non-zero processor path: processor state,
+preallocated compensation execution, and explicit discontinuity entry must be
+implemented together before such a processor becomes executable.
 
 ## Consequences
 

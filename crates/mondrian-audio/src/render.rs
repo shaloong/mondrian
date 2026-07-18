@@ -139,6 +139,11 @@ impl AudioRenderSession {
         })
     }
 
+    /// Total prepared latency of the selected Program Output.
+    pub fn output_latency_frames(&self) -> usize {
+        self.plan.output_latency_frames()
+    }
+
     /// Return the fixed allocation envelope owned by this Session.
     pub const fn capacity(&self) -> AudioRenderCapacity {
         self.capacity

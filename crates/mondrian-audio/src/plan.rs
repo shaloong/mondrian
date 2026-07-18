@@ -86,10 +86,28 @@ pub(crate) enum CompiledProcessor {
     Gain { automation: ExactAutomationCurve },
 }
 
+impl CompiledProcessor {
+    /// Render-Contract-specific intrinsic latency after processor realization.
+    /// Built-in Gain is strictly zero-latency.
+    pub(crate) const fn latency_frames(&self) -> usize {
+        match self {
+            Self::Gain { .. } => 0,
+        }
+    }
+}
+
 /// Ordered, immutable processor operations.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct CompiledRack {
     pub(crate) processors: Vec<CompiledProcessor>,
+}
+
+impl CompiledRack {
+    pub(crate) fn latency_frames(&self) -> Option<usize> {
+        self.processors.iter().try_fold(0_usize, |latency, processor| {
+            latency.checked_add(processor.latency_frames())
+        })
+    }
 }
 
 /// Non-placement processing scope compiled from one author definition.

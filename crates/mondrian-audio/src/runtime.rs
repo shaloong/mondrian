@@ -1,3 +1,4 @@
+use crate::schedule::{AudioKernelBackend, AudioPreparationDependencies};
 use crate::{
     compile_audio_program, AudioCompileRequest, AudioExecutionError, AudioPcmSource,
     AudioRenderContract, AudioRenderRequest, AudioRenderSession, CompiledAudioSource,
@@ -95,6 +96,7 @@ impl AudioProgramRuntime {
             let nested_cache_frames =
                 contract.max_block_frames.clamp(1, NESTED_SOURCE_CACHE_FRAMES);
             let mut entries = BTreeMap::new();
+            let mut dependencies = AudioPreparationDependencies::default();
             for contribution in program.contributions() {
                 let source = match contribution.source {
                     CompiledAudioSource::Media { asset_id, component_id } => {
@@ -120,16 +122,21 @@ impl AudioProgramRuntime {
                             .iter()
                             .find(|candidate| candidate.id == sequence_id)
                             .ok_or(AudioRuntimeBuildError::MissingNestedSequence(sequence_id))?;
+                        let runtime = Self::build_inner(
+                            child,
+                            sequences,
+                            resolver,
+                            contract,
+                            Some(output_id),
+                            stack,
+                            depth + 1,
+                        )?;
+                        dependencies.insert_nested_source_latency(
+                            contribution.edit_id,
+                            runtime.output_latency_frames(),
+                        )?;
                         RuntimeSource::Nested(NestedRuntimeSource {
-                            runtime: Box::new(Self::build_inner(
-                                child,
-                                sequences,
-                                resolver,
-                                contract,
-                                Some(output_id),
-                                stack,
-                                depth + 1,
-                            )?),
+                            runtime: Box::new(runtime),
                             cache_start: i64::MIN,
                             cache_frames: nested_cache_frames,
                             cache: vec![0.0; nested_cache_frames * contract.channels],
@@ -139,7 +146,12 @@ impl AudioProgramRuntime {
                 };
                 entries.insert(contribution.edit_id, source);
             }
-            let plan = Arc::new(PreparedAudioPlan::prepare(program, contract)?);
+            let plan = Arc::new(PreparedAudioPlan::prepare_with_dependencies(
+                program,
+                contract,
+                AudioKernelBackend::default(),
+                &dependencies,
+            )?);
             Ok(Self {
                 session: AudioRenderSession::new(plan)?,
                 sources: RuntimeSources {
@@ -159,6 +171,11 @@ impl AudioProgramRuntime {
         destination: &mut [f32],
     ) -> Result<(), AudioExecutionError> {
         self.render_into_cancellable(request, destination, &ExecutionCancellationToken::new())
+    }
+
+    /// Total prepared latency of this selected public output.
+    pub fn output_latency_frames(&self) -> usize {
+        self.session.output_latency_frames()
     }
 
     /// Execute one exact block with consumer-generation cancellation authority.

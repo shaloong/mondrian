@@ -188,17 +188,25 @@ Preparation now lowers the semantic graph into one dense execution schedule:
 - half-open active sample spans lowered once for the Render Contract;
 - liveness-assigned scratch slots whose lifetime extends through the last
   downstream consumer;
+- a checked latency solution for every Contribution-to-Track and Route-to-node
+  sum, including the exact `PreFader` versus post-fader source port;
 - constant gain/pan and rack-gain fast paths;
 - one explicitly selected scalar-reference or runtime-vectorized CPU kernel.
 
 The prepared schedule contains no authoring maps and the Session performs no
 Route search. Non-constant automation is validated once and lowered to ordered
 sample event spans; the Session advances span cursors instead of searching or
-validating author curves per sample. Layout negotiation, processor realization,
-plugin parameter-event batching, latency analysis, and PDC also belong here.
-The present executable processor set is zero-latency, so the runtime does not
-claim general plugin delay compensation. Any non-zero-latency processor must be
-rejected until preparation can produce a complete compensation plan.
+validating author curves per sample. Latency is accumulated through each
+pre-/post-fader rack and resolved independently at every real summing point;
+the selected Program Output exposes the resulting total latency. Recursive
+preparation is bottom-up: a parent Contribution receives the already-prepared,
+instance-specific child-output latency. Missing nested latency fails closed and
+can never be guessed as zero. Layout negotiation, processor realization, plugin
+parameter-event batching, compensation-delay execution, and state entry also
+belong here. The present executable processor set is zero-latency, so the
+runtime does not yet claim general plugin delay compensation. Any admitted
+non-zero-latency processor must arrive with its processor execution state,
+preallocated compensation lines, and discontinuity contract as one change.
 
 ### Stage 3: exclusive mutable Session
 
@@ -207,6 +215,10 @@ rendering; it does not allocate one permanent buffer per author node or Route.
 `render_into` accepts an exact signed start sample and exact frame count and
 writes caller-owned interleaved float storage. The Session is exclusive mutable
 state; plans may be shared, Sessions may not.
+
+The immutable Plan and recursive Runtime both report selected-output latency.
+This is execution scheduling information, not an instruction to rewrite author
+time, Clip placement, automation coordinates, or nested source mappings.
 
 The source Seam is block-shaped even when a Clip speed map produces reverse,
 repeated, or non-contiguous coordinates. The Session resolves one absolute

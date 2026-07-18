@@ -280,6 +280,8 @@ fn clip_track_bus_output_math_is_unclipped_and_block_invariant() {
             automation_curve_count: 1,
             automation_event_span_count: 2,
             scratch_slot_count: 2,
+            output_latency_frames: 0,
+            maximum_compensation_frames: 0,
         }
     );
     let mut source = RampSource::default();
@@ -480,11 +482,46 @@ fn nested_public_output_uses_an_independent_recursive_session() {
     };
     let mut runtime = AudioProgramRuntime::build(&root, &[child], &RampResolver, contract, None)
         .expect("recursive runtime");
+    assert_eq!(runtime.output_latency_frames(), 0);
     let mut pcm = vec![0.0; 4];
     runtime
         .render_into(AudioRenderRequest { start_sample: 0, frames: 4 }, &mut pcm)
         .expect("nested render");
     assert_eq!(pcm, vec![1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn direct_plan_preparation_rejects_unprepared_nested_latency() {
+    let child = sequence_with_audio_clip();
+    let child_output = child.audio_program.outputs[0].id;
+    let mut root = Sequence::new("root");
+    let root_track = root.audio_tracks[0].id;
+    let nested_clip = Clip::new_nested_sequence(
+        child.id,
+        TimelineTime::ZERO,
+        tt(4, 1),
+        Some("child".to_owned()),
+    )
+    .expect("nested clip");
+    root.add_nested_audio_clip(root_track, nested_clip, child_output)
+        .expect("nested audio authoring");
+    let root_output = root.audio_program.outputs[0].id;
+    let program = Arc::new(
+        compile_audio_program(&root, AudioCompileRequest::program(root_output))
+            .expect("semantic program"),
+    );
+    let error = PreparedAudioPlan::prepare(
+        program,
+        AudioRenderContract {
+            sample_rate: 2,
+            channels: 1,
+            max_block_frames: 8,
+            processing_mode: AudioProcessingMode::Offline,
+        },
+    )
+    .expect_err("nested latency must be supplied by recursive preparation");
+    assert!(matches!(error, AudioCompileError::InvalidPreparedGraph(_)));
+    assert!(error.to_string().contains("no prepared child-output latency"));
 }
 
 #[test]

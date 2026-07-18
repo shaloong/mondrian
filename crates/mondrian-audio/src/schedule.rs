@@ -1,5 +1,6 @@
 //! Render-contract-specific lowering from semantic audio IR to dense execution data.
 
+use crate::latency::{solve_prepared_latency, PreparedLatencyNodeInput, PreparedNodeLatency};
 use crate::plan::{
     AudioRenderContract, CompiledAudioContribution, CompiledAudioProgram, CompiledChannelStrip,
     CompiledProcessingScope, CompiledProcessor, CompiledRack, CompiledTransition,
@@ -15,6 +16,49 @@ use mondrian_timeline::audio::{
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
+
+/// Instance-specific facts supplied only after child render plans are prepared.
+///
+/// Semantic compilation deliberately cannot guess these values because plugin
+/// realization and the selected Render Contract may change processor latency.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AudioPreparationDependencies {
+    nested_source_latency_frames: BTreeMap<mondrian_core::AudioComponentEditId, usize>,
+}
+
+impl AudioPreparationDependencies {
+    pub(crate) fn insert_nested_source_latency(
+        &mut self,
+        edit_id: mondrian_core::AudioComponentEditId,
+        latency_frames: usize,
+    ) -> Result<(), AudioCompileError> {
+        if self.nested_source_latency_frames.insert(edit_id, latency_frames).is_some() {
+            return Err(AudioCompileError::InvalidPreparedGraph(format!(
+                "duplicate nested latency dependency for contribution {edit_id}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn source_latency_frames(
+        &self,
+        contribution: &CompiledAudioContribution,
+    ) -> Result<usize, AudioCompileError> {
+        match contribution.source {
+            crate::CompiledAudioSource::Media { .. } => Ok(0),
+            crate::CompiledAudioSource::NestedOutput { .. } => self
+                .nested_source_latency_frames
+                .get(&contribution.edit_id)
+                .copied()
+                .ok_or_else(|| {
+                    AudioCompileError::InvalidPreparedGraph(format!(
+                        "nested contribution {} has no prepared child-output latency",
+                        contribution.edit_id
+                    ))
+                }),
+        }
+    }
+}
 
 /// Prepared DSP kernel selected for one immutable plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -47,6 +91,10 @@ pub struct PreparedAudioScheduleSummary {
     pub automation_event_span_count: usize,
     /// Scratch slots after interval-liveness reuse.
     pub scratch_slot_count: usize,
+    /// Total intrinsic/PDC latency at the selected Program Output.
+    pub output_latency_frames: usize,
+    /// Largest compensation delay inserted at any prepared summing input.
+    pub maximum_compensation_frames: usize,
 }
 
 /// Immutable context-specific plan. Mutable buffers and processor instances do not live here.
@@ -73,10 +121,24 @@ impl PreparedAudioPlan {
         contract: AudioRenderContract,
         kernel_backend: AudioKernelBackend,
     ) -> Result<Self, AudioCompileError> {
+        Self::prepare_with_dependencies(
+            program,
+            contract,
+            kernel_backend,
+            &AudioPreparationDependencies::default(),
+        )
+    }
+
+    pub(crate) fn prepare_with_dependencies(
+        program: Arc<CompiledAudioProgram>,
+        contract: AudioRenderContract,
+        kernel_backend: AudioKernelBackend,
+        dependencies: &AudioPreparationDependencies,
+    ) -> Result<Self, AudioCompileError> {
         if contract.sample_rate == 0 || contract.channels == 0 || contract.max_block_frames == 0 {
             return Err(AudioCompileError::InvalidRenderContract);
         }
-        let schedule = PreparedAudioSchedule::build(program.as_ref(), contract)?;
+        let schedule = PreparedAudioSchedule::build(program.as_ref(), contract, dependencies)?;
         Ok(Self { program, contract, kernel_backend, schedule })
     }
 
@@ -98,6 +160,11 @@ impl PreparedAudioPlan {
     /// Dense schedule facts suitable for diagnostics and workload matrices.
     pub fn schedule_summary(&self) -> PreparedAudioScheduleSummary {
         self.schedule.summary
+    }
+
+    /// Total prepared Program Output latency on this plan's Evaluation Grid.
+    pub fn output_latency_frames(&self) -> usize {
+        self.schedule.summary.output_latency_frames
     }
 }
 
@@ -132,6 +199,7 @@ pub(crate) struct PreparedNode {
     pub(crate) pre_rack_automation: Vec<PreparedAutomationCurve>,
     pub(crate) fader_automation: Option<PreparedAutomationCurve>,
     pub(crate) post_rack_automation: Vec<PreparedAutomationCurve>,
+    pub(crate) latency: PreparedNodeLatency,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -139,6 +207,7 @@ pub(crate) struct PreparedRoute {
     pub(crate) source_slot: usize,
     pub(crate) destination_slot: usize,
     pub(crate) source_port: AudioChannelStripOutputPort,
+    pub(crate) compensation_delay_frames: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +223,9 @@ pub(crate) struct PreparedContribution {
     pub(crate) scope_rack_automation: Vec<PreparedAutomationCurve>,
     pub(crate) volume_automation: Option<PreparedAutomationCurve>,
     pub(crate) pan_automation: Option<PreparedAutomationCurve>,
+    pub(crate) source_latency_frames: usize,
+    pub(crate) scope_rack_latency_frames: usize,
+    pub(crate) compensation_delay_frames: usize,
 }
 
 /// One author curve lowered into exact sample-grid event spans.
@@ -251,6 +323,7 @@ impl PreparedAudioSchedule {
     fn build(
         program: &CompiledAudioProgram,
         contract: AudioRenderContract,
+        dependencies: &AudioPreparationDependencies,
     ) -> Result<Self, AudioCompileError> {
         let sample_rate = AudioSampleRate::new(contract.sample_rate).map_err(|error| {
             AudioCompileError::InvalidPreparedGraph(format!(
@@ -281,6 +354,7 @@ impl PreparedAudioSchedule {
                 pre_rack_automation: automation.pre_rack,
                 fader_automation: automation.fader,
                 post_rack_automation: automation.post_rack,
+                latency: PreparedNodeLatency::default(),
             });
         }
         for bus_id in &program.bus_order {
@@ -305,6 +379,7 @@ impl PreparedAudioSchedule {
                 pre_rack_automation: automation.pre_rack,
                 fader_automation: automation.fader,
                 post_rack_automation: automation.post_rack,
+                latency: PreparedNodeLatency::default(),
             });
         }
         let output_slot = nodes.len();
@@ -323,6 +398,7 @@ impl PreparedAudioSchedule {
             pre_rack_automation: automation.pre_rack,
             fader_automation: automation.fader,
             post_rack_automation: automation.post_rack,
+            latency: PreparedNodeLatency::default(),
         });
 
         let mut scope_slots = BTreeMap::new();
@@ -429,6 +505,16 @@ impl PreparedAudioSchedule {
                 sample_rate,
             )?;
             contributions.push(PreparedContribution {
+                source_latency_frames: dependencies.source_latency_frames(&semantic)?,
+                scope_rack_latency_frames: scopes[scope_slot].rack.latency_frames().ok_or_else(
+                    || {
+                        AudioCompileError::InvalidPreparedGraph(format!(
+                            "Contribution {} processor latency overflowed",
+                            semantic.edit_id
+                        ))
+                    },
+                )?,
+                compensation_delay_frames: 0,
                 semantic,
                 track_slot,
                 scope_slot,
@@ -492,10 +578,77 @@ impl PreparedAudioSchedule {
                             route.id
                         )));
                     }
-                    routes.push(PreparedRoute { source_slot, destination_slot, source_port });
+                    routes.push(PreparedRoute {
+                        source_slot,
+                        destination_slot,
+                        source_port,
+                        compensation_delay_frames: 0,
+                    });
                 }
             }
             node.incoming = start..routes.len();
+        }
+
+        let latency_nodes = nodes
+            .iter()
+            .map(|node| {
+                Ok(PreparedLatencyNodeInput {
+                    origin: node.origin,
+                    contribution_start: node.contributions.start,
+                    contribution_end: node.contributions.end,
+                    route_start: node.incoming.start,
+                    route_end: node.incoming.end,
+                    pre_rack_latency_frames: node.strip.pre_fader.latency_frames().ok_or_else(
+                        || {
+                            AudioCompileError::InvalidPreparedGraph(
+                                "pre-fader processor latency overflowed".to_owned(),
+                            )
+                        },
+                    )?,
+                    post_rack_latency_frames: node.strip.post_fader.latency_frames().ok_or_else(
+                        || {
+                            AudioCompileError::InvalidPreparedGraph(
+                                "post-fader processor latency overflowed".to_owned(),
+                            )
+                        },
+                    )?,
+                })
+            })
+            .collect::<Result<Vec<_>, AudioCompileError>>()?;
+        let contribution_intrinsic_latency_frames = contributions
+            .iter()
+            .map(|contribution| {
+                contribution
+                    .source_latency_frames
+                    .checked_add(contribution.scope_rack_latency_frames)
+                    .ok_or_else(|| {
+                        AudioCompileError::InvalidPreparedGraph(format!(
+                            "Contribution {} total latency overflowed",
+                            contribution.semantic.edit_id
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, AudioCompileError>>()?;
+        let latency = solve_prepared_latency(
+            &latency_nodes,
+            &routes,
+            &contribution_intrinsic_latency_frames,
+            output_slot,
+        )
+        .map_err(|reason| AudioCompileError::InvalidPreparedGraph(reason.to_owned()))?;
+        for (contribution, compensation) in contributions
+            .iter_mut()
+            .zip(latency.contribution_compensation_frames.iter().copied())
+        {
+            contribution.compensation_delay_frames = compensation;
+        }
+        for (route, compensation) in
+            routes.iter_mut().zip(latency.route_compensation_frames.iter().copied())
+        {
+            route.compensation_delay_frames = compensation;
+        }
+        for (node, node_latency) in nodes.iter_mut().zip(latency.node_latencies.iter().copied()) {
+            node.latency = node_latency;
         }
 
         let mut last_consumer = (0..nodes.len()).collect::<Vec<_>>();
@@ -534,6 +687,8 @@ impl PreparedAudioSchedule {
                 .map(|curve| curve.event_span_count())
                 .sum(),
             scratch_slot_count,
+            output_latency_frames: latency.output_latency_frames,
+            maximum_compensation_frames: latency.maximum_compensation_frames,
         };
         Ok(Self {
             nodes,
