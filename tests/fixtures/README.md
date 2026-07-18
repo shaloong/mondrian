@@ -16,9 +16,17 @@ Suggested naming:
 - `*_legal.*` / `*_full.*` for range variants
 - `*_rec709.*`, `*_rec2020.*`, `*_hlg.*`, `*_pq.*`, `*_log.*` for color-space variants
 
-Keep large or redistribution-restricted files out of repository history. Store them
-at the manifest path locally and validate their byte length and SHA-256 before use.
-Never replace an asset in place while retaining its fixture ID.
+Only self-owned, deterministically generated, public-domain, or explicitly
+licensed material may enter the canonical manifest. A redistribution-restricted
+fixture may remain outside repository history only when its test usage rights
+are verified; record that restriction as `prohibited`. Never replace an asset
+in place while retaining its fixture ID.
+
+Downloaded or inherited media with unverified rights is not a fixture. Keep it
+ignored and use it only with explicitly ignored/manual tests through a local
+path. Do not add its filename, hash, metadata, or expected result to the
+canonical manifest, and do not use it as release or professional acceptance
+evidence.
 
 Run the public/PR gate with:
 

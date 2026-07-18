@@ -252,7 +252,7 @@ Platform Capability Contract
 
 ### 5.1 Reference Corpus
 
-M0 建立可重现的 corpus manifest。仓库已有少量 Sony/ARRI/色彩素材，但不足以覆盖主工作流。每个样本记录来源许可、SHA-256、容器、codec、分辨率、帧率模式、bit depth、CICP/side data、预期解释和可公开性。
+M0 建立可重现的 corpus manifest。规范清单当前只保留许可边界明确的自有/可生成色彩参考，主工作流素材仍不足。每个样本记录来源许可、SHA-256、容器、codec、分辨率、帧率模式、bit depth、CICP/side data、预期解释和可公开性。
 
 最低覆盖：
 
@@ -264,7 +264,7 @@ M0 建立可重现的 corpus manifest。仓库已有少量 Sony/ARRI/色彩素�
 - CFR 与至少两种真实 VFR 手机素材；24/25/29.97/30/50/59.94 fps 混合。
 - 长 GOP、损坏尾部、离线/替换文件、极短片段、无音频和仅音频素材。
 
-公开 CI 使用体积受控子集；大型或受限素材由 manifest + 本地/夜间 runner 使用。禁止测试在运行时从不固定 URL 下载“最新样本”。
+公开 CI 使用体积受控子集；明确取得内部测试权利但禁止再分发的大型素材可由 manifest + 本地/夜间 runner 使用。许可未核实的下载/遗留样片只能进入 ignored manual 诊断，不得登记为规范 fixture、不得满足发布或专业门禁。禁止测试在运行时从不固定 URL 下载“最新样本”。
 
 ### 5.2 Golden Project
 

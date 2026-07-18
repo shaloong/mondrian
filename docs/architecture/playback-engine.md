@@ -1150,7 +1150,9 @@ work, and upload/readback/fallback counts were zero. GPU execution p95 was about
 1.8 ms and the real-media gate passed. This proves the short production
 decode→native-import→GPU-presentation path on that machine; it does not satisfy
 the 30-minute duration, repeated seek, physical audio-device, driver-matrix, or
-bounded whole-process-memory acceptance run.
+bounded whole-process-memory acceptance run. The source was an unverified-rights
+local download used only by an ignored manual diagnostic. It is not a canonical
+fixture and cannot support release or professional acceptance evidence.
 
 The generated-media gate additionally requires execution—not merely policy
 state—when at least two pressure thresholds of requested-but-unengaged hardware

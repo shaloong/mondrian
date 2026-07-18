@@ -35,7 +35,7 @@ foreach ($entry in $manifest.entries) {
     if ($ids.ContainsKey($entry.id)) { Add-Issue "error" "entry.duplicate-id" "Duplicate fixture id: $($entry.id)" } else { $ids[$entry.id] = $true }
     if ($entry.sha256 -notmatch '^[0-9a-f]{64}$') { Add-Issue "error" "entry.bad-hash" "$($entry.id): SHA-256 must be lowercase hexadecimal" }
     if ($entry.availability -notin @("committed", "local-restricted", "generated")) { Add-Issue "error" "entry.bad-availability" "$($entry.id): invalid availability" }
-    if ($entry.provenance.redistribution -notin @("permitted", "unverified", "prohibited")) { Add-Issue "error" "entry.bad-provenance" "$($entry.id): invalid redistribution state" }
+    if ($entry.provenance.redistribution -notin @("permitted", "prohibited")) { Add-Issue "error" "entry.unverified-provenance" "$($entry.id): canonical fixtures require verified usage and redistribution rights" }
 
     $path = Join-Path $FixtureRoot $entry.path
     $mustExist = $entry.availability -eq "committed" -or $Tier -in @("Nightly", "Release")

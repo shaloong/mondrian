@@ -1,106 +1,16 @@
 {
   "schema_version": 1,
-  "corpus_revision": "2026-07-15",
+  "corpus_revision": "2026-07-18",
   "entries": [
     {
       "id": "mondrian-standard-quality-v1",
       "path": "color/metadata/mondrian-standard-quality-corpus-v1.json",
       "availability": "committed",
-      "sha256": "2869076d641466d3e7a6e990fa288e27058a24af918e0e907fada5aee30dd6c3",
+      "sha256": "61a780d20f7b17706168e1ba0f605f8819400d321dbd98e9881412de01ebe7f2",
       "size_bytes": 6951,
       "provenance": { "source": "Mondrian v1 stimulus recipes plus Colour Science ColorChecker 2005 xyY data under BSD-3-Clause", "redistribution": "permitted" },
       "media": { "kind": "numeric-color-reference", "container": "json", "codec": "utf-8", "width": null, "height": null, "frame_rate": "not-applicable", "frame_rate_mode": "not-applicable", "bit_depth": "float32-recipes", "primaries": "rec2020-and-cie-xyy", "transfer": "scene-linear-and-reference", "matrix": "not-applicable", "range": "extended-float" },
       "purposes": ["mondrian-standard-quality", "colorchecker-reference", "sdr-hdr-view-invariants", "gamut-boundary-continuity"]
-    },
-    {
-      "id": "sony-slog3-uhd-5994-001",
-      "path": "color/source/广东-03-Sony-59.940 DF-Slog3-灰片.MP4",
-      "availability": "local-restricted",
-      "sha256": "73bfb57a2fb614b7f7228110f846021218aba3fc6d2bca3251ea2d7495f720e5",
-      "size_bytes": 130118481,
-      "provenance": { "source": "legacy local corpus", "redistribution": "unverified" },
-      "media": { "kind": "video", "container": "mp4", "codec": "unknown", "width": 3840, "height": 2160, "frame_rate": "60000/1001", "frame_rate_mode": "unknown", "bit_depth": "unknown", "primaries": "unknown", "transfer": "s-log3", "matrix": "unknown", "range": "unknown" },
-      "purposes": ["log-identification", "preview-export-color-parity"]
-    },
-    {
-      "id": "red-log3g10-5994-001",
-      "path": "color/source/新西兰人像-15-RED-59.94-Log3G10-灰片.mov",
-      "availability": "local-restricted",
-      "sha256": "30c45116d622ca16e264676b82304443d16505cdc5a4598f5fda2bf9566845d5",
-      "size_bytes": 186318867,
-      "provenance": { "source": "legacy local corpus", "redistribution": "unverified" },
-      "media": { "kind": "video", "container": "mov", "codec": "unknown", "width": null, "height": null, "frame_rate": "60000/1001", "frame_rate_mode": "unknown", "bit_depth": "unknown", "primaries": "red-wide-gamut-rgb", "transfer": "log3g10", "matrix": "identity-or-unknown", "range": "unknown" },
-      "purposes": ["log-identification", "preview-export-color-parity"]
-    },
-    {
-      "id": "camera-mxf-001",
-      "path": "color/source/DW0001C005_251020_113322_a1I7H.mxf",
-      "availability": "local-restricted",
-      "sha256": "5b315def2190009aa61eee6ef127404cf18a661df8ffeece880ef14c682b5361",
-      "size_bytes": 1989333076,
-      "provenance": { "source": "legacy local corpus", "redistribution": "unverified" },
-      "media": { "kind": "video", "container": "mxf", "codec": "unknown", "width": null, "height": null, "frame_rate": "unknown", "frame_rate_mode": "unknown", "bit_depth": "unknown", "primaries": "unknown", "transfer": "unknown", "matrix": "unknown", "range": "unknown" },
-      "purposes": ["native-import", "metadata-probe", "long-gop-seek"]
-    },
-    {
-      "id": "camera-mxf-002",
-      "path": "color/source/DW0001C021_251020_132307_a1I7H.mxf",
-      "availability": "local-restricted",
-      "sha256": "acb1ec2f25b55cfe8a8d604d1a1f04679d75ce1568c5399db2a42aaa5e75236c",
-      "size_bytes": 691732564,
-      "provenance": { "source": "legacy local corpus", "redistribution": "unverified" },
-      "media": { "kind": "video", "container": "mxf", "codec": "unknown", "width": null, "height": null, "frame_rate": "unknown", "frame_rate_mode": "unknown", "bit_depth": "unknown", "primaries": "unknown", "transfer": "unknown", "matrix": "unknown", "range": "unknown" },
-      "purposes": ["native-import", "metadata-probe", "long-gop-seek"]
-    },
-    {
-      "id": "hevc-main10-hdr10-4k24-001",
-      "path": "color/source/hevc_4k24P_main10_hdr10_3.mp4",
-      "availability": "local-restricted",
-      "sha256": "0f5beb1279d278eabf1215ba764d816edecffa9497d6f4c391e058765367cc5a",
-      "size_bytes": 97428328,
-      "provenance": { "source": "legacy local corpus", "redistribution": "unverified" },
-      "media": { "kind": "video", "container": "mp4", "codec": "hevc-main10", "width": 3840, "height": 2160, "frame_rate": "24/1", "frame_rate_mode": "unknown", "bit_depth": 10, "primaries": "bt2020", "transfer": "pq", "matrix": "bt2020-ncl", "range": "unknown" },
-      "purposes": ["hdr10-metadata", "10-bit-decode", "preview-export-color-parity"]
-    },
-    {
-      "id": "hevc-rext-12bit-444-pq-4k24-001",
-      "path": "color/source/hevc_4k24P_rext_12bit_444_pq.mp4",
-      "availability": "local-restricted",
-      "sha256": "d4d9807e2f67c6f19ec7a70a9f48b5dadf85d1a8bca391b6cad84231570e8c3c",
-      "size_bytes": 1071380538,
-      "provenance": { "source": "legacy local corpus", "redistribution": "unverified" },
-      "media": { "kind": "video", "container": "mp4", "codec": "hevc-rext", "width": 3840, "height": 2160, "frame_rate": "24/1", "frame_rate_mode": "unknown", "bit_depth": 12, "primaries": "bt2020", "transfer": "pq", "matrix": "identity-or-unknown", "range": "unknown" },
-      "purposes": ["unsupported-format-blocker", "no-silent-degradation"]
-    },
-    {
-      "id": "hevc-main10-4k25-001",
-      "path": "color/source/hevc_4k25P_main10_1.mp4",
-      "availability": "local-restricted",
-      "sha256": "d3bf021c1ac46d1417e7384b2c18189c592ca03ff2132bebf9306d68b39f94fb",
-      "size_bytes": 22766697,
-      "provenance": { "source": "legacy local corpus", "redistribution": "unverified" },
-      "media": { "kind": "video", "container": "mp4", "codec": "hevc-main10", "width": 3840, "height": 2160, "frame_rate": "25/1", "frame_rate_mode": "unknown", "bit_depth": 10, "primaries": "unknown", "transfer": "unknown", "matrix": "unknown", "range": "unknown" },
-      "purposes": ["10-bit-decode"]
-    },
-    {
-      "id": "hevc-main10-pq-4k60-001",
-      "path": "color/source/hevc_4k60P_main10_pq10.mp4",
-      "availability": "local-restricted",
-      "sha256": "68ec71f997797d084880490661066c038c6d7acfe62747b27c10e584f9d6a87e",
-      "size_bytes": 165609150,
-      "provenance": { "source": "legacy local corpus", "redistribution": "unverified" },
-      "media": { "kind": "video", "container": "mp4", "codec": "hevc-main10", "width": 3840, "height": 2160, "frame_rate": "60/1", "frame_rate_mode": "unknown", "bit_depth": 10, "primaries": "bt2020", "transfer": "pq", "matrix": "bt2020-ncl", "range": "unknown" },
-      "purposes": ["4k60-playback", "hdr10-metadata", "stress-project-picture"]
-    },
-    {
-      "id": "hevc-alpha-001",
-      "path": "color/source/hevc_with_alpha_layer.mp4",
-      "availability": "local-restricted",
-      "sha256": "6c651fcc1a49f0a759724d845cd0bd9993981a41b539cf3ff0a77a65745fc5a2",
-      "size_bytes": 4569025,
-      "provenance": { "source": "legacy local corpus", "redistribution": "unverified" },
-      "media": { "kind": "video", "container": "mp4", "codec": "hevc-alpha", "width": null, "height": null, "frame_rate": "unknown", "frame_rate_mode": "unknown", "bit_depth": "unknown", "primaries": "unknown", "transfer": "unknown", "matrix": "unknown", "range": "unknown" },
-      "purposes": ["alpha-interpretation", "unsupported-format-blocker"]
     }
   ]
 }
