@@ -54,7 +54,8 @@ media. It extracts:
 - video streams: codec, decoder-proven codec profile, dimensions, frame rate,
   pixel format, bit depth, alpha, detected color space, structured color
   interpretation, frame count, and HDR side-data summaries
-- audio streams: codec, sample rate, channels, layout, bit depth
+- audio streams: codec, stream-local declared duration, sample rate, channels,
+  layout, bit depth
 
 The probe runs off the UI thread. Once stream/CICP evidence identifies a video
 as HDR (or stream metadata declares dynamic HDR/Dolby Vision), the probe opens a
@@ -74,6 +75,10 @@ pixel formats retain an unproven marker rather than becoming YUV420P/8-bit.
 bit depth, filename, or extension. A professional Main10 gate requires the
 opened decoder context to report `HevcMain10`; persisted records written before
 these proof fields default to unproven and must be re-probed before acceptance.
+Likewise, a container duration cannot prove that its primary audio stream spans
+the same interval. Professional physical-output acceptance requires a positive
+stream-local duration and rejects missing or shorter audio-stream evidence
+instead of counting post-EOF silence as 30 minutes of source coverage.
 
 Asset registration is separate from metadata probing. `AssetLibrary` can import
 a path by calling `MediaInfo::probe`, but callers that already own a bounded

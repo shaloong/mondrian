@@ -191,7 +191,7 @@ pub(crate) struct PreviewProcessMemoryEvidenceReport {
     baseline_average_private_committed_bytes: u64,
     final_sample_count: u64,
     final_average_private_committed_bytes: u64,
-    post_seek_private_committed_bytes: Option<u64>,
+    post_stress_private_committed_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -226,11 +226,11 @@ impl PreviewProcessMemoryEvidenceCollector {
         }
     }
 
-    pub(crate) fn observe_post_seek(
+    pub(crate) fn observe_post_stress(
         &mut self,
         sample: mondrian_platform::ProcessMemoryProbeResult,
     ) {
-        self.report.post_seek_private_committed_bytes = self.observe_sample(sample);
+        self.report.post_stress_private_committed_bytes = self.observe_sample(sample);
     }
 
     pub(crate) fn report(mut self) -> PreviewProcessMemoryEvidenceReport {
@@ -297,9 +297,15 @@ pub(crate) struct PreviewProcessMemoryGateReport {
     baseline_average_private_committed_bytes: u64,
     final_average_private_committed_bytes: u64,
     settled_growth_bytes: u64,
-    post_seek_private_committed_bytes: Option<u64>,
-    post_seek_growth_bytes: Option<u64>,
+    post_stress_private_committed_bytes: Option<u64>,
+    post_stress_growth_bytes: Option<u64>,
     passed: bool,
+}
+
+impl PreviewProcessMemoryGateReport {
+    pub(crate) fn passed(&self) -> bool {
+        self.passed
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -741,34 +747,34 @@ fn evaluate_process_memory(
             "minutes 25-30 average private commit minus minutes 5-10 average",
         );
     }
-    let post_seek_growth_bytes = evidence
-        .post_seek_private_committed_bytes
+    let post_stress_growth_bytes = evidence
+        .post_stress_private_committed_bytes
         .map(|bytes| bytes.saturating_sub(evidence.final_average_private_committed_bytes));
     match (
-        evidence.post_seek_private_committed_bytes,
-        post_seek_growth_bytes,
+        evidence.post_stress_private_committed_bytes,
+        post_stress_growth_bytes,
     ) {
         (None, _) => push_failure(
             failures,
-            "process_memory_post_seek_sample_missing",
-            "one private-commit sample after seek burst quiescence",
+            "process_memory_post_stress_sample_missing",
+            "one private-commit sample after the gate's terminal stress and quiescence",
             "missing",
-            "post-seek process-memory evidence",
+            "post-stress process-memory evidence",
         ),
         (Some(bytes), Some(growth)) => {
             if bytes > PROCESS_MEMORY_MAX_PRIVATE_COMMITTED_BYTES {
                 push_failure(
                     failures,
-                    "process_memory_post_seek_private_commit_above_limit",
+                    "process_memory_post_stress_private_commit_above_limit",
                     format!("at most {PROCESS_MEMORY_MAX_PRIVATE_COMMITTED_BYTES} bytes"),
                     format!("{bytes} bytes"),
-                    "post-seek native process private commit",
+                    "post-stress native process private commit",
                 );
             }
             if growth > PROCESS_MEMORY_MAX_SETTLED_GROWTH_BYTES {
                 push_failure(
                     failures,
-                    "process_memory_seek_did_not_settle",
+                    "process_memory_stress_did_not_settle",
                     format!("at most {PROCESS_MEMORY_MAX_SETTLED_GROWTH_BYTES} bytes above final playback average"),
                     format!("{growth} bytes"),
                     "private commit after Broker/worker quiescence",
@@ -788,10 +794,19 @@ fn evaluate_process_memory(
         baseline_average_private_committed_bytes: evidence.baseline_average_private_committed_bytes,
         final_average_private_committed_bytes: evidence.final_average_private_committed_bytes,
         settled_growth_bytes,
-        post_seek_private_committed_bytes: evidence.post_seek_private_committed_bytes,
-        post_seek_growth_bytes,
+        post_stress_private_committed_bytes: evidence.post_stress_private_committed_bytes,
+        post_stress_growth_bytes,
         passed,
     }
+}
+
+/// Evaluate the shared whole-process memory contract without coupling another
+/// professional gate to the video-specific failure representation.
+pub(crate) fn evaluate_process_memory_gate(
+    evidence: &PreviewProcessMemoryEvidenceReport,
+) -> PreviewProcessMemoryGateReport {
+    let mut failures = Vec::new();
+    evaluate_process_memory(evidence, &mut failures)
 }
 
 fn percent(numerator: u64, denominator: u64) -> u64 {
@@ -1071,7 +1086,7 @@ mod tests {
             PROFESSIONAL_MIN_OBSERVED_DURATION_US,
             process_memory_sample(540 * mib),
         );
-        collector.observe_post_seek(process_memory_sample(560 * mib));
+        collector.observe_post_stress(process_memory_sample(560 * mib));
 
         let report = collector.report();
 
@@ -1085,7 +1100,7 @@ mod tests {
             PROCESS_MEMORY_MIN_WINDOW_SAMPLES + 1
         );
         assert_eq!(report.final_average_private_committed_bytes, 540 * mib);
-        assert_eq!(report.post_seek_private_committed_bytes, Some(560 * mib));
+        assert_eq!(report.post_stress_private_committed_bytes, Some(560 * mib));
         assert_eq!(
             report.attempted_samples,
             PROCESS_MEMORY_MIN_WINDOW_SAMPLES * 2 + 2
@@ -1102,7 +1117,7 @@ mod tests {
             .baseline_average_private_committed_bytes
             .saturating_add(PROCESS_MEMORY_MAX_SETTLED_GROWTH_BYTES)
             .saturating_add(1);
-        process_memory.post_seek_private_committed_bytes =
+        process_memory.post_stress_private_committed_bytes =
             Some(process_memory.final_average_private_committed_bytes);
 
         let report = evaluate_professional_playback(
@@ -1172,7 +1187,7 @@ mod tests {
             baseline_average_private_committed_bytes: 512 * 1024 * 1024,
             final_sample_count: PROCESS_MEMORY_MIN_WINDOW_SAMPLES,
             final_average_private_committed_bytes: 544 * 1024 * 1024,
-            post_seek_private_committed_bytes: Some(560 * 1024 * 1024),
+            post_stress_private_committed_bytes: Some(560 * 1024 * 1024),
         }
     }
 

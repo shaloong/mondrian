@@ -1,3 +1,7 @@
+use super::audio_playback_acceptance::{
+    evaluate_professional_audio_playback, AudioPlaybackMediaProbeReport,
+    ProfessionalAudioPlaybackObservation,
+};
 use super::playback_acceptance::{
     evaluate_professional_playback, PreviewPlaybackMediaProbeReport,
     PreviewProcessMemoryEvidenceCollector, PreviewProcessMemoryEvidenceReport,
@@ -1698,6 +1702,418 @@ fn audio_bounded_source_external_render_smoke() -> anyhow::Result<()> {
 }
 
 #[test]
+#[ignore = "development production CPAL + headless Viewer smoke; requires real external audio and an output device"]
+fn playback_cpal_av_external_smoke() -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("perf lock poisoned");
+    let Some(media_path) =
+        std::env::var_os("MONDRIAN_AUDIO_EXTERNAL_MEDIA_PATH").map(PathBuf::from)
+    else {
+        eprintln!(
+            "MONDRIAN_PERF_JSON={{\"scenario\":\"playback_cpal_av_external\",\"skipped\":\"MONDRIAN_AUDIO_EXTERNAL_MEDIA_PATH not set\"}}"
+        );
+        return Ok(());
+    };
+    let media_info = MediaInfo::probe(&media_path)?;
+    let audio_stream_duration = media_info
+        .primary_audio()
+        .and_then(|audio| audio.duration)
+        .context("CPAL smoke requires a proven primary-audio stream duration")?;
+    let frame_count = 8usize;
+    let frame_interval_ns = 1_000_000_000u64
+        .saturating_mul(1_001)
+        .checked_div(30_000)
+        .context("resolve 30000/1001 frame interval")?;
+    let required_duration =
+        Duration::from_nanos((frame_count as u64).saturating_mul(frame_interval_ns));
+    anyhow::ensure!(
+        audio_stream_duration >= required_duration,
+        "CPAL smoke audio is too short: {audio_stream_duration:?} < {required_duration:?}"
+    );
+    let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let root_dir = std::env::temp_dir().join(format!("mondrian_cpal_av_smoke_{uniq}"));
+    fs::create_dir_all(&root_dir)?;
+    let result = (|| {
+        let sequence_frame_count = audio_stream_duration
+            .as_nanos()
+            .checked_div(u128::from(frame_interval_ns))
+            .and_then(|frames| usize::try_from(frames).ok())
+            .unwrap_or(frame_count)
+            .saturating_sub(1)
+            .max(frame_count.saturating_add(2));
+        let mut state = build_professional_cpal_av_state(
+            &root_dir,
+            &media_path,
+            media_info,
+            sequence_frame_count,
+        )?;
+        let preview_service = AppUiPreviewService::new();
+        let mut gpu_adapter =
+            HeadlessViewerGpuAdapter::new().context("create headless Viewer GPU Adapter")?;
+        configure_headless_gpu_decode_admission(&preview_service, &gpu_adapter);
+        let mut gpu_summary = HeadlessViewerGpuExecutionSummary::default();
+        state.seek(0);
+        wait_for_headless_gpu_ready(
+            &preview_service,
+            &mut state,
+            &mut gpu_adapter,
+            &mut gpu_summary,
+            Duration::from_secs(30),
+        )?;
+        state.play();
+        let stream_generation = wait_for_production_av_qualification(
+            &preview_service,
+            &mut state,
+            &mut gpu_adapter,
+            &mut gpu_summary,
+            Duration::from_secs(30),
+        )?;
+        state.begin_playback_evidence_run(mondrian_playback::PlaybackEvidenceConfig::default())?;
+        let mut last_clock_tick = Instant::now();
+        for _ in 0..frame_count {
+            let _ = run_headless_production_av_interval(
+                &preview_service,
+                &mut state,
+                &mut gpu_adapter,
+                &mut gpu_summary,
+                Duration::from_nanos(frame_interval_ns),
+                &mut last_clock_tick,
+            )?;
+        }
+        state.pump_audio_output();
+        let audio = state.audio_playback_snapshot();
+        let output = audio.output.context("CPAL smoke produced no output snapshot")?;
+        anyhow::ensure!(
+            audio.state == mondrian_media::AudioPlaybackState::Active,
+            "{audio:?}"
+        );
+        anyhow::ensure!(
+            output.stream_generation == stream_generation
+                && output.active_callback_consumed_frames > 0
+                && !output.stream_failed,
+            "{output:?}"
+        );
+        anyhow::ensure!(
+            state.playback_clock_master() == Some(mondrian_playback::ClockMaster::AudioDevice),
+            "CPAL smoke did not retain Audio Device Clock Master"
+        );
+        anyhow::ensure!(
+            gpu_summary.rendered_frames.saturating_add(gpu_summary.cached_frames) > 0,
+            "CPAL smoke produced no headless GPU execution"
+        );
+        eprintln!(
+            "MONDRIAN_PERF_JSON={}",
+            serde_json::json!({
+                "scenario": "playback_cpal_av_external",
+                "stream_generation": stream_generation,
+                "active_callback_consumed_frames": output.active_callback_consumed_frames,
+                "callback_count": output.callback_count,
+                "underrun_frames": output.underrun_frames,
+                "gpu_executions": gpu_summary.rendered_frames.saturating_add(gpu_summary.cached_frames),
+                "delivery_clock_drift_max_us": state.playback_evidence_report().delivery_clock_drift.max_us,
+                "passed": true,
+            })
+        );
+        Ok(())
+    })();
+    let _ = fs::remove_dir_all(&root_dir);
+    result
+}
+
+#[test]
+#[ignore = "professional 30-minute production CPAL + headless Viewer A/V gate; requires long real audio and an output device"]
+fn playback_professional_cpal_av_gate() -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("perf lock poisoned");
+    let media_path = std::env::var_os("MONDRIAN_PLAYBACK_PROFESSIONAL_AUDIO_MEDIA_PATH")
+        .map(PathBuf::from)
+        .context(
+            "MONDRIAN_PLAYBACK_PROFESSIONAL_AUDIO_MEDIA_PATH is required; this gate never skips",
+        )?;
+    anyhow::ensure!(
+        media_path.exists(),
+        "professional audio media path does not exist: {}",
+        media_path.display()
+    );
+    let media_info = MediaInfo::probe(&media_path)
+        .with_context(|| format!("probe professional audio media {}", media_path.display()))?;
+    let media_probe = AudioPlaybackMediaProbeReport::from_media_info(&media_info)?;
+    let frame_interval_ns = Rational::FPS_2997
+        .den
+        .saturating_mul(1_000_000_000)
+        .checked_div(Rational::FPS_2997.num)
+        .and_then(|value| u64::try_from(value).ok())
+        .context("resolve 30000/1001 frame interval")?;
+    let frame_count = professional_min_frame_count_for_interval(frame_interval_ns)?;
+    const QUALIFICATION_GUARD_SECONDS: u64 = 30;
+    let qualification_guard_frames = usize::try_from(
+        30_000u64
+            .saturating_mul(QUALIFICATION_GUARD_SECONDS)
+            .saturating_add(1_000)
+            .checked_div(1_001)
+            .unwrap_or(u64::MAX),
+    )
+    .unwrap_or(usize::MAX);
+    let sequence_frame_count =
+        frame_count.saturating_add(qualification_guard_frames).saturating_add(2);
+    let required_source_duration_us = (sequence_frame_count as u128)
+        .saturating_mul(u128::from(frame_interval_ns))
+        .saturating_add(999)
+        .checked_div(1_000)
+        .unwrap_or(u128::MAX)
+        .min(u128::from(u64::MAX)) as u64;
+    media_probe.ensure_observation_coverage(required_source_duration_us)?;
+    let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let root_dir = std::env::temp_dir().join(format!("mondrian_cpal_av_gate_{uniq}"));
+    fs::create_dir_all(&root_dir)?;
+    let result = run_professional_cpal_av_probe(
+        &root_dir,
+        &media_path,
+        media_info,
+        media_probe,
+        frame_count,
+        sequence_frame_count,
+        frame_interval_ns,
+    );
+    let _ = fs::remove_dir_all(&root_dir);
+    result
+}
+
+fn run_professional_cpal_av_probe(
+    root_dir: &Path,
+    media_path: &Path,
+    media_info: MediaInfo,
+    media_probe: AudioPlaybackMediaProbeReport,
+    frame_count: usize,
+    sequence_frame_count: usize,
+    frame_interval_ns: u64,
+) -> anyhow::Result<()> {
+    let mut state =
+        build_professional_cpal_av_state(root_dir, media_path, media_info, sequence_frame_count)?;
+    let preview_service = AppUiPreviewService::new();
+    let mut gpu_adapter =
+        HeadlessViewerGpuAdapter::new().context("create real headless Viewer GPU Adapter")?;
+    configure_headless_gpu_decode_admission(&preview_service, &gpu_adapter);
+    let mut gpu_summary = HeadlessViewerGpuExecutionSummary {
+        adapter: Some(gpu_adapter.adapter_info().clone()),
+        ..HeadlessViewerGpuExecutionSummary::default()
+    };
+    let ready_timeout = Duration::from_secs(30);
+
+    state.seek(0);
+    wait_for_headless_gpu_ready(
+        &preview_service,
+        &mut state,
+        &mut gpu_adapter,
+        &mut gpu_summary,
+        ready_timeout,
+    )?;
+    state.play();
+    let qualified_stream_generation = wait_for_production_av_qualification(
+        &preview_service,
+        &mut state,
+        &mut gpu_adapter,
+        &mut gpu_summary,
+        ready_timeout,
+    )?;
+    gpu_summary = HeadlessViewerGpuExecutionSummary {
+        adapter: Some(gpu_adapter.adapter_info().clone()),
+        ..HeadlessViewerGpuExecutionSummary::default()
+    };
+
+    state.begin_playback_evidence_run(mondrian_playback::PlaybackEvidenceConfig::default())?;
+    let process_memory_probe = SystemPlatformService;
+    let mut process_memory_evidence = PreviewProcessMemoryEvidenceCollector::default();
+    process_memory_evidence.observe_playback(0, process_memory_probe.current_process_memory());
+    let mut next_process_memory_sample_us = 1_000_000u64;
+    let mut readiness = PreviewReadinessCounts::default();
+    let observation_started = Instant::now();
+    let mut last_clock_tick = observation_started;
+
+    for frame_index in 0..frame_count {
+        let sample = run_headless_production_av_interval(
+            &preview_service,
+            &mut state,
+            &mut gpu_adapter,
+            &mut gpu_summary,
+            Duration::from_nanos(frame_interval_ns),
+            &mut last_clock_tick,
+        )?;
+        record_headless_preview_readiness(&mut readiness, sample);
+        let observed_at_us =
+            observation_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+        if observed_at_us >= next_process_memory_sample_us {
+            process_memory_evidence.observe_playback(
+                observed_at_us,
+                process_memory_probe.current_process_memory(),
+            );
+            next_process_memory_sample_us = observed_at_us
+                .saturating_div(1_000_000)
+                .saturating_add(1)
+                .saturating_mul(1_000_000);
+        }
+        anyhow::ensure!(
+            state.is_playing(),
+            "production A/V transport ended before the 30-minute observation completed at frame {frame_index}"
+        );
+    }
+
+    state.pump_audio_output();
+    apply_headless_preview_outcome(&preview_service, &mut state);
+    let audio_snapshot = state.audio_playback_snapshot();
+    let playback_evidence = state.playback_evidence_report();
+    let source_cache = state.audio_source_cache_diagnostics();
+    state.pause();
+    wait_for_preview_work_quiescence(&preview_service, &mut state, ready_timeout)?;
+    process_memory_evidence.observe_post_stress(process_memory_probe.current_process_memory());
+    let process_memory_evidence = process_memory_evidence.report();
+    let gpu_timings = gpu_adapter
+        .finish_gpu_timings()
+        .context("finish deferred headless Viewer GPU timestamp maps")?;
+    gpu_summary.record_gpu_timings(&gpu_timings);
+    gpu_summary.discarded_gpu_timestamp_frames = gpu_adapter.discarded_gpu_timings();
+
+    let report = evaluate_professional_audio_playback(ProfessionalAudioPlaybackObservation {
+        media: &media_probe,
+        qualified_stream_generation,
+        audio: audio_snapshot,
+        source_cache,
+        playback_evidence: &playback_evidence,
+        process_memory: &process_memory_evidence,
+        video_ready_samples: readiness.ready as u64,
+        video_total_samples: frame_count as u64,
+        gpu_presented_frames: gpu_summary.rendered_frames.saturating_add(gpu_summary.cached_frames)
+            as u64,
+    });
+    let report_json = serde_json::to_string(&report)?;
+    eprintln!("MONDRIAN_PERF_JSON={report_json}");
+    anyhow::ensure!(
+        report.passed,
+        "professional production CPAL A/V gate failed: {:?}; report: {report_json}",
+        report.failures
+    );
+    Ok(())
+}
+
+fn wait_for_production_av_qualification(
+    preview_service: &AppUiPreviewService,
+    state: &mut AppState,
+    gpu_adapter: &mut HeadlessViewerGpuAdapter,
+    gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
+    timeout: Duration,
+) -> anyhow::Result<u64> {
+    let deadline = Instant::now() + timeout;
+    let mut last_clock_tick = Instant::now();
+    let mut candidate_frame = None;
+    let mut candidate_status = HeadlessGpuCandidateStatus::Loading;
+    loop {
+        let now = Instant::now();
+        state.advance_playback_clock(now.saturating_duration_since(last_clock_tick));
+        last_clock_tick = now;
+        state.pump_audio_output();
+        apply_headless_preview_outcome(preview_service, state);
+        let current_frame = state.current_frame();
+        if candidate_frame != Some(current_frame)
+            || candidate_status != HeadlessGpuCandidateStatus::Ready
+        {
+            candidate_status =
+                execute_headless_gpu_candidate(preview_service, state, gpu_adapter, gpu_summary)?;
+            candidate_frame = Some(current_frame);
+        }
+        let audio = state.audio_playback_snapshot();
+        if !state.is_playback_priming()
+            && state.playback_clock_master() == Some(mondrian_playback::ClockMaster::AudioDevice)
+            && audio.state == mondrian_media::AudioPlaybackState::Active
+        {
+            if let Some(output) = audio.output.filter(|output| {
+                output.active && !output.stream_failed && output.active_callback_consumed_frames > 0
+            }) {
+                return Ok(output.stream_generation);
+            }
+        }
+        anyhow::ensure!(
+            now < deadline,
+            "timed out qualifying real CPAL callback consumption and headless video presentation; audio={audio:?}, clock={:?}, preview={:?}",
+            state.playback_clock_master(),
+            preview_service.diagnostics()
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn run_headless_production_av_interval(
+    preview_service: &AppUiPreviewService,
+    state: &mut AppState,
+    gpu_adapter: &mut HeadlessViewerGpuAdapter,
+    gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
+    interval: Duration,
+    last_clock_tick: &mut Instant,
+) -> anyhow::Result<HeadlessPreviewSample> {
+    let deadline = Instant::now() + interval;
+    let mut candidate_frame = None;
+    let mut candidate_status = HeadlessGpuCandidateStatus::Loading;
+    let candidate_status = loop {
+        let now = Instant::now();
+        state.advance_playback_clock(now.saturating_duration_since(*last_clock_tick));
+        *last_clock_tick = now;
+        state.pump_audio_output();
+        apply_headless_preview_outcome(preview_service, state);
+        let current_frame = state.current_frame();
+        if candidate_frame != Some(current_frame)
+            || candidate_status != HeadlessGpuCandidateStatus::Ready
+        {
+            candidate_status =
+                execute_headless_gpu_candidate(preview_service, state, gpu_adapter, gpu_summary)?;
+            candidate_frame = Some(current_frame);
+        }
+        if now >= deadline {
+            break candidate_status;
+        }
+        thread::sleep((deadline - now).min(Duration::from_millis(1)));
+    };
+    Ok(HeadlessPreviewSample {
+        current_gpu_ready: candidate_status == HeadlessGpuCandidateStatus::Ready,
+        stale_output_available: gpu_adapter.has_presented_output(),
+        unavailable: candidate_status == HeadlessGpuCandidateStatus::Unavailable,
+    })
+}
+
+fn build_professional_cpal_av_state(
+    root_dir: &Path,
+    media_path: &Path,
+    media_info: MediaInfo,
+    frame_count: usize,
+) -> anyhow::Result<AppState> {
+    let library = AssetLibrary::open(root_dir.join("library"))?;
+    let audio_asset_id = library.upsert_media_file_with_info(media_path, media_info)?;
+    let solid_asset_id = library.create_solid_color_asset(Some("CPAL A/V gate picture"))?;
+    let mut sequence = Sequence::new("Professional CPAL A/V gate");
+    sequence.settings.frame_rate = Rational::FPS_2997;
+    let time_base = sequence.time_base();
+    let duration = tt(frame_count as i64, time_base);
+    sequence.video_tracks[0].add_clip(Clip::new_solid_color(
+        solid_asset_id,
+        mondrian_core::Color::from_rgba8(18, 18, 18, 255),
+        TimelineTime::ZERO,
+        duration,
+    )?)?;
+    let audio_track_id = sequence.audio_tracks[0].id;
+    sequence.add_media_audio_clip(
+        audio_track_id,
+        Clip::new(audio_asset_id, TimelineTime::ZERO, duration)?,
+        AudioSourceComponentId::primary(),
+    )?;
+    sequence.playhead = TimelineTime::ZERO;
+    sequence.mark_out(duration);
+    let sequence_id = sequence.id;
+    let mut state = AppState::new();
+    state.asset_library = Some(library);
+    state.active_sequence_id = Some(sequence_id);
+    state.default_sequence_id = Some(sequence_id);
+    state.sequences = vec![sequence.clone()];
+    state.sequence = Some(sequence);
+    Ok(state)
+}
+
+#[test]
 #[ignore = "professional 4K HEVC Main10 hardware playback gate; requires real media and GPU"]
 fn preview_media_professional_4k_hevc_main10_hardware_playback_gate() -> anyhow::Result<()> {
     let _guard = perf_lock().lock().expect("perf lock poisoned");
@@ -2184,7 +2600,7 @@ fn run_preview_media_continuous_playback_probe(
             Ok(())
         },
     )?;
-    process_memory_evidence.observe_post_seek(process_memory_probe.current_process_memory());
+    process_memory_evidence.observe_post_stress(process_memory_probe.current_process_memory());
     let gpu_timings = gpu_adapter
         .finish_gpu_timings()
         .context("finish deferred headless Viewer GPU timestamp maps")?;

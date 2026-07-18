@@ -1011,6 +1011,29 @@ hits, one 1,105,920-byte resident entry, and zero eviction. This is source-path
 evidence only: persistent cancelable decode Sessions and the physical-device
 30-minute gate remain required.
 
+The physical-device gate is now an implemented, ignored reference-machine
+Adapter rather than an unwritten requirement. `cpal_av_48khz_30min_v1` runs the
+ordinary App transport for real wall time, consumes the production bounded
+audio source through a concrete CPAL stream, completes a generated video layer
+through the real headless Viewer GPU Adapter, and evaluates the shared Playback
+Evidence plus native process-memory facts. It fails on a changed CPAL stream
+generation, stale/failed callback, non-48 kHz stereo output, callback cadence
+divergence above 100 ms, any PCM silence substitution, any underrun recovery,
+delivery-clock drift above 20 ms, less than 99.5% current video readiness,
+source-window decode failure/oversize/460 ms miss-budget violation, cache budget
+overflow, or failure of `whole_process_private_commit_v1`. CPAL callback
+consumption is explicitly OS-output evidence, not acoustic loopback evidence.
+The repository still lacks a completed 30-minute report from a fixed reference
+machine and therefore does not claim the gate has passed.
+Container duration alone cannot admit this run: the media probe must prove the
+primary audio stream itself spans the complete observation, so automatic
+post-EOF silence cannot masquerade as long-source evidence.
+The local short CPAL/A/V smoke has reached the production stream and headless
+presentation path with zero underrun and zero observed delivery-clock drift.
+However, its measured ~1.02 s process-per-window audio miss exceeds the 460 ms
+professional high-water budget, so it is evidence for the next decoder work,
+not grounds to waive or mark the 30-minute gate complete.
+
 Audio transport permission is now explicit. Priming renders into the bounded
 queue under `AudioPlaybackMode::Preroll` without enabling consumption;
 Playing/Recovering switches to `Consume` and activates that same generation.
@@ -1070,9 +1093,10 @@ diagnostic because OS paging is not application ownership. The versioned
 `whole_process_private_commit_v1` profile requires at least 240 valid samples
 in both minutes 5–10 and minutes 25–30, no incomplete/native-probe samples, a
 4 GiB absolute Private Commit high-water limit, and no more than 256 MiB growth
-from the early settled-window average to the final-window average. After 50
-warm seeks, 50 accurate seeks, the 100-request latest-wins burst, and verified
-Broker/worker quiescence, one further sample must remain within the same
+from the early settled-window average to the final-window average. After each
+gate's declared terminal stress reaches verified worker quiescence (the 4K
+video profile uses 50 warm seeks, 50 accurate seeks, and a 100-request
+latest-wins burst), one further sample must remain within the same
 absolute cap and within 256 MiB of the final playback average. The collector
 stores scalar counts/sums/high-water facts only; duration cannot make evidence
 memory grow. Unsupported platform probes fail the professional contract rather

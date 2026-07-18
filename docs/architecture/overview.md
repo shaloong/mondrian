@@ -66,6 +66,7 @@ Lower layers cannot depend on higher layers:
 - UI widgets dispatch `Action`; app decides what actions mean.
 - Platform services are injected into event/app layers; widgets never call OS APIs directly.
 - Native process-memory observation is a separate read-only `ProcessMemoryProbe` seam. Windows reports Private Commit plus current/peak Working Set through the Process Status API; acceptance policy lives above the platform crate. Unsupported operating systems return explicit unavailable evidence rather than fabricated zeros, so future Linux/macOS Adapters can preserve the same contract.
+- Professional playback acceptance is likewise policy above the execution Modules. The real-cadence CPAL A/V Adapter drives the ordinary App transport, Audio Playback, bounded media-source cache, Playback Evidence, headless Viewer GPU execution, and process-memory probe; it does not own a second transport or test-only mixer. A CPAL callback report is intentionally distinct from an acoustic loopback measurement.
 
 The audio dependency direction is one-way:
 

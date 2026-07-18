@@ -261,6 +261,38 @@ Master. Device loss or rejected phase handoff returns authority to Synthetic
 Clock Master; video presentation is never Clock Master. See
 [Playback Engine](playback-engine.md) for the full state and evidence contract.
 
+The ignored `playback_professional_cpal_av_gate` is the fail-closed physical-
+output reference Adapter. It requires a proven primary-audio stream duration
+long enough for the exact
+30-minute 30000/1001 observation, qualifies a concrete 48 kHz stereo CPAL
+generation, then drives the normal App event-loop seams at real wall cadence
+while a generated picture completes through the real headless Viewer GPU
+Adapter. Its versioned `cpal_av_48khz_30min_v1` policy requires at least 99.5%
+current-video readiness, completed GPU presentation, Audio Device Clock Master
+residency except at most five seconds of startup fallback, absolute delivery
+clock drift at most 20 ms, callback-frame versus monotonic-duration divergence
+at most 100 ms, no callback underrun/recovery or render-to-silence substitution,
+no source decode failure/oversize window, each ten-second source miss within the
+460 ms output high-water duration, the 256 MiB global source-cache budget, and
+the shared whole-process Private Commit plateau contract. Missing environment
+fixture, output device, callback facts, native memory facts, or presentation
+facts fail rather than skip.
+
+This gate proves a concrete OS output stream consumed the production PCM path;
+it does not claim acoustic loopback or speaker-waveform verification. The gate
+and its deterministic pass/fail unit tests are implemented, but no complete
+30-minute reference-machine report is checked into the repository yet.
+
+On 2026-07-18 the shorter development Adapter reached the same production path
+on the local Windows machine with CPAL stream generation 1: 13,312 active
+callback frames, 77 callbacks, zero underrun, retained Audio Device Clock
+Master, completed headless GPU work, and zero maximum delivery-clock drift over
+the sampled interval. The same source's first ten-second FFmpeg CLI window miss
+took about 1.02 s, above the 460 ms professional budget. The short smoke proves
+the wiring is executable; the miss measurement predicts a legitimate long-run
+failure until persistent decoder Sessions and bounded look-ahead replace the
+process-per-window Adapter.
+
 ## Correctness invariants
 
 - A valid snapshot has a closed Track/Channel/Scope/Route/Transition graph.
@@ -294,6 +326,9 @@ Automated tests currently prove:
   global PCM bytes, and invalidate after file replacement;
 - a manual external AAC parity gate compares arbitrary bounded windows against
   a sequential reference decode at start, middle, and tail positions.
+- deterministic professional-audio acceptance tests reject missing/fake output
+  facts and accept a complete versioned CPAL/A/V/memory evidence set; the real
+  30-minute Adapter is ignored and never treats an absent fixture as a pass.
 
 ## Required depth before professional audio completion
 

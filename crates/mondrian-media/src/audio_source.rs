@@ -126,7 +126,7 @@ pub struct AudioSourceReader {
 }
 
 /// Point-in-time bounded audio-source cache evidence.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct AudioSourceCacheDiagnostics {
     /// Resident decoded PCM windows.
     pub entries: usize,

@@ -978,6 +978,9 @@ pub struct VideoStreamInfo {
 pub struct AudioStreamInfo {
     pub index: u32,
     pub codec: AudioCodec,
+    /// Declared duration of this audio stream, independent of container duration.
+    #[serde(default)]
+    pub duration: Option<Duration>,
     pub sample_rate: u32,
     pub channels: u8,
     pub channel_layout: ChannelLayout,
@@ -1185,6 +1188,8 @@ impl MediaInfo {
                     });
                 }
                 ffmpeg::media::Type::Audio => {
+                    let stream_duration =
+                        duration_from_stream_ticks(stream.duration(), stream.time_base());
                     let mut sample_rate = 0u32;
                     let mut channels = 0u8;
                     let mut channel_layout = ChannelLayout::Other(0);
@@ -1204,6 +1209,7 @@ impl MediaInfo {
                     audio_streams.push(AudioStreamInfo {
                         index: stream.index() as u32,
                         codec: map_audio_codec(params.id()),
+                        duration: stream_duration,
                         sample_rate,
                         channels,
                         channel_layout,
@@ -2118,6 +2124,19 @@ fn map_rational(value: ffmpeg::Rational) -> (Rational, bool) {
     }
 }
 
+fn duration_from_stream_ticks(ticks: i64, time_base: ffmpeg::Rational) -> Option<Duration> {
+    let numerator = time_base.numerator();
+    let denominator = time_base.denominator();
+    if ticks <= 0 || numerator <= 0 || denominator <= 0 {
+        return None;
+    }
+    let nanos = (ticks as u128)
+        .checked_mul(numerator as u128)?
+        .checked_mul(1_000_000_000)?
+        .checked_div(denominator as u128)?;
+    Some(Duration::from_nanos(nanos.min(u128::from(u64::MAX)) as u64))
+}
+
 fn canonicalize_frame_rate(frame_rate: Rational) -> Rational {
     const TOLERANCE_PPM: i128 = 100;
     const NOMINAL_RATES: [Rational; 12] = [
@@ -2247,6 +2266,19 @@ mod tests {
             map_pixel_format(ffmpeg::util::format::pixel::Pixel::None),
             None
         );
+    }
+
+    #[test]
+    fn stream_duration_uses_stream_time_base_and_fails_closed() {
+        assert_eq!(
+            duration_from_stream_ticks(86_400_000, ffmpeg::Rational(1, 48_000)),
+            Some(Duration::from_secs(30 * 60))
+        );
+        assert_eq!(
+            duration_from_stream_ticks(0, ffmpeg::Rational(1, 48_000)),
+            None
+        );
+        assert_eq!(duration_from_stream_ticks(1, ffmpeg::Rational(0, 1)), None);
     }
 
     #[test]

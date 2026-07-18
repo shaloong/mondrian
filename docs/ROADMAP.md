@@ -64,7 +64,7 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 | Undo/Redo | UI 外的时间线命令历史可工作，主要编辑动作有回归测试 | 主要依赖完整 `Sequence` 快照，内存上限、跨序列事务和命令级不变量仍需收敛 | L1- |
 | 素材管理 | 文件夹/Bin 层级、移动/重命名/删除、缩略图、离线提示、单文件/目录重连、代理模式已接入产品 UI | tags/metadata 字段尚未形成检索产品；素材使用位置反查和批量诊断不足 | L1- |
 | 时间线编辑 | 多轨、移动、分割、普通 Trim、Ripple Delete、Insert/Overwrite、Roll/Slip/Slide、跨轨移动、链接片段跟随、锁定、吸附、多选和嵌套序列已有实现与测试 | Lift/Extract、显式 Link/Unlink、Track Targeting、转场 handles、反向/冻结/完整 time remap、VFR/混合帧率边界和复杂 ripple 传播未形成完整验收 | L1- |
-| 播放与缓存 | UI 无关 `PlaybackEngine`、`FrameWorkBroker`、`PreviewFrameStore`、Evidence v2、Headless GPU Adapter，以及播放/拖动/静帧三种访问语义、FFmpeg session/ring/seek index、原子 generation/抢占/取消 disposition、deadline、预取和代理已接入；Broker 的请求龄期、失效龄期、deadline 与 worker 完成时刻已统一到可注入的 Monotonic Runtime Clock：Adapter 只在准入前提交不透明绝对 deadline 与剩余时长，Broker 单次降低、同键 rebind 更新并在 worker 发结果前一次性盖完成戳，因而排队不会续期、UI 延迟轮询不会制造虚假 Late；deadline/generation/抢占按最早权威时刻统一裁决，时钟回退会钳制、按回退事件计数并令门禁失败；取消原因与 request→checkpoint→return 证据已由播放域统一聚合并以 Playback/Interactive/Still 固定策略供诊断、Headless 与专业验收共用；访问模式/Broker Adapter/有界 job transport 已迁到不依赖 UI 的 `app::preview_access_mode`，deadline/执行质量/预取深度策略已迁到 `app::preview_scheduler_policy`，Window/Headless 的完成、过期、终态 Delivery 与预卷顺序已统一到 `app::playback_preview`；Windows 原生 Private Commit/Working Set 探针与版本化整进程内存门禁已接入同一真实 cadence/seek 路径；加速 Headless 门禁已证明 30 分钟 48 kHz/29.97、Audio→Synthetic→Audio 连续切换、Frame Demand 一致性和证据内存有界 | 大量时间线渲染/色彩媒体适配仍集中在超大的 `app_ui::preview`；FFmpeg open/seek/I/O interrupt 与外部 still 子进程回收已有实现和单测，短时真实 4K Main10 主路径已有本机证据，但仍缺许可/参考 30 分钟素材上的完整 seek/取消/整进程内存门禁执行，以及真实声卡 30 分钟证据 | L1-，执行地基较强，产品证据未闭环 |
+| 播放与缓存 | UI 无关 `PlaybackEngine`、`FrameWorkBroker`、`PreviewFrameStore`、Evidence v2、Headless GPU Adapter，以及播放/拖动/静帧三种访问语义、FFmpeg session/ring/seek index、原子 generation/抢占/取消 disposition、deadline、预取和代理已接入；Broker 的请求龄期、失效龄期、deadline 与 worker 完成时刻已统一到可注入的 Monotonic Runtime Clock：Adapter 只在准入前提交不透明绝对 deadline 与剩余时长，Broker 单次降低、同键 rebind 更新并在 worker 发结果前一次性盖完成戳，因而排队不会续期、UI 延迟轮询不会制造虚假 Late；deadline/generation/抢占按最早权威时刻统一裁决，时钟回退会钳制、按回退事件计数并令门禁失败；取消原因与 request→checkpoint→return 证据已由播放域统一聚合并以 Playback/Interactive/Still 固定策略供诊断、Headless 与专业验收共用；访问模式/Broker Adapter/有界 job transport 已迁到不依赖 UI 的 `app::preview_access_mode`，deadline/执行质量/预取深度策略已迁到 `app::preview_scheduler_policy`，Window/Headless 的完成、过期、终态 Delivery 与预卷顺序已统一到 `app::playback_preview`；Windows 原生 Private Commit/Working Set 探针与版本化整进程内存门禁已接入真实 cadence/terminal-stress 路径；加速 Headless 门禁已证明 30 分钟时钟数学，真实 `cpal_av_48khz_30min_v1` Adapter 也已接入产品 Audio Playback、Headless GPU、源缓存与整进程证据并 fail-closed | 大量时间线渲染/色彩媒体适配仍集中在超大的 `app_ui::preview`；短时真实 4K Main10 主路径已有本机证据，但仍缺许可/参考 30 分钟视频素材的完整 seek/取消/内存报告，以及固定参考机上真实 CPAL 30 分钟报告；已实现门禁不等于已通过 | L1-，执行地基较强，产品证据未闭环 |
 | Windows 硬解/低拷贝 | FFmpeg 硬件设备/codec 探测、D3D11/D3D12 native frame 保留、D3D11→D3D12 导入、NV12/P010 GPU YUV 采样、准入与失败原因已有实现；2026-07-18 本地 2.88 秒 4K25 HEVC Main10 HLG 连续播放已取得 60/60 Ready、60/60 D3D12VA P010 原生 GPU 合成、零上传/回读/回退和约 1.8 ms GPU 执行 p95 的真实帧证据；专业门禁已把整进程 Private Commit 稳定窗、绝对上限和 seek 后收敛纳入 v3 合约 | 短素材只证明该参考机上的主路径可执行；仍须以许可/参考 30 分钟素材完整执行连续播放、频繁 seek、取消与整进程内存合约，并补充真实音频设备和多驱动证据，不以本次 smoke 代替专业门禁 | L1- 主路径已实证，长期验收未闭环 |
 | 渲染与色彩 | working-space 合成、OCIO CPU/GPU 路径、结构化色彩/显示诊断、golden 测试、预览/导出报告对比、Windows 显示探测和 fail-closed 逻辑较深入 | 仍有 legacy/CPU/读回路径与真实显示 payload 限制；常见 Log/HDR 必须补齐参考样片端到端证明；Windows HDR 监看不能提前宣称稳定 | L1+ 架构，继续符合性收敛 |
 | 效果与动画 | 稳定 `EffectId`、属性路径、`PropertyBag`/`AnimatedProperty`、多种插值、曲线编辑器、效果 DAG、mask、缓存策略和插件式 definition/DSL 已存在 | `PropertyDescriptor` 缺独立稳定 `ParameterId`、单位和完整能力契约；只有部分声明效果生成真实 render op；文字和转场类型尚未接入时间线/渲染主路径 | L0/L1 之间 |
@@ -81,7 +81,7 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 2. **关键复杂度的 Locality 不够。** Window/Headless 的完成收割、终态 Delivery 与预卷顺序已统一到 UI 无关 `app::playback_preview`，访问模式与纯策略也已迁入 `app`；具体 decode worker/取消检查点/结果发布/FFmpeg Adapter 已按行为隔离到 `app_ui::preview::media_execution`，但它仍复用父模块 payload，预览时间线求值、渲染适配、色彩诊断和缓存逻辑仍大量聚集在 `mondrian-app::app_ui::preview`。导出执行也集中在大型 queue 模块；后续继续按所有权迁出，不能只按文件大小机械拆分或用大量 `pub(crate)` 伪造边界。
 3. **项目版本化只有“拒绝”，没有“迁移”。** 这在 Alpha 继续变更数据结构时会快速成为真实项目风险。
 4. **声明能力和视觉执行能力可能分离。** 某些效果、文字和转场已有类型或属性，却没有主路径 render op；路线图不得把它们列为已完成。
-5. **音频/视频运行许可必须持续分离。** 当前 `Priming` 已可预填 PCM 但禁止设备提前消费，普通视频 Late/Recovering 也不会旋转音频 generation；仍需用真实音频设备、慢首帧/seek、持续视频压力和 30 分钟 A/V drift 门禁证明该不变量长期成立。
+5. **音频/视频运行许可必须持续分离。** 当前 `Priming` 已可预填 PCM 但禁止设备提前消费，普通视频 Late/Recovering 也不会旋转音频 generation；真实 CPAL/A/V 门禁已按产品路径实现，仍须在固定参考机完成慢首帧/seek、持续视频压力和 30 分钟报告，才能证明该不变量长期成立。
 
 ---
 
@@ -298,7 +298,7 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 | warm seek 首张可用图像 | p95 ≤ 200 ms |
 | accurate seek 稳定到目标帧 | p95 ≤ 500 ms |
 | 常用时间线操作 | UI event → model/paint 可见反馈 p95 ≤ 50 ms |
-| 连续播放 30 分钟 | 无持续 underrun；A/V drift 绝对值 ≤ 20 ms；分钟 5–10 与 25–30 的整进程 Private Commit 平均增长 ≤ 256 MiB、全程 ≤ 4 GiB，seek 静止后仍收敛 |
+| 连续播放 30 分钟 | 真实 CPAL callback（声学链路另以 loopback 验证）；无 underrun/recovery 或 render-to-silence；A/V drift 绝对值 ≤ 20 ms；当前视频 Ready ≥ 99.5%；分钟 5–10 与 25–30 的整进程 Private Commit 平均增长 ≤ 256 MiB、全程 ≤ 4 GiB，terminal stress 静止后仍收敛 |
 | 100 次跨区 seek | 旧任务不发布；结束后缓存回到预算内，不单调增长 |
 | Golden Project 导出 | 连续 3 次成功；时长误差 ≤ 1 video frame；A/V 起止误差 ≤ 20 ms |
 | 项目恢复 | 恢复点可打开；正常情况下最大数据损失不超过配置的 autosave interval |
@@ -348,7 +348,7 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 - [ ] `PlaybackEngine`、`FrameWorkBroker`、`PreviewFrameStore`、Monotonic Runtime Clock、Playback/Frame Cancellation Evidence 与 Headless GPU Adapter 已从 UI 收敛；Broker execution lease 已成为优先级/访问类/worker lane 驻留证据的单一事实来源并删除 App activity 原子计数；访问模式/Broker Adapter/有界 job transport 已迁到 `app::preview_access_mode`，Window 与 Headless 的“单次 Demand 采样→完成/过期→终态 Delivery→预卷”已统一到 `app::playback_preview`，两者都不依赖 Widget/Window 且 Adapter 不能直接修改 Transport；继续按行为所有权迁出 `app_ui::preview` 中的时间线求值、媒体执行和色彩诊断，使 `app_ui` 最终只保留意图、窗口资源与呈现状态适配。
 - [ ] 帧工作已统一 generation、priority、deadline、原子取消 disposition、请求龄期、资源预算和诊断所有权；deadline 在 Adapter 准入边界以“不透明绝对值 + 当前剩余时长”提交，由 Broker 单次降低、同键 rebind 更新，并在 worker 发布前一次性记录完成时刻；首次 Broker close 同样以 Monotonic Runtime Clock 固定取消时刻，重复 close 不续期，App stop flag 不再拥有计时权；精确 Headless 测试覆盖截止边界、最早取消原因、rebind、close age 和晚轮询不制造 Late，时钟回退会钳制并使性能/专业门禁失败；继续让缩略图、波形、代理、导出使用同一语言而不强并执行池。
 - [ ] FFmpeg open/stream-info/seek/packet I/O 已接入 request-scoped interrupt，外部 still 子进程可 kill/wait/join；播放域已统一 5 ms request→checkpoint、50 ms Playback/Interactive return、500 ms Still return 的 fail-closed 门禁，仍须在固定参考机用 pause/seek/close/quit、真实长 GOP、阻塞 I/O 与驱动路径取得最坏延迟证据，且 UI 线程不得 join worker。
-- [ ] `ProcessMemoryProbe` 已建立无 OS 调用的接口与 Windows Process Status Adapter；专业门禁以固定 cadence 聚合 5–10/25–30 分钟 Private Commit 稳定窗、4 GiB 绝对上限和 seek 静止后收敛，unsupported/缺样/探针错误失败关闭；仍须用许可参考素材在固定参考机完成一次 v3 报告并据实校准版本化阈值。
+- [ ] `ProcessMemoryProbe` 已建立无 OS 调用的接口与 Windows Process Status Adapter；专业门禁以固定 cadence 聚合 5–10/25–30 分钟 Private Commit 稳定窗、4 GiB 绝对上限和各门禁声明的 terminal stress 静止后收敛，unsupported/缺样/探针错误失败关闭；仍须用许可参考素材在固定参考机完成视频 v3 与 CPAL/A/V v1 报告并据实校准版本化阈值。
 
 **帧、参数与音频**
 
@@ -402,9 +402,10 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 - [ ] Clip gain、pan、fade in/out 已有持久化作者语义和公共执行；补齐产品 UI、细粒度命令/Undo、保存重开与 Golden Project 操作验收。
 - [ ] Track mute 已进入公共执行；实现 transient solo audition、master meter、显式基础 limiter，波形与缩放/代理/relink 后保持正确。
 - [ ] 输入重采样和 channel mapping 有明确策略；unsupported layout 明确降级/拒绝。
-- [ ] 将窗口 miss 的 FFmpeg CLI Adapter 换成可合作取消的持久 decoder Session 与有界预读；固定参考机证明 compressed-audio 随机 seek 和窗口边界不会耗尽 460 ms high watermark，且源缓存始终不超过 256 MiB。
+- [ ] 将窗口 miss 的 FFmpeg CLI Adapter 换成可合作取消的持久 decoder Session 与有界预读；2026-07-18 本机短素材已测得一次十秒窗口 miss 约 1.02 s，超过 460 ms high watermark，故这是已观测的实时阻塞而非推测优化；完成后须以固定参考机证明 compressed-audio 随机 seek/连续窗口边界满足预算，且源缓存始终不超过 256 MiB。
 - [x] 加速 Headless 30 分钟 48 kHz/29.97 门禁通过：精确最终位置、Audio→Synthetic→Audio 连续切换、零交付时钟漂移、零 underrun recovery，Evidence 固定容量且全程最大值不因淘汰丢失。
-- [ ] 固定参考机真实 CPAL/loopback 30 分钟播放达到无持续 underrun、A/V drift 绝对值 ≤ 20 ms 和整进程内存平台门槛；不得用上述加速门禁替代。
+- [ ] `cpal_av_48khz_30min_v1` 已实现真实墙钟产品路径 Adapter 和 fail-closed 规则：要求主音频流自身时长覆盖观察区间（不能用容器时长或 EOF 补零代替）、具体 48 kHz stereo CPAL generation、真实 callback consumption、Headless GPU presentation、Ready ≥99.5%、零 underrun/recovery/静默替代、A/V drift ≤20 ms、十秒源窗口 miss ≤460 ms、源缓存 ≤256 MiB 与整进程内存平台；仍须固定参考机执行完整报告。CPAL 只证明 OS 输出消费，声学端到端仍需独立 loopback，且不得用加速门禁替代。
+- [x] 短 CPAL/A/V 开发 smoke 已在本机真实产品路径通过：具体 stream generation、13,312 active callback frames/77 callbacks、零 underrun、Audio Device Clock Master、Headless GPU execution 和零最大交付时钟漂移均有结构化事实；该短证据不替代上一项 30 分钟门禁。
 
 ### 效果、动画、标题与转场
 

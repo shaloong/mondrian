@@ -54,6 +54,8 @@ pub(crate) fn tt(frame: i64, time_base: Rational) -> TimelineTime {
 
 mod action_handler;
 mod animation_state;
+#[cfg(test)]
+mod audio_playback_acceptance;
 mod audio_rendering;
 mod clip_clipboard;
 pub(crate) mod exporting;

@@ -475,6 +475,11 @@ impl AppState {
         self.audio_source_cache.diagnostics()
     }
 
+    /// Return the current production Audio Playback lifecycle and CPAL callback evidence.
+    pub fn audio_playback_snapshot(&self) -> AudioPlaybackSnapshot {
+        self.audio_playback.snapshot(self.audio_playback_mode())
+    }
+
     /// Advance playback using the active clock source.
     pub fn advance_playback_clock(&mut self, elapsed: Duration) -> PlaybackAdvance {
         let previous_frame = self.current_frame().max(0);
