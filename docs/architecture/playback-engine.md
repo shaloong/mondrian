@@ -1088,8 +1088,9 @@ playback GPU completion p95 exceeds one frame interval, a readback appears, or
 a GPU blocker is reported. Pre-roll pipeline warm-up is reported separately
 and cannot contaminate the steady-playback p95.
 The professional 4K HEVC Main10 gate now has a fail-closed input and execution
-contract (`uhd_hevc_main10_hardware_1x_v3`). It uses real FFmpeg decoder
-profile/format/rate evidence, the probed
+contract (`uhd_hevc_main10_hardware_1x_v4`). It uses real FFmpeg decoder
+profile/format/rate evidence, primary-video stream duration and any declared
+frame count rather than container duration alone, the probed
 rational cadence, frame-local decode provenance carried through caches and
 prefetch, the exact Viewer candidate, and a completed headless GPU submission.
 Its Adapter derives a non-overridable minimum frame count from 30 minutes and
@@ -1133,8 +1134,13 @@ the slowest single decode remains explicit diagnostic evidence but one
 session-open outlier cannot independently fail a 30-minute run whose sustained
 distribution and presentation hit rate pass.
 The deterministic rules and versioned structured failure codes live in the
-deep `app::playback_acceptance` Module; the perf harness is an Adapter that only
-collects real probe, playback, and completed-presentation observations.
+deep, UI-independent `app::playback_acceptance` Module; the perf harness is an
+Adapter that projects UI execution diagnostics into acceptance evidence and
+collects real probe, playback, and completed-presentation observations. The
+professional profile fixes cadence, 30-minute coverage, timeouts, decode/queue
+latency, visibility, readiness, and hardware-execution thresholds; developer
+environment variables apply only to non-professional smoke runs and cannot
+weaken these values.
 It cannot pass from filename labels, hardware candidates/device contexts, or
 PlaybackCursor aggregates containing speculative prefetch. The repository does
 not contain the licensed/reference 4K Main10 fixture, so a successful

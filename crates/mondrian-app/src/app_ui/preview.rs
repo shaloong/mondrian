@@ -9439,6 +9439,7 @@ mod tests {
             video_streams: vec![VideoStreamInfo {
                 index: 0,
                 codec: VideoCodec::H265,
+                duration: Some(Duration::from_secs(2)),
                 codec_profile: mondrian_media::VideoCodecProfile::HevcMain10,
                 width: 3840,
                 height: 2160,

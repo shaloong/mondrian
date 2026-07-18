@@ -3,11 +3,16 @@ use super::audio_playback_acceptance::{
     ProfessionalAudioPlaybackObservation,
 };
 use super::playback_acceptance::{
-    evaluate_professional_playback, PreviewPlaybackMediaProbeReport,
+    evaluate_professional_playback, PlaybackDecodeExecutionEvidence,
+    PresentedDecodeExecutionEvidence, PreviewPlaybackMediaProbeReport,
     PreviewProcessMemoryEvidenceCollector, PreviewProcessMemoryEvidenceReport,
-    PreviewProfessionalPlaybackGateReport, ProfessionalPlaybackObservation,
+    PreviewProfessionalPlaybackGateReport, PreviewRuntimeAcceptanceEvidence,
+    ProfessionalPlaybackObservation, PROFESSIONAL_GPU_CANDIDATE_LIMIT_MS,
     PROFESSIONAL_MIN_ACCURATE_SEEKS, PROFESSIONAL_MIN_OBSERVED_DURATION_US,
-    PROFESSIONAL_MIN_SUPERSEDED_SEEKS, PROFESSIONAL_MIN_WARM_SEEKS,
+    PROFESSIONAL_MIN_READY_BASIS_POINTS, PROFESSIONAL_MIN_SUPERSEDED_SEEKS,
+    PROFESSIONAL_MIN_VISIBLE_PERCENT, PROFESSIONAL_MIN_WARM_SEEKS,
+    PROFESSIONAL_PLAYBACK_DECODE_P95_LIMIT_US, PROFESSIONAL_PLAYBACK_QUEUE_WAIT_P95_LIMIT_US,
+    PROFESSIONAL_READY_TIMEOUT_MS, PROFESSIONAL_TOTAL_TIMEOUT_MS,
 };
 use super::playback_preview::{observe_playback_video_preroll, pump_playback_preview};
 use super::*;
@@ -2185,12 +2190,17 @@ fn run_external_continuous_playback_gate(
         professional_min_frames,
         max_frame_count,
     );
-    let frame_interval_ns = std::env::var("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_FRAME_MS")
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .map(|milliseconds| milliseconds.saturating_mul(1_000_000))
-        .unwrap_or(media_probe.frame_interval_ns()?);
+    let probed_frame_interval_ns = media_probe.frame_interval_ns()?;
+    let frame_interval_ns = if professional {
+        probed_frame_interval_ns
+    } else {
+        std::env::var("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_FRAME_MS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .map(|milliseconds| milliseconds.saturating_mul(1_000_000))
+            .unwrap_or(probed_frame_interval_ns)
+    };
     if professional {
         media_probe.ensure_observation_coverage(frame_count, frame_interval_ns)?;
     }
@@ -2199,42 +2209,73 @@ fn run_external_continuous_playback_gate(
     } else {
         8_000
     };
-    let playback_threshold_ms = env_u128(
-        "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_WINDOW_MS",
-        default_playback_threshold_ms,
-    );
-    let gpu_candidate_threshold_ms =
-        env_u128("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_GPU_CANDIDATE_MS", 2_000);
-    let ready_timeout = Duration::from_millis(env_u128(
-        "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_READY_TIMEOUT_MS",
-        30_000,
-    ) as u64);
+    let playback_threshold_ms = if professional {
+        default_playback_threshold_ms
+    } else {
+        env_u128(
+            "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_WINDOW_MS",
+            default_playback_threshold_ms,
+        )
+    };
+    let gpu_candidate_threshold_ms = if professional {
+        PROFESSIONAL_GPU_CANDIDATE_LIMIT_MS
+    } else {
+        env_u128("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_GPU_CANDIDATE_MS", 2_000)
+    };
+    let ready_timeout = Duration::from_millis(if professional {
+        PROFESSIONAL_READY_TIMEOUT_MS
+    } else {
+        env_u128(
+            "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_READY_TIMEOUT_MS",
+            30_000,
+        ) as u64
+    });
     let default_overall_timeout_ms = if professional {
-        40 * 60 * 1_000
+        u128::from(PROFESSIONAL_TOTAL_TIMEOUT_MS)
     } else {
         180_000
     };
-    let overall_timeout = Duration::from_millis(env_u128(
-        "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_TOTAL_TIMEOUT_MS",
-        default_overall_timeout_ms,
-    ) as u64);
-    let playback_p95_limit_us = env_u64("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_P95_US", 40_000);
-    let playback_queue_wait_p95_limit_us = env_u64(
-        "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_QUEUE_WAIT_P95_US",
-        10_000,
-    );
-    let min_visible_percent = env_usize_clamped(
-        "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_VISIBLE_PERCENT",
-        95,
-        1,
-        100,
-    );
-    let min_ready_basis_points = env_usize_clamped(
-        "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_READY_BASIS_POINTS",
-        9_950,
-        1,
-        10_000,
-    );
+    let overall_timeout = Duration::from_millis(if professional {
+        PROFESSIONAL_TOTAL_TIMEOUT_MS
+    } else {
+        env_u128(
+            "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_TOTAL_TIMEOUT_MS",
+            default_overall_timeout_ms,
+        ) as u64
+    });
+    let playback_p95_limit_us = if professional {
+        PROFESSIONAL_PLAYBACK_DECODE_P95_LIMIT_US
+    } else {
+        env_u64("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_P95_US", 40_000)
+    };
+    let playback_queue_wait_p95_limit_us = if professional {
+        PROFESSIONAL_PLAYBACK_QUEUE_WAIT_P95_LIMIT_US
+    } else {
+        env_u64(
+            "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_QUEUE_WAIT_P95_US",
+            10_000,
+        )
+    };
+    let min_visible_percent = if professional {
+        PROFESSIONAL_MIN_VISIBLE_PERCENT
+    } else {
+        env_usize_clamped(
+            "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_VISIBLE_PERCENT",
+            95,
+            1,
+            100,
+        )
+    };
+    let min_ready_basis_points = if professional {
+        PROFESSIONAL_MIN_READY_BASIS_POINTS
+    } else {
+        env_usize_clamped(
+            "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_READY_BASIS_POINTS",
+            9_950,
+            1,
+            10_000,
+        )
+    };
 
     let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let root_dir = std::env::temp_dir().join(format!("mondrian_preview_external_playback_{uniq}"));
@@ -2291,20 +2332,23 @@ fn run_external_continuous_playback_gate(
             .as_ref()
             .map(|summary| summary.access_mode_profiles.playback_cursor)
             .unwrap_or_default();
+        let runtime_evidence =
+            professional_runtime_acceptance_evidence(&report.preview_diagnostics);
         report.professional_media_gates = Some(evaluate_professional_playback(
             ProfessionalPlaybackObservation {
                 media: &report.media_probe,
-                rendered_decode_execution: report.headless_gpu.rendered_decode_execution,
+                rendered_decode_execution: professional_presented_decode_evidence(
+                    report.headless_gpu.rendered_decode_execution,
+                ),
                 viewer_fallback_count: report.headless_gpu.fallback_count,
                 viewer_fallback_reasons: &report.headless_gpu.fallback_reasons,
-                playback_decode,
+                playback_decode: professional_playback_decode_evidence(playback_decode),
                 playback_evidence: &report.playback_evidence,
-                preview_diagnostics: &report.preview_diagnostics,
+                preview_diagnostics: &runtime_evidence,
                 process_memory: &report.process_memory_evidence,
                 frames: report.frames,
                 frame_interval_ns: report.frame_interval_ns,
             },
-            90,
         ));
     }
     let report_json = serde_json::to_string(&report)?;
@@ -2492,6 +2536,65 @@ fn evaluate_external_playback_gates(
         cpu_frame_store_oversize_rejections,
         passed: failures.is_empty(),
         failures,
+    }
+}
+
+fn professional_presented_decode_evidence(
+    summary: AppUiPreviewDecodeExecutionSummary,
+) -> PresentedDecodeExecutionEvidence {
+    PresentedDecodeExecutionEvidence {
+        media_layers: summary.media_layers,
+        software_cpu_layers: summary.software_cpu_layers,
+        hardware_cpu_transfer_layers: summary.hardware_cpu_transfer_layers,
+        hardware_native_layers: summary.hardware_native_layers,
+        p010_10_bit_hardware_layers: summary.p010_10_bit_hardware_layers,
+    }
+}
+
+fn professional_playback_decode_evidence(
+    profile: AppUiPreviewDecodeAccessModeProfile,
+) -> PlaybackDecodeExecutionEvidence {
+    PlaybackDecodeExecutionEvidence {
+        hardware_decode_prefer_hardware_requested_frames: profile
+            .hardware_decode_prefer_hardware_requested_frames,
+        hardware_decode_prefer_gpu_requested_frames: profile
+            .hardware_decode_prefer_gpu_requested_frames,
+        hardware_decode_require_gpu_requested_frames: profile
+            .hardware_decode_require_gpu_requested_frames,
+        hardware_decode_cpu_not_requested_frames: profile.hardware_decode_cpu_not_requested_frames,
+        hardware_decode_cpu_unavailable_frames: profile.hardware_decode_cpu_unavailable_frames,
+        hardware_decode_backend_unavailable_frames: profile
+            .hardware_decode_backend_unavailable_frames,
+        hardware_decode_codec_unsupported_frames: profile.hardware_decode_codec_unsupported_frames,
+        hardware_decode_device_context_unavailable_frames: profile
+            .hardware_decode_device_context_unavailable_frames,
+        hardware_decode_cpu_transfer_setup_failed_frames: profile
+            .hardware_decode_cpu_transfer_setup_failed_frames,
+        hardware_decode_cpu_transfer_decoder_open_failed_frames: profile
+            .hardware_decode_cpu_transfer_decoder_open_failed_frames,
+        hardware_decode_cpu_transfer_awaiting_frame_frames: profile
+            .hardware_decode_cpu_transfer_awaiting_frame_frames,
+        hardware_decode_backend_boundary_frames: profile.hardware_decode_backend_boundary_frames,
+        hardware_decode_adapter_unavailable_frames: profile
+            .hardware_decode_adapter_unavailable_frames,
+    }
+}
+
+fn professional_runtime_acceptance_evidence(
+    diagnostics: &AppUiPreviewDiagnostics,
+) -> PreviewRuntimeAcceptanceEvidence {
+    PreviewRuntimeAcceptanceEvidence {
+        scheduler: diagnostics.scheduler,
+        worker_queue: diagnostics.worker_queue,
+        media_cache_reserved_bytes: diagnostics.media_cache_reserved_bytes,
+        media_cache_byte_budget: diagnostics.media_cache_byte_budget,
+        media_cache_oversize_rejections: diagnostics.media_cache_oversize_rejections,
+        viewer_frame_cache_reserved_bytes: diagnostics.viewer_frame_cache_reserved_bytes,
+        viewer_frame_cache_byte_budget: diagnostics.viewer_frame_cache_byte_budget,
+        viewer_frame_cache_oversize_rejections: diagnostics.viewer_frame_cache_oversize_rejections,
+        pinned_viewer_frame_bytes: diagnostics.pinned_viewer_frame_bytes,
+        pinned_media_frame_bytes: diagnostics.pinned_media_frame_bytes,
+        decode_cancellation: diagnostics.decode_cancellation,
     }
 }
 

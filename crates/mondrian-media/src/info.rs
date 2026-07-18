@@ -933,6 +933,9 @@ pub enum ChannelLayout {
 pub struct VideoStreamInfo {
     pub index: u32,
     pub codec: VideoCodec,
+    /// Declared duration of this video stream, independent of container duration.
+    #[serde(default)]
+    pub duration: Option<Duration>,
     /// Decoder-proven codec profile, or explicit `Unknown`.
     #[serde(default)]
     pub codec_profile: VideoCodecProfile,
@@ -1082,6 +1085,8 @@ impl MediaInfo {
             let params = stream.parameters();
             match params.medium() {
                 ffmpeg::media::Type::Video => {
+                    let stream_duration =
+                        duration_from_stream_ticks(stream.duration(), stream.time_base());
                     let mut color_metadata_hints = collect_color_metadata_hints(
                         VideoColorMetadataHintScope::Stream,
                         &stream.metadata(),
@@ -1128,6 +1133,7 @@ impl MediaInfo {
                             video_streams.push(VideoStreamInfo {
                                 index: stream.index() as u32,
                                 codec: map_video_codec(params.id()),
+                                duration: stream_duration,
                                 codec_profile: map_video_codec_profile(decoder.profile()),
                                 width,
                                 height,
@@ -1166,6 +1172,7 @@ impl MediaInfo {
                     video_streams.push(VideoStreamInfo {
                         index: stream.index() as u32,
                         codec: map_video_codec(params.id()),
+                        duration: stream_duration,
                         codec_profile: VideoCodecProfile::Unknown,
                         width,
                         height,
@@ -2279,6 +2286,19 @@ mod tests {
             None
         );
         assert_eq!(duration_from_stream_ticks(1, ffmpeg::Rational(0, 1)), None);
+    }
+
+    #[test]
+    fn probe_preserves_primary_video_stream_duration() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/small/h264-bframes.mp4");
+        let info = MediaInfo::probe(&path).expect("probe checked-in video fixture");
+        let duration = info
+            .primary_video()
+            .and_then(|video| video.duration)
+            .expect("fixture video stream duration");
+
+        assert_eq!(duration, Duration::from_millis(1_200));
     }
 
     #[test]

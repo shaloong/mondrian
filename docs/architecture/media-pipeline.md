@@ -74,7 +74,8 @@ media. It extracts:
 
 - container and duration
 - file size
-- video streams: codec, decoder-proven codec profile, dimensions, frame rate,
+- video streams: codec, decoder-proven codec profile, stream-local declared
+  duration, dimensions, frame rate,
   pixel format, bit depth, alpha, detected color space, structured color
   interpretation, frame count, and HDR side-data summaries
 - audio streams: codec, stream-local declared duration, sample rate, channels,
@@ -98,10 +99,11 @@ pixel formats retain an unproven marker rather than becoming YUV420P/8-bit.
 bit depth, filename, or extension. A professional Main10 gate requires the
 opened decoder context to report `HevcMain10`; persisted records written before
 these proof fields default to unproven and must be re-probed before acceptance.
-Likewise, a container duration cannot prove that its primary audio stream spans
-the same interval. Professional physical-output acceptance requires a positive
-stream-local duration and rejects missing or shorter audio-stream evidence
-instead of counting post-EOF silence as 30 minutes of source coverage.
+Likewise, a container duration cannot prove that its primary audio or video
+stream spans the same interval. Professional acceptance requires a positive
+stream-local duration for the relevant primary stream and rejects missing or
+shorter evidence. Audio cannot count post-EOF silence as source coverage, and
+video cannot count a longer container or unrelated stream as playable frames.
 
 Asset registration is separate from metadata probing. `AssetLibrary` can import
 a path by calling `MediaInfo::probe`, but callers that already own a bounded

@@ -9474,6 +9474,7 @@ mod tests {
         media_info.video_streams.push(mondrian_media::VideoStreamInfo {
             index: 0,
             codec: mondrian_media::info::VideoCodec::H264,
+            duration: Some(std::time::Duration::from_secs(1)),
             codec_profile: mondrian_media::VideoCodecProfile::Unknown,
             width: 1920,
             height: 1080,

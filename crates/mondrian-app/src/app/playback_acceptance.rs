@@ -18,15 +18,22 @@ const PROCESS_MEMORY_MIN_WINDOW_SAMPLES: u64 = 240;
 const PROCESS_MEMORY_MAX_PRIVATE_COMMITTED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const PROCESS_MEMORY_MAX_SETTLED_GROWTH_BYTES: u64 = 256 * 1024 * 1024;
 
-use crate::app_ui::preview::{
-    AppUiPreviewDecodeAccessModeProfile, AppUiPreviewDecodeExecutionSummary,
-    AppUiPreviewDiagnostics,
+use super::preview_access_mode::{
+    MediaPreviewJobQueueDiagnostics, MediaPreviewSchedulerDiagnostics,
 };
 
 pub(crate) const PROFESSIONAL_MIN_OBSERVED_DURATION_US: u64 = 30 * 60 * 1_000_000;
 pub(crate) const PROFESSIONAL_MIN_WARM_SEEKS: u64 = 50;
 pub(crate) const PROFESSIONAL_MIN_ACCURATE_SEEKS: u64 = 50;
 pub(crate) const PROFESSIONAL_MIN_SUPERSEDED_SEEKS: u64 = 99;
+pub(crate) const PROFESSIONAL_REQUIRED_HARDWARE_EXECUTION_PERCENT: usize = 90;
+pub(crate) const PROFESSIONAL_PLAYBACK_DECODE_P95_LIMIT_US: u64 = 40_000;
+pub(crate) const PROFESSIONAL_PLAYBACK_QUEUE_WAIT_P95_LIMIT_US: u64 = 10_000;
+pub(crate) const PROFESSIONAL_MIN_VISIBLE_PERCENT: usize = 95;
+pub(crate) const PROFESSIONAL_MIN_READY_BASIS_POINTS: usize = 9_950;
+pub(crate) const PROFESSIONAL_GPU_CANDIDATE_LIMIT_MS: u128 = 2_000;
+pub(crate) const PROFESSIONAL_READY_TIMEOUT_MS: u64 = 30_000;
+pub(crate) const PROFESSIONAL_TOTAL_TIMEOUT_MS: u64 = 40 * 60 * 1_000;
 const PROFESSIONAL_WARM_SEEK_P95_LIMIT_US: u64 = 200_000;
 const PROFESSIONAL_ACCURATE_SEEK_P95_LIMIT_US: u64 = 500_000;
 const PROFESSIONAL_FRAME_RATES: [Rational; 8] = [
@@ -52,6 +59,7 @@ pub(crate) struct PreviewPlaybackMediaProbeReport {
     pixel_format: PixelFormat,
     pixel_format_proven: bool,
     bit_depth: u8,
+    video_stream_duration_us: Option<u64>,
     duration_us: u64,
     total_frames: Option<u64>,
 }
@@ -79,6 +87,9 @@ impl PreviewPlaybackMediaProbeReport {
             pixel_format: video.pixel_format,
             pixel_format_proven: video.pixel_format_proven,
             bit_depth: video.bit_depth,
+            video_stream_duration_us: video
+                .duration
+                .map(|duration| duration.as_micros().min(u64::MAX as u128) as u64),
             duration_us: media_info.duration.as_micros().min(u64::MAX as u128) as u64,
             total_frames: video.total_frames,
         })
@@ -105,11 +116,24 @@ impl PreviewPlaybackMediaProbeReport {
         frame_interval_ns: u64,
     ) -> anyhow::Result<()> {
         let required_duration_us = required_media_duration_us(frames, frame_interval_ns);
+        let video_stream_duration_us = self
+            .video_stream_duration_us
+            .context("professional playback requires a proven primary-video stream duration")?;
+        anyhow::ensure!(
+            video_stream_duration_us >= required_duration_us,
+            "professional playback requires at least {required_duration_us} us of primary-video stream duration, but the probe provides {video_stream_duration_us} us"
+        );
         anyhow::ensure!(
             self.duration_us >= required_duration_us,
             "professional playback observation requires at least {required_duration_us} us of source media, but the probe provides {} us",
             self.duration_us
         );
+        if let Some(total_frames) = self.total_frames {
+            anyhow::ensure!(
+                total_frames >= frames as u64,
+                "professional playback requires at least {frames} declared primary-video frames, but the probe provides {total_frames}"
+            );
+        }
         Ok(())
     }
 }
@@ -316,14 +340,58 @@ pub(crate) struct PreviewAcceptanceFailure {
     evidence: String,
 }
 
+/// Presentation-bound decode provenance supplied by a concrete Viewer Adapter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PresentedDecodeExecutionEvidence {
+    pub(crate) media_layers: u32,
+    pub(crate) software_cpu_layers: u32,
+    pub(crate) hardware_cpu_transfer_layers: u32,
+    pub(crate) hardware_native_layers: u32,
+    pub(crate) p010_10_bit_hardware_layers: u32,
+}
+
+/// Playback-cursor decode request and fallback facts used by acceptance reports.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PlaybackDecodeExecutionEvidence {
+    pub(crate) hardware_decode_prefer_hardware_requested_frames: u64,
+    pub(crate) hardware_decode_prefer_gpu_requested_frames: u64,
+    pub(crate) hardware_decode_require_gpu_requested_frames: u64,
+    pub(crate) hardware_decode_cpu_not_requested_frames: u64,
+    pub(crate) hardware_decode_cpu_unavailable_frames: u64,
+    pub(crate) hardware_decode_backend_unavailable_frames: u64,
+    pub(crate) hardware_decode_codec_unsupported_frames: u64,
+    pub(crate) hardware_decode_device_context_unavailable_frames: u64,
+    pub(crate) hardware_decode_cpu_transfer_setup_failed_frames: u64,
+    pub(crate) hardware_decode_cpu_transfer_decoder_open_failed_frames: u64,
+    pub(crate) hardware_decode_cpu_transfer_awaiting_frame_frames: u64,
+    pub(crate) hardware_decode_backend_boundary_frames: u64,
+    pub(crate) hardware_decode_adapter_unavailable_frames: u64,
+}
+
+/// UI-independent point-in-time execution facts required by professional acceptance.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PreviewRuntimeAcceptanceEvidence {
+    pub(crate) scheduler: MediaPreviewSchedulerDiagnostics,
+    pub(crate) worker_queue: MediaPreviewJobQueueDiagnostics,
+    pub(crate) media_cache_reserved_bytes: usize,
+    pub(crate) media_cache_byte_budget: usize,
+    pub(crate) media_cache_oversize_rejections: u64,
+    pub(crate) viewer_frame_cache_reserved_bytes: usize,
+    pub(crate) viewer_frame_cache_byte_budget: usize,
+    pub(crate) viewer_frame_cache_oversize_rejections: u64,
+    pub(crate) pinned_viewer_frame_bytes: usize,
+    pub(crate) pinned_media_frame_bytes: usize,
+    pub(crate) decode_cancellation: mondrian_playback::FrameCancellationEvidenceReport,
+}
+
 pub(crate) struct ProfessionalPlaybackObservation<'a> {
     pub media: &'a PreviewPlaybackMediaProbeReport,
-    pub rendered_decode_execution: AppUiPreviewDecodeExecutionSummary,
+    pub rendered_decode_execution: PresentedDecodeExecutionEvidence,
     pub viewer_fallback_count: usize,
     pub viewer_fallback_reasons: &'a [String],
-    pub playback_decode: AppUiPreviewDecodeAccessModeProfile,
+    pub playback_decode: PlaybackDecodeExecutionEvidence,
     pub playback_evidence: &'a mondrian_playback::PlaybackEvidenceReport,
-    pub preview_diagnostics: &'a AppUiPreviewDiagnostics,
+    pub preview_diagnostics: &'a PreviewRuntimeAcceptanceEvidence,
     pub process_memory: &'a PreviewProcessMemoryEvidenceReport,
     pub frames: usize,
     pub frame_interval_ns: u64,
@@ -331,8 +399,8 @@ pub(crate) struct ProfessionalPlaybackObservation<'a> {
 
 pub(crate) fn evaluate_professional_playback(
     observation: ProfessionalPlaybackObservation<'_>,
-    required_hardware_execution_percent: usize,
 ) -> PreviewProfessionalPlaybackGateReport {
+    let required_hardware_execution_percent = PROFESSIONAL_REQUIRED_HARDWARE_EXECUTION_PERCENT;
     let media = observation.media;
     let mut failures = Vec::new();
     if media.codec != VideoCodec::H265 {
@@ -411,6 +479,34 @@ pub(crate) fn evaluate_professional_playback(
             format!("{} us", media.duration_us),
             media.source,
         );
+    }
+    match media.video_stream_duration_us {
+        None => push_failure(
+            &mut failures,
+            "media_video_stream_duration_unproven",
+            format!("at least {required_duration_us} us of primary-video stream duration"),
+            "unknown",
+            media.source,
+        ),
+        Some(duration_us) if duration_us < required_duration_us => push_failure(
+            &mut failures,
+            "media_video_stream_duration_insufficient",
+            format!("at least {required_duration_us} us"),
+            format!("{duration_us} us"),
+            media.source,
+        ),
+        Some(_) => {}
+    }
+    if let Some(total_frames) = media.total_frames {
+        if total_frames < observation.frames as u64 {
+            push_failure(
+                &mut failures,
+                "media_video_frame_count_insufficient",
+                format!("at least {} frames", observation.frames),
+                format!("{total_frames} frames"),
+                media.source,
+            );
+        }
     }
 
     let evidence = observation.playback_evidence;
@@ -628,7 +724,7 @@ pub(crate) fn evaluate_professional_playback(
         .saturating_add(playback.hardware_decode_prefer_gpu_requested_frames)
         .saturating_add(playback.hardware_decode_require_gpu_requested_frames);
     PreviewProfessionalPlaybackGateReport {
-        profile: "uhd_hevc_main10_hardware_1x_v3",
+        profile: "uhd_hevc_main10_hardware_1x_v4",
         required_hardware_execution_percent,
         presented_media_layers,
         presented_hardware_layers,
@@ -836,6 +932,10 @@ fn push_failure(
 mod tests {
     use super::*;
 
+    type AppUiPreviewDiagnostics = PreviewRuntimeAcceptanceEvidence;
+    type AppUiPreviewDecodeExecutionSummary = PresentedDecodeExecutionEvidence;
+    type AppUiPreviewDecodeAccessModeProfile = PlaybackDecodeExecutionEvidence;
+
     #[test]
     fn accepts_presented_main10_hardware_execution() {
         let media = main10_media();
@@ -860,9 +960,14 @@ mod tests {
             frame_interval_ns: 40_000_000,
         };
 
-        let report = evaluate_professional_playback(observation, 90);
+        let report = evaluate_professional_playback(observation);
 
         assert!(report.passed, "{:?}", report.failures);
+        assert_eq!(report.profile, "uhd_hevc_main10_hardware_1x_v4");
+        assert_eq!(
+            report.required_hardware_execution_percent,
+            PROFESSIONAL_REQUIRED_HARDWARE_EXECUTION_PERCENT
+        );
         assert_eq!(report.presented_hardware_layers, 100);
         assert_eq!(report.hardware_execution_percent, 100);
     }
@@ -901,7 +1006,7 @@ mod tests {
             frame_interval_ns: 40_000_000,
         };
 
-        let report = evaluate_professional_playback(observation, 90);
+        let report = evaluate_professional_playback(observation);
 
         assert!(!report.passed);
         assert!(!report.cancellation_gate.passed);
@@ -936,7 +1041,7 @@ mod tests {
             frame_interval_ns: 40_000_000,
         };
 
-        let report = evaluate_professional_playback(observation, 90);
+        let report = evaluate_professional_playback(observation);
         let codes: Vec<_> = report.failures.iter().map(|failure| failure.code).collect();
 
         assert_eq!(
@@ -953,16 +1058,71 @@ mod tests {
     }
 
     #[test]
-    fn preflight_rejects_media_shorter_than_observation_window() {
+    fn preflight_rejects_primary_video_shorter_than_observation_window() {
         let mut media = main10_media();
-        media.duration_us = 2_880_000;
+        media.video_stream_duration_us = Some(2_880_000);
 
         let error = media
             .ensure_observation_coverage(45_000, 40_000_000)
             .expect_err("short source must not start a thirty-minute gate");
 
-        assert!(error.to_string().contains("requires at least 1800000000 us"));
+        assert!(error.to_string().contains("primary-video stream duration"));
         assert!(error.to_string().contains("provides 2880000 us"));
+    }
+
+    #[test]
+    fn preflight_rejects_unproven_primary_video_duration() {
+        let mut media = main10_media();
+        media.video_stream_duration_us = None;
+
+        let error = media
+            .ensure_observation_coverage(45_000, 40_000_000)
+            .expect_err("unknown video duration must fail closed");
+
+        assert!(error.to_string().contains("proven primary-video stream duration"));
+    }
+
+    #[test]
+    fn preflight_rejects_insufficient_declared_video_frame_count() {
+        let mut media = main10_media();
+        media.total_frames = Some(44_999);
+
+        let error = media
+            .ensure_observation_coverage(45_000, 40_000_000)
+            .expect_err("short declared frame count must fail before a long run");
+
+        assert!(error.to_string().contains("at least 45000 declared primary-video frames"));
+        assert!(error.to_string().contains("provides 44999"));
+    }
+
+    #[test]
+    fn rejects_declared_video_frame_count_below_observation() {
+        let mut media = main10_media();
+        media.total_frames = Some(44_999);
+        let evidence = passing_playback_evidence();
+        let diagnostics = AppUiPreviewDiagnostics::default();
+        let report = evaluate_professional_playback(ProfessionalPlaybackObservation {
+            media: &media,
+            rendered_decode_execution: AppUiPreviewDecodeExecutionSummary {
+                media_layers: 100,
+                hardware_native_layers: 100,
+                p010_10_bit_hardware_layers: 100,
+                ..AppUiPreviewDecodeExecutionSummary::default()
+            },
+            viewer_fallback_count: 0,
+            viewer_fallback_reasons: &[],
+            playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
+            playback_evidence: &evidence,
+            preview_diagnostics: &diagnostics,
+            process_memory: &passing_process_memory_evidence(),
+            frames: 45_000,
+            frame_interval_ns: 40_000_000,
+        });
+
+        assert!(report
+            .failures
+            .iter()
+            .any(|failure| failure.code == "media_video_frame_count_insufficient"));
     }
 
     #[test]
@@ -972,26 +1132,23 @@ mod tests {
             media.frame_rate = frame_rate;
             let evidence = passing_playback_evidence();
             let diagnostics = AppUiPreviewDiagnostics::default();
-            let report = evaluate_professional_playback(
-                ProfessionalPlaybackObservation {
-                    media: &media,
-                    rendered_decode_execution: AppUiPreviewDecodeExecutionSummary {
-                        media_layers: 100,
-                        hardware_native_layers: 100,
-                        p010_10_bit_hardware_layers: 100,
-                        ..AppUiPreviewDecodeExecutionSummary::default()
-                    },
-                    viewer_fallback_count: 0,
-                    viewer_fallback_reasons: &[],
-                    playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
-                    playback_evidence: &evidence,
-                    preview_diagnostics: &diagnostics,
-                    process_memory: &passing_process_memory_evidence(),
-                    frames: 45_000,
-                    frame_interval_ns: 40_000_000,
+            let report = evaluate_professional_playback(ProfessionalPlaybackObservation {
+                media: &media,
+                rendered_decode_execution: AppUiPreviewDecodeExecutionSummary {
+                    media_layers: 100,
+                    hardware_native_layers: 100,
+                    p010_10_bit_hardware_layers: 100,
+                    ..AppUiPreviewDecodeExecutionSummary::default()
                 },
-                90,
-            );
+                viewer_fallback_count: 0,
+                viewer_fallback_reasons: &[],
+                playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
+                playback_evidence: &evidence,
+                preview_diagnostics: &diagnostics,
+                process_memory: &passing_process_memory_evidence(),
+                frames: 45_000,
+                frame_interval_ns: 40_000_000,
+            });
 
             assert!(report.passed, "{frame_rate}: {:?}", report.failures);
         }
@@ -1026,7 +1183,7 @@ mod tests {
             frame_interval_ns: 40_000_000,
         };
 
-        let report = evaluate_professional_playback(observation, 90);
+        let report = evaluate_professional_playback(observation);
         let codes: Vec<_> = report.failures.iter().map(|failure| failure.code).collect();
         assert!(codes.contains(&"playback_duration_below_minimum"));
         assert!(codes.contains(&"warm_seek_coverage_below_minimum"));
@@ -1062,7 +1219,7 @@ mod tests {
             frame_interval_ns: 40_000_000,
         };
 
-        let report = evaluate_professional_playback(observation, 90);
+        let report = evaluate_professional_playback(observation);
         let codes: Vec<_> = report.failures.iter().map(|failure| failure.code).collect();
         assert!(codes.contains(&"warm_seek_p95_above_limit"));
         assert!(codes.contains(&"accurate_seek_p95_above_limit"));
@@ -1120,26 +1277,23 @@ mod tests {
         process_memory.post_stress_private_committed_bytes =
             Some(process_memory.final_average_private_committed_bytes);
 
-        let report = evaluate_professional_playback(
-            ProfessionalPlaybackObservation {
-                media: &media,
-                rendered_decode_execution: AppUiPreviewDecodeExecutionSummary {
-                    media_layers: 100,
-                    hardware_native_layers: 100,
-                    p010_10_bit_hardware_layers: 100,
-                    ..AppUiPreviewDecodeExecutionSummary::default()
-                },
-                viewer_fallback_count: 0,
-                viewer_fallback_reasons: &[],
-                playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
-                playback_evidence: &evidence,
-                preview_diagnostics: &diagnostics,
-                process_memory: &process_memory,
-                frames: 45_000,
-                frame_interval_ns: 40_000_000,
+        let report = evaluate_professional_playback(ProfessionalPlaybackObservation {
+            media: &media,
+            rendered_decode_execution: AppUiPreviewDecodeExecutionSummary {
+                media_layers: 100,
+                hardware_native_layers: 100,
+                p010_10_bit_hardware_layers: 100,
+                ..AppUiPreviewDecodeExecutionSummary::default()
             },
-            90,
-        );
+            viewer_fallback_count: 0,
+            viewer_fallback_reasons: &[],
+            playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
+            playback_evidence: &evidence,
+            preview_diagnostics: &diagnostics,
+            process_memory: &process_memory,
+            frames: 45_000,
+            frame_interval_ns: 40_000_000,
+        });
 
         assert!(!report.process_memory.passed);
         assert!(report
@@ -1214,6 +1368,7 @@ mod tests {
             pixel_format: PixelFormat::Yuv420p10le,
             pixel_format_proven: true,
             bit_depth: 10,
+            video_stream_duration_us: Some(PROFESSIONAL_MIN_OBSERVED_DURATION_US),
             duration_us: PROFESSIONAL_MIN_OBSERVED_DURATION_US,
             total_frames: Some(45_000),
         }
