@@ -2651,6 +2651,10 @@ mod tests {
     fn dispatch_export_ui_updates_draft_fields() {
         let mut state = AppState::new();
         let sequence_id = mondrian_core::types::SequenceId::new();
+        let last_preset_index = crate::app::exporting::builtin_export_presets()
+            .len()
+            .checked_sub(1)
+            .expect("at least one built-in export preset");
 
         state
             .dispatch_action(export_set_draft_action(
@@ -2673,7 +2677,7 @@ mod tests {
             ))
             .expect("set output path");
 
-        assert_eq!(state.export_draft.selected_preset_idx, 2);
+        assert_eq!(state.export_draft.selected_preset_idx, last_preset_index);
         assert_eq!(state.export_draft.selected_sequence_id, Some(sequence_id));
         assert_eq!(
             state.export_draft.range,
