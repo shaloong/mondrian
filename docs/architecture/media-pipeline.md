@@ -417,6 +417,11 @@ while diagnostic aggregation remains in the Preview Adapter. This is a
 behavioral module boundary, not a second scheduler: all admission, deadline,
 generation, and worker-lane authority still comes from `app::preview_access_mode`
 and `mondrian-playback::FrameWorkBroker`.
+`app_ui::preview::request_scheduler` is the concrete Adapter for traversing
+current/nested prefetch needs, querying preroll residency, applying the already
+selected adaptive hints, and submitting Broker work. It does not own pressure
+thresholds, access-mode mapping, deadlines, or generation identity; those
+remain in the UI-independent policy/Broker Modules.
 Viewer lifecycle is adapted through `app_ui::playback_feedback` into typed Frame
 Deliveries. `Ready`, `StaleAvailable`, and `Blocked` are terminal observations;
 `Loading` is non-terminal pending work. Loading or stale presentation does not
