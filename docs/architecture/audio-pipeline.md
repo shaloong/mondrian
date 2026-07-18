@@ -299,8 +299,11 @@ Adapters unless the plugin itself exposes a separately qualified GPU execution
 contract.
 
 Performance acceptance is workload- and deadline-based rather than a claim from
-an enum or benchmark of one Gain processor. Fixed-reference-machine matrices
-must cover block sizes, sample rates/layouts, active Clips, Tracks, Buses,
+an enum or benchmark of one Gain processor. The current `dense_schedule_v2`
+matrix pairs 1/8/32/64 Tracks with 0/2/8/16 Buses, explicit Track→Bus→Output
+Routes, 64/256/1024-frame blocks, and scalar/SIMD PCM parity; a non-ignored
+three-Bus parity test keeps the routed topology in ordinary CI. Fixed-reference-
+machine matrices must continue to cover sample rates/layouts, active Clips,
 Transitions, automation density, nested Sequences, stateful built-ins, plugin
 instances, seek/re-entry, and decoder pressure. Reports include render-worker
 p50/p95/p99/max duration and deadline headroom, callback underruns, queue depth,

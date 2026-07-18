@@ -3,7 +3,13 @@ use mondrian_audio::{
     AudioPcmSource, AudioProcessingMode, AudioRenderContract, AudioRenderRequest,
     AudioRenderSession, PreparedAudioPlan,
 };
-use mondrian_core::{AssetId, AudioComponentEditId, AudioSourceComponentId, TimelineTime};
+use mondrian_core::{
+    AssetId, AudioComponentEditId, AudioRouteId, AudioSourceComponentId, MixBusId, TimelineTime,
+};
+use mondrian_timeline::audio::{
+    AudioChannelStrip, AudioChannelStripOutputPort, AudioMixBus, AudioRoute, AudioRouteDestination,
+    AudioRouteSource,
+};
 use mondrian_timeline::{Clip, Sequence};
 use std::hint::black_box;
 use std::sync::Arc;
@@ -41,8 +47,8 @@ impl AudioPcmSource for DeterministicSource {
 #[test]
 #[ignore = "fixed-reference-machine dense schedule scalar/SIMD multitrack load matrix"]
 fn dense_schedule_multitrack_load_matrix() {
-    for track_count in [1_usize, 8, 32, 64] {
-        let sequence = multitrack_sequence(track_count);
+    for (track_count, bus_count) in [(1_usize, 0_usize), (8, 2), (32, 8), (64, 16)] {
+        let sequence = multitrack_sequence(track_count, bus_count);
         for block_frames in [64_usize, 256, 1024] {
             let scalar = prepared(&sequence, block_frames, AudioKernelBackend::ScalarReference);
             let vectorized = prepared(
@@ -52,6 +58,13 @@ fn dense_schedule_multitrack_load_matrix() {
             );
             assert_eq!(scalar.schedule_summary(), vectorized.schedule_summary());
             assert_eq!(scalar.schedule_summary().track_count, track_count);
+            assert_eq!(scalar.schedule_summary().bus_count, bus_count);
+            let expected_routes = if bus_count == 0 {
+                track_count
+            } else {
+                track_count + bus_count
+            };
+            assert_eq!(scalar.schedule_summary().route_count, expected_routes);
             let scratch_slot_count = scalar.schedule_summary().scratch_slot_count;
 
             let (scalar_pcm, scalar_us) = run_case(scalar, block_frames);
@@ -65,7 +78,7 @@ fn dense_schedule_multitrack_load_matrix() {
             let scalar_deadline_misses = deadline_misses(&scalar_us, deadline_us);
             let vectorized_deadline_misses = deadline_misses(&vectorized_us, deadline_us);
             println!(
-                "MONDRIAN_AUDIO_LOAD_MATRIX={{\"profile\":\"dense_schedule_v1\",\"tracks\":{track_count},\"block_frames\":{block_frames},\"sample_rate\":{SAMPLE_RATE},\"channels\":{CHANNELS},\"iterations\":{ITERATIONS},\"deadline_us\":{deadline_us},\"scalar_p50_us\":{},\"scalar_p95_us\":{},\"scalar_p99_us\":{scalar_p99},\"scalar_max_us\":{},\"scalar_deadline_misses\":{scalar_deadline_misses},\"vectorized_p50_us\":{},\"vectorized_p95_us\":{},\"vectorized_p99_us\":{vectorized_p99},\"vectorized_max_us\":{},\"vectorized_deadline_misses\":{vectorized_deadline_misses},\"scratch_slots\":{}}}",
+                "MONDRIAN_AUDIO_LOAD_MATRIX={{\"profile\":\"dense_schedule_v2\",\"tracks\":{track_count},\"buses\":{bus_count},\"routes\":{expected_routes},\"block_frames\":{block_frames},\"sample_rate\":{SAMPLE_RATE},\"channels\":{CHANNELS},\"iterations\":{ITERATIONS},\"deadline_us\":{deadline_us},\"scalar_p50_us\":{},\"scalar_p95_us\":{},\"scalar_p99_us\":{scalar_p99},\"scalar_max_us\":{},\"scalar_deadline_misses\":{scalar_deadline_misses},\"vectorized_p50_us\":{},\"vectorized_p95_us\":{},\"vectorized_p99_us\":{vectorized_p99},\"vectorized_max_us\":{},\"vectorized_deadline_misses\":{vectorized_deadline_misses},\"scratch_slots\":{}}}",
                 percentile(&scalar_us, 50),
                 percentile(&scalar_us, 95),
                 scalar_us.last().copied().unwrap_or_default(),
@@ -82,7 +95,26 @@ fn dense_schedule_multitrack_load_matrix() {
     }
 }
 
-fn multitrack_sequence(track_count: usize) -> Sequence {
+#[test]
+fn dense_schedule_multibus_scalar_vectorized_pcm_parity() {
+    let sequence = multitrack_sequence(8, 3);
+    let block_frames = 257;
+    let scalar = prepared(&sequence, block_frames, AudioKernelBackend::ScalarReference);
+    let vectorized = prepared(
+        &sequence,
+        block_frames,
+        AudioKernelBackend::RuntimeVectorized,
+    );
+    assert_eq!(scalar.schedule_summary(), vectorized.schedule_summary());
+    assert_eq!(scalar.schedule_summary().bus_count, 3);
+    assert_eq!(scalar.schedule_summary().route_count, 11);
+    assert_eq!(
+        render_one_block(scalar, block_frames),
+        render_one_block(vectorized, block_frames)
+    );
+}
+
+fn multitrack_sequence(track_count: usize, bus_count: usize) -> Sequence {
     let mut sequence = Sequence::new("load-matrix");
     while sequence.audio_tracks.len() > track_count {
         let track_id = sequence.audio_tracks.last().expect("audio Track").id;
@@ -102,6 +134,41 @@ fn multitrack_sequence(track_count: usize) -> Sequence {
         sequence
             .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
             .expect("audio Clip");
+    }
+    if bus_count > 0 {
+        let output_id = sequence.audio_program.outputs[0].id;
+        sequence.audio_program.routes.clear();
+        let bus_ids = (0..bus_count)
+            .map(|index| {
+                let id = MixBusId::new();
+                sequence.audio_program.buses.push(AudioMixBus {
+                    id,
+                    name: format!("Load Bus {index}"),
+                    strip: AudioChannelStrip::default(),
+                });
+                id
+            })
+            .collect::<Vec<_>>();
+        for (index, track_id) in sequence.audio_tracks.iter().map(|track| track.id).enumerate() {
+            sequence.audio_program.routes.push(AudioRoute {
+                id: AudioRouteId::new(),
+                source: AudioRouteSource::Track {
+                    track_id,
+                    port: AudioChannelStripOutputPort::PostMute,
+                },
+                destination: AudioRouteDestination::Bus(bus_ids[index % bus_ids.len()]),
+            });
+        }
+        for bus_id in bus_ids {
+            sequence.audio_program.routes.push(AudioRoute {
+                id: AudioRouteId::new(),
+                source: AudioRouteSource::Bus {
+                    bus_id,
+                    port: AudioChannelStripOutputPort::PostMute,
+                },
+                destination: AudioRouteDestination::Output(output_id),
+            });
+        }
     }
     sequence
 }
@@ -139,7 +206,7 @@ fn run_case(plan: Arc<PreparedAudioPlan>, block_frames: usize) -> (Vec<f32>, Vec
     let mut durations = Vec::with_capacity(ITERATIONS);
     for iteration in 0..ITERATIONS {
         let request = AudioRenderRequest {
-            start_sample: i64::try_from(iteration.saturating_mul(block_frames))
+            start_sample: i64::try_from(iteration.saturating_add(1).saturating_mul(block_frames))
                 .expect("sample position"),
             frames: block_frames,
         };
@@ -152,6 +219,20 @@ fn run_case(plan: Arc<PreparedAudioPlan>, block_frames: usize) -> (Vec<f32>, Vec
     }
     durations.sort_unstable();
     (parity_pcm, durations)
+}
+
+fn render_one_block(plan: Arc<PreparedAudioPlan>, block_frames: usize) -> Vec<f32> {
+    let mut session = AudioRenderSession::new(plan).expect("Session");
+    let mut source = DeterministicSource;
+    let mut destination = vec![0.0; block_frames * CHANNELS];
+    session
+        .render_into(
+            &mut source,
+            AudioRenderRequest { start_sample: 0, frames: block_frames },
+            &mut destination,
+        )
+        .expect("parity render");
+    destination
 }
 
 fn percentile(sorted: &[u64], percentile: usize) -> u64 {
