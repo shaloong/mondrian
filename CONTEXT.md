@@ -80,6 +80,10 @@ _Avoid_: Window-owned result policy, Headless-only orchestration, separately sam
 The UI-independent App Module that atomically binds complete Viewer intent to one media generation, pending state, executed presentation quality, monotonic candidate identity, and the exact currently registered output. Window and Headless presentation are Adapters over its opaque GPU execution contract; neither may reconstruct candidate/cache lifecycle.
 _Avoid_: Window-owned candidate counter, separate Headless output identity, UI-owned generation/pending booleans, cache hit inferred from texture presence alone
 
+**Preview Presentation Module**:
+The private Window Adapter Module that selects an exact registered GPU output, exact Viewer raster cache entry, same-scope stale content, deferred playback composite, or explicit CPU output boundary for one resolved Viewer plan. It owns packaging and pinning but no generation, scheduling, cache-residency, or transport authority.
+_Avoid_: Redraw-local output priority, UI transport mutation, a second candidate lifecycle, stale reuse across sequence/display/geometry identity
+
 **Viewer GPU Preview Runtime**:
 The device-scoped owner of native video import, working-linear compositing, spatial processing, display output, calibration, and current external-texture presentation resources for Viewer execution.
 _Avoid_: Window-owned GPU grab bag, separate headless rendering semantics

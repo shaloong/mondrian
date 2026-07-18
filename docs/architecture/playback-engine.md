@@ -860,12 +860,16 @@ Consolidate frame-work scheduling in the Frame Work Broker; extract Frame Store
 and Evidence from `app_ui::preview` by behavioral ownership, not file size. The
 Playback Preview Pump is extracted and Window/Headless duplicate orchestration
 is deleted. Timeline evaluation, media adaptation, resolved Viewer planning,
-media execution, and immutable diagnostics now each have private deep Modules.
+media execution, final presentation arbitration, and immutable diagnostics now
+each have private deep Modules.
 The concrete media worker, cooperative cancellation, result publication, and
 FFmpeg Adapter remain isolated in `app_ui::preview::media_execution`; private
 modules deliberately reuse parent payloads rather than exposing a broad
-cross-layer Interface. Retain one public request seam into media and continue
-moving only behavior with clear ownership.
+cross-layer Interface. `app_ui::preview::presentation` selects exact registered
+GPU output, raster-cache hits, same-scope stale reuse, deferred playback
+composites, and the CPU output boundary. It owns no generation, candidate,
+cache-residency, scheduling, or transport authority. Retain one public request
+seam into media and continue moving only behavior with clear ownership.
 
 ### Phase 5 — Realtime policy
 

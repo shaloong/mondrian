@@ -402,8 +402,13 @@ open, seek, packet decode, frame receive, EOF drain, and RGBA conversion. Do
 not depend on thread abort to preempt synchronous packet decode.
 The concrete worker loop, cancellation checkpoints, result publication, and
 FFmpeg Preview Adapter now live together in
-`app_ui::preview::media_execution`; render-plan evaluation, frame caches, and
-diagnostic aggregation remain in the parent Preview Adapter. This is a
+`app_ui::preview::media_execution`. Timeline evaluation, media adaptation,
+Viewer planning, final presentation arbitration, and diagnostics live in
+separate private deep Modules. `app_ui::preview::presentation` exclusively
+chooses exact registered GPU output, raster cache, scoped stale reuse, deferred
+playback composite, or the CPU output boundary; it cannot schedule media work
+or mutate transport. Frame cache storage remains owned by `PreviewFrameStore`,
+while diagnostic aggregation remains in the Preview Adapter. This is a
 behavioral module boundary, not a second scheduler: all admission, deadline,
 generation, and worker-lane authority still comes from `app::preview_access_mode`
 and `mondrian-playback::FrameWorkBroker`.

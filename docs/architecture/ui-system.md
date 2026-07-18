@@ -375,6 +375,13 @@ retains that output without blocking the UI thread; subsequent event-loop turns
 may retry the current candidate, while superseded candidates are discarded by
 normal preview identity rules. This prevents transient native bridge or GPU
 queue pressure from producing a blank Viewer.
+The private `app_ui::preview::presentation` Module is the sole Window-side
+arbitrator for registered external textures, raster-cache hits, scoped stale
+content, deferred playback composites, CPU output transformation, packaging,
+and pinning. The parent Preview Adapter coordinates scheduling and diagnostics;
+`app::preview_execution` remains the sole generation/candidate/registered-output
+lifecycle owner. This Locality prevents UI redraw code from reconstructing a
+second output-selection policy.
 The same rule applies while a pause, seek, or exact-still request replaces the
 current frame: `Stale` prefers the last presented external GPU frame for the
 same sequence and output extent, then falls back to the pinned CPU raster. A
