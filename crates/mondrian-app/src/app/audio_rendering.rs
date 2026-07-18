@@ -46,12 +46,6 @@ impl TimelineAudioPcmRenderer {
             None::<ProgramOutputId>,
         )
         .map_err(|error| audio_render_error("timeline_audio_prepare", error.to_string()))?;
-        if runtime.requires_state_entry() && !runtime.supports_state_entry() {
-            return Err(audio_render_error(
-                "timeline_audio_state_entry",
-                "stateful nested audio requires direction/time-map-aware child replay",
-            ));
-        }
         let continuity_model = if runtime.requires_state_entry() {
             AudioPcmContinuityModel::GenerationState
         } else {

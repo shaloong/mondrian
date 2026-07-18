@@ -89,6 +89,14 @@ Timeline PCM Adapter maps the generation to the audio Runtime continuity epoch
 and validates exact next-sample progression. A changed coordinate can never be
 treated as an implicit seek/reset.
 
+The Runtime propagates that discontinuity into independent nested-instance
+state domains. Child entry is lazy because the parent time map, not the root
+sample coordinate, determines the first child sample. Nondecreasing child
+demands replay skipped history exactly; generic stateful reverse mapping is
+rejected before playback until an explicit reverse/checkpoint/materialization
+capability exists. Playback never guesses child coordinates or resets child
+state on an ordinary cache miss.
+
 The PCM Adapter also declares whether windows are independent or mutate
 generation-owned history. Independent-window failures preserve media duration
 with exact silence and evidence. A stateful failure, including an invalid PCM

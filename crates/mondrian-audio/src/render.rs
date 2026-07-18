@@ -229,6 +229,11 @@ impl AudioRenderSession {
         self.plan.requires_state_entry()
     }
 
+    #[cfg(test)]
+    pub(crate) fn require_state_entry_for_test(&mut self) {
+        Arc::make_mut(&mut self.plan).schedule.summary.requires_state_entry = true;
+    }
+
     /// Reset mutable execution history and enter one fresh continuity epoch.
     pub fn enter_state(&mut self, entry: AudioStateEntry) -> Result<(), AudioExecutionError> {
         let previous_epoch = match self.continuity {
@@ -850,10 +855,13 @@ pub enum AudioExecutionError {
     /// An execution failure may have partially advanced mutable state.
     #[error("audio continuity epoch {0:?} is poisoned and requires a fresh state entry")]
     ContinuityPoisoned(AudioContinuityEpoch),
-    /// Nested state entry requires direction/time-map-aware replay that the
-    /// current recursive coordinator cannot yet prove.
-    #[error("nested contribution {0} requires an unsupported state-entry plan")]
-    NestedStateEntryUnsupported(AudioComponentEditId),
+    /// A nested instance exhausted its private monotonic state-entry identity space.
+    #[error("audio nested continuity epoch space is exhausted")]
+    ContinuityEpochExhausted,
+    /// Generic processor state cannot be evaluated backwards without a proven
+    /// checkpoint, materialization, or processor-specific reverse capability.
+    #[error("nested contribution {0} requires unsupported reverse state evaluation")]
+    UnsupportedNestedStateDirection(AudioComponentEditId),
     /// A media or nested source Adapter could not provide required PCM.
     #[error("audio source is unavailable: {0}")]
     SourceUnavailable(String),

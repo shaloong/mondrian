@@ -98,9 +98,15 @@ already executes through Session-preallocated, block-partition-invariant delay
 lines. Preparation propagates a state-entry obligation through nested outputs;
 stateful Sessions require a fresh continuity epoch, exact first sample, and
 strictly contiguous blocks, poison the epoch after execution failure, and reset
-history only on a new epoch. Realtime Playback generation binding and nested
-direction/time-map replay remain fail-closed, so this mechanism alone does not
-authorize a non-zero processor.
+history only on a new epoch. Realtime Playback binds one explicit entry to each
+render generation. Each nested instance owns a private epoch stream: a
+nondecreasing parent time map enters at the first exact child sample and replays
+all skipped child samples in order. Stateless child outputs remain arbitrarily
+indexable. Generic stateful reverse mapping fails closed until a processor-
+specific reverse contract, checkpoint replay, or materialized child output can
+prove block-partition-invariant results. This still does not authorize a new
+non-zero processor: its own state, entry, latency, and deadline behavior must be
+implemented and tested together.
 
 ## Consequences
 

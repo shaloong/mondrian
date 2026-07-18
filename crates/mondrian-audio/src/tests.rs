@@ -631,6 +631,197 @@ fn nested_public_output_uses_an_independent_recursive_session() {
 }
 
 #[test]
+fn stateless_nested_runtime_preserves_fractional_reverse_mapping() {
+    let child = sequence_with_audio_clip();
+    let child_output = child.audio_program.outputs[0].id;
+    let mut root = Sequence::new("root");
+    let root_track = root.audio_tracks[0].id;
+    let mut nested_clip = Clip::new_nested_sequence(
+        child.id,
+        TimelineTime::ZERO,
+        tt(4, 1),
+        Some("reversed child".to_owned()),
+    )
+    .expect("nested clip");
+    nested_clip.source_in = tt(3, 1);
+    nested_clip.speed.set_scale(TimeScale::new(-1, 2).expect("exact reverse scale"));
+    root.add_nested_audio_clip(root_track, nested_clip, child_output)
+        .expect("nested audio authoring");
+
+    let contract = AudioRenderContract {
+        sample_rate: 2,
+        channels: 1,
+        max_block_frames: 4,
+        processing_mode: AudioProcessingMode::Offline,
+    };
+    let mut runtime = AudioProgramRuntime::build(&root, &[child], &RampResolver, contract, None)
+        .expect("stateless recursive runtime");
+    let mut pcm = vec![0.0; 4];
+    runtime
+        .render_into(AudioRenderRequest { start_sample: 0, frames: 4 }, &mut pcm)
+        .expect("stateless nested reverse render");
+    assert_eq!(pcm, vec![7.0, 6.0, 6.0, 5.0]);
+}
+
+#[test]
+fn stateful_nested_runtime_replays_forward_mapping_across_child_blocks() {
+    let child = sequence_with_audio_clip();
+    let child_output = child.audio_program.outputs[0].id;
+
+    let mut root = Sequence::new("root");
+    let root_track = root.audio_tracks[0].id;
+    let mut nested_clip = Clip::new_nested_sequence(
+        child.id,
+        TimelineTime::ZERO,
+        tt(4, 1),
+        Some("retimed child".to_owned()),
+    )
+    .expect("nested clip");
+    nested_clip.source_in = tt(1, 4);
+    nested_clip.speed.set_scale(TimeScale::new(3, 2).expect("exact forward scale"));
+    root.add_nested_audio_clip(root_track, nested_clip, child_output)
+        .expect("nested audio authoring");
+
+    let contract = AudioRenderContract {
+        sample_rate: 2,
+        channels: 1,
+        max_block_frames: 4,
+        processing_mode: AudioProcessingMode::Offline,
+    };
+    let mut runtime = AudioProgramRuntime::build(&root, &[child], &RampResolver, contract, None)
+        .expect("recursive runtime");
+    runtime.require_state_entry_recursively_for_test();
+    assert!(runtime.requires_state_entry());
+    runtime
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(41),
+            start_sample: 0,
+        })
+        .expect("recursive state entry");
+
+    let mut first = vec![0.0; 2];
+    runtime
+        .render_into(
+            AudioRenderRequest { start_sample: 0, frames: 2 },
+            &mut first,
+        )
+        .expect("first stateful nested retime block");
+    let mut second = vec![0.0; 2];
+    runtime
+        .render_into(
+            AudioRenderRequest { start_sample: 2, frames: 2 },
+            &mut second,
+        )
+        .expect("second stateful nested retime block");
+    assert_eq!(first, vec![1.0, 3.0]);
+    assert_eq!(second, vec![4.0, 6.0]);
+}
+
+#[test]
+fn stateful_nested_runtime_rejects_reverse_state_evaluation() {
+    let child = sequence_with_audio_clip();
+    let child_output = child.audio_program.outputs[0].id;
+    let mut root = Sequence::new("root");
+    let root_track = root.audio_tracks[0].id;
+    let mut nested_clip = Clip::new_nested_sequence(
+        child.id,
+        TimelineTime::ZERO,
+        tt(4, 1),
+        Some("reversed child".to_owned()),
+    )
+    .expect("nested clip");
+    nested_clip.source_in = tt(3, 1);
+    nested_clip.speed.set_scale(TimeScale::NEGATIVE_ONE);
+    root.add_nested_audio_clip(root_track, nested_clip, child_output)
+        .expect("nested audio authoring");
+
+    let contract = AudioRenderContract {
+        sample_rate: 2,
+        channels: 1,
+        max_block_frames: 4,
+        processing_mode: AudioProcessingMode::Offline,
+    };
+    let mut runtime = AudioProgramRuntime::build(&root, &[child], &RampResolver, contract, None)
+        .expect("recursive runtime");
+    runtime.require_state_entry_recursively_for_test();
+    runtime
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(42),
+            start_sample: 0,
+        })
+        .expect("recursive state entry");
+
+    let edit_id = root.audio_tracks[0].clips[0].audio_components[0].id;
+    let error = runtime
+        .render_into(
+            AudioRenderRequest { start_sample: 0, frames: 4 },
+            &mut [0.0; 4],
+        )
+        .expect_err("generic stateful child must not pretend to execute backwards");
+    assert_eq!(
+        error,
+        AudioExecutionError::UnsupportedNestedStateDirection(edit_id)
+    );
+}
+
+#[test]
+fn stateful_nested_runtime_reenters_after_root_discontinuity() {
+    let child = sequence_with_audio_clip();
+    let child_output = child.audio_program.outputs[0].id;
+    let mut root = Sequence::new("root");
+    let root_track = root.audio_tracks[0].id;
+    let nested_clip = Clip::new_nested_sequence(
+        child.id,
+        TimelineTime::ZERO,
+        tt(8, 1),
+        Some("child".to_owned()),
+    )
+    .expect("nested clip");
+    root.add_nested_audio_clip(root_track, nested_clip, child_output)
+        .expect("nested audio authoring");
+
+    let contract = AudioRenderContract {
+        sample_rate: 2,
+        channels: 1,
+        max_block_frames: 2,
+        processing_mode: AudioProcessingMode::Offline,
+    };
+    let mut runtime = AudioProgramRuntime::build(&root, &[child], &RampResolver, contract, None)
+        .expect("recursive runtime");
+    runtime.require_state_entry_recursively_for_test();
+    runtime
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(51),
+            start_sample: 0,
+        })
+        .expect("first recursive state entry");
+    let mut first = vec![0.0; 2];
+    runtime
+        .render_into(
+            AudioRenderRequest { start_sample: 0, frames: 2 },
+            &mut first,
+        )
+        .expect("first nested block");
+
+    runtime
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(52),
+            start_sample: 6,
+        })
+        .expect("seek recursive state entry");
+    let mut after_seek = vec![0.0; 2];
+    runtime
+        .render_into(
+            AudioRenderRequest { start_sample: 6, frames: 2 },
+            &mut after_seek,
+        )
+        .expect("nested block after seek");
+
+    assert_eq!(first, vec![1.0, 2.0]);
+    assert_eq!(after_seek, vec![7.0, 8.0]);
+}
+
+#[test]
 fn direct_plan_preparation_rejects_unprepared_nested_latency() {
     let child = sequence_with_audio_clip();
     let child_output = child.audio_program.outputs[0].id;

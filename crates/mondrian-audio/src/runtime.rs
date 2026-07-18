@@ -1,7 +1,7 @@
 use crate::schedule::{AudioKernelBackend, AudioPreparationDependencies};
 use crate::{
-    compile_audio_program, AudioCompileRequest, AudioExecutionError, AudioPcmSource,
-    AudioRenderContract, AudioRenderRequest, AudioRenderSession, AudioStateEntry,
+    compile_audio_program, AudioCompileRequest, AudioContinuityEpoch, AudioExecutionError,
+    AudioPcmSource, AudioRenderContract, AudioRenderRequest, AudioRenderSession, AudioStateEntry,
     CompiledAudioSource, PreparedAudioPlan,
 };
 use mondrian_core::{
@@ -131,6 +131,15 @@ impl AudioProgramRuntime {
                             stack,
                             depth + 1,
                         )?;
+                        if runtime.requires_state_entry()
+                            && contribution.source_time_map.speed.scale().numerator() < 0
+                        {
+                            return Err(
+                                AudioRuntimeBuildError::UnsupportedStatefulNestedDirection(
+                                    contribution.edit_id,
+                                ),
+                            );
+                        }
                         dependencies.insert_nested_source(
                             contribution.edit_id,
                             runtime.output_latency_frames(),
@@ -142,6 +151,10 @@ impl AudioProgramRuntime {
                             cache_frames: nested_cache_frames,
                             cache: vec![0.0; nested_cache_frames * contract.channels],
                             channels: contract.channels,
+                            next_sample: None,
+                            next_epoch: 1,
+                            last_demanded_sample: None,
+                            ordered_output_frames: Vec::with_capacity(contract.max_block_frames),
                         })
                     }
                 };
@@ -184,23 +197,24 @@ impl AudioProgramRuntime {
         self.session.requires_state_entry()
     }
 
-    /// Whether this Runtime can currently enter all state domains it owns.
-    ///
-    /// Root processor and compensation state are supported. A stateful nested
-    /// output remains unsupported until its direction/time-map-aware replay
-    /// coordinator can establish the child coordinate and history explicitly.
-    pub fn supports_state_entry(&self) -> bool {
-        self.sources.stateful_nested_edit().is_none()
+    #[cfg(test)]
+    pub(crate) fn require_state_entry_recursively_for_test(&mut self) {
+        self.session.require_state_entry_for_test();
+        for source in self.sources.entries.values_mut() {
+            if let RuntimeSource::Nested(nested) = source {
+                nested.runtime.require_state_entry_recursively_for_test();
+            }
+        }
     }
 
     /// Enter a fresh root continuity epoch before executing a stateful Plan.
-    /// Stateful nested outputs remain fail-closed until their direction/time-map
-    /// state-entry coordinator is implemented.
+    ///
+    /// Child instances enter lazily at the first exact child sample demanded by
+    /// the parent time map. Each instance owns its own monotonic epoch sequence.
     pub fn enter_state(&mut self, entry: AudioStateEntry) -> Result<(), AudioExecutionError> {
-        if let Some(edit_id) = self.sources.stateful_nested_edit() {
-            return Err(AudioExecutionError::NestedStateEntryUnsupported(edit_id));
-        }
-        self.session.enter_state(entry)
+        self.session.enter_state(entry)?;
+        self.sources.begin_continuity();
+        Ok(())
     }
 
     /// Execute one exact block with consumer-generation cancellation authority.
@@ -226,13 +240,12 @@ struct RuntimeSources {
 }
 
 impl RuntimeSources {
-    fn stateful_nested_edit(&self) -> Option<AudioComponentEditId> {
-        self.entries.iter().find_map(|(edit_id, source)| match source {
-            RuntimeSource::Nested(nested) if nested.runtime.requires_state_entry() => {
-                Some(*edit_id)
+    fn begin_continuity(&mut self) {
+        for source in self.entries.values_mut() {
+            if let RuntimeSource::Nested(nested) = source {
+                nested.begin_continuity();
             }
-            RuntimeSource::Media(_) | RuntimeSource::Nested(_) => None,
-        })
+        }
     }
 }
 
@@ -255,6 +268,10 @@ struct NestedRuntimeSource {
     cache_frames: usize,
     cache: Vec<f32>,
     channels: usize,
+    next_sample: Option<i64>,
+    next_epoch: u64,
+    last_demanded_sample: Option<i64>,
+    ordered_output_frames: Vec<usize>,
 }
 
 impl AudioPcmSource for RuntimeSources {
@@ -282,7 +299,7 @@ impl AudioPcmSource for RuntimeSources {
                 media.read_indexed(source_frames, channels, destination, &cancellation)
             }
             RuntimeSource::Nested(nested) => {
-                nested.read_indexed(source_frames, channels, destination, &cancellation)
+                nested.read_indexed(edit, source_frames, channels, destination, &cancellation)
             }
         }
     }
@@ -337,8 +354,15 @@ impl MediaRuntimeSource {
 }
 
 impl NestedRuntimeSource {
+    fn begin_continuity(&mut self) {
+        self.cache_start = i64::MIN;
+        self.next_sample = None;
+        self.last_demanded_sample = None;
+    }
+
     fn read_indexed(
         &mut self,
+        edit: AudioComponentEditId,
         source_frames: &[i64],
         channels: usize,
         destination: &mut [f32],
@@ -350,25 +374,21 @@ impl NestedRuntimeSource {
                 self.channels
             )));
         }
-        let cache_frames_i64 =
-            i64::try_from(self.cache_frames).map_err(|_| AudioExecutionError::BufferTooLarge)?;
-        for (output_frame, source_frame) in source_frames.iter().copied().enumerate() {
-            if source_frame < 0 {
-                continue;
-            }
-            let cache_end = self.cache_start.saturating_add(cache_frames_i64);
-            if source_frame < self.cache_start || source_frame >= cache_end {
-                self.cache_start = source_frame;
-                self.cache.fill(0.0);
-                self.runtime.render_into_cancellable(
-                    AudioRenderRequest {
-                        start_sample: self.cache_start,
-                        frames: self.cache_frames,
-                    },
-                    &mut self.cache,
-                    cancellation,
-                )?;
-            }
+        self.validate_demand_order(edit, source_frames)?;
+        if source_frames.len() > self.ordered_output_frames.capacity() {
+            return Err(AudioExecutionError::BlockTooLarge);
+        }
+        self.ordered_output_frames.clear();
+        self.ordered_output_frames.extend(source_frames.iter().enumerate().filter_map(
+            |(output_frame, source_frame)| (*source_frame >= 0).then_some(output_frame),
+        ));
+        self.ordered_output_frames
+            .sort_unstable_by_key(|output_frame| source_frames[*output_frame]);
+
+        for order_index in 0..self.ordered_output_frames.len() {
+            let output_frame = self.ordered_output_frames[order_index];
+            let source_frame = source_frames[output_frame];
+            self.ensure_cached(source_frame, cancellation)?;
             copy_interleaved_frame(
                 &self.cache,
                 usize::try_from(source_frame - self.cache_start)
@@ -377,6 +397,100 @@ impl NestedRuntimeSource {
                 output_frame,
                 channels,
             )?;
+        }
+        if let Some(last_demanded_sample) =
+            source_frames.iter().rev().copied().find(|sample| *sample >= 0)
+        {
+            self.last_demanded_sample = Some(last_demanded_sample);
+        }
+        Ok(())
+    }
+
+    fn validate_demand_order(
+        &self,
+        edit: AudioComponentEditId,
+        source_frames: &[i64],
+    ) -> Result<(), AudioExecutionError> {
+        if !self.runtime.requires_state_entry() {
+            return Ok(());
+        }
+        let mut previous = self.last_demanded_sample;
+        for sample in source_frames.iter().copied().filter(|sample| *sample >= 0) {
+            if previous.is_some_and(|previous| sample < previous) {
+                return Err(AudioExecutionError::UnsupportedNestedStateDirection(edit));
+            }
+            previous = Some(sample);
+        }
+        Ok(())
+    }
+
+    fn ensure_cached(
+        &mut self,
+        source_frame: i64,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<(), AudioExecutionError> {
+        let cache_frames_i64 =
+            i64::try_from(self.cache_frames).map_err(|_| AudioExecutionError::BufferTooLarge)?;
+        let cache_end = self.cache_start.checked_add(cache_frames_i64).unwrap_or(i64::MAX);
+        if source_frame >= self.cache_start && source_frame < cache_end {
+            return Ok(());
+        }
+
+        if !self.runtime.requires_state_entry() {
+            return self.render_cache(source_frame, cancellation);
+        }
+
+        match self.next_sample {
+            Some(next_sample) if source_frame >= next_sample => {}
+            Some(_) | None => self.enter_child(source_frame)?,
+        }
+        while self.next_sample.is_some_and(|next_sample| source_frame >= next_sample) {
+            let start_sample =
+                self.next_sample.ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+            self.render_cache(start_sample, cancellation)?;
+        }
+        Ok(())
+    }
+
+    fn enter_child(&mut self, start_sample: i64) -> Result<(), AudioExecutionError> {
+        let epoch = AudioContinuityEpoch::new(self.next_epoch);
+        self.next_epoch = self
+            .next_epoch
+            .checked_add(1)
+            .ok_or(AudioExecutionError::ContinuityEpochExhausted)?;
+        self.cache_start = i64::MIN;
+        self.next_sample = None;
+        self.runtime.enter_state(AudioStateEntry { epoch, start_sample })?;
+        self.next_sample = Some(start_sample);
+        Ok(())
+    }
+
+    fn render_cache(
+        &mut self,
+        start_sample: i64,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<(), AudioExecutionError> {
+        self.cache_start = i64::MIN;
+        self.cache.fill(0.0);
+        let result = self.runtime.render_into_cancellable(
+            AudioRenderRequest { start_sample, frames: self.cache_frames },
+            &mut self.cache,
+            cancellation,
+        );
+        if let Err(error) = result {
+            self.next_sample = None;
+            return Err(error);
+        }
+        self.cache_start = start_sample;
+        if self.runtime.requires_state_entry() {
+            self.next_sample = Some(
+                start_sample
+                    .checked_add(
+                        i64::try_from(self.cache_frames)
+                            .map_err(|_| AudioExecutionError::BufferTooLarge)?,
+                    )
+                    .ok_or(AudioExecutionError::BufferTooLarge)?,
+            );
         }
         Ok(())
     }
@@ -432,6 +546,9 @@ pub enum AudioRuntimeBuildError {
         sequence_id: SequenceId,
         maximum: usize,
     },
+    /// Generic child processor state has no proven reverse-evaluation contract.
+    #[error("nested contribution {0} cannot evaluate stateful audio in reverse")]
+    UnsupportedStatefulNestedDirection(AudioComponentEditId),
     /// The consumer media Adapter failed to bind a stable component.
     #[error("audio media component {component_id} of Asset {asset_id} is unavailable: {reason}")]
     Media {

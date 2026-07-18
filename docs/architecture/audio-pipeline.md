@@ -254,10 +254,17 @@ for `IndependentWindows` renderers. Consecutive poisoned generations consume a
 bounded recovery budget; exhaustion enters `RenderBlocked` and schedules no
 more PCM until an explicit reprime, source rebind, or device-open boundary.
 Completing fresh preroll clears the streak. Root stateful plans are therefore
-admitted without permitting an unbounded retry loop; stateful nested outputs
-still fail construction until a direction/time-map-aware child replay
-coordinator exists. Propagating the child's requirement upward is not a claim
-that root and child share one coordinate or state domain.
+admitted without permitting an unbounded retry loop. Stateful nested instances
+now own independent private epoch streams. A nondecreasing parent time map
+enters a child lazily at its first exact demanded sample and evaluates skipped
+child samples in order before publishing later samples; cache misses therefore
+cannot skip processor history. A root discontinuity invalidates child windows
+and causes a fresh lazy child entry. Generic stateful reverse mapping fails
+construction, with an execution-time defense, until checkpoint replay,
+materialization, or processor-specific reverse state can prove partition-
+invariant output. Stateless nested output remains freely indexable in either
+direction. Propagating the child's requirement upward never makes root and
+child share a coordinate or state domain.
 
 The source Seam is block-shaped even when a Clip speed map produces reverse,
 repeated, or non-contiguous coordinates. The Session resolves one absolute
@@ -357,8 +364,10 @@ and nested public outputs. Nested children are recursively compiled using the
 selected `ProgramOutputId`; cycles, missing children, and depth beyond the
 shared 16-level Sequence render contract fail before playback or export begins.
 Each nested instance owns an independent child Session and a
-bounded PCM window cache. The parent cannot inspect child Tracks, Buses, Roles,
-or private Routes.
+bounded PCM window cache plus a preallocated output-index ordering table. The
+table groups arbitrary stateless access and makes stateful nondecreasing access
+replay in child-time order without allocating during a block. The parent cannot
+inspect child Tracks, Buses, Roles, or private Routes.
 
 Media sources use the same block principle. Each bound source has one aligned
 4,096-frame Runtime hot window, so ordinary forward, reverse, and speed-mapped
