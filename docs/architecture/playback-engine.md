@@ -895,6 +895,9 @@ GPU output, raster-cache hits, same-scope stale reuse, deferred playback
 composites, and the CPU output boundary. It owns no generation, candidate,
 cache-residency, scheduling, or transport authority. Retain one public request
 seam into media and continue moving only behavior with clear ownership.
+The Preview service regression suite lives in the sibling private
+`app_ui::preview::tests` module, so production coordination remains reviewable
+without weakening module-private coverage or exposing test seams publicly.
 
 ### Phase 5 — Realtime policy
 
