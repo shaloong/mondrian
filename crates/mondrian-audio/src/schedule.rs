@@ -23,16 +23,30 @@ use std::sync::Arc;
 /// realization and the selected Render Contract may change processor latency.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AudioPreparationDependencies {
-    nested_source_latency_frames: BTreeMap<mondrian_core::AudioComponentEditId, usize>,
+    nested_sources: BTreeMap<mondrian_core::AudioComponentEditId, PreparedNestedSource>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PreparedNestedSource {
+    latency_frames: usize,
+    requires_state_entry: bool,
 }
 
 impl AudioPreparationDependencies {
-    pub(crate) fn insert_nested_source_latency(
+    pub(crate) fn insert_nested_source(
         &mut self,
         edit_id: mondrian_core::AudioComponentEditId,
         latency_frames: usize,
+        requires_state_entry: bool,
     ) -> Result<(), AudioCompileError> {
-        if self.nested_source_latency_frames.insert(edit_id, latency_frames).is_some() {
+        if self
+            .nested_sources
+            .insert(
+                edit_id,
+                PreparedNestedSource { latency_frames, requires_state_entry },
+            )
+            .is_some()
+        {
             return Err(AudioCompileError::InvalidPreparedGraph(format!(
                 "duplicate nested latency dependency for contribution {edit_id}"
             )));
@@ -40,16 +54,17 @@ impl AudioPreparationDependencies {
         Ok(())
     }
 
-    fn source_latency_frames(
+    fn nested_source(
         &self,
         contribution: &CompiledAudioContribution,
-    ) -> Result<usize, AudioCompileError> {
+    ) -> Result<Option<PreparedNestedSource>, AudioCompileError> {
         match contribution.source {
-            crate::CompiledAudioSource::Media { .. } => Ok(0),
+            crate::CompiledAudioSource::Media { .. } => Ok(None),
             crate::CompiledAudioSource::NestedOutput { .. } => self
-                .nested_source_latency_frames
+                .nested_sources
                 .get(&contribution.edit_id)
                 .copied()
+                .map(Some)
                 .ok_or_else(|| {
                     AudioCompileError::InvalidPreparedGraph(format!(
                         "nested contribution {} has no prepared child-output latency",
@@ -95,6 +110,8 @@ pub struct PreparedAudioScheduleSummary {
     pub output_latency_frames: usize,
     /// Largest compensation delay inserted at any prepared summing input.
     pub maximum_compensation_frames: usize,
+    /// Whether mutable DSP history requires explicit continuity entry.
+    pub requires_state_entry: bool,
 }
 
 /// Immutable context-specific plan. Mutable buffers and processor instances do not live here.
@@ -166,6 +183,11 @@ impl PreparedAudioPlan {
     pub fn output_latency_frames(&self) -> usize {
         self.schedule.summary.output_latency_frames
     }
+
+    /// Whether Sessions must enter a continuity epoch before rendering.
+    pub fn requires_state_entry(&self) -> bool {
+        self.schedule.summary.requires_state_entry
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -224,6 +246,7 @@ pub(crate) struct PreparedContribution {
     pub(crate) volume_automation: Option<PreparedAutomationCurve>,
     pub(crate) pan_automation: Option<PreparedAutomationCurve>,
     pub(crate) source_latency_frames: usize,
+    pub(crate) source_requires_state_entry: bool,
     pub(crate) scope_rack_latency_frames: usize,
     pub(crate) compensation_delay_frames: usize,
 }
@@ -504,8 +527,11 @@ impl PreparedAudioSchedule {
                 edit_time_offset,
                 sample_rate,
             )?;
+            let nested_source = dependencies.nested_source(&semantic)?;
             contributions.push(PreparedContribution {
-                source_latency_frames: dependencies.source_latency_frames(&semantic)?,
+                source_latency_frames: nested_source.map_or(0, |source| source.latency_frames),
+                source_requires_state_entry: nested_source
+                    .is_some_and(|source| source.requires_state_entry),
                 scope_rack_latency_frames: scopes[scope_slot].rack.latency_frames().ok_or_else(
                     || {
                         AudioCompileError::InvalidPreparedGraph(format!(
@@ -689,6 +715,15 @@ impl PreparedAudioSchedule {
             scratch_slot_count,
             output_latency_frames: latency.output_latency_frames,
             maximum_compensation_frames: latency.maximum_compensation_frames,
+            requires_state_entry: latency.maximum_compensation_frames > 0
+                || contributions.iter().any(|contribution| {
+                    contribution.source_requires_state_entry
+                        || scopes[contribution.scope_slot].rack.requires_state_entry()
+                })
+                || nodes.iter().any(|node| {
+                    node.strip.pre_fader.requires_state_entry()
+                        || node.strip.post_fader.requires_state_entry()
+                }),
         };
         Ok(Self {
             nodes,

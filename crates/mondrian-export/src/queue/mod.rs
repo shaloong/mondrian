@@ -10,8 +10,9 @@ use crate::validator::{
 };
 use chrono::{DateTime, Utc};
 use mondrian_audio::{
-    compile_audio_program, AudioCompileRequest, AudioDecodedSource, AudioMediaResolver,
-    AudioProcessingMode, AudioProgramRuntime, AudioRenderContract, AudioRenderRequest,
+    compile_audio_program, AudioCompileRequest, AudioContinuityEpoch, AudioDecodedSource,
+    AudioMediaResolver, AudioProcessingMode, AudioProgramRuntime, AudioRenderContract,
+    AudioRenderRequest, AudioStateEntry,
 };
 use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace, FramePosition, JobId, Rational};
@@ -1842,6 +1843,13 @@ fn render_timeline_audio_to_pcm_f32(
     };
     if total_samples == 0 {
         return JobExecutionResult::Completed;
+    }
+    if runtime.requires_state_entry() {
+        if let Err(error) = runtime
+            .enter_state(AudioStateEntry { epoch: AudioContinuityEpoch::new(1), start_sample })
+        {
+            return JobExecutionResult::Failed(format!("进入导出音频连续性状态失败: {error}"));
+        }
     }
 
     let chunk_frames_target = (sample_rate as usize / 5).clamp(1024, 16_384);

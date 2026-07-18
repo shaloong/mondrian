@@ -39,6 +39,12 @@ impl TimelineAudioPcmRenderer {
             None::<ProgramOutputId>,
         )
         .map_err(|error| audio_render_error("timeline_audio_prepare", error.to_string()))?;
+        if runtime.requires_state_entry() {
+            return Err(audio_render_error(
+                "timeline_audio_state_entry",
+                "stateful realtime audio requires generation-bound Playback state entry",
+            ));
+        }
         Ok(Self {
             runtime: Mutex::new(runtime),
             sample_rate,

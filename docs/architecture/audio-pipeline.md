@@ -229,8 +229,24 @@ the selected source port and before the destination sum. Neither path allocates
 or grows during a block. Scalar/SIMD execution shares these same state lines,
 and reference tests require whole-block and partitioned-block PCM identity.
 These compensation lines are real mutable history, so arbitrary discontinuous
-requests cannot be admitted once a plan contains one; explicit state entry is
-the remaining prerequisite before production admits non-zero latency.
+requests are not admitted once a plan contains one. Preparation marks the whole
+closure `requires_state_entry` when any local processor, compensation input, or
+prepared child output owns history. A stateful Session starts unentered. Its
+coordinator must supply a fresh `AudioContinuityEpoch` and exact first sample;
+the Session then accepts only exact contiguous blocks. Reusing an epoch or
+submitting a gap is rejected without guessing. Any execution failure poisons
+the epoch because an unknown prefix may have advanced history; only a fresh
+entry resets all compensation state. Stateless Gain-only plans retain random
+block evaluation and do not manufacture continuity obligations.
+
+Offline export enters one fresh epoch at its exact sample-range start. Realtime
+Playback currently rejects a stateful plan at Adapter construction until the
+Playback generation is carried through its PCM work request. Stateful nested
+outputs also fail entry explicitly until a direction/time-map-aware child
+replay coordinator exists; propagating the child's requirement upward is not a
+claim that root and child share one coordinate or state domain. These two
+fail-closed restrictions are the remaining prerequisites before production
+admits a non-zero-latency or otherwise stateful processor.
 
 The source Seam is block-shaped even when a Clip speed map produces reverse,
 repeated, or non-contiguous coordinates. The Session resolves one absolute

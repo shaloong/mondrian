@@ -1,8 +1,8 @@
 use crate::schedule::{AudioKernelBackend, AudioPreparationDependencies};
 use crate::{
     compile_audio_program, AudioCompileRequest, AudioExecutionError, AudioPcmSource,
-    AudioRenderContract, AudioRenderRequest, AudioRenderSession, CompiledAudioSource,
-    PreparedAudioPlan,
+    AudioRenderContract, AudioRenderRequest, AudioRenderSession, AudioStateEntry,
+    CompiledAudioSource, PreparedAudioPlan,
 };
 use mondrian_core::{
     AssetId, AudioComponentEditId, AudioSourceComponentId, ExecutionCancellationToken,
@@ -131,9 +131,10 @@ impl AudioProgramRuntime {
                             stack,
                             depth + 1,
                         )?;
-                        dependencies.insert_nested_source_latency(
+                        dependencies.insert_nested_source(
                             contribution.edit_id,
                             runtime.output_latency_frames(),
+                            runtime.requires_state_entry(),
                         )?;
                         RuntimeSource::Nested(NestedRuntimeSource {
                             runtime: Box::new(runtime),
@@ -178,6 +179,21 @@ impl AudioProgramRuntime {
         self.session.output_latency_frames()
     }
 
+    /// Whether the selected root/child closure owns mutable continuity state.
+    pub fn requires_state_entry(&self) -> bool {
+        self.session.requires_state_entry()
+    }
+
+    /// Enter a fresh root continuity epoch before executing a stateful Plan.
+    /// Stateful nested outputs remain fail-closed until their direction/time-map
+    /// state-entry coordinator is implemented.
+    pub fn enter_state(&mut self, entry: AudioStateEntry) -> Result<(), AudioExecutionError> {
+        if let Some(edit_id) = self.sources.stateful_nested_edit() {
+            return Err(AudioExecutionError::NestedStateEntryUnsupported(edit_id));
+        }
+        self.session.enter_state(entry)
+    }
+
     /// Execute one exact block with consumer-generation cancellation authority.
     pub fn render_into_cancellable(
         &mut self,
@@ -198,6 +214,17 @@ impl AudioProgramRuntime {
 struct RuntimeSources {
     entries: BTreeMap<AudioComponentEditId, RuntimeSource>,
     cancellation: ExecutionCancellationToken,
+}
+
+impl RuntimeSources {
+    fn stateful_nested_edit(&self) -> Option<AudioComponentEditId> {
+        self.entries.iter().find_map(|(edit_id, source)| match source {
+            RuntimeSource::Nested(nested) if nested.runtime.requires_state_entry() => {
+                Some(*edit_id)
+            }
+            RuntimeSource::Media(_) | RuntimeSource::Nested(_) => None,
+        })
+    }
 }
 
 enum RuntimeSource {

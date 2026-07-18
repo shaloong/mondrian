@@ -38,6 +38,22 @@ impl AudioPcmSource for RampSource {
     }
 }
 
+struct FailingSource;
+
+impl AudioPcmSource for FailingSource {
+    fn read_indexed_interleaved(
+        &mut self,
+        _edit: AudioComponentEditId,
+        _source_frames: &[i64],
+        _channels: usize,
+        _destination: &mut [f32],
+    ) -> Result<(), AudioExecutionError> {
+        Err(AudioExecutionError::SourceUnavailable(
+            "injected source failure".to_owned(),
+        ))
+    }
+}
+
 struct RampDecodedSource;
 
 impl AudioDecodedSource for RampDecodedSource {
@@ -193,16 +209,34 @@ fn session_executes_preallocated_contribution_and_route_compensation_block_invar
         prepared.schedule.routes[0].compensation_delay_frames = 2;
         prepared.schedule.summary.maximum_compensation_frames = 2;
         prepared.schedule.summary.output_latency_frames = 4;
+        prepared.schedule.summary.requires_state_entry = true;
         plan
     }
 
     let sequence = sequence_with_audio_clip();
     let whole_plan = plan_with_compensation(&sequence);
     let mut whole_session = AudioRenderSession::new(whole_plan).expect("whole Session");
+    assert!(whole_session.requires_state_entry());
     assert_eq!(whole_session.capacity().compensation_delay_line_count, 2);
     assert_eq!(whole_session.capacity().compensation_delay_samples, 4);
     let mut whole_source = RampSource::default();
     let mut whole = vec![0.0; 12];
+    let unentered = whole_session
+        .render_into(
+            &mut whole_source,
+            AudioRenderRequest { start_sample: 0, frames: 12 },
+            &mut whole,
+        )
+        .expect_err("stateful Session must reject unentered execution");
+    assert_eq!(unentered, AudioExecutionError::StateEntryRequired);
+    let whole_epoch = AudioContinuityEpoch::new(7);
+    whole_session
+        .enter_state(AudioStateEntry { epoch: whole_epoch, start_sample: 0 })
+        .expect("whole state entry");
+    assert!(matches!(
+        whole_session.enter_state(AudioStateEntry { epoch: whole_epoch, start_sample: 0 }),
+        Err(AudioExecutionError::ReusedContinuityEpoch(epoch)) if epoch == whole_epoch
+    ));
     whole_session
         .render_into(
             &mut whole_source,
@@ -213,6 +247,10 @@ fn session_executes_preallocated_contribution_and_route_compensation_block_invar
 
     let split_plan = plan_with_compensation(&sequence);
     let mut split_session = AudioRenderSession::new(split_plan).expect("split Session");
+    let split_epoch = AudioContinuityEpoch::new(8);
+    split_session
+        .enter_state(AudioStateEntry { epoch: split_epoch, start_sample: 0 })
+        .expect("split state entry");
     let mut split_source = RampSource::default();
     let mut split = Vec::new();
     for start_sample in [0, 2, 4, 6, 8, 10] {
@@ -232,6 +270,57 @@ fn session_executes_preallocated_contribution_and_route_compensation_block_invar
         [0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
     );
     assert_eq!(split, whole);
+
+    assert!(matches!(
+        split_session.render_into(
+            &mut split_source,
+            AudioRenderRequest { start_sample: 14, frames: 2 },
+            &mut [0.0; 2],
+        ),
+        Err(AudioExecutionError::NonContiguousBlock {
+            epoch,
+            expected_start_sample: 12,
+            actual_start_sample: 14,
+        }) if epoch == split_epoch
+    ));
+    split_session
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(9),
+            start_sample: 4,
+        })
+        .expect("fresh discontinuity entry");
+    let mut reset_output = [1.0; 2];
+    split_session
+        .render_into(
+            &mut split_source,
+            AudioRenderRequest { start_sample: 4, frames: 2 },
+            &mut reset_output,
+        )
+        .expect("reset render");
+    assert_eq!(reset_output, [0.0, 0.0]);
+
+    let poisoned_epoch = AudioContinuityEpoch::new(10);
+    split_session
+        .enter_state(AudioStateEntry { epoch: poisoned_epoch, start_sample: 6 })
+        .expect("failure entry");
+    assert!(matches!(
+        split_session.render_into(
+            &mut FailingSource,
+            AudioRenderRequest { start_sample: 6, frames: 2 },
+            &mut [0.0; 2],
+        ),
+        Err(AudioExecutionError::SourceUnavailable(_))
+    ));
+    assert_eq!(
+        split_session
+            .render_into(
+                &mut split_source,
+                AudioRenderRequest { start_sample: 6, frames: 2 },
+                &mut [0.0; 2],
+            )
+            .expect_err("partially advanced epoch must stay poisoned"),
+        AudioExecutionError::ContinuityPoisoned(poisoned_epoch)
+    );
 }
 
 #[test]
@@ -332,6 +421,7 @@ fn clip_track_bus_output_math_is_unclipped_and_block_invariant() {
             scratch_slot_count: 2,
             output_latency_frames: 0,
             maximum_compensation_frames: 0,
+            requires_state_entry: false,
         }
     );
     let mut source = RampSource::default();

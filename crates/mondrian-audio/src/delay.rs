@@ -44,6 +44,11 @@ impl FixedDelayLine {
         }
         Ok(())
     }
+
+    pub(crate) fn reset(&mut self) {
+        self.samples.fill(0.0);
+        self.cursor = 0;
+    }
 }
 
 #[cfg(test)]

@@ -17,8 +17,8 @@ mod schedule;
 pub use compiler::{compile_audio_program, AudioCompileError};
 pub use plan::*;
 pub use render::{
-    render_audio, AudioExecutionError, AudioPcmSource, AudioRenderCapacity, AudioRenderRequest,
-    AudioRenderSession,
+    render_audio, AudioContinuityEpoch, AudioExecutionError, AudioPcmSource, AudioRenderCapacity,
+    AudioRenderRequest, AudioRenderSession, AudioStateEntry,
 };
 pub use runtime::{
     AudioDecodedSource, AudioMediaResolver, AudioProgramRuntime, AudioRuntimeBuildError,

@@ -94,6 +94,14 @@ impl CompiledProcessor {
             Self::Gain { .. } => 0,
         }
     }
+
+    /// Whether execution owns history that requires an explicit continuity entry.
+    pub(crate) const fn requires_state_entry(&self) -> bool {
+        self.latency_frames() > 0
+            || match self {
+                Self::Gain { .. } => false,
+            }
+    }
 }
 
 /// Ordered, immutable processor operations.
@@ -107,6 +115,10 @@ impl CompiledRack {
         self.processors.iter().try_fold(0_usize, |latency, processor| {
             latency.checked_add(processor.latency_frames())
         })
+    }
+
+    pub(crate) fn requires_state_entry(&self) -> bool {
+        self.processors.iter().any(CompiledProcessor::requires_state_entry)
     }
 }
 

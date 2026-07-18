@@ -35,6 +35,31 @@ pub struct AudioRenderRequest {
     pub frames: usize,
 }
 
+/// Consumer-owned continuity identity. A discontinuity must use a new value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AudioContinuityEpoch(u64);
+
+impl AudioContinuityEpoch {
+    /// Construct a consumer-scoped monotonic continuity identity.
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Return the opaque numeric identity for diagnostics.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Explicit cold/seek/recovery entry selected by the owning coordinator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioStateEntry {
+    /// Fresh continuity identity; an existing epoch cannot be reset in place.
+    pub epoch: AudioContinuityEpoch,
+    /// First Sequence-domain sample that the next block must evaluate.
+    pub start_sample: i64,
+}
+
 /// Immutable allocation envelope established before realtime rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioRenderCapacity {
@@ -120,7 +145,20 @@ pub struct AudioRenderSession {
     scratch: RenderScratch,
     contribution_delay_lines: Vec<FixedDelayLine>,
     route_delay_lines: Vec<FixedDelayLine>,
+    continuity: SessionContinuity,
     capacity: AudioRenderCapacity,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SessionContinuity {
+    Unentered,
+    Active {
+        epoch: AudioContinuityEpoch,
+        next_sample: i64,
+    },
+    Poisoned {
+        epoch: AudioContinuityEpoch,
+    },
 }
 
 impl AudioRenderSession {
@@ -175,6 +213,7 @@ impl AudioRenderSession {
             scratch: RenderScratch::new(contract.max_block_frames, samples),
             contribution_delay_lines,
             route_delay_lines,
+            continuity: SessionContinuity::Unentered,
             capacity,
         })
     }
@@ -182,6 +221,37 @@ impl AudioRenderSession {
     /// Total prepared latency of the selected Program Output.
     pub fn output_latency_frames(&self) -> usize {
         self.plan.output_latency_frames()
+    }
+
+    /// Whether this Plan owns history and therefore rejects unentered or
+    /// discontinuous block execution.
+    pub fn requires_state_entry(&self) -> bool {
+        self.plan.requires_state_entry()
+    }
+
+    /// Reset mutable execution history and enter one fresh continuity epoch.
+    pub fn enter_state(&mut self, entry: AudioStateEntry) -> Result<(), AudioExecutionError> {
+        let previous_epoch = match self.continuity {
+            SessionContinuity::Unentered => None,
+            SessionContinuity::Active { epoch, .. } | SessionContinuity::Poisoned { epoch } => {
+                Some(epoch)
+            }
+        };
+        if previous_epoch == Some(entry.epoch) {
+            return Err(AudioExecutionError::ReusedContinuityEpoch(entry.epoch));
+        }
+        for delay in self
+            .contribution_delay_lines
+            .iter_mut()
+            .chain(self.route_delay_lines.iter_mut())
+        {
+            delay.reset();
+        }
+        self.continuity = SessionContinuity::Active {
+            epoch: entry.epoch,
+            next_sample: entry.start_sample,
+        };
+        Ok(())
     }
 
     /// Return the fixed allocation envelope owned by this Session.
@@ -210,6 +280,40 @@ impl AudioRenderSession {
         }
         destination.fill(0.0);
 
+        let next_sample = request
+            .start_sample
+            .checked_add(
+                i64::try_from(request.frames).map_err(|_| AudioExecutionError::BufferTooLarge)?,
+            )
+            .ok_or(AudioExecutionError::BufferTooLarge)?;
+        let active_epoch = if self.requires_state_entry() {
+            match self.continuity {
+                SessionContinuity::Unentered => {
+                    return Err(AudioExecutionError::StateEntryRequired);
+                }
+                SessionContinuity::Poisoned { epoch } => {
+                    return Err(AudioExecutionError::ContinuityPoisoned(epoch));
+                }
+                SessionContinuity::Active { epoch, next_sample }
+                    if next_sample != request.start_sample =>
+                {
+                    return Err(AudioExecutionError::NonContiguousBlock {
+                        epoch,
+                        expected_start_sample: next_sample,
+                        actual_start_sample: request.start_sample,
+                    });
+                }
+                SessionContinuity::Active { epoch, .. } => Some(epoch),
+            }
+        } else {
+            None
+        };
+        if let Some(epoch) = active_epoch {
+            // Any later `?` leaves the epoch poisoned: mutable processors or
+            // delay lines may already have consumed a prefix of this block.
+            self.continuity = SessionContinuity::Poisoned { epoch };
+        }
+
         let schedule = &self.plan.schedule;
         let backend = self.plan.kernel_backend();
         let sample_rate = AudioSampleRate::new(contract.sample_rate)?;
@@ -233,13 +337,17 @@ impl AudioRenderSession {
                 )?;
             } else {
                 for route_index in node.incoming.clone() {
+                    let delay_line = self
+                        .route_delay_lines
+                        .get_mut(route_index)
+                        .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
                     sum_prepared_route(
                         schedule,
                         route_index,
                         samples,
                         backend,
                         &mut self.node_buffers,
-                        &mut self.route_delay_lines[route_index],
+                        delay_line,
                     )?;
                 }
             }
@@ -257,6 +365,9 @@ impl AudioRenderSession {
 
         let output_scratch = schedule.nodes[schedule.output_slot].scratch_slot;
         destination.copy_from_slice(&self.node_buffers[output_scratch].post_mute[..samples]);
+        if let Some(epoch) = active_epoch {
+            self.continuity = SessionContinuity::Active { epoch, next_sample };
+        }
         Ok(())
     }
 }
@@ -272,7 +383,14 @@ pub fn render_audio(
         .checked_mul(plan.contract().channels)
         .ok_or(AudioExecutionError::BufferTooLarge)?;
     let mut output = vec![0.0; samples];
-    AudioRenderSession::new(plan)?.render_into(source, request, &mut output)?;
+    let mut session = AudioRenderSession::new(plan)?;
+    if session.requires_state_entry() {
+        session.enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(0),
+            start_sample: request.start_sample,
+        })?;
+    }
+    session.render_into(source, request, &mut output)?;
     Ok(output)
 }
 
@@ -714,6 +832,28 @@ pub enum AudioExecutionError {
     /// Dense schedule storage disagrees with its immutable preparation facts.
     #[error("prepared audio schedule is internally inconsistent")]
     InvalidPreparedSchedule,
+    /// A stateful Plan was executed before its coordinator selected an entry.
+    #[error("audio Session requires an explicit state entry")]
+    StateEntryRequired,
+    /// Resetting one epoch in place would erase the meaning of continuity evidence.
+    #[error("audio continuity epoch {0:?} was reused for a state reset")]
+    ReusedContinuityEpoch(AudioContinuityEpoch),
+    /// A stateful block did not exactly continue the current Evaluation Grid position.
+    #[error(
+        "audio continuity epoch {epoch:?} expected sample {expected_start_sample}, got {actual_start_sample}"
+    )]
+    NonContiguousBlock {
+        epoch: AudioContinuityEpoch,
+        expected_start_sample: i64,
+        actual_start_sample: i64,
+    },
+    /// An execution failure may have partially advanced mutable state.
+    #[error("audio continuity epoch {0:?} is poisoned and requires a fresh state entry")]
+    ContinuityPoisoned(AudioContinuityEpoch),
+    /// Nested state entry requires direction/time-map-aware replay that the
+    /// current recursive coordinator cannot yet prove.
+    #[error("nested contribution {0} requires an unsupported state-entry plan")]
+    NestedStateEntryUnsupported(AudioComponentEditId),
     /// A media or nested source Adapter could not provide required PCM.
     #[error("audio source is unavailable: {0}")]
     SourceUnavailable(String),

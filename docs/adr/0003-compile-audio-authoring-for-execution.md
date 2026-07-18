@@ -95,7 +95,12 @@ not admit an unimplemented non-zero processor path: processor state and
 explicit discontinuity entry must be implemented together before such a
 processor becomes executable. Prepared Contribution and Route compensation
 already executes through Session-preallocated, block-partition-invariant delay
-lines; this mechanism alone does not authorize a non-zero processor.
+lines. Preparation propagates a state-entry obligation through nested outputs;
+stateful Sessions require a fresh continuity epoch, exact first sample, and
+strictly contiguous blocks, poison the epoch after execution failure, and reset
+history only on a new epoch. Realtime Playback generation binding and nested
+direction/time-map replay remain fail-closed, so this mechanism alone does not
+authorize a non-zero processor.
 
 ## Consequences
 
