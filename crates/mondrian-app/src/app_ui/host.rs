@@ -19,6 +19,9 @@ use mondrian_ui_theme::{set_theme_preset, ThemePreset};
 use crate::app::playback_preview::{
     observe_playback_video_preroll as observe_preview_preroll, pump_playback_preview,
 };
+use crate::app::preview_execution::{
+    PreviewGpuFrame as AppUiGpuPreviewFrame, PreviewGpuFrameState as AppUiGpuPreviewFrameState,
+};
 use crate::app::ui_actions::{
     AssetsOpenFolderPayload, PreferencesShortcutPayload, PreferencesShortcutReboundPayload,
     PreferencesThemePayload, PreferencesWaveformDisplayPayload,
@@ -43,10 +46,7 @@ use crate::app_ui::preferences_store::{
     app_ui_preferences_path, load_app_ui_preferences, persist_app_ui_preferences_to,
     AppUiPreferences,
 };
-use crate::app_ui::preview::{
-    AppUiGpuPreviewFrame, AppUiGpuPreviewFrameState, AppUiPreviewColorRejection,
-    AppUiPreviewService,
-};
+use crate::app_ui::preview::{AppUiPreviewColorRejection, AppUiPreviewService};
 use crate::app_ui::shell::{try_resolve_app_shell_action, AppUiAppRoot};
 use crate::app_ui::shortcuts::{
     default_shortcuts, is_known_shortcut_id, AppUiShortcutBinding, AppUiShortcutKey,

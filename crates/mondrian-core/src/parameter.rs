@@ -197,6 +197,58 @@ impl ExactAutomationCurve {
             AutomationSegmentInterpolation::Bezier => bezier_value(left, right, time),
         }
     }
+
+    /// Validate once and materialize the ordered interpolation segments.
+    ///
+    /// Realtime consumers use these immutable segments to select interpolation
+    /// at preparation time instead of validating and searching the author
+    /// curve for every evaluation sample. Values outside a segment are clamped
+    /// to that segment's endpoint, matching [`Self::evaluate`].
+    pub fn prepared_segments(&self) -> Result<Vec<ExactAutomationSegment>, AutomationError> {
+        self.validate()?;
+        Ok(self
+            .keyframes
+            .windows(2)
+            .map(|pair| ExactAutomationSegment { left: pair[0].clone(), right: pair[1].clone() })
+            .collect())
+    }
+}
+
+/// One validated, immutable interpolation span from an exact automation curve.
+///
+/// Construction is owned by [`ExactAutomationCurve::prepared_segments`], so
+/// repeated evaluation does not revisit whole-curve validation or key lookup.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExactAutomationSegment {
+    left: ExactAutomationKeyframe,
+    right: ExactAutomationKeyframe,
+}
+
+impl ExactAutomationSegment {
+    /// Exact owner-local time at which this segment begins.
+    pub fn start_time(&self) -> TimelineTime {
+        self.left.time
+    }
+
+    /// Exact owner-local time at which this segment ends.
+    pub fn end_time(&self) -> TimelineTime {
+        self.right.time
+    }
+
+    /// Evaluate this already-validated segment with endpoint extension.
+    pub fn evaluate(&self, time: TimelineTime) -> Result<f64, AutomationError> {
+        if time <= self.left.time {
+            return Ok(self.left.value);
+        }
+        if time >= self.right.time {
+            return Ok(self.right.value);
+        }
+        match self.left.interpolation_to_next {
+            AutomationSegmentInterpolation::Hold => Ok(self.left.value),
+            AutomationSegmentInterpolation::Linear => linear_value(&self.left, &self.right, time),
+            AutomationSegmentInterpolation::Bezier => bezier_value(&self.left, &self.right, time),
+        }
+    }
 }
 
 /// Invalid automation author state or evaluation.

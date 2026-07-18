@@ -239,13 +239,21 @@ frame grid; chunks then advance integer samples only.
 ### Realtime execution performance contract
 
 The dense schedule, liveness scratch reuse, scalar reference kernels, runtime
-SIMD dispatch, and affine source accumulator are implemented. Realtime rendering
-does not scan author Routes or use tree/map lookup in sample loops. Remaining
-kernel work is to presegment non-constant automation and processor event spans,
-then add latency/PDC and state-entry obligations without reintroducing author
-graph interpretation.
+SIMD dispatch, affine source accumulator, and non-constant automation event-span
+preparation are implemented. Preparation validates each exact curve once,
+lowers its event boundaries to the Evaluation Grid, and stores immutable core
+segment evaluators; block execution advances a local span cursor and never
+validates or searches the author curve per sample. Hold, Linear, and Bezier
+semantics remain core-owned and are exactly block-partition invariant. Realtime
+rendering does not scan author Routes or use tree/map lookup in sample loops.
+Future plugin event batches, latency/PDC, and state-entry obligations must deepen
+this schedule without reintroducing author graph interpretation.
 
-The normative realtime path is CPU block DSP with a scalar reference kernel and
+`AudioRenderSession::new` establishes a typed fixed `AudioRenderCapacity` for
+maximum frames, channels, liveness scratch slots, and samples per slot.
+`render_into` performs no Session-owned allocation, buffer growth, author-map
+search, or event-container construction; the media Adapter fills caller-owned
+preallocated storage. The normative realtime path is CPU block DSP with a scalar reference kernel and
 vectorized kernels selected during preparation. A render worker runs ahead into
 the fixed-capacity playback queue; the device callback only consumes that queue
 and atomics. After Session construction, the realtime execution path admits no
@@ -479,12 +487,12 @@ gates rather than implied support:
    reference machine: cold open, sequential boundary, random restart,
    cancellation return, cross-source LRU pressure, and source-cache bytes must
    appear in the same long-run evidence report.
-9. Presegment non-constant automation and processor events during preparation,
-   add declared processor latency/PDC and state-entry obligations, and extend the
-   implemented scalar/SIMD matrix to Buses, Transitions, dense automation,
-   nested Sequences, decoder pressure, and stateful processors. Only then
-   evaluate qualified GPU batch processors against measured CPU SIMD headroom
-   and added latency.
+9. Non-constant built-in automation is presegmented during preparation and the
+   realtime Session exposes its fixed allocation envelope. Extend the existing
+   scalar/SIMD matrix to Buses, Transitions, dense automation, nested Sequences,
+   decoder pressure, and stateful processors; add plugin event batches, declared
+   latency/PDC, and state-entry obligations. Only then evaluate qualified GPU
+   batch processors against measured CPU SIMD headroom and added latency.
 
 No item may be closed by adding only schema, an effect enum, a disconnected UI,
 or a consumer-specific fallback mixer.

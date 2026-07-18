@@ -76,6 +76,10 @@ _Avoid_: Entry-count-only cache, treating zero-host-byte native surfaces as free
 The UI-independent App Module coordinator that samples one pending Frame Demand, applies bounded preview-work completions and expirations, submits their exact terminal Frame Deliveries, then observes current-epoch video preroll in that order.
 _Avoid_: Window-owned result policy, Headless-only orchestration, separately sampled demand identities for completion and expiration
 
+**Preview Execution Coordinator**:
+The UI-independent App Module that atomically binds complete Viewer intent to one media generation, pending state, executed presentation quality, monotonic candidate identity, and the exact currently registered output. Window and Headless presentation are Adapters over its opaque GPU execution contract; neither may reconstruct candidate/cache lifecycle.
+_Avoid_: Window-owned candidate counter, separate Headless output identity, UI-owned generation/pending booleans, cache hit inferred from texture presence alone
+
 **Viewer GPU Preview Runtime**:
 The device-scoped owner of native video import, working-linear compositing, spatial processing, display output, calibration, and current external-texture presentation resources for Viewer execution.
 _Avoid_: Window-owned GPU grab bag, separate headless rendering semantics
@@ -125,7 +129,7 @@ One non-persistent PCM-bearing execution branch derived from an owning Track/Cli
 _Avoid_: Persisted placement authority, user-routable graph node
 
 **Prepared Audio Schedule**:
-One immutable Render-Contract-bound lowering of compiled audio semantics into dense topological node slots, destination-contiguous Route and Contribution ranges, Transition bindings, exact sample spans, liveness-assigned scratch slots, and a selected processor kernel backend. It is execution data, never author data, and a Render Session may scan neither author collections nor routing maps after preparation.
+One immutable Render-Contract-bound lowering of compiled audio semantics into dense topological node slots, destination-contiguous Route and Contribution ranges, Transition bindings, exact sample spans, validated automation event spans, liveness-assigned scratch slots, and a selected processor kernel backend. It is execution data, never author data, and a Render Session may scan neither author collections nor routing maps after preparation.
 _Avoid_: Compiled Audio Program, runtime graph wrapper
 
 **Audio Program**:

@@ -65,6 +65,7 @@ mod playback;
 mod playback_acceptance;
 pub(crate) mod playback_preview;
 pub(crate) mod preview_access_mode;
+pub(crate) mod preview_execution;
 pub(crate) mod preview_scheduler_policy;
 mod project_lifecycle;
 pub(crate) mod proxy_generation;

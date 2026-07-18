@@ -155,6 +155,13 @@ exposed through `PropertyHost`/`PropertyBag`. Long-term visual and audio
 automation share exact curve primitives and stable Parameter IDs; string paths
 remain UI aliases and migration inputs rather than identity.
 
+`ExactAutomationCurve::prepared_segments` validates author order, finite values,
+and Bezier time monotonicity once, then returns immutable interpolation segments
+whose evaluator reuses the same Hold/Linear/Bezier mathematics as direct curve
+evaluation. Execution Modules may lower those segments onto their Evaluation
+Grid and advance span cursors; they may not copy the interpolation formulas or
+reinterpret the persisted author curve.
+
 ## Render Projection
 
 Timeline internals are projected into `FlatActiveClip` through `RenderPlanSource`. `mondrian-renderer` consumes that trait and must not depend on `Sequence`, `Track`, or `Clip` internals.

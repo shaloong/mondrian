@@ -147,7 +147,7 @@ impl AppUiPreviewService {
         if self.failed_media_key(&key) {
             return None;
         }
-        self.current_frame_pending.set(true);
+        self.execution.borrow_mut().set_pending(true);
         let adaptive_hints = self.preview_decode_adaptive_hints(access_mode, &key);
         self.request_media_preview(
             key,

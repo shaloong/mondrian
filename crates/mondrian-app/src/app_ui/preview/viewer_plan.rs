@@ -20,28 +20,6 @@ pub(super) enum ResolvedPreviewElement {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ViewerPreviewCacheKey {
-    pub(super) sequence_id: SequenceId,
-    pub(super) width: u32,
-    pub(super) height: u32,
-    pub(super) plan_signature: u64,
-}
-
-impl ViewerPreviewCacheKey {
-    pub(super) fn with_monitor_adaptation(&self, adaptation: &RenderMonitorAdaptation) -> Self {
-        let mut hasher = DefaultHasher::new();
-        self.plan_signature.hash(&mut hasher);
-        adaptation.hash(&mut hasher);
-        Self {
-            sequence_id: self.sequence_id,
-            width: self.width,
-            height: self.height,
-            plan_signature: hasher.finish(),
-        }
-    }
-}
-
 pub(super) fn viewer_preview_cache_key_for_resolved_plan(
     sequence_id: SequenceId,
     width: u32,
@@ -97,12 +75,7 @@ pub(super) fn viewer_preview_cache_key_for_resolved_plan(
             }
         }
     }
-    ViewerPreviewCacheKey {
-        sequence_id,
-        width,
-        height,
-        plan_signature: hasher.finish(),
-    }
+    ViewerPreviewCacheKey::new(sequence_id, width, height, hasher.finish())
 }
 
 fn hash_color(color: mondrian_core::Color, hasher: &mut impl Hasher) {

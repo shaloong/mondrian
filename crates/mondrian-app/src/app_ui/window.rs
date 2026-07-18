@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::app::preview_execution::{
+    PreviewGpuFrame as AppUiGpuPreviewFrame, PreviewGpuFrameState as AppUiGpuPreviewFrameState,
+    PreviewGpuWorkingInput as AppUiGpuPreviewWorkingInput,
+};
 use crate::app::ui_actions::app_shell_quit_action;
 use crate::app::AppState;
 use crate::app_ui::action_queue::PendingUiActions;
@@ -19,10 +23,7 @@ use crate::app_ui::native_video_import::{
     evaluate_native_video_import_readiness, AppUiNativeVideoImportReadiness,
     AppUiNativeVideoImportReadinessInput,
 };
-use crate::app_ui::preview::{
-    AppUiGpuPreviewFrame, AppUiGpuPreviewFrameState, AppUiGpuPreviewWorkingInput,
-    AppUiPreviewColorRejection,
-};
+use crate::app_ui::preview::AppUiPreviewColorRejection;
 use crate::app_ui::preview_gpu_output_blocker::{
     PreviewGpuOutputBlocker, PreviewGpuOutputBlockerBreakdown,
 };
@@ -815,7 +816,7 @@ impl AppUiViewerGpuOutputFrameContext {
             output_color_space: frame.program_output_boundary.output_color_space,
             monitor_color_space: frame.monitor_adaptation.monitor_color_space(),
             tone_map: frame.program_output_boundary.tone_map,
-            preview_candidate_id: Some(frame.preview_candidate_id()),
+            preview_candidate_id: Some(frame.candidate_id()),
             preview_candidate_state: AppUiViewerGpuOutputPreviewCandidateState::Ready,
             display_view: frame.program_output_boundary.display_view.as_ref().map(|display_view| {
                 AppUiViewerGpuOutputDisplayView {
@@ -3272,7 +3273,7 @@ fn prepare_viewer_gpu_preview(
         .record_frame_context(&frame, texture_key.as_str().to_owned());
     session.viewer_gpu_output_telemetry.record_preview_candidate_state(
         AppUiViewerGpuOutputPreviewCandidateState::Ready,
-        Some(frame.preview_candidate_id()),
+        Some(frame.candidate_id()),
     );
     let presentation_readiness = session
         .display_output_contract

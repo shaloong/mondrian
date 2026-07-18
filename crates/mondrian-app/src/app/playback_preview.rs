@@ -201,4 +201,44 @@ mod tests {
         assert_eq!(evidence.deliveries.late, 1);
         assert_eq!(evidence.deliveries.rejected, 0);
     }
+
+    #[test]
+    fn headless_seek_cancel_and_dropped_gpu_facts_share_one_terminal_authority() {
+        let mut state = AppState::new();
+        state.set_playback_frame_running(4);
+        let stale_identity =
+            state.pending_playback_frame_demand_identity().expect("pre-seek demand");
+        let stale_ticket = state
+            .playback_frame_presentation_ticket(mondrian_playback::FramePresentationQuality::Ready)
+            .expect("pre-seek presentation ticket");
+
+        // A Headless consumer models the seek as a fresh epoch. A GPU
+        // completion from the retired epoch and a queued cancellation may race
+        // the current presentation timeout, but only the current identity owns
+        // terminal authority.
+        state.set_playback_frame_running(12);
+        let current_identity =
+            state.pending_playback_frame_demand_identity().expect("post-seek demand");
+        assert_ne!(stale_identity, current_identity);
+        assert!(!state.complete_frame_presentation(stale_ticket, std::time::Instant::now()));
+
+        let adapter = FakePreviewAdapter {
+            poll: RefCell::new(Some(PreviewWorkPoll {
+                transport_change: true,
+                frame_deliveries: vec![
+                    FrameDelivery::for_demand(stale_identity, FrameDeliveryKind::Blocked),
+                    FrameDelivery::for_demand(current_identity, FrameDeliveryKind::Late),
+                ],
+                ..PreviewWorkPoll::default()
+            })),
+            preroll: None,
+        };
+        let outcome = pump_playback_preview(&mut state, &adapter);
+        let evidence = state.playback_evidence_report();
+
+        assert!(outcome.transport_change);
+        assert_eq!(evidence.deliveries.late, 1);
+        assert_eq!(evidence.deliveries.blocked, 0);
+        assert_eq!(evidence.deliveries.rejected, 0);
+    }
 }

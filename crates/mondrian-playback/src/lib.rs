@@ -1547,6 +1547,61 @@ mod tests {
     }
 
     #[test]
+    fn headless_seek_device_and_delayed_presentation_fault_sequence_stays_continuous() {
+        let mut engine = engine();
+        engine.play(200, ts(0)).unwrap();
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+        engine
+            .observe_audio_device_clock(audio_observation(&engine, 1_000, ts(0)))
+            .unwrap();
+        assert_eq!(
+            engine.snapshot().clock_master,
+            Some(ClockMaster::AudioDevice)
+        );
+
+        let stale_ticket = FramePresentationTicket::for_demand(
+            engine.pending_frame_demand().expect("pre-seek demand"),
+            FramePresentationQuality::Ready,
+        );
+        engine.seek(FramePosition::new(12, Rational::new(1, 25)), ts(40)).unwrap();
+        let post_seek = engine.pending_frame_demand().expect("post-seek demand");
+        assert_ne!(stale_ticket.identity(), post_seek.identity());
+        assert!(!engine
+            .observe_frame_delivery(stale_ticket.complete_at(ts(45)))
+            .expect("stale completion is a non-authoritative fact"));
+
+        engine.complete_priming(ClockMaster::Synthetic, ts(40)).unwrap();
+        let mut recovered_audio = audio_observation(&engine, 0, ts(40));
+        recovered_audio.stream_generation = 8;
+        recovered_audio.media_anchor = FramePosition::new(12, Rational::new(1, 25));
+        engine.observe_audio_device_clock(recovered_audio).unwrap();
+        assert_eq!(
+            engine.snapshot().clock_master,
+            Some(ClockMaster::AudioDevice)
+        );
+
+        let before_loss = engine.snapshot().position;
+        engine.audio_device_lost(ts(50)).unwrap();
+        assert_eq!(engine.snapshot().clock_master, Some(ClockMaster::Synthetic));
+        assert!(engine.snapshot().position.frame >= before_loss.frame);
+        let continued = engine.tick(ts(90)).unwrap();
+        assert!(continued.position.frame >= before_loss.frame);
+
+        let delayed_ticket = FramePresentationTicket::for_demand(
+            engine.pending_frame_demand().expect("synthetic-clock demand"),
+            FramePresentationQuality::Ready,
+        );
+        let deadline = delayed_ticket.deadline().expect("playing demand deadline");
+        let delivery =
+            delayed_ticket.complete_at(deadline.saturating_add(Duration::from_millis(1)));
+        assert_eq!(delivery.kind, FrameDeliveryKind::Late);
+        assert!(engine
+            .observe_frame_delivery(delivery)
+            .expect("current delayed presentation remains an accepted terminal fact"));
+        assert_eq!(engine.snapshot().clock_master, Some(ClockMaster::Synthetic));
+    }
+
+    #[test]
     fn audio_device_loss_refreshes_demand_when_handoff_crosses_a_frame_boundary() {
         let mut engine = engine();
         engine.play(100, ts(0)).unwrap();

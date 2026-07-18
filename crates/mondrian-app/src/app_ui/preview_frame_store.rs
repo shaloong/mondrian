@@ -7,8 +7,9 @@
 use mondrian_core::types::SequenceId;
 use mondrian_ui_widgets::ViewerFrameImage;
 
-use super::preview::{MediaPreviewFrame, ScopedViewerFrame, ViewerPreviewCacheKey};
+use super::preview::{MediaPreviewFrame, ScopedViewerFrame};
 use crate::app::preview_access_mode::MediaPreviewKey;
+use crate::app::preview_execution::PreviewOutputKey as ViewerPreviewCacheKey;
 use crate::app::preview_scheduler_policy::MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES;
 
 #[cfg(test)]

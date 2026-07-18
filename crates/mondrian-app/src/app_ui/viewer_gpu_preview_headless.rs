@@ -7,8 +7,9 @@
 
 use std::time::Instant;
 
-use super::preview::{
-    AppUiGpuPreviewFrame, AppUiGpuPreviewWorkingInput, AppUiPreviewDecodeExecutionSummary,
+use crate::app::preview_execution::{
+    PreviewDecodeExecutionSummary as AppUiPreviewDecodeExecutionSummary,
+    PreviewGpuFrame as AppUiGpuPreviewFrame, PreviewGpuWorkingInput as AppUiGpuPreviewWorkingInput,
 };
 use mondrian_renderer::{
     native_video_texture_device_features, ocio_lut_filtering_device_features,

@@ -17,6 +17,7 @@ use super::playback_acceptance::{
 use super::playback_preview::{observe_playback_video_preroll, pump_playback_preview};
 use super::*;
 use crate::app::preview_access_mode::MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT;
+use crate::app::preview_execution::PreviewDecodeExecutionSummary as AppUiPreviewDecodeExecutionSummary;
 use crate::app::ui_actions::TimelineSeekSource;
 use crate::app_ui::native_video_import::resolve_playback_hardware_decode_admission;
 use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
@@ -26,13 +27,12 @@ use crate::app_ui::preview::{
     build_preview_render_performance_report, AppUiPreviewColorHealthReport,
     AppUiPreviewColorHealthSummary, AppUiPreviewColorHealthVerdict,
     AppUiPreviewDecodeAccessModeProfile, AppUiPreviewDecodeAccessModeProfiles,
-    AppUiPreviewDecodeExecutionSummary, AppUiPreviewDecodeLatencyBuckets,
-    AppUiPreviewDecodePerformanceArea, AppUiPreviewDecodePerformanceCheck,
-    AppUiPreviewDecodePerformanceReport, AppUiPreviewDecodePerformanceSeverity,
-    AppUiPreviewDecodePerformanceVerdict, AppUiPreviewDiagnostics,
-    AppUiPreviewRenderPerformanceReport, AppUiPreviewRenderPerformanceSeverity,
-    AppUiPreviewRenderPerformanceVerdict, AppUiPreviewService,
-    APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
+    AppUiPreviewDecodeLatencyBuckets, AppUiPreviewDecodePerformanceArea,
+    AppUiPreviewDecodePerformanceCheck, AppUiPreviewDecodePerformanceReport,
+    AppUiPreviewDecodePerformanceSeverity, AppUiPreviewDecodePerformanceVerdict,
+    AppUiPreviewDiagnostics, AppUiPreviewRenderPerformanceReport,
+    AppUiPreviewRenderPerformanceSeverity, AppUiPreviewRenderPerformanceVerdict,
+    AppUiPreviewService, APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
     APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION,
     APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
 };
@@ -3217,7 +3217,7 @@ fn execute_headless_gpu_candidate(
     gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
 ) -> anyhow::Result<HeadlessGpuCandidateStatus> {
     match preview_service.gpu_preview_frame_for_state(state) {
-        crate::app_ui::preview::AppUiGpuPreviewFrameState::Ready(frame) => {
+        crate::app::preview_execution::PreviewGpuFrameState::Ready(frame) => {
             let execution = match gpu_adapter.execute(&frame) {
                 Ok(execution) => execution,
                 Err(crate::app_ui::viewer_gpu_preview_headless::HeadlessViewerGpuError::Backpressure(
@@ -3235,17 +3235,17 @@ fn execute_headless_gpu_candidate(
             observe_playback_video_preroll(state, preview_service);
             Ok(HeadlessGpuCandidateStatus::Ready)
         }
-        crate::app_ui::preview::AppUiGpuPreviewFrameState::Current => {
+        crate::app::preview_execution::PreviewGpuFrameState::Current => {
             if let Some(ticket) = preview_service.playback_presentation_ticket(state) {
                 state.complete_frame_presentation(ticket, Instant::now());
             }
             observe_playback_video_preroll(state, preview_service);
             Ok(HeadlessGpuCandidateStatus::Ready)
         }
-        crate::app_ui::preview::AppUiGpuPreviewFrameState::Loading => {
+        crate::app::preview_execution::PreviewGpuFrameState::Loading => {
             Ok(HeadlessGpuCandidateStatus::Loading)
         }
-        crate::app_ui::preview::AppUiGpuPreviewFrameState::Unavailable => {
+        crate::app::preview_execution::PreviewGpuFrameState::Unavailable => {
             Ok(HeadlessGpuCandidateStatus::Unavailable)
         }
     }

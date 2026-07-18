@@ -44,6 +44,7 @@ the new seams.
 | Frame Cancellation Evidence | exact all-run cause/timing aggregates and the shared cancellation acceptance policy | cancellation authority, codec checkpoints, UI presentation |
 | Preview Frame Store | ready/stale/in-flight identity, source revision, color contract, memory budgets | deadline policy or proxy selection |
 | Playback Preview Pump | one pending-demand sample, ordered completion/expiration delivery application, current-epoch video-preroll observation, Window/Headless-neutral pump outcome | decode/render implementation, Widget refresh, GPU resources |
+| Preview Execution Coordinator | complete generation binding, pending state, executed presentation quality, candidate identity, exact registered output | timeline interpretation, codec payloads, GPU resources, Widget state |
 | Presentation Adapter | GPU import/composite/display, Viewer handoff, presentation evidence | timeline advancement |
 | Playback Evidence | immutable events, aggregates, reports | policy decisions |
 
@@ -590,13 +591,25 @@ demand samples, and prevents a terminal delivery from being followed by
 preroll for the demand it just consumed. `AppUiHost` decides only how the pump
 outcome affects layout/repaint. The real Headless GPU gate drives the same pump
 and therefore cannot maintain a test-only Delivery or preroll policy. The
-Preview Adapter still owns decode scheduling, caches, result diagnostics, and
-lookahead calculation; it does not own Playback state transitions. Within that
-Adapter, timeline traversal and nested Sequence evaluation live in
+Preview Adapter still owns concrete decode execution, payload adaptation,
+result diagnostics, and lookahead observation; it does not own Playback state
+transitions or Viewer candidate lifecycle. `app::preview_execution` owns the
+complete output key and GPU execution contract consumed by both Window and
+Headless Adapters, and atomically coordinates generation binding, pending state,
+executed quality, candidate IDs, and exact registered-output reuse. Cache
+residency/eviction remains in the playback-owned `PreviewFrameStore`; GPU/color
+mathematics remain renderer-owned. Within the concrete Adapter, timeline
+traversal and nested Sequence evaluation live in
 `preview::timeline_evaluation`, media-key/path/proxy/decode adaptation lives in
 `preview::media_adapter`, and resolved Viewer identity plus GPU execution-layer
 lowering lives in `preview::viewer_plan`. These are private deep Modules over
 the existing request Interface, not new public seams.
+
+Deterministic Headless fault sequences cover a seek that retires an in-flight
+presentation, queued cancellation racing the replacement demand, delayed or
+dropped GPU presentation, Audio Device Clock reacquisition, explicit device
+loss, and continuous Synthetic fallback. Losing old-epoch facts are retired
+before Evidence; only the current demand can consume terminal authority.
 
 All thresholds live in one Playback Policy value, appear in evidence, and may be
 tuned by measured reference-machine data. Tests must pass an explicit policy;

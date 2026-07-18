@@ -6,8 +6,8 @@ use crate::plan::{
 };
 use crate::AudioCompileError;
 use mondrian_core::{
-    AudioSamplePosition, AudioSampleRate, AudioSampleRounding, ExactAutomationCurve, MixBusId,
-    ProgramOutputId, TrackId,
+    AudioSamplePosition, AudioSampleRate, AudioSampleRounding, ExactAutomationCurve,
+    ExactAutomationSegment, MixBusId, ProgramOutputId, TimelineTime, TrackId,
 };
 use mondrian_timeline::audio::{
     AudioChannelStripOutputPort, AudioRouteDestination, AudioRouteSource, AudioTransitionCurve,
@@ -41,6 +41,10 @@ pub struct PreparedAudioScheduleSummary {
     pub route_count: usize,
     /// Contribution-local Transition bindings.
     pub transition_binding_count: usize,
+    /// Validated non-constant automation curves lowered into the schedule.
+    pub automation_curve_count: usize,
+    /// Exact interpolation spans selected before Session execution.
+    pub automation_event_span_count: usize,
     /// Scratch slots after interval-liveness reuse.
     pub scratch_slot_count: usize,
 }
@@ -125,6 +129,9 @@ pub(crate) struct PreparedNode {
     pub(crate) scratch_slot: usize,
     pub(crate) constant_pre_gain: Option<f32>,
     pub(crate) constant_post_gain: Option<f32>,
+    pub(crate) pre_rack_automation: Vec<PreparedAutomationCurve>,
+    pub(crate) fader_automation: Option<PreparedAutomationCurve>,
+    pub(crate) post_rack_automation: Vec<PreparedAutomationCurve>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -143,6 +150,88 @@ pub(crate) struct PreparedContribution {
     pub(crate) sequence_start_sample: i64,
     pub(crate) sequence_end_sample: i64,
     pub(crate) constant_gain_pan: Option<(f32, f64)>,
+    pub(crate) scope_input_automation: Option<PreparedAutomationCurve>,
+    pub(crate) scope_rack_automation: Vec<PreparedAutomationCurve>,
+    pub(crate) volume_automation: Option<PreparedAutomationCurve>,
+    pub(crate) pan_automation: Option<PreparedAutomationCurve>,
+}
+
+/// One author curve lowered into exact sample-grid event spans.
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedAutomationCurve {
+    owner_time_offset: TimelineTime,
+    segments: Vec<PreparedAutomationSegment>,
+    constant_value: f64,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedAutomationSegment {
+    end_sample: i64,
+    evaluator: ExactAutomationSegment,
+}
+
+impl PreparedAutomationCurve {
+    fn build(
+        curve: &ExactAutomationCurve,
+        owner_time_offset: TimelineTime,
+        sample_rate: AudioSampleRate,
+    ) -> Result<Self, AudioCompileError> {
+        let evaluators = curve.prepared_segments().map_err(|error| {
+            AudioCompileError::InvalidPreparedGraph(format!(
+                "automation curve {} is invalid: {error}",
+                curve.parameter_id
+            ))
+        })?;
+        let constant_value =
+            curve.keyframes.last().map_or(curve.default_value, |keyframe| keyframe.value);
+        let mut segments = Vec::with_capacity(evaluators.len());
+        for evaluator in evaluators {
+            let sequence_end =
+                evaluator.end_time().checked_sub(owner_time_offset).map_err(|error| {
+                    AudioCompileError::InvalidPreparedGraph(format!(
+                        "automation event cannot map into Sequence time: {error}"
+                    ))
+                })?;
+            let end_sample = AudioSamplePosition::from_timeline_time(
+                sequence_end,
+                sample_rate,
+                AudioSampleRounding::Ceil,
+            )
+            .map_err(|error| {
+                AudioCompileError::InvalidPreparedGraph(format!(
+                    "automation event cannot lower to the Evaluation Grid: {error}"
+                ))
+            })?
+            .sample();
+            segments.push(PreparedAutomationSegment { end_sample, evaluator });
+        }
+        Ok(Self { owner_time_offset, segments, constant_value })
+    }
+
+    pub(crate) fn event_span_count(&self) -> usize {
+        self.segments.len().saturating_add(1)
+    }
+
+    pub(crate) fn initial_cursor(&self, sample: i64) -> usize {
+        self.segments.partition_point(|segment| segment.end_sample <= sample)
+    }
+
+    pub(crate) fn evaluate_sample(
+        &self,
+        sample: i64,
+        sample_rate: AudioSampleRate,
+        cursor: &mut usize,
+    ) -> Result<f64, mondrian_core::AutomationError> {
+        while self.segments.get(*cursor).is_some_and(|segment| sample >= segment.end_sample) {
+            *cursor += 1;
+        }
+        let Some(segment) = self.segments.get(*cursor) else {
+            return Ok(self.constant_value);
+        };
+        let sequence_time = TimelineTime::new(sample, i64::from(sample_rate.hz()))?;
+        let owner_time = sequence_time.checked_add(self.owner_time_offset)?;
+        segment.evaluator.evaluate(owner_time)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -179,6 +268,7 @@ impl PreparedAudioSchedule {
             track_slots.insert(*track_id, slot);
             let (constant_pre_gain, constant_post_gain) =
                 prepared_strip_constant_gains(&channel.strip);
+            let automation = prepared_strip_automation(&channel.strip, sample_rate)?;
             nodes.push(PreparedNode {
                 origin: PreparedNodeOrigin::Track(*track_id),
                 strip: channel.strip.clone(),
@@ -188,6 +278,9 @@ impl PreparedAudioSchedule {
                 scratch_slot: 0,
                 constant_pre_gain,
                 constant_post_gain,
+                pre_rack_automation: automation.pre_rack,
+                fader_automation: automation.fader,
+                post_rack_automation: automation.post_rack,
             });
         }
         for bus_id in &program.bus_order {
@@ -199,6 +292,7 @@ impl PreparedAudioSchedule {
             let slot = nodes.len();
             bus_slots.insert(*bus_id, slot);
             let (constant_pre_gain, constant_post_gain) = prepared_strip_constant_gains(strip);
+            let automation = prepared_strip_automation(strip, sample_rate)?;
             nodes.push(PreparedNode {
                 origin: PreparedNodeOrigin::Bus(*bus_id),
                 strip: strip.clone(),
@@ -208,11 +302,15 @@ impl PreparedAudioSchedule {
                 scratch_slot: 0,
                 constant_pre_gain,
                 constant_post_gain,
+                pre_rack_automation: automation.pre_rack,
+                fader_automation: automation.fader,
+                post_rack_automation: automation.post_rack,
             });
         }
         let output_slot = nodes.len();
         let (constant_pre_gain, constant_post_gain) =
             prepared_strip_constant_gains(&program.output);
+        let automation = prepared_strip_automation(&program.output, sample_rate)?;
         nodes.push(PreparedNode {
             origin: PreparedNodeOrigin::Output(program.output_id),
             strip: program.output.clone(),
@@ -222,6 +320,9 @@ impl PreparedAudioSchedule {
             scratch_slot: 0,
             constant_pre_gain,
             constant_post_gain,
+            pre_rack_automation: automation.pre_rack,
+            fader_automation: automation.fader,
+            post_rack_automation: automation.post_rack,
         });
 
         let mut scope_slots = BTreeMap::new();
@@ -294,6 +395,39 @@ impl PreparedAudioSchedule {
                 &scopes[scope_slot],
                 transition_start == transition_end,
             );
+            let scope_time_offset =
+                semantic.scope_in.checked_sub(semantic.sequence_range.start).map_err(|error| {
+                    AudioCompileError::InvalidPreparedGraph(format!(
+                        "Contribution {} Scope time mapping is invalid: {error}",
+                        semantic.edit_id
+                    ))
+                })?;
+            let edit_time_offset = semantic
+                .local_time_in
+                .checked_sub(semantic.sequence_range.start)
+                .map_err(|error| {
+                    AudioCompileError::InvalidPreparedGraph(format!(
+                        "Contribution {} Edit time mapping is invalid: {error}",
+                        semantic.edit_id
+                    ))
+                })?;
+            let scope_input_automation = prepare_optional_curve(
+                scopes[scope_slot].input_gain_automation.as_ref(),
+                scope_time_offset,
+                sample_rate,
+            )?;
+            let scope_rack_automation =
+                prepare_rack_automation(&scopes[scope_slot].rack, scope_time_offset, sample_rate)?;
+            let volume_automation = prepare_optional_curve(
+                semantic.volume_automation.as_ref(),
+                edit_time_offset,
+                sample_rate,
+            )?;
+            let pan_automation = prepare_optional_curve(
+                semantic.pan_automation.as_ref(),
+                edit_time_offset,
+                sample_rate,
+            )?;
             contributions.push(PreparedContribution {
                 semantic,
                 track_slot,
@@ -302,6 +436,10 @@ impl PreparedAudioSchedule {
                 sequence_start_sample,
                 sequence_end_sample,
                 constant_gain_pan,
+                scope_input_automation,
+                scope_rack_automation,
+                volume_automation,
+                pan_automation,
             });
         }
         let mut contribution_cursor = 0;
@@ -366,6 +504,23 @@ impl PreparedAudioSchedule {
                 last_consumer[route.source_slot].max(route.destination_slot);
         }
         let scratch_slot_count = assign_liveness_scratch(&mut nodes, &last_consumer);
+        let automation_curves = nodes
+            .iter()
+            .flat_map(|node| {
+                node.pre_rack_automation
+                    .iter()
+                    .chain(node.fader_automation.iter())
+                    .chain(node.post_rack_automation.iter())
+            })
+            .chain(contributions.iter().flat_map(|contribution| {
+                contribution
+                    .scope_input_automation
+                    .iter()
+                    .chain(contribution.scope_rack_automation.iter())
+                    .chain(contribution.volume_automation.iter())
+                    .chain(contribution.pan_automation.iter())
+            }))
+            .collect::<Vec<_>>();
         let summary = PreparedAudioScheduleSummary {
             node_count: nodes.len(),
             track_count,
@@ -373,6 +528,11 @@ impl PreparedAudioSchedule {
             contribution_count: contributions.len(),
             route_count: routes.len(),
             transition_binding_count: transitions.len(),
+            automation_curve_count: automation_curves.len(),
+            automation_event_span_count: automation_curves
+                .iter()
+                .map(|curve| curve.event_span_count())
+                .sum(),
             scratch_slot_count,
         };
         Ok(Self {
@@ -385,6 +545,51 @@ impl PreparedAudioSchedule {
             summary,
         })
     }
+}
+
+struct PreparedStripAutomation {
+    pre_rack: Vec<PreparedAutomationCurve>,
+    fader: Option<PreparedAutomationCurve>,
+    post_rack: Vec<PreparedAutomationCurve>,
+}
+
+fn prepared_strip_automation(
+    strip: &CompiledChannelStrip,
+    sample_rate: AudioSampleRate,
+) -> Result<PreparedStripAutomation, AudioCompileError> {
+    Ok(PreparedStripAutomation {
+        pre_rack: prepare_rack_automation(&strip.pre_fader, TimelineTime::ZERO, sample_rate)?,
+        fader: prepare_optional_curve(
+            strip.fader_automation.as_ref(),
+            TimelineTime::ZERO,
+            sample_rate,
+        )?,
+        post_rack: prepare_rack_automation(&strip.post_fader, TimelineTime::ZERO, sample_rate)?,
+    })
+}
+
+fn prepare_rack_automation(
+    rack: &CompiledRack,
+    owner_time_offset: TimelineTime,
+    sample_rate: AudioSampleRate,
+) -> Result<Vec<PreparedAutomationCurve>, AudioCompileError> {
+    rack.processors
+        .iter()
+        .filter_map(|processor| match processor {
+            CompiledProcessor::Gain { automation } => automation.as_ref(),
+        })
+        .map(|curve| PreparedAutomationCurve::build(curve, owner_time_offset, sample_rate))
+        .collect()
+}
+
+fn prepare_optional_curve(
+    curve: Option<&ExactAutomationCurve>,
+    owner_time_offset: TimelineTime,
+    sample_rate: AudioSampleRate,
+) -> Result<Option<PreparedAutomationCurve>, AudioCompileError> {
+    curve
+        .map(|curve| PreparedAutomationCurve::build(curve, owner_time_offset, sample_rate))
+        .transpose()
 }
 
 fn prepared_strip_constant_gains(strip: &CompiledChannelStrip) -> (Option<f32>, Option<f32>) {

@@ -31,15 +31,17 @@ use mondrian_media::{
     DecodedGpuFrameHandleKind, DecodedVideoRange, DecodedVideoRangeContract, DecodedVideoSampling,
     DecodedVideoSurfaceFormat, HwAccelBackend, HwAccelDeviceSelector, PreviewDecodeAccessMode,
     PreviewDecodeAdaptiveHints, PreviewDecodeCpuBudget, PreviewDecodeDiagnostics,
-    PreviewDecodeExecutionPath, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest,
-    PreviewDecodeSeekStrategy, PreviewDecodeStageDurations, PreviewDecodeThreadingKind,
-    PreviewFileFingerprint, PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
+    PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
+    PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
+    PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
     PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest, PreviewNativeDecodedFrame,
     PreviewScrubAdaptiveClass, PreviewSeekIndexSource, PreviewSourceColorContract,
     VideoColorDiagnostic, VideoColorDiagnosticIssueSummary,
 };
 #[cfg(test)]
-use mondrian_media::{DecodedVideoChromaLocation, PreviewNativeDecodedFrameHandle};
+use mondrian_media::{
+    DecodedVideoChromaLocation, PreviewDecodeExecutionPath, PreviewNativeDecodedFrameHandle,
+};
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
     evaluate_timeline_render_plan, execute_cpu_program_monitor_boundary_rgba8,
@@ -87,6 +89,12 @@ use crate::app::preview_access_mode::{
     media_preview_cancel_reason, MediaPreviewJobEnqueueStatus,
     MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US,
 };
+use crate::app::preview_execution::{PreviewCandidateDecision, PreviewExecutionCoordinator};
+use crate::app::preview_execution::{
+    PreviewDecodeExecutionSummary as AppUiPreviewDecodeExecutionSummary,
+    PreviewGpuFrame as AppUiGpuPreviewFrame, PreviewGpuFrameState as AppUiGpuPreviewFrameState,
+    PreviewGpuWorkingInput as AppUiGpuPreviewWorkingInput,
+};
 use crate::app::preview_scheduler_policy::{
     media_preview_forward_prefetch_window_frames, playback_frame_delivery_kind,
     playback_hardware_recovery_signals, preview_decode_presentation_quality,
@@ -129,17 +137,18 @@ pub struct AppUiPreviewService {
     frame_store: RefCell<PreviewCpuFrameStore>,
     requested_proxy_generations: RefCell<HashSet<PreviewProxyGenerationRequestKey>>,
     scrub_adaptation: RefCell<PreviewScrubAdaptationState>,
-    external_viewer_frame: RefCell<Option<ScopedExternalViewerFrame>>,
-    current_presentation_quality: Cell<mondrian_playback::FramePresentationQuality>,
+    execution: RefCell<
+        PreviewExecutionCoordinator<
+            ViewerPreviewGenerationKey,
+            ViewerPreviewCacheKey,
+            ViewerExternalTextureFrame,
+        >,
+    >,
     playback_pressure: Cell<PlaybackPressureState>,
-    next_gpu_preview_candidate_id: Cell<u64>,
     scheduler: MediaPreviewScheduler,
     scratch: RefCell<TimelineCompositeScratch>,
-    current_generation: Cell<u64>,
-    current_frame_pending: Cell<bool>,
     last_color_rejection: RefCell<Option<AppUiPreviewColorRejection>>,
     display_snapshot: RefCell<Option<DisplayOutputSnapshot>>,
-    last_generation_key: RefCell<Option<ViewerPreviewGenerationKey>>,
     playback_hardware_decode_request: Cell<PreviewHardwareDecodeRequest>,
     playback_hardware_decode_device_selector: Cell<Option<HwAccelDeviceSelector>>,
     playback_hardware_decode_renderer_import_known: Cell<bool>,
@@ -218,19 +227,12 @@ impl AppUiPreviewService {
             frame_store: RefCell::new(PreviewCpuFrameStore::default()),
             requested_proxy_generations: RefCell::new(HashSet::new()),
             scrub_adaptation: RefCell::new(PreviewScrubAdaptationState::default()),
-            external_viewer_frame: RefCell::new(None),
-            current_presentation_quality: Cell::new(
-                mondrian_playback::FramePresentationQuality::Ready,
-            ),
+            execution: RefCell::new(PreviewExecutionCoordinator::default()),
             playback_pressure: Cell::new(PlaybackPressureState::default()),
-            next_gpu_preview_candidate_id: Cell::new(0),
             scheduler,
             scratch: RefCell::new(TimelineCompositeScratch::default()),
-            current_generation: Cell::new(0),
-            current_frame_pending: Cell::new(false),
             last_color_rejection: RefCell::new(None),
             display_snapshot: RefCell::new(None),
-            last_generation_key: RefCell::new(None),
             playback_hardware_decode_request: Cell::new(PreviewHardwareDecodeRequest::Auto),
             playback_hardware_decode_device_selector: Cell::new(None),
             playback_hardware_decode_renderer_import_known: Cell::new(false),
@@ -453,8 +455,8 @@ impl AppUiPreviewService {
             demand_identity,
             execution_id: None,
         });
-        self.current_generation.set(generation);
-        self.current_frame_pending.set(true);
+        self.execution.borrow_mut().invalidate(|| generation);
+        self.execution.borrow_mut().set_pending(true);
     }
 
     /// Return a point-in-time snapshot of preview scheduling and cache health.
@@ -803,10 +805,7 @@ impl AppUiPreviewService {
         );
         add_cell(&self.metrics.interactive_cancel_queued_jobs, queued_jobs);
         add_cell(&self.metrics.queue_canceled_jobs, queued_jobs);
-        self.last_generation_key.replace(None);
-        self.current_generation.set(generation);
-        self.current_frame_pending.set(false);
-        self.external_viewer_frame.replace(None);
+        self.execution.borrow_mut().invalidate(|| generation);
         self.frame_store.borrow_mut().clear_all();
     }
 
@@ -901,7 +900,7 @@ impl AppUiPreviewService {
         );
         self.record_playback_current_late_drop(frame_deliveries.len() as u64);
         add_cell(&self.metrics.queue_canceled_jobs, canceled_queued_jobs);
-        self.current_frame_pending.set(false);
+        self.execution.borrow_mut().set_pending(false);
         PreviewWorkPoll {
             visible_change: false,
             transport_change: true,
@@ -1133,7 +1132,7 @@ impl AppUiPreviewService {
 
     fn render_preview(&self, state: &AppState) -> ViewerPreviewState {
         bump(&self.metrics.render_requests);
-        self.current_frame_pending.set(false);
+        self.execution.borrow_mut().set_pending(false);
         self.last_color_rejection.replace(None);
         let Some(sequence) = state.sequence.as_ref() else {
             self.invalidate_preview_generation();
@@ -1180,8 +1179,9 @@ impl AppUiPreviewService {
         };
         let preview_state = match resolved {
             Some(resolved) => {
-                self.current_presentation_quality
-                    .set(resolved_preview_presentation_quality(&resolved.elements));
+                self.execution.borrow_mut().set_presentation_quality(
+                    resolved_preview_presentation_quality(&resolved.elements),
+                );
                 let final_cache_lookup_started_at = Instant::now();
                 // GPU viewer outputs are display-referred resources. Keep the
                 // raster cache identity independent of the monitor contract,
@@ -1311,7 +1311,7 @@ impl AppUiPreviewService {
                     }
                 }
             }
-            None if self.current_frame_pending.get() => self
+            None if self.execution.borrow().is_pending() => self
                 .stale_viewer_content_for_sequence(sequence, width, height)
                 .map(ViewerPreviewState::Stale)
                 .unwrap_or(ViewerPreviewState::Loading),
@@ -1332,12 +1332,12 @@ impl AppUiPreviewService {
         state: &AppState,
     ) -> AppUiGpuPreviewFrameState {
         bump(&self.metrics.gpu_preview_candidate_requests);
-        self.current_frame_pending.set(false);
+        self.execution.borrow_mut().set_pending(false);
         self.last_color_rejection.replace(None);
         let Some(sequence) = state.sequence.as_ref() else {
             self.invalidate_preview_generation();
             self.scheduler.prune_obsolete();
-            self.external_viewer_frame.replace(None);
+            self.execution.borrow_mut().clear_output();
             bump(&self.metrics.gpu_preview_candidate_unavailable);
             return AppUiGpuPreviewFrameState::Unavailable;
         };
@@ -1353,7 +1353,7 @@ impl AppUiPreviewService {
             Err(blocker) => {
                 self.record_preview_gpu_output_blocker(&blocker);
                 self.scheduler.prune_obsolete();
-                self.external_viewer_frame.replace(None);
+                self.execution.borrow_mut().clear_output();
                 bump(&self.metrics.gpu_preview_candidate_unavailable);
                 return AppUiGpuPreviewFrameState::Unavailable;
             }
@@ -1370,7 +1370,7 @@ impl AppUiPreviewService {
                 ),
             });
             self.scheduler.prune_obsolete();
-            self.external_viewer_frame.replace(None);
+            self.execution.borrow_mut().clear_output();
             bump(&self.metrics.gpu_preview_candidate_unavailable);
             return AppUiGpuPreviewFrameState::Unavailable;
         };
@@ -1388,7 +1388,7 @@ impl AppUiPreviewService {
                     },
                 );
                 self.scheduler.prune_obsolete();
-                self.external_viewer_frame.replace(None);
+                self.execution.borrow_mut().clear_output();
                 bump(&self.metrics.gpu_preview_candidate_unavailable);
                 return AppUiGpuPreviewFrameState::Unavailable;
             }
@@ -1411,38 +1411,50 @@ impl AppUiPreviewService {
             color_context,
         ) {
             Some(resolved) => resolved,
-            None if self.current_frame_pending.get() => {
+            None => {
+                let decision = self.execution.borrow_mut().plan_candidate(None);
                 self.schedule_media_prefetches(state, sequence, frame, width, height);
                 self.scheduler.prune_obsolete();
-                bump(&self.metrics.gpu_preview_candidate_loading);
-                return AppUiGpuPreviewFrameState::Loading;
-            }
-            None => {
-                self.scheduler.prune_obsolete();
-                self.external_viewer_frame.replace(None);
-                bump(&self.metrics.gpu_preview_candidate_unavailable);
-                return AppUiGpuPreviewFrameState::Unavailable;
+                return match decision {
+                    PreviewCandidateDecision::Loading => {
+                        bump(&self.metrics.gpu_preview_candidate_loading);
+                        AppUiGpuPreviewFrameState::Loading
+                    }
+                    PreviewCandidateDecision::Unavailable => {
+                        self.execution.borrow_mut().clear_output();
+                        bump(&self.metrics.gpu_preview_candidate_unavailable);
+                        AppUiGpuPreviewFrameState::Unavailable
+                    }
+                    PreviewCandidateDecision::Current | PreviewCandidateDecision::Execute(_) => {
+                        unreachable!("unresolved preview intent cannot select an output")
+                    }
+                };
             }
         };
         if let Some(cache_key) = resolved.cache_key.as_mut() {
             *cache_key = cache_key.with_monitor_adaptation(&monitor_adaptation);
         }
-        self.current_presentation_quality
-            .set(resolved_preview_presentation_quality(&resolved.elements));
+        self.execution
+            .borrow_mut()
+            .set_presentation_quality(resolved_preview_presentation_quality(&resolved.elements));
         let Some(cache_key) = resolved.cache_key.clone() else {
             self.scheduler.prune_obsolete();
-            self.external_viewer_frame.replace(None);
+            self.execution.borrow_mut().clear_output();
             bump(&self.metrics.gpu_preview_candidate_unavailable);
             return AppUiGpuPreviewFrameState::Unavailable;
         };
-        let candidate_id = self.next_gpu_preview_candidate_id.get().saturating_add(1);
-        self.next_gpu_preview_candidate_id.set(candidate_id);
-        if self.external_viewer_frame_for_key(&cache_key).is_some() {
-            self.schedule_media_prefetches(state, sequence, frame, width, height);
-            self.scheduler.prune_obsolete();
-            bump(&self.metrics.gpu_preview_candidate_current);
-            return AppUiGpuPreviewFrameState::Current;
-        }
+        let candidate_id = match self.execution.borrow_mut().plan_candidate(Some(&cache_key)) {
+            PreviewCandidateDecision::Current => {
+                self.schedule_media_prefetches(state, sequence, frame, width, height);
+                self.scheduler.prune_obsolete();
+                bump(&self.metrics.gpu_preview_candidate_current);
+                return AppUiGpuPreviewFrameState::Current;
+            }
+            PreviewCandidateDecision::Execute(candidate_id) => candidate_id,
+            PreviewCandidateDecision::Loading | PreviewCandidateDecision::Unavailable => {
+                unreachable!("resolved preview key must be current or executable")
+            }
+        };
         let Ok(program_output_boundary) =
             output_boundary_from_color_context(&resolved.color_context)
         else {
@@ -1484,20 +1496,20 @@ impl AppUiPreviewService {
             &self.metrics.gpu_preview_candidate_pixels,
             (width as u64).saturating_mul(height as u64),
         );
-        AppUiGpuPreviewFrameState::Ready(Box::new(AppUiGpuPreviewFrame {
+        AppUiGpuPreviewFrameState::Ready(Box::new(AppUiGpuPreviewFrame::new(
             cache_key,
-            sequence_id: sequence.id,
+            sequence.id,
             frame,
             width,
             height,
-            working_color_space: resolved.color_context.working_color_space,
+            resolved.color_context.working_color_space,
             working_input,
             program_output_boundary,
             monitor_adaptation,
-            preview_candidate_id: candidate_id,
-            presentation_ticket: self.playback_presentation_ticket(state),
+            candidate_id,
+            self.playback_presentation_ticket(state),
             decode_execution,
-        }))
+        )))
     }
 
     /// Build the exact ticket that a Presentation Adapter may complete only
@@ -1506,7 +1518,7 @@ impl AppUiPreviewService {
         &self,
         state: &AppState,
     ) -> Option<mondrian_playback::FramePresentationTicket> {
-        state.playback_frame_presentation_ticket(self.current_presentation_quality.get())
+        state.playback_frame_presentation_ticket(self.execution.borrow().presentation_quality())
     }
 
     /// Mark a GPU preview output texture as the current viewer frame for its resolved plan.
@@ -1521,17 +1533,14 @@ impl AppUiPreviewService {
             bump(&self.metrics.gpu_preview_external_frames_rejected);
             return false;
         };
-        self.external_viewer_frame.replace(Some(ScopedExternalViewerFrame {
-            cache_key: frame.cache_key.clone(),
-            content,
-        }));
+        self.execution.borrow_mut().register_output(frame.output_key.clone(), content);
         bump(&self.metrics.gpu_preview_external_frames_registered);
         true
     }
 
     /// Clear any external GPU viewer frame currently advertised by the service.
     pub(crate) fn clear_external_viewer_frame(&self) {
-        self.external_viewer_frame.replace(None);
+        self.execution.borrow_mut().clear_output();
         bump(&self.metrics.gpu_preview_external_frames_cleared);
     }
 
@@ -1553,28 +1562,20 @@ impl AppUiPreviewService {
 
     fn clear_cached_frames_for_display_change(&self) {
         self.frame_store.borrow_mut().clear_viewer_frames();
-        self.external_viewer_frame.replace(None);
+        self.execution.borrow_mut().clear_output();
         self.invalidate_preview_generation();
         self.scheduler.prune_obsolete();
     }
 
     fn activate_preview_generation(&self, key: ViewerPreviewGenerationKey) -> u64 {
-        let mut last_key = self.last_generation_key.borrow_mut();
-        if last_key.as_ref() == Some(&key) {
-            return self.current_generation.get();
-        }
-        *last_key = Some(key);
-        let generation = self.scheduler.begin_generation();
-        self.current_generation.set(generation);
-        generation
+        self.execution
+            .borrow_mut()
+            .bind_generation(key, || self.scheduler.begin_generation())
+            .generation()
     }
 
     fn invalidate_preview_generation(&self) {
-        self.last_generation_key.replace(None);
-        self.current_presentation_quality
-            .set(mondrian_playback::FramePresentationQuality::Ready);
-        let generation = self.scheduler.begin_generation();
-        self.current_generation.set(generation);
+        self.execution.borrow_mut().invalidate(|| self.scheduler.begin_generation());
     }
 
     fn cached_viewer_frame(&self, key: &ViewerPreviewCacheKey) -> Option<ViewerFrameImage> {
@@ -1591,9 +1592,7 @@ impl AppUiPreviewService {
         &self,
         key: &ViewerPreviewCacheKey,
     ) -> Option<ViewerExternalTextureFrame> {
-        let frame = self.external_viewer_frame.borrow();
-        let frame = frame.as_ref()?;
-        (&frame.cache_key == key).then(|| frame.content.clone())
+        self.execution.borrow().output_for(key)
     }
 
     fn stale_viewer_content_for_sequence(
@@ -1602,11 +1601,11 @@ impl AppUiPreviewService {
         width: u32,
         height: u32,
     ) -> Option<ViewerFrameContent> {
-        self.external_viewer_frame
+        self.execution
             .borrow()
-            .as_ref()
-            .filter(|frame| frame.cache_key.sequence_id == sequence.id)
-            .map(|frame| ViewerFrameContent::ExternalTexture(frame.content.clone()))
+            .current_output()
+            .filter(|(key, _)| key.sequence_id == sequence.id)
+            .map(|(_, output)| ViewerFrameContent::ExternalTexture(output.clone()))
             .or_else(|| {
                 self.stale_frame_for_sequence(sequence, width, height)
                     .map(ViewerFrameContent::Raster)
@@ -2277,89 +2276,13 @@ use media_adapter::{
 mod timeline_evaluation;
 mod viewer_plan;
 
-pub(crate) use viewer_plan::ViewerPreviewCacheKey;
+use crate::app::preview_execution::PreviewOutputKey as ViewerPreviewCacheKey;
 use viewer_plan::{
     gpu_composite_layers_for_resolved, preview_elements_require_deferred_composite,
     resolved_preview_decode_execution, resolved_preview_presentation_quality,
     uncached_viewer_raster_frame_key, viewer_preview_cache_key_for_resolved_plan,
     viewer_raster_frame_key, ResolvedPreviewElement,
 };
-/// Result of asking the preview service for a GPU-output viewer frame candidate.
-pub(crate) enum AppUiGpuPreviewFrameState {
-    /// The current resolved viewer frame is already backed by a registered external texture.
-    Current,
-    /// A working-space frame is ready for GPU output-boundary recording.
-    Ready(Box<AppUiGpuPreviewFrame>),
-    /// Required media is still decoding or rendering.
-    Loading,
-    /// No viewer preview frame is expected for the current state.
-    Unavailable,
-}
-
-/// Working-space viewer frame plus the output boundary needed by the app-window GPU path.
-pub(crate) struct AppUiGpuPreviewFrame {
-    cache_key: ViewerPreviewCacheKey,
-    /// Active sequence that produced this frame.
-    pub sequence_id: SequenceId,
-    /// Timeline frame number.
-    pub frame: i64,
-    /// Preview frame width in pixels.
-    pub width: u32,
-    /// Preview frame height in pixels.
-    pub height: u32,
-    /// Timeline working color space represented by the working input.
-    pub working_color_space: WorkingColorSpace,
-    /// Working-space input that enters the GPU output boundary.
-    pub working_input: AppUiGpuPreviewWorkingInput,
-    /// Program Output boundary shared with delivery/export semantics.
-    pub program_output_boundary: RenderOutputColorBoundary,
-    /// Preview-only Program Output to local-monitor adaptation.
-    pub monitor_adaptation: RenderMonitorAdaptation,
-    /// Monotonic identifier for this working-frame candidate.
-    preview_candidate_id: u64,
-    /// Exact terminal delivery to emit only after presentation succeeds.
-    presentation_ticket: Option<mondrian_playback::FramePresentationTicket>,
-    /// Decode provenance of the exact media layers entering this candidate.
-    #[cfg_attr(not(test), allow(dead_code))]
-    decode_execution: AppUiPreviewDecodeExecutionSummary,
-}
-
-/// Working-space input for the app-window GPU output path.
-pub(crate) enum AppUiGpuPreviewWorkingInput {
-    /// Layer stack to composite directly on GPU before the GPU output transform.
-    GpuComposite {
-        /// Layers in bottom-to-top order.
-        layers: Vec<mondrian_renderer::ViewerGpuExecutionLayer>,
-    },
-}
-
-impl AppUiGpuPreviewFrame {
-    /// Stable external texture key for the resolved plan represented by this frame.
-    pub fn external_texture_key(&self) -> String {
-        format!(
-            "app-ui.viewer.gpu:{}:{}x{}:{:016x}",
-            self.sequence_id, self.width, self.height, self.cache_key.plan_signature
-        )
-    }
-
-    /// Candidate identifier for viewer output attempt correlation.
-    pub(crate) fn preview_candidate_id(&self) -> u64 {
-        self.preview_candidate_id
-    }
-
-    /// Exact playback delivery authorized for successful presentation.
-    pub(crate) const fn presentation_ticket(
-        &self,
-    ) -> Option<mondrian_playback::FramePresentationTicket> {
-        self.presentation_ticket
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) const fn decode_execution(&self) -> AppUiPreviewDecodeExecutionSummary {
-        self.decode_execution
-    }
-}
-
 impl ViewerPreviewSource for AppUiPreviewService {
     fn viewer_preview_for_state(&self, state: &AppState) -> ViewerPreviewState {
         self.render_preview(state)
@@ -2451,51 +2374,6 @@ pub(crate) struct MediaPreviewFrame {
     signature: u64,
     presentation_quality: mondrian_playback::FramePresentationQuality,
     decode_execution: AppUiPreviewDecodeExecutionSummary,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct AppUiPreviewDecodeExecutionSummary {
-    pub media_layers: u32,
-    pub software_cpu_layers: u32,
-    pub hardware_cpu_transfer_layers: u32,
-    pub hardware_native_layers: u32,
-    pub p010_10_bit_hardware_layers: u32,
-}
-
-impl AppUiPreviewDecodeExecutionSummary {
-    fn from_path(path: PreviewDecodeExecutionPath) -> Self {
-        let mut summary = Self { media_layers: 1, ..Self::default() };
-        match path {
-            PreviewDecodeExecutionPath::SoftwareCpu => summary.software_cpu_layers = 1,
-            PreviewDecodeExecutionPath::HardwareCpuTransfer { surface, sampling, .. } => {
-                summary.hardware_cpu_transfer_layers = 1;
-                if surface == DecodedVideoSurfaceFormat::P010 && sampling.bit_depth == 10 {
-                    summary.p010_10_bit_hardware_layers = 1;
-                }
-            }
-            PreviewDecodeExecutionPath::HardwareNative { surface, sampling, .. } => {
-                summary.hardware_native_layers = 1;
-                if surface == DecodedVideoSurfaceFormat::P010 && sampling.bit_depth == 10 {
-                    summary.p010_10_bit_hardware_layers = 1;
-                }
-            }
-        }
-        summary
-    }
-
-    pub(crate) fn accumulate(&mut self, other: Self) {
-        self.media_layers = self.media_layers.saturating_add(other.media_layers);
-        self.software_cpu_layers =
-            self.software_cpu_layers.saturating_add(other.software_cpu_layers);
-        self.hardware_cpu_transfer_layers = self
-            .hardware_cpu_transfer_layers
-            .saturating_add(other.hardware_cpu_transfer_layers);
-        self.hardware_native_layers =
-            self.hardware_native_layers.saturating_add(other.hardware_native_layers);
-        self.p010_10_bit_hardware_layers = self
-            .p010_10_bit_hardware_layers
-            .saturating_add(other.p010_10_bit_hardware_layers);
-    }
 }
 
 impl MediaPreviewFrame {
@@ -2712,12 +2590,6 @@ pub(crate) struct ScopedViewerFrame {
     pub(crate) frame: ViewerFrameImage,
 }
 
-#[derive(Debug, Clone)]
-struct ScopedExternalViewerFrame {
-    cache_key: ViewerPreviewCacheKey,
-    content: ViewerExternalTextureFrame,
-}
-
 #[derive(Debug)]
 struct MediaPreviewResult {
     key: MediaPreviewKey,
@@ -2777,7 +2649,7 @@ impl AppUiPreviewService {
         if !state.is_playing() {
             return;
         }
-        if self.current_frame_pending.get() {
+        if self.execution.borrow().is_pending() {
             bump(&self.metrics.prefetch_skipped_current_pending);
             return;
         }
@@ -3097,7 +2969,7 @@ impl AppUiPreviewService {
         demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
         adaptive_hints: PreviewDecodeAdaptiveHints,
     ) -> bool {
-        let generation = self.current_generation.get();
+        let generation = self.execution.borrow().generation();
         let is_current_playback = priority == MediaPreviewRequestPriority::Current
             && access_mode == PreviewDecodeAccessMode::PlaybackCursor;
         if is_current_playback
@@ -4392,8 +4264,8 @@ mod tests {
                 ));
             }
         }
-        assert!(frame.external_texture_key().starts_with("app-ui.viewer.gpu:"));
-        assert_eq!(frame.preview_candidate_id(), 1);
+        assert!(frame.external_texture_key().starts_with("viewer.gpu:"));
+        assert_eq!(frame.candidate_id(), 1);
         let ticket = frame.presentation_ticket().expect("paused current-frame presentation ticket");
         assert_eq!(ticket.deadline(), None);
         assert_eq!(ticket.identity().target_frame, state.current_frame());
@@ -4440,7 +4312,7 @@ mod tests {
             ColorSpace::Srgb
         );
         assert!(frame.monitor_adaptation.requires_pass());
-        assert_ne!(frame.cache_key, baseline_frame.cache_key);
+        assert_ne!(frame.output_key, baseline_frame.output_key);
     }
 
     #[test]
@@ -4849,7 +4721,7 @@ mod tests {
             _ => panic!("expected ready GPU preview candidate"),
         };
         let key = frame.external_texture_key();
-        let first_candidate_id = frame.preview_candidate_id();
+        let first_candidate_id = frame.candidate_id();
 
         assert!(service.set_external_viewer_frame(
             &frame,
@@ -4874,7 +4746,7 @@ mod tests {
             other => panic!("expected external GPU preview frame, got {other:?}"),
         }
         let diagnostics = service.diagnostics();
-        assert_eq!(frame.preview_candidate_id(), first_candidate_id);
+        assert_eq!(frame.candidate_id(), first_candidate_id);
         assert_eq!(diagnostics.gpu_preview_candidate_requests, 2);
         assert_eq!(diagnostics.gpu_preview_candidate_ready, 1);
         assert_eq!(diagnostics.gpu_preview_candidate_current, 1);
@@ -4887,7 +4759,7 @@ mod tests {
             AppUiGpuPreviewFrameState::Ready(frame) => frame,
             _ => panic!("expected new ready GPU preview candidate after external frame clear"),
         };
-        assert!(second_frame.preview_candidate_id() > first_candidate_id);
+        assert!(second_frame.candidate_id() > first_candidate_id);
     }
 
     #[test]
@@ -10222,7 +10094,7 @@ mod tests {
         let sequence = state.sequence.as_ref().expect("sequence");
         let (width, height) = preview_dimensions_for_sequence(sequence);
 
-        service.current_frame_pending.set(true);
+        service.execution.borrow_mut().set_pending(true);
         service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
 
         let diagnostics = service.diagnostics();
@@ -10240,7 +10112,7 @@ mod tests {
         let before = service.diagnostics();
         assert_eq!(before.scheduler.pending_requests, 1);
         assert_eq!(before.worker_queue.queued_jobs, 1);
-        assert!(service.current_frame_pending.get());
+        assert!(service.execution.borrow().is_pending());
 
         let outcome = service
             .expire_stalled_realtime_current_with_timeout(Duration::ZERO, Some(demand_identity));
@@ -10262,7 +10134,7 @@ mod tests {
         assert_eq!(diagnostics.scheduler.pending_requests, 0);
         assert_eq!(diagnostics.scheduler.canceled_requests, 1);
         assert_eq!(diagnostics.worker_queue.queued_jobs, 0);
-        assert!(!service.current_frame_pending.get());
+        assert!(!service.execution.borrow().is_pending());
     }
 
     #[test]
@@ -10369,7 +10241,7 @@ mod tests {
             service.jobs.enqueue(MediaPreviewJob {
                 key,
                 source_secs: 1.0,
-                generation: service.current_generation.get(),
+                generation: service.execution.borrow().generation(),
                 priority: MediaPreviewRequestPriority::Current,
                 access_mode: PreviewDecodeAccessMode::PlaybackCursor,
                 adaptive_hints: PreviewDecodeAdaptiveHints::default(),
@@ -10476,7 +10348,7 @@ mod tests {
         let service = AppUiPreviewService::new_without_workers_for_test();
         let still_key = test_media_key(205);
         let scrub_key = test_media_key(206);
-        let generation = service.current_generation.get();
+        let generation = service.execution.borrow().generation();
 
         assert_eq!(
             service.scheduler.request(
@@ -10762,7 +10634,7 @@ mod tests {
             media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
                 .expect("valid sequence frame rate");
         let generation = service.scheduler.begin_generation();
-        service.current_generation.set(generation);
+        service.execution.borrow_mut().invalidate(|| generation);
         let _prefetch = begin_test_media_execution(
             &service,
             test_media_key(350),
@@ -11414,7 +11286,7 @@ mod tests {
             mondrian_playback::FramePresentationQuality::Degraded,
             "cache admission must preserve executed hardware-fallback quality"
         );
-        service.current_presentation_quality.set(cached_quality);
+        service.execution.borrow_mut().set_presentation_quality(cached_quality);
         let ticket = service.playback_presentation_ticket(&state).expect("presentation ticket");
         let delivery = ticket.complete_at(mondrian_playback::MonotonicTimestamp::ZERO);
         assert_eq!(
@@ -11568,7 +11440,7 @@ mod tests {
 
         assert!(matches!(preview, ViewerPreviewState::Unavailable));
         assert!(
-            !service.current_frame_pending.get(),
+            !service.execution.borrow().is_pending(),
             "a cached decode failure is terminal evidence, not pending work"
         );
         service.shutdown();
