@@ -1368,8 +1368,8 @@ fn rekey_audio_scope(scope: &mut crate::audio::AudioProcessingScope) {
     rekey_optional_exact_curve(&mut scope.input_gain_automation);
     for processor in &mut scope.processors.processors {
         processor.id = AudioProcessorInstanceId::new();
-        for curve in processor.parameters.values_mut() {
-            rekey_exact_curve(curve);
+        for parameter in processor.parameters.values_mut() {
+            rekey_exact_curve(&mut parameter.automation);
         }
     }
 }
@@ -1379,8 +1379,8 @@ fn rekey_audio_channel_strip(strip: &mut crate::audio::AudioChannelStrip) {
     for rack in [&mut strip.pre_fader, &mut strip.post_fader] {
         for processor in &mut rack.processors {
             processor.id = AudioProcessorInstanceId::new();
-            for curve in processor.parameters.values_mut() {
-                rekey_exact_curve(curve);
+            for parameter in processor.parameters.values_mut() {
+                rekey_exact_curve(&mut parameter.automation);
             }
         }
     }

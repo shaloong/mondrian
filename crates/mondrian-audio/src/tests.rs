@@ -230,7 +230,7 @@ fn clip_track_bus_output_math_is_unclipped_and_block_invariant() {
     let scope_id = sequence.audio_tracks[0].clips[0].audio_components[0].processing.scope_id;
     let mut processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
     let curve = gain_curve(0.0, 6.0);
-    processor.parameters.insert(curve.parameter_id.clone(), curve);
+    processor.set_parameter_automation(curve).expect("valid gain automation");
     sequence
         .audio_program
         .processing_scopes
@@ -314,7 +314,9 @@ fn prepared_automation_event_spans_preserve_hold_bezier_and_block_partitioning()
     let scope_id = sequence.audio_tracks[0].clips[0].audio_components[0].processing.scope_id;
     let curve = hold_then_bezier_gain_curve();
     let mut processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
-    processor.parameters.insert(curve.parameter_id.clone(), curve.clone());
+    processor
+        .set_parameter_automation(curve.clone())
+        .expect("valid gain automation");
     sequence
         .audio_program
         .processing_scopes

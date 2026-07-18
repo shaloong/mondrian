@@ -113,7 +113,7 @@ The consumer-specific frame, shutter-sample, audio-sample, or parameter-event in
 _Avoid_: Persisted authoring time base, UI snap setting
 
 **Parameter Schema**:
-One versioned definition-stable contract for a parameter's `ParameterId`, value type, unit, numeric or enum constraints, allowed interpolation, localization message identity, and cache impact. Processor execution capabilities remain on the Processor/Effect Definition and compiled graph.
+One versioned definition-stable contract for a parameter's `ParameterId`, value type, definition default, automation capability, unit, numeric or enum constraints, admitted Hold/Linear/Bezier execution semantics, localization message identity, and cache impact. Editor presets such as Auto Bezier and Ease author Bezier handles and are not separate execution semantics. Processor execution capabilities remain on the Processor/Effect Definition and compiled graph.
 _Avoid_: Instance property path as identity, UI-only min/max, duplicated CPU/GPU or color-domain claims
 
 **Parameter Instance Address**:
@@ -157,7 +157,7 @@ A persistent typed connection between stable signal endpoints in one Audio Progr
 _Avoid_: Node-name connection, array-index connection, hidden fallback route
 
 **Audio Processor Instance**:
-A persistent built-in or external audio effect instance identified by a stable definition and stable parameters, with authored state independent of its loaded runtime.
+A persistent built-in or external audio effect instance identified by a stable definition. Each parameter captures the shared Parameter Schema plus one exact-time curve whose default is the unkeyed value, so unavailable external processors preserve editable author intent without a second static-value truth.
 _Avoid_: Video EffectNode, plugin file path, registry index, opaque JSON effect
 
 **Audio Processor Rack**:
@@ -285,6 +285,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - An **Audio Route** connects stable typed endpoints and can never target a **Generated Audio Stage**.
 - Every independently processable **Audio Processing Scope** and every **Audio Routing Node** may own explicitly placed **Audio Processor Racks** using the same **Audio Processor Instance** author model for built-ins, VST3, CLAP, and future host adapters.
 - An **Audio Processor Instance** addresses automation by stable instance and parameter identity; display names, property-path suffixes, plugin file paths, and parameter indexes are never authoritative.
+- Each Audio Processor parameter persists one validated **Parameter Schema** snapshot and one exact curve keyed by the same `ParameterId`; built-in compilation additionally requires an exact match to its canonical definition schema, while unavailable external dependencies retain the snapshot and opaque state but fail execution closed unless bypassed.
 - Component automation uses Audio Component Edit-local rational time, Scope automation uses Audio Processing Scope-local rational time, Track/Bus/Output automation uses Sequence-local rational time, and an **Audio Transition** interval is Sequence-local; compilation maps each domain once to exact sample offsets.
 - An **Audio Transition** names exactly two Audio Component Edits and does not affect other overlapping material; overlap without a Transition remains ordinary summing.
 - Every parallel input to a sum or Transition is delay-compensated from declared processor and nested latency; internal floating-point mixing neither normalizes, soft-clips, nor limits without an explicit authored processor.

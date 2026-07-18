@@ -7,8 +7,11 @@
 use crate::{clip::Clip, track::Track};
 use mondrian_core::{
     AudioComponentEditId, AudioProcessingScopeId, AudioProcessorInstanceId, AudioRoleId,
-    AudioRouteId, AudioSourceComponentId, AudioTransitionId, ClipId, ExactAutomationCurve,
-    MixBusId, ParameterId, ProgramOutputId, TimelineTime, TimelineTimeRange, TrackId,
+    AudioRouteId, AudioSourceComponentId, AudioTransitionId, AutomationSegmentInterpolation,
+    ClipId, ExactAutomationCurve, MixBusId, ParameterId, ParameterInterpolation,
+    ParameterInvalidValuePolicy, ParameterNumericContract, ParameterNumericRange, ParameterSchema,
+    ParameterUnit, ProgramOutputId, PropertyValue, PropertyValueType, TimelineTime,
+    TimelineTimeRange, TrackId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,6 +28,27 @@ pub const CLIP_VOLUME_DB_PARAMETER_ID: &str = "mondrian.audio.clip_volume.db";
 pub const CLIP_PAN_PARAMETER_ID: &str = "mondrian.audio.clip_pan";
 /// Stable parameter identity for a channel-strip fader in decibels.
 pub const FADER_DB_PARAMETER_ID: &str = "mondrian.audio.fader.db";
+
+/// Definition contract for the built-in gain processor's decibel parameter.
+///
+/// The hard interval protects DSP execution from non-finite or pathological
+/// persisted values. The narrower soft interval is the ordinary editor range;
+/// users can still enter the full hard interval explicitly.
+pub fn gain_parameter_schema() -> ParameterSchema {
+    ParameterSchema::v1(
+        ParameterId::new_static(GAIN_DB_PARAMETER_ID),
+        PropertyValue::Double(0.0),
+    )
+    .with_numeric_contract(
+        ParameterUnit::Decibels,
+        ParameterNumericContract {
+            hard_range: ParameterNumericRange { min: -120.0, max: 24.0 },
+            soft_range: ParameterNumericRange { min: -60.0, max: 12.0 },
+            step: Some(0.1),
+            invalid_value_policy: ParameterInvalidValuePolicy::Reject,
+        },
+    )
+}
 
 /// A persistent reference to one processor definition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +71,91 @@ pub enum AudioProcessorDefinitionRef {
     },
 }
 
+/// One processor parameter definition snapshot and its exact author-time value.
+///
+/// The schema remains editable and serializable when a plugin is unavailable.
+/// The curve owns both the current unkeyed value and any automation keys; there
+/// is no parallel static-value field that could disagree with it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioProcessorParameter {
+    /// Stable, versioned definition contract captured for this instance.
+    pub schema: ParameterSchema,
+    /// Exact owner-local parameter curve, including its unkeyed value.
+    pub automation: ExactAutomationCurve,
+}
+
+impl AudioProcessorParameter {
+    /// Create an unkeyed parameter from a validated numeric schema.
+    pub fn from_schema(schema: ParameterSchema) -> Result<Self, AudioAuthoringError> {
+        let default_value = schema
+            .default_value
+            .as_f64()
+            .ok_or(AudioAuthoringError::UnsupportedProcessorParameterType)?;
+        let automation = ExactAutomationCurve::new(schema.parameter_id.clone(), default_value)
+            .map_err(|error| AudioAuthoringError::InvalidAutomation {
+                reason: error.to_string(),
+            })?;
+        let parameter = Self { schema, automation };
+        parameter.validate()?;
+        Ok(parameter)
+    }
+
+    /// Replace the complete exact-time curve after validating it against the schema.
+    pub fn set_automation(
+        &mut self,
+        automation: ExactAutomationCurve,
+    ) -> Result<(), AudioAuthoringError> {
+        let candidate = Self { schema: self.schema.clone(), automation };
+        candidate.validate()?;
+        self.automation = candidate.automation;
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), AudioAuthoringError> {
+        self.schema
+            .validate()
+            .map_err(|error| AudioAuthoringError::InvalidParameterSchema {
+                reason: error.to_string(),
+            })?;
+        if self.schema.value_type != PropertyValueType::Double {
+            return Err(AudioAuthoringError::UnsupportedProcessorParameterType);
+        }
+        if self.schema.parameter_id != self.automation.parameter_id {
+            return Err(AudioAuthoringError::ParameterKeyMismatch);
+        }
+        validate_curve(&self.automation)?;
+        if !self.schema.is_animatable && !self.automation.keyframes.is_empty() {
+            return Err(AudioAuthoringError::ParameterDoesNotAdmitAutomation);
+        }
+        validate_parameter_value(&self.schema, self.automation.default_value)?;
+        for keyframe in &self.automation.keyframes {
+            validate_parameter_value(&self.schema, keyframe.value)?;
+            if let Some(handle) = keyframe.in_handle {
+                validate_parameter_value(&self.schema, keyframe.value + handle.value_offset)?;
+            }
+            if let Some(handle) = keyframe.out_handle {
+                validate_parameter_value(&self.schema, keyframe.value + handle.value_offset)?;
+            }
+        }
+        for keyframe in self
+            .automation
+            .keyframes
+            .iter()
+            .take(self.automation.keyframes.len().saturating_sub(1))
+        {
+            let interpolation = match keyframe.interpolation_to_next {
+                AutomationSegmentInterpolation::Hold => ParameterInterpolation::Hold,
+                AutomationSegmentInterpolation::Linear => ParameterInterpolation::Linear,
+                AutomationSegmentInterpolation::Bezier => ParameterInterpolation::Bezier,
+            };
+            if !self.schema.allowed_interpolations.contains(&interpolation) {
+                return Err(AudioAuthoringError::UnsupportedParameterInterpolation);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// One persistent processor instance used at every supported insertion point.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioProcessorInstance {
@@ -56,33 +165,56 @@ pub struct AudioProcessorInstance {
     pub definition: AudioProcessorDefinitionRef,
     /// Explicit user bypass state.
     pub bypassed: bool,
-    /// Parameter curves keyed by stable parameter identity.
-    pub parameters: BTreeMap<ParameterId, ExactAutomationCurve>,
+    /// Definition snapshots and curves keyed by stable parameter identity.
+    pub parameters: BTreeMap<ParameterId, AudioProcessorParameter>,
     /// Opaque, versioned plugin state preserved while a dependency is unavailable.
     pub opaque_state: Option<Vec<u8>>,
 }
 
 impl AudioProcessorInstance {
-    /// Create an empty built-in processor instance.
+    /// Create a built-in processor instance with its known definition schema.
     pub fn built_in(definition_id: impl Into<String>, schema_version: u32) -> Self {
+        let definition_id = definition_id.into();
+        let mut parameters = BTreeMap::new();
+        if definition_id == BUILTIN_GAIN_DEFINITION_ID && schema_version == 1 {
+            let schema = gain_parameter_schema();
+            let parameter_id = schema.parameter_id.clone();
+            let automation = ExactAutomationCurve {
+                parameter_id: parameter_id.clone(),
+                default_value: 0.0,
+                keyframes: Vec::new(),
+            };
+            parameters.insert(parameter_id, AudioProcessorParameter { schema, automation });
+        }
         Self {
             id: AudioProcessorInstanceId::new(),
-            definition: AudioProcessorDefinitionRef::BuiltIn {
-                definition_id: definition_id.into(),
-                schema_version,
-            },
+            definition: AudioProcessorDefinitionRef::BuiltIn { definition_id, schema_version },
             bypassed: false,
-            parameters: BTreeMap::new(),
+            parameters,
             opaque_state: None,
         }
     }
 
+    /// Replace one known parameter curve by exact stable identity.
+    pub fn set_parameter_automation(
+        &mut self,
+        automation: ExactAutomationCurve,
+    ) -> Result<(), AudioAuthoringError> {
+        let parameter = self
+            .parameters
+            .get_mut(&automation.parameter_id)
+            .ok_or(AudioAuthoringError::UnknownProcessorParameter)?;
+        parameter.set_automation(automation)
+    }
+
     fn validate(&self) -> Result<(), AudioAuthoringError> {
-        for (parameter_id, curve) in &self.parameters {
-            if parameter_id != &curve.parameter_id {
+        for (parameter_id, parameter) in &self.parameters {
+            if parameter_id != &parameter.schema.parameter_id
+                || parameter_id != &parameter.automation.parameter_id
+            {
                 return Err(AudioAuthoringError::ParameterKeyMismatch);
             }
-            validate_curve(curve)?;
+            parameter.validate()?;
         }
         Ok(())
     }
@@ -712,6 +844,22 @@ fn validate_curve(curve: &ExactAutomationCurve) -> Result<(), AudioAuthoringErro
         .map_err(|error| AudioAuthoringError::InvalidAutomation { reason: error.to_string() })
 }
 
+fn validate_parameter_value(
+    schema: &ParameterSchema,
+    value: f64,
+) -> Result<(), AudioAuthoringError> {
+    if !value.is_finite() {
+        return Err(AudioAuthoringError::InvalidProcessorParameterValue);
+    }
+    if schema
+        .numeric
+        .is_some_and(|numeric| value < numeric.hard_range.min || value > numeric.hard_range.max)
+    {
+        return Err(AudioAuthoringError::InvalidProcessorParameterValue);
+    }
+    Ok(())
+}
+
 fn validate_optional_curve(
     curve: &Option<ExactAutomationCurve>,
     expected_parameter: &str,
@@ -813,9 +961,27 @@ pub enum AudioAuthoringError {
     /// Track mixer state does not exactly match the Sequence audio Tracks.
     #[error("audio Track mixer channels do not match Sequence audio Tracks")]
     TrackChannelSetMismatch,
-    /// Stable parameter map key and curve identity disagree.
-    #[error("audio parameter map key does not match curve parameter identity")]
+    /// Stable parameter map key, schema identity, and curve identity disagree.
+    #[error("audio parameter map key, schema identity, and curve identity must match")]
     ParameterKeyMismatch,
+    /// A captured processor parameter schema is malformed.
+    #[error("invalid audio processor parameter schema: {reason}")]
+    InvalidParameterSchema { reason: String },
+    /// Processor parameters use exact double-precision host values.
+    #[error("audio processor parameters require a double-precision numeric schema")]
+    UnsupportedProcessorParameterType,
+    /// A parameter curve was supplied for an identity absent from the definition snapshot.
+    #[error("audio processor parameter is not present in the instance definition")]
+    UnknownProcessorParameter,
+    /// A non-animatable processor parameter contains keyframes.
+    #[error("audio processor parameter schema does not admit automation")]
+    ParameterDoesNotAdmitAutomation,
+    /// A curve uses an interpolation semantic not admitted by its schema.
+    #[error("audio processor parameter interpolation is not admitted by its schema")]
+    UnsupportedParameterInterpolation,
+    /// Default, keyframe, or Bezier control values violate the schema's hard range.
+    #[error("audio processor parameter value violates its schema")]
+    InvalidProcessorParameterValue,
     /// A persisted automation curve is invalid.
     #[error("invalid audio automation: {reason}")]
     InvalidAutomation { reason: String },
@@ -918,6 +1084,67 @@ mod tests {
             route.source,
             AudioRouteSource::Track { port: AudioChannelStripOutputPort::PostMute, .. }
         )));
+    }
+
+    #[test]
+    fn built_in_gain_owns_one_stable_schema_and_exact_curve() {
+        let processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        let parameter_id = ParameterId::new_static(GAIN_DB_PARAMETER_ID);
+        let parameter = processor.parameters.get(&parameter_id).expect("gain parameter");
+
+        assert_eq!(processor.parameters.len(), 1);
+        assert_eq!(parameter.schema, gain_parameter_schema());
+        assert_eq!(parameter.schema.value_type, PropertyValueType::Double);
+        assert_eq!(parameter.automation.parameter_id, parameter_id);
+        assert_eq!(parameter.automation.default_value, 0.0);
+        processor.validate().expect("valid built-in definition snapshot");
+    }
+
+    #[test]
+    fn processor_parameter_mutation_rejects_unknown_identity_and_hard_range_violations() {
+        let mut processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        let unknown =
+            ExactAutomationCurve::new(ParameterId::new_static("mondrian.audio.unknown"), 0.0)
+                .expect("finite curve");
+        assert_eq!(
+            processor.set_parameter_automation(unknown),
+            Err(AudioAuthoringError::UnknownProcessorParameter)
+        );
+
+        let out_of_range =
+            ExactAutomationCurve::new(ParameterId::new_static(GAIN_DB_PARAMETER_ID), 25.0)
+                .expect("finite curve");
+        assert_eq!(
+            processor.set_parameter_automation(out_of_range),
+            Err(AudioAuthoringError::InvalidProcessorParameterValue)
+        );
+    }
+
+    #[test]
+    fn processor_parameter_schema_governs_automation_and_interpolation() {
+        let parameter_id = ParameterId::new_static(GAIN_DB_PARAMETER_ID);
+        let mut processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        let parameter = processor.parameters.get_mut(&parameter_id).expect("gain parameter");
+        parameter.schema.allowed_interpolations = vec![ParameterInterpolation::Hold];
+        let mut curve = ExactAutomationCurve::new(parameter_id, 0.0).expect("curve");
+        curve
+            .set_keyframe(mondrian_core::ExactAutomationKeyframe::linear(
+                TimelineTime::ZERO,
+                0.0,
+            ))
+            .expect("first key");
+        curve
+            .set_keyframe(mondrian_core::ExactAutomationKeyframe::linear(
+                TimelineTime::ONE,
+                6.0,
+            ))
+            .expect("second key");
+        parameter.automation = curve;
+
+        assert_eq!(
+            processor.validate(),
+            Err(AudioAuthoringError::UnsupportedParameterInterpolation)
+        );
     }
 
     #[test]

@@ -575,8 +575,8 @@ fn prepare_rack_automation(
 ) -> Result<Vec<PreparedAutomationCurve>, AudioCompileError> {
     rack.processors
         .iter()
-        .filter_map(|processor| match processor {
-            CompiledProcessor::Gain { automation } => automation.as_ref(),
+        .map(|processor| match processor {
+            CompiledProcessor::Gain { automation } => automation,
         })
         .map(|curve| PreparedAutomationCurve::build(curve, owner_time_offset, sample_rate))
         .collect()
@@ -624,7 +624,7 @@ fn prepared_contribution_constant_gain_pan(
 fn constant_rack_gain_db(rack: &CompiledRack) -> Option<f64> {
     rack.processors.iter().try_fold(0.0, |sum, processor| match processor {
         CompiledProcessor::Gain { automation } => {
-            Some(sum + constant_curve_value(automation.as_ref(), 0.0)?)
+            Some(sum + constant_curve_value(Some(automation), 0.0)?)
         }
     })
 }

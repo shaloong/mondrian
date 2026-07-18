@@ -22,7 +22,7 @@ use migration::JsonMigrationRegistry;
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 8;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 9;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 1;
 
@@ -424,7 +424,10 @@ mod tests {
     use super::*;
     use mondrian_core::automation::{PropertyDescriptor, PropertyValue};
     use mondrian_core::effect_data::{EffectNode, EffectType};
-    use mondrian_core::{ParameterId, TimelineTime};
+    use mondrian_core::{ExactAutomationKeyframe, ParameterId, TimelineTime};
+    use mondrian_timeline::audio::{
+        AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID, GAIN_DB_PARAMETER_ID,
+    };
     use mondrian_timeline::{Clip, Sequence};
 
     fn missing_custom_engine(path: PathBuf) -> mondrian_core::ColorEngine {
@@ -582,6 +585,74 @@ mod tests {
             property.descriptor.schema.message_id,
             "mondrian.effect.builtin.gaussian_blur.radius.label"
         );
+    }
+
+    #[test]
+    fn audio_processor_schema_and_exact_curve_round_trip_without_plugin_resolution() {
+        let root = unique_temp_dir("audio-parameter-schema-round-trip");
+        let db_path = root.join("index.db");
+        fs::write(&db_path, b"sqlite placeholder").expect("write db");
+        let project_path = root.join("audio-parameter-schema.mdp");
+
+        let mut document = test_document();
+        let sequence = document.sequences.active_mut().expect("active sequence");
+        let track_id = sequence.audio_tracks[0].id;
+        let mut processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        let parameter_id = ParameterId::new_static(GAIN_DB_PARAMETER_ID);
+        let mut curve = processor.parameters[&parameter_id].automation.clone();
+        curve
+            .set_keyframe(ExactAutomationKeyframe::linear(TimelineTime::ZERO, -6.0))
+            .expect("gain key");
+        processor.set_parameter_automation(curve).expect("schema-compatible curve");
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track_id)
+            .expect("track channel")
+            .strip
+            .pre_fader
+            .processors
+            .push(processor);
+
+        save_project_archive(&document, &db_path, &project_path).expect("save project");
+        let reopened = read_project_document_from_archive(&project_path).expect("reopen project");
+        let sequence = reopened.sequences.active().expect("active reopened sequence");
+        let parameter =
+            &sequence.audio_program.track_channels[&track_id].strip.pre_fader.processors[0]
+                .parameters[&parameter_id];
+
+        assert_eq!(parameter.schema.parameter_id, parameter_id);
+        assert_eq!(parameter.schema.default_value, PropertyValue::Double(0.0));
+        assert_eq!(parameter.automation.keyframes[0].value, -6.0);
+    }
+
+    #[test]
+    fn project_validation_rejects_audio_processor_values_outside_schema() {
+        let mut document = test_document();
+        let sequence = document.sequences.active_mut().expect("active sequence");
+        let track_id = sequence.audio_tracks[0].id;
+        let mut processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        let parameter_id = ParameterId::new_static(GAIN_DB_PARAMETER_ID);
+        processor
+            .parameters
+            .get_mut(&parameter_id)
+            .expect("gain parameter")
+            .automation
+            .default_value = 25.0;
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track_id)
+            .expect("track channel")
+            .strip
+            .pre_fader
+            .processors
+            .push(processor);
+
+        let error = document
+            .validate()
+            .expect_err("invalid audio parameter must not enter a snapshot");
+        assert!(format!("{error:#}").contains("violates its schema"));
     }
 
     #[test]

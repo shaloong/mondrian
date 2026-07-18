@@ -83,9 +83,7 @@ pub enum CompiledAudioSource {
 /// Built-in processor operations currently admitted by the common executor.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CompiledProcessor {
-    Gain {
-        automation: Option<ExactAutomationCurve>,
-    },
+    Gain { automation: ExactAutomationCurve },
 }
 
 /// Ordered, immutable processor operations.

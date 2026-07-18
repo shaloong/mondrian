@@ -115,17 +115,24 @@ Every insertion point uses `AudioProcessorInstance`, regardless of whether the
 definition is built-in, VST3, CLAP, or a future host format. Author data keeps:
 
 - stable instance and definition identity;
-- schema version and stable Parameter IDs;
+- one versioned `ParameterSchema` snapshot per stable Parameter ID;
 - explicit bypass;
-- exact automation curves;
+- one exact curve per parameter, whose default is the unkeyed value;
 - opaque versioned external-plugin state.
 
 An unavailable dependency remains serializable and editable but is not
 executable. Compilation fails closed unless the instance is explicitly
 bypassed. Plugin path, scan order, parameter array index, and display name are
-never identity.
+never identity. Parameter map key, schema identity, and curve identity must be
+identical. Project validation rejects non-finite values, values and Bezier
+control points outside the hard range, disallowed interpolation mathematics,
+and keyframes on non-animatable parameters before an immutable snapshot exists.
 
-The current common executor admits built-in Gain schema 1. VST3/CLAP loading,
+The current common executor admits built-in Gain schema 1 only when its complete
+captured parameter schema equals the canonical definition. The required Gain
+parameter is never synthesized during compilation. Its hard interval is
+`[-120, +24] dB`, its ordinary editor interval is `[-60, +12] dB`, and invalid
+persisted values are rejected. VST3/CLAP loading,
 process isolation, layouts, state entry, latency, and parameter-delivery
 capabilities remain required work; no dry or flat fallback claims support.
 
@@ -185,10 +192,12 @@ Preparation now lowers the semantic graph into one dense execution schedule:
 - one explicitly selected scalar-reference or runtime-vectorized CPU kernel.
 
 The prepared schedule contains no authoring maps and the Session performs no
-Route search. Layout negotiation, processor realization, non-constant
-automation span segmentation, latency analysis, and PDC also belong here. The
-present executable processor set is zero-latency, so the runtime does not claim
-general plugin delay compensation. Any non-zero-latency processor must be
+Route search. Non-constant automation is validated once and lowered to ordered
+sample event spans; the Session advances span cursors instead of searching or
+validating author curves per sample. Layout negotiation, processor realization,
+plugin parameter-event batching, latency analysis, and PDC also belong here.
+The present executable processor set is zero-latency, so the runtime does not
+claim general plugin delay compensation. Any non-zero-latency processor must be
 rejected until preparation can produce a complete compensation plan.
 
 ### Stage 3: exclusive mutable Session

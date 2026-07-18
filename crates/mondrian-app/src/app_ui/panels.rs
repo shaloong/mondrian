@@ -1436,7 +1436,7 @@ impl InspectorPanelModel {
                                     hard_min: numeric.map(|contract| contract.hard_range.min),
                                     hard_max: numeric.map(|contract| contract.hard_range.max),
                                     step: numeric.and_then(|contract| contract.step),
-                                    is_animatable: property.descriptor.is_animatable,
+                                    is_animatable: property.descriptor.schema.is_animatable,
                                 }
                             })
                             .collect(),
@@ -8152,9 +8152,10 @@ mod tests {
             clip_id: ClipId::new(),
         };
         let property = InspectorEffectPropertyModel {
-            schema: ParameterSchema::v1(mondrian_core::ParameterId::new_static(
-                "mondrian.test.lighting_direction",
-            )),
+            schema: ParameterSchema::v1(
+                mondrian_core::ParameterId::new_static("mondrian.test.lighting_direction"),
+                PropertyValue::Vec3(glam::Vec3::new(0.1, 0.2, 0.3)),
+            ),
             path: "lighting.direction".to_string(),
             label: "Direction".to_string(),
             value: PropertyValue::Vec3(glam::Vec3::new(0.1, 0.2, 0.3)),
@@ -8230,9 +8231,10 @@ mod tests {
             clip_id: ClipId::new(),
         };
         let property = InspectorEffectPropertyModel {
-            schema: ParameterSchema::v1(mondrian_core::ParameterId::new_static(
-                "mondrian.test.color_exposure",
-            )),
+            schema: ParameterSchema::v1(
+                mondrian_core::ParameterId::new_static("mondrian.test.color_exposure"),
+                PropertyValue::Float(0.2),
+            ),
             path: "color.exposure".to_string(),
             label: "Exposure".to_string(),
             value: PropertyValue::Float(0.2),
@@ -8313,9 +8315,10 @@ mod tests {
             clip_id: ClipId::new(),
         };
         let property = InspectorEffectPropertyModel {
-            schema: ParameterSchema::v1(mondrian_core::ParameterId::new_static(
-                "mondrian.test.blur_radius",
-            )),
+            schema: ParameterSchema::v1(
+                mondrian_core::ParameterId::new_static("mondrian.test.blur_radius"),
+                PropertyValue::Float(0.2),
+            ),
             path: "blur.radius".to_string(),
             label: "Radius".to_string(),
             value: PropertyValue::Float(0.2),
@@ -8401,9 +8404,10 @@ mod tests {
             clip_id: ClipId::new(),
         };
         let property = InspectorEffectPropertyModel {
-            schema: ParameterSchema::v1(mondrian_core::ParameterId::new_static(
-                "mondrian.test.color_exposure",
-            )),
+            schema: ParameterSchema::v1(
+                mondrian_core::ParameterId::new_static("mondrian.test.color_exposure"),
+                PropertyValue::Float(0.2),
+            ),
             path: "color.exposure".to_string(),
             label: "Exposure".to_string(),
             value: PropertyValue::Float(0.2),
@@ -8481,9 +8485,10 @@ mod tests {
             clip_id: ClipId::new(),
         };
         let property = InspectorEffectPropertyModel {
-            schema: ParameterSchema::v1(mondrian_core::ParameterId::new_static(
-                "mondrian.test.level_iterations",
-            )),
+            schema: ParameterSchema::v1(
+                mondrian_core::ParameterId::new_static("mondrian.test.level_iterations"),
+                PropertyValue::Int(10),
+            ),
             path: "levels.iterations".to_string(),
             label: "Iterations".to_string(),
             value: PropertyValue::Int(10),

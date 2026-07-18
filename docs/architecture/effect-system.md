@@ -32,9 +32,14 @@ Every product property carries a versioned `ParameterSchema`. Its
 `ParameterId` is definition-stable and is the only identity accepted by effect
 execution. The string property path is an instance address for author commands
 and Inspector routing; renaming or re-namespacing that address must not rename
-the parameter. Effect registration rejects zero schema versions, empty message
-IDs, malformed ranges, invalid enum sets, and duplicate Parameter IDs before a
-definition enters the registry.
+the parameter. The schema owns value type, definition default, automation
+capability, unit/range, admitted Hold/Linear/Bezier mathematics, stable enum or
+resource intent, localization identity, and cache impact. Auto Bezier,
+Continuous Bezier, and Ease are editor presets that produce Bezier handles;
+they are not additional persisted execution semantics. Effect registration
+rejects zero schema versions, empty message IDs, malformed defaults/ranges,
+invalid enum sets, and duplicate Parameter IDs before a definition enters the
+registry.
 
 The schema is executable rather than decorative. `AnimatedProperty` enforces
 finite values, hard-range policy, allowed interpolation, dense channel layout,

@@ -100,7 +100,7 @@ is written with that field explicitly.
 
 Archive and document JSON pass through separate version registries before typed
 deserialization. During Alpha there are deliberately no legacy document steps:
-schema v8 is the sole accepted author schema, and older/future versions fail
+schema v9 is the sole accepted author schema, and older/future versions fail
 instead of being guessed. Version 5 introduced the explicit tagged
 `mondrian_standard` / `aces` / `custom_ocio` project contract and makes every
 Mondrian Standard package-identity field mandatory: product ID/version, config
@@ -117,10 +117,13 @@ single default-View identity with mandatory, independently typed SDR and
 1000-nit HDR View Transform IDs/versions. The Alpha format intentionally
 provides no alias, fallback, or migration from v5/v6; a missing or edited
 identity, missing parameter schema, or retired workflow fails closed. Version 8
-separates stable parameter identity from instance addresses and persists typed
-unit/range/interpolation/enum/resource/cache contracts. The registry remains the
-explicit seam for adding a real migration policy only when compatibility
-becomes a product promise.
+separates stable parameter identity from instance addresses. Version 9 makes
+value type, definition default, automation capability, unit/range,
+Hold/Linear/Bezier execution semantics, enum/resource intent, and cache impact
+one shared visual/audio `ParameterSchema`; audio Processor instances persist a
+schema snapshot beside their exact curve. The registry remains the explicit
+seam for adding a real migration policy only when compatibility becomes a
+product promise.
 
 SQLite schema ownership remains in `mondrian-assets`. Its ordered Registry uses
 `PRAGMA user_version`, applies each step in a transaction, validates the current
@@ -132,11 +135,12 @@ Future split-entry layouts require an archive migration and new
 SQLite migrates only in the extracted runtime copy. The source `.mdp` is never
 rewritten by open.
 
-Current document schema v8 persists canonical rational `TimelineTime` values
-directly and requires the stable visual `ParameterSchema` introduced after the
-time migration. It does not contain frame-oriented `TimeCode`, `TimeTicks`, or
-compatibility aliases. Alpha documents from earlier schemas are rejected rather
-than silently deriving parameter identity from instance-address strings.
+Current document schema v9 persists canonical rational `TimelineTime` values
+directly and requires the shared visual/audio `ParameterSchema`. It does not
+contain frame-oriented `TimeCode`, `TimeTicks`, descriptor-level duplicate
+defaults/types, editor-preset interpolation capabilities, or compatibility
+aliases. Alpha documents from earlier schemas are rejected rather than silently
+deriving parameter identity or parameter definition fields.
 
 The checked current document fixture lives under
 `crates/mondrian-project/tests/fixtures/current`; the SQLite upgrade fixture

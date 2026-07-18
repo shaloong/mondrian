@@ -5,8 +5,8 @@ use crate::plan::{
 };
 use mondrian_core::{AudioProcessingScopeId, MixBusId, ProgramOutputId, TrackId};
 use mondrian_timeline::audio::{
-    AudioChannelStrip, AudioComponentSource, AudioProcessorDefinitionRef, AudioProcessorRack,
-    AudioProgramOutput, AudioRoute, AudioRouteDestination, AudioRouteSource,
+    gain_parameter_schema, AudioChannelStrip, AudioComponentSource, AudioProcessorDefinitionRef,
+    AudioProcessorRack, AudioProgramOutput, AudioRoute, AudioRouteDestination, AudioRouteSource,
     ProgramOutputMainSource, BUILTIN_GAIN_DEFINITION_ID, GAIN_DB_PARAMETER_ID,
 };
 use mondrian_timeline::{AudioAuthoringError, Sequence};
@@ -199,10 +199,18 @@ fn compile_rack(rack: &AudioProcessorRack) -> Result<CompiledRack, AudioCompileE
             AudioProcessorDefinitionRef::BuiltIn { definition_id, schema_version }
                 if definition_id == BUILTIN_GAIN_DEFINITION_ID && *schema_version == 1 =>
             {
-                if processor.parameters.keys().any(|id| id.as_str() != GAIN_DB_PARAMETER_ID) {
+                if processor.parameters.len() != 1 {
                     return Err(AudioCompileError::UnsupportedBuiltInParameter);
                 }
-                let automation = processor.parameters.values().next().cloned();
+                let parameter_id = mondrian_core::ParameterId::new_static(GAIN_DB_PARAMETER_ID);
+                let parameter = processor
+                    .parameters
+                    .get(&parameter_id)
+                    .ok_or(AudioCompileError::UnsupportedBuiltInParameter)?;
+                if parameter.schema != gain_parameter_schema() {
+                    return Err(AudioCompileError::UnsupportedBuiltInParameter);
+                }
+                let automation = parameter.automation.clone();
                 processors.push(CompiledProcessor::Gain { automation });
             }
             AudioProcessorDefinitionRef::BuiltIn { definition_id, .. } => {

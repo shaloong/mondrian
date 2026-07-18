@@ -627,26 +627,26 @@ impl PropertyHost for Clip {
             }
         }
         let blend_mode_text = blend_mode_to_text(self.blend_mode);
-        let mut blend_mode_descriptor = PropertyDescriptor::new(
+        let blend_mode_descriptor = PropertyDescriptor::new(
             Self::BLEND_MODE_PATH,
             "混合模式",
             PropertyValue::Enum(blend_mode_text.clone()),
         )
         .with_parameter_id(ParameterId::new_static("mondrian.clip.blend_mode"))
-        .with_enum_options(blend_mode_options());
-        blend_mode_descriptor.is_animatable = false;
+        .with_enum_options(blend_mode_options())
+        .with_animatable(false);
         let mut blend_mode_property = AnimatedProperty::from_descriptor(blend_mode_descriptor);
         blend_mode_property.set_static_value(PropertyValue::Enum(blend_mode_text))?;
         properties.upsert(blend_mode_property);
         if self.is_solid_color() || self.solid_color.is_some() {
             let solid_color = self.solid_color.unwrap_or_else(|| Color::from_hex(0x000000));
-            let mut solid_color_descriptor = PropertyDescriptor::new(
+            let solid_color_descriptor = PropertyDescriptor::new(
                 Self::SOLID_COLOR_PATH,
                 "纯色",
                 PropertyValue::Color(solid_color),
             )
-            .with_parameter_id(ParameterId::new_static("mondrian.clip.solid_color"));
-            solid_color_descriptor.is_animatable = false;
+            .with_parameter_id(ParameterId::new_static("mondrian.clip.solid_color"))
+            .with_animatable(false);
             let mut solid_color_property =
                 AnimatedProperty::from_descriptor(solid_color_descriptor);
             solid_color_property.set_static_value(PropertyValue::Color(solid_color))?;
@@ -849,7 +849,7 @@ mod tests {
         let property =
             bag.property(Clip::BLEND_MODE_PATH).expect("blend mode property should exist");
 
-        assert!(!property.descriptor.is_animatable);
+        assert!(!property.descriptor.schema.is_animatable);
         assert_eq!(
             property.evaluate(tt(0)),
             PropertyValue::Enum("inherit".to_string())
@@ -878,7 +878,7 @@ mod tests {
         let property =
             bag.property(Clip::SOLID_COLOR_PATH).expect("solid color property should exist");
 
-        assert!(!property.descriptor.is_animatable);
+        assert!(!property.descriptor.schema.is_animatable);
         assert_eq!(property.evaluate(tt(0)), PropertyValue::Color(color));
     }
 

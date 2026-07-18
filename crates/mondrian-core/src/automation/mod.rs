@@ -28,6 +28,32 @@ pub enum InterpolationType {
     EaseOut,
 }
 
+/// Persisted interpolation mathematics shared by visual and audio parameters.
+///
+/// Auto/continuous/ease choices are editor presets that author Bezier handles;
+/// they are not distinct execution semantics and therefore do not enter a
+/// Parameter Schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ParameterInterpolation {
+    Hold,
+    Linear,
+    Bezier,
+}
+
+impl InterpolationType {
+    fn parameter_interpolation(self) -> ParameterInterpolation {
+        match self {
+            Self::Hold => ParameterInterpolation::Hold,
+            Self::Linear => ParameterInterpolation::Linear,
+            Self::Bezier
+            | Self::AutoBezier
+            | Self::ContinuousBezier
+            | Self::EaseIn
+            | Self::EaseOut => ParameterInterpolation::Bezier,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum KeyframeInterpolation {
     Hold,
@@ -168,12 +194,18 @@ pub struct ParameterSchema {
     pub schema_version: u32,
     /// Stable localization message identifier; never translated project data.
     pub message_id: String,
+    /// Definition-stable value representation.
+    pub value_type: PropertyValueType,
+    /// Definition default used by reset, missing automation, and migration.
+    pub default_value: PropertyValue,
+    /// Whether authoring may attach an automation curve.
+    pub is_animatable: bool,
     /// Physical/UI interpretation of numeric values.
     pub unit: ParameterUnit,
     /// Enforced numeric bounds and editor stepping, when numeric.
     pub numeric: Option<ParameterNumericContract>,
     /// Interpolation intents admitted by this schema.
-    pub allowed_interpolations: Vec<InterpolationType>,
+    pub allowed_interpolations: Vec<ParameterInterpolation>,
     /// Stable choices for `PropertyValue::Enum`; empty for other value types.
     pub enum_options: Vec<ParameterEnumOption>,
     /// Whether a value change can invalidate rendered or analysed output.
@@ -182,26 +214,75 @@ pub struct ParameterSchema {
 
 impl ParameterSchema {
     /// Construct the first schema revision for one stable parameter identity.
-    pub fn v1(parameter_id: ParameterId) -> Self {
+    pub fn v1(parameter_id: ParameterId, default_value: PropertyValue) -> Self {
         let message_id = format!("{}.label", parameter_id.as_str());
+        let value_type = default_value.value_type();
+        let is_animatable = value_type.supports_animation();
+        let allowed_interpolations = if matches!(
+            value_type,
+            PropertyValueType::Bool
+                | PropertyValueType::Int
+                | PropertyValueType::Enum
+                | PropertyValueType::Resource
+                | PropertyValueType::Text
+        ) {
+            vec![ParameterInterpolation::Hold]
+        } else {
+            vec![
+                ParameterInterpolation::Hold,
+                ParameterInterpolation::Linear,
+                ParameterInterpolation::Bezier,
+            ]
+        };
         Self {
             parameter_id,
             schema_version: 1,
             message_id,
+            value_type,
+            default_value,
+            is_animatable,
             unit: ParameterUnit::Unitless,
             numeric: None,
-            allowed_interpolations: vec![
-                InterpolationType::Hold,
-                InterpolationType::Linear,
-                InterpolationType::Bezier,
-                InterpolationType::AutoBezier,
-                InterpolationType::ContinuousBezier,
-                InterpolationType::EaseIn,
-                InterpolationType::EaseOut,
-            ],
+            allowed_interpolations,
             enum_options: Vec::new(),
             cache_impact: ParameterCacheImpact::Value,
         }
+    }
+
+    /// Attach a physical interpretation when no bounded numeric contract is needed.
+    pub fn with_unit(mut self, unit: ParameterUnit) -> Self {
+        self.unit = unit;
+        self
+    }
+
+    /// Attach one validated numeric contract and unit.
+    pub fn with_numeric_contract(
+        mut self,
+        unit: ParameterUnit,
+        numeric: ParameterNumericContract,
+    ) -> Self {
+        self.unit = unit;
+        self.numeric = Some(numeric);
+        self
+    }
+
+    /// Declare how this parameter participates in semantic cache invalidation.
+    pub fn with_cache_impact(mut self, cache_impact: ParameterCacheImpact) -> Self {
+        self.cache_impact = cache_impact;
+        self
+    }
+
+    /// Attach the stable option set used by a discrete enum parameter.
+    pub fn with_enum_options(mut self, options: Vec<ParameterEnumOption>) -> Self {
+        self.enum_options = options;
+        self.allowed_interpolations = vec![ParameterInterpolation::Hold];
+        self
+    }
+
+    /// Declare whether instances may carry automation.
+    pub fn with_animatable(mut self, is_animatable: bool) -> Self {
+        self.is_animatable = is_animatable;
+        self
     }
 
     /// Validate metadata that can also arrive from serialized plugin definitions.
@@ -220,6 +301,23 @@ impl ParameterSchema {
                 return Err(ParameterSchemaError::DuplicateInterpolation);
             }
         }
+        if self.value_type != self.default_value.value_type() {
+            return Err(ParameterSchemaError::ValueTypeMismatch);
+        }
+        if self.is_animatable && !self.value_type.supports_animation() {
+            return Err(ParameterSchemaError::UnsupportedAnimationType);
+        }
+        if matches!(
+            self.value_type,
+            PropertyValueType::Bool
+                | PropertyValueType::Int
+                | PropertyValueType::Enum
+                | PropertyValueType::Resource
+                | PropertyValueType::Text
+        ) && self.allowed_interpolations != [ParameterInterpolation::Hold]
+        {
+            return Err(ParameterSchemaError::InterpolationTypeMismatch);
+        }
         if let Some(numeric) = self.numeric {
             numeric.validate()?;
         }
@@ -229,6 +327,44 @@ impl ParameterSchema {
             }
             if self.enum_options[..index].iter().any(|previous| previous.key == option.key) {
                 return Err(ParameterSchemaError::DuplicateEnumOption);
+            }
+        }
+        match (&self.default_value, self.enum_options.is_empty()) {
+            (PropertyValue::Enum(key), false) => {
+                if !self.enum_options.iter().any(|option| option.key == *key) {
+                    return Err(ParameterSchemaError::UnknownEnumDefault);
+                }
+            }
+            (PropertyValue::Enum(_), true) | (_, false) => {
+                return Err(ParameterSchemaError::EnumOptionsMismatch);
+            }
+            _ => {}
+        }
+        if self.numeric.is_some()
+            && matches!(
+                self.value_type,
+                PropertyValueType::Bool
+                    | PropertyValueType::Enum
+                    | PropertyValueType::Resource
+                    | PropertyValueType::Text
+            )
+        {
+            return Err(ParameterSchemaError::NumericContractTypeMismatch);
+        }
+        if matches!(self.value_type, PropertyValueType::Resource)
+            && !matches!(
+                self.cache_impact,
+                ParameterCacheImpact::Resource | ParameterCacheImpact::Topology
+            )
+        {
+            return Err(ParameterSchemaError::ResourceCacheImpactRequired);
+        }
+        for value in self.default_value.to_channel_values() {
+            if !value.is_finite() {
+                return Err(ParameterSchemaError::NonFiniteDefaultValue);
+            }
+            if self.numeric.is_some_and(|numeric| !numeric.hard_range.contains(value)) {
+                return Err(ParameterSchemaError::DefaultValueOutsideHardRange);
             }
         }
         Ok(())
@@ -351,6 +487,14 @@ pub enum ParameterSchemaError {
     NumericContractTypeMismatch,
     #[error("descriptor value type does not match its default value")]
     ValueTypeMismatch,
+    #[error("parameter value type cannot be animated")]
+    UnsupportedAnimationType,
+    #[error("parameter interpolation modes are incompatible with its value type")]
+    InterpolationTypeMismatch,
+    #[error("parameter default numeric values must be finite")]
+    NonFiniteDefaultValue,
+    #[error("parameter default value must lie inside its hard range")]
+    DefaultValueOutsideHardRange,
     #[error("resource parameters must declare resource cache impact")]
     ResourceCacheImpactRequired,
     #[error("parameter range endpoints must be finite")]
@@ -753,17 +897,8 @@ pub struct PropertyDescriptor {
     /// Current authoring/UI address alias. Execution must use `schema.parameter_id`.
     pub path: String,
     pub display_name: String,
-    pub default_value: PropertyValue,
-    #[serde(default)]
-    pub value_type: Option<PropertyValueType>,
-    #[serde(default = "default_property_animatable")]
-    pub is_animatable: bool,
     #[serde(default)]
     pub ui_metadata: AnimatablePropertyUiMetadata,
-}
-
-const fn default_property_animatable() -> bool {
-    true
 }
 
 impl PropertyDescriptor {
@@ -783,28 +918,14 @@ impl PropertyDescriptor {
         let parameter_id = ParameterId::new(derived_id.clone()).unwrap_or_else(|error| {
             panic!("property address `{path}` cannot derive `{derived_id}`: {error}")
         });
-        let mut schema = ParameterSchema::v1(parameter_id);
-        if matches!(
-            default_value.value_type(),
-            PropertyValueType::Bool
-                | PropertyValueType::Int
-                | PropertyValueType::Enum
-                | PropertyValueType::Resource
-                | PropertyValueType::Text
-        ) {
-            schema.allowed_interpolations = vec![InterpolationType::Hold];
-        }
-        let value_type = default_value.value_type();
-        if matches!(value_type, PropertyValueType::Resource) {
+        let mut schema = ParameterSchema::v1(parameter_id, default_value);
+        if matches!(schema.value_type, PropertyValueType::Resource) {
             schema.cache_impact = ParameterCacheImpact::Resource;
         }
         Self {
             schema,
             path,
             display_name: display_name.into(),
-            value_type: Some(value_type),
-            default_value,
-            is_animatable: value_type.supports_animation(),
             ui_metadata: AnimatablePropertyUiMetadata::default(),
         }
     }
@@ -818,13 +939,13 @@ impl PropertyDescriptor {
 
     /// Declare how this parameter participates in semantic cache invalidation.
     pub fn with_cache_impact(mut self, cache_impact: ParameterCacheImpact) -> Self {
-        self.schema.cache_impact = cache_impact;
+        self.schema = self.schema.with_cache_impact(cache_impact);
         self
     }
 
     /// Attach a physical interpretation when no bounded numeric contract is needed.
     pub fn with_unit(mut self, unit: ParameterUnit) -> Self {
-        self.schema.unit = unit;
+        self.schema = self.schema.with_unit(unit);
         self
     }
 
@@ -834,15 +955,19 @@ impl PropertyDescriptor {
         unit: ParameterUnit,
         numeric: ParameterNumericContract,
     ) -> Self {
-        self.schema.unit = unit;
-        self.schema.numeric = Some(numeric);
+        self.schema = self.schema.with_numeric_contract(unit, numeric);
         self
     }
 
     /// Attach the stable option set used by a discrete enum parameter.
     pub fn with_enum_options(mut self, options: Vec<ParameterEnumOption>) -> Self {
-        self.schema.enum_options = options;
-        self.schema.allowed_interpolations = vec![InterpolationType::Hold];
+        self.schema = self.schema.with_enum_options(options);
+        self
+    }
+
+    /// Declare whether instances may carry automation.
+    pub fn with_animatable(mut self, is_animatable: bool) -> Self {
+        self.schema = self.schema.with_animatable(is_animatable);
         self
     }
 
@@ -853,42 +978,7 @@ impl PropertyDescriptor {
 
     /// Validate the relationship between value type, default value and schema.
     pub fn validate(&self) -> std::result::Result<(), ParameterSchemaError> {
-        self.schema.validate()?;
-        let value_type = self.value_type.unwrap_or_else(|| self.default_value.value_type());
-        if value_type != self.default_value.value_type() {
-            return Err(ParameterSchemaError::ValueTypeMismatch);
-        }
-        match (&self.default_value, self.schema.enum_options.is_empty()) {
-            (PropertyValue::Enum(key), false) => {
-                if !self.schema.enum_options.iter().any(|option| option.key == *key) {
-                    return Err(ParameterSchemaError::UnknownEnumDefault);
-                }
-            }
-            (PropertyValue::Enum(_), true) | (_, false) => {
-                return Err(ParameterSchemaError::EnumOptionsMismatch);
-            }
-            _ => {}
-        }
-        if self.schema.numeric.is_some()
-            && matches!(
-                value_type,
-                PropertyValueType::Bool
-                    | PropertyValueType::Enum
-                    | PropertyValueType::Resource
-                    | PropertyValueType::Text
-            )
-        {
-            return Err(ParameterSchemaError::NumericContractTypeMismatch);
-        }
-        if matches!(value_type, PropertyValueType::Resource)
-            && !matches!(
-                self.schema.cache_impact,
-                ParameterCacheImpact::Resource | ParameterCacheImpact::Topology
-            )
-        {
-            return Err(ParameterSchemaError::ResourceCacheImpactRequired);
-        }
-        Ok(())
+        self.schema.validate()
     }
 }
 
@@ -1020,10 +1110,9 @@ pub struct AnimatedProperty {
 
 impl AnimatedProperty {
     pub fn from_descriptor(descriptor: PropertyDescriptor) -> Self {
-        let value_type =
-            descriptor.value_type.unwrap_or_else(|| descriptor.default_value.value_type());
-        let static_value = descriptor.default_value.clone();
-        let channel_count = if descriptor.is_animatable && value_type.supports_animation() {
+        let value_type = descriptor.schema.value_type;
+        let static_value = descriptor.schema.default_value.clone();
+        let channel_count = if descriptor.schema.is_animatable && value_type.supports_animation() {
             value_type.channel_count()
         } else {
             0
@@ -1043,10 +1132,16 @@ impl AnimatedProperty {
             step_id: "parameter_schema_validation".to_string(),
             reason: format!("{}: {error}", self.descriptor.path),
         })?;
-        let _ = self.normalize_value(self.descriptor.default_value.clone())?;
-        let _ = self.normalize_value(self.static_value.clone())?;
+        let _ = self.normalize_value(self.descriptor.schema.default_value.clone())?;
+        let normalized_static = self.normalize_value(self.static_value.clone())?;
+        if normalized_static != self.static_value {
+            return Err(parameter_value_error(
+                &self.descriptor.path,
+                "persisted value lies outside the parameter hard range",
+            ));
+        }
         let expected_channels =
-            if self.descriptor.is_animatable && self.value_type().supports_animation() {
+            if self.descriptor.schema.is_animatable && self.value_type().supports_animation() {
                 self.value_type().channel_count()
             } else {
                 0
@@ -1074,6 +1169,12 @@ impl AnimatedProperty {
                 }
                 previous_time = Some(keyframe.time);
                 let value = self.normalize_numeric_channel(keyframe.value)?;
+                if value != keyframe.value {
+                    return Err(parameter_value_error(
+                        &self.descriptor.path,
+                        "persisted keyframe lies outside the parameter hard range",
+                    ));
+                }
                 if matches!(self.value_type(), PropertyValueType::Enum)
                     && (value.fract() != 0.0
                         || value < 0.0
@@ -1095,7 +1196,7 @@ impl AnimatedProperty {
     }
 
     pub fn value_type(&self) -> PropertyValueType {
-        self.descriptor.value_type.unwrap_or_else(|| self.static_value.value_type())
+        self.descriptor.schema.value_type
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -1190,7 +1291,7 @@ impl AnimatedProperty {
     }
 
     pub fn enable_animation(&mut self, time: TimelineTime) -> Result<()> {
-        if !self.descriptor.is_animatable || !self.value_type().supports_animation() {
+        if !self.descriptor.schema.is_animatable || !self.value_type().supports_animation() {
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "property_enable_animation".to_string(),
                 reason: format!("属性不支持关键帧: {}", self.descriptor.path),
@@ -1213,7 +1314,7 @@ impl AnimatedProperty {
     }
 
     pub fn disable_animation(&mut self, time: TimelineTime) -> Result<()> {
-        if !self.descriptor.is_animatable || !self.value_type().supports_animation() {
+        if !self.descriptor.schema.is_animatable || !self.value_type().supports_animation() {
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "property_disable_animation".to_string(),
                 reason: format!("属性不支持关键帧: {}", self.descriptor.path),
@@ -1242,7 +1343,10 @@ impl AnimatedProperty {
         let value = self.normalize_value(value)?;
         let channel_values = self.value_to_channel_values(&value)?;
         let updates = channel_values.into_iter().enumerate().collect::<Vec<(usize, f64)>>();
-        if self.animation_enabled && self.descriptor.is_animatable && !self.channels.is_empty() {
+        if self.animation_enabled
+            && self.descriptor.schema.is_animatable
+            && !self.channels.is_empty()
+        {
             self.write_channels(time, &updates, interpolation, handles)
         } else {
             self.static_value = value;
@@ -1297,9 +1401,12 @@ impl AnimatedProperty {
             .map(|(index, value)| Ok((*index, self.normalize_numeric_channel(*value)?)))
             .collect::<Result<Vec<_>>>()?;
 
-        if self.animation_enabled && self.descriptor.is_animatable && !self.channels.is_empty() {
+        if self.animation_enabled
+            && self.descriptor.schema.is_animatable
+            && !self.channels.is_empty()
+        {
             let normalized = self.value_type().normalized_interpolation(interpolation);
-            self.ensure_interpolation_allowed(normalized)?;
+            self.ensure_interpolation_allowed(normalized.parameter_interpolation())?;
             for (index, value) in &channel_values {
                 let channel = self.channels.get_mut(*index).ok_or_else(|| {
                     MondrianError::WorkflowStepFailed {
@@ -1421,7 +1528,7 @@ impl AnimatedProperty {
         time: TimelineTime,
         interpolation: InterpolationType,
     ) -> Result<()> {
-        if !self.descriptor.is_animatable || !self.value_type().supports_animation() {
+        if !self.descriptor.schema.is_animatable || !self.value_type().supports_animation() {
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "property_update_keyframe_interpolation".to_string(),
                 reason: format!("属性不支持关键帧: {}", self.descriptor.path),
@@ -1429,7 +1536,7 @@ impl AnimatedProperty {
         }
 
         let normalized = self.value_type().normalized_interpolation(interpolation);
-        self.ensure_interpolation_allowed(normalized)?;
+        self.ensure_interpolation_allowed(normalized.parameter_interpolation())?;
         let mut updated_any = false;
 
         for channel in &mut self.channels {
@@ -1491,7 +1598,7 @@ impl AnimatedProperty {
         interp_in: KeyframeInterpolation,
         interp_out: KeyframeInterpolation,
     ) -> Result<()> {
-        self.ensure_interpolation_allowed(InterpolationType::Bezier)?;
+        self.ensure_interpolation_allowed(ParameterInterpolation::Bezier)?;
         let channel = self.channels.get_mut(channel_index).ok_or_else(|| {
             MondrianError::WorkflowStepFailed {
                 step_id: "property_update_channel_keyframe_handles".to_string(),
@@ -1592,7 +1699,7 @@ impl AnimatedProperty {
     fn normalize_value(&self, value: PropertyValue) -> Result<PropertyValue> {
         ensure_value_compatible(
             &self.descriptor.path,
-            &self.descriptor.default_value,
+            &self.descriptor.schema.default_value,
             &value,
         )?;
         if let PropertyValue::Enum(key) = &value {
@@ -1680,7 +1787,7 @@ impl AnimatedProperty {
         }
     }
 
-    fn ensure_interpolation_allowed(&self, interpolation: InterpolationType) -> Result<()> {
+    fn ensure_interpolation_allowed(&self, interpolation: ParameterInterpolation) -> Result<()> {
         if self.descriptor.schema.allowed_interpolations.contains(&interpolation) {
             Ok(())
         } else {
@@ -1711,13 +1818,17 @@ impl AnimatedProperty {
             }
             PropertyMutation::SetStaticValue { path, value } => {
                 self.ensure_path(&path)?;
-                ensure_value_compatible(&path, &self.descriptor.default_value, &value)?;
+                ensure_value_compatible(&path, &self.descriptor.schema.default_value, &value)?;
                 self.set_static_value(value)
             }
             PropertyMutation::SetKeyframe { path, keyframe } => {
                 self.ensure_path(&path)?;
-                ensure_value_compatible(&path, &self.descriptor.default_value, &keyframe.value)?;
-                if !self.descriptor.is_animatable {
+                ensure_value_compatible(
+                    &path,
+                    &self.descriptor.schema.default_value,
+                    &keyframe.value,
+                )?;
+                if !self.descriptor.schema.is_animatable {
                     return Err(MondrianError::WorkflowStepFailed {
                         step_id: "property_set_keyframe".to_string(),
                         reason: format!("属性不支持关键帧: {path}"),
@@ -1771,7 +1882,7 @@ impl AnimatedProperty {
             }
             PropertyMutation::WriteValue { path, time, value, interpolation } => {
                 self.ensure_path(&path)?;
-                ensure_value_compatible(&path, &self.descriptor.default_value, &value)?;
+                ensure_value_compatible(&path, &self.descriptor.schema.default_value, &value)?;
                 self.write_value(time, value, interpolation, None)
             }
             PropertyMutation::WriteChannels { path, time, channel_values, interpolation } => {
@@ -1856,8 +1967,12 @@ impl PropertyBag {
 
     pub fn set_keyframe(&mut self, path: &str, keyframe: Keyframe<PropertyValue>) -> Result<()> {
         let property = self.require_property_mut(path)?;
-        ensure_value_compatible(path, &property.descriptor.default_value, &keyframe.value)?;
-        if !property.descriptor.is_animatable {
+        ensure_value_compatible(
+            path,
+            &property.descriptor.schema.default_value,
+            &keyframe.value,
+        )?;
+        if !property.descriptor.schema.is_animatable {
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: "property_set_keyframe".to_string(),
                 reason: format!("属性不支持关键帧: {path}"),
@@ -1891,7 +2006,7 @@ impl PropertyBag {
         interpolation: InterpolationType,
     ) -> Result<()> {
         let property = self.require_property_mut(path)?;
-        ensure_value_compatible(path, &property.descriptor.default_value, &value)?;
+        ensure_value_compatible(path, &property.descriptor.schema.default_value, &value)?;
         property.write_value(time, value, interpolation, None)
     }
 
@@ -2210,7 +2325,7 @@ fn parameter_value_error(path: &str, reason: &str) -> MondrianError {
     }
 }
 
-fn keyframe_interpolation_type(keyframe: &Keyframe<PropertyValue>) -> InterpolationType {
+fn keyframe_interpolation_type(keyframe: &Keyframe<PropertyValue>) -> ParameterInterpolation {
     interpolation_type_from_parts(
         keyframe.interp_in,
         keyframe.interp_out,
@@ -2218,7 +2333,7 @@ fn keyframe_interpolation_type(keyframe: &Keyframe<PropertyValue>) -> Interpolat
     )
 }
 
-fn channel_keyframe_interpolation_type(keyframe: &Keyframe<f64>) -> InterpolationType {
+fn channel_keyframe_interpolation_type(keyframe: &Keyframe<f64>) -> ParameterInterpolation {
     interpolation_type_from_parts(
         keyframe.interp_in,
         keyframe.interp_out,
@@ -2230,21 +2345,19 @@ fn interpolation_type_from_parts(
     interp_in: KeyframeInterpolation,
     interp_out: KeyframeInterpolation,
     temporal_flags: KeyframeTemporalFlags,
-) -> InterpolationType {
-    if temporal_flags.auto_bezier {
-        InterpolationType::AutoBezier
-    } else if temporal_flags.continuous {
-        InterpolationType::ContinuousBezier
+) -> ParameterInterpolation {
+    if temporal_flags.auto_bezier || temporal_flags.continuous {
+        ParameterInterpolation::Bezier
     } else if matches!(interp_in, KeyframeInterpolation::Hold)
         || matches!(interp_out, KeyframeInterpolation::Hold)
     {
-        InterpolationType::Hold
+        ParameterInterpolation::Hold
     } else if matches!(interp_in, KeyframeInterpolation::Linear)
         && matches!(interp_out, KeyframeInterpolation::Linear)
     {
-        InterpolationType::Linear
+        ParameterInterpolation::Linear
     } else {
-        InterpolationType::Bezier
+        ParameterInterpolation::Bezier
     }
 }
 
@@ -2363,6 +2476,15 @@ mod tests {
         assert_eq!(property.descriptor.parameter_id(), &id);
         assert_eq!(property.descriptor.schema.schema_version, 1);
         assert_eq!(
+            property.descriptor.schema.value_type,
+            PropertyValueType::Float
+        );
+        assert_eq!(
+            property.descriptor.schema.default_value,
+            PropertyValue::Float(4.0)
+        );
+        assert!(property.descriptor.schema.is_animatable);
+        assert_eq!(
             property.descriptor.schema.cache_impact,
             ParameterCacheImpact::Value
         );
@@ -2390,6 +2512,30 @@ mod tests {
             decoded.descriptor.path,
             "effect.instance-renamed.radius_alias"
         );
+    }
+
+    #[test]
+    fn editor_interpolation_presets_lower_to_persisted_execution_semantics() {
+        assert_eq!(
+            InterpolationType::Hold.parameter_interpolation(),
+            ParameterInterpolation::Hold
+        );
+        assert_eq!(
+            InterpolationType::Linear.parameter_interpolation(),
+            ParameterInterpolation::Linear
+        );
+        for preset in [
+            InterpolationType::Bezier,
+            InterpolationType::AutoBezier,
+            InterpolationType::ContinuousBezier,
+            InterpolationType::EaseIn,
+            InterpolationType::EaseOut,
+        ] {
+            assert_eq!(
+                preset.parameter_interpolation(),
+                ParameterInterpolation::Bezier
+            );
+        }
     }
 
     #[test]
@@ -2475,10 +2621,30 @@ mod tests {
     }
 
     #[test]
+    fn clamp_is_an_edit_policy_not_a_persisted_state_escape_hatch() {
+        let numeric =
+            ParameterNumericContract::closed(0.0, 1.0, None, ParameterInvalidValuePolicy::Clamp)
+                .expect("valid numeric contract");
+        let descriptor =
+            PropertyDescriptor::new("transform.opacity", "Opacity", PropertyValue::Float(1.0))
+                .with_numeric_contract(ParameterUnit::Normalized, numeric);
+        let mut property = AnimatedProperty::from_descriptor(descriptor);
+        property.set_static_value(PropertyValue::Float(2.0)).expect("edit input clamps");
+        assert_eq!(property.static_value(), &PropertyValue::Float(1.0));
+
+        property.static_value = PropertyValue::Float(2.0);
+        assert!(property
+            .validate()
+            .expect_err("persisted out-of-range state must fail closed")
+            .to_string()
+            .contains("persisted value lies outside"));
+    }
+
+    #[test]
     fn parameter_interpolation_contract_rejects_unlisted_presets() {
         let mut descriptor =
             PropertyDescriptor::new("effect.step.mode", "Step", PropertyValue::Float(0.0));
-        descriptor.schema.allowed_interpolations = vec![InterpolationType::Hold];
+        descriptor.schema.allowed_interpolations = vec![ParameterInterpolation::Hold];
         let mut property = AnimatedProperty::from_descriptor(descriptor);
         property.set_animation_enabled(true);
 

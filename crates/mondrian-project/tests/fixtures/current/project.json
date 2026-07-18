@@ -1,5 +1,5 @@
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "project_id": "97f12455-ec34-4b5d-a696-3da93cd914d7",
   "document_revision": 1,
   "meta": {
@@ -125,6 +125,11 @@
                   "parameter_id": "mondrian.track.opacity",
                   "schema_version": 1,
                   "message_id": "mondrian.track.opacity.label",
+                  "value_type": "Float",
+                  "default_value": {
+                    "Float": 1.0
+                  },
+                  "is_animatable": true,
                   "unit": "normalized",
                   "numeric": {
                     "hard_range": { "min": 0.0, "max": 1.0 },
@@ -133,19 +138,13 @@
                     "invalid_value_policy": "reject"
                   },
                   "allowed_interpolations": [
-                    "Hold", "Linear", "Bezier", "AutoBezier",
-                    "ContinuousBezier", "EaseIn", "EaseOut"
+                    "Hold", "Linear", "Bezier"
                   ],
                   "enum_options": [],
                   "cache_impact": "value"
                 },
                 "path": "track.opacity",
                 "display_name": "轨道不透明度",
-                "default_value": {
-                  "Float": 1.0
-                },
-                "value_type": "Float",
-                "is_animatable": true,
                 "ui_metadata": {
                   "group_name": null,
                   "supports_spatial": false
@@ -180,6 +179,11 @@
                   "parameter_id": "mondrian.track.opacity",
                   "schema_version": 1,
                   "message_id": "mondrian.track.opacity.label",
+                  "value_type": "Float",
+                  "default_value": {
+                    "Float": 1.0
+                  },
+                  "is_animatable": true,
                   "unit": "normalized",
                   "numeric": {
                     "hard_range": { "min": 0.0, "max": 1.0 },
@@ -188,19 +192,13 @@
                     "invalid_value_policy": "reject"
                   },
                   "allowed_interpolations": [
-                    "Hold", "Linear", "Bezier", "AutoBezier",
-                    "ContinuousBezier", "EaseIn", "EaseOut"
+                    "Hold", "Linear", "Bezier"
                   ],
                   "enum_options": [],
                   "cache_impact": "value"
                 },
                 "path": "track.opacity",
                 "display_name": "轨道不透明度",
-                "default_value": {
-                  "Float": 1.0
-                },
-                "value_type": "Float",
-                "is_animatable": true,
                 "ui_metadata": {
                   "group_name": null,
                   "supports_spatial": false
@@ -235,6 +233,11 @@
                   "parameter_id": "mondrian.track.opacity",
                   "schema_version": 1,
                   "message_id": "mondrian.track.opacity.label",
+                  "value_type": "Float",
+                  "default_value": {
+                    "Float": 1.0
+                  },
+                  "is_animatable": true,
                   "unit": "normalized",
                   "numeric": {
                     "hard_range": { "min": 0.0, "max": 1.0 },
@@ -243,19 +246,13 @@
                     "invalid_value_policy": "reject"
                   },
                   "allowed_interpolations": [
-                    "Hold", "Linear", "Bezier", "AutoBezier",
-                    "ContinuousBezier", "EaseIn", "EaseOut"
+                    "Hold", "Linear", "Bezier"
                   ],
                   "enum_options": [],
                   "cache_impact": "value"
                 },
                 "path": "track.opacity",
                 "display_name": "轨道不透明度",
-                "default_value": {
-                  "Float": 1.0
-                },
-                "value_type": "Float",
-                "is_animatable": true,
                 "ui_metadata": {
                   "group_name": null,
                   "supports_spatial": false
@@ -292,6 +289,11 @@
                   "parameter_id": "mondrian.track.opacity",
                   "schema_version": 1,
                   "message_id": "mondrian.track.opacity.label",
+                  "value_type": "Float",
+                  "default_value": {
+                    "Float": 1.0
+                  },
+                  "is_animatable": true,
                   "unit": "normalized",
                   "numeric": {
                     "hard_range": { "min": 0.0, "max": 1.0 },
@@ -300,19 +302,13 @@
                     "invalid_value_policy": "reject"
                   },
                   "allowed_interpolations": [
-                    "Hold", "Linear", "Bezier", "AutoBezier",
-                    "ContinuousBezier", "EaseIn", "EaseOut"
+                    "Hold", "Linear", "Bezier"
                   ],
                   "enum_options": [],
                   "cache_impact": "value"
                 },
                 "path": "track.opacity",
                 "display_name": "轨道不透明度",
-                "default_value": {
-                  "Float": 1.0
-                },
-                "value_type": "Float",
-                "is_animatable": true,
                 "ui_metadata": {
                   "group_name": null,
                   "supports_spatial": false
@@ -347,6 +343,11 @@
                   "parameter_id": "mondrian.track.opacity",
                   "schema_version": 1,
                   "message_id": "mondrian.track.opacity.label",
+                  "value_type": "Float",
+                  "default_value": {
+                    "Float": 1.0
+                  },
+                  "is_animatable": true,
                   "unit": "normalized",
                   "numeric": {
                     "hard_range": { "min": 0.0, "max": 1.0 },
@@ -355,19 +356,13 @@
                     "invalid_value_policy": "reject"
                   },
                   "allowed_interpolations": [
-                    "Hold", "Linear", "Bezier", "AutoBezier",
-                    "ContinuousBezier", "EaseIn", "EaseOut"
+                    "Hold", "Linear", "Bezier"
                   ],
                   "enum_options": [],
                   "cache_impact": "value"
                 },
                 "path": "track.opacity",
                 "display_name": "轨道不透明度",
-                "default_value": {
-                  "Float": 1.0
-                },
-                "value_type": "Float",
-                "is_animatable": true,
                 "ui_metadata": {
                   "group_name": null,
                   "supports_spatial": false
@@ -402,6 +397,11 @@
                   "parameter_id": "mondrian.track.opacity",
                   "schema_version": 1,
                   "message_id": "mondrian.track.opacity.label",
+                  "value_type": "Float",
+                  "default_value": {
+                    "Float": 1.0
+                  },
+                  "is_animatable": true,
                   "unit": "normalized",
                   "numeric": {
                     "hard_range": { "min": 0.0, "max": 1.0 },
@@ -410,19 +410,13 @@
                     "invalid_value_policy": "reject"
                   },
                   "allowed_interpolations": [
-                    "Hold", "Linear", "Bezier", "AutoBezier",
-                    "ContinuousBezier", "EaseIn", "EaseOut"
+                    "Hold", "Linear", "Bezier"
                   ],
                   "enum_options": [],
                   "cache_impact": "value"
                 },
                 "path": "track.opacity",
                 "display_name": "轨道不透明度",
-                "default_value": {
-                  "Float": 1.0
-                },
-                "value_type": "Float",
-                "is_animatable": true,
                 "ui_metadata": {
                   "group_name": null,
                   "supports_spatial": false
