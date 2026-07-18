@@ -258,6 +258,36 @@ impl AppState {
                 %reason,
                 "audio render window replaced with exact-duration silence"
             ),
+            AudioPlaybackEvent::RenderGenerationInvalidated {
+                failed_generation,
+                restart_generation,
+                failed_start_sample,
+                restart_anchor,
+                final_output,
+                final_media_anchor,
+                reason,
+                disposition,
+            } => {
+                if let (Some(final_output), Some(final_media_anchor)) =
+                    (final_output, final_media_anchor)
+                {
+                    self.observe_final_audio_clock_before_recovery(
+                        final_output,
+                        final_media_anchor,
+                    );
+                } else {
+                    self.capture_playback_evidence();
+                }
+                tracing::warn!(
+                    failed_generation,
+                    restart_generation,
+                    failed_start_sample,
+                    restart_sample = restart_anchor.frame,
+                    ?disposition,
+                    %reason,
+                    "stateful audio render generation invalidated; using Synthetic Clock Master"
+                );
+            }
             AudioPlaybackEvent::UnderrunObserved {
                 stream_generation,
                 delta_frames,

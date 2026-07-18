@@ -466,6 +466,7 @@ fn audio_state_name(state: AudioPlaybackState) -> &'static str {
         AudioPlaybackState::WaitingForSource => "WaitingForSource",
         AudioPlaybackState::Prerolling => "Prerolling",
         AudioPlaybackState::Recovering => "Recovering",
+        AudioPlaybackState::RenderBlocked => "RenderBlocked",
         AudioPlaybackState::Active => "Active",
     }
 }
@@ -544,6 +545,7 @@ mod tests {
                 active: true,
             }),
             render_substitution_count: 0,
+            render_generation_recovery_count: 0,
             stale_completion_count: 0,
             canceled_render_count: 0,
             active_interval_underrun_frames: 0,

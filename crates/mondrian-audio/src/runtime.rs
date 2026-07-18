@@ -184,6 +184,15 @@ impl AudioProgramRuntime {
         self.session.requires_state_entry()
     }
 
+    /// Whether this Runtime can currently enter all state domains it owns.
+    ///
+    /// Root processor and compensation state are supported. A stateful nested
+    /// output remains unsupported until its direction/time-map-aware replay
+    /// coordinator can establish the child coordinate and history explicitly.
+    pub fn supports_state_entry(&self) -> bool {
+        self.sources.stateful_nested_edit().is_none()
+    }
+
     /// Enter a fresh root continuity epoch before executing a stateful Plan.
     /// Stateful nested outputs remain fail-closed until their direction/time-map
     /// state-entry coordinator is implemented.

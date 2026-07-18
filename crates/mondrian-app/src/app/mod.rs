@@ -26,9 +26,9 @@ use mondrian_effects::{
 use mondrian_export::queue::RenderQueue;
 use mondrian_media::audio::{AudioBuffer, RealtimeAudioOutputSnapshot};
 use mondrian_media::{
-    AudioPcmContinuity, AudioPcmRenderGeneration, AudioPcmRenderRequest, AudioPcmRenderer,
-    AudioPlayback, AudioPlaybackEvent, AudioPlaybackMode, AudioPlaybackSnapshot, AudioSourceCache,
-    AudioSourceCacheDiagnostics,
+    AudioPcmContinuity, AudioPcmContinuityModel, AudioPcmRenderGeneration, AudioPcmRenderRequest,
+    AudioPcmRenderer, AudioPlayback, AudioPlaybackEvent, AudioPlaybackMode, AudioPlaybackSnapshot,
+    AudioSourceCache, AudioSourceCacheDiagnostics,
 };
 use mondrian_playback::{
     AudioClockObservationGrade, AudioDeviceClockObservation, AudioDeviceClockState, ClockMaster,

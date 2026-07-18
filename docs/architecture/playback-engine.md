@@ -89,6 +89,18 @@ Timeline PCM Adapter maps the generation to the audio Runtime continuity epoch
 and validates exact next-sample progression. A changed coordinate can never be
 treated as an implicit seek/reset.
 
+The PCM Adapter also declares whether windows are independent or mutate
+generation-owned history. Independent-window failures preserve media duration
+with exact silence and evidence. A stateful failure, including an invalid PCM
+contract after execution, poisons all later work: Audio Playback cancels and
+clears the old generation, captures its final output evidence, begins recovery
+preroll at the authoritative Playback position, and admits only a fresh
+`Enter`. The application submits the captured final device observation before
+using Synthetic Clock Master during recovery. Repeated poisoned generations
+consume a fixed recovery budget; exhaustion becomes `RenderBlocked` with no
+further scheduling. Explicit reprime/source binding/device open starts a new
+attempt cycle, while a generation that completes preroll clears the streak.
+
 The main event thread calls the Playback Engine. Decode/render/audio workers do
 not mutate it; they return observations tagged with the session epoch.
 

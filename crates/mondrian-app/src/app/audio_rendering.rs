@@ -11,6 +11,7 @@ const MAX_AUDIO_RENDER_BLOCK_FRAMES: usize = 16_384;
 
 pub(super) struct TimelineAudioPcmRenderer {
     state: Mutex<TimelineAudioRenderState>,
+    continuity_model: AudioPcmContinuityModel,
     sample_rate: u32,
     channels: u8,
 }
@@ -45,18 +46,24 @@ impl TimelineAudioPcmRenderer {
             None::<ProgramOutputId>,
         )
         .map_err(|error| audio_render_error("timeline_audio_prepare", error.to_string()))?;
-        if runtime.requires_state_entry() {
+        if runtime.requires_state_entry() && !runtime.supports_state_entry() {
             return Err(audio_render_error(
                 "timeline_audio_state_entry",
-                "stateful realtime audio remains blocked until render-failure generation recovery is qualified",
+                "stateful nested audio requires direction/time-map-aware child replay",
             ));
         }
+        let continuity_model = if runtime.requires_state_entry() {
+            AudioPcmContinuityModel::GenerationState
+        } else {
+            AudioPcmContinuityModel::IndependentWindows
+        };
         Ok(Self {
             state: Mutex::new(TimelineAudioRenderState {
                 runtime,
                 generation: None,
                 next_sample: None,
             }),
+            continuity_model,
             sample_rate,
             channels,
         })
@@ -64,6 +71,10 @@ impl TimelineAudioPcmRenderer {
 }
 
 impl AudioPcmRenderer for TimelineAudioPcmRenderer {
+    fn continuity_model(&self) -> AudioPcmContinuityModel {
+        self.continuity_model
+    }
+
     fn render(
         &self,
         request: AudioPcmRenderRequest,

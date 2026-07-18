@@ -244,14 +244,20 @@ Playback carries its generation on every PCM work request: the first admitted
 window is `Enter`, later windows are `Continue`, and the Timeline Adapter rejects
 duplicate/missing entry, generation mismatch, or a non-contiguous sample. The
 Adapter maps Playback generation to Runtime continuity rather than deriving a
-reset from coordinates. Realtime construction still rejects a stateful plan
-until render-failure recovery can rotate the generation without accepting PCM
-from the poisoned one. Stateful nested outputs also fail entry explicitly until
-a direction/time-map-aware child replay coordinator exists; propagating the
-child's requirement upward is not a claim that root and child share one
-coordinate or state domain. These two fail-closed restrictions are the
-remaining prerequisites before production admits a non-zero-latency or
-otherwise stateful processor.
+reset from coordinates. The Adapter declares `GenerationState` whenever its
+root Runtime requires entry. Any execution failure or PCM-contract violation
+then invalidates the whole Playback generation: queued output and pending work
+are discarded, the application submits the final device observation so Clock
+Master falls back to Synthetic, and a fresh generation enters at Playback's
+authoritative position. Exact-duration silence substitution remains legal only
+for `IndependentWindows` renderers. Consecutive poisoned generations consume a
+bounded recovery budget; exhaustion enters `RenderBlocked` and schedules no
+more PCM until an explicit reprime, source rebind, or device-open boundary.
+Completing fresh preroll clears the streak. Root stateful plans are therefore
+admitted without permitting an unbounded retry loop; stateful nested outputs
+still fail construction until a direction/time-map-aware child replay
+coordinator exists. Propagating the child's requirement upward is not a claim
+that root and child share one coordinate or state domain.
 
 The source Seam is block-shaped even when a Clip speed map produces reverse,
 repeated, or non-contiguous coordinates. The Session resolves one absolute

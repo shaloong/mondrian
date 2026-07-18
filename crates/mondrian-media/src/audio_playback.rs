@@ -28,6 +28,8 @@ pub struct AudioPlaybackConfig {
     pub max_in_flight: usize,
     /// Missing active-consumption frames required to enter underrun recovery.
     pub underrun_recovery_threshold_frames: u64,
+    /// Consecutive stateful generation invalidations admitted before rendering is blocked.
+    pub max_consecutive_render_recoveries: u32,
 }
 
 impl AudioPlaybackConfig {
@@ -41,6 +43,7 @@ impl AudioPlaybackConfig {
             high_watermark_frames: 22_080,
             max_in_flight: 8,
             underrun_recovery_threshold_frames: 960,
+            max_consecutive_render_recoveries: 3,
         }
     }
 }
@@ -105,12 +108,39 @@ impl AudioPcmContinuity {
     }
 }
 
+/// Cross-window state contract declared by a PCM renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioPcmContinuityModel {
+    /// Every window can be evaluated independently, so one failure may be
+    /// replaced with exact-duration silence without poisoning later windows.
+    IndependentWindows,
+    /// Admitted windows mutate generation-owned history. Any failure requires
+    /// the whole generation to be invalidated and explicitly re-entered.
+    GenerationState,
+}
+
+/// Scheduler action after a stateful render generation is invalidated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioRenderRecoveryDisposition {
+    /// A fresh generation will enter at the authoritative Playback position.
+    Reprime,
+    /// The bounded recovery budget is exhausted; explicit reprime is required.
+    Blocked,
+}
+
 /// Adapter Interface used by Audio Playback to render timeline PCM.
 ///
 /// Implementations may decode and mix, but must return exactly the requested
-/// rate, channels, and frame count. Errors become same-duration silence plus
-/// structured evidence so queued media position never shifts.
+/// rate, channels, and frame count. Independent-window errors become
+/// same-duration silence; generation-state errors invalidate all work in that
+/// generation. Both paths emit structured evidence and never shift media time.
 pub trait AudioPcmRenderer: Send + Sync + 'static {
+    /// Declare whether a failed window poisons later work in the generation.
+    /// The value must remain invariant for the lifetime of the renderer.
+    fn continuity_model(&self) -> AudioPcmContinuityModel {
+        AudioPcmContinuityModel::IndependentWindows
+    }
+
     /// Render one exact timeline-media window.
     fn render(
         &self,
@@ -156,8 +186,10 @@ pub enum AudioPlaybackState {
     WaitingForSource,
     /// Current generation is filling preroll or is ready but not yet permitted to consume.
     Prerolling,
-    /// Sustained underrun forced a Synthetic handoff and fresh preroll.
+    /// Output or state continuity failed and fresh-generation preroll is active.
     Recovering,
+    /// Repeated stateful generation failures exhausted the bounded retry policy.
+    RenderBlocked,
     /// Callback consumption is active for a preroll-qualified generation.
     Active,
 }
@@ -179,6 +211,26 @@ pub enum AudioPlaybackEvent {
         generation: u64,
         start_sample: i64,
         reason: String,
+    },
+    /// Stateful rendering failed, so no PCM from that generation remains valid.
+    RenderGenerationInvalidated {
+        /// Generation whose state history was invalidated.
+        failed_generation: u64,
+        /// Fresh generation allocated at `restart_anchor`; admitted only when
+        /// `disposition` is [`AudioRenderRecoveryDisposition::Reprime`].
+        restart_generation: u64,
+        /// Window at which the failure was observed.
+        failed_start_sample: i64,
+        /// Authoritative timeline position selected for fresh preroll.
+        restart_anchor: FramePosition,
+        /// Final output observation captured before deactivation, when present.
+        final_output: Option<RealtimeAudioOutputSnapshot>,
+        /// Media anchor paired with `final_output`, when a source was still bound.
+        final_media_anchor: Option<FramePosition>,
+        /// Structured renderer or PCM-contract failure.
+        reason: String,
+        /// Whether Playback will retry or now requires an explicit reprime.
+        disposition: AudioRenderRecoveryDisposition,
     },
     /// New callback starvation was observed but may remain below recovery policy.
     UnderrunObserved {
@@ -216,6 +268,8 @@ pub struct AudioPlaybackSnapshot {
     pub output: Option<RealtimeAudioOutputSnapshot>,
     /// Current-generation render failures replaced by exact-duration silence.
     pub render_substitution_count: u64,
+    /// Number of stateful render failures that invalidated and restarted a generation.
+    pub render_generation_recovery_count: u64,
     /// Old-generation completions discarded before reaching the output queue.
     pub stale_completion_count: u64,
     /// Queued render windows canceled synchronously by generation invalidation.
@@ -238,6 +292,7 @@ pub struct AudioPlaybackPoll {
 struct RenderWork {
     generation: u64,
     request: AudioPcmRenderRequest,
+    continuity_model: AudioPcmContinuityModel,
     renderer: Arc<dyn AudioPcmRenderer>,
     cancellation: ExecutionCancellationToken,
 }
@@ -245,6 +300,7 @@ struct RenderWork {
 struct RenderCompletion {
     generation: u64,
     request: AudioPcmRenderRequest,
+    continuity_model: AudioPcmContinuityModel,
     result: mondrian_core::Result<AudioBuffer>,
 }
 
@@ -359,12 +415,15 @@ pub struct AudioPlayback {
     media_anchor: Option<FramePosition>,
     activation_preroll_satisfied: bool,
     render_substitution_count: u64,
+    render_generation_recovery_count: u64,
+    consecutive_render_generation_failures: u32,
+    render_blocked: bool,
     stale_completion_count: u64,
     canceled_render_count: u64,
     underrun_baseline_frames: u64,
     last_underrun_frames: u64,
     underrun_recovery_count: u64,
-    recovering_from_underrun: bool,
+    recovery_preroll: bool,
 }
 
 impl AudioPlayback {
@@ -398,6 +457,7 @@ impl AudioPlayback {
                     .send(RenderCompletion {
                         generation: work.generation,
                         request: work.request,
+                        continuity_model: work.continuity_model,
                         result,
                     })
                     .is_err()
@@ -420,12 +480,15 @@ impl AudioPlayback {
             media_anchor: None,
             activation_preroll_satisfied: false,
             render_substitution_count: 0,
+            render_generation_recovery_count: 0,
+            consecutive_render_generation_failures: 0,
+            render_blocked: false,
             stale_completion_count: 0,
             canceled_render_count: 0,
             underrun_baseline_frames: 0,
             last_underrun_frames: 0,
             underrun_recovery_count: 0,
-            recovering_from_underrun: false,
+            recovery_preroll: false,
         }
     }
 
@@ -443,10 +506,12 @@ impl AudioPlayback {
 
     /// Invalidate outstanding work and restart PCM scheduling at an exact timeline anchor.
     pub fn reprime(&mut self, anchor: FramePosition) {
+        self.consecutive_render_generation_failures = 0;
+        self.render_blocked = false;
         self.reprime_internal(anchor, false);
     }
 
-    fn reprime_internal(&mut self, anchor: FramePosition, recovering_from_underrun: bool) {
+    fn reprime_internal(&mut self, anchor: FramePosition, recovery_preroll: bool) {
         let start_sample = time_code_to_sample_frame(anchor, self.config.sample_rate);
         self.output.set_active(false);
         self.output.clear();
@@ -469,7 +534,7 @@ impl AudioPlayback {
         let underrun_frames = self.output.snapshot().map_or(0, |output| output.underrun_frames);
         self.underrun_baseline_frames = underrun_frames;
         self.last_underrun_frames = underrun_frames;
-        self.recovering_from_underrun = recovering_from_underrun;
+        self.recovery_preroll = recovery_preroll;
     }
 
     /// Poll lifecycle, completions, watermarks, and preroll without waiting on workers.
@@ -489,7 +554,7 @@ impl AudioPlayback {
                         self.activation_preroll_satisfied = false;
                         self.underrun_baseline_frames = 0;
                         self.last_underrun_frames = 0;
-                        self.recovering_from_underrun = false;
+                        self.recovery_preroll = false;
                         events.push(AudioPlaybackEvent::DeviceLost { stream_generation });
                     }
                     RealtimeAudioOutputEvent::OpenFailed { retry_after, reason } => {
@@ -507,7 +572,10 @@ impl AudioPlayback {
             self.in_flight = self.in_flight.saturating_sub(1);
             match validate_rendered_buffer(completion.request, completion.result) {
                 Ok(buffer) => self.output.enqueue(&buffer),
-                Err(reason) => {
+                Err(reason)
+                    if completion.continuity_model
+                        == AudioPcmContinuityModel::IndependentWindows =>
+                {
                     let silence = AudioBuffer::silent(
                         completion.request.sample_rate,
                         completion.request.channels,
@@ -522,6 +590,38 @@ impl AudioPlayback {
                         reason,
                     });
                 }
+                Err(reason) => {
+                    let final_output = self.output.snapshot();
+                    let final_media_anchor = self.media_anchor;
+                    let failed_generation = completion.generation;
+                    let failed_start_sample = completion.request.start_sample;
+                    self.render_generation_recovery_count =
+                        self.render_generation_recovery_count.saturating_add(1);
+                    self.consecutive_render_generation_failures =
+                        self.consecutive_render_generation_failures.saturating_add(1);
+                    let disposition = if self.consecutive_render_generation_failures
+                        >= self.config.max_consecutive_render_recoveries
+                    {
+                        AudioRenderRecoveryDisposition::Blocked
+                    } else {
+                        AudioRenderRecoveryDisposition::Reprime
+                    };
+                    self.reprime_internal(position, true);
+                    if disposition == AudioRenderRecoveryDisposition::Blocked {
+                        self.render_blocked = true;
+                        self.recovery_preroll = false;
+                    }
+                    events.push(AudioPlaybackEvent::RenderGenerationInvalidated {
+                        failed_generation,
+                        restart_generation: self.generation,
+                        failed_start_sample,
+                        restart_anchor: position,
+                        final_output,
+                        final_media_anchor,
+                        reason,
+                        disposition,
+                    });
+                }
             }
         }
 
@@ -529,7 +629,7 @@ impl AudioPlayback {
             self.output.set_active(false);
             self.output.clear();
             self.activation_preroll_satisfied = false;
-            self.recovering_from_underrun = false;
+            self.recovery_preroll = false;
             return AudioPlaybackPoll { snapshot: self.snapshot(mode), events };
         }
 
@@ -568,47 +668,55 @@ impl AudioPlayback {
             }
         }
 
-        if let (Some(renderer), Some(_)) = (self.renderer.as_ref(), self.output.snapshot()) {
-            while self
-                .output
-                .buffered_frames()
-                .saturating_add(self.in_flight.saturating_mul(self.config.chunk_frames))
-                < self.config.high_watermark_frames
-                && self.in_flight < self.config.max_in_flight
-            {
-                let request = AudioPcmRenderRequest {
-                    start_sample: self.next_start_sample,
-                    frame_count: self.config.chunk_frames,
-                    sample_rate: self.config.sample_rate,
-                    channels: self.config.channels,
-                    continuity: if self.generation_entry_pending {
-                        AudioPcmContinuity::Enter(AudioPcmRenderGeneration::new(self.generation))
-                    } else {
-                        AudioPcmContinuity::Continue(AudioPcmRenderGeneration::new(self.generation))
-                    },
-                };
-                let work = RenderWork {
-                    generation: self.generation,
-                    request,
-                    renderer: Arc::clone(renderer),
-                    cancellation: self.generation_cancellation.clone(),
-                };
-                if self.render_queue.push(work).is_err() {
-                    break;
-                }
-                self.generation_entry_pending = false;
-                self.in_flight = self.in_flight.saturating_add(1);
-                self.next_start_sample = self
-                    .next_start_sample
-                    .saturating_add(self.config.chunk_frames.min(i64::MAX as usize) as i64);
-            }
-            if self.output.buffered_frames() >= self.config.preroll_frames {
-                self.activation_preroll_satisfied = true;
-                if mode.permits_consumption()
-                    && self.output.snapshot().is_some_and(|snapshot| !snapshot.active)
+        if !self.render_blocked {
+            if let (Some(renderer), Some(_)) = (self.renderer.as_ref(), self.output.snapshot()) {
+                while self
+                    .output
+                    .buffered_frames()
+                    .saturating_add(self.in_flight.saturating_mul(self.config.chunk_frames))
+                    < self.config.high_watermark_frames
+                    && self.in_flight < self.config.max_in_flight
                 {
-                    self.output.set_active(true);
-                    self.recovering_from_underrun = false;
+                    let request = AudioPcmRenderRequest {
+                        start_sample: self.next_start_sample,
+                        frame_count: self.config.chunk_frames,
+                        sample_rate: self.config.sample_rate,
+                        channels: self.config.channels,
+                        continuity: if self.generation_entry_pending {
+                            AudioPcmContinuity::Enter(AudioPcmRenderGeneration::new(
+                                self.generation,
+                            ))
+                        } else {
+                            AudioPcmContinuity::Continue(AudioPcmRenderGeneration::new(
+                                self.generation,
+                            ))
+                        },
+                    };
+                    let work = RenderWork {
+                        generation: self.generation,
+                        request,
+                        continuity_model: renderer.continuity_model(),
+                        renderer: Arc::clone(renderer),
+                        cancellation: self.generation_cancellation.clone(),
+                    };
+                    if self.render_queue.push(work).is_err() {
+                        break;
+                    }
+                    self.generation_entry_pending = false;
+                    self.in_flight = self.in_flight.saturating_add(1);
+                    self.next_start_sample = self
+                        .next_start_sample
+                        .saturating_add(self.config.chunk_frames.min(i64::MAX as usize) as i64);
+                }
+                if self.output.buffered_frames() >= self.config.preroll_frames {
+                    self.activation_preroll_satisfied = true;
+                    self.consecutive_render_generation_failures = 0;
+                    if mode.permits_consumption()
+                        && self.output.snapshot().is_some_and(|snapshot| !snapshot.active)
+                    {
+                        self.output.set_active(true);
+                        self.recovery_preroll = false;
+                    }
                 }
             }
         }
@@ -623,7 +731,8 @@ impl AudioPlayback {
             None => AudioPlaybackState::DeviceUnavailable,
             Some(_) if mode == AudioPlaybackMode::Idle => AudioPlaybackState::Idle,
             Some(_) if self.renderer.is_none() => AudioPlaybackState::WaitingForSource,
-            Some(_) if self.recovering_from_underrun => AudioPlaybackState::Recovering,
+            Some(_) if self.render_blocked => AudioPlaybackState::RenderBlocked,
+            Some(_) if self.recovery_preroll => AudioPlaybackState::Recovering,
             Some(snapshot) if snapshot.active => AudioPlaybackState::Active,
             Some(_) => AudioPlaybackState::Prerolling,
         };
@@ -636,6 +745,7 @@ impl AudioPlayback {
             state,
             output,
             render_substitution_count: self.render_substitution_count,
+            render_generation_recovery_count: self.render_generation_recovery_count,
             stale_completion_count: self.stale_completion_count,
             canceled_render_count: self.canceled_render_count,
             active_interval_underrun_frames: output.map_or(0, |output| {
@@ -661,6 +771,7 @@ fn validate_config(config: AudioPlaybackConfig) -> Result<(), AudioPlaybackConfi
         || config.high_watermark_frames == 0
         || config.max_in_flight == 0
         || config.underrun_recovery_threshold_frames == 0
+        || config.max_consecutive_render_recoveries == 0
     {
         return Err(AudioPlaybackConfigError::ZeroValue);
     }
@@ -780,6 +891,15 @@ mod tests {
         canceled: Arc<AtomicBool>,
     }
 
+    struct FailOnceStatefulRenderer {
+        requests: Arc<Mutex<Vec<AudioPcmRenderRequest>>>,
+        failed: AtomicBool,
+    }
+
+    struct AlwaysFailStatefulRenderer {
+        requests: Arc<Mutex<Vec<AudioPcmRenderRequest>>>,
+    }
+
     impl AudioPcmRenderer for GateRenderer {
         fn render(
             &self,
@@ -822,6 +942,51 @@ mod tests {
         }
     }
 
+    impl AudioPcmRenderer for FailOnceStatefulRenderer {
+        fn continuity_model(&self) -> AudioPcmContinuityModel {
+            AudioPcmContinuityModel::GenerationState
+        }
+
+        fn render(
+            &self,
+            request: AudioPcmRenderRequest,
+            _cancellation: &ExecutionCancellationToken,
+        ) -> mondrian_core::Result<AudioBuffer> {
+            self.requests.lock().push(request);
+            if matches!(request.continuity, AudioPcmContinuity::Continue(_))
+                && !self.failed.swap(true, Ordering::AcqRel)
+            {
+                return Err(mondrian_core::MondrianError::DecodeFailed {
+                    asset_id: "stateful-test".to_owned(),
+                    reason: "injected continuation failure".to_owned(),
+                });
+            }
+            Ok(AudioBuffer::silent(
+                request.sample_rate,
+                request.channels,
+                request.frame_count,
+            ))
+        }
+    }
+
+    impl AudioPcmRenderer for AlwaysFailStatefulRenderer {
+        fn continuity_model(&self) -> AudioPcmContinuityModel {
+            AudioPcmContinuityModel::GenerationState
+        }
+
+        fn render(
+            &self,
+            request: AudioPcmRenderRequest,
+            _cancellation: &ExecutionCancellationToken,
+        ) -> mondrian_core::Result<AudioBuffer> {
+            self.requests.lock().push(request);
+            Err(mondrian_core::MondrianError::DecodeFailed {
+                asset_id: "persistent-stateful-test".to_owned(),
+                reason: "injected persistent failure".to_owned(),
+            })
+        }
+    }
+
     fn test_config() -> AudioPlaybackConfig {
         AudioPlaybackConfig {
             sample_rate: 1_000,
@@ -831,6 +996,7 @@ mod tests {
             high_watermark_frames: 30,
             max_in_flight: 3,
             underrun_recovery_threshold_frames: 10,
+            max_consecutive_render_recoveries: 3,
         }
     }
 
@@ -997,12 +1163,142 @@ mod tests {
     }
 
     #[test]
+    fn stateful_render_failure_invalidates_generation_and_reenters_at_authority() {
+        let (output, state) = fake_output();
+        let mut playback = AudioPlayback::with_output(test_config(), output);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        playback.prepare(
+            FramePosition::new(0, Rational::new(1, 1_000)),
+            Arc::new(FailOnceStatefulRenderer {
+                requests: Arc::clone(&requests),
+                failed: AtomicBool::new(false),
+            }),
+        );
+        let authority = FramePosition::new(5, Rational::new(1, 1_000));
+
+        let events = poll_until_settled(&mut playback, authority);
+        let snapshot = playback.snapshot(AudioPlaybackMode::Consume);
+
+        assert_eq!(state.lock().queued_frames, 30);
+        assert_eq!(snapshot.render_substitution_count, 0);
+        assert_eq!(snapshot.render_generation_recovery_count, 1);
+        let recovery = events.iter().find_map(|event| match event {
+            AudioPlaybackEvent::RenderGenerationInvalidated {
+                failed_generation,
+                restart_generation,
+                failed_start_sample,
+                restart_anchor,
+                disposition,
+                ..
+            } => Some((
+                *failed_generation,
+                *restart_generation,
+                *failed_start_sample,
+                *restart_anchor,
+                *disposition,
+            )),
+            _ => None,
+        });
+        let (
+            failed_generation,
+            restart_generation,
+            failed_start_sample,
+            restart_anchor,
+            disposition,
+        ) = recovery.expect("stateful recovery evidence");
+        assert_ne!(failed_generation, restart_generation);
+        assert_eq!(restart_generation, snapshot.generation);
+        assert_eq!(failed_start_sample, 15);
+        assert_eq!(restart_anchor, authority);
+        assert_eq!(disposition, AudioRenderRecoveryDisposition::Reprime);
+
+        let current = requests
+            .lock()
+            .iter()
+            .filter(|request| request.continuity.generation().get() == restart_generation)
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            current.iter().map(|request| request.start_sample).collect::<Vec<_>>(),
+            vec![5, 15, 25]
+        );
+        let generation = AudioPcmRenderGeneration::new(restart_generation);
+        assert_eq!(
+            current.iter().map(|request| request.continuity).collect::<Vec<_>>(),
+            vec![
+                AudioPcmContinuity::Enter(generation),
+                AudioPcmContinuity::Continue(generation),
+                AudioPcmContinuity::Continue(generation),
+            ]
+        );
+    }
+
+    #[test]
+    fn persistent_stateful_failure_exhausts_bounded_generation_recovery() {
+        let (output, state) = fake_output();
+        let mut config = test_config();
+        config.max_consecutive_render_recoveries = 2;
+        let mut playback = AudioPlayback::with_output(config, output);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        playback.prepare(
+            FramePosition::new(0, Rational::new(1, 1_000)),
+            Arc::new(AlwaysFailStatefulRenderer { requests: Arc::clone(&requests) }),
+        );
+        let authority = FramePosition::new(5, Rational::new(1, 1_000));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut events = Vec::new();
+        while Instant::now() < deadline {
+            let poll = playback.poll(AudioPlaybackMode::Consume, authority);
+            events.extend(poll.events);
+            if poll.snapshot.state == AudioPlaybackState::RenderBlocked {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let blocked = playback.snapshot(AudioPlaybackMode::Consume);
+        assert_eq!(blocked.state, AudioPlaybackState::RenderBlocked);
+        assert_eq!(blocked.render_generation_recovery_count, 2);
+        assert_eq!(blocked.render_substitution_count, 0);
+        assert_eq!(state.lock().queued_frames, 0);
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    AudioPlaybackEvent::RenderGenerationInvalidated { disposition, .. } => {
+                        Some(*disposition)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                AudioRenderRecoveryDisposition::Reprime,
+                AudioRenderRecoveryDisposition::Blocked,
+            ]
+        );
+        assert_eq!(
+            requests
+                .lock()
+                .iter()
+                .filter(|request| matches!(request.continuity, AudioPcmContinuity::Enter(_)))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn invalid_policy_is_rejected_at_the_interface() {
         let mut config = test_config();
         config.preroll_frames = 31;
         assert_eq!(
             AudioPlayback::new(config).err(),
             Some(AudioPlaybackConfigError::PrerollExceedsHighWatermark)
+        );
+        let mut config = test_config();
+        config.max_consecutive_render_recoveries = 0;
+        assert_eq!(
+            AudioPlayback::new(config).err(),
+            Some(AudioPlaybackConfigError::ZeroValue)
         );
     }
 
