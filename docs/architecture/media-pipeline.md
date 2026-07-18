@@ -239,7 +239,8 @@ Diagnostics report these as `prefetch_skipped_current_pending`,
 `prefetch_skipped_current_work`, and `prefetch_skipped_prefetch_backlog`. This
 keeps first-frame display and dropped-frame recovery ahead of cache warming on
 slow or long-GOP media. The configured forward window is derived from a
-wall-clock horizon and the active sequence frame rate, then capped before
+250 ms wall-clock horizon and the active sequence frame rate, then capped at
+16 frames before
 enqueueing; high frame-rate playback warms more timeline frames than 24/25/30
 fps playback without letting speculative work flood the bounded worker queue.
 Preview diagnostics expose this playback-clock contract as structured
@@ -260,6 +261,10 @@ filesystem, or driver stall inside a preview worker must not prevent pause,
 window close, or app quit from being processed. Each worker still explicitly
 drops its thread-local media decode sessions before exit; thread-local FFmpeg
 decoder state must not be left to implicit TLS teardown at project/app close.
+An otherwise idle worker performs a timed Broker receive and releases its
+thread-local decode sessions after two seconds without work. This preserves
+short-gap playback locality while bounding native decoder/device residency
+during an open but inactive project; the next request cold-opens normally.
 The app scheduler lowers explicit `MediaPreviewAccessIntent` values to media
 access modes. Viewer playback lowers to `PlaybackCursor`, active playhead/ruler
 dragging lowers to `ScrubCursor`, and settled non-playing viewer frames plus
@@ -1100,16 +1105,18 @@ hardware-decode CPU-transfer fallback. Device probes are cached by backend plus
 selector. The renderer still validates every decoded D3D12 resource's LUID, so
 selection prevents accidental cross-adapter creation without weakening the
 native resource boundary.
-GPU-resident decoder setup reserves eight FFmpeg `extra_hw_frames` before
+GPU-resident decoder setup reserves thirty-two FFmpeg `extra_hw_frames` before
 `avcodec_open2` because native frames remain leased after the receive call.
 This is decoder-pool headroom, not application cache capacity; CPU-transfer
 decode leaves the setting at zero because it exports no hardware surfaces.
 GPU-resident requests bypass the process-global CPU RGBA cache and the
 session-local RGBA playback ring. Native decoder surfaces are not inserted into
-either cache because retaining them there can exhaust the decoder surface pool;
-their bounded lifetime belongs to the returned current/prefetch payloads and
-the app scheduler. CPU fallback payloads remain eligible for the existing CPU
-cache policy.
+either media-owned CPU cache. They may enter the App's playback-owned Preview
+Frame Store as opaque leases charged one decoder-resource unit each; the App
+composition root sets that resource-unit budget to at least the maximum bounded
+prefetch window. This permits useful forward residency without treating a
+zero-host-byte surface as free or allowing the Store to exhaust the decoder
+pool. CPU fallback payloads remain eligible for the existing CPU cache policy.
 CPU consumers such as thumbnails and current RGBA fallback paths must explicitly
 match `Frame(RgbaFrame)` and fail closed on `NativeGpuFrame`; they must not
 reinterpret a native decoder surface as RGBA or silently force a CPU transfer.
@@ -1220,7 +1227,10 @@ interactive headroom so current-frame decode can make progress while another
 worker is occupied by prefetch or a long-GOP seek without oversubscribing the
 UI, renderer, audio, or FFmpeg's own codec threads. When a current-frame request
 is scheduled, the job queue also prunes obsolete prefetch jobs from older render
-generations before enqueueing the current work; fresh same-generation prefetch
+generations before enqueueing the current work. One continuous Playback Epoch
+retains its generation across ordinary frame advances: frame identity belongs
+to the media request key, while seek/restart or another interpretation
+discontinuity rotates the generation. Fresh same-generation prefetch
 remains eligible only after the current frame is not pending, no current-frame
 job is already queued or running, and queued plus in-flight prefetch is below
 the forward window. It then tops up only the unfilled queued-plus-in-flight
@@ -1364,6 +1374,12 @@ layers, and bind it to the exact GPU candidate. A cache hit therefore describes
 the current request without pretending another hardware decode occurred.
 `PreviewNativeDecodedFrame` is the separate GPU-resident payload contract and
 must flow toward renderer native decoded-frame import rather than the RGBA cache.
+For an admitted opaque NV12/P010 native decode, cache and in-flight identity use
+the probed source raster, not the current Viewer presentation scale. Native
+surfaces are source-sized and Half/Quarter quality is a later Viewer spatial
+operation; including that output extent in the decode key would invalidate
+useful prefetch whenever adaptive presentation scale changes. CPU decode keeps
+its requested decode extent because scaling is part of that media operation.
 Preview decode session reuse is isolated by `PreviewDecodeAccessMode`, and each
 session slot plus the process-global preview frame cache must be keyed by a
 media file fingerprint, not by path alone. Proxy regeneration finalizes fresh
@@ -1391,11 +1407,13 @@ callers that do not already have one.
 semantics. `THREADS` means FFmpeg decoder threads per app preview worker;
 `WORKERS` means the app preview worker budget used for access-mode lanes. The
 app viewer preview service uses the resolved budget directly for playback and
-interactive lane workers. Thread-local preview decode sessions are
-intentionally kept alive for playback locality and must be released through
+interactive lane workers. Thread-local preview decode sessions are kept alive
+across short gaps for playback locality, released automatically by the app
+worker after two seconds idle, and also released through
 `clear_thread_local_preview_decode_session()` at explicit lifecycle boundaries
 such as perf probes, media/project shutdown, or tests that open threaded
-software decoders.
+software decoders. The idle release is resource policy, not a cache-key or
+generation change.
 Codec safety policy may narrow these diagnostic overrides. OpenEXR contexts are
 always serial (`None`, one decoder thread): FFmpeg's frame-threaded EXR path can
 hold the single image until EOF and deadlock during codec-context destruction

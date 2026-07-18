@@ -9,6 +9,7 @@ use mondrian_ui_widgets::ViewerFrameImage;
 
 use super::preview::{MediaPreviewFrame, ScopedViewerFrame, ViewerPreviewCacheKey};
 use crate::app::preview_access_mode::MediaPreviewKey;
+use crate::app::preview_scheduler_policy::MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES;
 
 #[cfg(test)]
 pub(crate) type PreviewCpuFrameStoreConfig = mondrian_playback::PreviewFrameStoreConfig;
@@ -30,9 +31,21 @@ type PlaybackFrameStore = mondrian_playback::PreviewFrameStore<
 >;
 
 /// Thin App Adapter over the playback-owned Preview Frame Store Interface.
-#[derive(Default)]
 pub(crate) struct PreviewCpuFrameStore {
     store: PlaybackFrameStore,
+}
+
+impl Default for PreviewCpuFrameStore {
+    fn default() -> Self {
+        let mut config = mondrian_playback::PreviewFrameStoreConfig::default();
+        // The composition root must keep speculative scheduling and decoder
+        // resource residency coherent. Otherwise completing the far edge of
+        // the bounded lookahead can evict the imminent frame before playback
+        // reaches it, defeating prefetch while still consuming decoder work.
+        config.media_resource_unit_budget =
+            config.media_resource_unit_budget.max(MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES);
+        Self { store: PlaybackFrameStore::new(config) }
+    }
 }
 
 impl PreviewCpuFrameStore {

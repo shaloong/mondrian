@@ -233,6 +233,9 @@ pub enum AudioClockObservationGrade {
 pub enum AudioDeviceClockState {
     /// The stream callback is active and its cumulative frame counter is usable.
     Running,
+    /// The stream exists but its latest callback sample is temporarily too
+    /// stale or uncertain to advance safely.
+    Uncertain,
     /// The stream failed or no longer provides a usable monotonic observation.
     Unavailable,
 }
@@ -405,19 +408,27 @@ pub struct PlaybackPolicy {
     pub healthy_deliveries_to_recover: usize,
     /// Maximum uncertainty accepted for callback-estimated Audio Device Master.
     pub max_audio_clock_uncertainty: Duration,
+    /// Grace interval that preserves Audio Device Master across transient
+    /// callback sampling uncertainty before Synthetic fallback.
+    pub audio_clock_uncertainty_grace: Duration,
     /// Largest absolute media phase error allowed when selecting a new audio stream.
     pub max_audio_handoff_phase_error: Duration,
 }
+
+/// Largest immediate video lookahead a Playback Adapter may report for
+/// bounded startup/seek priming.
+pub const MAX_BOUNDED_VIDEO_PREROLL_FRAMES: usize = 16;
 
 impl Default for PlaybackPolicy {
     fn default() -> Self {
         Self {
             priming_limit: Duration::from_millis(500),
-            minimum_video_preroll_frames: 1,
+            minimum_video_preroll_frames: MAX_BOUNDED_VIDEO_PREROLL_FRAMES,
             pressure_window: 12,
             pressure_threshold: 8,
             healthy_deliveries_to_recover: 60,
             max_audio_clock_uncertainty: Duration::from_millis(50),
+            audio_clock_uncertainty_grace: Duration::from_secs(1),
             max_audio_handoff_phase_error: Duration::from_millis(20),
         }
     }
@@ -485,8 +496,8 @@ pub enum PlaybackError {
     /// Audio observation did not carry a usable sample rate.
     #[error("audio clock observation sample rate must be positive")]
     InvalidAudioSampleRate,
-    /// Preview Adapter reported more ready media frames than exist in its lookahead window.
-    #[error("video preroll ready frames cannot exceed available media frames")]
+    /// Preview Adapter reported an inconsistent or unbounded lookahead window.
+    #[error("video preroll must be a bounded ready prefix of the available media window")]
     InvalidVideoPrerollObservation,
 }
 
@@ -522,7 +533,6 @@ pub struct PlaybackEngine {
     quality_revision: u64,
     recent_pressure: Vec<bool>,
     consecutive_healthy: usize,
-    active_target_frame: Option<i64>,
     next_demand_sequence: u64,
     active_demand: Option<FrameDemand>,
     terminal_delivery: Option<(PlaybackEpoch, u64, FrameDemandSequence)>,
@@ -531,6 +541,7 @@ pub struct PlaybackEngine {
     audio_device_anchor: Option<AudioDeviceClockAnchor>,
     last_audio_observation: Option<AudioDeviceClockObservation>,
     last_audio_handoff: Option<AudioClockHandoffEvidence>,
+    audio_uncertain_since: Option<MonotonicTimestamp>,
 }
 
 impl PlaybackEngine {
@@ -538,11 +549,13 @@ impl PlaybackEngine {
     pub fn new(time_base: Rational, policy: PlaybackPolicy) -> Result<Self, PlaybackError> {
         validate_time_base(time_base)?;
         if policy.priming_limit.is_zero()
+            || policy.minimum_video_preroll_frames > MAX_BOUNDED_VIDEO_PREROLL_FRAMES
             || policy.pressure_window == 0
             || policy.pressure_threshold == 0
             || policy.pressure_threshold > policy.pressure_window
             || policy.healthy_deliveries_to_recover == 0
             || policy.max_audio_clock_uncertainty.is_zero()
+            || policy.audio_clock_uncertainty_grace.is_zero()
             || policy.max_audio_handoff_phase_error.is_zero()
         {
             return Err(PlaybackError::InvalidPolicy);
@@ -567,7 +580,6 @@ impl PlaybackEngine {
             quality_revision: 0,
             recent_pressure: Vec::with_capacity(policy.pressure_window),
             consecutive_healthy: 0,
-            active_target_frame: None,
             next_demand_sequence: 1,
             active_demand: None,
             terminal_delivery: None,
@@ -576,6 +588,7 @@ impl PlaybackEngine {
             audio_device_anchor: None,
             last_audio_observation: None,
             last_audio_handoff: None,
+            audio_uncertain_since: None,
         }
     }
 
@@ -596,7 +609,6 @@ impl PlaybackEngine {
         self.bump_epoch();
         self.state = TransportState::Priming;
         self.clock_master = Some(ClockMaster::Synthetic);
-        self.active_target_frame = Some(self.position.frame);
         self.reset_runtime_policy();
         self.refresh_frame_demand_with_duration(now, self.policy.priming_limit)?;
         self.reanchor(now);
@@ -635,7 +647,6 @@ impl PlaybackEngine {
         self.bump_epoch();
         self.state = TransportState::Priming;
         self.clock_master = Some(ClockMaster::Synthetic);
-        self.active_target_frame = Some(self.position.frame);
         self.reset_runtime_policy();
         self.refresh_frame_demand_with_duration(now, self.policy.priming_limit)?;
         self.reanchor(now);
@@ -663,7 +674,6 @@ impl PlaybackEngine {
         self.advance_position(now)?;
         self.state = TransportState::Paused;
         self.clock_master = None;
-        self.active_target_frame = Some(self.position.frame);
         self.reanchor(now);
         Ok(self.snapshot())
     }
@@ -706,7 +716,6 @@ impl PlaybackEngine {
             TransportState::Paused
         };
         self.clock_master = was_running.then_some(ClockMaster::Synthetic);
-        self.active_target_frame = Some(self.position.frame);
         self.reset_runtime_policy();
         self.reanchor(now);
         if was_running {
@@ -785,8 +794,10 @@ impl PlaybackEngine {
 
     /// Apply a qualified audio callback-consumption observation.
     ///
-    /// Old epochs are ignored. Unavailable, non-monotonic, or excessively
-    /// uncertain observations hand off continuously to Synthetic Clock Master.
+    /// Old epochs are ignored. Explicitly unavailable, non-monotonic, or
+    /// excessively uncertain observations hand off continuously to Synthetic
+    /// Clock Master. A temporarily `Uncertain` active stream retains an existing
+    /// Audio Device Master only for the policy's bounded uncertainty grace.
     pub fn observe_audio_device_clock(
         &mut self,
         observation: AudioDeviceClockObservation,
@@ -805,9 +816,26 @@ impl PlaybackEngine {
             return Ok(self.snapshot());
         }
         if observation.state == AudioDeviceClockState::Unavailable {
+            self.audio_uncertain_since = None;
             self.handoff_to_synthetic(observation.observed_at)?;
             return Ok(self.snapshot());
         }
+        if observation.state == AudioDeviceClockState::Uncertain {
+            let uncertain_since =
+                *self.audio_uncertain_since.get_or_insert(observation.observed_at);
+            if self.clock_master == Some(ClockMaster::AudioDevice)
+                && observation
+                    .observed_at
+                    .duration_since_origin()
+                    .saturating_sub(uncertain_since.duration_since_origin())
+                    <= self.policy.audio_clock_uncertainty_grace
+            {
+                return Ok(self.snapshot());
+            }
+            self.handoff_to_synthetic(observation.observed_at)?;
+            return Ok(self.snapshot());
+        }
+        self.audio_uncertain_since = None;
         let uncertainty = sample_frames_duration(
             observation.uncertainty_frames as u64,
             observation.sample_rate,
@@ -925,13 +953,12 @@ impl PlaybackEngine {
         if self.terminal_delivery == Some(identity) {
             return Ok(false);
         }
-        if self
-            .active_demand
-            .is_none_or(|demand| demand.sequence != delivery.demand_sequence)
-        {
+        let Some(active_demand) =
+            self.active_demand.filter(|demand| demand.sequence == delivery.demand_sequence)
+        else {
             return Ok(false);
-        }
-        if self.active_target_frame.is_some_and(|target| target != delivery.target_frame) {
+        };
+        if active_demand.target.frame != delivery.target_frame {
             return Err(PlaybackError::MismatchedFrameDelivery);
         }
         if delivery.kind == FrameDeliveryKind::Blocked {
@@ -974,7 +1001,6 @@ impl PlaybackEngine {
             if lowered != self.preview_scale {
                 self.preview_scale = lowered;
                 self.quality_revision = self.quality_revision.saturating_add(1);
-                self.active_target_frame = Some(self.position.frame);
                 self.refresh_frame_demand(self.last_timestamp)?;
             }
             self.recent_pressure.clear();
@@ -1008,7 +1034,9 @@ impl PlaybackEngine {
         if observation.epoch != self.epoch {
             return Ok(false);
         }
-        if observation.ready_media_frames > observation.available_media_frames {
+        if observation.ready_media_frames > observation.available_media_frames
+            || observation.available_media_frames > MAX_BOUNDED_VIDEO_PREROLL_FRAMES
+        {
             return Err(PlaybackError::InvalidVideoPrerollObservation);
         }
         if self.state != TransportState::Priming
@@ -1074,10 +1102,6 @@ impl PlaybackEngine {
         };
         let target = timeline_frame_at_ns(phase_ns, self.position.time_base)?;
         self.position.frame = target.min(self.end_frame).max(0);
-        if self.active_target_frame != Some(self.position.frame) {
-            self.active_target_frame = Some(self.position.frame);
-            self.terminal_delivery = None;
-        }
         if self.position.frame >= self.end_frame {
             self.state = TransportState::Ended;
             self.clock_master = None;
@@ -1177,7 +1201,6 @@ impl PlaybackEngine {
         self.quality_revision = self.quality_revision.saturating_add(1);
         self.recent_pressure.clear();
         self.consecutive_healthy = 0;
-        self.active_target_frame = Some(self.position.frame);
         self.active_demand = None;
         self.terminal_delivery = None;
         self.priming_current_presentable = false;
@@ -1185,6 +1208,7 @@ impl PlaybackEngine {
         self.audio_device_anchor = None;
         self.last_audio_observation = None;
         self.last_audio_handoff = None;
+        self.audio_uncertain_since = None;
     }
 
     fn try_complete_observed_priming(&mut self) -> bool {
@@ -1474,6 +1498,12 @@ mod tests {
         assert_eq!(advanced.position.frame, 1);
         assert_eq!(demand.target, advanced.position);
         assert_ne!(demand.sequence, previous_sequence);
+        assert!(engine
+            .observe_frame_delivery(FrameDelivery::for_demand(
+                demand.identity(),
+                FrameDeliveryKind::Ready,
+            ))
+            .expect("current audio-clock demand delivery"));
     }
 
     #[test]
@@ -1557,6 +1587,47 @@ mod tests {
             .unwrap();
         assert_eq!(reacquired.clock_master, Some(ClockMaster::AudioDevice));
         assert_eq!(engine.tick(ts(45)).unwrap().position.frame, 1);
+    }
+
+    #[test]
+    fn transient_stale_callback_keeps_audio_master_within_grace() {
+        let mut engine = engine();
+        engine.play(100, ts(0)).unwrap();
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+        engine
+            .observe_audio_device_clock(audio_observation(&engine, 1_000, ts(0)))
+            .unwrap();
+        engine
+            .observe_audio_device_clock(audio_observation(&engine, 1_960, ts(20)))
+            .unwrap();
+
+        let mut uncertain = audio_observation(&engine, 1_960, ts(80));
+        uncertain.state = AudioDeviceClockState::Uncertain;
+        let held = engine.observe_audio_device_clock(uncertain).unwrap();
+        assert_eq!(held.clock_master, Some(ClockMaster::AudioDevice));
+
+        let resumed = engine
+            .observe_audio_device_clock(audio_observation(&engine, 2_920, ts(100)))
+            .unwrap();
+        assert_eq!(resumed.clock_master, Some(ClockMaster::AudioDevice));
+    }
+
+    #[test]
+    fn prolonged_callback_uncertainty_hands_off_to_synthetic() {
+        let mut engine = engine();
+        engine.play(100, ts(0)).unwrap();
+        engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+        engine
+            .observe_audio_device_clock(audio_observation(&engine, 1_000, ts(0)))
+            .unwrap();
+
+        let mut uncertain = audio_observation(&engine, 1_000, ts(60));
+        uncertain.state = AudioDeviceClockState::Uncertain;
+        engine.observe_audio_device_clock(uncertain).unwrap();
+        uncertain.observed_at = ts(1_061);
+        let fallback = engine.observe_audio_device_clock(uncertain).unwrap();
+
+        assert_eq!(fallback.clock_master, Some(ClockMaster::Synthetic));
     }
 
     #[test]
@@ -1801,6 +1872,14 @@ mod tests {
         assert_eq!(engine.snapshot(), before);
         assert_eq!(
             engine.observe_video_preroll(video_preroll(&engine, 2, 1)),
+            Err(PlaybackError::InvalidVideoPrerollObservation)
+        );
+        assert_eq!(
+            engine.observe_video_preroll(video_preroll(
+                &engine,
+                MAX_BOUNDED_VIDEO_PREROLL_FRAMES,
+                MAX_BOUNDED_VIDEO_PREROLL_FRAMES + 1,
+            )),
             Err(PlaybackError::InvalidVideoPrerollObservation)
         );
         assert_eq!(engine.snapshot(), before);

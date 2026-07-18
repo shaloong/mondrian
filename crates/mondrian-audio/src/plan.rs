@@ -2,12 +2,9 @@ use mondrian_core::{
     AudioComponentEditId, AudioProcessingScopeId, ExactAutomationCurve, MixBusId, ProgramOutputId,
     SequenceId, TimelineTime, TimelineTimeRange, TrackId,
 };
-use mondrian_timeline::audio::{
-    AudioChannelStripOutputPort, AudioFadeCurve, AudioRoute, AudioTransitionCurve,
-};
+use mondrian_timeline::audio::{AudioFadeCurve, AudioRoute, AudioTransitionCurve};
 use mondrian_timeline::clip::SpeedMap;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 /// DSP execution contract selected by one consumer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,52 +195,4 @@ pub struct AudioRenderContract {
     pub max_block_frames: usize,
     /// Realtime or offline processor contract.
     pub processing_mode: AudioProcessingMode,
-}
-
-/// Immutable context-specific plan. Mutable buffers and processor instances do not live here.
-#[derive(Debug, Clone)]
-pub struct PreparedAudioPlan {
-    pub(crate) program: Arc<CompiledAudioProgram>,
-    pub(crate) contract: AudioRenderContract,
-}
-
-impl PreparedAudioPlan {
-    /// Prepare one semantic program for a concrete Render Contract.
-    pub fn prepare(
-        program: Arc<CompiledAudioProgram>,
-        contract: AudioRenderContract,
-    ) -> Result<Self, crate::AudioCompileError> {
-        if contract.sample_rate == 0 || contract.channels == 0 || contract.max_block_frames == 0 {
-            return Err(crate::AudioCompileError::InvalidRenderContract);
-        }
-        Ok(Self { program, contract })
-    }
-
-    /// Concrete Render Contract used by Sessions.
-    pub fn contract(&self) -> AudioRenderContract {
-        self.contract
-    }
-
-    /// Exact semantic Program from which this plan was prepared.
-    pub fn program(&self) -> &CompiledAudioProgram {
-        self.program.as_ref()
-    }
-}
-
-/// Resolve samples for one typed source port.
-pub(crate) fn source_port_key(
-    source: mondrian_timeline::audio::AudioRouteSource,
-) -> (
-    Option<TrackId>,
-    Option<MixBusId>,
-    AudioChannelStripOutputPort,
-) {
-    match source {
-        mondrian_timeline::audio::AudioRouteSource::Track { track_id, port } => {
-            (Some(track_id), None, port)
-        }
-        mondrian_timeline::audio::AudioRouteSource::Bus { bus_id, port } => {
-            (None, Some(bus_id), port)
-        }
-    }
 }

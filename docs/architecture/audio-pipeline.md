@@ -172,18 +172,32 @@ fail compilation explicitly; only `RoutedInputs` is executable.
 - maximum admitted block frames;
 - `Realtime` or `Offline` processing mode.
 
-Preparation is where layout negotiation, processor realization, latency
-analysis, and scratch sizing belong. The present executable processor set is
-zero-latency, so the runtime does not claim general plugin delay compensation.
-Future non-zero-latency admission must build an explicit compensation plan
-before a Session begins.
+Preparation now lowers the semantic graph into one dense execution schedule:
+
+- stable topological slots for Track Channels, Buses, and the selected Output;
+- destination-contiguous incoming Route ranges and Track-contiguous
+  Contribution ranges;
+- dense Processing Scope slots and Contribution-local Transition bindings;
+- half-open active sample spans lowered once for the Render Contract;
+- liveness-assigned scratch slots whose lifetime extends through the last
+  downstream consumer;
+- constant gain/pan and rack-gain fast paths;
+- one explicitly selected scalar-reference or runtime-vectorized CPU kernel.
+
+The prepared schedule contains no authoring maps and the Session performs no
+Route search. Layout negotiation, processor realization, non-constant
+automation span segmentation, latency analysis, and PDC also belong here. The
+present executable processor set is zero-latency, so the runtime does not claim
+general plugin delay compensation. Any non-zero-latency processor must be
+rejected until preparation can produce a complete compensation plan.
 
 ### Stage 3: exclusive mutable Session
 
-`AudioRenderSession` allocates Track, Bus, Output, and route scratch buffers
-before rendering. `render_into` accepts an exact signed start sample and exact
-frame count and writes caller-owned interleaved float storage. The Session is
-exclusive mutable state; plans may be shared, Sessions may not.
+`AudioRenderSession` allocates the schedule's liveness-sized scratch bank before
+rendering; it does not allocate one permanent buffer per author node or Route.
+`render_into` accepts an exact signed start sample and exact frame count and
+writes caller-owned interleaved float storage. The Session is exclusive mutable
+state; plans may be shared, Sessions may not.
 
 The source Seam is block-shaped even when a Clip speed map produces reverse,
 repeated, or non-contiguous coordinates. The Session resolves one absolute
@@ -216,19 +230,20 @@ explicit processor or downstream contract.
 
 Exact automation is evaluated in its owner domain and is invariant under block
 partition. Timeline-to-sample conversion uses `AudioSamplePosition` with an
-explicit rounding policy. Export range boundaries are converted once from the
-Sequence frame grid; chunks then advance integer samples only.
+explicit rounding policy. Static source-time spans map the first sample exactly
+and advance an `i128` rational accumulator across the block, including
+fractional forward and reverse rates; they do not reconstruct general Timeline
+values per sample. Export range boundaries are converted once from the Sequence
+frame grid; chunks then advance integer samples only.
 
 ### Realtime execution performance contract
 
-Correct signal semantics do not make the current reference executor a DAW-grade
-kernel. Before that claim, preparation must lower semantic IR into a dense,
-index-addressed execution schedule with stable node slots, contiguous incoming
-route ranges, liveness-based scratch reuse, processor latency, and presegmented
-automation/source spans. Realtime rendering must not scan author Routes or use
-tree/map lookup in sample loops. Exact rational mapping is resolved at block or
-span boundaries; steady affine spans advance integer/rational accumulators
-without reconstructing general Timeline values for every processor and sample.
+The dense schedule, liveness scratch reuse, scalar reference kernels, runtime
+SIMD dispatch, and affine source accumulator are implemented. Realtime rendering
+does not scan author Routes or use tree/map lookup in sample loops. Remaining
+kernel work is to presegment non-constant automation and processor event spans,
+then add latency/PDC and state-entry obligations without reintroducing author
+graph interpretation.
 
 The normative realtime path is CPU block DSP with a scalar reference kernel and
 vectorized kernels selected during preparation. A render worker runs ahead into
@@ -339,7 +354,8 @@ Adapter. Its versioned `cpal_av_48khz_30min_v1` policy requires at least 99.5%
 current-video readiness, completed GPU presentation, Audio Device Clock Master
 residency except at most five seconds of startup fallback, absolute delivery
 clock drift at most 20 ms, callback-frame versus monotonic-duration divergence
-at most 100 ms, no callback underrun/recovery or render-to-silence substitution,
+at most 1,000 ppm with a 100 ms minimum allowance, no callback
+underrun/recovery or render-to-silence substitution,
 no source decode failure/oversize window, a bounded persistent Session pool
 with observed sequential reuse, each steady sequential ten-second window within
 the 460 ms output high-water duration, the 256 MiB global source-cache budget, and
@@ -347,10 +363,20 @@ the shared whole-process Private Commit plateau contract. Missing environment
 fixture, output device, callback facts, native memory facts, or presentation
 facts fail rather than skip.
 
+The observation begins only after the same stream generation, fresh callback,
+Active Audio Playback, and Audio Device Clock Master remain continuously
+qualified for one second. A bounded 30-second tail may extend execution until
+both the current uninterrupted callback interval and Playback Evidence cover
+30 minutes; it never reduces either acceptance duration.
+
 This gate proves a concrete OS output stream consumed the production PCM path;
-it does not claim acoustic loopback or speaker-waveform verification. The gate
-and its deterministic pass/fail unit tests are implemented, but no complete
-30-minute reference-machine report is checked into the repository yet.
+it does not claim acoustic loopback or speaker-waveform verification. On
+2026-07-18 it passed a complete local 30-minute run with one stable 48 kHz
+stereo stream: 86,474,752 consumed frames, 168,926 callbacks, zero underrun,
+render substitution, recovery, drift, or rejected terminal delivery, and
+53,964/53,964 video Ready samples with 107,924 headless GPU presentations. The
+report is local development evidence; no redistributable fixture or fixed-
+reference-machine baseline is checked into the repository.
 
 On 2026-07-18 the shorter development Adapter reached the same production path
 on the local Windows machine with CPAL stream generation 1: 13,312 active
@@ -361,8 +387,9 @@ ten-second process-per-window miss took about 1.02 s. That historical cold
 measurement justified this work but is not steady-state evidence. The
 professional gate now reports cold, sequential, and random-restart maxima
 separately and applies the 460 ms playback high-water rule only to observed
-sequential reuse. No complete 30-minute reference-machine report has yet
-established that bound.
+sequential reuse. The local complete run opened one Session, reused it for 180
+sequential windows, and measured a 79,973 us steady maximum against the 460 ms
+bound; wider fixed-machine/device coverage remains outstanding.
 
 With a generated 24-second 48 kHz AAC development fixture, the product renderer
 opened one Session, decoded three ten-second windows, reused it twice, and
@@ -403,6 +430,15 @@ Automated tests currently prove:
 - unresolved VST3/CLAP instances fail closed;
 - timeline/audio crates compile and test independently;
 - app playback and export compile against the shared Runtime.
+- dense schedule lowering produces topological node slots, contiguous Route and
+  Contribution ranges, and liveness-reused scratch for Track→Bus→Output;
+- scalar and runtime-vectorized kernels are sample-for-sample identical for the supported DSP
+  set, including awkward block sizes and an eight-Track full-schedule render;
+- exact fractional forward and reverse source mappings remain block-shaped and
+  preserve floor semantics;
+- the ignored fixed-reference load matrix exercises 1/8/32/64 Tracks at
+  64/256/1024-frame blocks, compares scalar and SIMD PCM, and fails when p99
+  exceeds the block deadline;
 - decoded-media block reads cross aligned windows exactly, reuse hits, evict by
   global PCM bytes, and invalidate after file replacement;
 - a manual external AAC parity gate compares a cold window, sequential boundary,
@@ -443,11 +479,12 @@ gates rather than implied support:
    reference machine: cold open, sequential boundary, random restart,
    cancellation return, cross-source LRU pressure, and source-cache bytes must
    appear in the same long-run evidence report.
-9. Replace author-collection lookup and per-sample exact-time evaluation in the
-   reference executor with the prepared dense schedule, span automation, scalar
-   reference/SIMD kernels, scratch liveness plan, and the workload matrix above;
-   only then evaluate qualified GPU batch processors against measured CPU SIMD
-   headroom and added latency.
+9. Presegment non-constant automation and processor events during preparation,
+   add declared processor latency/PDC and state-entry obligations, and extend the
+   implemented scalar/SIMD matrix to Buses, Transitions, dense automation,
+   nested Sequences, decoder pressure, and stateful processors. Only then
+   evaluate qualified GPU batch processors against measured CPU SIMD headroom
+   and added latency.
 
 No item may be closed by adding only schema, an effect enum, a disconnected UI,
 or a consumer-specific fallback mixer.

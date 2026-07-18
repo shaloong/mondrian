@@ -75,7 +75,16 @@ pub(crate) fn pump_playback_preview(
     let poll = adapter.poll_playback_work(pending_demand);
     let delivery_changed =
         poll.frame_deliveries.iter().copied().fold(false, |changed, delivery| {
-            state.observe_frame_delivery(delivery) || changed
+            // Completion draining and realtime-stall expiry are independent
+            // bounded sources. They may both report a terminal fact for the
+            // identity sampled at the start of this turn. The first accepted
+            // fact consumes that authority; later facts are expected losing
+            // races, not rejected Playback observations.
+            if state.pending_playback_frame_demand_identity() == Some(delivery.identity()) {
+                state.observe_frame_delivery(delivery) || changed
+            } else {
+                changed
+            }
         });
     let preroll_changed = observe_playback_video_preroll(state, adapter);
 
@@ -168,5 +177,28 @@ mod tests {
 
         assert!(outcome.transport_change);
         assert!(!state.is_playing());
+    }
+
+    #[test]
+    fn pump_silently_retires_losing_terminal_facts_for_consumed_demand() {
+        let mut state = AppState::new();
+        state.set_playback_frame_running(4);
+        let identity = state.pending_playback_frame_demand_identity().expect("active demand");
+        let adapter = FakePreviewAdapter {
+            poll: RefCell::new(Some(PreviewWorkPoll {
+                frame_deliveries: vec![
+                    FrameDelivery::for_demand(identity, FrameDeliveryKind::Late),
+                    FrameDelivery::for_demand(identity, FrameDeliveryKind::Late),
+                ],
+                ..PreviewWorkPoll::default()
+            })),
+            preroll: None,
+        };
+
+        pump_playback_preview(&mut state, &adapter);
+        let evidence = state.playback_evidence_report();
+
+        assert_eq!(evidence.deliveries.late, 1);
+        assert_eq!(evidence.deliveries.rejected, 0);
     }
 }

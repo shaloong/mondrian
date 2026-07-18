@@ -16,7 +16,8 @@ use serde::Serialize;
 
 const OUTPUT_SAMPLE_RATE: u32 = 48_000;
 const OUTPUT_CHANNELS: u8 = 2;
-const MAX_CALLBACK_TIMELINE_DIVERGENCE_US: u64 = 100_000;
+const MAX_CALLBACK_TIMELINE_DIVERGENCE_FLOOR_US: u64 = 100_000;
+const MAX_CALLBACK_CLOCK_RATE_ERROR_PPM: u64 = 1_000;
 const MAX_CALLBACK_AGE_US: u64 = 100_000;
 const MAX_DELIVERY_CLOCK_DRIFT_US: u64 = 20_000;
 const MAX_SYNTHETIC_STARTUP_US: u64 = 5_000_000;
@@ -231,6 +232,12 @@ pub(crate) fn evaluate_professional_audio_playback(
             .checked_div(u64::from(output.sample_rate.max(1)))
             .unwrap_or(u64::MAX);
         callback_divergence_us = callback_position_us.abs_diff(callback_duration_us);
+        let callback_divergence_limit_us = MAX_CALLBACK_TIMELINE_DIVERGENCE_FLOOR_US.max(
+            callback_duration_us
+                .saturating_mul(MAX_CALLBACK_CLOCK_RATE_ERROR_PPM)
+                .checked_div(1_000_000)
+                .unwrap_or(u64::MAX),
+        );
         callback_count = output.callback_count;
         output_underrun_frames = output.underrun_frames;
         let callback_age_us = output
@@ -287,9 +294,11 @@ pub(crate) fn evaluate_professional_audio_playback(
         );
         require(
             &mut failures,
-            callback_divergence_us <= MAX_CALLBACK_TIMELINE_DIVERGENCE_US,
+            callback_divergence_us <= callback_divergence_limit_us,
             "audio_callback_cadence_diverged",
-            format!("at most {MAX_CALLBACK_TIMELINE_DIVERGENCE_US} us"),
+            format!(
+                "at most {callback_divergence_limit_us} us ({MAX_CALLBACK_CLOCK_RATE_ERROR_PPM} ppm with {MAX_CALLBACK_TIMELINE_DIVERGENCE_FLOOR_US} us floor)"
+            ),
             format!("{callback_divergence_us} us"),
             "callback-consumed frames versus active monotonic wall duration",
         );

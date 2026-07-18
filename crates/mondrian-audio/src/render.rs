@@ -1,14 +1,11 @@
-use crate::plan::{
-    source_port_key, CompiledChannelStrip, CompiledProcessor, CompiledRack, PreparedAudioPlan,
+use crate::dsp;
+use crate::plan::{CompiledChannelStrip, CompiledProcessor, CompiledRack};
+use crate::schedule::{
+    PreparedAudioPlan, PreparedAudioSchedule, PreparedContribution, PreparedNodeOrigin,
+    PreparedTransitionBinding, PreparedTransitionDirection,
 };
-use mondrian_core::{
-    AudioComponentEditId, AudioSamplePosition, AudioSampleRate, AudioSampleRounding, MixBusId,
-    TimelineTime, TimelineTimeError, TrackId,
-};
-use mondrian_timeline::audio::{
-    AudioChannelStripOutputPort, AudioRouteDestination, AudioTransitionCurve,
-};
-use std::collections::BTreeMap;
+use mondrian_core::{AudioComponentEditId, AudioSampleRate, TimelineTime, TimelineTimeError};
+use mondrian_timeline::audio::{AudioChannelStripOutputPort, AudioTransitionCurve};
 use std::sync::Arc;
 
 /// Pull-style source Adapter for generated contribution identities.
@@ -72,17 +69,32 @@ impl NodeBuffers {
     }
 }
 
+#[derive(Debug)]
+struct RenderScratch {
+    source_frames: Vec<i64>,
+    contribution_pcm: Vec<f32>,
+    contribution_sample_gains: Vec<f32>,
+    strip_pre_gains: Vec<f32>,
+    strip_post_gains: Vec<f32>,
+}
+
+impl RenderScratch {
+    fn new(max_frames: usize, samples: usize) -> Self {
+        Self {
+            source_frames: vec![-1; max_frames],
+            contribution_pcm: vec![0.0; samples],
+            contribution_sample_gains: vec![0.0; samples],
+            strip_pre_gains: vec![0.0; samples],
+            strip_post_gains: vec![0.0; samples],
+        }
+    }
+}
+
 /// Exclusive mutable execution state for one Playback, Export, or Audition run.
 pub struct AudioRenderSession {
     plan: Arc<PreparedAudioPlan>,
-    tracks: BTreeMap<TrackId, NodeBuffers>,
-    buses: BTreeMap<MixBusId, NodeBuffers>,
-    output: NodeBuffers,
-    route_mix: Vec<f32>,
-    source_frames: Vec<i64>,
-    contribution_pcm: Vec<f32>,
-    contribution_gain: Vec<f32>,
-    contribution_pan: Vec<f64>,
+    node_buffers: Vec<NodeBuffers>,
+    scratch: RenderScratch,
 }
 
 impl AudioRenderSession {
@@ -93,24 +105,13 @@ impl AudioRenderSession {
             .max_block_frames
             .checked_mul(contract.channels)
             .ok_or(AudioExecutionError::BufferTooLarge)?;
-        let tracks = plan
-            .program()
-            .track_channels
-            .keys()
-            .map(|id| (*id, NodeBuffers::new(samples)))
+        let node_buffers = (0..plan.schedule.summary.scratch_slot_count)
+            .map(|_| NodeBuffers::new(samples))
             .collect();
-        let buses =
-            plan.program().buses.keys().map(|id| (*id, NodeBuffers::new(samples))).collect();
         Ok(Self {
             plan,
-            tracks,
-            buses,
-            output: NodeBuffers::new(samples),
-            route_mix: vec![0.0; samples],
-            source_frames: vec![-1; contract.max_block_frames],
-            contribution_pcm: vec![0.0; samples],
-            contribution_gain: vec![0.0; contract.max_block_frames],
-            contribution_pan: vec![0.0; contract.max_block_frames],
+            node_buffers,
+            scratch: RenderScratch::new(contract.max_block_frames, samples),
         })
     }
 
@@ -133,166 +134,55 @@ impl AudioRenderSession {
             return Err(AudioExecutionError::OutputSizeMismatch);
         }
         destination.fill(0.0);
-        for buffers in self.tracks.values_mut() {
-            buffers.clear(samples);
-        }
-        for buffers in self.buses.values_mut() {
-            buffers.clear(samples);
-        }
-        self.output.clear(samples);
 
+        let schedule = &self.plan.schedule;
+        let backend = self.plan.kernel_backend();
         let sample_rate = AudioSampleRate::new(contract.sample_rate)?;
-        for contribution in &self.plan.program().contributions {
-            let Some(track) = self.tracks.get_mut(&contribution.track_id) else {
-                continue;
-            };
-            let scope = self
-                .plan
-                .program()
-                .processing_scopes
-                .get(&contribution.processing_scope)
-                .ok_or(AudioExecutionError::MissingPreparedScope)?;
-            self.source_frames[..request.frames].fill(-1);
-            self.contribution_gain[..request.frames].fill(0.0);
-            self.contribution_pan[..request.frames].fill(0.0);
-            let mut has_audible_frame = false;
-            for frame in 0..request.frames {
-                let absolute_sample = request
-                    .start_sample
-                    .checked_add(
-                        i64::try_from(frame).map_err(|_| AudioExecutionError::BufferTooLarge)?,
-                    )
-                    .ok_or(AudioExecutionError::BufferTooLarge)?;
-                let sequence_time =
-                    TimelineTime::new(absolute_sample, i64::from(sample_rate.hz()))?;
-                if !contribution.sequence_range.contains(sequence_time)? {
-                    continue;
-                }
-                let source_time = contribution.source_time_map.map(sequence_time)?;
-                let source_frame = AudioSamplePosition::from_timeline_time(
-                    source_time,
+        for node_slot in 0..schedule.nodes.len() {
+            let node = &schedule.nodes[node_slot];
+            let scratch_slot = node.scratch_slot;
+            self.node_buffers[scratch_slot].clear(samples);
+
+            if matches!(node.origin, PreparedNodeOrigin::Track(_)) {
+                render_track_contributions(
+                    schedule,
+                    node_slot,
+                    source,
+                    request,
                     sample_rate,
-                    AudioSampleRounding::Floor,
-                )?
-                .sample();
-                let clip_local = sequence_time.checked_sub(contribution.sequence_range.start)?;
-                let scope_time = contribution.scope_in.checked_add(clip_local)?;
-                let edit_time = contribution.local_time_in.checked_add(clip_local)?;
-                let scope_gain_db = scope
-                    .input_gain_automation
-                    .as_ref()
-                    .map_or(Ok(scope.input_gain_db), |curve| curve.evaluate(scope_time))?
-                    + scope.rack.gain_db(scope_time)?;
-                let volume_db = contribution
-                    .volume_automation
-                    .as_ref()
-                    .map_or(Ok(contribution.volume_db), |curve| {
-                        curve.evaluate(edit_time)
-                    })?;
-                let pan = contribution
-                    .pan_automation
-                    .as_ref()
-                    .map_or(Ok(contribution.pan), |curve| curve.evaluate(edit_time))?
-                    .clamp(-1.0, 1.0);
-                let envelope = contribution_envelope(
-                    contribution,
-                    clip_local,
-                    sequence_time,
-                    &self.plan.program().transitions,
+                    contract.channels,
+                    backend,
+                    &mut self.node_buffers[scratch_slot],
+                    &mut self.scratch,
                 )?;
-                self.source_frames[frame] = source_frame;
-                self.contribution_gain[frame] = db_to_linear(scope_gain_db + volume_db) * envelope;
-                self.contribution_pan[frame] = pan;
-                has_audible_frame |= source_frame >= 0;
-            }
-            if !has_audible_frame {
-                continue;
-            }
-            self.contribution_pcm[..samples].fill(0.0);
-            source.read_indexed_interleaved(
-                contribution.edit_id,
-                &self.source_frames[..request.frames],
-                contract.channels,
-                &mut self.contribution_pcm[..samples],
-            )?;
-
-            for frame in 0..request.frames {
-                if self.source_frames[frame] < 0 {
-                    continue;
-                }
-                let gain = self.contribution_gain[frame];
-                let pan = self.contribution_pan[frame];
-                for channel in 0..contract.channels {
-                    let pan_gain = stereo_balance_gain(channel, contract.channels, pan);
-                    let value = self.contribution_pcm[frame * contract.channels + channel];
-                    track.input[frame * contract.channels + channel] += value * gain * pan_gain;
+            } else {
+                for route_index in node.incoming.clone() {
+                    sum_prepared_route(
+                        schedule,
+                        route_index,
+                        samples,
+                        backend,
+                        &mut self.node_buffers,
+                    )?;
                 }
             }
-        }
 
-        for (track_id, buffers) in &mut self.tracks {
-            let channel = self
-                .plan
-                .program()
-                .track_channels
-                .get(track_id)
-                .ok_or(AudioExecutionError::MissingPreparedTrack)?;
             process_strip(
-                &channel.strip,
-                channel.muted,
+                &node.strip,
+                node.muted,
+                node.constant_pre_gain,
+                node.constant_post_gain,
                 request,
                 contract.sample_rate,
                 contract.channels,
-                buffers,
+                backend,
+                &mut self.node_buffers[scratch_slot],
+                &mut self.scratch,
             )?;
         }
 
-        for bus_id in &self.plan.program().bus_order {
-            self.route_mix[..samples].fill(0.0);
-            sum_incoming(
-                &mut self.route_mix[..samples],
-                AudioRouteDestination::Bus(*bus_id),
-                &self.plan.program().routes,
-                &self.tracks,
-                &self.buses,
-                samples,
-            );
-            let buffers =
-                self.buses.get_mut(bus_id).ok_or(AudioExecutionError::MissingPreparedBus)?;
-            buffers.input[..samples].copy_from_slice(&self.route_mix[..samples]);
-            let strip = self
-                .plan
-                .program()
-                .buses
-                .get(bus_id)
-                .ok_or(AudioExecutionError::MissingPreparedBus)?;
-            process_strip(
-                strip,
-                false,
-                request,
-                contract.sample_rate,
-                contract.channels,
-                buffers,
-            )?;
-        }
-
-        sum_incoming(
-            &mut self.output.input[..samples],
-            AudioRouteDestination::Output(self.plan.program().output_id),
-            &self.plan.program().routes,
-            &self.tracks,
-            &self.buses,
-            samples,
-        );
-        process_strip(
-            &self.plan.program().output,
-            false,
-            request,
-            contract.sample_rate,
-            contract.channels,
-            &mut self.output,
-        )?;
-        destination.copy_from_slice(&self.output.post_mute[..samples]);
+        let output_scratch = schedule.nodes[schedule.output_slot].scratch_slot;
+        destination.copy_from_slice(&self.node_buffers[output_scratch].post_mute[..samples]);
         Ok(())
     }
 }
@@ -312,75 +202,269 @@ pub fn render_audio(
     Ok(output)
 }
 
-fn process_strip(
-    strip: &CompiledChannelStrip,
-    muted: bool,
+#[allow(clippy::too_many_arguments)]
+fn render_track_contributions(
+    schedule: &PreparedAudioSchedule,
+    node_slot: usize,
+    source: &mut impl AudioPcmSource,
     request: AudioRenderRequest,
-    sample_rate: u32,
+    sample_rate: AudioSampleRate,
     channels: usize,
-    buffers: &mut NodeBuffers,
+    backend: crate::AudioKernelBackend,
+    track: &mut NodeBuffers,
+    scratch: &mut RenderScratch,
 ) -> Result<(), AudioExecutionError> {
-    for frame in 0..request.frames {
-        let absolute_sample = request
-            .start_sample
-            .checked_add(i64::try_from(frame).map_err(|_| AudioExecutionError::BufferTooLarge)?)
-            .ok_or(AudioExecutionError::BufferTooLarge)?;
-        let time = TimelineTime::new(absolute_sample, i64::from(sample_rate))?;
-        let pre_gain = db_to_linear(strip.input_trim_db + strip.pre_fader.gain_db(time)?);
-        let fader_db = strip
-            .fader_automation
-            .as_ref()
-            .map_or(Ok(strip.fader_db), |curve| curve.evaluate(time))?;
-        let post_gain = db_to_linear(fader_db + strip.post_fader.gain_db(time)?);
-        for channel in 0..channels {
-            let index = frame * channels + channel;
-            let pre = buffers.input[index] * pre_gain;
-            let post = pre * post_gain;
-            buffers.pre_fader[index] = pre;
-            buffers.post_fader_pre_mute[index] = post;
-            buffers.post_mute[index] = if muted { 0.0 } else { post };
+    let samples = request
+        .frames
+        .checked_mul(channels)
+        .ok_or(AudioExecutionError::BufferTooLarge)?;
+    for contribution_index in schedule.nodes[node_slot].contributions.clone() {
+        let contribution = &schedule.contributions[contribution_index];
+        let scope = &schedule.scopes[contribution.scope_slot];
+        scratch.source_frames[..request.frames].fill(-1);
+        scratch.contribution_sample_gains[..samples].fill(0.0);
+        let Some(active_frames) = prepare_source_frames(
+            contribution,
+            request,
+            sample_rate,
+            &mut scratch.source_frames[..request.frames],
+        )?
+        else {
+            continue;
+        };
+        let has_audible_frame = scratch.source_frames[active_frames.clone()]
+            .iter()
+            .any(|source_frame| *source_frame >= 0);
+        if let Some((gain, pan)) = contribution.constant_gain_pan {
+            for frame in active_frames.clone() {
+                for channel in 0..channels {
+                    scratch.contribution_sample_gains[frame * channels + channel] =
+                        gain * stereo_balance_gain(channel, channels, pan);
+                }
+            }
+        } else {
+            for frame in active_frames {
+                let absolute_sample = request
+                    .start_sample
+                    .checked_add(
+                        i64::try_from(frame).map_err(|_| AudioExecutionError::BufferTooLarge)?,
+                    )
+                    .ok_or(AudioExecutionError::BufferTooLarge)?;
+                let sequence_time =
+                    TimelineTime::new(absolute_sample, i64::from(sample_rate.hz()))?;
+                let clip_local =
+                    sequence_time.checked_sub(contribution.semantic.sequence_range.start)?;
+                let scope_time = contribution.semantic.scope_in.checked_add(clip_local)?;
+                let edit_time = contribution.semantic.local_time_in.checked_add(clip_local)?;
+                let scope_gain_db = scope
+                    .input_gain_automation
+                    .as_ref()
+                    .map_or(Ok(scope.input_gain_db), |curve| curve.evaluate(scope_time))?
+                    + scope.rack.gain_db(scope_time)?;
+                let volume_db = contribution
+                    .semantic
+                    .volume_automation
+                    .as_ref()
+                    .map_or(Ok(contribution.semantic.volume_db), |curve| {
+                        curve.evaluate(edit_time)
+                    })?;
+                let pan = contribution
+                    .semantic
+                    .pan_automation
+                    .as_ref()
+                    .map_or(Ok(contribution.semantic.pan), |curve| {
+                        curve.evaluate(edit_time)
+                    })?
+                    .clamp(-1.0, 1.0);
+                let envelope = contribution_envelope(
+                    contribution,
+                    clip_local,
+                    sequence_time,
+                    &schedule.transitions[contribution.transitions.clone()],
+                )?;
+                let gain = db_to_linear(scope_gain_db + volume_db) * envelope;
+                for channel in 0..channels {
+                    scratch.contribution_sample_gains[frame * channels + channel] =
+                        gain * stereo_balance_gain(channel, channels, pan);
+                }
+            }
         }
+        if !has_audible_frame {
+            continue;
+        }
+        scratch.contribution_pcm[..samples].fill(0.0);
+        source.read_indexed_interleaved(
+            contribution.semantic.edit_id,
+            &scratch.source_frames[..request.frames],
+            channels,
+            &mut scratch.contribution_pcm[..samples],
+        )?;
+        dsp::multiply_add(
+            backend,
+            &mut track.input[..samples],
+            &scratch.contribution_pcm[..samples],
+            &scratch.contribution_sample_gains[..samples],
+        );
     }
     Ok(())
 }
 
-fn sum_incoming(
-    destination: &mut [f32],
-    destination_node: AudioRouteDestination,
-    routes: &[mondrian_timeline::audio::AudioRoute],
-    tracks: &BTreeMap<TrackId, NodeBuffers>,
-    buses: &BTreeMap<MixBusId, NodeBuffers>,
-    samples: usize,
-) {
-    for route in routes.iter().filter(|route| route.destination == destination_node) {
-        let (track_id, bus_id, port) = source_port_key(route.source);
-        let source = track_id
-            .and_then(|id| tracks.get(&id))
-            .or_else(|| bus_id.and_then(|id| buses.get(&id)))
-            .map(|buffers| buffers.port(port, samples));
-        if let Some(source) = source {
-            for (destination, source) in destination.iter_mut().zip(source) {
-                *destination += *source;
-            }
-        }
+fn prepare_source_frames(
+    contribution: &PreparedContribution,
+    request: AudioRenderRequest,
+    sample_rate: AudioSampleRate,
+    destination: &mut [i64],
+) -> Result<Option<std::ops::Range<usize>>, AudioExecutionError> {
+    let request_frames =
+        i64::try_from(request.frames).map_err(|_| AudioExecutionError::BufferTooLarge)?;
+    let request_end = request
+        .start_sample
+        .checked_add(request_frames)
+        .ok_or(AudioExecutionError::BufferTooLarge)?;
+    let active_start = request.start_sample.max(contribution.sequence_start_sample);
+    let active_end = request_end.min(contribution.sequence_end_sample);
+    if active_start >= active_end {
+        return Ok(None);
     }
+    let first_index = usize::try_from(active_start - request.start_sample)
+        .map_err(|_| AudioExecutionError::BufferTooLarge)?;
+    let active_len = usize::try_from(active_end - active_start)
+        .map_err(|_| AudioExecutionError::BufferTooLarge)?;
+    let active_range = first_index..first_index.saturating_add(active_len);
+
+    let sequence_time = TimelineTime::new(active_start, i64::from(sample_rate.hz()))?;
+    let source_time = contribution.semantic.source_time_map.map(sequence_time)?;
+    let scale = contribution.semantic.source_time_map.speed.scale();
+    let denominator = i128::from(source_time.denominator())
+        .checked_mul(i128::from(scale.denominator()))
+        .ok_or(AudioExecutionError::BufferTooLarge)?;
+    let mut numerator = i128::from(source_time.numerator())
+        .checked_mul(i128::from(sample_rate.hz()))
+        .and_then(|value| value.checked_mul(i128::from(scale.denominator())))
+        .ok_or(AudioExecutionError::BufferTooLarge)?;
+    let step = i128::from(scale.numerator())
+        .checked_mul(i128::from(source_time.denominator()))
+        .ok_or(AudioExecutionError::BufferTooLarge)?;
+    for frame in active_range.clone() {
+        destination[frame] = i64::try_from(numerator.div_euclid(denominator))
+            .map_err(|_| AudioExecutionError::BufferTooLarge)?;
+        numerator = numerator.checked_add(step).ok_or(AudioExecutionError::BufferTooLarge)?;
+    }
+    Ok(Some(active_range))
+}
+
+fn sum_prepared_route(
+    schedule: &PreparedAudioSchedule,
+    route_index: usize,
+    samples: usize,
+    backend: crate::AudioKernelBackend,
+    buffers: &mut [NodeBuffers],
+) -> Result<(), AudioExecutionError> {
+    let route = schedule
+        .routes
+        .get(route_index)
+        .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+    let source_scratch = schedule.nodes[route.source_slot].scratch_slot;
+    let destination_scratch = schedule.nodes[route.destination_slot].scratch_slot;
+    if source_scratch == destination_scratch {
+        return Err(AudioExecutionError::InvalidPreparedSchedule);
+    }
+    if source_scratch < destination_scratch {
+        let (left, right) = buffers.split_at_mut(destination_scratch);
+        let source = left[source_scratch].port(route.source_port, samples);
+        dsp::add(backend, &mut right[0].input[..samples], source);
+    } else {
+        let (left, right) = buffers.split_at_mut(source_scratch);
+        let destination = &mut left[destination_scratch].input[..samples];
+        let source = right[0].port(route.source_port, samples);
+        dsp::add(backend, destination, source);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_strip(
+    strip: &CompiledChannelStrip,
+    muted: bool,
+    constant_pre_gain: Option<f32>,
+    constant_post_gain: Option<f32>,
+    request: AudioRenderRequest,
+    sample_rate: u32,
+    channels: usize,
+    backend: crate::AudioKernelBackend,
+    buffers: &mut NodeBuffers,
+    scratch: &mut RenderScratch,
+) -> Result<(), AudioExecutionError> {
+    let samples = request
+        .frames
+        .checked_mul(channels)
+        .ok_or(AudioExecutionError::BufferTooLarge)?;
+    if let (Some(pre_gain), Some(post_gain)) = (constant_pre_gain, constant_post_gain) {
+        dsp::multiply_constant_into(
+            backend,
+            &mut buffers.pre_fader[..samples],
+            &buffers.input[..samples],
+            pre_gain,
+        );
+        dsp::multiply_constant_into(
+            backend,
+            &mut buffers.post_fader_pre_mute[..samples],
+            &buffers.pre_fader[..samples],
+            post_gain,
+        );
+    } else {
+        for frame in 0..request.frames {
+            let absolute_sample = request
+                .start_sample
+                .checked_add(i64::try_from(frame).map_err(|_| AudioExecutionError::BufferTooLarge)?)
+                .ok_or(AudioExecutionError::BufferTooLarge)?;
+            let time = TimelineTime::new(absolute_sample, i64::from(sample_rate))?;
+            let pre_gain = db_to_linear(strip.input_trim_db + strip.pre_fader.gain_db(time)?);
+            let fader_db = strip
+                .fader_automation
+                .as_ref()
+                .map_or(Ok(strip.fader_db), |curve| curve.evaluate(time))?;
+            let post_gain = db_to_linear(fader_db + strip.post_fader.gain_db(time)?);
+            scratch.strip_pre_gains[frame * channels..(frame + 1) * channels].fill(pre_gain);
+            scratch.strip_post_gains[frame * channels..(frame + 1) * channels].fill(post_gain);
+        }
+        dsp::multiply_into(
+            backend,
+            &mut buffers.pre_fader[..samples],
+            &buffers.input[..samples],
+            &scratch.strip_pre_gains[..samples],
+        );
+        dsp::multiply_into(
+            backend,
+            &mut buffers.post_fader_pre_mute[..samples],
+            &buffers.pre_fader[..samples],
+            &scratch.strip_post_gains[..samples],
+        );
+    }
+    if muted {
+        buffers.post_mute[..samples].fill(0.0);
+    } else {
+        buffers.post_mute[..samples].copy_from_slice(&buffers.post_fader_pre_mute[..samples]);
+    }
+    Ok(())
 }
 
 fn contribution_envelope(
-    contribution: &crate::CompiledAudioContribution,
+    contribution: &PreparedContribution,
     clip_local: TimelineTime,
     sequence_time: TimelineTime,
-    transitions: &[crate::plan::CompiledTransition],
+    transitions: &[PreparedTransitionBinding],
 ) -> Result<f32, AudioExecutionError> {
     let mut gain = 1.0_f32;
-    if let Some((duration, curve)) = contribution.fade_in {
+    if let Some((duration, curve)) = contribution.semantic.fade_in {
         if duration > TimelineTime::ZERO && clip_local < duration {
             gain *= rising_curve(clip_local.to_f64() / duration.to_f64(), curve);
         }
     }
-    if let Some((duration, curve)) = contribution.fade_out {
+    if let Some((duration, curve)) = contribution.semantic.fade_out {
         if duration > TimelineTime::ZERO {
-            let remaining = contribution.sequence_range.duration.checked_sub(clip_local)?;
+            let remaining =
+                contribution.semantic.sequence_range.duration.checked_sub(clip_local)?;
             if remaining < duration {
                 gain *= falling_curve(remaining.to_f64() / duration.to_f64(), curve);
             }
@@ -393,11 +477,10 @@ fn contribution_envelope(
         let local = sequence_time.checked_sub(transition.sequence_range.start)?;
         let progress =
             (local.to_f64() / transition.sequence_range.duration.to_f64()).clamp(0.0, 1.0);
-        if transition.left == contribution.edit_id {
-            gain *= transition_falling(progress, transition.curve);
-        } else if transition.right == contribution.edit_id {
-            gain *= transition_rising(progress, transition.curve);
-        }
+        gain *= match transition.direction {
+            PreparedTransitionDirection::Rising => transition_rising(progress, transition.curve),
+            PreparedTransitionDirection::Falling => transition_falling(progress, transition.curve),
+        };
     }
     Ok(gain)
 }
@@ -475,6 +558,9 @@ pub enum AudioExecutionError {
     /// A prepared processing scope was unexpectedly absent.
     #[error("prepared audio processing scope is missing")]
     MissingPreparedScope,
+    /// Dense schedule storage disagrees with its immutable preparation facts.
+    #[error("prepared audio schedule is internally inconsistent")]
+    InvalidPreparedSchedule,
     /// A media or nested source Adapter could not provide required PCM.
     #[error("audio source is unavailable: {0}")]
     SourceUnavailable(String),

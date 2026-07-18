@@ -612,6 +612,15 @@ impl AppState {
         self.playback_engine.snapshot().clock_master
     }
 
+    /// Identity of the current contiguous Playback Session.
+    ///
+    /// Preview execution uses this to retain forward work across ordinary
+    /// frame advances while still invalidating it atomically on seek, stop,
+    /// restart, or another transport discontinuity.
+    pub(crate) fn playback_epoch(&self) -> mondrian_playback::PlaybackEpoch {
+        self.playback_engine.snapshot().epoch
+    }
+
     /// Runtime-only Viewer scale selected by the Playback Quality Policy.
     pub fn playback_preview_resolution_scale(&self) -> PreviewResolutionScale {
         if self.is_playing() {
@@ -660,6 +669,12 @@ impl AppState {
         ticket: FramePresentationTicket,
         completed_at: Instant,
     ) -> bool {
+        if self.pending_playback_frame_demand_identity() != Some(ticket.identity()) {
+            // GPU completion may race a newer frame demand. It is a stale
+            // presentation completion, not a terminal observation for the
+            // newer demand and must not pollute rejected-delivery evidence.
+            return false;
+        }
         let completion_timestamp = self
             .playback_presentation_timestamp_at(completed_at)
             .max(self.playback_evidence_now);
@@ -688,6 +703,14 @@ impl AppState {
                 false
             }
         };
+        #[cfg(test)]
+        if !accepted {
+            eprintln!(
+                "MONDRIAN_REJECTED_FRAME_DELIVERY delivery={delivery:?} pending={:?} snapshot={:?}",
+                self.pending_playback_frame_demand_identity(),
+                self.playback_engine.snapshot()
+            );
+        }
         let after = self.playback_engine.snapshot();
         if let Err(error) =
             self.playback_evidence
@@ -822,12 +845,11 @@ fn audio_device_clock_observation(
         .saturating_add(u64::from(snapshot.last_callback_frames));
         snapshot.active_callback_consumed_frames <= maximum_consumed_frames
     });
-    let usable = snapshot.active
-        && !snapshot.stream_failed
+    let stream_available = snapshot.active && !snapshot.stream_failed && media_anchor.is_some();
+    let usable = stream_available
         && snapshot.active_callback_consumed_frames > 0
         && callback_fresh
         && callback_position_plausible
-        && media_anchor.is_some()
         && (already_audio_master || activation_preroll_satisfied);
     let playback_delay = snapshot.last_callback_playback_delay.unwrap_or_else(|| {
         Duration::from_nanos(
@@ -858,6 +880,8 @@ fn audio_device_clock_observation(
         underrun_frames: snapshot.underrun_frames,
         state: if usable {
             AudioDeviceClockState::Running
+        } else if stream_available {
+            AudioDeviceClockState::Uncertain
         } else {
             AudioDeviceClockState::Unavailable
         },
@@ -931,7 +955,7 @@ mod tests {
     }
 
     #[test]
-    fn audio_adapter_requires_fresh_callback_and_preroll_before_handoff() {
+    fn audio_adapter_distinguishes_transient_uncertainty_from_device_loss() {
         let state = state_with_sequence(20);
         let epoch = state.playback_engine.snapshot().epoch;
 
@@ -963,7 +987,7 @@ mod tests {
                 true,
             )
             .state,
-            AudioDeviceClockState::Unavailable
+            AudioDeviceClockState::Uncertain
         );
 
         let mut unprimed = audio_snapshot();
@@ -978,7 +1002,7 @@ mod tests {
                 false,
             )
             .state,
-            AudioDeviceClockState::Unavailable
+            AudioDeviceClockState::Uncertain
         );
 
         let mut implausibly_fast = audio_snapshot();
@@ -990,6 +1014,21 @@ mod tests {
                 epoch,
                 MonotonicTimestamp::ZERO,
                 false,
+                Some(FramePosition::new(0, Rational::new(1, 25))),
+                true,
+            )
+            .state,
+            AudioDeviceClockState::Uncertain
+        );
+
+        let mut failed = audio_snapshot();
+        failed.stream_failed = true;
+        assert_eq!(
+            audio_device_clock_observation(
+                failed,
+                epoch,
+                MonotonicTimestamp::ZERO,
+                true,
                 Some(FramePosition::new(0, Rational::new(1, 25))),
                 true,
             )
@@ -1185,6 +1224,25 @@ mod tests {
         assert_eq!(report.deliveries.late, 1);
         assert_eq!(report.demand_latency.count, 2);
         assert!(report.demand_latency.p95_us >= 41_000);
+    }
+
+    #[test]
+    fn superseded_gpu_presentation_ticket_is_silently_retired() {
+        let mut state = state_with_sequence(40);
+        play_ready(&mut state);
+        state.advance_playback_clock(Duration::from_millis(40));
+        let stale_ticket = state
+            .playback_frame_presentation_ticket(FramePresentationQuality::Ready)
+            .expect("current presentation ticket");
+        state.advance_playback_clock(Duration::from_millis(40));
+        let rejected_before = state.playback_evidence_report().deliveries.rejected;
+
+        assert!(!state.complete_frame_presentation(stale_ticket, Instant::now()));
+
+        assert_eq!(
+            state.playback_evidence_report().deliveries.rejected,
+            rejected_before
+        );
     }
 
     #[test]

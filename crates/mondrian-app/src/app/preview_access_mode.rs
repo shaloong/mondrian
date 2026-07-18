@@ -19,6 +19,7 @@ use mondrian_media::{
 
 pub(crate) const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
 pub(crate) const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 50_000;
+pub(crate) const MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 3;
 const MEDIA_PREVIEW_MAX_PENDING_REQUESTS: usize = MEDIA_PREVIEW_JOB_QUEUE_CAPACITY;
 
@@ -349,6 +350,14 @@ pub struct MediaPreviewJobQueueDiagnostics {
     pub queued_jobs: usize,
     /// Total jobs currently owned by worker execution leases.
     pub in_flight_jobs: usize,
+    /// Worker leases whose result has completed but is not yet resolved.
+    pub in_flight_completed_jobs: usize,
+    /// Worker leases for which cancellation has already been requested.
+    pub in_flight_cancellation_requested_jobs: usize,
+    /// Oldest current worker lease age in microseconds.
+    pub in_flight_max_age_us: u64,
+    /// Oldest current worker cancellation age in microseconds.
+    pub in_flight_cancellation_max_age_us: u64,
     /// Current-priority jobs waiting for a worker lease.
     pub queued_current_jobs: usize,
     /// Current-priority worker execution leases.
@@ -428,6 +437,19 @@ pub(crate) struct MediaPreviewJobPromoteStatus {
 pub(crate) enum MediaPreviewJobQueueReceive {
     Job(MediaPreviewJob),
     DroppedExpired(MediaPreviewJob),
+}
+
+#[derive(Debug)]
+/// Timed worker receive result.
+///
+/// The large work payload stays inline deliberately: boxing it would allocate
+/// on every dequeue in the preview worker hot path merely to shrink Idle and
+/// Closed values that are observed only at session lifecycle boundaries.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum MediaPreviewJobQueueWait {
+    Work(MediaPreviewJobQueueReceive),
+    Idle,
+    Closed,
 }
 
 #[cfg(test)]
@@ -548,6 +570,7 @@ impl MediaPreviewJobQueueReceiver {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn recv_for_worker_outcome(
         &self,
         lane: MediaPreviewWorkerLane,
@@ -562,6 +585,27 @@ impl MediaPreviewJobQueueReceiver {
                 ))
             }
             None => None,
+        }
+    }
+
+    pub(crate) fn recv_for_worker_outcome_timeout(
+        &self,
+        lane: MediaPreviewWorkerLane,
+        timeout: Duration,
+    ) -> MediaPreviewJobQueueWait {
+        match self.broker.receive_timeout(frame_worker_lane(lane), timeout) {
+            mondrian_playback::FrameWorkReceiveWait::Work(
+                mondrian_playback::FrameWorkReceive::Ready(execution),
+            ) => MediaPreviewJobQueueWait::Work(MediaPreviewJobQueueReceive::Job(
+                media_preview_job_from_execution(execution),
+            )),
+            mondrian_playback::FrameWorkReceiveWait::Work(
+                mondrian_playback::FrameWorkReceive::Expired(execution),
+            ) => MediaPreviewJobQueueWait::Work(MediaPreviewJobQueueReceive::DroppedExpired(
+                media_preview_job_from_execution(execution),
+            )),
+            mondrian_playback::FrameWorkReceiveWait::TimedOut => MediaPreviewJobQueueWait::Idle,
+            mondrian_playback::FrameWorkReceiveWait::Closed => MediaPreviewJobQueueWait::Closed,
         }
     }
 }
@@ -633,6 +677,10 @@ fn media_preview_job_queue_diagnostics(
     MediaPreviewJobQueueDiagnostics {
         queued_jobs: state.queued_work,
         in_flight_jobs: state.in_flight_work,
+        in_flight_completed_jobs: state.in_flight_completed,
+        in_flight_cancellation_requested_jobs: state.in_flight_cancellation_requested,
+        in_flight_max_age_us: state.in_flight_max_age_us,
+        in_flight_cancellation_max_age_us: state.in_flight_cancellation_max_age_us,
         queued_current_jobs: state.queued_current,
         in_flight_current_jobs: state.in_flight_current,
         queued_prefetch_jobs: state.queued_prefetch,
@@ -879,11 +927,19 @@ impl MediaPreviewScheduler {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn execution_cancellation(
         &self,
         id: mondrian_playback::FrameExecutionId,
     ) -> Option<mondrian_playback::FrameExecutionCancellation> {
         self.broker.execution_cancellation(id)
+    }
+
+    pub(crate) fn execution_cancellation_evidence(
+        &self,
+        id: mondrian_playback::FrameExecutionId,
+    ) -> Option<mondrian_playback::FrameExecutionCancellationEvidence> {
+        self.broker.execution_cancellation_evidence(id)
     }
 
     pub(crate) fn mark_execution_completed(&self, id: mondrian_playback::FrameExecutionId) -> bool {
@@ -2904,6 +2960,10 @@ mod tests {
             MediaPreviewJobQueueDiagnostics {
                 queued_jobs: 3,
                 in_flight_jobs: 0,
+                in_flight_completed_jobs: 0,
+                in_flight_cancellation_requested_jobs: 0,
+                in_flight_max_age_us: 0,
+                in_flight_cancellation_max_age_us: 0,
                 queued_current_jobs: 2,
                 in_flight_current_jobs: 0,
                 queued_prefetch_jobs: 1,

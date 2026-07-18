@@ -4,6 +4,7 @@
 //! parent Preview Adapter owns render planning, caches, and diagnostics.
 
 use super::*;
+use std::path::Path;
 
 pub(super) fn media_preview_worker(
     lane: MediaPreviewWorkerLane,
@@ -12,7 +13,17 @@ pub(super) fn media_preview_worker(
     scheduler: MediaPreviewScheduler,
     shutdown: Arc<PreviewShutdownSignal>,
 ) {
-    while let Some(outcome) = jobs.recv_for_worker_outcome(lane) {
+    loop {
+        let outcome = match jobs
+            .recv_for_worker_outcome_timeout(lane, MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT)
+        {
+            MediaPreviewJobQueueWait::Work(outcome) => outcome,
+            MediaPreviewJobQueueWait::Idle => {
+                mondrian_media::clear_thread_local_preview_decode_session();
+                continue;
+            }
+            MediaPreviewJobQueueWait::Closed => break,
+        };
         let job = match outcome {
             MediaPreviewJobQueueReceive::Job(job) => job,
             MediaPreviewJobQueueReceive::DroppedExpired(job) => {
@@ -26,7 +37,9 @@ pub(super) fn media_preview_worker(
                 let Some(execution_id) = job.execution_id else {
                     continue;
                 };
-                let scheduler_cancellation = scheduler.execution_cancellation(execution_id);
+                let scheduler_evidence = scheduler.execution_cancellation_evidence(execution_id);
+                let scheduler_cancellation =
+                    scheduler_evidence.map(|evidence| evidence.cancellation);
                 let reason = scheduler_cancellation
                     .map(|cancellation| {
                         media_preview_cancel_reason_from_execution(
@@ -39,7 +52,7 @@ pub(super) fn media_preview_worker(
                 let cancel_request_to_observed_us = scheduler_cancellation
                     .and_then(mondrian_playback::FrameExecutionCancellation::request_age)
                     .map(app_duration_us);
-                let result = media_preview_canceled_result(
+                let mut result = media_preview_canceled_result(
                     job,
                     queue_wait_us,
                     reason,
@@ -47,6 +60,7 @@ pub(super) fn media_preview_worker(
                     Some(0),
                     cancel_request_to_observed_us,
                 );
+                result.cancellation_phase = Some(MediaPreviewCancellationPhase::Queued);
                 if !send_media_preview_result(&results, &scheduler, result) {
                     break;
                 }
@@ -63,19 +77,21 @@ pub(super) fn media_preview_worker(
         let Some(execution_id) = job.execution_id else {
             continue;
         };
-        let scheduler_cancellation = scheduler.execution_cancellation(execution_id);
-        if let Some(cancellation) = scheduler_cancellation {
+        let scheduler_evidence = scheduler.execution_cancellation_evidence(execution_id);
+        if let Some(evidence) = scheduler_evidence {
+            let cancellation = evidence.cancellation;
             let reason = media_preview_cancel_reason_from_execution(
                 cancellation,
                 job.priority,
                 job.access_mode,
             );
+            let execution_age_us = app_duration_us(evidence.execution_age);
             let result = media_preview_canceled_result(
                 job,
                 queue_wait_us,
                 reason,
-                0,
-                Some(0),
+                execution_age_us,
+                Some(execution_age_us),
                 cancellation.request_age().map(app_duration_us),
             );
             if !send_media_preview_result(&results, &scheduler, result) {
@@ -91,7 +107,8 @@ pub(super) fn media_preview_worker(
         let cancel_observation = Arc::new(Mutex::new(MediaPreviewCancelObservation::default()));
         let worker_cancel_observation = Arc::clone(&cancel_observation);
         let mut result = decode_media_preview(job, queue_wait_us, move || {
-            let scheduler_cancellation = cancel_scheduler.execution_cancellation(execution_id);
+            let scheduler_evidence = cancel_scheduler.execution_cancellation_evidence(execution_id);
+            let scheduler_cancellation = scheduler_evidence.map(|evidence| evidence.cancellation);
             let reason = media_preview_cancel_reason_at_checkpoint(
                 scheduler_cancellation,
                 cancel_priority,
@@ -104,9 +121,13 @@ pub(super) fn media_preview_worker(
                 let mut observation =
                     lock_media_preview_cancel_observation(&worker_cancel_observation);
                 if observation.observed_elapsed_us.is_none() {
-                    observation.observed_elapsed_us = Some(app_duration_us(
-                        observed_at.duration_since(decode_started_at),
-                    ));
+                    observation.observed_elapsed_us = Some(
+                        scheduler_evidence
+                            .map(|evidence| app_duration_us(evidence.execution_age))
+                            .unwrap_or_else(|| {
+                                app_duration_us(observed_at.duration_since(decode_started_at))
+                            }),
+                    );
                     observation.request_to_observed_us =
                         media_preview_cancel_request_to_observed_us(
                             reason,
@@ -129,6 +150,11 @@ pub(super) fn media_preview_worker(
         }
         if result.canceled && result.cancel_request_to_observed_us.is_none() {
             result.cancel_request_to_observed_us = observation.request_to_observed_us;
+        }
+        if result.canceled {
+            if let Some(evidence) = scheduler.execution_cancellation_evidence(execution_id) {
+                result.decode_elapsed_us = app_duration_us(evidence.execution_age);
+            }
         }
         if !send_media_preview_result(&results, &scheduler, result) {
             break;
@@ -193,6 +219,7 @@ pub(super) fn media_preview_canceled_result(
         cancel_observed_elapsed_us,
         cancel_request_to_observed_us,
         canceled: true,
+        cancellation_phase: Some(MediaPreviewCancellationPhase::Executing),
         cancel_reason: Some(reason),
         decode_diagnostics: None,
         color_diagnostics: None,
@@ -299,6 +326,7 @@ pub(super) fn decode_media_preview(
                 cancel_observed_elapsed_us: None,
                 cancel_request_to_observed_us: None,
                 canceled: false,
+                cancellation_phase: None,
                 cancel_reason: None,
                 decode_diagnostics: Some(decode_diagnostics),
                 color_diagnostics: None,
@@ -370,6 +398,7 @@ pub(super) fn decode_media_preview(
                 cancel_observed_elapsed_us: None,
                 cancel_request_to_observed_us: None,
                 canceled: false,
+                cancellation_phase: None,
                 cancel_reason: None,
                 decode_diagnostics: Some(decode_diagnostics),
                 color_diagnostics: None,
@@ -430,6 +459,7 @@ pub(super) fn decode_media_preview(
                 cancel_observed_elapsed_us: None,
                 cancel_request_to_observed_us: None,
                 canceled: false,
+                cancellation_phase: None,
                 cancel_reason: None,
                 decode_diagnostics: Some(decode_diagnostics),
                 color_diagnostics: None,
@@ -452,6 +482,7 @@ pub(super) fn decode_media_preview(
             cancel_observed_elapsed_us: None,
             cancel_request_to_observed_us: None,
             canceled: true,
+            cancellation_phase: Some(MediaPreviewCancellationPhase::Executing),
             cancel_reason: None,
             decode_diagnostics: None,
             color_diagnostics: None,
@@ -475,6 +506,7 @@ pub(super) fn decode_media_preview(
                 cancel_observed_elapsed_us: None,
                 cancel_request_to_observed_us: None,
                 canceled: false,
+                cancellation_phase: None,
                 cancel_reason: None,
                 decode_diagnostics: None,
                 color_diagnostics: None,
@@ -507,6 +539,7 @@ fn media_preview_alpha_failure(
         cancel_observed_elapsed_us: None,
         cancel_request_to_observed_us: None,
         canceled: false,
+        cancellation_phase: None,
         cancel_reason: None,
         decode_diagnostics: Some(decode_diagnostics),
         color_diagnostics: None,

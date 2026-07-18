@@ -1,12 +1,15 @@
 //! Viewer preview service for the app UI host.
 //!
-//! The service owns render-plan interpretation and preview-frame cache keys.
-//! Panels stay read-only and only consume renderer-ready viewer frame content.
+//! The service coordinates private timeline-evaluation, media-adaptation,
+//! Viewer-plan, media-execution, and diagnostics Modules through one host-facing
+//! Interface. Panels stay read-only and only consume renderer-ready Viewer
+//! frame content.
 
 use std::cell::{Cell, RefCell};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+#[cfg(test)]
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
@@ -74,9 +77,10 @@ use crate::app::preview_access_mode::{
     media_preview_frame_work_class, media_preview_viewer_access_intent, media_preview_worker_count,
     media_preview_worker_lane, MediaPreviewCancelReason, MediaPreviewJob,
     MediaPreviewJobQueueDiagnostics, MediaPreviewJobQueueReceive, MediaPreviewJobQueueReceiver,
-    MediaPreviewJobQueueSender, MediaPreviewKey, MediaPreviewNativeSurfaceHint,
-    MediaPreviewRequestPriority, MediaPreviewRequestStatus, MediaPreviewScheduler,
-    MediaPreviewSchedulerDiagnostics, MediaPreviewWorkerLane,
+    MediaPreviewJobQueueSender, MediaPreviewJobQueueWait, MediaPreviewKey,
+    MediaPreviewNativeSurfaceHint, MediaPreviewRequestPriority, MediaPreviewRequestStatus,
+    MediaPreviewScheduler, MediaPreviewSchedulerDiagnostics, MediaPreviewWorkerLane,
+    MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT,
 };
 #[cfg(test)]
 use crate::app::preview_access_mode::{
@@ -971,6 +975,25 @@ impl AppUiPreviewService {
                 );
             }
             if result.canceled {
+                if result.cancellation_phase == Some(MediaPreviewCancellationPhase::Queued) {
+                    // A request that expired before codec execution is a
+                    // scheduler deadline drop, not cooperative-cancellation
+                    // latency evidence. Complete the matching demand as Late
+                    // so playback can advance without waiting for its stall
+                    // timeout; broker expiry counters retain the diagnosis.
+                    if owns_pending_playback_demand {
+                        if let Some(identity) = completion_demand_identity {
+                            outcome.frame_deliveries.push(
+                                mondrian_playback::FrameDelivery::for_demand(
+                                    identity,
+                                    mondrian_playback::FrameDeliveryKind::Late,
+                                ),
+                            );
+                        }
+                        self.record_playback_current_late_drop(1);
+                    }
+                    continue;
+                }
                 self.record_preview_decode_cancel(
                     result.access_mode,
                     result.cancel_reason,
@@ -2166,197 +2189,6 @@ impl AppUiPreviewService {
     ) -> Option<ViewerFrameImage> {
         self.frame_store.borrow().stale_viewer_frame(sequence.id, width, height)
     }
-
-    fn render_nested_sequence_frame(
-        &self,
-        state: &AppState,
-        sequence: &Sequence,
-        frame: i64,
-        depth: usize,
-        parent_color_context: ColorContext,
-    ) -> Option<MediaPreviewFrame> {
-        if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
-            return None;
-        }
-        let (width, height) = preview_dimensions_for_state(state, sequence);
-        let parent_working_color_space = parent_color_context.working_color_space;
-        let color_context = sequence.settings.nested_render_color_context(parent_color_context);
-        let resolved = self
-            .resolve_sequence_elements(
-                state,
-                sequence,
-                frame.max(0),
-                width,
-                height,
-                depth,
-                color_context.clone(),
-            )?
-            .elements;
-        let presentation_quality = resolved_preview_presentation_quality(&resolved);
-        let decode_execution = resolved_preview_decode_execution(&resolved);
-        let mut scratch = TimelineCompositeScratch::default();
-        let output = composite_resolved_preview_working(
-            width,
-            height,
-            &resolved,
-            &color_context,
-            &mut scratch,
-        )
-        .ok()?;
-        let render_stage_durations = output.render_stage_durations;
-        let render_total_us = render_stage_durations
-            .working_prepare_us
-            .saturating_add(render_stage_durations.cpu_composite_us);
-        self.record_composite(output.composite_diagnostics);
-        for diagnostics in output.input_color_diagnostics {
-            self.record_color_transform(diagnostics);
-        }
-        self.record_color_stage(output.input_color_stage_diagnostics);
-        self.record_render_stage_durations(render_total_us, render_stage_durations);
-        let mut working_frame = output.frame;
-        if working_frame.descriptor().color_space.working() != Some(parent_working_color_space) {
-            let converted = execute_cpu_working_transform(
-                &working_frame,
-                parent_working_color_space,
-                color_context.engine.clone(),
-            )
-            .ok()?;
-            self.record_color_transform(converted.result.diagnostics);
-            self.record_color_stage(converted.stage_diagnostics);
-            working_frame = converted.result.frame;
-        }
-        let signature = nested_preview_frame_signature(
-            sequence.id,
-            frame.max(0),
-            width,
-            height,
-            &working_frame,
-        );
-        Some(MediaPreviewFrame {
-            width,
-            height,
-            logical_width: sequence.settings.resolution.width,
-            logical_height: sequence.settings.resolution.height,
-            frame: Some(working_frame),
-            gpu_source: None,
-            native_source: None,
-            signature,
-            presentation_quality,
-            decode_execution,
-        })
-    }
-
-    fn resolve_sequence_elements(
-        &self,
-        state: &AppState,
-        sequence: &Sequence,
-        frame: i64,
-        width: u32,
-        height: u32,
-        depth: usize,
-        color_context: ColorContext,
-    ) -> Option<ResolvedPreviewPlan> {
-        let evaluation = evaluate_timeline_render_plan(
-            sequence,
-            TimelineEvaluationRequest::preview(
-                frame,
-                normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale),
-            ),
-        )
-        .ok()?;
-        if evaluation.is_empty() {
-            return None;
-        }
-
-        let mut resolved = Vec::with_capacity(evaluation.len());
-        for element in evaluation.elements {
-            match element {
-                TimelineRenderPlanElement::SolidColor(solid) => {
-                    resolved.push(ResolvedPreviewElement::SolidColor(
-                        TimelineSolidColorLayer {
-                            color: solid.color,
-                            opacity: solid.opacity,
-                            blend_mode: solid.blend_mode,
-                            transform: solid.transform,
-                            effect_graph: solid.effect_graph,
-                            frame_seed: solid.frame_seed,
-                        },
-                    ));
-                }
-                TimelineRenderPlanElement::Media(media) => {
-                    let frame = self.media_frame_for_plan(
-                        state,
-                        &media.asset_id,
-                        media.color_space_override,
-                        media.alpha_interpretation,
-                        media.source_frame,
-                        media.source_secs,
-                        width,
-                        height,
-                        &color_context,
-                        sequence.settings.frame_rate,
-                    )?;
-                    let transform = project_preview_media_transform(
-                        media.transform,
-                        &frame,
-                        sequence.settings.resolution,
-                        Resolution { width, height },
-                    )?;
-                    resolved.push(ResolvedPreviewElement::Media {
-                        frame,
-                        opacity: media.opacity,
-                        blend_mode: media.blend_mode,
-                        transform,
-                        effect_graph: media.effect_graph,
-                        frame_seed: media.frame_seed,
-                    });
-                }
-                TimelineRenderPlanElement::Adjustment(adjustment) => {
-                    resolved.push(ResolvedPreviewElement::Adjustment(
-                        TimelineAdjustmentLayer {
-                            effect_graph: adjustment.effect_graph,
-                            opacity: adjustment.opacity,
-                            blend_mode: Some(adjustment.blend_mode),
-                            frame_seed: adjustment.frame_seed,
-                        },
-                    ));
-                }
-                TimelineRenderPlanElement::NestedSequence(nested) => {
-                    let nested_sequence = state.sequence_by_id(nested.sequence_id)?;
-                    let frame = self.render_nested_sequence_frame(
-                        state,
-                        nested_sequence,
-                        nested.source_frame,
-                        depth + 1,
-                        color_context.clone(),
-                    )?;
-                    let transform = project_preview_media_transform(
-                        nested.transform,
-                        &frame,
-                        sequence.settings.resolution,
-                        Resolution { width, height },
-                    )?;
-                    resolved.push(ResolvedPreviewElement::Media {
-                        frame,
-                        opacity: nested.opacity,
-                        blend_mode: nested.blend_mode,
-                        transform,
-                        effect_graph: nested.effect_graph,
-                        frame_seed: nested.frame_seed,
-                    });
-                }
-            }
-        }
-        let cache_key = Some(viewer_preview_cache_key_for_resolved_plan(
-            sequence.id,
-            width,
-            height,
-            &resolved,
-            &color_context,
-        ));
-
-        Some(ResolvedPreviewPlan { elements: resolved, cache_key, color_context })
-    }
 }
 
 fn join_preview_workers(handles: Vec<JoinHandle<()>>) {
@@ -2369,12 +2201,6 @@ fn join_preview_workers(handles: Vec<JoinHandle<()>>) {
             tracing::warn!("app UI viewer preview worker panicked during shutdown");
         }
     }
-}
-
-struct ResolvedPreviewPlan {
-    elements: Vec<ResolvedPreviewElement>,
-    cache_key: Option<ViewerPreviewCacheKey>,
-    color_context: ColorContext,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2405,7 +2231,10 @@ impl Default for MediaPrerollFrameReadiness {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ViewerPreviewGenerationKey {
     sequence_id: SequenceId,
-    frame: i64,
+    /// Playback Epoch for a running cursor. `None` identifies an idle/still
+    /// cursor, whose exact frame remains part of the generation identity.
+    playback_epoch: Option<mondrian_playback::PlaybackEpoch>,
+    still_frame: Option<i64>,
     width: u32,
     height: u32,
     display_color_space: ColorSpace,
@@ -2422,13 +2251,15 @@ impl ViewerPreviewGenerationKey {
         height: u32,
         display_color_space: ColorSpace,
     ) -> Self {
+        let playing = state.is_playing();
         Self {
             sequence_id: sequence.id,
-            frame,
+            playback_epoch: playing.then(|| state.playback_epoch()),
+            still_frame: (!playing).then_some(frame),
             width,
             height,
             display_color_space,
-            playing: state.is_playing(),
+            playing,
             seek_source: state.last_timeline_seek_source,
         }
     }
@@ -2436,6 +2267,23 @@ impl ViewerPreviewGenerationKey {
 
 mod diagnostics;
 pub use diagnostics::*;
+mod media_adapter;
+use media_adapter::PreviewProxyGenerationRequestKey;
+#[cfg(test)]
+use media_adapter::{
+    resolve_preview_media_decode_path, should_request_preview_proxy_generation, source_micros,
+    PreviewMediaDecodePathResolution,
+};
+mod timeline_evaluation;
+mod viewer_plan;
+
+pub(crate) use viewer_plan::ViewerPreviewCacheKey;
+use viewer_plan::{
+    gpu_composite_layers_for_resolved, preview_elements_require_deferred_composite,
+    resolved_preview_decode_execution, resolved_preview_presentation_quality,
+    uncached_viewer_raster_frame_key, viewer_preview_cache_key_for_resolved_plan,
+    viewer_raster_frame_key, ResolvedPreviewElement,
+};
 /// Result of asking the preview service for a GPU-output viewer frame candidate.
 pub(crate) enum AppUiGpuPreviewFrameState {
     /// The current resolved viewer frame is already backed by a registered external texture.
@@ -2510,19 +2358,6 @@ impl AppUiGpuPreviewFrame {
     pub(crate) const fn decode_execution(&self) -> AppUiPreviewDecodeExecutionSummary {
         self.decode_execution
     }
-}
-
-enum ResolvedPreviewElement {
-    SolidColor(TimelineSolidColorLayer),
-    Adjustment(TimelineAdjustmentLayer),
-    Media {
-        frame: MediaPreviewFrame,
-        opacity: f32,
-        blend_mode: BlendMode,
-        transform: [f32; 6],
-        effect_graph: Arc<CompiledEffectGraph>,
-        frame_seed: i64,
-    },
 }
 
 impl ViewerPreviewSource for AppUiPreviewService {
@@ -2883,28 +2718,6 @@ struct ScopedExternalViewerFrame {
     content: ViewerExternalTextureFrame,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ViewerPreviewCacheKey {
-    sequence_id: SequenceId,
-    width: u32,
-    height: u32,
-    plan_signature: u64,
-}
-
-impl ViewerPreviewCacheKey {
-    fn with_monitor_adaptation(&self, adaptation: &RenderMonitorAdaptation) -> Self {
-        let mut hasher = DefaultHasher::new();
-        self.plan_signature.hash(&mut hasher);
-        adaptation.hash(&mut hasher);
-        Self {
-            sequence_id: self.sequence_id,
-            width: self.width,
-            height: self.height,
-            plan_signature: hasher.finish(),
-        }
-    }
-}
-
 #[derive(Debug)]
 struct MediaPreviewResult {
     key: MediaPreviewKey,
@@ -2920,12 +2733,21 @@ struct MediaPreviewResult {
     cancel_observed_elapsed_us: Option<u64>,
     cancel_request_to_observed_us: Option<u64>,
     canceled: bool,
+    cancellation_phase: Option<MediaPreviewCancellationPhase>,
     cancel_reason: Option<MediaPreviewCancelReason>,
     decode_diagnostics: Option<PreviewDecodeDiagnostics>,
     color_diagnostics: Option<RenderColorTransformDiagnostics>,
     color_stage_diagnostics: Option<RenderColorStageDiagnostics>,
     demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
     execution_id: Option<mondrian_playback::FrameExecutionId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaPreviewCancellationPhase {
+    /// Deadline or obsolescence was resolved before codec work began.
+    Queued,
+    /// A worker lease began and cancellation was observed cooperatively.
+    Executing,
 }
 
 #[derive(Default)]
@@ -3105,12 +2927,12 @@ impl AppUiPreviewService {
         }
     }
 
-    /// Inspect the same next-frame media keys used by playback prefetch.
+    /// Inspect the same bounded forward media window used by playback prefetch.
     ///
     /// This does not claim that a Viewer output is presented. It reports only
-    /// whether the immediate future frame has media payloads and whether all of
-    /// them are resident; the Playback Engine separately requires current-frame
-    /// presentation before releasing its clock anchor.
+    /// whether immediate future frames have media payloads and how much of the
+    /// media-bearing prefix is resident; the Playback Engine separately
+    /// requires current-frame presentation before releasing its clock anchor.
     fn playback_video_preroll_readiness(&self, state: &AppState) -> Option<PreviewVideoPreroll> {
         if !state.is_playback_priming() {
             return None;
@@ -3133,22 +2955,34 @@ impl AppUiPreviewService {
             &state.project_settings.color_management,
             display_color_space,
         );
-        let readiness = self.media_preroll_frame_readiness(
-            state,
-            sequence,
-            current_frame.saturating_add(1),
-            width,
-            height,
-            0,
-            color_context,
-        );
-        if !readiness.has_media {
-            return Some(PreviewVideoPreroll { ready_media_frames: 0, available_media_frames: 0 });
+        let window = media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)?;
+        let mut ready_media_frames = 0usize;
+        let mut available_media_frames = 0usize;
+        let mut ready_prefix = true;
+        for offset in 1..=window as i64 {
+            let future_frame = current_frame.saturating_add(offset);
+            if future_frame > end_frame {
+                break;
+            }
+            let readiness = self.media_preroll_frame_readiness(
+                state,
+                sequence,
+                future_frame,
+                width,
+                height,
+                0,
+                color_context.clone(),
+            );
+            if !readiness.has_media {
+                continue;
+            }
+            available_media_frames = available_media_frames.saturating_add(1);
+            ready_prefix &= readiness.ready;
+            if ready_prefix {
+                ready_media_frames = ready_media_frames.saturating_add(1);
+            }
         }
-        Some(PreviewVideoPreroll {
-            ready_media_frames: usize::from(readiness.ready),
-            available_media_frames: 1,
-        })
+        Some(PreviewVideoPreroll { ready_media_frames, available_media_frames })
     }
 
     fn media_preroll_frame_readiness(
@@ -3221,289 +3055,6 @@ impl AppUiPreviewService {
             }
         }
         readiness
-    }
-
-    fn media_frame_for_plan(
-        &self,
-        state: &AppState,
-        asset_id: &AssetId,
-        color_space_override: Option<ColorSpace>,
-        alpha_interpretation: AlphaInterpretation,
-        source_frame: i64,
-        source_secs: f64,
-        target_width: u32,
-        target_height: u32,
-        color_context: &ColorContext,
-        _sequence_frame_rate: Rational,
-    ) -> Option<MediaPreviewFrame> {
-        let access_mode = media_preview_access_mode_for_intent(media_preview_viewer_access_intent(
-            state.is_playing(),
-            state.last_timeline_seek_source,
-        ));
-        let (key, source_secs) = self.media_preview_key_for_asset(
-            state,
-            asset_id,
-            color_space_override,
-            alpha_interpretation,
-            source_frame,
-            source_secs,
-            target_width,
-            target_height,
-            color_context,
-            true,
-            access_mode == PreviewDecodeAccessMode::PlaybackCursor,
-        )?;
-        if let Some(frame) = self.cached_media_frame(&key) {
-            return Some(frame);
-        }
-        if self.failed_media_key(&key) {
-            return None;
-        }
-        self.current_frame_pending.set(true);
-        let adaptive_hints = self.preview_decode_adaptive_hints(access_mode, &key);
-        self.request_media_preview(
-            key,
-            source_secs,
-            MediaPreviewRequestPriority::Current,
-            access_mode,
-            (access_mode == PreviewDecodeAccessMode::PlaybackCursor)
-                .then(|| state.playback_frame_deadline_at(Instant::now()))
-                .flatten(),
-            (access_mode == PreviewDecodeAccessMode::PlaybackCursor)
-                .then(|| state.pending_playback_frame_demand_identity())
-                .flatten(),
-            adaptive_hints,
-        );
-        None
-    }
-
-    fn cached_media_frame(&self, key: &MediaPreviewKey) -> Option<MediaPreviewFrame> {
-        let frame = self.frame_store.borrow_mut().media_frame(key);
-        if frame.is_some() {
-            bump(&self.metrics.media_cache_hits);
-        } else {
-            bump(&self.metrics.media_cache_misses);
-        }
-        frame
-    }
-
-    fn failed_media_key(&self, key: &MediaPreviewKey) -> bool {
-        let failed = self.frame_store.borrow_mut().contains_failure(key);
-        if failed {
-            bump(&self.metrics.media_failure_hits);
-        }
-        failed
-    }
-
-    fn media_preview_key_for_asset(
-        &self,
-        state: &AppState,
-        asset_id: &AssetId,
-        color_space_override: Option<ColorSpace>,
-        alpha_interpretation: AlphaInterpretation,
-        source_frame: i64,
-        source_secs: f64,
-        target_width: u32,
-        target_height: u32,
-        color_context: &ColorContext,
-        record_color_rejection: bool,
-        request_missing_proxy_generation: bool,
-    ) -> Option<(MediaPreviewKey, f64)> {
-        let library = state.asset_library.as_ref()?;
-        let asset = match library.get_asset(*asset_id) {
-            Ok(Some(asset)) if asset.kind == AssetKind::Video => asset,
-            Ok(_) => return None,
-            Err(err) => {
-                tracing::debug!(asset_id = %asset_id, "viewer preview asset lookup failed: {err}");
-                return None;
-            }
-        };
-        let proxy_config = state.proxy_config();
-        let source_has_alpha =
-            asset.media_info.primary_video().is_some_and(|video| video.has_alpha);
-        let proxy_color = resolve_asset_proxy_color_contract(&asset, color_context).ok();
-        let resolved_path = resolve_preview_media_decode_path(
-            state.project_settings.proxy_enabled && state.is_asset_proxy_mode(*asset_id),
-            source_has_alpha,
-            &asset.path,
-            &proxy_config,
-            proxy_color,
-        )?;
-        match resolved_path.resolution {
-            PreviewMediaDecodePathResolution::Proxy => bump(&self.metrics.media_proxy_path_hits),
-            PreviewMediaDecodePathResolution::ProxyMissing => {
-                bump(&self.metrics.media_proxy_path_misses);
-            }
-            PreviewMediaDecodePathResolution::ProxyStale => {
-                bump(&self.metrics.media_proxy_path_stale);
-            }
-            PreviewMediaDecodePathResolution::Source => {
-                bump(&self.metrics.media_proxy_path_bypasses);
-            }
-        }
-        self.maybe_request_preview_proxy_generation(
-            request_missing_proxy_generation,
-            state,
-            *asset_id,
-            &asset.path,
-            &proxy_config,
-            &resolved_path,
-            proxy_color,
-        );
-
-        let detected_color_space = asset
-            .media_info
-            .video_streams
-            .first()
-            .and_then(|video| video.detected_color_space);
-        let input_color_resolution = resolve_preview_input_color_space(
-            color_space_override,
-            asset.interpretation,
-            detected_color_space,
-            color_context,
-        );
-        self.record_input_color_resolution(input_color_resolution.source);
-        let input_color_space = match input_color_resolution.resolved {
-            ResolvedInputColor::Color(color_space) => color_space,
-            ResolvedInputColor::Data | ResolvedInputColor::Rejected => {
-                let diagnostic = asset
-                    .media_info
-                    .primary_video()
-                    .map(VideoColorDiagnostic::from_stream)
-                    .unwrap_or_else(|| VideoColorDiagnostic {
-                        detected_color_space: None,
-                        color_range: mondrian_media::DecodedVideoRange::Unknown,
-                        interpretation: mondrian_media::DetectedColorInterpretation {
-                            color_space: None,
-                            confidence: mondrian_media::VideoColorInterpretationConfidence::None,
-                            source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
-                            method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
-                            evidence: Vec::new(),
-                            warnings: Vec::new(),
-                            user_overridable: true,
-                        },
-                        source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
-                        method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
-                        metadata: None,
-                        metadata_hints: Vec::new(),
-                        hdr_metadata: Vec::new(),
-                    });
-                let diagnostic_summary = diagnostic.summary();
-                let diagnostic_issue_summary = diagnostic.issue_summary();
-                if record_color_rejection {
-                    self.record_color_rejection(AppUiPreviewColorRejection::new(
-                        *asset_id,
-                        asset.path.clone(),
-                        input_color_resolution,
-                        diagnostic_summary.clone(),
-                        diagnostic_issue_summary,
-                    ));
-                }
-                tracing::warn!(
-                    asset_id = %asset_id,
-                    path = %asset.path.display(),
-                    missing_metadata_policy = ?color_context.missing_metadata_policy,
-                    color_resolution_source = ?input_color_resolution.source,
-                    override_color_space = ?input_color_resolution.override_color_space,
-                    detected_color_space = ?input_color_resolution.detected_color_space,
-                    working_color_space = ?input_color_resolution.working_color_space,
-                    color_diagnostic = %diagnostic_summary,
-                    color_diagnostic_issue_summary = ?diagnostic_issue_summary,
-                    "viewer preview rejected media with missing color metadata"
-                );
-                return None;
-            }
-        };
-        Some((
-            MediaPreviewKey {
-                asset_id: *asset_id,
-                path: resolved_path.path,
-                fingerprint: Some(resolved_path.fingerprint),
-                source_frame: source_frame.max(0),
-                source_micros: source_micros(source_secs),
-                target_width,
-                target_height,
-                source_width: asset
-                    .media_info
-                    .primary_video()
-                    .map_or(target_width, |video| video.width.max(1)),
-                source_height: asset
-                    .media_info
-                    .primary_video()
-                    .map_or(target_height, |video| video.height.max(1)),
-                input_color_space,
-                input_video_range: DecodedVideoRangeContract::from_interpretation(
-                    asset.interpretation.range,
-                    asset
-                        .media_info
-                        .primary_video()
-                        .map(|video| video.color_range)
-                        .unwrap_or(DecodedVideoRange::Unknown),
-                ),
-                native_surface_hint: asset.media_info.primary_video().and_then(|video| match video
-                    .pixel_format
-                {
-                    mondrian_media::info::PixelFormat::Yuv420p
-                    | mondrian_media::info::PixelFormat::Nv12 => {
-                        Some(MediaPreviewNativeSurfaceHint::Nv12)
-                    }
-                    mondrian_media::info::PixelFormat::Yuv420p10le
-                    | mondrian_media::info::PixelFormat::P010 => {
-                        Some(MediaPreviewNativeSurfaceHint::P010)
-                    }
-                    _ => None,
-                }),
-                source_has_alpha,
-                alpha_interpretation,
-                working_color_space: color_context.working_color_space,
-                tone_map: color_context.tone_map,
-                engine: color_context.engine.clone(),
-                ocio_generation: mondrian_core::ocio_config_generation(),
-            },
-            source_secs.max(0.0),
-        ))
-    }
-
-    fn maybe_request_preview_proxy_generation(
-        &self,
-        request_missing_proxy_generation: bool,
-        state: &AppState,
-        asset_id: AssetId,
-        source_path: &Path,
-        proxy_config: &mondrian_media::ProxyConfig,
-        resolved_path: &PreviewMediaDecodePath,
-        proxy_color: Option<mondrian_media::ProxyColorContract>,
-    ) {
-        if !should_request_preview_proxy_generation(
-            request_missing_proxy_generation,
-            state.project_settings.proxy_enabled,
-            state.is_asset_proxy_mode(asset_id),
-            resolved_path.resolution,
-        ) {
-            return;
-        }
-        let Some(proxy_color) = proxy_color else {
-            return;
-        };
-
-        let request_key = PreviewProxyGenerationRequestKey {
-            asset_id,
-            source_fingerprint: resolved_path.fingerprint,
-            resolution: resolved_path.resolution,
-            color: proxy_color,
-        };
-        if !self.requested_proxy_generations.borrow_mut().insert(request_key) {
-            bump(&self.metrics.media_proxy_generation_request_dedupes);
-            return;
-        }
-
-        bump(&self.metrics.media_proxy_generation_requests);
-        request_proxy_generation(
-            asset_id,
-            source_path.to_path_buf(),
-            proxy_config.clone(),
-            proxy_color,
-        );
     }
 
     fn preview_decode_adaptive_hints(
@@ -3929,94 +3480,6 @@ fn app_duration_us(duration: Duration) -> u64 {
     duration.as_micros().min(u128::from(u64::MAX)) as u64
 }
 
-fn viewer_preview_cache_key_for_resolved_plan(
-    sequence_id: SequenceId,
-    width: u32,
-    height: u32,
-    elements: &[ResolvedPreviewElement],
-    color_context: &ColorContext,
-) -> ViewerPreviewCacheKey {
-    let mut hasher = DefaultHasher::new();
-    color_context.working_color_space.hash(&mut hasher);
-    color_context.output_color_space.hash(&mut hasher);
-    color_context.tone_map.hash(&mut hasher);
-    color_context.engine.hash(&mut hasher);
-    color_context.display_management.hash(&mut hasher);
-    color_context.output_transform.hash(&mut hasher);
-    mondrian_core::ocio_config_generation().hash(&mut hasher);
-    elements.len().hash(&mut hasher);
-    for element in elements {
-        match element {
-            ResolvedPreviewElement::SolidColor(solid) => {
-                0u8.hash(&mut hasher);
-                hash_color(solid.color, &mut hasher);
-                solid.opacity.to_bits().hash(&mut hasher);
-                solid.blend_mode.hash(&mut hasher);
-                hash_transform(solid.transform, &mut hasher);
-                hash_effect_graph_signature(&solid.effect_graph, solid.frame_seed, &mut hasher);
-            }
-            ResolvedPreviewElement::Adjustment(adjustment) => {
-                1u8.hash(&mut hasher);
-                adjustment.opacity.to_bits().hash(&mut hasher);
-                adjustment.blend_mode.hash(&mut hasher);
-                hash_effect_graph_signature(
-                    &adjustment.effect_graph,
-                    adjustment.frame_seed,
-                    &mut hasher,
-                );
-            }
-            ResolvedPreviewElement::Media {
-                frame,
-                opacity,
-                blend_mode,
-                transform,
-                effect_graph,
-                frame_seed,
-            } => {
-                2u8.hash(&mut hasher);
-                frame.signature.hash(&mut hasher);
-                frame.width().hash(&mut hasher);
-                frame.height().hash(&mut hasher);
-                opacity.to_bits().hash(&mut hasher);
-                blend_mode.hash(&mut hasher);
-                hash_transform(*transform, &mut hasher);
-                hash_effect_graph_signature(effect_graph, *frame_seed, &mut hasher);
-            }
-        }
-    }
-    ViewerPreviewCacheKey {
-        sequence_id,
-        width,
-        height,
-        plan_signature: hasher.finish(),
-    }
-}
-
-fn hash_color(color: mondrian_core::Color, hasher: &mut impl Hasher) {
-    color.r.to_bits().hash(hasher);
-    color.g.to_bits().hash(hasher);
-    color.b.to_bits().hash(hasher);
-    color.a.to_bits().hash(hasher);
-}
-
-fn hash_transform(transform: [f32; 6], hasher: &mut impl Hasher) {
-    for value in transform {
-        value.to_bits().hash(hasher);
-    }
-}
-
-fn hash_effect_graph_signature(
-    graph: &CompiledEffectGraph,
-    frame_seed: i64,
-    hasher: &mut impl Hasher,
-) {
-    graph.signature_hash.hash(hasher);
-    graph.output_cache_policy.hash(hasher);
-    if graph.output_cache_policy == EffectCachePolicy::FrameDependent {
-        frame_seed.hash(hasher);
-    }
-}
-
 fn media_preview_frame_signature(key: &MediaPreviewKey) -> u64 {
     let mut hasher = DefaultHasher::new();
     key.hash(&mut hasher);
@@ -4321,156 +3784,6 @@ fn output_boundary_from_color_context(
     .map_err(|error| error.to_string())
 }
 
-fn gpu_composite_layers_for_resolved(
-    _width: u32,
-    _height: u32,
-    resolved: &[ResolvedPreviewElement],
-    working_color_space: WorkingColorSpace,
-) -> Result<Vec<mondrian_renderer::ViewerGpuExecutionLayer>, GpuCompositingBlockerReason> {
-    let mut layers = Vec::with_capacity(resolved.len());
-    let mut has_composited_layer = false;
-    for element in resolved {
-        match element {
-            ResolvedPreviewElement::Media {
-                frame,
-                opacity,
-                blend_mode,
-                transform,
-                effect_graph,
-                frame_seed,
-            } => {
-                let effect_plan = get_or_lower_effect_graph_to_gpu_plan(effect_graph)
-                    .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
-                if *blend_mode != BlendMode::Normal {
-                    return Err(GpuCompositingBlockerReason::UnsupportedBlendMode);
-                }
-                let layer_working_color_space = frame
-                    .frame
-                    .as_ref()
-                    .and_then(|working| working.descriptor().color_space.working())
-                    .or_else(|| {
-                        frame
-                            .gpu_source
-                            .as_ref()
-                            .map(|source| source.input_transform.working_color_space)
-                    })
-                    .or_else(|| {
-                        frame
-                            .native_source
-                            .as_ref()
-                            .map(|source| source.input_transform.working_color_space)
-                    })
-                    .ok_or(GpuCompositingBlockerReason::GpuUnavailable)?;
-                if layer_working_color_space != working_color_space {
-                    return Err(GpuCompositingBlockerReason::UnsupportedTransform);
-                }
-                if !is_preview_gpu_media_transform_supported(*transform) {
-                    return Err(GpuCompositingBlockerReason::UnsupportedTransform);
-                }
-                layers.push(mondrian_renderer::ViewerGpuExecutionLayer::Media {
-                    frame: frame.frame.clone(),
-                    gpu_source: frame.gpu_source(),
-                    native_source: frame.native_source(),
-                    opacity: *opacity,
-                    transform: *transform,
-                    effect_plan,
-                    frame_seed: *frame_seed,
-                });
-                has_composited_layer = true;
-            }
-            ResolvedPreviewElement::SolidColor(layer) => {
-                let effect_plan = get_or_lower_effect_graph_to_gpu_plan(&layer.effect_graph)
-                    .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
-                if layer.blend_mode != BlendMode::Normal {
-                    return Err(GpuCompositingBlockerReason::UnsupportedBlendMode);
-                }
-                if !is_preview_identity_transform(layer.transform) {
-                    return Err(GpuCompositingBlockerReason::UnsupportedTransform);
-                }
-                layers.push(mondrian_renderer::ViewerGpuExecutionLayer::SolidColor {
-                    layer: layer.clone(),
-                    effect_plan,
-                });
-                has_composited_layer = true;
-            }
-            ResolvedPreviewElement::Adjustment(layer) => {
-                if !has_composited_layer
-                    || layer.opacity <= 1.0e-4
-                    || layer.effect_graph.graph.is_identity()
-                {
-                    continue;
-                }
-                let blend_mode = layer.blend_mode.unwrap_or(BlendMode::Normal);
-                if blend_mode != BlendMode::Normal {
-                    return Err(GpuCompositingBlockerReason::UnsupportedBlendMode);
-                }
-                let effect_plan = get_or_lower_effect_graph_to_gpu_plan(&layer.effect_graph)
-                    .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
-                layers.push(mondrian_renderer::ViewerGpuExecutionLayer::Adjustment {
-                    effect_plan,
-                    opacity: layer.opacity,
-                    blend_mode,
-                    frame_seed: layer.frame_seed,
-                });
-            }
-        }
-    }
-    if layers.len() > 5 {
-        return Err(GpuCompositingBlockerReason::TooManyLayers);
-    }
-    Ok(layers)
-}
-
-fn preview_elements_require_deferred_composite(resolved: &[ResolvedPreviewElement]) -> bool {
-    resolved
-        .iter()
-        .any(|element| matches!(element, ResolvedPreviewElement::Media { .. }))
-}
-
-fn resolved_preview_presentation_quality(
-    resolved: &[ResolvedPreviewElement],
-) -> mondrian_playback::FramePresentationQuality {
-    if resolved.iter().any(|element| {
-        matches!(
-            element,
-            ResolvedPreviewElement::Media { frame, .. }
-                if frame.presentation_quality()
-                    == mondrian_playback::FramePresentationQuality::Degraded
-        )
-    }) {
-        mondrian_playback::FramePresentationQuality::Degraded
-    } else {
-        mondrian_playback::FramePresentationQuality::Ready
-    }
-}
-
-fn resolved_preview_decode_execution(
-    resolved: &[ResolvedPreviewElement],
-) -> AppUiPreviewDecodeExecutionSummary {
-    let mut summary = AppUiPreviewDecodeExecutionSummary::default();
-    for element in resolved {
-        if let ResolvedPreviewElement::Media { frame, .. } = element {
-            summary.accumulate(frame.decode_execution());
-        }
-    }
-    summary
-}
-
-fn is_preview_identity_transform(transform: [f32; 6]) -> bool {
-    const EPSILON: f32 = 1.0e-6;
-    (transform[0] - 1.0).abs() <= EPSILON
-        && transform[1].abs() <= EPSILON
-        && transform[2].abs() <= EPSILON
-        && transform[3].abs() <= EPSILON
-        && (transform[4] - 1.0).abs() <= EPSILON
-        && transform[5].abs() <= EPSILON
-}
-
-fn is_preview_gpu_media_transform_supported(transform: [f32; 6]) -> bool {
-    let det = transform[0] * transform[4] - transform[3] * transform[1];
-    det.abs() > 1.0e-8
-}
-
 fn composite_resolved_preview(
     service: &AppUiPreviewService,
     width: u32,
@@ -4520,128 +3833,6 @@ fn composite_resolved_preview(
             }
         })
         .map_err(|err| format!("viewer preview final color transform failed: {err}"))
-}
-
-fn viewer_raster_frame_key(cache_key: &ViewerPreviewCacheKey) -> String {
-    format!(
-        "app-ui.viewer.raster:{}:{}x{}:{:016x}",
-        cache_key.sequence_id, cache_key.width, cache_key.height, cache_key.plan_signature
-    )
-}
-
-fn uncached_viewer_raster_frame_key(
-    sequence_id: SequenceId,
-    frame: i64,
-    width: u32,
-    height: u32,
-) -> String {
-    format!(
-        "app-ui.viewer.raster-uncached:{sequence_id}:{width}x{height}:f{}",
-        frame.max(0)
-    )
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PreviewMediaDecodePath {
-    path: PathBuf,
-    resolution: PreviewMediaDecodePathResolution,
-    fingerprint: PreviewFileFingerprint,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum PreviewMediaDecodePathResolution {
-    Source,
-    Proxy,
-    ProxyMissing,
-    ProxyStale,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct PreviewProxyGenerationRequestKey {
-    asset_id: AssetId,
-    source_fingerprint: PreviewFileFingerprint,
-    resolution: PreviewMediaDecodePathResolution,
-    color: mondrian_media::ProxyColorContract,
-}
-
-fn should_request_preview_proxy_generation(
-    request_missing_proxy_generation: bool,
-    project_proxy_enabled: bool,
-    asset_proxy_mode: bool,
-    resolution: PreviewMediaDecodePathResolution,
-) -> bool {
-    request_missing_proxy_generation
-        && project_proxy_enabled
-        && asset_proxy_mode
-        && matches!(
-            resolution,
-            PreviewMediaDecodePathResolution::ProxyMissing
-                | PreviewMediaDecodePathResolution::ProxyStale
-        )
-}
-
-fn resolve_preview_media_decode_path(
-    prefer_proxy: bool,
-    source_has_alpha: bool,
-    source_path: &Path,
-    proxy_config: &mondrian_media::ProxyConfig,
-    proxy_color: Option<mondrian_media::ProxyColorContract>,
-) -> Option<PreviewMediaDecodePath> {
-    let source_metadata = media_path_metadata(source_path)?;
-    if !prefer_proxy || source_has_alpha {
-        return Some(PreviewMediaDecodePath {
-            path: source_path.to_path_buf(),
-            resolution: PreviewMediaDecodePathResolution::Source,
-            fingerprint: source_metadata.fingerprint,
-        });
-    }
-    let Some(proxy_color) = proxy_color else {
-        return Some(PreviewMediaDecodePath {
-            path: source_path.to_path_buf(),
-            resolution: PreviewMediaDecodePathResolution::Source,
-            fingerprint: source_metadata.fingerprint,
-        });
-    };
-    let proxy_generator = mondrian_media::ProxyGenerator::new(proxy_config.clone());
-    let proxy_path = proxy_generator.proxy_path(source_path, proxy_color).ok()?;
-    match (
-        proxy_generator.proxy_status(source_path, proxy_color),
-        media_path_metadata(&proxy_path),
-    ) {
-        (mondrian_media::ProxyStatus::Fresh, Some(proxy_metadata)) => {
-            Some(PreviewMediaDecodePath {
-                path: proxy_path,
-                resolution: PreviewMediaDecodePathResolution::Proxy,
-                fingerprint: proxy_metadata.fingerprint,
-            })
-        }
-        (mondrian_media::ProxyStatus::Missing, _) => Some(PreviewMediaDecodePath {
-            path: source_path.to_path_buf(),
-            resolution: PreviewMediaDecodePathResolution::ProxyMissing,
-            fingerprint: source_metadata.fingerprint,
-        }),
-        (mondrian_media::ProxyStatus::Stale, _) | (_, None) => Some(PreviewMediaDecodePath {
-            path: source_path.to_path_buf(),
-            resolution: PreviewMediaDecodePathResolution::ProxyStale,
-            fingerprint: source_metadata.fingerprint,
-        }),
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MediaPathMetadata {
-    fingerprint: PreviewFileFingerprint,
-}
-
-fn media_path_metadata(path: &Path) -> Option<MediaPathMetadata> {
-    let metadata = std::fs::metadata(path).ok()?;
-    Some(MediaPathMetadata {
-        fingerprint: PreviewFileFingerprint::from_metadata(&metadata),
-    })
-}
-
-fn source_micros(source_secs: f64) -> i64 {
-    (source_secs.max(0.0) * 1_000_000.0).round() as i64
 }
 
 fn playback_deadline_remaining_us(deadline_at: Option<Instant>) -> Option<u64> {
@@ -4720,6 +3911,78 @@ mod tests {
         state.sequence = Some(sequence);
         state.seek(4);
         state
+    }
+
+    #[test]
+    fn playback_generation_survives_frame_advance_but_not_discontinuity() {
+        let mut state = state_with_solid_color_clip(Color::from_rgba8(12, 34, 56, 255));
+        let sequence = state.sequence.as_ref().expect("sequence").clone();
+        state.play();
+
+        let current = ViewerPreviewGenerationKey::from_state(
+            &state,
+            &sequence,
+            4,
+            960,
+            540,
+            ColorSpace::Srgb,
+        );
+        let advanced = ViewerPreviewGenerationKey::from_state(
+            &state,
+            &sequence,
+            5,
+            960,
+            540,
+            ColorSpace::Srgb,
+        );
+        assert_eq!(
+            current, advanced,
+            "ordinary playback must retain forward prefetch work"
+        );
+
+        state.seek(6);
+        let after_seek = ViewerPreviewGenerationKey::from_state(
+            &state,
+            &sequence,
+            6,
+            960,
+            540,
+            ColorSpace::Srgb,
+        );
+        assert_ne!(
+            current, after_seek,
+            "seek must invalidate the prior playback epoch"
+        );
+
+        state.pause();
+        let idle_a = ViewerPreviewGenerationKey::from_state(
+            &state,
+            &sequence,
+            6,
+            960,
+            540,
+            ColorSpace::Srgb,
+        );
+        let idle_b = ViewerPreviewGenerationKey::from_state(
+            &state,
+            &sequence,
+            7,
+            960,
+            540,
+            ColorSpace::Srgb,
+        );
+        assert_ne!(
+            idle_a, idle_b,
+            "idle current-frame work remains latest-wins"
+        );
+    }
+
+    #[test]
+    fn app_frame_store_residency_covers_the_prefetch_window() {
+        let diagnostics = PreviewCpuFrameStore::default().diagnostics();
+        assert!(
+            diagnostics.media_resource_unit_budget >= MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES
+        );
     }
 
     fn unique_preview_test_root(name: &str) -> PathBuf {
@@ -6744,13 +6007,19 @@ mod tests {
         let (mut state, asset_id, root) = state_with_invalid_video_asset();
         state.play();
         let service = AppUiPreviewService::new_without_workers_for_test();
+        let sequence = state.sequence.as_ref().expect("media sequence");
+        let preroll_window =
+            media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
+                .expect("valid media sequence frame rate");
 
         assert_eq!(
             service.playback_video_preroll_readiness(&state),
-            Some(PreviewVideoPreroll { ready_media_frames: 0, available_media_frames: 1 })
+            Some(PreviewVideoPreroll {
+                ready_media_frames: 0,
+                available_media_frames: preroll_window,
+            })
         );
 
-        let sequence = state.sequence.as_ref().expect("media sequence");
         let frame = state.current_frame().saturating_add(1);
         let evaluation = evaluate_timeline_render_plan(
             sequence,
@@ -6799,7 +6068,10 @@ mod tests {
 
         assert_eq!(
             service.playback_video_preroll_readiness(&state),
-            Some(PreviewVideoPreroll { ready_media_frames: 1, available_media_frames: 1 })
+            Some(PreviewVideoPreroll {
+                ready_media_frames: 1,
+                available_media_frames: preroll_window,
+            })
         );
 
         service.shutdown();
@@ -7544,6 +6816,10 @@ mod tests {
             worker_queue: MediaPreviewJobQueueDiagnostics {
                 queued_jobs: 3,
                 in_flight_jobs: 2,
+                in_flight_completed_jobs: 0,
+                in_flight_cancellation_requested_jobs: 0,
+                in_flight_max_age_us: 0,
+                in_flight_cancellation_max_age_us: 0,
                 queued_current_jobs: 2,
                 in_flight_current_jobs: 1,
                 queued_prefetch_jobs: 1,
@@ -11467,7 +10743,10 @@ mod tests {
             diagnostics.worker_queue.queued_prefetch_jobs,
             prefetch_window
         );
-        assert_eq!(diagnostics.enqueued_jobs, 1);
+        assert_eq!(
+            diagnostics.enqueued_jobs,
+            prefetch_window.saturating_sub(1) as u64
+        );
         service.shutdown();
         let _ = std::fs::remove_dir_all(root);
     }
@@ -11548,8 +10827,9 @@ mod tests {
             prefetch_window
         );
         assert_eq!(
-            diagnostics.enqueued_jobs, 1,
-            "one remaining prefetch slot must admit only one media job even if the next frame has multiple active tracks"
+            diagnostics.enqueued_jobs,
+            prefetch_window.saturating_sub(1) as u64,
+            "prefetch must fill only the remaining job slots even when a future frame has multiple active tracks"
         );
         service.shutdown();
         let _ = std::fs::remove_dir_all(root);
@@ -11713,6 +10993,10 @@ mod tests {
             result.cancel_reason,
             Some(MediaPreviewCancelReason::PlaybackDeadline)
         );
+        assert_eq!(
+            result.cancellation_phase,
+            Some(MediaPreviewCancellationPhase::Queued)
+        );
         assert_eq!(result.access_mode, PreviewDecodeAccessMode::PlaybackCursor);
         assert_eq!(result.priority, MediaPreviewRequestPriority::Current);
         assert_eq!(result.decode_elapsed_us, 0);
@@ -11728,6 +11012,68 @@ mod tests {
 
         job_tx.close();
         worker.join().expect("preview worker should stop after queue close");
+    }
+
+    #[test]
+    fn queued_expiry_completes_matching_demand_without_cancellation_latency_evidence() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let result_tx = install_preview_result_channel_for_test(&service);
+        let key = test_media_key(76);
+        let generation = service.scheduler.begin_generation();
+        let demand_identity = AppUiPreviewService::test_frame_demand_identity();
+        assert_eq!(
+            service.scheduler.request_with_demand_identity(
+                key.clone(),
+                generation,
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                Some(demand_identity),
+            ),
+            MediaPreviewRequestStatus::Scheduled { evicted_prefetch: None, evicted_still: None }
+        );
+        let mut result = media_preview_canceled_result(
+            MediaPreviewJob {
+                key,
+                source_secs: 76.0,
+                generation,
+                priority: MediaPreviewRequestPriority::Current,
+                access_mode: PreviewDecodeAccessMode::PlaybackCursor,
+                adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+                hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+                hardware_decode_device_selector: None,
+                enqueued_at: Instant::now(),
+                deadline_at: Some(Instant::now() - Duration::from_millis(1)),
+                demand_identity: Some(demand_identity),
+                execution_id: None,
+            },
+            12_000,
+            MediaPreviewCancelReason::PlaybackDeadline,
+            0,
+            Some(0),
+            None,
+        );
+        result.cancellation_phase = Some(MediaPreviewCancellationPhase::Queued);
+        result_tx.send(result).expect("send queued expiry result");
+
+        let outcome = service.poll_finished_outcome_with_budget(
+            8,
+            Duration::from_millis(5),
+            Some(demand_identity),
+        );
+
+        assert_eq!(
+            outcome.frame_deliveries,
+            vec![mondrian_playback::FrameDelivery::for_demand(
+                demand_identity,
+                mondrian_playback::FrameDeliveryKind::Late,
+            )]
+        );
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.scheduler.pending_requests, 0);
+        assert_eq!(diagnostics.decode_canceled_jobs, 0);
+        assert_eq!(diagnostics.decode_cancellation.all.cancellations, 0);
+        assert_eq!(diagnostics.playback_schedule.current_drop_late_decisions, 1);
+        service.shutdown();
     }
 
     #[test]
@@ -12438,6 +11784,7 @@ mod tests {
             cancel_observed_elapsed_us: None,
             cancel_request_to_observed_us: None,
             canceled: false,
+            cancellation_phase: None,
             cancel_reason: None,
             decode_diagnostics: None,
             color_diagnostics: None,
@@ -12974,6 +12321,56 @@ mod tests {
     }
 
     #[test]
+    fn native_decode_key_is_stable_across_viewer_quality_scales() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        service.set_playback_hardware_decode_admission(AppUiPlaybackHardwareDecodeAdmission {
+            request: PreviewHardwareDecodeRequest::PreferGpuResident,
+            hardware_decode_device_selector: Some(HwAccelDeviceSelector::D3D12VaAdapterIndex(0)),
+            renderer_native_import_ready: true,
+            platform_native_import_ready: true,
+            native_import_admission_ready: true,
+            admission_blocker: None,
+            platform_discovery_available: true,
+            platform_zero_copy_supported: true,
+            platform_low_copy_fallback_supported: false,
+            renderer_supported_handle_kinds: 1,
+            renderer_supported_source_texture_formats: 1,
+            renderer_supports_nv12: true,
+            renderer_supports_p010: true,
+        });
+        let mut full = test_media_key(12);
+        full.source_width = 3840;
+        full.source_height = 2160;
+        full.target_width = 960;
+        full.target_height = 540;
+        full.native_surface_hint = Some(MediaPreviewNativeSurfaceHint::P010);
+        let mut quarter = full.clone();
+        quarter.target_width = 240;
+        quarter.target_height = 135;
+
+        let full = service.canonicalize_media_decode_geometry(full);
+        let quarter = service.canonicalize_media_decode_geometry(quarter);
+
+        assert_eq!(full, quarter);
+        assert_eq!((full.target_width, full.target_height), (3840, 2160));
+    }
+
+    #[test]
+    fn cpu_decode_key_retains_requested_decode_extent() {
+        let service = AppUiPreviewService::new_without_workers_for_test();
+        let mut key = test_media_key(12);
+        key.source_width = 3840;
+        key.source_height = 2160;
+        key.target_width = 960;
+        key.target_height = 540;
+        key.native_surface_hint = Some(MediaPreviewNativeSurfaceHint::P010);
+
+        let key = service.canonicalize_media_decode_geometry(key);
+
+        assert_eq!((key.target_width, key.target_height), (960, 540));
+    }
+
+    #[test]
     fn scrub_adaptation_switches_for_hot_region_and_slow_latency() {
         let mut adaptation = PreviewScrubAdaptationState::default();
         let mut key = test_media_key(100);
@@ -13453,15 +12850,15 @@ mod tests {
     fn media_preview_forward_prefetch_window_uses_sequence_frame_rate() {
         assert_eq!(
             media_preview_forward_prefetch_window_frames(Rational::FPS_24),
-            Some(2)
+            Some(6)
         );
         assert_eq!(
             media_preview_forward_prefetch_window_frames(Rational::FPS_30),
-            Some(2)
+            Some(8)
         );
         assert_eq!(
             media_preview_forward_prefetch_window_frames(Rational::FPS_60),
-            Some(5)
+            Some(15)
         );
         assert_eq!(
             media_preview_forward_prefetch_window_frames(Rational::new(240, 1)),
@@ -13469,7 +12866,7 @@ mod tests {
         );
         assert_eq!(
             media_preview_forward_prefetch_window_frames(Rational::FPS_10),
-            Some(MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES)
+            Some(3)
         );
         assert_eq!(
             media_preview_forward_prefetch_window_frames(Rational::new(0, 1)),

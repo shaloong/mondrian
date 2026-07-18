@@ -1,6 +1,7 @@
 //! Structured preview diagnostics and fail-closed performance/color reports.
 
 use super::*;
+use std::path::PathBuf;
 
 /// Aggregated CPU-side viewer render stage timings after media decode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]

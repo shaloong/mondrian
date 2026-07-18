@@ -2726,6 +2726,7 @@ version = "0.1.0"
 dependencies = [
  "mondrian-core",
  "mondrian-timeline",
+ "pulp",
  "thiserror 1.0.69",
 ]
 

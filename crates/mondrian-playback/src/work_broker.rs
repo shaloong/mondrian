@@ -8,7 +8,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::{
     FrameDemandIdentity, FrameExecutionCancellation, FrameRequestBinding, FrameRequestCompletion,
@@ -133,6 +133,17 @@ pub enum FrameWorkReceive<K, D, P> {
     Expired(FrameWorkExecution<K, D, P>),
 }
 
+/// Result of a bounded worker wait.
+#[derive(Debug)]
+pub enum FrameWorkReceiveWait<K, D, P> {
+    /// One execution lease is ready or expired.
+    Work(FrameWorkReceive<K, D, P>),
+    /// No eligible work arrived before the requested idle interval.
+    TimedOut,
+    /// The broker closed while the worker was waiting.
+    Closed,
+}
+
 /// Binding canceled by residency expiration before completion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpiredFrameWork<K, D> {
@@ -155,6 +166,14 @@ pub struct FrameWorkBrokerDiagnostics {
     pub queued_work: usize,
     /// Execution leases not yet resolved or abandoned.
     pub in_flight_work: usize,
+    /// In-flight leases for which the worker already stamped completion.
+    pub in_flight_completed: usize,
+    /// In-flight leases whose lifecycle already requests cancellation.
+    pub in_flight_cancellation_requested: usize,
+    /// Oldest current in-flight lease age in microseconds.
+    pub in_flight_max_age_us: u64,
+    /// Oldest pending cancellation age among in-flight leases in microseconds.
+    pub in_flight_cancellation_max_age_us: u64,
     /// In-flight current execution leases.
     pub in_flight_current: usize,
     /// In-flight speculative execution leases.
@@ -264,6 +283,7 @@ struct InFlightWork<K> {
     work_class: FrameWorkClass,
     worker_lane: Option<FrameWorkerLane>,
     demand_identity: Option<FrameDemandIdentity>,
+    started_at: MonotonicTimestamp,
     deadline_at: Option<MonotonicTimestamp>,
     completed_at: Option<MonotonicTimestamp>,
     preempted_at: Option<MonotonicTimestamp>,
@@ -522,56 +542,45 @@ where
         let mut state = lock_state(&self.shared.state);
         loop {
             let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
-            if let Some(index) = next_work_index(&state.queue, lane, now) {
-                let queued = state.queue.remove(index)?;
-                let request = queued.request;
-                let id = FrameExecutionId(state.next_execution_id);
-                state.next_execution_id = state.next_execution_id.saturating_add(1);
-                state.in_flight.insert(
-                    id,
-                    InFlightWork {
-                        key: request.key.clone(),
-                        generation: request.generation,
-                        priority: request.priority,
-                        work_class: request.work_class,
-                        worker_lane: Some(lane),
-                        demand_identity: request.demand_identity,
-                        deadline_at: queued.deadline_at,
-                        completed_at: None,
-                        preempted_at: None,
-                        invalidated_at: None,
-                    },
-                );
-                refresh_in_flight_invalidations_locked(&mut state, now);
-                let expired = deadline_expired(queued.deadline_at, now);
-                if expired {
-                    bump(&mut state.metrics.dropped_expired_work);
-                    if request.priority == FrameWorkPriority::Current
-                        && request.work_class == FrameWorkClass::Playback
-                    {
-                        bump(&mut state.metrics.dropped_expired_playback_current);
-                    }
-                }
-                let execution = FrameWorkExecution {
-                    id,
-                    key: request.key,
-                    generation: request.generation,
-                    priority: request.priority,
-                    work_class: request.work_class,
-                    demand_identity: request.demand_identity,
-                    deadline: request.deadline.map(FrameWorkDeadline::adapter_deadline),
-                    payload: request.payload,
-                };
-                return Some(if expired {
-                    FrameWorkReceive::Expired(execution)
-                } else {
-                    FrameWorkReceive::Ready(execution)
-                });
+            if let Some(work) = dequeue_work_locked(&mut state, lane, now) {
+                return Some(work);
             }
             if state.closed_at.is_some() {
                 return None;
             }
             state = wait_state(&self.shared.changed, state);
+        }
+    }
+
+    /// Wait for eligible work while exposing an idle lifecycle boundary.
+    ///
+    /// Adapters use the timeout to release access-pattern-local decoder
+    /// sessions without polling the broker or weakening its queue authority.
+    pub fn receive_timeout(
+        &self,
+        lane: FrameWorkerLane,
+        timeout: Duration,
+    ) -> FrameWorkReceiveWait<K, D, P> {
+        let wait_started = Instant::now();
+        let mut state = lock_state(&self.shared.state);
+        loop {
+            let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
+            if let Some(work) = dequeue_work_locked(&mut state, lane, now) {
+                return FrameWorkReceiveWait::Work(work);
+            }
+            if state.closed_at.is_some() {
+                return FrameWorkReceiveWait::Closed;
+            }
+            let remaining = timeout.saturating_sub(wait_started.elapsed());
+            if remaining.is_zero() {
+                return FrameWorkReceiveWait::TimedOut;
+            }
+            let (next_state, timed_out) =
+                wait_state_timeout(&self.shared.changed, state, remaining);
+            state = next_state;
+            if timed_out && wait_started.elapsed() >= timeout {
+                return FrameWorkReceiveWait::TimedOut;
+            }
         }
     }
 
@@ -581,20 +590,41 @@ where
         &self,
         id: FrameExecutionId,
     ) -> Option<FrameExecutionCancellation> {
+        self.execution_cancellation_evidence(id).map(|evidence| evidence.cancellation)
+    }
+
+    /// Decide cancellation and sample execution age under one lifecycle lock.
+    pub fn execution_cancellation_evidence(
+        &self,
+        id: FrameExecutionId,
+    ) -> Option<crate::FrameExecutionCancellationEvidence> {
         let mut state = lock_state(&self.shared.state);
         let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
         if let Some(closed_at) = state.closed_at {
-            return Some(FrameExecutionCancellation::BrokerClosed {
-                age: elapsed_since(now, closed_at),
+            let execution_age = state.in_flight.get(&id).map_or(Duration::ZERO, |execution| {
+                elapsed_since(now, execution.started_at)
+            });
+            return Some(crate::FrameExecutionCancellationEvidence {
+                cancellation: FrameExecutionCancellation::BrokerClosed {
+                    age: elapsed_since(now, closed_at),
+                },
+                execution_age,
             });
         }
         let Some(execution) = state.in_flight.get(&id) else {
-            return Some(FrameExecutionCancellation::Superseded { age: None });
+            return Some(crate::FrameExecutionCancellationEvidence {
+                cancellation: FrameExecutionCancellation::Superseded { age: None },
+                execution_age: Duration::ZERO,
+            });
         };
+        let execution_age = elapsed_since(now, execution.started_at);
         let mut candidate = None;
         if current_pending_binding(state.latest_generation, &state.pending, execution).is_none() {
             let Some(invalidated_at) = execution.invalidated_at else {
-                return Some(FrameExecutionCancellation::Superseded { age: None });
+                return Some(crate::FrameExecutionCancellationEvidence {
+                    cancellation: FrameExecutionCancellation::Superseded { age: None },
+                    execution_age,
+                });
             };
             candidate = Some(ExecutionCancellationCandidate {
                 requested_at: invalidated_at,
@@ -621,7 +651,10 @@ where
                 },
             );
         }
-        candidate.map(|candidate| candidate.into_cancellation(now))
+        candidate.map(|candidate| crate::FrameExecutionCancellationEvidence {
+            cancellation: candidate.into_cancellation(now),
+            execution_age,
+        })
     }
 
     /// Record the worker-return instant without resolving its latest binding.
@@ -683,6 +716,7 @@ where
             work_class,
             worker_lane: None,
             demand_identity,
+            started_at: now,
             deadline_at: None,
             completed_at: Some(now),
             preempted_at: None,
@@ -925,6 +959,28 @@ where
             }
         }
         for execution in state.in_flight.values() {
+            diagnostics.in_flight_completed += usize::from(execution.completed_at.is_some());
+            diagnostics.in_flight_max_age_us = diagnostics
+                .in_flight_max_age_us
+                .max(duration_micros(elapsed_since(now, execution.started_at)));
+            let lifecycle_cancel_at = [
+                state.closed_at,
+                current_pending_binding(state.latest_generation, &state.pending, execution)
+                    .is_none()
+                    .then_some(execution.invalidated_at)
+                    .flatten(),
+                execution.preempted_at,
+                execution.deadline_at.filter(|deadline| *deadline <= now),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
+            if let Some(cancel_at) = lifecycle_cancel_at {
+                diagnostics.in_flight_cancellation_requested += 1;
+                diagnostics.in_flight_cancellation_max_age_us = diagnostics
+                    .in_flight_cancellation_max_age_us
+                    .max(duration_micros(elapsed_since(now, cancel_at)));
+            }
             match execution.priority {
                 FrameWorkPriority::Current => diagnostics.in_flight_current += 1,
                 FrameWorkPriority::Prefetch => diagnostics.in_flight_prefetch += 1,
@@ -1247,6 +1303,63 @@ fn earlier_cancellation(
     }
 }
 
+fn dequeue_work_locked<K, D, P>(
+    state: &mut BrokerState<K, D, P>,
+    lane: FrameWorkerLane,
+    now: MonotonicTimestamp,
+) -> Option<FrameWorkReceive<K, D, P>>
+where
+    K: Clone + Eq + Hash,
+    D: Copy,
+{
+    let index = next_work_index(&state.queue, lane, now)?;
+    let queued = state.queue.remove(index)?;
+    let request = queued.request;
+    let id = FrameExecutionId(state.next_execution_id);
+    state.next_execution_id = state.next_execution_id.saturating_add(1);
+    state.in_flight.insert(
+        id,
+        InFlightWork {
+            key: request.key.clone(),
+            generation: request.generation,
+            priority: request.priority,
+            work_class: request.work_class,
+            worker_lane: Some(lane),
+            demand_identity: request.demand_identity,
+            started_at: now,
+            deadline_at: queued.deadline_at,
+            completed_at: None,
+            preempted_at: None,
+            invalidated_at: None,
+        },
+    );
+    refresh_in_flight_invalidations_locked(state, now);
+    let expired = deadline_expired(queued.deadline_at, now);
+    if expired {
+        bump(&mut state.metrics.dropped_expired_work);
+        if request.priority == FrameWorkPriority::Current
+            && request.work_class == FrameWorkClass::Playback
+        {
+            bump(&mut state.metrics.dropped_expired_playback_current);
+        }
+    }
+    let execution = FrameWorkExecution {
+        id,
+        key: request.key,
+        generation: request.generation,
+        priority: request.priority,
+        work_class: request.work_class,
+        demand_identity: request.demand_identity,
+        deadline: request.deadline.map(FrameWorkDeadline::adapter_deadline),
+        payload: request.payload,
+    };
+    Some(if expired {
+        FrameWorkReceive::Expired(execution)
+    } else {
+        FrameWorkReceive::Ready(execution)
+    })
+}
+
 fn refresh_in_flight_invalidations_locked<K, D, P>(
     state: &mut BrokerState<K, D, P>,
     now: MonotonicTimestamp,
@@ -1269,6 +1382,12 @@ fn refresh_in_flight_invalidations_locked<K, D, P>(
             None
         };
         if let Some(preempted_at) = preempted_at {
+            // An execution-specific stop request cannot predate the lease it
+            // acts on. A current binding may legitimately remain pending for
+            // presentation while a later prefetch lease begins; clamp that
+            // inherited request time to lease start instead of manufacturing
+            // a negative request-to-checkpoint interval.
+            let preempted_at = preempted_at.max(execution.started_at);
             execution.preempted_at = Some(
                 execution
                     .preempted_at
@@ -1481,6 +1600,10 @@ fn elapsed_since(now: MonotonicTimestamp, earlier: MonotonicTimestamp) -> Durati
     now.duration_since_origin().saturating_sub(earlier.duration_since_origin())
 }
 
+fn duration_micros(duration: Duration) -> u64 {
+    duration.as_micros().min(u128::from(u64::MAX)) as u64
+}
+
 fn lock_state<K, D, P>(
     state: &Mutex<BrokerState<K, D, P>>,
 ) -> MutexGuard<'_, BrokerState<K, D, P>> {
@@ -1492,6 +1615,20 @@ fn wait_state<'a, K, D, P>(
     state: MutexGuard<'a, BrokerState<K, D, P>>,
 ) -> MutexGuard<'a, BrokerState<K, D, P>> {
     changed.wait(state).unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn wait_state_timeout<'a, K, D, P>(
+    changed: &Condvar,
+    state: MutexGuard<'a, BrokerState<K, D, P>>,
+    timeout: Duration,
+) -> (MutexGuard<'a, BrokerState<K, D, P>>, bool) {
+    match changed.wait_timeout(state, timeout) {
+        Ok((state, result)) => (state, result.timed_out()),
+        Err(poisoned) => {
+            let (state, result) = poisoned.into_inner();
+            (state, result.timed_out())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1563,6 +1700,21 @@ mod tests {
         assert_eq!(diagnostics.pending_requests, 0);
         assert_eq!(diagnostics.queued_work, 0);
         assert_eq!(diagnostics.in_flight_work, 0);
+    }
+
+    #[test]
+    fn bounded_receive_distinguishes_idle_from_closed() {
+        let broker = FrameWorkBroker::<u64, u64, u64>::new(2, 2);
+
+        assert!(matches!(
+            broker.receive_timeout(FrameWorkerLane::Any, Duration::ZERO),
+            FrameWorkReceiveWait::TimedOut
+        ));
+        broker.close();
+        assert!(matches!(
+            broker.receive_timeout(FrameWorkerLane::Any, Duration::from_secs(1)),
+            FrameWorkReceiveWait::Closed
+        ));
     }
 
     #[test]
@@ -1670,6 +1822,15 @@ mod tests {
         broker.begin_generation();
         clock.set(Duration::from_millis(27));
         assert_eq!(
+            broker.execution_cancellation_evidence(execution.id),
+            Some(crate::FrameExecutionCancellationEvidence {
+                cancellation: FrameExecutionCancellation::Superseded {
+                    age: Some(Duration::from_millis(7)),
+                },
+                execution_age: Duration::from_millis(17),
+            })
+        );
+        assert_eq!(
             broker.execution_cancellation(execution.id),
             Some(FrameExecutionCancellation::Superseded { age: Some(Duration::from_millis(7)) })
         );
@@ -1696,6 +1857,34 @@ mod tests {
 
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].key, 1);
+    }
+
+    #[test]
+    fn preemption_request_cannot_predate_execution_lease() {
+        let clock = ManualRuntimeClock::at(Duration::from_millis(10));
+        let broker = FrameWorkBroker::new_with_clock(3, 3, clock.clone());
+        let generation = broker.begin_generation();
+        broker.submit(request(2, generation, FrameWorkClass::Interactive));
+        let mut prefetch = request(1, generation, FrameWorkClass::Playback);
+        prefetch.priority = FrameWorkPriority::Prefetch;
+        broker.submit(prefetch);
+
+        clock.set(Duration::from_millis(20));
+        let execution = match broker.receive(FrameWorkerLane::Playback) {
+            Some(FrameWorkReceive::Ready(execution)) => execution,
+            other => panic!("unexpected receive: {other:?}"),
+        };
+        clock.set(Duration::from_millis(25));
+
+        assert_eq!(
+            broker.execution_cancellation_evidence(execution.id),
+            Some(crate::FrameExecutionCancellationEvidence {
+                cancellation: FrameExecutionCancellation::PrefetchPreemptedByCurrent {
+                    request_age: Duration::from_millis(5),
+                },
+                execution_age: Duration::from_millis(5),
+            })
+        );
     }
 
     #[test]

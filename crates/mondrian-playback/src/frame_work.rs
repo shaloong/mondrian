@@ -131,6 +131,20 @@ impl FrameExecutionCancellation {
     }
 }
 
+/// One atomic Broker-clock sample of cancellation and execution age.
+///
+/// Adapters must use this evidence when comparing request-to-checkpoint and
+/// execution-to-checkpoint durations. Reconstructing execution age from an
+/// Adapter-local codec entry instant creates incompatible time origins during
+/// dequeue/cancellation races.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameExecutionCancellationEvidence {
+    /// Authoritative semantic cancellation reason and request age.
+    pub cancellation: FrameExecutionCancellation,
+    /// Age of the execution lease at the same Broker clock sample.
+    pub execution_age: Duration,
+}
+
 impl FrameRequestCompletion {
     /// Return whether this completion may satisfy visible current-frame work.
     pub const fn is_current(self) -> bool {

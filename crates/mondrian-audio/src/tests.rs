@@ -1,7 +1,7 @@
 use super::*;
 use mondrian_core::{
     AssetId, AudioComponentEditId, AudioRouteId, AudioSourceComponentId, ExactAutomationCurve,
-    ExactAutomationKeyframe, ExecutionCancellationToken, ParameterId, TimelineTime,
+    ExactAutomationKeyframe, ExecutionCancellationToken, ParameterId, TimeScale, TimelineTime,
 };
 use mondrian_timeline::audio::{
     AudioChannelStripOutputPort, AudioMixBus, AudioProcessorInstance, AudioRoute,
@@ -103,11 +103,19 @@ fn sequence_with_audio_clip() -> Sequence {
 }
 
 fn prepared(sequence: &Sequence, max_frames: usize) -> Arc<PreparedAudioPlan> {
+    prepared_with_backend(sequence, max_frames, AudioKernelBackend::RuntimeVectorized)
+}
+
+fn prepared_with_backend(
+    sequence: &Sequence,
+    max_frames: usize,
+    backend: AudioKernelBackend,
+) -> Arc<PreparedAudioPlan> {
     let output = sequence.audio_program.outputs[0].id;
     let compiled = compile_audio_program(sequence, AudioCompileRequest::program(output))
         .expect("compiled program");
     Arc::new(
-        PreparedAudioPlan::prepare(
+        PreparedAudioPlan::prepare_with_backend(
             Arc::new(compiled),
             AudioRenderContract {
                 sample_rate: 2,
@@ -115,6 +123,7 @@ fn prepared(sequence: &Sequence, max_frames: usize) -> Arc<PreparedAudioPlan> {
                 max_block_frames: max_frames,
                 processing_mode: AudioProcessingMode::Offline,
             },
+            backend,
         )
         .expect("prepared plan"),
     )
@@ -156,6 +165,44 @@ fn source_adapter_is_crossed_once_per_contribution_block() {
 
     assert_eq!(source.block_reads, 1);
     assert_eq!(pcm, vec![1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn prepared_source_schedule_preserves_fractional_forward_retime() {
+    let mut sequence = sequence_with_audio_clip();
+    let clip = &mut sequence.audio_tracks[0].clips[0];
+    clip.source_in = tt(1, 4);
+    clip.speed.set_scale(TimeScale::new(3, 2).expect("exact forward scale"));
+
+    let mut source = RampSource::default();
+    let pcm = render_audio(
+        prepared(&sequence, 4),
+        &mut source,
+        AudioRenderRequest { start_sample: 0, frames: 4 },
+    )
+    .expect("fractional forward render");
+
+    assert_eq!(source.block_reads, 1);
+    assert_eq!(pcm, vec![1.0, 3.0, 4.0, 6.0]);
+}
+
+#[test]
+fn prepared_source_schedule_preserves_fractional_reverse_retime() {
+    let mut sequence = sequence_with_audio_clip();
+    let clip = &mut sequence.audio_tracks[0].clips[0];
+    clip.source_in = tt(3, 1);
+    clip.speed.set_scale(TimeScale::new(-1, 2).expect("exact reverse scale"));
+
+    let mut source = RampSource::default();
+    let pcm = render_audio(
+        prepared(&sequence, 4),
+        &mut source,
+        AudioRenderRequest { start_sample: 0, frames: 4 },
+    )
+    .expect("fractional reverse render");
+
+    assert_eq!(source.block_reads, 1);
+    assert_eq!(pcm, vec![7.0, 6.0, 6.0, 5.0]);
 }
 
 #[test]
@@ -204,6 +251,18 @@ fn clip_track_bus_output_math_is_unclipped_and_block_invariant() {
     ]);
 
     let plan = prepared(&sequence, 8);
+    assert_eq!(
+        plan.schedule_summary(),
+        PreparedAudioScheduleSummary {
+            node_count: 3,
+            track_count: 1,
+            bus_count: 1,
+            contribution_count: 1,
+            route_count: 2,
+            transition_binding_count: 0,
+            scratch_slot_count: 2,
+        }
+    );
     let mut source = RampSource::default();
     let whole = render_audio(
         Arc::clone(&plan),
@@ -228,6 +287,46 @@ fn clip_track_bus_output_math_is_unclipped_and_block_invariant() {
         whole[2] > 3.0,
         "internal float PCM must not be clipped or tanh-shaped"
     );
+}
+
+#[test]
+fn scalar_reference_and_runtime_vectorized_schedule_are_pcm_equivalent() {
+    let mut sequence = sequence_with_audio_clip();
+    while sequence.audio_tracks.len() < 8 {
+        sequence.add_audio_track();
+    }
+    let additional_tracks =
+        sequence.audio_tracks[1..8].iter().map(|track| track.id).collect::<Vec<_>>();
+    for track_id in additional_tracks {
+        let clip = Clip::new(AssetId::new(), TimelineTime::ZERO, tt(4, 1)).expect("clip");
+        sequence
+            .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
+            .expect("authored audio Clip");
+    }
+    let scalar = prepared_with_backend(&sequence, 257, AudioKernelBackend::ScalarReference);
+    let vectorized = prepared_with_backend(&sequence, 257, AudioKernelBackend::RuntimeVectorized);
+    assert_eq!(scalar.schedule_summary(), vectorized.schedule_summary());
+    assert_eq!(scalar.schedule_summary().track_count, 8);
+    assert_eq!(scalar.schedule_summary().contribution_count, 8);
+    assert_eq!(scalar.schedule_summary().route_count, 8);
+
+    let mut scalar_source = RampSource::default();
+    let mut vectorized_source = RampSource::default();
+    let scalar_pcm = render_audio(
+        scalar,
+        &mut scalar_source,
+        AudioRenderRequest { start_sample: 0, frames: 257 },
+    )
+    .expect("scalar render");
+    let vectorized_pcm = render_audio(
+        vectorized,
+        &mut vectorized_source,
+        AudioRenderRequest { start_sample: 0, frames: 257 },
+    )
+    .expect("vectorized render");
+    assert_eq!(scalar_pcm, vectorized_pcm);
+    assert_eq!(scalar_source.block_reads, 8);
+    assert_eq!(vectorized_source.block_reads, 8);
 }
 
 #[test]

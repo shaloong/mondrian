@@ -331,4 +331,7 @@ pub enum AudioCompileError {
     /// Render Contract contains zero or unbounded values.
     #[error("invalid audio Render Contract")]
     InvalidRenderContract,
+    /// Semantic IR could not be lowered into a closed dense execution schedule.
+    #[error("invalid prepared audio graph: {0}")]
+    InvalidPreparedGraph(String),
 }

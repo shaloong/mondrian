@@ -6,9 +6,11 @@
 //! export, audition, and analysis use the same Interface and DSP mathematics.
 
 mod compiler;
+mod dsp;
 mod plan;
 mod render;
 mod runtime;
+mod schedule;
 
 pub use compiler::{compile_audio_program, AudioCompileError};
 pub use plan::*;
@@ -18,6 +20,7 @@ pub use render::{
 pub use runtime::{
     AudioDecodedSource, AudioMediaResolver, AudioProgramRuntime, AudioRuntimeBuildError,
 };
+pub use schedule::{AudioKernelBackend, PreparedAudioPlan, PreparedAudioScheduleSummary};
 
 #[cfg(test)]
 mod tests;

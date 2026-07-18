@@ -11,11 +11,12 @@ use mondrian_media::{
 use mondrian_playback::{FrameDeliveryKind, FramePresentationQuality};
 
 /// Wall-clock lookahead used to derive playback prefetch depth.
-pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US: u64 = 80_000;
+pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US: u64 = 250_000;
 /// Minimum playback prefetch depth for a valid frame rate.
 pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES: usize = 1;
 /// Maximum playback prefetch depth regardless of frame rate.
-pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES: usize = 6;
+pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES: usize =
+    mondrian_playback::MAX_BOUNDED_VIDEO_PREROLL_FRAMES;
 /// Consecutive current-frame late results required to declare sustained pressure.
 pub(crate) const MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD: u64 = 2;
 pub(crate) const PREVIEW_SCRUB_HOT_REQUEST_WINDOW_US: u64 = 250_000;
@@ -178,11 +179,11 @@ pub(crate) fn media_preview_forward_prefetch_window_frames(frame_rate: Rational)
     if !fps.is_finite() || fps <= 0.0 {
         return None;
     }
-    let frames = ((MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US as f64 / 1_000_000.0) * fps).round();
-    if !frames.is_finite() || frames <= 0.0 {
+    let frames = ((MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US as f64 / 1_000_000.0) * fps).ceil();
+    if !frames.is_finite() {
         return None;
     }
-    Some((frames as usize).clamp(
+    Some((frames.max(1.0) as usize).clamp(
         MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
         MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES,
     ))
@@ -321,7 +322,7 @@ mod tests {
             Some(MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES)
         );
         assert_eq!(
-            media_preview_forward_prefetch_window_frames(Rational::FPS_10),
+            media_preview_forward_prefetch_window_frames(Rational::new(1, 1)),
             Some(MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES)
         );
     }

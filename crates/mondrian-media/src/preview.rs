@@ -53,7 +53,13 @@ const PREVIEW_SCRUB_RECOVERY_ANY_SEEK_WINDOW_MS: u64 = 180;
 const PREVIEW_FRAME_CACHE_CAPACITY: usize = 256;
 const PREVIEW_SEEK_INDEX_CACHE_CAPACITY: usize = 32;
 const PREVIEW_PLAYBACK_SESSION_RING_CAPACITY: usize = 8;
-const PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES: i32 = 8;
+// Native preview frames may outlive one codec call in the bounded global media
+// cache (4), the currently presented GPU output (1), and the exact before/after
+// selector (2). HEVC frame threading and reorder must retain independent
+// headroom beyond those external leases; otherwise a canceled random seek can
+// block inside the driver waiting for a surface and never reach its next
+// cooperative checkpoint.
+const PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES: i32 = 32;
 const PREVIEW_HIT_TOLERANCE_SECS: f64 = 0.025;
 const PREVIEW_MAX_SELECT_DISTANCE_SECS: f64 = 0.100;
 const PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES: i64 = 48;

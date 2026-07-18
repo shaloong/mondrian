@@ -16,6 +16,7 @@ use super::playback_acceptance::{
 };
 use super::playback_preview::{observe_playback_video_preroll, pump_playback_preview};
 use super::*;
+use crate::app::preview_access_mode::MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT;
 use crate::app::ui_actions::TimelineSeekSource;
 use crate::app_ui::native_video_import::resolve_playback_hardware_decode_admission;
 use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
@@ -1750,7 +1751,7 @@ fn playback_cpal_av_external_smoke() -> anyhow::Result<()> {
         .primary_audio()
         .and_then(|audio| audio.duration)
         .context("CPAL smoke requires a proven primary-audio stream duration")?;
-    let frame_count = 8usize;
+    let frame_count = env_usize_clamped("MONDRIAN_AUDIO_EXTERNAL_SMOKE_FRAMES", 8, 8, 3_600);
     let frame_interval_ns = 1_000_000_000u64
         .saturating_mul(1_001)
         .checked_div(30_000)
@@ -1800,14 +1801,15 @@ fn playback_cpal_av_external_smoke() -> anyhow::Result<()> {
             Duration::from_secs(30),
         )?;
         state.begin_playback_evidence_run(mondrian_playback::PlaybackEvidenceConfig::default())?;
-        let mut last_clock_tick = Instant::now();
-        for _ in 0..frame_count {
+        let cadence_started = Instant::now();
+        let mut last_clock_tick = cadence_started;
+        for frame_index in 0..frame_count {
             let _ = run_headless_production_av_interval(
                 &preview_service,
                 &mut state,
                 &mut gpu_adapter,
                 &mut gpu_summary,
-                Duration::from_nanos(frame_interval_ns),
+                absolute_frame_deadline(cadence_started, frame_index, frame_interval_ns)?,
                 &mut last_clock_tick,
             )?;
         }
@@ -1832,6 +1834,12 @@ fn playback_cpal_av_external_smoke() -> anyhow::Result<()> {
             gpu_summary.rendered_frames.saturating_add(gpu_summary.cached_frames) > 0,
             "CPAL smoke produced no headless GPU execution"
         );
+        let evidence = state.playback_evidence_report();
+        anyhow::ensure!(
+            evidence.deliveries.rejected == 0,
+            "CPAL smoke observed rejected terminal deliveries: {:?}",
+            evidence.deliveries
+        );
         eprintln!(
             "MONDRIAN_PERF_JSON={}",
             serde_json::json!({
@@ -1842,6 +1850,7 @@ fn playback_cpal_av_external_smoke() -> anyhow::Result<()> {
                 "underrun_frames": output.underrun_frames,
                 "gpu_executions": gpu_summary.rendered_frames.saturating_add(gpu_summary.cached_frames),
                 "delivery_clock_drift_max_us": state.playback_evidence_report().delivery_clock_drift.max_us,
+                "deliveries": evidence.deliveries,
                 "passed": true,
             })
         );
@@ -1959,17 +1968,32 @@ fn run_professional_cpal_av_probe(
     let mut readiness = PreviewReadinessCounts::default();
     let observation_started = Instant::now();
     let mut last_clock_tick = observation_started;
+    // Qualification proves a healthy starting point, while this bounded tail
+    // guarantees that a short startup reactivation cannot shorten the required
+    // uninterrupted callback interval. The evaluator still requires a complete
+    // 30-minute active interval; the extension grants no missing evidence.
+    const MAX_EVIDENCE_EXTENSION_SECONDS: u64 = 30;
+    let max_frame_count = frame_count.saturating_add(
+        usize::try_from(
+            MAX_EVIDENCE_EXTENSION_SECONDS
+                .saturating_mul(1_000_000_000)
+                .div_ceil(frame_interval_ns),
+        )
+        .unwrap_or(usize::MAX),
+    );
+    let mut observed_frame_count = 0usize;
 
-    for frame_index in 0..frame_count {
+    for frame_index in 0..max_frame_count {
         let sample = run_headless_production_av_interval(
             &preview_service,
             &mut state,
             &mut gpu_adapter,
             &mut gpu_summary,
-            Duration::from_nanos(frame_interval_ns),
+            absolute_frame_deadline(observation_started, frame_index, frame_interval_ns)?,
             &mut last_clock_tick,
         )?;
         record_headless_preview_readiness(&mut readiness, sample);
+        observed_frame_count = frame_index.saturating_add(1);
         let observed_at_us =
             observation_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
         if observed_at_us >= next_process_memory_sample_us {
@@ -1986,22 +2010,35 @@ fn run_professional_cpal_av_probe(
             state.is_playing(),
             "production A/V transport ended before the 30-minute observation completed at frame {frame_index}"
         );
+        if observed_frame_count >= frame_count {
+            let playback_duration_ready = state.playback_evidence_report().observed_duration_us
+                >= PROFESSIONAL_MIN_OBSERVED_DURATION_US;
+            let callback_duration_ready = state
+                .audio_playback_snapshot()
+                .output
+                .and_then(|output| output.active_duration)
+                .is_some_and(|duration| {
+                    duration.as_micros() >= u128::from(PROFESSIONAL_MIN_OBSERVED_DURATION_US)
+                });
+            if playback_duration_ready && callback_duration_ready {
+                break;
+            }
+        }
     }
-
     state.pump_audio_output();
     apply_headless_preview_outcome(&preview_service, &mut state);
     let audio_snapshot = state.audio_playback_snapshot();
     let playback_evidence = state.playback_evidence_report();
     let source_cache = state.audio_source_cache_diagnostics();
     state.pause();
-    wait_for_preview_work_quiescence(&preview_service, &mut state, ready_timeout)?;
-    process_memory_evidence.observe_post_stress(process_memory_probe.current_process_memory());
-    let process_memory_evidence = process_memory_evidence.report();
+    wait_for_preview_idle_residency_release(&preview_service, &mut state, ready_timeout)?;
     let gpu_timings = gpu_adapter
         .finish_gpu_timings()
         .context("finish deferred headless Viewer GPU timestamp maps")?;
     gpu_summary.record_gpu_timings(&gpu_timings);
     gpu_summary.discarded_gpu_timestamp_frames = gpu_adapter.discarded_gpu_timings();
+    process_memory_evidence.observe_post_stress(process_memory_probe.current_process_memory());
+    let process_memory_evidence = process_memory_evidence.report();
 
     let report = evaluate_professional_audio_playback(ProfessionalAudioPlaybackObservation {
         media: &media_probe,
@@ -2011,12 +2048,13 @@ fn run_professional_cpal_av_probe(
         playback_evidence: &playback_evidence,
         process_memory: &process_memory_evidence,
         video_ready_samples: readiness.ready as u64,
-        video_total_samples: frame_count as u64,
+        video_total_samples: observed_frame_count as u64,
         gpu_presented_frames: gpu_summary.rendered_frames.saturating_add(gpu_summary.cached_frames)
             as u64,
     });
     let report_json = serde_json::to_string(&report)?;
     eprintln!("MONDRIAN_PERF_JSON={report_json}");
+    write_report_if_needed(&report_json);
     anyhow::ensure!(
         report.passed,
         "professional production CPAL A/V gate failed: {:?}; report: {report_json}",
@@ -2036,6 +2074,8 @@ fn wait_for_production_av_qualification(
     let mut last_clock_tick = Instant::now();
     let mut candidate_frame = None;
     let mut candidate_status = HeadlessGpuCandidateStatus::Loading;
+    let mut stable_qualification: Option<(u64, Instant)> = None;
+    const QUALIFICATION_STABILITY: Duration = Duration::from_secs(1);
     loop {
         let now = Instant::now();
         state.advance_playback_clock(now.saturating_duration_since(last_clock_tick));
@@ -2051,15 +2091,31 @@ fn wait_for_production_av_qualification(
             candidate_frame = Some(current_frame);
         }
         let audio = state.audio_playback_snapshot();
-        if !state.is_playback_priming()
+        let qualified_output = (!state.is_playback_priming()
             && state.playback_clock_master() == Some(mondrian_playback::ClockMaster::AudioDevice)
-            && audio.state == mondrian_media::AudioPlaybackState::Active
-        {
-            if let Some(output) = audio.output.filter(|output| {
-                output.active && !output.stream_failed && output.active_callback_consumed_frames > 0
-            }) {
-                return Ok(output.stream_generation);
+            && audio.state == mondrian_media::AudioPlaybackState::Active)
+            .then_some(audio.output)
+            .flatten()
+            .filter(|output| {
+                output.active
+                    && !output.stream_failed
+                    && output.active_callback_consumed_frames > 0
+                    && output.last_callback_age.is_some_and(|age| age <= Duration::from_millis(100))
+            });
+        if let Some(output) = qualified_output {
+            match stable_qualification {
+                Some((generation, qualified_at))
+                    if generation == output.stream_generation
+                        && now.saturating_duration_since(qualified_at)
+                            >= QUALIFICATION_STABILITY =>
+                {
+                    return Ok(output.stream_generation);
+                }
+                Some((generation, _)) if generation == output.stream_generation => {}
+                _ => stable_qualification = Some((output.stream_generation, now)),
             }
+        } else {
+            stable_qualification = None;
         }
         anyhow::ensure!(
             now < deadline,
@@ -2076,10 +2132,9 @@ fn run_headless_production_av_interval(
     state: &mut AppState,
     gpu_adapter: &mut HeadlessViewerGpuAdapter,
     gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
-    interval: Duration,
+    deadline: Instant,
     last_clock_tick: &mut Instant,
 ) -> anyhow::Result<HeadlessPreviewSample> {
-    let deadline = Instant::now() + interval;
     let mut candidate_frame = None;
     let mut candidate_status = HeadlessGpuCandidateStatus::Loading;
     let candidate_status = loop {
@@ -2106,6 +2161,70 @@ fn run_headless_production_av_interval(
         stale_output_available: gpu_adapter.has_presented_output(),
         unavailable: candidate_status == HeadlessGpuCandidateStatus::Unavailable,
     })
+}
+
+fn run_headless_realtime_video_interval(
+    preview_service: &AppUiPreviewService,
+    state: &mut AppState,
+    gpu_adapter: &mut HeadlessViewerGpuAdapter,
+    gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
+    deadline: Instant,
+    last_clock_tick: &mut Instant,
+) -> anyhow::Result<HeadlessPreviewSample> {
+    let mut candidate_frame = None;
+    let mut candidate_status = HeadlessGpuCandidateStatus::Loading;
+    let candidate_status = loop {
+        let now = Instant::now();
+        state.advance_playback_clock(now.saturating_duration_since(*last_clock_tick));
+        *last_clock_tick = now;
+        apply_headless_preview_outcome(preview_service, state);
+        let current_frame = state.current_frame();
+        if candidate_frame != Some(current_frame)
+            || candidate_status != HeadlessGpuCandidateStatus::Ready
+        {
+            candidate_status =
+                execute_headless_gpu_candidate(preview_service, state, gpu_adapter, gpu_summary)?;
+            candidate_frame = Some(current_frame);
+        }
+        if now >= deadline {
+            break candidate_status;
+        }
+        thread::sleep((deadline - now).min(Duration::from_millis(1)));
+    };
+    Ok(HeadlessPreviewSample {
+        current_gpu_ready: candidate_status == HeadlessGpuCandidateStatus::Ready,
+        stale_output_available: gpu_adapter.has_presented_output(),
+        unavailable: candidate_status == HeadlessGpuCandidateStatus::Unavailable,
+    })
+}
+
+fn absolute_frame_deadline(
+    cadence_started: Instant,
+    frame_index: usize,
+    frame_interval_ns: u64,
+) -> anyhow::Result<Instant> {
+    let sample_number = u64::try_from(frame_index).unwrap_or(u64::MAX).saturating_add(1);
+    let offset = Duration::from_nanos(frame_interval_ns.saturating_mul(sample_number));
+    cadence_started
+        .checked_add(offset)
+        .context("headless playback cadence deadline overflow")
+}
+
+#[test]
+fn headless_frame_deadlines_are_anchored_to_one_cadence_epoch() {
+    let started = Instant::now();
+    let interval_ns = 16_683_333;
+    let first = absolute_frame_deadline(started, 0, interval_ns).expect("first deadline");
+    let hundredth = absolute_frame_deadline(started, 99, interval_ns).expect("later deadline");
+
+    assert_eq!(
+        first.duration_since(started),
+        Duration::from_nanos(interval_ns)
+    );
+    assert_eq!(
+        hundredth.duration_since(started),
+        Duration::from_nanos(interval_ns.saturating_mul(100))
+    );
 }
 
 fn build_professional_cpal_av_state(
@@ -2207,7 +2326,11 @@ fn run_external_continuous_playback_gate(
     let default_playback_threshold_ms = if professional {
         professional_playback_case_budget_ms(frame_count, frame_interval_ns)
     } else {
-        8_000
+        (frame_count as u128)
+            .saturating_mul(u128::from(frame_interval_ns))
+            .saturating_add(999_999)
+            .saturating_div(1_000_000)
+            .saturating_add(5_000)
     };
     let playback_threshold_ms = if professional {
         default_playback_threshold_ms
@@ -2287,6 +2410,15 @@ fn run_external_continuous_playback_gate(
     } else {
         "preview_media_external_continuous_playback"
     };
+    let seek_probe_count = if professional {
+        PROFESSIONAL_MIN_WARM_SEEKS.saturating_add(PROFESSIONAL_MIN_ACCURATE_SEEKS) as usize
+    } else {
+        std::env::var("MONDRIAN_PREVIEW_EXTERNAL_SEEK_PROBES")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or_default()
+            .min(200)
+    };
     let result = run_preview_media_continuous_playback_probe(
         &root_dir,
         &video_path,
@@ -2297,11 +2429,7 @@ fn run_external_continuous_playback_gate(
         playback_threshold_ms,
         gpu_candidate_threshold_ms,
         ready_timeout,
-        if professional {
-            PROFESSIONAL_MIN_WARM_SEEKS.saturating_add(PROFESSIONAL_MIN_ACCURATE_SEEKS) as usize
-        } else {
-            0
-        },
+        seek_probe_count,
     );
     let _ = fs::remove_dir_all(&root_dir);
 
@@ -2668,14 +2796,16 @@ fn run_preview_media_continuous_playback_probe(
         1,
         playback_threshold_ms,
         || {
+            let cadence_started = Instant::now();
+            let mut last_clock_tick = cadence_started;
             for frame_index in 0..frame_count {
-                state.advance_playback_clock(Duration::from_nanos(frame_interval_ns));
-                let sample = run_headless_preview_interval(
+                let sample = run_headless_realtime_video_interval(
                     &preview_service,
                     &mut state,
                     &mut gpu_adapter,
                     &mut headless_gpu,
-                    Duration::from_nanos(frame_interval_ns),
+                    absolute_frame_deadline(cadence_started, frame_index, frame_interval_ns)?,
+                    &mut last_clock_tick,
                 )?;
                 record_headless_preview_readiness(&mut readiness, sample);
                 let observed_at_us = ((frame_index as u128).saturating_add(1))
@@ -2730,13 +2860,14 @@ fn run_preview_media_continuous_playback_probe(
             Ok(())
         },
     )?;
-    process_memory_evidence.observe_post_stress(process_memory_probe.current_process_memory());
+    wait_for_preview_idle_residency_release(&preview_service, &mut state, ready_timeout)?;
     let gpu_timings = gpu_adapter
         .finish_gpu_timings()
         .context("finish deferred headless Viewer GPU timestamp maps")?;
     headless_gpu_preroll.record_gpu_timings(&gpu_timings);
     headless_gpu.record_gpu_timings(&gpu_timings);
     headless_gpu.discarded_gpu_timestamp_frames = gpu_adapter.discarded_gpu_timings();
+    process_memory_evidence.observe_post_stress(process_memory_probe.current_process_memory());
 
     anyhow::ensure!(
         readiness.unavailable == 0,
@@ -2938,6 +3069,26 @@ fn wait_for_preview_work_quiescence(
     }
 }
 
+fn wait_for_preview_idle_residency_release(
+    preview_service: &AppUiPreviewService,
+    state: &mut AppState,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    wait_for_preview_work_quiescence(preview_service, state, timeout)?;
+    thread::sleep(
+        MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT.saturating_add(Duration::from_millis(50)),
+    );
+    apply_headless_preview_outcome(preview_service, state);
+    let diagnostics = preview_service.diagnostics();
+    anyhow::ensure!(
+        diagnostics.scheduler.pending_requests == 0
+            && diagnostics.worker_queue.queued_jobs == 0
+            && diagnostics.worker_queue.in_flight_jobs == 0,
+        "preview work restarted while releasing idle decoder residency: {diagnostics:?}"
+    );
+    Ok(())
+}
+
 fn validate_executed_adaptive_scaling(
     report: &PreviewMediaPlaybackPerfReport,
 ) -> anyhow::Result<()> {
@@ -3057,36 +3208,6 @@ fn wait_for_headless_playback_preroll(
         thread::sleep(Duration::from_millis(1));
     }
     Ok(())
-}
-
-fn run_headless_preview_interval(
-    preview_service: &AppUiPreviewService,
-    state: &mut AppState,
-    gpu_adapter: &mut HeadlessViewerGpuAdapter,
-    gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
-    interval: Duration,
-) -> anyhow::Result<HeadlessPreviewSample> {
-    let deadline = Instant::now() + interval;
-    let mut candidate_status = HeadlessGpuCandidateStatus::Loading;
-
-    loop {
-        apply_headless_preview_outcome(preview_service, state);
-        if candidate_status != HeadlessGpuCandidateStatus::Ready {
-            candidate_status =
-                execute_headless_gpu_candidate(preview_service, state, gpu_adapter, gpu_summary)?;
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            break;
-        }
-        thread::sleep((deadline - now).min(Duration::from_millis(1)));
-    }
-
-    Ok(HeadlessPreviewSample {
-        current_gpu_ready: candidate_status == HeadlessGpuCandidateStatus::Ready,
-        stale_output_available: gpu_adapter.has_presented_output(),
-        unavailable: candidate_status == HeadlessGpuCandidateStatus::Unavailable,
-    })
 }
 
 fn execute_headless_gpu_candidate(
