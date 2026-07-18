@@ -9563,16 +9563,20 @@ mod tests {
             diagnostics.color_output_transform_calls
         );
         assert_eq!(
-            diagnostics.color_stage_total_stages,
+            diagnostics.color_intermediate_transform_calls,
             diagnostics.color_output_transform_calls
         );
+        let color_stage_passes = diagnostics
+            .color_output_transform_calls
+            .saturating_add(diagnostics.color_intermediate_transform_calls);
+        assert_eq!(diagnostics.color_stage_total_stages, color_stage_passes);
         assert_eq!(
             diagnostics.color_stage_cpu_output_stages,
-            diagnostics.color_output_transform_calls
+            color_stage_passes
         );
         assert_eq!(
             diagnostics.color_stage_pixels,
-            diagnostics.color_output_transform_calls * 960_u64 * 540
+            color_stage_passes * 960_u64 * 540
         );
         assert_eq!(
             diagnostics.color_composite_plans,
@@ -9784,7 +9788,7 @@ mod tests {
             .expect("encoded preview output")
             .display_view
             .expect("resolved display/view");
-        assert_eq!(display_view.display, "sRGB - Display");
+        assert_eq!(display_view.display, "Rec.1886 Rec.709 - Display");
         assert_eq!(display_view.view, "Mondrian Standard SDR v2");
     }
 

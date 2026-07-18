@@ -2652,10 +2652,8 @@ mod tests {
             root.handle_shell_action(Action::FocusPanel(PanelKind::Effects), &platform, None);
 
         assert_eq!(action, None);
-        assert_eq!(
-            active_index_for_dock_panel(&root, PanelKind::Effects),
-            Some(0)
-        );
+        assert!(root.is_panel_active(PanelKind::Effects));
+        assert_eq!(active_index_for_dock_panel(&root, PanelKind::Effects), None);
     }
 
     #[test]

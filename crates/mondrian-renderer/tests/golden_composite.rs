@@ -201,7 +201,7 @@ fn golden_opaque_red() {
 }
 
 #[test]
-fn golden_half_opacity_red_over_black() {
+fn golden_half_opacity_red_preserves_straight_alpha() {
     let w = 64;
     let h = 64;
     let data = solid_rgba(w, h, 255, 0, 0, 128);
