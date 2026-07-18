@@ -457,6 +457,13 @@ playback-current decode clears it. This value-state machine lives in
 Playback Engine's 8-of-12 Transport recovery policy: it cannot enter
 `Recovering`, change Clock Master, or lower runtime presentation scale.
 
+Hardware-path recovery signals are likewise pure scheduling policy. For a
+playback-current completion, `app::preview_scheduler_policy` compares the
+configured hardware request and native-import admission with frame-local decode
+provenance, then returns typed `native_import_unavailable` and
+`hardware_fallback_not_engaged` facts. The Preview Adapter may count and display
+those facts but cannot infer fallback from a capability probe or report schema.
+
 The Preview Adapter must execute that policy rather than merely report it. It
 multiplies the sequence's user-authored preview scale by the runtime
 `Full`/`Half`/`Quarter` divisor before constructing decode, composite, nested

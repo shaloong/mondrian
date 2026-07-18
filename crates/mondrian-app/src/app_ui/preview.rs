@@ -87,10 +87,10 @@ use crate::app::preview_access_mode::{
 use crate::app::preview_scheduler_policy::MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD;
 use crate::app::preview_scheduler_policy::{
     media_preview_forward_prefetch_window_frames, playback_frame_delivery_kind,
-    playback_hardware_decode_requested, preview_decode_presentation_quality,
-    preview_hardware_decode_effective, PlaybackDecodeExecution, PlaybackPressureState,
-    PlaybackPressureTransition, MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US,
-    MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES, MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
+    playback_hardware_recovery_signals, preview_decode_presentation_quality,
+    PlaybackDecodeExecution, PlaybackPressureState, PlaybackPressureTransition,
+    MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US, MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES,
+    MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
 };
 use crate::app::proxy_generation::{request_proxy_generation, resolve_asset_proxy_color_contract};
 use crate::app::AppState;
@@ -2009,26 +2009,19 @@ impl AppUiPreviewService {
         priority: MediaPreviewRequestPriority,
         diagnostics: &PreviewDecodeDiagnostics,
     ) {
-        if priority != MediaPreviewRequestPriority::Current
-            || diagnostics.access_mode != PreviewDecodeAccessMode::PlaybackCursor
-        {
-            return;
-        }
-
-        let native_import_unavailable =
-            playback_hardware_decode_requested(self.playback_hardware_decode_request.get())
-                && !self.playback_hardware_decode_native_import_admission_ready.get();
-        let hardware_fallback_not_engaged =
-            playback_hardware_decode_requested(diagnostics.hardware_decode_request)
-                && !preview_hardware_decode_effective(diagnostics);
-
-        if native_import_unavailable {
+        let signals = playback_hardware_recovery_signals(
+            priority,
+            self.playback_hardware_decode_request.get(),
+            self.playback_hardware_decode_native_import_admission_ready.get(),
+            PlaybackDecodeExecution::from(diagnostics),
+        );
+        if signals.native_import_unavailable {
             bump(&self.metrics.playback_current_native_import_unavailable_decisions);
         }
-        if hardware_fallback_not_engaged {
+        if signals.hardware_fallback_not_engaged {
             bump(&self.metrics.playback_current_hardware_fallback_not_engaged_decisions);
         }
-        if native_import_unavailable || hardware_fallback_not_engaged {
+        if signals.recovery_recommended() {
             bump(&self.metrics.playback_current_proxy_or_hardware_recommended_decisions);
         }
     }

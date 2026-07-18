@@ -142,6 +142,42 @@ impl From<&PreviewDecodeDiagnostics> for PlaybackDecodeExecution {
     }
 }
 
+/// Hardware-path recovery facts derived without UI diagnostics or counters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PlaybackHardwareRecoverySignals {
+    pub(crate) native_import_unavailable: bool,
+    pub(crate) hardware_fallback_not_engaged: bool,
+}
+
+impl PlaybackHardwareRecoverySignals {
+    /// Whether either signal recommends proxy or hardware-path recovery.
+    pub(crate) const fn recovery_recommended(self) -> bool {
+        self.native_import_unavailable || self.hardware_fallback_not_engaged
+    }
+}
+
+/// Derive playback-current hardware recovery signals from configuration and
+/// frame-local execution provenance.
+pub(crate) fn playback_hardware_recovery_signals(
+    priority: MediaPreviewRequestPriority,
+    configured_request: PreviewHardwareDecodeRequest,
+    native_import_admission_ready: bool,
+    execution: PlaybackDecodeExecution,
+) -> PlaybackHardwareRecoverySignals {
+    if priority != MediaPreviewRequestPriority::Current
+        || execution.access_mode != PreviewDecodeAccessMode::PlaybackCursor
+    {
+        return PlaybackHardwareRecoverySignals::default();
+    }
+    PlaybackHardwareRecoverySignals {
+        native_import_unavailable: playback_hardware_decode_requested(configured_request)
+            && !native_import_admission_ready,
+        hardware_fallback_not_engaged: playback_hardware_decode_requested(
+            execution.hardware_decode_request,
+        ) && !execution.hardware_decode_effective,
+    }
+}
+
 /// Classify a playback-current worker completion without treating capability
 /// probes as execution. A correct CPU frame after requested-but-unengaged
 /// hardware decode is presentable, but explicitly Degraded so Playback Quality
@@ -221,6 +257,30 @@ mod tests {
                 Some(execution),
             ),
             FrameDeliveryKind::Ready
+        );
+    }
+
+    #[test]
+    fn hardware_recovery_signals_require_playback_current_execution() {
+        let execution = software_fallback_execution();
+        let signals = playback_hardware_recovery_signals(
+            MediaPreviewRequestPriority::Current,
+            PreviewHardwareDecodeRequest::PreferGpuResident,
+            false,
+            execution,
+        );
+        assert!(signals.native_import_unavailable);
+        assert!(signals.hardware_fallback_not_engaged);
+        assert!(signals.recovery_recommended());
+
+        assert_eq!(
+            playback_hardware_recovery_signals(
+                MediaPreviewRequestPriority::Prefetch,
+                PreviewHardwareDecodeRequest::PreferGpuResident,
+                false,
+                execution,
+            ),
+            PlaybackHardwareRecoverySignals::default()
         );
     }
 
