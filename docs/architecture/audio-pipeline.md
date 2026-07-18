@@ -205,8 +205,8 @@ can never be guessed as zero. Layout negotiation, processor realization, plugin
 parameter-event batching, compensation-delay execution, and state entry also
 belong here. The present executable processor set is zero-latency, so the
 runtime does not yet claim general plugin delay compensation. Any admitted
-non-zero-latency processor must arrive with its processor execution state,
-preallocated compensation lines, and discontinuity contract as one change.
+non-zero-latency processor must arrive with its processor execution state and
+discontinuity contract as one change.
 
 ### Stage 3: exclusive mutable Session
 
@@ -219,6 +219,18 @@ state; plans may be shared, Sessions may not.
 The immutable Plan and recursive Runtime both report selected-output latency.
 This is execution scheduling information, not an instruction to rewrite author
 time, Clip placement, automation coordinates, or nested source mappings.
+
+Session construction allocates one fixed interleaved delay line for every
+prepared Contribution and Route compensation input; zero-delay lines retain no
+sample storage. The capacity report exposes the non-zero line count and exact
+retained sample count. Contribution compensation executes after contribution-
+local processing and before the Track sum; Route compensation executes after
+the selected source port and before the destination sum. Neither path allocates
+or grows during a block. Scalar/SIMD execution shares these same state lines,
+and reference tests require whole-block and partitioned-block PCM identity.
+These compensation lines are real mutable history, so arbitrary discontinuous
+requests cannot be admitted once a plan contains one; explicit state entry is
+the remaining prerequisite before production admits non-zero latency.
 
 The source Seam is block-shaped even when a Clip speed map produces reverse,
 repeated, or non-contiguous coordinates. The Session resolves one absolute

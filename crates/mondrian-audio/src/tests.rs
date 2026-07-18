@@ -185,6 +185,56 @@ fn source_adapter_is_crossed_once_per_contribution_block() {
 }
 
 #[test]
+fn session_executes_preallocated_contribution_and_route_compensation_block_invariant() {
+    fn plan_with_compensation(sequence: &Sequence) -> Arc<PreparedAudioPlan> {
+        let mut plan = prepared(sequence, 12);
+        let prepared = Arc::make_mut(&mut plan);
+        prepared.schedule.contributions[0].compensation_delay_frames = 2;
+        prepared.schedule.routes[0].compensation_delay_frames = 2;
+        prepared.schedule.summary.maximum_compensation_frames = 2;
+        prepared.schedule.summary.output_latency_frames = 4;
+        plan
+    }
+
+    let sequence = sequence_with_audio_clip();
+    let whole_plan = plan_with_compensation(&sequence);
+    let mut whole_session = AudioRenderSession::new(whole_plan).expect("whole Session");
+    assert_eq!(whole_session.capacity().compensation_delay_line_count, 2);
+    assert_eq!(whole_session.capacity().compensation_delay_samples, 4);
+    let mut whole_source = RampSource::default();
+    let mut whole = vec![0.0; 12];
+    whole_session
+        .render_into(
+            &mut whole_source,
+            AudioRenderRequest { start_sample: 0, frames: 12 },
+            &mut whole,
+        )
+        .expect("whole render");
+
+    let split_plan = plan_with_compensation(&sequence);
+    let mut split_session = AudioRenderSession::new(split_plan).expect("split Session");
+    let mut split_source = RampSource::default();
+    let mut split = Vec::new();
+    for start_sample in [0, 2, 4, 6, 8, 10] {
+        let mut block = vec![0.0; 2];
+        split_session
+            .render_into(
+                &mut split_source,
+                AudioRenderRequest { start_sample, frames: 2 },
+                &mut block,
+            )
+            .expect("split render");
+        split.extend(block);
+    }
+
+    assert_eq!(
+        whole,
+        [0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+    );
+    assert_eq!(split, whole);
+}
+
+#[test]
 fn prepared_source_schedule_preserves_fractional_forward_retime() {
     let mut sequence = sequence_with_audio_clip();
     let clip = &mut sequence.audio_tracks[0].clips[0];

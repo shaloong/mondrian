@@ -91,9 +91,11 @@ mutate the live graph inside a block. The current executable processor set is
 zero-latency built-in Gain. Preparation already solves checked Contribution and
 port-specific Route compensation at every sum and propagates child-output
 latency bottom-up; a missing child preparation dependency fails closed. It does
-not admit an unimplemented non-zero processor path: processor state,
-preallocated compensation execution, and explicit discontinuity entry must be
-implemented together before such a processor becomes executable.
+not admit an unimplemented non-zero processor path: processor state and
+explicit discontinuity entry must be implemented together before such a
+processor becomes executable. Prepared Contribution and Route compensation
+already executes through Session-preallocated, block-partition-invariant delay
+lines; this mechanism alone does not authorize a non-zero processor.
 
 ## Consequences
 

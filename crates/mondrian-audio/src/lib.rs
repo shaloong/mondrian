@@ -6,6 +6,7 @@
 //! export, audition, and analysis use the same Interface and DSP mathematics.
 
 mod compiler;
+mod delay;
 mod dsp;
 mod latency;
 mod plan;
