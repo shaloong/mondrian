@@ -40,18 +40,22 @@ values cannot be mixed into an unregistered hybrid identity. Archive and preview
 fingerprints, OCIO CPU processor keys, and renderer GPU shader keys all include
 the exact package identity.
 
-Document schema v7 retains the v5 Custom OCIO reproducibility contract and the
+Document schema v8 retains the v5 Custom OCIO reproducibility contract and the
 v6 removal of the redundant sequence-level ACES workflow selector. It also
 requires the Mondrian Standard package identity to pin both the SDR and
 1000-nit HDR View Transform IDs and versions; the old single default-View field
-cannot fully describe HDR project semantics. A Custom project
+cannot fully describe HDR project semantics. Version 8 additionally requires a
+complete `ParameterSchema` on every persisted visual property; stable identity,
+unit/range/interpolation/enum/resource and cache semantics cannot be inferred
+from an instance path. A Custom project
 stores its config/content and executable processor graph identities together
 with working/display/view/look/role selections.
 Opening the archive must reload and validate the selected external config; a
 missing config, edited LUT, changed role, or changed default resource is an
 open diagnostic, never a silent substitution. Schemas v5 and v6 are
 deliberately not migrated during Alpha: v6 made project `ColorEngine` the sole
-color-mode selector, while v7 completes the Standard View identity. Current
+color-mode selector, while v7 completes the Standard View identity and v8
+establishes the parameter contract. Current
 new sequences default to SceneReferred and persist the selected engine's
 package-pinned rendering View intent; DisplayReferred is the explicit
 direct-colorimetric bypass.

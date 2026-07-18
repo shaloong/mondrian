@@ -4,9 +4,11 @@
 //! `mondrian-effects`. This separation allows `mondrian-timeline` to depend on
 //! effect data types without depending on the full effect evaluation engine.
 
-use crate::automation::{PropertyBag, PropertyDescriptor, PropertyValue};
+use crate::automation::{
+    ParameterResourceReference, PropertyBag, PropertyDescriptor, PropertyValue,
+};
 use crate::types::EffectId;
-use crate::TimelineTime;
+use crate::{ParameterId, ParameterIdError, TimelineTime};
 use serde::{Deserialize, Serialize};
 
 /// Supported effect types.
@@ -124,8 +126,9 @@ impl EffectType {
         format!("effect.{}.{}", self.property_namespace(), parameter)
     }
 
-    pub fn property_suffix(&self, parameter: &str) -> String {
-        format!("{}.{}", self.property_namespace(), parameter)
+    /// Build the stable parameter identity owned by this effect definition.
+    pub fn parameter_id(&self, parameter: &str) -> Result<ParameterId, ParameterIdError> {
+        ParameterId::new(format!("mondrian.effect.{}.{}", self.key(), parameter))
     }
 }
 
@@ -165,15 +168,28 @@ impl EffectNode {
         self.properties.evaluate(path, time)
     }
 
+    /// Evaluate one definition-stable parameter independent of instance address.
+    pub fn evaluate_parameter(
+        &self,
+        parameter_id: &ParameterId,
+        time: TimelineTime,
+    ) -> Option<PropertyValue> {
+        self.unique_parameter_property(parameter_id)
+            .map(|(_, property)| property.evaluate(time))
+    }
+
     pub fn define_property(&mut self, descriptor: PropertyDescriptor) {
         self.properties.define(descriptor);
     }
 
-    pub fn evaluate_f32_by_suffix(&self, suffix: &str, time: TimelineTime, fallback: f32) -> f32 {
-        self.properties
-            .iter()
-            .find(|(path, _)| path.ends_with(suffix))
-            .and_then(|(path, _)| self.evaluate_property(path, time))
+    /// Evaluate one floating parameter by stable schema identity.
+    pub fn evaluate_f32_parameter(
+        &self,
+        parameter_id: &ParameterId,
+        time: TimelineTime,
+        fallback: f32,
+    ) -> f32 {
+        self.evaluate_parameter(parameter_id, time)
             .and_then(|value| value.as_f32())
             .unwrap_or(fallback)
     }
@@ -194,32 +210,56 @@ impl EffectNode {
         self.properties = namespaced;
     }
 
-    pub fn evaluate_text_by_suffix(&self, suffix: &str, time: TimelineTime) -> Option<String> {
-        self.properties
-            .iter()
-            .find(|(path, _)| path.ends_with(suffix))
-            .and_then(|(path, _)| self.evaluate_property(path, time))
-            .and_then(|value| match value {
-                PropertyValue::Text(text) if !text.trim().is_empty() => Some(text),
-                _ => None,
-            })
+    /// Evaluate one non-empty text parameter by stable schema identity.
+    pub fn evaluate_text_parameter(
+        &self,
+        parameter_id: &ParameterId,
+        time: TimelineTime,
+    ) -> Option<String> {
+        self.evaluate_parameter(parameter_id, time).and_then(|value| match value {
+            PropertyValue::Text(text) if !text.trim().is_empty() => Some(text),
+            _ => None,
+        })
     }
 
-    pub fn set_static_value_by_suffix(
+    /// Evaluate a typed resource reference by stable schema identity.
+    pub fn evaluate_resource_parameter(
+        &self,
+        parameter_id: &ParameterId,
+        time: TimelineTime,
+    ) -> Option<ParameterResourceReference> {
+        self.evaluate_parameter(parameter_id, time).and_then(|value| match value {
+            PropertyValue::Resource(reference) => Some(reference),
+            _ => None,
+        })
+    }
+
+    /// Mutate one property selected by definition-stable parameter identity.
+    pub fn set_static_value_by_parameter(
         &mut self,
-        suffix: &str,
+        parameter_id: &ParameterId,
         value: PropertyValue,
     ) -> crate::Result<()> {
         let path = self
-            .properties
-            .iter()
-            .find(|(path, _)| path.ends_with(suffix))
+            .unique_parameter_property(parameter_id)
             .map(|(path, _)| path.to_string())
             .ok_or_else(|| crate::MondrianError::WorkflowStepFailed {
-                step_id: "effect_set_static_value".to_string(),
-                reason: format!("效果属性不存在: {suffix}"),
-            })?;
+            step_id: "effect_set_static_value".to_string(),
+            reason: format!("effect parameter does not exist: {parameter_id}"),
+        })?;
         self.properties.set_static_value(&path, value)
+    }
+
+    fn unique_parameter_property(
+        &self,
+        parameter_id: &ParameterId,
+    ) -> Option<(&str, &crate::automation::AnimatedProperty)> {
+        let mut matches = self
+            .properties
+            .iter()
+            .filter(|(_, property)| property.descriptor.parameter_id() == parameter_id);
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
     }
 }
 

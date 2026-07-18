@@ -161,47 +161,86 @@ impl MaskComponent {
     pub fn new(name: String, initial: MaskKeyframe) -> Self {
         let id = MaskId::new();
         let mut properties = PropertyBag::default();
-        use crate::automation::{AnimatablePropertyUiMetadata, PropertyDescriptor};
+        use crate::automation::{
+            AnimatablePropertyUiMetadata, ParameterEnumOption, ParameterInvalidValuePolicy,
+            ParameterNumericContract, ParameterUnit, PropertyDescriptor,
+        };
 
-        let define_prop =
-            |bag: &mut PropertyBag, path: &str, display: &str, value: PropertyValue| {
-                let mut desc = PropertyDescriptor::new(path, display, value);
-                desc.ui_metadata = AnimatablePropertyUiMetadata {
-                    group_name: Some(name.clone()),
-                    ..Default::default()
-                };
-                bag.define(desc);
+        let define_prop = |bag: &mut PropertyBag,
+                           parameter_id: &'static str,
+                           path: &str,
+                           display: &str,
+                           value: PropertyValue| {
+            let mut desc = PropertyDescriptor::new(path, display, value)
+                .with_parameter_id(crate::ParameterId::new_static(parameter_id));
+            desc = match parameter_id {
+                "mondrian.mask.feather" | "mondrian.mask.expansion" => {
+                    desc.with_unit(ParameterUnit::Pixels)
+                }
+                "mondrian.mask.opacity" => desc.with_numeric_contract(
+                    ParameterUnit::Normalized,
+                    ParameterNumericContract::closed(
+                        0.0,
+                        1.0,
+                        Some(0.01),
+                        ParameterInvalidValuePolicy::Reject,
+                    )
+                    .expect("mask opacity has a valid built-in numeric contract"),
+                ),
+                "mondrian.mask.operation" => desc.with_enum_options(
+                    ["Add", "Subtract", "Intersect", "Difference"]
+                        .into_iter()
+                        .map(|key| {
+                            ParameterEnumOption::new(
+                                key,
+                                format!("mondrian.mask.operation.{key}.label"),
+                            )
+                        })
+                        .collect(),
+                ),
+                _ => desc,
             };
+            desc.ui_metadata = AnimatablePropertyUiMetadata {
+                group_name: Some(name.clone()),
+                ..Default::default()
+            };
+            bag.define(desc);
+        };
 
         define_prop(
             &mut properties,
+            "mondrian.mask.feather",
             MASK_PROP_FEATHER,
             "羽化",
             PropertyValue::Float(initial.feather),
         );
         define_prop(
             &mut properties,
+            "mondrian.mask.opacity",
             MASK_PROP_OPACITY,
             "不透明度",
             PropertyValue::Float(initial.opacity),
         );
         define_prop(
             &mut properties,
+            "mondrian.mask.expansion",
             MASK_PROP_EXPANSION,
             "扩展",
             PropertyValue::Float(initial.expansion),
         );
         define_prop(
             &mut properties,
+            "mondrian.mask.invert",
             MASK_PROP_INVERT,
             "反转",
             PropertyValue::Bool(initial.invert),
         );
         define_prop(
             &mut properties,
+            "mondrian.mask.operation",
             MASK_PROP_MASK_OP,
             "模式",
-            PropertyValue::Text(initial.mask_op.as_str().to_string()),
+            PropertyValue::Enum(initial.mask_op.as_str().to_string()),
         );
 
         Self {
@@ -298,7 +337,7 @@ impl MaskComponent {
             .properties
             .evaluate(MASK_PROP_MASK_OP, time)
             .and_then(|v| {
-                if let PropertyValue::Text(s) = v {
+                if let PropertyValue::Enum(s) = v {
                     Some(s.clone())
                 } else {
                     None

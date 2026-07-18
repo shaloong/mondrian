@@ -2577,6 +2577,19 @@ mod tests {
                 changed[0] += 0.5;
                 PropertyValue::Vec4(changed)
             }
+            PropertyValue::Enum(value) => PropertyValue::Enum(value.clone()),
+            PropertyValue::Resource(reference) => match reference {
+                mondrian_core::automation::ParameterResourceReference::Unbound => {
+                    PropertyValue::Resource(
+                        mondrian_core::automation::ParameterResourceReference::ExternalFile {
+                            path: std::path::PathBuf::from("test-resource.cube"),
+                        },
+                    )
+                }
+                _ => PropertyValue::Resource(
+                    mondrian_core::automation::ParameterResourceReference::Unbound,
+                ),
+            },
             PropertyValue::Text(value) => PropertyValue::Text(format!("{value} edited")),
         }
     }

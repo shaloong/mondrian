@@ -859,9 +859,12 @@ fn splitting_adjustment_layer_keeps_instance_state_isolated() {
     let mut clip =
         Clip::new_adjustment_layer(AssetId::new(), tt(0, tb), tt(40, tb)).expect("valid clip");
     let effect = mondrian_effects::EffectNodeExt::with_defaults(EffectType::BasicCorrection);
-    clip.add_effect_node(effect);
+    let effect_id = clip.add_effect_node(effect);
+    let exposure_id = EffectType::BasicCorrection
+        .parameter_id("exposure")
+        .expect("exposure parameter ID");
     let exposure_path = clip
-        .effect_property_path("basic_correction.exposure")
+        .effect_parameter_address(effect_id, &exposure_id)
         .expect("adjustment exposure path");
     clip.apply_property_mutation(
         mondrian_core::automation::PropertyMutation::SetStaticValue {
@@ -900,8 +903,9 @@ fn splitting_adjustment_layer_keeps_instance_state_isolated() {
         .iter_mut()
         .find(|clip| clip.id == right_id)
         .expect("right split clip should exist");
+    let right_effect_id = right_clip.effects[0].id;
     let right_exposure_path = right_clip
-        .effect_property_path("basic_correction.exposure")
+        .effect_parameter_address(right_effect_id, &exposure_id)
         .expect("right adjustment exposure path");
     right_clip
         .apply_property_mutation(

@@ -4,13 +4,14 @@ use crate::audio::AudioComponentEdit;
 use glam::Vec2;
 use mondrian_core::{
     automation::{
-        AnimatedProperty, PropertyBag, PropertyDescriptor, PropertyHost, PropertyMutation,
-        PropertyValue,
+        AnimatedProperty, ParameterEnumOption, ParameterInvalidValuePolicy,
+        ParameterNumericContract, ParameterUnit, PropertyBag, PropertyDescriptor, PropertyHost,
+        PropertyMutation, PropertyValue,
     },
     effect_data::{EffectNode, EffectType},
     mask_data::MaskComponent,
     types::*,
-    MondrianError, Result, TimeScale, TimelineTime,
+    MondrianError, ParameterId, Result, TimeScale, TimelineTime,
 };
 use serde::{Deserialize, Serialize};
 
@@ -38,31 +39,35 @@ impl Transform2D {
 
     pub fn identity() -> Self {
         let mut properties = PropertyBag::default();
-        properties.define(PropertyDescriptor::new(
-            Self::POSITION_PATH,
-            "位置",
-            PropertyValue::Vec2(Vec2::ZERO),
-        ));
-        properties.define(PropertyDescriptor::new(
-            Self::SCALE_PATH,
-            "缩放",
-            PropertyValue::Vec2(Vec2::ONE),
-        ));
-        properties.define(PropertyDescriptor::new(
-            Self::ROTATION_PATH,
-            "旋转",
-            PropertyValue::Float(0.0),
-        ));
-        properties.define(PropertyDescriptor::new(
-            Self::ANCHOR_POINT_PATH,
-            "锚点",
-            PropertyValue::Vec2(Vec2::ZERO),
-        ));
-        properties.define(PropertyDescriptor::new(
-            Self::OPACITY_PATH,
-            "不透明度",
-            PropertyValue::Float(1.0),
-        ));
+        properties.define(
+            PropertyDescriptor::new(Self::POSITION_PATH, "位置", PropertyValue::Vec2(Vec2::ZERO))
+                .with_parameter_id(ParameterId::new_static("mondrian.transform.position"))
+                .with_unit(ParameterUnit::Pixels),
+        );
+        properties.define(
+            PropertyDescriptor::new(Self::SCALE_PATH, "缩放", PropertyValue::Vec2(Vec2::ONE))
+                .with_parameter_id(ParameterId::new_static("mondrian.transform.scale"))
+                .with_unit(ParameterUnit::Normalized),
+        );
+        properties.define(
+            PropertyDescriptor::new(Self::ROTATION_PATH, "旋转", PropertyValue::Float(0.0))
+                .with_parameter_id(ParameterId::new_static("mondrian.transform.rotation"))
+                .with_unit(ParameterUnit::Degrees),
+        );
+        properties.define(
+            PropertyDescriptor::new(
+                Self::ANCHOR_POINT_PATH,
+                "锚点",
+                PropertyValue::Vec2(Vec2::ZERO),
+            )
+            .with_parameter_id(ParameterId::new_static("mondrian.transform.anchor_point"))
+            .with_unit(ParameterUnit::Pixels),
+        );
+        properties.define(
+            PropertyDescriptor::new(Self::OPACITY_PATH, "不透明度", PropertyValue::Float(1.0))
+                .with_parameter_id(ParameterId::new_static("mondrian.transform.opacity"))
+                .with_numeric_contract(ParameterUnit::Normalized, normalized_opacity_contract()),
+        );
         Self { properties }
     }
 
@@ -164,6 +169,11 @@ impl Transform2D {
     }
 }
 
+fn normalized_opacity_contract() -> ParameterNumericContract {
+    ParameterNumericContract::closed(0.0, 1.0, Some(0.01), ParameterInvalidValuePolicy::Reject)
+        .expect("opacity has a valid built-in numeric contract")
+}
+
 fn blend_mode_to_text(mode: Option<BlendMode>) -> String {
     match mode {
         None => "inherit".to_string(),
@@ -195,6 +205,42 @@ fn blend_mode_to_text(mode: Option<BlendMode>) -> String {
         Some(BlendMode::Color) => "Color".to_string(),
         Some(BlendMode::Luminosity) => "Luminosity".to_string(),
     }
+}
+
+fn blend_mode_options() -> Vec<ParameterEnumOption> {
+    [
+        "inherit",
+        "Normal",
+        "Dissolve",
+        "Multiply",
+        "Screen",
+        "Overlay",
+        "Darken",
+        "Lighten",
+        "ColorDodge",
+        "ColorBurn",
+        "HardLight",
+        "SoftLight",
+        "Difference",
+        "Exclusion",
+        "Subtract",
+        "DarkerColor",
+        "LighterColor",
+        "LinearBurn",
+        "LinearDodge",
+        "VividLight",
+        "LinearLight",
+        "PinLight",
+        "HardMix",
+        "Divide",
+        "Hue",
+        "Saturation",
+        "Color",
+        "Luminosity",
+    ]
+    .into_iter()
+    .map(|key| ParameterEnumOption::new(key, format!("mondrian.blend_mode.{key}.label")))
+    .collect()
 }
 
 fn blend_mode_from_text(value: &str) -> Result<Option<BlendMode>> {
@@ -506,11 +552,21 @@ impl Clip {
             .map(|effect| effect.is_enabled)
     }
 
-    pub fn effect_property_path(&self, suffix: &str) -> Option<String> {
+    /// Resolve the current UI/command address for one effect parameter.
+    ///
+    /// Execution identity is the `(EffectId, ParameterId)` pair; the returned
+    /// string is only an Adapter alias used by the current mutation interface.
+    pub fn effect_parameter_address(
+        &self,
+        effect_id: EffectId,
+        parameter_id: &ParameterId,
+    ) -> Option<String> {
         self.effects
             .iter()
-            .flat_map(|effect| effect.properties.iter())
-            .find(|(path, _)| path.ends_with(suffix))
+            .find(|effect| effect.id == effect_id)?
+            .properties
+            .iter()
+            .find(|(_, property)| property.descriptor.parameter_id() == parameter_id)
             .map(|(path, _)| path.to_string())
     }
 
@@ -574,11 +630,13 @@ impl PropertyHost for Clip {
         let mut blend_mode_descriptor = PropertyDescriptor::new(
             Self::BLEND_MODE_PATH,
             "混合模式",
-            PropertyValue::Text(blend_mode_text.clone()),
-        );
+            PropertyValue::Enum(blend_mode_text.clone()),
+        )
+        .with_parameter_id(ParameterId::new_static("mondrian.clip.blend_mode"))
+        .with_enum_options(blend_mode_options());
         blend_mode_descriptor.is_animatable = false;
         let mut blend_mode_property = AnimatedProperty::from_descriptor(blend_mode_descriptor);
-        blend_mode_property.set_static_value(PropertyValue::Text(blend_mode_text));
+        blend_mode_property.set_static_value(PropertyValue::Enum(blend_mode_text))?;
         properties.upsert(blend_mode_property);
         if self.is_solid_color() || self.solid_color.is_some() {
             let solid_color = self.solid_color.unwrap_or_else(|| Color::from_hex(0x000000));
@@ -586,11 +644,12 @@ impl PropertyHost for Clip {
                 Self::SOLID_COLOR_PATH,
                 "纯色",
                 PropertyValue::Color(solid_color),
-            );
+            )
+            .with_parameter_id(ParameterId::new_static("mondrian.clip.solid_color"));
             solid_color_descriptor.is_animatable = false;
             let mut solid_color_property =
                 AnimatedProperty::from_descriptor(solid_color_descriptor);
-            solid_color_property.set_static_value(PropertyValue::Color(solid_color));
+            solid_color_property.set_static_value(PropertyValue::Color(solid_color))?;
             properties.upsert(solid_color_property);
         }
         Ok(properties)
@@ -620,10 +679,10 @@ impl PropertyHost for Clip {
                     reason: "缺少 clip.blend_mode 属性".to_string(),
                 }
             })?;
-            let PropertyValue::Text(value) = property.static_value() else {
+            let PropertyValue::Enum(value) = property.static_value() else {
                 return Err(MondrianError::WorkflowStepFailed {
                     step_id: "clip_apply_property_mutation".to_string(),
-                    reason: "clip.blend_mode 需要 text 值".to_string(),
+                    reason: "clip.blend_mode 需要 enum 值".to_string(),
                 });
             };
             self.blend_mode = blend_mode_from_text(value)?;
@@ -793,7 +852,7 @@ mod tests {
         assert!(!property.descriptor.is_animatable);
         assert_eq!(
             property.evaluate(tt(0)),
-            PropertyValue::Text("inherit".to_string())
+            PropertyValue::Enum("inherit".to_string())
         );
     }
 
@@ -803,7 +862,7 @@ mod tests {
 
         clip.apply_property_mutation(PropertyMutation::SetStaticValue {
             path: Clip::BLEND_MODE_PATH.to_string(),
-            value: PropertyValue::Text("Multiply".to_string()),
+            value: PropertyValue::Enum("Multiply".to_string()),
         })
         .expect("set blend mode");
 
@@ -892,14 +951,17 @@ mod tests {
             Clip::new_adjustment_layer(shared_asset_id, tt(0), tt(30)).expect("valid clip");
         let mut second =
             Clip::new_adjustment_layer(shared_asset_id, tt(40), tt(30)).expect("valid clip");
-        first.add_effect_node(mondrian_effects::EffectNodeExt::with_defaults(
-            EffectType::BasicCorrection,
-        ));
+        let first_effect_id = first.add_effect_node(
+            mondrian_effects::EffectNodeExt::with_defaults(EffectType::BasicCorrection),
+        );
         second.add_effect_node(mondrian_effects::EffectNodeExt::with_defaults(
             EffectType::BasicCorrection,
         ));
+        let exposure_id = EffectType::BasicCorrection
+            .parameter_id("exposure")
+            .expect("exposure parameter ID");
         let exposure_path = first
-            .effect_property_path("basic_correction.exposure")
+            .effect_parameter_address(first_effect_id, &exposure_id)
             .expect("adjustment exposure path");
 
         first

@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use mondrian_assets::library::FolderRecord;
 use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
-use mondrian_core::automation::PropertyValue;
+use mondrian_core::automation::{ParameterResourceReference, ParameterSchema, PropertyValue};
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::types::{
     AssetId, ClipId, ColorSpace, EffectId, FramePosition, JobId, Rational, SequenceId, TrackId,
@@ -1334,6 +1334,8 @@ pub struct InspectorEffectModel {
 /// One property row inside an effect inspector section.
 #[derive(Debug, Clone)]
 pub struct InspectorEffectPropertyModel {
+    /// Stable parameter schema consumed independently from the instance address.
+    pub schema: ParameterSchema,
     /// Namespaced property path, e.g. `effect.<id>.exposure`.
     pub path: String,
     /// Human-readable property name from the descriptor.
@@ -1343,6 +1345,9 @@ pub struct InspectorEffectPropertyModel {
     /// UI min/max bounds extracted from the descriptor.
     pub min: Option<f64>,
     pub max: Option<f64>,
+    /// Author-valid bounds; soft min/max above only shape slider travel.
+    pub hard_min: Option<f64>,
+    pub hard_max: Option<f64>,
     pub step: Option<f64>,
     /// Whether the property supports animation.
     pub is_animatable: bool,
@@ -1419,14 +1424,20 @@ impl InspectorPanelModel {
                         properties: effect
                             .properties
                             .iter()
-                            .map(|(path, property)| InspectorEffectPropertyModel {
-                                path: path.to_string(),
-                                label: property.descriptor.display_name.clone(),
-                                value: property.evaluate(time_ticks),
-                                min: property.descriptor.ui_metadata.min,
-                                max: property.descriptor.ui_metadata.max,
-                                step: property.descriptor.ui_metadata.step,
-                                is_animatable: property.descriptor.is_animatable,
+                            .map(|(path, property)| {
+                                let numeric = property.descriptor.schema.numeric;
+                                InspectorEffectPropertyModel {
+                                    schema: property.descriptor.schema.clone(),
+                                    path: path.to_string(),
+                                    label: property.descriptor.display_name.clone(),
+                                    value: property.evaluate(time_ticks),
+                                    min: numeric.map(|contract| contract.soft_range.min),
+                                    max: numeric.map(|contract| contract.soft_range.max),
+                                    hard_min: numeric.map(|contract| contract.hard_range.min),
+                                    hard_max: numeric.map(|contract| contract.hard_range.max),
+                                    step: numeric.and_then(|contract| contract.step),
+                                    is_animatable: property.descriptor.is_animatable,
+                                }
                             })
                             .collect(),
                     }
@@ -3962,15 +3973,33 @@ fn numeric_slider_input_control(
     enabled: bool,
     action: impl Fn(f32) -> Action + 'static,
 ) -> Box<dyn Widget> {
+    numeric_slider_input_control_with_hard_range(
+        value, min, max, min, max, step, decimals, enabled, action,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn numeric_slider_input_control_with_hard_range(
+    value: f32,
+    soft_min: f32,
+    soft_max: f32,
+    hard_min: f32,
+    hard_max: f32,
+    step: Option<f32>,
+    decimals: usize,
+    enabled: bool,
+    action: impl Fn(f32) -> Action + 'static,
+) -> Box<dyn Widget> {
     let action: Rc<dyn Fn(f32) -> Action> = Rc::new(action);
-    let mut slider = Slider::new(value, min, max).enabled(enabled);
+    let mut slider =
+        Slider::new(value.clamp(soft_min, soft_max), soft_min, soft_max).enabled(enabled);
     if let Some(step) = step.filter(|step| step.is_finite() && *step > 0.0) {
         slider = slider.with_step(step);
     }
     let slider_action = Rc::clone(&action);
     slider = slider.on_change(move |value| slider_action(value));
 
-    let mut input = NumberInput::new(value as f64, min as f64, max as f64)
+    let mut input = NumberInput::new(value as f64, hard_min as f64, hard_max as f64)
         .with_width(72.0)
         .with_decimals(decimals)
         .enabled(enabled);
@@ -4237,13 +4266,15 @@ fn effect_property_value_widget(
             )
         }
         PropertyValue::Float(value) => {
-            let (min, max) = numeric_property_range(property.min, property.max, 0.0, 1.0);
+            let ((min, max), (hard_min, hard_max)) = parameter_numeric_ranges(property, 0.0, 1.0);
             let selected_clip = selection;
             let path = path.clone();
-            numeric_slider_input_control(
+            numeric_slider_input_control_with_hard_range(
                 *value,
                 min,
                 max,
+                hard_min,
+                hard_max,
                 property_step(property.step, None),
                 numeric_decimals(property.step, *value),
                 can_edit,
@@ -4252,19 +4283,21 @@ fn effect_property_value_widget(
                         selected_clip,
                         effect_id,
                         &path,
-                        PropertyValue::Float(v.clamp(min, max)),
+                        PropertyValue::Float(v.clamp(hard_min, hard_max)),
                     )
                 },
             )
         }
         PropertyValue::Double(value) => {
-            let (min, max) = numeric_property_range(property.min, property.max, 0.0, 1.0);
+            let ((min, max), (hard_min, hard_max)) = parameter_numeric_ranges(property, 0.0, 1.0);
             let selected_clip = selection;
             let path = path.clone();
-            numeric_slider_input_control(
+            numeric_slider_input_control_with_hard_range(
                 *value as f32,
                 min,
                 max,
+                hard_min,
+                hard_max,
                 property_step(property.step, None),
                 numeric_decimals(property.step, *value as f32),
                 can_edit,
@@ -4273,19 +4306,21 @@ fn effect_property_value_widget(
                         selected_clip,
                         effect_id,
                         &path,
-                        PropertyValue::Double((v as f64).clamp(min as f64, max as f64)),
+                        PropertyValue::Double((v as f64).clamp(hard_min as f64, hard_max as f64)),
                     )
                 },
             )
         }
         PropertyValue::Int(value) => {
-            let (min, max) = numeric_property_range(property.min, property.max, 0.0, 100.0);
+            let ((min, max), (hard_min, hard_max)) = parameter_numeric_ranges(property, 0.0, 100.0);
             let selected_clip = selection;
             let path = path.clone();
-            numeric_slider_input_control(
+            numeric_slider_input_control_with_hard_range(
                 *value as f32,
                 min,
                 max,
+                hard_min,
+                hard_max,
                 property_step(property.step, Some(1.0)),
                 0,
                 can_edit,
@@ -4294,7 +4329,9 @@ fn effect_property_value_widget(
                         selected_clip,
                         effect_id,
                         &path,
-                        PropertyValue::Int((v.round() as i64).clamp(min as i64, max as i64)),
+                        PropertyValue::Int(
+                            (v.round() as i64).clamp(hard_min as i64, hard_max as i64),
+                        ),
                     )
                 },
             )
@@ -4331,6 +4368,50 @@ fn effect_property_value_widget(
                     }),
                 )
             }
+        }
+        PropertyValue::Enum(value) => {
+            let items = property
+                .schema
+                .enum_options
+                .iter()
+                .map(|option| {
+                    MenuItem::new(
+                        option.key.clone(),
+                        inspector_effect_property_action(
+                            selection,
+                            effect_id,
+                            &path,
+                            PropertyValue::Enum(option.key.clone()),
+                        ),
+                    )
+                })
+                .collect();
+            Box::new(Dropdown::new(value.clone(), items).enabled(can_edit))
+        }
+        PropertyValue::Resource(reference) => {
+            let text = match reference {
+                ParameterResourceReference::Unbound => String::new(),
+                ParameterResourceReference::ExternalFile { path } => path.display().to_string(),
+                ParameterResourceReference::ProjectAsset { asset_id } => asset_id.to_string(),
+                ParameterResourceReference::Uri { uri } => uri.clone(),
+            };
+            let selected_clip = selection;
+            let path = path.clone();
+            Box::new(
+                TextInput::new(text).enabled(can_edit).on_change(move |text| {
+                    let value = if text.trim().is_empty() {
+                        ParameterResourceReference::Unbound
+                    } else {
+                        ParameterResourceReference::ExternalFile { path: PathBuf::from(text) }
+                    };
+                    inspector_effect_property_action(
+                        selected_clip,
+                        effect_id,
+                        &path,
+                        PropertyValue::Resource(value),
+                    )
+                }),
+            )
         }
         PropertyValue::Vec2(value) => vector_property_widget(
             &["X", "Y"],
@@ -4375,10 +4456,10 @@ fn vector_property_widget(
     path: String,
     build_value: fn(&[f32]) -> PropertyValue,
 ) -> Box<dyn Widget> {
-    let (min, max) = numeric_property_range(property.min, property.max, 0.0, 1.0);
+    let ((min, max), (hard_min, hard_max)) = parameter_numeric_ranges(property, 0.0, 1.0);
     let values = values
         .iter()
-        .map(|value| finite_f32_from_f32(*value).unwrap_or(min).clamp(min, max))
+        .map(|value| finite_f32_from_f32(*value).unwrap_or(hard_min).clamp(hard_min, hard_max))
         .collect::<Vec<_>>();
     let rows = labels
         .iter()
@@ -4388,16 +4469,18 @@ fn vector_property_widget(
             let base_values = values.to_vec();
             let selected_clip = selection;
             let path = path.clone();
-            let control = numeric_slider_input_control(
+            let control = numeric_slider_input_control_with_hard_range(
                 *value,
                 min,
                 max,
+                hard_min,
+                hard_max,
                 property_step(property.step, None),
                 numeric_decimals(property.step, *value),
                 can_edit,
                 move |v| {
                     let mut next_values = base_values.clone();
-                    next_values[component_index] = v.clamp(min, max);
+                    next_values[component_index] = v.clamp(hard_min, hard_max);
                     inspector_effect_property_action(
                         selected_clip,
                         effect_id,
@@ -4435,6 +4518,16 @@ fn numeric_property_range(
         (None, Some(max)) => (default_min.min(max), max),
         (None, None) => (default_min, default_max),
     }
+}
+
+fn parameter_numeric_ranges(
+    property: &InspectorEffectPropertyModel,
+    default_min: f32,
+    default_max: f32,
+) -> ((f32, f32), (f32, f32)) {
+    let soft = numeric_property_range(property.min, property.max, default_min, default_max);
+    let hard = numeric_property_range(property.hard_min, property.hard_max, soft.0, soft.1);
+    (soft, hard)
 }
 
 fn ordered_numeric_range(min: f32, max: f32) -> (f32, f32) {
@@ -7060,6 +7153,17 @@ mod tests {
         assert_eq!(models.inspector.effects.len(), 1);
         assert_eq!(models.inspector.selected_effect_id, Some(effect_id));
         assert_eq!(models.inspector.effects[0].effect_id, effect_id);
+        let blur_property = &models.inspector.effects[0].properties[0];
+        assert_eq!(
+            blur_property.schema.parameter_id.as_str(),
+            "mondrian.effect.builtin.gaussian_blur.radius"
+        );
+        assert_eq!(blur_property.schema.schema_version, 1);
+        assert_eq!(
+            blur_property.schema.message_id,
+            "mondrian.effect.builtin.gaussian_blur.radius.label"
+        );
+        assert!(blur_property.path.contains(&effect_id.to_string()));
         assert_eq!(
             models.inspector.effects[0].label,
             effect_display_name(&EffectType::GaussianBlur)
@@ -8048,11 +8152,16 @@ mod tests {
             clip_id: ClipId::new(),
         };
         let property = InspectorEffectPropertyModel {
+            schema: ParameterSchema::v1(mondrian_core::ParameterId::new_static(
+                "mondrian.test.lighting_direction",
+            )),
             path: "lighting.direction".to_string(),
             label: "Direction".to_string(),
             value: PropertyValue::Vec3(glam::Vec3::new(0.1, 0.2, 0.3)),
             min: Some(0.0),
             max: Some(1.0),
+            hard_min: None,
+            hard_max: None,
             step: Some(0.01),
             is_animatable: true,
         };
@@ -8121,11 +8230,16 @@ mod tests {
             clip_id: ClipId::new(),
         };
         let property = InspectorEffectPropertyModel {
+            schema: ParameterSchema::v1(mondrian_core::ParameterId::new_static(
+                "mondrian.test.color_exposure",
+            )),
             path: "color.exposure".to_string(),
             label: "Exposure".to_string(),
             value: PropertyValue::Float(0.2),
             min: Some(0.0),
             max: Some(1.0),
+            hard_min: None,
+            hard_max: None,
             step: Some(0.25),
             is_animatable: true,
         };
@@ -8199,11 +8313,16 @@ mod tests {
             clip_id: ClipId::new(),
         };
         let property = InspectorEffectPropertyModel {
+            schema: ParameterSchema::v1(mondrian_core::ParameterId::new_static(
+                "mondrian.test.blur_radius",
+            )),
             path: "blur.radius".to_string(),
             label: "Radius".to_string(),
             value: PropertyValue::Float(0.2),
             min: Some(0.0),
             max: Some(1.0),
+            hard_min: None,
+            hard_max: None,
             step: Some(0.1),
             is_animatable: true,
         };
@@ -8282,11 +8401,16 @@ mod tests {
             clip_id: ClipId::new(),
         };
         let property = InspectorEffectPropertyModel {
+            schema: ParameterSchema::v1(mondrian_core::ParameterId::new_static(
+                "mondrian.test.color_exposure",
+            )),
             path: "color.exposure".to_string(),
             label: "Exposure".to_string(),
             value: PropertyValue::Float(0.2),
             min: Some(f64::NAN),
             max: Some(f64::INFINITY),
+            hard_min: None,
+            hard_max: None,
             step: Some(0.25),
             is_animatable: true,
         };
@@ -8357,11 +8481,16 @@ mod tests {
             clip_id: ClipId::new(),
         };
         let property = InspectorEffectPropertyModel {
+            schema: ParameterSchema::v1(mondrian_core::ParameterId::new_static(
+                "mondrian.test.level_iterations",
+            )),
             path: "levels.iterations".to_string(),
             label: "Iterations".to_string(),
             value: PropertyValue::Int(10),
             min: Some(0.0),
             max: Some(1000.0),
+            hard_min: None,
+            hard_max: None,
             step: None,
             is_animatable: false,
         };

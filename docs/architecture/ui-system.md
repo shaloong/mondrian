@@ -33,6 +33,14 @@ targeting an sRGB, Display P3, PQ, or HLG surface.
 
 `paint()` must be side-effect free. `event()` may request platform side effects through `EventRequests`; app/platform layers execute them.
 
+Inspector effect rows are projected from the domain `ParameterSchema`. Numeric
+soft bounds and step, enum options, and typed resource intent come from that
+single schema; `AnimatablePropertyUiMetadata` only groups or spatially lays out
+controls. The UI routes mutations through the instance address but displays and
+persists the definition-stable `ParameterId`. It must not recreate ranges,
+accept enum keys absent from the schema, or flatten a resource reference into a
+generic text parameter.
+
 ## Focus and Accessibility
 
 Focus ownership is not the same as visible focus indication. `FocusSource::Keyboard` may show a focus ring; pointer/programmatic focus owns keyboard input but normally does not show the ring.

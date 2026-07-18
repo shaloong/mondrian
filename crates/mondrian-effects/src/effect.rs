@@ -9,9 +9,13 @@ use crate::plugin_contract::{
     record_plugin_runtime_failure, register_plugin_contract, EffectPluginContract,
 };
 use mondrian_core::{
-    automation::{AnimatablePropertyUiMetadata, PropertyBag, PropertyDescriptor, PropertyValue},
+    automation::{
+        AnimatablePropertyUiMetadata, ParameterCacheImpact, ParameterInvalidValuePolicy,
+        ParameterNumericContract, ParameterNumericRange, ParameterResourceReference, ParameterUnit,
+        PropertyBag, PropertyDescriptor, PropertyValue,
+    },
     types::{Color, ColorSpace, EffectId},
-    TimelineTime,
+    ParameterId, TimelineTime,
 };
 // Re-export effect data types from mondrian-core.
 pub use mondrian_core::effect_data::{namespaced_effect_path, EffectNode, EffectType};
@@ -20,7 +24,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     panic::{catch_unwind, AssertUnwindSafe},
-    path::Path,
     sync::{Arc, OnceLock, RwLock},
 };
 
@@ -319,6 +322,31 @@ pub struct EffectDefinition {
     color_domain_contract: EffectColorDomainContract,
 }
 
+/// Invalid effect definition rejected before it can enter the registry.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EffectDefinitionError {
+    /// Effect keys are persistent machine identities and cannot be empty.
+    #[error("effect definition key cannot be empty")]
+    EmptyKey,
+    /// A malformed parameter contract cannot enter the global registry.
+    #[error("effect `{effect_key}` parameter `{parameter_id}` has invalid schema: {reason}")]
+    InvalidParameterSchema {
+        effect_key: String,
+        parameter_id: ParameterId,
+        reason: String,
+    },
+    /// A definition cannot resolve one stable parameter ID to two addresses.
+    #[error(
+        "effect `{effect_key}` parameter `{parameter_id}` is duplicated at `{first_address}` and `{second_address}`"
+    )]
+    DuplicateParameterId {
+        effect_key: String,
+        parameter_id: ParameterId,
+        first_address: String,
+        second_address: String,
+    },
+}
+
 impl EffectDefinition {
     /// Create an effect definition with an explicit processing-domain contract.
     ///
@@ -450,6 +478,35 @@ impl EffectDefinition {
     pub fn plugin_contract(&self) -> Option<&EffectPluginContract> {
         self.plugin_contract.as_ref()
     }
+
+    /// Validate stable schema identity before registry publication.
+    pub fn validate(&self) -> Result<(), EffectDefinitionError> {
+        if self.key.trim().is_empty() {
+            return Err(EffectDefinitionError::EmptyKey);
+        }
+        let mut parameter_addresses = HashMap::<ParameterId, String>::new();
+        for (address, property) in self.default_properties.iter() {
+            let schema = &property.descriptor.schema;
+            property
+                .validate()
+                .map_err(|error| EffectDefinitionError::InvalidParameterSchema {
+                    effect_key: self.key.clone(),
+                    parameter_id: schema.parameter_id.clone(),
+                    reason: error.to_string(),
+                })?;
+            if let Some(first_address) =
+                parameter_addresses.insert(schema.parameter_id.clone(), address.to_string())
+            {
+                return Err(EffectDefinitionError::DuplicateParameterId {
+                    effect_key: self.key.clone(),
+                    parameter_id: schema.parameter_id.clone(),
+                    first_address,
+                    second_address: address.to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 fn builtin_effect_types() -> [EffectType; 13] {
@@ -479,13 +536,19 @@ fn effect_registry() -> &'static RwLock<HashMap<String, Arc<EffectDefinition>>> 
         let mut definitions = HashMap::new();
         for effect_type in builtin_effect_types() {
             let definition = builtin_effect_definition(effect_type);
+            definition
+                .validate()
+                .unwrap_or_else(|error| panic!("invalid built-in effect definition: {error}"));
             definitions.insert(definition.key.clone(), Arc::new(definition));
         }
         RwLock::new(definitions)
     })
 }
 
-pub fn register_effect_definition(definition: EffectDefinition) {
+pub fn register_effect_definition(
+    definition: EffectDefinition,
+) -> Result<(), EffectDefinitionError> {
+    definition.validate()?;
     if let Some(contract) = definition.plugin_contract().cloned() {
         register_plugin_contract(definition.key(), contract);
     }
@@ -494,6 +557,7 @@ pub fn register_effect_definition(definition: EffectDefinition) {
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .insert(key, Arc::new(definition));
+    Ok(())
 }
 
 pub fn effect_definition(effect_type: &EffectType) -> Option<Arc<EffectDefinition>> {
@@ -787,7 +851,7 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 "path",
                 "LUT",
                 "LUT 文件",
-                PropertyValue::Text(String::new()),
+                PropertyValue::Resource(ParameterResourceReference::Unbound),
                 None,
                 None,
                 None,
@@ -1051,18 +1115,56 @@ fn define_builtin_property(
     step: Option<f64>,
 ) {
     let path = effect_type.property_path(parameter);
-    let mut descriptor = PropertyDescriptor::new(path, name, value);
+    let mut descriptor = PropertyDescriptor::new(path, name, value)
+        .with_parameter_id(builtin_parameter_id(effect_type, parameter));
+    if let (Some(min), Some(max)) = (min, max) {
+        let hard_range = ParameterNumericRange::new(min, max).unwrap_or_else(|error| {
+            panic!(
+                "invalid built-in hard range for {}.{parameter}: {error}",
+                effect_type.key()
+            )
+        });
+        let numeric = ParameterNumericContract::new(
+            hard_range,
+            hard_range,
+            step,
+            ParameterInvalidValuePolicy::Reject,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "invalid built-in numeric contract for {}.{parameter}: {error}",
+                effect_type.key()
+            )
+        });
+        descriptor = descriptor
+            .with_numeric_contract(builtin_parameter_unit(effect_type, parameter), numeric);
+    }
+    if matches!(effect_type, EffectType::Lut3D) && parameter == "path" {
+        descriptor = descriptor.with_cache_impact(ParameterCacheImpact::Resource);
+    }
     descriptor.ui_metadata = AnimatablePropertyUiMetadata {
         group_name: Some(group.to_string()),
-        min,
-        max,
-        soft_min: min,
-        soft_max: max,
-        step,
-        supports_bezier: true,
         supports_spatial: false,
     };
     properties.define(descriptor);
+}
+
+fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> ParameterUnit {
+    match (effect_type, parameter) {
+        (EffectType::BasicCorrection, "exposure") => ParameterUnit::Stops,
+        (EffectType::HueSaturationLightness, "hue") => ParameterUnit::Degrees,
+        (EffectType::GaussianBlur, "radius") => ParameterUnit::Pixels,
+        _ => ParameterUnit::Unitless,
+    }
+}
+
+fn builtin_parameter_id(effect_type: &EffectType, parameter: &str) -> ParameterId {
+    effect_type.parameter_id(parameter).unwrap_or_else(|error| {
+        panic!(
+            "invalid built-in parameter ID for `{}` / `{parameter}`: {error}",
+            effect_type.key()
+        )
+    })
 }
 
 fn builtin_effect_category(effect_type: &EffectType) -> Vec<String> {
@@ -1101,13 +1203,13 @@ fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
 fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuilder> {
     match effect_type {
         EffectType::BasicCorrection => {
-            let exposure_path = effect_type.property_suffix("exposure");
-            let contrast_path = effect_type.property_suffix("contrast");
-            let saturation_path = effect_type.property_suffix("saturation");
+            let exposure_id = builtin_parameter_id(effect_type, "exposure");
+            let contrast_id = builtin_parameter_id(effect_type, "contrast");
+            let saturation_id = builtin_parameter_id(effect_type, "saturation");
             Some(Arc::new(move |effect, context, graph| {
-                let exposure = effect.evaluate_f32_by_suffix(&exposure_path, context.time, 0.0);
-                let contrast = effect.evaluate_f32_by_suffix(&contrast_path, context.time, 1.0);
-                let saturation = effect.evaluate_f32_by_suffix(&saturation_path, context.time, 1.0);
+                let exposure = effect.evaluate_f32_parameter(&exposure_id, context.time, 0.0);
+                let contrast = effect.evaluate_f32_parameter(&contrast_id, context.time, 1.0);
+                let saturation = effect.evaluate_f32_parameter(&saturation_id, context.time, 1.0);
                 if exposure.abs() > 1.0e-4
                     || (contrast - 1.0).abs() > 1.0e-4
                     || (saturation - 1.0).abs() > 1.0e-4
@@ -1121,80 +1223,81 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
             }))
         }
         EffectType::WhiteBalance => {
-            let temperature_path = effect_type.property_suffix("temperature");
-            let tint_path = effect_type.property_suffix("tint");
+            let temperature_id = builtin_parameter_id(effect_type, "temperature");
+            let tint_id = builtin_parameter_id(effect_type, "tint");
             Some(Arc::new(move |effect, context, graph| {
-                let temperature =
-                    effect.evaluate_f32_by_suffix(&temperature_path, context.time, 0.0);
-                let tint = effect.evaluate_f32_by_suffix(&tint_path, context.time, 0.0);
+                let temperature = effect.evaluate_f32_parameter(&temperature_id, context.time, 0.0);
+                let tint = effect.evaluate_f32_parameter(&tint_id, context.time, 0.0);
                 if temperature.abs() > 1.0e-4 || tint.abs() > 1.0e-4 {
                     graph.append_unary(EffectRenderOp::WhiteBalance { temperature, tint });
                 }
             }))
         }
         EffectType::Lut3D => {
-            let path_suffix = effect_type.property_suffix("path");
-            let intensity_path = effect_type.property_suffix("intensity");
+            let path_id = builtin_parameter_id(effect_type, "path");
+            let intensity_id = builtin_parameter_id(effect_type, "intensity");
             Some(Arc::new(move |effect, context, graph| {
-                let intensity = effect.evaluate_f32_by_suffix(&intensity_path, context.time, 1.0);
+                let intensity = effect.evaluate_f32_parameter(&intensity_id, context.time, 1.0);
                 if intensity <= 1.0e-4 {
                     return;
                 }
-                let Some(path) = effect.evaluate_text_by_suffix(&path_suffix, context.time) else {
+                let Some(ParameterResourceReference::ExternalFile { path }) =
+                    effect.evaluate_resource_parameter(&path_id, context.time)
+                else {
                     return;
                 };
-                match Lut3D::from_cube_file_cached(Path::new(path.trim())) {
+                match Lut3D::from_cube_file_cached(&path) {
                     Ok(lut) => {
                         graph.append_unary(EffectRenderOp::Lut3D { lut, intensity });
                     }
                     Err(err) => {
-                        tracing::warn!(path = %path, "failed to load LUT graph file: {err}")
+                        tracing::warn!(path = %path.display(), "failed to load LUT graph file: {err}")
                     }
                 }
             }))
         }
         EffectType::GaussianBlur => {
-            let radius_path = effect_type.property_suffix("radius");
+            let radius_id = builtin_parameter_id(effect_type, "radius");
             Some(Arc::new(move |effect, context, graph| {
-                let radius = effect.evaluate_f32_by_suffix(&radius_path, context.time, 0.0);
+                let radius = effect.evaluate_f32_parameter(&radius_id, context.time, 0.0);
                 if radius.abs() > 1.0e-4 {
                     graph.append_unary(EffectRenderOp::GaussianBlur { radius });
                 }
             }))
         }
         EffectType::Sharpen => {
-            let amount_path = effect_type.property_suffix("amount");
+            let amount_id = builtin_parameter_id(effect_type, "amount");
             Some(Arc::new(move |effect, context, graph| {
-                let amount = effect.evaluate_f32_by_suffix(&amount_path, context.time, 0.0);
+                let amount = effect.evaluate_f32_parameter(&amount_id, context.time, 0.0);
                 if amount.abs() > 1.0e-4 {
                     graph.append_unary(EffectRenderOp::Sharpen { amount });
                 }
             }))
         }
         EffectType::Vignette => {
-            let intensity_path = effect_type.property_suffix("intensity");
-            let feather_path = effect_type.property_suffix("feather");
+            let intensity_id = builtin_parameter_id(effect_type, "intensity");
+            let feather_id = builtin_parameter_id(effect_type, "feather");
             Some(Arc::new(move |effect, context, graph| {
-                let intensity = effect.evaluate_f32_by_suffix(&intensity_path, context.time, 0.0);
-                let feather = effect.evaluate_f32_by_suffix(&feather_path, context.time, 0.65);
+                let intensity = effect.evaluate_f32_parameter(&intensity_id, context.time, 0.0);
+                let feather = effect.evaluate_f32_parameter(&feather_id, context.time, 0.65);
                 if intensity.abs() > 1.0e-4 {
                     graph.append_unary(EffectRenderOp::Vignette { intensity, feather });
                 }
             }))
         }
         EffectType::ChromaticAberration => {
-            let amount_path = effect_type.property_suffix("amount");
+            let amount_id = builtin_parameter_id(effect_type, "amount");
             Some(Arc::new(move |effect, context, graph| {
-                let amount = effect.evaluate_f32_by_suffix(&amount_path, context.time, 0.0);
+                let amount = effect.evaluate_f32_parameter(&amount_id, context.time, 0.0);
                 if amount.abs() > 1.0e-4 {
                     graph.append_unary(EffectRenderOp::ChromaticAberration { amount });
                 }
             }))
         }
         EffectType::Grain => {
-            let amount_path = effect_type.property_suffix("amount");
+            let amount_id = builtin_parameter_id(effect_type, "amount");
             Some(Arc::new(move |effect, context, graph| {
-                let amount = effect.evaluate_f32_by_suffix(&amount_path, context.time, 0.0);
+                let amount = effect.evaluate_f32_parameter(&amount_id, context.time, 0.0);
                 if amount.abs() > 1.0e-4 {
                     graph.append_unary(EffectRenderOp::Grain { amount });
                 }
@@ -1308,13 +1411,68 @@ mod tests {
             );
 
             let properties = default_properties_for(effect_type.clone());
-            for (path, _) in properties.iter() {
+            let mut parameter_ids = std::collections::BTreeSet::new();
+            for (path, property) in properties.iter() {
                 assert!(
                     path.starts_with(&format!("effect.{namespace}.")),
                     "property path {path} should use canonical namespace {namespace}"
                 );
+                assert!(
+                    parameter_ids.insert(property.descriptor.parameter_id().clone()),
+                    "parameter IDs must be unique within {effect_type:?}"
+                );
+                assert!(
+                    property
+                        .descriptor
+                        .parameter_id()
+                        .as_str()
+                        .starts_with(&format!("mondrian.effect.{key}.")),
+                    "built-in parameter identity must be definition-stable"
+                );
             }
         }
+    }
+
+    #[test]
+    fn builtin_execution_uses_parameter_identity_and_value_invalidates_graph_signature() {
+        let mut effect = EffectNode::with_defaults(EffectType::GaussianBlur);
+        let radius_id = builtin_parameter_id(&EffectType::GaussianBlur, "radius");
+
+        let mut addressed = PropertyBag::default();
+        for (_, property) in effect.properties.iter() {
+            let mut property = property.clone();
+            property.descriptor.path = "effect.instance.alias_changed".to_string();
+            addressed.upsert(property);
+        }
+        effect.properties = addressed;
+        effect
+            .set_static_value_by_parameter(&radius_id, PropertyValue::Float(4.0))
+            .expect("set radius by stable ID");
+        let first =
+            compile_clip_effect_graph(&[effect.clone()], &[], tt(0)).expect("compile first graph");
+
+        effect
+            .set_static_value_by_parameter(&radius_id, PropertyValue::Float(12.0))
+            .expect("set changed radius by stable ID");
+        let second =
+            compile_clip_effect_graph(&[effect], &[], tt(0)).expect("compile second graph");
+
+        assert_ne!(first.signature_hash, second.signature_hash);
+        let blur_radius = |graph: &CompiledEffectGraph| {
+            graph.graph.nodes.iter().find_map(|node| match &node.kind {
+                EffectGraphNodeKind::UnaryEffect {
+                    op: EffectRenderOp::GaussianBlur { radius },
+                    ..
+                }
+                | EffectGraphNodeKind::DomainEffect {
+                    op: EffectRenderOp::GaussianBlur { radius },
+                    ..
+                } => Some(*radius),
+                _ => None,
+            })
+        };
+        assert_eq!(blur_radius(&first), Some(4.0));
+        assert_eq!(blur_radius(&second), Some(12.0));
     }
 
     #[test]
@@ -1341,17 +1499,19 @@ mod tests {
         .expect("cube");
 
         let mut effect = EffectNode::with_defaults(EffectType::Lut3D);
+        let path_id = EffectType::Lut3D.parameter_id("path").expect("path parameter ID");
+        let intensity_id =
+            EffectType::Lut3D.parameter_id("intensity").expect("intensity parameter ID");
         effect
-            .set_static_value_by_suffix(
-                &EffectType::Lut3D.property_suffix("path"),
-                PropertyValue::Text(path.display().to_string()),
+            .set_static_value_by_parameter(
+                &path_id,
+                PropertyValue::Resource(ParameterResourceReference::ExternalFile {
+                    path: path.clone(),
+                }),
             )
             .expect("set lut path");
         effect
-            .set_static_value_by_suffix(
-                &EffectType::Lut3D.property_suffix("intensity"),
-                PropertyValue::Float(0.75),
-            )
+            .set_static_value_by_parameter(&intensity_id, PropertyValue::Float(0.75))
             .expect("set intensity");
 
         let graph = build_effect_render_graph(&[effect], tt(0));
@@ -1368,13 +1528,16 @@ mod tests {
     fn plugin_can_register_custom_effect_property() {
         let plugin_type = EffectType::Plugin("plugin.ai.auto_exposure".to_string());
         let exposure_path = plugin_type.property_path("exposure");
-        let exposure_suffix = plugin_type.property_suffix("exposure");
+        let exposure_id = plugin_type.parameter_id("exposure").expect("parameter ID");
         let mut properties = PropertyBag::default();
-        properties.define(PropertyDescriptor::new(
-            exposure_path.clone(),
-            "AI 自动曝光",
-            PropertyValue::Float(0.0),
-        ));
+        properties.define(
+            PropertyDescriptor::new(
+                exposure_path.clone(),
+                "AI 自动曝光",
+                PropertyValue::Float(0.0),
+            )
+            .with_parameter_id(exposure_id.clone()),
+        );
         register_effect_definition(
             EffectDefinition::new(
                 plugin_type.key(),
@@ -1383,7 +1546,7 @@ mod tests {
                 EffectColorDomainContract::SCENE_LINEAR,
             )
             .with_graph_builder(Arc::new(move |effect, context, graph| {
-                let exposure = effect.evaluate_f32_by_suffix(&exposure_suffix, context.time, 0.0);
+                let exposure = effect.evaluate_f32_parameter(&exposure_id, context.time, 0.0);
                 if exposure.abs() > 1e-4 {
                     graph.append_unary(EffectRenderOp::ColorAdjust {
                         exposure,
@@ -1392,7 +1555,8 @@ mod tests {
                     });
                 }
             })),
-        );
+        )
+        .expect("register auto exposure definition");
 
         let mut effect = EffectNode::with_defaults(plugin_type.clone());
         effect
@@ -1417,12 +1581,16 @@ mod tests {
     #[test]
     fn plugin_can_build_custom_render_op_plan() {
         let plugin_type = EffectType::Plugin("plugin.render.glow".to_string());
+        let amount_id = plugin_type.parameter_id("amount").expect("parameter ID");
         let mut properties = PropertyBag::default();
-        properties.define(PropertyDescriptor::new(
-            "plugin.render.glow.amount",
-            "Glow Amount",
-            PropertyValue::Float(0.4),
-        ));
+        properties.define(
+            PropertyDescriptor::new(
+                "plugin.render.glow.amount",
+                "Glow Amount",
+                PropertyValue::Float(0.4),
+            )
+            .with_parameter_id(amount_id.clone()),
+        );
         register_effect_definition(
             EffectDefinition::new(
                 plugin_type.key(),
@@ -1431,12 +1599,8 @@ mod tests {
                 EffectColorDomainContract::SCENE_LINEAR,
             )
             .with_custom_render_processor(
-                Arc::new(|effect, context| {
-                    let amount = effect.evaluate_f32_by_suffix(
-                        "plugin.render.glow.amount",
-                        context.time,
-                        0.0,
-                    );
+                Arc::new(move |effect, context| {
+                    let amount = effect.evaluate_f32_parameter(&amount_id, context.time, 0.0);
                     if amount > 0.0 {
                         Some(serde_json::json!({ "amount": amount }))
                     } else {
@@ -1445,7 +1609,8 @@ mod tests {
                 }),
                 Arc::new(|_, _, _, _, _| Ok(())),
             ),
-        );
+        )
+        .expect("register custom render definition");
 
         let effect = EffectNode::with_defaults(plugin_type);
         let graph = build_effect_render_graph(&[effect], tt(0));
@@ -1473,17 +1638,25 @@ mod tests {
     #[test]
     fn plugin_can_build_branching_render_graph() {
         let plugin_type = EffectType::Plugin("plugin.graph.glow_mix".to_string());
+        let radius_id = plugin_type.parameter_id("radius").expect("radius ID");
+        let opacity_id = plugin_type.parameter_id("opacity").expect("opacity ID");
         let mut properties = PropertyBag::default();
-        properties.define(PropertyDescriptor::new(
-            "plugin.graph.glow_mix.radius",
-            "Glow Radius",
-            PropertyValue::Float(4.0),
-        ));
-        properties.define(PropertyDescriptor::new(
-            "plugin.graph.glow_mix.opacity",
-            "Glow Opacity",
-            PropertyValue::Float(0.35),
-        ));
+        properties.define(
+            PropertyDescriptor::new(
+                "plugin.graph.glow_mix.radius",
+                "Glow Radius",
+                PropertyValue::Float(4.0),
+            )
+            .with_parameter_id(radius_id.clone()),
+        );
+        properties.define(
+            PropertyDescriptor::new(
+                "plugin.graph.glow_mix.opacity",
+                "Glow Opacity",
+                PropertyValue::Float(0.35),
+            )
+            .with_parameter_id(opacity_id.clone()),
+        );
         register_effect_definition(
             EffectDefinition::new(
                 plugin_type.key(),
@@ -1491,15 +1664,10 @@ mod tests {
                 properties,
                 EffectColorDomainContract::SCENE_LINEAR,
             )
-            .with_branching_graph_builder(Arc::new(|effect, context, graph| {
-                let radius = effect.evaluate_f32_by_suffix(
-                    "plugin.graph.glow_mix.radius",
-                    context.time,
-                    0.0,
-                );
-                let opacity = effect
-                    .evaluate_f32_by_suffix("plugin.graph.glow_mix.opacity", context.time, 0.0)
-                    .clamp(0.0, 1.0);
+            .with_branching_graph_builder(Arc::new(move |effect, context, graph| {
+                let radius = effect.evaluate_f32_parameter(&radius_id, context.time, 0.0);
+                let opacity =
+                    effect.evaluate_f32_parameter(&opacity_id, context.time, 0.0).clamp(0.0, 1.0);
                 if radius <= 1.0e-4 || opacity <= 1.0e-4 {
                     return;
                 }
@@ -1512,7 +1680,8 @@ mod tests {
                     },
                 );
             })),
-        );
+        )
+        .expect("register branching definition");
 
         let effect = EffectNode::with_defaults(plugin_type.clone());
         let graph = build_effect_render_graph(&[effect], tt(0));
@@ -1535,12 +1704,19 @@ mod tests {
     #[test]
     fn custom_render_backend_can_provide_stable_cache_key_contract() {
         let plugin_type = EffectType::Plugin("plugin.render.lut_loader".to_string());
+        let path_id = plugin_type.parameter_id("asset_path").expect("asset path ID");
         let mut properties = PropertyBag::default();
-        properties.define(PropertyDescriptor::new(
-            "plugin.render.lut_loader.asset_path",
-            "LUT Path",
-            PropertyValue::Text("looks/teal_orange.cube".to_string()),
-        ));
+        properties.define(
+            PropertyDescriptor::new(
+                "plugin.render.lut_loader.asset_path",
+                "LUT Path",
+                PropertyValue::Text("looks/teal_orange.cube".to_string()),
+            )
+            .with_parameter_id(path_id.clone())
+            .with_cache_impact(mondrian_core::automation::ParameterCacheImpact::Resource),
+        );
+        let params_path_id = path_id.clone();
+        let cache_path_id = path_id;
         register_effect_definition(
             EffectDefinition::new(
                 plugin_type.key(),
@@ -1549,9 +1725,9 @@ mod tests {
                 EffectColorDomainContract::SCENE_LINEAR,
             )
             .with_custom_render_backend(
-                Arc::new(|effect, context| {
+                Arc::new(move |effect, context| {
                     let path = effect
-                        .evaluate_property("plugin.render.lut_loader.asset_path", context.time)
+                        .evaluate_parameter(&params_path_id, context.time)
                         .and_then(|value| match value {
                             PropertyValue::Text(text) => Some(text),
                             _ => None,
@@ -1559,9 +1735,9 @@ mod tests {
                         .unwrap_or_default();
                     Some(serde_json::json!({ "asset_path": path }))
                 }),
-                Some(Arc::new(|effect, context| {
+                Some(Arc::new(move |effect, context| {
                     effect
-                        .evaluate_property("plugin.render.lut_loader.asset_path", context.time)
+                        .evaluate_parameter(&cache_path_id, context.time)
                         .and_then(|value| match value {
                             PropertyValue::Text(text) => Some(text),
                             _ => None,
@@ -1571,7 +1747,8 @@ mod tests {
                 EffectCachePolicy::Deterministic,
                 Arc::new(|_, _, _, _, _| Ok(())),
             ),
-        );
+        )
+        .expect("register cached render definition");
 
         let effect = EffectNode::with_defaults(plugin_type.clone());
         let graph = build_effect_render_graph(&[effect], tt(0));
@@ -1611,7 +1788,8 @@ mod tests {
             .with_graph_builder(Arc::new(|_, _, _| {
                 panic!("unstable graph builder");
             })),
-        );
+        )
+        .expect("register unstable definition");
 
         let effect = EffectNode::new(plugin_type.clone());
         let graph = build_effect_render_graph(&[effect], tt(0));

@@ -31,6 +31,16 @@ impl ParameterId {
         Ok(Self(value))
     }
 
+    /// Construct an ID embedded in a built-in schema definition.
+    ///
+    /// Invalid static definitions are programmer errors and fail immediately;
+    /// runtime/plugin input must use [`Self::new`] and handle validation.
+    #[track_caller]
+    pub fn new_static(value: &'static str) -> Self {
+        Self::new(value)
+            .unwrap_or_else(|error| panic!("invalid static parameter ID `{value}`: {error}"))
+    }
+
     /// Canonical serialized identifier.
     pub fn as_str(&self) -> &str {
         &self.0

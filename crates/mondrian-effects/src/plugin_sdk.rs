@@ -227,26 +227,32 @@ mod tests {
     #[test]
     fn plugin_sdk_builds_branching_graph_definition() {
         let plugin_type = EffectType::Plugin("plugin.sdk.soft_glow".to_string());
+        let radius_id = plugin_type.parameter_id("radius").expect("radius ID");
+        let opacity_id = plugin_type.parameter_id("opacity").expect("opacity ID");
         let definition = EffectPluginDefinitionBuilder::new(
             plugin_type.key(),
             "Soft Glow",
             crate::EffectColorDomainContract::SCENE_LINEAR,
         )
-        .property(PropertyDescriptor::new(
-            "plugin.sdk.soft_glow.radius",
-            "Radius",
-            PropertyValue::Float(6.0),
-        ))
-        .property(PropertyDescriptor::new(
-            "plugin.sdk.soft_glow.opacity",
-            "Opacity",
-            PropertyValue::Float(0.35),
-        ))
-        .with_branching_graph(|effect, context, graph| {
-            let radius =
-                effect.evaluate_f32_by_suffix("plugin.sdk.soft_glow.radius", context.time, 0.0);
-            let opacity =
-                effect.evaluate_f32_by_suffix("plugin.sdk.soft_glow.opacity", context.time, 0.0);
+        .property(
+            PropertyDescriptor::new(
+                "plugin.sdk.soft_glow.radius",
+                "Radius",
+                PropertyValue::Float(6.0),
+            )
+            .with_parameter_id(radius_id.clone()),
+        )
+        .property(
+            PropertyDescriptor::new(
+                "plugin.sdk.soft_glow.opacity",
+                "Opacity",
+                PropertyValue::Float(0.35),
+            )
+            .with_parameter_id(opacity_id.clone()),
+        )
+        .with_branching_graph(move |effect, context, graph| {
+            let radius = effect.evaluate_f32_parameter(&radius_id, context.time, 0.0);
+            let opacity = effect.evaluate_f32_parameter(&opacity_id, context.time, 0.0);
             if radius <= 1.0e-4 || opacity <= 1.0e-4 {
                 return;
             }
@@ -255,7 +261,7 @@ mod tests {
             });
         })
         .build();
-        register_effect_definition(definition);
+        register_effect_definition(definition).expect("register SDK definition");
 
         let effect = crate::EffectNode::with_defaults(plugin_type.clone());
         let graph = build_effect_render_graph(&[effect], tt(0));

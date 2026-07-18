@@ -151,9 +151,17 @@ Supported `ClipKind`:
 - `SolidColor`
 
 Transform, speed, blend mode, solid color, masks, and effects are currently
-exposed through `PropertyHost`/`PropertyBag`. Long-term visual and audio
-automation share exact curve primitives and stable Parameter IDs; string paths
-remain UI aliases and migration inputs rather than identity.
+exposed through `PropertyHost`/`PropertyBag`. Every product definition carries
+a versioned `ParameterSchema` with an address-independent `ParameterId` and
+typed unit, numeric/enum/resource, interpolation, message, and cache-impact
+contracts. Effect execution resolves the stable ID exactly; the
+instance-qualified string path remains only an authoring/UI address alias and
+cannot define execution identity. `PropertyBag::validate` rejects malformed
+persisted descriptors, values, channel layouts, keyframe order, enum indices,
+and interpolation before the project enters execution. Visual and audio
+automation share exact curve primitives and stable Parameter IDs; audio
+Processor definitions still need to publish the same parameter-description
+contract before the M0 parameter milestone is closed.
 
 `ExactAutomationCurve::prepared_segments` validates author order, finite values,
 and Bezier time monotonicity once, then returns immutable interpolation segments

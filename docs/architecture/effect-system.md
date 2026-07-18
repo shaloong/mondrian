@@ -26,6 +26,32 @@ An effect instance contains:
 
 When placed on a clip, property paths are prefixed as `effect.<effect_id>.<rest>` to avoid collisions between multiple instances of the same effect type.
 
+## Parameter Schema and Addressing
+
+Every product property carries a versioned `ParameterSchema`. Its
+`ParameterId` is definition-stable and is the only identity accepted by effect
+execution. The string property path is an instance address for author commands
+and Inspector routing; renaming or re-namespacing that address must not rename
+the parameter. Effect registration rejects zero schema versions, empty message
+IDs, malformed ranges, invalid enum sets, and duplicate Parameter IDs before a
+definition enters the registry.
+
+The schema is executable rather than decorative. `AnimatedProperty` enforces
+finite values, hard-range policy, allowed interpolation, dense channel layout,
+strict keyframe ordering, and stable enum option indices on every mutation and
+when project author state is validated. Soft ranges and steps drive the editor
+from that same schema; UI metadata only owns presentation grouping and spatial
+layout hints. Enum parameters use Hold automation over stable option keys.
+Resource parameters distinguish unbound, project-asset, external-file, and URI
+intent and require resource-level cache invalidation. LUT selection uses this
+typed resource value rather than a free-form text parameter.
+
+Parameter cache impact describes whether a value changes output, selects a
+resource, or changes topology. Processor capabilities are not copied into every
+parameter: color/alpha domain, CPU/GPU implementation, determinism, temporal
+extent, and ROI remain owned by `EffectDefinition` and the compiled graph. A
+topology-impacting parameter forces those capabilities to be resolved again.
+
 ## Graph Model
 
 `EffectRenderGraph` supports:

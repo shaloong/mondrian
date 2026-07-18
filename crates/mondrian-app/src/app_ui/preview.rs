@@ -3754,6 +3754,7 @@ mod tests {
     use mondrian_assets::AssetLibrary;
     use mondrian_core::types::{AssetId, Rational};
     use mondrian_core::{ensure_mondrian_default_ocio_loaded, Color, ProjectColorManagement};
+    use mondrian_effects::EffectNodeExt;
     use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
     use mondrian_media::info::{PixelFormat, VideoCodec};
     use mondrian_media::{
@@ -8773,6 +8774,69 @@ mod tests {
     }
 
     #[test]
+    fn stable_parameter_value_changes_compiled_graph_and_viewer_cache_identity() {
+        let parameter_id = mondrian_core::effect_data::EffectType::GaussianBlur
+            .parameter_id("radius")
+            .expect("stable radius parameter ID");
+        let mut effect = mondrian_core::effect_data::EffectNode::with_defaults(
+            mondrian_core::effect_data::EffectType::GaussianBlur,
+        );
+        effect
+            .set_static_value_by_parameter(
+                &parameter_id,
+                mondrian_core::automation::PropertyValue::Float(4.0),
+            )
+            .expect("set first radius");
+        let first_graph = mondrian_effects::compile_clip_effect_graph(
+            &[effect.clone()],
+            &[],
+            mondrian_core::TimelineTime::ZERO,
+        )
+        .expect("compile first graph");
+        effect
+            .set_static_value_by_parameter(
+                &parameter_id,
+                mondrian_core::automation::PropertyValue::Float(12.0),
+            )
+            .expect("set second radius");
+        let second_graph = mondrian_effects::compile_clip_effect_graph(
+            &[effect],
+            &[],
+            mondrian_core::TimelineTime::ZERO,
+        )
+        .expect("compile second graph");
+        assert_ne!(first_graph.signature_hash, second_graph.signature_hash);
+
+        let make_plan = |effect_graph| {
+            vec![ResolvedPreviewElement::Media {
+                frame: test_media_frame_with_size(0, 2, 2, 100),
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_graph,
+                frame_seed: 12,
+            }]
+        };
+        let sequence_id = SequenceId::new();
+        let color_context = test_color_context(ColorSpace::Rec709);
+        let first = viewer_preview_cache_key_for_resolved_plan(
+            sequence_id,
+            320,
+            180,
+            &make_plan(first_graph),
+            &color_context,
+        );
+        let second = viewer_preview_cache_key_for_resolved_plan(
+            sequence_id,
+            320,
+            180,
+            &make_plan(second_graph),
+            &color_context,
+        );
+        assert_ne!(first, second);
+    }
+
+    #[test]
     fn resolved_media_preview_cache_key_includes_color_context() {
         let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
             .expect("default effect graph");
@@ -9593,8 +9657,10 @@ mod tests {
         let mut blur: mondrian_effects::EffectNode = mondrian_effects::EffectNodeExt::with_defaults(
             mondrian_effects::EffectType::GaussianBlur,
         );
-        blur.set_static_value_by_suffix(
-            "radius",
+        blur.set_static_value_by_parameter(
+            &mondrian_effects::EffectType::GaussianBlur
+                .parameter_id("radius")
+                .expect("blur radius parameter ID"),
             mondrian_core::automation::PropertyValue::Float(1.0),
         )
         .expect("set test blur radius");

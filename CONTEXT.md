@@ -112,6 +112,18 @@ _Avoid_: Rewriting a time base, floating-point seconds bridge, implicit cross-do
 The consumer-specific frame, shutter-sample, audio-sample, or parameter-event instants at which authored semantics are evaluated.
 _Avoid_: Persisted authoring time base, UI snap setting
 
+**Parameter Schema**:
+One versioned definition-stable contract for a parameter's `ParameterId`, value type, unit, numeric or enum constraints, allowed interpolation, localization message identity, and cache impact. Processor execution capabilities remain on the Processor/Effect Definition and compiled graph.
+_Avoid_: Instance property path as identity, UI-only min/max, duplicated CPU/GPU or color-domain claims
+
+**Parameter Instance Address**:
+A current authoring and command-routing address for one parameter instance, which may include an Effect or owner ID and may change without changing its Parameter Schema identity.
+_Avoid_: ParameterId derived from display name, suffix matching during execution
+
+**Parameter Resource Reference**:
+A recoverable typed parameter value representing unbound intent, a Project Asset, an external file, or a URI, with resource-level invalidation semantics.
+_Avoid_: Free-form path text treated as a loaded resource, persisted resolved/available flag
+
 **Display Timecode**:
 A presentation contract for formatting timeline positions with a start offset, nominal rate, and drop/non-drop-frame rules.
 _Avoid_: Timeline storage coordinate, arithmetic duration, Clock Master
@@ -287,6 +299,9 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - CPU scalar, CPU SIMD, isolated plugin, and optional GPU execution are prepared processor backends for the same compiled semantics, not alternate Audio Programs. A GPU backend must declare and account for batch/transfer latency, PDC, state ordering, cancellation, bounded in-flight storage, and device loss; the audio callback never waits for GPU work.
 - Equal **Signal Closures** may share immutable plans, but mutable processors share an **Audio State Domain** only when all continuity and evaluation identities also match; fingerprints alone never authorize state sharing.
 - An **Audio Program** exposes one or more stable **Sequence Output Ports** and never binds physical listening devices.
+- A **Parameter Schema** has one stable identity shared by all instances; each instance has its own **Parameter Instance Address** and author value.
+- Effect execution selects parameters by Parameter Schema identity, never by address suffix; UI and commands may route through the current Parameter Instance Address.
+- Color/Alpha domain, CPU/GPU support, determinism, temporal extent, and ROI have one owner on the Processor/Effect Definition and compiled graph; Parameter Schema cache impact only determines what must be re-resolved.
 - A nested Sequence is one instanced composite audio source in its parent; it consumes selected **Sequence Output Ports** and owns independent mutable DSP execution state.
 - A parent binds nested PCM through the child's stable public output identities and records any semantic assignment separately against parent-local **Audio Roles**; it never references child-internal Audio Role identities.
 - A **Delivery Mapping** packages Sequence outputs but cannot address private child tracks, buses, or routes.

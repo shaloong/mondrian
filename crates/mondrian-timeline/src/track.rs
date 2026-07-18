@@ -3,11 +3,11 @@
 use crate::clip::Clip;
 use mondrian_core::{
     automation::{
-        AnimatedProperty, PropertyBag, PropertyDescriptor, PropertyHost, PropertyMutation,
-        PropertyValue,
+        AnimatedProperty, ParameterInvalidValuePolicy, ParameterNumericContract, ParameterUnit,
+        PropertyBag, PropertyDescriptor, PropertyHost, PropertyMutation, PropertyValue,
     },
     types::*,
-    MondrianError, Result, TimelineTime,
+    MondrianError, ParameterId, Result, TimelineTime,
 };
 use serde::{Deserialize, Serialize};
 
@@ -49,11 +49,7 @@ impl Track {
             is_locked: false,
             is_visible: true,
             blend_mode: BlendMode::Normal,
-            opacity: AnimatedProperty::from_descriptor(PropertyDescriptor::new(
-                Self::OPACITY_PATH,
-                "轨道不透明度",
-                PropertyValue::Float(1.0),
-            )),
+            opacity: AnimatedProperty::from_descriptor(track_opacity_descriptor()),
             clips: vec![],
         }
     }
@@ -68,11 +64,7 @@ impl Track {
             is_locked: false,
             is_visible: true,
             blend_mode: BlendMode::Normal,
-            opacity: AnimatedProperty::from_descriptor(PropertyDescriptor::new(
-                Self::OPACITY_PATH,
-                "轨道不透明度",
-                PropertyValue::Float(1.0),
-            )),
+            opacity: AnimatedProperty::from_descriptor(track_opacity_descriptor()),
             clips: vec![],
         }
     }
@@ -126,6 +118,19 @@ impl Track {
         properties.upsert(self.opacity.clone());
         properties
     }
+}
+
+fn track_opacity_descriptor() -> PropertyDescriptor {
+    let numeric =
+        ParameterNumericContract::closed(0.0, 1.0, Some(0.01), ParameterInvalidValuePolicy::Reject)
+            .expect("track opacity has a valid built-in numeric contract");
+    PropertyDescriptor::new(
+        Track::OPACITY_PATH,
+        "轨道不透明度",
+        PropertyValue::Float(1.0),
+    )
+    .with_parameter_id(ParameterId::new_static("mondrian.track.opacity"))
+    .with_numeric_contract(ParameterUnit::Normalized, numeric)
 }
 
 impl PropertyHost for Track {

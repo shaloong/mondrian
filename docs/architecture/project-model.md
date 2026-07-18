@@ -100,7 +100,7 @@ is written with that field explicitly.
 
 Archive and document JSON pass through separate version registries before typed
 deserialization. During Alpha there are deliberately no legacy document steps:
-schema v7 is the sole accepted author schema, and older/future versions fail
+schema v8 is the sole accepted author schema, and older/future versions fail
 instead of being guessed. Version 5 introduced the explicit tagged
 `mondrian_standard` / `aces` / `custom_ocio` project contract and makes every
 Mondrian Standard package-identity field mandatory: product ID/version, config
@@ -116,7 +116,9 @@ and the persisted enum keeps workflow separate from engine selection. Version 7 
 single default-View identity with mandatory, independently typed SDR and
 1000-nit HDR View Transform IDs/versions. The Alpha format intentionally
 provides no alias, fallback, or migration from v5/v6; a missing or edited
-identity or retired workflow fails closed. The registry remains the
+identity, missing parameter schema, or retired workflow fails closed. Version 8
+separates stable parameter identity from instance addresses and persists typed
+unit/range/interpolation/enum/resource/cache contracts. The registry remains the
 explicit seam for adding a real migration policy only when compatibility
 becomes a product promise.
 
@@ -130,8 +132,11 @@ Future split-entry layouts require an archive migration and new
 SQLite migrates only in the extracted runtime copy. The source `.mdp` is never
 rewritten by open.
 
-Schema v2 persists canonical rational `TimelineTime` values directly. It does
-not contain frame-oriented `TimeCode`, `TimeTicks`, or compatibility aliases.
+Current document schema v8 persists canonical rational `TimelineTime` values
+directly and requires the stable visual `ParameterSchema` introduced after the
+time migration. It does not contain frame-oriented `TimeCode`, `TimeTicks`, or
+compatibility aliases. Alpha documents from earlier schemas are rejected rather
+than silently deriving parameter identity from instance-address strings.
 
 The checked current document fixture lives under
 `crates/mondrian-project/tests/fixtures/current`; the SQLite upgrade fixture

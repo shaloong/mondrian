@@ -6,7 +6,7 @@
 //! outside the project archive.
 
 use anyhow::Context;
-use mondrian_core::{AssetId, ProjectId, ProjectMeta, ProjectSettings};
+use mondrian_core::{automation::PropertyHost, AssetId, ProjectId, ProjectMeta, ProjectSettings};
 use mondrian_timeline::SequenceCollection;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -22,7 +22,7 @@ use migration::JsonMigrationRegistry;
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 7;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 8;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 1;
 
@@ -171,6 +171,16 @@ impl ProjectDocument {
                 .with_context(|| {
                     format!("sequence '{}' color management is invalid", sequence.name)
                 })?;
+            for track in sequence.video_tracks.iter().chain(&sequence.audio_tracks) {
+                track.property_bag()?.validate().with_context(|| {
+                    format!("track '{}' parameter schema is invalid", track.name)
+                })?;
+                for clip in &track.clips {
+                    clip.property_bag()?.validate().with_context(|| {
+                        format!("clip '{}' parameter schema is invalid", clip.id)
+                    })?;
+                }
+            }
         }
         Ok(())
     }
@@ -412,7 +422,10 @@ fn replace_file_preserving_original_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_timeline::Sequence;
+    use mondrian_core::automation::{PropertyDescriptor, PropertyValue};
+    use mondrian_core::effect_data::{EffectNode, EffectType};
+    use mondrian_core::{ParameterId, TimelineTime};
+    use mondrian_timeline::{Clip, Sequence};
 
     fn missing_custom_engine(path: PathBuf) -> mondrian_core::ColorEngine {
         mondrian_core::ColorEngine::CustomOcio {
@@ -523,6 +536,66 @@ mod tests {
             fs::read(runtime_library.join("index.db")).expect("read extracted db"),
             b"sqlite placeholder"
         );
+    }
+
+    #[test]
+    fn parameter_schema_and_instance_address_round_trip_without_identity_drift() {
+        let root = unique_temp_dir("parameter-schema-round-trip");
+        let db_path = root.join("index.db");
+        fs::write(&db_path, b"sqlite placeholder").expect("write db");
+        let project_path = root.join("parameter-schema.mdp");
+
+        let mut document = test_document();
+        let parameter_id = ParameterId::new_static("mondrian.effect.builtin.gaussian_blur.radius");
+        let mut effect = EffectNode::new(EffectType::GaussianBlur);
+        effect.define_property(
+            PropertyDescriptor::new(
+                "effect.gaussian_blur.radius",
+                "Radius",
+                PropertyValue::Float(12.0),
+            )
+            .with_parameter_id(parameter_id.clone()),
+        );
+        let mut clip = Clip::new(
+            AssetId::new(),
+            TimelineTime::ZERO,
+            TimelineTime::new(5, 1).expect("duration"),
+        )
+        .expect("clip");
+        let effect_id = clip.add_effect_node(effect);
+        document.sequences.active_mut().expect("active sequence").video_tracks[0]
+            .add_clip(clip)
+            .expect("add clip");
+
+        save_project_archive(&document, &db_path, &project_path).expect("save project");
+        let reopened = read_project_document_from_archive(&project_path).expect("reopen project");
+        let reopened_effect =
+            &reopened.sequences.active().expect("active sequence").video_tracks[0].clips[0].effects
+                [0];
+        let (address, property) = reopened_effect.properties.iter().next().expect("property");
+
+        assert_eq!(reopened_effect.id, effect_id);
+        assert_eq!(property.descriptor.parameter_id(), &parameter_id);
+        assert!(address.contains(&effect_id.to_string()));
+        assert_eq!(property.descriptor.schema.schema_version, 1);
+        assert_eq!(
+            property.descriptor.schema.message_id,
+            "mondrian.effect.builtin.gaussian_blur.radius.label"
+        );
+    }
+
+    #[test]
+    fn project_validation_rejects_deserialized_parameter_state_outside_hard_range() {
+        let mut encoded = serde_json::to_value(test_document()).expect("serialize document");
+        encoded["sequences"]["sequences"][0]["video_tracks"][0]["opacity"]["static_value"]
+            ["Float"] = serde_json::json!(2.0);
+        let document: ProjectDocument =
+            serde_json::from_value(encoded).expect("structurally decodable document");
+
+        let error = document
+            .validate()
+            .expect_err("invalid author value must not enter a project snapshot");
+        assert!(format!("{error:#}").contains("outside [0, 1]"));
     }
 
     #[test]
