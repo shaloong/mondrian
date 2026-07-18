@@ -421,6 +421,10 @@ Within diagnostics, the versioned Color Health report model and its
 check/root-cause/action derivation live in the private `color_health` deep
 Module. It consumes the same immutable aggregate as before and cannot count
 execution independently from the Preview Adapter.
+The sibling private `performance` Module derives versioned Decode/Render
+budget checks, verdicts, bottleneck classification, root causes, and actions
+from immutable summaries. Public report builders are re-exported unchanged;
+the Module owns no counters, scheduler feedback, or acceptance thresholds.
 `app_ui::preview::request_scheduler` is the concrete Adapter for traversing
 current/nested prefetch needs, querying preroll residency, applying the already
 selected adaptive hints, and submitting Broker work. It does not own pressure
