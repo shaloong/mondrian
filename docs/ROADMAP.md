@@ -68,7 +68,7 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 | Windows 硬解/低拷贝 | FFmpeg 硬件设备/codec 探测、D3D11/D3D12 native frame 保留、D3D11→D3D12 导入、NV12/P010 GPU YUV 采样、准入与失败原因已有实现；2026-07-18 本地 2.88 秒 4K25 HEVC Main10 HLG 连续播放已取得 60/60 Ready、60/60 D3D12VA P010 原生 GPU 合成、零上传/回读/回退和约 1.8 ms GPU 执行 p95 的临时诊断帧证据；专业门禁 v4 已加入整进程 Private Commit 稳定窗/绝对上限/seek 后收敛、主视频流覆盖和不可放宽策略 | 短素材只证明该参考机上的主路径可执行；仍须以自有、许可或可生成的 30 分钟素材完整执行连续播放、频繁 seek、取消与整进程内存合约，并补充真实音频设备和多驱动证据，不以本次 smoke 代替专业门禁 | L1- 主路径已实证，长期验收未闭环 |
 | 渲染与色彩 | working-space 合成、OCIO CPU/GPU 路径、结构化色彩/显示诊断、golden 测试、预览/导出报告对比、Windows 显示探测和 fail-closed 逻辑较深入 | 仍有 legacy/CPU/读回路径与真实显示 payload 限制；常见 Log/HDR 必须补齐参考样片端到端证明；Windows HDR 监看不能提前宣称稳定 | L1+ 架构，继续符合性收敛 |
 | 效果与动画 | 稳定 `EffectId`、属性路径、`PropertyBag`/`AnimatedProperty`、多种插值、曲线编辑器、效果 DAG、mask、缓存策略和插件式 definition/DSL 已存在 | `PropertyDescriptor` 缺独立稳定 `ParameterId`、单位和完整能力契约；只有部分声明效果生成真实 render op；文字和转场类型尚未接入时间线/渲染主路径 | L0/L1 之间 |
-| 音频 | Track→Clip 已是 placement SSOT；Clip 持有 Component Edit，Sequence 持有 Processing Scope/Track Channel/Bus/Output/typed Route/Transition；播放与导出已共用 `AudioProgramRuntime`、块式 decoder Adapter、嵌套公共输出、sample-accurate Gain/pan/fade/Transition、无隐式 clipping，并删除旧 flat `AudioMixer`/`tanh`；产品 PCM 源已从整文件无界驻留改为文件指纹 + 10 秒窗口 + 128 项/256 MiB 加权 LRU，Runtime 仅保留 4096 帧热窗 | 当前窗口 miss 仍由专用 render worker 调 FFmpeg CLI，须换成可取消持久 decoder Session/预读；真实 VST3/CLAP host、channel layout/组件选流、重采样、通用 PDC/状态重入、send/sidechain、meter/loudness/limiter、完整编辑 UI/undo 命令和长时间同步/负载门禁仍未完成 | L1 主路地基；不宣称 DAW 完成度 |
+| 音频 | Track→Clip 已是 placement SSOT；Clip 持有 Component Edit，Sequence 持有 Processing Scope/Track Channel/Bus/Output/typed Route/Transition；播放与导出已共用 `AudioProgramRuntime`、块式 decoder Adapter、嵌套公共输出、sample-accurate Gain/pan/fade/Transition、无隐式 clipping，并删除旧 flat `AudioMixer`/`tanh`；产品 PCM 源已从整文件无界驻留改为文件指纹 + 10 秒窗口 + 128 项/256 MiB 加权 LRU，Runtime 仅保留 4096 帧热窗；最多 8 个可取消持久 FFmpeg Session 已支持顺序复用/随机重启/有界预读，执行器与 Runtime 的 source Seam 也已改为每个 Contribution 每块一次的索引化交错读取 | 当前执行器仍按作者集合/BTreeMap 和 Route 扫描工作，并在样本循环重复一般精确时间与自动化求值；尚需 preparation 阶段的稠密索引 schedule、路由邻接区间、automation/source span、scratch liveness、CPU scalar reference + SIMD kernel 和多轨负载矩阵。GPU 只作为计入 PDC/批量延迟且可证明 deadline 的可选 processor backend，不能成为 callback 依赖。真实 VST3/CLAP host、channel layout/组件选流、重采样、通用 PDC/状态重入、send/sidechain、meter/loudness/limiter、完整编辑 UI/undo 命令和长时间同步/负载门禁仍未完成 | L1 主路地基；不宣称 DAW 完成度 |
 | 导出 | 后台队列、取消、时间线逐帧合成、音频混编、FFmpeg 编码、色彩标签/HDR 元数据约束、结果 probe/校验和诊断已存在 | 产品 UI 主要暴露 H.264 预设；Windows 硬编检测未落地主路径；HEVC Main10、专业中间格式和长项目需真实 roundtrip，不以 enum/FFmpeg 参数单测视为交付 | L1- |
 | 自研 UI | winit/wgpu 产品入口、retained widget、主题 token、事件/焦点/IME、Dock、面板和大量组件测试已建立 | 交互一致性和无障碍仍需真实工作流验证；产品字符串大量硬编码，中英文混用，尚无 message ID/pseudo-locale 基础 | L1-；i18n 为 L0 |
 | 插件 | 内部效果 definition、graph DSL、能力/缓存/失败隔离契约已有 | 尚无稳定外部 ABI、包加载/权限/隔离/兼容矩阵；当前只能称内部扩展接缝 | L0 |
@@ -78,7 +78,7 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 ### 2.1 当前最重要的结构性风险
 
 1. **产品证据弱于代码广度。** 测试数量很多，但 CI 主测试排除了完整 `mondrian-app`，真实 GPU、真实硬解、真实音频设备和长项目主要依赖手动/ignored smoke。
-2. **关键复杂度的 Locality 不够。** Window/Headless 的完成收割、终态 Delivery 与预卷顺序已统一到 UI 无关 `app::playback_preview`，访问模式与纯策略也已迁入 `app`；具体 decode worker/取消检查点/结果发布/FFmpeg Adapter 已按行为隔离到 `app_ui::preview::media_execution`，但它仍复用父模块 payload，预览时间线求值、渲染适配、色彩诊断和缓存逻辑仍大量聚集在 `mondrian-app::app_ui::preview`。导出执行也集中在大型 queue 模块；后续继续按所有权迁出，不能只按文件大小机械拆分或用大量 `pub(crate)` 伪造边界。
+2. **关键复杂度的 Locality 仍不足。** Window/Headless 的完成收割、终态 Delivery 与预卷顺序已统一到 UI 无关 `app::playback_preview`，访问模式与纯策略也已迁入 `app`；具体 decode worker/取消检查点/结果发布/FFmpeg Adapter 已按行为隔离到 `app_ui::preview::media_execution`，约 4,400 行不可变诊断/报告规则也已迁入独立 `app_ui::preview::diagnostics` Module，但 media execution 仍复用父模块 payload，预览时间线求值、渲染适配和缓存逻辑仍大量聚集在约 13,000 行的 `mondrian-app::app_ui::preview`。导出执行也集中在大型 queue 模块；后续继续按所有权迁出，不能只按文件大小机械拆分或用大量 `pub(crate)` 伪造接缝。
 3. **项目版本化只有“拒绝”，没有“迁移”。** 这在 Alpha 继续变更数据结构时会快速成为真实项目风险。
 4. **声明能力和视觉执行能力可能分离。** 某些效果、文字和转场已有类型或属性，却没有主路径 render op；路线图不得把它们列为已完成。
 5. **音频/视频运行许可必须持续分离。** 当前 `Priming` 已可预填 PCM 但禁止设备提前消费，普通视频 Late/Recovering 也不会旋转音频 generation；真实 CPAL/A/V 门禁已按产品路径实现，仍须在固定参考机完成慢首帧/seek、持续视频压力和 30 分钟报告，才能证明该不变量长期成立。
@@ -356,7 +356,7 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 - [ ] 扩展参数 schema：稳定 ParameterId、精确跨音视频曲线时间、单位、enum/resource 类型、hard/soft range、能力/缓存/颜色域、schema version 与 message ID。
 - [x] Track/Clip placement → Component Edit/Scope → Track/Bus/Program Output、Gain/pan/fade/Transition、headless compiler、recursive nested Runtime 和 reference PCM 已进入 `mondrian-audio`；播放/导出共用 decoder Adapter 和执行语义，旧 flat mixer 已删除。
 - [x] `AudioDecodedSource` 已改为可失败的精确 interleaved block Interface；播放/导出共用文件指纹与 128 项/256 MiB 加权 LRU 的十秒 PCM 窗口，Runtime 仅保留对齐 4096 帧热窗，不再以整文件 PCM 作为产品执行源。
-- [ ] 补齐 channel layout/组件选流/重采样、通用 latency/PDC 与 discontinuity state entry，再实现隔离的 VST3/CLAP host、send/sidechain、meter/loudness 和编辑 UI/命令；callback 实时安全、underrun 与 A/V drift 继续由真实门禁证明。
+- [ ] source Seam 已从逐样本调用改为每个 Contribution 每块一次的索引化交错读取；继续把 semantic IR prepare 为稠密 schedule、路由邻接区间、automation/source span 与 scratch liveness，建立 CPU scalar reference/SIMD kernel 和多轨/多 Bus/多插件 deadline 矩阵。补齐 channel layout/组件选流/重采样、通用 latency/PDC 与 discontinuity state entry，再实现隔离的 VST3/CLAP host、send/sidechain、meter/loudness 和编辑 UI/命令；GPU 仅允许作为声明固定批量延迟、计入 PDC、设备丢失与状态切换可控且实测优于 CPU SIMD 的可选 processor backend；callback 实时安全、underrun 与 A/V drift 继续由真实门禁证明。
 
 **验证基础**
 

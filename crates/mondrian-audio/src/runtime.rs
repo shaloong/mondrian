@@ -205,76 +205,156 @@ struct NestedRuntimeSource {
 }
 
 impl AudioPcmSource for RuntimeSources {
-    fn sample(
+    fn read_indexed_interleaved(
         &mut self,
         edit: AudioComponentEditId,
-        source_frame: i64,
-        channel: usize,
-    ) -> Result<f32, AudioExecutionError> {
-        if source_frame < 0 {
-            return Ok(0.0);
+        source_frames: &[i64],
+        channels: usize,
+        destination: &mut [f32],
+    ) -> Result<(), AudioExecutionError> {
+        let expected_samples = source_frames
+            .len()
+            .checked_mul(channels)
+            .ok_or(AudioExecutionError::BufferTooLarge)?;
+        if destination.len() != expected_samples {
+            return Err(AudioExecutionError::OutputSizeMismatch);
         }
+        destination.fill(0.0);
+        let cancellation = self.cancellation.clone();
         let source = self.entries.get_mut(&edit).ok_or_else(|| {
             AudioExecutionError::SourceUnavailable(format!("component edit {edit}"))
         })?;
         match source {
             RuntimeSource::Media(media) => {
-                let cache_frames_i64 = i64::try_from(media.cache_frames).unwrap_or(i64::MAX);
-                let cache_end = media.cache_start.saturating_add(cache_frames_i64);
-                if source_frame < media.cache_start || source_frame >= cache_end {
-                    media.cache_start =
-                        source_frame.div_euclid(cache_frames_i64).saturating_mul(cache_frames_i64);
-                    media.cache.fill(0.0);
-                    media
-                        .source
-                        .read_interleaved(
-                            media.cache_start,
-                            media.cache_frames,
-                            media.channels,
-                            &mut media.cache,
-                            &self.cancellation,
-                        )
-                        .map_err(AudioExecutionError::SourceUnavailable)?;
-                }
-                let local_frame =
-                    usize::try_from(source_frame - media.cache_start).map_err(|_| {
-                        AudioExecutionError::SourceUnavailable(
-                            "decoded media cache coordinate overflow".to_owned(),
-                        )
-                    })?;
-                Ok(media
-                    .cache
-                    .get(local_frame.saturating_mul(media.channels).saturating_add(channel))
-                    .copied()
-                    .unwrap_or(0.0))
+                media.read_indexed(source_frames, channels, destination, &cancellation)
             }
             RuntimeSource::Nested(nested) => {
-                let cache_end = nested
-                    .cache_start
-                    .saturating_add(i64::try_from(nested.cache_frames).unwrap_or(i64::MAX));
-                if source_frame < nested.cache_start || source_frame >= cache_end {
-                    nested.cache_start = source_frame;
-                    nested.runtime.render_into_cancellable(
-                        AudioRenderRequest {
-                            start_sample: nested.cache_start,
-                            frames: nested.cache_frames,
-                        },
-                        &mut nested.cache,
-                        &self.cancellation,
-                    )?;
-                }
-                let frame = usize::try_from(source_frame - nested.cache_start)
-                    .map_err(|_| AudioExecutionError::BufferTooLarge)?;
-                let index = frame
-                    .checked_mul(nested.channels)
-                    .and_then(|base| base.checked_add(channel.min(nested.channels - 1)))
-                    .ok_or(AudioExecutionError::BufferTooLarge)?;
-                Ok(nested.cache.get(index).copied().unwrap_or(0.0))
+                nested.read_indexed(source_frames, channels, destination, &cancellation)
             }
         }
     }
 }
 
+impl MediaRuntimeSource {
+    fn read_indexed(
+        &mut self,
+        source_frames: &[i64],
+        channels: usize,
+        destination: &mut [f32],
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<(), AudioExecutionError> {
+        if channels != self.channels {
+            return Err(AudioExecutionError::SourceUnavailable(format!(
+                "decoded media channel contract changed from {} to {channels}",
+                self.channels
+            )));
+        }
+        let cache_frames_i64 =
+            i64::try_from(self.cache_frames).map_err(|_| AudioExecutionError::BufferTooLarge)?;
+        for (output_frame, source_frame) in source_frames.iter().copied().enumerate() {
+            if source_frame < 0 {
+                continue;
+            }
+            let cache_end = self.cache_start.saturating_add(cache_frames_i64);
+            if source_frame < self.cache_start || source_frame >= cache_end {
+                self.cache_start =
+                    source_frame.div_euclid(cache_frames_i64).saturating_mul(cache_frames_i64);
+                self.cache.fill(0.0);
+                self.source
+                    .read_interleaved(
+                        self.cache_start,
+                        self.cache_frames,
+                        self.channels,
+                        &mut self.cache,
+                        cancellation,
+                    )
+                    .map_err(AudioExecutionError::SourceUnavailable)?;
+            }
+            copy_interleaved_frame(
+                &self.cache,
+                usize::try_from(source_frame - self.cache_start)
+                    .map_err(|_| AudioExecutionError::BufferTooLarge)?,
+                destination,
+                output_frame,
+                channels,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl NestedRuntimeSource {
+    fn read_indexed(
+        &mut self,
+        source_frames: &[i64],
+        channels: usize,
+        destination: &mut [f32],
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<(), AudioExecutionError> {
+        if channels != self.channels {
+            return Err(AudioExecutionError::SourceUnavailable(format!(
+                "nested audio channel contract changed from {} to {channels}",
+                self.channels
+            )));
+        }
+        let cache_frames_i64 =
+            i64::try_from(self.cache_frames).map_err(|_| AudioExecutionError::BufferTooLarge)?;
+        for (output_frame, source_frame) in source_frames.iter().copied().enumerate() {
+            if source_frame < 0 {
+                continue;
+            }
+            let cache_end = self.cache_start.saturating_add(cache_frames_i64);
+            if source_frame < self.cache_start || source_frame >= cache_end {
+                self.cache_start = source_frame;
+                self.cache.fill(0.0);
+                self.runtime.render_into_cancellable(
+                    AudioRenderRequest {
+                        start_sample: self.cache_start,
+                        frames: self.cache_frames,
+                    },
+                    &mut self.cache,
+                    cancellation,
+                )?;
+            }
+            copy_interleaved_frame(
+                &self.cache,
+                usize::try_from(source_frame - self.cache_start)
+                    .map_err(|_| AudioExecutionError::BufferTooLarge)?,
+                destination,
+                output_frame,
+                channels,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn copy_interleaved_frame(
+    source: &[f32],
+    source_frame: usize,
+    destination: &mut [f32],
+    destination_frame: usize,
+    channels: usize,
+) -> Result<(), AudioExecutionError> {
+    let source_start =
+        source_frame.checked_mul(channels).ok_or(AudioExecutionError::BufferTooLarge)?;
+    let source_end =
+        source_start.checked_add(channels).ok_or(AudioExecutionError::BufferTooLarge)?;
+    let destination_start = destination_frame
+        .checked_mul(channels)
+        .ok_or(AudioExecutionError::BufferTooLarge)?;
+    let destination_end = destination_start
+        .checked_add(channels)
+        .ok_or(AudioExecutionError::BufferTooLarge)?;
+    let source = source.get(source_start..source_end).ok_or_else(|| {
+        AudioExecutionError::SourceUnavailable("audio source cache extent is invalid".to_owned())
+    })?;
+    let destination = destination
+        .get_mut(destination_start..destination_end)
+        .ok_or(AudioExecutionError::OutputSizeMismatch)?;
+    destination.copy_from_slice(source);
+    Ok(())
+}
 /// Failure before a render Session is ready. No partial/fallback graph is returned.
 #[derive(Debug, thiserror::Error)]
 pub enum AudioRuntimeBuildError {

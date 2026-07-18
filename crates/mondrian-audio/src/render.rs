@@ -13,14 +13,20 @@ use std::sync::Arc;
 
 /// Pull-style source Adapter for generated contribution identities.
 pub trait AudioPcmSource {
-    /// Return one normalized floating sample at an absolute source sample position.
+    /// Fill one indexed interleaved contribution block.
+    ///
+    /// `source_frames` contains one absolute source position for each output
+    /// frame. Negative positions are silence. Implementations must preserve
+    /// order and duplicates, accept non-contiguous/reverse coordinates, and
+    /// either fill the complete pre-zeroed destination or return an error.
     /// Values outside `[-1, 1]` are legal.
-    fn sample(
+    fn read_indexed_interleaved(
         &mut self,
         edit: AudioComponentEditId,
-        source_frame: i64,
-        channel: usize,
-    ) -> Result<f32, AudioExecutionError>;
+        source_frames: &[i64],
+        channels: usize,
+        destination: &mut [f32],
+    ) -> Result<(), AudioExecutionError>;
 }
 
 /// One exact block requested from a prepared Session.
@@ -73,6 +79,10 @@ pub struct AudioRenderSession {
     buses: BTreeMap<MixBusId, NodeBuffers>,
     output: NodeBuffers,
     route_mix: Vec<f32>,
+    source_frames: Vec<i64>,
+    contribution_pcm: Vec<f32>,
+    contribution_gain: Vec<f32>,
+    contribution_pan: Vec<f64>,
 }
 
 impl AudioRenderSession {
@@ -97,6 +107,10 @@ impl AudioRenderSession {
             buses,
             output: NodeBuffers::new(samples),
             route_mix: vec![0.0; samples],
+            source_frames: vec![-1; contract.max_block_frames],
+            contribution_pcm: vec![0.0; samples],
+            contribution_gain: vec![0.0; contract.max_block_frames],
+            contribution_pan: vec![0.0; contract.max_block_frames],
         })
     }
 
@@ -138,6 +152,10 @@ impl AudioRenderSession {
                 .processing_scopes
                 .get(&contribution.processing_scope)
                 .ok_or(AudioExecutionError::MissingPreparedScope)?;
+            self.source_frames[..request.frames].fill(-1);
+            self.contribution_gain[..request.frames].fill(0.0);
+            self.contribution_pan[..request.frames].fill(0.0);
+            let mut has_audible_frame = false;
             for frame in 0..request.frames {
                 let absolute_sample = request
                     .start_sample
@@ -150,9 +168,6 @@ impl AudioRenderSession {
                 if !contribution.sequence_range.contains(sequence_time)? {
                     continue;
                 }
-                let clip_local = sequence_time.checked_sub(contribution.sequence_range.start)?;
-                let scope_time = contribution.scope_in.checked_add(clip_local)?;
-                let edit_time = contribution.local_time_in.checked_add(clip_local)?;
                 let source_time = contribution.source_time_map.map(sequence_time)?;
                 let source_frame = AudioSamplePosition::from_timeline_time(
                     source_time,
@@ -160,7 +175,9 @@ impl AudioRenderSession {
                     AudioSampleRounding::Floor,
                 )?
                 .sample();
-
+                let clip_local = sequence_time.checked_sub(contribution.sequence_range.start)?;
+                let scope_time = contribution.scope_in.checked_add(clip_local)?;
+                let edit_time = contribution.local_time_in.checked_add(clip_local)?;
                 let scope_gain_db = scope
                     .input_gain_automation
                     .as_ref()
@@ -183,10 +200,31 @@ impl AudioRenderSession {
                     sequence_time,
                     &self.plan.program().transitions,
                 )?;
-                let gain = db_to_linear(scope_gain_db + volume_db) * envelope;
+                self.source_frames[frame] = source_frame;
+                self.contribution_gain[frame] = db_to_linear(scope_gain_db + volume_db) * envelope;
+                self.contribution_pan[frame] = pan;
+                has_audible_frame |= source_frame >= 0;
+            }
+            if !has_audible_frame {
+                continue;
+            }
+            self.contribution_pcm[..samples].fill(0.0);
+            source.read_indexed_interleaved(
+                contribution.edit_id,
+                &self.source_frames[..request.frames],
+                contract.channels,
+                &mut self.contribution_pcm[..samples],
+            )?;
+
+            for frame in 0..request.frames {
+                if self.source_frames[frame] < 0 {
+                    continue;
+                }
+                let gain = self.contribution_gain[frame];
+                let pan = self.contribution_pan[frame];
                 for channel in 0..contract.channels {
                     let pan_gain = stereo_balance_gain(channel, contract.channels, pan);
-                    let value = source.sample(contribution.edit_id, source_frame, channel)?;
+                    let value = self.contribution_pcm[frame * contract.channels + channel];
                     track.input[frame * contract.channels + channel] += value * gain * pan_gain;
                 }
             }

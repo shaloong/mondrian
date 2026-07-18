@@ -11,16 +11,29 @@ use mondrian_timeline::{Clip, Sequence};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-struct RampSource;
+#[derive(Default)]
+struct RampSource {
+    block_reads: usize,
+}
 
 impl AudioPcmSource for RampSource {
-    fn sample(
+    fn read_indexed_interleaved(
         &mut self,
         _edit: AudioComponentEditId,
-        source_frame: i64,
-        _channel: usize,
-    ) -> Result<f32, AudioExecutionError> {
-        Ok(source_frame.max(0) as f32 + 1.0)
+        source_frames: &[i64],
+        channels: usize,
+        destination: &mut [f32],
+    ) -> Result<(), AudioExecutionError> {
+        self.block_reads = self.block_reads.saturating_add(1);
+        for (frame, source_frame) in source_frames.iter().copied().enumerate() {
+            let value = if source_frame < 0 {
+                0.0
+            } else {
+                source_frame as f32 + 1.0
+            };
+            destination[frame * channels..(frame + 1) * channels].fill(value);
+        }
+        Ok(())
     }
 }
 
@@ -131,6 +144,21 @@ fn compiler_derives_track_and_range_from_real_clip_placement() {
 }
 
 #[test]
+fn source_adapter_is_crossed_once_per_contribution_block() {
+    let sequence = sequence_with_audio_clip();
+    let mut source = RampSource::default();
+    let pcm = render_audio(
+        prepared(&sequence, 4),
+        &mut source,
+        AudioRenderRequest { start_sample: 0, frames: 4 },
+    )
+    .expect("block render");
+
+    assert_eq!(source.block_reads, 1);
+    assert_eq!(pcm, vec![1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
 fn clip_track_bus_output_math_is_unclipped_and_block_invariant() {
     let mut sequence = sequence_with_audio_clip();
     let track_id = sequence.audio_tracks[0].id;
@@ -176,7 +204,7 @@ fn clip_track_bus_output_math_is_unclipped_and_block_invariant() {
     ]);
 
     let plan = prepared(&sequence, 8);
-    let mut source = RampSource;
+    let mut source = RampSource::default();
     let whole = render_audio(
         Arc::clone(&plan),
         &mut source,
@@ -206,7 +234,7 @@ fn clip_track_bus_output_math_is_unclipped_and_block_invariant() {
 fn track_mute_zeros_post_mute_route_without_reinterpreting_the_graph() {
     let mut sequence = sequence_with_audio_clip();
     sequence.audio_tracks[0].is_muted = true;
-    let mut source = RampSource;
+    let mut source = RampSource::default();
     let pcm = render_audio(
         prepared(&sequence, 4),
         &mut source,

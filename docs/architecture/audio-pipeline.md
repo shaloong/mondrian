@@ -185,6 +185,16 @@ before rendering. `render_into` accepts an exact signed start sample and exact
 frame count and writes caller-owned interleaved float storage. The Session is
 exclusive mutable state; plans may be shared, Sessions may not.
 
+The source Seam is block-shaped even when a Clip speed map produces reverse,
+repeated, or non-contiguous coordinates. The Session resolves one absolute
+source-frame index per output frame into preallocated storage and crosses
+`AudioPcmSource::read_indexed_interleaved` once per active Contribution block,
+not once per sample or channel. The Adapter must preserve the supplied order and
+duplicates, treat negative coordinates as silence, and either fill the complete
+pre-zeroed block or fail it. This keeps exact time mapping outside media decode
+while permitting a decoder, nested Runtime, or future resampler to optimize
+contiguous runs internally.
+
 The normative signal order is:
 
 ```text
@@ -209,6 +219,51 @@ partition. Timeline-to-sample conversion uses `AudioSamplePosition` with an
 explicit rounding policy. Export range boundaries are converted once from the
 Sequence frame grid; chunks then advance integer samples only.
 
+### Realtime execution performance contract
+
+Correct signal semantics do not make the current reference executor a DAW-grade
+kernel. Before that claim, preparation must lower semantic IR into a dense,
+index-addressed execution schedule with stable node slots, contiguous incoming
+route ranges, liveness-based scratch reuse, processor latency, and presegmented
+automation/source spans. Realtime rendering must not scan author Routes or use
+tree/map lookup in sample loops. Exact rational mapping is resolved at block or
+span boundaries; steady affine spans advance integer/rational accumulators
+without reconstructing general Timeline values for every processor and sample.
+
+The normative realtime path is CPU block DSP with a scalar reference kernel and
+vectorized kernels selected during preparation. A render worker runs ahead into
+the fixed-capacity playback queue; the device callback only consumes that queue
+and atomics. After Session construction, the realtime execution path admits no
+heap allocation, blocking lock, file or decoder I/O, processor construction,
+graph mutation, logging, unbounded retry, or wait on UI/GPU completion. Stateful
+processors execute in declared rack order. Independent routing nodes may run in
+parallel only when the prepared dependency schedule and available block
+headroom prove that scheduling overhead is beneficial.
+
+GPU audio is an optional prepared execution backend, not a second author graph
+and never a realtime requirement. It is admissible only for processors that
+declare deterministic block/batch behavior, channel/layout support, state
+ordering, minimum efficient batch, fixed buffering latency, cancellation, and
+device-loss behavior. Preparation must include transfer/queue latency in PDC,
+bound all in-flight buffers, and reject a contract whose deadline cannot cover
+the required batch. Realtime execution may not submit a tiny block and
+synchronously wait/read back on every callback. CPU SIMD remains the qualified
+fallback; any live backend handoff requires an already prepared equivalent path
+plus explicit continuity/state-entry policy. Offline rendering may choose larger
+GPU batches. Native VST3/CLAP instances normally remain isolated CPU/plugin-host
+Adapters unless the plugin itself exposes a separately qualified GPU execution
+contract.
+
+Performance acceptance is workload- and deadline-based rather than a claim from
+an enum or benchmark of one Gain processor. Fixed-reference-machine matrices
+must cover block sizes, sample rates/layouts, active Clips, Tracks, Buses,
+Transitions, automation density, nested Sequences, stateful built-ins, plugin
+instances, seek/re-entry, and decoder pressure. Reports include render-worker
+p50/p95/p99/max duration and deadline headroom, callback underruns, queue depth,
+allocations after preparation, CPU time, memory plateau, PDC, cancellation
+latency, and CPU/GPU/backend provenance. PCM parity and block-partition tests
+remain mandatory for every optimized backend.
+
 ### Shared recursive Runtime
 
 `AudioProgramRuntime` combines compiler, prepared plan, Session, media binding,
@@ -221,8 +276,8 @@ or private Routes.
 
 Media sources use the same block principle. Each bound source has one aligned
 4,096-frame Runtime hot window, so ordinary forward, reverse, and speed-mapped
-sample access crosses the trait boundary once per block rather than once per
-sample. A source failure rejects the entire requested block; Playback may then
+sample access crosses both the Runtime source Seam and decoded-media Seam in
+blocks rather than once per sample. A source failure rejects the entire requested block; Playback may then
 substitute exact-duration silence at its downstream scheduling boundary, while
 Export fails the job. Partial decoded data can never shift later media time.
 
@@ -388,6 +443,11 @@ gates rather than implied support:
    reference machine: cold open, sequential boundary, random restart,
    cancellation return, cross-source LRU pressure, and source-cache bytes must
    appear in the same long-run evidence report.
+9. Replace author-collection lookup and per-sample exact-time evaluation in the
+   reference executor with the prepared dense schedule, span automation, scalar
+   reference/SIMD kernels, scratch liveness plan, and the workload matrix above;
+   only then evaluate qualified GPU batch processors against measured CPU SIMD
+   headroom and added latency.
 
 No item may be closed by adding only schema, an effect enum, a disconnected UI,
 or a consumer-specific fallback mixer.
