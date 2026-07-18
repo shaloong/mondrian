@@ -83,14 +83,17 @@ use crate::app::preview_access_mode::{
     media_preview_cancel_reason, MediaPreviewJobEnqueueStatus,
     MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US,
 };
-#[cfg(test)]
-use crate::app::preview_scheduler_policy::MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD;
 use crate::app::preview_scheduler_policy::{
     media_preview_forward_prefetch_window_frames, playback_frame_delivery_kind,
     playback_hardware_recovery_signals, preview_decode_presentation_quality,
-    PlaybackDecodeExecution, PlaybackPressureState, PlaybackPressureTransition,
+    MediaPreviewFailureReason, PlaybackDecodeExecution, PlaybackPressureState,
+    PlaybackPressureTransition, PreviewScrubAdaptationState,
     MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US, MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES,
     MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
+};
+#[cfg(test)]
+use crate::app::preview_scheduler_policy::{
+    MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD, PREVIEW_SCRUB_SLOW_LATENCY_US,
 };
 use crate::app::proxy_generation::{request_proxy_generation, resolve_asset_proxy_color_contract};
 use crate::app::AppState;
@@ -7469,13 +7472,6 @@ impl ViewerPreviewCacheKey {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MediaPreviewFailureReason {
-    Timeout,
-    DecodeError,
-    ForwardDecodeBudgetExhausted,
-}
-
 #[derive(Debug)]
 struct MediaPreviewResult {
     key: MediaPreviewKey,
@@ -8085,7 +8081,11 @@ impl AppUiPreviewService {
         if access_mode != PreviewDecodeAccessMode::ScrubCursor {
             return PreviewDecodeAdaptiveHints::default();
         }
-        let hints = self.scrub_adaptation.borrow_mut().observe_request(key);
+        let hints = self.scrub_adaptation.borrow_mut().observe_request(
+            key.asset_id,
+            key.source_micros,
+            Instant::now(),
+        );
         match hints.scrub_class {
             PreviewScrubAdaptiveClass::Normal => {
                 bump(&self.metrics.scrub_adaptive_normal_requests);
@@ -9205,87 +9205,6 @@ fn media_path_metadata(path: &Path) -> Option<MediaPathMetadata> {
     Some(MediaPathMetadata {
         fingerprint: PreviewFileFingerprint::from_metadata(&metadata),
     })
-}
-
-const PREVIEW_SCRUB_HOT_REQUEST_WINDOW_US: u64 = 250_000;
-const PREVIEW_SCRUB_HOT_SOURCE_WINDOW_US: i64 = 750_000;
-const PREVIEW_SCRUB_SLOW_LATENCY_US: u64 = 40_000;
-const PREVIEW_SCRUB_RECOVERY_LATENCY_US: u64 = 25_000;
-const PREVIEW_SCRUB_SLOW_SCORE_MAX: u8 = 3;
-
-#[derive(Debug, Clone, Copy)]
-struct PreviewScrubRequestObservation {
-    asset_id: AssetId,
-    source_micros: i64,
-    observed_at: Instant,
-}
-
-#[derive(Debug, Default)]
-struct PreviewScrubAdaptationState {
-    last_request: Option<PreviewScrubRequestObservation>,
-    hot_request_streak: u8,
-    slow_latency_score: u8,
-}
-
-impl PreviewScrubAdaptationState {
-    fn observe_request(&mut self, key: &MediaPreviewKey) -> PreviewDecodeAdaptiveHints {
-        let now = Instant::now();
-        let is_hot_region = self
-            .last_request
-            .map(|last| {
-                last.asset_id == key.asset_id
-                    && app_duration_us(now.saturating_duration_since(last.observed_at))
-                        <= PREVIEW_SCRUB_HOT_REQUEST_WINDOW_US
-                    && key.source_micros.saturating_sub(last.source_micros).abs()
-                        <= PREVIEW_SCRUB_HOT_SOURCE_WINDOW_US
-            })
-            .unwrap_or(false);
-        self.hot_request_streak = if is_hot_region {
-            self.hot_request_streak.saturating_add(1)
-        } else {
-            0
-        };
-        self.last_request = Some(PreviewScrubRequestObservation {
-            asset_id: key.asset_id,
-            source_micros: key.source_micros,
-            observed_at: now,
-        });
-
-        let scrub_class = if self.slow_latency_score >= 2 {
-            PreviewScrubAdaptiveClass::SlowLatency
-        } else if self.slow_latency_score == 1 {
-            PreviewScrubAdaptiveClass::Recovery
-        } else if self.hot_request_streak >= 2 {
-            PreviewScrubAdaptiveClass::HotRegion
-        } else {
-            PreviewScrubAdaptiveClass::Normal
-        };
-        PreviewDecodeAdaptiveHints { scrub_class }
-    }
-
-    fn observe_decode(&mut self, diagnostics: PreviewDecodeDiagnostics) {
-        if diagnostics.access_mode != PreviewDecodeAccessMode::ScrubCursor {
-            return;
-        }
-        if diagnostics.elapsed_us >= PREVIEW_SCRUB_SLOW_LATENCY_US {
-            self.slow_latency_score =
-                self.slow_latency_score.saturating_add(1).min(PREVIEW_SCRUB_SLOW_SCORE_MAX);
-        } else if diagnostics.elapsed_us <= PREVIEW_SCRUB_RECOVERY_LATENCY_US {
-            self.slow_latency_score = self.slow_latency_score.saturating_sub(1);
-        }
-    }
-
-    fn observe_failure(
-        &mut self,
-        access_mode: PreviewDecodeAccessMode,
-        reason: MediaPreviewFailureReason,
-    ) {
-        if access_mode == PreviewDecodeAccessMode::ScrubCursor
-            && reason == MediaPreviewFailureReason::ForwardDecodeBudgetExhausted
-        {
-            self.slow_latency_score = self.slow_latency_score.max(2);
-        }
-    }
 }
 
 fn source_micros(source_secs: f64) -> i64 {
@@ -17621,19 +17540,34 @@ mod tests {
     fn scrub_adaptation_switches_for_hot_region_and_slow_latency() {
         let mut adaptation = PreviewScrubAdaptationState::default();
         let mut key = test_media_key(100);
+        let observed_at = Instant::now();
 
         assert_eq!(
-            adaptation.observe_request(&key).scrub_class,
+            adaptation
+                .observe_request(key.asset_id, key.source_micros, observed_at)
+                .scrub_class,
             PreviewScrubAdaptiveClass::Normal
         );
         key.source_micros += 100_000;
         assert_eq!(
-            adaptation.observe_request(&key).scrub_class,
+            adaptation
+                .observe_request(
+                    key.asset_id,
+                    key.source_micros,
+                    observed_at + Duration::from_millis(1),
+                )
+                .scrub_class,
             PreviewScrubAdaptiveClass::Normal
         );
         key.source_micros += 100_000;
         assert_eq!(
-            adaptation.observe_request(&key).scrub_class,
+            adaptation
+                .observe_request(
+                    key.asset_id,
+                    key.source_micros,
+                    observed_at + Duration::from_millis(2),
+                )
+                .scrub_class,
             PreviewScrubAdaptiveClass::HotRegion
         );
 
@@ -17694,7 +17628,13 @@ mod tests {
         adaptation.observe_decode(slow_decode);
         key.source_micros += 100_000;
         assert_eq!(
-            adaptation.observe_request(&key).scrub_class,
+            adaptation
+                .observe_request(
+                    key.asset_id,
+                    key.source_micros,
+                    observed_at + Duration::from_millis(3),
+                )
+                .scrub_class,
             PreviewScrubAdaptiveClass::SlowLatency
         );
 
@@ -17704,7 +17644,13 @@ mod tests {
             MediaPreviewFailureReason::ForwardDecodeBudgetExhausted,
         );
         assert_eq!(
-            failed_adaptation.observe_request(&key).scrub_class,
+            failed_adaptation
+                .observe_request(
+                    key.asset_id,
+                    key.source_micros,
+                    observed_at + Duration::from_millis(4),
+                )
+                .scrub_class,
             PreviewScrubAdaptiveClass::SlowLatency
         );
     }

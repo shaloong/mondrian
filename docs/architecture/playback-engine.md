@@ -464,6 +464,17 @@ provenance, then returns typed `native_import_unavailable` and
 `hardware_fallback_not_engaged` facts. The Preview Adapter may count and display
 those facts but cannot infer fallback from a capability probe or report schema.
 
+Scrub adaptation is part of the same UI-independent policy Module. Its Adapter
+supplies an explicit monotonic observation instant for each request; the policy
+classifies a hot source region from request/source locality and combines that
+with completed decode latency or forward-decode-budget failure. The resulting
+`Normal`, `HotRegion`, `Recovery`, or `SlowLatency` value is only a decoder
+strategy hint. It cannot change source time, proxy/original selection, color
+interpretation, authored quality, or the requirement that a settled scrub
+returns the exact requested frame. Keeping both the thresholds and state out of
+the Viewer preserves one deterministic test surface for Window and Headless
+Adapters.
+
 The Preview Adapter must execute that policy rather than merely report it. It
 multiplies the sequence's user-authored preview scale by the runtime
 `Full`/`Half`/`Quarter` divisor before constructing decode, composite, nested
@@ -890,9 +901,11 @@ atomics were also deleted: windowed reports and Headless verification share the
 Broker diagnostics Interface for execution-lane residency.
 
 `app::preview_scheduler_policy` owns the corresponding pure decision boundary:
-Frame Demand deadline completion, real decode execution quality, and bounded
-frame-rate-derived prefetch depth. Moving it out of `app_ui` prevents a Viewer
-Adapter from redefining Ready/Degraded/Late or hardware-fallback semantics.
+Frame Demand deadline completion, real decode execution quality, bounded
+frame-rate-derived prefetch depth, frame-local hardware recovery signals,
+consecutive-late pressure, and timestamped scrub adaptation. Moving it out of
+`app_ui` prevents a Viewer Adapter from redefining Ready/Degraded/Late,
+hardware-fallback, or decode-strategy semantics.
 
 Time-sensitive Broker transitions use the `MonotonicRuntimeClock` Interface.
 Production adapts Rust's monotonic `Instant`; Headless tests inject an exact

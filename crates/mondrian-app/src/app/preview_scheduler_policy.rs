@@ -1,10 +1,12 @@
 //! Pure deadline, execution-quality, and prefetch policy for preview scheduling.
 
 use crate::app::preview_access_mode::MediaPreviewRequestPriority;
-use mondrian_core::Rational;
+use std::time::Instant;
+
+use mondrian_core::{types::AssetId, Rational};
 use mondrian_media::{
-    PreviewDecodeAccessMode, PreviewDecodeDiagnostics, PreviewHardwareDecodeDecision,
-    PreviewHardwareDecodeRequest,
+    PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeDiagnostics,
+    PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest,
 };
 use mondrian_playback::{FrameDeliveryKind, FramePresentationQuality};
 
@@ -16,6 +18,99 @@ pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES: usize = 1;
 pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES: usize = 6;
 /// Consecutive current-frame late results required to declare sustained pressure.
 pub(crate) const MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD: u64 = 2;
+pub(crate) const PREVIEW_SCRUB_HOT_REQUEST_WINDOW_US: u64 = 250_000;
+pub(crate) const PREVIEW_SCRUB_HOT_SOURCE_WINDOW_US: i64 = 750_000;
+pub(crate) const PREVIEW_SCRUB_SLOW_LATENCY_US: u64 = 40_000;
+pub(crate) const PREVIEW_SCRUB_RECOVERY_LATENCY_US: u64 = 25_000;
+const PREVIEW_SCRUB_SLOW_SCORE_MAX: u8 = 3;
+
+/// Structured decode failure consumed by scheduling policy and diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MediaPreviewFailureReason {
+    Timeout,
+    DecodeError,
+    ForwardDecodeBudgetExhausted,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PreviewScrubRequestObservation {
+    asset_id: AssetId,
+    source_micros: i64,
+    observed_at: Instant,
+}
+
+/// UI-independent scrub locality and latency adaptation state.
+#[derive(Debug, Default)]
+pub(crate) struct PreviewScrubAdaptationState {
+    last_request: Option<PreviewScrubRequestObservation>,
+    hot_request_streak: u8,
+    slow_latency_score: u8,
+}
+
+impl PreviewScrubAdaptationState {
+    /// Observe an explicitly timestamped scrub request and return decoder hints.
+    pub(crate) fn observe_request(
+        &mut self,
+        asset_id: AssetId,
+        source_micros: i64,
+        observed_at: Instant,
+    ) -> PreviewDecodeAdaptiveHints {
+        let is_hot_region = self
+            .last_request
+            .map(|last| {
+                last.asset_id == asset_id
+                    && observed_at.saturating_duration_since(last.observed_at).as_micros()
+                        <= u128::from(PREVIEW_SCRUB_HOT_REQUEST_WINDOW_US)
+                    && source_micros.saturating_sub(last.source_micros).abs()
+                        <= PREVIEW_SCRUB_HOT_SOURCE_WINDOW_US
+            })
+            .unwrap_or(false);
+        self.hot_request_streak = if is_hot_region {
+            self.hot_request_streak.saturating_add(1)
+        } else {
+            0
+        };
+        self.last_request =
+            Some(PreviewScrubRequestObservation { asset_id, source_micros, observed_at });
+
+        let scrub_class = if self.slow_latency_score >= 2 {
+            mondrian_media::PreviewScrubAdaptiveClass::SlowLatency
+        } else if self.slow_latency_score == 1 {
+            mondrian_media::PreviewScrubAdaptiveClass::Recovery
+        } else if self.hot_request_streak >= 2 {
+            mondrian_media::PreviewScrubAdaptiveClass::HotRegion
+        } else {
+            mondrian_media::PreviewScrubAdaptiveClass::Normal
+        };
+        PreviewDecodeAdaptiveHints { scrub_class }
+    }
+
+    /// Observe frame-local decode latency for a completed scrub request.
+    pub(crate) fn observe_decode(&mut self, diagnostics: PreviewDecodeDiagnostics) {
+        if diagnostics.access_mode != PreviewDecodeAccessMode::ScrubCursor {
+            return;
+        }
+        if diagnostics.elapsed_us >= PREVIEW_SCRUB_SLOW_LATENCY_US {
+            self.slow_latency_score =
+                self.slow_latency_score.saturating_add(1).min(PREVIEW_SCRUB_SLOW_SCORE_MAX);
+        } else if diagnostics.elapsed_us <= PREVIEW_SCRUB_RECOVERY_LATENCY_US {
+            self.slow_latency_score = self.slow_latency_score.saturating_sub(1);
+        }
+    }
+
+    /// Observe a decode failure that proves the current scrub strategy is too slow.
+    pub(crate) fn observe_failure(
+        &mut self,
+        access_mode: PreviewDecodeAccessMode,
+        reason: MediaPreviewFailureReason,
+    ) {
+        if access_mode == PreviewDecodeAccessMode::ScrubCursor
+            && reason == MediaPreviewFailureReason::ForwardDecodeBudgetExhausted
+        {
+            self.slow_latency_score = self.slow_latency_score.max(2);
+        }
+    }
+}
 
 /// Edge emitted when playback pressure changes acceptance state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -318,5 +413,52 @@ mod tests {
             PlaybackPressureTransition::Recovered
         );
         assert_eq!(pressure.late_streak(), 0);
+    }
+
+    #[test]
+    fn scrub_adaptation_uses_explicit_time_locality_and_failure_evidence() {
+        let asset_id = AssetId::new();
+        let started_at = Instant::now();
+        let mut adaptation = PreviewScrubAdaptationState::default();
+
+        assert_eq!(
+            adaptation.observe_request(asset_id, 0, started_at).scrub_class,
+            mondrian_media::PreviewScrubAdaptiveClass::Normal
+        );
+        assert_eq!(
+            adaptation
+                .observe_request(
+                    asset_id,
+                    100_000,
+                    started_at + std::time::Duration::from_millis(1)
+                )
+                .scrub_class,
+            mondrian_media::PreviewScrubAdaptiveClass::Normal
+        );
+        assert_eq!(
+            adaptation
+                .observe_request(
+                    asset_id,
+                    200_000,
+                    started_at + std::time::Duration::from_millis(2)
+                )
+                .scrub_class,
+            mondrian_media::PreviewScrubAdaptiveClass::HotRegion
+        );
+
+        adaptation.observe_failure(
+            PreviewDecodeAccessMode::ScrubCursor,
+            MediaPreviewFailureReason::ForwardDecodeBudgetExhausted,
+        );
+        assert_eq!(
+            adaptation
+                .observe_request(
+                    asset_id,
+                    300_000,
+                    started_at + std::time::Duration::from_millis(3)
+                )
+                .scrub_class,
+            mondrian_media::PreviewScrubAdaptiveClass::SlowLatency
+        );
     }
 }
