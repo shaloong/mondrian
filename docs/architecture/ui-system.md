@@ -344,8 +344,14 @@ diagnostic bookkeeping. Project close cancels queued and in-flight preview work,
 clears preview caches/failure caches, and leaves workers alive for the next
 project. Application quit additionally closes the preview worker queue and must
 not perform a workspace-to-startup native-window role sync on the way out.
-`AppUiPreviewService::diagnostics()` exposes render, cache, queue, decode, and
-scheduler counters so performance tooling can distinguish cache misses,
+`AppUiPreviewService::diagnostics()` exposes an immutable observation snapshot;
+the sibling `app_ui::preview::diagnostics` Module exclusively owns its typed
+decode/render/color evidence models and fail-closed report construction. The
+realtime preview implementation records facts but does not contain acceptance
+thresholds, root-cause classification, or remediation text. This keeps the
+same report Interface available to UI presentation and Headless performance
+gates without giving either caller authority over execution. The snapshot
+contains render, cache, queue, decode, and scheduler counters so performance tooling can distinguish cache misses,
 backpressure drops, stale completions, decode failures, and GPU preview
 candidate readiness without changing timeline evaluation. Scrub-adaptive
 request counters expose whether interactive seeks are using normal, hot-region,
