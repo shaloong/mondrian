@@ -81,6 +81,14 @@ Frame Work Broker ──> media decode ──> render/presentation ──> Frame
 Audio Engine ──> device callback / synthetic availability ──> AudioObservation
 ```
 
+Each Audio Playback render generation is carried across the PCM Adapter Seam.
+Exactly its first admitted window is `Enter(generation)`; every later window is
+`Continue(generation)`. Queue admission flips this state only after the Enter
+work item is accepted, and reprime always installs a fresh pending Enter. The
+Timeline PCM Adapter maps the generation to the audio Runtime continuity epoch
+and validates exact next-sample progression. A changed coordinate can never be
+treated as an implicit seek/reset.
+
 The main event thread calls the Playback Engine. Decode/render/audio workers do
 not mutate it; they return observations tagged with the session epoch.
 

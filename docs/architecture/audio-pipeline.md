@@ -240,13 +240,18 @@ entry resets all compensation state. Stateless Gain-only plans retain random
 block evaluation and do not manufacture continuity obligations.
 
 Offline export enters one fresh epoch at its exact sample-range start. Realtime
-Playback currently rejects a stateful plan at Adapter construction until the
-Playback generation is carried through its PCM work request. Stateful nested
-outputs also fail entry explicitly until a direction/time-map-aware child
-replay coordinator exists; propagating the child's requirement upward is not a
-claim that root and child share one coordinate or state domain. These two
-fail-closed restrictions are the remaining prerequisites before production
-admits a non-zero-latency or otherwise stateful processor.
+Playback carries its generation on every PCM work request: the first admitted
+window is `Enter`, later windows are `Continue`, and the Timeline Adapter rejects
+duplicate/missing entry, generation mismatch, or a non-contiguous sample. The
+Adapter maps Playback generation to Runtime continuity rather than deriving a
+reset from coordinates. Realtime construction still rejects a stateful plan
+until render-failure recovery can rotate the generation without accepting PCM
+from the poisoned one. Stateful nested outputs also fail entry explicitly until
+a direction/time-map-aware child replay coordinator exists; propagating the
+child's requirement upward is not a claim that root and child share one
+coordinate or state domain. These two fail-closed restrictions are the
+remaining prerequisites before production admits a non-zero-latency or
+otherwise stateful processor.
 
 The source Seam is block-shaped even when a Clip speed map produces reverse,
 repeated, or non-contiguous coordinates. The Session resolves one absolute

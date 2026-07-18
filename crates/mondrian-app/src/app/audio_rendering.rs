@@ -1,7 +1,7 @@
 use super::*;
 use mondrian_audio::{
-    AudioDecodedSource, AudioMediaResolver, AudioProcessingMode, AudioProgramRuntime,
-    AudioRenderContract, AudioRenderRequest,
+    AudioContinuityEpoch, AudioDecodedSource, AudioMediaResolver, AudioProcessingMode,
+    AudioProgramRuntime, AudioRenderContract, AudioRenderRequest, AudioStateEntry,
 };
 use mondrian_core::{AudioSourceComponentId, ExecutionCancellationToken, ProgramOutputId};
 use mondrian_media::AudioSourceReader;
@@ -10,9 +10,15 @@ use parking_lot::Mutex;
 const MAX_AUDIO_RENDER_BLOCK_FRAMES: usize = 16_384;
 
 pub(super) struct TimelineAudioPcmRenderer {
-    runtime: Mutex<AudioProgramRuntime>,
+    state: Mutex<TimelineAudioRenderState>,
     sample_rate: u32,
     channels: u8,
+}
+
+struct TimelineAudioRenderState {
+    runtime: AudioProgramRuntime,
+    generation: Option<AudioPcmRenderGeneration>,
+    next_sample: Option<i64>,
 }
 
 impl TimelineAudioPcmRenderer {
@@ -42,11 +48,15 @@ impl TimelineAudioPcmRenderer {
         if runtime.requires_state_entry() {
             return Err(audio_render_error(
                 "timeline_audio_state_entry",
-                "stateful realtime audio requires generation-bound Playback state entry",
+                "stateful realtime audio remains blocked until render-failure generation recovery is qualified",
             ));
         }
         Ok(Self {
-            runtime: Mutex::new(runtime),
+            state: Mutex::new(TimelineAudioRenderState {
+                runtime,
+                generation: None,
+                next_sample: None,
+            }),
             sample_rate,
             channels,
         })
@@ -81,9 +91,64 @@ impl AudioPcmRenderer for TimelineAudioPcmRenderer {
             request.frame_count.checked_mul(usize::from(self.channels)).ok_or_else(|| {
                 audio_render_error("timeline_audio_sample_range", "audio window is too large")
             })?;
+        let next_sample = request
+            .start_sample
+            .checked_add(i64::try_from(request.frame_count).map_err(|_| {
+                audio_render_error("timeline_audio_sample_range", "audio window is too large")
+            })?)
+            .ok_or_else(|| {
+                audio_render_error("timeline_audio_sample_range", "audio window is too large")
+            })?;
         let mut output = vec![0.0; samples];
-        self.runtime
-            .lock()
+        let mut state = self.state.lock();
+        let generation = request.continuity.generation();
+        match request.continuity {
+            AudioPcmContinuity::Enter(_) => {
+                if state.generation == Some(generation) {
+                    return Err(audio_render_error(
+                        "timeline_audio_continuity",
+                        format!(
+                            "render generation {} attempted to enter twice",
+                            generation.get()
+                        ),
+                    ));
+                }
+                state
+                    .runtime
+                    .enter_state(AudioStateEntry {
+                        epoch: AudioContinuityEpoch::new(generation.get()),
+                        start_sample: request.start_sample,
+                    })
+                    .map_err(|error| {
+                        audio_render_error("timeline_audio_state_entry", error.to_string())
+                    })?;
+                state.generation = Some(generation);
+                state.next_sample = Some(request.start_sample);
+            }
+            AudioPcmContinuity::Continue(_) if state.generation != Some(generation) => {
+                return Err(audio_render_error(
+                    "timeline_audio_continuity",
+                    format!(
+                        "render generation {} continued without a matching entry",
+                        generation.get()
+                    ),
+                ));
+            }
+            AudioPcmContinuity::Continue(_) => {}
+        }
+        if state.next_sample != Some(request.start_sample) {
+            return Err(audio_render_error(
+                "timeline_audio_continuity",
+                format!(
+                    "render generation {} expected sample {:?}, got {}",
+                    generation.get(),
+                    state.next_sample,
+                    request.start_sample
+                ),
+            ));
+        }
+        state
+            .runtime
             .render_into_cancellable(
                 AudioRenderRequest {
                     start_sample: request.start_sample,
@@ -93,6 +158,7 @@ impl AudioPcmRenderer for TimelineAudioPcmRenderer {
                 cancellation,
             )
             .map_err(|error| audio_render_error("timeline_audio_execute", error.to_string()))?;
+        state.next_sample = Some(next_sample);
         Ok(AudioBuffer {
             samples: output,
             sample_rate: self.sample_rate,
@@ -158,5 +224,78 @@ fn audio_render_error(
     mondrian_core::MondrianError::WorkflowStepFailed {
         step_id: step_id.to_owned(),
         reason: reason.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeline_pcm_adapter_requires_one_entry_and_exact_generation_continuation() {
+        let root = std::env::temp_dir().join(format!(
+            "mondrian-audio-continuity-{}",
+            mondrian_core::ProjectId::new()
+        ));
+        let sequence = Sequence::new("continuity");
+        let renderer = TimelineAudioPcmRenderer::new(
+            sequence,
+            Vec::new(),
+            AssetLibrary::open(root.clone()).expect("asset library"),
+            Arc::new(AudioSourceCache::new(48_000, 2)),
+            48_000,
+            2,
+        )
+        .expect("stateless renderer");
+        let cancellation = ExecutionCancellationToken::new();
+        let generation = AudioPcmRenderGeneration::new(7);
+        let request = |continuity, start_sample| AudioPcmRenderRequest {
+            start_sample,
+            frame_count: 4,
+            sample_rate: 48_000,
+            channels: 2,
+            continuity,
+        };
+
+        assert!(renderer
+            .render(
+                request(AudioPcmContinuity::Continue(generation), 0),
+                &cancellation,
+            )
+            .is_err());
+        renderer
+            .render(
+                request(AudioPcmContinuity::Enter(generation), 0),
+                &cancellation,
+            )
+            .expect("entry");
+        renderer
+            .render(
+                request(AudioPcmContinuity::Continue(generation), 4),
+                &cancellation,
+            )
+            .expect("continuation");
+        assert!(renderer
+            .render(
+                request(AudioPcmContinuity::Continue(generation), 9),
+                &cancellation,
+            )
+            .is_err());
+        assert!(renderer
+            .render(
+                request(AudioPcmContinuity::Enter(generation), 8),
+                &cancellation
+            )
+            .is_err());
+
+        let next_generation = AudioPcmRenderGeneration::new(8);
+        renderer
+            .render(
+                request(AudioPcmContinuity::Enter(next_generation), 9),
+                &cancellation,
+            )
+            .expect("fresh generation entry");
+        drop(renderer);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

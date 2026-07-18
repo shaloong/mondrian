@@ -437,17 +437,23 @@ impl AppState {
             return;
         };
         let cancellation = mondrian_core::ExecutionCancellationToken::new();
-        for start_sample in [
+        for (generation, start_sample) in [
             center.sample(),
             before,
             center.sample().saturating_add(chunk_frames as i64),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let _ = renderer.render(
                 AudioPcmRenderRequest {
                     start_sample,
                     frame_count: chunk_frames,
                     sample_rate: self.audio_sample_rate,
                     channels: AUDIO_OUTPUT_CHANNELS,
+                    continuity: AudioPcmContinuity::Enter(AudioPcmRenderGeneration::new(
+                        generation as u64 + 1,
+                    )),
                 },
                 &cancellation,
             );

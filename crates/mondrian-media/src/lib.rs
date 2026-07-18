@@ -22,9 +22,9 @@ pub mod waveform;
 pub use audio::{AudioBuffer, AudioRenderCursor, RealtimeAudioOutput, RealtimeAudioOutputSnapshot};
 pub use audio_output::{RealtimeAudioOutputEvent, RealtimeAudioOutputManager};
 pub use audio_playback::{
-    AudioPcmRenderRequest, AudioPcmRenderer, AudioPlayback, AudioPlaybackConfig,
-    AudioPlaybackConfigError, AudioPlaybackEvent, AudioPlaybackMode, AudioPlaybackPoll,
-    AudioPlaybackSnapshot, AudioPlaybackState,
+    AudioPcmContinuity, AudioPcmRenderGeneration, AudioPcmRenderRequest, AudioPcmRenderer,
+    AudioPlayback, AudioPlaybackConfig, AudioPlaybackConfigError, AudioPlaybackEvent,
+    AudioPlaybackMode, AudioPlaybackPoll, AudioPlaybackSnapshot, AudioPlaybackState,
 };
 pub use audio_source::{AudioSourceCache, AudioSourceCacheDiagnostics, AudioSourceReader};
 pub use decoder::{

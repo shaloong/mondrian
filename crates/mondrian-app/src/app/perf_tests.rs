@@ -1667,13 +1667,18 @@ fn audio_bounded_source_external_render_smoke() -> anyhow::Result<()> {
             2,
         )?;
         let cancellation = mondrian_core::ExecutionCancellationToken::new();
-        for start_sample in [0, 24_000, 96_000, 480_000, 960_000] {
+        for (generation, start_sample) in
+            [0, 24_000, 96_000, 480_000, 960_000].into_iter().enumerate()
+        {
             let rendered = renderer.render(
                 AudioPcmRenderRequest {
                     start_sample,
                     frame_count: 2_048,
                     sample_rate: 48_000,
                     channels: 2,
+                    continuity: AudioPcmContinuity::Enter(AudioPcmRenderGeneration::new(
+                        generation as u64 + 1,
+                    )),
                 },
                 &cancellation,
             )?;

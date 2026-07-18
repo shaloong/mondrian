@@ -67,6 +67,42 @@ pub struct AudioPcmRenderRequest {
     pub sample_rate: u32,
     /// Required interleaved output channel count.
     pub channels: u8,
+    /// Explicit generation entry or exact continuation selected by Playback.
+    pub continuity: AudioPcmContinuity,
+}
+
+/// Playback-owned render generation identity carried through the PCM Adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AudioPcmRenderGeneration(u64);
+
+impl AudioPcmRenderGeneration {
+    /// Construct one Playback-owned generation identity.
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Return the numeric identity for cross-module evidence correlation.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// State-domain operation attached to one exact PCM window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioPcmContinuity {
+    /// First window of a fresh render generation.
+    Enter(AudioPcmRenderGeneration),
+    /// Exact next window in the current render generation.
+    Continue(AudioPcmRenderGeneration),
+}
+
+impl AudioPcmContinuity {
+    /// Generation shared by both operations.
+    pub const fn generation(self) -> AudioPcmRenderGeneration {
+        match self {
+            Self::Enter(generation) | Self::Continue(generation) => generation,
+        }
+    }
 }
 
 /// Adapter Interface used by Audio Playback to render timeline PCM.
@@ -317,6 +353,7 @@ pub struct AudioPlayback {
     renderer: Option<Arc<dyn AudioPcmRenderer>>,
     generation: u64,
     generation_cancellation: ExecutionCancellationToken,
+    generation_entry_pending: bool,
     in_flight: usize,
     next_start_sample: i64,
     media_anchor: Option<FramePosition>,
@@ -377,6 +414,7 @@ impl AudioPlayback {
             renderer: None,
             generation: 1,
             generation_cancellation: ExecutionCancellationToken::new(),
+            generation_entry_pending: true,
             in_flight: 0,
             next_start_sample: 0,
             media_anchor: None,
@@ -418,6 +456,7 @@ impl AudioPlayback {
         self.generation_cancellation.cancel();
         self.generation_cancellation = ExecutionCancellationToken::new();
         self.generation = self.generation.saturating_add(1);
+        self.generation_entry_pending = true;
         self.in_flight = 0;
         self.next_start_sample = start_sample;
         self.media_anchor = self.renderer.as_ref().map(|_| {
@@ -542,6 +581,11 @@ impl AudioPlayback {
                     frame_count: self.config.chunk_frames,
                     sample_rate: self.config.sample_rate,
                     channels: self.config.channels,
+                    continuity: if self.generation_entry_pending {
+                        AudioPcmContinuity::Enter(AudioPcmRenderGeneration::new(self.generation))
+                    } else {
+                        AudioPcmContinuity::Continue(AudioPcmRenderGeneration::new(self.generation))
+                    },
                 };
                 let work = RenderWork {
                     generation: self.generation,
@@ -552,6 +596,7 @@ impl AudioPlayback {
                 if self.render_queue.push(work).is_err() {
                     break;
                 }
+                self.generation_entry_pending = false;
                 self.in_flight = self.in_flight.saturating_add(1);
                 self.next_start_sample = self
                     .next_start_sample
@@ -858,9 +903,19 @@ mod tests {
         let snapshot = playback.snapshot(AudioPlaybackMode::Consume);
 
         assert!(events.contains(&AudioPlaybackEvent::DeviceOpened { stream_generation: 4 }));
+        let requests = requests.lock();
         assert_eq!(
-            requests.lock().iter().map(|request| request.start_sample).collect::<Vec<_>>(),
+            requests.iter().map(|request| request.start_sample).collect::<Vec<_>>(),
             vec![40, 50, 60]
+        );
+        let generation = AudioPcmRenderGeneration::new(snapshot.generation);
+        assert_eq!(
+            requests.iter().map(|request| request.continuity).collect::<Vec<_>>(),
+            vec![
+                AudioPcmContinuity::Enter(generation),
+                AudioPcmContinuity::Continue(generation),
+                AudioPcmContinuity::Continue(generation),
+            ]
         );
         assert_eq!(snapshot.state, AudioPlaybackState::Active);
         assert!(snapshot.activation_preroll_satisfied);
@@ -1077,13 +1132,19 @@ mod tests {
         assert_eq!(snapshot.stale_completion_count, 1);
         assert_eq!(snapshot.canceled_render_count, 2);
         assert_eq!(state.lock().queued_frames, 30);
+        let current_requests = current_requests.lock();
         assert_eq!(
-            current_requests
-                .lock()
-                .iter()
-                .map(|request| request.start_sample)
-                .collect::<Vec<_>>(),
+            current_requests.iter().map(|request| request.start_sample).collect::<Vec<_>>(),
             vec![40, 50, 60]
+        );
+        let generation = AudioPcmRenderGeneration::new(snapshot.generation);
+        assert_eq!(
+            current_requests.iter().map(|request| request.continuity).collect::<Vec<_>>(),
+            vec![
+                AudioPcmContinuity::Enter(generation),
+                AudioPcmContinuity::Continue(generation),
+                AudioPcmContinuity::Continue(generation),
+            ]
         );
     }
 }
