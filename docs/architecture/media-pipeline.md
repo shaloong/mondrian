@@ -417,6 +417,9 @@ while diagnostic aggregation remains in the Preview Adapter. This is a
 behavioral module boundary, not a second scheduler: all admission, deadline,
 generation, and worker-lane authority still comes from `app::preview_access_mode`
 and `mondrian-playback::FrameWorkBroker`.
+Mutable counter accumulation and point-in-time diagnostics projection are
+localized in `app_ui::preview::evidence`. It records facts selected elsewhere;
+it cannot schedule, change pressure state, or derive pass/fail verdicts.
 Within diagnostics, the versioned Color Health report model and its
 check/root-cause/action derivation live in the private `color_health` deep
 Module. It consumes the same immutable aggregate as before and cannot count
