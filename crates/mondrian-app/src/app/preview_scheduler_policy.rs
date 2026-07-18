@@ -14,6 +14,68 @@ pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US: u64 = 80_000;
 pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES: usize = 1;
 /// Maximum playback prefetch depth regardless of frame rate.
 pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES: usize = 6;
+/// Consecutive current-frame late results required to declare sustained pressure.
+pub(crate) const MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD: u64 = 2;
+
+/// Edge emitted when playback pressure changes acceptance state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlaybackPressureTransition {
+    Unchanged,
+    Entered,
+    Recovered,
+}
+
+/// UI-independent consecutive-late state used by decode and prefetch policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PlaybackPressureState {
+    late_streak: u64,
+}
+
+impl PlaybackPressureState {
+    /// Observe one or more late current-frame outcomes.
+    pub(crate) fn observe_late(&mut self, count: u64) -> PlaybackPressureTransition {
+        if count == 0 {
+            return PlaybackPressureTransition::Unchanged;
+        }
+        let was_active = self.is_active();
+        self.late_streak = self.late_streak.saturating_add(count);
+        if !was_active && self.is_active() {
+            PlaybackPressureTransition::Entered
+        } else {
+            PlaybackPressureTransition::Unchanged
+        }
+    }
+
+    /// Observe a successful decode result, resetting only playback-current pressure.
+    pub(crate) fn observe_success(
+        &mut self,
+        priority: MediaPreviewRequestPriority,
+        access_mode: PreviewDecodeAccessMode,
+    ) -> PlaybackPressureTransition {
+        if priority != MediaPreviewRequestPriority::Current
+            || access_mode != PreviewDecodeAccessMode::PlaybackCursor
+        {
+            return PlaybackPressureTransition::Unchanged;
+        }
+        let was_active = self.is_active();
+        self.late_streak = 0;
+        if was_active {
+            PlaybackPressureTransition::Recovered
+        } else {
+            PlaybackPressureTransition::Unchanged
+        }
+    }
+
+    /// Consecutive late current-frame count.
+    pub(crate) const fn late_streak(self) -> u64 {
+        self.late_streak
+    }
+
+    /// Whether sustained playback pressure is active.
+    pub(crate) const fn is_active(self) -> bool {
+        self.late_streak >= MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD
+    }
+}
 
 /// Derive bounded prefetch depth from a wall-clock horizon and exact frame rate.
 pub(crate) fn media_preview_forward_prefetch_window_frames(frame_rate: Rational) -> Option<usize> {
@@ -160,5 +222,41 @@ mod tests {
             ),
             FrameDeliveryKind::Ready
         );
+    }
+
+    #[test]
+    fn playback_pressure_enters_once_and_recovers_only_on_current_success() {
+        let mut pressure = PlaybackPressureState::default();
+        assert_eq!(
+            pressure.observe_late(1),
+            PlaybackPressureTransition::Unchanged
+        );
+        assert!(!pressure.is_active());
+        assert_eq!(
+            pressure.observe_late(1),
+            PlaybackPressureTransition::Entered
+        );
+        assert!(pressure.is_active());
+        assert_eq!(
+            pressure.observe_late(5),
+            PlaybackPressureTransition::Unchanged
+        );
+        assert_eq!(pressure.late_streak(), 7);
+        assert_eq!(
+            pressure.observe_success(
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::ScrubCursor,
+            ),
+            PlaybackPressureTransition::Unchanged
+        );
+        assert!(pressure.is_active());
+        assert_eq!(
+            pressure.observe_success(
+                MediaPreviewRequestPriority::Current,
+                PreviewDecodeAccessMode::PlaybackCursor,
+            ),
+            PlaybackPressureTransition::Recovered
+        );
+        assert_eq!(pressure.late_streak(), 0);
     }
 }

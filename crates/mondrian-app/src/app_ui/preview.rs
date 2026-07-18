@@ -83,12 +83,14 @@ use crate::app::preview_access_mode::{
     media_preview_cancel_reason, MediaPreviewJobEnqueueStatus,
     MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US,
 };
+#[cfg(test)]
+use crate::app::preview_scheduler_policy::MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD;
 use crate::app::preview_scheduler_policy::{
     media_preview_forward_prefetch_window_frames, playback_frame_delivery_kind,
     playback_hardware_decode_requested, preview_decode_presentation_quality,
-    preview_hardware_decode_effective, PlaybackDecodeExecution,
-    MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US, MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES,
-    MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
+    preview_hardware_decode_effective, PlaybackDecodeExecution, PlaybackPressureState,
+    PlaybackPressureTransition, MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US,
+    MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES, MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
 };
 use crate::app::proxy_generation::{request_proxy_generation, resolve_asset_proxy_color_contract};
 use crate::app::AppState;
@@ -104,7 +106,6 @@ use crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 
 const MEDIA_PREVIEW_PLAYBACK_BUFFERING_STALL_TIMEOUT_US: u64 = 250_000;
-const MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD: u64 = 2;
 const MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
 const MEDIA_PREVIEW_COMPLETED_RESULTS_POLL_BUDGET_US: u64 = 2_000;
 
@@ -123,6 +124,7 @@ pub struct AppUiPreviewService {
     scrub_adaptation: RefCell<PreviewScrubAdaptationState>,
     external_viewer_frame: RefCell<Option<ScopedExternalViewerFrame>>,
     current_presentation_quality: Cell<mondrian_playback::FramePresentationQuality>,
+    playback_pressure: Cell<PlaybackPressureState>,
     next_gpu_preview_candidate_id: Cell<u64>,
     scheduler: MediaPreviewScheduler,
     scratch: RefCell<TimelineCompositeScratch>,
@@ -213,6 +215,7 @@ impl AppUiPreviewService {
             current_presentation_quality: Cell::new(
                 mondrian_playback::FramePresentationQuality::Ready,
             ),
+            playback_pressure: Cell::new(PlaybackPressureState::default()),
             next_gpu_preview_candidate_id: Cell::new(0),
             scheduler,
             scratch: RefCell::new(TimelineCompositeScratch::default()),
@@ -1915,7 +1918,7 @@ impl AppUiPreviewService {
                 .metrics
                 .media_proxy_generation_request_dedupes
                 .get(),
-            current_late_streak: self.metrics.playback_current_late_streak.get(),
+            current_late_streak: self.playback_pressure.get().late_streak(),
             sustained_pressure_active: self.playback_sustained_pressure_active(),
             sustained_pressure_events: self.metrics.playback_sustained_pressure_events.get(),
             sustained_pressure_recoveries: self
@@ -1967,12 +1970,10 @@ impl AppUiPreviewService {
             &self.metrics.playback_current_proxy_or_hardware_recommended_decisions,
             count,
         );
-        let previous = self.metrics.playback_current_late_streak.get();
-        let next = previous.saturating_add(count);
-        self.metrics.playback_current_late_streak.set(next);
-        if previous < MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD
-            && next >= MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD
-        {
+        let mut pressure = self.playback_pressure.get();
+        let transition = pressure.observe_late(count);
+        self.playback_pressure.set(pressure);
+        if transition == PlaybackPressureTransition::Entered {
             bump(&self.metrics.playback_sustained_pressure_events);
         }
     }
@@ -1995,13 +1996,10 @@ impl AppUiPreviewService {
         priority: MediaPreviewRequestPriority,
         access_mode: PreviewDecodeAccessMode,
     ) {
-        if priority != MediaPreviewRequestPriority::Current
-            || access_mode != PreviewDecodeAccessMode::PlaybackCursor
-        {
-            return;
-        }
-        let previous = self.metrics.playback_current_late_streak.replace(0);
-        if previous >= MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD {
+        let mut pressure = self.playback_pressure.get();
+        let transition = pressure.observe_success(priority, access_mode);
+        self.playback_pressure.set(pressure);
+        if transition == PlaybackPressureTransition::Recovered {
             bump(&self.metrics.playback_sustained_pressure_recoveries);
         }
     }
@@ -2036,8 +2034,7 @@ impl AppUiPreviewService {
     }
 
     fn playback_sustained_pressure_active(&self) -> bool {
-        self.metrics.playback_current_late_streak.get()
-            >= MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD
+        self.playback_pressure.get().is_active()
     }
 
     fn record_playback_forward_prefetch_window(&self, window_frames: Option<usize>) {
@@ -8441,7 +8438,6 @@ struct AppUiPreviewMetrics {
     playback_current_proxy_or_hardware_recommended_decisions: Cell<u64>,
     playback_current_native_import_unavailable_decisions: Cell<u64>,
     playback_current_hardware_fallback_not_engaged_decisions: Cell<u64>,
-    playback_current_late_streak: Cell<u64>,
     playback_sustained_pressure_events: Cell<u64>,
     playback_sustained_pressure_recoveries: Cell<u64>,
     playback_prefetch_skipped_sustained_pressure: Cell<u64>,

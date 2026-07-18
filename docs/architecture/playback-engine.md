@@ -448,6 +448,15 @@ The Engine may automatically lower temporary preview resolution under sustained
 pressure. The scale is runtime-only, monotonic within a recovery step, bounded
 by a configured minimum, and restored only after a hysteresis window.
 
+The App preview scheduler has a separate, deliberately smaller consecutive-late
+decode-pressure guard. After two late current decode outcomes it suppresses
+speculative prefetch and avoids submitting duplicate current work while a
+realtime request is already queued or executing; the next successful
+playback-current decode clears it. This value-state machine lives in
+`app::preview_scheduler_policy`. It is an execution backpressure guard, not the
+Playback Engine's 8-of-12 Transport recovery policy: it cannot enter
+`Recovering`, change Clock Master, or lower runtime presentation scale.
+
 The Preview Adapter must execute that policy rather than merely report it. It
 multiplies the sequence's user-authored preview scale by the runtime
 `Full`/`Half`/`Quarter` divisor before constructing decode, composite, nested
