@@ -149,21 +149,7 @@ pub struct AppUiPreviewService {
     scratch: RefCell<TimelineCompositeScratch>,
     last_color_rejection: RefCell<Option<AppUiPreviewColorRejection>>,
     display_snapshot: RefCell<Option<DisplayOutputSnapshot>>,
-    playback_hardware_decode_request: Cell<PreviewHardwareDecodeRequest>,
-    playback_hardware_decode_device_selector: Cell<Option<HwAccelDeviceSelector>>,
-    playback_hardware_decode_renderer_import_known: Cell<bool>,
-    playback_hardware_decode_renderer_import_ready: Cell<bool>,
-    playback_hardware_decode_platform_import_ready: Cell<bool>,
-    playback_hardware_decode_native_import_admission_ready: Cell<bool>,
-    playback_hardware_decode_admission_blocker:
-        Cell<Option<AppUiPreviewHardwareDecodeAdmissionBlocker>>,
-    playback_hardware_decode_platform_discovery_available: Cell<bool>,
-    playback_hardware_decode_platform_zero_copy_supported: Cell<bool>,
-    playback_hardware_decode_platform_low_copy_fallback_supported: Cell<bool>,
-    playback_hardware_decode_renderer_supported_handle_kinds: Cell<u8>,
-    playback_hardware_decode_renderer_supported_source_texture_formats: Cell<u8>,
-    playback_hardware_decode_renderer_supports_nv12: Cell<bool>,
-    playback_hardware_decode_renderer_supports_p010: Cell<bool>,
+    hardware_decode_admission: Cell<PreviewHardwareDecodeAdmissionState>,
     decode_cpu_budget: PreviewDecodeCpuBudget,
     decode_worker_count: usize,
     metrics: AppUiPreviewMetrics,
@@ -233,137 +219,11 @@ impl AppUiPreviewService {
             scratch: RefCell::new(TimelineCompositeScratch::default()),
             last_color_rejection: RefCell::new(None),
             display_snapshot: RefCell::new(None),
-            playback_hardware_decode_request: Cell::new(PreviewHardwareDecodeRequest::Auto),
-            playback_hardware_decode_device_selector: Cell::new(None),
-            playback_hardware_decode_renderer_import_known: Cell::new(false),
-            playback_hardware_decode_renderer_import_ready: Cell::new(false),
-            playback_hardware_decode_platform_import_ready: Cell::new(false),
-            playback_hardware_decode_native_import_admission_ready: Cell::new(false),
-            playback_hardware_decode_admission_blocker: Cell::new(None),
-            playback_hardware_decode_platform_discovery_available: Cell::new(false),
-            playback_hardware_decode_platform_zero_copy_supported: Cell::new(false),
-            playback_hardware_decode_platform_low_copy_fallback_supported: Cell::new(false),
-            playback_hardware_decode_renderer_supported_handle_kinds: Cell::new(0),
-            playback_hardware_decode_renderer_supported_source_texture_formats: Cell::new(0),
-            playback_hardware_decode_renderer_supports_nv12: Cell::new(false),
-            playback_hardware_decode_renderer_supports_p010: Cell::new(false),
+            hardware_decode_admission: Cell::new(PreviewHardwareDecodeAdmissionState::default()),
             decode_cpu_budget,
             decode_worker_count,
             metrics: AppUiPreviewMetrics::default(),
         }
-    }
-
-    /// Set playback hardware-decode admission selected by the app runtime.
-    ///
-    /// The default is `Auto` until renderer/platform readiness is reported. The
-    /// runtime may raise playback to `PreferHardwareDecode` for FFmpeg
-    /// CPU-transfer fallback or to `PreferGpuResident` once native video import
-    /// support is actually ready.
-    pub(crate) fn set_playback_hardware_decode_admission(
-        &self,
-        admission: AppUiPlaybackHardwareDecodeAdmission,
-    ) {
-        self.playback_hardware_decode_request.set(admission.request);
-        self.playback_hardware_decode_device_selector
-            .set(admission.hardware_decode_device_selector);
-        self.playback_hardware_decode_renderer_import_known.set(true);
-        self.playback_hardware_decode_renderer_import_ready
-            .set(admission.renderer_native_import_ready);
-        self.playback_hardware_decode_platform_import_ready
-            .set(admission.platform_native_import_ready);
-        self.playback_hardware_decode_native_import_admission_ready
-            .set(admission.native_import_admission_ready);
-        self.playback_hardware_decode_admission_blocker.set(admission.admission_blocker);
-        self.playback_hardware_decode_platform_discovery_available
-            .set(admission.platform_discovery_available);
-        self.playback_hardware_decode_platform_zero_copy_supported
-            .set(admission.platform_zero_copy_supported);
-        self.playback_hardware_decode_platform_low_copy_fallback_supported
-            .set(admission.platform_low_copy_fallback_supported);
-        self.playback_hardware_decode_renderer_supported_handle_kinds
-            .set(admission.renderer_supported_handle_kinds);
-        self.playback_hardware_decode_renderer_supported_source_texture_formats
-            .set(admission.renderer_supported_source_texture_formats);
-        self.playback_hardware_decode_renderer_supports_nv12
-            .set(admission.renderer_supports_nv12);
-        self.playback_hardware_decode_renderer_supports_p010
-            .set(admission.renderer_supports_p010);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn playback_hardware_decode_request_for_test(&self) -> PreviewHardwareDecodeRequest {
-        self.playback_hardware_decode_request.get()
-    }
-
-    fn hardware_decode_admission_diagnostics(
-        &self,
-    ) -> AppUiPreviewHardwareDecodeAdmissionDiagnostics {
-        AppUiPreviewHardwareDecodeAdmissionDiagnostics {
-            playback_request: self.playback_hardware_decode_request.get(),
-            renderer_native_import_support_known: self
-                .playback_hardware_decode_renderer_import_known
-                .get(),
-            renderer_native_import_ready: self.playback_hardware_decode_renderer_import_ready.get(),
-            platform_native_import_ready: self.playback_hardware_decode_platform_import_ready.get(),
-            native_import_admission_ready: self
-                .playback_hardware_decode_native_import_admission_ready
-                .get(),
-            admission_blocker: self.playback_hardware_decode_admission_blocker.get(),
-            platform_discovery_available: self
-                .playback_hardware_decode_platform_discovery_available
-                .get(),
-            platform_zero_copy_supported: self
-                .playback_hardware_decode_platform_zero_copy_supported
-                .get(),
-            platform_low_copy_fallback_supported: self
-                .playback_hardware_decode_platform_low_copy_fallback_supported
-                .get(),
-            renderer_supported_handle_kinds: self
-                .playback_hardware_decode_renderer_supported_handle_kinds
-                .get(),
-            renderer_supported_source_texture_formats: self
-                .playback_hardware_decode_renderer_supported_source_texture_formats
-                .get(),
-        }
-    }
-
-    fn hardware_decode_request_for_access_mode(
-        &self,
-        _access_mode: PreviewDecodeAccessMode,
-    ) -> PreviewHardwareDecodeRequest {
-        self.playback_hardware_decode_request.get()
-    }
-
-    fn hardware_decode_request_for_key(
-        &self,
-        access_mode: PreviewDecodeAccessMode,
-        key: &MediaPreviewKey,
-    ) -> PreviewHardwareDecodeRequest {
-        let request = self.hardware_decode_request_for_access_mode(access_mode);
-        if request != PreviewHardwareDecodeRequest::PreferGpuResident {
-            return request;
-        }
-        let supported = match key.native_surface_hint {
-            Some(MediaPreviewNativeSurfaceHint::Nv12) => {
-                self.playback_hardware_decode_renderer_supports_nv12.get()
-            }
-            Some(MediaPreviewNativeSurfaceHint::P010) => {
-                self.playback_hardware_decode_renderer_supports_p010.get()
-            }
-            None => true,
-        };
-        if supported {
-            request
-        } else {
-            PreviewHardwareDecodeRequest::PreferHardwareDecode
-        }
-    }
-
-    fn hardware_decode_device_selector_for_access_mode(
-        &self,
-        _access_mode: PreviewDecodeAccessMode,
-    ) -> Option<HwAccelDeviceSelector> {
-        self.playback_hardware_decode_device_selector.get()
     }
 
     #[cfg(test)]
@@ -1463,10 +1323,11 @@ impl AppUiPreviewService {
         priority: MediaPreviewRequestPriority,
         diagnostics: &PreviewDecodeDiagnostics,
     ) {
+        let admission = self.hardware_decode_admission_diagnostics();
         let signals = playback_hardware_recovery_signals(
             priority,
-            self.playback_hardware_decode_request.get(),
-            self.playback_hardware_decode_native_import_admission_ready.get(),
+            admission.playback_request,
+            admission.native_import_admission_ready,
             PlaybackDecodeExecution::from(diagnostics),
         );
         if signals.native_import_unavailable {
@@ -1697,6 +1558,8 @@ mod composite;
 use composite::*;
 mod diagnostics;
 pub use diagnostics::*;
+mod hardware_admission;
+use hardware_admission::PreviewHardwareDecodeAdmissionState;
 mod media_adapter;
 use media_adapter::PreviewProxyGenerationRequestKey;
 #[cfg(test)]
