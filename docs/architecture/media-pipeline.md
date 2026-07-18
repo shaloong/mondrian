@@ -32,26 +32,40 @@ interleaved PCM through aligned ten-second windows. One weighted LRU spans all
 readers at the prepared sample-rate/channel contract: 128 entries, 256 MiB
 payload, and 64 bounded terminal failures. Path + file length + modification
 timestamp is the current source revision boundary. Cache diagnostics expose
-bytes, entry pressure, hits/misses, decode results, oversize windows, and
-evictions; an entry-count-only claim is insufficient.
+bytes, entry pressure, hits/misses, decode results, oversize windows,
+single-flight leaders, and evictions; an entry-count-only claim is insufficient.
 
-The current miss Adapter invokes FFmpeg with accurate input seek and a bounded
-duration, then truncates to the exact requested window extent. It may block the
-dedicated audio render worker but never the CPAL callback or UI thread. This is
-the correctness and memory baseline, not the final latency design: persistent
-in-process decoder Sessions, cooperative cancellation, and look-ahead must
-replace the process-per-miss Adapter without changing the media-source block
-contract. The older whole-file helper remains only for waveform/reference
-jobs and is not the playback/export PCM source path.
+The concrete miss Adapter owns a bounded pool of at most eight persistent
+FFmpeg child-process Sessions. A Session is keyed by the complete source
+fingerprint plus output sample-rate/channel contract, opens at the first
+requested sample, and continuously emits interleaved `f32le`. Consecutive
+windows reuse that stream; a non-contiguous miss terminates and reopens only
+that source Session using at most ten seconds of input-side coarse preroll plus
+output-side exact trim. This preserves the sample coordinates of a sequential
+decode instead of trusting codec-dependent input-seek priming. Pool pressure
+evicts an idle least-recently-used Session. This is an intentionally isolated process
+Adapter, not an in-process FFmpeg claim; a linked FFmpeg Adapter may replace it
+behind the same Interface without changing cache or sample semantics.
+
+Stdout has two bounded 64 KiB look-ahead chunks and stderr retains only its
+latest 64 KiB while always draining the pipe. Generation cancellation is
+polled every 5 ms while waiting for output, then kills, waits, and joins the
+child and both pump threads. Partial EOF is accepted only on a complete
+interleaved frame boundary. The cache additionally provides single-flight per
+complete source-window key, so concurrent consumers share one decode result
+instead of serially reopening the Session. None of this work runs in the CPAL
+callback or UI thread. The older whole-file helper remains only for
+waveform/reference jobs and is not the playback/export PCM source path.
 
 The block contract now carries the generation-owned
 `ExecutionCancellationToken` all the way into `AudioWindowDecoder`. Cancellation
 is checked before lookup, across concrete decode, and before cache admission.
 Canceled results are neither decoded-window entries nor terminal failures, so a
 seek cannot poison the same source coordinate for its successor generation.
-The current CLI call can observe cancellation only before/after its blocking
-child; the persistent Session Adapter must poll/interrupt within the fixed
-return budget.
+Session diagnostics separate cold opens, sequential reuse, and random-seek
+restarts and expose resident/peak/capacity, evictions, cancellations, and each
+class's worst wall duration. Acceptance may constrain steady sequential
+latency without falsely relabeling cold-open or random-seek cost.
 
 ## Probe
 

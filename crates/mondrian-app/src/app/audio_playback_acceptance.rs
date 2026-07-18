@@ -349,12 +349,15 @@ pub(crate) fn evaluate_professional_audio_playback(
     );
     require(
         &mut failures,
-        cache.decode_successes > 0 && cache.decode_failures == 0 && cache.failures == 0,
+        cache.decode_successes > 0
+            && cache.decode_failures == 0
+            && cache.failures == 0
+            && cache.in_flight_decodes == 0,
         "audio_source_decode_failure_observed",
-        "successful bounded-window decodes and zero failures",
+        "successful bounded-window decodes, zero failures, and no in-flight decode at quiescence",
         format!(
-            "successes={}, failures={}, retained_failures={}",
-            cache.decode_successes, cache.decode_failures, cache.failures
+            "successes={}, failures={}, retained_failures={}, in_flight={}",
+            cache.decode_successes, cache.decode_failures, cache.failures, cache.in_flight_decodes
         ),
         "bounded decoded-source cache diagnostics",
     );
@@ -368,11 +371,43 @@ pub(crate) fn evaluate_professional_audio_playback(
     );
     require(
         &mut failures,
-        cache.decode_max_duration_us <= MAX_AUDIO_WINDOW_DECODE_US,
-        "audio_source_window_decode_above_realtime_budget",
+        cache.decoder_session_capacity > 0
+            && cache.decoder_sessions <= cache.decoder_session_capacity
+            && cache.decoder_peak_sessions <= cache.decoder_session_capacity,
+        "audio_decoder_session_budget_exceeded",
+        "resident and peak session slots within a non-zero configured capacity",
+        format!(
+            "resident={}, peak={}, capacity={}",
+            cache.decoder_sessions, cache.decoder_peak_sessions, cache.decoder_session_capacity
+        ),
+        "persistent audio decoder session pool",
+    );
+    require(
+        &mut failures,
+        cache.decoder_session_opens > 0 && cache.decoder_sequential_reuses > 0,
+        "audio_decoder_steady_state_evidence_missing",
+        "at least one session open and one sequential reuse",
+        format!(
+            "opens={}, sequential_reuses={}",
+            cache.decoder_session_opens, cache.decoder_sequential_reuses
+        ),
+        "persistent audio decoder session diagnostics",
+    );
+    require(
+        &mut failures,
+        cache.decoder_cancellations == 0,
+        "audio_decoder_cancellation_observed",
+        "zero generation cancellations during continuous playback",
+        cache.decoder_cancellations.to_string(),
+        "persistent audio decoder session diagnostics",
+    );
+    require(
+        &mut failures,
+        cache.decoder_sequential_window_max_duration_us <= MAX_AUDIO_WINDOW_DECODE_US,
+        "audio_source_steady_window_decode_above_realtime_budget",
         format!("at most {MAX_AUDIO_WINDOW_DECODE_US} us"),
-        format!("{} us", cache.decode_max_duration_us),
-        "slowest ten-second source-window miss versus product output high-water duration",
+        format!("{} us", cache.decoder_sequential_window_max_duration_us),
+        "slowest sequential ten-second source window versus product output high-water duration",
     );
     if !process_memory.passed() {
         push_failure(
@@ -600,9 +635,22 @@ mod tests {
                 decode_successes: 180,
                 decode_failures: 0,
                 decode_total_duration_us: 18_000_000,
-                decode_max_duration_us: 150_000,
+                decode_max_duration_us: 950_000,
                 evictions: 178,
                 oversize_windows: 0,
+                in_flight_decodes: 0,
+                peak_in_flight_decodes: 1,
+                decoder_sessions: 1,
+                decoder_session_capacity: 8,
+                decoder_peak_sessions: 1,
+                decoder_session_opens: 1,
+                decoder_sequential_reuses: 179,
+                decoder_random_seek_restarts: 0,
+                decoder_session_evictions: 0,
+                decoder_cancellations: 0,
+                decoder_cold_window_max_duration_us: 950_000,
+                decoder_sequential_window_max_duration_us: 80_000,
+                decoder_random_seek_window_max_duration_us: 0,
             },
             playback_evidence: &evidence,
             process_memory: &memory,

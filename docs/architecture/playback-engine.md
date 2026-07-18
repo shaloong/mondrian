@@ -992,7 +992,7 @@ resampling/slew and backend-native hardware position remain Phase 3 work.
 
 The same Audio Playback Module now owns the PCM render worker, current
 generation, integer-sample next-window position, bounded in-flight admission,
-460 ms high watermark, and preroll activation. `AppState` supplies only an
+460 ms steady sequential high watermark, and preroll activation. `AppState` supplies only an
 immutable timeline `AudioPcmRenderer` Adapter and consumes snapshots/events. A
 headless fake output plus fake PCM renderer exercise the same Interface,
 including exact window order, preroll activation, malformed-buffer silence
@@ -1015,11 +1015,14 @@ The product `AudioPcmRenderer` and Export now bind the same block-oriented
 4,096-frame hot window; `mondrian-media` owns ten-second FFmpeg decode windows
 in a cross-source 128-entry/256 MiB weighted LRU keyed by file fingerprint.
 This removes whole-file PCM residency from playback and makes arbitrary seek
-memory independent of source duration. A manual 2.88-second AAC product-path
-smoke rendered three noncontiguous windows with one decode miss, three reuse
-hits, one 1,105,920-byte resident entry, and zero eviction. This is source-path
-evidence only: persistent cancelable decode Sessions and the physical-device
-30-minute gate remain required.
+memory independent of source duration. The concrete media Adapter now owns at
+most eight persistent FFmpeg child Sessions with bounded stdout look-ahead and
+stderr retention. Sequential windows reuse one continuous decode stream;
+non-contiguous misses restart only that source revision/output contract.
+Generation cancellation is observed while waiting for output and performs
+kill/wait/join. The PCM cache single-flights identical misses. Cold-open,
+steady-sequential, and random-restart latency remain separate evidence classes;
+the physical-device 30-minute gate is still required.
 
 The physical-device gate is now an implemented, ignored reference-machine
 Adapter rather than an unwritten requirement. `cpal_av_48khz_30min_v1` runs the
@@ -1030,7 +1033,8 @@ Evidence plus native process-memory facts. It fails on a changed CPAL stream
 generation, stale/failed callback, non-48 kHz stereo output, callback cadence
 divergence above 100 ms, any PCM silence substitution, any underrun recovery,
 delivery-clock drift above 20 ms, less than 99.5% current video readiness,
-source-window decode failure/oversize/460 ms miss-budget violation, cache budget
+source-window decode failure/oversize, missing/broken Session-pool or sequential-
+reuse evidence, steady sequential latency above 460 ms, cache budget
 overflow, or failure of `whole_process_private_commit_v1`. CPAL callback
 consumption is explicitly OS-output evidence, not acoustic loopback evidence.
 The repository still lacks a completed 30-minute report from a fixed reference
@@ -1040,9 +1044,10 @@ primary audio stream itself spans the complete observation, so automatic
 post-EOF silence cannot masquerade as long-source evidence.
 The local short CPAL/A/V smoke has reached the production stream and headless
 presentation path with zero underrun and zero observed delivery-clock drift.
-However, its measured ~1.02 s process-per-window audio miss exceeds the 460 ms
-professional high-water budget, so it is evidence for the next decoder work,
-not grounds to waive or mark the 30-minute gate complete.
+Its earlier ~1.02 s process-per-window miss was a cold-path observation that
+motivated persistent Session reuse. It neither proves nor disproves the new
+steady-sequential bound; only the complete reference-machine run can close the
+gate.
 
 Audio transport permission is now explicit. Priming renders into the bounded
 queue under `AudioPlaybackMode::Preroll` without enabling consumption;

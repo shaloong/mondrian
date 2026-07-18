@@ -233,11 +233,16 @@ retains them in one cross-source weighted LRU capped at 128 entries and 256 MiB.
 Terminal decode failure memory is separately capped at 64 identities. A new
 file fingerprint cannot reuse old PCM. Negative and post-EOF coordinates are
 silence; arbitrary seeks request the containing window. Resident bytes, hits,
-misses, decodes, failures, oversize windows, and evictions are structured
-diagnostics. The current concrete decoder is an accurate-seek FFmpeg CLI
-Adapter; replacing it with a persistent in-process Session must not alter the
-block Interface, sample coordinates, or cache policy. It runs only on the audio
-render worker, never on the callback or UI thread.
+misses, decodes, failures, oversize windows, in-flight single-flight leaders,
+and evictions are structured diagnostics. The concrete decoder uses an
+eight-entry LRU pool of isolated persistent FFmpeg child Sessions: sequential
+windows reuse continuous `f32le` output, while a non-contiguous miss restarts
+only the matching fingerprint/output-contract Session with bounded coarse
+preroll followed by output-side exact trim. Stdout look-ahead and
+stderr retention are byte-bounded, and generation cancellation kills, waits,
+and joins the process and pump threads. Linked in-process decoding remains a
+replaceable Adapter choice rather than a different source contract. Decode
+runs only on audio render workers, never on the callback or UI thread.
 
 Playback and export both use this Runtime. Their only differences are Render
 Contract mode, scheduling, error handling, and downstream sink:
@@ -280,8 +285,9 @@ current-video readiness, completed GPU presentation, Audio Device Clock Master
 residency except at most five seconds of startup fallback, absolute delivery
 clock drift at most 20 ms, callback-frame versus monotonic-duration divergence
 at most 100 ms, no callback underrun/recovery or render-to-silence substitution,
-no source decode failure/oversize window, each ten-second source miss within the
-460 ms output high-water duration, the 256 MiB global source-cache budget, and
+no source decode failure/oversize window, a bounded persistent Session pool
+with observed sequential reuse, each steady sequential ten-second window within
+the 460 ms output high-water duration, the 256 MiB global source-cache budget, and
 the shared whole-process Private Commit plateau contract. Missing environment
 fixture, output device, callback facts, native memory facts, or presentation
 facts fail rather than skip.
@@ -293,13 +299,23 @@ and its deterministic pass/fail unit tests are implemented, but no complete
 
 On 2026-07-18 the shorter development Adapter reached the same production path
 on the local Windows machine with CPAL stream generation 1: 13,312 active
-callback frames, 77 callbacks, zero underrun, retained Audio Device Clock
-Master, completed headless GPU work, and zero maximum delivery-clock drift over
-the sampled interval. The same source's first ten-second FFmpeg CLI window miss
-took about 1.02 s, above the 460 ms professional budget. The short smoke proves
-the wiring is executable; the miss measurement predicts a legitimate long-run
-failure until persistent decoder Sessions and bounded look-ahead replace the
-process-per-window Adapter.
+callback frames, 191 callbacks, zero underrun, retained Audio Device Clock
+Master, 78 completed headless GPU executions, and zero maximum delivery-clock drift over
+the sampled interval. Before persistent Session reuse, the same source's first
+ten-second process-per-window miss took about 1.02 s. That historical cold
+measurement justified this work but is not steady-state evidence. The
+professional gate now reports cold, sequential, and random-restart maxima
+separately and applies the 460 ms playback high-water rule only to observed
+sequential reuse. No complete 30-minute reference-machine report has yet
+established that bound.
+
+With a generated 24-second 48 kHz AAC development fixture, the product renderer
+opened one Session, decoded three ten-second windows, reused it twice, and
+reported a 953,057 us cold maximum versus a 142,261 us sequential maximum; PCM
+residency was 9,216,000 bytes. The external parity gate matched sequential
+reference PCM across a sequential boundary and an evicted-window random
+restart, and the real child cancellation gate returned inside 50 ms. These are
+local development facts, not the fixed-machine 30-minute acceptance report.
 
 ## Correctness invariants
 
@@ -334,8 +350,12 @@ Automated tests currently prove:
 - app playback and export compile against the shared Runtime.
 - decoded-media block reads cross aligned windows exactly, reuse hits, evict by
   global PCM bytes, and invalidate after file replacement;
-- a manual external AAC parity gate compares arbitrary bounded windows against
-  a sequential reference decode at start, middle, and tail positions.
+- a manual external AAC parity gate compares a cold window, sequential boundary,
+  and evicted-window random restart against one sequential reference decode;
+- a manual real-child cancellation gate requires kill/wait/join observation
+  within 50 ms and zero success/failure cache admission;
+- concurrent identical window misses elect one decode leader and one follower
+  cache hit;
 - deterministic professional-audio acceptance tests reject missing/fake output
   facts and accept a complete versioned CPAL/A/V/memory evidence set; the real
   30-minute Adapter is ignored and never treats an absent fixture as a pass.
@@ -364,10 +384,10 @@ gates rather than implied support:
 7. Add reference PCM fixtures for fades/Transitions/nesting/PDC, long 29.97 and
    59.94 projects, block-size matrices, seek/discontinuity, plugin failure,
    export parity, and reference-machine realtime load/drift gates.
-8. Replace the per-window FFmpeg CLI decoder Adapter with persistent,
-   cooperatively cancelable decoder Sessions plus bounded look-ahead. Prove
-   worst-case window-miss latency under long-GOP/compressed audio and keep
-   source cache bytes inside the same long-run evidence report.
+8. Prove the persistent, cooperatively cancelable decoder Sessions on the fixed
+   reference machine: cold open, sequential boundary, random restart,
+   cancellation return, cross-source LRU pressure, and source-cache bytes must
+   appear in the same long-run evidence report.
 
 No item may be closed by adding only schema, an effect enum, a disconnected UI,
 or a consumer-specific fallback mixer.

@@ -402,10 +402,10 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 - [ ] Clip gain、pan、fade in/out 已有持久化作者语义和公共执行；补齐产品 UI、细粒度命令/Undo、保存重开与 Golden Project 操作验收。
 - [ ] Track mute 已进入公共执行；实现 transient solo audition、master meter、显式基础 limiter，波形与缩放/代理/relink 后保持正确。
 - [ ] 输入重采样和 channel mapping 有明确策略；unsupported layout 明确降级/拒绝。
-- [ ] generation-owned 单调 `ExecutionCancellationToken` 已贯穿 Audio Playback→Timeline Runtime/嵌套→Decoded Source→媒体窗口，reprime/seek/recovery/shutdown 会先取消旧 token，取消结果不进入成功缓存或 failure memory，执行中 render/source 测试要求 50 ms 内观察；下一步将仍只能在 CLI 子进程前后观察取消的窗口 Adapter 换成可在阻塞 I/O 内合作取消的持久 decoder Session 与有界预读。2026-07-18 本机短素材已测得一次十秒窗口 miss 约 1.02 s，超过 460 ms high watermark，故这是已观测的实时阻塞而非推测优化；完成后须以固定参考机证明 compressed-audio 随机 seek/连续窗口边界满足预算，且源缓存始终不超过 256 MiB。
+- [ ] generation-owned 单调 `ExecutionCancellationToken` 已贯穿 Audio Playback→Timeline Runtime/嵌套→Decoded Source→媒体窗口，reprime/seek/recovery/shutdown 会先取消旧 token，取消结果不进入成功缓存或 failure memory，执行中 render/source 测试要求 50 ms 内观察。媒体 Adapter 已改为最多 8 个按完整源指纹/输出契约寻址的持久 FFmpeg 子进程 Session：顺序窗口复用连续输出、随机 miss 只重启对应 Session并以最多十秒 coarse preroll + output exact trim 保持顺序解码样本坐标、stdout 有界预读、stderr 有界保留但持续排空、等待输出每 5 ms 观察取消并 kill/wait/join；PCM 缓存按完整窗口键 single-flight。仍须在固定参考机同时证明 compressed-audio 冷启动、连续边界、随机重启、取消返回、跨源 LRU 与 256 MiB 缓存预算。
 - [x] 加速 Headless 30 分钟 48 kHz/29.97 门禁通过：精确最终位置、Audio→Synthetic→Audio 连续切换、零交付时钟漂移、零 underrun recovery，Evidence 固定容量且全程最大值不因淘汰丢失。
-- [ ] `cpal_av_48khz_30min_v1` 已实现真实墙钟产品路径 Adapter 和 fail-closed 规则：要求主音频流自身时长覆盖观察区间（不能用容器时长或 EOF 补零代替）、具体 48 kHz stereo CPAL generation、真实 callback consumption、Headless GPU presentation、Ready ≥99.5%、零 underrun/recovery/静默替代、A/V drift ≤20 ms、十秒源窗口 miss ≤460 ms、源缓存 ≤256 MiB 与整进程内存平台；仍须固定参考机执行完整报告。CPAL 只证明 OS 输出消费，声学端到端仍需独立 loopback，且不得用加速门禁替代。
-- [x] 短 CPAL/A/V 开发 smoke 已在本机真实产品路径通过：具体 stream generation、13,312 active callback frames/77 callbacks、零 underrun、Audio Device Clock Master、Headless GPU execution 和零最大交付时钟漂移均有结构化事实；该短证据不替代上一项 30 分钟门禁。
+- [ ] `cpal_av_48khz_30min_v1` 已实现真实墙钟产品路径 Adapter 和 fail-closed 规则：要求主音频流自身时长覆盖观察区间（不能用容器时长或 EOF 补零代替）、具体 48 kHz stereo CPAL generation、真实 callback consumption、Headless GPU presentation、Ready ≥99.5%、零 underrun/recovery/静默替代、A/V drift ≤20 ms、Session resident/peak 不超过容量且真实发生顺序复用、稳态顺序十秒窗口 ≤460 ms、源缓存 ≤256 MiB 与整进程内存平台；冷启动/随机重启分别留证据但不冒充稳态预算。仍须固定参考机执行完整报告。CPAL 只证明 OS 输出消费，声学端到端仍需独立 loopback，且不得用加速门禁替代。
+- [x] 短 CPAL/A/V 开发 smoke 已在本机真实产品路径通过：具体 stream generation、13,312 active callback frames/191 callbacks、零 underrun、Audio Device Clock Master、78 次 Headless GPU execution 和零最大交付时钟漂移均有结构化事实；该短证据不替代上一项 30 分钟门禁。
 
 ### 效果、动画、标题与转场
 

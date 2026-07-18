@@ -1,14 +1,16 @@
 //! Bounded, fingerprinted decoded-audio source windows.
 
+mod session;
+
 use crate::audio::AudioBuffer;
 use mondrian_core::{ExecutionCancellationToken, MondrianError, Result};
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
+use session::PersistentFfmpegAudioWindowDecoder;
 use std::collections::VecDeque;
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const AUDIO_SOURCE_WINDOW_SECONDS: usize = 10;
 const AUDIO_SOURCE_CACHE_ENTRY_CAPACITY: usize = 128;
@@ -23,15 +25,16 @@ pub struct AudioSourceCache {
     entry_capacity: usize,
     byte_budget: usize,
     state: Mutex<AudioSourceCacheState>,
+    window_ready: Condvar,
     decoder: Arc<dyn AudioWindowDecoder>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct AudioSourceIdentity {
-    path: PathBuf,
-    len: u64,
-    modified_secs: Option<u64>,
-    modified_nanos: Option<u32>,
+pub(super) struct AudioSourceIdentity {
+    pub(super) path: PathBuf,
+    pub(super) len: u64,
+    pub(super) modified_secs: Option<u64>,
+    pub(super) modified_nanos: Option<u32>,
 }
 
 impl AudioSourceIdentity {
@@ -87,46 +90,38 @@ struct AudioSourceCacheState {
     decode_max_duration_us: u64,
     evictions: u64,
     oversize_windows: u64,
+    in_flight: Vec<AudioSourceWindowKey>,
+    peak_in_flight: usize,
 }
 
-trait AudioWindowDecoder: Send + Sync {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct AudioWindowDecoderDiagnostics {
+    pub(super) sessions: usize,
+    pub(super) session_capacity: usize,
+    pub(super) peak_sessions: usize,
+    pub(super) session_opens: u64,
+    pub(super) sequential_reuses: u64,
+    pub(super) random_seek_restarts: u64,
+    pub(super) session_evictions: u64,
+    pub(super) cancellations: u64,
+    pub(super) cold_window_max_duration_us: u64,
+    pub(super) sequential_window_max_duration_us: u64,
+    pub(super) random_seek_window_max_duration_us: u64,
+}
+
+pub(super) trait AudioWindowDecoder: Send + Sync {
     fn decode_window(
         &self,
-        path: &Path,
+        source: &AudioSourceIdentity,
         start_frame: i64,
         frame_count: usize,
         sample_rate: u32,
         channels: u8,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<AudioBuffer>;
-}
 
-struct FfmpegCliAudioWindowDecoder;
-
-impl AudioWindowDecoder for FfmpegCliAudioWindowDecoder {
-    fn decode_window(
-        &self,
-        path: &Path,
-        start_frame: i64,
-        frame_count: usize,
-        sample_rate: u32,
-        channels: u8,
-        cancellation: &ExecutionCancellationToken,
-    ) -> Result<AudioBuffer> {
-        if cancellation.is_canceled() {
-            return Err(canceled_audio_decode(path));
-        }
-        let result = decode_audio_window_with_ffmpeg_cli(
-            path,
-            start_frame,
-            frame_count,
-            sample_rate,
-            channels,
-        );
-        if cancellation.is_canceled() {
-            return Err(canceled_audio_decode(path));
-        }
-        result
+    fn diagnostics(&self) -> AudioWindowDecoderDiagnostics {
+        AudioWindowDecoderDiagnostics::default()
     }
 }
 
@@ -169,6 +164,32 @@ pub struct AudioSourceCacheDiagnostics {
     pub evictions: u64,
     /// Decoded windows too large for the configured byte budget and therefore not retained.
     pub oversize_windows: u64,
+    /// Distinct source windows currently owned by decode leaders.
+    pub in_flight_decodes: usize,
+    /// Peak simultaneous distinct source-window decodes.
+    pub peak_in_flight_decodes: usize,
+    /// Resident or admitted persistent decode-session slots.
+    pub decoder_sessions: usize,
+    /// Configured persistent decode-session slot capacity.
+    pub decoder_session_capacity: usize,
+    /// Peak resident or admitted persistent decode-session slots.
+    pub decoder_peak_sessions: usize,
+    /// Persistent decoder process opens.
+    pub decoder_session_opens: u64,
+    /// Windows supplied by an already-positioned sequential session.
+    pub decoder_sequential_reuses: u64,
+    /// Non-contiguous requests that restarted an existing source session.
+    pub decoder_random_seek_restarts: u64,
+    /// Sessions evicted by bounded decoder-pool pressure.
+    pub decoder_session_evictions: u64,
+    /// Decode sessions terminated by generation cancellation.
+    pub decoder_cancellations: u64,
+    /// Slowest first window from a newly opened decode session.
+    pub decoder_cold_window_max_duration_us: u64,
+    /// Slowest window from an already-positioned sequential session.
+    pub decoder_sequential_window_max_duration_us: u64,
+    /// Slowest first window after a random-seek session restart.
+    pub decoder_random_seek_window_max_duration_us: u64,
 }
 
 impl AudioSourceCache {
@@ -181,7 +202,7 @@ impl AudioSourceCache {
             AUDIO_SOURCE_WINDOW_SECONDS,
             AUDIO_SOURCE_CACHE_ENTRY_CAPACITY,
             AUDIO_SOURCE_CACHE_BYTE_BUDGET,
-            Arc::new(FfmpegCliAudioWindowDecoder),
+            Arc::new(PersistentFfmpegAudioWindowDecoder::default()),
         )
     }
 
@@ -201,6 +222,7 @@ impl AudioSourceCache {
             entry_capacity: entry_capacity.max(1),
             byte_budget: byte_budget.max(1),
             state: Mutex::new(AudioSourceCacheState::default()),
+            window_ready: Condvar::new(),
             decoder,
         }
     }
@@ -216,6 +238,7 @@ impl AudioSourceCache {
     /// Capture bounded residency and execution evidence.
     pub fn diagnostics(&self) -> AudioSourceCacheDiagnostics {
         let state = self.state.lock();
+        let decoder = self.decoder.diagnostics();
         AudioSourceCacheDiagnostics {
             entries: state.entries.len(),
             failures: state.failures.len(),
@@ -230,12 +253,20 @@ impl AudioSourceCache {
             decode_max_duration_us: state.decode_max_duration_us,
             evictions: state.evictions,
             oversize_windows: state.oversize_windows,
+            in_flight_decodes: state.in_flight.len(),
+            peak_in_flight_decodes: state.peak_in_flight,
+            decoder_sessions: decoder.sessions,
+            decoder_session_capacity: decoder.session_capacity,
+            decoder_peak_sessions: decoder.peak_sessions,
+            decoder_session_opens: decoder.session_opens,
+            decoder_sequential_reuses: decoder.sequential_reuses,
+            decoder_random_seek_restarts: decoder.random_seek_restarts,
+            decoder_session_evictions: decoder.session_evictions,
+            decoder_cancellations: decoder.cancellations,
+            decoder_cold_window_max_duration_us: decoder.cold_window_max_duration_us,
+            decoder_sequential_window_max_duration_us: decoder.sequential_window_max_duration_us,
+            decoder_random_seek_window_max_duration_us: decoder.random_seek_window_max_duration_us,
         }
-    }
-
-    /// Drop every decoded window and remembered failure.
-    pub fn clear(&self) {
-        *self.state.lock() = AudioSourceCacheState::default();
     }
 
     fn window(
@@ -246,7 +277,7 @@ impl AudioSourceCache {
         if cancellation.is_canceled() {
             return Err(canceled_audio_decode(&key.source.path));
         }
-        {
+        loop {
             let mut state = self.state.lock();
             if let Some(index) = state.entries.iter().position(|entry| entry.key == key) {
                 if let Some(entry) = state.entries.remove(index) {
@@ -262,14 +293,25 @@ impl AudioSourceCache {
                     reason: failure.reason.clone(),
                 });
             }
+            if state.in_flight.iter().any(|in_flight| in_flight == &key) {
+                self.window_ready.wait_for(&mut state, Duration::from_millis(5));
+                drop(state);
+                if cancellation.is_canceled() {
+                    return Err(canceled_audio_decode(&key.source.path));
+                }
+                continue;
+            }
             state.misses = state.misses.saturating_add(1);
+            state.in_flight.push(key.clone());
+            state.peak_in_flight = state.peak_in_flight.max(state.in_flight.len());
+            break;
         }
 
         let decode_started = Instant::now();
         let decoded = self
             .decoder
             .decode_window(
-                &key.source.path,
+                &key.source,
                 key.start_frame,
                 self.window_frames,
                 self.sample_rate,
@@ -279,6 +321,7 @@ impl AudioSourceCache {
             .and_then(|buffer| self.validate_window(&key, buffer));
         let decode_duration_us = decode_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
         if cancellation.is_canceled() {
+            self.finish_in_flight(&key);
             return Err(canceled_audio_decode(&key.source.path));
         }
         match decoded {
@@ -291,13 +334,6 @@ impl AudioSourceCache {
                     state.decode_total_duration_us.saturating_add(decode_duration_us);
                 state.decode_max_duration_us = state.decode_max_duration_us.max(decode_duration_us);
                 state.failures.retain(|failure| failure.key != key);
-                if let Some(index) = state.entries.iter().position(|entry| entry.key == key) {
-                    if let Some(entry) = state.entries.remove(index) {
-                        let existing = Arc::clone(&entry.buffer);
-                        state.entries.push_front(entry);
-                        return Ok(existing);
-                    }
-                }
                 while !state.entries.is_empty()
                     && (state.entries.len() >= self.entry_capacity
                         || state.reserved_bytes.saturating_add(bytes) > self.byte_budget)
@@ -309,6 +345,7 @@ impl AudioSourceCache {
                 }
                 if bytes <= self.byte_budget {
                     state.reserved_bytes = state.reserved_bytes.saturating_add(bytes);
+                    state.in_flight.retain(|in_flight| in_flight != &key);
                     state.entries.push_front(AudioSourceWindowEntry {
                         key,
                         buffer: Arc::clone(&buffer),
@@ -316,7 +353,9 @@ impl AudioSourceCache {
                     });
                 } else {
                     state.oversize_windows = state.oversize_windows.saturating_add(1);
+                    state.in_flight.retain(|in_flight| in_flight != &key);
                 }
+                self.window_ready.notify_all();
                 Ok(buffer)
             }
             Err(error) => {
@@ -327,15 +366,22 @@ impl AudioSourceCache {
                     state.decode_total_duration_us.saturating_add(decode_duration_us);
                 state.decode_max_duration_us = state.decode_max_duration_us.max(decode_duration_us);
                 state.failures.retain(|failure| failure.key != key);
+                state.in_flight.retain(|in_flight| in_flight != &key);
                 state
                     .failures
                     .push_front(AudioSourceFailureEntry { key, reason: reason.clone() });
                 while state.failures.len() > AUDIO_SOURCE_FAILURE_CAPACITY {
                     state.failures.pop_back();
                 }
+                self.window_ready.notify_all();
                 Err(error)
             }
         }
+    }
+
+    fn finish_in_flight(&self, key: &AudioSourceWindowKey) {
+        self.state.lock().in_flight.retain(|in_flight| in_flight != key);
+        self.window_ready.notify_all();
     }
 
     fn validate_window(
@@ -451,82 +497,14 @@ impl AudioSourceReader {
     }
 }
 
-fn canceled_audio_decode(path: &Path) -> MondrianError {
+pub(super) fn canceled_audio_decode(path: &Path) -> MondrianError {
     MondrianError::DecodeFailed {
         asset_id: path.display().to_string(),
         reason: "audio render generation was canceled".to_owned(),
     }
 }
 
-fn decode_audio_window_with_ffmpeg_cli(
-    path: &Path,
-    start_frame: i64,
-    frame_count: usize,
-    sample_rate: u32,
-    channels: u8,
-) -> Result<AudioBuffer> {
-    let sample_rate = sample_rate.max(8_000);
-    let channels = channels.max(1);
-    let start_frame = start_frame.max(0);
-    let output = Command::new("ffmpeg")
-        .arg("-v")
-        .arg("error")
-        .arg("-nostdin")
-        .arg("-accurate_seek")
-        .arg("-ss")
-        .arg(audio_frame_timestamp(start_frame, sample_rate))
-        .arg("-i")
-        .arg(path)
-        .arg("-map")
-        .arg("0:a:0")
-        .arg("-vn")
-        .arg("-sn")
-        .arg("-dn")
-        .arg("-t")
-        .arg(audio_frame_timestamp(
-            i64::try_from(frame_count).unwrap_or(i64::MAX),
-            sample_rate,
-        ))
-        .arg("-f")
-        .arg("f32le")
-        .arg("-acodec")
-        .arg("pcm_f32le")
-        .arg("-ac")
-        .arg(channels.to_string())
-        .arg("-ar")
-        .arg(sample_rate.to_string())
-        .arg("pipe:1")
-        .output()
-        .map_err(|error| MondrianError::DecodeFailed {
-            asset_id: path.display().to_string(),
-            reason: format!("调用 ffmpeg 窗口解码失败: {error}"),
-        })?;
-
-    if !output.status.success() {
-        return Err(MondrianError::DecodeFailed {
-            asset_id: path.display().to_string(),
-            reason: format!(
-                "ffmpeg 音频窗口解码失败: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ),
-        });
-    }
-    if output.stdout.len() % std::mem::size_of::<f32>() != 0 {
-        return Err(MondrianError::DecodeFailed {
-            asset_id: path.display().to_string(),
-            reason: "ffmpeg returned a truncated f32le audio window".to_owned(),
-        });
-    }
-
-    let maximum_samples = frame_count.saturating_mul(usize::from(channels));
-    let mut samples = Vec::with_capacity((output.stdout.len() / 4).min(maximum_samples));
-    for chunk in output.stdout.chunks_exact(4).take(maximum_samples) {
-        samples.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-    }
-    Ok(AudioBuffer { samples, sample_rate, channels })
-}
-
-fn audio_frame_timestamp(frame: i64, sample_rate: u32) -> String {
+pub(super) fn audio_frame_timestamp(frame: i64, sample_rate: u32) -> String {
     let frame = frame.max(0) as u128;
     let sample_rate = u128::from(sample_rate.max(1));
     let seconds = frame / sample_rate;
@@ -554,7 +532,7 @@ mod tests {
     impl AudioWindowDecoder for RampWindowDecoder {
         fn decode_window(
             &self,
-            _path: &Path,
+            _source: &AudioSourceIdentity,
             start_frame: i64,
             frame_count: usize,
             sample_rate: u32,
@@ -582,10 +560,16 @@ mod tests {
         entered: AtomicBool,
     }
 
+    struct SingleFlightWindowDecoder {
+        calls: AtomicU64,
+        entered: AtomicBool,
+        release: AtomicBool,
+    }
+
     impl AudioWindowDecoder for MalformedWindowDecoder {
         fn decode_window(
             &self,
-            _path: &Path,
+            _source: &AudioSourceIdentity,
             _start_frame: i64,
             frame_count: usize,
             sample_rate: u32,
@@ -604,7 +588,7 @@ mod tests {
     impl AudioWindowDecoder for BlockingWindowDecoder {
         fn decode_window(
             &self,
-            path: &Path,
+            source: &AudioSourceIdentity,
             _start_frame: i64,
             _frame_count: usize,
             _sample_rate: u32,
@@ -615,7 +599,30 @@ mod tests {
             while !cancellation.is_canceled() {
                 std::thread::yield_now();
             }
-            Err(canceled_audio_decode(path))
+            Err(canceled_audio_decode(&source.path))
+        }
+    }
+
+    impl AudioWindowDecoder for SingleFlightWindowDecoder {
+        fn decode_window(
+            &self,
+            _source: &AudioSourceIdentity,
+            _start_frame: i64,
+            frame_count: usize,
+            sample_rate: u32,
+            channels: u8,
+            _cancellation: &ExecutionCancellationToken,
+        ) -> Result<AudioBuffer> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.entered.store(true, Ordering::Release);
+            while !self.release.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            Ok(AudioBuffer {
+                samples: vec![0.0; frame_count * usize::from(channels)],
+                sample_rate,
+                channels,
+            })
         }
     }
 
@@ -701,9 +708,57 @@ mod tests {
                 byte_budget: 1_000_000,
                 entry_capacity: 2,
                 misses: 1,
+                peak_in_flight_decodes: 1,
                 ..AudioSourceCacheDiagnostics::default()
             }
         );
+    }
+
+    #[test]
+    fn concurrent_same_window_miss_has_one_decode_leader() {
+        let mut file = tempfile::NamedTempFile::new().expect("temporary source");
+        file.write_all(b"source").expect("source bytes");
+        file.flush().expect("flush source");
+        let decoder = Arc::new(SingleFlightWindowDecoder {
+            calls: AtomicU64::new(0),
+            entered: AtomicBool::new(false),
+            release: AtomicBool::new(false),
+        });
+        let cache = Arc::new(AudioSourceCache::with_decoder(
+            48_000,
+            2,
+            1,
+            2,
+            1_000_000,
+            decoder.clone(),
+        ));
+        let first_reader = cache.open(file.path()).expect("open first reader");
+        let second_reader = first_reader.clone();
+        let first = std::thread::spawn(move || {
+            let mut destination = vec![0.0; 2_048 * 2];
+            first_reader.read_interleaved(0, 2_048, 2, &mut destination)
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && !decoder.entered.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        assert!(decoder.entered.load(Ordering::Acquire));
+        let second = std::thread::spawn(move || {
+            let mut destination = vec![0.0; 2_048 * 2];
+            second_reader.read_interleaved(0, 2_048, 2, &mut destination)
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(decoder.calls.load(Ordering::Relaxed), 1);
+        decoder.release.store(true, Ordering::Release);
+        first.join().expect("first reader returns").expect("first read");
+        second.join().expect("second reader returns").expect("second read");
+
+        let diagnostics = cache.diagnostics();
+        assert_eq!(decoder.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(diagnostics.misses, 1);
+        assert_eq!(diagnostics.hits, 1);
+        assert_eq!(diagnostics.in_flight_decodes, 0);
+        assert_eq!(diagnostics.peak_in_flight_decodes, 1);
     }
 
     #[test]
@@ -815,11 +870,21 @@ mod tests {
         let channels = 2;
         let full = decode_audio_file_with_ffmpeg_cli(&path, sample_rate, channels)
             .expect("sequential reference decode");
-        let cache = Arc::new(AudioSourceCache::new(sample_rate, channels));
+        assert!(
+            full.frame_count() >= sample_rate as usize * 2 + 2_048,
+            "manual parity source must contain at least two seconds of audio"
+        );
+        let cache = Arc::new(AudioSourceCache::with_decoder(
+            sample_rate,
+            channels,
+            1,
+            1,
+            sample_rate as usize * usize::from(channels) * std::mem::size_of::<f32>(),
+            Arc::new(PersistentFfmpegAudioWindowDecoder::default()),
+        ));
         let reader = cache.open(&path).expect("open bounded source");
         let frames = 2_048usize;
-        let final_start = full.frame_count().saturating_sub(frames);
-        for start in [0usize, sample_rate as usize / 2, final_start] {
+        for start in [0usize, sample_rate as usize, 0] {
             if start.saturating_add(frames) > full.frame_count() {
                 continue;
             }
@@ -840,7 +905,50 @@ mod tests {
             );
         }
         let diagnostics = cache.diagnostics();
-        assert!(diagnostics.entries > 0);
+        assert_eq!(diagnostics.entries, 1);
         assert!(diagnostics.reserved_bytes <= diagnostics.byte_budget);
+        assert_eq!(diagnostics.decoder_session_opens, 2);
+        assert_eq!(diagnostics.decoder_sequential_reuses, 1);
+        assert_eq!(diagnostics.decoder_random_seek_restarts, 1);
+        assert_eq!(diagnostics.decoder_sessions, 1);
+        assert!(diagnostics.decoder_peak_sessions <= diagnostics.decoder_session_capacity);
+    }
+
+    #[test]
+    #[ignore = "manual real-media cancellation gate; requires MONDRIAN_AUDIO_EXTERNAL_MEDIA_PATH"]
+    fn external_persistent_audio_session_observes_cancellation() {
+        let Some(path) = std::env::var_os("MONDRIAN_AUDIO_EXTERNAL_MEDIA_PATH").map(PathBuf::from)
+        else {
+            eprintln!("skipped: MONDRIAN_AUDIO_EXTERNAL_MEDIA_PATH not set");
+            return;
+        };
+        let cache = Arc::new(AudioSourceCache::new(48_000, 2));
+        let reader = cache.open(&path).expect("open bounded source");
+        let cancellation = ExecutionCancellationToken::new();
+        let worker_cancellation = cancellation.clone();
+        let worker = std::thread::spawn(move || {
+            let mut destination = vec![0.0; 2_048 * 2];
+            reader.read_interleaved_cancellable(0, 2_048, 2, &mut destination, &worker_cancellation)
+        });
+        let admission_deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < admission_deadline && cache.diagnostics().decoder_sessions == 0 {
+            std::thread::yield_now();
+        }
+        assert_eq!(cache.diagnostics().decoder_sessions, 1);
+        let canceled_at = Instant::now();
+        cancellation.cancel();
+        let error = worker.join().expect("decode worker returns").expect_err("decode cancels");
+        assert!(
+            canceled_at.elapsed() <= Duration::from_millis(50),
+            "persistent decode cancellation exceeded 50 ms: {:?}",
+            canceled_at.elapsed()
+        );
+        assert!(error.to_string().contains("canceled"));
+        let diagnostics = cache.diagnostics();
+        assert_eq!(diagnostics.entries, 0);
+        assert_eq!(diagnostics.failures, 0);
+        assert_eq!(diagnostics.in_flight_decodes, 0);
+        assert_eq!(diagnostics.decoder_sessions, 0);
+        assert_eq!(diagnostics.decoder_cancellations, 1);
     }
 }

@@ -1630,6 +1630,13 @@ fn audio_bounded_source_external_render_smoke() -> anyhow::Result<()> {
         !media_info.audio_streams.is_empty(),
         "external bounded-audio smoke source has no audio stream"
     );
+    anyhow::ensure!(
+        media_info
+            .primary_audio()
+            .and_then(|stream| stream.duration)
+            .is_some_and(|duration| duration.as_micros() >= 22_000_000),
+        "external bounded-audio smoke requires at least 22 seconds of proven primary audio"
+    );
     let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let root_dir = std::env::temp_dir().join(format!("mondrian_audio_source_smoke_{uniq}"));
     fs::create_dir_all(&root_dir)?;
@@ -1637,7 +1644,7 @@ fn audio_bounded_source_external_render_smoke() -> anyhow::Result<()> {
         let library = AssetLibrary::open(root_dir.join("library"))?;
         let asset_id = library.upsert_media_file_with_info(&media_path, media_info)?;
         let mut sequence = Sequence::new("Bounded audio source smoke");
-        let duration = TimelineTime::new(3, 1)?;
+        let duration = TimelineTime::new(22, 1)?;
         let track_id = sequence.audio_tracks[0].id;
         sequence.add_media_audio_clip(
             track_id,
@@ -1654,7 +1661,7 @@ fn audio_bounded_source_external_render_smoke() -> anyhow::Result<()> {
             2,
         )?;
         let cancellation = mondrian_core::ExecutionCancellationToken::new();
-        for start_sample in [0, 24_000, 96_000] {
+        for start_sample in [0, 24_000, 96_000, 480_000, 960_000] {
             let rendered = renderer.render(
                 AudioPcmRenderRequest {
                     start_sample,
@@ -1675,15 +1682,24 @@ fn audio_bounded_source_external_render_smoke() -> anyhow::Result<()> {
         }
         let diagnostics = cache.diagnostics();
         anyhow::ensure!(
-            diagnostics.entries == 1,
+            diagnostics.entries == 3,
             "unexpected source residency: {diagnostics:?}"
         );
         anyhow::ensure!(
             diagnostics.reserved_bytes <= diagnostics.byte_budget,
             "audio source cache exceeded byte budget: {diagnostics:?}"
         );
-        anyhow::ensure!(diagnostics.decode_successes == 1, "{diagnostics:?}");
+        anyhow::ensure!(diagnostics.decode_successes == 3, "{diagnostics:?}");
         anyhow::ensure!(diagnostics.hits >= 2, "{diagnostics:?}");
+        anyhow::ensure!(diagnostics.decoder_session_opens == 1, "{diagnostics:?}");
+        anyhow::ensure!(
+            diagnostics.decoder_sequential_reuses == 2,
+            "{diagnostics:?}"
+        );
+        anyhow::ensure!(
+            diagnostics.decoder_random_seek_restarts == 0,
+            "{diagnostics:?}"
+        );
         eprintln!(
             "MONDRIAN_PERF_JSON={}",
             serde_json::json!({
@@ -1695,6 +1711,13 @@ fn audio_bounded_source_external_render_smoke() -> anyhow::Result<()> {
                 "misses": diagnostics.misses,
                 "decode_successes": diagnostics.decode_successes,
                 "decode_max_duration_us": diagnostics.decode_max_duration_us,
+                "decoder_sessions": diagnostics.decoder_sessions,
+                "decoder_session_capacity": diagnostics.decoder_session_capacity,
+                "decoder_session_opens": diagnostics.decoder_session_opens,
+                "decoder_sequential_reuses": diagnostics.decoder_sequential_reuses,
+                "decoder_random_seek_restarts": diagnostics.decoder_random_seek_restarts,
+                "decoder_cold_window_max_duration_us": diagnostics.decoder_cold_window_max_duration_us,
+                "decoder_sequential_window_max_duration_us": diagnostics.decoder_sequential_window_max_duration_us,
                 "evictions": diagnostics.evictions,
                 "passed": true,
             })
