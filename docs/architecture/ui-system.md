@@ -180,6 +180,17 @@ mutation, generation state, or failure policy to paint/layout code. Project
 library replacement rotates service generation, and source revision prevents a
 same-asset relink from presenting stale waveform data.
 
+Asset thumbnails follow the same Window boundary but retain an independent
+execution policy. `AppUiHost` owns one
+`app::thumbnail_service::AssetThumbnailService` through the shallow
+`AssetThumbnailAdapter`; the panel performs only a nonblocking lookup and
+receives `Loading`, structured failure, or a resident image. The service—not
+the panel—owns source/color identity, deterministic still decode, bounded
+admission and transport, generation cancellation, weighted raster LRU, failure
+memory, and terminal diagnostics. The adapter converts the validated sRGB
+`ThumbnailRasterFrame` to `RasterImage` without copying its `Arc<[u8]>` and
+cannot manufacture a second cache or scheduling rule.
+
 `app::preview_runtime::PreviewProductionRuntime` owns media preview scheduling.
 `WindowPreviewAdapter` is only its Window output specialization. Each viewer preview request
 starts a monotonic generation, and background media jobs check that their key is

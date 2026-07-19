@@ -60,6 +60,10 @@ _Avoid_: Universal media worker pool, cross-domain job enum, one global capacity
 One immutable terminal classification for a Module-local execution attempt: generation, cross-domain priority, completed/failed/canceled/superseded/rejected disposition, and deadline status. Domain diagnostics retain the detailed reason and resource evidence.
 _Avoid_: Boolean success, tracing log as completion truth, UI-inferred cancellation, shared type owning domain failure taxonomy
 
+**Thumbnail Execution Service**:
+The UI-independent App Module that resolves exact source/color identity, admits and cancels deterministic still work, owns bounded raster/failure residency, and publishes terminal execution evidence. Its product output is a validated encoded RGBA raster; Widget payloads exist only in the Window Adapter.
+_Avoid_: Widget-owned FFmpeg worker, unbounded completion channel, cache keyed only by AssetId, stale publication after relink or color-generation change, UI raster as execution payload
+
 **Playback Quality Policy**:
 The allowed temporary preview resolution and user-selected proxy/original policy for a Playback Session.
 _Avoid_: Quality flag
@@ -322,6 +326,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - `app::preview_frame_store::PreviewFrameStoreAdapter` is the sole Frame Store policy Adapter inside `PreviewProductionRuntime`, over the playback-owned generic Store. Window and Headless specializations share it; `app_ui` cannot own another cache or residency policy.
 - `app::preview_raster_frame` owns the validated RGBA8 extent, encoded color identity, exact byte reservation, and stable resource key for a final CPU Preview raster. Cache and stale-reuse paths retain that application contract; the Window Presentation Adapter performs the only conversion to `ViewerFrameImage`, sharing the pixel allocation rather than copying it.
 - The **Waveform Analysis Service** is the sole product owner of Timeline waveform execution. Its key includes asset identity and source revision; project rebinding rotates generation, relink/removal can evict one asset, canceled/stale results cannot populate the success or failure cache, and paint/layout code can only issue a nonblocking lookup.
+- The **Thumbnail Execution Service** is the sole product owner of asset-thumbnail work. Its exact key includes source path/fingerprint plus resolved input/range/working/output color contract; generation and pending ownership gate publication, raster bytes and entries are independently bounded, and the Window Adapter performs the only zero-copy conversion to a Widget image.
 - `app::preview_viewer_plan` owns the **Preview Viewer Plan** representation, stable cache identity, frame-local quality/provenance aggregation, and GPU lowering. It is pure and UI-independent; Window and Headless Adapters cannot rebuild these rules.
 - `app::preview_cpu_execution` owns **Preview CPU Execution** for both nested working-linear output and final CPU raster output. Its result retains input/output/monitor color facts, composite diagnostics, and execution durations; Window and Headless Adapters may record or assert those facts but cannot execute alternate color/composite rules.
 - A **Viewer GPU Preview Runtime** owns GPU execution resources independently of a Window; production Window and headless validation must adapt the same execution lifetime and must not duplicate color or compositing interpretation.

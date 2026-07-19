@@ -87,6 +87,7 @@ pub(crate) mod preview_viewer_plan;
 mod project_lifecycle;
 pub(crate) mod proxy_generation;
 mod selection;
+pub mod thumbnail_service;
 mod timeline_commands;
 mod timeline_editing;
 pub mod ui_actions;

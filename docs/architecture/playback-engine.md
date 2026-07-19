@@ -345,11 +345,11 @@ to compare execution reports: `ExecutionPriority`, an opaque
 `ExecutionDeadline<D>` lowered with one admission-time remaining budget, and
 `ExecutionTerminalEvidence`. It deliberately contains no task enum, queue,
 worker pool, retry rule, or resource budget. The Frame Work Broker remains the
-deep realtime lifecycle Module described below; waveform analysis independently
-owns a bounded background queue and cache; thumbnail, proxy, and Export must
-retain their own domain policies as they adopt the same language. Sharing this
-Interface never authorizes background Export to contend with realtime frame or
-audio work.
+deep realtime lifecycle Module described below; waveform analysis and thumbnail
+execution each independently own a bounded background transport, cache, and
+terminal evidence; proxy and Export must retain their own domain policies as
+they adopt the same language. Sharing this Interface never authorizes
+background Export to contend with realtime frame or audio work.
 
 `FrameWorkBroker<K, D, P>` is the Playback Module's codec- and UI-independent
 request-lifecycle Interface. `K` is an opaque Adapter key, `D` an opaque

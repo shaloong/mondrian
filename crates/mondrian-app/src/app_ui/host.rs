@@ -39,7 +39,7 @@ use crate::app::waveform_service::AudioWaveformService;
 use crate::app::{discover_crash_recovery_candidates, AppState, CrashRecoveryCandidate};
 use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::action_queue::PendingUiActions;
-use crate::app_ui::asset_thumbnails::AssetThumbnailCache;
+use crate::app_ui::asset_thumbnails::AssetThumbnailAdapter;
 use crate::app_ui::pending_close_dialog::PendingCloseDialogAction;
 use crate::app_ui::playback_feedback::ViewerPlaybackFeedback;
 use crate::app_ui::preferences_store::{
@@ -90,7 +90,7 @@ pub struct AppUiHost {
     preferences: AppUiPreferences,
     preferences_path: PathBuf,
     recovery_candidates: Vec<CrashRecoveryCandidate>,
-    asset_thumbnails: AssetThumbnailCache,
+    asset_thumbnails: AssetThumbnailAdapter,
     waveform_service: Arc<AudioWaveformService>,
     preview_service: WindowPreviewAdapter,
     playback_feedback: ViewerPlaybackFeedback,
@@ -118,7 +118,7 @@ impl AppUiHost {
     ) -> Self {
         let system_theme_preset = ThemePreset::Dark;
         set_theme_preset(preferences.theme_preference.resolve(system_theme_preset));
-        let asset_thumbnails = AssetThumbnailCache::new();
+        let asset_thumbnails = AssetThumbnailAdapter::new();
         asset_thumbnails.set_color_context(thumbnail_color_context(&app_state));
         let waveform_service = AudioWaveformService::new();
         waveform_service.set_library(app_state.asset_library.clone());

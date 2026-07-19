@@ -94,6 +94,32 @@ layout pass, or event callback opens FFmpeg, blocks for PCM, owns a worker, or
 reconstructs generation/failure policy. The presentation-width resampler uses
 max aggregation while reducing resolution so a narrow transient cannot vanish.
 
+## Asset thumbnails
+
+`app::thumbnail_service::AssetThumbnailService` is the product composition and
+execution boundary for asset thumbnails. It derives one exact request identity
+from `AssetId`, source path and live file fingerprint, plus the resolved source
+color/range, working space, output space, tone-map, engine, output-transform,
+and OCIO generation contract. A relink, same-path replacement, interpretation
+override, or sequence/project color change therefore cannot reuse an unrelated
+raster or retained failure.
+
+The service owns a 512-demand admission bound, a 16-job deterministic-still
+transport, generation cancellation, publication ownership, a 512-entry/128 MiB
+weighted raster LRU, bounded failure memory, and bounded terminal evidence.
+Completion pumping is constrained by both result count and elapsed time per
+event-loop turn. Canceled and superseded work cannot enter the success or
+failure cache. A worker decodes through `PreviewDecodeRequest` with
+`RandomAccessStillFrame`, observes the shared cancellation token, executes the
+canonical source-to-working and working-to-sRGB output boundaries, and returns
+only a validated UI-independent `ThumbnailRasterFrame`.
+
+`app_ui::asset_thumbnails::AssetThumbnailAdapter` is a shallow Window Adapter.
+It maps a resident raster into `RasterImage` while sharing the same `Arc<[u8]>`;
+it owns no worker, queue, cache, color interpretation, generation, retry, or
+failure policy. Headless verification consumes the service's immutable
+diagnostics and terminal records without importing Widget types.
+
 ## Probe
 
 `MediaInfo::probe(path)` uses FFmpeg format/codec metadata without decoding full
@@ -153,7 +179,7 @@ paint/layout code.
 
 ## Decode and Cache
 
-Decoding and frame caching belong to media/renderer/export paths, not UI widgets. UI panels may request thumbnails or waveform data through app adapters, but must not own FFmpeg state. Waveform execution is owned by the UI-independent App service described above; the media crate owns only its decode and streaming-analysis primitives.
+Decoding and frame caching belong to media/renderer/export paths, not UI widgets. UI panels may request thumbnails or waveform data through app adapters, but must not own FFmpeg state. Waveform and thumbnail execution are owned by the UI-independent App services described above; the media crate owns only its decode and streaming-analysis primitives.
 
 The media decode layer exposes three access contracts, matching the way mature
 NLEs separate playback, interactive navigation, and precise still extraction:
@@ -171,13 +197,13 @@ NLEs separate playback, interactive navigation, and precise still extraction:
 - `PreviewDecodeAccessMode::RandomAccessStillFrame` is for deterministic still
   extraction: thumbnails, poster frames, export fallback, diagnostics, and exact
   one-off requests.
-  App thumbnail workers must pass the already-probed `PreviewFileFingerprint`
-  into the still-frame request and use the same fingerprint for thumbnail cache and
-  failure invalidation, so replaced files cannot reuse stale still-frame UI
-  rasters. Decoded RGBA remains source-encoded: the app thumbnail adapter must
-  resolve asset input color through the active sequence/project policy, execute
-  the renderer source-to-working CPU reference stage, and cross an explicit
-  working-to-sRGB display boundary before constructing a UI raster.
+  The App thumbnail service passes the already-probed
+  `PreviewFileFingerprint` into the still-frame request and uses the same
+  fingerprint for raster and failure invalidation, so replaced files cannot
+  reuse stale output. Decoded RGBA remains source-encoded: the service resolves
+  asset input color through the active sequence/project policy, executes the
+  renderer source-to-working CPU reference stage, and crosses an explicit
+  working-to-sRGB display boundary before publishing its validated raster.
 
 Every request also carries a required `PreviewSourceColorContract`: the
 app-resolved input/source color space plus an authority-aware

@@ -53,6 +53,10 @@ use mondrian_ui_widgets::{
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
+pub use crate::app::thumbnail_service::{
+    ThumbnailFailure as AssetThumbnailFailure,
+    ThumbnailFailureReason as AssetThumbnailFailureReason,
+};
 use crate::app::ui_actions::{
     app_shell_export_output_dialog_action, app_shell_import_media_dialog_action_with_target,
     app_shell_interpret_asset_dialog_action, app_shell_relink_asset_dialog_action,
@@ -194,74 +198,6 @@ pub enum AssetThumbnailState {
     Failed(AssetThumbnailFailure),
     /// A render-ready thumbnail is available.
     Ready(RasterImage),
-}
-
-/// Stable machine-readable reason for a thumbnail failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AssetThumbnailFailureReason {
-    /// Source path is missing or inaccessible.
-    MissingSourceFile,
-    /// Asset ingest has no primary video stream contract.
-    MissingVideoStreamContract,
-    /// Non-color YUV data cannot be interpreted as a presentation thumbnail.
-    NonColorDataUnsupported,
-    /// Missing-metadata policy rejected the input identity.
-    InputColorRejected,
-    /// An internal working identity reached a presentation-only boundary.
-    InternalOutputIdentity,
-    /// UI raster atlas cannot represent the requested encoded output.
-    UnsupportedRasterOutput,
-    /// Background thumbnail worker is unavailable.
-    WorkerUnavailable,
-    /// Media decode failed.
-    DecodeFailed,
-    /// Deterministic still decode was unexpectedly canceled.
-    DecodeCanceled,
-    /// Still decode unexpectedly returned a GPU-resident frame.
-    UnexpectedGpuFrame,
-    /// Source-to-working transform failed.
-    InputTransformFailed,
-    /// Working-to-display transform failed.
-    OutputTransformFailed,
-    /// Final raster payload shape was invalid.
-    InvalidRasterPayload,
-}
-
-impl AssetThumbnailFailureReason {
-    /// Stable diagnostic code for logs, tests, and telemetry.
-    pub const fn code(self) -> &'static str {
-        match self {
-            Self::MissingSourceFile => "missing_source_file",
-            Self::MissingVideoStreamContract => "missing_video_stream_contract",
-            Self::NonColorDataUnsupported => "non_color_data_unsupported",
-            Self::InputColorRejected => "input_color_rejected",
-            Self::InternalOutputIdentity => "internal_output_identity",
-            Self::UnsupportedRasterOutput => "unsupported_raster_output",
-            Self::WorkerUnavailable => "worker_unavailable",
-            Self::DecodeFailed => "decode_failed",
-            Self::DecodeCanceled => "decode_canceled",
-            Self::UnexpectedGpuFrame => "unexpected_gpu_frame",
-            Self::InputTransformFailed => "input_transform_failed",
-            Self::OutputTransformFailed => "output_transform_failed",
-            Self::InvalidRasterPayload => "invalid_raster_payload",
-        }
-    }
-}
-
-/// Structured thumbnail failure retained by the cache and panel model.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AssetThumbnailFailure {
-    /// Stable failure category.
-    pub reason: AssetThumbnailFailureReason,
-    /// Diagnostic detail for logs and support tooling.
-    pub detail: String,
-}
-
-impl AssetThumbnailFailure {
-    /// Build a structured thumbnail failure.
-    pub fn new(reason: AssetThumbnailFailureReason, detail: impl Into<String>) -> Self {
-        Self { reason, detail: detail.into() }
-    }
 }
 
 /// Complete set of view models needed by the app UI panel shell.
