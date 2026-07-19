@@ -1965,25 +1965,32 @@ impl AudioMediaResolver for ExportAudioMediaResolver<'_> {
         &self,
         asset_id: AssetId,
         component_id: AudioSourceComponentId,
-        _contract: AudioRenderContract,
+        contract: AudioRenderContract,
     ) -> Result<Arc<dyn AudioDecodedSource>, String> {
-        if component_id != AudioSourceComponentId::primary() {
+        if self.cache.channel_layout() != contract.channel_layout {
             return Err(format!(
-                "audio component {component_id} is not bound to an export media stream"
+                "audio source cache layout {:?} does not match export render layout {:?}",
+                self.cache.channel_layout(),
+                contract.channel_layout
             ));
         }
-        let path = self
+        let dependency = self
             .timeline
             .media
             .get(&asset_id)
-            .map(|dependency| &dependency.path)
             .ok_or_else(|| format!("Asset {asset_id} has no export media dependency"))?;
-        let source = self.cache.open(path.as_path()).map_err(|error| {
+        let selection = dependency.audio_components.get(&component_id).ok_or_else(|| {
             format!(
-                "failed to open bounded audio source Asset {asset_id} at {}: {error}",
-                path.display()
+                "audio Component {component_id} has no frozen stream binding for Asset {asset_id}"
             )
         })?;
+        let source =
+            self.cache.open(dependency.path.as_path(), selection.clone()).map_err(|error| {
+                format!(
+                    "failed to open bounded audio source Asset {asset_id} at {}: {error}",
+                    dependency.path.display()
+                )
+            })?;
         Ok(Arc::new(ExportDecodedAudioSource(source)))
     }
 }
@@ -3072,6 +3079,7 @@ mod tests {
         crate::preset::ExportMediaDependency {
             source_fingerprint: MediaFileFingerprint::capture(path.as_path()),
             path,
+            audio_components: HashMap::new(),
             detected_color_space,
             interpretation,
             color_diagnostic,
@@ -4430,6 +4438,57 @@ mod tests {
 
         let range = compute_timeline_render_range(&timeline).expect("valid render range");
         assert!(timeline_has_audio_content(&timeline, range).expect("audio presence"));
+    }
+
+    #[test]
+    fn export_audio_resolver_accepts_frozen_non_primary_stream_binding() {
+        let source = tempfile::NamedTempFile::new().expect("temporary audio source");
+        let asset_id = AssetId::new();
+        let component_id = AudioSourceComponentId::new();
+        let fingerprint = MediaFileFingerprint::capture(source.path());
+        let mut dependency = test_media_dependency(
+            source.path().to_path_buf(),
+            None,
+            AssetMediaInterpretation::default(),
+            None,
+        );
+        dependency.audio_components.insert(
+            component_id,
+            mondrian_media::AudioSourceSelection::new(
+                3,
+                mondrian_media::info::ChannelLayout::Stereo,
+                fingerprint,
+            ),
+        );
+        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec709);
+        timeline.media.insert(asset_id, dependency);
+        let cache = Arc::new(AudioSourceCache::new(48_000, AudioChannelLayout::Stereo));
+        let resolver = ExportAudioMediaResolver { timeline: &timeline, cache };
+
+        assert!(resolver
+            .resolve(
+                asset_id,
+                component_id,
+                AudioRenderContract {
+                    sample_rate: 48_000,
+                    channel_layout: AudioChannelLayout::Stereo,
+                    max_block_frames: 1_024,
+                    processing_mode: AudioProcessingMode::Offline,
+                },
+            )
+            .is_ok());
+        assert!(resolver
+            .resolve(
+                asset_id,
+                AudioSourceComponentId::new(),
+                AudioRenderContract {
+                    sample_rate: 48_000,
+                    channel_layout: AudioChannelLayout::Stereo,
+                    max_block_frames: 1_024,
+                    processing_mode: AudioProcessingMode::Offline,
+                },
+            )
+            .is_err());
     }
 
     #[test]

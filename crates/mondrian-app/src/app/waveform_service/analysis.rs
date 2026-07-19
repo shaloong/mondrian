@@ -38,7 +38,7 @@ fn build_waveform_source(
     if job.cancellation.is_canceled() {
         return Err(canceled_failure());
     }
-    let reader = source_cache.open(&job.path).map_err(|error| {
+    let reader = source_cache.open(&job.path, job.selection.clone()).map_err(|error| {
         WaveformFailure::new(WaveformFailureReason::DecodeFailed, error.to_string())
     })?;
     let width = usize::try_from(job.total_frames.min(u64::from(WAVEFORM_MAX_WIDTH)))

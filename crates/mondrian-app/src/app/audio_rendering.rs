@@ -192,11 +192,6 @@ impl AudioMediaResolver for PlaybackMediaResolver {
         component_id: AudioSourceComponentId,
         contract: AudioRenderContract,
     ) -> Result<Arc<dyn AudioDecodedSource>, String> {
-        if component_id != AudioSourceComponentId::primary() {
-            return Err(format!(
-                "audio component {component_id} is not bound to a decoded media stream"
-            ));
-        }
         if self.source_cache.channel_layout() != contract.channel_layout {
             return Err(format!(
                 "audio source cache layout {:?} does not match render layout {:?}",
@@ -209,7 +204,16 @@ impl AudioMediaResolver for PlaybackMediaResolver {
             .get_asset(asset_id)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("Asset {asset_id} is unavailable"))?;
-        let source = self.source_cache.open(asset.path.as_path()).map_err(|error| {
+        let current_fingerprint = mondrian_media::MediaFileFingerprint::capture(&asset.path);
+        let selection = asset
+            .audio_components
+            .resolve_current_selection(component_id, &asset.media_info, current_fingerprint)
+            .map_err(|error| {
+                format!(
+                    "failed to bind audio Component {component_id} for Asset {asset_id}: {error}"
+                )
+            })?;
+        let source = self.source_cache.open(asset.path.as_path(), selection).map_err(|error| {
             format!(
                 "failed to open bounded audio source {} at {}: {error}",
                 asset.id,

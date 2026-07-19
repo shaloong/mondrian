@@ -37,8 +37,9 @@ single-flight leaders, and evictions; an entry-count-only claim is insufficient.
 
 The concrete miss Adapter owns a bounded pool of at most eight persistent
 FFmpeg child-process Sessions. A Session is keyed by the complete source
-fingerprint plus output sample-rate/layout contract, opens at the first
-requested sample, and continuously emits interleaved `f32le`. Consecutive
+fingerprint, absolute selected stream/native layout, and output
+sample-rate/layout contract, opens at the first requested sample, and
+continuously emits interleaved `f32le`. Consecutive
 windows reuse that stream; a non-contiguous miss terminates and reopens only
 that source Session using at most ten seconds of input-side coarse preroll plus
 output-side exact trim. This preserves the sample coordinates of a sequential
@@ -49,20 +50,34 @@ behind the same Interface without changing cache or sample semantics.
 
 The cache and every returned `AudioBuffer` carry `AudioChannelLayout`, not an
 independent channel count. Mono, stereo, and 5.1 use canonical semantic orders;
-the FFmpeg Adapter supplies both `-channel_layout` and the derived `-ac`, with
-5.1 lowered specifically to `5.1(side)`. Cache validation rejects a decoded
-buffer whose layout differs even when its raw sample extent happens to match.
-Native stream selection beyond the stable primary component and general
-up/down-mix policy remain audio-domain work, not decoder guesses.
+the FFmpeg Adapter selects `-map 0:<absolute stream index>` and installs an
+explicit `pan` matrix before setting the declared output layout/count, with 5.1
+lowered specifically to `5.1(side)`. Cache validation rejects a decoded buffer
+whose layout differs even when its raw sample extent happens to match. The
+selection, including its authorizing source fingerprint, participates in
+window single-flight and persistent Session identity, so two Components of one
+file cannot alias the same PCM entry and a file replacement cannot reuse an old
+selection.
 
 Audio probing reads FFmpeg's declared channel layout rather than deriving it
 from channel count. `5.1(side)` and back-surround `5.1` remain distinct;
 nonstandard six-channel, unspecified, and unsupported layouts stay explicit
-probe facts and cannot be promoted to a render contract. Each probed audio
+probe facts. The standard mapping policy admits declared mono/stereo/5.1(side)
+and explicit discrete defaults for otherwise-unlabelled one- or two-channel
+sources; it never promotes an ambiguous 3+ channel count. Each probed audio
 stream also retains its absolute stream index, optional container stream ID,
 language/title metadata, and default disposition. These are selection evidence
 for the Asset Component Catalog, not permission to auto-retarget an authored
 Component when a relinked file differs.
+
+`mondrian-assets` owns the persistent Component Catalog. Import assigns stable
+IDs, persists conservative stream signatures plus the probe source fingerprint,
+and SQLite schema v2 migrates existing complete media records transactionally.
+Relink preserves old identities, discovers only genuinely unclaimed stream
+indices, and leaves same-index signature drift unresolved. Playback resolves
+the live catalog, waveform explicitly requests `primary`, and Export snapshots
+freeze only the reachable bindings; media receives only a validated
+`AudioSourceSelection` and never owns author identity.
 
 Stdout has two bounded 64 KiB look-ahead chunks and stderr retains only its
 latest 64 KiB while always draining the pipe. Generation cancellation is

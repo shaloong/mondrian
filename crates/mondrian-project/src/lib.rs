@@ -24,7 +24,7 @@ pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
 pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 11;
 /// Current embedded asset-library SQLite schema version.
-pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 1;
+pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 2;
 
 /// Entry name for the archive manifest.
 pub const MANIFEST_ENTRY: &str = "manifest.json";
@@ -786,7 +786,10 @@ mod tests {
 
         let runtime = root.join("runtime");
         let loaded = load_project_archive(&source, &runtime).expect("load fixture");
-        assert_eq!(loaded.library_schema_version, 1);
+        assert_eq!(
+            loaded.library_schema_version,
+            PROJECT_LIBRARY_SCHEMA_VERSION
+        );
         let resaved = root.join("resaved.mdp");
         save_project_archive(&loaded.document, &runtime.join("index.db"), &resaved)
             .expect("resave fixture");

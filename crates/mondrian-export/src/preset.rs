@@ -2,7 +2,8 @@
 
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, ColorSpace};
-use mondrian_media::{MediaFileFingerprint, VideoColorDiagnostic};
+use mondrian_core::AudioSourceComponentId;
+use mondrian_media::{AudioSourceSelection, MediaFileFingerprint, VideoColorDiagnostic};
 use mondrian_timeline::sequence::Sequence;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -152,6 +153,9 @@ pub struct ExportMediaDependency {
     pub path: PathBuf,
     /// Exact source revision that the export is allowed to publish from.
     pub source_fingerprint: MediaFileFingerprint,
+    /// Frozen physical bindings for the audio Components used by this snapshot.
+    #[serde(default)]
+    pub audio_components: HashMap<AudioSourceComponentId, AudioSourceSelection>,
     /// Color space explicitly detected from source metadata, when reliable.
     pub detected_color_space: Option<ColorSpace>,
     /// Persistent user interpretation captured with the source revision.

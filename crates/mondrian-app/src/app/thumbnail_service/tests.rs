@@ -139,6 +139,7 @@ fn video_asset(path: PathBuf) -> AssetRecord {
         source: None,
         folder_id: None,
         interpretation: AssetMediaInterpretation::default(),
+        audio_components: Default::default(),
         media_info,
         created_at: String::new(),
         updated_at: String::new(),

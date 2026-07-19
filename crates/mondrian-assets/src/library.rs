@@ -1,12 +1,12 @@
 //! 素材库主入口
 
-use crate::migration::migrate_asset_library;
+use crate::{audio_catalog::AssetAudioComponentCatalog, migration::migrate_asset_library};
 use mondrian_core::{
     timeline_data::AssetMediaInterpretation,
     types::{AssetId, AssetSource},
     MondrianError, Result,
 };
-use mondrian_media::MediaInfo;
+use mondrian_media::{MediaFileFingerprint, MediaInfo};
 use parking_lot::Mutex;
 use rusqlite::{params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -56,6 +56,9 @@ pub struct AssetRecord {
     pub folder_id: Option<String>,
     #[serde(default)]
     pub interpretation: AssetMediaInterpretation,
+    /// Stable logical audio Components and their conservative stream bindings.
+    #[serde(default)]
+    pub audio_components: AssetAudioComponentCatalog,
     pub media_info: MediaInfo,
     pub created_at: String,
     pub updated_at: String,
@@ -125,6 +128,7 @@ impl AssetLibrary {
         })?;
         info.path = canonical_path.clone();
         let kind = detect_asset_kind(&info, &canonical_path)?;
+        let source_fingerprint = MediaFileFingerprint::capture(&canonical_path);
 
         let name = canonical_path
             .file_name()
@@ -136,32 +140,48 @@ impl AssetLibrary {
         let now = chrono::Utc::now().to_rfc3339();
         let db = self.db.lock();
 
-        let existing_id = db
+        let existing = db
             .query_row(
-                "SELECT id FROM assets WHERE path = ?1",
-                rusqlite::params![path_str],
-                |row| row.get::<_, String>(0),
+                "SELECT id, audio_components FROM assets WHERE path = ?1",
+                rusqlite::params![&path_str],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
-            .ok();
+            .optional()
+            .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
 
-        let id = match existing_id {
-            Some(existing) => {
-                let parsed = Uuid::parse_str(&existing).map_err(|e| {
+        let (id, audio_components) = match existing {
+            Some((existing_id, existing_catalog)) => {
+                let parsed = Uuid::parse_str(&existing_id).map_err(|e| {
                     MondrianError::AssetDbError { reason: format!("invalid asset id in db: {e}") }
                 })?;
-                AssetId(parsed)
+                let catalog = serde_json::from_str::<AssetAudioComponentCatalog>(&existing_catalog)
+                    .map_err(|e| MondrianError::AssetDbError {
+                        reason: format!("invalid audio Component catalog in db: {e}"),
+                    })?
+                    .reconcile(&info, source_fingerprint)
+                    .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+                (AssetId(parsed), catalog)
             }
-            None => AssetId::new(),
+            None => (
+                AssetId::new(),
+                AssetAudioComponentCatalog::from_media_info(&info, source_fingerprint),
+            ),
         };
 
         let metadata_json = serde_json::to_string(&info)?;
+        let audio_components_json = serde_json::to_string(&audio_components)?;
         let interpretation_json = serde_json::to_string(&AssetMediaInterpretation::default())?;
         db.execute(
-            "INSERT OR REPLACE INTO assets \
-             (id, name, asset_type, path, tags, metadata, interpretation, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, \
-                COALESCE((SELECT interpretation FROM assets WHERE path = ?4), ?7), \
-                COALESCE((SELECT created_at FROM assets WHERE path = ?4), ?8), ?8)",
+            "INSERT INTO assets \
+             (id, name, asset_type, path, tags, metadata, interpretation, audio_components, \
+              created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9) \
+             ON CONFLICT(path) DO UPDATE SET \
+                name = excluded.name, \
+                asset_type = excluded.asset_type, \
+                metadata = excluded.metadata, \
+                audio_components = excluded.audio_components, \
+                updated_at = excluded.updated_at",
             rusqlite::params![
                 id.0.to_string(),
                 name,
@@ -170,6 +190,7 @@ impl AssetLibrary {
                 "[]",
                 metadata_json,
                 interpretation_json,
+                audio_components_json,
                 now
             ],
         )
@@ -191,12 +212,14 @@ impl AssetLibrary {
         let synthetic_path = synthetic_adjustment_layer_path(asset_id);
         let metadata_json = serde_json::to_string(&MediaInfo::synthetic_adjustment_layer())?;
         let interpretation_json = serde_json::to_string(&AssetMediaInterpretation::default())?;
+        let audio_components_json = serde_json::to_string(&AssetAudioComponentCatalog::default())?;
         let db = self.db.lock();
 
         db.execute(
             "INSERT INTO assets \
-             (id, name, asset_type, path, tags, metadata, interpretation, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+             (id, name, asset_type, path, tags, metadata, interpretation, audio_components, \
+              created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
             rusqlite::params![
                 asset_id.0.to_string(),
                 asset_name,
@@ -205,6 +228,7 @@ impl AssetLibrary {
                 "[]",
                 metadata_json,
                 interpretation_json,
+                audio_components_json,
                 now
             ],
         )
@@ -224,12 +248,14 @@ impl AssetLibrary {
         let synthetic_path = synthetic_solid_color_path(asset_id);
         let metadata_json = serde_json::to_string(&MediaInfo::synthetic_solid_color())?;
         let interpretation_json = serde_json::to_string(&AssetMediaInterpretation::default())?;
+        let audio_components_json = serde_json::to_string(&AssetAudioComponentCatalog::default())?;
         let db = self.db.lock();
 
         db.execute(
             "INSERT INTO assets \
-             (id, name, asset_type, path, tags, metadata, interpretation, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+             (id, name, asset_type, path, tags, metadata, interpretation, audio_components, \
+              created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
             rusqlite::params![
                 asset_id.0.to_string(),
                 asset_name,
@@ -238,6 +264,7 @@ impl AssetLibrary {
                 "[]",
                 metadata_json,
                 interpretation_json,
+                audio_components_json,
                 now
             ],
         )
@@ -254,21 +281,22 @@ impl AssetLibrary {
 
         let info = MediaInfo::probe(&canonical_path)?;
         let kind = detect_asset_kind(&info, &canonical_path)?;
+        let source_fingerprint = MediaFileFingerprint::capture(&canonical_path);
         let now = chrono::Utc::now().to_rfc3339();
         let metadata_json = serde_json::to_string(&info)?;
         let path_str = canonical_path.to_string_lossy().to_string();
 
         let db = self.db.lock();
-        let existing_kind = db
+        let existing = db
             .query_row(
-                "SELECT asset_type FROM assets WHERE id = ?1 LIMIT 1",
+                "SELECT asset_type, audio_components FROM assets WHERE id = ?1 LIMIT 1",
                 rusqlite::params![asset_id.0.to_string()],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()
             .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
 
-        let Some(existing_kind) = existing_kind else {
+        let Some((existing_kind, existing_catalog)) = existing else {
             return Err(MondrianError::AssetNotFound { asset_id: asset_id.to_string() });
         };
 
@@ -282,10 +310,26 @@ impl AssetLibrary {
             });
         }
 
+        let audio_components =
+            serde_json::from_str::<AssetAudioComponentCatalog>(&existing_catalog)
+                .map_err(|e| MondrianError::AssetDbError {
+                    reason: format!("invalid audio Component catalog in db: {e}"),
+                })?
+                .reconcile(&info, source_fingerprint)
+                .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
+        let audio_components_json = serde_json::to_string(&audio_components)?;
+
         let changed = db
             .execute(
-                "UPDATE assets SET path = ?1, metadata = ?2, updated_at = ?3 WHERE id = ?4",
-                rusqlite::params![path_str, metadata_json, now, asset_id.0.to_string()],
+                "UPDATE assets SET path = ?1, metadata = ?2, audio_components = ?3, \
+                 updated_at = ?4 WHERE id = ?5",
+                rusqlite::params![
+                    path_str,
+                    metadata_json,
+                    audio_components_json,
+                    now,
+                    asset_id.0.to_string()
+                ],
             )
             .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
 
@@ -306,28 +350,28 @@ impl AssetLibrary {
             let mut stmt = db
                 .prepare(
                     "SELECT id, name, asset_type, path, folder_id, metadata, created_at, updated_at \
-                     , interpretation \
+                     , interpretation, audio_components \
                      FROM assets WHERE folder_id = ?1 ORDER BY updated_at DESC",
                 )
                 .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
             let rows = stmt
                 .query_map(rusqlite::params![fid], parse_asset_row)
                 .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
-            let records: Vec<_> = rows.flatten().collect();
-            Ok(records)
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })
         } else {
             let mut stmt = db
                 .prepare(
                     "SELECT id, name, asset_type, path, folder_id, metadata, created_at, updated_at \
-                     , interpretation \
+                     , interpretation, audio_components \
                      FROM assets ORDER BY updated_at DESC",
                 )
                 .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
             let rows = stmt
                 .query_map([], parse_asset_row)
                 .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
-            let records: Vec<_> = rows.flatten().collect();
-            Ok(records)
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })
         }
     }
 
@@ -336,7 +380,7 @@ impl AssetLibrary {
         let mut stmt = db
             .prepare(
                 "SELECT id, name, asset_type, path, folder_id, metadata, created_at, updated_at \
-                 , interpretation \
+                 , interpretation, audio_components \
                  FROM assets WHERE id = ?1 LIMIT 1",
             )
             .map_err(|e| MondrianError::AssetDbError { reason: e.to_string() })?;
@@ -735,6 +779,7 @@ fn parse_asset_row(row: &rusqlite::Row) -> rusqlite::Result<AssetRecord> {
     let created_at: String = row.get(6)?;
     let updated_at: String = row.get(7)?;
     let interpretation_raw: String = row.get(8)?;
+    let audio_components_raw: String = row.get(9)?;
 
     let asset_id = Uuid::parse_str(&id_raw).map(AssetId).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
@@ -746,6 +791,13 @@ fn parse_asset_row(row: &rusqlite::Row) -> rusqlite::Result<AssetRecord> {
         .map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(e))
         })?;
+    let audio_components =
+        serde_json::from_str::<AssetAudioComponentCatalog>(&audio_components_raw).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(e))
+        })?;
+    audio_components.validate().map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(e))
+    })?;
 
     Ok(AssetRecord {
         id: asset_id,
@@ -755,6 +807,7 @@ fn parse_asset_row(row: &rusqlite::Row) -> rusqlite::Result<AssetRecord> {
         source: None, // legacy DB records; set for new assets only
         folder_id,
         interpretation,
+        audio_components,
         media_info,
         created_at,
         updated_at,
@@ -809,12 +862,13 @@ mod tests {
     use super::*;
     use mondrian_core::{
         timeline_data::{AssetMediaInterpretation, MediaColorInterpretation},
-        ColorSpace,
+        AudioSourceComponentId, ColorSpace,
     };
     use mondrian_media::{
-        info::{PixelFormat, VideoCodec},
-        DetectedColorInterpretation, VideoColorDetectionMethod, VideoColorInterpretationConfidence,
-        VideoColorInterpretationWarning, VideoColorSpaceSource, VideoStreamInfo,
+        info::{AudioCodec, ChannelLayout, PixelFormat, VideoCodec},
+        AudioStreamInfo, DetectedColorInterpretation, VideoColorDetectionMethod,
+        VideoColorInterpretationConfidence, VideoColorInterpretationWarning, VideoColorSpaceSource,
+        VideoStreamInfo,
     };
     use std::time::Duration;
 
@@ -867,6 +921,33 @@ mod tests {
         }
     }
 
+    fn lightweight_audio_info(path: &Path) -> MediaInfo {
+        let stream = |index, stream_id, language: &str, is_default| AudioStreamInfo {
+            index,
+            stream_id: Some(stream_id),
+            language: Some(language.to_owned()),
+            title: None,
+            is_default,
+            codec: AudioCodec::Aac,
+            duration: Some(Duration::from_secs(1)),
+            sample_rate: 48_000,
+            channels: 2,
+            channel_layout: ChannelLayout::Stereo,
+            bit_depth: 24,
+            avg_bitrate: 256_000,
+        };
+        MediaInfo {
+            path: path.to_path_buf(),
+            duration: Duration::from_secs(1),
+            file_size: 1,
+            container: "mov".to_string(),
+            video_streams: Vec::new(),
+            audio_streams: vec![stream(1, 10, "eng", false), stream(3, 30, "jpn", true)],
+            has_video: false,
+            has_audio: true,
+        }
+    }
+
     #[test]
     fn open_and_list_empty() {
         let lib = open_test_library();
@@ -893,6 +974,70 @@ mod tests {
             media_path.canonicalize().expect("canonical path")
         );
         assert_eq!(record.media_info.path, record.path);
+    }
+
+    #[test]
+    fn import_persists_default_stream_as_stable_primary_component() {
+        let lib = open_test_library();
+        let media_dir = tempfile::tempdir().expect("media tempdir");
+        let media_path = media_dir.path().join("dual-audio.mov");
+        std::fs::write(&media_path, [0u8]).expect("media file");
+
+        let asset_id = lib
+            .upsert_media_file_with_info(&media_path, lightweight_audio_info(&media_path))
+            .expect("upsert preprobed media");
+        let record = lib.get_asset(asset_id).expect("get").expect("asset exists");
+        let primary = record
+            .audio_components
+            .resolve(AudioSourceComponentId::primary(), &record.media_info)
+            .expect("primary binding");
+
+        assert_eq!(primary.index, 3);
+        assert_eq!(record.audio_components.components.len(), 2);
+    }
+
+    #[test]
+    fn media_upsert_preserves_asset_side_state_and_component_identities() {
+        let lib = open_test_library();
+        let media_dir = tempfile::tempdir().expect("media tempdir");
+        let media_path = media_dir.path().join("dual-audio.mov");
+        std::fs::write(&media_path, [0u8]).expect("media file");
+        let original_id = lib
+            .upsert_media_file_with_info(&media_path, lightweight_audio_info(&media_path))
+            .expect("initial upsert");
+        let folder_id = lib.create_folder("Dialogue", None).expect("folder");
+        lib.move_asset_to_folder(original_id, Some(&folder_id)).expect("move");
+        let interpretation = AssetMediaInterpretation {
+            color: MediaColorInterpretation::Override { color_space: ColorSpace::Rec2100Pq },
+            ..AssetMediaInterpretation::default()
+        };
+        lib.set_asset_interpretation(original_id, interpretation)
+            .expect("interpretation");
+        let original = lib.get_asset(original_id).expect("get").expect("original");
+        let original_component_ids = original
+            .audio_components
+            .components
+            .iter()
+            .map(|component| component.id)
+            .collect::<Vec<_>>();
+
+        let repeated_id = lib
+            .upsert_media_file_with_info(&media_path, lightweight_audio_info(&media_path))
+            .expect("repeat upsert");
+        let repeated = lib.get_asset(repeated_id).expect("get").expect("repeated");
+
+        assert_eq!(repeated_id, original_id);
+        assert_eq!(repeated.folder_id.as_deref(), Some(folder_id.as_str()));
+        assert_eq!(repeated.interpretation, interpretation);
+        assert_eq!(
+            repeated
+                .audio_components
+                .components
+                .iter()
+                .map(|component| component.id)
+                .collect::<Vec<_>>(),
+            original_component_ids
+        );
     }
 
     #[test]

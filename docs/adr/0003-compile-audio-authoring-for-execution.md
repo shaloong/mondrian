@@ -12,7 +12,7 @@ same three-stage Interface:
 1. `compile_audio_program` validates a Sequence and resolves one Program Output
    plus an optional transient audition overlay into immutable semantic IR.
 2. `PreparedAudioPlan` binds that IR to one explicit Render Contract: sample
-   rate, channel count, maximum block size, and realtime/offline mode.
+   rate, semantic channel layout, maximum block size, and realtime/offline mode.
 3. `AudioRenderSession` owns exclusive mutable buffers and processor state for
    one run. It renders exact integer-sample windows into caller-owned storage.
 

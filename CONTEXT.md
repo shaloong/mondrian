@@ -157,8 +157,16 @@ One signed integer position on an explicitly identified sample-rate timeline, re
 _Avoid_: Floating-point seconds passed between audio render stages, sample index without rate
 
 **Decoded Audio Source Window**:
-One exact interleaved PCM block for a fingerprinted media component on a prepared Audio Render Contract. Runtime hot windows and media LRU windows may differ in size but preserve the same integer sample coordinates.
+One exact interleaved PCM block for a fingerprinted physical stream selection on a prepared Audio Render Contract. Runtime hot windows and media LRU windows may differ in size but preserve the same integer sample coordinates.
 _Avoid_: Whole-file PCM as the source Interface, per-sample decoder virtual call, path-only cache identity
+
+**Asset Audio Component Catalog**:
+The Asset-owned persisted mapping from stable `AudioSourceComponentId` values to conservative physical-stream signatures and the exact source fingerprint whose probe produced them. Initial default disposition may choose `primary`; relink never retargets an existing identity by index alone.
+_Avoid_: Timeline-owned stream index, `0:a:0`, language/title as identity, silently rebinding after source replacement
+
+**Audio Source Selection**:
+A short-lived media Adapter value containing one absolute container stream index, its probed native layout, and the source fingerprint that authorized the binding. It is part of decoded-window and persistent-Session identity and is revalidated at open.
+_Avoid_: Author state, path-only decode key, channel count presented as layout
 
 **Audio Signal Layout**:
 The semantic channel positions and canonical interleaving order of one audio signal. Mono, stereo, and 5.1 surround currently have explicit stable orders; channel count is always derived from the layout and is never an independent author or render fact.

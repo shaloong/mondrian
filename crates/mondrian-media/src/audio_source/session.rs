@@ -1,8 +1,8 @@
 //! Bounded persistent FFmpeg child-process sessions for decoded source windows.
 
 use super::{
-    audio_frame_timestamp, canceled_audio_decode, AudioSourceIdentity, AudioWindowDecoder,
-    AudioWindowDecoderDiagnostics,
+    audio_frame_timestamp, canceled_audio_decode, mapping::standard_pan_filter,
+    AudioSourceIdentity, AudioWindowDecoder, AudioWindowDecoderDiagnostics,
 };
 use crate::audio::AudioBuffer;
 use mondrian_core::{AudioChannelLayout, ExecutionCancellationToken, MondrianError, Result};
@@ -309,6 +309,16 @@ impl DecodeSession {
     fn spawn(key: &SessionKey, start_frame: i64) -> Result<Self> {
         let (input_start_frame, exact_trim_frames) =
             exact_seek_partition(start_frame, key.sample_rate);
+        let pan_filter =
+            standard_pan_filter(key.source.selection.source_layout(), key.channel_layout)
+                .ok_or_else(|| MondrianError::DecodeFailed {
+                    asset_id: key.source.path.display().to_string(),
+                    reason: format!(
+                        "no explicit standard channel mapping from {:?} to {:?}",
+                        key.source.selection.source_layout(),
+                        key.channel_layout
+                    ),
+                })?;
         let mut command = Command::new("ffmpeg");
         command.arg("-v").arg("error").arg("-nostdin");
         if input_start_frame > 0 {
@@ -324,7 +334,7 @@ impl DecodeSession {
         }
         command
             .arg("-map")
-            .arg("0:a:0")
+            .arg(ffmpeg_stream_map(key.source.selection.stream_index()))
             .arg("-vn")
             .arg("-sn")
             .arg("-dn")
@@ -332,6 +342,8 @@ impl DecodeSession {
             .arg("f32le")
             .arg("-acodec")
             .arg("pcm_f32le")
+            .arg("-filter:a")
+            .arg(pan_filter)
             .arg("-channel_layout")
             .arg(ffmpeg_channel_layout(key.channel_layout))
             .arg("-ac")
@@ -579,6 +591,10 @@ fn ffmpeg_channel_layout(layout: AudioChannelLayout) -> &'static str {
     }
 }
 
+fn ffmpeg_stream_map(stream_index: u32) -> String {
+    format!("0:{stream_index}")
+}
+
 impl Drop for DecodeSession {
     fn drop(&mut self) {
         self.terminate();
@@ -702,5 +718,11 @@ mod tests {
             ffmpeg_channel_layout(AudioChannelLayout::Surround51),
             "5.1(side)"
         );
+    }
+
+    #[test]
+    fn ffmpeg_stream_map_uses_the_absolute_container_index() {
+        assert_eq!(ffmpeg_stream_map(0), "0:0");
+        assert_eq!(ffmpeg_stream_map(7), "0:7");
     }
 }

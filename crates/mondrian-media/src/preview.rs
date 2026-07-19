@@ -2987,7 +2987,9 @@ impl PreviewPlaybackRing {
 /// The optional fields let callers represent missing/unreadable metadata
 /// without falling back to a false stable identity. A successful app/media path
 /// probe should prefer [`MediaFileFingerprint::from_metadata`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct MediaFileFingerprint {
     /// File length in bytes when available.
     pub len: Option<u64>,

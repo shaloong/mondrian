@@ -15,6 +15,12 @@ Persistence is currently handled by `mondrian-app::app::project_lifecycle`.
 streamed into the archive during save and extracted into the runtime directory
 during open.
 
+The current SQLite schema is v2. Its `audio_components` column persists stable
+Asset audio Component identities, conservative stream signatures, and the file
+fingerprint used for the probe. The v1→v2 migration derives catalogs from each
+complete media record inside one migration transaction; malformed metadata
+rolls back the column and version rather than writing a partial binding.
+
 ## Atomic Save
 
 Save writes a temporary archive next to the target, reopens and validates the

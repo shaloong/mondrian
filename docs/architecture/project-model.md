@@ -89,6 +89,13 @@ The project runtime directory contains a SQLite asset library. On save, `library
 
 Generated assets such as adjustment layers and solid colors are represented as library records with synthetic `mondrian://...` paths.
 
+SQLite schema v2 stores an `audio_components` catalog beside probe metadata and
+user interpretation. The catalog owns stable logical audio Component IDs,
+conservative physical-stream signatures, and the source fingerprint that
+authorized them. Timeline and Project JSON never persist FFmpeg stream indices;
+Export copies validated reachable selections into its immutable execution
+snapshot.
+
 ## Format Evolution
 
 The current document layout intentionally stays single-document:
@@ -101,7 +108,7 @@ library/index.db
 
 Archive `format_version`, document `schema_version`, and embedded library
 `PRAGMA user_version` are independent contracts. `manifest.json` records the
-expected library schema version in addition to archive layout. A v1 manifest
+expected library schema version in addition to archive layout. A v2 manifest
 is written with that field explicitly.
 
 Archive and document JSON pass through separate version registries before typed
@@ -139,7 +146,8 @@ contract is shared by Viewer and Timeline, permits signed origins, validates
 drop-frame against the exact Sequence rate, and removes unimplemented
 Feet+Frames values from persisted author data.
 
-SQLite schema ownership remains in `mondrian-assets`. Its ordered Registry uses
+SQLite schema ownership remains in `mondrian-assets`; the current version is
+v2. Its ordered Registry uses
 `PRAGMA user_version`, applies each step in a transaction, validates the current
 tables/columns, and rolls back both DDL and version on failure. The former
 best-effort `ALTER TABLE` calls that discarded errors have been removed.

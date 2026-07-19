@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use mondrian_assets::AssetLibrary;
 use mondrian_core::{
-    AssetId, AudioChannelLayout, ExecutionCancellationToken, ExecutionTerminalDisposition,
-    ExecutionTerminalEvidence,
+    AssetId, AudioChannelLayout, AudioSourceComponentId, ExecutionCancellationToken,
+    ExecutionTerminalDisposition, ExecutionTerminalEvidence,
 };
 pub use mondrian_media::MAX_WAVEFORM_WIDTH as WAVEFORM_MAX_WIDTH;
 use mondrian_media::{AudioSourceCache, AudioSourceCacheDiagnostics};
@@ -355,16 +355,40 @@ impl AudioWaveformService {
                 return;
             }
         };
-        let Some(audio) = record.media_info.primary_audio() else {
-            self.retain_failure(
-                key,
-                generation,
-                WaveformFailure::new(
-                    WaveformFailureReason::AudioStreamUnavailable,
-                    "waveform asset has no probed primary audio stream",
-                ),
-            );
-            return;
+        let audio = match record
+            .audio_components
+            .resolve(AudioSourceComponentId::primary(), &record.media_info)
+        {
+            Ok(audio) => audio,
+            Err(error) => {
+                self.retain_failure(
+                    key,
+                    generation,
+                    WaveformFailure::new(
+                        WaveformFailureReason::AudioStreamUnavailable,
+                        format!("waveform primary audio Component is unavailable: {error}"),
+                    ),
+                );
+                return;
+            }
+        };
+        let selection = match record.audio_components.resolve_current_selection(
+            AudioSourceComponentId::primary(),
+            &record.media_info,
+            mondrian_media::MediaFileFingerprint::capture(&record.path),
+        ) {
+            Ok(selection) => selection,
+            Err(error) => {
+                self.retain_failure(
+                    key,
+                    generation,
+                    WaveformFailure::new(
+                        WaveformFailureReason::AudioStreamUnavailable,
+                        format!("waveform source revision is unresolved: {error}"),
+                    ),
+                );
+                return;
+            }
         };
         let duration = audio.duration.filter(|duration| !duration.is_zero()).or_else(|| {
             (!record.media_info.duration.is_zero()).then_some(record.media_info.duration)
@@ -386,6 +410,7 @@ impl AudioWaveformService {
             key: key.clone(),
             generation,
             path: record.path,
+            selection,
             total_frames,
             cancellation: cancellation.clone(),
         };

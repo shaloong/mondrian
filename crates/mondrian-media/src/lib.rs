@@ -27,7 +27,9 @@ pub use audio_playback::{
     AudioPlaybackEvent, AudioPlaybackMode, AudioPlaybackPoll, AudioPlaybackSnapshot,
     AudioPlaybackState, AudioRenderRecoveryDisposition,
 };
-pub use audio_source::{AudioSourceCache, AudioSourceCacheDiagnostics, AudioSourceReader};
+pub use audio_source::{
+    AudioSourceCache, AudioSourceCacheDiagnostics, AudioSourceReader, AudioSourceSelection,
+};
 pub use decoder::{
     resolve_decoded_video_range, DecodedFrameResidency, DecodedGpuFrameHandleKind,
     DecodedVideoChromaLocation, DecodedVideoMatrix, DecodedVideoRange, DecodedVideoRangeContract,

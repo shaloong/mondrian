@@ -59,22 +59,37 @@ It cannot contain a Track ID, Sequence range, Clip speed, source range, nested
 Sequence ID, Route, or output. Compilation derives those from the owning
 Track/Clip. This prevents two editable copies of placement from diverging.
 
-The current media Adapter binds only the stable
-`AudioSourceComponentId::primary()` logical component. Any other component ID
-fails binding instead of being silently redirected to the primary stream. A
-future asset stream catalog must make additional stable component identities
-resolvable before authoring them.
+`mondrian-assets` persists one `AssetAudioComponentCatalog` per Asset. Initial
+import assigns `AudioSourceComponentId::primary()` to the stream carrying the
+container default disposition, or the first stream only when no default is
+declared; every other stream receives its own persisted ID. A catalog binding
+contains absolute stream index, optional container stream ID, native layout,
+language, and the exact file fingerprint whose probe produced those facts.
+Playback and waveform resolution compare that fingerprint with the live file;
+Export freezes only Component selections reachable from its immutable Sequence
+closure. Unknown IDs, changed files, missing streams, and signature drift fail
+before PCM decode.
+
+Reprobe/relink preserves existing logical IDs and their signatures. A new
+unclaimed stream index receives a new ID, while a changed stream at a claimed
+index remains unresolved until an explicit future rebind operation; neither
+language nor current default disposition may silently retarget authored edits.
 
 The Sequence persists one semantic `AudioChannelLayout`; it does not persist a
 second channel count. The same layout crosses preparation, nested Runtime,
 Playback PCM requests, decoded-source cache, PCM buffers, and Export. Supported
 standard orders are mono `[M]`, stereo `[L, R]`, and 5.1
 `[L, R, C, LFE, Ls, Rs]`. Channel capacity is derived from this value. The
-media Adapter requests both the output sample rate and explicit FFmpeg layout
-(`5.1(side)` for 5.1), so sample-rate conversion and standard-layout mapping
-happen once before PCM enters the Runtime. Unknown component identities or
-layout mismatches fail closed; arbitrary native component catalogs, custom
-layouts, and authored up/down-mix policy remain unfinished.
+media Adapter selects the absolute physical stream with `-map 0:<index>`,
+requests the output sample rate, and installs one explicit FFmpeg `pan` matrix
+before PCM enters the Runtime. All mono/stereo/5.1(side) input/output pairs are
+defined. Stereo fold-down averages L/R; 5.1 fold-down uses -3 dB center and
+side coefficients and deliberately omits LFE. Mono feeds stereo L/R or 5.1
+center; stereo feeds 5.1 L/R. Unlabelled one- and two-channel sources retain an
+`Unspecified` probe fact but use the same explicit discrete defaults required
+for ordinary PCM WAVE compatibility. Unspecified 3+ channel, 5.1(back), 7.1,
+and other layouts fail closed. Custom layouts and user-authored mix matrices
+remain future authoring work; FFmpeg defaults are never that policy.
 
 ### Processing scopes
 
@@ -547,11 +562,11 @@ Automated tests currently prove:
 The architecture is now on the product path, but these are explicit remaining
 gates rather than implied support:
 
-1. Extend the implemented standard mono/stereo/5.1 signal-layout contract and
-   FFmpeg sample-rate/layout lowering with a probed media component catalog,
-   stable non-primary stream binding, declared native layouts, deterministic
-   custom-layout mapping, and authored up/down-mix policy. Unknown identities
-   and layouts must continue to fail instead of being guessed.
+1. Extend the implemented fingerprinted Component Catalog, stable non-primary
+   binding, and explicit mono/stereo/5.1 standard matrices with user-visible
+   Component selection/rebind, deterministic custom-layout mapping, and
+   authored mix-matrix policy. Unknown identities and unsupported layouts must
+   continue to fail instead of being guessed.
 2. Add processor capability negotiation, real built-in stateful processors,
    latency propagation/PDC, seek entry/preroll, discontinuity tests, and nested
    latency evidence.

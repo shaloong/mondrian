@@ -10,6 +10,7 @@ use mondrian_core::{
     AssetId, ExecutionCancellationToken, ExecutionDeadlineStatus, ExecutionPriority,
     ExecutionTerminalDisposition, ExecutionTerminalEvidence,
 };
+use mondrian_media::AudioSourceSelection;
 
 use super::{
     WaveformFailureReason, WaveformTerminalRecord, WAVEFORM_FAILURE_CAPACITY, WAVEFORM_SAMPLE_RATE,
@@ -46,6 +47,7 @@ pub(super) struct WaveformJob {
     pub(super) key: WaveformSourceKey,
     pub(super) generation: u64,
     pub(super) path: PathBuf,
+    pub(super) selection: AudioSourceSelection,
     pub(super) total_frames: u64,
     pub(super) cancellation: ExecutionCancellationToken,
 }

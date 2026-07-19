@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use mondrian_core::{AssetId, ExecutionCancellationToken, ExecutionTerminalDisposition};
+use mondrian_media::{info::ChannelLayout, AudioSourceSelection};
 
 use super::analysis::resample_peaks;
 use super::state::{
@@ -126,6 +127,11 @@ fn canceled_deferred_demand_is_retired_without_worker_admission() {
             key: key.clone(),
             generation: 1,
             path: PathBuf::from("unused-canceled-source.wav"),
+            selection: AudioSourceSelection::new(
+                0,
+                ChannelLayout::Mono,
+                mondrian_media::MediaFileFingerprint::default(),
+            ),
             total_frames: 1,
             cancellation,
         });

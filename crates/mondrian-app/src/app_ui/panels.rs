@@ -9632,6 +9632,7 @@ mod tests {
             source: None,
             folder_id: None,
             interpretation: mondrian_core::timeline_data::AssetMediaInterpretation::default(),
+            audio_components: Default::default(),
             media_info,
             created_at: "2026-06-19T00:00:00Z".to_owned(),
             updated_at: "2026-06-19T00:00:00Z".to_owned(),

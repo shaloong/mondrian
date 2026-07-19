@@ -203,8 +203,10 @@ pub(crate) fn capture_timeline_export_snapshot(
         &mut active_sequences,
         &mut asset_ids,
     )?;
+    let audio_component_ids =
+        collect_reachable_media_audio_components(&sequence, &sequences, &visited_sequences);
 
-    let media = resolve_export_media_dependencies(state, asset_ids)?;
+    let media = resolve_export_media_dependencies(state, asset_ids, &audio_component_ids)?;
     let nested_sequences = sequences
         .into_iter()
         .filter(|candidate| {
@@ -224,6 +226,7 @@ pub(crate) fn capture_timeline_export_snapshot(
 fn resolve_export_media_dependencies(
     state: &AppState,
     asset_ids: HashSet<AssetId>,
+    audio_component_ids: &HashMap<AssetId, HashSet<AudioSourceComponentId>>,
 ) -> std::result::Result<HashMap<AssetId, ExportMediaDependency>, String> {
     if asset_ids.is_empty() {
         return Ok(HashMap::new());
@@ -243,17 +246,29 @@ fn resolve_export_media_dependencies(
 
         let metadata = std::fs::metadata(&asset.path)
             .map_err(|error| format!("素材离线: {} ({error})", asset.path.display()))?;
+        let source_fingerprint = mondrian_media::MediaFileFingerprint::from_metadata(&metadata);
         let detected_color_space =
             asset.media_info.primary_video().and_then(|video| video.detected_color_space);
         let color_diagnostic = asset
             .media_info
             .primary_video()
             .map(mondrian_media::VideoColorDiagnostic::from_stream);
+        let mut audio_components = HashMap::new();
+        for component_id in audio_component_ids.get(&asset_id).into_iter().flatten() {
+            let selection = asset
+                .audio_components
+                .resolve_current_selection(*component_id, &asset.media_info, source_fingerprint)
+                .map_err(|error| {
+                    format!("素材 {asset_id} 的音频 Component {component_id} 无法绑定: {error}")
+                })?;
+            audio_components.insert(*component_id, selection);
+        }
         media.insert(
             asset_id,
             ExportMediaDependency {
                 path: asset.path,
-                source_fingerprint: mondrian_media::MediaFileFingerprint::from_metadata(&metadata),
+                source_fingerprint,
+                audio_components,
                 detected_color_space,
                 interpretation: asset.interpretation,
                 color_diagnostic,
@@ -262,6 +277,37 @@ fn resolve_export_media_dependencies(
     }
 
     Ok(media)
+}
+
+fn collect_reachable_media_audio_components(
+    root: &mondrian_timeline::sequence::Sequence,
+    sequences: &[mondrian_timeline::sequence::Sequence],
+    reachable_sequences: &HashSet<SequenceId>,
+) -> HashMap<AssetId, HashSet<AudioSourceComponentId>> {
+    let mut components = HashMap::<AssetId, HashSet<AudioSourceComponentId>>::new();
+    for sequence in std::iter::once(root).chain(sequences) {
+        if !reachable_sequences.contains(&sequence.id) {
+            continue;
+        }
+        for clip in sequence
+            .audio_tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .filter(|clip| !clip.is_disabled && !clip.is_nested_sequence())
+        {
+            for edit in &clip.audio_components {
+                if !edit.enabled {
+                    continue;
+                }
+                if let mondrian_timeline::audio::AudioComponentSource::Media { component_id } =
+                    &edit.source
+                {
+                    components.entry(clip.asset_id).or_default().insert(*component_id);
+                }
+            }
+        }
+    }
+    components
 }
 
 pub(crate) fn collect_sequence_asset_ids(
@@ -427,9 +473,13 @@ mod tests {
         {
             let seq = state.sequence.as_mut().expect("sequence should exist");
             let tb = seq.time_base();
-            seq.audio_tracks[0]
-                .add_clip(Clip::new(asset_id, tt(0, tb), tt(20, tb)).expect("valid clip"))
-                .expect("add audio clip");
+            let track_id = seq.audio_tracks[0].id;
+            seq.add_media_audio_clip(
+                track_id,
+                Clip::new(asset_id, tt(0, tb), tt(20, tb)).expect("valid clip"),
+                AudioSourceComponentId::primary(),
+            )
+            .expect("add audio clip");
         }
 
         let seq = state.sequence.as_ref().expect("sequence should exist").clone();
@@ -450,6 +500,15 @@ mod tests {
         assert_eq!(
             dependency.source_fingerprint,
             mondrian_media::MediaFileFingerprint::capture(dependency.path.as_path())
+        );
+        let audio_selection = dependency
+            .audio_components
+            .get(&AudioSourceComponentId::primary())
+            .expect("frozen primary audio binding");
+        assert_eq!(audio_selection.stream_index(), 0);
+        assert_eq!(
+            audio_selection.source_layout(),
+            &mondrian_media::info::ChannelLayout::Unspecified(1)
         );
 
         let _ = std::fs::remove_dir_all(temp_root);

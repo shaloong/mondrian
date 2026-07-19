@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS assets (
     tags        TEXT DEFAULT '[]',
     metadata    TEXT DEFAULT '{}',
     interpretation TEXT DEFAULT '{"color":{"mode":"auto"}}',
+    audio_components TEXT NOT NULL DEFAULT '{"components":[]}',
     usage_count INTEGER DEFAULT 0,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL,

@@ -476,6 +476,14 @@ those types instead of carrying a test-private schema copy.
 
 Preview and export may use different scheduling, cache lifetime, and readback strategy. They must share timeline interpretation, clip ordering, effect evaluation, blend semantics, and color-management decisions.
 
+For audio, `TimelineExportSnapshot.media[AssetId]` freezes only stable Component
+bindings reachable from the captured Sequence closure. Each binding carries an
+absolute physical stream index, native layout, and the source fingerprint that
+authorized it. Export resolution cannot consult the live Asset Library, fall
+back to `0:a:0`, or reinterpret a missing Component; it uses the same standard
+channel-matrix lowering as realtime Playback and fails the job when the frozen
+binding or file revision no longer matches.
+
 Preview media decoding must convert source media into the sequence working
 color space before compositing. The source color space resolves from clip
 override first, then explicitly detected media metadata, then the configured

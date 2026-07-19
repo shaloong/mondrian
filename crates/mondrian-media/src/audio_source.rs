@@ -1,6 +1,9 @@
 //! Bounded, fingerprinted decoded-audio source windows.
 
+mod mapping;
 mod session;
+
+pub use mapping::AudioSourceSelection;
 
 use crate::audio::AudioBuffer;
 use mondrian_core::{AudioChannelLayout, ExecutionCancellationToken, MondrianError, Result};
@@ -35,18 +38,26 @@ pub(super) struct AudioSourceIdentity {
     pub(super) len: u64,
     pub(super) modified_secs: Option<u64>,
     pub(super) modified_nanos: Option<u32>,
+    pub(super) selection: AudioSourceSelection,
 }
 
 impl AudioSourceIdentity {
-    fn capture(path: &Path) -> Result<Self> {
+    fn capture(path: &Path, selection: AudioSourceSelection) -> Result<Self> {
         let metadata = std::fs::metadata(path).map_err(|error| MondrianError::DecodeFailed {
             asset_id: path.display().to_string(),
             reason: format!("读取音频源元数据失败: {error}"),
         })?;
-        Ok(Self::from_metadata(path, &metadata))
+        let current_fingerprint = crate::MediaFileFingerprint::from_metadata(&metadata);
+        if current_fingerprint != selection.source_fingerprint() {
+            return Err(MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason: "audio source revision changed after stream selection".to_owned(),
+            });
+        }
+        Ok(Self::from_metadata(path, &metadata, selection))
     }
 
-    fn from_metadata(path: &Path, metadata: &Metadata) -> Self {
+    fn from_metadata(path: &Path, metadata: &Metadata, selection: AudioSourceSelection) -> Self {
         let modified = metadata
             .modified()
             .ok()
@@ -56,6 +67,7 @@ impl AudioSourceIdentity {
             len: metadata.len(),
             modified_secs: modified.map(|duration| duration.as_secs()),
             modified_nanos: modified.map(|duration| duration.subsec_nanos()),
+            selection,
         }
     }
 }
@@ -256,10 +268,24 @@ impl AudioSourceCache {
     }
 
     /// Open one source identity without decoding its complete duration.
-    pub fn open(self: &Arc<Self>, path: &Path) -> Result<AudioSourceReader> {
+    pub fn open(
+        self: &Arc<Self>,
+        path: &Path,
+        selection: AudioSourceSelection,
+    ) -> Result<AudioSourceReader> {
+        if mapping::standard_pan_filter(selection.source_layout(), self.channel_layout).is_none() {
+            return Err(MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason: format!(
+                    "no explicit standard channel mapping from {:?} to {:?}",
+                    selection.source_layout(),
+                    self.channel_layout
+                ),
+            });
+        }
         Ok(AudioSourceReader {
             cache: Arc::clone(self),
-            source: AudioSourceIdentity::capture(path)?,
+            source: AudioSourceIdentity::capture(path, selection)?,
         })
     }
 
@@ -542,8 +568,18 @@ pub(super) fn audio_frame_timestamp(frame: i64, sample_rate: u32) -> String {
 mod tests {
     use super::*;
     use crate::audio::decode_audio_file_with_ffmpeg_cli;
+    use crate::info::ChannelLayout;
+    use crate::MediaFileFingerprint;
     use std::io::Write;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    fn stereo_selection(path: &Path, stream_index: u32) -> AudioSourceSelection {
+        AudioSourceSelection::new(
+            stream_index,
+            ChannelLayout::Stereo,
+            MediaFileFingerprint::capture(path),
+        )
+    }
 
     struct RampWindowDecoder {
         calls: AtomicU64,
@@ -558,7 +594,7 @@ mod tests {
     impl AudioWindowDecoder for RampWindowDecoder {
         fn decode_window(
             &self,
-            _source: &AudioSourceIdentity,
+            source: &AudioSourceIdentity,
             start_frame: i64,
             frame_count: usize,
             sample_rate: u32,
@@ -567,11 +603,12 @@ mod tests {
         ) -> Result<AudioBuffer> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             let channels_usize = channel_layout.channel_count();
+            let stream_offset = source.selection.stream_index() as f32 * 1_000_000.0;
             let mut samples = vec![0.0; frame_count * channels_usize];
             for frame in 0..frame_count {
                 for channel in 0..channels_usize {
                     samples[frame * channels_usize + channel] =
-                        (start_frame + frame as i64) as f32 * 10.0 + channel as f32;
+                        stream_offset + (start_frame + frame as i64) as f32 * 10.0 + channel as f32;
                 }
             }
             Ok(AudioBuffer { samples, sample_rate, channel_layout })
@@ -671,7 +708,8 @@ mod tests {
             byte_budget,
             decoder,
         ));
-        let reader = cache.open(file.path()).expect("open source");
+        let reader =
+            cache.open(file.path(), stereo_selection(file.path(), 0)).expect("open source");
         (file, cache, reader)
     }
 
@@ -696,6 +734,34 @@ mod tests {
     }
 
     #[test]
+    fn physical_stream_selection_is_part_of_cache_identity() {
+        let mut file = tempfile::NamedTempFile::new().expect("temporary source");
+        file.write_all(b"source").expect("source identity");
+        let decoder = Arc::new(RampWindowDecoder::new());
+        let cache = Arc::new(AudioSourceCache::with_decoder(
+            8_000,
+            AudioChannelLayout::Stereo,
+            1,
+            4,
+            4 * 8_000 * 2 * std::mem::size_of::<f32>(),
+            decoder.clone(),
+        ));
+        let first = cache.open(file.path(), stereo_selection(file.path(), 1)).expect("stream one");
+        let second =
+            cache.open(file.path(), stereo_selection(file.path(), 3)).expect("stream three");
+        let mut first_samples = [0.0; 2];
+        let mut second_samples = [0.0; 2];
+
+        first.read_interleaved(0, 1, &mut first_samples).expect("first stream read");
+        second.read_interleaved(0, 1, &mut second_samples).expect("second stream read");
+
+        assert_eq!(first_samples, [1_000_000.0, 1_000_001.0]);
+        assert_eq!(second_samples, [3_000_000.0, 3_000_001.0]);
+        assert_eq!(decoder.calls.load(Ordering::Relaxed), 2);
+        assert_eq!(cache.diagnostics().entries, 2);
+    }
+
+    #[test]
     fn source_window_observes_generation_cancellation() {
         let mut file = tempfile::NamedTempFile::new().expect("temporary source");
         file.write_all(b"source").expect("source bytes");
@@ -709,7 +775,8 @@ mod tests {
             1_000_000,
             decoder.clone(),
         ));
-        let reader = cache.open(file.path()).expect("open source");
+        let reader =
+            cache.open(file.path(), stereo_selection(file.path(), 0)).expect("open source");
         let cancellation = ExecutionCancellationToken::new();
         let worker_cancellation = cancellation.clone();
         let worker = std::thread::spawn(move || {
@@ -756,7 +823,9 @@ mod tests {
             1_000_000,
             decoder.clone(),
         ));
-        let first_reader = cache.open(file.path()).expect("open first reader");
+        let first_reader = cache
+            .open(file.path(), stereo_selection(file.path(), 0))
+            .expect("open first reader");
         let second_reader = first_reader.clone();
         let first = std::thread::spawn(move || {
             let mut destination = vec![0.0; 2_048 * 2];
@@ -854,11 +923,31 @@ mod tests {
         file.write_all(b"-replacement").expect("replace source identity");
         file.flush().expect("flush replacement");
 
-        let second_reader = cache.open(file.path()).expect("reopen replaced source");
+        let second_reader = cache
+            .open(file.path(), stereo_selection(file.path(), 0))
+            .expect("reopen replaced source");
         second_reader.read_interleaved(0, 1, &mut destination).expect("second identity");
 
         assert_eq!(decoder.calls.load(Ordering::Relaxed), 2);
         assert_eq!(cache.diagnostics().entries, 2);
+    }
+
+    #[test]
+    fn open_rejects_a_selection_from_an_obsolete_file_revision() {
+        let mut file = tempfile::NamedTempFile::new().expect("temporary source");
+        file.write_all(b"source").expect("source identity");
+        file.flush().expect("flush source");
+        let selection = stereo_selection(file.path(), 0);
+        file.write_all(b"-replacement").expect("replace source identity");
+        file.flush().expect("flush replacement");
+        let cache = Arc::new(AudioSourceCache::new(48_000, AudioChannelLayout::Stereo));
+
+        let error = cache
+            .open(file.path(), selection)
+            .err()
+            .expect("obsolete stream selection must fail");
+
+        assert!(error.to_string().contains("revision changed"));
     }
 
     #[test]
@@ -874,7 +963,8 @@ mod tests {
             128 * 1024,
             decoder.clone(),
         ));
-        let reader = cache.open(file.path()).expect("open source");
+        let reader =
+            cache.open(file.path(), stereo_selection(file.path(), 0)).expect("open source");
         let mut destination = vec![0.0; 4];
 
         for _ in 0..2 {
@@ -915,7 +1005,17 @@ mod tests {
             sample_rate as usize * usize::from(channels) * std::mem::size_of::<f32>(),
             Arc::new(PersistentFfmpegAudioWindowDecoder::default()),
         ));
-        let reader = cache.open(&path).expect("open bounded source");
+        let stream = crate::MediaInfo::probe(&path)
+            .expect("probe external source")
+            .primary_audio()
+            .expect("primary audio stream")
+            .clone();
+        let reader = cache
+            .open(
+                &path,
+                AudioSourceSelection::from_stream(&stream, MediaFileFingerprint::capture(&path)),
+            )
+            .expect("open bounded source");
         let frames = 2_048usize;
         for start in [0usize, sample_rate as usize, 0] {
             if start.saturating_add(frames) > full.frame_count() {
@@ -956,7 +1056,17 @@ mod tests {
             return;
         };
         let cache = Arc::new(AudioSourceCache::new(48_000, AudioChannelLayout::Stereo));
-        let reader = cache.open(&path).expect("open bounded source");
+        let stream = crate::MediaInfo::probe(&path)
+            .expect("probe external source")
+            .primary_audio()
+            .expect("primary audio stream")
+            .clone();
+        let reader = cache
+            .open(
+                &path,
+                AudioSourceSelection::from_stream(&stream, MediaFileFingerprint::capture(&path)),
+            )
+            .expect("open bounded source");
         let cancellation = ExecutionCancellationToken::new();
         let worker_cancellation = cancellation.clone();
         let worker = std::thread::spawn(move || {

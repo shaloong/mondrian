@@ -923,7 +923,7 @@ impl VideoHdrMetadataSummary {
 /// This is source evidence, not a requested render layout. Unsupported or
 /// unspecified layouts remain explicit and must not be inferred from their
 /// channel count.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ChannelLayout {
     /// FFmpeg exposed no semantic channel layout; the count is retained only
     /// as diagnostic evidence.
@@ -2266,7 +2266,9 @@ fn map_video_codec_profile(profile: ffmpeg::codec::Profile) -> VideoCodecProfile
 }
 
 fn map_channel_layout(layout: ffmpeg::ChannelLayout, reported_channels: u8) -> ChannelLayout {
-    if layout == ffmpeg::ChannelLayout::MONO {
+    if layout.is_empty() {
+        ChannelLayout::Unspecified(reported_channels)
+    } else if layout == ffmpeg::ChannelLayout::MONO {
         ChannelLayout::Mono
     } else if layout == ffmpeg::ChannelLayout::STEREO {
         ChannelLayout::Stereo
@@ -2276,8 +2278,6 @@ fn map_channel_layout(layout: ffmpeg::ChannelLayout, reported_channels: u8) -> C
         ChannelLayout::Surround51Back
     } else if layout == ffmpeg::ChannelLayout::_7POINT1 {
         ChannelLayout::Surround71
-    } else if layout.channels() <= 0 {
-        ChannelLayout::Unspecified(reported_channels)
     } else {
         ChannelLayout::Other(reported_channels)
     }
@@ -3750,6 +3750,41 @@ mod tests {
             Some(mondrian_core::AudioChannelLayout::Surround51)
         );
         assert_eq!(ChannelLayout::Surround51Back.exact_render_layout(), None);
+    }
+
+    #[test]
+    fn pcm_wave_without_a_channel_mask_remains_explicitly_unspecified() {
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::new().expect("temporary wave");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&36u32.to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&8_000u32.to_le_bytes());
+        bytes.extend_from_slice(&16_000u32.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        file.write_all(&bytes).expect("write wave");
+        file.flush().expect("flush wave");
+        crate::ffmpeg_runtime::ensure_ffmpeg_initialized(file.path()).expect("ffmpeg init");
+        let input = ffmpeg::format::input(file.path()).expect("open wave");
+        let stream = input.streams().next().expect("audio stream");
+        let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+            .expect("audio context");
+        let decoder = context.decoder().audio().expect("audio decoder");
+
+        let layout = decoder.channel_layout();
+        assert!(layout.is_empty());
+        assert_eq!(
+            map_channel_layout(layout, decoder.channels() as u8),
+            ChannelLayout::Unspecified(1)
+        );
     }
 
     #[test]
