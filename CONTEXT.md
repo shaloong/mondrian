@@ -160,6 +160,10 @@ _Avoid_: Floating-point seconds passed between audio render stages, sample index
 One exact interleaved PCM block for a fingerprinted media component on a prepared Audio Render Contract. Runtime hot windows and media LRU windows may differ in size but preserve the same integer sample coordinates.
 _Avoid_: Whole-file PCM as the source Interface, per-sample decoder virtual call, path-only cache identity
 
+**Audio Signal Layout**:
+The semantic channel positions and canonical interleaving order of one audio signal. Mono, stereo, and 5.1 surround currently have explicit stable orders; channel count is always derived from the layout and is never an independent author or render fact.
+_Avoid_: Bare channel count as signal meaning, device channel index, guessed six-channel ordering
+
 **Timeline Time**:
 A normalized exact rational offset interpreted within its owner's declared Authoring Time Domain, independent of frame, sample, or display grids.
 _Avoid_: Frame number as universal time, floating-point seconds, fixed subframe ticks
@@ -354,6 +358,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - **CPAL Output Evidence** proves that a concrete operating-system output stream repeatedly consumed production PCM at a bounded callback cadence. It is not acoustic loopback evidence and cannot prove the waveform reached a physical connector, amplifier, or speaker.
 - Every **Audio Sample Position** carries its sample rate. Positions at different rates cannot be compared or subtracted without an explicit resampling Adapter.
 - An **AudioDecodedSource** fills exact interleaved **Decoded Audio Source Windows** and may fail the whole block; it cannot publish a partial shifted block. `mondrian-audio` owns only a small aligned hot window, while the media Adapter owns fingerprinting, decode, weighted LRU residency, and failure memory.
+- Every Sequence, Audio Render Contract, PCM render request, decoded source cache, and PCM buffer carries one **Audio Signal Layout**. Capacity is derived from that layout; the FFmpeg Adapter explicitly lowers 5.1 to `5.1(side)` and may not infer semantics from the integer six.
 - An **Audio Render Session** crosses its source Adapter Seam once per active Generated Audio Contribution block using ordered absolute source-frame coordinates; reverse, repeated, and non-contiguous mappings cannot force a per-sample Interface or move time-mapping authority into media decode.
 - A **Prepared Audio Schedule** is the only graph representation interpreted by an **Audio Render Session**. Preparation assigns dense node/contribution/scope slots, contiguous incoming Route ranges, exact active sample spans, Transition bindings, scratch liveness, and the CPU kernel backend; author maps and general Route searches cannot enter block execution.
 - CPU scalar reference and runtime-selected SIMD implementations consume the same **Prepared Audio Schedule** and must produce identical PCM for the supported processor set. SIMD is an execution choice, never a second semantic compiler.

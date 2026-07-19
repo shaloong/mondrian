@@ -3,7 +3,7 @@
 mod session;
 
 use crate::audio::AudioBuffer;
-use mondrian_core::{ExecutionCancellationToken, MondrianError, Result};
+use mondrian_core::{AudioChannelLayout, ExecutionCancellationToken, MondrianError, Result};
 use parking_lot::{Condvar, Mutex};
 use session::PersistentFfmpegAudioWindowDecoder;
 use std::collections::VecDeque;
@@ -20,7 +20,7 @@ const AUDIO_SOURCE_FAILURE_CAPACITY: usize = 64;
 /// Shared weighted-LRU owner for decoded PCM windows at one output contract.
 pub struct AudioSourceCache {
     sample_rate: u32,
-    channels: u8,
+    channel_layout: AudioChannelLayout,
     window_frames: usize,
     entry_capacity: usize,
     byte_budget: usize,
@@ -116,7 +116,7 @@ pub(super) trait AudioWindowDecoder: Send + Sync {
         start_frame: i64,
         frame_count: usize,
         sample_rate: u32,
-        channels: u8,
+        channel_layout: AudioChannelLayout,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<AudioBuffer>;
 
@@ -195,15 +195,20 @@ pub struct AudioSourceCacheDiagnostics {
 impl AudioSourceCache {
     /// Create the product cache: ten-second decode windows, 128 entries, and a
     /// 256 MiB global PCM payload budget across every open source.
-    pub fn new(sample_rate: u32, channels: u8) -> Self {
+    pub fn new(sample_rate: u32, channel_layout: AudioChannelLayout) -> Self {
         Self::with_decoder(
             sample_rate,
-            channels,
+            channel_layout,
             AUDIO_SOURCE_WINDOW_SECONDS,
             AUDIO_SOURCE_CACHE_ENTRY_CAPACITY,
             AUDIO_SOURCE_CACHE_BYTE_BUDGET,
             Arc::new(PersistentFfmpegAudioWindowDecoder::default()),
         )
+    }
+
+    /// Semantic layout shared by every decoded window in this cache.
+    pub const fn channel_layout(&self) -> AudioChannelLayout {
+        self.channel_layout
     }
 
     /// Create an independently scheduled source cache with explicit hard limits.
@@ -214,14 +219,14 @@ impl AudioSourceCache {
     /// and byte; callers should expose the effective values through diagnostics.
     pub fn new_bounded(
         sample_rate: u32,
-        channels: u8,
+        channel_layout: AudioChannelLayout,
         window_seconds: usize,
         entry_capacity: usize,
         byte_budget: usize,
     ) -> Self {
         Self::with_decoder(
             sample_rate,
-            channels,
+            channel_layout,
             window_seconds,
             entry_capacity,
             byte_budget,
@@ -231,7 +236,7 @@ impl AudioSourceCache {
 
     fn with_decoder(
         sample_rate: u32,
-        channels: u8,
+        channel_layout: AudioChannelLayout,
         window_seconds: usize,
         entry_capacity: usize,
         byte_budget: usize,
@@ -240,7 +245,7 @@ impl AudioSourceCache {
         let sample_rate = sample_rate.max(8_000);
         Self {
             sample_rate,
-            channels: channels.max(1),
+            channel_layout,
             window_frames: (sample_rate as usize).saturating_mul(window_seconds.max(1)),
             entry_capacity: entry_capacity.max(1),
             byte_budget: byte_budget.max(1),
@@ -338,7 +343,7 @@ impl AudioSourceCache {
                 key.start_frame,
                 self.window_frames,
                 self.sample_rate,
-                self.channels,
+                self.channel_layout,
                 cancellation,
             )
             .and_then(|buffer| self.validate_window(&key, buffer));
@@ -412,20 +417,20 @@ impl AudioSourceCache {
         key: &AudioSourceWindowKey,
         buffer: AudioBuffer,
     ) -> Result<AudioBuffer> {
-        let channels = usize::from(self.channels);
+        let channels = self.channel_layout.channel_count();
         if buffer.sample_rate != self.sample_rate
-            || buffer.channels != self.channels
+            || buffer.channel_layout != self.channel_layout
             || !buffer.samples.len().is_multiple_of(channels)
             || buffer.frame_count() > self.window_frames
         {
             return Err(MondrianError::DecodeFailed {
                 asset_id: key.source.path.display().to_string(),
                 reason: format!(
-                    "decoded audio window violated contract: rate={}/{} channels={}/{} frames={}/{}",
+                    "decoded audio window violated contract: rate={}/{} layout={:?}/{:?} frames={}/{}",
                     buffer.sample_rate,
                     self.sample_rate,
-                    buffer.channels,
-                    self.channels,
+                    buffer.channel_layout,
+                    self.channel_layout,
                     buffer.frame_count(),
                     self.window_frames,
                 ),
@@ -444,13 +449,11 @@ impl AudioSourceReader {
         &self,
         start_frame: i64,
         frames: usize,
-        channels: usize,
         destination: &mut [f32],
     ) -> Result<()> {
         self.read_interleaved_cancellable(
             start_frame,
             frames,
-            channels,
             destination,
             &ExecutionCancellationToken::new(),
         )
@@ -461,17 +464,17 @@ impl AudioSourceReader {
         &self,
         start_frame: i64,
         frames: usize,
-        channels: usize,
         destination: &mut [f32],
         cancellation: &ExecutionCancellationToken,
     ) -> Result<()> {
         if cancellation.is_canceled() {
             return Err(canceled_audio_decode(&self.source.path));
         }
+        let channels = self.cache.channel_layout.channel_count();
         let expected_samples = frames.checked_mul(channels).ok_or_else(|| {
             MondrianError::Other(anyhow::anyhow!("audio source block extent overflow"))
         })?;
-        if destination.len() != expected_samples || channels != usize::from(self.cache.channels) {
+        if destination.len() != expected_samples {
             return Err(MondrianError::Other(anyhow::anyhow!(
                 "audio source block does not match the opened channel contract"
             )));
@@ -559,11 +562,11 @@ mod tests {
             start_frame: i64,
             frame_count: usize,
             sample_rate: u32,
-            channels: u8,
+            channel_layout: AudioChannelLayout,
             _cancellation: &ExecutionCancellationToken,
         ) -> Result<AudioBuffer> {
             self.calls.fetch_add(1, Ordering::Relaxed);
-            let channels_usize = usize::from(channels);
+            let channels_usize = channel_layout.channel_count();
             let mut samples = vec![0.0; frame_count * channels_usize];
             for frame in 0..frame_count {
                 for channel in 0..channels_usize {
@@ -571,7 +574,7 @@ mod tests {
                         (start_frame + frame as i64) as f32 * 10.0 + channel as f32;
                 }
             }
-            Ok(AudioBuffer { samples, sample_rate, channels })
+            Ok(AudioBuffer { samples, sample_rate, channel_layout })
         }
     }
 
@@ -596,14 +599,14 @@ mod tests {
             _start_frame: i64,
             frame_count: usize,
             sample_rate: u32,
-            _channels: u8,
+            _channel_layout: AudioChannelLayout,
             _cancellation: &ExecutionCancellationToken,
         ) -> Result<AudioBuffer> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             Ok(AudioBuffer {
                 samples: vec![0.0; frame_count],
                 sample_rate,
-                channels: 1,
+                channel_layout: AudioChannelLayout::Mono,
             })
         }
     }
@@ -615,7 +618,7 @@ mod tests {
             _start_frame: i64,
             _frame_count: usize,
             _sample_rate: u32,
-            _channels: u8,
+            _channel_layout: AudioChannelLayout,
             cancellation: &ExecutionCancellationToken,
         ) -> Result<AudioBuffer> {
             self.entered.store(true, Ordering::Release);
@@ -633,7 +636,7 @@ mod tests {
             _start_frame: i64,
             frame_count: usize,
             sample_rate: u32,
-            channels: u8,
+            channel_layout: AudioChannelLayout,
             _cancellation: &ExecutionCancellationToken,
         ) -> Result<AudioBuffer> {
             self.calls.fetch_add(1, Ordering::Relaxed);
@@ -642,9 +645,9 @@ mod tests {
                 std::thread::yield_now();
             }
             Ok(AudioBuffer {
-                samples: vec![0.0; frame_count * usize::from(channels)],
+                samples: vec![0.0; frame_count * channel_layout.channel_count()],
                 sample_rate,
-                channels,
+                channel_layout,
             })
         }
     }
@@ -662,7 +665,7 @@ mod tests {
         file.write_all(b"source").expect("source identity");
         let cache = Arc::new(AudioSourceCache::with_decoder(
             8_000,
-            2,
+            AudioChannelLayout::Stereo,
             1,
             entry_capacity,
             byte_budget,
@@ -682,9 +685,7 @@ mod tests {
         );
         let mut destination = vec![0.0; 8];
 
-        reader
-            .read_interleaved(7_998, 4, 2, &mut destination)
-            .expect("cross-window read");
+        reader.read_interleaved(7_998, 4, &mut destination).expect("cross-window read");
 
         assert_eq!(
             destination,
@@ -702,7 +703,7 @@ mod tests {
         let decoder = Arc::new(BlockingWindowDecoder { entered: AtomicBool::new(false) });
         let cache = Arc::new(AudioSourceCache::with_decoder(
             48_000,
-            2,
+            AudioChannelLayout::Stereo,
             1,
             2,
             1_000_000,
@@ -713,7 +714,7 @@ mod tests {
         let worker_cancellation = cancellation.clone();
         let worker = std::thread::spawn(move || {
             let mut destination = vec![0.0; 2_048 * 2];
-            reader.read_interleaved_cancellable(0, 2_048, 2, &mut destination, &worker_cancellation)
+            reader.read_interleaved_cancellable(0, 2_048, &mut destination, &worker_cancellation)
         });
         let deadline = Instant::now() + std::time::Duration::from_secs(2);
         while Instant::now() < deadline && !decoder.entered.load(Ordering::Acquire) {
@@ -749,7 +750,7 @@ mod tests {
         });
         let cache = Arc::new(AudioSourceCache::with_decoder(
             48_000,
-            2,
+            AudioChannelLayout::Stereo,
             1,
             2,
             1_000_000,
@@ -759,7 +760,7 @@ mod tests {
         let second_reader = first_reader.clone();
         let first = std::thread::spawn(move || {
             let mut destination = vec![0.0; 2_048 * 2];
-            first_reader.read_interleaved(0, 2_048, 2, &mut destination)
+            first_reader.read_interleaved(0, 2_048, &mut destination)
         });
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline && !decoder.entered.load(Ordering::Acquire) {
@@ -768,7 +769,7 @@ mod tests {
         assert!(decoder.entered.load(Ordering::Acquire));
         let second = std::thread::spawn(move || {
             let mut destination = vec![0.0; 2_048 * 2];
-            second_reader.read_interleaved(0, 2_048, 2, &mut destination)
+            second_reader.read_interleaved(0, 2_048, &mut destination)
         });
         std::thread::sleep(Duration::from_millis(20));
         assert_eq!(decoder.calls.load(Ordering::Relaxed), 1);
@@ -794,11 +795,9 @@ mod tests {
         );
         let mut destination = vec![1.0; 8];
 
+        reader.read_interleaved(-2, 4, &mut destination).expect("negative source read");
         reader
-            .read_interleaved(-2, 4, 2, &mut destination)
-            .expect("negative source read");
-        reader
-            .read_interleaved(128, 2, 2, &mut destination[..4])
+            .read_interleaved(128, 2, &mut destination[..4])
             .expect("same-window seek");
 
         assert_eq!(&destination[4..], &[0.0, 1.0, 10.0, 11.0]);
@@ -815,11 +814,9 @@ mod tests {
         let (_file, cache, reader) = test_audio_source(Arc::clone(&decoder), 8, window_bytes);
         let mut destination = vec![0.0; 2];
 
-        reader.read_interleaved(0, 1, 2, &mut destination).expect("first window");
-        reader.read_interleaved(8_000, 1, 2, &mut destination).expect("second window");
-        reader
-            .read_interleaved(0, 1, 2, &mut destination)
-            .expect("evicted window reload");
+        reader.read_interleaved(0, 1, &mut destination).expect("first window");
+        reader.read_interleaved(8_000, 1, &mut destination).expect("second window");
+        reader.read_interleaved(0, 1, &mut destination).expect("evicted window reload");
 
         let diagnostics = cache.diagnostics();
         assert_eq!(diagnostics.entries, 1);
@@ -830,7 +827,13 @@ mod tests {
 
     #[test]
     fn independently_bounded_cache_reports_effective_hard_limits() {
-        let cache = AudioSourceCache::new_bounded(48_000, 1, 10, 4, 16 * 1024 * 1024);
+        let cache = AudioSourceCache::new_bounded(
+            48_000,
+            AudioChannelLayout::Mono,
+            10,
+            4,
+            16 * 1024 * 1024,
+        );
         let diagnostics = cache.diagnostics();
         assert_eq!(diagnostics.entry_capacity, 4);
         assert_eq!(diagnostics.byte_budget, 16 * 1024 * 1024);
@@ -847,16 +850,12 @@ mod tests {
             4 * 8_000 * 2 * std::mem::size_of::<f32>(),
         );
         let mut destination = vec![0.0; 2];
-        first_reader
-            .read_interleaved(0, 1, 2, &mut destination)
-            .expect("first identity");
+        first_reader.read_interleaved(0, 1, &mut destination).expect("first identity");
         file.write_all(b"-replacement").expect("replace source identity");
         file.flush().expect("flush replacement");
 
         let second_reader = cache.open(file.path()).expect("reopen replaced source");
-        second_reader
-            .read_interleaved(0, 1, 2, &mut destination)
-            .expect("second identity");
+        second_reader.read_interleaved(0, 1, &mut destination).expect("second identity");
 
         assert_eq!(decoder.calls.load(Ordering::Relaxed), 2);
         assert_eq!(cache.diagnostics().entries, 2);
@@ -869,7 +868,7 @@ mod tests {
         file.write_all(b"source").expect("source identity");
         let cache = Arc::new(AudioSourceCache::with_decoder(
             8_000,
-            2,
+            AudioChannelLayout::Stereo,
             1,
             2,
             128 * 1024,
@@ -880,7 +879,7 @@ mod tests {
 
         for _ in 0..2 {
             reader
-                .read_interleaved(0, 2, 2, &mut destination)
+                .read_interleaved(0, 2, &mut destination)
                 .expect_err("malformed channel contract must fail");
         }
 
@@ -900,8 +899,9 @@ mod tests {
             return;
         };
         let sample_rate = 48_000;
-        let channels = 2;
-        let full = decode_audio_file_with_ffmpeg_cli(&path, sample_rate, channels)
+        let channel_layout = AudioChannelLayout::Stereo;
+        let channels = channel_layout.channel_count_u8();
+        let full = decode_audio_file_with_ffmpeg_cli(&path, sample_rate, channel_layout)
             .expect("sequential reference decode");
         assert!(
             full.frame_count() >= sample_rate as usize * 2 + 2_048,
@@ -909,7 +909,7 @@ mod tests {
         );
         let cache = Arc::new(AudioSourceCache::with_decoder(
             sample_rate,
-            channels,
+            channel_layout,
             1,
             1,
             sample_rate as usize * usize::from(channels) * std::mem::size_of::<f32>(),
@@ -923,7 +923,7 @@ mod tests {
             }
             let mut actual = vec![0.0; frames * usize::from(channels)];
             reader
-                .read_interleaved(start as i64, frames, usize::from(channels), &mut actual)
+                .read_interleaved(start as i64, frames, &mut actual)
                 .expect("window decode");
             let expected_start = start * usize::from(channels);
             let expected = &full.samples[expected_start..expected_start + actual.len()];
@@ -955,13 +955,13 @@ mod tests {
             eprintln!("skipped: MONDRIAN_AUDIO_EXTERNAL_MEDIA_PATH not set");
             return;
         };
-        let cache = Arc::new(AudioSourceCache::new(48_000, 2));
+        let cache = Arc::new(AudioSourceCache::new(48_000, AudioChannelLayout::Stereo));
         let reader = cache.open(&path).expect("open bounded source");
         let cancellation = ExecutionCancellationToken::new();
         let worker_cancellation = cancellation.clone();
         let worker = std::thread::spawn(move || {
             let mut destination = vec![0.0; 2_048 * 2];
-            reader.read_interleaved_cancellable(0, 2_048, 2, &mut destination, &worker_cancellation)
+            reader.read_interleaved_cancellable(0, 2_048, &mut destination, &worker_cancellation)
         });
         let admission_deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < admission_deadline && cache.diagnostics().decoder_sessions == 0 {

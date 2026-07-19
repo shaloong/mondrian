@@ -17,8 +17,8 @@ use mondrian_core::{
         AssetId, AudioSourceComponentId, ClipId, Color, EffectId, FramePosition, KeyframeId,
         Rational, Resolution, SequenceId, TrackId,
     },
-    AudioSamplePosition, AudioSampleRate, AudioSampleRounding, FrameRounding, ProjectId,
-    ProjectMeta, ProjectSettings, TimelineTime,
+    AudioChannelLayout, AudioSamplePosition, AudioSampleRate, AudioSampleRounding, FrameRounding,
+    ProjectId, ProjectMeta, ProjectSettings, TimelineTime,
 };
 use mondrian_effects::{
     EffectNode, EffectNodeExt, EffectType, MaskComponent, MaskId, MaskKeyframe, MaskShape,
@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 const PROJECT_EXTENSION: &str = "mdp";
 const DEFAULT_ADJUSTMENT_LAYER_DURATION_SECS: f64 = 5.0;
 const MAX_STATUS_LOG_ENTRIES: usize = 64;
-const AUDIO_OUTPUT_CHANNELS: u8 = 2;
+const AUDIO_OUTPUT_LAYOUT: AudioChannelLayout = AudioChannelLayout::Stereo;
 const AUDIO_IDLE_WARMUP_CHUNK_MILLIS: u32 = 80;
 
 #[cfg(test)]
@@ -332,8 +332,10 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         let audio_sample_rate = 48_000;
-        let audio_channels = AUDIO_OUTPUT_CHANNELS;
-        let audio_source_cache = Arc::new(AudioSourceCache::new(audio_sample_rate, audio_channels));
+        let audio_source_cache = Arc::new(AudioSourceCache::new(
+            audio_sample_rate,
+            AUDIO_OUTPUT_LAYOUT,
+        ));
         let (media_import_tx, media_import_rx) = mpsc::channel::<MediaImportResult>();
         let playback_presentation_wall_anchor = Instant::now();
 

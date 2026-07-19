@@ -3,7 +3,9 @@ use mondrian_audio::{
     AudioContinuityEpoch, AudioDecodedSource, AudioMediaResolver, AudioProcessingMode,
     AudioProgramRuntime, AudioRenderContract, AudioRenderRequest, AudioStateEntry,
 };
-use mondrian_core::{AudioSourceComponentId, ExecutionCancellationToken, ProgramOutputId};
+use mondrian_core::{
+    AudioChannelLayout, AudioSourceComponentId, ExecutionCancellationToken, ProgramOutputId,
+};
 use mondrian_media::AudioSourceReader;
 use parking_lot::Mutex;
 
@@ -13,7 +15,7 @@ pub(super) struct TimelineAudioPcmRenderer {
     state: Mutex<TimelineAudioRenderState>,
     continuity_model: AudioPcmContinuityModel,
     sample_rate: u32,
-    channels: u8,
+    channel_layout: AudioChannelLayout,
 }
 
 struct TimelineAudioRenderState {
@@ -29,11 +31,11 @@ impl TimelineAudioPcmRenderer {
         library: Arc<AssetLibrary>,
         source_cache: Arc<AudioSourceCache>,
         sample_rate: u32,
-        channels: u8,
+        channel_layout: AudioChannelLayout,
     ) -> mondrian_core::Result<Self> {
         let contract = AudioRenderContract {
             sample_rate,
-            channels: usize::from(channels),
+            channel_layout,
             max_block_frames: MAX_AUDIO_RENDER_BLOCK_FRAMES,
             processing_mode: AudioProcessingMode::Realtime,
         };
@@ -59,7 +61,7 @@ impl TimelineAudioPcmRenderer {
             }),
             continuity_model,
             sample_rate,
-            channels,
+            channel_layout,
         })
     }
 }
@@ -74,12 +76,16 @@ impl AudioPcmRenderer for TimelineAudioPcmRenderer {
         request: AudioPcmRenderRequest,
         cancellation: &ExecutionCancellationToken,
     ) -> mondrian_core::Result<AudioBuffer> {
-        if request.sample_rate != self.sample_rate || request.channels != self.channels {
+        if request.sample_rate != self.sample_rate || request.channel_layout != self.channel_layout
+        {
             return Err(audio_render_error(
                 "timeline_audio_render_contract",
                 format!(
-                    "requested {} Hz/{} ch but Adapter is configured for {} Hz/{} ch",
-                    request.sample_rate, request.channels, self.sample_rate, self.channels
+                    "requested {} Hz/{:?} but Adapter is configured for {} Hz/{:?}",
+                    request.sample_rate,
+                    request.channel_layout,
+                    self.sample_rate,
+                    self.channel_layout
                 ),
             ));
         }
@@ -92,8 +98,10 @@ impl AudioPcmRenderer for TimelineAudioPcmRenderer {
                 ),
             ));
         }
-        let samples =
-            request.frame_count.checked_mul(usize::from(self.channels)).ok_or_else(|| {
+        let samples = request
+            .frame_count
+            .checked_mul(self.channel_layout.channel_count())
+            .ok_or_else(|| {
                 audio_render_error("timeline_audio_sample_range", "audio window is too large")
             })?;
         let next_sample = request
@@ -167,7 +175,7 @@ impl AudioPcmRenderer for TimelineAudioPcmRenderer {
         Ok(AudioBuffer {
             samples: output,
             sample_rate: self.sample_rate,
-            channels: self.channels,
+            channel_layout: self.channel_layout,
         })
     }
 }
@@ -182,11 +190,18 @@ impl AudioMediaResolver for PlaybackMediaResolver {
         &self,
         asset_id: AssetId,
         component_id: AudioSourceComponentId,
-        _contract: AudioRenderContract,
+        contract: AudioRenderContract,
     ) -> Result<Arc<dyn AudioDecodedSource>, String> {
         if component_id != AudioSourceComponentId::primary() {
             return Err(format!(
                 "audio component {component_id} is not bound to a decoded media stream"
+            ));
+        }
+        if self.source_cache.channel_layout() != contract.channel_layout {
+            return Err(format!(
+                "audio source cache layout {:?} does not match render layout {:?}",
+                self.source_cache.channel_layout(),
+                contract.channel_layout
             ));
         }
         let asset = self
@@ -212,12 +227,11 @@ impl AudioDecodedSource for PlaybackDecodedAudioSource {
         &self,
         start_frame: i64,
         frames: usize,
-        channels: usize,
         destination: &mut [f32],
         cancellation: &ExecutionCancellationToken,
     ) -> Result<(), String> {
         self.0
-            .read_interleaved_cancellable(start_frame, frames, channels, destination, cancellation)
+            .read_interleaved_cancellable(start_frame, frames, destination, cancellation)
             .map_err(|error| error.to_string())
     }
 }
@@ -247,9 +261,9 @@ mod tests {
             sequence,
             Vec::new(),
             AssetLibrary::open(root.clone()).expect("asset library"),
-            Arc::new(AudioSourceCache::new(48_000, 2)),
+            Arc::new(AudioSourceCache::new(48_000, AudioChannelLayout::Stereo)),
             48_000,
-            2,
+            AudioChannelLayout::Stereo,
         )
         .expect("stateless renderer");
         let cancellation = ExecutionCancellationToken::new();
@@ -258,7 +272,7 @@ mod tests {
             start_sample,
             frame_count: 4,
             sample_rate: 48_000,
-            channels: 2,
+            channel_layout: AudioChannelLayout::Stereo,
             continuity,
         };
 

@@ -5,8 +5,8 @@ use crate::{
     CompiledAudioSource, PreparedAudioPlan,
 };
 use mondrian_core::{
-    AssetId, AudioComponentEditId, AudioSourceComponentId, ExecutionCancellationToken,
-    ProgramOutputId, SequenceId,
+    AssetId, AudioChannelLayout, AudioComponentEditId, AudioSourceComponentId,
+    ExecutionCancellationToken, ProgramOutputId, SequenceId,
 };
 use mondrian_timeline::{sequence::MAX_NESTED_SEQUENCE_RENDER_DEPTH, Sequence};
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,14 +19,14 @@ const MEDIA_SOURCE_CACHE_FRAMES: usize = 4_096;
 pub trait AudioDecodedSource: Send + Sync + 'static {
     /// Fill one exact interleaved block on the prepared contract's Evaluation Grid.
     ///
-    /// `destination` is pre-zeroed and has exactly `frames * channels` samples.
+    /// `destination` is pre-zeroed and has exactly `frames` multiplied by the
+    /// resolved Render Contract layout's channel count samples.
     /// Implementations must preserve silence outside the source range and return
     /// an error rather than publish a partial or shifted block.
     fn read_interleaved(
         &self,
         start_frame: i64,
         frames: usize,
-        channels: usize,
         destination: &mut [f32],
         cancellation: &ExecutionCancellationToken,
     ) -> Result<(), String>;
@@ -113,8 +113,8 @@ impl AudioProgramRuntime {
                             source,
                             cache_start: i64::MIN,
                             cache_frames,
-                            cache: vec![0.0; cache_frames * contract.channels],
-                            channels: contract.channels,
+                            cache: vec![0.0; cache_frames * contract.channel_count()],
+                            channel_layout: contract.channel_layout,
                         })
                     }
                     CompiledAudioSource::NestedOutput { sequence_id, output_id } => {
@@ -149,8 +149,8 @@ impl AudioProgramRuntime {
                             runtime: Box::new(runtime),
                             cache_start: i64::MIN,
                             cache_frames: nested_cache_frames,
-                            cache: vec![0.0; nested_cache_frames * contract.channels],
-                            channels: contract.channels,
+                            cache: vec![0.0; nested_cache_frames * contract.channel_count()],
+                            channel_layout: contract.channel_layout,
                             next_sample: None,
                             next_epoch: 1,
                             last_demanded_sample: None,
@@ -259,7 +259,7 @@ struct MediaRuntimeSource {
     cache_start: i64,
     cache_frames: usize,
     cache: Vec<f32>,
-    channels: usize,
+    channel_layout: AudioChannelLayout,
 }
 
 struct NestedRuntimeSource {
@@ -267,7 +267,7 @@ struct NestedRuntimeSource {
     cache_start: i64,
     cache_frames: usize,
     cache: Vec<f32>,
-    channels: usize,
+    channel_layout: AudioChannelLayout,
     next_sample: Option<i64>,
     next_epoch: u64,
     last_demanded_sample: Option<i64>,
@@ -279,9 +279,10 @@ impl AudioPcmSource for RuntimeSources {
         &mut self,
         edit: AudioComponentEditId,
         source_frames: &[i64],
-        channels: usize,
+        channel_layout: AudioChannelLayout,
         destination: &mut [f32],
     ) -> Result<(), AudioExecutionError> {
+        let channels = channel_layout.channel_count();
         let expected_samples = source_frames
             .len()
             .checked_mul(channels)
@@ -296,11 +297,15 @@ impl AudioPcmSource for RuntimeSources {
         })?;
         match source {
             RuntimeSource::Media(media) => {
-                media.read_indexed(source_frames, channels, destination, &cancellation)
+                media.read_indexed(source_frames, channel_layout, destination, &cancellation)
             }
-            RuntimeSource::Nested(nested) => {
-                nested.read_indexed(edit, source_frames, channels, destination, &cancellation)
-            }
+            RuntimeSource::Nested(nested) => nested.read_indexed(
+                edit,
+                source_frames,
+                channel_layout,
+                destination,
+                &cancellation,
+            ),
         }
     }
 }
@@ -309,16 +314,17 @@ impl MediaRuntimeSource {
     fn read_indexed(
         &mut self,
         source_frames: &[i64],
-        channels: usize,
+        channel_layout: AudioChannelLayout,
         destination: &mut [f32],
         cancellation: &ExecutionCancellationToken,
     ) -> Result<(), AudioExecutionError> {
-        if channels != self.channels {
+        if channel_layout != self.channel_layout {
             return Err(AudioExecutionError::SourceUnavailable(format!(
-                "decoded media channel contract changed from {} to {channels}",
-                self.channels
+                "decoded media layout contract changed from {:?} to {channel_layout:?}",
+                self.channel_layout
             )));
         }
+        let channels = channel_layout.channel_count();
         let cache_frames_i64 =
             i64::try_from(self.cache_frames).map_err(|_| AudioExecutionError::BufferTooLarge)?;
         for (output_frame, source_frame) in source_frames.iter().copied().enumerate() {
@@ -334,7 +340,6 @@ impl MediaRuntimeSource {
                     .read_interleaved(
                         self.cache_start,
                         self.cache_frames,
-                        self.channels,
                         &mut self.cache,
                         cancellation,
                     )
@@ -364,16 +369,17 @@ impl NestedRuntimeSource {
         &mut self,
         edit: AudioComponentEditId,
         source_frames: &[i64],
-        channels: usize,
+        channel_layout: AudioChannelLayout,
         destination: &mut [f32],
         cancellation: &ExecutionCancellationToken,
     ) -> Result<(), AudioExecutionError> {
-        if channels != self.channels {
+        if channel_layout != self.channel_layout {
             return Err(AudioExecutionError::SourceUnavailable(format!(
-                "nested audio channel contract changed from {} to {channels}",
-                self.channels
+                "nested audio layout contract changed from {:?} to {channel_layout:?}",
+                self.channel_layout
             )));
         }
+        let channels = channel_layout.channel_count();
         self.validate_demand_order(edit, source_frames)?;
         if source_frames.len() > self.ordered_output_frames.capacity() {
             return Err(AudioExecutionError::BlockTooLarge);

@@ -2,7 +2,7 @@
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_queue::ArrayQueue;
-use mondrian_core::{MondrianError, Result};
+use mondrian_core::{AudioChannelLayout, MondrianError, Result};
 #[cfg(test)]
 use std::path::Path;
 #[cfg(test)]
@@ -17,21 +17,27 @@ pub struct AudioBuffer {
     /// 交错 PCM f32 样本 [L0, R0, L1, R1, ...]
     pub samples: Vec<f32>,
     pub sample_rate: u32,
-    pub channels: u8,
+    /// Semantic layout and canonical interleaving order.
+    pub channel_layout: AudioChannelLayout,
 }
 
 impl AudioBuffer {
-    pub fn silent(sample_rate: u32, channels: u8, frames: usize) -> Self {
+    pub fn silent(sample_rate: u32, channel_layout: AudioChannelLayout, frames: usize) -> Self {
         Self {
-            samples: vec![0.0; frames * channels as usize],
+            samples: vec![0.0; frames * channel_layout.channel_count()],
             sample_rate,
-            channels,
+            channel_layout,
         }
+    }
+
+    /// Channel count derived from the buffer's sole semantic layout authority.
+    pub const fn channel_count(&self) -> usize {
+        self.channel_layout.channel_count()
     }
 
     /// 帧数（样本数 / 声道数）
     pub fn frame_count(&self) -> usize {
-        self.samples.len() / self.channels as usize
+        self.samples.len() / self.channel_count()
     }
 
     /// 时长（秒）
@@ -55,10 +61,10 @@ impl AudioBuffer {
     }
 
     pub fn slice_frames(&self, start_frame: usize, frame_count: usize) -> Self {
-        let channels = self.channels as usize;
+        let channels = self.channel_count();
         let total_frames = self.frame_count();
         if start_frame >= total_frames || frame_count == 0 {
-            return Self::silent(self.sample_rate, self.channels, 0);
+            return Self::silent(self.sample_rate, self.channel_layout, 0);
         }
 
         let end_frame = (start_frame + frame_count).min(total_frames);
@@ -68,7 +74,7 @@ impl AudioBuffer {
         Self {
             samples: self.samples[start..end].to_vec(),
             sample_rate: self.sample_rate,
-            channels: self.channels,
+            channel_layout: self.channel_layout,
         }
     }
 }
@@ -369,7 +375,7 @@ impl RealtimeAudioOutput {
     }
 
     pub fn enqueue(&self, buffer: &AudioBuffer) {
-        if buffer.samples.is_empty() {
+        if buffer.samples.is_empty() || buffer.channel_count() != usize::from(self.channels) {
             return;
         }
         for sample in &buffer.samples {
@@ -575,7 +581,7 @@ fn callback_playback_delay(info: &cpal::OutputCallbackInfo) -> Duration {
 pub(crate) fn decode_audio_file_with_ffmpeg_cli(
     path: &Path,
     sample_rate: u32,
-    channels: u8,
+    channel_layout: AudioChannelLayout,
 ) -> Result<AudioBuffer> {
     let output = Command::new("ffmpeg")
         .arg("-v")
@@ -587,8 +593,14 @@ pub(crate) fn decode_audio_file_with_ffmpeg_cli(
         .arg("-dn")
         .arg("-f")
         .arg("f32le")
+        .arg("-channel_layout")
+        .arg(match channel_layout {
+            AudioChannelLayout::Mono => "mono",
+            AudioChannelLayout::Stereo => "stereo",
+            AudioChannelLayout::Surround51 => "5.1(side)",
+        })
         .arg("-ac")
-        .arg(channels.max(1).to_string())
+        .arg(channel_layout.channel_count().to_string())
         .arg("-ar")
         .arg(sample_rate.max(8_000).to_string())
         .arg("pipe:1")
@@ -616,7 +628,7 @@ pub(crate) fn decode_audio_file_with_ffmpeg_cli(
     Ok(AudioBuffer {
         samples,
         sample_rate: sample_rate.max(8_000),
-        channels: channels.max(1),
+        channel_layout,
     })
 }
 

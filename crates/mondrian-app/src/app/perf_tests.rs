@@ -1659,14 +1659,14 @@ fn audio_bounded_source_external_render_smoke() -> anyhow::Result<()> {
             Clip::new(asset_id, TimelineTime::ZERO, duration)?,
             AudioSourceComponentId::primary(),
         )?;
-        let cache = Arc::new(AudioSourceCache::new(48_000, 2));
+        let cache = Arc::new(AudioSourceCache::new(48_000, AudioChannelLayout::Stereo));
         let renderer = TimelineAudioPcmRenderer::new(
             sequence.clone(),
             vec![sequence],
             library,
             Arc::clone(&cache),
             48_000,
-            2,
+            AudioChannelLayout::Stereo,
         )?;
         let cancellation = mondrian_core::ExecutionCancellationToken::new();
         for (generation, start_sample) in
@@ -1677,7 +1677,7 @@ fn audio_bounded_source_external_render_smoke() -> anyhow::Result<()> {
                     start_sample,
                     frame_count: 2_048,
                     sample_rate: 48_000,
-                    channels: 2,
+                    channel_layout: AudioChannelLayout::Stereo,
                     continuity: AudioPcmContinuity::Enter(AudioPcmRenderGeneration::new(
                         generation as u64 + 1,
                     )),

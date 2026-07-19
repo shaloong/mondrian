@@ -2970,7 +2970,7 @@ mod tests {
         state.active_sequence_id = Some(sequence_id);
         state.sequence = Some(sequence.clone());
         state.sequences.push(sequence);
-        let mut settings = SequenceSettings {
+        let settings = SequenceSettings {
             resolution: Resolution::UHD4K,
             frame_rate: Rational::FPS_2997,
             audio_sample_rate: 96_000,
@@ -2980,8 +2980,6 @@ mod tests {
             },
             ..SequenceSettings::default()
         };
-        settings.audio_channels = settings.audio_channel_layout.channels();
-
         state
             .dispatch_action(sequence_update_settings_action(
                 SequenceUpdateSettingsPayload {

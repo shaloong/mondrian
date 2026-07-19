@@ -3468,10 +3468,7 @@ mod tests {
             payload.settings.audio_channel_layout,
             AudioChannelLayout::Surround51
         );
-        assert_eq!(
-            payload.settings.audio_channels,
-            payload.settings.audio_channel_layout.channels()
-        );
+        assert_eq!(payload.settings.audio_channel_layout.channel_count(), 6);
         assert_eq!(
             payload.settings.audio_display_format,
             AudioDisplayFormat::Milliseconds

@@ -3,7 +3,7 @@
 use crate::{
     AudioBuffer, RealtimeAudioOutputEvent, RealtimeAudioOutputManager, RealtimeAudioOutputSnapshot,
 };
-use mondrian_core::{ExecutionCancellationToken, FramePosition, Rational};
+use mondrian_core::{AudioChannelLayout, ExecutionCancellationToken, FramePosition, Rational};
 use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
 use std::sync::{mpsc, Arc};
@@ -16,8 +16,8 @@ use thiserror::Error;
 pub struct AudioPlaybackConfig {
     /// Output sample rate used by render and device Adapters.
     pub sample_rate: u32,
-    /// Interleaved output channel count.
-    pub channels: u8,
+    /// Semantic render layout lowered to the concrete device Adapter.
+    pub channel_layout: AudioChannelLayout,
     /// Frames in each independently rendered PCM window.
     pub chunk_frames: usize,
     /// Queued frames required before callback consumption starts.
@@ -37,7 +37,7 @@ impl AudioPlaybackConfig {
     pub const fn product_default() -> Self {
         Self {
             sample_rate: 48_000,
-            channels: 2,
+            channel_layout: AudioChannelLayout::Stereo,
             chunk_frames: 3_840,
             preroll_frames: 5_760,
             high_watermark_frames: 22_080,
@@ -68,8 +68,8 @@ pub struct AudioPcmRenderRequest {
     pub frame_count: usize,
     /// Required output sample rate.
     pub sample_rate: u32,
-    /// Required interleaved output channel count.
-    pub channels: u8,
+    /// Required semantic output layout and interleaving order.
+    pub channel_layout: AudioChannelLayout,
     /// Explicit generation entry or exact continuation selected by Playback.
     pub continuity: AudioPcmContinuity,
 }
@@ -434,7 +434,7 @@ impl AudioPlayback {
             config,
             Box::new(RealtimeAudioOutputManager::new(
                 config.sample_rate,
-                config.channels,
+                config.channel_layout.channel_count_u8(),
             )),
         )
     }
@@ -442,7 +442,10 @@ impl AudioPlayback {
     /// Construct production Audio Playback with a dedicated CPAL lifecycle thread and render worker.
     pub fn new(config: AudioPlaybackConfig) -> Result<Self, AudioPlaybackConfigError> {
         validate_config(config)?;
-        let output = RealtimeAudioOutputManager::new(config.sample_rate, config.channels);
+        let output = RealtimeAudioOutputManager::new(
+            config.sample_rate,
+            config.channel_layout.channel_count_u8(),
+        );
         Ok(Self::with_output(config, Box::new(output)))
     }
 
@@ -578,7 +581,7 @@ impl AudioPlayback {
                 {
                     let silence = AudioBuffer::silent(
                         completion.request.sample_rate,
-                        completion.request.channels,
+                        completion.request.channel_layout,
                         completion.request.frame_count,
                     );
                     self.output.enqueue(&silence);
@@ -681,7 +684,7 @@ impl AudioPlayback {
                         start_sample: self.next_start_sample,
                         frame_count: self.config.chunk_frames,
                         sample_rate: self.config.sample_rate,
-                        channels: self.config.channels,
+                        channel_layout: self.config.channel_layout,
                         continuity: if self.generation_entry_pending {
                             AudioPcmContinuity::Enter(AudioPcmRenderGeneration::new(
                                 self.generation,
@@ -765,7 +768,6 @@ impl Drop for AudioPlayback {
 
 fn validate_config(config: AudioPlaybackConfig) -> Result<(), AudioPlaybackConfigError> {
     if config.sample_rate == 0
-        || config.channels == 0
         || config.chunk_frames == 0
         || config.preroll_frames == 0
         || config.high_watermark_frames == 0
@@ -808,10 +810,10 @@ fn validate_rendered_buffer(
             buffer.sample_rate, request.sample_rate
         ));
     }
-    if buffer.channels != request.channels {
+    if buffer.channel_layout != request.channel_layout {
         return Err(format!(
-            "rendered channel count {} does not match requested {}",
-            buffer.channels, request.channels
+            "rendered layout {:?} does not match requested {:?} layout",
+            buffer.channel_layout, request.channel_layout,
         ));
     }
     if buffer.frame_count() != request.frame_count {
@@ -916,7 +918,7 @@ mod tests {
             }
             Ok(AudioBuffer::silent(
                 request.sample_rate,
-                request.channels,
+                request.channel_layout,
                 request.frame_count,
             ))
         }
@@ -936,7 +938,7 @@ mod tests {
             };
             Ok(AudioBuffer::silent(
                 request.sample_rate,
-                request.channels,
+                request.channel_layout,
                 frames,
             ))
         }
@@ -963,7 +965,7 @@ mod tests {
             }
             Ok(AudioBuffer::silent(
                 request.sample_rate,
-                request.channels,
+                request.channel_layout,
                 request.frame_count,
             ))
         }
@@ -990,7 +992,7 @@ mod tests {
     fn test_config() -> AudioPlaybackConfig {
         AudioPlaybackConfig {
             sample_rate: 1_000,
-            channels: 2,
+            channel_layout: AudioChannelLayout::Stereo,
             chunk_frames: 10,
             preroll_frames: 20,
             high_watermark_frames: 30,
@@ -998,6 +1000,29 @@ mod tests {
             underrun_recovery_threshold_frames: 10,
             max_consecutive_render_recoveries: 3,
         }
+    }
+
+    #[test]
+    fn rendered_buffer_requires_the_exact_requested_semantic_layout() {
+        let request = AudioPcmRenderRequest {
+            start_sample: 0,
+            frame_count: 10,
+            sample_rate: 1_000,
+            channel_layout: AudioChannelLayout::Stereo,
+            continuity: AudioPcmContinuity::Enter(AudioPcmRenderGeneration::new(1)),
+        };
+        let result = validate_rendered_buffer(
+            request,
+            Ok(AudioBuffer::silent(
+                request.sample_rate,
+                AudioChannelLayout::Mono,
+                request.frame_count,
+            )),
+        );
+
+        let error = result.expect_err("a different semantic layout must fail closed");
+        assert!(error.contains("Mono"));
+        assert!(error.contains("Stereo"));
     }
 
     fn fake_output() -> (Box<dyn AudioOutputAdapter>, Arc<Mutex<FakeOutputState>>) {

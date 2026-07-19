@@ -27,7 +27,10 @@ A `Sequence` contains:
 - optional exact in/out range
 - a Sequence-owned `AudioProgram`
 
-Default sequences create `V1..V3` and `A1..A3`. `SequenceSettings` validates resolution, frame rate, audio sample rate/layout, preview settings, and color-management constraints.
+Default sequences create `V1..V3` and `A1..A3`. `SequenceSettings` validates
+resolution, frame rate, audio sample rate/layout, preview settings, and
+color-management constraints. Audio layout is the sole persisted channel
+authority; no parallel channel-count field can diverge from it.
 
 ### Position Display
 

@@ -152,7 +152,7 @@ impl PreparedAudioPlan {
         kernel_backend: AudioKernelBackend,
         dependencies: &AudioPreparationDependencies,
     ) -> Result<Self, AudioCompileError> {
-        if contract.sample_rate == 0 || contract.channels == 0 || contract.max_block_frames == 0 {
+        if contract.sample_rate == 0 || contract.max_block_frames == 0 {
             return Err(AudioCompileError::InvalidRenderContract);
         }
         let schedule = PreparedAudioSchedule::build(program.as_ref(), contract, dependencies)?;

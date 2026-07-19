@@ -89,6 +89,12 @@ Timeline PCM Adapter maps the generation to the audio Runtime continuity epoch
 and validates exact next-sample progression. A changed coordinate can never be
 treated as an implicit seek/reset.
 
+The same request carries one semantic `AudioChannelLayout`. The Timeline PCM
+Adapter, prepared Runtime, decoded source cache, and returned `AudioBuffer`
+must agree on the complete layout, not merely its channel count. Only the final
+device Adapter lowers it to a concrete CPAL channel count; a mismatched PCM
+layout invalidates the render result before enqueue.
+
 The Runtime propagates that discontinuity into independent nested-instance
 state domains. Child entry is lazy because the parent time map, not the root
 sample coordinate, determines the first child sample. Nondecreasing child
@@ -1186,6 +1192,8 @@ The product `AudioPcmRenderer` and Export now bind the same block-oriented
 `AudioDecodedSource` Interface. `mondrian-audio` keeps only an aligned
 4,096-frame hot window; `mondrian-media` owns ten-second FFmpeg decode windows
 in a cross-source 128-entry/256 MiB weighted LRU keyed by file fingerprint.
+The cache key's output contract includes sample rate and semantic layout, and
+PCM buffer validation compares the complete layout before publication.
 This removes whole-file PCM residency from playback and makes arbitrary seek
 memory independent of source duration. The concrete media Adapter now owns at
 most eight persistent FFmpeg child Sessions with bounded stdout look-ahead and

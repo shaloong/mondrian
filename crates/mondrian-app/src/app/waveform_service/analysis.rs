@@ -7,7 +7,7 @@ use mondrian_media::{AudioSourceCache, WaveformEnvelopeBuilder};
 
 use super::state::{WaveformFailure, WaveformJob, WaveformResult, WaveformSource};
 use super::{
-    WaveformFailureReason, WAVEFORM_CHANNELS, WAVEFORM_DECODE_WINDOW_SECONDS, WAVEFORM_MAX_WIDTH,
+    WaveformFailureReason, WAVEFORM_DECODE_WINDOW_SECONDS, WAVEFORM_LAYOUT, WAVEFORM_MAX_WIDTH,
     WAVEFORM_SAMPLE_RATE,
 };
 
@@ -69,7 +69,6 @@ fn build_waveform_source(
                     )
                 })?,
                 frames,
-                usize::from(WAVEFORM_CHANNELS),
                 &mut samples[..frames],
                 &job.cancellation,
             )
@@ -86,7 +85,7 @@ fn build_waveform_source(
             }
             let chunk_start = start + (chunk_index * 4096) as u64;
             envelope
-                .accumulate_interleaved(chunk_start, usize::from(WAVEFORM_CHANNELS), chunk)
+                .accumulate_interleaved(chunk_start, WAVEFORM_LAYOUT.channel_count(), chunk)
                 .map_err(|error| {
                     WaveformFailure::new(WaveformFailureReason::DecodeFailed, error.to_string())
                 })?;

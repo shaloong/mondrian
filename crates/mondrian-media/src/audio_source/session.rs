@@ -5,7 +5,7 @@ use super::{
     AudioWindowDecoderDiagnostics,
 };
 use crate::audio::AudioBuffer;
-use mondrian_core::{ExecutionCancellationToken, MondrianError, Result};
+use mondrian_core::{AudioChannelLayout, ExecutionCancellationToken, MondrianError, Result};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::io::Read;
@@ -55,7 +55,7 @@ struct DecoderState {
 struct SessionKey {
     source: AudioSourceIdentity,
     sample_rate: u32,
-    channels: u8,
+    channel_layout: AudioChannelLayout,
 }
 
 struct DecoderEntry {
@@ -77,7 +77,7 @@ impl AudioWindowDecoder for PersistentFfmpegAudioWindowDecoder {
         start_frame: i64,
         frame_count: usize,
         sample_rate: u32,
-        channels: u8,
+        channel_layout: AudioChannelLayout,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<AudioBuffer> {
         if cancellation.is_canceled() {
@@ -87,7 +87,7 @@ impl AudioWindowDecoder for PersistentFfmpegAudioWindowDecoder {
         let key = SessionKey {
             source: source.clone(),
             sample_rate: sample_rate.max(8_000),
-            channels: channels.max(1),
+            channel_layout,
         };
         let slot = self.acquire_slot(key.clone(), cancellation)?;
         let mut session = self.lock_slot(&slot, source, cancellation)?;
@@ -292,7 +292,7 @@ enum StdoutMessage {
 struct DecodeSession {
     source_path: std::path::PathBuf,
     sample_rate: u32,
-    channels: u8,
+    channel_layout: AudioChannelLayout,
     next_frame: i64,
     child: Option<Child>,
     terminal_status: Option<ExitStatus>,
@@ -332,8 +332,10 @@ impl DecodeSession {
             .arg("f32le")
             .arg("-acodec")
             .arg("pcm_f32le")
+            .arg("-channel_layout")
+            .arg(ffmpeg_channel_layout(key.channel_layout))
             .arg("-ac")
-            .arg(key.channels.to_string())
+            .arg(key.channel_layout.channel_count().to_string())
             .arg("-ar")
             .arg(key.sample_rate.to_string())
             .arg("pipe:1")
@@ -400,7 +402,7 @@ impl DecodeSession {
         Ok(Self {
             source_path: key.source.path.clone(),
             sample_rate: key.sample_rate,
-            channels: key.channels,
+            channel_layout: key.channel_layout,
             next_frame: start_frame,
             child: Some(child),
             terminal_status: None,
@@ -419,7 +421,8 @@ impl DecodeSession {
         frame_count: usize,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<AudioBuffer> {
-        let frame_bytes = usize::from(self.channels).saturating_mul(std::mem::size_of::<f32>());
+        let frame_bytes =
+            self.channel_layout.channel_count().saturating_mul(std::mem::size_of::<f32>());
         let target_bytes = frame_count.checked_mul(frame_bytes).ok_or_else(|| {
             MondrianError::Other(anyhow::anyhow!("audio decode window extent overflow"))
         })?;
@@ -469,12 +472,12 @@ impl DecodeSession {
         for chunk in bytes.chunks_exact(std::mem::size_of::<f32>()) {
             samples.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         }
-        let decoded_frames = samples.len() / usize::from(self.channels);
+        let decoded_frames = samples.len() / self.channel_layout.channel_count();
         self.next_frame = self.next_frame.saturating_add(decoded_frames as i64);
         Ok(AudioBuffer {
             samples,
             sample_rate: self.sample_rate,
-            channels: self.channels,
+            channel_layout: self.channel_layout,
         })
     }
 
@@ -565,6 +568,14 @@ impl DecodeSession {
         self.take_stderr_tail();
         self.pending.clear();
         self.pending_offset = 0;
+    }
+}
+
+fn ffmpeg_channel_layout(layout: AudioChannelLayout) -> &'static str {
+    match layout {
+        AudioChannelLayout::Mono => "mono",
+        AudioChannelLayout::Stereo => "stereo",
+        AudioChannelLayout::Surround51 => "5.1(side)",
     }
 }
 
@@ -681,5 +692,15 @@ mod tests {
         let (input, trim) = exact_seek_partition(i64::MAX, sample_rate);
         assert_eq!(input.saturating_add(trim), i64::MAX);
         assert!(trim <= 480_000);
+    }
+
+    #[test]
+    fn ffmpeg_layout_names_preserve_semantic_surround_positions() {
+        assert_eq!(ffmpeg_channel_layout(AudioChannelLayout::Mono), "mono");
+        assert_eq!(ffmpeg_channel_layout(AudioChannelLayout::Stereo), "stereo");
+        assert_eq!(
+            ffmpeg_channel_layout(AudioChannelLayout::Surround51),
+            "5.1(side)"
+        );
     }
 }

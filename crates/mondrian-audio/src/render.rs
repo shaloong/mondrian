@@ -4,7 +4,10 @@ use crate::schedule::{
     PreparedAudioPlan, PreparedAudioSchedule, PreparedAutomationCurve, PreparedContribution,
     PreparedNode, PreparedNodeOrigin, PreparedTransitionBinding, PreparedTransitionDirection,
 };
-use mondrian_core::{AudioComponentEditId, AudioSampleRate, TimelineTime, TimelineTimeError};
+use mondrian_core::{
+    AudioChannelLayout, AudioChannelPosition, AudioComponentEditId, AudioSampleRate, TimelineTime,
+    TimelineTimeError,
+};
 use mondrian_timeline::audio::{AudioChannelStripOutputPort, AudioTransitionCurve};
 use std::sync::Arc;
 
@@ -21,7 +24,7 @@ pub trait AudioPcmSource {
         &mut self,
         edit: AudioComponentEditId,
         source_frames: &[i64],
-        channels: usize,
+        channel_layout: AudioChannelLayout,
         destination: &mut [f32],
     ) -> Result<(), AudioExecutionError>;
 }
@@ -167,7 +170,7 @@ impl AudioRenderSession {
         let contract = plan.contract();
         let samples = contract
             .max_block_frames
-            .checked_mul(contract.channels)
+            .checked_mul(contract.channel_count())
             .ok_or(AudioExecutionError::BufferTooLarge)?;
         let node_buffers = (0..plan.schedule.summary.scratch_slot_count)
             .map(|_| NodeBuffers::new(samples))
@@ -177,14 +180,19 @@ impl AudioRenderSession {
             .contributions
             .iter()
             .map(|contribution| {
-                FixedDelayLine::new(contribution.compensation_delay_frames, contract.channels)
+                FixedDelayLine::new(
+                    contribution.compensation_delay_frames,
+                    contract.channel_count(),
+                )
             })
             .collect::<Result<Vec<_>, AudioExecutionError>>()?;
         let route_delay_lines = plan
             .schedule
             .routes
             .iter()
-            .map(|route| FixedDelayLine::new(route.compensation_delay_frames, contract.channels))
+            .map(|route| {
+                FixedDelayLine::new(route.compensation_delay_frames, contract.channel_count())
+            })
             .collect::<Result<Vec<_>, AudioExecutionError>>()?;
         let compensation_delay_line_count = contribution_delay_lines
             .iter()
@@ -201,7 +209,7 @@ impl AudioRenderSession {
             })?;
         let capacity = AudioRenderCapacity {
             max_block_frames: contract.max_block_frames,
-            channels: contract.channels,
+            channels: contract.channel_count(),
             node_scratch_slots: plan.schedule.summary.scratch_slot_count,
             samples_per_node_slot: samples,
             compensation_delay_line_count,
@@ -278,7 +286,7 @@ impl AudioRenderSession {
         }
         let samples = request
             .frames
-            .checked_mul(contract.channels)
+            .checked_mul(contract.channel_count())
             .ok_or(AudioExecutionError::BufferTooLarge)?;
         if destination.len() != samples {
             return Err(AudioExecutionError::OutputSizeMismatch);
@@ -334,7 +342,7 @@ impl AudioRenderSession {
                     source,
                     request,
                     sample_rate,
-                    contract.channels,
+                    contract.channel_layout,
                     backend,
                     &mut self.node_buffers[scratch_slot],
                     &mut self.scratch,
@@ -361,7 +369,7 @@ impl AudioRenderSession {
                 node,
                 request,
                 contract.sample_rate,
-                contract.channels,
+                contract.channel_count(),
                 backend,
                 &mut self.node_buffers[scratch_slot],
                 &mut self.scratch,
@@ -385,7 +393,7 @@ pub fn render_audio(
 ) -> Result<Vec<f32>, AudioExecutionError> {
     let samples = request
         .frames
-        .checked_mul(plan.contract().channels)
+        .checked_mul(plan.contract().channel_count())
         .ok_or(AudioExecutionError::BufferTooLarge)?;
     let mut output = vec![0.0; samples];
     let mut session = AudioRenderSession::new(plan)?;
@@ -406,12 +414,13 @@ fn render_track_contributions(
     source: &mut impl AudioPcmSource,
     request: AudioRenderRequest,
     sample_rate: AudioSampleRate,
-    channels: usize,
+    channel_layout: AudioChannelLayout,
     backend: crate::AudioKernelBackend,
     track: &mut NodeBuffers,
     scratch: &mut RenderScratch,
     delay_lines: &mut [FixedDelayLine],
 ) -> Result<(), AudioExecutionError> {
+    let channels = channel_layout.channel_count();
     let samples = request
         .frames
         .checked_mul(channels)
@@ -441,7 +450,7 @@ fn render_track_contributions(
             for frame in active_frames.clone() {
                 for channel in 0..channels {
                     scratch.contribution_sample_gains[frame * channels + channel] =
-                        gain * stereo_balance_gain(channel, channels, pan);
+                        gain * stereo_balance_gain(channel_layout, channel, pan);
                 }
             }
         } else {
@@ -496,7 +505,7 @@ fn render_track_contributions(
                 let gain = db_to_linear(gain_db[local_index]) * envelope;
                 for channel in 0..channels {
                     scratch.contribution_sample_gains[frame * channels + channel] =
-                        gain * stereo_balance_gain(channel, channels, pan);
+                        gain * stereo_balance_gain(channel_layout, channel, pan);
                 }
             }
         }
@@ -508,7 +517,7 @@ fn render_track_contributions(
         source.read_indexed_interleaved(
             contribution.semantic.edit_id,
             &scratch.source_frames[..request.frames],
-            channels,
+            channel_layout,
             &mut scratch.contribution_pcm[..samples],
         )?;
         if delay_line.sample_capacity() == 0 {
@@ -798,13 +807,14 @@ fn transition_falling(progress: f64, curve: AudioTransitionCurve) -> f32 {
     }
 }
 
-fn stereo_balance_gain(channel: usize, channels: usize, pan: f64) -> f32 {
-    if channels < 2 {
-        return 1.0;
-    }
-    match channel {
-        0 if pan > 0.0 => (pan * std::f64::consts::FRAC_PI_2).cos() as f32,
-        1 if pan < 0.0 => (-pan * std::f64::consts::FRAC_PI_2).cos() as f32,
+fn stereo_balance_gain(layout: AudioChannelLayout, channel: usize, pan: f64) -> f32 {
+    match layout.ordered_channels().get(channel) {
+        Some(AudioChannelPosition::FrontLeft) if pan > 0.0 => {
+            (pan * std::f64::consts::FRAC_PI_2).cos() as f32
+        }
+        Some(AudioChannelPosition::FrontRight) if pan < 0.0 => {
+            (-pan * std::f64::consts::FRAC_PI_2).cos() as f32
+        }
         _ => 1.0,
     }
 }

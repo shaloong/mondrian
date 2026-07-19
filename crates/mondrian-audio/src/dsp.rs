@@ -237,4 +237,67 @@ mod tests {
         );
         assert_eq!(scalar, vectorized);
     }
+
+    #[test]
+    fn runtime_vectorized_kernels_match_scalar_for_short_block_tails() {
+        for len in 0..=64 {
+            let source = (0..len).map(|index| index as f32 * 0.25 - 2.0).collect::<Vec<_>>();
+            let gains = (0..len).map(|index| (index % 7) as f32 * 0.125).collect::<Vec<_>>();
+            let initial = (0..len).map(|index| (index % 5) as f32 * -0.5).collect::<Vec<_>>();
+
+            let mut scalar = initial.clone();
+            let mut vectorized = initial.clone();
+            multiply_add(
+                AudioKernelBackend::ScalarReference,
+                &mut scalar,
+                &source,
+                &gains,
+            );
+            multiply_add(
+                AudioKernelBackend::RuntimeVectorized,
+                &mut vectorized,
+                &source,
+                &gains,
+            );
+            assert_eq!(scalar, vectorized, "multiply-add length {len}");
+
+            multiply_into(
+                AudioKernelBackend::ScalarReference,
+                &mut scalar,
+                &source,
+                &gains,
+            );
+            multiply_into(
+                AudioKernelBackend::RuntimeVectorized,
+                &mut vectorized,
+                &source,
+                &gains,
+            );
+            assert_eq!(scalar, vectorized, "multiply-into length {len}");
+
+            multiply_constant_into(
+                AudioKernelBackend::ScalarReference,
+                &mut scalar,
+                &source,
+                0.375,
+            );
+            multiply_constant_into(
+                AudioKernelBackend::RuntimeVectorized,
+                &mut vectorized,
+                &source,
+                0.375,
+            );
+            assert_eq!(scalar, vectorized, "multiply-constant length {len}");
+
+            scalar.fill(0.5);
+            vectorized.fill(0.5);
+            add(AudioKernelBackend::ScalarReference, &mut scalar, &source);
+            add(
+                AudioKernelBackend::RuntimeVectorized,
+                &mut vectorized,
+                &source,
+            );
+            assert_eq!(scalar, vectorized, "add length {len}");
+        }
+    }
 }

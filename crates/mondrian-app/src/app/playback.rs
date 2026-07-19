@@ -402,7 +402,7 @@ impl AppState {
                     Arc::clone(library),
                     Arc::clone(&self.audio_source_cache),
                     self.audio_sample_rate,
-                    AUDIO_OUTPUT_CHANNELS,
+                    AUDIO_OUTPUT_LAYOUT,
                 ) {
                     Ok(renderer) => Some(Arc::new(renderer) as Arc<dyn AudioPcmRenderer>),
                     Err(error) => {
@@ -462,7 +462,7 @@ impl AppState {
             Arc::clone(library),
             Arc::clone(&self.audio_source_cache),
             self.audio_sample_rate,
-            AUDIO_OUTPUT_CHANNELS,
+            AUDIO_OUTPUT_LAYOUT,
         ) else {
             return;
         };
@@ -480,7 +480,7 @@ impl AppState {
                     start_sample,
                     frame_count: chunk_frames,
                     sample_rate: self.audio_sample_rate,
-                    channels: AUDIO_OUTPUT_CHANNELS,
+                    channel_layout: AUDIO_OUTPUT_LAYOUT,
                     continuity: AudioPcmContinuity::Enter(AudioPcmRenderGeneration::new(
                         generation as u64 + 1,
                     )),

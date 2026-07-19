@@ -1,6 +1,6 @@
 use mondrian_core::{
-    AudioComponentEditId, AudioProcessingScopeId, ExactAutomationCurve, MixBusId, ProgramOutputId,
-    SequenceId, TimelineTime, TimelineTimeRange, TrackId,
+    AudioChannelLayout, AudioComponentEditId, AudioProcessingScopeId, ExactAutomationCurve,
+    MixBusId, ProgramOutputId, SequenceId, TimelineTime, TimelineTimeRange, TrackId,
 };
 use mondrian_timeline::audio::{AudioFadeCurve, AudioRoute, AudioTransitionCurve};
 use mondrian_timeline::clip::SpeedMap;
@@ -217,10 +217,17 @@ impl CompiledAudioProgram {
 pub struct AudioRenderContract {
     /// Concrete Evaluation Grid.
     pub sample_rate: u32,
-    /// Explicit interleaved output channel count.
-    pub channels: usize,
+    /// Semantic output layout and canonical interleaving order.
+    pub channel_layout: AudioChannelLayout,
     /// Largest block admitted by the Session.
     pub max_block_frames: usize,
     /// Realtime or offline processor contract.
     pub processing_mode: AudioProcessingMode,
+}
+
+impl AudioRenderContract {
+    /// Channel count derived from the sole layout authority.
+    pub const fn channel_count(self) -> usize {
+        self.channel_layout.channel_count()
+    }
 }

@@ -1,6 +1,6 @@
 use super::*;
 use mondrian_core::{
-    AssetId, AudioComponentEditId, AudioRouteId, AudioSourceComponentId,
+    AssetId, AudioChannelLayout, AudioComponentEditId, AudioRouteId, AudioSourceComponentId,
     AutomationSegmentInterpolation, ExactAutomationCurve, ExactAutomationKeyframe,
     ExactBezierHandle, ExecutionCancellationToken, ParameterId, TimeScale, TimelineTime,
 };
@@ -22,9 +22,10 @@ impl AudioPcmSource for RampSource {
         &mut self,
         _edit: AudioComponentEditId,
         source_frames: &[i64],
-        channels: usize,
+        channel_layout: AudioChannelLayout,
         destination: &mut [f32],
     ) -> Result<(), AudioExecutionError> {
+        let channels = channel_layout.channel_count();
         self.block_reads = self.block_reads.saturating_add(1);
         for (frame, source_frame) in source_frames.iter().copied().enumerate() {
             let value = if source_frame < 0 {
@@ -45,7 +46,7 @@ impl AudioPcmSource for FailingSource {
         &mut self,
         _edit: AudioComponentEditId,
         _source_frames: &[i64],
-        _channels: usize,
+        _channel_layout: AudioChannelLayout,
         _destination: &mut [f32],
     ) -> Result<(), AudioExecutionError> {
         Err(AudioExecutionError::SourceUnavailable(
@@ -61,11 +62,11 @@ impl AudioDecodedSource for RampDecodedSource {
         &self,
         start_frame: i64,
         frames: usize,
-        channels: usize,
         destination: &mut [f32],
         _cancellation: &ExecutionCancellationToken,
     ) -> Result<(), String> {
-        if destination.len() != frames.saturating_mul(channels) {
+        let channels = 1;
+        if destination.len() != frames {
             return Err("invalid destination extent".to_owned());
         }
         for frame in 0..frames {
@@ -152,7 +153,7 @@ fn prepared_with_backend(
             Arc::new(compiled),
             AudioRenderContract {
                 sample_rate: 2,
-                channels: 1,
+                channel_layout: AudioChannelLayout::Mono,
                 max_block_frames: max_frames,
                 processing_mode: AudioProcessingMode::Offline,
             },
@@ -205,8 +206,15 @@ fn session_executes_preallocated_contribution_and_route_compensation_block_invar
     fn plan_with_compensation(sequence: &Sequence) -> Arc<PreparedAudioPlan> {
         let mut plan = prepared(sequence, 12);
         let prepared = Arc::make_mut(&mut plan);
+        let contribution_track_slot = prepared.schedule.contributions[0].track_slot;
+        let contribution_route = prepared
+            .schedule
+            .routes
+            .iter()
+            .position(|route| route.source_slot == contribution_track_slot)
+            .expect("Contribution Track route");
         prepared.schedule.contributions[0].compensation_delay_frames = 2;
-        prepared.schedule.routes[0].compensation_delay_frames = 2;
+        prepared.schedule.routes[contribution_route].compensation_delay_frames = 2;
         prepared.schedule.summary.maximum_compensation_frames = 2;
         prepared.schedule.summary.output_latency_frames = 4;
         prepared.schedule.summary.requires_state_entry = true;
@@ -616,7 +624,7 @@ fn nested_public_output_uses_an_independent_recursive_session() {
 
     let contract = AudioRenderContract {
         sample_rate: 2,
-        channels: 1,
+        channel_layout: AudioChannelLayout::Mono,
         max_block_frames: 8,
         processing_mode: AudioProcessingMode::Offline,
     };
@@ -650,7 +658,7 @@ fn stateless_nested_runtime_preserves_fractional_reverse_mapping() {
 
     let contract = AudioRenderContract {
         sample_rate: 2,
-        channels: 1,
+        channel_layout: AudioChannelLayout::Mono,
         max_block_frames: 4,
         processing_mode: AudioProcessingMode::Offline,
     };
@@ -684,7 +692,7 @@ fn stateful_nested_runtime_replays_forward_mapping_across_child_blocks() {
 
     let contract = AudioRenderContract {
         sample_rate: 2,
-        channels: 1,
+        channel_layout: AudioChannelLayout::Mono,
         max_block_frames: 4,
         processing_mode: AudioProcessingMode::Offline,
     };
@@ -737,7 +745,7 @@ fn stateful_nested_runtime_rejects_reverse_state_evaluation() {
 
     let contract = AudioRenderContract {
         sample_rate: 2,
-        channels: 1,
+        channel_layout: AudioChannelLayout::Mono,
         max_block_frames: 4,
         processing_mode: AudioProcessingMode::Offline,
     };
@@ -782,7 +790,7 @@ fn stateful_nested_runtime_reenters_after_root_discontinuity() {
 
     let contract = AudioRenderContract {
         sample_rate: 2,
-        channels: 1,
+        channel_layout: AudioChannelLayout::Mono,
         max_block_frames: 2,
         processing_mode: AudioProcessingMode::Offline,
     };
@@ -845,7 +853,7 @@ fn direct_plan_preparation_rejects_unprepared_nested_latency() {
         program,
         AudioRenderContract {
             sample_rate: 2,
-            channels: 1,
+            channel_layout: AudioChannelLayout::Mono,
             max_block_frames: 8,
             processing_mode: AudioProcessingMode::Offline,
         },
@@ -879,7 +887,7 @@ fn nested_runtime_rejects_depth_beyond_the_shared_sequence_contract() {
 
     let contract = AudioRenderContract {
         sample_rate: 2,
-        channels: 1,
+        channel_layout: AudioChannelLayout::Mono,
         max_block_frames: 8,
         processing_mode: AudioProcessingMode::Offline,
     };
@@ -891,4 +899,47 @@ fn nested_runtime_rejects_depth_beyond_the_shared_sequence_contract() {
         error,
         AudioRuntimeBuildError::NestedDepthExceeded { .. }
     ));
+}
+
+#[test]
+fn clip_balance_targets_semantic_front_pair_without_touching_surround_channels() {
+    let mut sequence = sequence_with_audio_clip();
+    sequence.audio_tracks[0].clips[0].audio_components[0].pan = 1.0;
+    let output = sequence.audio_program.outputs[0].id;
+    let program = Arc::new(
+        compile_audio_program(&sequence, AudioCompileRequest::program(output))
+            .expect("semantic program"),
+    );
+
+    for (layout, expected) in [
+        (AudioChannelLayout::Mono, vec![1.0]),
+        (AudioChannelLayout::Stereo, vec![0.0, 1.0]),
+        (
+            AudioChannelLayout::Surround51,
+            vec![0.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        ),
+    ] {
+        let plan = Arc::new(
+            PreparedAudioPlan::prepare(
+                Arc::clone(&program),
+                AudioRenderContract {
+                    sample_rate: 2,
+                    channel_layout: layout,
+                    max_block_frames: 1,
+                    processing_mode: AudioProcessingMode::Offline,
+                },
+            )
+            .expect("layout-specific plan"),
+        );
+        let actual = render_audio(
+            plan,
+            &mut RampSource::default(),
+            AudioRenderRequest { start_sample: 0, frames: 1 },
+        )
+        .expect("rendered layout");
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!((actual - expected).abs() <= 1.0e-6, "layout={layout:?}");
+        }
+    }
 }

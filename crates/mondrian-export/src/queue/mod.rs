@@ -15,9 +15,9 @@ use mondrian_audio::{
 use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace, FramePosition, JobId, Rational};
 use mondrian_core::{
-    AudioSamplePosition, AudioSampleRate, AudioSampleRounding, AudioSourceComponentId,
-    ExecutionCancellationToken, FrameRounding, TimelineTime, WorkingColorSpace,
-    WorkingRgbaF32Frame,
+    AudioChannelLayout, AudioSamplePosition, AudioSampleRate, AudioSampleRounding,
+    AudioSourceComponentId, ExecutionCancellationToken, FrameRounding, TimelineTime,
+    WorkingColorSpace, WorkingRgbaF32Frame,
 };
 use mondrian_media::AudioSourceCache;
 use mondrian_media::{
@@ -1391,11 +1391,11 @@ enum TimelineAudioInput {
     PcmFile {
         path: PathBuf,
         sample_rate: u32,
-        channels: u8,
+        channel_layout: AudioChannelLayout,
     },
     Silent {
         sample_rate: u32,
-        channels: u8,
+        channel_layout: AudioChannelLayout,
     },
     Disabled,
 }
@@ -1485,13 +1485,15 @@ fn execute_timeline_export(
             .arg("pipe:0");
 
         match &audio_input {
-            TimelineAudioInput::PcmFile { path, sample_rate, channels } => {
+            TimelineAudioInput::PcmFile { path, sample_rate, channel_layout } => {
                 cmd.arg("-f")
                     .arg("f32le")
                     .arg("-ar")
                     .arg(sample_rate.to_string())
+                    .arg("-channel_layout")
+                    .arg(ffmpeg_channel_layout(*channel_layout))
                     .arg("-ac")
-                    .arg(channels.to_string())
+                    .arg(channel_layout.channel_count().to_string())
                     .arg("-i")
                     .arg(path)
                     .arg("-map")
@@ -1500,8 +1502,8 @@ fn execute_timeline_export(
                     .arg("1:a:0")
                     .arg("-shortest");
             }
-            TimelineAudioInput::Silent { sample_rate, channels } => {
-                let channel_layout = ffmpeg_channel_layout(*channels);
+            TimelineAudioInput::Silent { sample_rate, channel_layout } => {
+                let channel_layout = ffmpeg_channel_layout(*channel_layout);
                 cmd.arg("-f")
                     .arg("lavfi")
                     .arg("-i")
@@ -1752,9 +1754,9 @@ fn prepare_timeline_audio_input(
     }
 
     let sample_rate = timeline.sequence.settings.audio_sample_rate.max(8_000);
-    let channels = timeline.sequence.settings.audio_channel_layout.channels().max(1);
+    let channel_layout = timeline.sequence.settings.audio_channel_layout;
     if !timeline_has_audio_content(timeline, range).map_err(JobExecutionResult::Failed)? {
-        return Ok(TimelineAudioInput::Silent { sample_rate, channels });
+        return Ok(TimelineAudioInput::Silent { sample_rate, channel_layout });
     }
 
     let temp_path = std::env::temp_dir().join(format!(
@@ -1768,12 +1770,12 @@ fn prepare_timeline_audio_input(
         timeline,
         range,
         sample_rate,
-        channels,
+        channel_layout,
         cancel,
         report,
     ) {
         JobExecutionResult::Completed => {
-            Ok(TimelineAudioInput::PcmFile { path: temp_path, sample_rate, channels })
+            Ok(TimelineAudioInput::PcmFile { path: temp_path, sample_rate, channel_layout })
         }
         JobExecutionResult::Cancelled => Err(JobExecutionResult::Cancelled),
         JobExecutionResult::Failed(reason) => Err(JobExecutionResult::Failed(reason)),
@@ -1815,7 +1817,7 @@ fn render_timeline_audio_to_pcm_f32(
     timeline: &TimelineExportSnapshot,
     range: TimelineRenderRange,
     sample_rate: u32,
-    channels: u8,
+    channel_layout: AudioChannelLayout,
     cancel: &ExecutionCancellationToken,
     report: &mut dyn FnMut(ExportProgress),
 ) -> JobExecutionResult {
@@ -1829,11 +1831,11 @@ fn render_timeline_audio_to_pcm_f32(
             ));
         }
     };
-    let cache = Arc::new(AudioSourceCache::new(sample_rate, channels));
+    let cache = Arc::new(AudioSourceCache::new(sample_rate, channel_layout));
     let resolver = ExportAudioMediaResolver { timeline, cache: Arc::clone(&cache) };
     let contract = AudioRenderContract {
         sample_rate,
-        channels: usize::from(channels),
+        channel_layout,
         max_block_frames: 16_384,
         processing_mode: AudioProcessingMode::Offline,
     };
@@ -1870,8 +1872,9 @@ fn render_timeline_audio_to_pcm_f32(
     let chunk_frames_target = (sample_rate as usize / 5).clamp(1024, 16_384);
     let mut writer = BufWriter::new(file);
     let mut rendered_samples = 0usize;
-    let mut sample_bytes = Vec::<u8>::with_capacity(chunk_frames_target * channels as usize * 4);
-    let mut pcm = vec![0.0_f32; chunk_frames_target * usize::from(channels)];
+    let channels = channel_layout.channel_count();
+    let mut sample_bytes = Vec::<u8>::with_capacity(chunk_frames_target * channels * 4);
+    let mut pcm = vec![0.0_f32; chunk_frames_target * channels];
 
     while rendered_samples < total_samples {
         if cancel.is_canceled() {
@@ -1892,7 +1895,7 @@ fn render_timeline_audio_to_pcm_f32(
                 return JobExecutionResult::Failed("导出音频样本位置超出支持范围".to_owned());
             }
         };
-        let chunk_samples = chunk_frames * usize::from(channels);
+        let chunk_samples = chunk_frames * channels;
         if let Err(error) = runtime.render_into(
             AudioRenderRequest { start_sample: chunk_start, frames: chunk_frames },
             &mut pcm[..chunk_samples],
@@ -1992,12 +1995,11 @@ impl AudioDecodedSource for ExportDecodedAudioSource {
         &self,
         start_frame: i64,
         frames: usize,
-        channels: usize,
         destination: &mut [f32],
         _cancellation: &mondrian_core::ExecutionCancellationToken,
     ) -> Result<(), String> {
         self.0
-            .read_interleaved(start_frame, frames, channels, destination)
+            .read_interleaved(start_frame, frames, destination)
             .map_err(|error| error.to_string())
     }
 }
@@ -2924,12 +2926,11 @@ fn timeline_output_resolution(job: &RenderJob, timeline: &TimelineExportSnapshot
     )
 }
 
-fn ffmpeg_channel_layout(channels: u8) -> &'static str {
-    match channels {
-        0 | 1 => "mono",
-        2 => "stereo",
-        6 => "5.1",
-        _ => "stereo",
+fn ffmpeg_channel_layout(layout: AudioChannelLayout) -> &'static str {
+    match layout {
+        AudioChannelLayout::Mono => "mono",
+        AudioChannelLayout::Stereo => "stereo",
+        AudioChannelLayout::Surround51 => "5.1(side)",
     }
 }
 

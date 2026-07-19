@@ -165,7 +165,6 @@ impl AppUiSequenceSettingsDraft {
                 self.settings.preview.cache_enabled = enabled;
             }
         }
-        self.settings.audio_channels = self.settings.audio_channel_layout.channels();
     }
 
     /// Convert the current draft into the editor action payload.

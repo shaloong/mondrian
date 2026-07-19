@@ -29,7 +29,7 @@ decode requests and reports facts; it does not pause or advance transport.
 Playback and Export do not decode complete audio sources into resident memory.
 `AudioSourceCache` opens fingerprinted source readers and supplies exact
 interleaved PCM through aligned ten-second windows. One weighted LRU spans all
-readers at the prepared sample-rate/channel contract: 128 entries, 256 MiB
+readers at the prepared sample-rate/semantic-layout contract: 128 entries, 256 MiB
 payload, and 64 bounded terminal failures. Path + file length + modification
 timestamp is the current source revision boundary. Cache diagnostics expose
 bytes, entry pressure, hits/misses, decode results, oversize windows,
@@ -37,7 +37,7 @@ single-flight leaders, and evictions; an entry-count-only claim is insufficient.
 
 The concrete miss Adapter owns a bounded pool of at most eight persistent
 FFmpeg child-process Sessions. A Session is keyed by the complete source
-fingerprint plus output sample-rate/channel contract, opens at the first
+fingerprint plus output sample-rate/layout contract, opens at the first
 requested sample, and continuously emits interleaved `f32le`. Consecutive
 windows reuse that stream; a non-contiguous miss terminates and reopens only
 that source Session using at most ten seconds of input-side coarse preroll plus
@@ -46,6 +46,14 @@ decode instead of trusting codec-dependent input-seek priming. Pool pressure
 evicts an idle least-recently-used Session. This is an intentionally isolated process
 Adapter, not an in-process FFmpeg claim; a linked FFmpeg Adapter may replace it
 behind the same Interface without changing cache or sample semantics.
+
+The cache and every returned `AudioBuffer` carry `AudioChannelLayout`, not an
+independent channel count. Mono, stereo, and 5.1 use canonical semantic orders;
+the FFmpeg Adapter supplies both `-channel_layout` and the derived `-ac`, with
+5.1 lowered specifically to `5.1(side)`. Cache validation rejects a decoded
+buffer whose layout differs even when its raw sample extent happens to match.
+Native stream selection beyond the stable primary component and general
+up/down-mix policy remain audio-domain work, not decoder guesses.
 
 Stdout has two bounded 64 KiB look-ahead chunks and stderr retains only its
 latest 64 KiB while always draining the pipe. Generation cancellation is

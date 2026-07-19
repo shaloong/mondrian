@@ -65,6 +65,17 @@ fails binding instead of being silently redirected to the primary stream. A
 future asset stream catalog must make additional stable component identities
 resolvable before authoring them.
 
+The Sequence persists one semantic `AudioChannelLayout`; it does not persist a
+second channel count. The same layout crosses preparation, nested Runtime,
+Playback PCM requests, decoded-source cache, PCM buffers, and Export. Supported
+standard orders are mono `[M]`, stereo `[L, R]`, and 5.1
+`[L, R, C, LFE, Ls, Rs]`. Channel capacity is derived from this value. The
+media Adapter requests both the output sample rate and explicit FFmpeg layout
+(`5.1(side)` for 5.1), so sample-rate conversion and standard-layout mapping
+happen once before PCM enters the Runtime. Unknown component identities or
+layout mismatches fail closed; arbitrary native component catalogs, custom
+layouts, and authored up/down-mix policy remain unfinished.
+
 ### Processing scopes
 
 `AudioProcessingScope` is a Sequence-owned processing definition containing
@@ -132,9 +143,9 @@ The current common executor admits built-in Gain schema 1 only when its complete
 captured parameter schema equals the canonical definition. The required Gain
 parameter is never synthesized during compilation. Its hard interval is
 `[-120, +24] dB`, its ordinary editor interval is `[-60, +12] dB`, and invalid
-persisted values are rejected. VST3/CLAP loading,
-process isolation, layouts, state entry, latency, and parameter-delivery
-capabilities remain required work; no dry or flat fallback claims support.
+persisted values are rejected. VST3/CLAP loading, process isolation, plugin-bus
+layout negotiation, state entry, latency, and parameter-delivery capabilities
+remain required work; no dry or flat fallback claims support.
 
 ### Fades and transitions
 
@@ -175,7 +186,7 @@ fail compilation explicitly; only `RoutedInputs` is executable.
 `PreparedAudioPlan` binds immutable semantic IR to an `AudioRenderContract`:
 
 - positive sample rate;
-- positive interleaved channel count;
+- one supported semantic channel layout with count and order derived from it;
 - maximum admitted block frames;
 - `Realtime` or `Offline` processing mode.
 
@@ -536,9 +547,11 @@ Automated tests currently prove:
 The architecture is now on the product path, but these are explicit remaining
 gates rather than implied support:
 
-1. Define channel-layout and sample-format types, deterministic resampling,
-   media component/stream selection, and up/down-mix policy; reject unknown
-   layouts instead of guessing.
+1. Extend the implemented standard mono/stereo/5.1 signal-layout contract and
+   FFmpeg sample-rate/layout lowering with a probed media component catalog,
+   stable non-primary stream binding, declared native layouts, deterministic
+   custom-layout mapping, and authored up/down-mix policy. Unknown identities
+   and layouts must continue to fail instead of being guessed.
 2. Add processor capability negotiation, real built-in stateful processors,
    latency propagation/PDC, seek entry/preroll, discontinuity tests, and nested
    latency evidence.

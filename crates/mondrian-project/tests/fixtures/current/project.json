@@ -68,7 +68,6 @@
             "timecode_start_frame": 0
           },
           "audio_sample_rate": 48000,
-          "audio_channels": 2,
           "audio_display_format": "AudioSamples",
           "audio_channel_layout": "Stereo",
           "preview": {

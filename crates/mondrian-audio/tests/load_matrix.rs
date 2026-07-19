@@ -4,7 +4,8 @@ use mondrian_audio::{
     AudioRenderSession, PreparedAudioPlan,
 };
 use mondrian_core::{
-    AssetId, AudioComponentEditId, AudioRouteId, AudioSourceComponentId, MixBusId, TimelineTime,
+    AssetId, AudioChannelLayout, AudioComponentEditId, AudioRouteId, AudioSourceComponentId,
+    MixBusId, TimelineTime,
 };
 use mondrian_timeline::audio::{
     AudioChannelStrip, AudioChannelStripOutputPort, AudioMixBus, AudioRoute, AudioRouteDestination,
@@ -29,9 +30,10 @@ impl AudioPcmSource for DeterministicSource {
         &mut self,
         _edit: AudioComponentEditId,
         source_frames: &[i64],
-        channels: usize,
+        channel_layout: AudioChannelLayout,
         destination: &mut [f32],
     ) -> Result<(), AudioExecutionError> {
+        let channels = channel_layout.channel_count();
         for (frame, source_frame) in source_frames.iter().copied().enumerate() {
             let value = if source_frame < 0 {
                 0.0
@@ -186,7 +188,7 @@ fn prepared(
             Arc::new(program),
             AudioRenderContract {
                 sample_rate: SAMPLE_RATE,
-                channels: CHANNELS,
+                channel_layout: AudioChannelLayout::Stereo,
                 max_block_frames,
                 processing_mode: AudioProcessingMode::Realtime,
             },
