@@ -99,6 +99,7 @@ use crate::app::preview_execution::{
     PreviewGpuWorkingInput as AppUiGpuPreviewWorkingInput,
 };
 use crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
+use crate::app::preview_hardware_admission::PreviewHardwareDecodeAdmissionState;
 use crate::app::preview_quality::normalize_preview_resolution_scale;
 use crate::app::preview_scheduler_policy::{
     media_preview_forward_prefetch_window_frames, playback_frame_delivery_kind,
@@ -673,7 +674,6 @@ mod diagnostics;
 pub use diagnostics::*;
 mod evidence;
 mod hardware_admission;
-use hardware_admission::PreviewHardwareDecodeAdmissionState;
 mod media_adapter;
 use media_adapter::PreviewProxyGenerationRequestKey;
 #[cfg(test)]

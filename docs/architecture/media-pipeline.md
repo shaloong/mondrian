@@ -544,11 +544,12 @@ access modes. Reverting scrub or still requests to `Auto` would silently move a
 4K Main10 interaction from the admitted native P010 path back to CPU decode and
 is forbidden. CPU-only preview services retain the default `Auto` policy
 because no GPU Adapter admission is installed.
-`app_ui::preview::hardware_admission` stores the renderer/platform observation
-as one Copy snapshot (or the explicit pre-discovery `None` state). Request,
-device selector, native-format support, blocker, and diagnostics are always
+UI-independent `app::preview_hardware_admission` stores the renderer/platform
+observation as one Copy snapshot (or the explicit pre-discovery `None` state).
+Base request, native-surface-specific downgrade, and device selector are always
 projected from that same observation; independently updated booleans cannot
-manufacture a mixed admission state.
+manufacture a mixed admission state. The concrete Preview module only projects
+this state into its diagnostics and job fields; it owns no admission rule.
 When background preview completion changes Viewer lifecycle, the app host may
 perform one preview-aware model refresh, then adapt its payload-free feedback
 without requesting preview again. A feedback transition must not trigger a

@@ -1,25 +1,6 @@
-//! Coherent renderer/platform hardware-decode admission snapshot and request projection.
+//! Preview-service Adapter for application-owned hardware-decode admission.
 
 use super::*;
-
-/// One coherent renderer/platform admission observation.
-///
-/// `None` is the pre-discovery state. A reported observation is replaced as a
-/// whole so request projection cannot combine fields from different probes.
-#[derive(Debug, Clone, Copy, Default)]
-pub(super) struct PreviewHardwareDecodeAdmissionState(Option<PlaybackHardwareDecodeAdmission>);
-
-impl PreviewHardwareDecodeAdmissionState {
-    fn reported(admission: PlaybackHardwareDecodeAdmission) -> Self {
-        Self(Some(admission))
-    }
-
-    fn request(self) -> PreviewHardwareDecodeRequest {
-        self.0.map_or(PreviewHardwareDecodeRequest::Auto, |admission| {
-            admission.request
-        })
-    }
-}
 
 impl AppUiPreviewService {
     /// Set playback hardware-decode admission selected by the app runtime.
@@ -45,7 +26,7 @@ impl AppUiPreviewService {
         &self,
     ) -> AppUiPreviewHardwareDecodeAdmissionDiagnostics {
         let state = self.hardware_decode_admission.get();
-        let Some(admission) = state.0 else {
+        let Some(admission) = state.observation() else {
             return AppUiPreviewHardwareDecodeAdmissionDiagnostics {
                 playback_request: state.request(),
                 ..AppUiPreviewHardwareDecodeAdmissionDiagnostics::default()
@@ -67,6 +48,7 @@ impl AppUiPreviewService {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn hardware_decode_request_for_access_mode(
         &self,
         _access_mode: PreviewDecodeAccessMode,
@@ -76,37 +58,18 @@ impl AppUiPreviewService {
 
     pub(super) fn hardware_decode_request_for_key(
         &self,
-        access_mode: PreviewDecodeAccessMode,
+        _access_mode: PreviewDecodeAccessMode,
         key: &MediaPreviewKey,
     ) -> PreviewHardwareDecodeRequest {
-        let request = self.hardware_decode_request_for_access_mode(access_mode);
-        if request != PreviewHardwareDecodeRequest::PreferGpuResident {
-            return request;
-        }
-        let admission = self.hardware_decode_admission.get().0;
-        let supported = match key.native_surface_hint {
-            Some(MediaPreviewNativeSurfaceHint::Nv12) => {
-                admission.is_some_and(|admission| admission.renderer_supports_nv12)
-            }
-            Some(MediaPreviewNativeSurfaceHint::P010) => {
-                admission.is_some_and(|admission| admission.renderer_supports_p010)
-            }
-            None => true,
-        };
-        if supported {
-            request
-        } else {
-            PreviewHardwareDecodeRequest::PreferHardwareDecode
-        }
+        self.hardware_decode_admission
+            .get()
+            .request_for_surface(key.native_surface_hint)
     }
 
     pub(super) fn hardware_decode_device_selector_for_access_mode(
         &self,
         _access_mode: PreviewDecodeAccessMode,
     ) -> Option<HwAccelDeviceSelector> {
-        self.hardware_decode_admission
-            .get()
-            .0
-            .and_then(|admission| admission.hardware_decode_device_selector)
+        self.hardware_decode_admission.get().device_selector()
     }
 }
