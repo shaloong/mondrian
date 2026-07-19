@@ -305,7 +305,7 @@ impl AppState {
                 .to_frame_position(after.settings.frame_rate, FrameRounding::Nearest)?
                 .frame
                 .max(0);
-            self.record_sequence_snapshot_command(description, before, after);
+            self.record_sequence_snapshot_command(description, before, after)?;
             self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
             self.replace_clip_selection(pasted_selection);
             self.seek(seek_frame);

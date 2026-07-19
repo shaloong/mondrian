@@ -21,6 +21,42 @@ fn primary_track_clip_lens(state: &AppState) -> (usize, usize) {
 }
 
 #[test]
+fn sequence_revision_advances_on_edit_undo_and_redo_without_reusing_snapshots() {
+    let mut state = create_state_with_sequence();
+    let initial = state.sequence.as_ref().expect("sequence").revision;
+
+    state.add_video_track().expect("add track");
+    let edited = state.sequence.as_ref().expect("sequence").revision;
+    assert_eq!(edited.get(), initial.get() + 1);
+
+    assert!(state.undo_timeline().expect("undo"));
+    let undone = state.sequence.as_ref().expect("sequence").revision;
+    assert_eq!(undone.get(), edited.get() + 1);
+
+    assert!(state.redo_timeline().expect("redo"));
+    let redone = state.sequence.as_ref().expect("sequence").revision;
+    assert_eq!(redone.get(), undone.get() + 1);
+    assert_eq!(state.cmd_history.diagnostics().undo_entries, 1);
+    assert_eq!(state.cmd_history.diagnostics().redo_entries, 0);
+}
+
+#[test]
+fn exhausted_sequence_revision_rolls_back_the_author_mutation() {
+    let mut state = create_state_with_sequence();
+    state.sequence.as_mut().expect("sequence").revision =
+        mondrian_core::SequenceRevision::new(u64::MAX).expect("nonzero revision");
+    let before_tracks = state.sequence.as_ref().expect("sequence").video_tracks.len();
+
+    let error = state.add_video_track().expect_err("exhausted revision must fail");
+
+    assert!(error.to_string().contains("revision"));
+    let sequence = state.sequence.as_ref().expect("sequence");
+    assert_eq!(sequence.video_tracks.len(), before_tracks);
+    assert_eq!(sequence.revision.get(), u64::MAX);
+    assert!(!state.cmd_history.can_undo());
+}
+
+#[test]
 fn create_new_project_with_settings_preserves_sequence_color_management() {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -183,6 +219,8 @@ fn sequence_management_duplicate_rename_delete_updates_collection() {
     state.active_sequence_id = Some(first);
     state.default_sequence_id = Some(first);
     state.sync_current_sequence_into_collection();
+    state.add_video_track().expect("advance source revision");
+    assert!(state.sequence.as_ref().expect("sequence").revision.get() > 1);
 
     let source_output = state.sequence.as_ref().expect("sequence").audio_program.outputs[0].id;
     let source_routes = state
@@ -199,6 +237,10 @@ fn sequence_management_duplicate_rename_delete_updates_collection() {
     assert_eq!(state.active_sequence_id, Some(duplicate));
     assert_eq!(state.sequence.as_ref().expect("active").name, "Duplicate");
     let duplicated = state.sequence.as_ref().expect("active");
+    assert_eq!(
+        duplicated.revision,
+        mondrian_core::SequenceRevision::INITIAL
+    );
     assert_ne!(duplicated.audio_program.outputs[0].id, source_output);
     assert!(duplicated
         .audio_program

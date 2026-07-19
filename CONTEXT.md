@@ -128,6 +128,10 @@ _Avoid_: Whole-file PCM as the source Interface, per-sample decoder virtual call
 A normalized exact rational offset interpreted within its owner's declared Authoring Time Domain, independent of frame, sample, or display grids.
 _Avoid_: Frame number as universal time, floating-point seconds, fixed subframe ticks
 
+**Sequence Author Revision**:
+A persisted nonzero monotonic generation of one stable Sequence identity. Every committed author transaction, Undo, Redo, and inherited Project semantic change advances it; file-save attempts and playhead-only navigation do not define it.
+_Avoid_: Project document save revision, frame-demand sequence, content hash presented as a transaction generation
+
 **Authoring Time Domain**:
 The coordinate origin and mapping owned by a Sequence, Audio Component Edit, Audio Processing Scope, Transition, source, or other time-bearing author entity.
 _Avoid_: Renderer frame grid, audio block, implicit clip-local flag
@@ -313,6 +317,8 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - CPU scalar reference and runtime-selected SIMD implementations consume the same **Prepared Audio Schedule** and must produce identical PCM for the supported processor set. SIMD is an execution choice, never a second semantic compiler.
 - Concurrent misses for the same complete **Decoded Audio Source Window** have one decode leader. Persistent media decode Sessions are bounded by source revision plus output contract; sequential reuse, cold open, and random restart are distinct evidence classes and cannot share one latency claim.
 - Persisted timeline positions, ranges, automation keys, and temporal handles use **Timeline Time** in an explicit **Authoring Time Domain**; video frames and audio samples are derived **Evaluation Grids**, not competing author time systems.
+- A **Sequence Author Revision** is the conservative invalidation generation for every author entity owned by that Sequence. Project document revision records successful file saves and can never substitute for it in Playback, Preview, audio compilation, or render-cache identity.
+- Undo and Redo restore author content but always advance the **Sequence Author Revision**; restored content can therefore never masquerade as the older live snapshot from which it originated.
 - **Timeline Time** equality, ordering, arithmetic, and hashing use checked canonical rational semantics; serialized numerator/denominator field order can never define chronology.
 - Timeline Times from different **Authoring Time Domains** cannot be compared or combined until an explicit **Time Transform** maps one domain into the other.
 - Video automation and audio automation share the same exact curve and stable parameter-identity foundation; their Evaluation Grids, supported value types, and delivery cadence remain domain-specific.

@@ -10,7 +10,10 @@ use crate::{
 };
 use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    path::PathBuf,
+};
 
 /// 面向 UI/命令层的插值意图。
 ///
@@ -1152,6 +1155,7 @@ impl AnimatedProperty {
                 "persisted animation channel count does not match the parameter type",
             ));
         }
+        let mut keyframe_times = HashMap::<KeyframeId, TimelineTime>::new();
         for (expected_index, channel) in self.channels.iter().enumerate() {
             if channel.index != expected_index {
                 return Err(parameter_value_error(
@@ -1161,6 +1165,14 @@ impl AnimatedProperty {
             }
             let mut previous_time = None;
             for keyframe in &channel.keyframes {
+                if let Some(existing_time) = keyframe_times.insert(keyframe.id, keyframe.time) {
+                    if existing_time != keyframe.time {
+                        return Err(parameter_value_error(
+                            &self.descriptor.path,
+                            "one keyframe identity cannot address different author times",
+                        ));
+                    }
+                }
                 if previous_time.is_some_and(|time| time >= keyframe.time) {
                     return Err(parameter_value_error(
                         &self.descriptor.path,
@@ -1945,6 +1957,7 @@ impl PropertyBag {
 
     /// Validate every property before accepting deserialized author state.
     pub fn validate(&self) -> Result<()> {
+        let mut track_ids = HashSet::with_capacity(self.properties.len());
         for (address, property) in &self.properties {
             if address != &property.descriptor.path {
                 return Err(MondrianError::WorkflowStepFailed {
@@ -1952,6 +1965,15 @@ impl PropertyBag {
                     reason: format!(
                         "property map key `{address}` does not match descriptor address `{}`",
                         property.descriptor.path
+                    ),
+                });
+            }
+            if !track_ids.insert(property.track_id) {
+                return Err(MondrianError::WorkflowStepFailed {
+                    step_id: "property_identity_validation".to_owned(),
+                    reason: format!(
+                        "duplicate animation-track identity {} in one property owner",
+                        property.track_id
                     ),
                 });
             }

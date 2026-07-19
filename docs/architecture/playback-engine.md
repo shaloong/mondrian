@@ -149,7 +149,8 @@ the quality-policy revision, invalidating incompatible demands.
 Commands are synchronous state transitions. They may emit directives but must
 not decode, render, block on a device, or wait for a worker.
 
-An App Adapter applies Sequence identity, semantic revision, evaluation time
+An App Adapter applies Sequence identity, persisted monotonic
+`SequenceRevision`, evaluation time
 base, content end, and the requested position as one validated
 `PlaybackTimelineBinding`. `play_timeline` and `seek_timeline` commit that
 binding and the transport transition atomically. One user Play or Seek intent
@@ -158,6 +159,8 @@ seek, and play sequence. A seek received during Priming, Playing, or Recovering
 preserves play intent and publishes the new bounded Priming demand immediately;
 a paused or stopped seek publishes one untimed demand. Binding and position time
 bases must match or the complete transition fails without partial mutation.
+The project document's successful-save revision is not accepted as this value:
+draft edits, failed saves, Undo, and Redo must still rotate semantic identity.
 
 ### Observations
 

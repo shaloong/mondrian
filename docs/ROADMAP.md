@@ -60,8 +60,8 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 | 能力域 | 已有事实 | 仍不足以宣称完成的部分 | 当前判断 |
 | --- | --- | --- | --- |
 | 核心时间与 ID | 作者位置/范围/曲线已迁移为 canonical `TimelineTime`，已有显式 Time Domain/Transform、稳定 ParameterId；`FramePosition` 仅作求值适配，SMPTE NDF/DF 已有独立 display contract | 仍需补齐 VFR/混合帧率、嵌套和长项目 corpus，并把 display mode 完整接入序列/UI 设置 | L1- |
-| 项目持久化 | `.mdp` manifest、schema v9 精确时间与跨媒体参数文档、当前 fixture、SQLite 素材库、临时文件写入、自动保存、恢复候选和重连已接入 | Alpha 明确拒绝旧 schema、不承诺兼容迁移；替换目标文件前的持久化/崩溃语义仍需压力验证 | L1- |
-| Undo/Redo | UI 外的时间线命令历史可工作，主要编辑动作有回归测试 | 主要依赖完整 `Sequence` 快照，内存上限、跨序列事务和命令级不变量仍需收敛 | L1- |
+| 项目持久化 | `.mdp` manifest、schema v10 精确时间/跨媒体参数/Sequence author revision 文档、当前 fixture、SQLite 素材库、临时文件写入、自动保存、恢复候选和重连已接入 | Alpha 明确拒绝旧 schema、不承诺兼容迁移；替换目标文件前的持久化/崩溃语义仍需压力验证 | L1- |
+| Undo/Redo | UI 外的活动 Sequence 命令历史可工作；主要编辑动作有回归测试，完整快照已改为可计量的序列化载荷，并受 200 条/128 MiB 双重硬预算和结构化淘汰诊断约束 | 跨 Sequence/Project 聚合事务仍需独立设计；超大项目是否引入 delta command 取决于基准证据，不能另建一套语义 | L1- |
 | 素材管理 | 文件夹/Bin 层级、移动/重命名/删除、缩略图、离线提示、单文件/目录重连、代理模式已接入产品 UI | tags/metadata 字段尚未形成检索产品；素材使用位置反查和批量诊断不足 | L1- |
 | 时间线编辑 | 多轨、移动、分割、普通 Trim、Ripple Delete、Insert/Overwrite、Roll/Slip/Slide、跨轨移动、链接片段跟随、锁定、吸附、多选和嵌套序列已有实现与测试 | Lift/Extract、显式 Link/Unlink、Track Targeting、转场 handles、反向/冻结/完整 time remap、VFR/混合帧率边界和复杂 ripple 传播未形成完整验收 | L1- |
 | 播放与缓存 | UI 无关 `PlaybackEngine`、`FrameWorkBroker`、`PreviewFrameStore`、Evidence v2、Headless GPU Adapter，以及播放/拖动/静帧三种访问语义、FFmpeg session/ring/seek index、原子 generation/抢占/取消 disposition、deadline、预取和代理已接入；Broker 的请求龄期、失效龄期、deadline 与 worker 完成时刻已统一到可注入的 Monotonic Runtime Clock：Adapter 只在准入前提交不透明绝对 deadline 与剩余时长，Broker 单次降低、同键 rebind 更新并在 worker 发结果前一次性盖完成戳，因而排队不会续期、UI 延迟轮询不会制造虚假 Late；deadline/generation/抢占按最早权威时刻统一裁决，时钟回退会钳制、按回退事件计数并令门禁失败；取消原因与 request→checkpoint→return 证据已由播放域统一聚合并以 Playback/Interactive/Still 固定策略供诊断、Headless 与专业验收共用；访问模式/Broker Adapter/有界 job transport 已迁到不依赖 UI 的 `app::preview_access_mode`，deadline/执行质量/预取深度策略已迁到 `app::preview_scheduler_policy`，具体 FFmpeg worker、协作取消观察、结构化结果发布和有界关闭已迁到 `app::preview_media_task`，素材记录加完整 Viewer 意图到 canonical media key/色彩拒绝/不可用结果的解析已迁到 `app::preview_media_source`，Window/Headless 的完成、过期、终态 Delivery 与预卷顺序已统一到 `app::playback_preview`；`app::preview_execution` 原子拥有完整 generation binding、pending、执行质量、候选 ID、Viewer output key、UI 无关 GPU execution contract 与 exact registered-output reuse，Window/Headless 均直接消费该 contract；`app::native_video_import` 统一聚合 renderer/platform native import 事实与稳定 admission blocker，`app::preview_hardware_admission` 以单一快照投影硬解请求、native surface-specific downgrade 与 device selector，Window/Headless composition root 共用该状态；UI 无关 `app::preview_media_frame`、`app::preview_timeline_execution`、`app::preview_viewer_plan`、`app::preview_cpu_execution` 分别拥有解码驻留、canonical Timeline/嵌套求值及 media-demand collection、Viewer lowering 与 CPU 合成/输出语义；Timeline 执行对每个子 Sequence 按自身画布与共享运行时质量求值，Ready 结果必带 cache identity，Window 只提供 typed media outcome、消费统一的预取/preroll/输入色彩 demand 并投影执行事实；UI 无关 `app::preview_runtime` 是唯一生产组合根，按职责拥有 asset-library/proxy-dispatch Adapter、presentation、request scheduler、result pump、service lifecycle、hardware admission、evidence 与分层 diagnostics；Window `app_ui::preview` 只负责 GPU 输出 Widget 注册、CPU raster 无拷贝转换和 panel diagnostics 投影；专业验收消费 UI 无关 evidence，固定策略不可由 smoke 环境变量放宽，并以主视频/主音频流时长及声明帧数而非容器时长证明覆盖；Windows 原生 Private Commit/Working Set 探针与版本化整进程内存门禁已接入真实 cadence/terminal-stress 路径；加速 Headless 门禁已证明 30 分钟时钟数学，真实 `cpal_av_48khz_30min_v1` Adapter 也已接入产品 Audio Playback、Headless GPU、源缓存与整进程证据并 fail-closed | `app::preview_runtime::PreviewProductionRuntime<O>` 已成为 Window/Headless 共用的 UI 无关生产组合根；真实 CPAL、4K HEVC、连续播放、Seek 与取消门禁直接实例化 Headless 输出 specialization，不再借用 `WindowPreviewAdapter`；2026-07-18 已用不提交、权利未核实的本地长素材完成一次视频 v4（连续播放、100 次 seek、取消、内存平台、GPU presentation）和一次真实 CPAL/A/V v1 全绿报告，这些只能作为开发机证据，不能替代可再分发 canonical corpus、固定参考机/多驱动基线或声学 loopback | L1，单机产品路径已闭环，发布证据仍未闭环 |
@@ -340,9 +340,9 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 **项目与编辑**
 
-- [x] 建立 archive/document/SQLite version registry，并提供 schema v9 current document fixture、v0 SQLite fixture、幂等打开、事务回滚和失败不覆盖测试；Alpha 不保留旧 document schema 兼容。
-- [ ] 为 ProjectDocument、Sequence、Clip、Effect/Parameter、Mask、音频自动化定义稳定 ID 与 revision/invalidation 规则。
-- [ ] 审计所有高频编辑是否经 command/transaction；确定快照历史内存预算并输出淘汰诊断。
+- [x] 建立 archive/document/SQLite version registry，并提供 schema v10 current document fixture、v0 SQLite fixture、幂等打开、事务回滚和失败不覆盖测试；Alpha 不保留旧 document schema 兼容。
+- [x] Project document save revision 与持久化 `SequenceRevision` 已分离；每次作者事务、Undo/Redo 及继承的 Project 语义变化单调推进 Sequence revision，Playback 不再拿保存代次冒充 Timeline revision。Track/Clip/Effect/Mask/Parameter/Keyframe 与全部音频作者实体保留稳定强类型 ID，以 Sequence revision 作保守失效、以定义/内容/资源指纹作精细失效；当前文档会拒绝零 revision、重复 Sequence/Track/Clip/Effect/Mask/动画轨身份、重复 effect-local Parameter/曲线 keyframe 身份和悬空强 Clip 引用。
+- [x] 高频 Timeline、Inspector、Viewer 变换与关键帧编辑统一提交 Sequence snapshot command；历史 Module 按目标 Sequence 失败关闭，默认同时硬限制 200 条与 128 MiB command-owned retained bytes，使用可精确计量的序列化快照和 `VecDeque` 常数时间淘汰，累计报告预算淘汰、分支 Redo 丢弃和超大命令未保留。历史构造/入栈失败会回滚作者 Sequence，Undo/Redo 失败不吞命令；选择和导航仍明确不是作者事务。
 - [ ] 精确 Timeline Time、显式 Time Domain/Transform、Frame/Sample Evaluation Grid 和独立 SMPTE NDF/DF display contract 已落地并删除旧 `TimeCode`/`TimeTicks`；仍须完整接入显示设置，并补齐 VFR、混合帧率、负时间、嵌套与长项目 fixture。
 
 **播放与任务**
@@ -368,7 +368,7 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 ### 退出门槛
 
-- schema v9 current fixture 可保存、重开；旧/未来 schema 明确拒绝；故意失败不会破坏源文件。
+- schema v10 current fixture 可保存、重开；旧/未来 schema 明确拒绝；故意失败不会破坏源文件。
 - Headless 测试可驱动 play/seek/cancel，并以手动 Monotonic Runtime Clock 精确验证请求年龄、过期边界、最早取消原因、同键 rebind、worker 完成与 UI 轮询解耦以及回退证据，而不构造 Widget 或 native window。
 - 一个参数从 schema → UI → animation → save/reopen → preview/export → cache invalidation 全链通过。
 - 音频时钟、video target selection 和 fallback 决策可由结构化报告关联到同一次播放。
@@ -510,7 +510,7 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 ### 第 3–5 周：迁移、所有权与音频时钟
 
-- 落地项目 version registry 与 schema v9 current fixture；Alpha 旧 schema 明确拒绝。
+- 落地项目 version registry 与 schema v10 current fixture；Alpha 旧 schema 明确拒绝。
 - 将可 headless 驱动的播放/任务核心从 UI 适配器中收敛出来，保留现有成熟调度逻辑。
 - 冻结 Timeline Time/Time Domain、稳定 ParameterId、统一曲线 schema 和 cache semantic revision；旧 `TimeCode`/`TimeTicks` 不作为兼容格式保留。
 - 将 audio master、video late-frame、buffering 和 underrun 证据统一到播放报告。

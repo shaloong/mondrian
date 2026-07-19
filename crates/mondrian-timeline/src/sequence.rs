@@ -939,6 +939,8 @@ impl SequencePreset {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Sequence {
     pub id: SequenceId,
+    /// Monotonic authoring transaction revision for this stable Sequence ID.
+    pub revision: SequenceRevision,
     pub name: String,
     pub role: SequenceRole,
     pub settings: SequenceSettings,
@@ -965,6 +967,7 @@ impl Sequence {
             crate::audio::AudioProgram::for_tracks(audio_tracks.iter().map(|track| track.id));
         Self {
             id: SequenceId::new(),
+            revision: SequenceRevision::INITIAL,
             name: name.into(),
             role: SequenceRole::Editorial,
             video_tracks: vec![
@@ -1362,6 +1365,65 @@ impl Sequence {
         renumber_tracks(&mut self.video_tracks, "V");
         renumber_tracks(&mut self.audio_tracks, "A");
     }
+
+    /// Validate stable author identities and strong Clip links inside this Sequence.
+    pub fn validate_author_identities(&self) -> mondrian_core::Result<()> {
+        let mut track_ids = HashSet::new();
+        let mut clip_ids = HashSet::new();
+        let mut effect_ids = HashSet::new();
+        let mut mask_ids = HashSet::new();
+
+        for track in self.video_tracks.iter().chain(&self.audio_tracks) {
+            if !track_ids.insert(track.id) {
+                return Err(duplicate_author_identity("Track", track.id));
+            }
+            for clip in &track.clips {
+                if !clip_ids.insert(clip.id) {
+                    return Err(duplicate_author_identity("Clip", clip.id));
+                }
+                for effect in &clip.effects {
+                    if !effect_ids.insert(effect.id) {
+                        return Err(duplicate_author_identity("Effect", effect.id));
+                    }
+                }
+                for mask in &clip.masks {
+                    if !mask_ids.insert(mask.id) {
+                        return Err(duplicate_author_identity("Mask", mask.id));
+                    }
+                }
+            }
+        }
+
+        for clip in self
+            .video_tracks
+            .iter()
+            .chain(&self.audio_tracks)
+            .flat_map(|track| &track.clips)
+        {
+            if let Some(linked_clip) = clip.linked_clip {
+                if linked_clip == clip.id || !clip_ids.contains(&linked_clip) {
+                    return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                        step_id: "validate_author_identities".to_owned(),
+                        reason: format!(
+                            "Clip {} has invalid strong linked-Clip reference {}",
+                            clip.id, linked_clip
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn duplicate_author_identity(
+    kind: &str,
+    identity: impl std::fmt::Display,
+) -> mondrian_core::MondrianError {
+    mondrian_core::MondrianError::WorkflowStepFailed {
+        step_id: "validate_author_identities".to_owned(),
+        reason: format!("duplicate {kind} identity {identity}"),
+    }
 }
 
 fn rekey_audio_scope(scope: &mut crate::audio::AudioProcessingScope) {
@@ -1507,7 +1569,14 @@ impl SequenceCollection {
 
     pub fn validate_nested_sequences(&self) -> mondrian_core::Result<()> {
         let sequence_ids: HashSet<SequenceId> = self.sequences.iter().map(|seq| seq.id).collect();
+        if sequence_ids.len() != self.sequences.len() {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "validate_author_identities".to_owned(),
+                reason: "duplicate Sequence identity in project document".to_owned(),
+            });
+        }
         for sequence in &self.sequences {
+            sequence.validate_author_identities()?;
             sequence
                 .audio_program
                 .validate(&sequence.audio_tracks, &sequence.audio_roles)
@@ -1668,6 +1737,32 @@ mod tests {
     fn tt(frame: i64, time_base: Rational) -> TimelineTime {
         TimelineTime::from_frame_position(FramePosition::new(frame, time_base))
             .expect("valid test time")
+    }
+
+    #[test]
+    fn author_identity_validation_rejects_duplicate_clip_identity_across_tracks() {
+        let mut sequence = Sequence::new("identity");
+        let time_base = sequence.time_base();
+        let clip =
+            Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base)).expect("valid clip");
+        sequence.video_tracks[0].add_clip(clip.clone()).expect("first placement");
+        sequence.video_tracks[1].add_clip(clip).expect("second placement");
+
+        let error =
+            sequence.validate_author_identities().expect_err("duplicate identity must fail");
+        assert!(error.to_string().contains("duplicate Clip identity"));
+    }
+
+    #[test]
+    fn collection_validation_rejects_duplicate_sequence_identity() {
+        let sequence = Sequence::new("identity");
+        let mut collection = SequenceCollection::new(sequence.clone());
+        collection.sequences.push(sequence);
+
+        let error = collection
+            .validate_nested_sequences()
+            .expect_err("duplicate Sequence identity must fail");
+        assert!(error.to_string().contains("duplicate Sequence identity"));
     }
 
     #[test]

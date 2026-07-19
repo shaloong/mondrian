@@ -20,7 +20,7 @@ creating a second Timeline model.
 
 A `Sequence` contains:
 
-- `id`, `name`, `role`
+- stable `id`, monotonic author `revision`, `name`, `role`
 - `settings`
 - ordered video and audio tracks
 - playhead
@@ -28,6 +28,50 @@ A `Sequence` contains:
 - a Sequence-owned `AudioProgram`
 
 Default sequences create `V1..V3` and `A1..A3`. `SequenceSettings` validates resolution, frame rate, audio sample rate/layout, preview settings, and color-management constraints.
+
+## Author Identity, Revision, and Undo
+
+`SequenceId` is stable identity; `SequenceRevision` is the persisted, nonzero,
+monotonic author-transaction generation for that identity. A new or duplicated
+Sequence starts at revision 1. Every committed author edit, Undo, and Redo
+advances it without saturation. A Project color-engine replacement advances
+every inheriting Sequence because its effective render semantics changed.
+`ProjectDocument.document_revision` is only the generation of successful file
+saves and is never a Playback or render-cache revision.
+
+Track, Clip, Effect, Mask, animation-track, keyframe, audio edit/scope/processor,
+Route, Bus, Output, Transition, and Role identities remain stable entity IDs.
+They deliberately do not each own a second revision counter. The owning
+Sequence revision is the conservative invalidation contract; definition,
+processor, resource, color, media-source, and prepared-plan fingerprints provide
+the narrower cache keys where retaining unaffected work matters. This avoids a
+family of counters whose atomic agreement would be harder to prove than the
+author transaction itself.
+
+Project validation rejects duplicate Sequence, Track, Clip, Effect, and Mask
+identities, invalid strong linked-Clip references, duplicate effect-local
+Parameter identities, duplicate animation-track identities in one property
+owner, and duplicate keyframe identities in one exact automation curve. Audio
+Program validation owns the corresponding typed audio-entity uniqueness rules.
+Copy and razor operations must fork the identities specified by the Sequence
+audio ADR; Sequence duplication forks every Sequence-owned identity and resets
+only the new Sequence revision.
+
+`mondrian-timeline::CommandHistory` is the deep Module behind the active
+Sequence Undo seam. Commands declare their target `SequenceId` and exact
+command-owned retained bytes. The default hard budget is 200 commands and
+128 MiB across Undo and Redo. Complete Sequence snapshots are stored as bounded
+serialized byte payloads rather than unaccounted cloned heap graphs. Oldest
+entries are evicted in constant time, a new branch accounts for discarded Redo
+bytes, an oversize edit is not retained, and immutable diagnostics expose all
+three outcomes. Target mismatch and snapshot failure fail closed; failed
+Undo/Redo returns the command to its original stack. App author mutations
+propagate history errors and restore the preceding Sequence rather than saving
+a partially recorded transaction. Sequence switching, project replacement and
+a successful project color-engine replacement establish a new active-history
+scope instead of replaying snapshots against another aggregate or inherited
+color contract. A failed color-engine replacement preserves the prior state and
+history.
 `validate_with_project_color_management` additionally validates the effective
 inherited/overridden `ColorEngine`. Mondrian Standard sequences use the exact
 Linear Rec.2020 working identity pinned by the immutable package; Custom OCIO

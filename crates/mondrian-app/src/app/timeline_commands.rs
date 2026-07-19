@@ -16,6 +16,17 @@ fn sequence_frame_from_time(
     Ok(time.to_frame_position(frame_rate, FrameRounding::Nearest)?.frame)
 }
 
+fn next_sequence_revision(
+    revision: mondrian_core::SequenceRevision,
+) -> mondrian_core::Result<mondrian_core::SequenceRevision> {
+    revision
+        .checked_next()
+        .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+            step_id: "advance_sequence_revision".to_owned(),
+            reason: format!("Sequence author revision {} is exhausted", revision.get()),
+        })
+}
+
 impl AppState {
     pub fn sync_current_sequence_into_collection(&mut self) {
         let Some(sequence) = self.sequence.clone() else {
@@ -82,7 +93,7 @@ impl AppState {
         self.active_sequence_id = Some(sequence_id);
         self.stop();
         self.settle_preview_access_source();
-        self.cmd_history = mondrian_timeline::command::CommandHistory::new(200);
+        self.cmd_history = mondrian_timeline::command::CommandHistory::default();
         Ok(())
     }
 
@@ -122,6 +133,19 @@ impl AppState {
                 reason: "序列名称不能为空".to_string(),
             });
         }
+        if self.active_sequence_id == Some(sequence_id) {
+            let settings = self
+                .sequence
+                .as_ref()
+                .filter(|sequence| sequence.id == sequence_id)
+                .map(|sequence| sequence.settings.clone())
+                .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "rename_sequence".to_owned(),
+                    reason: format!("活动序列不存在: {sequence_id}"),
+                })?;
+            return self.update_sequence_identity_and_settings(sequence_id, name, settings);
+        }
+
         self.sync_current_sequence_into_collection();
         let sequence = self
             .sequences
@@ -132,9 +156,7 @@ impl AppState {
                 reason: format!("序列不存在: {sequence_id}"),
             })?;
         sequence.name = name.trim().to_string();
-        if self.active_sequence_id == Some(sequence_id) {
-            self.sequence = Some(sequence.clone());
-        }
+        sequence.revision = next_sequence_revision(sequence.revision)?;
         let _ = self.save_project_file();
         Ok(())
     }
@@ -156,6 +178,7 @@ impl AppState {
             })?;
         let fallback_name = format!("{} 副本", duplicated.name);
         duplicated.id = SequenceId::new();
+        duplicated.revision = mondrian_core::SequenceRevision::INITIAL;
         duplicated.fork_audio_identities_for_sequence_duplicate();
         duplicated.name = name.into();
         if duplicated.name.trim().is_empty() {
@@ -204,7 +227,7 @@ impl AppState {
             self.sequence = self.sequences.first().cloned();
             self.stop();
             self.settle_preview_access_source();
-            self.cmd_history = mondrian_timeline::command::CommandHistory::new(200);
+            self.cmd_history = mondrian_timeline::command::CommandHistory::default();
         }
         self.sequence_navigation_stack.retain(|id| *id != sequence_id);
         let _ = self.save_project_file();
@@ -239,7 +262,7 @@ impl AppState {
             (seq.id, before, seq.clone())
         };
         self.sync_current_sequence_into_collection();
-        self.record_sequence_snapshot_command("修改序列设置", before, after);
+        self.record_sequence_snapshot_command("修改序列设置", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
         Ok(())
@@ -286,7 +309,7 @@ impl AppState {
             self.stop();
             self.settle_preview_access_source();
         }
-        self.record_sequence_snapshot_command("修改序列设置", before, after);
+        self.record_sequence_snapshot_command("修改序列设置", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
         Ok(())
@@ -296,25 +319,91 @@ impl AppState {
         &mut self,
         description: impl Into<String>,
         before: Sequence,
-        after: Sequence,
-    ) {
-        self.cmd_history.record_executed(Box::new(SequenceSnapshotCommand::new(
-            description,
-            before,
-            after,
-        )));
+        mut after: Sequence,
+    ) -> mondrian_core::Result<()> {
+        let target = before.id;
+        let current_target = self.sequence.as_ref().map(|sequence| sequence.id);
+        if current_target != Some(target)
+            || self.active_sequence_id.is_some_and(|active| active != target)
+        {
+            self.restore_sequence_after_failed_history(&before);
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "record_sequence_snapshot_command".to_owned(),
+                reason: format!(
+                    "cannot record Sequence {target} in active Sequence history {current_target:?}"
+                ),
+            });
+        }
+        let Some(current_revision) = self.sequence.as_ref().map(|sequence| sequence.revision)
+        else {
+            self.restore_sequence_after_failed_history(&before);
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "record_sequence_snapshot_command".to_owned(),
+                reason: format!("active Sequence {target} disappeared before history commit"),
+            });
+        };
+        if before.revision != after.revision || current_revision != before.revision {
+            self.restore_sequence_after_failed_history(&before);
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "record_sequence_snapshot_command".to_owned(),
+                reason: format!(
+                    "Sequence {target} author revision was mutated outside its transaction: before={}, after={}, current={}",
+                    before.revision.get(),
+                    after.revision.get(),
+                    current_revision.get()
+                ),
+            });
+        }
+        after.revision = match next_sequence_revision(before.revision) {
+            Ok(revision) => revision,
+            Err(error) => {
+                self.restore_sequence_after_failed_history(&before);
+                return Err(error);
+            }
+        };
+        let command = match SequenceSnapshotCommand::new(description, &before, &after) {
+            Ok(command) => command,
+            Err(error) => {
+                self.restore_sequence_after_failed_history(&before);
+                return Err(error);
+            }
+        };
+        self.sequence = Some(after);
+        if let Err(error) = self.cmd_history.record_executed(Box::new(command)) {
+            self.restore_sequence_after_failed_history(&before);
+            return Err(error);
+        }
+        self.sync_current_sequence_into_collection();
+        Ok(())
+    }
+
+    fn restore_sequence_after_failed_history(&mut self, before: &Sequence) {
+        if let Some(current) = self.sequence.as_mut().filter(|sequence| sequence.id == before.id) {
+            *current = before.clone();
+        }
+        if let Some(stored) = self.sequences.iter_mut().find(|sequence| sequence.id == before.id) {
+            *stored = before.clone();
+        }
     }
 
     pub fn undo_timeline(&mut self) -> mondrian_core::Result<bool> {
+        if !self.cmd_history.can_undo() {
+            return Ok(false);
+        }
         let (undone, sequence_id) = {
             let Some(seq) = self.sequence.as_mut() else {
                 return Ok(false);
             };
+            let next_revision = next_sequence_revision(seq.revision)?;
             let undone = self.cmd_history.undo(seq)?;
+            if undone {
+                seq.revision = next_revision;
+            }
             (undone, seq.id)
         };
 
         if undone {
+            self.sync_current_sequence_into_collection();
             self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
             let _ = self.save_project_file();
         }
@@ -323,15 +412,23 @@ impl AppState {
     }
 
     pub fn redo_timeline(&mut self) -> mondrian_core::Result<bool> {
+        if !self.cmd_history.can_redo() {
+            return Ok(false);
+        }
         let (redone, sequence_id) = {
             let Some(seq) = self.sequence.as_mut() else {
                 return Ok(false);
             };
+            let next_revision = next_sequence_revision(seq.revision)?;
             let redone = self.cmd_history.redo(seq)?;
+            if redone {
+                seq.revision = next_revision;
+            }
             (redone, seq.id)
         };
 
         if redone {
+            self.sync_current_sequence_into_collection();
             self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
             let _ = self.save_project_file();
         }
@@ -343,15 +440,16 @@ impl AppState {
         &mut self,
         description: impl Into<String>,
         before: Sequence,
-    ) {
+    ) -> mondrian_core::Result<()> {
         let (sequence_id, after) = match self.sequence.as_ref() {
             Some(seq) => (seq.id, seq.clone()),
-            None => return,
+            None => return Ok(()),
         };
 
-        self.record_sequence_snapshot_command(description, before, after);
+        self.record_sequence_snapshot_command(description, before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
+        Ok(())
     }
 
     pub fn close_project(&mut self) {
@@ -370,7 +468,7 @@ impl AppState {
         self.stop();
         self.settle_preview_access_source();
         self.dragging_asset = None;
-        self.cmd_history = mondrian_timeline::command::CommandHistory::new(200);
+        self.cmd_history = mondrian_timeline::command::CommandHistory::default();
         self.proxy_mode_assets.clear();
         self.clear_status_hint();
     }
@@ -384,7 +482,7 @@ impl AppState {
             None
         };
         if let Some(before) = before {
-            self.record_timeline_edit_snapshot("新增视频轨道", before);
+            self.record_timeline_edit_snapshot("新增视频轨道", before)?;
         }
         Ok(())
     }
@@ -398,7 +496,7 @@ impl AppState {
             None
         };
         if let Some(before) = before {
-            self.record_timeline_edit_snapshot("新增音频轨道", before);
+            self.record_timeline_edit_snapshot("新增音频轨道", before)?;
         }
         Ok(())
     }
@@ -730,7 +828,7 @@ impl AppState {
             track.add_clip(clip)?;
             resolve_track_conflicts(track, clip_id, overlap_mode)?;
             let sequence_id = seq.id;
-            self.record_timeline_edit_snapshot("创建纯色层", before);
+            self.record_timeline_edit_snapshot("创建纯色层", before)?;
             (sequence_id, clip_id)
         };
 
@@ -760,7 +858,7 @@ impl AppState {
         };
 
         self.prune_selection_to_active_sequence();
-        self.record_timeline_edit_snapshot("删除轨道", before);
+        self.record_timeline_edit_snapshot("删除轨道", before)?;
         Ok(())
     }
 
@@ -825,7 +923,7 @@ impl AppState {
         };
 
         self.prune_selection_to_active_sequence();
-        self.record_timeline_edit_snapshot("删除轨道", before);
+        self.record_timeline_edit_snapshot("删除轨道", before)?;
         Ok(())
     }
 
@@ -851,7 +949,7 @@ impl AppState {
             before
         };
 
-        self.record_timeline_edit_snapshot("移动轨道", before);
+        self.record_timeline_edit_snapshot("移动轨道", before)?;
         Ok(())
     }
 
@@ -885,7 +983,7 @@ impl AppState {
             before
         };
 
-        self.record_timeline_edit_snapshot("切换轨道可见性", before);
+        self.record_timeline_edit_snapshot("切换轨道可见性", before)?;
         Ok(())
     }
 
@@ -919,7 +1017,7 @@ impl AppState {
             before
         };
 
-        self.record_timeline_edit_snapshot("切换轨道静音", before);
+        self.record_timeline_edit_snapshot("切换轨道静音", before)?;
         Ok(())
     }
 
@@ -953,7 +1051,7 @@ impl AppState {
             before
         };
 
-        self.record_timeline_edit_snapshot("切换轨道锁定", before);
+        self.record_timeline_edit_snapshot("切换轨道锁定", before)?;
         Ok(())
     }
 
@@ -1018,7 +1116,7 @@ impl AppState {
         } else {
             "启用片段"
         };
-        self.record_sequence_snapshot_command(action, before, after);
+        self.record_sequence_snapshot_command(action, before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
 
@@ -1066,7 +1164,7 @@ impl AppState {
             (seq.id, before, seq.clone())
         };
 
-        self.record_sequence_snapshot_command("删除片段", before, after);
+        self.record_sequence_snapshot_command("删除片段", before, after)?;
         self.event_bus.publish(AppEvent::ClipRemoved { sequence_id, clip_id });
         let _ = self.save_project_file();
         Ok(())
@@ -1169,7 +1267,7 @@ impl AppState {
         };
 
         if let Some((sequence_id, before, after)) = history_snapshot {
-            self.record_sequence_snapshot_command("删除多个片段", before, after);
+            self.record_sequence_snapshot_command("删除多个片段", before, after)?;
             self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
             let _ = self.save_project_file();
         }
@@ -1222,7 +1320,7 @@ impl AppState {
 
         if removed_count > 0 {
             if let Some(before) = before_snapshot {
-                self.record_timeline_edit_snapshot("删除素材并清理时间线", before);
+                self.record_timeline_edit_snapshot("删除素材并清理时间线", before)?;
             }
         }
 
@@ -1309,7 +1407,7 @@ impl AppState {
             self.default_sequence_id = Some(sequence_id);
         }
         self.ensure_minimum_tracks();
-        self.cmd_history = mondrian_timeline::command::CommandHistory::new(200);
+        self.cmd_history = mondrian_timeline::command::CommandHistory::default();
         let _ = self.save_project_file();
         tracing::info!("新建序列: {name}");
     }
@@ -1513,7 +1611,7 @@ impl AppState {
             self.sequences.push(after.clone());
         }
         self.sequences.push(nested_sequence);
-        self.record_sequence_snapshot_command("预合成为嵌套序列", before, after);
+        self.record_sequence_snapshot_command("预合成为嵌套序列", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
         Ok(nested_clip_id)
@@ -1682,7 +1780,7 @@ impl AppState {
             TrimEdge::In => "修剪入点",
             TrimEdge::Out => "修剪出点",
         };
-        self.record_sequence_snapshot_command(action, before, after);
+        self.record_sequence_snapshot_command(action, before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
         Ok(changed_count)
@@ -1710,7 +1808,7 @@ impl AppState {
         };
 
         if changed {
-            self.record_sequence_snapshot_command("滚动修剪", before, after);
+            self.record_sequence_snapshot_command("滚动修剪", before, after)?;
             self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
             let _ = self.save_project_file();
         }
@@ -1788,7 +1886,7 @@ impl AppState {
             (seq.id, before, seq.clone(), changed_count)
         };
 
-        self.record_sequence_snapshot_command("滑移片段", before, after);
+        self.record_sequence_snapshot_command("滑移片段", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
         Ok(changed_count)
@@ -1858,7 +1956,7 @@ impl AppState {
             (seq.id, before, seq.clone(), changed_count)
         };
 
-        self.record_sequence_snapshot_command("滑动片段", before, after);
+        self.record_sequence_snapshot_command("滑动片段", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
         Ok(changed_count)
@@ -1893,7 +1991,7 @@ impl AppState {
             (seq.id, before, seq.clone())
         };
 
-        self.record_sequence_snapshot_command("分割片段", before, after);
+        self.record_sequence_snapshot_command("分割片段", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
         Ok(true)
@@ -1964,7 +2062,7 @@ impl AppState {
         };
 
         if let Some((sequence_id, before, after)) = history_snapshot {
-            self.record_sequence_snapshot_command("在播放头分割片段", before, after);
+            self.record_sequence_snapshot_command("在播放头分割片段", before, after)?;
             self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
             let _ = self.save_project_file();
         }
@@ -2172,7 +2270,7 @@ impl AppState {
             (seq.id, clip_id, start_frame, before, seq.clone())
         };
 
-        self.record_sequence_snapshot_command("添加视频片段", before, after);
+        self.record_sequence_snapshot_command("添加视频片段", before, after)?;
         self.event_bus.publish(AppEvent::ClipAdded { sequence_id, clip_id });
         self.seek(start_frame);
         self.clear_dragging_asset();
@@ -2240,7 +2338,7 @@ impl AppState {
             (seq.id, clip_id, start_frame, before, seq.clone())
         };
 
-        self.record_sequence_snapshot_command("添加音频片段", before, after);
+        self.record_sequence_snapshot_command("添加音频片段", before, after)?;
         self.event_bus.publish(AppEvent::ClipAdded { sequence_id, clip_id });
         self.seek(start_frame);
         self.clear_dragging_asset();
@@ -2557,7 +2655,7 @@ impl AppState {
         clip.masks.push(component);
         let after = seq.clone();
         let sequence_id = seq.id;
-        self.record_sequence_snapshot_command("添加蒙版", before, after);
+        self.record_sequence_snapshot_command("添加蒙版", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
         Ok(id)
@@ -2586,7 +2684,7 @@ impl AppState {
         if removed {
             let after = seq.clone();
             let sequence_id = seq.id;
-            self.record_sequence_snapshot_command("删除蒙版", before, after);
+            self.record_sequence_snapshot_command("删除蒙版", before, after)?;
             self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
             let _ = self.save_project_file();
         }
@@ -2614,7 +2712,7 @@ impl AppState {
         }
         let after = seq.clone();
         let sequence_id = seq.id;
-        self.record_sequence_snapshot_command("切换蒙版启用", before, after);
+        self.record_sequence_snapshot_command("切换蒙版启用", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
         Ok(())
@@ -2663,7 +2761,7 @@ impl AppState {
         }
         let after = seq.clone();
         let sequence_id = seq.id;
-        self.record_sequence_snapshot_command("切换蒙版形状动画", before, after);
+        self.record_sequence_snapshot_command("切换蒙版形状动画", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
         Ok(true)
@@ -2735,7 +2833,7 @@ impl AppState {
         }
         let after = seq.clone();
         let sequence_id = seq.id;
-        self.record_sequence_snapshot_command("修改蒙版", before, after);
+        self.record_sequence_snapshot_command("修改蒙版", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
         Ok(true)

@@ -10,6 +10,7 @@ use crate::automation::{
 use crate::types::EffectId;
 use crate::{ParameterId, ParameterIdError, TimelineTime};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// Supported effect types.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,6 +163,25 @@ impl EffectNode {
             params: serde_json::json!({}),
             is_enabled: true,
         }
+    }
+
+    /// Validate one effect instance's parameter schemas and stable identities.
+    pub fn validate_author_state(&self) -> crate::Result<()> {
+        self.properties.validate()?;
+        let mut parameter_ids = HashSet::new();
+        for (_, property) in self.properties.iter() {
+            let parameter_id = property.descriptor.parameter_id();
+            if !parameter_ids.insert(parameter_id.clone()) {
+                return Err(crate::MondrianError::WorkflowStepFailed {
+                    step_id: "effect_parameter_identity_validation".to_owned(),
+                    reason: format!(
+                        "Effect {} contains duplicate parameter identity {}",
+                        self.id, parameter_id
+                    ),
+                });
+            }
+        }
+        Ok(())
     }
 
     pub fn evaluate_property(&self, path: &str, time: TimelineTime) -> Option<PropertyValue> {

@@ -794,9 +794,11 @@ impl AppState {
         &self,
         end_frame: i64,
     ) -> Result<mondrian_playback::PlaybackTimelineBinding, mondrian_playback::PlaybackError> {
+        let sequence_revision =
+            self.sequence.as_ref().map_or(0, |sequence| sequence.revision.get());
         mondrian_playback::PlaybackTimelineBinding::new(
             self.sequence.as_ref().map(|sequence| sequence.id),
-            self.project_document_revision,
+            sequence_revision,
             self.playback_time_base(),
             end_frame,
         )
@@ -962,12 +964,16 @@ mod tests {
     fn play_binds_timeline_and_starts_one_epoch() {
         let mut state = state_with_sequence(20);
         let before = state.playback_engine.snapshot().epoch;
+        state.project_document_revision = 91;
+        let sequence_revision = state.sequence.as_ref().expect("sequence").revision.get();
 
         state.play();
 
         let after = state.playback_engine.snapshot();
         assert_eq!(after.epoch.get(), before.get() + 1);
         assert_eq!(after.state, TransportState::Priming);
+        assert_eq!(state.playback_engine.timeline_revision(), sequence_revision);
+        assert_ne!(state.playback_engine.timeline_revision(), 91);
         assert!(state.pending_playback_frame_demand_identity().is_some());
     }
 

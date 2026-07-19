@@ -40,7 +40,7 @@ values cannot be mixed into an unregistered hybrid identity. Archive and preview
 fingerprints, OCIO CPU processor keys, and renderer GPU shader keys all include
 the exact package identity.
 
-Document schema v9 retains the v5 Custom OCIO reproducibility contract and the
+Document schema v10 retains the v5 Custom OCIO reproducibility contract and the
 v6 removal of the redundant sequence-level ACES workflow selector. It also
 requires the Mondrian Standard package identity to pin both the SDR and
 1000-nit HDR View Transform IDs and versions; the old single default-View field
@@ -60,8 +60,10 @@ open diagnostic, never a silent substitution. Schemas v5 and v6 are
 deliberately not migrated during Alpha: v6 made project `ColorEngine` the sole
 color-mode selector, while v7 completes the Standard View identity, v8
 establishes stable parameter identity, and v9 completes the cross-media
-parameter definition contract. Current
-new sequences default to SceneReferred and persist the selected engine's
+parameter definition contract. Version 10 separates the persisted monotonic
+Sequence author revision from the Project document's successful-save revision
+and rejects invalid author identity graphs before they enter runtime state.
+Current new sequences default to SceneReferred and persist the selected engine's
 package-pinned rendering View intent; DisplayReferred is the explicit
 direct-colorimetric bypass.
 

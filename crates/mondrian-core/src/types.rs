@@ -59,6 +59,48 @@ define_id!(AudioRoleId, "音频角色 ID");
 define_id!(JobId, "渲染任务 ID");
 define_id!(MaskId, "蒙版 ID");
 
+/// Monotonic authoring revision of one stable Sequence identity.
+///
+/// This is distinct from the project-document save revision. Every committed
+/// Sequence authoring transaction, including Undo and Redo, advances this value
+/// so playback and caches cannot mistake restored content for an old snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SequenceRevision(u64);
+
+impl SequenceRevision {
+    /// First revision assigned to a newly authored Sequence.
+    pub const INITIAL: Self = Self(1);
+
+    /// Construct a revision when validating persisted data.
+    pub const fn new(value: u64) -> Option<Self> {
+        if value == 0 {
+            None
+        } else {
+            Some(Self(value))
+        }
+    }
+
+    /// Return the stored monotonically increasing value.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Advance without saturating. Exhaustion must fail the author transaction.
+    pub const fn checked_next(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(value) => Self::new(value),
+            None => None,
+        }
+    }
+}
+
+impl Default for SequenceRevision {
+    fn default() -> Self {
+        Self::INITIAL
+    }
+}
+
 impl AudioSourceComponentId {
     /// Stable logical identity for the asset's explicitly selected primary
     /// audio component. Adapters must reject, not reinterpret, unknown IDs.

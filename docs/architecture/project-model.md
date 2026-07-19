@@ -21,6 +21,12 @@ must live outside `.mdp`.
 `mondrian-core` keeps only shared project metadata and settings types. It does
 not define a second top-level project container.
 
+`document_revision` advances only after an explicit project save succeeds. It
+is persistence/conflict evidence, not author-semantic identity. Each persisted
+Sequence owns an independent monotonic `SequenceRevision`; Playback, Preview,
+audio compilation, and render caches bind that revision, so an edited draft or
+failed save cannot continue under an older Timeline identity.
+
 `ProjectSettings.color_management.engine` is the sole persisted product-mode
 selector for Mondrian Standard, ACES, or Custom OCIO. Sequence workflow stores
 only the rendering-domain choice (SceneReferred by default for Standard picture
@@ -100,7 +106,7 @@ is written with that field explicitly.
 
 Archive and document JSON pass through separate version registries before typed
 deserialization. During Alpha there are deliberately no legacy document steps:
-schema v9 is the sole accepted author schema, and older/future versions fail
+schema v10 is the sole accepted author schema, and older/future versions fail
 instead of being guessed. Version 5 introduced the explicit tagged
 `mondrian_standard` / `aces` / `custom_ocio` project contract and makes every
 Mondrian Standard package-identity field mandatory: product ID/version, config
@@ -124,6 +130,9 @@ one shared visual/audio `ParameterSchema`; audio Processor instances persist a
 schema snapshot beside their exact curve. The registry remains the explicit
 seam for adding a real migration policy only when compatibility becomes a
 product promise.
+Version 10 adds the nonzero persisted Sequence author revision and makes author
+identity validation fail closed for duplicate identities and dangling strong
+Clip references.
 
 SQLite schema ownership remains in `mondrian-assets`. Its ordered Registry uses
 `PRAGMA user_version`, applies each step in a transaction, validates the current
@@ -135,7 +144,7 @@ Future split-entry layouts require an archive migration and new
 SQLite migrates only in the extracted runtime copy. The source `.mdp` is never
 rewritten by open.
 
-Current document schema v9 persists canonical rational `TimelineTime` values
+Current document schema v10 persists canonical rational `TimelineTime` values
 directly and requires the shared visual/audio `ParameterSchema`. It does not
 contain frame-oriented `TimeCode`, `TimeTicks`, descriptor-level duplicate
 defaults/types, editor-preset interpolation capabilities, or compatibility

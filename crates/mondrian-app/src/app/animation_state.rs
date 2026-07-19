@@ -313,7 +313,7 @@ impl AppState {
             (seq.id, before, seq.clone())
         };
 
-        self.record_sequence_snapshot_command("解释素材", before, after);
+        self.record_sequence_snapshot_command("解释素材", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
         Ok(true)
@@ -341,7 +341,7 @@ impl AppState {
             clip.transform.set_position(pos);
             (seq.id, before, seq.clone())
         };
-        self.record_sequence_snapshot_command("move clip", before, after);
+        self.record_sequence_snapshot_command("move clip", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
         Ok(true)
@@ -377,7 +377,7 @@ impl AppState {
             clip.transform.set_position(new_pos);
             (seq.id, before, seq.clone())
         };
-        self.record_sequence_snapshot_command("move anchor", before, after);
+        self.record_sequence_snapshot_command("move anchor", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
         Ok(true)
@@ -405,7 +405,7 @@ impl AppState {
             clip.transform.set_scale(scale);
             (seq.id, before, seq.clone())
         };
-        self.record_sequence_snapshot_command("scale clip", before, after);
+        self.record_sequence_snapshot_command("scale clip", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
         Ok(true)
@@ -462,7 +462,7 @@ impl AppState {
             (seq.id, before, seq.clone())
         };
 
-        self.record_sequence_snapshot_command(description, before, after);
+        self.record_sequence_snapshot_command(description, before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
         Ok(true)
@@ -524,7 +524,7 @@ impl AppState {
             format!("添加{}", effect_type.display_name()),
             before,
             after,
-        );
+        )?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
         Ok(effect_id)
@@ -582,7 +582,7 @@ impl AppState {
             (seq.id, before, seq.clone())
         };
 
-        self.record_sequence_snapshot_command("切换特效启用状态", before, after);
+        self.record_sequence_snapshot_command("切换特效启用状态", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
         Ok(true)
@@ -623,7 +623,7 @@ impl AppState {
             (seq.id, before, seq.clone())
         };
 
-        self.record_sequence_snapshot_command("删除特效", before, after);
+        self.record_sequence_snapshot_command("删除特效", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
         Ok(true)
@@ -680,7 +680,7 @@ impl AppState {
             (seq.id, before, seq.clone())
         };
 
-        self.record_sequence_snapshot_command("调整特效顺序", before, after);
+        self.record_sequence_snapshot_command("调整特效顺序", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         let _ = self.save_project_file();
         Ok(true)

@@ -306,7 +306,7 @@ impl AppState {
         self.stop();
         self.settle_preview_access_source();
         self.dragging_asset = None;
-        self.cmd_history = mondrian_timeline::command::CommandHistory::new(200);
+        self.cmd_history = mondrian_timeline::command::CommandHistory::default();
         self.ensure_minimum_tracks();
 
         self.asset_library = Some(asset_library);
@@ -415,7 +415,7 @@ impl AppState {
         self.project_settings = project_settings;
         self.stop();
         self.settle_preview_access_source();
-        self.cmd_history = mondrian_timeline::command::CommandHistory::new(200);
+        self.cmd_history = mondrian_timeline::command::CommandHistory::default();
         self.proxy_mode_assets.clear();
 
         let library_root = runtime_root.join("library");
@@ -456,18 +456,71 @@ impl AppState {
             }
         })?;
 
+        let inherited_revisions = self
+            .sequences
+            .iter()
+            .filter(|sequence| sequence.settings.color_management.inherit)
+            .map(|sequence| {
+                sequence
+                    .revision
+                    .checked_next()
+                    .map(|next| (sequence.id, sequence.revision, next))
+                    .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+                        step_id: "set_project_color_engine".to_owned(),
+                        reason: format!(
+                            "Sequence {} author revision {} is exhausted",
+                            sequence.id,
+                            sequence.revision.get()
+                        ),
+                    })
+            })
+            .collect::<mondrian_core::Result<Vec<_>>>()?;
+        for (sequence_id, _, next) in &inherited_revisions {
+            if let Some(sequence) =
+                self.sequences.iter_mut().find(|sequence| sequence.id == *sequence_id)
+            {
+                sequence.revision = *next;
+            }
+        }
+        if let Some(active) = self.sequence.as_mut() {
+            if let Some((_, _, next)) =
+                inherited_revisions.iter().find(|(sequence_id, _, _)| *sequence_id == active.id)
+            {
+                active.revision = *next;
+            }
+        }
+
         let previous =
             std::mem::replace(&mut self.project_settings.color_management.engine, engine);
         self.stop();
         self.settle_preview_access_source();
         if let Err(error) = self.save_project_file() {
             self.project_settings.color_management.engine = previous;
+            for (sequence_id, previous_revision, _) in &inherited_revisions {
+                if let Some(sequence) =
+                    self.sequences.iter_mut().find(|sequence| sequence.id == *sequence_id)
+                {
+                    sequence.revision = *previous_revision;
+                }
+            }
+            if let Some(active) = self.sequence.as_mut() {
+                if let Some((_, previous_revision, _)) =
+                    inherited_revisions.iter().find(|(sequence_id, _, _)| *sequence_id == active.id)
+                {
+                    active.revision = *previous_revision;
+                }
+            }
             self.settle_preview_access_source();
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "set_project_color_engine".to_owned(),
                 reason: format!("项目颜色模式保存失败: {error:#}"),
             });
         }
+        // Sequence undo entries are valid only in the authoring context in
+        // which their snapshots were captured. Replacing the project color
+        // engine changes that context for every inheriting sequence, so stale
+        // snapshots must not be allowed to re-enter the current project.
+        self.cmd_history = mondrian_timeline::command::CommandHistory::default();
         Ok(())
     }
 }

@@ -1,5 +1,5 @@
 {
-  "schema_version": 9,
+  "schema_version": 10,
   "project_id": "97f12455-ec34-4b5d-a696-3da93cd914d7",
   "document_revision": 1,
   "meta": {
@@ -46,6 +46,7 @@
     "sequences": [
       {
         "id": "f4d7b743-4075-4043-a624-e2df3bd9f8f6",
+        "revision": 1,
         "name": "Main",
         "role": "Editorial",
         "settings": {

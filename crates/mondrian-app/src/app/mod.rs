@@ -341,7 +341,7 @@ impl AppState {
             current_project_path: None,
             project_runtime_dir: None,
             project_settings: ProjectSettings::default(),
-            cmd_history: mondrian_timeline::command::CommandHistory::new(200),
+            cmd_history: mondrian_timeline::command::CommandHistory::default(),
             playback_engine: PlaybackEngine::default(),
             playback_evidence: PlaybackEvidenceCollector::default(),
             playback_evidence_now: MonotonicTimestamp::ZERO,

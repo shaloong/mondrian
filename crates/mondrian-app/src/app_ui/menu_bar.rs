@@ -1072,13 +1072,16 @@ mod tests {
         let mut after = before.clone();
         after.name = "Edit renamed".to_owned();
         state.sequence = Some(after.clone());
-        state.cmd_history.record_executed(Box::new(
-            mondrian_timeline::command::SequenceSnapshotCommand::new(
-                "Rename sequence",
-                before,
-                after,
-            ),
-        ));
+        let command = mondrian_timeline::command::SequenceSnapshotCommand::new(
+            "Rename sequence",
+            &before,
+            &after,
+        )
+        .expect("serializable command");
+        state
+            .cmd_history
+            .record_executed(Box::new(command))
+            .expect("matching Sequence history");
 
         let menu_items = default_menu_items_for_app_state(&state);
         assert!(menu_item(&menu_items, "编辑", "撤销").enabled);

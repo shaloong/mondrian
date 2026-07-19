@@ -2,7 +2,7 @@
 
 use crate::{KeyframeId, TimeScale, TimelineTime, TimelineTimeError};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
-use std::fmt;
+use std::{collections::HashSet, fmt};
 
 /// Stable schema identity for one editable parameter.
 ///
@@ -168,8 +168,12 @@ impl ExactAutomationCurve {
         if !self.default_value.is_finite() {
             return Err(AutomationError::NonFiniteValue);
         }
+        let mut keyframe_ids = HashSet::with_capacity(self.keyframes.len());
         for (index, keyframe) in self.keyframes.iter().enumerate() {
             validate_keyframe(keyframe)?;
+            if !keyframe_ids.insert(keyframe.id) {
+                return Err(AutomationError::DuplicateKeyframeIdentity);
+            }
             if index > 0 && self.keyframes[index - 1].time >= keyframe.time {
                 return Err(AutomationError::NonIncreasingTime);
             }
@@ -270,6 +274,9 @@ pub enum AutomationError {
     /// Keyframe times must be strictly increasing.
     #[error("automation keyframe times must be strictly increasing")]
     NonIncreasingTime,
+    /// One curve cannot address two keys through the same stable identity.
+    #[error("automation keyframe identities must be unique within one curve")]
+    DuplicateKeyframeIdentity,
     /// Bezier time handles must stay within their segment and remain monotonic.
     #[error("automation Bezier time handles are outside their segment")]
     InvalidBezierTimeHandle,

@@ -903,7 +903,7 @@ impl AppState {
         } else {
             self.refresh_selected_clip_locations(&[clip_id]);
         }
-        self.record_timeline_edit_snapshot("移动片段", before);
+        self.record_timeline_edit_snapshot("移动片段", before)?;
         Ok(())
     }
 
@@ -1656,7 +1656,7 @@ impl AppState {
         {
             self.sequence = Some(after.clone());
         }
-        self.record_sequence_snapshot_command("修改预览分辨率", before, after);
+        self.record_sequence_snapshot_command("修改预览分辨率", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         self.set_status_hint(
             format!("预览分辨率：{}", preview_resolution_scale_label(scale)),
@@ -1766,7 +1766,7 @@ impl AppState {
             }
         };
         if changed {
-            self.record_timeline_edit_snapshot("调整特效属性", before);
+            self.record_timeline_edit_snapshot("调整特效属性", before)?;
         }
         Ok(())
     }
@@ -1864,7 +1864,7 @@ impl AppState {
             changed |= set_clip_disabled(seq, *clip_id, !enabled);
         }
         if changed {
-            self.record_timeline_edit_snapshot("切换片段启用状态", before);
+            self.record_timeline_edit_snapshot("切换片段启用状态", before)?;
             Ok(())
         } else if clip_ids.iter().all(|clip_id| clip_exists(seq, *clip_id)) {
             Ok(())
@@ -1900,7 +1900,7 @@ impl AppState {
             }
         };
         if changed {
-            self.record_timeline_edit_snapshot("调整片段不透明度", before);
+            self.record_timeline_edit_snapshot("调整片段不透明度", before)?;
         }
         Ok(())
     }
@@ -1929,7 +1929,7 @@ impl AppState {
             }
         };
         if changed {
-            self.record_timeline_edit_snapshot("调整片段颜色", before);
+            self.record_timeline_edit_snapshot("调整片段颜色", before)?;
         }
         Ok(())
     }
@@ -2017,7 +2017,7 @@ impl AppState {
             }
         };
         if changed {
-            self.record_timeline_edit_snapshot("调整片段变换", before);
+            self.record_timeline_edit_snapshot("调整片段变换", before)?;
         }
         Ok(())
     }
@@ -2093,7 +2093,7 @@ impl AppState {
             changed
         };
         if changed {
-            self.record_timeline_edit_snapshot("调整监视器片段变换", before);
+            self.record_timeline_edit_snapshot("调整监视器片段变换", before)?;
         }
         Ok(())
     }
@@ -2152,7 +2152,7 @@ impl AppState {
                 })?;
             }
         }
-        self.record_timeline_edit_snapshot("调整片段不透明度曲线", before);
+        self.record_timeline_edit_snapshot("调整片段不透明度曲线", before)?;
         Ok(())
     }
 
@@ -4684,10 +4684,26 @@ mod tests {
     #[test]
     fn dispatch_project_color_engine_update_changes_inherited_program_context() {
         let mut state = AppState::new();
-        let sequence = Sequence::new("Program");
+        let before = Sequence::new("Program");
+        let mut sequence = before.clone();
+        sequence.name = "Edited Program".to_owned();
+        sequence.revision = sequence.revision.checked_next().expect("next revision");
         state.active_sequence_id = Some(sequence.id);
         state.sequence = Some(sequence.clone());
-        state.sequences.push(sequence);
+        state.sequences.push(sequence.clone());
+        state
+            .cmd_history
+            .record_executed(Box::new(
+                mondrian_timeline::command::SequenceSnapshotCommand::new(
+                    "Rename sequence",
+                    &before,
+                    &sequence,
+                )
+                .expect("snapshot command"),
+            ))
+            .expect("record command");
+        assert_eq!(state.cmd_history.diagnostics().undo_entries, 1);
+        let before_revision = state.sequence.as_ref().expect("sequence").revision;
         let engine = mondrian_core::ColorEngine::Aces {
             preset: mondrian_core::AcesConfigPreset::CgV4Aces2Ocio25,
         };
@@ -4700,6 +4716,14 @@ mod tests {
 
         assert_eq!(state.project_settings.color_management.engine, engine);
         assert_eq!(
+            state.sequence.as_ref().expect("active sequence").revision.get(),
+            before_revision.get() + 1
+        );
+        assert_eq!(
+            state.sequences[0].revision,
+            state.sequence.as_ref().expect("active sequence").revision
+        );
+        assert_eq!(
             state
                 .sequence
                 .as_ref()
@@ -4709,6 +4733,8 @@ mod tests {
                 .engine,
             engine
         );
+        assert_eq!(state.cmd_history.diagnostics().undo_entries, 0);
+        assert_eq!(state.cmd_history.diagnostics().redo_entries, 0);
     }
 
     #[test]
@@ -4719,6 +4745,7 @@ mod tests {
         state.sequence = Some(sequence.clone());
         state.sequences.push(sequence);
         let previous = state.project_settings.color_management.engine.clone();
+        let previous_revision = state.sequence.as_ref().expect("sequence").revision;
 
         let error = state
             .dispatch_action(project_set_color_engine_action(
@@ -4728,6 +4755,10 @@ mod tests {
 
         assert!(error.to_string().contains("pins working space 'ACEScg'"));
         assert_eq!(state.project_settings.color_management.engine, previous);
+        assert_eq!(
+            state.sequence.as_ref().expect("sequence").revision,
+            previous_revision
+        );
     }
 
     #[test]

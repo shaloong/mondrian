@@ -22,7 +22,7 @@ use migration::JsonMigrationRegistry;
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 9;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 10;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 1;
 
@@ -165,6 +165,12 @@ impl ProjectDocument {
             anyhow::bail!("project document has no active sequence");
         }
         for sequence in &self.sequences.sequences {
+            if sequence.revision.get() == 0 {
+                anyhow::bail!(
+                    "sequence '{}' has invalid author revision zero",
+                    sequence.name
+                );
+            }
             sequence
                 .settings
                 .validate_with_project_color_management(&self.settings.color_management)
@@ -179,6 +185,11 @@ impl ProjectDocument {
                     clip.property_bag()?.validate().with_context(|| {
                         format!("clip '{}' parameter schema is invalid", clip.id)
                     })?;
+                    for effect in &clip.effects {
+                        effect.validate_author_state().with_context(|| {
+                            format!("effect '{}' author state is invalid", effect.id)
+                        })?;
+                    }
                 }
             }
         }
@@ -506,6 +517,10 @@ mod tests {
         assert_eq!(opened.sequences.sequences.len(), 1);
         let opened_sequence = opened.sequences.active().expect("active sequence after reopen");
         assert_eq!(
+            opened_sequence.revision,
+            document.sequences.active().expect("source sequence").revision
+        );
+        assert_eq!(
             opened_sequence.settings.color_management.workflow,
             mondrian_timeline::sequence::ColorWorkflow::SceneReferred
         );
@@ -539,6 +554,17 @@ mod tests {
             fs::read(runtime_library.join("index.db")).expect("read extracted db"),
             b"sqlite placeholder"
         );
+    }
+
+    #[test]
+    fn document_validation_rejects_zero_sequence_revision() {
+        let mut value = serde_json::to_value(test_document()).expect("serialize document");
+        value["sequences"]["sequences"][0]["revision"] = serde_json::json!(0);
+        let document = serde_json::from_value::<ProjectDocument>(value)
+            .expect("zero revision remains structurally deserializable");
+
+        let error = document.validate().expect_err("zero revision must fail");
+        assert!(error.to_string().contains("author revision zero"));
     }
 
     #[test]
