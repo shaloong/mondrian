@@ -1,8 +1,8 @@
-//! Preview-service Adapter for application-owned hardware-decode admission.
+//! Preview Runtime Adapter for application-owned hardware-decode admission.
 
 use super::*;
 
-impl AppUiPreviewService {
+impl<O: Clone> PreviewProductionRuntime<O> {
     /// Set playback hardware-decode admission selected by the app runtime.
     ///
     /// The default is `Auto` until renderer/platform readiness is reported. The
@@ -24,15 +24,15 @@ impl AppUiPreviewService {
 
     pub(super) fn hardware_decode_admission_diagnostics(
         &self,
-    ) -> AppUiPreviewHardwareDecodeAdmissionDiagnostics {
+    ) -> PreviewHardwareDecodeAdmissionDiagnostics {
         let state = self.hardware_decode_admission.get();
         let Some(admission) = state.observation() else {
-            return AppUiPreviewHardwareDecodeAdmissionDiagnostics {
+            return PreviewHardwareDecodeAdmissionDiagnostics {
                 playback_request: state.request(),
-                ..AppUiPreviewHardwareDecodeAdmissionDiagnostics::default()
+                ..PreviewHardwareDecodeAdmissionDiagnostics::default()
             };
         };
-        AppUiPreviewHardwareDecodeAdmissionDiagnostics {
+        PreviewHardwareDecodeAdmissionDiagnostics {
             playback_request: admission.request,
             renderer_native_import_support_known: true,
             renderer_native_import_ready: admission.renderer_native_import_ready,

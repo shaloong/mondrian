@@ -1,6 +1,6 @@
-//! Application media adaptation for Viewer preview.
+//! Application media adaptation for production Preview.
 //!
-//! This Window Adapter owns asset-library lookup, cache observation, proxy-job
+//! This production Adapter owns asset-library lookup, cache observation, proxy-job
 //! dispatch, and diagnostics projection. Canonical media-source interpretation
 //! lives in `app::preview_media_source`.
 
@@ -13,7 +13,7 @@ use crate::app::preview_timeline_execution::{
     PreviewTimelineMediaFrame, PreviewTimelineMediaRequest,
 };
 
-impl AppUiPreviewService {
+impl<O: Clone> PreviewProductionRuntime<O> {
     pub(super) fn media_frame_for_plan(
         &self,
         state: &AppState,
@@ -151,7 +151,7 @@ impl AppUiPreviewService {
                 let diagnostic_summary = rejection.diagnostic.summary();
                 let diagnostic_issue_summary = rejection.diagnostic.issue_summary();
                 if record_color_rejection {
-                    self.record_color_rejection(AppUiPreviewColorRejection::new(
+                    self.record_color_rejection(PreviewColorRejection::new(
                         rejection.asset_id,
                         rejection.path.clone(),
                         resolution,

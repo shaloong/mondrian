@@ -1,14 +1,14 @@
-//! Final Viewer output arbitration for the Window Preview Adapter.
+//! UI-independent final Preview output arbitration.
 //!
 //! Timeline evaluation and media adaptation produce a resolved plan. This deep
 //! Module alone decides whether that plan uses an exact registered GPU output,
 //! a raster cache entry, an explicitly scoped stale output, or the CPU output
-//! boundary. The parent Adapter retains scheduling and diagnostics ownership.
+//! boundary. Window and Headless Adapters only project the returned state.
 
 use super::*;
 
-impl AppUiPreviewService {
-    pub(super) fn render_preview(&self, state: &AppState) -> ViewerPreviewState {
+impl<O: Clone> PreviewProductionRuntime<O> {
+    pub(crate) fn presentation_for_state(&self, state: &AppState) -> PreviewPresentationState<O> {
         bump(&self.metrics.render_requests);
         self.execution.borrow_mut().set_pending(false);
         self.last_color_rejection.replace(None);
@@ -17,7 +17,7 @@ impl AppUiPreviewService {
             self.scheduler.prune_obsolete();
             self.frame_store.borrow_mut().clear_pinned_viewer_frame();
             bump(&self.metrics.unavailable_frames);
-            return ViewerPreviewState::Unavailable;
+            return PreviewPresentationState::Unavailable;
         };
         let frame = state.current_frame().max(0);
         let (width, height) = preview_dimensions_for_state(state, sequence);
@@ -33,7 +33,7 @@ impl AppUiPreviewService {
                 self.scheduler.prune_obsolete();
                 self.frame_store.borrow_mut().clear_pinned_viewer_frame();
                 bump(&self.metrics.unavailable_frames);
-                return ViewerPreviewState::Unavailable;
+                return PreviewPresentationState::Unavailable;
             }
         };
         let color_context = sequence
@@ -51,9 +51,9 @@ impl AppUiPreviewService {
         let resolve_started_at = Instant::now();
         let resolved =
             self.resolve_sequence_elements(state, sequence, frame, width, height, color_context);
-        let mut render_stage_durations = AppUiPreviewRenderStageDurations {
+        let mut render_stage_durations = PreviewRenderStageDurations {
             resolve_us: app_duration_us(resolve_started_at.elapsed()),
-            ..AppUiPreviewRenderStageDurations::default()
+            ..PreviewRenderStageDurations::default()
         };
         let preview_state = match resolved {
             Some(resolved) => {
@@ -79,7 +79,7 @@ impl AppUiPreviewService {
                     });
                 if let Some(frame) = external_cache_key
                     .as_ref()
-                    .and_then(|cache_key| self.external_viewer_frame_for_key(cache_key))
+                    .and_then(|cache_key| self.registered_gpu_output_for_key(cache_key))
                 {
                     render_stage_durations.final_cache_lookup_us =
                         app_duration_us(final_cache_lookup_started_at.elapsed());
@@ -87,7 +87,7 @@ impl AppUiPreviewService {
                         app_duration_us(render_started_at.elapsed()),
                         render_stage_durations,
                     );
-                    ViewerPreviewState::Ready(ViewerFrameContent::ExternalTexture(frame))
+                    PreviewPresentationState::Ready(PreviewPresentationContent::Gpu(frame))
                 } else if let Some(frame) = self.cached_viewer_frame(&resolved.cache_key) {
                     render_stage_durations.final_cache_lookup_us =
                         app_duration_us(final_cache_lookup_started_at.elapsed());
@@ -101,9 +101,7 @@ impl AppUiPreviewService {
                         height,
                         frame: frame.clone(),
                     });
-                    viewer_frame_image(&frame)
-                        .map(|frame| ViewerPreviewState::Ready(ViewerFrameContent::Raster(frame)))
-                        .unwrap_or(ViewerPreviewState::Unavailable)
+                    PreviewPresentationState::Ready(PreviewPresentationContent::Raster(frame))
                 } else if state.is_playing()
                     && preview_elements_require_deferred_composite(&resolved.elements)
                 {
@@ -114,8 +112,8 @@ impl AppUiPreviewService {
                         render_stage_durations,
                     );
                     self.stale_viewer_content_for_sequence(sequence, width, height)
-                        .map(ViewerPreviewState::Stale)
-                        .unwrap_or(ViewerPreviewState::Loading)
+                        .map(PreviewPresentationState::Stale)
+                        .unwrap_or(PreviewPresentationState::Loading)
                 } else {
                     render_stage_durations.final_cache_lookup_us =
                         app_duration_us(final_cache_lookup_started_at.elapsed());
@@ -127,7 +125,7 @@ impl AppUiPreviewService {
                                     output_color_space = ?output_color_space,
                                     "CPU raster viewer has no compatible presentation contract"
                                 );
-                                return ViewerPreviewState::Unavailable;
+                                return PreviewPresentationState::Unavailable;
                             }
                         };
                     let output = match composite_resolved_preview(
@@ -140,7 +138,7 @@ impl AppUiPreviewService {
                         Ok(rgba) => rgba,
                         Err(err) => {
                             tracing::warn!("viewer preview color render failed: {err}");
-                            return ViewerPreviewState::Unavailable;
+                            return PreviewPresentationState::Unavailable;
                         }
                     };
                     render_stage_durations.accumulate_cpu_execution(output.execution_durations);
@@ -178,21 +176,19 @@ impl AppUiPreviewService {
                                     frame: frame.clone(),
                                 },
                             );
-                            viewer_frame_image(&frame)
-                                .map(|frame| {
-                                    ViewerPreviewState::Ready(ViewerFrameContent::Raster(frame))
-                                })
-                                .unwrap_or(ViewerPreviewState::Unavailable)
+                            PreviewPresentationState::Ready(PreviewPresentationContent::Raster(
+                                frame,
+                            ))
                         }
-                        None => ViewerPreviewState::Unavailable,
+                        None => PreviewPresentationState::Unavailable,
                     }
                 }
             }
             None if self.execution.borrow().is_pending() => self
                 .stale_viewer_content_for_sequence(sequence, width, height)
-                .map(ViewerPreviewState::Stale)
-                .unwrap_or(ViewerPreviewState::Loading),
-            None => ViewerPreviewState::Unavailable,
+                .map(PreviewPresentationState::Stale)
+                .unwrap_or(PreviewPresentationState::Loading),
+            None => PreviewPresentationState::Unavailable,
         };
         self.schedule_media_prefetches(state, sequence, frame, width, height);
         self.scheduler.prune_obsolete();
@@ -215,42 +211,24 @@ impl AppUiPreviewService {
         sequence: &Sequence,
         width: u32,
         height: u32,
-    ) -> Option<ViewerFrameContent> {
+    ) -> Option<PreviewPresentationContent<O>> {
         self.execution
             .borrow()
             .current_output()
             .filter(|(key, _)| key.sequence_id == sequence.id)
-            .map(|(_, output)| ViewerFrameContent::ExternalTexture(output.clone()))
+            .map(|(_, output)| PreviewPresentationContent::Gpu(output.clone()))
             .or_else(|| {
                 self.stale_frame_for_sequence(sequence, width, height)
-                    .as_ref()
-                    .and_then(viewer_frame_image)
-                    .map(ViewerFrameContent::Raster)
+                    .map(PreviewPresentationContent::Raster)
             })
     }
 
-    fn record_preview_state(&self, state: &ViewerPreviewState) {
+    fn record_preview_state(&self, state: &PreviewPresentationState<O>) {
         match state {
-            ViewerPreviewState::Ready(_) => bump(&self.metrics.ready_frames),
-            ViewerPreviewState::Loading => bump(&self.metrics.loading_frames),
-            ViewerPreviewState::Stale(_) => bump(&self.metrics.stale_frames),
-            ViewerPreviewState::Unavailable => bump(&self.metrics.unavailable_frames),
+            PreviewPresentationState::Ready(_) => bump(&self.metrics.ready_frames),
+            PreviewPresentationState::Loading => bump(&self.metrics.loading_frames),
+            PreviewPresentationState::Stale(_) => bump(&self.metrics.stale_frames),
+            PreviewPresentationState::Unavailable => bump(&self.metrics.unavailable_frames),
         }
     }
-}
-
-/// Final Window Adapter conversion. Cached and pinned Preview state never
-/// retains Widget payloads; only an about-to-be-presented raster crosses this
-/// boundary.
-fn viewer_frame_image(frame: &PreviewRasterFrame) -> Option<ViewerFrameImage> {
-    let color_space = match frame.color_space {
-        PreviewRasterColorSpace::Srgb => mondrian_ui_core::RasterImageColorSpace::Srgb,
-    };
-    ViewerFrameImage::new(
-        frame.resource_key.clone(),
-        frame.width,
-        frame.height,
-        color_space,
-        Arc::clone(&frame.rgba),
-    )
 }

@@ -16,17 +16,16 @@ use crate::app::native_video_import::{
     NativeVideoImportReadinessInput,
 };
 use crate::app::preview_execution::{
-    PreviewGpuFrame as AppUiGpuPreviewFrame, PreviewGpuFrameState as AppUiGpuPreviewFrameState,
-    PreviewGpuWorkingInput as AppUiGpuPreviewWorkingInput,
+    PreviewGpuFrame, PreviewGpuFrameState, PreviewGpuWorkingInput,
 };
 use crate::app::preview_gpu_output_blocker::{
     PreviewGpuOutputBlocker, PreviewGpuOutputBlockerBreakdown,
 };
+use crate::app::preview_runtime::PreviewColorRejection;
 use crate::app::ui_actions::app_shell_quit_action;
 use crate::app::AppState;
 use crate::app_ui::action_queue::PendingUiActions;
 use crate::app_ui::host::{AppUiHost, AppUiMode, AppUiShellCommands};
-use crate::app_ui::preview::AppUiPreviewColorRejection;
 use crate::app_ui::rendering::{
     AppUiBackendEvent, AppUiFramePressure, AppUiFrameRenderer, AppUiRenderDiagnosticReporter,
 };
@@ -200,7 +199,7 @@ struct AppUiViewerGpuOutputDiagnostics {
     last_frame_context: Option<AppUiViewerGpuOutputFrameContext>,
     last_preview_candidate_id: Option<u64>,
     last_preview_candidate_state: Option<AppUiViewerGpuOutputPreviewCandidateState>,
-    last_color_rejection: Option<AppUiPreviewColorRejection>,
+    last_color_rejection: Option<PreviewColorRejection>,
     last_display_contract_blocker: Option<AppUiDisplayBoundaryBlockerDiagnostics>,
     last_display_presentation_readiness: Option<AppUiDisplayPresentationReadinessDiagnostics>,
     recent_display_contract_refreshes: Vec<AppUiDisplayContractRefreshEvent>,
@@ -604,7 +603,7 @@ impl AppUiViewerGpuOutputTelemetry {
         self.last_preview_candidate_state = Some(state);
     }
 
-    fn record_frame_context(&mut self, frame: &AppUiGpuPreviewFrame, external_texture_key: String) {
+    fn record_frame_context(&mut self, frame: &PreviewGpuFrame, external_texture_key: String) {
         self.last_frame_context = Some(AppUiViewerGpuOutputFrameContext::from_frame(
             frame,
             external_texture_key,
@@ -805,7 +804,7 @@ impl AppUiViewerGpuOutputHealthCounts {
 }
 
 impl AppUiViewerGpuOutputFrameContext {
-    fn from_frame(frame: &AppUiGpuPreviewFrame, external_texture_key: String) -> Self {
+    fn from_frame(frame: &PreviewGpuFrame, external_texture_key: String) -> Self {
         Self {
             sequence_id: frame.sequence_id.to_string(),
             frame: frame.frame,
@@ -830,9 +829,9 @@ impl AppUiViewerGpuOutputFrameContext {
 }
 
 impl AppUiViewerGpuOutputFrameResidency {
-    fn from_frame(frame: &AppUiGpuPreviewFrame) -> Self {
+    fn from_frame(frame: &PreviewGpuFrame) -> Self {
         match &frame.working_input {
-            AppUiGpuPreviewWorkingInput::GpuComposite { layers } => {
+            PreviewGpuWorkingInput::GpuComposite { layers } => {
                 let media_layers = layers
                     .iter()
                     .filter(|layer| matches!(layer, ViewerGpuExecutionLayer::Media { .. }))
@@ -3226,8 +3225,8 @@ fn prepare_viewer_gpu_preview(
         session.program_scopes_refresh_requested = true;
     }
     let frame = match host.gpu_preview_frame_for_current_state() {
-        AppUiGpuPreviewFrameState::Ready(frame) => frame,
-        AppUiGpuPreviewFrameState::Current => {
+        PreviewGpuFrameState::Ready(frame) => frame,
+        PreviewGpuFrameState::Current => {
             session.viewer_gpu_output_telemetry.record_preview_candidate_state(
                 AppUiViewerGpuOutputPreviewCandidateState::Current,
                 None,
@@ -3235,7 +3234,7 @@ fn prepare_viewer_gpu_preview(
             session.viewer_gpu_output_telemetry.record_current_skip();
             finish_prepare!();
         }
-        AppUiGpuPreviewFrameState::Loading => {
+        PreviewGpuFrameState::Loading => {
             session.viewer_gpu_output_telemetry.record_preview_candidate_state(
                 AppUiViewerGpuOutputPreviewCandidateState::Loading,
                 None,
@@ -3243,7 +3242,7 @@ fn prepare_viewer_gpu_preview(
             session.viewer_gpu_output_telemetry.record_loading_skip();
             finish_prepare!();
         }
-        AppUiGpuPreviewFrameState::Unavailable => {
+        PreviewGpuFrameState::Unavailable => {
             unregister_program_scopes_textures(session);
             session.program_scopes_refresh_requested = program_scopes_requested;
             session.viewer_gpu_output_telemetry.record_preview_candidate_state(
@@ -3304,7 +3303,7 @@ fn prepare_viewer_gpu_preview(
                 "v2 display output contract invalid — blocking preview"
             );
             let preview_blockers =
-                super::display_probe_impl::preview_blockers_from_snapshot(snapshot);
+                crate::app::preview_display_contract::preview_blockers_from_snapshot(snapshot);
             for blocker in &snapshot.blockers {
                 host.record_preview_gpu_output_blocker(
                     &preview_blockers
@@ -3383,7 +3382,7 @@ fn prepare_viewer_gpu_preview(
         label: Some("app_ui_viewer_gpu_preview_output_encoder"),
     });
     let layers = match &frame.working_input {
-        AppUiGpuPreviewWorkingInput::GpuComposite { layers } => layers,
+        PreviewGpuWorkingInput::GpuComposite { layers } => layers,
     };
     let display_calibration = match session.display_calibration.clone() {
         Some(calibration) => {
@@ -4076,7 +4075,8 @@ fn refresh_display_output_contract(
         }
     }
 
-    let snapshot_blockers = super::display_probe_impl::preview_blockers_from_snapshot(&snapshot);
+    let snapshot_blockers =
+        crate::app::preview_display_contract::preview_blockers_from_snapshot(&snapshot);
     for blocker in &snapshot_blockers {
         host.record_preview_gpu_output_blocker(blocker);
     }
@@ -6391,7 +6391,7 @@ mod tests {
         });
         let mut diagnostics =
             telemetry.diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default());
-        diagnostics.last_color_rejection = Some(AppUiPreviewColorRejection {
+        diagnostics.last_color_rejection = Some(PreviewColorRejection {
             asset_id: mondrian_core::types::AssetId::new(),
             path: PathBuf::from("E:/media/missing-color-tags.mov"),
             missing_metadata_policy:

@@ -433,9 +433,9 @@ The sibling UI-independent `app::preview_cpu_execution` Module owns source to
 working-linear preparation, renderer timeline composition, Program Output,
 monitor adaptation, and exact stage durations. It returns pixels plus all input,
 composite, output, and monitor facts; Window diagnostics only project that result,
-and Headless execution can assert the same result without constructing
-`AppUiPreviewService`.
-`app_ui::preview::presentation` exclusively
+and Headless execution asserts the same result through the shared
+`PreviewProductionRuntime`.
+`app::preview_runtime::presentation` exclusively
 chooses exact registered GPU output, raster cache, scoped stale reuse, deferred
 playback composite, or the CPU output boundary; it cannot schedule media work
 or mutate transport. CPU raster cache and stale state use the validated,
@@ -443,15 +443,15 @@ UI-independent `app::preview_raster_frame::PreviewRasterFrame`; only this final
 Window Adapter converts it to a Widget `ViewerFrameImage`, without copying the
 shared pixel allocation. Raster extent, encoded color identity, byte reservation,
 and stable resource naming therefore remain available to Headless presentation
-without importing Widget types. `app_ui::preview::result_pump` exclusively
-performs the bounded UI-thread drain of completed work, Broker resolution,
+without importing Widget types. `app::preview_runtime::result_pump` exclusively
+performs the bounded foreground drain of completed work, Broker resolution,
 deadline expiry, cache admission, and terminal Frame Delivery projection; it may
 record facts but cannot invent generation or deadline authority. Window lifecycle
 code initiates project/switch shutdown in `service_lifecycle`, while the shutdown
 signal, worker observation, and bounded exit behavior stay in
 `app::preview_media_task`; teardown cannot become an alternate completion policy.
-The one concrete App composition
-root is `app::preview_frame_store::PreviewFrameStoreAdapter`; its generic storage
+The sole Frame Store policy Adapter inside the Preview Production Runtime is
+`app::preview_frame_store::PreviewFrameStoreAdapter`; its generic storage
 and residency algorithm remains owned by `mondrian-playback::PreviewFrameStore`,
 while diagnostic aggregation remains in the Preview Adapter. This is a
 behavioral module boundary, not a second scheduler: all admission, deadline,
@@ -462,7 +462,7 @@ in UI-independent `app::preview_gpu_output_blocker`. Renderer, display-contract,
 Window, and Headless Adapters may contribute typed facts to it, but no Widget
 module owns or reinterprets those diagnostic identities.
 Mutable counter accumulation and point-in-time diagnostics projection are
-localized in `app_ui::preview::evidence`. It records facts selected elsewhere;
+localized in `app::preview_runtime::evidence`. It records facts selected elsewhere;
 it cannot schedule, change pressure state, or derive pass/fail verdicts.
 Within diagnostics, the versioned Color Health report model and its
 check/root-cause/action derivation live in the private `color_health` deep
@@ -472,7 +472,7 @@ The sibling private `performance` Module derives versioned Decode/Render
 budget checks, verdicts, bottleneck classification, root causes, and actions
 from immutable summaries. Public report builders are re-exported unchanged;
 the Module owns no counters, scheduler feedback, or acceptance thresholds.
-`app_ui::preview::request_scheduler` is the concrete Adapter that consumes
+`app::preview_runtime::request_scheduler` is the concrete Adapter that consumes
 canonical current/nested media demands, queries preroll residency, applies the
 already selected adaptive hints, and submits Broker work. It does not own pressure
 thresholds, access-mode mapping, deadlines, or generation identity; those
@@ -492,8 +492,9 @@ frame-rate-to-prefetch-window policy;
 `app::preview_media_task` owns concrete decode execution and cooperative
 cancellation observation, `app::preview_media_source` owns canonical source
 interpretation, `app::preview_timeline_execution` owns canonical Timeline and
-nested-Sequence execution, while `app_ui::preview` owns asset-library and
-proxy-dispatch side effects plus Window diagnostics projection. None of them
+nested-Sequence execution, while `app::preview_runtime` owns asset-library and
+proxy-dispatch side effects plus immutable diagnostics projection. The shallow
+`app_ui::preview` Adapter owns only Widget conversion. None of them
 duplicate clock math, construct a second media key, or reinterpret nesting.
 
 The same current request carries an opaque Frame Demand identity end-to-end.
@@ -1007,7 +1008,7 @@ contract through `ProxyStatus` (`Missing`, `Fresh`, `Stale`). If project proxy
 playback is enabled for an asset and the expected proxy file is `Fresh`, app
 preview decodes that proxy path. If the proxy is `Missing` or `Stale`, preview
 falls back to the source path and records proxy hit/miss/stale counters in
-`AppUiPreviewDiagnostics`. Export continues to use the source/export contract;
+`PreviewDiagnostics`. Export continues to use the source/export contract;
 proxy selection is a preview playback scheduling decision, not media color
 interpretation.
 Alpha-bearing sources bypass the current opaque proxy profiles and GPU-native

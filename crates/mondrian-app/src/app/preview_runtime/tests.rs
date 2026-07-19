@@ -1,4 +1,10 @@
 use super::*;
+use crate::app::preview_raster_frame::PreviewRasterColorSpace;
+use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
+use crate::app_ui::preview::{WindowPreviewAdapter, WindowPreviewOutputRegistration};
+use mondrian_ui_widgets::{
+    ViewerExternalTexturePresentation, ViewerFrameContent, ViewerFrameImage,
+};
 
 fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::TimelineTime {
     let numerator = frame.checked_mul(time_base.num).expect("test time fits i64");
@@ -439,14 +445,14 @@ fn preview_display_color_space_accepts_calibrated_icc_status() {
 
 #[test]
 fn gpu_preview_frame_for_icc_policy_rejects_uncalibrated_monitor_profile() {
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
     let state = state_with_icc_display_policy(Color::from_rgba8(24, 80, 160, 255));
     let snapshot = managed_icc_display_snapshot(ColorSpace::DisplayP3);
     service.set_display_output_snapshot(Some(&snapshot));
 
     assert!(matches!(
         service.gpu_preview_frame_for_state(&state),
-        AppUiGpuPreviewFrameState::Unavailable
+        PreviewGpuFrameState::Unavailable
     ));
 }
 
@@ -462,7 +468,7 @@ fn ready_frame(state: ViewerPreviewState) -> ViewerFrameImage {
 
 #[test]
 fn solid_color_sequence_returns_preview_frame_at_preview_scale() {
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
     let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
 
     let frame = service.viewer_preview_for_state(&state);
@@ -477,14 +483,14 @@ fn solid_color_sequence_returns_preview_frame_at_preview_scale() {
 
 #[test]
 fn paused_gpu_candidate_carries_untimed_presentation_authority() {
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
     let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
 
     let frame = match service.gpu_preview_frame_for_state(&state) {
-        AppUiGpuPreviewFrameState::Ready(frame) => frame,
-        AppUiGpuPreviewFrameState::Current => panic!("expected new GPU preview candidate"),
-        AppUiGpuPreviewFrameState::Loading => panic!("expected ready GPU preview candidate"),
-        AppUiGpuPreviewFrameState::Unavailable => {
+        PreviewGpuFrameState::Ready(frame) => frame,
+        PreviewGpuFrameState::Current => panic!("expected new GPU preview candidate"),
+        PreviewGpuFrameState::Loading => panic!("expected ready GPU preview candidate"),
+        PreviewGpuFrameState::Unavailable => {
             panic!("expected available GPU preview candidate")
         }
     };
@@ -493,7 +499,7 @@ fn paused_gpu_candidate_carries_untimed_presentation_authority() {
     assert_eq!(frame.height, 540);
     assert_eq!(frame.working_color_space, WorkingColorSpace::LinearRec2020);
     match &frame.working_input {
-        AppUiGpuPreviewWorkingInput::GpuComposite { layers } => {
+        PreviewGpuWorkingInput::GpuComposite { layers } => {
             assert_eq!(layers.len(), 1);
             assert!(matches!(
                 layers[0],
@@ -518,10 +524,10 @@ fn paused_gpu_candidate_carries_untimed_presentation_authority() {
 
 #[test]
 fn gpu_candidate_separates_program_output_from_monitor_identity() {
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     let baseline_frame = match service.gpu_preview_frame_for_state(&state) {
-        AppUiGpuPreviewFrameState::Ready(frame) => frame,
+        PreviewGpuFrameState::Ready(frame) => frame,
         _ => panic!("expected baseline GPU preview candidate"),
     };
     state.project_settings.color_management.display_management.monitor_profile =
@@ -532,7 +538,7 @@ fn gpu_candidate_separates_program_output_from_monitor_identity() {
     service.set_display_output_snapshot(Some(&snapshot));
 
     let frame = match service.gpu_preview_frame_for_state(&state) {
-        AppUiGpuPreviewFrameState::Ready(frame) => frame,
+        PreviewGpuFrameState::Ready(frame) => frame,
         _ => panic!("expected ready GPU preview candidate"),
     };
 
@@ -554,13 +560,13 @@ fn gpu_candidate_separates_program_output_from_monitor_identity() {
 
 #[test]
 fn playing_gpu_candidate_carries_exact_presentation_ticket() {
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     state.play();
     let identity = state.pending_playback_frame_demand_identity().expect("frame demand identity");
 
     let frame = match service.gpu_preview_frame_for_state(&state) {
-        AppUiGpuPreviewFrameState::Ready(frame) => frame,
+        PreviewGpuFrameState::Ready(frame) => frame,
         _ => panic!("expected ready GPU preview candidate"),
     };
 
@@ -758,7 +764,7 @@ fn gpu_composite_layers_accept_source_only_media_frame() {
         Resolution { width: 320, height: 180 },
         44,
         mondrian_playback::FramePresentationQuality::Ready,
-        AppUiPreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
+        PreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
     );
     let effect_graph = mondrian_effects::get_or_compile_scheduled_effect_graph(
         &mondrian_effects::EffectRenderPlan::default(),
@@ -795,7 +801,7 @@ fn gpu_composite_layers_preserve_native_source_only_media_frame() {
         Resolution { width: 320, height: 180 },
         45,
         mondrian_playback::FramePresentationQuality::Ready,
-        AppUiPreviewDecodeExecutionSummary::default(),
+        PreviewDecodeExecutionSummary::default(),
     );
     let effect_graph = mondrian_effects::get_or_compile_scheduled_effect_graph(
         &mondrian_effects::EffectRenderPlan::default(),
@@ -867,7 +873,7 @@ fn native_source_only_media_frame_fails_cpu_working_fallback() {
         Resolution { width: 320, height: 180 },
         46,
         mondrian_playback::FramePresentationQuality::Ready,
-        AppUiPreviewDecodeExecutionSummary::default(),
+        PreviewDecodeExecutionSummary::default(),
     );
 
     let err = match frame.working_frame() {
@@ -905,10 +911,10 @@ fn gpu_composite_layers_reject_singular_media_transform() {
 
 #[test]
 fn external_gpu_preview_frame_overrides_raster_preview_for_same_plan() {
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
     let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     let frame = match service.gpu_preview_frame_for_state(&state) {
-        AppUiGpuPreviewFrameState::Ready(frame) => frame,
+        PreviewGpuFrameState::Ready(frame) => frame,
         _ => panic!("expected ready GPU preview candidate"),
     };
     let key = frame.external_texture_key();
@@ -921,7 +927,7 @@ fn external_gpu_preview_frame_overrides_raster_preview_for_same_plan() {
             .expect("full-frame presentation"),
     ));
     match service.gpu_preview_frame_for_state(&state) {
-        AppUiGpuPreviewFrameState::Current => {}
+        PreviewGpuFrameState::Current => {}
         _ => panic!("expected current external GPU preview frame"),
     }
     match service.viewer_preview_for_state(&state) {
@@ -947,18 +953,46 @@ fn external_gpu_preview_frame_overrides_raster_preview_for_same_plan() {
 
     service.clear_external_viewer_frame();
     let second_frame = match service.gpu_preview_frame_for_state(&state) {
-        AppUiGpuPreviewFrameState::Ready(frame) => frame,
+        PreviewGpuFrameState::Ready(frame) => frame,
         _ => panic!("expected new ready GPU preview candidate after external frame clear"),
     };
     assert!(second_frame.candidate_id() > first_candidate_id);
 }
 
 #[test]
-fn pending_replacement_prefers_last_presented_gpu_frame() {
-    let service = AppUiPreviewService::new();
+fn headless_output_uses_the_same_runtime_registration_and_current_lifecycle() {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TestHeadlessOutput {
+        resource_key: String,
+    }
+
+    let service = PreviewProductionRuntime::<TestHeadlessOutput>::new_without_workers_for_test();
     let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     let frame = match service.gpu_preview_frame_for_state(&state) {
-        AppUiGpuPreviewFrameState::Ready(frame) => frame,
+        PreviewGpuFrameState::Ready(frame) => frame,
+        _ => panic!("expected ready Headless GPU candidate"),
+    };
+    let output = TestHeadlessOutput { resource_key: frame.external_texture_key() };
+
+    assert!(service.register_gpu_output(&frame, output.clone()));
+    assert!(matches!(
+        service.gpu_preview_frame_for_state(&state),
+        PreviewGpuFrameState::Current
+    ));
+    match service.presentation_for_state(&state) {
+        PreviewPresentationState::Ready(PreviewPresentationContent::Gpu(current)) => {
+            assert_eq!(current, output);
+        }
+        other => panic!("expected exact registered Headless output, got {other:?}"),
+    }
+}
+
+#[test]
+fn pending_replacement_prefers_last_presented_gpu_frame() {
+    let service = WindowPreviewAdapter::new();
+    let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    let frame = match service.gpu_preview_frame_for_state(&state) {
+        PreviewGpuFrameState::Ready(frame) => frame,
         _ => panic!("expected ready GPU preview candidate"),
     };
     assert!(service.set_external_viewer_frame(
@@ -970,7 +1004,7 @@ fn pending_replacement_prefers_last_presented_gpu_frame() {
     let sequence = state.sequence.as_ref().expect("test sequence");
 
     match service.stale_viewer_content_for_sequence(sequence, frame.width, frame.height) {
-        Some(ViewerFrameContent::ExternalTexture(stale)) => {
+        Some(PreviewPresentationContent::Gpu(stale)) => {
             assert_eq!(stale.key, "viewer:last-presented");
         }
         other => panic!("expected retained external frame, got {other:?}"),
@@ -979,7 +1013,7 @@ fn pending_replacement_prefers_last_presented_gpu_frame() {
 
 #[test]
 fn preview_diagnostics_count_ready_render_requests() {
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
     let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
 
     let diagnostics = service.diagnostics();
@@ -1045,7 +1079,7 @@ fn preview_diagnostics_count_ready_render_requests() {
 
 #[test]
 fn preview_diagnostics_count_gpu_stage_blocker_breakdown() {
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
     service.record_color_stage(RenderColorStageDiagnostics {
         total_stages: 1,
         gpu_color_stages: 1,
@@ -1155,7 +1189,7 @@ fn nearest_keyframe_scrub_is_explicitly_degraded_until_settled() {
 
 #[test]
 fn preview_diagnostics_count_decode_paths_and_duration() {
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
 
     service.record_preview_decode(
         PreviewDecodeDiagnostics {
@@ -1525,7 +1559,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
     assert_eq!(diagnostics.decode_max_frame_queue_wait_us, 400);
     assert_eq!(
         diagnostics.decode_max_frame_bottleneck,
-        AppUiPreviewDecodeBottleneck::ExternalProcess
+        PreviewDecodeBottleneck::ExternalProcess
     );
     let playback_profile = diagnostics.decode_access_mode_profiles.playback_cursor;
     assert_eq!(playback_profile.frames, 2);
@@ -1544,7 +1578,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
     assert_eq!(playback_profile.max_frame_queue_wait_us, 400);
     assert_eq!(
         playback_profile.max_frame_bottleneck,
-        AppUiPreviewDecodeBottleneck::ExternalProcess
+        PreviewDecodeBottleneck::ExternalProcess
     );
     assert_eq!(playback_profile.canceled_jobs, 1);
     assert_eq!(playback_profile.canceled_prefetch_deadline_jobs, 1);
@@ -1747,7 +1781,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
 
 #[test]
 fn preview_diagnostics_count_decode_failures_by_access_mode() {
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
 
     service.record_preview_decode_failure(
         PreviewDecodeAccessMode::ScrubCursor,
@@ -1785,7 +1819,7 @@ fn preview_diagnostics_count_decode_failures_by_access_mode() {
 
 #[test]
 fn preview_diagnostics_count_prefetch_preemptions_by_access_mode() {
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
 
     service.record_preview_decode_cancel(
         PreviewDecodeAccessMode::PlaybackCursor,
@@ -1811,7 +1845,7 @@ fn preview_diagnostics_count_prefetch_preemptions_by_access_mode() {
 
 #[test]
 fn preview_diagnostics_count_playback_deadline_cancellations_by_access_mode() {
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
 
     service.record_preview_decode_cancel(
         PreviewDecodeAccessMode::PlaybackCursor,
@@ -1841,7 +1875,7 @@ fn preview_diagnostics_count_playback_deadline_cancellations_by_access_mode() {
 
 #[test]
 fn preview_diagnostics_count_still_preemptions_by_access_mode() {
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
 
     service.record_preview_decode_cancel(
         PreviewDecodeAccessMode::RandomAccessStillFrame,
@@ -1866,20 +1900,20 @@ fn preview_diagnostics_count_still_preemptions_by_access_mode() {
 
 #[test]
 fn preview_decode_performance_report_fails_scrub_keyframe_seek_strategy() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
         decode_in_process_cpu_frames: 1,
         decode_scrub_cursor_frames: 1,
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            scrub_cursor: PreviewDecodeAccessModeProfile {
                 frames: 1,
                 in_process_cpu_frames: 1,
                 keyframe_seek_strategy_frames: 1,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -1888,10 +1922,10 @@ fn preview_decode_performance_report_fails_scrub_keyframe_seek_strategy() {
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_scrub_cursor_bounded_any_seek_strategy"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+            && check.severity == PreviewDecodePerformanceSeverity::Fail
             && check.observed == 0
             && check.limit == Some(1)
     }));
@@ -1908,23 +1942,23 @@ fn preview_decode_performance_report_fails_scrub_keyframe_seek_strategy() {
 
 #[test]
 fn preview_decode_performance_report_fails_scrub_without_any_seek_window() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
         decode_in_process_cpu_frames: 1,
         decode_scrub_cursor_frames: 1,
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            scrub_cursor: PreviewDecodeAccessModeProfile {
                 frames: 1,
                 in_process_cpu_frames: 1,
                 bounded_any_seek_strategy_frames: 1,
                 forward_reuse_frame_window_max: 1,
                 forward_decode_budget_frames_max: 8,
                 any_seek_window_ms_max: 0,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -1933,10 +1967,10 @@ fn preview_decode_performance_report_fails_scrub_without_any_seek_window() {
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_scrub_cursor_any_seek_window_ms"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+            && check.severity == PreviewDecodePerformanceSeverity::Fail
             && check.observed == 0
             && check.limit == Some(1)
     }));
@@ -1954,18 +1988,18 @@ fn preview_decode_performance_report_fails_scrub_without_any_seek_window() {
 
 #[test]
 fn preview_decode_performance_report_fails_structured_budget_exhaustion() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_failures: 1,
         decode_budget_exhausted_failures: 1,
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            scrub_cursor: PreviewDecodeAccessModeProfile {
                 failed_jobs: 1,
                 budget_exhausted_failures: 1,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -1974,10 +2008,10 @@ fn preview_decode_performance_report_fails_structured_budget_exhaustion() {
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_forward_budget_exhausted_failures"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+            && check.severity == PreviewDecodePerformanceSeverity::Fail
     }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_forward_budget_exhausted"
@@ -1991,7 +2025,7 @@ fn preview_decode_performance_report_fails_structured_budget_exhaustion() {
 
 #[test]
 fn preview_playback_schedule_diagnostics_records_clock_contract() {
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
 
     service.record_playback_current_deadline_budget(Some(33_333));
     service.record_playback_forward_prefetch_window(Some(2));
@@ -2026,7 +2060,7 @@ fn preview_playback_schedule_diagnostics_records_clock_contract() {
 
 #[test]
 fn startup_preroll_decode_evidence_is_separate_from_steady_state_latency() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut decode = test_preview_decode_diagnostics(
         PreviewDecodeAccessMode::PlaybackCursor,
         PreviewHardwareDecodeDecision::GpuResidentNative,
@@ -2065,7 +2099,7 @@ fn startup_preroll_decode_evidence_is_separate_from_steady_state_latency() {
 fn playback_video_preroll_requires_next_media_payload_and_observes_cache_residency() {
     let (mut state, asset_id, root) = state_with_invalid_video_asset();
     state.play();
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let sequence = state.sequence.as_ref().expect("media sequence");
     let preroll_window = media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
         .expect("valid media sequence frame rate");
@@ -2142,7 +2176,7 @@ fn playback_video_preroll_does_not_delay_procedural_future_frames() {
     let mut state = state_with_solid_color_clip(Color::WHITE);
     state.seek(0);
     state.play();
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
 
     assert_eq!(
         service.playback_video_preroll_readiness(&state),
@@ -2154,7 +2188,7 @@ fn playback_video_preroll_does_not_delay_procedural_future_frames() {
 
 #[test]
 fn preview_playback_schedule_counts_native_import_unavailable_current_frames() {
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
     service.set_playback_hardware_decode_admission(PlaybackHardwareDecodeAdmission {
         request: PreviewHardwareDecodeRequest::PreferHardwareDecode,
         hardware_decode_device_selector: None,
@@ -2219,17 +2253,17 @@ fn preview_playback_schedule_counts_native_import_unavailable_current_frames() {
 
 #[test]
 fn preview_decode_performance_report_warns_invalid_playback_clock_contract() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_canceled_jobs: 1,
-        playback_schedule: AppUiPreviewPlaybackScheduleDiagnostics {
+        playback_schedule: PreviewPlaybackScheduleDiagnostics {
             current_deadline_missing_frame_rate: 1,
             forward_prefetch_invalid_frame_rate: 1,
             forward_prefetch_horizon_us: MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US,
             forward_prefetch_min_frames: MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
             forward_prefetch_max_frames: MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES,
-            ..AppUiPreviewPlaybackScheduleDiagnostics::default()
+            ..PreviewPlaybackScheduleDiagnostics::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -2238,15 +2272,15 @@ fn preview_decode_performance_report_warns_invalid_playback_clock_contract() {
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Warn);
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_playback_deadline_invalid_frame_rate"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+            && check.severity == PreviewDecodePerformanceSeverity::Warn
             && check.observed == 1
     }));
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_prefetch_window_invalid_frame_rate"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+            && check.severity == PreviewDecodePerformanceSeverity::Warn
             && check.observed == 1
     }));
     assert!(report.root_causes.iter().any(|root| {
@@ -2269,18 +2303,18 @@ fn preview_decode_performance_report_warns_invalid_playback_clock_contract() {
 
 #[test]
 fn preview_decode_performance_report_fails_structured_timeout_failures() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_failures: 1,
         decode_timeout_failures: 1,
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            scrub_cursor: PreviewDecodeAccessModeProfile {
                 failed_jobs: 1,
                 timeout_failures: 1,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -2289,10 +2323,10 @@ fn preview_decode_performance_report_fails_structured_timeout_failures() {
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
     assert!(
         report.checks.iter().any(|check| check.code == "preview_decode_timeout_failures"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail)
+            && check.severity == PreviewDecodePerformanceSeverity::Fail)
     );
     assert!(report
         .root_causes
@@ -2307,18 +2341,18 @@ fn preview_decode_performance_report_fails_structured_timeout_failures() {
 
 #[test]
 fn preview_decode_performance_report_defaults_to_no_required_access_modes() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
         decode_in_process_cpu_frames: 1,
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            random_access_still: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            random_access_still: PreviewDecodeAccessModeProfile {
                 frames: 1,
                 in_process_cpu_frames: 1,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -2327,7 +2361,7 @@ fn preview_decode_performance_report_defaults_to_no_required_access_modes() {
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Warn);
     assert!(report.required_access_modes.is_empty());
     assert!(!report
         .checks
@@ -2337,18 +2371,18 @@ fn preview_decode_performance_report_defaults_to_no_required_access_modes() {
 
 #[test]
 fn preview_decode_performance_report_fails_missing_required_access_modes() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
         decode_in_process_cpu_frames: 1,
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            random_access_still: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            random_access_still: PreviewDecodeAccessModeProfile {
                 frames: 1,
                 in_process_cpu_frames: 1,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report_with_required_access_modes(
@@ -2361,7 +2395,7 @@ fn preview_decode_performance_report_fails_missing_required_access_modes() {
         ],
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
     assert_eq!(
         report.required_access_modes,
         vec![
@@ -2371,12 +2405,12 @@ fn preview_decode_performance_report_fails_missing_required_access_modes() {
     );
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_scrub_cursor_sampled"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+            && check.severity == PreviewDecodePerformanceSeverity::Fail
             && check.observed == 0
     }));
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_random_access_still_sampled"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Pass
+            && check.severity == PreviewDecodePerformanceSeverity::Pass
             && check.observed == 1
     }));
     assert!(report.root_causes.iter().any(|root| {
@@ -2391,20 +2425,20 @@ fn preview_decode_performance_report_fails_missing_required_access_modes() {
 
 #[test]
 fn preview_decode_performance_report_rejects_cache_only_required_access_mode() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
         decode_cache_hit_frames: 1,
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            scrub_cursor: PreviewDecodeAccessModeProfile {
                 frames: 1,
                 cache_hit_frames: 1,
                 bounded_any_seek_strategy_frames: 1,
                 any_seek_window_ms_max: 1,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report_with_required_access_modes(
@@ -2414,14 +2448,14 @@ fn preview_decode_performance_report_rejects_cache_only_required_access_mode() {
         &[PreviewDecodeAccessMode::ScrubCursor],
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_scrub_cursor_sampled"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Pass
+            && check.severity == PreviewDecodePerformanceSeverity::Pass
     }));
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_scrub_cursor_mode_local_sampled"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+            && check.severity == PreviewDecodePerformanceSeverity::Fail
             && check.observed == 0
     }));
     assert!(report.root_causes.iter().any(|root| {
@@ -2436,18 +2470,18 @@ fn preview_decode_performance_report_rejects_cache_only_required_access_mode() {
 
 #[test]
 fn preview_decode_performance_report_accepts_playback_ring_as_mode_local_evidence() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
         decode_playback_session_ring_hit_frames: 1,
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            playback_cursor: PreviewDecodeAccessModeProfile {
                 frames: 1,
                 playback_session_ring_hit_frames: 1,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report_with_required_access_modes(
@@ -2457,10 +2491,10 @@ fn preview_decode_performance_report_accepts_playback_ring_as_mode_local_evidenc
         &[PreviewDecodeAccessMode::PlaybackCursor],
     );
 
-    assert_ne!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+    assert_ne!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_playback_cursor_mode_local_sampled"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Pass
+            && check.severity == PreviewDecodePerformanceSeverity::Pass
             && check.observed == 1
     }));
     assert!(!report
@@ -2471,7 +2505,7 @@ fn preview_decode_performance_report_accepts_playback_ring_as_mode_local_evidenc
 
 #[test]
 fn preview_decode_performance_report_classifies_codec_bound_slow_frame() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
         decode_in_process_cpu_frames: 1,
         decode_total_duration_us: 120_000,
@@ -2494,8 +2528,8 @@ fn preview_decode_performance_report_classifies_codec_bound_slow_frame() {
             rgba_copy_us: 2_000,
             ..PreviewDecodeStageDurations::default()
         },
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            scrub_cursor: PreviewDecodeAccessModeProfile {
                 frames: 1,
                 in_process_cpu_frames: 1,
                 total_duration_us: 120_000,
@@ -2520,11 +2554,11 @@ fn preview_decode_performance_report_classifies_codec_bound_slow_frame() {
                     rgba_copy_us: 2_000,
                     ..PreviewDecodeStageDurations::default()
                 },
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -2533,11 +2567,11 @@ fn preview_decode_performance_report_classifies_codec_bound_slow_frame() {
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
     let summary = report.summary.expect("decode summary");
     assert_eq!(
         summary.primary_bottleneck,
-        AppUiPreviewDecodeBottleneck::PacketDecode
+        PreviewDecodeBottleneck::PacketDecode
     );
     assert_eq!(
         summary.slowest_access_mode,
@@ -2553,20 +2587,20 @@ fn preview_decode_performance_report_classifies_codec_bound_slow_frame() {
     }));
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_scrub_cursor_max_frame_us"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+            && check.severity == PreviewDecodePerformanceSeverity::Fail
             && check.observed == 120_000
             && check.limit == Some(50_000)
     }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_access_mode_over_budget"
-            && root.area == AppUiPreviewDecodePerformanceArea::AccessMode
+            && root.area == PreviewDecodePerformanceArea::AccessMode
             && root.evidence.contains("access_mode=ScrubCursor")
             && root.evidence.contains("packet_decode_us=95000")
             && root.evidence.contains("seek_index_available_frames=0")
     }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_scrub_cursor_without_seek_index_evidence"
-            && root.area == AppUiPreviewDecodePerformanceArea::AccessMode
+            && root.area == PreviewDecodePerformanceArea::AccessMode
             && root.evidence.contains("seek_index_available_frames=0")
     }));
     assert!(report
@@ -2589,7 +2623,7 @@ fn preview_decode_performance_report_classifies_codec_bound_slow_frame() {
 
 #[test]
 fn preview_decode_performance_report_classifies_hardware_transfer_bound_frame() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
         decode_playback_cursor_frames: 1,
         decode_playback_session_ring_hit_frames: 1,
@@ -2608,8 +2642,8 @@ fn preview_decode_performance_report_classifies_hardware_transfer_bound_frame() 
             rgba_copy_us: 2_000,
             ..PreviewDecodeStageDurations::default()
         },
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            playback_cursor: PreviewDecodeAccessModeProfile {
                 frames: 1,
                 playback_session_ring_hit_frames: 1,
                 total_duration_us: 90_000,
@@ -2628,11 +2662,11 @@ fn preview_decode_performance_report_classifies_hardware_transfer_bound_frame() 
                     rgba_copy_us: 2_000,
                     ..PreviewDecodeStageDurations::default()
                 },
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -2644,7 +2678,7 @@ fn preview_decode_performance_report_classifies_hardware_transfer_bound_frame() 
     let summary = report.summary.expect("decode summary");
     assert_eq!(
         summary.primary_bottleneck,
-        AppUiPreviewDecodeBottleneck::HardwareTransfer
+        PreviewDecodeBottleneck::HardwareTransfer
     );
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_hardware_transfer_bound"
@@ -2659,11 +2693,11 @@ fn preview_decode_performance_report_classifies_hardware_transfer_bound_frame() 
 
 #[test]
 fn preview_decode_performance_report_flags_hardware_cpu_transfer_setup_failures() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 2,
         decode_playback_cursor_frames: 2,
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            playback_cursor: PreviewDecodeAccessModeProfile {
                 frames: 2,
                 hardware_decode_prefer_hardware_requested_frames: 2,
                 hardware_decode_device_context_attempted_frames: 2,
@@ -2673,11 +2707,11 @@ fn preview_decode_performance_report_flags_hardware_cpu_transfer_setup_failures(
                 hardware_decode_cpu_transfer_decoder_open_failed_frames: 1,
                 hardware_decode_cpu_transfer_configured_frames: 1,
                 hardware_decode_cpu_transfer_observed_frames: 0,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -2688,7 +2722,7 @@ fn preview_decode_performance_report_flags_hardware_cpu_transfer_setup_failures(
 
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_hardware_cpu_transfer_setup_failed"
-            && root.area == AppUiPreviewDecodePerformanceArea::CodecDecode
+            && root.area == PreviewDecodePerformanceArea::CodecDecode
             && root.evidence.contains("setup_failed_frames=1")
             && root.evidence.contains("decoder_open_failed_frames=1")
             && root.evidence.contains("device_context_created_frames=1")
@@ -2701,11 +2735,11 @@ fn preview_decode_performance_report_flags_hardware_cpu_transfer_setup_failures(
 
 #[test]
 fn preview_decode_performance_report_flags_unengaged_playback_hardware_fallback() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 3,
         decode_playback_cursor_frames: 3,
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            playback_cursor: PreviewDecodeAccessModeProfile {
                 frames: 3,
                 hardware_decode_prefer_hardware_requested_frames: 3,
                 hardware_decode_backend_unavailable_frames: 1,
@@ -2717,11 +2751,11 @@ fn preview_decode_performance_report_flags_unengaged_playback_hardware_fallback(
                 hardware_decode_gpu_resident_native_frames: 0,
                 hardware_decode_candidate_d3d12va_frames: 1,
                 hardware_decode_candidate_d3d11va_frames: 1,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -2730,16 +2764,16 @@ fn preview_decode_performance_report_flags_unengaged_playback_hardware_fallback(
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Warn);
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_playback_hardware_fallback_not_engaged"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+            && check.severity == PreviewDecodePerformanceSeverity::Warn
             && check.observed == 3
             && check.limit == Some(0)
     }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_playback_hardware_fallback_not_engaged"
-            && root.area == AppUiPreviewDecodePerformanceArea::CodecDecode
+            && root.area == PreviewDecodePerformanceArea::CodecDecode
             && root.evidence.contains("requested_frames=3")
             && root.evidence.contains("effective_frames=0")
             && root.evidence.contains("not_engaged_frames=3")
@@ -2757,20 +2791,20 @@ fn preview_decode_performance_report_flags_unengaged_playback_hardware_fallback(
 
 #[test]
 fn preview_decode_performance_report_accepts_engaged_playback_hardware_fallback() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 2,
         decode_playback_cursor_frames: 2,
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            playback_cursor: PreviewDecodeAccessModeProfile {
                 frames: 2,
                 hardware_decode_prefer_hardware_requested_frames: 2,
                 hardware_decode_cpu_transfer_observed_frames: 1,
                 hardware_decode_gpu_resident_native_frames: 1,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -2781,7 +2815,7 @@ fn preview_decode_performance_report_accepts_engaged_playback_hardware_fallback(
 
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_playback_hardware_fallback_not_engaged"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Pass
+            && check.severity == PreviewDecodePerformanceSeverity::Pass
             && check.observed == 0
     }));
     assert!(!report
@@ -2792,30 +2826,30 @@ fn preview_decode_performance_report_accepts_engaged_playback_hardware_fallback(
 
 #[test]
 fn preview_decode_performance_report_flags_hardware_fallback_recovery_decisions() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 2,
         decode_playback_cursor_frames: 2,
-        playback_schedule: AppUiPreviewPlaybackScheduleDiagnostics {
+        playback_schedule: PreviewPlaybackScheduleDiagnostics {
             current_hardware_fallback_not_engaged_decisions: 2,
             current_proxy_or_hardware_recommended_decisions: 2,
             current_drop_late_decisions: 1,
             current_proxy_generation_requests: 1,
             current_proxy_generation_request_dedupes: 1,
-            ..AppUiPreviewPlaybackScheduleDiagnostics::default()
+            ..PreviewPlaybackScheduleDiagnostics::default()
         },
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            playback_cursor: PreviewDecodeAccessModeProfile {
                 frames: 2,
                 hardware_decode_prefer_hardware_requested_frames: 2,
                 hardware_decode_backend_unavailable_frames: 1,
                 hardware_decode_codec_unsupported_frames: 1,
                 hardware_decode_cpu_transfer_observed_frames: 0,
                 hardware_decode_gpu_resident_native_frames: 0,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -2824,16 +2858,16 @@ fn preview_decode_performance_report_flags_hardware_fallback_recovery_decisions(
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Warn);
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_playback_hardware_fallback_not_engaged_decisions"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+            && check.severity == PreviewDecodePerformanceSeverity::Warn
             && check.observed == 2
             && check.limit == Some(0)
     }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_playback_hardware_fallback_recovery_decisions"
-            && root.area == AppUiPreviewDecodePerformanceArea::Scheduling
+            && root.area == PreviewDecodePerformanceArea::Scheduling
             && root.evidence.contains("current_hardware_fallback_not_engaged_decisions=2")
             && root.evidence.contains("current_proxy_generation_requests=1")
             && root.evidence.contains("current_proxy_generation_request_dedupes=1")
@@ -2850,7 +2884,7 @@ fn preview_decode_performance_report_flags_hardware_fallback_recovery_decisions(
 
 #[test]
 fn preview_decode_performance_report_classifies_queue_wait_bound_frame() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
         decode_in_process_cpu_frames: 1,
         decode_total_duration_us: 12_000,
@@ -2903,8 +2937,8 @@ fn preview_decode_performance_report_classifies_queue_wait_bound_frame() {
             queued_non_playback_lane_eligible_jobs: 2,
             closed: false,
         },
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            scrub_cursor: PreviewDecodeAccessModeProfile {
                 frames: 1,
                 in_process_cpu_frames: 1,
                 total_duration_us: 12_000,
@@ -2928,10 +2962,10 @@ fn preview_decode_performance_report_classifies_queue_wait_bound_frame() {
                     ..PreviewDecodeStageDurations::default()
                 },
                 max_frame_queue_wait_us: 95_000,
-                max_frame_bottleneck: AppUiPreviewDecodeBottleneck::QueueWait,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                max_frame_bottleneck: PreviewDecodeBottleneck::QueueWait,
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
         decode_stage_durations: PreviewDecodeStageDurations {
             packet_decode_us: 10_000,
@@ -2946,14 +2980,14 @@ fn preview_decode_performance_report_classifies_queue_wait_bound_frame() {
             ..PreviewDecodeStageDurations::default()
         },
         decode_max_frame_queue_wait_us: 95_000,
-        decode_max_frame_bottleneck: AppUiPreviewDecodeBottleneck::QueueWait,
+        decode_max_frame_bottleneck: PreviewDecodeBottleneck::QueueWait,
         scheduler: MediaPreviewSchedulerDiagnostics {
             skipped_decode_access_mode_mismatch: 1,
             completed_stale_access_mode_mismatch: 1,
             dropped_pending_window_requests: 2,
             ..MediaPreviewSchedulerDiagnostics::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -2962,11 +2996,11 @@ fn preview_decode_performance_report_classifies_queue_wait_bound_frame() {
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Warn);
     let summary = report.summary.expect("decode summary");
     assert_eq!(
         summary.primary_bottleneck,
-        AppUiPreviewDecodeBottleneck::QueueWait
+        PreviewDecodeBottleneck::QueueWait
     );
     assert_eq!(summary.enqueued_jobs, 4);
     assert_eq!(summary.queue_evicted_prefetch_jobs, 1);
@@ -3027,13 +3061,13 @@ fn preview_decode_performance_report_classifies_queue_wait_bound_frame() {
             && root.evidence.contains("queue_promoted_current_jobs=1")));
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_scrub_cursor_queue_wait_max_us"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+            && check.severity == PreviewDecodePerformanceSeverity::Warn
             && check.observed == 95_000
             && check.limit == Some(50_000)
     }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_access_mode_queue_wait_bound"
-            && root.area == AppUiPreviewDecodePerformanceArea::AccessMode
+            && root.area == PreviewDecodePerformanceArea::AccessMode
             && root.evidence.contains("access_mode=ScrubCursor")
             && root.evidence.contains("queue_wait_max_us=95000")
     }));
@@ -3057,7 +3091,7 @@ fn preview_decode_performance_report_classifies_queue_wait_bound_frame() {
 
 #[test]
 fn preview_decode_performance_report_flags_expired_playback_current_queue() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
         decode_in_process_cpu_frames: 1,
         decode_total_duration_us: 12_000,
@@ -3081,14 +3115,14 @@ fn preview_decode_performance_report_flags_expired_playback_current_queue() {
             closed: false,
             ..MediaPreviewJobQueueDiagnostics::default()
         },
-        playback_schedule: AppUiPreviewPlaybackScheduleDiagnostics {
+        playback_schedule: PreviewPlaybackScheduleDiagnostics {
             current_deadline_assignments: 4,
             current_decode_decisions: 3,
             current_drop_late_decisions: 1,
             current_proxy_or_hardware_recommended_decisions: 1,
-            ..AppUiPreviewPlaybackScheduleDiagnostics::default()
+            ..PreviewPlaybackScheduleDiagnostics::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -3097,7 +3131,7 @@ fn preview_decode_performance_report_flags_expired_playback_current_queue() {
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Warn);
     let summary = report.summary.expect("decode summary");
     assert_eq!(summary.worker_queue.queued_expired_playback_current_jobs, 2);
     assert_eq!(
@@ -3106,13 +3140,13 @@ fn preview_decode_performance_report_flags_expired_playback_current_queue() {
     );
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_expired_playback_current_queue"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+            && check.severity == PreviewDecodePerformanceSeverity::Warn
             && check.observed == 3
             && check.limit == Some(0)
     }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_expired_playback_current_queue"
-            && root.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+            && root.severity == PreviewDecodePerformanceSeverity::Warn
             && root.evidence.contains("queued_expired_playback_current_jobs=2")
             && root.evidence.contains("dropped_expired_playback_current_jobs=1")
             && root.evidence.contains("queued_playback_cursor_jobs=2")
@@ -3129,7 +3163,7 @@ fn preview_decode_performance_report_flags_expired_playback_current_queue() {
 
 #[test]
 fn preview_decode_performance_report_flags_playback_current_stall_expiration() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         playback_current_stalled_expirations: 1,
         queue_canceled_jobs: 1,
         scheduler: MediaPreviewSchedulerDiagnostics {
@@ -3141,7 +3175,7 @@ fn preview_decode_performance_report_flags_playback_current_stall_expiration() {
             in_flight_current_jobs: 1,
             ..MediaPreviewJobQueueDiagnostics::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -3150,22 +3184,22 @@ fn preview_decode_performance_report_flags_playback_current_stall_expiration() {
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Warn);
     let summary = report.summary.expect("decode summary");
     assert_eq!(summary.playback_current_stalled_expirations, 1);
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_evidence_present"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Pass
+            && check.severity == PreviewDecodePerformanceSeverity::Pass
     }));
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_playback_current_stall_expirations"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+            && check.severity == PreviewDecodePerformanceSeverity::Warn
             && check.observed == 1
             && check.limit == Some(0)
     }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_playback_current_stall_expirations"
-            && root.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+            && root.severity == PreviewDecodePerformanceSeverity::Warn
             && root.evidence.contains("playback_current_stalled_expirations=1")
             && root.evidence.contains("queue_canceled_jobs=1")
             && root.evidence.contains("scheduler_canceled_requests=1")
@@ -3180,9 +3214,9 @@ fn preview_decode_performance_report_flags_playback_current_stall_expiration() {
 
 #[test]
 fn preview_decode_performance_report_flags_playback_sustained_pressure() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_canceled_jobs: 2,
-        playback_schedule: AppUiPreviewPlaybackScheduleDiagnostics {
+        playback_schedule: PreviewPlaybackScheduleDiagnostics {
             current_late_streak: 2,
             sustained_pressure_active: true,
             sustained_pressure_events: 1,
@@ -3190,14 +3224,14 @@ fn preview_decode_performance_report_flags_playback_sustained_pressure() {
             current_drop_late_decisions: 2,
             current_proxy_or_hardware_recommended_decisions: 2,
             prefetch_skipped_sustained_pressure: 1,
-            ..AppUiPreviewPlaybackScheduleDiagnostics::default()
+            ..PreviewPlaybackScheduleDiagnostics::default()
         },
         worker_queue: MediaPreviewJobQueueDiagnostics {
             queued_prefetch_jobs: 1,
             in_flight_prefetch_jobs: 1,
             ..MediaPreviewJobQueueDiagnostics::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -3206,16 +3240,16 @@ fn preview_decode_performance_report_flags_playback_sustained_pressure() {
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Warn);
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_playback_sustained_pressure_events"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+            && check.severity == PreviewDecodePerformanceSeverity::Warn
             && check.observed == 1
             && check.limit == Some(0)
     }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_playback_sustained_pressure"
-            && root.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+            && root.severity == PreviewDecodePerformanceSeverity::Warn
             && root.evidence.contains("sustained_pressure_active=true")
             && root.evidence.contains("current_late_streak=2")
             && root.evidence.contains("prefetch_skipped_sustained_pressure=1")
@@ -3228,23 +3262,23 @@ fn preview_decode_performance_report_flags_playback_sustained_pressure() {
 
 #[test]
 fn preview_decode_performance_report_flags_native_import_unavailable_playback_frames() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
         decode_playback_cursor_frames: 1,
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            playback_cursor: PreviewDecodeAccessModeProfile {
                 frames: 1,
                 hardware_decode_prefer_gpu_requested_frames: 1,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        playback_schedule: AppUiPreviewPlaybackScheduleDiagnostics {
+        playback_schedule: PreviewPlaybackScheduleDiagnostics {
             current_native_import_unavailable_decisions: 1,
             current_proxy_or_hardware_recommended_decisions: 1,
-            ..AppUiPreviewPlaybackScheduleDiagnostics::default()
+            ..PreviewPlaybackScheduleDiagnostics::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -3253,16 +3287,16 @@ fn preview_decode_performance_report_flags_native_import_unavailable_playback_fr
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Warn);
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_native_import_unavailable_playback_frames"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+            && check.severity == PreviewDecodePerformanceSeverity::Warn
             && check.observed == 1
             && check.limit == Some(0)
     }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_native_import_unavailable_playback_frames"
-            && root.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+            && root.severity == PreviewDecodePerformanceSeverity::Warn
             && root.evidence.contains("current_native_import_unavailable_decisions=1")
             && root.evidence.contains("playback_gpu_resident_native_frames=0")
     }));
@@ -3274,14 +3308,14 @@ fn preview_decode_performance_report_flags_native_import_unavailable_playback_fr
 
 #[test]
 fn preview_decode_performance_report_flags_hardware_decode_admission_gate() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
         decode_playback_cursor_frames: 1,
-        playback_schedule: AppUiPreviewPlaybackScheduleDiagnostics {
+        playback_schedule: PreviewPlaybackScheduleDiagnostics {
             current_decode_decisions: 1,
-            ..AppUiPreviewPlaybackScheduleDiagnostics::default()
+            ..PreviewPlaybackScheduleDiagnostics::default()
         },
-        hardware_decode_admission: AppUiPreviewHardwareDecodeAdmissionDiagnostics {
+        hardware_decode_admission: PreviewHardwareDecodeAdmissionDiagnostics {
             playback_request: PreviewHardwareDecodeRequest::PreferHardwareDecode,
             renderer_native_import_support_known: true,
             renderer_native_import_ready: false,
@@ -3296,7 +3330,7 @@ fn preview_decode_performance_report_flags_hardware_decode_admission_gate() {
             renderer_supported_handle_kinds: 0,
             renderer_supported_source_texture_formats: 0,
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -3305,16 +3339,16 @@ fn preview_decode_performance_report_flags_hardware_decode_admission_gate() {
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Warn);
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_hardware_decode_admission_gated"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+            && check.severity == PreviewDecodePerformanceSeverity::Warn
             && check.observed == 1
             && check.limit == Some(0)
     }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_hardware_decode_admission_gated"
-            && root.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+            && root.severity == PreviewDecodePerformanceSeverity::Warn
             && root.evidence.contains("playback_hardware_decode_request=PreferHardwareDecode")
             && root.evidence.contains("admission_blocker=Some(RendererImportUnavailable)")
             && root.evidence.contains("renderer_native_import_support_known=true")
@@ -3334,12 +3368,12 @@ fn preview_decode_performance_report_flags_hardware_decode_admission_gate() {
 
 #[test]
 fn preview_decode_performance_report_checks_access_mode_p95_upper_bounds() {
-    let slow_buckets = AppUiPreviewDecodeLatencyBuckets {
+    let slow_buckets = PreviewDecodeLatencyBuckets {
         le_50ms: 1,
         le_80ms: 19,
-        ..AppUiPreviewDecodeLatencyBuckets::default()
+        ..PreviewDecodeLatencyBuckets::default()
     };
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 20,
         decode_in_process_cpu_frames: 20,
         decode_total_duration_us: 1_250_000,
@@ -3349,8 +3383,8 @@ fn preview_decode_performance_report_checks_access_mode_p95_upper_bounds() {
         decode_queue_wait_max_us: 70_000,
         decode_queue_wait_last_us: 60_000,
         decode_current_queue_wait_max_us: 70_000,
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            scrub_cursor: PreviewDecodeAccessModeProfile {
                 frames: 20,
                 in_process_cpu_frames: 20,
                 total_duration_us: 1_250_000,
@@ -3363,11 +3397,11 @@ fn preview_decode_performance_report_checks_access_mode_p95_upper_bounds() {
                 queue_wait_buckets: slow_buckets,
                 bounded_any_seek_strategy_frames: 20,
                 any_seek_window_ms_max: 1,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -3376,15 +3410,15 @@ fn preview_decode_performance_report_checks_access_mode_p95_upper_bounds() {
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_scrub_cursor_p95_frame_us"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+            && check.severity == PreviewDecodePerformanceSeverity::Fail
             && check.observed == 80_000
     }));
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_scrub_cursor_queue_wait_p95_us"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+            && check.severity == PreviewDecodePerformanceSeverity::Warn
             && check.observed == 80_000
     }));
     assert!(report.root_causes.iter().any(|root| {
@@ -3401,7 +3435,7 @@ fn preview_decode_performance_report_checks_access_mode_p95_upper_bounds() {
 
 #[test]
 fn preview_decode_performance_report_fails_invalid_access_mode_admission() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
         decode_in_process_cpu_frames: 1,
         decode_total_duration_us: 12_000,
@@ -3412,7 +3446,7 @@ fn preview_decode_performance_report_fails_invalid_access_mode_admission() {
             dropped_invalid_access_mode_requests: 2,
             ..MediaPreviewSchedulerDiagnostics::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -3421,27 +3455,27 @@ fn preview_decode_performance_report_fails_invalid_access_mode_admission() {
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_invalid_access_mode_requests"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+            && check.severity == PreviewDecodePerformanceSeverity::Fail
             && check.observed == 2
             && check.limit == Some(0)
     }));
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_queue_invalid_access_mode_drops"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+            && check.severity == PreviewDecodePerformanceSeverity::Fail
             && check.observed == 1
             && check.limit == Some(0)
     }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_invalid_access_mode_request"
-            && root.area == AppUiPreviewDecodePerformanceArea::Scheduling
+            && root.area == PreviewDecodePerformanceArea::Scheduling
             && root.evidence.contains("dropped_invalid_access_mode_requests=2")
     }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_queue_invalid_access_mode_drop"
-            && root.area == AppUiPreviewDecodePerformanceArea::Scheduling
+            && root.area == PreviewDecodePerformanceArea::Scheduling
             && root.evidence.contains("queue_invalid_access_mode_drops=1")
     }));
     assert!(report
@@ -3452,7 +3486,7 @@ fn preview_decode_performance_report_fails_invalid_access_mode_admission() {
 
 #[test]
 fn preview_decode_performance_report_fails_worker_transport_drops() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
         decode_in_process_cpu_frames: 1,
         decode_total_duration_us: 12_000,
@@ -3484,7 +3518,7 @@ fn preview_decode_performance_report_fails_worker_transport_drops() {
             dropped_pending_window_requests: 2,
             ..MediaPreviewSchedulerDiagnostics::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -3493,7 +3527,7 @@ fn preview_decode_performance_report_fails_worker_transport_drops() {
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
     let summary = report.summary.expect("decode summary");
     assert_eq!(summary.enqueued_jobs, 3);
     assert_eq!(summary.queue_full_drops, 1);
@@ -3504,19 +3538,19 @@ fn preview_decode_performance_report_fails_worker_transport_drops() {
     assert_eq!(summary.worker_disconnected_drops, 1);
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_worker_queue_full_drops"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+            && check.severity == PreviewDecodePerformanceSeverity::Fail
             && check.observed == 1
             && check.limit == Some(0)
     }));
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_worker_disconnected_drops"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+            && check.severity == PreviewDecodePerformanceSeverity::Fail
             && check.observed == 1
             && check.limit == Some(0)
     }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_worker_queue_full_drops"
-            && root.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+            && root.severity == PreviewDecodePerformanceSeverity::Fail
             && root.evidence.contains("queue_full_drops=1")
             && root.evidence.contains("interactive_cancel_requests=1")
             && root.evidence.contains("interactive_cancel_scheduler_requests=2")
@@ -3526,7 +3560,7 @@ fn preview_decode_performance_report_fails_worker_transport_drops() {
     }));
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_worker_disconnected_drops"
-            && root.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+            && root.severity == PreviewDecodePerformanceSeverity::Fail
             && root.evidence.contains("worker_disconnected_drops=1")
     }));
     assert!(report
@@ -3541,13 +3575,13 @@ fn preview_decode_performance_report_fails_worker_transport_drops() {
 
 #[test]
 fn preview_decode_performance_report_fails_broker_clock_regression() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
         scheduler: MediaPreviewSchedulerDiagnostics {
             clock_regressions: 1,
             ..MediaPreviewSchedulerDiagnostics::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -3556,10 +3590,10 @@ fn preview_decode_performance_report_fails_broker_clock_regression() {
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_broker_clock_regressions"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+            && check.severity == PreviewDecodePerformanceSeverity::Fail
             && check.observed == 1
     }));
     assert!(report.root_causes.iter().any(|root| {
@@ -3570,7 +3604,7 @@ fn preview_decode_performance_report_fails_broker_clock_regression() {
 
 #[test]
 fn preview_decode_performance_report_keeps_queue_wait_evidence_without_successful_frame() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_canceled_jobs: 1,
         decode_canceled_obsolete_jobs: 1,
         decode_canceled_scrub_cursor_jobs: 1,
@@ -3578,18 +3612,18 @@ fn preview_decode_performance_report_keeps_queue_wait_evidence_without_successfu
         decode_queue_wait_max_us: 75_000,
         decode_queue_wait_last_us: 75_000,
         decode_current_queue_wait_max_us: 75_000,
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            scrub_cursor: PreviewDecodeAccessModeProfile {
                 queue_wait_total_us: 75_000,
                 queue_wait_max_us: 75_000,
                 queue_wait_last_us: 75_000,
                 canceled_jobs: 1,
                 canceled_obsolete_jobs: 1,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -3598,10 +3632,10 @@ fn preview_decode_performance_report_keeps_queue_wait_evidence_without_successfu
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Warn);
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_scrub_cursor_queue_wait_max_us"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+            && check.severity == PreviewDecodePerformanceSeverity::Warn
             && check.observed == 75_000
             && check.limit == Some(50_000)
     }));
@@ -3623,7 +3657,7 @@ fn preview_decode_performance_report_keeps_queue_wait_evidence_without_successfu
 
 #[test]
 fn preview_decode_performance_report_accepts_long_work_before_timely_cancellation() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_cancellation: cancellation_evidence(
             mondrian_playback::FrameWorkClass::Interactive,
             mondrian_playback::FrameCancellationCause::Superseded,
@@ -3637,18 +3671,18 @@ fn preview_decode_performance_report_accepts_long_work_before_timely_cancellatio
         decode_canceled_total_duration_us: 85_000,
         decode_canceled_max_duration_us: 85_000,
         decode_canceled_last_duration_us: 85_000,
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            scrub_cursor: PreviewDecodeAccessModeProfile {
                 canceled_jobs: 1,
                 canceled_obsolete_jobs: 1,
                 canceled_total_duration_us: 85_000,
                 canceled_max_duration_us: 85_000,
                 canceled_last_duration_us: 85_000,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -3659,7 +3693,7 @@ fn preview_decode_performance_report_accepts_long_work_before_timely_cancellatio
 
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_cancellation_gate"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Pass
+            && check.severity == PreviewDecodePerformanceSeverity::Pass
     }));
     assert!(!report
         .root_causes
@@ -3673,7 +3707,7 @@ fn preview_decode_performance_report_accepts_long_work_before_timely_cancellatio
 
 #[test]
 fn preview_decode_performance_report_flags_slow_cancel_return_latency() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_cancellation: cancellation_evidence(
             mondrian_playback::FrameWorkClass::Interactive,
             mondrian_playback::FrameCancellationCause::Superseded,
@@ -3690,8 +3724,8 @@ fn preview_decode_performance_report_flags_slow_cancel_return_latency() {
         decode_canceled_return_latency_total_us: 70_000,
         decode_canceled_return_latency_max_us: 70_000,
         decode_canceled_return_latency_last_us: 70_000,
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            scrub_cursor: PreviewDecodeAccessModeProfile {
                 canceled_jobs: 1,
                 canceled_obsolete_jobs: 1,
                 canceled_total_duration_us: 90_000,
@@ -3700,11 +3734,11 @@ fn preview_decode_performance_report_flags_slow_cancel_return_latency() {
                 canceled_return_latency_total_us: 70_000,
                 canceled_return_latency_max_us: 70_000,
                 canceled_return_latency_last_us: 70_000,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -3713,10 +3747,10 @@ fn preview_decode_performance_report_flags_slow_cancel_return_latency() {
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_interactive_cancel_return_latency_max_us"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+            && check.severity == PreviewDecodePerformanceSeverity::Fail
             && check.observed == 70_000
             && check.limit == Some(50_000)
     }));
@@ -3732,7 +3766,7 @@ fn preview_decode_performance_report_flags_slow_cancel_return_latency() {
 
 #[test]
 fn preview_decode_performance_report_flags_slow_cancel_observation_latency() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_cancellation: cancellation_evidence(
             mondrian_playback::FrameWorkClass::Interactive,
             mondrian_playback::FrameCancellationCause::Superseded,
@@ -3750,8 +3784,8 @@ fn preview_decode_performance_report_flags_slow_cancel_observation_latency() {
         decode_cancel_observation_total_us: 8_000,
         decode_cancel_observation_max_us: 8_000,
         decode_cancel_observation_last_us: 8_000,
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            scrub_cursor: PreviewDecodeAccessModeProfile {
                 canceled_jobs: 1,
                 canceled_obsolete_jobs: 1,
                 canceled_total_duration_us: 9_000,
@@ -3761,11 +3795,11 @@ fn preview_decode_performance_report_flags_slow_cancel_observation_latency() {
                 cancel_observation_total_us: 8_000,
                 cancel_observation_max_us: 8_000,
                 cancel_observation_last_us: 8_000,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -3774,10 +3808,10 @@ fn preview_decode_performance_report_flags_slow_cancel_observation_latency() {
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_cancel_observation_max_us"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Fail
+            && check.severity == PreviewDecodePerformanceSeverity::Fail
             && check.observed == 8_000
             && check.limit
                 == Some(
@@ -3798,7 +3832,7 @@ fn preview_decode_performance_report_flags_slow_cancel_observation_latency() {
 
 #[test]
 fn preview_decode_performance_report_classifies_prefetch_deadline_cancellations() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
         decode_canceled_jobs: 3,
         decode_canceled_prefetch_deadline_jobs: 2,
@@ -3825,18 +3859,18 @@ fn preview_decode_performance_report_classifies_prefetch_deadline_cancellations(
             rgba_copy_us: 500,
             ..PreviewDecodeStageDurations::default()
         },
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            playback_cursor: PreviewDecodeAccessModeProfile {
                 frames: 1,
                 in_process_cpu_frames: 1,
                 canceled_jobs: 3,
                 canceled_prefetch_deadline_jobs: 2,
                 canceled_prefetch_preempted_jobs: 1,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -3845,7 +3879,7 @@ fn preview_decode_performance_report_classifies_prefetch_deadline_cancellations(
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Warn);
     let summary = report.summary.expect("decode summary");
     assert_eq!(summary.canceled_jobs, 3);
     assert_eq!(summary.canceled_prefetch_deadline_jobs, 2);
@@ -3874,27 +3908,27 @@ fn preview_decode_performance_report_classifies_prefetch_deadline_cancellations(
 
 #[test]
 fn preview_decode_performance_report_classifies_playback_deadline_cancellations() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_canceled_jobs: 1,
         decode_canceled_playback_deadline_jobs: 1,
         decode_canceled_playback_cursor_jobs: 1,
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            playback_cursor: PreviewDecodeAccessModeProfile {
                 canceled_jobs: 1,
                 canceled_playback_deadline_jobs: 1,
                 queue_wait_max_us: 55_000,
                 max_duration_us: 0,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        playback_schedule: AppUiPreviewPlaybackScheduleDiagnostics {
+        playback_schedule: PreviewPlaybackScheduleDiagnostics {
             current_decode_decisions: 1,
             current_drop_late_decisions: 1,
             current_proxy_or_hardware_recommended_decisions: 1,
-            ..AppUiPreviewPlaybackScheduleDiagnostics::default()
+            ..PreviewPlaybackScheduleDiagnostics::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -3903,7 +3937,7 @@ fn preview_decode_performance_report_classifies_playback_deadline_cancellations(
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Warn);
     let summary = report.summary.expect("decode summary");
     assert_eq!(summary.canceled_playback_deadline_jobs, 1);
     assert!(report.root_causes.iter().any(|root| {
@@ -3922,7 +3956,7 @@ fn preview_decode_performance_report_classifies_playback_deadline_cancellations(
 
 #[test]
 fn preview_decode_performance_report_classifies_still_preemptions() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
         decode_canceled_jobs: 1,
         decode_canceled_still_preempted_jobs: 1,
@@ -3938,17 +3972,17 @@ fn preview_decode_performance_report_classifies_still_preemptions() {
             queued_random_access_still_jobs: 1,
             ..MediaPreviewJobQueueDiagnostics::default()
         },
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            random_access_still: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            random_access_still: PreviewDecodeAccessModeProfile {
                 frames: 1,
                 in_process_cpu_frames: 1,
                 canceled_jobs: 1,
                 canceled_still_preempted_jobs: 1,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -3957,13 +3991,13 @@ fn preview_decode_performance_report_classifies_still_preemptions() {
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Warn);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Warn);
     let summary = report.summary.expect("decode summary");
     assert_eq!(summary.canceled_still_preempted_jobs, 1);
     assert_eq!(summary.canceled_random_access_still_jobs, 1);
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_still_preempted_by_realtime_cancellations"
-            && check.severity == AppUiPreviewDecodePerformanceSeverity::Warn
+            && check.severity == PreviewDecodePerformanceSeverity::Warn
             && check.observed == 1
             && check.limit == Some(0)
     }));
@@ -3981,7 +4015,7 @@ fn preview_decode_performance_report_classifies_still_preemptions() {
 
 #[test]
 fn preview_decode_performance_report_breaks_down_unknown_cancellations_by_access_mode() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_cancellation: cancellation_evidence(
             mondrian_playback::FrameWorkClass::Still,
             mondrian_playback::FrameCancellationCause::Unknown,
@@ -3992,15 +4026,15 @@ fn preview_decode_performance_report_breaks_down_unknown_cancellations_by_access
         decode_canceled_jobs: 1,
         decode_canceled_unknown_jobs: 1,
         decode_canceled_random_access_still_jobs: 1,
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            random_access_still: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            random_access_still: PreviewDecodeAccessModeProfile {
                 canceled_jobs: 1,
                 canceled_unknown_jobs: 1,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -4009,7 +4043,7 @@ fn preview_decode_performance_report_breaks_down_unknown_cancellations_by_access
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewDecodePerformanceVerdict::Fail);
+    assert_eq!(report.verdict, PreviewDecodePerformanceVerdict::Fail);
     assert!(report.root_causes.iter().any(|root| {
         root.code == "preview_decode_cancellation_gate_failed"
             && root.evidence.contains("UnknownCause")
@@ -4018,7 +4052,7 @@ fn preview_decode_performance_report_breaks_down_unknown_cancellations_by_access
 
 #[test]
 fn preview_decode_performance_report_flags_playback_without_locality() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 2,
         decode_in_process_cpu_frames: 2,
         decode_total_duration_us: 80_000,
@@ -4037,8 +4071,8 @@ fn preview_decode_performance_report_flags_playback_without_locality() {
             packet_decode_us: 30_000,
             ..PreviewDecodeStageDurations::default()
         },
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            playback_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            playback_cursor: PreviewDecodeAccessModeProfile {
                 frames: 2,
                 in_process_cpu_frames: 2,
                 total_duration_us: 80_000,
@@ -4060,11 +4094,11 @@ fn preview_decode_performance_report_flags_playback_without_locality() {
                     packet_decode_us: 30_000,
                     ..PreviewDecodeStageDurations::default()
                 },
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -4090,12 +4124,12 @@ fn preview_decode_performance_report_flags_playback_without_locality() {
 
 #[test]
 fn preview_render_performance_report_classifies_output_boundary_bound_slow_frame() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         render_timed_frames: 1,
         render_total_duration_us: 120_000,
         render_max_duration_us: 120_000,
         render_last_duration_us: 120_000,
-        render_stage_durations: AppUiPreviewRenderStageDurations {
+        render_stage_durations: PreviewRenderStageDurations {
             resolve_us: 2_000,
             final_cache_lookup_us: 100,
             working_prepare_us: 7_000,
@@ -4103,7 +4137,7 @@ fn preview_render_performance_report_classifies_output_boundary_bound_slow_frame
             cpu_output_boundary_us: 90_000,
             frame_packaging_us: 900,
         },
-        render_max_frame_stage_durations: AppUiPreviewRenderStageDurations {
+        render_max_frame_stage_durations: PreviewRenderStageDurations {
             resolve_us: 2_000,
             final_cache_lookup_us: 100,
             working_prepare_us: 7_000,
@@ -4111,7 +4145,7 @@ fn preview_render_performance_report_classifies_output_boundary_bound_slow_frame
             cpu_output_boundary_us: 90_000,
             frame_packaging_us: 900,
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_render_performance_report(
@@ -4120,11 +4154,11 @@ fn preview_render_performance_report_classifies_output_boundary_bound_slow_frame
         50_000,
     );
 
-    assert_eq!(report.verdict, AppUiPreviewRenderPerformanceVerdict::Fail);
+    assert_eq!(report.verdict, PreviewRenderPerformanceVerdict::Fail);
     let summary = report.summary.expect("render summary");
     assert_eq!(
         summary.primary_bottleneck,
-        AppUiPreviewRenderBottleneck::CpuOutputBoundary
+        PreviewRenderBottleneck::CpuOutputBoundary
     );
     assert!(report
         .root_causes
@@ -4142,7 +4176,7 @@ fn preview_render_performance_report_classifies_output_boundary_bound_slow_frame
 
 #[test]
 fn preview_performance_reports_classify_slowest_frame_not_aggregate_total() {
-    let decode_diagnostics = AppUiPreviewDiagnostics {
+    let decode_diagnostics = PreviewDiagnostics {
         decode_successes: 2,
         decode_in_process_cpu_frames: 2,
         decode_total_duration_us: 160_000,
@@ -4161,7 +4195,7 @@ fn preview_performance_reports_classify_slowest_frame_not_aggregate_total() {
             rgba_copy_us: 2_000,
             ..PreviewDecodeStageDurations::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
     let decode_report = build_preview_decode_performance_report(
         decode_diagnostics.decode_performance_summary(50_000),
@@ -4171,29 +4205,29 @@ fn preview_performance_reports_classify_slowest_frame_not_aggregate_total() {
 
     assert_eq!(
         decode_report.summary.expect("decode summary").primary_bottleneck,
-        AppUiPreviewDecodeBottleneck::PacketDecode
+        PreviewDecodeBottleneck::PacketDecode
     );
     assert!(decode_report
         .root_causes
         .iter()
         .any(|root| root.evidence.contains("packet_decode_us=95000")));
 
-    let render_diagnostics = AppUiPreviewDiagnostics {
+    let render_diagnostics = PreviewDiagnostics {
         render_timed_frames: 2,
         render_total_duration_us: 160_000,
         render_max_duration_us: 120_000,
         render_last_duration_us: 40_000,
-        render_stage_durations: AppUiPreviewRenderStageDurations {
+        render_stage_durations: PreviewRenderStageDurations {
             cpu_composite_us: 200_000,
             cpu_output_boundary_us: 30_000,
-            ..AppUiPreviewRenderStageDurations::default()
+            ..PreviewRenderStageDurations::default()
         },
-        render_max_frame_stage_durations: AppUiPreviewRenderStageDurations {
+        render_max_frame_stage_durations: PreviewRenderStageDurations {
             cpu_composite_us: 20_000,
             cpu_output_boundary_us: 90_000,
-            ..AppUiPreviewRenderStageDurations::default()
+            ..PreviewRenderStageDurations::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
     let render_report = build_preview_render_performance_report(
         render_diagnostics.render_performance_summary(50_000),
@@ -4203,7 +4237,7 @@ fn preview_performance_reports_classify_slowest_frame_not_aggregate_total() {
 
     assert_eq!(
         render_report.summary.expect("render summary").primary_bottleneck,
-        AppUiPreviewRenderBottleneck::CpuOutputBoundary
+        PreviewRenderBottleneck::CpuOutputBoundary
     );
     assert!(render_report
         .root_causes
@@ -4213,7 +4247,7 @@ fn preview_performance_reports_classify_slowest_frame_not_aggregate_total() {
 
 #[test]
 fn preview_decode_bottleneck_uses_queue_wait_from_same_slowest_frame() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
         decode_in_process_cpu_frames: 1,
         decode_total_duration_us: 120_000,
@@ -4232,8 +4266,8 @@ fn preview_decode_bottleneck_uses_queue_wait_from_same_slowest_frame() {
             ..PreviewDecodeStageDurations::default()
         },
         decode_max_frame_queue_wait_us: 1_000,
-        decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles {
-            scrub_cursor: AppUiPreviewDecodeAccessModeProfile {
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            scrub_cursor: PreviewDecodeAccessModeProfile {
                 frames: 1,
                 in_process_cpu_frames: 1,
                 total_duration_us: 120_000,
@@ -4252,12 +4286,12 @@ fn preview_decode_bottleneck_uses_queue_wait_from_same_slowest_frame() {
                     ..PreviewDecodeStageDurations::default()
                 },
                 max_frame_queue_wait_us: 1_000,
-                max_frame_bottleneck: AppUiPreviewDecodeBottleneck::PacketDecode,
-                ..AppUiPreviewDecodeAccessModeProfile::default()
+                max_frame_bottleneck: PreviewDecodeBottleneck::PacketDecode,
+                ..PreviewDecodeAccessModeProfile::default()
             },
-            ..AppUiPreviewDecodeAccessModeProfiles::default()
+            ..PreviewDecodeAccessModeProfiles::default()
         },
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let report = build_preview_decode_performance_report(
@@ -4269,7 +4303,7 @@ fn preview_decode_bottleneck_uses_queue_wait_from_same_slowest_frame() {
     let summary = report.summary.expect("decode summary");
     assert_eq!(
         summary.primary_bottleneck,
-        AppUiPreviewDecodeBottleneck::PacketDecode
+        PreviewDecodeBottleneck::PacketDecode
     );
     assert_eq!(summary.queue_wait_max_us, 200_000);
     assert_eq!(summary.max_frame_queue_wait_us, 1_000);
@@ -4286,7 +4320,7 @@ fn preview_decode_bottleneck_uses_queue_wait_from_same_slowest_frame() {
 
 #[test]
 fn preview_diagnostics_count_input_color_resolution_sources() {
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
 
     service.record_input_color_resolution(InputColorResolutionSource::Override);
     service.record_input_color_resolution(InputColorResolutionSource::DataTexture);
@@ -4306,13 +4340,13 @@ fn preview_diagnostics_count_input_color_resolution_sources() {
 
 #[test]
 fn preview_diagnostics_derives_composite_color_path_summary() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         color_composite_elements: 5,
         color_composite_float_linear: 2,
         color_composite_legacy_rgba8: 1,
         color_composite_legacy_media_transform: 1,
         color_composite_legacy_adjustment_effect: 2,
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let summary = diagnostics.composite_color_path_summary();
@@ -4327,12 +4361,9 @@ fn preview_diagnostics_derives_composite_color_path_summary() {
 
 #[test]
 fn preview_diagnostics_derives_color_health_summary() {
-    assert_eq!(
-        AppUiPreviewDiagnostics::default().color_health_summary(),
-        None
-    );
+    assert_eq!(PreviewDiagnostics::default().color_health_summary(), None);
 
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         input_color_resolution_override: 2,
         input_color_resolution_data_texture: 3,
         input_color_resolution_detected_metadata: 5,
@@ -4353,7 +4384,7 @@ fn preview_diagnostics_derives_color_health_summary() {
         color_composite_float_linear: 2,
         color_composite_legacy_rgba8: 1,
         color_composite_legacy_media_transform: 1,
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let summary = diagnostics.color_health_summary().expect("preview color health");
@@ -4388,7 +4419,7 @@ fn preview_diagnostics_derives_color_health_summary() {
 }
 
 fn assert_preview_export_color_health_match(
-    preview: AppUiPreviewColorHealthSummary,
+    preview: PreviewColorHealthSummary,
     export: mondrian_export::queue::ExportJobColorDiagnosticsSummary,
 ) {
     assert_eq!(export.diagnosed_frames, 1);
@@ -4428,12 +4459,12 @@ fn assert_preview_export_color_health_match(
 
 #[test]
 fn unresolved_effect_domain_is_a_distinct_fail_closed_preview_failure() {
-    let diagnostics = AppUiPreviewDiagnostics {
+    let diagnostics = PreviewDiagnostics {
         color_composite_plans: 1,
         color_composite_elements: 1,
         color_composite_blocked_domains: 1,
         color_composite_blocked_media_effect_domain: 1,
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
 
     let composite = diagnostics.composite_color_path_summary();
@@ -4444,10 +4475,10 @@ fn unresolved_effect_domain_is_a_distinct_fail_closed_preview_failure() {
 
     let summary = diagnostics.color_health_summary().expect("preview color health");
     let report = summary.health_report("effect-domain-blocker");
-    assert_eq!(report.verdict, AppUiPreviewColorHealthVerdict::Fail);
+    assert_eq!(report.verdict, PreviewColorHealthVerdict::Fail);
     assert!(report.checks.iter().any(|check| {
         check.code == color_report_vocab::check::EFFECT_DOMAIN_BLOCKERS
-            && check.severity == AppUiPreviewColorHealthSeverity::Fail
+            && check.severity == PreviewColorHealthSeverity::Fail
             && check.observed == 1
     }));
     assert!(report
@@ -4464,7 +4495,7 @@ fn unresolved_effect_domain_is_a_distinct_fail_closed_preview_failure() {
 }
 
 fn assert_preview_export_color_reports_match(
-    preview: &AppUiPreviewColorHealthReport,
+    preview: &PreviewColorHealthReport,
     export: &mondrian_export::queue::ExportColorHealthReport,
 ) {
     assert_eq!(
@@ -4485,11 +4516,11 @@ fn assert_preview_export_color_reports_match(
     );
 }
 
-fn preview_color_report_verdict(verdict: AppUiPreviewColorHealthVerdict) -> &'static str {
+fn preview_color_report_verdict(verdict: PreviewColorHealthVerdict) -> &'static str {
     match verdict {
-        AppUiPreviewColorHealthVerdict::Pass => "pass",
-        AppUiPreviewColorHealthVerdict::Warn => "warn",
-        AppUiPreviewColorHealthVerdict::Fail => "fail",
+        PreviewColorHealthVerdict::Pass => "pass",
+        PreviewColorHealthVerdict::Warn => "warn",
+        PreviewColorHealthVerdict::Fail => "fail",
     }
 }
 
@@ -4504,7 +4535,7 @@ fn export_color_report_verdict(
 }
 
 fn preview_shared_check_signature(
-    report: &AppUiPreviewColorHealthReport,
+    report: &PreviewColorHealthReport,
 ) -> Vec<(String, String, String, u64, Option<u64>)> {
     let mut signature = report
         .checks
@@ -4558,7 +4589,7 @@ fn is_shared_color_report_check(code: &str) -> bool {
 }
 
 fn preview_root_cause_signature(
-    report: &AppUiPreviewColorHealthReport,
+    report: &PreviewColorHealthReport,
 ) -> Vec<(String, String, String, String)> {
     let mut signature = report
         .root_causes
@@ -4596,7 +4627,7 @@ fn export_root_cause_signature(
     signature
 }
 
-fn preview_action_signature(report: &AppUiPreviewColorHealthReport) -> Vec<(String, String)> {
+fn preview_action_signature(report: &PreviewColorHealthReport) -> Vec<(String, String)> {
     let mut signature = report
         .actions
         .iter()
@@ -4661,11 +4692,11 @@ fn normalized_color_action_code(code: &str) -> &str {
     }
 }
 
-fn preview_color_report_severity(severity: AppUiPreviewColorHealthSeverity) -> &'static str {
+fn preview_color_report_severity(severity: PreviewColorHealthSeverity) -> &'static str {
     match severity {
-        AppUiPreviewColorHealthSeverity::Pass => "pass",
-        AppUiPreviewColorHealthSeverity::Warn => "warn",
-        AppUiPreviewColorHealthSeverity::Fail => "fail",
+        PreviewColorHealthSeverity::Pass => "pass",
+        PreviewColorHealthSeverity::Warn => "warn",
+        PreviewColorHealthSeverity::Fail => "fail",
     }
 }
 
@@ -4798,7 +4829,7 @@ fn nested_solid_color_sequence_returns_preview_frame() {
     state.sequence = Some(parent);
     state.seek(3);
 
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
     let frame = service.viewer_preview_for_state(&state);
     let frame = ready_frame(frame);
 
@@ -4817,7 +4848,7 @@ fn unsupported_media_plan_returns_no_partial_preview() {
         .expect("media clip should be insertable");
     state.sequence = Some(sequence);
 
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
 
     assert!(matches!(
         service.viewer_preview_for_state(&state),
@@ -4836,7 +4867,7 @@ fn repeated_same_viewer_request_does_not_obsolete_in_flight_decode() {
     state.sequence = Some(sequence);
     state.seek(3);
 
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
     let _ = service.viewer_preview_for_state(&state);
     let first_generation = service.diagnostics().scheduler.latest_generation;
     let _ = service.viewer_preview_for_state(&state);
@@ -4853,7 +4884,7 @@ fn repeated_same_viewer_request_does_not_obsolete_in_flight_decode() {
 
 #[test]
 fn preview_raster_key_changes_when_render_plan_changes() {
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
     let first = service.viewer_preview_for_state(&state_with_solid_color_clip(Color::from_rgba8(
         255, 0, 0, 255,
     )));
@@ -4868,7 +4899,7 @@ fn preview_raster_key_changes_when_render_plan_changes() {
 
 #[test]
 fn deterministic_solid_preview_reuses_raster_key_across_frames() {
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(255, 128, 0, 255));
 
     let first = ready_frame(service.viewer_preview_for_state(&state));
@@ -5310,7 +5341,7 @@ fn preview_input_color_resolution_honors_override_metadata_and_missing_policy() 
 
 #[test]
 fn preview_color_rejection_preserves_resolution_and_media_diagnostic() {
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
     let mut color_context = test_color_context(ColorSpace::Rec709);
     color_context.working_color_space = WorkingColorSpace::LinearRec2020;
     color_context.missing_metadata_policy = MissingColorMetadataPolicy::RejectMedia;
@@ -5361,7 +5392,7 @@ fn preview_color_rejection_preserves_resolution_and_media_diagnostic() {
         }
     };
 
-    service.record_color_rejection(AppUiPreviewColorRejection::new(
+    service.record_color_rejection(PreviewColorRejection::new(
         asset_id,
         path.clone(),
         resolution,
@@ -5392,9 +5423,9 @@ fn preview_color_rejection_preserves_resolution_and_media_diagnostic() {
 
 #[test]
 fn preview_render_request_clears_stale_color_rejection() {
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
     let color_context = test_color_context(ColorSpace::Rec709);
-    service.record_color_rejection(AppUiPreviewColorRejection::new(
+    service.record_color_rejection(PreviewColorRejection::new(
         AssetId::new(),
         PathBuf::from("E:/media/old.mov"),
         resolve_preview_input_color_space(
@@ -5842,7 +5873,7 @@ fn preview_and_export_composite_color_path_summaries_match_for_frame() {
     let mut state = AppState::new();
     state.sequence = Some(sequence.clone());
     state.seek(0);
-    let preview_service = AppUiPreviewService::new();
+    let preview_service = WindowPreviewAdapter::new();
     let preview_frame = preview_service.viewer_preview_for_state(&state);
     let preview_frame = ready_frame(preview_frame);
     let preview_summary = preview_service.diagnostics().composite_color_path_summary();
@@ -5906,7 +5937,7 @@ fn preview_single_media_color_output_matches_export_composite_contract() {
         frame_seed: 0,
     }];
     let mut preview_scratch = TimelineCompositeScratch::default();
-    let preview_service = AppUiPreviewService::new();
+    let preview_service = WindowPreviewAdapter::new();
     let preview = composite_resolved_preview(1, 1, &resolved, &color_context, &mut preview_scratch)
         .expect("preview color composite");
     preview_service.record_cpu_execution_evidence(&preview);
@@ -5987,7 +6018,7 @@ fn preview_camera_log_input_matches_export_frame_hash() {
         Resolution { width: 2, height: 2 },
         3_003,
         mondrian_playback::FramePresentationQuality::Ready,
-        AppUiPreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
+        PreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
     );
     let mut color_context = test_color_context(ColorSpace::Srgb);
     color_context.working_color_space = WorkingColorSpace::LinearRec2020;
@@ -6001,7 +6032,7 @@ fn preview_camera_log_input_matches_export_frame_hash() {
         effect_graph: Arc::clone(&effect_graph),
         frame_seed: 3_003,
     }];
-    let preview_service = AppUiPreviewService::new();
+    let preview_service = WindowPreviewAdapter::new();
     let mut preview_scratch = TimelineCompositeScratch::default();
     let preview = composite_resolved_preview(2, 2, &resolved, &color_context, &mut preview_scratch)
         .expect("preview camera-log composite");
@@ -6090,7 +6121,7 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
         logical_resolution,
         2_020,
         mondrian_playback::FramePresentationQuality::Ready,
-        AppUiPreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
+        PreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
     );
     let solid = TimelineSolidColorLayer {
         color: Color::from_rgba8(32, 180, 220, 255),
@@ -6117,7 +6148,7 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
         ResolvedPreviewElement::SolidColor(solid.clone()),
     ];
     let mut preview_scratch = TimelineCompositeScratch::default();
-    let preview_service = AppUiPreviewService::new();
+    let preview_service = WindowPreviewAdapter::new();
     let preview = composite_resolved_preview(2, 2, &resolved, &color_context, &mut preview_scratch)
         .expect("preview multilayer composite");
     preview_service.record_cpu_execution_evidence(&preview);
@@ -6174,7 +6205,7 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
     assert_eq!(preview.composite_diagnostics.legacy_solid_transform, 0);
 
     let preview_composite_summary = preview.composite_diagnostics.color_path_summary();
-    let preview_diagnostics = AppUiPreviewDiagnostics {
+    let preview_diagnostics = PreviewDiagnostics {
         color_stage_total_stages: preview.color_stage_diagnostics.total_stages,
         color_stage_cpu_input_stages: preview.color_stage_diagnostics.cpu_input_stages,
         color_stage_cpu_output_stages: preview.color_stage_diagnostics.cpu_output_stages,
@@ -6224,7 +6255,7 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
         color_composite_legacy_adjustment_effect: preview
             .composite_diagnostics
             .legacy_adjustment_effect,
-        ..AppUiPreviewDiagnostics::default()
+        ..PreviewDiagnostics::default()
     };
     let preview_health = preview_diagnostics.color_health_summary().expect("preview color health");
     assert_eq!(
@@ -6250,7 +6281,7 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
 
 #[test]
 fn stale_viewer_frame_is_scoped_to_sequence_and_dimensions() {
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
     let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     let sequence = state.sequence.as_ref().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
@@ -6272,7 +6303,7 @@ fn stale_viewer_frame_is_scoped_to_sequence_and_dimensions() {
 
 #[test]
 fn playback_prefetch_yields_while_current_frame_is_pending() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     state.play();
     let sequence = state.sequence.as_ref().expect("sequence");
@@ -6289,8 +6320,8 @@ fn playback_prefetch_yields_while_current_frame_is_pending() {
 
 #[test]
 fn stalled_playback_current_expiration_releases_pending_and_queued_work() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
-    let demand_identity = AppUiPreviewService::test_frame_demand_identity();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let demand_identity = WindowPreviewAdapter::test_frame_demand_identity();
     service.seed_pending_playback_current_preview_work_for_test(demand_identity);
 
     let before = service.diagnostics();
@@ -6323,8 +6354,8 @@ fn stalled_playback_current_expiration_releases_pending_and_queued_work() {
 
 #[test]
 fn expired_work_cannot_publish_late_after_its_demand_completed() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
-    let completed_identity = AppUiPreviewService::test_frame_demand_identity();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let completed_identity = WindowPreviewAdapter::test_frame_demand_identity();
     service.seed_pending_playback_current_preview_work_for_test(completed_identity);
     let mut engine = mondrian_playback::PlaybackEngine::new(
         Rational::new(1, 25),
@@ -6361,7 +6392,7 @@ fn expired_work_cannot_publish_late_after_its_demand_completed() {
 
 #[test]
 fn stalled_scrub_releases_capacity_without_reporting_playback_delivery() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     service.seed_pending_preview_work_with_access_mode_for_test(
         PreviewDecodeAccessMode::ScrubCursor,
         None,
@@ -6381,9 +6412,9 @@ fn stalled_scrub_releases_capacity_without_reporting_playback_delivery() {
 
 #[test]
 fn repeated_late_playback_current_frames_enter_pressure_recovery() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
 
-    let demand_identity = AppUiPreviewService::test_frame_demand_identity();
+    let demand_identity = WindowPreviewAdapter::test_frame_demand_identity();
     service.seed_pending_playback_current_preview_work_for_test(demand_identity);
     assert!(
         service
@@ -6411,7 +6442,7 @@ fn repeated_late_playback_current_frames_enter_pressure_recovery() {
 
 #[test]
 fn playback_pressure_skips_new_current_decode_when_realtime_work_is_pending() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let key = test_media_key(200);
     assert_eq!(
         service.jobs.enqueue(MediaPreviewJob {
@@ -6458,7 +6489,7 @@ fn playback_pressure_skips_new_current_decode_when_realtime_work_is_pending() {
 
 #[test]
 fn playback_pressure_allows_recovery_decode_when_no_realtime_work_is_pending() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     service
         .record_playback_current_late_drop(MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD);
 
@@ -6483,7 +6514,7 @@ fn playback_pressure_allows_recovery_decode_when_no_realtime_work_is_pending() {
 
 #[test]
 fn realtime_current_preempts_queued_still_work_before_queue_is_full() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let still_key = test_media_key(203);
     let scrub_key = test_media_key(204);
 
@@ -6519,7 +6550,7 @@ fn realtime_current_preempts_queued_still_work_before_queue_is_full() {
 
 #[test]
 fn realtime_current_keeps_in_flight_still_pending_for_structured_preemption() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let still_key = test_media_key(205);
     let scrub_key = test_media_key(206);
     let generation = service.execution.borrow().generation();
@@ -6569,7 +6600,7 @@ fn realtime_current_keeps_in_flight_still_pending_for_structured_preemption() {
 
 #[test]
 fn playback_pressure_recovery_suppresses_forward_prefetch_until_current_success() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     state.play();
     let sequence = state.sequence.as_ref().expect("sequence");
@@ -6604,7 +6635,7 @@ fn playback_pressure_recovery_suppresses_forward_prefetch_until_current_success(
 
 #[test]
 fn playback_prefetch_yields_while_current_work_is_queued() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     state.play();
     let sequence = state.sequence.as_ref().expect("sequence");
@@ -6641,7 +6672,7 @@ fn playback_prefetch_yields_while_current_work_is_queued() {
 
 #[test]
 fn playback_prefetch_yields_while_current_work_is_in_flight() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     state.play();
     let sequence = state.sequence.as_ref().expect("sequence");
@@ -6669,7 +6700,7 @@ fn playback_prefetch_yields_while_current_work_is_in_flight() {
 
 #[test]
 fn playback_prefetch_yields_when_prefetch_backlog_already_covers_window() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     state.play();
     let sequence = state.sequence.as_ref().expect("sequence");
@@ -6712,7 +6743,7 @@ fn playback_prefetch_yields_when_prefetch_backlog_already_covers_window() {
 
 #[test]
 fn playback_prefetch_yields_when_in_flight_prefetch_covers_window() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     state.play();
     let sequence = state.sequence.as_ref().expect("sequence");
@@ -6750,7 +6781,7 @@ fn playback_prefetch_yields_when_in_flight_prefetch_covers_window() {
 
 #[test]
 fn playback_prefetch_tops_up_only_remaining_window_slots() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let (mut state, _, root) = state_with_invalid_video_asset();
     state.play();
     let sequence = state.sequence.as_ref().expect("sequence");
@@ -6795,7 +6826,7 @@ fn playback_prefetch_tops_up_only_remaining_window_slots() {
 
 #[test]
 fn playback_prefetch_tops_up_only_remaining_in_flight_window_slots() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let (mut state, _, root) = state_with_invalid_video_asset();
     state.play();
     let sequence = state.sequence.as_ref().expect("sequence");
@@ -6833,7 +6864,7 @@ fn playback_prefetch_tops_up_only_remaining_in_flight_window_slots() {
 
 #[test]
 fn playback_prefetch_tops_up_by_actual_jobs_across_tracks() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let (mut state, root) = state_with_two_invalid_video_assets();
     state.play();
     let sequence = state.sequence.as_ref().expect("sequence");
@@ -6879,11 +6910,11 @@ fn playback_prefetch_tops_up_by_actual_jobs_across_tracks() {
 
 #[test]
 fn queued_expiry_completes_matching_demand_without_cancellation_latency_evidence() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let result_tx = install_preview_result_channel_for_test(&service);
     let key = test_media_key(76);
     let generation = service.scheduler.begin_generation();
-    let demand_identity = AppUiPreviewService::test_frame_demand_identity();
+    let demand_identity = WindowPreviewAdapter::test_frame_demand_identity();
     assert_eq!(
         service.scheduler.request_with_demand_identity(
             key.clone(),
@@ -6941,11 +6972,11 @@ fn queued_expiry_completes_matching_demand_without_cancellation_latency_evidence
 
 #[test]
 fn preview_service_poll_releases_expired_playback_deadline_without_preview_refresh() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let result_tx = install_preview_result_channel_for_test(&service);
     let key = test_media_key(77);
     let generation = service.scheduler.begin_generation();
-    let demand_identity = AppUiPreviewService::test_frame_demand_identity();
+    let demand_identity = WindowPreviewAdapter::test_frame_demand_identity();
     assert_eq!(
         service.scheduler.request_with_demand_identity(
             key.clone(),
@@ -7011,7 +7042,7 @@ fn preview_service_poll_releases_expired_playback_deadline_without_preview_refre
 
 #[test]
 fn preview_service_poll_drops_successful_playback_completion_after_deadline() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     state.play();
     let demand_identity = state
@@ -7075,7 +7106,7 @@ fn preview_service_poll_drops_successful_playback_completion_after_deadline() {
 
 #[test]
 fn preview_service_stale_late_completion_cannot_publish_terminal_delivery() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     state.play();
     let demand_identity = state
@@ -7116,7 +7147,7 @@ fn preview_service_stale_late_completion_cannot_publish_terminal_delivery() {
 
 #[test]
 fn preview_service_current_late_completion_cannot_revive_replaced_playback_demand() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     state.play();
     let completed_identity = state
@@ -7165,7 +7196,7 @@ fn preview_service_current_late_completion_cannot_revive_replaced_playback_deman
 
 #[test]
 fn preview_service_deadline_uses_worker_completion_not_later_poll_time() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     state.play();
     let demand_identity = state
@@ -7220,7 +7251,7 @@ fn preview_service_deadline_uses_worker_completion_not_later_poll_time() {
 
 #[test]
 fn preview_service_stages_presentable_hardware_fallback_until_presentation() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     state.play();
     let demand_identity = state
@@ -7300,7 +7331,7 @@ fn preview_service_stages_presentable_hardware_fallback_until_presentation() {
 
 #[test]
 fn preview_service_poll_separates_canceled_backlog_from_visible_change() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let result_tx = install_preview_result_channel_for_test(&service);
     let generation = service.scheduler.begin_generation();
 
@@ -7354,7 +7385,7 @@ fn preview_service_poll_separates_canceled_backlog_from_visible_change() {
 
 #[test]
 fn canceled_current_scrub_requests_follow_up_render_for_settled_frame() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let result_tx = install_preview_result_channel_for_test(&service);
     let generation = service.scheduler.begin_generation();
     let key = test_media_key(91);
@@ -7403,7 +7434,7 @@ fn canceled_current_scrub_requests_follow_up_render_for_settled_frame() {
 #[test]
 fn failed_current_media_preview_cache_does_not_leave_viewer_loading() {
     let (state, asset_id, root) = state_with_invalid_video_asset();
-    let service = AppUiPreviewService::new();
+    let service = WindowPreviewAdapter::new();
     let sequence = state.sequence.as_ref().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
     let color_context = sequence
@@ -7440,7 +7471,7 @@ fn failed_current_media_preview_cache_does_not_leave_viewer_loading() {
 #[test]
 fn media_preview_cache_identity_changes_with_range_override() {
     let (state, asset_id, root) = state_with_invalid_video_asset();
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let sequence = state.sequence.as_ref().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
     let color_context = sequence
@@ -7501,7 +7532,7 @@ fn media_preview_cache_identity_changes_with_range_override() {
 #[test]
 fn playing_cached_media_preview_defers_sync_raster_composite() {
     let (mut state, asset_id, root) = state_with_invalid_video_asset();
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let sequence = state.sequence.as_ref().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
     let color_context = sequence
@@ -7574,7 +7605,7 @@ fn test_media_key(source_frame: i64) -> MediaPreviewKey {
 }
 
 fn begin_test_media_execution(
-    service: &AppUiPreviewService,
+    service: &WindowPreviewAdapter,
     key: MediaPreviewKey,
     generation: u64,
     priority: MediaPreviewRequestPriority,
@@ -7618,7 +7649,7 @@ fn test_cpu_frame_store(
 }
 
 fn install_preview_result_channel_for_test(
-    service: &AppUiPreviewService,
+    service: &WindowPreviewAdapter,
 ) -> mpsc::Sender<MediaPreviewResult> {
     let (result_tx, result_rx) = mpsc::channel();
     service.results.replace(result_rx);
@@ -7691,7 +7722,7 @@ fn test_media_frame_rgba(
         Resolution { width, height },
         signature,
         mondrian_playback::FramePresentationQuality::Ready,
-        AppUiPreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
+        PreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
     )
 }
 
@@ -7788,7 +7819,7 @@ fn media_preview_gpu_source_caches_lazy_cpu_working_transform() {
         Resolution { width: 1, height: 1 },
         42,
         mondrian_playback::FramePresentationQuality::Ready,
-        AppUiPreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
+        PreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
     );
 
     let first = frame.working_frame().expect("first lazy working transform");
@@ -7823,7 +7854,7 @@ fn media_preview_scene_linear_source_stays_gpu_eligible_and_lazily_caches_cpu_fa
         Resolution { width: 2, height: 1 },
         43,
         mondrian_playback::FramePresentationQuality::Ready,
-        AppUiPreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
+        PreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
     );
 
     let gpu_source = frame.gpu_source().expect("scene-linear GPU source");
@@ -7843,7 +7874,7 @@ fn media_preview_scene_linear_source_stays_gpu_eligible_and_lazily_caches_cpu_fa
 
 #[test]
 fn gpu_viewer_hardware_decode_admission_covers_every_access_mode() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
 
     assert_eq!(
         service.hardware_decode_request_for_access_mode(PreviewDecodeAccessMode::PlaybackCursor),
@@ -7899,7 +7930,7 @@ fn gpu_viewer_hardware_decode_admission_covers_every_access_mode() {
 
 #[test]
 fn gpu_viewer_hardware_decode_admission_is_scoped_to_native_surface_format() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     service.set_playback_hardware_decode_admission(PlaybackHardwareDecodeAdmission {
         request: PreviewHardwareDecodeRequest::PreferGpuResident,
         hardware_decode_device_selector: Some(HwAccelDeviceSelector::D3D12VaAdapterIndex(1)),
@@ -8261,7 +8292,7 @@ fn media_preview_failure_cache_updates_existing_key_without_growing() {
 
 #[test]
 fn preview_service_cancel_interactive_work_clears_pending_and_cached_state() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let key = test_media_key(1);
     let generation = service.scheduler.begin_generation();
     assert_eq!(
@@ -8318,7 +8349,7 @@ fn preview_service_cancel_interactive_work_clears_pending_and_cached_state() {
 
 #[test]
 fn preview_service_completion_poll_respects_result_count_budget() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let results = install_preview_result_channel_for_test(&service);
     let generation = service.scheduler.begin_generation();
     for index in 0..3 {
@@ -8363,7 +8394,7 @@ fn preview_service_completion_poll_respects_result_count_budget() {
 
 #[test]
 fn preview_service_completion_poll_respects_time_budget() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let results = install_preview_result_channel_for_test(&service);
     let generation = service.scheduler.begin_generation();
     for index in 0..2 {
@@ -8584,7 +8615,7 @@ fn media_preview_cancel_observation_uses_competing_request_timestamp() {
 
 #[test]
 fn preview_service_shutdown_does_not_block_on_busy_worker() {
-    let service = AppUiPreviewService::new_without_workers_for_test();
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
 

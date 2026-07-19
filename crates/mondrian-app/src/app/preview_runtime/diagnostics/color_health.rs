@@ -3,30 +3,30 @@
 use super::*;
 
 /// Schema version for preview color health reports.
-pub const APP_UI_PREVIEW_COLOR_HEALTH_REPORT_SCHEMA_VERSION: u32 = 2;
+pub const PREVIEW_COLOR_HEALTH_REPORT_SCHEMA_VERSION: u32 = 2;
 
 /// Versioned preview color health report for UI, telemetry, and perf artifacts.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewColorHealthReport {
+pub struct PreviewColorHealthReport {
     /// Report schema version.
     pub schema_version: u32,
     /// Applied report profile.
     pub profile: String,
     /// Overall preview color health verdict.
-    pub verdict: AppUiPreviewColorHealthVerdict,
+    pub verdict: PreviewColorHealthVerdict,
     /// Structured color health summary used as report evidence.
-    pub summary: Option<AppUiPreviewColorHealthSummary>,
+    pub summary: Option<PreviewColorHealthSummary>,
     /// Structured checks by preview color-pipeline area.
-    pub checks: Vec<AppUiPreviewColorHealthCheck>,
+    pub checks: Vec<PreviewColorHealthCheck>,
     /// Prioritized machine-readable root causes.
-    pub root_causes: Vec<AppUiPreviewColorHealthRootCause>,
+    pub root_causes: Vec<PreviewColorHealthRootCause>,
     /// Suggested engineering or operator actions.
-    pub actions: Vec<AppUiPreviewColorHealthAction>,
+    pub actions: Vec<PreviewColorHealthAction>,
 }
 
 /// Overall preview color health verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub enum AppUiPreviewColorHealthVerdict {
+pub enum PreviewColorHealthVerdict {
     /// Preview color path met all fail-closed checks.
     Pass,
     /// Preview color path passed hard checks but has warning evidence.
@@ -37,7 +37,7 @@ pub enum AppUiPreviewColorHealthVerdict {
 
 /// Preview color diagnostic area.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub enum AppUiPreviewColorHealthArea {
+pub enum PreviewColorHealthArea {
     /// Evidence capture and summary availability.
     CaptureIntegrity,
     /// Input media metadata and policy handling.
@@ -52,7 +52,7 @@ pub enum AppUiPreviewColorHealthArea {
 
 /// Preview color health check severity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub enum AppUiPreviewColorHealthSeverity {
+pub enum PreviewColorHealthSeverity {
     /// Check passed.
     Pass,
     /// Check produced warning evidence.
@@ -63,13 +63,13 @@ pub enum AppUiPreviewColorHealthSeverity {
 
 /// One preview color health check.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewColorHealthCheck {
+pub struct PreviewColorHealthCheck {
     /// Diagnostic area for this check.
-    pub area: AppUiPreviewColorHealthArea,
+    pub area: PreviewColorHealthArea,
     /// Stable check code.
     pub code: &'static str,
     /// Check severity.
-    pub severity: AppUiPreviewColorHealthSeverity,
+    pub severity: PreviewColorHealthSeverity,
     /// Observed value.
     pub observed: u64,
     /// Optional target or threshold.
@@ -78,47 +78,47 @@ pub struct AppUiPreviewColorHealthCheck {
 
 /// One preview color health root cause.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewColorHealthRootCause {
+pub struct PreviewColorHealthRootCause {
     /// Diagnostic area for this root cause.
-    pub area: AppUiPreviewColorHealthArea,
+    pub area: PreviewColorHealthArea,
     /// Stable root-cause code.
     pub code: &'static str,
     /// Root-cause severity.
-    pub severity: AppUiPreviewColorHealthSeverity,
+    pub severity: PreviewColorHealthSeverity,
     /// Compact evidence string.
     pub evidence: String,
 }
 
 /// One preview color health action.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewColorHealthAction {
+pub struct PreviewColorHealthAction {
     /// Diagnostic area for this action.
-    pub area: AppUiPreviewColorHealthArea,
+    pub area: PreviewColorHealthArea,
     /// Stable action code.
     pub code: &'static str,
     /// Human-readable action.
     pub description: &'static str,
 }
 
-impl AppUiPreviewColorHealthSummary {
+impl PreviewColorHealthSummary {
     /// Build the versioned preview color health report for this summary.
-    pub fn health_report(self, profile: impl Into<String>) -> AppUiPreviewColorHealthReport {
+    pub fn health_report(self, profile: impl Into<String>) -> PreviewColorHealthReport {
         build_preview_color_health_report(Some(self), profile)
     }
 }
 
 /// Build a versioned preview color health report from an optional summary.
 pub fn build_preview_color_health_report(
-    summary: Option<AppUiPreviewColorHealthSummary>,
+    summary: Option<PreviewColorHealthSummary>,
     profile: impl Into<String>,
-) -> AppUiPreviewColorHealthReport {
+) -> PreviewColorHealthReport {
     let mut checks = Vec::new();
     let mut root_causes = Vec::new();
     let mut actions = Vec::new();
 
     push_preview_bool_check(
         &mut checks,
-        AppUiPreviewColorHealthArea::CaptureIntegrity,
+        PreviewColorHealthArea::CaptureIntegrity,
         "color_health_present",
         summary.is_some(),
     );
@@ -126,68 +126,68 @@ pub fn build_preview_color_health_report(
     if let Some(summary) = summary {
         push_preview_bool_check(
             &mut checks,
-            AppUiPreviewColorHealthArea::CompositePath,
+            PreviewColorHealthArea::CompositePath,
             color_report_vocab::check::FULLY_FLOAT_LINEAR,
             summary.fully_float_linear,
         );
         push_preview_bool_check(
             &mut checks,
-            AppUiPreviewColorHealthArea::StageScheduling,
+            PreviewColorHealthArea::StageScheduling,
             color_report_vocab::check::GPU_PATH_READY,
             summary.gpu_path_ready,
         );
         push_preview_max_check(
             &mut checks,
-            AppUiPreviewColorHealthArea::StageScheduling,
+            PreviewColorHealthArea::StageScheduling,
             color_report_vocab::check::GPU_BLOCKERS,
             summary.gpu_blockers,
             0,
         );
         push_preview_max_check(
             &mut checks,
-            AppUiPreviewColorHealthArea::StageScheduling,
+            PreviewColorHealthArea::StageScheduling,
             color_report_vocab::check::TRANSFER_STAGES,
             summary.transfer_stages,
             0,
         );
         push_preview_max_check(
             &mut checks,
-            AppUiPreviewColorHealthArea::CompositePath,
+            PreviewColorHealthArea::CompositePath,
             color_report_vocab::check::LEGACY_REASON_TOTAL,
             summary.legacy_reason_total,
             0,
         );
         push_preview_max_check(
             &mut checks,
-            AppUiPreviewColorHealthArea::CompositePath,
+            PreviewColorHealthArea::CompositePath,
             color_report_vocab::check::EFFECT_DOMAIN_BLOCKERS,
             summary.domain_blockers.total().max(summary.blocked_color_domain_composites),
             0,
         );
         push_preview_max_check(
             &mut checks,
-            AppUiPreviewColorHealthArea::InputColorPolicy,
+            PreviewColorHealthArea::InputColorPolicy,
             color_report_vocab::check::POLICY_REJECTIONS,
             summary.policy_rejections,
             0,
         );
         push_preview_max_check(
             &mut checks,
-            AppUiPreviewColorHealthArea::StageScheduling,
+            PreviewColorHealthArea::StageScheduling,
             color_report_vocab::check::CPU_OUTPUT_FALLBACK_FRAMES,
             summary.cpu_output_fallback_frames,
             0,
         );
         push_preview_max_check(
             &mut checks,
-            AppUiPreviewColorHealthArea::StageScheduling,
+            PreviewColorHealthArea::StageScheduling,
             color_report_vocab::check::GPU_OUTPUT_BLOCKERS,
             summary.preview_gpu_output_blocker_breakdown.total(),
             0,
         );
         push_preview_max_check(
             &mut checks,
-            AppUiPreviewColorHealthArea::UnsupportedFeature,
+            PreviewColorHealthArea::UnsupportedFeature,
             "unsupported_feature_count",
             summary.preview_gpu_output_blocker_breakdown.unsupported_features,
             0,
@@ -197,7 +197,7 @@ pub fn build_preview_color_health_report(
         push_preview_root_cause_with_action(
             &mut root_causes,
             &mut actions,
-            AppUiPreviewColorHealthArea::CaptureIntegrity,
+            PreviewColorHealthArea::CaptureIntegrity,
             "missing_preview_color_evidence",
             "color_health_present=false".to_owned(),
             "inspect_preview_diagnostics",
@@ -205,22 +205,20 @@ pub fn build_preview_color_health_report(
         );
     }
 
-    let has_failures = checks
-        .iter()
-        .any(|check| check.severity == AppUiPreviewColorHealthSeverity::Fail);
-    let has_warnings = checks
-        .iter()
-        .any(|check| check.severity == AppUiPreviewColorHealthSeverity::Warn);
+    let has_failures =
+        checks.iter().any(|check| check.severity == PreviewColorHealthSeverity::Fail);
+    let has_warnings =
+        checks.iter().any(|check| check.severity == PreviewColorHealthSeverity::Warn);
     let verdict = if has_failures {
-        AppUiPreviewColorHealthVerdict::Fail
+        PreviewColorHealthVerdict::Fail
     } else if has_warnings {
-        AppUiPreviewColorHealthVerdict::Warn
+        PreviewColorHealthVerdict::Warn
     } else {
-        AppUiPreviewColorHealthVerdict::Pass
+        PreviewColorHealthVerdict::Pass
     };
 
-    AppUiPreviewColorHealthReport {
-        schema_version: APP_UI_PREVIEW_COLOR_HEALTH_REPORT_SCHEMA_VERSION,
+    PreviewColorHealthReport {
+        schema_version: PREVIEW_COLOR_HEALTH_REPORT_SCHEMA_VERSION,
         profile: profile.into(),
         verdict,
         summary,
@@ -231,19 +229,19 @@ pub fn build_preview_color_health_report(
 }
 
 fn push_preview_max_check(
-    checks: &mut Vec<AppUiPreviewColorHealthCheck>,
-    area: AppUiPreviewColorHealthArea,
+    checks: &mut Vec<PreviewColorHealthCheck>,
+    area: PreviewColorHealthArea,
     code: &'static str,
     observed: u64,
     limit: u64,
 ) {
-    checks.push(AppUiPreviewColorHealthCheck {
+    checks.push(PreviewColorHealthCheck {
         area,
         code,
         severity: if observed > limit {
-            AppUiPreviewColorHealthSeverity::Fail
+            PreviewColorHealthSeverity::Fail
         } else {
-            AppUiPreviewColorHealthSeverity::Pass
+            PreviewColorHealthSeverity::Pass
         },
         observed,
         limit: Some(limit),
@@ -251,18 +249,18 @@ fn push_preview_max_check(
 }
 
 fn push_preview_bool_check(
-    checks: &mut Vec<AppUiPreviewColorHealthCheck>,
-    area: AppUiPreviewColorHealthArea,
+    checks: &mut Vec<PreviewColorHealthCheck>,
+    area: PreviewColorHealthArea,
     code: &'static str,
     passed: bool,
 ) {
-    checks.push(AppUiPreviewColorHealthCheck {
+    checks.push(PreviewColorHealthCheck {
         area,
         code,
         severity: if passed {
-            AppUiPreviewColorHealthSeverity::Pass
+            PreviewColorHealthSeverity::Pass
         } else {
-            AppUiPreviewColorHealthSeverity::Fail
+            PreviewColorHealthSeverity::Fail
         },
         observed: if passed { 1 } else { 0 },
         limit: Some(1),
@@ -270,15 +268,15 @@ fn push_preview_bool_check(
 }
 
 fn push_preview_root_causes_and_actions(
-    summary: AppUiPreviewColorHealthSummary,
-    root_causes: &mut Vec<AppUiPreviewColorHealthRootCause>,
-    actions: &mut Vec<AppUiPreviewColorHealthAction>,
+    summary: PreviewColorHealthSummary,
+    root_causes: &mut Vec<PreviewColorHealthRootCause>,
+    actions: &mut Vec<PreviewColorHealthAction>,
 ) {
     if summary.policy_rejections > 0 {
         push_preview_root_cause_with_action(
             root_causes,
             actions,
-            AppUiPreviewColorHealthArea::InputColorPolicy,
+            PreviewColorHealthArea::InputColorPolicy,
             color_report_vocab::root_cause::INPUT_COLOR_POLICY_REJECTED_SOURCE,
             format!("policy_rejections={}", summary.policy_rejections),
             color_report_vocab::action::INSPECT_ASSET_COLOR_DIAGNOSTICS,
@@ -289,7 +287,7 @@ fn push_preview_root_causes_and_actions(
         push_preview_root_cause_with_action(
             root_causes,
             actions,
-            AppUiPreviewColorHealthArea::StageScheduling,
+            PreviewColorHealthArea::StageScheduling,
             "preview_gpu_color_stage_blocked",
             format!(
                 "gpu_blockers={} shader={} ocio={} wrapper={} pipeline={}",
@@ -309,7 +307,7 @@ fn push_preview_root_causes_and_actions(
         push_preview_root_cause_with_action(
             root_causes,
             actions,
-            AppUiPreviewColorHealthArea::StageScheduling,
+            PreviewColorHealthArea::StageScheduling,
             "preview_transfer_stage_present",
             format!("transfer_stages={}", summary.transfer_stages),
             color_report_vocab::action::REMOVE_TRANSFER_STAGE,
@@ -320,7 +318,7 @@ fn push_preview_root_causes_and_actions(
         push_preview_root_cause_with_action(
             root_causes,
             actions,
-            AppUiPreviewColorHealthArea::CompositePath,
+            PreviewColorHealthArea::CompositePath,
             color_report_vocab::root_cause::LEGACY_RGBA8_COMPOSITE_PATH,
             format!(
                 "fully_float_linear={} legacy_reason_total={}",
@@ -334,7 +332,7 @@ fn push_preview_root_causes_and_actions(
         push_preview_root_cause_with_action(
             root_causes,
             actions,
-            AppUiPreviewColorHealthArea::CompositePath,
+            PreviewColorHealthArea::CompositePath,
             color_report_vocab::root_cause::EFFECT_DOMAIN_UNRESOLVED,
             format!(
                 "blocked_composites={} media={} solid={} adjustment={}",
@@ -351,7 +349,7 @@ fn push_preview_root_causes_and_actions(
         push_preview_root_cause_with_action(
             root_causes,
             actions,
-            AppUiPreviewColorHealthArea::CompositePath,
+            PreviewColorHealthArea::CompositePath,
             "preview_gpu_compositing_cpu_fallback",
             format!(
                 "cpu_fallback_composites={} cpu_composited_pixels={} first_blocker={:?}",
@@ -367,7 +365,7 @@ fn push_preview_root_causes_and_actions(
         push_preview_root_cause_with_action(
             root_causes,
             actions,
-            AppUiPreviewColorHealthArea::StageScheduling,
+            PreviewColorHealthArea::StageScheduling,
             "preview_cpu_output_fallback",
             format!(
                 "cpu_output_fallback_frames={} cpu_output_fallback_pixels={}",
@@ -382,7 +380,7 @@ fn push_preview_root_causes_and_actions(
         push_preview_root_cause_with_action(
             root_causes,
             actions,
-            AppUiPreviewColorHealthArea::StageScheduling,
+            PreviewColorHealthArea::StageScheduling,
             "preview_gpu_output_blocked",
             format!(
                 "total_blockers={} ocio_config={} ocio_processor={} shader_extraction={} \
@@ -412,7 +410,7 @@ fn push_preview_root_causes_and_actions(
         push_preview_root_cause_with_action(
             root_causes,
             actions,
-            AppUiPreviewColorHealthArea::UnsupportedFeature,
+            PreviewColorHealthArea::UnsupportedFeature,
             "preview_unsupported_feature",
             format!(
                 "unsupported_features={}",
@@ -425,24 +423,24 @@ fn push_preview_root_causes_and_actions(
 }
 
 fn push_preview_root_cause_with_action(
-    root_causes: &mut Vec<AppUiPreviewColorHealthRootCause>,
-    actions: &mut Vec<AppUiPreviewColorHealthAction>,
-    area: AppUiPreviewColorHealthArea,
+    root_causes: &mut Vec<PreviewColorHealthRootCause>,
+    actions: &mut Vec<PreviewColorHealthAction>,
+    area: PreviewColorHealthArea,
     root_code: &'static str,
     evidence: String,
     action_code: &'static str,
     action_description: &'static str,
 ) {
     if !root_causes.iter().any(|root| root.code == root_code) {
-        root_causes.push(AppUiPreviewColorHealthRootCause {
+        root_causes.push(PreviewColorHealthRootCause {
             area,
             code: root_code,
-            severity: AppUiPreviewColorHealthSeverity::Fail,
+            severity: PreviewColorHealthSeverity::Fail,
             evidence,
         });
     }
     if !actions.iter().any(|action| action.code == action_code) {
-        actions.push(AppUiPreviewColorHealthAction {
+        actions.push(PreviewColorHealthAction {
             area,
             code: action_code,
             description: action_description,

@@ -153,7 +153,8 @@ Playback-frame refreshes use a narrow UI update path: the host advances
 `AppState`, then refreshes viewer playback chrome/frame data and the timeline
 playhead without rebuilding the full dock tree.
 
-`AppUiPreviewService` owns media preview scheduling. Each viewer preview request
+`app::preview_runtime::PreviewProductionRuntime` owns media preview scheduling.
+`WindowPreviewAdapter` is only its Window output specialization. Each viewer preview request
 starts a monotonic generation, and background media jobs check that their key is
 still requested by the latest generation before decoding. Completed stale jobs
 may warm the cache, but they do not force a UI refresh for an older playback
@@ -352,8 +353,8 @@ diagnostic bookkeeping. Project close cancels queued and in-flight preview work,
 clears preview caches/failure caches, and leaves workers alive for the next
 project. Application quit additionally closes the preview worker queue and must
 not perform a workspace-to-startup native-window role sync on the way out.
-`AppUiPreviewService::diagnostics()` exposes an immutable observation snapshot;
-the sibling `app_ui::preview::diagnostics` Module exclusively owns its typed
+`PreviewProductionRuntime::diagnostics()` exposes an immutable observation snapshot;
+the sibling `app::preview_runtime::diagnostics` Module exclusively owns its typed
 decode/render/color evidence models and fail-closed report construction. The
 realtime preview implementation records facts but does not contain acceptance
 thresholds, root-cause classification, or remediation text. This keeps the
@@ -364,7 +365,7 @@ backpressure drops, stale completions, decode failures, and GPU preview
 candidate readiness without changing timeline evaluation. Scrub-adaptive
 request counters expose whether interactive seeks are using normal, hot-region,
 slow-latency, or recovery policy. Each service call produces
-`preview_candidate_id`, and the same id is propagated into `AppUiGpuPreviewFrame`
+`preview_candidate_id`, and the same id is propagated into `PreviewGpuFrame`
 when the frame is ready. Window-level telemetry records this candidate id and
 state alongside structured runtime/stage evidence so a JSONL record can be
 linked against the exact working-space attempt that fed it.
@@ -375,15 +376,16 @@ retains that output without blocking the UI thread; subsequent event-loop turns
 may retry the current candidate, while superseded candidates are discarded by
 normal preview identity rules. This prevents transient native bridge or GPU
 queue pressure from producing a blank Viewer.
-The private `app_ui::preview::presentation` Module is the sole Window-side
-arbitrator for registered external textures, raster-cache hits, scoped stale
+The private `app::preview_runtime::presentation` Module is the sole application
+arbitrator for registered outputs, raster-cache hits, scoped stale
 content, deferred playback composites, CPU output transformation, packaging,
-and pinning. The parent Preview Adapter coordinates scheduling and diagnostics;
+and pinning. The production Runtime coordinates scheduling and diagnostics;
 `app::preview_execution` remains the sole generation/candidate/registered-output
 lifecycle owner. This Locality prevents UI redraw code from reconstructing a
 second output-selection policy. Raster cache and stale pinning retain the
-UI-independent `PreviewRasterFrame`; this final Window Adapter performs the only
-conversion to `ViewerFrameImage` and shares the existing pixel allocation.
+UI-independent `PreviewRasterFrame`; the shallow `app_ui::preview` Window
+Adapter performs the only conversion to `ViewerFrameImage` and shares the
+existing pixel allocation.
 CPU color/composite execution itself is not Window-owned:
 `app::preview_cpu_execution` returns the final raster, complete execution facts,
 and stage durations. Presentation records those facts into Window diagnostics

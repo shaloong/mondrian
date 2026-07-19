@@ -474,7 +474,7 @@ raw CICP tags rather than rebuilding diagnostics from path or decoder text.
 Export jobs carry this as `TimelineExportInput.asset_color_diagnostics`, and
 preview emits the same diagnostic summary when missing-metadata policy rejects a
 media asset. Preview also stores the latest viewer-request rejection as
-`AppUiPreviewColorRejection` so panels, diagnostics, and automated smoke tests
+`PreviewColorRejection` so panels, diagnostics, and automated smoke tests
 can inspect the rejected asset id, path, missing-metadata policy,
 `InputColorResolution` branch, working color space, and media diagnostic summary
 without scraping logs. Playback prefetch must not overwrite this viewer-facing
@@ -746,9 +746,9 @@ User scrub/play
   → prepare_viewer_gpu_preview(device, queue, session, host)
     → resolve the currently laid-out ViewerExternalTexturePresentation
     → host.gpu_preview_frame_for_current_state()
-      → AppUiPreviewService::gpu_preview_frame_for_state()
+      → WindowPreviewAdapter::gpu_preview_frame_for_state()
         → resolve_sequence_elements()  [timeline render plan]
-        → returns AppUiGpuPreviewFrame {
+        → returns PreviewGpuFrame {
             working_input,
             program_output_boundary,
             monitor_adaptation,

@@ -3,7 +3,7 @@
 use super::*;
 use crate::app::preview_media_task::MediaPreviewCancellationPhase;
 
-impl AppUiPreviewService {
+impl<O: Clone> PreviewProductionRuntime<O> {
     /// Poll completed background media preview decodes.
     pub fn poll_finished(
         &self,

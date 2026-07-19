@@ -20,9 +20,8 @@ use crate::app::native_video_import::resolve_playback_hardware_decode_admission;
 use crate::app::playback_preview::{
     observe_playback_video_preroll as observe_preview_preroll, pump_playback_preview,
 };
-use crate::app::preview_execution::{
-    PreviewGpuFrame as AppUiGpuPreviewFrame, PreviewGpuFrameState as AppUiGpuPreviewFrameState,
-};
+use crate::app::preview_execution::{PreviewGpuFrame, PreviewGpuFrameState};
+use crate::app::preview_runtime::PreviewColorRejection;
 use crate::app::ui_actions::{
     AssetsOpenFolderPayload, PreferencesShortcutPayload, PreferencesShortcutReboundPayload,
     PreferencesThemePayload, PreferencesWaveformDisplayPayload,
@@ -46,7 +45,7 @@ use crate::app_ui::preferences_store::{
     app_ui_preferences_path, load_app_ui_preferences, persist_app_ui_preferences_to,
     AppUiPreferences,
 };
-use crate::app_ui::preview::{AppUiPreviewColorRejection, AppUiPreviewService};
+use crate::app_ui::preview::{WindowPreviewAdapter, WindowPreviewOutputRegistration};
 use crate::app_ui::shell::{try_resolve_app_shell_action, AppUiAppRoot};
 use crate::app_ui::shortcuts::{
     default_shortcuts, is_known_shortcut_id, AppUiShortcutBinding, AppUiShortcutKey,
@@ -93,7 +92,7 @@ pub struct AppUiHost {
     recovery_candidates: Vec<CrashRecoveryCandidate>,
     asset_thumbnails: AssetThumbnailCache,
     waveform_cache: AudioWaveformCache,
-    preview_service: AppUiPreviewService,
+    preview_service: WindowPreviewAdapter,
     playback_feedback: ViewerPlaybackFeedback,
     mode: AppUiMode,
     system_theme_preset: ThemePreset,
@@ -125,7 +124,7 @@ impl AppUiHost {
         if let Some(ref library) = app_state.asset_library {
             waveform_cache.set_library(Arc::clone(library));
         }
-        let preview_service = AppUiPreviewService::new();
+        let preview_service = WindowPreviewAdapter::new();
         let root = AppUiAppRoot::from_app_state_with_preferences_thumbnails_and_preview(
             &app_state,
             &preferences,
@@ -243,7 +242,7 @@ impl AppUiHost {
     }
 
     /// Build a GPU-output preview candidate for the current app state.
-    pub(crate) fn gpu_preview_frame_for_current_state(&self) -> AppUiGpuPreviewFrameState {
+    pub(crate) fn gpu_preview_frame_for_current_state(&self) -> PreviewGpuFrameState {
         let state = self.app_state.borrow();
         self.preview_service.gpu_preview_frame_for_state(&state)
     }
@@ -271,7 +270,7 @@ impl AppUiHost {
     /// Advertise a registered GPU preview texture as the viewer frame for its resolved plan.
     pub(crate) fn set_external_viewer_frame(
         &self,
-        frame: &AppUiGpuPreviewFrame,
+        frame: &PreviewGpuFrame,
         texture_key: impl Into<String>,
         presentation: mondrian_ui_widgets::ViewerExternalTexturePresentation,
     ) -> bool {
@@ -329,7 +328,7 @@ impl AppUiHost {
     }
 
     /// Latest structured preview color rejection, if the current viewer request was rejected.
-    pub(crate) fn current_viewer_color_rejection(&self) -> Option<AppUiPreviewColorRejection> {
+    pub(crate) fn current_viewer_color_rejection(&self) -> Option<PreviewColorRejection> {
         self.preview_service.last_color_rejection()
     }
 
@@ -1551,7 +1550,7 @@ mod tests {
             temp_preferences_path(name),
         );
         host.preview_service.shutdown();
-        host.preview_service = AppUiPreviewService::new_without_workers_for_test();
+        host.preview_service = WindowPreviewAdapter::new_without_workers_for_test();
         host
     }
 

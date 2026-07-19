@@ -1,4 +1,4 @@
-//! Window Adapter for UI-independent recursive Preview Timeline execution.
+//! Production Adapter for UI-independent recursive Preview Timeline execution.
 
 use super::*;
 use crate::app::preview_timeline_execution::{
@@ -6,7 +6,7 @@ use crate::app::preview_timeline_execution::{
     PreviewTimelineResolution, ResolvedPreviewPlan,
 };
 
-impl AppUiPreviewService {
+impl<O: Clone> PreviewProductionRuntime<O> {
     pub(super) fn resolve_sequence_elements(
         &self,
         state: &AppState,
@@ -61,7 +61,7 @@ impl AppUiPreviewService {
                     durations.working_prepare_us.saturating_add(durations.cpu_composite_us);
                 self.record_render_stage_durations(
                     total_us,
-                    AppUiPreviewRenderStageDurations::from_cpu_execution(durations),
+                    PreviewRenderStageDurations::from_cpu_execution(durations),
                 );
             }
         }

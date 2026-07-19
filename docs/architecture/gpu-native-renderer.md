@@ -253,7 +253,7 @@ discard decoder bridge pools. It allocates native import frame ids from the same
 `RenderGpuOutputBoundaryRuntime` namespace that will receive the returned
 working resources, preventing resource-table id collisions.
 Renderer/platform readiness must remain in
-`AppUiPreviewHardwareDecodeAdmissionDiagnostics`. It must not be copied into
+`PreviewHardwareDecodeAdmissionDiagnostics`. It must not be copied into
 media `HwAccelProbe`, `PreviewDecodeDiagnostics`, hardware-decode decisions, or
 media blocker enums. Media reports whether decode produced a retained native
 surface; the app separately reports whether renderer and platform capabilities
@@ -789,7 +789,8 @@ format, selected `SurfaceColorSpace`, SDR/HDR mode, available surface formats,
 per-format surface color-space capabilities, `display_hdr_info` and tone-map
 headroom diagnostics, present modes, alpha modes, and monitor fingerprint.
 Viewer preview evaluation now splits at the correct boundary:
-`AppUiPreviewService` resolves the timeline and composites a working-space
+`app::preview_runtime::PreviewProductionRuntime` resolves the timeline and
+composites a working-space
 `CpuColorFrame`, while the app window validates the requested display boundary
 against that contract and records the display/output boundary through the
 session-owned GPU runtime. Unsupported presentation requests, such as HDR output
@@ -850,7 +851,7 @@ Successful native frames also attach the cumulative
 prefilter/Lanczos passes, and output pixels) to the Viewer GPU JSONL report;
 spatial execution must not be inferred only from an external texture success.
 Headless smoke tests cannot create this window/session boundary, so
-`AppUiPreviewService::diagnostics()` separately reports GPU preview candidate
+`PreviewProductionRuntime::diagnostics()` separately reports GPU preview candidate
 requests, ready/current/loading/unavailable outcomes, candidate pixels, and
 external-frame handoff counters. Those counters prove the service produced a
 working-frame candidate for the window path; they do not replace the

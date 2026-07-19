@@ -932,27 +932,27 @@ fn push_failure(
 mod tests {
     use super::*;
 
-    type AppUiPreviewDiagnostics = PreviewRuntimeAcceptanceEvidence;
-    type AppUiPreviewDecodeExecutionSummary = PresentedDecodeExecutionEvidence;
-    type AppUiPreviewDecodeAccessModeProfile = PlaybackDecodeExecutionEvidence;
+    type PreviewDiagnostics = PreviewRuntimeAcceptanceEvidence;
+    type PreviewDecodeExecutionSummary = PresentedDecodeExecutionEvidence;
+    type PreviewDecodeAccessModeProfile = PlaybackDecodeExecutionEvidence;
 
     #[test]
     fn accepts_presented_main10_hardware_execution() {
         let media = main10_media();
         let evidence = passing_playback_evidence();
-        let diagnostics = AppUiPreviewDiagnostics::default();
+        let diagnostics = PreviewDiagnostics::default();
         let observation = ProfessionalPlaybackObservation {
             media: &media,
-            rendered_decode_execution: AppUiPreviewDecodeExecutionSummary {
+            rendered_decode_execution: PreviewDecodeExecutionSummary {
                 media_layers: 100,
                 hardware_cpu_transfer_layers: 60,
                 hardware_native_layers: 40,
                 p010_10_bit_hardware_layers: 100,
-                ..AppUiPreviewDecodeExecutionSummary::default()
+                ..PreviewDecodeExecutionSummary::default()
             },
             viewer_fallback_count: 0,
             viewer_fallback_reasons: &[],
-            playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
+            playback_decode: PreviewDecodeAccessModeProfile::default(),
             playback_evidence: &evidence,
             preview_diagnostics: &diagnostics,
             process_memory: &passing_process_memory_evidence(),
@@ -984,21 +984,21 @@ mod tests {
             execution_to_checkpoint: Some(std::time::Duration::from_millis(20)),
             request_to_checkpoint: Some(std::time::Duration::from_millis(1)),
         });
-        let diagnostics = AppUiPreviewDiagnostics {
+        let diagnostics = PreviewDiagnostics {
             decode_cancellation: cancellation.report(),
-            ..AppUiPreviewDiagnostics::default()
+            ..PreviewDiagnostics::default()
         };
         let observation = ProfessionalPlaybackObservation {
             media: &media,
-            rendered_decode_execution: AppUiPreviewDecodeExecutionSummary {
+            rendered_decode_execution: PreviewDecodeExecutionSummary {
                 media_layers: 100,
                 hardware_native_layers: 100,
                 p010_10_bit_hardware_layers: 100,
-                ..AppUiPreviewDecodeExecutionSummary::default()
+                ..PreviewDecodeExecutionSummary::default()
             },
             viewer_fallback_count: 0,
             viewer_fallback_reasons: &[],
-            playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
+            playback_decode: PreviewDecodeAccessModeProfile::default(),
             playback_evidence: &evidence,
             preview_diagnostics: &diagnostics,
             process_memory: &passing_process_memory_evidence(),
@@ -1020,20 +1020,20 @@ mod tests {
     fn rejects_unproven_identity_and_software_presentation() {
         let mut media = main10_media();
         let evidence = passing_playback_evidence();
-        let diagnostics = AppUiPreviewDiagnostics::default();
+        let diagnostics = PreviewDiagnostics::default();
         media.codec_profile = VideoCodecProfile::Unknown;
         media.frame_rate_proven = false;
         media.pixel_format_proven = false;
         let observation = ProfessionalPlaybackObservation {
             media: &media,
-            rendered_decode_execution: AppUiPreviewDecodeExecutionSummary {
+            rendered_decode_execution: PreviewDecodeExecutionSummary {
                 media_layers: 10,
                 software_cpu_layers: 10,
-                ..AppUiPreviewDecodeExecutionSummary::default()
+                ..PreviewDecodeExecutionSummary::default()
             },
             viewer_fallback_count: 0,
             viewer_fallback_reasons: &[],
-            playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
+            playback_decode: PreviewDecodeAccessModeProfile::default(),
             playback_evidence: &evidence,
             preview_diagnostics: &diagnostics,
             process_memory: &passing_process_memory_evidence(),
@@ -1100,18 +1100,18 @@ mod tests {
         let mut media = main10_media();
         media.total_frames = Some(44_999);
         let evidence = passing_playback_evidence();
-        let diagnostics = AppUiPreviewDiagnostics::default();
+        let diagnostics = PreviewDiagnostics::default();
         let report = evaluate_professional_playback(ProfessionalPlaybackObservation {
             media: &media,
-            rendered_decode_execution: AppUiPreviewDecodeExecutionSummary {
+            rendered_decode_execution: PreviewDecodeExecutionSummary {
                 media_layers: 100,
                 hardware_native_layers: 100,
                 p010_10_bit_hardware_layers: 100,
-                ..AppUiPreviewDecodeExecutionSummary::default()
+                ..PreviewDecodeExecutionSummary::default()
             },
             viewer_fallback_count: 0,
             viewer_fallback_reasons: &[],
-            playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
+            playback_decode: PreviewDecodeAccessModeProfile::default(),
             playback_evidence: &evidence,
             preview_diagnostics: &diagnostics,
             process_memory: &passing_process_memory_evidence(),
@@ -1131,18 +1131,18 @@ mod tests {
             let mut media = main10_media();
             media.frame_rate = frame_rate;
             let evidence = passing_playback_evidence();
-            let diagnostics = AppUiPreviewDiagnostics::default();
+            let diagnostics = PreviewDiagnostics::default();
             let report = evaluate_professional_playback(ProfessionalPlaybackObservation {
                 media: &media,
-                rendered_decode_execution: AppUiPreviewDecodeExecutionSummary {
+                rendered_decode_execution: PreviewDecodeExecutionSummary {
                     media_layers: 100,
                     hardware_native_layers: 100,
                     p010_10_bit_hardware_layers: 100,
-                    ..AppUiPreviewDecodeExecutionSummary::default()
+                    ..PreviewDecodeExecutionSummary::default()
                 },
                 viewer_fallback_count: 0,
                 viewer_fallback_reasons: &[],
-                playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
+                playback_decode: PreviewDecodeAccessModeProfile::default(),
                 playback_evidence: &evidence,
                 preview_diagnostics: &diagnostics,
                 process_memory: &passing_process_memory_evidence(),
@@ -1158,7 +1158,7 @@ mod tests {
     fn rejects_short_run_missing_seek_coverage_and_rejected_old_delivery() {
         let media = main10_media();
         let mut evidence = mondrian_playback::PlaybackEvidenceCollector::default().report();
-        let mut diagnostics = AppUiPreviewDiagnostics::default();
+        let mut diagnostics = PreviewDiagnostics::default();
         diagnostics.scheduler.pending_requests = 1;
         diagnostics.scheduler.clock_regressions = 1;
         diagnostics.worker_queue.queued_jobs = 1;
@@ -1167,15 +1167,15 @@ mod tests {
         evidence.deliveries.rejected = 1;
         let observation = ProfessionalPlaybackObservation {
             media: &media,
-            rendered_decode_execution: AppUiPreviewDecodeExecutionSummary {
+            rendered_decode_execution: PreviewDecodeExecutionSummary {
                 media_layers: 10,
                 hardware_native_layers: 10,
                 p010_10_bit_hardware_layers: 10,
-                ..AppUiPreviewDecodeExecutionSummary::default()
+                ..PreviewDecodeExecutionSummary::default()
             },
             viewer_fallback_count: 0,
             viewer_fallback_reasons: &[],
-            playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
+            playback_decode: PreviewDecodeAccessModeProfile::default(),
             playback_evidence: &evidence,
             preview_diagnostics: &diagnostics,
             process_memory: &passing_process_memory_evidence(),
@@ -1198,20 +1198,20 @@ mod tests {
     fn rejects_seek_latency_above_professional_p95_limits() {
         let media = main10_media();
         let mut evidence = passing_playback_evidence();
-        let diagnostics = AppUiPreviewDiagnostics::default();
+        let diagnostics = PreviewDiagnostics::default();
         evidence.warm_seek_latency.p95_us = PROFESSIONAL_WARM_SEEK_P95_LIMIT_US + 1;
         evidence.accurate_seek_latency.p95_us = PROFESSIONAL_ACCURATE_SEEK_P95_LIMIT_US + 1;
         let observation = ProfessionalPlaybackObservation {
             media: &media,
-            rendered_decode_execution: AppUiPreviewDecodeExecutionSummary {
+            rendered_decode_execution: PreviewDecodeExecutionSummary {
                 media_layers: 100,
                 hardware_native_layers: 100,
                 p010_10_bit_hardware_layers: 100,
-                ..AppUiPreviewDecodeExecutionSummary::default()
+                ..PreviewDecodeExecutionSummary::default()
             },
             viewer_fallback_count: 0,
             viewer_fallback_reasons: &[],
-            playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
+            playback_decode: PreviewDecodeAccessModeProfile::default(),
             playback_evidence: &evidence,
             preview_diagnostics: &diagnostics,
             process_memory: &passing_process_memory_evidence(),
@@ -1268,7 +1268,7 @@ mod tests {
     fn rejects_process_memory_growth_that_does_not_plateau() {
         let media = main10_media();
         let evidence = passing_playback_evidence();
-        let diagnostics = AppUiPreviewDiagnostics::default();
+        let diagnostics = PreviewDiagnostics::default();
         let mut process_memory = passing_process_memory_evidence();
         process_memory.final_average_private_committed_bytes = process_memory
             .baseline_average_private_committed_bytes
@@ -1279,15 +1279,15 @@ mod tests {
 
         let report = evaluate_professional_playback(ProfessionalPlaybackObservation {
             media: &media,
-            rendered_decode_execution: AppUiPreviewDecodeExecutionSummary {
+            rendered_decode_execution: PreviewDecodeExecutionSummary {
                 media_layers: 100,
                 hardware_native_layers: 100,
                 p010_10_bit_hardware_layers: 100,
-                ..AppUiPreviewDecodeExecutionSummary::default()
+                ..PreviewDecodeExecutionSummary::default()
             },
             viewer_fallback_count: 0,
             viewer_fallback_reasons: &[],
-            playback_decode: AppUiPreviewDecodeAccessModeProfile::default(),
+            playback_decode: PreviewDecodeAccessModeProfile::default(),
             playback_evidence: &evidence,
             preview_diagnostics: &diagnostics,
             process_memory: &process_memory,

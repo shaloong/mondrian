@@ -3,7 +3,7 @@
 use super::*;
 use crate::app::preview_timeline_execution::collect_preview_timeline_media_demands;
 
-impl AppUiPreviewService {
+impl<O: Clone> PreviewProductionRuntime<O> {
     pub(super) fn schedule_media_prefetches(
         &self,
         state: &AppState,

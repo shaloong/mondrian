@@ -1,8 +1,8 @@
-//! Preview worker and interactive-work lifecycle owned by the service.
+//! Preview worker and interactive-work lifecycle owned by the production Runtime.
 
 use super::*;
 
-impl AppUiPreviewService {
+impl<O: Clone> PreviewProductionRuntime<O> {
     /// Cancel outstanding preview decode work without shutting down workers.
     ///
     /// Closing a project, switching projects, or quitting should make any
@@ -45,7 +45,7 @@ impl AppUiPreviewService {
             .spawn(move || join_preview_workers(handles))
         {
             tracing::warn!(
-                "failed to start app UI viewer preview reaper; workers will finish detached: {err}"
+                "failed to start production preview reaper; workers will finish detached: {err}"
             );
         }
     }

@@ -2,16 +2,16 @@
 
 use super::*;
 
-impl AppUiPreviewService {
+impl<O: Clone> PreviewProductionRuntime<O> {
     /// Return a point-in-time snapshot of preview scheduling and cache health.
-    pub fn diagnostics(&self) -> AppUiPreviewDiagnostics {
+    pub fn diagnostics(&self) -> PreviewDiagnostics {
         let scheduler = self.scheduler.diagnostics();
         let frame_store = self.frame_store.borrow().diagnostics();
         let decode_cancellation = self.metrics.decode_cancellation.borrow().report();
         let cancellation = decode_cancellation.all;
         let mut decode_access_mode_profiles = self.metrics.decode_access_mode_profiles.get();
         decode_access_mode_profiles.apply_cancellation(decode_cancellation);
-        AppUiPreviewDiagnostics {
+        PreviewDiagnostics {
             render_requests: self.metrics.render_requests.get(),
             ready_frames: self.metrics.ready_frames.get(),
             loading_frames: self.metrics.loading_frames.get(),
@@ -328,7 +328,7 @@ impl AppUiPreviewService {
     }
 
     /// Return the latest color-management rejection captured for the current viewer request.
-    pub fn last_color_rejection(&self) -> Option<AppUiPreviewColorRejection> {
+    pub fn last_color_rejection(&self) -> Option<PreviewColorRejection> {
         self.last_color_rejection.borrow().clone()
     }
 
@@ -623,8 +623,8 @@ impl AppUiPreviewService {
         self.metrics.decode_access_mode_profiles.set(access_mode_profiles);
     }
 
-    pub(super) fn playback_schedule_diagnostics(&self) -> AppUiPreviewPlaybackScheduleDiagnostics {
-        AppUiPreviewPlaybackScheduleDiagnostics {
+    pub(super) fn playback_schedule_diagnostics(&self) -> PreviewPlaybackScheduleDiagnostics {
+        PreviewPlaybackScheduleDiagnostics {
             last_current_deadline_budget_us: self.metrics.playback_current_deadline_budget_us.get(),
             current_deadline_assignments: self.metrics.playback_current_deadline_assignments.get(),
             current_deadline_missing_frame_rate: self
@@ -780,7 +780,7 @@ impl AppUiPreviewService {
     pub(super) fn record_render_stage_durations(
         &self,
         total_duration_us: u64,
-        durations: AppUiPreviewRenderStageDurations,
+        durations: PreviewRenderStageDurations,
     ) {
         bump(&self.metrics.render_timed_frames);
         add_cell(&self.metrics.render_total_duration_us, total_duration_us);

@@ -799,8 +799,8 @@ surface and zero for CPU frames. LRU eviction enforces count, byte, and resource
 budgets together, and diagnostics expose both current resource units and the
 configured limit.
 
-`app::preview_frame_store::PreviewFrameStoreAdapter` is the one concrete App
-Adapter and policy composition root. It computes the reservation for
+`app::preview_frame_store::PreviewFrameStoreAdapter` is the sole Frame Store
+policy Adapter inside the Preview Production Runtime. It computes the reservation for
 `MediaPreviewFrame`, admits the validated
 UI-independent `PreviewRasterFrame` by its exact encoded byte size, aligns
 native-resource residency with the configured maximum prefetch window, and
@@ -897,8 +897,8 @@ commands/observations/snapshots, invariants, and fake-clock tests. Adapt existin
 ### Phase 2 — Frame Delivery seam
 
 Replace `preview_waiting` feedback with typed Frame Deliveries. Move deadline,
-drop, Priming, and Recovering decisions into the Engine. Keep current
-`AppUiPreviewService` as an Adapter.
+drop, Priming, and Recovering decisions into the Engine. Use the UI-independent
+Preview Production Runtime as the shared Adapter composition root.
 
 ### Phase 3 — Audio Playback Engine
 
@@ -908,24 +908,25 @@ controlled handoff.
 
 ### Phase 4 — Preview deepening
 
-Consolidate frame-work scheduling in the Frame Work Broker; extract Frame Store
-and Evidence from `app_ui::preview` by behavioral ownership, not file size. The
+Consolidate frame-work scheduling in the Frame Work Broker; keep Frame Store,
+Evidence, scheduling, and result pumping in `app::preview_runtime` by behavioral
+ownership, not file size. The
 Playback Preview Pump is extracted and Window/Headless duplicate orchestration
 is deleted. Canonical Timeline/nested execution, media-source resolution,
 resolved Viewer planning, and concrete media execution have UI-independent App
-Modules. Asset-library/proxy-dispatch adaptation, final presentation arbitration,
-and immutable diagnostics remain private Window deep Modules.
+Modules. Asset-library/proxy-dispatch adaptation, application presentation
+arbitration, and immutable diagnostics belong to the production Runtime;
+`app_ui::preview` only converts its output into Window Widget models.
 The concrete media worker, cooperative cancellation, result publication,
 bounded shutdown, and FFmpeg Adapter are isolated in the UI-independent
 `app::preview_media_task` deep Module. Its structured task result is the only
 Window/Headless consumption seam; there is no second decoder loop or UI-owned
-cancellation authority. `app_ui::preview::presentation` selects exact registered
+cancellation authority. `app::preview_runtime::presentation` selects exact registered
 GPU output, raster-cache hits, same-scope stale reuse, deferred playback
 composites, and the CPU output boundary. It owns no generation, candidate,
 cache-residency, scheduling, or transport authority. Retain one public request
 seam into media and continue moving only behavior with clear ownership.
-Window composition regressions live in the sibling private
-`app_ui::preview::tests` module. Media worker failure, cancellation, queue
+Production Runtime regressions live beside `app::preview_runtime`. Media worker failure, cancellation, queue
 deadline, execution-lease settlement, and shutdown behavior live with
 `app::preview_media_task`, where they run without a Window or Widget.
 
@@ -1039,7 +1040,7 @@ single application lowering point from that evidence plus request
 priority/access mode into media cancellation reason, Playback work class, and
 request-to-checkpoint attribution. It combines Broker evidence only with the
 separate steady-state prefetch decode budget; the concrete worker polls this
-policy, while `app_ui::preview` only records and projects its result. Absolute
+policy, while `app::preview_runtime` only records and projects its result. Absolute
 Frame Work Deadline comparison is not repeated in the App. The Broker evaluates deadline, generation invalidation,
 preemption, and closure together and returns authoritative request and lease ages, so
 one cause cannot hide slower observation of an earlier cause. The first close

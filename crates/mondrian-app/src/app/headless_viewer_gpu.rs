@@ -28,6 +28,8 @@ const HEADLESS_GPU_TIMESTAMP_RING_CAPACITY: usize = 16;
 /// Evidence for one real headless Viewer GPU execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HeadlessViewerGpuExecution {
+    /// Exact output made usable by this completed Adapter execution.
+    pub output: HeadlessViewerGpuOutput,
     /// Exact output width submitted to the shared Viewer GPU Runtime.
     pub output_width: u32,
     /// Exact output height submitted to the shared Viewer GPU Runtime.
@@ -64,6 +66,17 @@ pub(crate) struct HeadlessViewerGpuExecution {
     pub native_import_contract_pools: usize,
     /// Native-import bridge entries retained after this execution.
     pub native_import_bridge_entries: usize,
+}
+
+/// Opaque usable output payload registered with the production Preview Runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeadlessViewerGpuOutput {
+    /// Renderer resource identity retained by the Headless Adapter.
+    pub resource_key: String,
+    /// Presented output width.
+    pub width: u32,
+    /// Presented output height.
+    pub height: u32,
 }
 
 /// Stable adapter identity serialized by real-GPU execution gates.
@@ -206,10 +219,16 @@ impl HeadlessViewerGpuAdapter {
     ) -> Result<HeadlessViewerGpuExecution, HeadlessViewerGpuError> {
         let started = Instant::now();
         let output_key = frame.external_texture_key();
+        let output = HeadlessViewerGpuOutput {
+            resource_key: output_key.clone(),
+            width: frame.width,
+            height: frame.height,
+        };
         if self.current_output_key.as_deref() == Some(output_key.as_str()) {
             let (native_import_contract_pools, native_import_bridge_entries) =
                 self.runtime.native_import_pool_residency();
             return Ok(HeadlessViewerGpuExecution {
+                output,
                 output_width: frame.width,
                 output_height: frame.height,
                 cached: true,
@@ -324,6 +343,7 @@ impl HeadlessViewerGpuAdapter {
         let (native_import_contract_pools, native_import_bridge_entries) =
             self.runtime.native_import_pool_residency();
         Ok(HeadlessViewerGpuExecution {
+            output,
             output_width: frame.width,
             output_height: frame.height,
             cached: false,

@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 /// Aggregated CPU-side viewer render stage timings after media decode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewRenderStageDurations {
+pub struct PreviewRenderStageDurations {
     /// Time spent resolving sequence elements, media cache keys, and current-frame readiness.
     pub resolve_us: u64,
     /// Time spent checking external/final viewer frame caches.
@@ -31,7 +31,7 @@ pub struct AppUiPreviewRenderStageDurations {
     pub frame_packaging_us: u64,
 }
 
-impl AppUiPreviewRenderStageDurations {
+impl PreviewRenderStageDurations {
     pub(crate) fn from_cpu_execution(durations: PreviewCpuExecutionDurations) -> Self {
         Self {
             working_prepare_us: durations.working_prepare_us,
@@ -59,7 +59,7 @@ impl AppUiPreviewRenderStageDurations {
 
 /// Playback-clock scheduling contract observed by the app preview service.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewPlaybackScheduleDiagnostics {
+pub struct PreviewPlaybackScheduleDiagnostics {
     /// Remaining budget sampled from the absolute current Frame Demand deadline.
     pub last_current_deadline_budget_us: Option<u64>,
     /// Current playback requests that received a display deadline.
@@ -108,7 +108,7 @@ pub struct AppUiPreviewPlaybackScheduleDiagnostics {
 
 /// Playback hardware-decode admission selected by the app preview scheduler.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewHardwareDecodeAdmissionDiagnostics {
+pub struct PreviewHardwareDecodeAdmissionDiagnostics {
     /// Request that will be attached to playback decode jobs.
     pub playback_request: PreviewHardwareDecodeRequest,
     /// Whether renderer native decoded-frame import support reached preview scheduling.
@@ -134,7 +134,7 @@ pub struct AppUiPreviewHardwareDecodeAdmissionDiagnostics {
     pub renderer_supported_source_texture_formats: u8,
 }
 
-impl AppUiPreviewHardwareDecodeAdmissionDiagnostics {
+impl PreviewHardwareDecodeAdmissionDiagnostics {
     fn playback_native_import_gated(self) -> bool {
         self.renderer_native_import_support_known
             && !self.native_import_admission_ready
@@ -144,7 +144,7 @@ impl AppUiPreviewHardwareDecodeAdmissionDiagnostics {
 
 /// Point-in-time preview service counters for local performance diagnostics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewDiagnostics {
+pub struct PreviewDiagnostics {
     /// Viewer preview render requests received by the service.
     pub render_requests: u64,
     /// Requests that produced a current ready frame.
@@ -216,8 +216,8 @@ pub struct AppUiPreviewDiagnostics {
     /// Preview decode workers successfully started for this service.
     pub decode_worker_count: usize,
     /// App-level playback hardware-decode admission state.
-    pub hardware_decode_admission: AppUiPreviewHardwareDecodeAdmissionDiagnostics,
-    /// Successful background media decodes received by the UI service.
+    pub hardware_decode_admission: PreviewHardwareDecodeAdmissionDiagnostics,
+    /// Successful background media decodes received by the production Runtime.
     pub decode_successes: u64,
     /// Successful startup-preroll media decodes excluded from steady-state latency budgets.
     pub decode_startup_preroll_frames: u64,
@@ -229,7 +229,7 @@ pub struct AppUiPreviewDiagnostics {
     pub decode_startup_preroll_queue_wait_total_us: u64,
     /// Slowest queue wait for startup-preroll decode work.
     pub decode_startup_preroll_queue_wait_max_us: u64,
-    /// Failed background media decodes received by the UI service.
+    /// Failed background media decodes received by the production Runtime.
     pub decode_failures: u64,
     /// Failed background media decodes caused by a structured decode timeout.
     pub decode_timeout_failures: u64,
@@ -334,9 +334,9 @@ pub struct AppUiPreviewDiagnostics {
     pub decode_max_frame_queue_wait_us: u64,
     /// Dominant bottleneck for the same decoded preview frame that produced
     /// `decode_max_frame_stage_durations`.
-    pub decode_max_frame_bottleneck: AppUiPreviewDecodeBottleneck,
+    pub decode_max_frame_bottleneck: PreviewDecodeBottleneck,
     /// Decode profile split by playback, scrub, and random-access still modes.
-    pub decode_access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles,
+    pub decode_access_mode_profiles: PreviewDecodeAccessModeProfiles,
     /// Viewer render requests with post-decode stage timing evidence.
     pub render_timed_frames: u64,
     /// Total post-decode viewer render duration in microseconds.
@@ -346,24 +346,24 @@ pub struct AppUiPreviewDiagnostics {
     /// Most recent post-decode viewer render duration in microseconds.
     pub render_last_duration_us: u64,
     /// Aggregated CPU-side viewer render stage timings after media decode.
-    pub render_stage_durations: AppUiPreviewRenderStageDurations,
+    pub render_stage_durations: PreviewRenderStageDurations,
     /// CPU-side viewer render stage timings from the slowest post-decode frame.
-    pub render_max_frame_stage_durations: AppUiPreviewRenderStageDurations,
-    /// UI-thread completion polling passes for decoded preview results.
+    pub render_max_frame_stage_durations: PreviewRenderStageDurations,
+    /// Foreground completion polling passes for decoded preview results.
     pub completion_poll_calls: u64,
-    /// Decoded preview results processed by UI-thread completion polling.
+    /// Decoded preview results processed by foreground completion polling.
     pub completion_poll_results: u64,
-    /// Total UI-thread completion polling duration in microseconds.
+    /// Total foreground completion polling duration in microseconds.
     pub completion_poll_total_duration_us: u64,
-    /// Slowest UI-thread completion polling pass in microseconds.
+    /// Slowest foreground completion polling pass in microseconds.
     pub completion_poll_max_duration_us: u64,
-    /// Most recent UI-thread completion polling pass in microseconds.
+    /// Most recent foreground completion polling pass in microseconds.
     pub completion_poll_last_duration_us: u64,
     /// Largest configured completion-result count budget observed by diagnostics.
     pub completion_poll_max_results_per_poll: u64,
     /// Completion polling passes that stopped at the result-count budget.
     pub completion_poll_count_budget_exhaustions: u64,
-    /// Completion polling passes that yielded after the UI-thread time budget.
+    /// Completion polling passes that yielded after the foreground time budget.
     pub completion_poll_time_budget_exhaustions: u64,
     /// Media preview jobs accepted by the worker queue.
     pub enqueued_jobs: u64,
@@ -400,7 +400,7 @@ pub struct AppUiPreviewDiagnostics {
     /// Scheduler-side request, drop, completion, and pruning counters.
     pub scheduler: MediaPreviewSchedulerDiagnostics,
     /// Playback-clock deadline and forward-prefetch scheduling contract.
-    pub playback_schedule: AppUiPreviewPlaybackScheduleDiagnostics,
+    pub playback_schedule: PreviewPlaybackScheduleDiagnostics,
     /// Final viewer preview frame cache hits.
     pub viewer_frame_cache_hits: u64,
     /// Final viewer preview frame cache misses.
@@ -530,7 +530,7 @@ pub struct AppUiPreviewDiagnostics {
 
 /// Structured color-management rejection captured from the viewer preview path.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewColorRejection {
+pub struct PreviewColorRejection {
     /// Asset that could not be interpreted for preview.
     pub asset_id: AssetId,
     /// Media path shown in diagnostics.
@@ -553,7 +553,7 @@ pub struct AppUiPreviewColorRejection {
 
 /// Stable preview color-path health summary for perf JSONL and diagnostics tooling.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewColorHealthSummary {
+pub struct PreviewColorHealthSummary {
     /// Preview composite plans represented by this snapshot.
     pub composite_plans: u64,
     /// Inputs resolved from detected media metadata.
@@ -611,7 +611,7 @@ pub struct AppUiPreviewColorHealthSummary {
 
 /// Fixed latency buckets for compact preview decode distribution diagnostics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewDecodeLatencyBuckets {
+pub struct PreviewDecodeLatencyBuckets {
     /// Samples at or below 10 ms.
     pub le_10ms: u64,
     /// Samples above 10 ms and at or below 16 ms.
@@ -628,7 +628,7 @@ pub struct AppUiPreviewDecodeLatencyBuckets {
     pub gt_80ms: u64,
 }
 
-impl AppUiPreviewDecodeLatencyBuckets {
+impl PreviewDecodeLatencyBuckets {
     fn record(&mut self, duration_us: u64) {
         match duration_us {
             0..=10_000 => self.le_10ms = self.le_10ms.saturating_add(1),
@@ -682,7 +682,7 @@ impl AppUiPreviewDecodeLatencyBuckets {
 
 /// Preview decode profile for one access mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewDecodeAccessModeProfile {
+pub struct PreviewDecodeAccessModeProfile {
     /// Successful decode/cache results for this access mode.
     pub frames: u64,
     /// Successful in-process CPU RGBA8/f32 results for this access mode.
@@ -700,7 +700,7 @@ pub struct AppUiPreviewDecodeAccessModeProfile {
     /// Most recent end-to-end decode duration for this access mode.
     pub last_duration_us: u64,
     /// Fixed distribution buckets for end-to-end decode duration.
-    pub latency_buckets: AppUiPreviewDecodeLatencyBuckets,
+    pub latency_buckets: PreviewDecodeLatencyBuckets,
     /// Total worker-queue wait before decode started for this access mode.
     pub queue_wait_total_us: u64,
     /// Slowest worker-queue wait before decode started for this access mode.
@@ -708,7 +708,7 @@ pub struct AppUiPreviewDecodeAccessModeProfile {
     /// Most recent worker-queue wait before decode started for this access mode.
     pub queue_wait_last_us: u64,
     /// Fixed distribution buckets for worker-queue wait.
-    pub queue_wait_buckets: AppUiPreviewDecodeLatencyBuckets,
+    pub queue_wait_buckets: PreviewDecodeLatencyBuckets,
     /// Canceled decode jobs for this access mode.
     pub canceled_jobs: u64,
     /// Canceled jobs caused by preview shutdown for this access mode.
@@ -858,10 +858,10 @@ pub struct AppUiPreviewDecodeAccessModeProfile {
     /// Queue wait from the same slowest frame in this access mode.
     pub max_frame_queue_wait_us: u64,
     /// Dominant bottleneck from the same slowest frame in this access mode.
-    pub max_frame_bottleneck: AppUiPreviewDecodeBottleneck,
+    pub max_frame_bottleneck: PreviewDecodeBottleneck,
 }
 
-impl AppUiPreviewDecodeAccessModeProfile {
+impl PreviewDecodeAccessModeProfile {
     fn mode_local_evidence_frames(self) -> u64 {
         self.frames.saturating_sub(self.cache_hit_frames)
     }
@@ -1160,20 +1160,17 @@ impl AppUiPreviewDecodeAccessModeProfile {
 
 /// Preview decode profiles split by access mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewDecodeAccessModeProfiles {
+pub struct PreviewDecodeAccessModeProfiles {
     /// Sustained playback and forward-prefetch decode profile.
-    pub playback_cursor: AppUiPreviewDecodeAccessModeProfile,
+    pub playback_cursor: PreviewDecodeAccessModeProfile,
     /// Latest-wins interactive scrub decode profile.
-    pub scrub_cursor: AppUiPreviewDecodeAccessModeProfile,
+    pub scrub_cursor: PreviewDecodeAccessModeProfile,
     /// Deterministic still-frame/random-access decode profile.
-    pub random_access_still: AppUiPreviewDecodeAccessModeProfile,
+    pub random_access_still: PreviewDecodeAccessModeProfile,
 }
 
-impl AppUiPreviewDecodeAccessModeProfiles {
-    fn profile_for(
-        self,
-        access_mode: PreviewDecodeAccessMode,
-    ) -> AppUiPreviewDecodeAccessModeProfile {
+impl PreviewDecodeAccessModeProfiles {
+    fn profile_for(self, access_mode: PreviewDecodeAccessMode) -> PreviewDecodeAccessModeProfile {
         match access_mode {
             PreviewDecodeAccessMode::PlaybackCursor => self.playback_cursor,
             PreviewDecodeAccessMode::ScrubCursor => self.scrub_cursor,
@@ -1248,7 +1245,7 @@ impl AppUiPreviewDecodeAccessModeProfiles {
             .map(|(access_mode, _)| access_mode)
     }
 
-    fn named_profiles(self) -> [(PreviewDecodeAccessMode, AppUiPreviewDecodeAccessModeProfile); 3] {
+    fn named_profiles(self) -> [(PreviewDecodeAccessMode, PreviewDecodeAccessModeProfile); 3] {
         [
             (
                 PreviewDecodeAccessMode::PlaybackCursor,
@@ -1265,11 +1262,11 @@ impl AppUiPreviewDecodeAccessModeProfiles {
 
 /// Stable preview decode performance summary for perf JSONL and diagnostics tooling.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewDecodePerformanceSummary {
+pub struct PreviewDecodePerformanceSummary {
     /// Coordinated CPU budget used for preview workers and FFmpeg decoder threads.
     pub cpu_budget: PreviewDecodeCpuBudget,
     /// App-level playback hardware-decode admission state.
-    pub hardware_decode_admission: AppUiPreviewHardwareDecodeAdmissionDiagnostics,
+    pub hardware_decode_admission: PreviewHardwareDecodeAdmissionDiagnostics,
     /// Successful preview decode/cache results.
     pub decode_successes: u64,
     /// Successful bounded startup-preroll decodes, outside steady-state budgets.
@@ -1411,20 +1408,20 @@ pub struct AppUiPreviewDecodePerformanceSummary {
     /// Queue wait from the same slowest decode frame.
     pub max_frame_queue_wait_us: u64,
     /// Decode profile split by playback, scrub, and random-access still modes.
-    pub access_mode_profiles: AppUiPreviewDecodeAccessModeProfiles,
+    pub access_mode_profiles: PreviewDecodeAccessModeProfiles,
     /// Access mode that produced the slowest successful decode frame.
     pub slowest_access_mode: Option<PreviewDecodeAccessMode>,
     /// Dominant stage inferred from the slowest successful decode frame.
-    pub primary_bottleneck: AppUiPreviewDecodeBottleneck,
+    pub primary_bottleneck: PreviewDecodeBottleneck,
     /// Scheduler-side access-mode/drop/stale diagnostics captured with decode evidence.
     pub scheduler: MediaPreviewSchedulerDiagnostics,
     /// Playback-clock deadline and forward-prefetch scheduling contract.
-    pub playback_schedule: AppUiPreviewPlaybackScheduleDiagnostics,
+    pub playback_schedule: PreviewPlaybackScheduleDiagnostics,
 }
 
 /// Dominant preview decode bottleneck inferred from stage diagnostics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
-pub enum AppUiPreviewDecodeBottleneck {
+pub enum PreviewDecodeBottleneck {
     /// No decode evidence was captured.
     #[default]
     None,
@@ -1447,35 +1444,35 @@ pub enum AppUiPreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const APP_UI_PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 31;
+pub const PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 31;
 
 /// Default preview slow-frame budget: one frame should complete in tens of ms.
-pub const APP_UI_PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
+pub const PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
 
 /// Versioned preview decode performance report for UI, telemetry, and perf artifacts.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewDecodePerformanceReport {
+pub struct PreviewDecodePerformanceReport {
     /// Report schema version.
     pub schema_version: u32,
     /// Applied report profile.
     pub profile: String,
     /// Overall preview decode performance verdict.
-    pub verdict: AppUiPreviewDecodePerformanceVerdict,
+    pub verdict: PreviewDecodePerformanceVerdict,
     /// Access modes this report profile required to be sampled.
     pub required_access_modes: Vec<PreviewDecodeAccessMode>,
     /// Structured decode performance summary used as report evidence.
-    pub summary: Option<AppUiPreviewDecodePerformanceSummary>,
+    pub summary: Option<PreviewDecodePerformanceSummary>,
     /// Structured checks by preview decode area.
-    pub checks: Vec<AppUiPreviewDecodePerformanceCheck>,
+    pub checks: Vec<PreviewDecodePerformanceCheck>,
     /// Prioritized machine-readable root causes.
-    pub root_causes: Vec<AppUiPreviewDecodePerformanceRootCause>,
+    pub root_causes: Vec<PreviewDecodePerformanceRootCause>,
     /// Suggested engineering or operator actions.
-    pub actions: Vec<AppUiPreviewDecodePerformanceAction>,
+    pub actions: Vec<PreviewDecodePerformanceAction>,
 }
 
 /// Stable preview render performance summary for post-decode viewer work.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewRenderPerformanceSummary {
+pub struct PreviewRenderPerformanceSummary {
     /// Viewer render requests with timing evidence.
     pub timed_frames: u64,
     /// Maximum post-decode render duration.
@@ -1487,16 +1484,16 @@ pub struct AppUiPreviewRenderPerformanceSummary {
     /// Slow-frame budget applied by the report.
     pub slow_frame_budget_us: u64,
     /// Aggregated post-decode render stage timings.
-    pub stage_durations: AppUiPreviewRenderStageDurations,
+    pub stage_durations: PreviewRenderStageDurations,
     /// Stage timings from the slowest post-decode render frame.
-    pub max_frame_stage_durations: AppUiPreviewRenderStageDurations,
+    pub max_frame_stage_durations: PreviewRenderStageDurations,
     /// Dominant post-decode render bottleneck inferred from the slowest-frame timings.
-    pub primary_bottleneck: AppUiPreviewRenderBottleneck,
+    pub primary_bottleneck: PreviewRenderBottleneck,
 }
 
 /// Dominant post-decode preview render bottleneck.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
-pub enum AppUiPreviewRenderBottleneck {
+pub enum PreviewRenderBottleneck {
     /// No post-decode render evidence was captured.
     #[default]
     None,
@@ -1515,33 +1512,33 @@ pub enum AppUiPreviewRenderBottleneck {
 }
 
 /// Schema version for preview render performance reports.
-pub const APP_UI_PREVIEW_RENDER_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 1;
+pub const PREVIEW_RENDER_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 1;
 
 /// Default post-decode viewer render budget: one frame should complete in tens of ms.
-pub const APP_UI_PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
+pub const PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
 
 /// Versioned preview render performance report for UI, telemetry, and perf artifacts.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewRenderPerformanceReport {
+pub struct PreviewRenderPerformanceReport {
     /// Report schema version.
     pub schema_version: u32,
     /// Applied report profile.
     pub profile: String,
     /// Overall post-decode render performance verdict.
-    pub verdict: AppUiPreviewRenderPerformanceVerdict,
+    pub verdict: PreviewRenderPerformanceVerdict,
     /// Structured render performance summary used as report evidence.
-    pub summary: Option<AppUiPreviewRenderPerformanceSummary>,
+    pub summary: Option<PreviewRenderPerformanceSummary>,
     /// Structured checks by preview render area.
-    pub checks: Vec<AppUiPreviewRenderPerformanceCheck>,
+    pub checks: Vec<PreviewRenderPerformanceCheck>,
     /// Prioritized machine-readable root causes.
-    pub root_causes: Vec<AppUiPreviewRenderPerformanceRootCause>,
+    pub root_causes: Vec<PreviewRenderPerformanceRootCause>,
     /// Suggested engineering or operator actions.
-    pub actions: Vec<AppUiPreviewRenderPerformanceAction>,
+    pub actions: Vec<PreviewRenderPerformanceAction>,
 }
 
 /// Overall post-decode preview render performance verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub enum AppUiPreviewRenderPerformanceVerdict {
+pub enum PreviewRenderPerformanceVerdict {
     /// Preview render met the applied performance budget.
     Pass,
     /// Preview render violated the budget or had no evidence.
@@ -1550,7 +1547,7 @@ pub enum AppUiPreviewRenderPerformanceVerdict {
 
 /// Preview render performance diagnostic area.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub enum AppUiPreviewRenderPerformanceArea {
+pub enum PreviewRenderPerformanceArea {
     /// Evidence capture and summary availability.
     CaptureIntegrity,
     /// End-to-end post-decode render latency budget.
@@ -1571,7 +1568,7 @@ pub enum AppUiPreviewRenderPerformanceArea {
 
 /// Preview render performance check severity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub enum AppUiPreviewRenderPerformanceSeverity {
+pub enum PreviewRenderPerformanceSeverity {
     /// Check passed.
     Pass,
     /// Check failed.
@@ -1580,13 +1577,13 @@ pub enum AppUiPreviewRenderPerformanceSeverity {
 
 /// One preview render performance check.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewRenderPerformanceCheck {
+pub struct PreviewRenderPerformanceCheck {
     /// Diagnostic area for this check.
-    pub area: AppUiPreviewRenderPerformanceArea,
+    pub area: PreviewRenderPerformanceArea,
     /// Stable check code.
     pub code: &'static str,
     /// Check severity.
-    pub severity: AppUiPreviewRenderPerformanceSeverity,
+    pub severity: PreviewRenderPerformanceSeverity,
     /// Observed value.
     pub observed: u64,
     /// Optional target or threshold.
@@ -1595,22 +1592,22 @@ pub struct AppUiPreviewRenderPerformanceCheck {
 
 /// One preview render performance root cause.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewRenderPerformanceRootCause {
+pub struct PreviewRenderPerformanceRootCause {
     /// Diagnostic area for this root cause.
-    pub area: AppUiPreviewRenderPerformanceArea,
+    pub area: PreviewRenderPerformanceArea,
     /// Stable root-cause code.
     pub code: &'static str,
     /// Root-cause severity.
-    pub severity: AppUiPreviewRenderPerformanceSeverity,
+    pub severity: PreviewRenderPerformanceSeverity,
     /// Compact evidence string.
     pub evidence: String,
 }
 
 /// One preview render performance action.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewRenderPerformanceAction {
+pub struct PreviewRenderPerformanceAction {
     /// Diagnostic area for this action.
-    pub area: AppUiPreviewRenderPerformanceArea,
+    pub area: PreviewRenderPerformanceArea,
     /// Stable action code.
     pub code: &'static str,
     /// Human-readable action.
@@ -1619,7 +1616,7 @@ pub struct AppUiPreviewRenderPerformanceAction {
 
 /// Overall preview decode performance verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub enum AppUiPreviewDecodePerformanceVerdict {
+pub enum PreviewDecodePerformanceVerdict {
     /// Preview decode met the applied performance budget.
     Pass,
     /// Preview decode has warning evidence but no hard budget failure.
@@ -1630,7 +1627,7 @@ pub enum AppUiPreviewDecodePerformanceVerdict {
 
 /// Preview decode performance diagnostic area.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub enum AppUiPreviewDecodePerformanceArea {
+pub enum PreviewDecodePerformanceArea {
     /// Evidence capture and summary availability.
     CaptureIntegrity,
     /// End-to-end decode latency budget.
@@ -1653,7 +1650,7 @@ pub enum AppUiPreviewDecodePerformanceArea {
 
 /// Preview decode performance check severity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub enum AppUiPreviewDecodePerformanceSeverity {
+pub enum PreviewDecodePerformanceSeverity {
     /// Check passed.
     Pass,
     /// Check produced warning evidence.
@@ -1664,13 +1661,13 @@ pub enum AppUiPreviewDecodePerformanceSeverity {
 
 /// One preview decode performance check.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewDecodePerformanceCheck {
+pub struct PreviewDecodePerformanceCheck {
     /// Diagnostic area for this check.
-    pub area: AppUiPreviewDecodePerformanceArea,
+    pub area: PreviewDecodePerformanceArea,
     /// Stable check code.
     pub code: &'static str,
     /// Check severity.
-    pub severity: AppUiPreviewDecodePerformanceSeverity,
+    pub severity: PreviewDecodePerformanceSeverity,
     /// Observed value.
     pub observed: u64,
     /// Optional target or threshold.
@@ -1679,29 +1676,29 @@ pub struct AppUiPreviewDecodePerformanceCheck {
 
 /// One preview decode performance root cause.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewDecodePerformanceRootCause {
+pub struct PreviewDecodePerformanceRootCause {
     /// Diagnostic area for this root cause.
-    pub area: AppUiPreviewDecodePerformanceArea,
+    pub area: PreviewDecodePerformanceArea,
     /// Stable root-cause code.
     pub code: &'static str,
     /// Root-cause severity.
-    pub severity: AppUiPreviewDecodePerformanceSeverity,
+    pub severity: PreviewDecodePerformanceSeverity,
     /// Compact evidence string.
     pub evidence: String,
 }
 
 /// One preview decode performance action.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct AppUiPreviewDecodePerformanceAction {
+pub struct PreviewDecodePerformanceAction {
     /// Diagnostic area for this action.
-    pub area: AppUiPreviewDecodePerformanceArea,
+    pub area: PreviewDecodePerformanceArea,
     /// Stable action code.
     pub code: &'static str,
     /// Human-readable action.
     pub description: &'static str,
 }
 
-impl AppUiPreviewColorRejection {
+impl PreviewColorRejection {
     pub(super) fn new(
         asset_id: AssetId,
         path: PathBuf,
@@ -1723,12 +1720,12 @@ impl AppUiPreviewColorRejection {
     }
 }
 
-impl AppUiPreviewDiagnostics {
+impl PreviewDiagnostics {
     /// Return structured preview decode performance evidence when decode activity exists.
     pub fn decode_performance_summary(
         self,
         slow_frame_budget_us: u64,
-    ) -> Option<AppUiPreviewDecodePerformanceSummary> {
+    ) -> Option<PreviewDecodePerformanceSummary> {
         let decode_successes = self.decode_successes;
         if decode_successes
             .saturating_add(self.decode_failures)
@@ -1742,13 +1739,13 @@ impl AppUiPreviewDiagnostics {
         let max_frame_stage_durations = self.decode_max_frame_stage_durations;
         let max_frame_queue_wait_us = self.decode_max_frame_queue_wait_us;
         let mut primary_bottleneck = self.decode_max_frame_bottleneck;
-        if primary_bottleneck == AppUiPreviewDecodeBottleneck::None {
+        if primary_bottleneck == PreviewDecodeBottleneck::None {
             primary_bottleneck = classify_preview_decode_bottleneck(
                 max_frame_stage_durations,
                 max_frame_queue_wait_us,
             );
         }
-        Some(AppUiPreviewDecodePerformanceSummary {
+        Some(PreviewDecodePerformanceSummary {
             cpu_budget: self.decode_cpu_budget,
             hardware_decode_admission: self.hardware_decode_admission,
             decode_successes,
@@ -1833,13 +1830,13 @@ impl AppUiPreviewDiagnostics {
     pub fn render_performance_summary(
         self,
         slow_frame_budget_us: u64,
-    ) -> Option<AppUiPreviewRenderPerformanceSummary> {
+    ) -> Option<PreviewRenderPerformanceSummary> {
         if self.render_timed_frames == 0 {
             return None;
         }
         let stage_durations = self.render_stage_durations;
         let max_frame_stage_durations = self.render_max_frame_stage_durations;
-        Some(AppUiPreviewRenderPerformanceSummary {
+        Some(PreviewRenderPerformanceSummary {
             timed_frames: self.render_timed_frames,
             max_duration_us: self.render_max_duration_us,
             last_duration_us: self.render_last_duration_us,
@@ -1910,7 +1907,7 @@ impl AppUiPreviewDiagnostics {
     }
 
     /// Return the stable preview color-path health summary when diagnostics have evidence.
-    pub fn color_health_summary(self) -> Option<AppUiPreviewColorHealthSummary> {
+    pub fn color_health_summary(self) -> Option<PreviewColorHealthSummary> {
         let counts = self.input_color_resolution_counts();
         let stages = self.color_stage_diagnostics();
         let composite = self.composite_color_path_summary();
@@ -1924,7 +1921,7 @@ impl AppUiPreviewDiagnostics {
             return None;
         }
 
-        Some(AppUiPreviewColorHealthSummary {
+        Some(PreviewColorHealthSummary {
             composite_plans: composite.composite_plans(),
             detected_metadata: counts.detected_metadata,
             override_count: counts.override_count,
