@@ -939,13 +939,15 @@ decode counters. They remain a diagnostic fallback state only; `Observed` means
 hardware frames were transferred back to CPU, not that Mondrian achieved
 GPU-resident playback.
 Playback hardware-decode admission is an app-layer aggregation contract, not a
-media, renderer, or platform responsibility. The host combines renderer native
-decoded-frame import support, OS native texture import probing, and preview
-scheduler policy into `AppUiPreviewHardwareDecodeAdmissionDiagnostics`. That
-diagnostic must include the playback request, whether renderer support is
-known/ready, renderer-supported handle and source-format counts, platform
-discovery/zero-copy/low-copy facts, and a stable `admission_blocker` enum such
-as `RendererImportUnavailable`, `PlatformDiscoveryUnavailable`,
+media, renderer, or platform responsibility. UI-independent
+`app::native_video_import` combines renderer native decoded-frame import
+support and OS native texture import probing into one
+`PlaybackHardwareDecodeAdmission`; Window and Headless composition roots pass
+that same value to the concrete Preview Adapter. Preview diagnostics project,
+but do not own, its playback request, renderer readiness and supported handle/
+source-format counts, platform discovery/zero-copy/low-copy facts, and stable
+`PreviewHardwareDecodeAdmissionBlocker` variants such as
+`RendererImportUnavailable`, `PlatformDiscoveryUnavailable`,
 `PlatformCopyPathUnavailable`, or `PlatformHandleUnsupported`. The scheduler
 may request `PreferGpuResident` only when renderer import and platform import
 are both ready for a shared handle family. Otherwise playback may request
@@ -1352,8 +1354,9 @@ missing GPU-resident path from deadline pressure or proxy-generation pressure.
 Preview decode performance reports must surface that case with a specific check,
 root-cause evidence, and an action to connect renderer native video import.
 Playback hardware-decode admission is also runtime-gated by the app preview
-service. The media request default remains `PreviewHardwareDecodeRequest::Auto`;
-window/renderer code may raise playback jobs to `PreferHardwareDecode` for
+service from the coherent `app::native_video_import` snapshot. The media
+request default remains `PreviewHardwareDecodeRequest::Auto`; Window or
+Headless composition code may raise playback jobs to `PreferHardwareDecode` for
 FFmpeg hardware CPU-transfer fallback, and to `PreferGpuResident` only after the
 renderer native decoded-frame import contract reports ready and the platform
 probe supports at least one renderer-supported native handle family with

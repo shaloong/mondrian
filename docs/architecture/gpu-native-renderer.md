@@ -119,9 +119,11 @@ be presented as the modern GPU-native renderer import path.
 
 The app layer owns the combined readiness report because it is the first layer
 that can see media decode facts, platform probes, and renderer backend support
-together. `app_ui::native_video_import` evaluates those facts into a stable
-viewer telemetry payload without giving media a renderer dependency or giving
-the renderer a platform dependency. CPU-decoded frames remain
+together. UI-independent `app::native_video_import` evaluates those facts into
+one playback admission and one stable readiness report; Window and Headless
+Adapters only project the result into their telemetry. This avoids giving media
+a renderer dependency, giving the renderer a platform dependency, or making a
+Widget module the owner of execution admission. CPU-decoded frames remain
 `CpuDecodedMedia`; retained D3D12VA resources can report `ReadyLowCopy` only
 when platform probing, renderer support, sampling metadata, and actual backend
 construction all agree. D3D11VA remains a media hardware-decode CPU-transfer

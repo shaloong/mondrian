@@ -16,7 +16,6 @@ pub mod icons;
 pub mod interpret_asset_dialog;
 pub mod menu_bar;
 pub mod modal;
-pub(crate) mod native_video_import;
 pub mod new_project_dialog;
 pub mod panels;
 pub mod pending_close_dialog;

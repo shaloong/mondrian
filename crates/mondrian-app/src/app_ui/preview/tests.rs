@@ -2185,15 +2185,13 @@ fn playback_video_preroll_does_not_delay_procedural_future_frames() {
 #[test]
 fn preview_playback_schedule_counts_native_import_unavailable_current_frames() {
     let service = AppUiPreviewService::new();
-    service.set_playback_hardware_decode_admission(AppUiPlaybackHardwareDecodeAdmission {
+    service.set_playback_hardware_decode_admission(PlaybackHardwareDecodeAdmission {
         request: PreviewHardwareDecodeRequest::PreferHardwareDecode,
         hardware_decode_device_selector: None,
         renderer_native_import_ready: false,
         platform_native_import_ready: false,
         native_import_admission_ready: false,
-        admission_blocker: Some(
-            AppUiPreviewHardwareDecodeAdmissionBlocker::RendererImportUnavailable,
-        ),
+        admission_blocker: Some(PreviewHardwareDecodeAdmissionBlocker::RendererImportUnavailable),
         platform_discovery_available: true,
         platform_zero_copy_supported: false,
         platform_low_copy_fallback_supported: false,
@@ -3320,7 +3318,7 @@ fn preview_decode_performance_report_flags_hardware_decode_admission_gate() {
             platform_native_import_ready: true,
             native_import_admission_ready: false,
             admission_blocker: Some(
-                AppUiPreviewHardwareDecodeAdmissionBlocker::RendererImportUnavailable,
+                PreviewHardwareDecodeAdmissionBlocker::RendererImportUnavailable,
             ),
             platform_discovery_available: true,
             platform_zero_copy_supported: false,
@@ -8329,7 +8327,7 @@ fn gpu_viewer_hardware_decode_admission_covers_every_access_mode() {
         service.hardware_decode_request_for_access_mode(PreviewDecodeAccessMode::PlaybackCursor),
         PreviewHardwareDecodeRequest::Auto
     );
-    service.set_playback_hardware_decode_admission(AppUiPlaybackHardwareDecodeAdmission {
+    service.set_playback_hardware_decode_admission(PlaybackHardwareDecodeAdmission {
         request: PreviewHardwareDecodeRequest::PreferGpuResident,
         hardware_decode_device_selector: Some(HwAccelDeviceSelector::D3D12VaAdapterIndex(1)),
         renderer_native_import_ready: true,
@@ -8380,7 +8378,7 @@ fn gpu_viewer_hardware_decode_admission_covers_every_access_mode() {
 #[test]
 fn gpu_viewer_hardware_decode_admission_is_scoped_to_native_surface_format() {
     let service = AppUiPreviewService::new_without_workers_for_test();
-    service.set_playback_hardware_decode_admission(AppUiPlaybackHardwareDecodeAdmission {
+    service.set_playback_hardware_decode_admission(PlaybackHardwareDecodeAdmission {
         request: PreviewHardwareDecodeRequest::PreferGpuResident,
         hardware_decode_device_selector: Some(HwAccelDeviceSelector::D3D12VaAdapterIndex(1)),
         renderer_native_import_ready: true,
@@ -8413,7 +8411,7 @@ fn gpu_viewer_hardware_decode_admission_is_scoped_to_native_surface_format() {
 #[test]
 fn native_decode_key_is_stable_across_viewer_quality_scales() {
     let service = AppUiPreviewService::new_without_workers_for_test();
-    service.set_playback_hardware_decode_admission(AppUiPlaybackHardwareDecodeAdmission {
+    service.set_playback_hardware_decode_admission(PlaybackHardwareDecodeAdmission {
         request: PreviewHardwareDecodeRequest::PreferGpuResident,
         hardware_decode_device_selector: Some(HwAccelDeviceSelector::D3D12VaAdapterIndex(0)),
         renderer_native_import_ready: true,

@@ -107,7 +107,8 @@ pub struct AppUiPreviewHardwareDecodeAdmissionDiagnostics {
     /// Whether playback is allowed to request GPU-resident decode.
     pub native_import_admission_ready: bool,
     /// Stable reason playback cannot request GPU-resident decode, when gated.
-    pub admission_blocker: Option<AppUiPreviewHardwareDecodeAdmissionBlocker>,
+    pub admission_blocker:
+        Option<crate::app::native_video_import::PreviewHardwareDecodeAdmissionBlocker>,
     /// Whether the platform native texture import probe is available.
     pub platform_discovery_available: bool,
     /// Whether the platform reports a zero-copy native texture path.
@@ -126,25 +127,6 @@ impl AppUiPreviewHardwareDecodeAdmissionDiagnostics {
             && !self.native_import_admission_ready
             && self.admission_blocker.is_some()
     }
-}
-
-/// Stable hardware-decode admission blocker reported by the app scheduler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub enum AppUiPreviewHardwareDecodeAdmissionBlocker {
-    /// Renderer runtime has not reported native decoded-frame import support yet.
-    RendererSupportUnknown,
-    /// Renderer backend has no native decoded-frame import implementation.
-    RendererImportUnavailable,
-    /// Renderer reports native import but no decoder handle family.
-    RendererHandleSupportMissing,
-    /// Renderer reports native import but no decoded source texture format.
-    RendererSourceTextureFormatSupportMissing,
-    /// Platform native texture import probe is unavailable.
-    PlatformDiscoveryUnavailable,
-    /// Platform can be probed, but neither zero-copy nor low-copy import is declared.
-    PlatformCopyPathUnavailable,
-    /// Platform import exists but cannot consume any renderer-supported decoder handle.
-    PlatformHandleUnsupported,
 }
 
 /// Point-in-time preview service counters for local performance diagnostics.

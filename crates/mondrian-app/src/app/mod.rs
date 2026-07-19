@@ -61,6 +61,7 @@ mod audio_rendering;
 mod clip_clipboard;
 pub(crate) mod exporting;
 mod media_import;
+pub(crate) mod native_video_import;
 mod playback;
 #[cfg(test)]
 mod playback_acceptance;

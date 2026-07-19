@@ -7,10 +7,10 @@ use super::*;
 /// `None` is the pre-discovery state. A reported observation is replaced as a
 /// whole so request projection cannot combine fields from different probes.
 #[derive(Debug, Clone, Copy, Default)]
-pub(super) struct PreviewHardwareDecodeAdmissionState(Option<AppUiPlaybackHardwareDecodeAdmission>);
+pub(super) struct PreviewHardwareDecodeAdmissionState(Option<PlaybackHardwareDecodeAdmission>);
 
 impl PreviewHardwareDecodeAdmissionState {
-    fn reported(admission: AppUiPlaybackHardwareDecodeAdmission) -> Self {
+    fn reported(admission: PlaybackHardwareDecodeAdmission) -> Self {
         Self(Some(admission))
     }
 
@@ -30,7 +30,7 @@ impl AppUiPreviewService {
     /// support is actually ready.
     pub(crate) fn set_playback_hardware_decode_admission(
         &self,
-        admission: AppUiPlaybackHardwareDecodeAdmission,
+        admission: PlaybackHardwareDecodeAdmission,
     ) {
         self.hardware_decode_admission
             .set(PreviewHardwareDecodeAdmissionState::reported(admission));

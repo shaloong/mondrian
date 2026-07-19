@@ -16,6 +16,7 @@ use mondrian_ui_core::types::{Point, Rect};
 use mondrian_ui_core::{TreeWalker, Widget};
 use mondrian_ui_theme::{set_theme_preset, ThemePreset};
 
+use crate::app::native_video_import::resolve_playback_hardware_decode_admission;
 use crate::app::playback_preview::{
     observe_playback_video_preroll as observe_preview_preroll, pump_playback_preview,
 };
@@ -39,7 +40,6 @@ use crate::app::{discover_crash_recovery_candidates, AppState, CrashRecoveryCand
 use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::action_queue::PendingUiActions;
 use crate::app_ui::asset_thumbnails::AssetThumbnailCache;
-use crate::app_ui::native_video_import::resolve_playback_hardware_decode_admission;
 use crate::app_ui::pending_close_dialog::PendingCloseDialogAction;
 use crate::app_ui::playback_feedback::ViewerPlaybackFeedback;
 use crate::app_ui::preferences_store::{

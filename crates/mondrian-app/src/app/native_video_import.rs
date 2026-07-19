@@ -5,7 +5,6 @@
 //! each other just to explain why preview playback is still using CPU RGBA
 //! uploads.
 
-use super::preview::AppUiPreviewHardwareDecodeAdmissionBlocker;
 use mondrian_media::{
     DecodedFrameResidency, DecodedGpuFrameHandleKind, HwAccelDeviceSelector,
     PreviewHardwareDecodeRequest,
@@ -26,9 +25,28 @@ use mondrian_renderer::{
 #[cfg(test)]
 use mondrian_renderer::{GpuVideoChromaLocation, GpuVideoRange};
 
+/// Stable reason playback cannot request GPU-resident decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum PreviewHardwareDecodeAdmissionBlocker {
+    /// Renderer runtime has not reported native decoded-frame import support yet.
+    RendererSupportUnknown,
+    /// Renderer backend has no native decoded-frame import implementation.
+    RendererImportUnavailable,
+    /// Renderer reports native import but no decoder handle family.
+    RendererHandleSupportMissing,
+    /// Renderer reports native import but no decoded source texture format.
+    RendererSourceTextureFormatSupportMissing,
+    /// Platform native texture import probe is unavailable.
+    PlatformDiscoveryUnavailable,
+    /// Platform can be probed, but neither zero-copy nor low-copy import is declared.
+    PlatformCopyPathUnavailable,
+    /// Platform import exists but cannot consume any renderer-supported decoder handle.
+    PlatformHandleUnsupported,
+}
+
 /// Stable readiness category for native decoded-frame import.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub(crate) enum AppUiNativeVideoImportReadinessStatus {
+pub(crate) enum NativeVideoImportReadinessStatus {
     /// Current media preview path delivered CPU RGBA bytes, not a GPU decoder surface.
     CpuDecodedMedia,
     /// Decoder output claims GPU residency but no native handle family was reported.
@@ -58,7 +76,7 @@ pub(crate) enum AppUiNativeVideoImportReadinessStatus {
 
 /// Input facts for native decoded-frame import readiness evaluation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AppUiNativeVideoImportReadinessInput {
+pub(crate) struct NativeVideoImportReadinessInput {
     /// Residency reported by the media decoder boundary.
     pub decoder_residency: DecodedFrameResidency,
     /// Native decoder handle family, when the decoder produced a GPU surface.
@@ -76,9 +94,9 @@ pub(crate) struct AppUiNativeVideoImportReadinessInput {
 
 /// Point-in-time native decoded-frame import readiness report.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct AppUiNativeVideoImportReadiness {
+pub(crate) struct NativeVideoImportReadiness {
     /// Stable readiness status.
-    pub status: AppUiNativeVideoImportReadinessStatus,
+    pub status: NativeVideoImportReadinessStatus,
     /// Whether a zero-copy decoder-surface-to-renderer path is ready.
     pub zero_copy_ready: bool,
     /// Whether a declared low-copy fallback path is ready.
@@ -116,8 +134,8 @@ pub(crate) struct AppUiNativeVideoImportReadiness {
 
 /// Evaluate native decoded-frame import readiness from media/platform/renderer facts.
 pub(crate) fn evaluate_native_video_import_readiness(
-    input: AppUiNativeVideoImportReadinessInput,
-) -> AppUiNativeVideoImportReadiness {
+    input: NativeVideoImportReadinessInput,
+) -> NativeVideoImportReadiness {
     let decoder_gpu_resident = input.decoder_residency == DecodedFrameResidency::GpuTexture;
     let decoder_handle_kind = input.decoder_handle_kind.map(DecodedGpuFrameHandleKind::as_str);
     let platform_handle_kind = input
@@ -133,8 +151,8 @@ pub(crate) fn evaluate_native_video_import_readiness(
         .map(|format| input.renderer_support.supports_source_texture_format(format))
         .unwrap_or(false);
 
-    let base = AppUiNativeVideoImportReadiness {
-        status: AppUiNativeVideoImportReadinessStatus::CpuDecodedMedia,
+    let base = NativeVideoImportReadiness {
+        status: NativeVideoImportReadinessStatus::CpuDecodedMedia,
         zero_copy_ready: false,
         low_copy_ready: false,
         decoder_gpu_resident,
@@ -154,14 +172,14 @@ pub(crate) fn evaluate_native_video_import_readiness(
 
     if !decoder_gpu_resident {
         return base.with_status(
-            AppUiNativeVideoImportReadinessStatus::CpuDecodedMedia,
+            NativeVideoImportReadinessStatus::CpuDecodedMedia,
             "media preview delivered CPU RGBA bytes; native decoder texture import is not active",
         );
     }
 
     let Some(decoder_handle_kind) = input.decoder_handle_kind else {
         return base.with_status(
-            AppUiNativeVideoImportReadinessStatus::DecoderGpuHandleMissing,
+            NativeVideoImportReadinessStatus::DecoderGpuHandleMissing,
             "decoder reported GPU residency without a native handle family",
         );
     };
@@ -169,7 +187,7 @@ pub(crate) fn evaluate_native_video_import_readiness(
 
     if !input.platform_probe.discovery_available {
         return base.with_status(
-            AppUiNativeVideoImportReadinessStatus::PlatformImportUnsupported,
+            NativeVideoImportReadinessStatus::PlatformImportUnsupported,
             input
                 .platform_probe
                 .error
@@ -179,9 +197,9 @@ pub(crate) fn evaluate_native_video_import_readiness(
     }
     if !input.platform_probe.supports(platform_kind) {
         let status = if input.platform_probe.supported_handle_kinds.is_empty() {
-            AppUiNativeVideoImportReadinessStatus::PlatformImportMissing
+            NativeVideoImportReadinessStatus::PlatformImportMissing
         } else {
-            AppUiNativeVideoImportReadinessStatus::PlatformHandleUnsupported
+            NativeVideoImportReadinessStatus::PlatformHandleUnsupported
         };
         return base.with_status(
             status,
@@ -193,7 +211,7 @@ pub(crate) fn evaluate_native_video_import_readiness(
 
     if !input.renderer_support.renderer_backend_ready {
         return base.with_status(
-            AppUiNativeVideoImportReadinessStatus::RendererBackendUnavailable,
+            NativeVideoImportReadinessStatus::RendererBackendUnavailable,
             input
                 .renderer_support
                 .unavailable_reason
@@ -203,54 +221,46 @@ pub(crate) fn evaluate_native_video_import_readiness(
     }
     if !renderer_supports_handle_kind {
         return base.with_status(
-            AppUiNativeVideoImportReadinessStatus::RendererHandleUnsupported,
+            NativeVideoImportReadinessStatus::RendererHandleUnsupported,
             "renderer backend does not support the decoder handle family",
         );
     }
 
     let Some(source_texture_format) = input.source_texture_format else {
         return base.with_status(
-            AppUiNativeVideoImportReadinessStatus::SourceTextureFormatUnknown,
+            NativeVideoImportReadinessStatus::SourceTextureFormatUnknown,
             "decoded GPU source texture format is unknown",
         );
     };
     if !input.renderer_support.supports_source_texture_format(source_texture_format) {
         return base.with_status(
-            AppUiNativeVideoImportReadinessStatus::RendererSourceTextureFormatUnsupported,
+            NativeVideoImportReadinessStatus::RendererSourceTextureFormatUnsupported,
             "renderer backend does not support the decoded source texture format",
         );
     }
     if input.source_video_sampling.is_none() {
         return base.with_status(
-            AppUiNativeVideoImportReadinessStatus::SourceVideoSamplingUnknown,
+            NativeVideoImportReadinessStatus::SourceVideoSamplingUnknown,
             "native decoded-frame import requires explicit video sampling metadata",
         );
     }
     if input.platform_probe.zero_copy_supported {
-        return base.with_ready(
-            AppUiNativeVideoImportReadinessStatus::ReadyZeroCopy,
-            true,
-            false,
-        );
+        return base.with_ready(NativeVideoImportReadinessStatus::ReadyZeroCopy, true, false);
     }
     if input.platform_probe.low_copy_fallback_supported {
-        return base.with_ready(
-            AppUiNativeVideoImportReadinessStatus::ReadyLowCopy,
-            false,
-            true,
-        );
+        return base.with_ready(NativeVideoImportReadinessStatus::ReadyLowCopy, false, true);
     }
 
     base.with_status(
-        AppUiNativeVideoImportReadinessStatus::PlatformImportMissing,
+        NativeVideoImportReadinessStatus::PlatformImportMissing,
         "platform import support was reported without zero-copy or low-copy residency",
     )
 }
 
-impl AppUiNativeVideoImportReadiness {
+impl NativeVideoImportReadiness {
     fn with_status(
         mut self,
-        status: AppUiNativeVideoImportReadinessStatus,
+        status: NativeVideoImportReadinessStatus,
         reason: impl Into<String>,
     ) -> Self {
         self.status = status;
@@ -260,7 +270,7 @@ impl AppUiNativeVideoImportReadiness {
 
     fn with_ready(
         mut self,
-        status: AppUiNativeVideoImportReadinessStatus,
+        status: NativeVideoImportReadinessStatus,
         zero_copy_ready: bool,
         low_copy_ready: bool,
     ) -> Self {
@@ -268,10 +278,10 @@ impl AppUiNativeVideoImportReadiness {
         self.zero_copy_ready = zero_copy_ready;
         self.low_copy_ready = low_copy_ready;
         self.reason = match status {
-            AppUiNativeVideoImportReadinessStatus::ReadyZeroCopy => {
+            NativeVideoImportReadinessStatus::ReadyZeroCopy => {
                 "native decoded-frame import is ready for zero-copy playback".to_owned()
             }
-            AppUiNativeVideoImportReadinessStatus::ReadyLowCopy => {
+            NativeVideoImportReadinessStatus::ReadyLowCopy => {
                 "native decoded-frame import is ready through a declared low-copy fallback"
                     .to_owned()
             }
@@ -301,13 +311,13 @@ pub(crate) fn platform_handle_kind_for_decoder(
 
 /// Shared renderer/platform admission facts for playback hardware decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AppUiPlaybackHardwareDecodeAdmission {
+pub(crate) struct PlaybackHardwareDecodeAdmission {
     pub(crate) request: PreviewHardwareDecodeRequest,
     pub(crate) hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
     pub(crate) renderer_native_import_ready: bool,
     pub(crate) platform_native_import_ready: bool,
     pub(crate) native_import_admission_ready: bool,
-    pub(crate) admission_blocker: Option<AppUiPreviewHardwareDecodeAdmissionBlocker>,
+    pub(crate) admission_blocker: Option<PreviewHardwareDecodeAdmissionBlocker>,
     pub(crate) platform_discovery_available: bool,
     pub(crate) platform_zero_copy_supported: bool,
     pub(crate) platform_low_copy_fallback_supported: bool,
@@ -322,7 +332,7 @@ pub(crate) struct AppUiPlaybackHardwareDecodeAdmission {
 pub(crate) fn resolve_playback_hardware_decode_admission(
     renderer_support: &GpuNativeDecodedFrameImportSupport,
     platform_probe: &NativeVideoTextureImportProbeResult,
-) -> AppUiPlaybackHardwareDecodeAdmission {
+) -> PlaybackHardwareDecodeAdmission {
     let renderer_native_import_ready = renderer_support.renderer_backend_ready;
     let renderer_supported_handle_kinds =
         saturated_u8_len(renderer_support.supported_handle_kinds.len());
@@ -349,26 +359,26 @@ pub(crate) fn resolve_playback_hardware_decode_admission(
     let admission_blocker = if native_import_admission_ready {
         None
     } else if !renderer_support.renderer_backend_ready {
-        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::RendererImportUnavailable)
+        Some(PreviewHardwareDecodeAdmissionBlocker::RendererImportUnavailable)
     } else if renderer_support.supported_handle_kinds.is_empty() {
-        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::RendererHandleSupportMissing)
+        Some(PreviewHardwareDecodeAdmissionBlocker::RendererHandleSupportMissing)
     } else if renderer_support.supported_source_texture_formats.is_empty() {
-        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::RendererSourceTextureFormatSupportMissing)
+        Some(PreviewHardwareDecodeAdmissionBlocker::RendererSourceTextureFormatSupportMissing)
     } else if !platform_probe.discovery_available {
-        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::PlatformDiscoveryUnavailable)
+        Some(PreviewHardwareDecodeAdmissionBlocker::PlatformDiscoveryUnavailable)
     } else if !platform_copy_path_ready {
-        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::PlatformCopyPathUnavailable)
+        Some(PreviewHardwareDecodeAdmissionBlocker::PlatformCopyPathUnavailable)
     } else if !platform_supports_renderer_handle {
-        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::PlatformHandleUnsupported)
+        Some(PreviewHardwareDecodeAdmissionBlocker::PlatformHandleUnsupported)
     } else {
-        Some(AppUiPreviewHardwareDecodeAdmissionBlocker::RendererSupportUnknown)
+        Some(PreviewHardwareDecodeAdmissionBlocker::RendererSupportUnknown)
     };
     let request = if native_import_admission_ready {
         PreviewHardwareDecodeRequest::PreferGpuResident
     } else {
         PreviewHardwareDecodeRequest::PreferHardwareDecode
     };
-    AppUiPlaybackHardwareDecodeAdmission {
+    PlaybackHardwareDecodeAdmission {
         request,
         hardware_decode_device_selector: renderer_support.hardware_decode_device_selector,
         renderer_native_import_ready,
@@ -450,7 +460,7 @@ mod tests {
         assert!(!admission.native_import_admission_ready);
         assert_eq!(
             admission.admission_blocker,
-            Some(AppUiPreviewHardwareDecodeAdmissionBlocker::PlatformCopyPathUnavailable)
+            Some(PreviewHardwareDecodeAdmissionBlocker::PlatformCopyPathUnavailable)
         );
         assert!(admission.platform_discovery_available);
         assert_eq!(admission.renderer_supported_handle_kinds, 1);
@@ -481,7 +491,7 @@ mod tests {
         assert!(!admission.native_import_admission_ready);
         assert_eq!(
             admission.admission_blocker,
-            Some(AppUiPreviewHardwareDecodeAdmissionBlocker::PlatformHandleUnsupported)
+            Some(PreviewHardwareDecodeAdmissionBlocker::PlatformHandleUnsupported)
         );
         assert!(admission.platform_discovery_available);
         assert!(admission.platform_zero_copy_supported);
@@ -495,7 +505,7 @@ mod tests {
 
         assert_eq!(
             report.status,
-            AppUiNativeVideoImportReadinessStatus::CpuDecodedMedia
+            NativeVideoImportReadinessStatus::CpuDecodedMedia
         );
         assert!(!report.decoder_gpu_resident);
         assert!(!report.zero_copy_ready);
@@ -505,7 +515,7 @@ mod tests {
 
     #[test]
     fn native_video_import_readiness_reports_platform_missing() {
-        let report = evaluate_native_video_import_readiness(AppUiNativeVideoImportReadinessInput {
+        let report = evaluate_native_video_import_readiness(NativeVideoImportReadinessInput {
             decoder_residency: DecodedFrameResidency::GpuTexture,
             decoder_handle_kind: Some(DecodedGpuFrameHandleKind::D3D11Texture2D),
             source_texture_format: Some(GpuNativeDecodedFrameTextureFormat::Nv12),
@@ -516,7 +526,7 @@ mod tests {
 
         assert_eq!(
             report.status,
-            AppUiNativeVideoImportReadinessStatus::PlatformImportMissing
+            NativeVideoImportReadinessStatus::PlatformImportMissing
         );
         assert_eq!(
             report.platform_handle_kind.as_deref(),
@@ -527,7 +537,7 @@ mod tests {
 
     #[test]
     fn native_video_import_readiness_reports_renderer_unavailable() {
-        let report = evaluate_native_video_import_readiness(AppUiNativeVideoImportReadinessInput {
+        let report = evaluate_native_video_import_readiness(NativeVideoImportReadinessInput {
             renderer_support: GpuNativeDecodedFrameImportSupport::unavailable_with_reason(
                 "Dx12",
                 "D3D11 shared texture import bridge is not connected",
@@ -537,7 +547,7 @@ mod tests {
 
         assert_eq!(
             report.status,
-            AppUiNativeVideoImportReadinessStatus::RendererBackendUnavailable
+            NativeVideoImportReadinessStatus::RendererBackendUnavailable
         );
         assert!(!report.renderer_backend_ready);
         assert_eq!(report.renderer_backend_label.as_deref(), Some("Dx12"));
@@ -550,7 +560,7 @@ mod tests {
 
     #[test]
     fn native_video_import_readiness_preserves_platform_partial_diagnostics() {
-        let report = evaluate_native_video_import_readiness(AppUiNativeVideoImportReadinessInput {
+        let report = evaluate_native_video_import_readiness(NativeVideoImportReadinessInput {
             platform_probe: NativeVideoTextureImportProbeResult::found_partial(
                 vec![NativeVideoTextureHandleKind::D3D11Texture2D],
                 false,
@@ -563,7 +573,7 @@ mod tests {
 
         assert_eq!(
             report.status,
-            AppUiNativeVideoImportReadinessStatus::RendererBackendUnavailable
+            NativeVideoImportReadinessStatus::RendererBackendUnavailable
         );
         assert!(!report.platform_zero_copy_supported);
         assert!(report.platform_low_copy_fallback_supported);
@@ -572,28 +582,28 @@ mod tests {
 
     #[test]
     fn native_video_import_readiness_requires_source_texture_format() {
-        let report = evaluate_native_video_import_readiness(AppUiNativeVideoImportReadinessInput {
+        let report = evaluate_native_video_import_readiness(NativeVideoImportReadinessInput {
             source_texture_format: None,
             ..ready_input()
         });
 
         assert_eq!(
             report.status,
-            AppUiNativeVideoImportReadinessStatus::SourceTextureFormatUnknown
+            NativeVideoImportReadinessStatus::SourceTextureFormatUnknown
         );
         assert!(!report.renderer_supports_source_texture_format);
     }
 
     #[test]
     fn native_video_import_readiness_requires_video_sampling_contract() {
-        let report = evaluate_native_video_import_readiness(AppUiNativeVideoImportReadinessInput {
+        let report = evaluate_native_video_import_readiness(NativeVideoImportReadinessInput {
             source_video_sampling: None,
             ..ready_input()
         });
 
         assert_eq!(
             report.status,
-            AppUiNativeVideoImportReadinessStatus::SourceVideoSamplingUnknown
+            NativeVideoImportReadinessStatus::SourceVideoSamplingUnknown
         );
         assert!(!report.zero_copy_ready);
         assert!(report.reason.contains("video sampling"));
@@ -605,7 +615,7 @@ mod tests {
 
         assert_eq!(
             report.status,
-            AppUiNativeVideoImportReadinessStatus::ReadyZeroCopy
+            NativeVideoImportReadinessStatus::ReadyZeroCopy
         );
         assert!(report.zero_copy_ready);
         assert!(!report.low_copy_ready);
@@ -747,8 +757,8 @@ mod tests {
         );
     }
 
-    fn cpu_decoded_input() -> AppUiNativeVideoImportReadinessInput {
-        AppUiNativeVideoImportReadinessInput {
+    fn cpu_decoded_input() -> NativeVideoImportReadinessInput {
+        NativeVideoImportReadinessInput {
             decoder_residency: DecodedFrameResidency::CpuRgba,
             decoder_handle_kind: None,
             source_texture_format: None,
@@ -758,8 +768,8 @@ mod tests {
         }
     }
 
-    fn ready_input() -> AppUiNativeVideoImportReadinessInput {
-        AppUiNativeVideoImportReadinessInput {
+    fn ready_input() -> NativeVideoImportReadinessInput {
+        NativeVideoImportReadinessInput {
             decoder_residency: DecodedFrameResidency::GpuTexture,
             decoder_handle_kind: Some(DecodedGpuFrameHandleKind::D3D11Texture2D),
             source_texture_format: Some(GpuNativeDecodedFrameTextureFormat::Nv12),

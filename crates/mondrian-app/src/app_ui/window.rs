@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::app::native_video_import::{
+    evaluate_native_video_import_readiness, NativeVideoImportReadiness,
+    NativeVideoImportReadinessInput,
+};
 use crate::app::preview_execution::{
     PreviewGpuFrame as AppUiGpuPreviewFrame, PreviewGpuFrameState as AppUiGpuPreviewFrameState,
     PreviewGpuWorkingInput as AppUiGpuPreviewWorkingInput,
@@ -22,10 +26,6 @@ use crate::app::ui_actions::app_shell_quit_action;
 use crate::app::AppState;
 use crate::app_ui::action_queue::PendingUiActions;
 use crate::app_ui::host::{AppUiHost, AppUiMode, AppUiShellCommands};
-use crate::app_ui::native_video_import::{
-    evaluate_native_video_import_readiness, AppUiNativeVideoImportReadiness,
-    AppUiNativeVideoImportReadinessInput,
-};
 use crate::app_ui::preview::AppUiPreviewColorRejection;
 use crate::app_ui::rendering::{
     AppUiBackendEvent, AppUiFramePressure, AppUiFrameRenderer, AppUiRenderDiagnosticReporter,
@@ -348,7 +348,7 @@ struct AppUiViewerGpuOutputFrameResidency {
     readback_count: u32,
     reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    native_video_import: Option<AppUiNativeVideoImportReadiness>,
+    native_video_import: Option<NativeVideoImportReadiness>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -3787,10 +3787,10 @@ fn preview_gpu_composite_native_video_import_readiness(
     has_media: bool,
     facts: Option<ViewerGpuNativeVideoFacts>,
     renderer_support: GpuNativeDecodedFrameImportSupport,
-) -> Option<AppUiNativeVideoImportReadiness> {
+) -> Option<NativeVideoImportReadiness> {
     let facts = facts.unwrap_or_default();
     has_media.then(|| {
-        evaluate_native_video_import_readiness(AppUiNativeVideoImportReadinessInput {
+        evaluate_native_video_import_readiness(NativeVideoImportReadinessInput {
             decoder_residency: facts.decoder_residency,
             decoder_handle_kind: facts.decoder_handle_kind,
             source_texture_format: facts.source_texture_format,
@@ -6038,7 +6038,7 @@ mod tests {
             .expect("media path reports native import readiness");
         assert_eq!(
             native_video_import.status,
-            crate::app_ui::native_video_import::AppUiNativeVideoImportReadinessStatus::CpuDecodedMedia
+            crate::app::native_video_import::NativeVideoImportReadinessStatus::CpuDecodedMedia
         );
         assert!(!native_video_import.zero_copy_ready);
     }
@@ -6078,7 +6078,7 @@ mod tests {
         );
         assert_ne!(
             native_video_import.status,
-            crate::app_ui::native_video_import::AppUiNativeVideoImportReadinessStatus::CpuDecodedMedia
+            crate::app::native_video_import::NativeVideoImportReadinessStatus::CpuDecodedMedia
         );
     }
 
@@ -6116,7 +6116,7 @@ mod tests {
         assert!(native_video_import.decoder_gpu_resident);
         assert_ne!(
             native_video_import.status,
-            crate::app_ui::native_video_import::AppUiNativeVideoImportReadinessStatus::CpuDecodedMedia
+            crate::app::native_video_import::NativeVideoImportReadinessStatus::CpuDecodedMedia
         );
     }
 
@@ -6150,7 +6150,7 @@ mod tests {
             .expect("media path reports native import readiness");
         assert_eq!(
             native_video_import.status,
-            crate::app_ui::native_video_import::AppUiNativeVideoImportReadinessStatus::CpuDecodedMedia
+            crate::app::native_video_import::NativeVideoImportReadinessStatus::CpuDecodedMedia
         );
         assert!(!native_video_import.decoder_gpu_resident);
         assert!(!native_video_import.zero_copy_ready);

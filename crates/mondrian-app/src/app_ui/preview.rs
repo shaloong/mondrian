@@ -72,6 +72,9 @@ use mondrian_ui_widgets::{
     ViewerFrameImage,
 };
 
+use crate::app::native_video_import::PlaybackHardwareDecodeAdmission;
+#[cfg(test)]
+use crate::app::native_video_import::PreviewHardwareDecodeAdmissionBlocker;
 use crate::app::playback_preview::{PlaybackPreviewAdapter, PreviewVideoPreroll, PreviewWorkPoll};
 use crate::app::preview_access_mode::{
     media_preview_access_mode_for_intent, media_preview_cancel_reason_at_checkpoint,
@@ -110,7 +113,6 @@ use crate::app::preview_scheduler_policy::{
 };
 use crate::app::proxy_generation::{request_proxy_generation, resolve_asset_proxy_color_contract};
 use crate::app::AppState;
-use crate::app_ui::native_video_import::AppUiPlaybackHardwareDecodeAdmission;
 use crate::app_ui::panels::{
     ViewerColorPipelineStatus, ViewerPreviewColorRejectionModel, ViewerPreviewSource,
     ViewerPreviewState,

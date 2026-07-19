@@ -16,10 +16,10 @@ use super::playback_acceptance::{
 };
 use super::playback_preview::{observe_playback_video_preroll, pump_playback_preview};
 use super::*;
+use crate::app::native_video_import::resolve_playback_hardware_decode_admission;
 use crate::app::preview_access_mode::MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT;
 use crate::app::preview_execution::PreviewDecodeExecutionSummary as AppUiPreviewDecodeExecutionSummary;
 use crate::app::ui_actions::TimelineSeekSource;
-use crate::app_ui::native_video_import::resolve_playback_hardware_decode_admission;
 use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
 use crate::app_ui::preview::{
     build_preview_color_health_report, build_preview_decode_performance_report,
