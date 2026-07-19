@@ -1,11 +1,14 @@
 //! Timeline export orchestration shared by all UI frontends.
 
 use super::*;
-use mondrian_core::{MondrianError, Result};
+use mondrian_core::{JobId, MondrianError, Result};
 use mondrian_export::preset::{
-    Container, ExportConfig, ExportInput, ExportPreset, TimelineExportInput, TimelineExportRange,
+    Container, ExportConfig, ExportMediaDependency, ExportPreset, TimelineExportRange,
+    TimelineExportSnapshot,
 };
-use mondrian_export::queue::RenderJob;
+use mondrian_export::queue::{
+    ExportCancelOutcome, ExportJobSnapshot, ExportQueueDiagnostics, RenderJob,
+};
 
 /// Request to enqueue a timeline export job.
 #[derive(Debug, Clone)]
@@ -108,7 +111,7 @@ impl AppState {
     }
 
     /// Build and enqueue a render job from a timeline export request.
-    pub fn enqueue_timeline_export(&mut self, request: TimelineExportRequest) -> Result<()> {
+    pub fn enqueue_timeline_export(&mut self, request: TimelineExportRequest) -> Result<JobId> {
         if request.output_path.as_os_str().is_empty() {
             let reason = "请指定输出路径".to_string();
             self.set_status_hint(format!("导出失败：{reason}"), true);
@@ -128,56 +131,106 @@ impl AppState {
             return Err(export_error("enqueue_timeline_export", reason));
         };
 
-        let (asset_paths, asset_color_spaces, asset_interpretations, asset_color_diagnostics) =
-            collect_timeline_asset_paths(self, &sequence, &sequences).map_err(|reason| {
-                self.set_status_hint(format!("导出失败：{reason}"), true);
-                export_error("enqueue_timeline_export", reason)
-            })?;
+        let timeline =
+            match capture_timeline_export_snapshot(self, sequence, sequences, request.range) {
+                Ok(timeline) => timeline,
+                Err(reason) => {
+                    self.set_status_hint(format!("导出失败：{reason}"), true);
+                    return Err(export_error("enqueue_timeline_export", reason));
+                }
+            };
 
         let config = ExportConfig {
             preset: request.preset,
-            input: ExportInput::Timeline(Box::new(TimelineExportInput {
-                sequence,
-                sequences,
-                asset_paths,
-                asset_color_spaces,
-                asset_interpretations,
-                asset_color_diagnostics,
-                range: request.range,
-                project_color_management: self.project_settings.color_management.clone(),
-            })),
+            timeline: Box::new(timeline),
             output_path: request.output_path,
         };
         let output_path = config.output_path.display().to_string();
-        self.render_queue.enqueue(RenderJob::new(config));
+        let job_id = self.render_queue.enqueue(RenderJob::new(config)).map_err(|error| {
+            let reason = error.to_string();
+            self.set_status_hint(format!("导出失败：{reason}"), true);
+            export_error("enqueue_timeline_export", reason)
+        })?;
         self.set_status_hint("已加入导出队列", false);
-        tracing::info!("导出任务已加入队列: {output_path}");
-        Ok(())
+        tracing::info!(%job_id, "导出任务已加入队列: {output_path}");
+        Ok(job_id)
+    }
+
+    /// Lightweight export snapshots for UI and Headless observers.
+    pub fn export_jobs_snapshot(&self) -> Vec<ExportJobSnapshot> {
+        self.render_queue.list_jobs()
+    }
+
+    /// Request cancellation without exposing queue internals to UI actions.
+    pub fn cancel_export_job(&self, job_id: JobId) -> ExportCancelOutcome {
+        self.render_queue.cancel(job_id)
+    }
+
+    /// Remove retained terminal export evidence after explicit user cleanup.
+    pub fn clear_completed_exports(&self) {
+        self.render_queue.clear_completed();
+    }
+
+    /// Snapshot bounded offline export execution evidence.
+    pub fn export_queue_diagnostics(&self) -> ExportQueueDiagnostics {
+        self.render_queue.diagnostics()
+    }
+
+    /// Observe queue changes without consuming evidence needed by another observer.
+    pub fn poll_export_queue(&mut self) -> bool {
+        let revision = self.render_queue.revision();
+        if revision == self.export_queue_observed_revision {
+            return false;
+        }
+        self.export_queue_observed_revision = revision;
+        true
     }
 }
 
-pub(crate) type TimelineAssetPaths = (
-    HashMap<mondrian_core::types::AssetId, PathBuf>,
-    HashMap<mondrian_core::types::AssetId, mondrian_core::types::ColorSpace>,
-    HashMap<mondrian_core::types::AssetId, mondrian_core::timeline_data::AssetMediaInterpretation>,
-    HashMap<mondrian_core::types::AssetId, mondrian_media::VideoColorDiagnostic>,
-);
-
-pub(crate) fn collect_timeline_asset_paths(
+pub(crate) fn capture_timeline_export_snapshot(
     state: &AppState,
-    sequence: &mondrian_timeline::sequence::Sequence,
-    sequences: &[mondrian_timeline::sequence::Sequence],
-) -> std::result::Result<TimelineAssetPaths, String> {
-    let library = state.asset_library.as_ref().ok_or_else(|| "素材库未连接".to_string())?;
-
+    sequence: mondrian_timeline::sequence::Sequence,
+    sequences: Vec<mondrian_timeline::sequence::Sequence>,
+    range: TimelineExportRange,
+) -> std::result::Result<TimelineExportSnapshot, String> {
     let mut asset_ids = HashSet::new();
     let mut visited_sequences = HashSet::new();
-    collect_sequence_asset_ids(sequence, sequences, &mut visited_sequences, &mut asset_ids)?;
+    let mut active_sequences = HashSet::new();
+    collect_sequence_asset_ids(
+        &sequence,
+        &sequences,
+        &mut visited_sequences,
+        &mut active_sequences,
+        &mut asset_ids,
+    )?;
 
-    let mut paths = HashMap::new();
-    let mut color_spaces = HashMap::new();
-    let mut interpretations = HashMap::new();
-    let mut color_diagnostics = HashMap::new();
+    let media = resolve_export_media_dependencies(state, asset_ids)?;
+    let nested_sequences = sequences
+        .into_iter()
+        .filter(|candidate| {
+            candidate.id != sequence.id && visited_sequences.contains(&candidate.id)
+        })
+        .collect();
+
+    Ok(TimelineExportSnapshot {
+        sequence,
+        sequences: nested_sequences,
+        media,
+        range,
+        project_color_management: state.project_settings.color_management.clone(),
+    })
+}
+
+fn resolve_export_media_dependencies(
+    state: &AppState,
+    asset_ids: HashSet<AssetId>,
+) -> std::result::Result<HashMap<AssetId, ExportMediaDependency>, String> {
+    if asset_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let library = state.asset_library.as_ref().ok_or_else(|| "素材库未连接".to_string())?;
+
+    let mut media = HashMap::new();
     for asset_id in asset_ids {
         let asset = library
             .get_asset(asset_id)
@@ -188,37 +241,43 @@ pub(crate) fn collect_timeline_asset_paths(
             continue;
         }
 
-        if !asset.path.exists() {
-            return Err(format!("素材离线: {}", asset.path.display()));
-        }
-        if let Some(color_space) =
-            asset.media_info.primary_video().and_then(|video| video.detected_color_space)
-        {
-            color_spaces.insert(asset_id, color_space);
-        }
-        interpretations.insert(asset_id, asset.interpretation);
-        if let Some(diagnostic) = asset
+        let metadata = std::fs::metadata(&asset.path)
+            .map_err(|error| format!("素材离线: {} ({error})", asset.path.display()))?;
+        let detected_color_space =
+            asset.media_info.primary_video().and_then(|video| video.detected_color_space);
+        let color_diagnostic = asset
             .media_info
             .primary_video()
-            .map(mondrian_media::VideoColorDiagnostic::from_stream)
-        {
-            color_diagnostics.insert(asset_id, diagnostic);
-        }
-        paths.insert(asset_id, asset.path);
+            .map(mondrian_media::VideoColorDiagnostic::from_stream);
+        media.insert(
+            asset_id,
+            ExportMediaDependency {
+                path: asset.path,
+                source_fingerprint: mondrian_media::MediaFileFingerprint::from_metadata(&metadata),
+                detected_color_space,
+                interpretation: asset.interpretation,
+                color_diagnostic,
+            },
+        );
     }
 
-    Ok((paths, color_spaces, interpretations, color_diagnostics))
+    Ok(media)
 }
 
 pub(crate) fn collect_sequence_asset_ids(
     sequence: &mondrian_timeline::sequence::Sequence,
     sequences: &[mondrian_timeline::sequence::Sequence],
     visited_sequences: &mut HashSet<SequenceId>,
+    active_sequences: &mut HashSet<SequenceId>,
     asset_ids: &mut HashSet<mondrian_core::types::AssetId>,
 ) -> std::result::Result<(), String> {
-    if !visited_sequences.insert(sequence.id) {
+    if active_sequences.contains(&sequence.id) {
+        return Err(format!("嵌套序列形成循环: {}", sequence.id));
+    }
+    if visited_sequences.contains(&sequence.id) {
         return Ok(());
     }
+    active_sequences.insert(sequence.id);
 
     for track in sequence.video_tracks.iter().chain(sequence.audio_tracks.iter()) {
         for clip in &track.clips {
@@ -237,6 +296,7 @@ pub(crate) fn collect_sequence_asset_ids(
                     nested_sequence,
                     sequences,
                     visited_sequences,
+                    active_sequences,
                     asset_ids,
                 )?;
                 continue;
@@ -244,6 +304,8 @@ pub(crate) fn collect_sequence_asset_ids(
             asset_ids.insert(clip.asset_id);
         }
     }
+    active_sequences.remove(&sequence.id);
+    visited_sequences.insert(sequence.id);
     Ok(())
 }
 
@@ -295,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn build_asset_paths_skips_synthetic_adjustment_assets() {
+    fn build_media_dependencies_skips_synthetic_adjustment_assets() {
         let mut state = AppState {
             sequence: Some(Sequence::new("export-adjustment")),
             ..Default::default()
@@ -321,20 +383,21 @@ mod tests {
                 .expect("add adjustment clip");
         }
 
-        let seq = state.sequence.as_ref().expect("sequence should exist");
-        let (paths, color_spaces, interpretations, color_diagnostics) =
-            collect_timeline_asset_paths(&state, seq, std::slice::from_ref(seq))
-                .expect("collect asset paths");
-        assert!(!paths.contains_key(&asset_id));
-        assert!(!color_spaces.contains_key(&asset_id));
-        assert!(!interpretations.contains_key(&asset_id));
-        assert!(!color_diagnostics.contains_key(&asset_id));
+        let seq = state.sequence.as_ref().expect("sequence should exist").clone();
+        let snapshot = capture_timeline_export_snapshot(
+            &state,
+            seq.clone(),
+            vec![seq],
+            TimelineExportRange::EntireSequence,
+        )
+        .expect("capture export snapshot");
+        assert!(!snapshot.media.contains_key(&asset_id));
 
         let _ = std::fs::remove_dir_all(temp_root);
     }
 
     #[test]
-    fn build_asset_paths_carries_asset_interpretations_for_export() {
+    fn build_media_dependencies_keeps_interpretation_and_source_revision_together() {
         let mut state = AppState {
             sequence: Some(Sequence::new("export-interpretation")),
             ..Default::default()
@@ -369,12 +432,25 @@ mod tests {
                 .expect("add audio clip");
         }
 
-        let seq = state.sequence.as_ref().expect("sequence should exist");
-        let (_, _, interpretations, _) =
-            collect_timeline_asset_paths(&state, seq, std::slice::from_ref(seq))
-                .expect("collect asset paths");
+        let seq = state.sequence.as_ref().expect("sequence should exist").clone();
+        let snapshot = capture_timeline_export_snapshot(
+            &state,
+            seq.clone(),
+            vec![seq],
+            TimelineExportRange::EntireSequence,
+        )
+        .expect("capture export snapshot");
 
-        assert_eq!(interpretations.get(&asset_id), Some(&interpretation));
+        let dependency = snapshot.media.get(&asset_id).expect("captured dependency");
+        assert_eq!(dependency.interpretation, interpretation);
+        assert_eq!(
+            std::fs::canonicalize(&dependency.path).expect("canonical dependency path"),
+            std::fs::canonicalize(&media_path).expect("canonical fixture path")
+        );
+        assert_eq!(
+            dependency.source_fingerprint,
+            mondrian_media::MediaFileFingerprint::capture(dependency.path.as_path())
+        );
 
         let _ = std::fs::remove_dir_all(temp_root);
     }
@@ -403,11 +479,83 @@ mod tests {
 
         let sequences = vec![parent.clone(), child];
         let mut visited = HashSet::new();
+        let mut active = HashSet::new();
         let mut assets = HashSet::new();
-        collect_sequence_asset_ids(&parent, &sequences, &mut visited, &mut assets)
+        collect_sequence_asset_ids(&parent, &sequences, &mut visited, &mut active, &mut assets)
             .expect("collect nested assets");
 
         assert!(assets.contains(&asset_id));
+    }
+
+    #[test]
+    fn export_snapshot_contains_only_reachable_nested_sequence_closure() {
+        let state = AppState::default();
+        let mut parent = Sequence::new("parent");
+        let child = Sequence::new("child");
+        let unrelated = Sequence::new("unrelated");
+        let tb = parent.time_base();
+        parent.video_tracks[0]
+            .add_clip(
+                Clip::new_nested_sequence(
+                    child.id,
+                    tt(0, tb),
+                    tt(12, tb),
+                    Some("child".to_string()),
+                )
+                .expect("valid nested clip"),
+            )
+            .expect("add nested clip");
+
+        let snapshot = capture_timeline_export_snapshot(
+            &state,
+            parent.clone(),
+            vec![parent, child.clone(), unrelated],
+            TimelineExportRange::EntireSequence,
+        )
+        .expect("capture reachable closure");
+
+        assert_eq!(snapshot.sequences.len(), 1);
+        assert_eq!(snapshot.sequences[0].id, child.id);
+    }
+
+    #[test]
+    fn export_snapshot_rejects_recursive_sequence_nesting() {
+        let state = AppState::default();
+        let mut parent = Sequence::new("parent");
+        let mut child = Sequence::new("child");
+        let tb = parent.time_base();
+        parent.video_tracks[0]
+            .add_clip(
+                Clip::new_nested_sequence(
+                    child.id,
+                    tt(0, tb),
+                    tt(12, tb),
+                    Some("child".to_string()),
+                )
+                .expect("valid nested clip"),
+            )
+            .expect("add child clip");
+        child.video_tracks[0]
+            .add_clip(
+                Clip::new_nested_sequence(
+                    parent.id,
+                    tt(0, tb),
+                    tt(12, tb),
+                    Some("parent".to_string()),
+                )
+                .expect("valid nested clip"),
+            )
+            .expect("add parent clip");
+
+        let error = capture_timeline_export_snapshot(
+            &state,
+            parent.clone(),
+            vec![parent, child],
+            TimelineExportRange::EntireSequence,
+        )
+        .expect_err("recursive nesting must fail closed");
+
+        assert!(error.contains("循环"));
     }
 
     #[test]

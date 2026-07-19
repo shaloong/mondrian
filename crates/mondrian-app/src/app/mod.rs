@@ -295,7 +295,9 @@ pub struct AppState {
     pub selection: SelectionState,
 
     // 渲染导出队列
-    pub render_queue: Arc<RenderQueue>,
+    pub(crate) render_queue: Arc<RenderQueue>,
+    /// Last export queue revision consumed by the app event-loop Adapter.
+    export_queue_observed_revision: u64,
     /// UI-stable timeline export draft shared by app UI export panels.
     pub export_draft: TimelineExportDraft,
 
@@ -360,6 +362,7 @@ impl AppState {
             dragging_asset: None,
             selection: SelectionState::default(),
             render_queue: RenderQueue::new(),
+            export_queue_observed_revision: 0,
             export_draft: TimelineExportDraft::default(),
             status_hint: None,
             status_log: Vec::new(),

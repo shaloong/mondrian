@@ -38,8 +38,8 @@ fn color_contract() -> ThumbnailColorContract {
     }
 }
 
-fn fingerprint(seed: u64) -> PreviewFileFingerprint {
-    PreviewFileFingerprint {
+fn fingerprint(seed: u64) -> MediaFileFingerprint {
+    MediaFileFingerprint {
         len: Some(seed),
         modified_secs: Some(seed),
         modified_nanos: Some(seed as u32),

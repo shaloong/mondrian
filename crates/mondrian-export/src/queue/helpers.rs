@@ -1,122 +1,81 @@
-//! Export helpers: filter building, codec args, validation, probing.
+//! Export helpers: codec arguments, transactional process monitoring, and validation.
 use super::*;
+use std::collections::VecDeque;
+use std::io::Read;
+use std::process::{Child, ExitStatus};
+use std::time::Duration;
 
-pub(crate) fn update_job_terminal_state(
-    jobs: &Mutex<VecDeque<RenderJob>>,
-    job_id: JobId,
-    status: JobStatus,
-    progress: f32,
-) {
-    let mut queue = jobs.lock();
-    if let Some(job) = queue.iter_mut().find(|job| job.id == job_id) {
-        if is_terminal(&job.status) {
-            return;
-        }
-        job.status = status;
-        job.progress = progress.clamp(0.0, 1.0);
-        job.completed_at = Some(Utc::now());
-    }
+const FFMPEG_ERROR_TAIL_CAPACITY: usize = 64 * 1024;
+
+pub(crate) struct FfmpegExit {
+    pub(crate) status: ExitStatus,
+    pub(crate) stderr_tail: String,
 }
 
-pub(crate) fn is_terminal(status: &JobStatus) -> bool {
-    matches!(
-        status,
-        JobStatus::Completed | JobStatus::Failed(_) | JobStatus::Cancelled
-    )
-}
-
-pub(crate) fn monitor_ffmpeg_child(
+pub(crate) fn wait_for_ffmpeg_child(
     mut child: Child,
-    duration_ms: u64,
-    cancel: &AtomicBool,
-    report: &mut dyn FnMut(JobStatus, f32),
-) -> JobExecutionResult {
-    let stderr = match child.stderr.take() {
-        Some(stderr) => stderr,
-        None => {
+    cancellation: &ExecutionCancellationToken,
+) -> Result<FfmpegExit, JobExecutionResult> {
+    let Some(mut stderr) = child.stderr.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(JobExecutionResult::Failed(
+            "ffmpeg stderr pipe is unavailable".to_owned(),
+        ));
+    };
+    let stderr_reader = match std::thread::Builder::new()
+        .name("mondrian-export-ffmpeg-stderr".to_owned())
+        .spawn(move || {
+            let mut tail = VecDeque::with_capacity(FFMPEG_ERROR_TAIL_CAPACITY);
+            let mut buffer = [0_u8; 4_096];
+            loop {
+                match stderr.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        for byte in &buffer[..count] {
+                            if tail.len() == FFMPEG_ERROR_TAIL_CAPACITY {
+                                tail.pop_front();
+                            }
+                            tail.push_back(*byte);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            String::from_utf8_lossy(&tail.into_iter().collect::<Vec<_>>()).into_owned()
+        }) {
+        Ok(handle) => handle,
+        Err(error) => {
             let _ = child.kill();
-            return JobExecutionResult::Failed("ffmpeg stderr 管道不可用".to_string());
+            let _ = child.wait();
+            return Err(JobExecutionResult::Failed(format!(
+                "failed to start bounded ffmpeg diagnostic reader: {error}"
+            )));
         }
     };
 
-    let (progress_tx, progress_rx) = mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        let reader = BufReader::new(stderr);
-        for line in reader.lines() {
-            match line {
-                Ok(line) => {
-                    let _ = progress_tx.send(line);
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
-    let mut last_ratio = 0.0_f64;
     loop {
-        if cancel.load(Ordering::Relaxed) {
+        if cancellation.is_canceled() {
             let _ = child.kill();
             let _ = child.wait();
-            return JobExecutionResult::Cancelled;
+            let _ = stderr_reader.join();
+            return Err(JobExecutionResult::Cancelled);
         }
-
-        match progress_rx.recv_timeout(Duration::from_millis(120)) {
-            Ok(line) => {
-                if let Some(out_time_us) = parse_progress_time_us(&line) {
-                    if duration_ms > 0 {
-                        let ratio =
-                            (out_time_us as f64 / (duration_ms as f64 * 1000.0)).clamp(0.0, 1.0);
-                        if ratio > last_ratio + 0.001 {
-                            last_ratio = ratio;
-                            let frame = (ratio * 1000.0).round().clamp(0.0, 1000.0) as u64;
-                            let progress = (0.05 + 0.9 * ratio).clamp(0.0, 0.98) as f32;
-                            report(JobStatus::Rendering { frame, total_frames: 1000 }, progress);
-                        }
-                    }
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {}
-        }
-
         match child.try_wait() {
             Ok(Some(status)) => {
-                if status.success() {
-                    report(JobStatus::Encoding, 0.99);
-                    return JobExecutionResult::Completed;
-                }
-                return JobExecutionResult::Failed(format!("ffmpeg 退出码：{}", status));
+                let stderr_tail = stderr_reader.join().unwrap_or_default();
+                return Ok(FfmpegExit { status, stderr_tail });
             }
-            Ok(None) => {}
-            Err(err) => {
-                return JobExecutionResult::Failed(format!("检查 ffmpeg 进程状态失败: {}", err));
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stderr_reader.join();
+                return Err(JobExecutionResult::Failed(format!(
+                    "failed to observe ffmpeg process: {error}"
+                )));
             }
         }
-    }
-}
-
-pub(crate) fn build_video_filter(config: &ExportConfig) -> Option<String> {
-    let mut filters = Vec::<String>::new();
-
-    if matches!(config.preset.video, VideoCodecConfig::Gif { .. }) {
-        filters.push("fps=15".to_string());
-    }
-
-    if let Some(resolution) = &config.preset.resolution {
-        filters.push(format!(
-            "scale={}:{}:force_original_aspect_ratio=decrease",
-            resolution.width, resolution.height
-        ));
-        filters.push(format!(
-            "pad={}:{}:(ow-iw)/2:(oh-ih)/2",
-            resolution.width, resolution.height
-        ));
-    }
-
-    if filters.is_empty() {
-        None
-    } else {
-        Some(filters.join(","))
     }
 }
 
@@ -397,7 +356,7 @@ pub(crate) fn apply_audio_codec_args(cmd: &mut Command, codec: &AudioCodecConfig
 
 pub(crate) fn validate_timeline_export_color_compatibility(
     config: &ExportConfig,
-    timeline: &TimelineExportInput,
+    timeline: &TimelineExportSnapshot,
 ) -> Result<(), String> {
     let settings = &timeline.sequence.settings;
     let output = settings.color_management.output_color_space;
@@ -560,94 +519,6 @@ pub(crate) fn container_format(container: &Container) -> &'static str {
         Container::Gif => "gif",
         Container::Mxf => "mxf",
         Container::Webm => "webm",
-    }
-}
-
-pub(crate) fn parse_progress_time_us(line: &str) -> Option<u64> {
-    if let Some(raw) = line.strip_prefix("out_time_ms=") {
-        // ffmpeg progress 的 out_time_ms 字段单位为 microseconds
-        return raw.trim().parse::<u64>().ok();
-    }
-    if let Some(raw) = line.strip_prefix("out_time=") {
-        let millis = parse_time_spec_millis(raw.trim())?;
-        return Some(millis.saturating_mul(1000));
-    }
-    None
-}
-
-pub(crate) fn probe_duration_ms(
-    path: &Path,
-    in_point: Option<&str>,
-    out_point: Option<&str>,
-) -> Option<u64> {
-    let output = Command::new("ffprobe")
-        .arg("-v")
-        .arg("error")
-        .arg("-show_entries")
-        .arg("format=duration")
-        .arg("-of")
-        .arg("default=nokey=1:noprint_wrappers=1")
-        .arg(path)
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let raw = String::from_utf8(output.stdout).ok()?;
-    let total_ms = (raw.trim().parse::<f64>().ok()? * 1000.0).max(0.0) as u64;
-
-    let in_ms = in_point.and_then(parse_time_spec_millis).unwrap_or(0);
-    let out_ms = out_point.and_then(parse_time_spec_millis);
-
-    match out_ms {
-        Some(out_ms) if out_ms > in_ms => Some(out_ms - in_ms),
-        Some(out_ms) => Some(out_ms),
-        None if total_ms > in_ms => Some(total_ms - in_ms),
-        None => Some(total_ms),
-    }
-}
-
-pub(crate) fn parse_time_spec_millis(raw: &str) -> Option<u64> {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return None;
-    }
-
-    if let Ok(secs) = raw.parse::<f64>() {
-        if secs.is_sign_negative() {
-            return None;
-        }
-        return Some((secs * 1000.0).round() as u64);
-    }
-
-    let parts: Vec<&str> = raw.split(':').collect();
-    match parts.as_slice() {
-        [ss] => {
-            let secs = ss.parse::<f64>().ok()?;
-            if secs.is_sign_negative() {
-                return None;
-            }
-            Some((secs * 1000.0).round() as u64)
-        }
-        [mm, ss] => {
-            let mins = mm.parse::<u64>().ok()?;
-            let secs = ss.parse::<f64>().ok()?;
-            Some(mins.saturating_mul(60_000) + (secs * 1000.0).round() as u64)
-        }
-        [hh, mm, ss] => {
-            let hours = hh.parse::<u64>().ok()?;
-            let mins = mm.parse::<u64>().ok()?;
-            let secs = ss.parse::<f64>().ok()?;
-            Some(
-                hours
-                    .saturating_mul(3_600_000)
-                    .saturating_add(mins.saturating_mul(60_000))
-                    .saturating_add((secs * 1000.0).round() as u64),
-            )
-        }
-        _ => None,
     }
 }
 

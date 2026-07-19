@@ -13,7 +13,7 @@ use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
 use mondrian_core::WorkingColorSpace;
 use mondrian_media::{
     preview_decode_cpu_budget, DecodedVideoRangeContract, HwAccelDeviceSelector,
-    PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewFileFingerprint,
+    MediaFileFingerprint, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
     PreviewHardwareDecodeRequest,
 };
 
@@ -35,7 +35,7 @@ pub(crate) enum MediaPreviewNativeSurfaceHint {
 pub(crate) struct MediaPreviewKey {
     pub(crate) asset_id: AssetId,
     pub(crate) path: PathBuf,
-    pub(crate) fingerprint: Option<PreviewFileFingerprint>,
+    pub(crate) fingerprint: Option<MediaFileFingerprint>,
     pub(crate) source_frame: i64,
     pub(crate) source_micros: i64,
     pub(crate) target_width: u32,

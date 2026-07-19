@@ -2,7 +2,7 @@
 
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, ColorSpace};
-use mondrian_media::VideoColorDiagnostic;
+use mondrian_media::{MediaFileFingerprint, VideoColorDiagnostic};
 use mondrian_timeline::sequence::Sequence;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -114,20 +114,9 @@ impl ExportPreset {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportConfig {
     pub preset: ExportPreset,
-    pub input: ExportInput,
+    /// Immutable timeline and media-dependency snapshot captured at admission.
+    pub timeline: Box<TimelineExportSnapshot>,
     pub output_path: std::path::PathBuf,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ExportInput {
-    /// 直接转码单文件输入（兼容旧流程）
-    File {
-        input_path: PathBuf,
-        in_point: Option<String>, // TODO: FramePosition
-        out_point: Option<String>,
-    },
-    /// 从时间线逐帧渲染后再编码输出
-    Timeline(Box<TimelineExportInput>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -142,26 +131,31 @@ pub enum TimelineExportRange {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TimelineExportInput {
+pub struct TimelineExportSnapshot {
     pub sequence: Sequence,
     #[serde(default)]
     pub sequences: Vec<Sequence>,
-    pub asset_paths: HashMap<AssetId, PathBuf>,
-    /// Asset color spaces explicitly detected from media metadata.
-    ///
-    /// Missing entries mean the media was untagged or unsupported; render code
-    /// must resolve them through the sequence missing-metadata policy.
+    /// Closed dependency set for every real media asset reachable from the sequence graph.
     #[serde(default)]
-    pub asset_color_spaces: HashMap<AssetId, ColorSpace>,
-    /// Persistent user interpretation stored on asset-library records.
-    #[serde(default)]
-    pub asset_interpretations: HashMap<AssetId, AssetMediaInterpretation>,
-    /// Per-asset media color diagnostics captured during app-side asset lookup.
-    #[serde(default)]
-    pub asset_color_diagnostics: HashMap<AssetId, VideoColorDiagnostic>,
+    pub media: HashMap<AssetId, ExportMediaDependency>,
     #[serde(default)]
     pub range: TimelineExportRange,
     /// 项目级色彩管理设置（所有序列默认继承）。
     #[serde(default)]
     pub project_color_management: mondrian_core::ProjectColorManagement,
+}
+
+/// One internally consistent media dependency frozen into an export snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportMediaDependency {
+    /// Source path resolved when the snapshot was captured.
+    pub path: PathBuf,
+    /// Exact source revision that the export is allowed to publish from.
+    pub source_fingerprint: MediaFileFingerprint,
+    /// Color space explicitly detected from source metadata, when reliable.
+    pub detected_color_space: Option<ColorSpace>,
+    /// Persistent user interpretation captured with the source revision.
+    pub interpretation: AssetMediaInterpretation,
+    /// Source color evidence captured with the source revision.
+    pub color_diagnostic: Option<VideoColorDiagnostic>,
 }

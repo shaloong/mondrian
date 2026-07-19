@@ -7,7 +7,7 @@ use mondrian_core::{
     AssetId, ColorSpace, ExecutionCancellationToken, ExecutionTerminalDisposition, ProjectId,
 };
 use mondrian_media::{
-    DecodedVideoRange, PreviewFileFingerprint, ProxyColorContract, ProxyConfig,
+    DecodedVideoRange, MediaFileFingerprint, ProxyColorContract, ProxyConfig,
     ProxyGenerationOutcome, ProxyStatus,
 };
 use parking_lot::{Condvar, Mutex};
@@ -153,7 +153,7 @@ fn synthetic_request(seed: u64) -> ProxyGenerationRequest {
     ProxyGenerationRequest::new(
         AssetId::new(),
         PathBuf::from(format!("E:/media/proxy-{seed}.mov")),
-        PreviewFileFingerprint {
+        MediaFileFingerprint {
             len: Some(seed),
             modified_secs: Some(seed),
             modified_nanos: Some(seed as u32),

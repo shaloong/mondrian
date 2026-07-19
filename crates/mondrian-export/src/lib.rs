@@ -9,11 +9,13 @@ pub mod validator;
 
 pub use encoder::EncoderBackend;
 pub use preset::{
-    ExportConfig, ExportInput, ExportPreset, TimelineExportInput, TimelineExportRange,
+    ExportConfig, ExportMediaDependency, ExportPreset, TimelineExportRange, TimelineExportSnapshot,
 };
 pub use queue::{
-    ExportColorHealthAction, ExportColorHealthArea, ExportColorHealthCheck,
-    ExportColorHealthReport, ExportColorHealthRootCause, ExportColorHealthSeverity,
-    ExportColorHealthVerdict, ExportJobColorDiagnostics, ExportJobColorDiagnosticsSummary,
-    ExportJobDiagnostics, JobStatus, RenderJob, RenderQueue,
+    ExportAdmissionError, ExportCancelOutcome, ExportColorHealthAction, ExportColorHealthArea,
+    ExportColorHealthCheck, ExportColorHealthReport, ExportColorHealthRootCause,
+    ExportColorHealthSeverity, ExportColorHealthVerdict, ExportFailure, ExportFailureReason,
+    ExportJobColorDiagnostics, ExportJobColorDiagnosticsSummary, ExportJobDiagnostics,
+    ExportJobSnapshot, ExportProgress, ExportProgressDetail, ExportProgressPhase,
+    ExportQueueDiagnostics, JobStatus, RenderJob, RenderQueue,
 };

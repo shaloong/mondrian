@@ -8,7 +8,7 @@ use mondrian_core::{
     AssetId, ExecutionCancellationToken, ExecutionDeadlineStatus, ExecutionPriority,
     ExecutionTerminalDisposition, ExecutionTerminalEvidence,
 };
-use mondrian_media::PreviewFileFingerprint;
+use mondrian_media::MediaFileFingerprint;
 use mondrian_timeline::sequence::ColorContext;
 
 use super::analysis::ThumbnailColorContract;
@@ -21,7 +21,7 @@ use super::{
 pub(super) struct ThumbnailRequestKey {
     pub(super) asset_id: AssetId,
     pub(super) path: PathBuf,
-    pub(super) fingerprint: PreviewFileFingerprint,
+    pub(super) fingerprint: MediaFileFingerprint,
     pub(super) color: ThumbnailColorContract,
 }
 
@@ -62,7 +62,7 @@ pub(super) struct ThumbnailFailureEntry {
 pub(super) struct ThumbnailFailureKey {
     pub(super) asset_id: AssetId,
     pub(super) path: PathBuf,
-    pub(super) fingerprint: PreviewFileFingerprint,
+    pub(super) fingerprint: MediaFileFingerprint,
     pub(super) color: Option<ThumbnailColorContract>,
 }
 
@@ -186,7 +186,7 @@ pub(super) fn push_terminal(
 pub(super) fn push_terminal_identity(
     state: &mut ThumbnailState,
     asset_id: AssetId,
-    fingerprint: PreviewFileFingerprint,
+    fingerprint: MediaFileFingerprint,
     generation: u64,
     disposition: ExecutionTerminalDisposition,
     elapsed: Duration,

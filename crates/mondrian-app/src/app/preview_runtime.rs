@@ -111,8 +111,8 @@ use mondrian_media::{
 #[cfg(test)]
 use mondrian_media::{
     DecodedGpuFrameHandleKind, DecodedVideoChromaLocation, DecodedVideoRange,
-    DecodedVideoRangeContract, DecodedVideoSampling, PreviewDecodeExecutionPath,
-    PreviewFileFingerprint, PreviewNativeDecodedFrame, PreviewNativeDecodedFrameHandle,
+    DecodedVideoRangeContract, DecodedVideoSampling, MediaFileFingerprint,
+    PreviewDecodeExecutionPath, PreviewNativeDecodedFrame, PreviewNativeDecodedFrameHandle,
     VideoColorDiagnostic,
 };
 use mondrian_renderer::{

@@ -317,7 +317,7 @@ pub struct PreviewDecodeRequest<'a> {
     /// Access pattern that drives decoder residency and seek policy.
     pub access_mode: PreviewDecodeAccessMode,
     /// Optional stable file fingerprint already resolved by the caller.
-    pub fingerprint: Option<PreviewFileFingerprint>,
+    pub fingerprint: Option<MediaFileFingerprint>,
     /// Adaptive scheduling hints selected by the caller.
     pub adaptive_hints: PreviewDecodeAdaptiveHints,
     /// Hardware decode/native-residency preference selected by the caller.
@@ -394,7 +394,7 @@ impl<'a> PreviewDecodeRequest<'a> {
     }
 
     /// Attach a caller-resolved file fingerprint.
-    pub fn with_fingerprint(mut self, fingerprint: PreviewFileFingerprint) -> Self {
+    pub fn with_fingerprint(mut self, fingerprint: MediaFileFingerprint) -> Self {
         self.fingerprint = Some(fingerprint);
         self
     }
@@ -2455,7 +2455,7 @@ fn ffmpeg_native_resource_adapter_available(config: &HwAccelCodecConfigProbe) ->
 
 struct PreviewDecodeSession {
     path: PathBuf,
-    fingerprint: PreviewFileFingerprint,
+    fingerprint: MediaFileFingerprint,
     max_width: Option<u32>,
     max_height: Option<u32>,
     backend: PreviewDecodeBackend,
@@ -2568,7 +2568,7 @@ impl PreviewDecodedFramePayload {
     fn cache_cpu_frame(
         &self,
         path: &Path,
-        fingerprint: PreviewFileFingerprint,
+        fingerprint: MediaFileFingerprint,
         width: u32,
         height: u32,
         pts: i64,
@@ -2845,7 +2845,7 @@ impl PreviewSeekIndex {
 #[derive(Debug, Clone)]
 struct PreviewSeekIndexCacheEntry {
     path: PathBuf,
-    fingerprint: PreviewFileFingerprint,
+    fingerprint: MediaFileFingerprint,
     stream_index: usize,
     keyframe_pts: Vec<i64>,
 }
@@ -2859,7 +2859,7 @@ fn preview_seek_index_cache() -> &'static Mutex<VecDeque<PreviewSeekIndexCacheEn
 
 fn preview_seek_index_cache_get(
     path: &Path,
-    fingerprint: PreviewFileFingerprint,
+    fingerprint: MediaFileFingerprint,
     stream_index: usize,
 ) -> Option<PreviewSeekIndex> {
     let mut cache = preview_seek_index_cache().lock().ok()?;
@@ -2874,7 +2874,7 @@ fn preview_seek_index_cache_get(
 
 fn preview_seek_index_cache_put(
     path: &Path,
-    fingerprint: PreviewFileFingerprint,
+    fingerprint: MediaFileFingerprint,
     stream_index: usize,
     keyframe_pts: &[i64],
 ) {
@@ -2980,13 +2980,13 @@ impl PreviewPlaybackRing {
     }
 }
 
-/// Stable file identity used to invalidate preview decode sessions and frames.
+/// Stable media-file revision identity shared by decode and derived-work snapshots.
 ///
 /// The optional fields let callers represent missing/unreadable metadata
 /// without falling back to a false stable identity. A successful app/media path
-/// probe should prefer [`PreviewFileFingerprint::from_metadata`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PreviewFileFingerprint {
+/// probe should prefer [`MediaFileFingerprint::from_metadata`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct MediaFileFingerprint {
     /// File length in bytes when available.
     pub len: Option<u64>,
     /// File modification time seconds since Unix epoch when available.
@@ -2995,7 +2995,7 @@ pub struct PreviewFileFingerprint {
     pub modified_nanos: Option<u32>,
 }
 
-impl PreviewFileFingerprint {
+impl MediaFileFingerprint {
     /// Capture a fingerprint from the filesystem, preserving missing metadata.
     pub fn capture(path: &Path) -> Self {
         let Ok(metadata) = std::fs::metadata(path) else {
@@ -3149,7 +3149,7 @@ fn open_preview_input(
 impl PreviewDecodeSession {
     fn open(
         path: &Path,
-        fingerprint: PreviewFileFingerprint,
+        fingerprint: MediaFileFingerprint,
         max_width: Option<u32>,
         max_height: Option<u32>,
         access_mode: PreviewDecodeAccessMode,
@@ -3181,7 +3181,7 @@ impl PreviewDecodeSession {
         input: ffmpeg::format::context::Input,
         interrupt_state: Arc<PreviewDecodeInterruptState>,
         path: &Path,
-        fingerprint: PreviewFileFingerprint,
+        fingerprint: MediaFileFingerprint,
         max_width: Option<u32>,
         max_height: Option<u32>,
         access_mode: PreviewDecodeAccessMode,
@@ -3360,7 +3360,7 @@ impl PreviewDecodeSession {
     fn matches(
         &self,
         path: &Path,
-        fingerprint: PreviewFileFingerprint,
+        fingerprint: MediaFileFingerprint,
         max_width: Option<u32>,
         max_height: Option<u32>,
         backend: PreviewDecodeBackend,
@@ -4152,7 +4152,7 @@ fn decode_preview_frame_outcome(
     max_width: Option<u32>,
     max_height: Option<u32>,
     access_mode: PreviewDecodeAccessMode,
-    fingerprint: Option<PreviewFileFingerprint>,
+    fingerprint: Option<MediaFileFingerprint>,
     adaptive_hints: PreviewDecodeAdaptiveHints,
     hardware_decode_request: PreviewHardwareDecodeRequest,
     hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
@@ -4164,7 +4164,7 @@ fn decode_preview_frame_outcome(
         return Ok(PreviewDecodeOutcome::Canceled);
     }
     ensure_ffmpeg_initialized(path)?;
-    let fingerprint = fingerprint.unwrap_or_else(|| PreviewFileFingerprint::capture(path));
+    let fingerprint = fingerprint.unwrap_or_else(|| MediaFileFingerprint::capture(path));
     PREVIEW_DECODE_SESSIONS.with(|sessions| {
         let mut sessions = sessions.borrow_mut();
         let slot = sessions.slot_mut(access_mode);
@@ -4431,7 +4431,7 @@ struct PreviewCacheHit {
 #[derive(Clone)]
 struct PreviewFrameCacheEntry {
     path: PathBuf,
-    fingerprint: PreviewFileFingerprint,
+    fingerprint: MediaFileFingerprint,
     source_color: PreviewSourceColorContract,
     width: u32,
     height: u32,
@@ -4441,7 +4441,7 @@ struct PreviewFrameCacheEntry {
 
 fn preview_cache_get(
     path: &Path,
-    fingerprint: PreviewFileFingerprint,
+    fingerprint: MediaFileFingerprint,
     source_color: PreviewSourceColorContract,
     width: u32,
     height: u32,
@@ -4483,7 +4483,7 @@ fn preview_cache_get(
 
 fn preview_cache_put_with_fingerprint(
     path: &Path,
-    fingerprint: PreviewFileFingerprint,
+    fingerprint: MediaFileFingerprint,
     width: u32,
     height: u32,
     pts: i64,
@@ -5533,17 +5533,18 @@ mod tests {
         run_external_decode_command_cancellable, temporal_selection_is_approximate,
         DecodedRgbaFrameContract, FfmpegAvD3D12VaFrame, FfmpegAvD3D12VaSyncContext,
         FfmpegNativeDecodedFrameResource, FfmpegNativeDecodedFrameResourceError,
-        PreviewDecodeAccessMode, PreviewDecodeAccessPolicy, PreviewDecodeAdaptiveHints,
-        PreviewDecodeBackend, PreviewDecodeDiagnostics, PreviewDecodeExecutionPath,
-        PreviewDecodeInterruptState, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest,
-        PreviewDecodeSeekStrategy, PreviewDecodeStageDurations, PreviewDecodeThreadingConfig,
-        PreviewDecodeThreadingKind, PreviewDecodedFramePayload, PreviewFileFingerprint,
-        PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
-        PreviewHardwareDecodeDecision, PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest,
-        PreviewNativeDecodeFallback, PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError,
-        PreviewNativeDecodedFrameHandle, PreviewNativeDecodedFrameResource, PreviewPlaybackRing,
-        PreviewScrubAdaptiveClass, PreviewSeekIndex, PreviewSeekIndexDiagnostics,
-        PreviewSeekIndexSource, PreviewSeekResolution, PreviewSourceColorContract, RgbaFrame,
+        MediaFileFingerprint, PreviewDecodeAccessMode, PreviewDecodeAccessPolicy,
+        PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeDiagnostics,
+        PreviewDecodeExecutionPath, PreviewDecodeInterruptState, PreviewDecodeOutcome,
+        PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
+        PreviewDecodeStageDurations, PreviewDecodeThreadingConfig, PreviewDecodeThreadingKind,
+        PreviewDecodedFramePayload, PreviewHardwareDecodeBlocker,
+        PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
+        PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest, PreviewNativeDecodeFallback,
+        PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
+        PreviewNativeDecodedFrameResource, PreviewPlaybackRing, PreviewScrubAdaptiveClass,
+        PreviewSeekIndex, PreviewSeekIndexDiagnostics, PreviewSeekIndexSource,
+        PreviewSeekResolution, PreviewSourceColorContract, RgbaFrame,
         PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES,
         PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS,
         PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
@@ -6109,7 +6110,7 @@ mod tests {
     #[test]
     fn preview_decode_rgba_request_preserves_explicit_contract_fields() {
         let path = PathBuf::from("E:/media/source.mov");
-        let fingerprint = PreviewFileFingerprint {
+        let fingerprint = MediaFileFingerprint {
             len: Some(10),
             modified_secs: Some(20),
             modified_nanos: Some(30),
@@ -6437,7 +6438,7 @@ mod tests {
     #[test]
     fn preview_seek_index_cache_is_keyed_by_path_fingerprint_and_stream() {
         let path = Path::new("cache-keyed-video.mov");
-        let fingerprint = PreviewFileFingerprint {
+        let fingerprint = MediaFileFingerprint {
             len: Some(10),
             modified_secs: Some(20),
             modified_nanos: Some(30),
@@ -7338,7 +7339,7 @@ mod tests {
 
         clear_global_preview_frame_cache();
         let path = PathBuf::from("synthetic-linear.exr");
-        let fingerprint = PreviewFileFingerprint {
+        let fingerprint = MediaFileFingerprint {
             len: Some(128),
             modified_secs: Some(1),
             modified_nanos: Some(2),
@@ -7433,7 +7434,7 @@ mod tests {
         assert_eq!(plan.native_decode_fallback, None);
 
         let path = PathBuf::from("synthetic-d3d11");
-        let fingerprint = PreviewFileFingerprint {
+        let fingerprint = MediaFileFingerprint {
             len: None,
             modified_secs: None,
             modified_nanos: None,
@@ -7696,10 +7697,10 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let path = root.path().join("proxy.mp4");
         std::fs::write(&path, b"old").expect("old");
-        let first = PreviewFileFingerprint::capture(&path);
+        let first = MediaFileFingerprint::capture(&path);
         std::thread::sleep(Duration::from_millis(20));
         std::fs::write(&path, b"new proxy bytes").expect("new");
-        let second = PreviewFileFingerprint::capture(&path);
+        let second = MediaFileFingerprint::capture(&path);
 
         assert_ne!(first, second);
     }
@@ -7708,12 +7709,12 @@ mod tests {
     fn preview_frame_cache_is_keyed_by_file_fingerprint() {
         clear_global_preview_frame_cache();
         let path = PathBuf::from("same-proxy-path.mp4");
-        let old_fingerprint = PreviewFileFingerprint {
+        let old_fingerprint = MediaFileFingerprint {
             len: Some(3),
             modified_secs: Some(1),
             modified_nanos: Some(0),
         };
-        let new_fingerprint = PreviewFileFingerprint {
+        let new_fingerprint = MediaFileFingerprint {
             len: Some(15),
             modified_secs: Some(2),
             modified_nanos: Some(0),
@@ -7741,7 +7742,7 @@ mod tests {
     fn preview_frame_cache_respects_strict_pts_tolerance() {
         clear_global_preview_frame_cache();
         let path = PathBuf::from("strict-cache-window.mp4");
-        let fingerprint = PreviewFileFingerprint {
+        let fingerprint = MediaFileFingerprint {
             len: Some(3),
             modified_secs: Some(1),
             modified_nanos: Some(0),
@@ -7765,7 +7766,7 @@ mod tests {
     fn preview_frame_cache_isolated_by_applied_source_color_contract() {
         clear_global_preview_frame_cache();
         let path = PathBuf::from("same-frame-different-color.mov");
-        let fingerprint = PreviewFileFingerprint {
+        let fingerprint = MediaFileFingerprint {
             len: Some(8),
             modified_secs: Some(3),
             modified_nanos: Some(0),
@@ -7901,7 +7902,7 @@ mod tests {
 
         clear_thread_local_preview_decode_session();
         let access_mode = PreviewDecodeAccessMode::PlaybackCursor;
-        let fingerprint = PreviewFileFingerprint::capture(&path);
+        let fingerprint = MediaFileFingerprint::capture(&path);
         let mut frames = Vec::with_capacity(frame_count);
         let mut total_us = 0u64;
         let mut max_us = 0u64;

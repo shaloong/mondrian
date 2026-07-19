@@ -5,7 +5,7 @@
 
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
-use mondrian_export::queue::JobStatus;
+use mondrian_export::queue::{ExportProgressDetail, ExportProgressPhase, JobStatus};
 use mondrian_platform::{FileFilter, PlatformService};
 use mondrian_timeline::Sequence;
 use mondrian_ui_core::types::*;
@@ -245,27 +245,30 @@ fn elide_text_to_width(text: &str, font_size: f32, max_width: f32) -> String {
 }
 
 fn status_bar_model(state: &AppState) -> StatusBarModel {
-    let jobs = state.render_queue.list_jobs();
-    let active_jobs = jobs
-        .iter()
-        .filter(|job| {
-            matches!(
-                job.status,
-                JobStatus::Pending | JobStatus::Rendering { .. } | JobStatus::Encoding
-            )
-        })
-        .collect::<Vec<_>>();
+    let jobs = state.export_jobs_snapshot();
+    let active_jobs = jobs.iter().filter(|job| !job.status.is_terminal()).collect::<Vec<_>>();
 
     let (message, is_error, is_busy) = if let Some(job) = active_jobs.first() {
         let message = match &job.status {
             JobStatus::Pending => format!("导出队列处理中（{}）", active_jobs.len()),
-            JobStatus::Rendering { frame, total_frames } => format!(
-                "正在导出帧 {}/{}（队列 {}）",
-                frame,
-                total_frames,
-                active_jobs.len()
-            ),
-            JobStatus::Encoding => format!("正在编码（队列 {}）", active_jobs.len()),
+            JobStatus::Running { phase } => match job.progress.detail {
+                ExportProgressDetail::Frames { completed, total }
+                    if *phase == ExportProgressPhase::Rendering =>
+                {
+                    format!(
+                        "正在导出帧 {completed}/{total}（队列 {}）",
+                        active_jobs.len()
+                    )
+                }
+                _ => format!(
+                    "{}（队列 {}）",
+                    export_phase_status_message(*phase),
+                    active_jobs.len()
+                ),
+            },
+            JobStatus::Cancelling { .. } => {
+                format!("正在取消导出（队列 {}）", active_jobs.len())
+            }
             _ => "导出处理中".to_owned(),
         };
         (message, false, true)
@@ -289,6 +292,16 @@ fn status_bar_model(state: &AppState) -> StatusBarModel {
         .unwrap_or_else(|| "没有项目".to_owned());
 
     StatusBarModel { message, is_error, is_busy, context }
+}
+
+fn export_phase_status_message(phase: ExportProgressPhase) -> &'static str {
+    match phase {
+        ExportProgressPhase::Preparing => "正在准备导出",
+        ExportProgressPhase::Rendering => "正在渲染",
+        ExportProgressPhase::Encoding => "正在编码",
+        ExportProgressPhase::Validating => "正在验证成品",
+        ExportProgressPhase::Publishing => "正在发布成品",
+    }
 }
 
 /// File dialog filter for timeline export output commands.

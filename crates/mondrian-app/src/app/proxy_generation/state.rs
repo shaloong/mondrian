@@ -12,7 +12,7 @@ use mondrian_core::{
     ExecutionTerminalEvidence,
 };
 use mondrian_media::{
-    PreviewFileFingerprint, ProxyCodec, ProxyColorContract, ProxyConfig, ProxyGenerationOutcome,
+    MediaFileFingerprint, ProxyCodec, ProxyColorContract, ProxyConfig, ProxyGenerationOutcome,
     ProxyResolution, ProxyStatus,
 };
 use parking_lot::{Condvar, Mutex};
@@ -29,7 +29,7 @@ use super::{
 pub(super) struct ProxyGenerationKey {
     pub(super) asset_id: AssetId,
     pub(super) source_path: PathBuf,
-    pub(super) source_fingerprint: PreviewFileFingerprint,
+    pub(super) source_fingerprint: MediaFileFingerprint,
     resolution: ProxyResolution,
     codec: ProxyCodec,
     crf: u8,
@@ -48,7 +48,7 @@ impl ProxyGenerationRequest {
     pub(super) fn new(
         asset_id: AssetId,
         source_path: PathBuf,
-        source_fingerprint: PreviewFileFingerprint,
+        source_fingerprint: MediaFileFingerprint,
         config: ProxyConfig,
         color: ProxyColorContract,
     ) -> Self {
@@ -393,7 +393,7 @@ pub(super) fn record_immediate_failure(
     state: &mut ProxyGenerationState,
     key: Option<ProxyGenerationKey>,
     asset_id: AssetId,
-    fingerprint: PreviewFileFingerprint,
+    fingerprint: MediaFileFingerprint,
     origin: ProxyGenerationOrigin,
     failure: ProxyGenerationFailure,
 ) {

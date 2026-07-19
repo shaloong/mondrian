@@ -475,7 +475,8 @@ share the same `InputColorResolution` branch diagnostics. When preview/export
 logs or UI need to explain why metadata was rejected or unsupported, they should
 attach `VideoStreamInfo.color_interpretation` and `VideoStreamInfo.color_metadata`
 raw CICP tags rather than rebuilding diagnostics from path or decoder text.
-Export jobs carry this as `TimelineExportInput.asset_color_diagnostics`, and
+Export jobs carry the evidence inside each
+`TimelineExportSnapshot.media[AssetId]` dependency, and
 preview emits the same diagnostic summary when missing-metadata policy rejects a
 media asset. Preview also stores the latest viewer-request rejection as
 `PreviewColorRejection` so panels, diagnostics, and automated smoke tests

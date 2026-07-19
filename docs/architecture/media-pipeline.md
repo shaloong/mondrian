@@ -198,7 +198,7 @@ NLEs separate playback, interactive navigation, and precise still extraction:
   extraction: thumbnails, poster frames, export fallback, diagnostics, and exact
   one-off requests.
   The App thumbnail service passes the already-probed
-  `PreviewFileFingerprint` into the still-frame request and uses the same
+  `MediaFileFingerprint` into the still-frame request and uses the same
   fingerprint for raster and failure invalidation, so replaced files cannot
   reuse stale output. Decoded RGBA remains source-encoded: the service resolves
   asset input color through the active sequence/project policy, executes the
@@ -1558,7 +1558,7 @@ PNG and OpenEXR. Windows CI, release, and developer setup must install
 were compiled. The vcpkg step is idempotent and uses `--recurse` so an older
 cache with the default component set is upgraded instead of silently reused.
 Preview path resolution already probes the source/proxy file identity; app
-workers must forward that `PreviewFileFingerprint` into the media decode
+workers must forward that `MediaFileFingerprint` into the media decode
 boundary instead of making the decode worker repeat the filesystem metadata
 lookup. `mondrian-media` may capture the fingerprint itself only for lower-level
 callers that do not already have one.
@@ -1579,6 +1579,38 @@ always serial (`None`, one decoder thread): FFmpeg's frame-threaded EXR path can
 hold the single image until EOF and deadlock during codec-context destruction
 on Windows. Independent image requests remain parallel at the app decode-pool
 level, so this does not serialize the media pipeline globally.
+
+## Offline Timeline Export execution
+
+Export consumes one immutable `TimelineExportSnapshot`; it does not read the
+live Asset Library, current Sequence, or UI selection after admission. The App
+capture boundary traverses enabled Clips from the selected root Sequence,
+rejects missing and recursive nested references, retains only the reachable
+nested Sequence closure, and resolves each real Asset into one
+`ExportMediaDependency`. That record keeps path, `MediaFileFingerprint`,
+detected color evidence, authored interpretation, and color diagnostics
+together so no independent map can drift from another.
+
+The Export queue is a dedicated offline service with bounded in-flight work and
+bounded lightweight terminal history. The immutable Project-sized payload is
+consumed once when its worker dispatches; Window and Headless observation clone
+only `ExportJobSnapshot`. Preview/Thumbnail/Waveform/Proxy and Export share
+`ExecutionCancellationToken`, priority, generation, and terminal-evidence value
+semantics, but they intentionally do not share one worker pool or capacity
+policy.
+
+Source revision is validated before media preparation and again immediately
+before publication. FFmpeg writes to a unique sibling temporary file and its
+stderr is drained into a bounded tail while the process is polled at
+cooperative-cancellation checkpoints. Stream/signal validation runs against
+the temporary deliverable. Its file contents are flushed before publication.
+Windows then uses its write-through atomic file replacement operation;
+Unix-family platforms use same-filesystem rename and attempt a post-commit
+directory durability sync. Failure or cancellation before that boundary
+removes the temporary artifact and cannot disturb an existing final output.
+`Completed` is returned only after publication and is therefore authoritative
+over a cancellation request that arrives after the commit point. The complete
+contract is specified in `docs/specs/export-spec.md`.
 
 The renderer now owns a GPU input-stage resource contract for decoded CPU RGBA8
 source frames: upload to `Rgba8Unorm`, execute the OCIO GPU input transform, and

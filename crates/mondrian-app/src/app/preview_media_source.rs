@@ -15,7 +15,7 @@ use mondrian_core::types::{AssetId, ColorSpace};
 use mondrian_core::Resolution;
 use mondrian_media::info::PixelFormat;
 use mondrian_media::{
-    DecodedVideoRange, DecodedVideoRangeContract, PreviewFileFingerprint,
+    DecodedVideoRange, DecodedVideoRangeContract, MediaFileFingerprint,
     PreviewHardwareDecodeRequest, ProxyColorContract, ProxyConfig, ProxyGenerator, ProxyStatus,
     VideoColorDiagnostic,
 };
@@ -29,7 +29,7 @@ use super::preview_hardware_admission::PreviewHardwareDecodeAdmissionState;
 pub(crate) struct PreviewMediaDecodePath {
     pub(crate) path: PathBuf,
     pub(crate) resolution: PreviewMediaDecodePathResolution,
-    pub(crate) fingerprint: PreviewFileFingerprint,
+    pub(crate) fingerprint: MediaFileFingerprint,
 }
 
 /// Why Preview decoded the source path or an optimized proxy path.
@@ -45,7 +45,7 @@ pub(crate) enum PreviewMediaDecodePathResolution {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct PreviewProxyGenerationRequestKey {
     pub(crate) asset_id: AssetId,
-    pub(crate) source_fingerprint: PreviewFileFingerprint,
+    pub(crate) source_fingerprint: MediaFileFingerprint,
     pub(crate) resolution: PreviewMediaDecodePathResolution,
     pub(crate) color: ProxyColorContract,
 }
@@ -257,7 +257,7 @@ fn resolve_preview_media_decode_path(
 
 fn source_decode_path(
     source_path: &Path,
-    fingerprint: PreviewFileFingerprint,
+    fingerprint: MediaFileFingerprint,
 ) -> PreviewMediaDecodePath {
     PreviewMediaDecodePath {
         path: source_path.to_path_buf(),
@@ -266,14 +266,14 @@ fn source_decode_path(
     }
 }
 
-fn media_path_fingerprint(path: &Path) -> std::io::Result<PreviewFileFingerprint> {
-    std::fs::metadata(path).map(|metadata| PreviewFileFingerprint::from_metadata(&metadata))
+fn media_path_fingerprint(path: &Path) -> std::io::Result<MediaFileFingerprint> {
+    std::fs::metadata(path).map(|metadata| MediaFileFingerprint::from_metadata(&metadata))
 }
 
 fn proxy_generation_intent(
     request: &PreviewMediaSourceRequest<'_>,
     resolution: PreviewMediaDecodePathResolution,
-    source_fingerprint: PreviewFileFingerprint,
+    source_fingerprint: MediaFileFingerprint,
 ) -> Option<PreviewProxyGenerationIntent> {
     if !request.request_missing_proxy_generation
         || !request.prefer_proxy

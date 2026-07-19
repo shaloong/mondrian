@@ -13,7 +13,7 @@ use mondrian_assets::{AssetKind, AssetRecord};
 use mondrian_core::{
     AssetId, ExecutionCancellationToken, ExecutionTerminalDisposition, ExecutionTerminalEvidence,
 };
-use mondrian_media::PreviewFileFingerprint;
+use mondrian_media::MediaFileFingerprint;
 use mondrian_timeline::sequence::ColorContext;
 use parking_lot::Mutex;
 
@@ -177,7 +177,7 @@ pub struct ThumbnailTerminalRecord {
     /// Asset whose request terminated.
     pub asset_id: AssetId,
     /// Source fingerprint used by the request.
-    pub fingerprint: PreviewFileFingerprint,
+    pub fingerprint: MediaFileFingerprint,
     /// Wall duration after worker admission.
     pub elapsed: Duration,
     /// Domain failure category, when applicable.
@@ -283,7 +283,7 @@ impl AssetThumbnailService {
                 return self.retain_immediate_failure(
                     asset.id,
                     asset.path.clone(),
-                    PreviewFileFingerprint {
+                    MediaFileFingerprint {
                         len: None,
                         modified_secs: None,
                         modified_nanos: None,
@@ -296,7 +296,7 @@ impl AssetThumbnailService {
                 );
             }
         };
-        let fingerprint = PreviewFileFingerprint::from_metadata(&metadata);
+        let fingerprint = MediaFileFingerprint::from_metadata(&metadata);
         let color = match ThumbnailColorContract::resolve(asset, &context) {
             Ok(color) => color,
             Err(failure) => {
@@ -611,7 +611,7 @@ impl AssetThumbnailService {
         &self,
         asset_id: AssetId,
         path: PathBuf,
-        fingerprint: PreviewFileFingerprint,
+        fingerprint: MediaFileFingerprint,
         color: Option<ThumbnailColorContract>,
         failure: ThumbnailFailure,
     ) -> ThumbnailLookupState {

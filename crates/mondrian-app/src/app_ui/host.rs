@@ -392,6 +392,7 @@ impl AppUiHost {
         self.waveform_service.set_library(self.app_state.borrow().asset_library.clone());
         let media_imports_changed = self.app_state.borrow_mut().poll_media_imports();
         let proxy_generation_changed = self.app_state.borrow_mut().poll_proxy_generation();
+        let export_queue_changed = self.app_state.borrow_mut().poll_export_queue();
         let thumbnails_changed = self.asset_thumbnails.poll_finished();
         let preview_outcome =
             pump_playback_preview(&mut self.app_state.borrow_mut(), &self.preview_service);
@@ -402,6 +403,7 @@ impl AppUiHost {
         }
         let visible_model_changed = media_imports_changed
             || proxy_generation_changed
+            || export_queue_changed
             || thumbnails_changed
             || preview_outcome.visible_change
             || waveform_changed;

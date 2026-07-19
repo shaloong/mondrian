@@ -1045,12 +1045,13 @@ Preview and export both follow override -> detected metadata -> missing-policy
 resolution through `MissingColorMetadataPolicy::resolve_input_decision(...)`.
 The returned `InputColorResolution` is the shared diagnostic record for the
 decision branch, including override, detected metadata, policy, sequence working
-space, and whether the media was rejected. Export
-`TimelineExportInput.asset_color_spaces` is a detected-only
-metadata table; absence of an asset id means "resolve via policy", not
-"fallback to Rec.709". Export `asset_color_diagnostics` carries the matching
-per-asset diagnostic snapshot, including `color_interpretation`, and must be
-used for failure messages and reports, not for choosing the transform.
+space, and whether the media was rejected. Each Export
+`TimelineExportSnapshot.media[AssetId]` dependency stores detected-only color
+metadata beside the matching persistent interpretation, source revision, and
+diagnostic snapshot. Absence of detected color means "resolve via policy", not
+"fallback to Rec.709"; absence of a required Asset dependency is an invalid
+snapshot and fails closed. The diagnostic, including `color_interpretation`,
+must be used for failure messages and reports, not for choosing the transform.
 `VideoColorDiagnosticIssueAggregate` is the stable rollup for these per-asset
 snapshots: export job diagnostics carry it as `asset_issue_summary`, and
 preview media smoke reports serialize the same aggregate as `media_color_issues`

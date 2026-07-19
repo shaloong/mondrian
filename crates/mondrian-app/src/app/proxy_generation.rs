@@ -15,8 +15,7 @@ use mondrian_assets::AssetRecord;
 use mondrian_core::types::{AssetId, ColorSpace, ProjectId};
 use mondrian_core::{ExecutionPriority, ExecutionTerminalEvidence};
 use mondrian_media::{
-    resolve_decoded_video_range, PreviewFileFingerprint, ProxyColorContract, ProxyConfig,
-    ProxyStatus,
+    resolve_decoded_video_range, MediaFileFingerprint, ProxyColorContract, ProxyConfig, ProxyStatus,
 };
 use mondrian_timeline::sequence::{ColorContext, ResolvedInputColor};
 use parking_lot::{Condvar, Mutex};
@@ -134,7 +133,7 @@ pub struct ProxyGenerationTerminalRecord {
     /// Asset that owned the request.
     pub asset_id: AssetId,
     /// Exact source revision admitted by the attempt.
-    pub source_fingerprint: PreviewFileFingerprint,
+    pub source_fingerprint: MediaFileFingerprint,
     /// Product origin used by domain scheduling.
     pub origin: ProxyGenerationOrigin,
     /// Wall duration after worker dispatch.
@@ -243,7 +242,7 @@ impl ProxyGenerationService {
                 return self.immediate_failure(
                     None,
                     asset_id,
-                    PreviewFileFingerprint {
+                    MediaFileFingerprint {
                         len: None,
                         modified_secs: None,
                         modified_nanos: None,
@@ -259,7 +258,7 @@ impl ProxyGenerationService {
         let request = ProxyGenerationRequest::new(
             asset_id,
             source_path,
-            PreviewFileFingerprint::from_metadata(&metadata),
+            MediaFileFingerprint::from_metadata(&metadata),
             config,
             color,
         );
@@ -328,7 +327,7 @@ impl ProxyGenerationService {
         &self,
         key: Option<ProxyGenerationKey>,
         asset_id: AssetId,
-        fingerprint: PreviewFileFingerprint,
+        fingerprint: MediaFileFingerprint,
         origin: ProxyGenerationOrigin,
         failure: ProxyGenerationFailure,
     ) -> ProxyGenerationRequestOutcome {

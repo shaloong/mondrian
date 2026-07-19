@@ -68,6 +68,18 @@ _Avoid_: Widget-owned FFmpeg worker, unbounded completion channel, cache keyed o
 The AppState-owned, lazily started deep Module that unifies import, user, and Playback-recovery proxy demand under one exact artifact key, bounded project generation, fair domain queues, cache-root execution capacity, recoverable failure memory, and terminal evidence. Media owns freshness, encoding, and cancellable FFmpeg artifact production; Window and Preview callers own no second dedupe registry.
 _Avoid_: Process-global app dispatcher, unbounded FIFO, worker blocked on a limiter after falsely entering Running, permanent Preview request set, project-close orphan transcode, automatic retry storm
 
+**Timeline Export Snapshot**:
+One immutable execution capture containing a root Sequence, only its reachable nested Sequence closure, one internally consistent media-dependency record per reachable real Asset, the selected range, and Project color management. Capture rejects missing/cyclic internal references and offline media before admission; the snapshot then executes independently of later Project edits or closure.
+_Avoid_: Whole-Project clone, four parallel asset maps, live Asset Library lookup from the worker, path without source revision, snapshot presented as persisted author state
+
+**Export Execution Service**:
+The instance-owned offline Module that admits immutable Timeline Export Snapshots into a bounded dedicated queue, reserves final output identities, owns attempt generations and cancellation, consumes each heavy payload once, and exposes only bounded lightweight lifecycle/evidence snapshots. It shares cross-domain execution value semantics but not worker capacity with Preview, Thumbnail, Waveform, Proxy, or realtime audio.
+_Avoid_: Process-global queue, universal media worker pool, UI-mutated job status, unbounded terminal Project retention, enqueue success after worker failure
+
+**Export Deliverable Publication**:
+The irreversible boundary at which a fully encoded and validated sibling temporary artifact atomically replaces or creates the requested final path using the platform filesystem Adapter. `Completed` means this boundary was crossed; cancellation observed after it cannot rewrite history as `Cancelled`.
+_Avoid_: FFmpeg writing the final path directly, moving the prior deliverable away before publication, validation success treated as publication success, late cancellation overriding a committed output
+
 **Playback Quality Policy**:
 The allowed temporary preview resolution and user-selected proxy/original policy for a Playback Session.
 _Avoid_: Quality flag

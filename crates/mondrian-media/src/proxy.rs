@@ -3,7 +3,7 @@
 //! 后台将高码率原始素材转码为低码率代理文件，用于编辑时的流畅预览。
 //! 导出时自动切换回原始文件。
 
-use crate::{DecodedVideoRange, PreviewFileFingerprint};
+use crate::{DecodedVideoRange, MediaFileFingerprint};
 use mondrian_core::{
     types::AssetId, types::ColorSpace, ExecutionCancellationToken, MondrianError, Result,
 };
@@ -199,8 +199,8 @@ pub struct ProxySourceFingerprint {
     pub modified_nanos: Option<u32>,
 }
 
-impl From<PreviewFileFingerprint> for ProxySourceFingerprint {
-    fn from(value: PreviewFileFingerprint) -> Self {
+impl From<MediaFileFingerprint> for ProxySourceFingerprint {
+    fn from(value: MediaFileFingerprint) -> Self {
         Self {
             len: value.len,
             modified_secs: value.modified_secs,
@@ -387,7 +387,7 @@ impl ProxyGenerator {
     ) -> Result<ProxyArtifactManifest> {
         Ok(ProxyArtifactManifest {
             version: PROXY_MANIFEST_VERSION,
-            source: PreviewFileFingerprint::capture(source_path).into(),
+            source: MediaFileFingerprint::capture(source_path).into(),
             color,
             settings: self.artifact_settings(),
             encoding: self.encoding_profile(color)?,
@@ -425,7 +425,7 @@ impl ProxyGenerator {
     pub fn proxy_status(&self, source_path: &Path, color: ProxyColorContract) -> ProxyStatus {
         self.proxy_status_for_source_fingerprint(
             source_path,
-            PreviewFileFingerprint::capture(source_path),
+            MediaFileFingerprint::capture(source_path),
             color,
         )
         .unwrap_or(ProxyStatus::Stale)
@@ -436,7 +436,7 @@ impl ProxyGenerator {
     pub fn proxy_status_for_source_fingerprint(
         &self,
         source_path: &Path,
-        admitted_source: PreviewFileFingerprint,
+        admitted_source: MediaFileFingerprint,
         color: ProxyColorContract,
     ) -> Result<ProxyStatus> {
         let proxy_path = self.proxy_path(source_path, color)?;
@@ -480,7 +480,7 @@ impl ProxyGenerator {
             .generate_cancellable(
                 asset_id,
                 source_path.clone(),
-                PreviewFileFingerprint::capture(&source_path),
+                MediaFileFingerprint::capture(&source_path),
                 color,
                 progress_tx,
                 ExecutionCancellationToken::new(),
@@ -502,7 +502,7 @@ impl ProxyGenerator {
         &self,
         asset_id: AssetId,
         source_path: PathBuf,
-        admitted_source: PreviewFileFingerprint,
+        admitted_source: MediaFileFingerprint,
         color: ProxyColorContract,
         progress_tx: mpsc::Sender<ProxyProgress>,
         cancellation: ExecutionCancellationToken,
@@ -516,7 +516,7 @@ impl ProxyGenerator {
                 reason: "source file not found".to_string(),
             });
         }
-        let execution_source = PreviewFileFingerprint::capture(&source_path);
+        let execution_source = MediaFileFingerprint::capture(&source_path);
         if execution_source != admitted_source {
             return Err(MondrianError::ProxyGenerationFailed {
                 reason: format!(
@@ -1057,7 +1057,7 @@ mod tests {
         ProxyEncodingProfile, ProxyGenerationOutcome, ProxyGenerator, ProxyStatus,
         PROXY_COLOR_CONTRACT_VERSION, PROXY_FFMPEG_STDERR_TAIL_CAPACITY,
     };
-    use crate::{DecodedVideoRange, PreviewFileFingerprint};
+    use crate::{DecodedVideoRange, MediaFileFingerprint};
     use mondrian_core::{types::ColorSpace, ExecutionCancellationToken};
     use std::sync::Arc;
     use std::time::Duration;
@@ -1382,7 +1382,7 @@ mod tests {
             .block_on(generator.generate_cancellable(
                 mondrian_core::AssetId::new(),
                 root.path().join("missing.mov"),
-                PreviewFileFingerprint {
+                MediaFileFingerprint {
                     len: None,
                     modified_secs: None,
                     modified_nanos: None,
@@ -1400,7 +1400,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let source = root.path().join("source.mov");
         std::fs::write(&source, b"admitted").expect("source");
-        let admitted = PreviewFileFingerprint::capture(&source);
+        let admitted = MediaFileFingerprint::capture(&source);
         std::fs::write(&source, b"replacement with different length").expect("replace source");
         let generator = ProxyGenerator::new(test_proxy_config(root.path().to_path_buf()));
         let (progress_tx, _progress_rx) = tokio::sync::mpsc::channel(1);

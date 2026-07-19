@@ -1,14 +1,12 @@
 //! 后台渲染队列
 
 use crate::preset::{
-    AudioCodecConfig, Container, ExportAlphaMode, ExportConfig, ExportInput, TimelineExportInput,
-    TimelineExportRange, VideoCodecConfig,
+    AudioCodecConfig, Container, ExportAlphaMode, ExportConfig, TimelineExportRange,
+    TimelineExportSnapshot, VideoCodecConfig,
 };
 use crate::validator::{
-    probe_media_summary, validate_export_output, ExpectedVideoConstraints,
-    ExportValidationExpectations,
+    validate_export_output, ExpectedVideoConstraints, ExportValidationExpectations,
 };
-use chrono::{DateTime, Utc};
 use mondrian_audio::{
     compile_audio_program, AudioCompileRequest, AudioContinuityEpoch, AudioDecodedSource,
     AudioMediaResolver, AudioProcessingMode, AudioProgramRuntime, AudioRenderContract,
@@ -18,12 +16,13 @@ use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace, FramePosition, JobId, Rational};
 use mondrian_core::{
     AudioSamplePosition, AudioSampleRate, AudioSampleRounding, AudioSourceComponentId,
-    FrameRounding, TimelineTime, WorkingColorSpace, WorkingRgbaF32Frame,
+    ExecutionCancellationToken, FrameRounding, TimelineTime, WorkingColorSpace,
+    WorkingRgbaF32Frame,
 };
 use mondrian_media::AudioSourceCache;
 use mondrian_media::{
     decode_preview_frame_cancellable, DecodedVideoRange, DecodedVideoRangeContract,
-    PreviewDecodeAccessMode, PreviewDecodeOutcome, PreviewDecodeRequest,
+    MediaFileFingerprint, PreviewDecodeAccessMode, PreviewDecodeOutcome, PreviewDecodeRequest,
     PreviewSourceColorContract, VideoColorDiagnosticIssueAggregate,
 };
 use mondrian_renderer::{
@@ -45,16 +44,16 @@ use mondrian_timeline::sequence::{
     ColorContext, DeliveryBitDepth, InputColorResolutionSourceCounts, ResolvedInputColor,
     SequenceSettings, VideoRange, MAX_NESTED_SEQUENCE_RENDER_DEPTH,
 };
-use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::collections::{HashMap, HashSet};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::process::{ChildStdin, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex as StdMutex, OnceLock};
-use std::time::Duration;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
+
+mod service;
+pub use service::*;
 
 /// Internal pipe contract selected from the requested delivery bit depth.
 ///
@@ -408,29 +407,6 @@ fn execute_export_gpu_output_boundary(
     runtime.clear_frame_resources();
 
     Ok(ExportGpuOutputAttemptOutcome { rgba, stage_diagnostics: record.stage_diagnostics })
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum JobStatus {
-    Pending,
-    Rendering { frame: u64, total_frames: u64 },
-    Encoding,
-    Completed,
-    Failed(String),
-    Cancelled,
-}
-
-#[derive(Debug, Clone)]
-pub struct RenderJob {
-    pub id: JobId,
-    pub config: ExportConfig,
-    pub status: JobStatus,
-    pub progress: f32,
-    /// Export diagnostics accumulated by the worker while the job runs.
-    pub diagnostics: ExportJobDiagnostics,
-    pub created_at: DateTime<Utc>,
-    pub started_at: Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
 }
 
 /// Diagnostics accumulated for one export job.
@@ -1323,33 +1299,21 @@ impl ExportJobColorDiagnostics {
     }
 }
 
-impl RenderJob {
-    pub fn new(config: ExportConfig) -> Self {
-        Self {
-            id: JobId::new(),
-            config,
-            status: JobStatus::Pending,
-            progress: 0.0,
-            diagnostics: ExportJobDiagnostics::default(),
-            created_at: Utc::now(),
-            started_at: None,
-            completed_at: None,
-        }
-    }
-}
-
 pub(crate) enum JobExecutionResult {
+    /// The validated deliverable crossed its irreversible publication point.
     Completed,
+    /// Execution ended without publishing a new deliverable.
     Failed(String),
+    /// Cancellation was observed before the irreversible publication point.
     Cancelled,
 }
 
-trait ExportExecutor: Send + Sync + 'static {
+pub(crate) trait ExportExecutor: Send + Sync + 'static {
     fn execute(
         &self,
         job: &RenderJob,
-        cancel: &AtomicBool,
-        report: &mut dyn FnMut(JobStatus, f32),
+        cancel: &ExecutionCancellationToken,
+        report: &mut dyn FnMut(ExportProgress),
         report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
     ) -> JobExecutionResult;
 }
@@ -1361,15 +1325,18 @@ impl ExportExecutor for FfmpegExportExecutor {
     fn execute(
         &self,
         job: &RenderJob,
-        cancel: &AtomicBool,
-        report: &mut dyn FnMut(JobStatus, f32),
+        cancel: &ExecutionCancellationToken,
+        report: &mut dyn FnMut(ExportProgress),
         report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
     ) -> JobExecutionResult {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.is_canceled() {
             return JobExecutionResult::Cancelled;
         }
+        report(ExportProgress::preparing(0.01));
 
-        if let Some(parent) = job.config.output_path.parent() {
+        let final_output = job.config.output_path.as_path();
+        if let Some(parent) = final_output.parent().filter(|parent| !parent.as_os_str().is_empty())
+        {
             if let Err(err) = std::fs::create_dir_all(parent) {
                 return JobExecutionResult::Failed(format!(
                     "无法创建导出目录 {}: {}",
@@ -1379,17 +1346,34 @@ impl ExportExecutor for FfmpegExportExecutor {
             }
         }
 
-        match &job.config.input {
-            ExportInput::File { input_path, in_point, out_point } => execute_file_export(
-                job,
-                input_path,
-                in_point.as_deref(),
-                out_point.as_deref(),
-                cancel,
-                report,
-            ),
-            ExportInput::Timeline(timeline) => {
-                execute_timeline_export(job, timeline, cancel, report, report_diagnostics)
+        let partial_output = export_partial_output_path(final_output, job.id());
+        let _ = std::fs::remove_file(&partial_output);
+        let outcome = execute_timeline_export(
+            job,
+            &job.config.timeline,
+            partial_output.as_path(),
+            cancel,
+            report,
+            report_diagnostics,
+        );
+        if !matches!(outcome, JobExecutionResult::Completed) {
+            let _ = std::fs::remove_file(&partial_output);
+            return outcome;
+        }
+        if cancel.is_canceled() {
+            let _ = std::fs::remove_file(&partial_output);
+            return JobExecutionResult::Cancelled;
+        }
+        if let Err(reason) = validate_snapshot_media_revisions(&job.config.timeline) {
+            let _ = std::fs::remove_file(&partial_output);
+            return JobExecutionResult::Failed(reason);
+        }
+        report(ExportProgress::publishing(0.995));
+        match finalize_export_output(partial_output.as_path(), final_output) {
+            Ok(()) => JobExecutionResult::Completed,
+            Err(reason) => {
+                let _ = std::fs::remove_file(&partial_output);
+                JobExecutionResult::Failed(reason)
             }
         }
     }
@@ -1422,110 +1406,22 @@ struct DecodedVideoLayer {
     stage_diagnostics: RenderColorStageDiagnostics,
 }
 
-fn execute_file_export(
-    job: &RenderJob,
-    input_path: &Path,
-    in_point: Option<&str>,
-    out_point: Option<&str>,
-    cancel: &AtomicBool,
-    report: &mut dyn FnMut(JobStatus, f32),
-) -> JobExecutionResult {
-    if !input_path.exists() {
-        return JobExecutionResult::Failed(format!("导出输入不存在：{}", input_path.display()));
-    }
-
-    let source_summary = probe_media_summary(input_path).ok();
-    report(JobStatus::Encoding, 0.02);
-
-    let duration_ms = probe_duration_ms(input_path, in_point, out_point).unwrap_or(0);
-
-    let mut cmd = Command::new("ffmpeg");
-    cmd.arg("-y")
-        .arg("-hide_banner")
-        .arg("-progress")
-        .arg("pipe:2")
-        .arg("-nostats")
-        .arg("-loglevel")
-        .arg("error");
-
-    if let Some(in_point) = in_point {
-        cmd.arg("-ss").arg(in_point);
-    }
-    cmd.arg("-i").arg(input_path);
-    if let Some(out_point) = out_point {
-        cmd.arg("-to").arg(out_point);
-    }
-
-    if let Some(filter) = build_video_filter(&job.config) {
-        cmd.arg("-vf").arg(filter);
-    }
-
-    apply_video_codec_args(&mut cmd, &job.config.preset.video);
-    apply_audio_codec_args(&mut cmd, &job.config.preset.audio);
-    cmd.arg("-f")
-        .arg(container_format(&job.config.preset.container))
-        .arg(&job.config.output_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-
-    let child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(err) => {
-            return JobExecutionResult::Failed(format!("无法启动 ffmpeg: {}", err));
-        }
-    };
-
-    match monitor_ffmpeg_child(child, duration_ms, cancel, report) {
-        JobExecutionResult::Completed => {
-            let expectations = ExportValidationExpectations {
-                require_video_stream: true,
-                require_audio_stream: source_summary.map(|s| s.has_audio).unwrap_or(false),
-                expected_video: job.config.preset.resolution.as_ref().map(|resolution| {
-                    ExpectedVideoConstraints {
-                        width: Some(normalize_output_dimension(resolution.width)),
-                        height: Some(normalize_output_dimension(resolution.height)),
-                        fps_num: None,
-                        fps_den: None,
-                        signal: None,
-                    }
-                }),
-                expected_duration_secs: if duration_ms > 0 {
-                    Some(duration_ms as f64 / 1000.0)
-                } else {
-                    None
-                },
-            };
-            match validate_export_output(job.config.output_path.as_path(), &expectations) {
-                Ok(()) => JobExecutionResult::Completed,
-                Err(err) => JobExecutionResult::Failed(format!("导出结果校验失败: {err}")),
-            }
-        }
-        other => other,
-    }
-}
-
 fn execute_timeline_export(
     job: &RenderJob,
-    timeline: &TimelineExportInput,
-    cancel: &AtomicBool,
-    report: &mut dyn FnMut(JobStatus, f32),
+    timeline: &TimelineExportSnapshot,
+    output_path: &Path,
+    cancel: &ExecutionCancellationToken,
+    report: &mut dyn FnMut(ExportProgress),
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
 ) -> JobExecutionResult {
     let mut temp_audio_path_to_cleanup: Option<PathBuf> = None;
     let result = (|| {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.is_canceled() {
             return JobExecutionResult::Cancelled;
         }
 
-        for (asset_id, path) in &timeline.asset_paths {
-            if !path.exists() {
-                return JobExecutionResult::Failed(format!(
-                    "时间线素材离线：asset={} path={}",
-                    asset_id,
-                    path.display()
-                ));
-            }
+        if let Err(reason) = validate_snapshot_media_revisions(timeline) {
+            return JobExecutionResult::Failed(reason);
         }
         if let Err(err) = validate_timeline_export_color_compatibility(&job.config, timeline) {
             return JobExecutionResult::Failed(err);
@@ -1646,7 +1542,7 @@ fn execute_timeline_export(
         }
         cmd.arg("-f")
             .arg(container_format(&job.config.preset.container))
-            .arg(&job.config.output_path)
+            .arg(output_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -1688,26 +1584,24 @@ fn execute_timeline_export(
             }
         }
 
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.is_canceled() {
             let _ = child.kill();
             let _ = child.wait();
             return JobExecutionResult::Cancelled;
         }
 
-        report(JobStatus::Encoding, 0.98);
-        match child.wait_with_output() {
+        report(ExportProgress::encoding(0.98));
+        match wait_for_ffmpeg_child(child, cancel) {
             Ok(output) if output.status.success() => {
-                match validate_export_output(
-                    job.config.output_path.as_path(),
-                    &validation_expectations,
-                ) {
+                report(ExportProgress::validating(0.99));
+                match validate_export_output(output_path, &validation_expectations) {
                     Ok(()) => JobExecutionResult::Completed,
                     Err(err) => JobExecutionResult::Failed(format!("导出结果校验失败: {err}")),
                 }
             }
             Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let reason = stderr
+                let reason = output
+                    .stderr_tail
                     .lines()
                     .rev()
                     .find(|line| !line.trim().is_empty())
@@ -1715,7 +1609,7 @@ fn execute_timeline_export(
                     .unwrap_or_else(|| format!("ffmpeg 退出码：{}", output.status));
                 JobExecutionResult::Failed(format!("时间线编码失败：{reason}"))
             }
-            Err(err) => JobExecutionResult::Failed(format!("等待 ffmpeg 结束失败: {}", err)),
+            Err(outcome) => outcome,
         }
     })();
 
@@ -1725,12 +1619,133 @@ fn execute_timeline_export(
     result
 }
 
+fn validate_snapshot_media_revisions(timeline: &TimelineExportSnapshot) -> Result<(), String> {
+    for (asset_id, dependency) in &timeline.media {
+        let actual = MediaFileFingerprint::capture(dependency.path.as_path());
+        if actual != dependency.source_fingerprint {
+            return Err(format!(
+                "export source revision changed: asset={} path={} admitted={:?} actual={:?}",
+                asset_id,
+                dependency.path.display(),
+                dependency.source_fingerprint,
+                actual
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn export_partial_output_path(final_output: &Path, job_id: JobId) -> PathBuf {
+    let mut file_name = final_output
+        .file_name()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "mondrian-export".into());
+    file_name.push(format!(".mondrian-{job_id}.partial"));
+    final_output.with_file_name(file_name)
+}
+
+fn finalize_export_output(partial_output: &Path, final_output: &Path) -> Result<(), String> {
+    if !partial_output.is_file() {
+        return Err(format!(
+            "validated export temporary output is unavailable: {}",
+            partial_output.display()
+        ));
+    }
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(partial_output)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| {
+            format!(
+                "failed to durably flush validated export {} before publication: {error}",
+                partial_output.display()
+            )
+        })?;
+    replace_validated_output(partial_output, final_output).map_err(|error| {
+        format!(
+            "failed to publish validated export {}: {error}",
+            final_output.display()
+        )
+    })?;
+
+    if let Err(error) = sync_output_directory(final_output) {
+        tracing::warn!(
+            path = %final_output.display(),
+            %error,
+            "export was atomically published but its directory durability sync failed"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_validated_output(partial_output: &Path, final_output: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, ReplaceFileW, MOVEFILE_WRITE_THROUGH, REPLACEFILE_WRITE_THROUGH,
+    };
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    let partial = wide(partial_output);
+    let final_path = wide(final_output);
+    let succeeded = if final_output.exists() {
+        // SAFETY: All pointers reference live, NUL-terminated UTF-16 buffers for
+        // the duration of the call. The reserved pointers are required to be null.
+        unsafe {
+            ReplaceFileW(
+                final_path.as_ptr(),
+                partial.as_ptr(),
+                std::ptr::null(),
+                REPLACEFILE_WRITE_THROUGH,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        }
+    } else {
+        // SAFETY: Both pointers reference live, NUL-terminated UTF-16 buffers.
+        unsafe {
+            MoveFileExW(
+                partial.as_ptr(),
+                final_path.as_ptr(),
+                MOVEFILE_WRITE_THROUGH,
+            )
+        }
+    };
+    if succeeded == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_validated_output(partial_output: &Path, final_output: &Path) -> std::io::Result<()> {
+    std::fs::rename(partial_output, final_output)
+}
+
+#[cfg(unix)]
+fn sync_output_directory(final_output: &Path) -> std::io::Result<()> {
+    let Some(parent) = final_output.parent().filter(|parent| !parent.as_os_str().is_empty()) else {
+        return Ok(());
+    };
+    std::fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_output_directory(_final_output: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 fn prepare_timeline_audio_input(
     job: &RenderJob,
-    timeline: &TimelineExportInput,
+    timeline: &TimelineExportSnapshot,
     range: TimelineRenderRange,
-    cancel: &AtomicBool,
-    report: &mut dyn FnMut(JobStatus, f32),
+    cancel: &ExecutionCancellationToken,
+    report: &mut dyn FnMut(ExportProgress),
 ) -> Result<TimelineAudioInput, JobExecutionResult> {
     if matches!(job.config.preset.container, Container::Gif) {
         return Ok(TimelineAudioInput::Disabled);
@@ -1744,8 +1759,8 @@ fn prepare_timeline_audio_input(
 
     let temp_path = std::env::temp_dir().join(format!(
         "mondrian-export-audio-{}-{}.f32",
-        job.id,
-        Utc::now().timestamp_millis()
+        job.id(),
+        chrono::Utc::now().timestamp_millis()
     ));
 
     match render_timeline_audio_to_pcm_f32(
@@ -1766,7 +1781,7 @@ fn prepare_timeline_audio_input(
 }
 
 fn timeline_has_audio_content(
-    timeline: &TimelineExportInput,
+    timeline: &TimelineExportSnapshot,
     range: TimelineRenderRange,
 ) -> Result<bool, String> {
     let time_base = timeline.sequence.time_base();
@@ -1797,12 +1812,12 @@ fn timeline_has_audio_content(
 
 fn render_timeline_audio_to_pcm_f32(
     output_path: &Path,
-    timeline: &TimelineExportInput,
+    timeline: &TimelineExportSnapshot,
     range: TimelineRenderRange,
     sample_rate: u32,
     channels: u8,
-    cancel: &AtomicBool,
-    report: &mut dyn FnMut(JobStatus, f32),
+    cancel: &ExecutionCancellationToken,
+    report: &mut dyn FnMut(ExportProgress),
 ) -> JobExecutionResult {
     let file = match std::fs::File::create(output_path) {
         Ok(file) => file,
@@ -1859,7 +1874,7 @@ fn render_timeline_audio_to_pcm_f32(
     let mut pcm = vec![0.0_f32; chunk_frames_target * usize::from(channels)];
 
     while rendered_samples < total_samples {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.is_canceled() {
             return JobExecutionResult::Cancelled;
         }
 
@@ -1897,7 +1912,7 @@ fn render_timeline_audio_to_pcm_f32(
         rendered_samples += chunk_frames;
         let ratio = rendered_samples as f32 / total_samples as f32;
         let progress = (0.02 + 0.14 * ratio).clamp(0.02, 0.16);
-        report(JobStatus::Encoding, progress);
+        report(ExportProgress::preparing(progress));
     }
 
     if let Err(err) = writer.flush() {
@@ -1938,7 +1953,7 @@ fn timeline_audio_sample_range(
 }
 
 struct ExportAudioMediaResolver<'a> {
-    timeline: &'a TimelineExportInput,
+    timeline: &'a TimelineExportSnapshot,
     cache: Arc<AudioSourceCache>,
 }
 
@@ -1956,9 +1971,10 @@ impl AudioMediaResolver for ExportAudioMediaResolver<'_> {
         }
         let path = self
             .timeline
-            .asset_paths
+            .media
             .get(&asset_id)
-            .ok_or_else(|| format!("Asset {asset_id} has no export source path"))?;
+            .map(|dependency| &dependency.path)
+            .ok_or_else(|| format!("Asset {asset_id} has no export media dependency"))?;
         let source = self.cache.open(path.as_path()).map_err(|error| {
             format!(
                 "failed to open bounded audio source Asset {asset_id} at {}: {error}",
@@ -1988,13 +2004,13 @@ impl AudioDecodedSource for ExportDecodedAudioSource {
 
 fn write_timeline_frames(
     stdin: ChildStdin,
-    timeline: &TimelineExportInput,
+    timeline: &TimelineExportSnapshot,
     range: TimelineRenderRange,
     width: u32,
     height: u32,
     alpha_mode: ExportAlphaMode,
-    cancel: &AtomicBool,
-    report: &mut dyn FnMut(JobStatus, f32),
+    cancel: &ExecutionCancellationToken,
+    report: &mut dyn FnMut(ExportProgress),
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
 ) -> JobExecutionResult {
     let mut writer = BufWriter::new(stdin);
@@ -2013,13 +2029,13 @@ fn write_timeline_frames(
 
 fn write_timeline_frames_to_writer<W: Write>(
     writer: &mut W,
-    timeline: &TimelineExportInput,
+    timeline: &TimelineExportSnapshot,
     range: TimelineRenderRange,
     width: u32,
     height: u32,
     alpha_mode: ExportAlphaMode,
-    cancel: &AtomicBool,
-    report: &mut dyn FnMut(JobStatus, f32),
+    cancel: &ExecutionCancellationToken,
+    report: &mut dyn FnMut(ExportProgress),
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
 ) -> JobExecutionResult {
     let total = range.total_frames.max(1);
@@ -2031,7 +2047,7 @@ fn write_timeline_frames_to_writer<W: Write>(
         .record_asset_issue_summary(export_asset_issue_summary(timeline));
 
     for index in 0..total {
-        if cancel.load(Ordering::Relaxed) {
+        if cancel.is_canceled() {
             return JobExecutionResult::Cancelled;
         }
 
@@ -2074,10 +2090,7 @@ fn write_timeline_frames_to_writer<W: Write>(
         let rendered = index + 1;
         let ratio = rendered as f32 / total as f32;
         let progress = (0.18 + 0.72 * ratio).clamp(0.18, 0.92);
-        report(
-            JobStatus::Rendering { frame: rendered, total_frames: total },
-            progress,
-        );
+        report(ExportProgress::rendering(progress, rendered, total));
     }
 
     if let Err(err) = writer.flush() {
@@ -2109,7 +2122,7 @@ fn export_output_boundary_from_context(
 }
 
 fn render_timeline_frame_into(
-    timeline: &TimelineExportInput,
+    timeline: &TimelineExportSnapshot,
     timeline_frame: i64,
     width: u32,
     height: u32,
@@ -2159,7 +2172,7 @@ enum SequenceRenderTarget<'a> {
 /// nested sequence recursion and sequence color-context inheritance. It is the
 /// export-side diagnostic counterpart to preview's per-frame source counters.
 pub fn export_input_color_resolution_counts_for_frame(
-    timeline: &TimelineExportInput,
+    timeline: &TimelineExportSnapshot,
     timeline_frame: i64,
 ) -> Result<InputColorResolutionSourceCounts, String> {
     let color_context = timeline
@@ -2180,7 +2193,7 @@ pub fn export_input_color_resolution_counts_for_frame(
 /// This executes the same frame render path used by export jobs and is intended
 /// for preview/export parity tests, telemetry probes, and performance budgets.
 pub fn export_composite_diagnostics_for_frame(
-    timeline: &TimelineExportInput,
+    timeline: &TimelineExportSnapshot,
     timeline_frame: i64,
     width: u32,
     height: u32,
@@ -2207,7 +2220,7 @@ pub fn export_composite_diagnostics_for_frame(
 /// This executes the same frame render path used by export jobs and records the
 /// actual input, nested, and final output stage executions.
 pub fn export_color_stage_diagnostics_for_frame(
-    timeline: &TimelineExportInput,
+    timeline: &TimelineExportSnapshot,
     timeline_frame: i64,
     width: u32,
     height: u32,
@@ -2231,14 +2244,18 @@ pub fn export_color_stage_diagnostics_for_frame(
 
 /// Aggregate media color-diagnostic issues for assets actually referenced by this export timeline.
 pub fn export_asset_issue_summary(
-    timeline: &TimelineExportInput,
+    timeline: &TimelineExportSnapshot,
 ) -> VideoColorDiagnosticIssueAggregate {
     let mut asset_ids = HashSet::new();
     collect_sequence_asset_ids(timeline, &timeline.sequence, 0, &mut asset_ids);
 
     let mut summary = VideoColorDiagnosticIssueAggregate::default();
     for asset_id in asset_ids {
-        if let Some(diagnostic) = timeline.asset_color_diagnostics.get(&asset_id) {
+        if let Some(diagnostic) = timeline
+            .media
+            .get(&asset_id)
+            .and_then(|dependency| dependency.color_diagnostic.as_ref())
+        {
             summary.observe(diagnostic);
         }
     }
@@ -2246,7 +2263,7 @@ pub fn export_asset_issue_summary(
 }
 
 fn collect_sequence_asset_ids(
-    timeline: &TimelineExportInput,
+    timeline: &TimelineExportSnapshot,
     sequence: &mondrian_timeline::sequence::Sequence,
     depth: usize,
     asset_ids: &mut HashSet<AssetId>,
@@ -2278,7 +2295,7 @@ fn collect_sequence_asset_ids(
 }
 
 fn export_sequence_input_color_resolution_counts(
-    timeline: &TimelineExportInput,
+    timeline: &TimelineExportSnapshot,
     sequence: &mondrian_timeline::sequence::Sequence,
     timeline_frame: i64,
     color_context: ColorContext,
@@ -2295,18 +2312,15 @@ fn export_sequence_input_color_resolution_counts(
     for element in &render_plan.elements {
         match element {
             TimelineRenderPlanElement::Media(media) => {
-                let detected_color_space =
-                    timeline.asset_color_spaces.get(&media.asset_id).copied();
-                let asset_interpretation = timeline
-                    .asset_interpretations
+                let dependency = timeline
+                    .media
                     .get(&media.asset_id)
-                    .copied()
-                    .unwrap_or_default();
+                    .ok_or_else(|| format!("导出快照缺少素材依赖: {}", media.asset_id))?;
                 let resolution =
                     color_context.missing_metadata_policy.resolve_asset_input_decision(
                         media.color_space_override,
-                        asset_interpretation,
-                        detected_color_space,
+                        dependency.interpretation,
+                        dependency.detected_color_space,
                         color_context.working_color_space,
                     );
                 counts.record(resolution.source);
@@ -2342,7 +2356,7 @@ fn export_sequence_input_color_resolution_counts(
 }
 
 fn render_sequence_frame_into(
-    timeline: &TimelineExportInput,
+    timeline: &TimelineExportSnapshot,
     sequence: &mondrian_timeline::sequence::Sequence,
     timeline_frame: i64,
     width: u32,
@@ -2406,12 +2420,13 @@ fn render_sequence_frame_into(
         let TimelineRenderPlanElement::Media(media) = element else {
             continue;
         };
-        let Some(path) = timeline.asset_paths.get(&media.asset_id) else {
-            continue;
-        };
-        let detected_color_space = timeline.asset_color_spaces.get(&media.asset_id).copied();
-        let asset_interpretation =
-            timeline.asset_interpretations.get(&media.asset_id).copied().unwrap_or_default();
+        let dependency = timeline
+            .media
+            .get(&media.asset_id)
+            .ok_or_else(|| format!("导出快照缺少素材依赖: {}", media.asset_id))?;
+        let path = &dependency.path;
+        let detected_color_space = dependency.detected_color_space;
+        let asset_interpretation = dependency.interpretation;
         let input_color_resolution =
             color_context.missing_metadata_policy.resolve_asset_input_decision(
                 media.color_space_override,
@@ -2426,9 +2441,9 @@ fn render_sequence_frame_into(
             ResolvedInputColor::Color(color_space) => color_space,
             ResolvedInputColor::Data | ResolvedInputColor::Rejected => {
                 return Err({
-                    let diagnostic = timeline
-                        .asset_color_diagnostics
-                        .get(&media.asset_id)
+                    let diagnostic = dependency
+                        .color_diagnostic
+                        .as_ref()
                         .map(mondrian_media::VideoColorDiagnostic::summary)
                         .unwrap_or_else(|| "unavailable".to_string());
                     format!(
@@ -2734,13 +2749,14 @@ fn render_sequence_frame_into(
 }
 
 fn resolve_export_input_video_range(
-    timeline: &TimelineExportInput,
+    timeline: &TimelineExportSnapshot,
     asset_id: AssetId,
     interpretation: mondrian_core::timeline_data::AssetMediaInterpretation,
 ) -> DecodedVideoRangeContract {
     let detected = timeline
-        .asset_color_diagnostics
+        .media
         .get(&asset_id)
+        .and_then(|dependency| dependency.color_diagnostic.as_ref())
         .map(|diagnostic| diagnostic.color_range)
         .unwrap_or(DecodedVideoRange::Unknown);
     DecodedVideoRangeContract::from_interpretation(interpretation.range, detected)
@@ -2851,7 +2867,7 @@ fn decode_video_layer_scaled(
 }
 
 fn compute_timeline_render_range(
-    timeline: &TimelineExportInput,
+    timeline: &TimelineExportSnapshot,
 ) -> Result<TimelineRenderRange, String> {
     let sequence = &timeline.sequence;
     let frame_rate = sequence.settings.frame_rate;
@@ -2896,7 +2912,7 @@ fn compute_timeline_render_range(
     Ok(TimelineRenderRange { start_frame: start, total_frames, fps_num, fps_den })
 }
 
-fn timeline_output_resolution(job: &RenderJob, timeline: &TimelineExportInput) -> (u32, u32) {
+fn timeline_output_resolution(job: &RenderJob, timeline: &TimelineExportSnapshot) -> (u32, u32) {
     if let Some(resolution) = &job.config.preset.resolution {
         return (
             normalize_output_dimension(resolution.width),
@@ -2927,206 +2943,6 @@ fn normalize_output_dimension(value: u32) -> u32 {
     dim.max(1)
 }
 
-/// 异步后台渲染队列
-pub struct RenderQueue {
-    jobs: Arc<Mutex<VecDeque<RenderJob>>>,
-    wake: Arc<Condvar>,
-    shutdown: Arc<AtomicBool>,
-    cancel_flags: Arc<Mutex<HashMap<JobId, Arc<AtomicBool>>>>,
-    executor: Arc<dyn ExportExecutor>,
-}
-
-impl RenderQueue {
-    pub fn new() -> Arc<Self> {
-        Self::new_with_executor(Arc::new(FfmpegExportExecutor))
-    }
-
-    fn new_with_executor(executor: Arc<dyn ExportExecutor>) -> Arc<Self> {
-        let queue = Arc::new(Self::with_executor(executor));
-        queue.spawn_worker();
-        queue
-    }
-
-    fn with_executor(executor: Arc<dyn ExportExecutor>) -> Self {
-        Self {
-            jobs: Arc::new(Mutex::new(VecDeque::new())),
-            wake: Arc::new(Condvar::new()),
-            shutdown: Arc::new(AtomicBool::new(false)),
-            cancel_flags: Arc::new(Mutex::new(HashMap::new())),
-            executor,
-        }
-    }
-
-    fn spawn_worker(&self) {
-        let jobs = Arc::clone(&self.jobs);
-        let wake = Arc::clone(&self.wake);
-        let shutdown = Arc::clone(&self.shutdown);
-        let cancel_flags = Arc::clone(&self.cancel_flags);
-        let executor = Arc::clone(&self.executor);
-
-        let result = std::thread::Builder::new().name("mondrian-export-worker".to_string()).spawn(
-            move || {
-                while let Some((job, cancel_flag)) =
-                    take_next_pending_job(&jobs, &wake, &shutdown, &cancel_flags)
-                {
-                    let mut report = |status: JobStatus, progress: f32| {
-                        update_job_status(&jobs, job.id, status, progress);
-                    };
-                    let mut report_diagnostics = |diagnostics: ExportJobDiagnostics| {
-                        update_job_diagnostics(&jobs, job.id, diagnostics);
-                    };
-                    let outcome = executor.execute(
-                        &job,
-                        cancel_flag.as_ref(),
-                        &mut report,
-                        &mut report_diagnostics,
-                    );
-
-                    match outcome {
-                        JobExecutionResult::Completed => {
-                            update_job_terminal_state(&jobs, job.id, JobStatus::Completed, 1.0);
-                        }
-                        JobExecutionResult::Cancelled => {
-                            update_job_terminal_state(&jobs, job.id, JobStatus::Cancelled, 0.0);
-                        }
-                        JobExecutionResult::Failed(reason) => {
-                            update_job_terminal_state(
-                                &jobs,
-                                job.id,
-                                JobStatus::Failed(reason),
-                                0.0,
-                            );
-                        }
-                    }
-
-                    cancel_flags.lock().remove(&job.id);
-                }
-            },
-        );
-        if let Err(e) = result {
-            tracing::error!("Failed to spawn export worker thread: {}", e);
-        }
-    }
-
-    pub fn enqueue(&self, job: RenderJob) -> JobId {
-        let id = job.id;
-        self.jobs.lock().push_back(job);
-        self.wake.notify_one();
-        id
-    }
-
-    pub fn list_jobs(&self) -> Vec<RenderJob> {
-        self.jobs.lock().iter().cloned().collect()
-    }
-
-    pub fn cancel(&self, id: JobId) {
-        let mut should_wake = false;
-        {
-            let mut queue = self.jobs.lock();
-            if let Some(job) = queue.iter_mut().find(|j| j.id == id) {
-                match job.status {
-                    JobStatus::Pending => {
-                        job.status = JobStatus::Cancelled;
-                        job.progress = 0.0;
-                        job.completed_at = Some(Utc::now());
-                        should_wake = true;
-                    }
-                    JobStatus::Rendering { .. } | JobStatus::Encoding => {
-                        if let Some(flag) = self.cancel_flags.lock().get(&id).cloned() {
-                            flag.store(true, Ordering::Relaxed);
-                        }
-                    }
-                    JobStatus::Completed | JobStatus::Failed(_) | JobStatus::Cancelled => {}
-                }
-            }
-        }
-        if should_wake {
-            self.wake.notify_all();
-        }
-    }
-
-    pub fn clear_completed(&self) {
-        let mut queue = self.jobs.lock();
-        queue.retain(|job| !helpers::is_terminal(&job.status));
-    }
-}
-
-impl Drop for RenderQueue {
-    fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Relaxed);
-        self.wake.notify_all();
-    }
-}
-
-impl Default for RenderQueue {
-    fn default() -> Self {
-        let queue = Self::with_executor(Arc::new(FfmpegExportExecutor));
-        queue.spawn_worker();
-        queue
-    }
-}
-
-fn take_next_pending_job(
-    jobs: &Mutex<VecDeque<RenderJob>>,
-    wake: &Condvar,
-    shutdown: &AtomicBool,
-    cancel_flags: &Mutex<HashMap<JobId, Arc<AtomicBool>>>,
-) -> Option<(RenderJob, Arc<AtomicBool>)> {
-    let mut queue = jobs.lock();
-    loop {
-        if shutdown.load(Ordering::Relaxed) {
-            return None;
-        }
-
-        if let Some(index) = queue.iter().position(|job| matches!(job.status, JobStatus::Pending)) {
-            let Some(job) = queue.get_mut(index) else {
-                tracing::error!("Pending job index {index} disappeared from queue");
-                continue;
-            };
-            job.status = JobStatus::Rendering { frame: 0, total_frames: 1000 };
-            job.progress = 0.0;
-            job.started_at = Some(Utc::now());
-
-            let snapshot = job.clone();
-            let cancel_flag = Arc::new(AtomicBool::new(false));
-            cancel_flags.lock().insert(snapshot.id, Arc::clone(&cancel_flag));
-            return Some((snapshot, cancel_flag));
-        }
-
-        wake.wait(&mut queue);
-    }
-}
-
-fn update_job_status(
-    jobs: &Mutex<VecDeque<RenderJob>>,
-    job_id: JobId,
-    status: JobStatus,
-    progress: f32,
-) {
-    let mut queue = jobs.lock();
-    if let Some(job) = queue.iter_mut().find(|job| job.id == job_id) {
-        if matches!(job.status, JobStatus::Cancelled) && !matches!(status, JobStatus::Cancelled) {
-            return;
-        }
-        if is_terminal(&job.status) {
-            return;
-        }
-        job.status = status;
-        job.progress = progress.clamp(0.0, 1.0);
-    }
-}
-
-fn update_job_diagnostics(
-    jobs: &Mutex<VecDeque<RenderJob>>,
-    job_id: JobId,
-    diagnostics: ExportJobDiagnostics,
-) {
-    let mut queue = jobs.lock();
-    if let Some(job) = queue.iter_mut().find(|job| job.id == job_id) {
-        job.diagnostics = diagnostics;
-    }
-}
-
 mod helpers;
 pub(crate) use helpers::*;
 
@@ -3147,7 +2963,8 @@ mod tests {
     };
     use mondrian_timeline::track::Track;
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     fn tt(frame: i64, time_base: Rational) -> TimelineTime {
         TimelineTime::from_frame_position(FramePosition::new(frame, time_base))
@@ -3187,27 +3004,24 @@ mod tests {
         fn execute(
             &self,
             _job: &RenderJob,
-            cancel: &AtomicBool,
-            report: &mut dyn FnMut(JobStatus, f32),
+            cancel: &ExecutionCancellationToken,
+            report: &mut dyn FnMut(ExportProgress),
             _report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
         ) -> JobExecutionResult {
             self.calls.fetch_add(1, Ordering::Relaxed);
-            report(JobStatus::Encoding, 0.2);
+            report(ExportProgress::encoding(0.2));
 
             let step = 20u64;
             let mut elapsed = 0u64;
             while elapsed < self.delay_ms {
-                if cancel.load(Ordering::Relaxed) {
+                if cancel.is_canceled() {
                     return JobExecutionResult::Cancelled;
                 }
                 std::thread::sleep(Duration::from_millis(step));
                 elapsed += step;
             }
 
-            report(
-                JobStatus::Rendering { frame: 1000, total_frames: 1000 },
-                0.95,
-            );
+            report(ExportProgress::rendering(0.95, 1_000, 1_000));
             JobExecutionResult::Completed
         }
     }
@@ -3220,11 +3034,11 @@ mod tests {
         fn execute(
             &self,
             _job: &RenderJob,
-            _cancel: &AtomicBool,
-            report: &mut dyn FnMut(JobStatus, f32),
+            _cancel: &ExecutionCancellationToken,
+            report: &mut dyn FnMut(ExportProgress),
             report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
         ) -> JobExecutionResult {
-            report(JobStatus::Rendering { frame: 1, total_frames: 1 }, 0.5);
+            report(ExportProgress::rendering(0.5, 1, 1));
             report_diagnostics(self.diagnostics);
             JobExecutionResult::Completed
         }
@@ -3233,28 +3047,103 @@ mod tests {
     fn dummy_config(output_name: &str) -> ExportConfig {
         ExportConfig {
             preset: crate::preset::ExportPreset::youtube_1080p(),
-            input: ExportInput::File {
-                input_path: PathBuf::from("dummy-input.mp4"),
-                in_point: None,
-                out_point: None,
-            },
+            timeline: Box::new(timeline_input_with_output_color(ColorSpace::Rec709)),
             output_path: PathBuf::from(output_name),
         }
     }
 
-    fn timeline_input_with_output_color(output_color_space: ColorSpace) -> TimelineExportInput {
+    fn timeline_input_with_output_color(output_color_space: ColorSpace) -> TimelineExportSnapshot {
         let mut sequence = Sequence::new("color-validation");
         sequence.settings.color_management.output_color_space = output_color_space;
-        TimelineExportInput {
+        TimelineExportSnapshot {
             sequence,
             sequences: Vec::new(),
-            asset_paths: HashMap::new(),
-            asset_color_spaces: HashMap::new(),
-            asset_interpretations: HashMap::new(),
-            asset_color_diagnostics: HashMap::new(),
+            media: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         }
+    }
+
+    fn test_media_dependency(
+        path: PathBuf,
+        detected_color_space: Option<ColorSpace>,
+        interpretation: AssetMediaInterpretation,
+        color_diagnostic: Option<mondrian_media::VideoColorDiagnostic>,
+    ) -> crate::preset::ExportMediaDependency {
+        crate::preset::ExportMediaDependency {
+            source_fingerprint: MediaFileFingerprint::capture(path.as_path()),
+            path,
+            detected_color_space,
+            interpretation,
+            color_diagnostic,
+        }
+    }
+
+    #[test]
+    fn export_source_revision_change_is_fail_closed() {
+        let root = std::env::temp_dir().join(format!("mondrian-export-revision-{}", JobId::new()));
+        std::fs::create_dir_all(&root).expect("create export revision root");
+        let source = root.join("source.mov");
+        std::fs::write(&source, b"admitted").expect("write admitted source");
+        let asset_id = AssetId::new();
+        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec709);
+        timeline.media.insert(
+            asset_id,
+            test_media_dependency(
+                source.clone(),
+                Some(ColorSpace::Rec709),
+                AssetMediaInterpretation::default(),
+                None,
+            ),
+        );
+        std::fs::write(&source, b"source revision changed").expect("replace source");
+
+        let error = validate_snapshot_media_revisions(&timeline)
+            .expect_err("changed source revision must fail closed");
+        assert!(error.contains(&asset_id.to_string()));
+        assert!(error.contains(source.to_string_lossy().as_ref()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn validated_export_publication_replaces_final_atomically() {
+        let root = std::env::temp_dir().join(format!("mondrian-export-publish-{}", JobId::new()));
+        std::fs::create_dir_all(&root).expect("create export publication root");
+        let final_output = root.join("deliverable.mp4");
+        let job_id = JobId::new();
+        let partial_output = export_partial_output_path(&final_output, job_id);
+        std::fs::write(&final_output, b"prior deliverable").expect("write prior output");
+        std::fs::write(&partial_output, b"validated deliverable").expect("write partial output");
+
+        finalize_export_output(&partial_output, &final_output).expect("publish validated output");
+
+        assert_eq!(
+            std::fs::read(&final_output).expect("read published output"),
+            b"validated deliverable"
+        );
+        assert!(!partial_output.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_partial_never_disturbs_existing_deliverable() {
+        let root = std::env::temp_dir().join(format!("mondrian-export-preserve-{}", JobId::new()));
+        std::fs::create_dir_all(&root).expect("create export preservation root");
+        let final_output = root.join("deliverable.mp4");
+        let job_id = JobId::new();
+        std::fs::write(&final_output, b"prior deliverable").expect("write prior output");
+
+        finalize_export_output(
+            export_partial_output_path(&final_output, job_id).as_path(),
+            &final_output,
+        )
+        .expect_err("missing partial must fail");
+
+        assert_eq!(
+            std::fs::read(&final_output).expect("read preserved output"),
+            b"prior deliverable"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn test_color_diagnostic(
@@ -3302,7 +3191,8 @@ mod tests {
             delay_ms: 100,
         }));
 
-        let job_id = queue.enqueue(RenderJob::new(dummy_config("out-a.mp4")));
+        let job_id =
+            queue.enqueue(RenderJob::new(dummy_config("out-a.mp4"))).expect("admit export");
 
         let done = wait_until(2_000, || {
             queue
@@ -3325,8 +3215,12 @@ mod tests {
             delay_ms: 300,
         }));
 
-        let first_id = queue.enqueue(RenderJob::new(dummy_config("out-first.mp4")));
-        let second_id = queue.enqueue(RenderJob::new(dummy_config("out-second.mp4")));
+        let first_id = queue
+            .enqueue(RenderJob::new(dummy_config("out-first.mp4")))
+            .expect("admit first export");
+        let second_id = queue
+            .enqueue(RenderJob::new(dummy_config("out-second.mp4")))
+            .expect("admit second export");
         queue.cancel(second_id);
 
         let done = wait_until(3_000, || {
@@ -3355,22 +3249,25 @@ mod tests {
             calls: Arc::clone(&calls),
             delay_ms: 100,
         }));
-        let mut completed = RenderJob::new(dummy_config("completed.mp4"));
-        completed.status = JobStatus::Completed;
-        completed.progress = 1.0;
-        let mut failed = RenderJob::new(dummy_config("failed.mp4"));
-        failed.status = JobStatus::Failed("disk full".to_owned());
-        let mut cancelled = RenderJob::new(dummy_config("cancelled.mp4"));
-        cancelled.status = JobStatus::Cancelled;
-
-        queue.enqueue(completed);
-        queue.enqueue(failed);
-        queue.enqueue(cancelled);
+        queue
+            .enqueue(RenderJob::new(dummy_config("completed.mp4")))
+            .expect("admit first terminal");
+        queue
+            .enqueue(RenderJob::new(dummy_config("second-completed.mp4")))
+            .expect("admit second terminal");
+        let cancelled = queue
+            .enqueue(RenderJob::new(dummy_config("cancelled.mp4")))
+            .expect("admit canceled terminal");
+        queue.cancel(cancelled);
+        assert!(wait_until(2_000, || queue
+            .list_jobs()
+            .iter()
+            .all(|job| job.status.is_terminal())));
 
         queue.clear_completed();
 
         assert!(queue.list_jobs().is_empty());
-        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -3403,7 +3300,9 @@ mod tests {
         );
         let queue = RenderQueue::new_with_executor(Arc::new(DiagnosticExecutor { diagnostics }));
 
-        let job_id = queue.enqueue(RenderJob::new(dummy_config("diagnostics.mp4")));
+        let job_id = queue
+            .enqueue(RenderJob::new(dummy_config("diagnostics.mp4")))
+            .expect("admit diagnostic export");
 
         let done = wait_until(2_000, || {
             queue
@@ -3701,13 +3600,10 @@ mod tests {
                 .expect("valid clip"),
             )
             .expect("add solid clip");
-        let timeline = TimelineExportInput {
+        let timeline = TimelineExportSnapshot {
             sequence: seq,
             sequences: Vec::new(),
-            asset_paths: HashMap::new(),
-            asset_color_spaces: HashMap::new(),
-            asset_interpretations: HashMap::new(),
-            asset_color_diagnostics: HashMap::new(),
+            media: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
@@ -3901,13 +3797,10 @@ mod tests {
                 .expect("valid clip"),
             )
             .expect("add solid clip");
-        let timeline = TimelineExportInput {
+        let timeline = TimelineExportSnapshot {
             sequence: seq,
             sequences: Vec::new(),
-            asset_paths: HashMap::new(),
-            asset_color_spaces: HashMap::new(),
-            asset_interpretations: HashMap::new(),
-            asset_color_diagnostics: HashMap::new(),
+            media: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
@@ -4075,13 +3968,24 @@ mod tests {
             ),
         );
 
-        let timeline = TimelineExportInput {
+        let media = asset_color_diagnostics
+            .into_iter()
+            .map(|(asset_id, diagnostic)| {
+                (
+                    asset_id,
+                    test_media_dependency(
+                        PathBuf::from(format!("diagnostic-{asset_id}.mov")),
+                        None,
+                        AssetMediaInterpretation::default(),
+                        Some(diagnostic),
+                    ),
+                )
+            })
+            .collect();
+        let timeline = TimelineExportSnapshot {
             sequence,
             sequences: vec![nested],
-            asset_paths: HashMap::new(),
-            asset_color_spaces: HashMap::new(),
-            asset_interpretations: HashMap::new(),
-            asset_color_diagnostics,
+            media,
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
@@ -4285,7 +4189,15 @@ mod tests {
             payload_size: 32,
             payload: None,
         });
-        timeline.asset_color_diagnostics.insert(asset_id, diagnostic);
+        timeline.media.insert(
+            asset_id,
+            test_media_dependency(
+                PathBuf::from("dynamic-hdr.mov"),
+                None,
+                AssetMediaInterpretation::default(),
+                Some(diagnostic),
+            ),
+        );
         let mut config = dummy_config("hdr-dynamic-passthrough.mp4");
         config.preset.video = VideoCodecConfig::H265 { crf: 20, bitrate_kbps: None };
 
@@ -4319,13 +4231,10 @@ mod tests {
         seq.in_point = Some(tt(40, tb));
         seq.out_point = Some(tt(99, tb));
 
-        let timeline = TimelineExportInput {
+        let timeline = TimelineExportSnapshot {
             sequence: seq,
             sequences: Vec::new(),
-            asset_paths: HashMap::new(),
-            asset_color_spaces: HashMap::new(),
-            asset_interpretations: HashMap::new(),
-            asset_color_diagnostics: HashMap::new(),
+            media: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
@@ -4344,13 +4253,10 @@ mod tests {
         seq.in_point = Some(tt(40, tb));
         seq.out_point = Some(tt(99, tb));
 
-        let timeline = TimelineExportInput {
+        let timeline = TimelineExportSnapshot {
             sequence: seq,
             sequences: Vec::new(),
-            asset_paths: HashMap::new(),
-            asset_color_spaces: HashMap::new(),
-            asset_interpretations: HashMap::new(),
-            asset_color_diagnostics: HashMap::new(),
+            media: HashMap::new(),
             range: TimelineExportRange::EntireSequence,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
@@ -4387,32 +4293,56 @@ mod tests {
             seq.video_tracks.push(track);
         }
 
-        let mut timeline = TimelineExportInput {
+        let mut timeline = TimelineExportSnapshot {
             sequence: seq,
             sequences: Vec::new(),
-            asset_paths: HashMap::new(),
-            asset_color_spaces: HashMap::new(),
-            asset_interpretations: HashMap::new(),
-            asset_color_diagnostics: HashMap::new(),
+            media: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
-        timeline.asset_color_spaces.insert(detected_id, ColorSpace::Srgb);
-        timeline.asset_interpretations.insert(
-            override_id,
-            AssetMediaInterpretation {
-                color: MediaColorInterpretation::Override {
-                    color_space: ColorSpace::SonySLog3SGamut3Cine,
-                },
-                ..AssetMediaInterpretation::default()
-            },
+        timeline.media.insert(
+            detected_id,
+            test_media_dependency(
+                PathBuf::from("detected.mov"),
+                Some(ColorSpace::Srgb),
+                AssetMediaInterpretation::default(),
+                None,
+            ),
         );
-        timeline.asset_interpretations.insert(
+        timeline.media.insert(
+            override_id,
+            test_media_dependency(
+                PathBuf::from("override.mov"),
+                None,
+                AssetMediaInterpretation {
+                    color: MediaColorInterpretation::Override {
+                        color_space: ColorSpace::SonySLog3SGamut3Cine,
+                    },
+                    ..AssetMediaInterpretation::default()
+                },
+                None,
+            ),
+        );
+        timeline.media.insert(
+            missing_id,
+            test_media_dependency(
+                PathBuf::from("missing.mov"),
+                None,
+                AssetMediaInterpretation::default(),
+                None,
+            ),
+        );
+        timeline.media.insert(
             data_id,
-            AssetMediaInterpretation {
-                payload: AssetColorPayload::NonColorData,
-                ..AssetMediaInterpretation::default()
-            },
+            test_media_dependency(
+                PathBuf::from("data.exr"),
+                None,
+                AssetMediaInterpretation {
+                    payload: AssetColorPayload::NonColorData,
+                    ..AssetMediaInterpretation::default()
+                },
+                None,
+            ),
         );
 
         let counts = export_input_color_resolution_counts_for_frame(&timeline, 0)
@@ -4441,7 +4371,15 @@ mod tests {
             None,
         );
         diagnostic.color_range = DecodedVideoRange::Limited;
-        timeline.asset_color_diagnostics.insert(asset_id, diagnostic);
+        timeline.media.insert(
+            asset_id,
+            test_media_dependency(
+                PathBuf::from("range.mov"),
+                None,
+                AssetMediaInterpretation::default(),
+                Some(diagnostic),
+            ),
+        );
         let interpretation = AssetMediaInterpretation {
             range: MediaRangeInterpretation::Override { range: MediaSignalRange::Full },
             ..AssetMediaInterpretation::default()
@@ -4473,15 +4411,20 @@ mod tests {
         seq.in_point = Some(tt(30, tb));
         seq.out_point = Some(tt(40, tb));
 
-        let mut asset_paths = HashMap::new();
-        asset_paths.insert(asset_id, PathBuf::from("dummy-audio.wav"));
-        let timeline = TimelineExportInput {
+        let mut media = HashMap::new();
+        media.insert(
+            asset_id,
+            test_media_dependency(
+                PathBuf::from("dummy-audio.wav"),
+                None,
+                AssetMediaInterpretation::default(),
+                None,
+            ),
+        );
+        let timeline = TimelineExportSnapshot {
             sequence: seq,
             sequences: Vec::new(),
-            asset_paths,
-            asset_color_spaces: HashMap::new(),
-            asset_interpretations: HashMap::new(),
-            asset_color_diagnostics: HashMap::new(),
+            media,
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
@@ -4687,13 +4630,10 @@ mod tests {
         let tb = seq.time_base();
         seq.in_point = Some(tt(0, tb));
         seq.out_point = Some(tt(10, tb));
-        let timeline = TimelineExportInput {
+        let timeline = TimelineExportSnapshot {
             sequence: seq,
             sequences: Vec::new(),
-            asset_paths: HashMap::new(),
-            asset_color_spaces: HashMap::new(),
-            asset_interpretations: HashMap::new(),
-            asset_color_diagnostics: HashMap::new(),
+            media: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
@@ -4736,13 +4676,10 @@ mod tests {
             .expect("add alpha solid");
         seq.in_point = Some(tt(0, tb));
         seq.out_point = Some(tt(1, tb));
-        let timeline = TimelineExportInput {
+        let timeline = TimelineExportSnapshot {
             sequence: seq,
             sequences: Vec::new(),
-            asset_paths: HashMap::new(),
-            asset_color_spaces: HashMap::new(),
-            asset_interpretations: HashMap::new(),
-            asset_color_diagnostics: HashMap::new(),
+            media: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
@@ -4787,13 +4724,10 @@ mod tests {
         let tb = seq.time_base();
         seq.in_point = Some(tt(0, tb));
         seq.out_point = Some(tt(10, tb));
-        let timeline = TimelineExportInput {
+        let timeline = TimelineExportSnapshot {
             sequence: seq,
             sequences: Vec::new(),
-            asset_paths: HashMap::new(),
-            asset_color_spaces: HashMap::new(),
-            asset_interpretations: HashMap::new(),
-            asset_color_diagnostics: HashMap::new(),
+            media: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
@@ -4853,13 +4787,10 @@ mod tests {
                 .expect("valid clip"),
             )
             .expect("add solid clip");
-        let timeline = TimelineExportInput {
+        let timeline = TimelineExportSnapshot {
             sequence: seq,
             sequences: Vec::new(),
-            asset_paths: HashMap::new(),
-            asset_color_spaces: HashMap::new(),
-            asset_interpretations: HashMap::new(),
-            asset_color_diagnostics: HashMap::new(),
+            media: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
@@ -4898,51 +4829,42 @@ mod tests {
         ));
         std::fs::write(&temp_path, []).expect("create placeholder media path");
 
-        let mut asset_paths = HashMap::new();
-        asset_paths.insert(asset_id, temp_path.clone());
-        let mut asset_color_diagnostics = HashMap::new();
-        asset_color_diagnostics.insert(
-            asset_id,
-            mondrian_media::VideoColorDiagnostic {
-                detected_color_space: None,
-                color_range: mondrian_media::DecodedVideoRange::Unknown,
-                interpretation: mondrian_media::DetectedColorInterpretation {
-                    color_space: None,
-                    confidence: mondrian_media::VideoColorInterpretationConfidence::None,
-                    source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
-                    method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
-                    evidence: Vec::new(),
-                    warnings: vec![
-                        mondrian_media::VideoColorInterpretationWarning::MissingCicpTags,
-                    ],
-                    user_overridable: true,
-                },
+        let color_diagnostic = mondrian_media::VideoColorDiagnostic {
+            detected_color_space: None,
+            color_range: mondrian_media::DecodedVideoRange::Unknown,
+            interpretation: mondrian_media::DetectedColorInterpretation {
+                color_space: None,
+                confidence: mondrian_media::VideoColorInterpretationConfidence::None,
                 source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
                 method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
-                metadata: Some(mondrian_media::VideoColorMetadata {
-                    primaries: mondrian_media::VideoColorTag {
-                        code: 2,
-                        name: None,
-                        specified: false,
-                    },
-                    transfer: mondrian_media::VideoColorTag {
-                        code: 2,
-                        name: None,
-                        specified: false,
-                    },
-                    matrix: mondrian_media::VideoColorTag { code: 2, name: None, specified: false },
-                }),
-                metadata_hints: Vec::new(),
-                hdr_metadata: Vec::new(),
+                evidence: Vec::new(),
+                warnings: vec![mondrian_media::VideoColorInterpretationWarning::MissingCicpTags],
+                user_overridable: true,
             },
+            source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
+            method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
+            metadata: Some(mondrian_media::VideoColorMetadata {
+                primaries: mondrian_media::VideoColorTag { code: 2, name: None, specified: false },
+                transfer: mondrian_media::VideoColorTag { code: 2, name: None, specified: false },
+                matrix: mondrian_media::VideoColorTag { code: 2, name: None, specified: false },
+            }),
+            metadata_hints: Vec::new(),
+            hdr_metadata: Vec::new(),
+        };
+        let mut media = HashMap::new();
+        media.insert(
+            asset_id,
+            test_media_dependency(
+                temp_path.clone(),
+                None,
+                AssetMediaInterpretation::default(),
+                Some(color_diagnostic),
+            ),
         );
-        let timeline = TimelineExportInput {
+        let timeline = TimelineExportSnapshot {
             sequence: seq,
             sequences: Vec::new(),
-            asset_paths,
-            asset_color_spaces: HashMap::new(),
-            asset_interpretations: HashMap::new(),
-            asset_color_diagnostics,
+            media,
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
@@ -5124,13 +5046,10 @@ mod tests {
                 .expect("valid clip"),
             )
             .expect("add solid clip");
-        let timeline = TimelineExportInput {
+        let timeline = TimelineExportSnapshot {
             sequence: seq,
             sequences: Vec::new(),
-            asset_paths: HashMap::new(),
-            asset_color_spaces: HashMap::new(),
-            asset_interpretations: HashMap::new(),
-            asset_color_diagnostics: HashMap::new(),
+            media: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
@@ -5179,13 +5098,10 @@ mod tests {
                 .expect("valid clip"),
             )
             .expect("add solid clip");
-        let timeline = TimelineExportInput {
+        let timeline = TimelineExportSnapshot {
             sequence: seq,
             sequences: Vec::new(),
-            asset_paths: HashMap::new(),
-            asset_color_spaces: HashMap::new(),
-            asset_interpretations: HashMap::new(),
-            asset_color_diagnostics: HashMap::new(),
+            media: HashMap::new(),
             range: TimelineExportRange::SequenceInOut,
             project_color_management: mondrian_core::ProjectColorManagement::default(),
         };

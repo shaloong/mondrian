@@ -210,6 +210,19 @@ the service. Background polling observes one completion revision and refreshes
 models so a newly fresh proxy can replace source fallback; no Widget owns a
 worker, retry rule, or FFmpeg process.
 
+Timeline Export follows the same UI boundary but is a separate offline Module.
+`AppState::enqueue_timeline_export` resolves one selected Sequence, atomically
+captures its reachable nested/media dependency closure, and submits an
+immutable `RenderJob` to the instance-owned bounded `RenderQueue`. The queue
+outlives neither its App composition owner nor its cancellation authority, but
+an admitted snapshot intentionally remains independent of later Project edits
+or Project closure. Panels call only the App Adapter for enqueue, cancel,
+terminal cleanup, revision polling, and lightweight `ExportJobSnapshot`
+observation. They may project structured phases, truthful units, failures, and
+color diagnostics; they cannot clone the heavy Timeline payload, mutate status,
+invent progress, or infer completion from file existence. Headless execution
+uses the same queue/evidence Interface rather than a Window-specific path.
+
 Media preview frames are held in a bounded LRU cache keyed by asset identity,
 media file fingerprint (file length plus modification timestamp), source
 frame/time, target preview dimensions, input color interpretation, target

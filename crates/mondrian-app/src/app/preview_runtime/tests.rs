@@ -5472,6 +5472,30 @@ fn preview_render_request_clears_stale_color_rejection() {
     assert_eq!(service.last_color_rejection(), None);
 }
 
+fn export_test_media_dependencies(
+    asset_ids: impl IntoIterator<Item = AssetId>,
+    color_spaces: &HashMap<AssetId, ColorSpace>,
+    interpretations: &HashMap<AssetId, AssetMediaInterpretation>,
+    diagnostics: &HashMap<AssetId, VideoColorDiagnostic>,
+) -> HashMap<AssetId, mondrian_export::preset::ExportMediaDependency> {
+    asset_ids
+        .into_iter()
+        .map(|asset_id| {
+            let path = PathBuf::from(format!("preview-export-parity-{asset_id}.mov"));
+            (
+                asset_id,
+                mondrian_export::preset::ExportMediaDependency {
+                    source_fingerprint: MediaFileFingerprint::capture(path.as_path()),
+                    path,
+                    detected_color_space: color_spaces.get(&asset_id).copied(),
+                    interpretation: interpretations.get(&asset_id).copied().unwrap_or_default(),
+                    color_diagnostic: diagnostics.get(&asset_id).cloned(),
+                },
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn preview_and_export_input_color_resolution_counts_match_for_frame() {
     let mut sequence = Sequence::new("preview-export-color-resolution-parity");
@@ -5530,14 +5554,17 @@ fn preview_and_export_input_color_resolution_counts_match_for_frame() {
         0,
     )
     .expect("preview counts");
+    let media = export_test_media_dependencies(
+        [detected_id, override_id, missing_id, data_id],
+        &asset_color_spaces,
+        &asset_interpretations,
+        &HashMap::new(),
+    );
     let export_counts = mondrian_export::queue::export_input_color_resolution_counts_for_frame(
-        &mondrian_export::preset::TimelineExportInput {
+        &mondrian_export::preset::TimelineExportSnapshot {
             sequence,
             sequences: Vec::new(),
-            asset_paths: HashMap::new(),
-            asset_color_spaces,
-            asset_interpretations,
-            asset_color_diagnostics: HashMap::new(),
+            media,
             range: mondrian_export::preset::TimelineExportRange::SequenceInOut,
             project_color_management,
         },
@@ -5650,14 +5677,22 @@ fn preview_and_export_nested_input_color_resolution_counts_match_for_frame() {
         0,
     )
     .expect("preview nested counts");
+    let media = export_test_media_dependencies(
+        [
+            parent_override_id,
+            nested_detected_id,
+            nested_data_id,
+            nested_missing_id,
+        ],
+        &asset_color_spaces,
+        &asset_interpretations,
+        &HashMap::new(),
+    );
     let export_counts = mondrian_export::queue::export_input_color_resolution_counts_for_frame(
-        &mondrian_export::preset::TimelineExportInput {
+        &mondrian_export::preset::TimelineExportSnapshot {
             sequence: parent,
             sequences: nested_sequences,
-            asset_paths: HashMap::new(),
-            asset_color_spaces,
-            asset_interpretations,
-            asset_color_diagnostics: HashMap::new(),
+            media,
             range: mondrian_export::preset::TimelineExportRange::SequenceInOut,
             project_color_management,
         },
@@ -5809,14 +5844,17 @@ fn preview_and_export_asset_issue_summaries_match_for_referenced_assets() {
         );
     }
 
+    let media = export_test_media_dependencies(
+        [direct_id, nested_asset_id, unused_id],
+        &HashMap::new(),
+        &HashMap::new(),
+        &asset_color_diagnostics,
+    );
     let export_summary = mondrian_export::queue::export_asset_issue_summary(
-        &mondrian_export::preset::TimelineExportInput {
+        &mondrian_export::preset::TimelineExportSnapshot {
             sequence: parent,
             sequences: nested_sequences,
-            asset_paths: HashMap::new(),
-            asset_color_spaces: HashMap::new(),
-            asset_interpretations: HashMap::new(),
-            asset_color_diagnostics,
+            media,
             range: mondrian_export::preset::TimelineExportRange::SequenceInOut,
             project_color_management: ProjectColorManagement::default(),
         },
@@ -5879,13 +5917,10 @@ fn preview_and_export_composite_color_path_summaries_match_for_frame() {
     let preview_summary = preview_service.diagnostics().composite_color_path_summary();
 
     let export_diagnostics = mondrian_export::queue::export_composite_diagnostics_for_frame(
-        &mondrian_export::preset::TimelineExportInput {
+        &mondrian_export::preset::TimelineExportSnapshot {
             sequence,
             sequences: Vec::new(),
-            asset_paths: HashMap::new(),
-            asset_color_spaces: HashMap::new(),
-            asset_interpretations: HashMap::new(),
-            asset_color_diagnostics: HashMap::new(),
+            media: HashMap::new(),
             range: mondrian_export::preset::TimelineExportRange::SequenceInOut,
             project_color_management: ProjectColorManagement::default(),
         },
@@ -8204,13 +8239,13 @@ fn preview_frame_store_clear_releases_frames_failures_and_reserved_bytes() {
 fn media_preview_key_includes_file_length_in_identity() {
     let mut first = test_media_key(1);
     first.path = PathBuf::from("E:/media/replaced.mov");
-    first.fingerprint = Some(PreviewFileFingerprint {
+    first.fingerprint = Some(MediaFileFingerprint {
         len: Some(1_024),
         modified_secs: Some(10),
         modified_nanos: Some(20),
     });
     let mut second = first.clone();
-    second.fingerprint = Some(PreviewFileFingerprint {
+    second.fingerprint = Some(MediaFileFingerprint {
         len: Some(2_048),
         modified_secs: Some(10),
         modified_nanos: Some(20),
@@ -8223,13 +8258,13 @@ fn media_preview_key_includes_file_length_in_identity() {
 fn media_preview_cache_does_not_reuse_same_path_with_different_file_length() {
     let mut old_key = test_media_key(1);
     old_key.path = PathBuf::from("E:/media/replaced.mov");
-    old_key.fingerprint = Some(PreviewFileFingerprint {
+    old_key.fingerprint = Some(MediaFileFingerprint {
         len: Some(1_024),
         modified_secs: Some(10),
         modified_nanos: Some(20),
     });
     let mut new_key = old_key.clone();
-    new_key.fingerprint = Some(PreviewFileFingerprint {
+    new_key.fingerprint = Some(MediaFileFingerprint {
         len: Some(2_048),
         modified_secs: Some(10),
         modified_nanos: Some(20),

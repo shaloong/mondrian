@@ -13,9 +13,9 @@ use std::time::{Duration, Instant};
 
 use mondrian_core::{MondrianError, Resolution};
 use mondrian_media::{
-    decode_preview_frame_cancellable, HwAccelDeviceSelector, PreviewDecodeAccessMode,
-    PreviewDecodeAdaptiveHints, PreviewDecodeDiagnostics, PreviewDecodeOutcome,
-    PreviewDecodeRequest, PreviewFileFingerprint, PreviewHardwareDecodeRequest,
+    decode_preview_frame_cancellable, HwAccelDeviceSelector, MediaFileFingerprint,
+    PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeDiagnostics,
+    PreviewDecodeOutcome, PreviewDecodeRequest, PreviewHardwareDecodeRequest,
     PreviewSourceColorContract,
 };
 use mondrian_playback::{FrameDemandIdentity, FrameExecutionId};
@@ -625,7 +625,7 @@ fn decode_media_preview_for_access_mode(
     max_width: Option<u32>,
     max_height: Option<u32>,
     access_mode: PreviewDecodeAccessMode,
-    fingerprint: Option<PreviewFileFingerprint>,
+    fingerprint: Option<MediaFileFingerprint>,
     adaptive_hints: PreviewDecodeAdaptiveHints,
     hardware_decode_request: PreviewHardwareDecodeRequest,
     hardware_decode_device_selector: Option<HwAccelDeviceSelector>,

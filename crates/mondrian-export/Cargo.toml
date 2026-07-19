@@ -23,3 +23,6 @@ tracing     = { workspace = true }
 uuid        = { workspace = true }
 chrono      = { workspace = true }
 parking_lot = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }

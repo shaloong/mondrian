@@ -25,7 +25,10 @@ use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
 use mondrian_effects::{effect_display_name, effect_library_types};
 use mondrian_export::preset::{ExportPreset, TimelineExportRange, VideoCodecConfig};
-use mondrian_export::queue::{ExportColorHealthSeverity, ExportJobColorDiagnostics, JobStatus};
+use mondrian_export::queue::{
+    ExportColorHealthSeverity, ExportJobColorDiagnostics, ExportProgress, ExportProgressDetail,
+    ExportProgressPhase, JobStatus,
+};
 use mondrian_media::{VideoColorDiagnosticIssueAggregate, VideoColorDiagnosticIssueSummary};
 use mondrian_timeline::clip::{Clip, Transform2D};
 use mondrian_timeline::sequence::{
@@ -1630,32 +1633,21 @@ impl ExportPanelModel {
             .filter(|id| sequences.iter().any(|sequence| sequence.id == *id))
             .or_else(|| sequences.first().map(|sequence| sequence.id));
 
-        let jobs = state.render_queue.list_jobs();
+        let jobs = state.export_jobs_snapshot();
         let queue_count = jobs.len();
-        let can_clear_completed_jobs = jobs.iter().any(|job| {
-            matches!(
-                job.status,
-                JobStatus::Completed | JobStatus::Failed(_) | JobStatus::Cancelled
-            )
-        });
+        let can_clear_completed_jobs = jobs.iter().any(|job| job.status.is_terminal());
         let jobs = jobs
             .into_iter()
             .rev()
             .take(6)
             .map(|job| ExportJobModel {
                 id: job.id,
-                title: export_job_title(job.config.output_path.as_path()),
-                status: export_job_status_label(&job.status),
+                title: export_job_title(job.output_path.as_path()),
+                status: export_job_status_label(&job.status, job.progress),
                 color_diagnostics: export_job_color_diagnostics_label(job.diagnostics.color),
-                progress_percent: (job.progress.clamp(0.0, 1.0) * 100.0).round() as u8,
-                can_cancel: matches!(
-                    job.status,
-                    JobStatus::Pending | JobStatus::Rendering { .. } | JobStatus::Encoding
-                ),
-                is_completed: matches!(
-                    job.status,
-                    JobStatus::Completed | JobStatus::Failed(_) | JobStatus::Cancelled
-                ),
+                progress_percent: (job.progress.fraction.clamp(0.0, 1.0) * 100.0).round() as u8,
+                can_cancel: job.status.can_cancel(),
+                is_completed: job.status.is_terminal(),
             })
             .collect();
 
@@ -3664,16 +3656,31 @@ fn export_job_title(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-fn export_job_status_label(status: &JobStatus) -> String {
+fn export_job_status_label(status: &JobStatus, progress: ExportProgress) -> String {
     match status {
         JobStatus::Pending => "Pending".to_owned(),
-        JobStatus::Rendering { frame, total_frames } => {
-            format!("Rendering {}/{}", frame, total_frames)
-        }
-        JobStatus::Encoding => "Encoding".to_owned(),
+        JobStatus::Running { phase } => match progress.detail {
+            ExportProgressDetail::Frames { completed, total }
+                if *phase == ExportProgressPhase::Rendering =>
+            {
+                format!("Rendering {completed}/{total}")
+            }
+            _ => export_progress_phase_label(*phase).to_owned(),
+        },
+        JobStatus::Cancelling { .. } => "Cancelling".to_owned(),
         JobStatus::Completed => "Completed".to_owned(),
-        JobStatus::Failed(reason) => format!("Failed: {reason}"),
+        JobStatus::Failed(failure) => format!("Failed: {}", failure.detail),
         JobStatus::Cancelled => "Cancelled".to_owned(),
+    }
+}
+
+fn export_progress_phase_label(phase: ExportProgressPhase) -> &'static str {
+    match phase {
+        ExportProgressPhase::Preparing => "Preparing",
+        ExportProgressPhase::Rendering => "Rendering",
+        ExportProgressPhase::Encoding => "Encoding",
+        ExportProgressPhase::Validating => "Validating",
+        ExportProgressPhase::Publishing => "Publishing",
     }
 }
 
@@ -4573,6 +4580,7 @@ fn inspector_effect_property_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mondrian_export::queue::{ExportFailure, ExportFailureReason};
 
     fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::TimelineTime {
         let numerator = frame.checked_mul(time_base.num).expect("test time fits i64");
@@ -5158,28 +5166,14 @@ mod tests {
     }
 
     #[test]
-    fn export_panel_model_exposes_render_queue_jobs() {
-        let state = AppState::new();
-        let render_job = |output_path: &str| {
-            mondrian_export::queue::RenderJob::new(mondrian_export::preset::ExportConfig {
-                preset: mondrian_export::preset::ExportPreset::youtube_1080p(),
-                input: mondrian_export::preset::ExportInput::File {
-                    input_path: "missing-source.mov".into(),
-                    in_point: None,
-                    out_point: None,
-                },
-                output_path: output_path.into(),
-            })
-        };
-        let mut encoding = render_job("E:/renders/encoding.mp4");
-        encoding.status = JobStatus::Encoding;
-        encoding.progress = 0.82;
+    fn export_panel_formats_structured_queue_status_and_diagnostics() {
         let mut input_counts =
             mondrian_timeline::sequence::InputColorResolutionSourceCounts::default();
         input_counts
             .record(mondrian_timeline::sequence::InputColorResolutionSource::DetectedMetadata);
         input_counts.record(mondrian_timeline::sequence::InputColorResolutionSource::Override);
-        encoding.diagnostics.color.record_frame_diagnostics(
+        let mut diagnostics = ExportJobColorDiagnostics::default();
+        diagnostics.record_frame_diagnostics(
             input_counts,
             mondrian_renderer::RenderColorStageDiagnostics {
                 total_stages: 2,
@@ -5199,45 +5193,41 @@ mod tests {
                 ..mondrian_renderer::TimelineCompositeDiagnostics::default()
             },
         );
-        encoding
-            .diagnostics
-            .color
-            .record_asset_issue_summary(VideoColorDiagnosticIssueAggregate {
-                diagnostics: 2,
-                diagnostics_with_warnings: 2,
-                missing_cicp_tags: 1,
-                unsupported_cicp_tags: 0,
-                decoder_unavailable: 1,
-                ..VideoColorDiagnosticIssueAggregate::default()
-            });
-        let legacy_summary = encoding.diagnostics.color.composite_color_path_summary();
+        diagnostics.record_asset_issue_summary(VideoColorDiagnosticIssueAggregate {
+            diagnostics: 2,
+            diagnostics_with_warnings: 2,
+            missing_cicp_tags: 1,
+            unsupported_cicp_tags: 0,
+            decoder_unavailable: 1,
+            ..VideoColorDiagnosticIssueAggregate::default()
+        });
+        let legacy_summary = diagnostics.composite_color_path_summary();
         assert_eq!(legacy_summary.float_linear_composites, 1);
         assert_eq!(legacy_summary.legacy_rgba8_composites, 0);
-        let encoding_id = state.render_queue.enqueue(encoding);
-        let mut failed = render_job("E:/renders/failed.mp4");
-        failed.status = JobStatus::Failed("disk full".to_owned());
-        let failed_id = state.render_queue.enqueue(failed);
-        let mut completed = render_job("E:/renders/completed.mp4");
-        completed.status = JobStatus::Completed;
-        completed.progress = 1.0;
-        let completed_id = state.render_queue.enqueue(completed);
-
-        let model = ExportPanelModel::from_app_state(&state);
-
-        assert_eq!(model.queue_count, 3);
-        assert_eq!(model.jobs.len(), 3);
-        assert!(model.can_clear_completed_jobs);
+        let progress = ExportProgress {
+            phase: ExportProgressPhase::Encoding,
+            fraction: 0.82,
+            detail: ExportProgressDetail::None,
+        };
         assert_eq!(
-            model.jobs.iter().map(|job| job.id).collect::<Vec<_>>(),
-            vec![completed_id, failed_id, encoding_id]
+            export_job_status_label(
+                &JobStatus::Running { phase: ExportProgressPhase::Encoding },
+                progress,
+            ),
+            "Encoding"
         );
-
-        let encoding =
-            model.jobs.iter().find(|job| job.id == encoding_id).expect("encoding job model");
-        assert_eq!(encoding.title, "encoding.mp4");
-        assert_eq!(encoding.status, "Encoding");
+        assert_eq!(
+            export_job_status_label(
+                &JobStatus::Failed(ExportFailure {
+                    reason: ExportFailureReason::ExecutionFailed,
+                    detail: "disk full".to_owned(),
+                }),
+                progress,
+            ),
+            "Failed: disk full"
+        );
         let color_diagnostics =
-            encoding.color_diagnostics.as_deref().expect("encoding color diagnostics");
+            export_job_color_diagnostics_label(diagnostics).expect("encoding color diagnostics");
         assert!(
             color_diagnostics.contains("metadata 1 / override 1 / policy 0 / data 0 / reject 0")
         );
@@ -5247,15 +5237,6 @@ mod tests {
         assert!(color_diagnostics.contains("export_gpu_color_stage_blocked"));
         assert!(color_diagnostics.contains("actions inspect_asset_color_warning_evidence"));
         assert!(color_diagnostics.contains("gpu blockers shader 0 resource 0 wrapper 0 pipeline 1"));
-        assert_eq!(encoding.progress_percent, 82);
-        assert!(encoding.can_cancel);
-        assert!(!encoding.is_completed);
-
-        let failed = model.jobs.iter().find(|job| job.id == failed_id).expect("failed job model");
-        assert_eq!(failed.title, "failed.mp4");
-        assert_eq!(failed.status, "Failed: disk full");
-        assert!(!failed.can_cancel);
-        assert!(failed.is_completed);
     }
 
     #[test]
