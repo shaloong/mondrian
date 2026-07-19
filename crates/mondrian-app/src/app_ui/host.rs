@@ -2023,6 +2023,10 @@ mod tests {
     fn poll_background_tasks_expires_stalled_delivery_without_holding_transport() {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let mut host = workspace_host_without_preview_workers("buffering-stall-release");
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+        // Construction may leave unrelated startup services with one visible
+        // completion. Drain that work before measuring the stall-release path.
+        let _ = host.poll_background_tasks(bounds);
         host.app_state.borrow_mut().play();
         let demand_identity = host
             .app_state
@@ -2035,7 +2039,7 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(275));
 
-        assert!(host.poll_background_tasks(Rect::new(0.0, 0.0, 1280.0, 720.0)));
+        assert!(host.poll_background_tasks(bounds));
         assert!(host.app_state.borrow().is_playing());
         assert!(!host.should_defer_gpu_preview_prepare_for_interaction());
         let diagnostics = host.preview_service.diagnostics();
