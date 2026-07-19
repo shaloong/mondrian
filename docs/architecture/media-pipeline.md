@@ -414,6 +414,12 @@ The UI-independent `app::preview_viewer_plan` Module owns resolved element
 representation, stable cache identity, quality/provenance aggregation, deferred
 composite classification, and renderer GPU-layer lowering. Final presentation
 arbitration and diagnostics live in separate private deep Modules.
+The sibling UI-independent `app::preview_cpu_execution` Module owns source to
+working-linear preparation, renderer timeline composition, Program Output,
+monitor adaptation, and exact stage durations. It returns pixels plus all input,
+composite, output, and monitor facts; Window diagnostics only project that result,
+and Headless execution can assert the same result without constructing
+`AppUiPreviewService`.
 `app_ui::preview::presentation` exclusively
 chooses exact registered GPU output, raster cache, scoped stale reuse, deferred
 playback composite, or the CPU output boundary; it cannot schedule media work

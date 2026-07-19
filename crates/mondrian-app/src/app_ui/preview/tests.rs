@@ -295,12 +295,10 @@ fn cpu_raster_preview_retains_program_output_before_srgb_adaptation() {
         },
     )];
     let color_context = test_color_context(ColorSpace::Rec709);
-    let service = AppUiPreviewService::new();
     let mut scratch = TimelineCompositeScratch::default();
 
-    let output =
-        composite_resolved_preview(&service, 2, 2, &resolved, &color_context, &mut scratch)
-            .expect("CPU raster Program Output and monitor adaptation");
+    let output = composite_resolved_preview(2, 2, &resolved, &color_context, &mut scratch)
+        .expect("CPU raster Program Output and monitor adaptation");
 
     assert_eq!(
         output.color_diagnostics.output.color_space,
@@ -5905,15 +5903,9 @@ fn preview_single_media_color_output_matches_export_composite_contract() {
     }];
     let mut preview_scratch = TimelineCompositeScratch::default();
     let preview_service = AppUiPreviewService::new();
-    let preview = composite_resolved_preview(
-        &preview_service,
-        1,
-        1,
-        &resolved,
-        &color_context,
-        &mut preview_scratch,
-    )
-    .expect("preview color composite");
+    let preview = composite_resolved_preview(1, 1, &resolved, &color_context, &mut preview_scratch)
+        .expect("preview color composite");
+    preview_service.record_cpu_execution_evidence(&preview);
     assert_eq!(
         preview.color_diagnostics.output.domain,
         ColorFrameDomain::Display
@@ -6007,15 +5999,9 @@ fn preview_camera_log_input_matches_export_frame_hash() {
     }];
     let preview_service = AppUiPreviewService::new();
     let mut preview_scratch = TimelineCompositeScratch::default();
-    let preview = composite_resolved_preview(
-        &preview_service,
-        2,
-        2,
-        &resolved,
-        &color_context,
-        &mut preview_scratch,
-    )
-    .expect("preview camera-log composite");
+    let preview = composite_resolved_preview(2, 2, &resolved, &color_context, &mut preview_scratch)
+        .expect("preview camera-log composite");
+    preview_service.record_cpu_execution_evidence(&preview);
 
     let export_input = execute_cpu_input_stage(&source, &input_transform)
         .expect("export camera-log input transform");
@@ -6128,15 +6114,9 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
     ];
     let mut preview_scratch = TimelineCompositeScratch::default();
     let preview_service = AppUiPreviewService::new();
-    let preview = composite_resolved_preview(
-        &preview_service,
-        2,
-        2,
-        &resolved,
-        &color_context,
-        &mut preview_scratch,
-    )
-    .expect("preview multilayer composite");
+    let preview = composite_resolved_preview(2, 2, &resolved, &color_context, &mut preview_scratch)
+        .expect("preview multilayer composite");
+    preview_service.record_cpu_execution_evidence(&preview);
 
     let export_media_working = media.working_frame().expect("export media working frame");
     let export_elements = vec![

@@ -67,6 +67,7 @@ mod playback;
 mod playback_acceptance;
 pub(crate) mod playback_preview;
 pub(crate) mod preview_access_mode;
+pub(crate) mod preview_cpu_execution;
 pub(crate) mod preview_execution;
 pub(crate) mod preview_frame_store;
 pub(crate) mod preview_gpu_output_blocker;

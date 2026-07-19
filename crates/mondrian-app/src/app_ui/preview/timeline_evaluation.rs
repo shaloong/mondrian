@@ -49,16 +49,19 @@ impl AppUiPreviewService {
             &mut scratch,
         )
         .ok()?;
-        let render_stage_durations = output.render_stage_durations;
-        let render_total_us = render_stage_durations
+        let execution_durations = output.execution_durations;
+        let render_total_us = execution_durations
             .working_prepare_us
-            .saturating_add(render_stage_durations.cpu_composite_us);
+            .saturating_add(execution_durations.cpu_composite_us);
         self.record_composite(output.composite_diagnostics);
         for diagnostics in output.input_color_diagnostics {
             self.record_color_transform(diagnostics);
         }
         self.record_color_stage(output.input_color_stage_diagnostics);
-        self.record_render_stage_durations(render_total_us, render_stage_durations);
+        self.record_render_stage_durations(
+            render_total_us,
+            AppUiPreviewRenderStageDurations::from_cpu_execution(execution_durations),
+        );
         let mut working_frame = output.frame;
         if working_frame.descriptor().color_space.working() != Some(parent_working_color_space) {
             let converted = execute_cpu_working_transform(

@@ -32,6 +32,19 @@ pub struct AppUiPreviewRenderStageDurations {
 }
 
 impl AppUiPreviewRenderStageDurations {
+    pub(crate) fn from_cpu_execution(durations: PreviewCpuExecutionDurations) -> Self {
+        Self {
+            working_prepare_us: durations.working_prepare_us,
+            cpu_composite_us: durations.cpu_composite_us,
+            cpu_output_boundary_us: durations.cpu_output_boundary_us,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn accumulate_cpu_execution(&mut self, durations: PreviewCpuExecutionDurations) {
+        self.accumulate(Self::from_cpu_execution(durations));
+    }
+
     pub(crate) fn accumulate(&mut self, other: Self) {
         self.resolve_us = self.resolve_us.saturating_add(other.resolve_us);
         self.final_cache_lookup_us =

@@ -384,6 +384,10 @@ lifecycle owner. This Locality prevents UI redraw code from reconstructing a
 second output-selection policy. Raster cache and stale pinning retain the
 UI-independent `PreviewRasterFrame`; this final Window Adapter performs the only
 conversion to `ViewerFrameImage` and shares the existing pixel allocation.
+CPU color/composite execution itself is not Window-owned:
+`app::preview_cpu_execution` returns the final raster, complete execution facts,
+and stage durations. Presentation records those facts into Window diagnostics
+before packaging; a Headless Adapter consumes the same Module directly.
 The same rule applies while a pause, seek, or exact-still request replaces the
 current frame: `Stale` prefers the last presented external GPU frame for the
 same sequence and output extent, then falls back to the pinned CPU raster. A

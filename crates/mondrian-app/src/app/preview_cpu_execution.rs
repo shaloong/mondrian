@@ -5,23 +5,48 @@
 //! decode scheduling, GPU planning, and final presentation arbitration remain
 //! outside it.
 
-use super::*;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-pub(super) struct PreviewCompositeOutput {
-    pub(super) rgba: Vec<u8>,
-    pub(super) composite_diagnostics: TimelineCompositeDiagnostics,
-    pub(super) color_diagnostics: RenderColorTransformDiagnostics,
-    pub(super) monitor_color_diagnostics: Option<RenderColorTransformDiagnostics>,
-    pub(super) color_stage_diagnostics: RenderColorStageDiagnostics,
-    pub(super) render_stage_durations: AppUiPreviewRenderStageDurations,
+use mondrian_core::types::{BlendMode, ColorSpace};
+use mondrian_effects::CompiledEffectGraph;
+use mondrian_renderer::{
+    composite_timeline_elements_color_frame_with_diagnostics,
+    execute_cpu_program_monitor_boundary_rgba8, CpuColorFrame, RenderColorStageDiagnostics,
+    RenderColorTransformDiagnostics, RenderMonitorAdaptation, RenderOutputColorBoundary,
+    TimelineAdjustmentLayer, TimelineCompositeDiagnostics, TimelineCompositeElement,
+    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEffectColorRuntime,
+    TimelineMediaLayer, TimelineSolidColorLayer,
+};
+use mondrian_timeline::sequence::ColorContext;
+
+use super::preview_viewer_plan::ResolvedPreviewElement;
+
+/// CPU Preview execution timings independent of any diagnostics projection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PreviewCpuExecutionDurations {
+    pub(crate) working_prepare_us: u64,
+    pub(crate) cpu_composite_us: u64,
+    pub(crate) cpu_output_boundary_us: u64,
 }
 
-pub(super) struct PreviewWorkingCompositeOutput {
-    pub(super) frame: CpuColorFrame,
-    pub(super) composite_diagnostics: TimelineCompositeDiagnostics,
-    pub(super) input_color_diagnostics: Vec<RenderColorTransformDiagnostics>,
-    pub(super) input_color_stage_diagnostics: RenderColorStageDiagnostics,
-    pub(super) render_stage_durations: AppUiPreviewRenderStageDurations,
+pub(crate) struct PreviewCompositeOutput {
+    pub(crate) rgba: Vec<u8>,
+    pub(crate) composite_diagnostics: TimelineCompositeDiagnostics,
+    pub(crate) input_color_diagnostics: Vec<RenderColorTransformDiagnostics>,
+    pub(crate) input_color_stage_diagnostics: RenderColorStageDiagnostics,
+    pub(crate) color_diagnostics: RenderColorTransformDiagnostics,
+    pub(crate) monitor_color_diagnostics: Option<RenderColorTransformDiagnostics>,
+    pub(crate) color_stage_diagnostics: RenderColorStageDiagnostics,
+    pub(crate) execution_durations: PreviewCpuExecutionDurations,
+}
+
+pub(crate) struct PreviewWorkingCompositeOutput {
+    pub(crate) frame: CpuColorFrame,
+    pub(crate) composite_diagnostics: TimelineCompositeDiagnostics,
+    pub(crate) input_color_diagnostics: Vec<RenderColorTransformDiagnostics>,
+    pub(crate) input_color_stage_diagnostics: RenderColorStageDiagnostics,
+    pub(crate) execution_durations: PreviewCpuExecutionDurations,
 }
 
 enum PreviewWorkingElement {
@@ -37,7 +62,7 @@ enum PreviewWorkingElement {
     },
 }
 
-pub(super) fn composite_resolved_preview_working(
+pub(crate) fn composite_resolved_preview_working(
     width: u32,
     height: u32,
     resolved: &[ResolvedPreviewElement],
@@ -111,7 +136,7 @@ pub(super) fn composite_resolved_preview_working(
             }),
         })
         .collect();
-    let working_prepare_us = app_duration_us(working_prepare_started_at.elapsed());
+    let working_prepare_us = duration_us(working_prepare_started_at.elapsed());
     let cpu_composite_started_at = Instant::now();
     let composite = composite_timeline_elements_color_frame_with_diagnostics(
         width,
@@ -121,21 +146,21 @@ pub(super) fn composite_resolved_preview_working(
         TimelineEffectColorRuntime::new(&color_context.engine, color_context.working_color_space),
         scratch,
     );
-    let cpu_composite_us = app_duration_us(cpu_composite_started_at.elapsed());
+    let cpu_composite_us = duration_us(cpu_composite_started_at.elapsed());
     Ok(PreviewWorkingCompositeOutput {
         frame: composite.frame,
         composite_diagnostics: composite.diagnostics,
         input_color_diagnostics,
         input_color_stage_diagnostics,
-        render_stage_durations: AppUiPreviewRenderStageDurations {
+        execution_durations: PreviewCpuExecutionDurations {
             working_prepare_us,
             cpu_composite_us,
-            ..AppUiPreviewRenderStageDurations::default()
+            ..PreviewCpuExecutionDurations::default()
         },
     })
 }
 
-pub(super) fn output_boundary_from_color_context(
+pub(crate) fn output_boundary_from_color_context(
     color_context: &ColorContext,
 ) -> Result<RenderOutputColorBoundary, String> {
     let output_color_space = color_context.output_color_space.color().ok_or_else(|| {
@@ -154,8 +179,7 @@ pub(super) fn output_boundary_from_color_context(
     .map_err(|error| error.to_string())
 }
 
-pub(super) fn composite_resolved_preview(
-    service: &AppUiPreviewService,
+pub(crate) fn composite_resolved_preview(
     width: u32,
     height: u32,
     resolved: &[ResolvedPreviewElement],
@@ -164,22 +188,8 @@ pub(super) fn composite_resolved_preview(
 ) -> Result<PreviewCompositeOutput, String> {
     let composite =
         composite_resolved_preview_working(width, height, resolved, color_context, scratch)?;
-    for diagnostics in composite.input_color_diagnostics {
-        service.record_color_transform(diagnostics);
-    }
-    if composite.input_color_stage_diagnostics != RenderColorStageDiagnostics::default() {
-        service.record_color_stage(composite.input_color_stage_diagnostics);
-    }
-    if composite.composite_diagnostics.legacy_rgba8_composites > 0 {
-        use crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
-        service.record_preview_gpu_output_blocker(
-            &PreviewGpuOutputBlocker::LegacyRgba8CompositeBoundary {
-                legacy_composites: composite.composite_diagnostics.legacy_rgba8_composites,
-            },
-        );
-    }
     let output_boundary_started_at = Instant::now();
-    let mut render_stage_durations = composite.render_stage_durations;
+    let mut execution_durations = composite.execution_durations;
     let boundary = output_boundary_from_color_context(color_context)
         .map_err(|error| format!("unsupported preview output transform: {error}"))?;
     let program_output = boundary.output_color_space;
@@ -191,16 +201,22 @@ pub(super) fn composite_resolved_preview(
     .map_err(|error| format!("unsupported CPU raster monitor adaptation: {error}"))?;
     execute_cpu_program_monitor_boundary_rgba8(&composite.frame, &boundary, &adaptation)
         .map(|output| {
-            render_stage_durations.cpu_output_boundary_us =
-                app_duration_us(output_boundary_started_at.elapsed());
+            execution_durations.cpu_output_boundary_us =
+                duration_us(output_boundary_started_at.elapsed());
             PreviewCompositeOutput {
                 rgba: output.rgba,
                 composite_diagnostics: composite.composite_diagnostics,
+                input_color_diagnostics: composite.input_color_diagnostics,
+                input_color_stage_diagnostics: composite.input_color_stage_diagnostics,
                 color_diagnostics: output.program_output.color_diagnostics,
                 monitor_color_diagnostics: output.monitor_color_diagnostics,
                 color_stage_diagnostics: output.stage_diagnostics,
-                render_stage_durations,
+                execution_durations,
             }
         })
         .map_err(|err| format!("viewer preview final color transform failed: {err}"))
+}
+
+fn duration_us(duration: Duration) -> u64 {
+    duration.as_micros().min(u128::from(u64::MAX)) as u64
 }

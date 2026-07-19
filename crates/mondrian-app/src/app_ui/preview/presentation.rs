@@ -133,7 +133,6 @@ impl AppUiPreviewService {
                             }
                         };
                     let output = match composite_resolved_preview(
-                        self,
                         width,
                         height,
                         &resolved.elements,
@@ -146,7 +145,8 @@ impl AppUiPreviewService {
                             return ViewerPreviewState::Unavailable;
                         }
                     };
-                    render_stage_durations.accumulate(output.render_stage_durations);
+                    render_stage_durations.accumulate_cpu_execution(output.execution_durations);
+                    self.record_cpu_execution_evidence(&output);
                     self.record_composite(output.composite_diagnostics);
                     self.record_color_transform(output.color_diagnostics);
                     if let Some(diagnostics) = output.monitor_color_diagnostics {

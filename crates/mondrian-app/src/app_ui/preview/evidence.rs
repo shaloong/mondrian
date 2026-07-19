@@ -794,6 +794,22 @@ impl AppUiPreviewService {
         self.metrics.render_stage_durations.set(stage_durations);
     }
 
+    pub(super) fn record_cpu_execution_evidence(&self, output: &PreviewCompositeOutput) {
+        for diagnostics in &output.input_color_diagnostics {
+            self.record_color_transform(*diagnostics);
+        }
+        if output.input_color_stage_diagnostics != RenderColorStageDiagnostics::default() {
+            self.record_color_stage(output.input_color_stage_diagnostics);
+        }
+        if output.composite_diagnostics.legacy_rgba8_composites > 0 {
+            self.record_preview_gpu_output_blocker(
+                &PreviewGpuOutputBlocker::LegacyRgba8CompositeBoundary {
+                    legacy_composites: output.composite_diagnostics.legacy_rgba8_composites,
+                },
+            );
+        }
+    }
+
     pub(super) fn record_composite(&self, diagnostics: TimelineCompositeDiagnostics) {
         bump(&self.metrics.color_composite_plans);
         add_cell(&self.metrics.color_composite_elements, diagnostics.elements);

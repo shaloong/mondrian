@@ -19,11 +19,10 @@ use std::time::{Duration, Instant};
 use mondrian_assets::AssetKind;
 use mondrian_core::display_contract::{DisplayOutputSnapshot, MonitorProfileStatus};
 use mondrian_core::timeline_data::{AlphaInterpretation, AssetMediaInterpretation};
+use mondrian_core::types::{AssetId, ColorSpace, Rational, SequenceId};
 #[cfg(test)]
-use mondrian_core::types::ColorEngine;
-use mondrian_core::types::{AssetId, BlendMode, ColorSpace, Rational, SequenceId};
+use mondrian_core::types::{BlendMode, ColorEngine};
 use mondrian_core::{MondrianError, Resolution, WorkingColorSpace};
-use mondrian_effects::CompiledEffectGraph;
 use mondrian_media::{
     decode_preview_frame_cancellable, preview_decode_cpu_budget, DecodedFrameResidency,
     DecodedVideoRange, DecodedVideoRangeContract, DecodedVideoSurfaceFormat, HwAccelBackend,
@@ -41,22 +40,21 @@ use mondrian_media::{
     PreviewDecodeExecutionPath, PreviewNativeDecodedFrame, PreviewNativeDecodedFrameHandle,
 };
 use mondrian_renderer::{
-    color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
-    evaluate_timeline_render_plan, execute_cpu_program_monitor_boundary_rgba8,
-    execute_cpu_working_transform, CpuColorFrame, CpuEncodedColorFrame, CpuSourceColorFrame,
-    GpuCompositingDiagnostics, LinearFloatSource, RenderColorStageDiagnostics,
-    RenderColorStageGpuBlockerBreakdown, RenderColorTransformDiagnostics,
-    RenderColorTransformDirection, RenderInputTransform, RenderMonitorAdaptation,
-    RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
+    color_report_vocab, evaluate_timeline_render_plan, execute_cpu_working_transform,
+    CpuColorFrame, CpuEncodedColorFrame, CpuSourceColorFrame, GpuCompositingDiagnostics,
+    LinearFloatSource, RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
+    RenderColorTransformDiagnostics, RenderColorTransformDirection, RenderInputTransform,
+    RenderMonitorAdaptation, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
     TimelineCompositeDiagnostics, TimelineCompositeDomainBlockerBreakdown,
-    TimelineCompositeElement, TimelineCompositeLegacyBreakdown, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineEffectColorRuntime, TimelineEvaluationRequest,
-    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
+    TimelineCompositeLegacyBreakdown, TimelineCompositeScratch, TimelineEvaluationRequest,
+    TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 #[cfg(test)]
 use mondrian_renderer::{
     execute_cpu_input_stage, GpuCompositingBlockerReason, GpuNativeDecodedFrameImportSource,
-    GpuNativeDecodedFrameTextureFormat, TimelineCompositeColorPath, ViewerGpuExecutionLayer,
+    GpuNativeDecodedFrameTextureFormat, RenderOutputColorBoundary, TimelineCompositeColorPath,
+    TimelineCompositeElement, TimelineCompositeOptions, TimelineEffectColorRuntime,
+    TimelineMediaLayer, ViewerGpuExecutionLayer,
 };
 use mondrian_timeline::sequence::{
     ColorContext, InputColorResolution, InputColorResolutionSource,
@@ -87,6 +85,10 @@ use crate::app::preview_access_mode::{
 use crate::app::preview_access_mode::{
     media_preview_cancel_reason, MediaPreviewJobEnqueueStatus,
     MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US,
+};
+use crate::app::preview_cpu_execution::{
+    composite_resolved_preview, composite_resolved_preview_working,
+    output_boundary_from_color_context, PreviewCompositeOutput, PreviewCpuExecutionDurations,
 };
 use crate::app::preview_execution::{PreviewCandidateDecision, PreviewExecutionCoordinator};
 use crate::app::preview_execution::{
@@ -676,8 +678,6 @@ impl ViewerPreviewGenerationKey {
     }
 }
 
-mod composite;
-use composite::*;
 mod diagnostics;
 pub use diagnostics::*;
 mod evidence;
