@@ -808,7 +808,7 @@ fn transition_falling(progress: f64, curve: AudioTransitionCurve) -> f32 {
 }
 
 fn stereo_balance_gain(layout: AudioChannelLayout, channel: usize, pan: f64) -> f32 {
-    match layout.ordered_channels().get(channel) {
+    match layout.channel_position(channel) {
         Some(AudioChannelPosition::FrontLeft) if pan > 0.0 => {
             (pan * std::f64::consts::FRAC_PI_2).cos() as f32
         }

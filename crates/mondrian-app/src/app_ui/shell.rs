@@ -3356,7 +3356,7 @@ mod tests {
         root.handle_shell_action(
             app_shell_sequence_settings_draft_changed_action(
                 SequenceSettingsDraftUpdatePayload::AudioChannelLayout(
-                    AudioChannelLayout::Surround51,
+                    AudioChannelLayout::Surround51Side,
                 ),
             ),
             &platform,
@@ -3466,7 +3466,7 @@ mod tests {
         assert_eq!(payload.settings.audio_sample_rate, 96_000);
         assert_eq!(
             payload.settings.audio_channel_layout,
-            AudioChannelLayout::Surround51
+            AudioChannelLayout::Surround51Side
         );
         assert_eq!(payload.settings.audio_channel_layout.channel_count(), 6);
         assert_eq!(

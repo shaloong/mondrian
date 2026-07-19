@@ -319,6 +319,15 @@ impl DecodeSession {
                         key.channel_layout
                     ),
                 })?;
+        let output_layout = ffmpeg_channel_layout(key.channel_layout).ok_or_else(|| {
+            MondrianError::DecodeFailed {
+                asset_id: key.source.path.display().to_string(),
+                reason: format!(
+                    "audio output layout {:?} has no explicit FFmpeg lowering",
+                    key.channel_layout
+                ),
+            }
+        })?;
         let mut command = Command::new("ffmpeg");
         command.arg("-v").arg("error").arg("-nostdin");
         if input_start_frame > 0 {
@@ -345,7 +354,7 @@ impl DecodeSession {
             .arg("-filter:a")
             .arg(pan_filter)
             .arg("-channel_layout")
-            .arg(ffmpeg_channel_layout(key.channel_layout))
+            .arg(output_layout)
             .arg("-ac")
             .arg(key.channel_layout.channel_count().to_string())
             .arg("-ar")
@@ -583,11 +592,12 @@ impl DecodeSession {
     }
 }
 
-fn ffmpeg_channel_layout(layout: AudioChannelLayout) -> &'static str {
+fn ffmpeg_channel_layout(layout: AudioChannelLayout) -> Option<&'static str> {
     match layout {
-        AudioChannelLayout::Mono => "mono",
-        AudioChannelLayout::Stereo => "stereo",
-        AudioChannelLayout::Surround51 => "5.1(side)",
+        AudioChannelLayout::Mono => Some("mono"),
+        AudioChannelLayout::Stereo => Some("stereo"),
+        AudioChannelLayout::Surround51Side => Some("5.1(side)"),
+        AudioChannelLayout::Speakers(_) | AudioChannelLayout::Discrete(_) => None,
     }
 }
 
@@ -712,11 +722,21 @@ mod tests {
 
     #[test]
     fn ffmpeg_layout_names_preserve_semantic_surround_positions() {
-        assert_eq!(ffmpeg_channel_layout(AudioChannelLayout::Mono), "mono");
-        assert_eq!(ffmpeg_channel_layout(AudioChannelLayout::Stereo), "stereo");
         assert_eq!(
-            ffmpeg_channel_layout(AudioChannelLayout::Surround51),
-            "5.1(side)"
+            ffmpeg_channel_layout(AudioChannelLayout::Mono),
+            Some("mono")
+        );
+        assert_eq!(
+            ffmpeg_channel_layout(AudioChannelLayout::Stereo),
+            Some("stereo")
+        );
+        assert_eq!(
+            ffmpeg_channel_layout(AudioChannelLayout::Surround51Side),
+            Some("5.1(side)")
+        );
+        assert_eq!(
+            ffmpeg_channel_layout(AudioChannelLayout::Surround51Back),
+            None
         );
     }
 

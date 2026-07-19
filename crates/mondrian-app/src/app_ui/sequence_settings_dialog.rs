@@ -238,7 +238,7 @@ const TIMELINE_DISPLAY_FORMAT_OPTIONS: [TimelineDisplayFormat; 3] = [
 const AUDIO_CHANNEL_LAYOUT_OPTIONS: [AudioChannelLayout; 3] = [
     AudioChannelLayout::Mono,
     AudioChannelLayout::Stereo,
-    AudioChannelLayout::Surround51,
+    AudioChannelLayout::Surround51Side,
 ];
 
 const AUDIO_DISPLAY_FORMAT_OPTIONS: [AudioDisplayFormat; 2] = [
@@ -369,7 +369,9 @@ fn audio_channel_layout_label(value: AudioChannelLayout) -> &'static str {
     match value {
         AudioChannelLayout::Mono => "单声道",
         AudioChannelLayout::Stereo => "立体声",
-        AudioChannelLayout::Surround51 => "5.1 Surround",
+        AudioChannelLayout::Surround51Side => "5.1 Surround (Side)",
+        AudioChannelLayout::Speakers(_) => "自定义扬声器布局",
+        AudioChannelLayout::Discrete(_) => "离散通道",
     }
 }
 

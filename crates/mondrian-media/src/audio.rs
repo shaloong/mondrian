@@ -583,6 +583,16 @@ pub(crate) fn decode_audio_file_with_ffmpeg_cli(
     sample_rate: u32,
     channel_layout: AudioChannelLayout,
 ) -> Result<AudioBuffer> {
+    let ffmpeg_layout = match channel_layout {
+        AudioChannelLayout::Mono => Some("mono"),
+        AudioChannelLayout::Stereo => Some("stereo"),
+        AudioChannelLayout::Surround51Side => Some("5.1(side)"),
+        AudioChannelLayout::Speakers(_) | AudioChannelLayout::Discrete(_) => None,
+    }
+    .ok_or_else(|| MondrianError::DecodeFailed {
+        asset_id: path.display().to_string(),
+        reason: format!("audio output layout {channel_layout:?} has no explicit FFmpeg lowering"),
+    })?;
     let output = Command::new("ffmpeg")
         .arg("-v")
         .arg("error")
@@ -594,11 +604,7 @@ pub(crate) fn decode_audio_file_with_ffmpeg_cli(
         .arg("-f")
         .arg("f32le")
         .arg("-channel_layout")
-        .arg(match channel_layout {
-            AudioChannelLayout::Mono => "mono",
-            AudioChannelLayout::Stereo => "stereo",
-            AudioChannelLayout::Surround51 => "5.1(side)",
-        })
+        .arg(ffmpeg_layout)
         .arg("-ac")
         .arg(channel_layout.channel_count().to_string())
         .arg("-ar")

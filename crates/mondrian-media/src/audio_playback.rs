@@ -812,7 +812,7 @@ fn validate_rendered_buffer(
     }
     if buffer.channel_layout != request.channel_layout {
         return Err(format!(
-            "rendered layout {:?} does not match requested {:?} layout",
+            "rendered layout {} does not match requested {} layout",
             buffer.channel_layout, request.channel_layout,
         ));
     }

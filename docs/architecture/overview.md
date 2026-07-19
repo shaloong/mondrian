@@ -21,7 +21,7 @@ foundation:
 
 ## Crate Responsibilities
 
-- `mondrian-core`: shared value types, strong IDs, project settings, color primitives, automation/keyframe data, mask/effect data, timeline render-plan data traits. It must not depend on UI, platform, media, renderer, or app crates.
+- `mondrian-core`: shared value types, strong IDs, project settings, canonical audio signal layouts, color primitives, automation/keyframe data, mask/effect data, timeline render-plan data traits. It must not depend on UI, platform, media, renderer, or app crates.
 - `mondrian-editor-state`: editor actions and state enums shared by UI and app code. It should remain UI-toolkit agnostic.
 - `mondrian-editor-ui`: product-level panel/workspace descriptors. It should define editor UI concepts, not render widgets.
 - `mondrian-platform-core`: platform service traits and native-fact result types. No OS calls.
@@ -42,9 +42,9 @@ foundation:
   Timeline audio routing or processor order.
 - `mondrian-audio`: validated author-to-IR compilation, Render Contract
   preparation, common float DSP, exclusive render Sessions, recursive nested
-  Program Runtime, and media source interfaces. Real plugin hosts, general PDC,
-  and execution coordination deepen this crate; format-only placeholder crates
-  are not created.
+  Program Runtime, prepared contribution/route PDC, and media source interfaces.
+  Real plugin hosts, parameter-event delivery, layout negotiation, and richer
+  processors deepen this crate; format-only placeholder crates are not created.
 - `mondrian-playback`: headless Playback Session state machine, Synthetic Clock
   Master, epoch/revision invalidation, frame-delivery recovery policy, and
   transport snapshots. It has no UI, codec, GPU, device, asset-library, or

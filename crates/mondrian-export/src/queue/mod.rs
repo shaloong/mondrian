@@ -1486,12 +1486,17 @@ fn execute_timeline_export(
 
         match &audio_input {
             TimelineAudioInput::PcmFile { path, sample_rate, channel_layout } => {
+                let Some(ffmpeg_layout) = ffmpeg_channel_layout(*channel_layout) else {
+                    return JobExecutionResult::Failed(format!(
+                        "audio output layout {channel_layout:?} has no explicit FFmpeg lowering"
+                    ));
+                };
                 cmd.arg("-f")
                     .arg("f32le")
                     .arg("-ar")
                     .arg(sample_rate.to_string())
                     .arg("-channel_layout")
-                    .arg(ffmpeg_channel_layout(*channel_layout))
+                    .arg(ffmpeg_layout)
                     .arg("-ac")
                     .arg(channel_layout.channel_count().to_string())
                     .arg("-i")
@@ -1503,7 +1508,11 @@ fn execute_timeline_export(
                     .arg("-shortest");
             }
             TimelineAudioInput::Silent { sample_rate, channel_layout } => {
-                let channel_layout = ffmpeg_channel_layout(*channel_layout);
+                let Some(channel_layout) = ffmpeg_channel_layout(*channel_layout) else {
+                    return JobExecutionResult::Failed(format!(
+                        "audio output layout {channel_layout:?} has no explicit FFmpeg lowering"
+                    ));
+                };
                 cmd.arg("-f")
                     .arg("lavfi")
                     .arg("-i")
@@ -2933,11 +2942,12 @@ fn timeline_output_resolution(job: &RenderJob, timeline: &TimelineExportSnapshot
     )
 }
 
-fn ffmpeg_channel_layout(layout: AudioChannelLayout) -> &'static str {
+fn ffmpeg_channel_layout(layout: AudioChannelLayout) -> Option<&'static str> {
     match layout {
-        AudioChannelLayout::Mono => "mono",
-        AudioChannelLayout::Stereo => "stereo",
-        AudioChannelLayout::Surround51 => "5.1(side)",
+        AudioChannelLayout::Mono => Some("mono"),
+        AudioChannelLayout::Stereo => Some("stereo"),
+        AudioChannelLayout::Surround51Side => Some("5.1(side)"),
+        AudioChannelLayout::Speakers(_) | AudioChannelLayout::Discrete(_) => None,
     }
 }
 
@@ -4500,6 +4510,30 @@ mod tests {
             fps_den: 1,
         };
         assert_eq!(timeline_audio_sample_range(range, 48_000), Ok((0, 96_000)));
+    }
+
+    #[test]
+    fn ffmpeg_audio_output_lowering_rejects_unnegotiated_layouts() {
+        assert_eq!(
+            ffmpeg_channel_layout(AudioChannelLayout::Mono),
+            Some("mono")
+        );
+        assert_eq!(
+            ffmpeg_channel_layout(AudioChannelLayout::Stereo),
+            Some("stereo")
+        );
+        assert_eq!(
+            ffmpeg_channel_layout(AudioChannelLayout::Surround51Side),
+            Some("5.1(side)")
+        );
+        assert_eq!(
+            ffmpeg_channel_layout(AudioChannelLayout::Surround51Back),
+            None
+        );
+        assert_eq!(
+            ffmpeg_channel_layout(AudioChannelLayout::discrete(8).expect("discrete layout")),
+            None
+        );
     }
 
     #[test]

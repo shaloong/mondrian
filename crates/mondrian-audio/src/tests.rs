@@ -1,8 +1,9 @@
 use super::*;
 use mondrian_core::{
-    AssetId, AudioChannelLayout, AudioComponentEditId, AudioRouteId, AudioSourceComponentId,
-    AutomationSegmentInterpolation, ExactAutomationCurve, ExactAutomationKeyframe,
-    ExactBezierHandle, ExecutionCancellationToken, ParameterId, TimeScale, TimelineTime,
+    AssetId, AudioChannelLayout, AudioChannelPosition, AudioComponentEditId, AudioRouteId,
+    AudioSourceComponentId, AutomationSegmentInterpolation, ExactAutomationCurve,
+    ExactAutomationKeyframe, ExactBezierHandle, ExecutionCancellationToken, ParameterId, TimeScale,
+    TimelineTime,
 };
 use mondrian_timeline::audio::{
     AudioChannelStripOutputPort, AudioMixBus, AudioProcessorInstance, AudioRoute,
@@ -915,8 +916,21 @@ fn clip_balance_targets_semantic_front_pair_without_touching_surround_channels()
         (AudioChannelLayout::Mono, vec![1.0]),
         (AudioChannelLayout::Stereo, vec![0.0, 1.0]),
         (
-            AudioChannelLayout::Surround51,
+            AudioChannelLayout::Surround51Side,
             vec![0.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        ),
+        (
+            AudioChannelLayout::speakers([
+                AudioChannelPosition::FrontLeft,
+                AudioChannelPosition::FrontRight,
+                AudioChannelPosition::TopCenter,
+            ])
+            .expect("custom speaker layout"),
+            vec![0.0, 1.0, 1.0],
+        ),
+        (
+            AudioChannelLayout::discrete(4).expect("discrete layout"),
+            vec![1.0, 1.0, 1.0, 1.0],
         ),
     ] {
         let plan = Arc::new(

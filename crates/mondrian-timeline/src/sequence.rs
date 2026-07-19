@@ -1987,7 +1987,7 @@ mod tests {
             working_color_space: WorkingColorSpace::LinearRec2020,
             audio_sample_rate: 96_000,
             audio_display_format: AudioDisplayFormat::Milliseconds,
-            audio_channel_layout: AudioChannelLayout::Surround51,
+            audio_channel_layout: AudioChannelLayout::Surround51Side,
             preview: SequencePreviewSettings {
                 format: PreviewRenderFormat::ProResProxy,
                 resolution_scale: 0.5,

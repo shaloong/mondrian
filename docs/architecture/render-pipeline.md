@@ -483,6 +483,11 @@ authorized it. Export resolution cannot consult the live Asset Library, fall
 back to `0:a:0`, or reinterpret a missing Component; it uses the same standard
 channel-matrix lowering as realtime Playback and fails the job when the frozen
 binding or file revision no longer matches.
+The frozen Sequence `AudioChannelLayout` is also authoritative for output
+packaging. The common DSP may carry named/custom or Discrete layouts, but the
+current FFmpeg export Adapter publishes only mono, stereo, and 5.1(side), for
+which it has exact layout names and media-input matrices. Every other layout
+fails before encoder launch instead of being reduced to a matching `-ac` count.
 
 Preview media decoding must convert source media into the sequence working
 color space before compositing. The source color space resolves from clip

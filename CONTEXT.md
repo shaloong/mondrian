@@ -169,7 +169,8 @@ A short-lived media Adapter value containing one absolute container stream index
 _Avoid_: Author state, path-only decode key, channel count presented as layout
 
 **Audio Signal Layout**:
-The semantic channel positions and canonical interleaving order of one audio signal. Mono, stereo, and 5.1 surround currently have explicit stable orders; channel count is always derived from the layout and is never an independent author or render fact.
+The validated semantic layout and canonical interleaving order of one audio signal. It is either layout-independent Mono, a canonical non-empty set of named speaker positions, or a bounded 1–64 channel Discrete bus with deliberately absent speaker meaning. Standard Stereo, 5.1(side), 5.1(back), and 7.1 are canonical named-speaker values rather than channel-count aliases; channel capacity is always derived from the layout.
+_Avoid_: Bare channel count, unordered speaker vector, treating Discrete channels as speakers, `5.1` without side/back meaning, representation mistaken for Adapter execution support
 _Avoid_: Bare channel count as signal meaning, device channel index, guessed six-channel ordering
 
 **Timeline Time**:
@@ -366,7 +367,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - **CPAL Output Evidence** proves that a concrete operating-system output stream repeatedly consumed production PCM at a bounded callback cadence. It is not acoustic loopback evidence and cannot prove the waveform reached a physical connector, amplifier, or speaker.
 - Every **Audio Sample Position** carries its sample rate. Positions at different rates cannot be compared or subtracted without an explicit resampling Adapter.
 - An **AudioDecodedSource** fills exact interleaved **Decoded Audio Source Windows** and may fail the whole block; it cannot publish a partial shifted block. `mondrian-audio` owns only a small aligned hot window, while the media Adapter owns fingerprinting, decode, weighted LRU residency, and failure memory.
-- Every Sequence, Audio Render Contract, PCM render request, decoded source cache, and PCM buffer carries one **Audio Signal Layout**. Capacity is derived from that layout; the FFmpeg Adapter explicitly lowers 5.1 to `5.1(side)` and may not infer semantics from the integer six.
+- Every Sequence, Audio Render Contract, PCM render request, decoded source cache, and PCM buffer carries one **Audio Signal Layout**. Capacity is derived from that layout. The DSP core can preserve named/custom and Discrete buses, but each media, plugin, device, and export Adapter must negotiate an exact lowering; current FFmpeg execution admits only explicit mono/stereo/5.1(side) matrices and may not infer semantics from a channel count.
 - An **Audio Render Session** crosses its source Adapter Seam once per active Generated Audio Contribution block using ordered absolute source-frame coordinates; reverse, repeated, and non-contiguous mappings cannot force a per-sample Interface or move time-mapping authority into media decode.
 - A **Prepared Audio Schedule** is the only graph representation interpreted by an **Audio Render Session**. Preparation assigns dense node/contribution/scope slots, contiguous incoming Route ranges, exact active sample spans, Transition bindings, scratch liveness, and the CPU kernel backend; author maps and general Route searches cannot enter block execution.
 - CPU scalar reference and runtime-selected SIMD implementations consume the same **Prepared Audio Schedule** and must produce identical PCM for the supported processor set. SIMD is an execution choice, never a second semantic compiler.

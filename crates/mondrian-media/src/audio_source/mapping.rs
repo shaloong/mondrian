@@ -71,7 +71,7 @@ pub(super) fn standard_pan_filter(
         }
         (
             ChannelLayout::Mono | ChannelLayout::Unspecified(1),
-            AudioChannelLayout::Surround51,
+            AudioChannelLayout::Surround51Side,
         ) => Some(
             "pan=5.1(side)|c0=0*c0|c1=0*c0|c2=c0|c3=0*c0|c4=0*c0|c5=0*c0",
         ),
@@ -83,7 +83,7 @@ pub(super) fn standard_pan_filter(
         }
         (
             ChannelLayout::Stereo | ChannelLayout::Unspecified(2),
-            AudioChannelLayout::Surround51,
+            AudioChannelLayout::Surround51Side,
         ) => Some(
             "pan=5.1(side)|c0=c0|c1=c1|c2=0*c0|c3=0*c0|c4=0*c0|c5=0*c0",
         ),
@@ -93,7 +93,7 @@ pub(super) fn standard_pan_filter(
         (ChannelLayout::Surround51Side, AudioChannelLayout::Stereo) => Some(
             "pan=stereo|c0=c0+0.7071067811865476*c2+0.7071067811865476*c4|c1=c1+0.7071067811865476*c2+0.7071067811865476*c5",
         ),
-        (ChannelLayout::Surround51Side, AudioChannelLayout::Surround51) => {
+        (ChannelLayout::Surround51Side, AudioChannelLayout::Surround51Side) => {
             Some("pan=5.1(side)|c0=c0|c1=c1|c2=c2|c3=c3|c4=c4|c5=c5")
         }
         (
@@ -103,6 +103,7 @@ pub(super) fn standard_pan_filter(
             | ChannelLayout::Other(_),
             _,
         ) => None,
+        (_, AudioChannelLayout::Speakers(_) | AudioChannelLayout::Discrete(_)) => None,
     }
 }
 
@@ -120,7 +121,7 @@ mod tests {
             for output in [
                 AudioChannelLayout::Mono,
                 AudioChannelLayout::Stereo,
-                AudioChannelLayout::Surround51,
+                AudioChannelLayout::Surround51Side,
             ] {
                 assert!(standard_pan_filter(&source, output).is_some());
             }
@@ -140,6 +141,17 @@ mod tests {
                 None
             );
         }
+        assert_eq!(
+            standard_pan_filter(&ChannelLayout::Stereo, AudioChannelLayout::Surround51Back),
+            None
+        );
+        assert_eq!(
+            standard_pan_filter(
+                &ChannelLayout::Stereo,
+                AudioChannelLayout::discrete(2).expect("discrete layout")
+            ),
+            None
+        );
     }
 
     #[test]

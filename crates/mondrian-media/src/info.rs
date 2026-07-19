@@ -955,14 +955,26 @@ impl ChannelLayout {
         }
     }
 
-    /// Resolve only native layouts whose semantics exactly match a supported
-    /// Mondrian render layout.
-    pub const fn exact_render_layout(&self) -> Option<mondrian_core::AudioChannelLayout> {
+    /// Preserve probe semantics in the shared signal-layout value.
+    ///
+    /// This proves representation only. Decode, plugin, device, and export
+    /// Adapters must still negotiate an explicit mapping before execution.
+    pub const fn exact_signal_layout(&self) -> Option<mondrian_core::AudioChannelLayout> {
         match self {
             Self::Mono => Some(mondrian_core::AudioChannelLayout::Mono),
             Self::Stereo => Some(mondrian_core::AudioChannelLayout::Stereo),
-            Self::Surround51Side => Some(mondrian_core::AudioChannelLayout::Surround51),
-            Self::Unspecified(_) | Self::Surround51Back | Self::Surround71 | Self::Other(_) => None,
+            Self::Surround51Side => Some(mondrian_core::AudioChannelLayout::Surround51Side),
+            Self::Surround51Back => Some(mondrian_core::AudioChannelLayout::Surround51Back),
+            Self::Surround71 => Some(mondrian_core::AudioChannelLayout::Surround71),
+            Self::Unspecified(channels)
+                if *channels > 0 && *channels <= mondrian_core::MAX_AUDIO_CHANNELS =>
+            {
+                match mondrian_core::AudioChannelLayout::discrete(*channels) {
+                    Ok(layout) => Some(layout),
+                    Err(_) => None,
+                }
+            }
+            Self::Unspecified(_) | Self::Other(_) => None,
         }
     }
 }
@@ -3746,10 +3758,22 @@ mod tests {
             ChannelLayout::Other(6)
         );
         assert_eq!(
-            ChannelLayout::Surround51Side.exact_render_layout(),
-            Some(mondrian_core::AudioChannelLayout::Surround51)
+            ChannelLayout::Surround51Side.exact_signal_layout(),
+            Some(mondrian_core::AudioChannelLayout::Surround51Side)
         );
-        assert_eq!(ChannelLayout::Surround51Back.exact_render_layout(), None);
+        assert_eq!(
+            ChannelLayout::Surround51Back.exact_signal_layout(),
+            Some(mondrian_core::AudioChannelLayout::Surround51Back)
+        );
+        assert_eq!(
+            ChannelLayout::Surround71.exact_signal_layout(),
+            Some(mondrian_core::AudioChannelLayout::Surround71)
+        );
+        assert_eq!(
+            ChannelLayout::Unspecified(12).exact_signal_layout(),
+            Some(mondrian_core::AudioChannelLayout::discrete(12).expect("discrete layout"))
+        );
+        assert_eq!(ChannelLayout::Other(6).exact_signal_layout(), None);
     }
 
     #[test]

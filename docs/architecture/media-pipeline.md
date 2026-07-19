@@ -48,9 +48,13 @@ evicts an idle least-recently-used Session. This is an intentionally isolated pr
 Adapter, not an in-process FFmpeg claim; a linked FFmpeg Adapter may replace it
 behind the same Interface without changing cache or sample semantics.
 
-The cache and every returned `AudioBuffer` carry `AudioChannelLayout`, not an
-independent channel count. Mono, stereo, and 5.1 use canonical semantic orders;
-the FFmpeg Adapter selects `-map 0:<absolute stream index>` and installs an
+The cache and every returned `AudioBuffer` carry the validated
+`AudioChannelLayout`, not an independent channel count. Mono, canonical named
+speaker sets, and bounded Discrete buses are distinct signal facts; 5.1(side),
+5.1(back), and 7.1 therefore cannot alias by extent. The DSP contract can retain
+all of those meanings, while the current FFmpeg Adapter admits only the standard
+mono/stereo/5.1(side) execution matrix. It selects
+`-map 0:<absolute stream index>` and installs an
 explicit `pan` matrix before setting the declared output layout/count, with 5.1
 lowered specifically to `5.1(side)`. Cache validation rejects a decoded buffer
 whose layout differs even when its raw sample extent happens to match. The
@@ -60,9 +64,10 @@ file cannot alias the same PCM entry and a file replacement cannot reuse an old
 selection.
 
 Audio probing reads FFmpeg's declared channel layout rather than deriving it
-from channel count. `5.1(side)` and back-surround `5.1` remain distinct;
-nonstandard six-channel, unspecified, and unsupported layouts stay explicit
-probe facts. The standard mapping policy admits declared mono/stereo/5.1(side)
+from channel count. `5.1(side)`, `5.1(back)`, and 7.1 project to distinct shared
+signal layouts; bounded unspecified layouts project to Discrete values without
+inventing speakers, while unsupported named layouts remain explicit probe
+facts. The standard execution mapping policy admits declared mono/stereo/5.1(side)
 and explicit discrete defaults for otherwise-unlabelled one- or two-channel
 sources; it never promotes an ambiguous 3+ channel count. Each probed audio
 stream also retains its absolute stream index, optional container stream ID,

@@ -113,7 +113,7 @@ is written with that field explicitly.
 
 Archive and document JSON pass through separate version registries before typed
 deserialization. During Alpha there are deliberately no legacy document steps:
-schema v11 is the sole accepted author schema, and older/future versions fail
+schema v12 is the sole accepted author schema, and older/future versions fail
 instead of being guessed. Version 5 introduced the explicit tagged
 `mondrian_standard` / `aces` / `custom_ocio` project contract and makes every
 Mondrian Standard package-identity field mandatory: product ID/version, config
@@ -145,6 +145,11 @@ Version 11 replaces the independent `video_display_format` and
 contract is shared by Viewer and Timeline, permits signed origins, validates
 drop-frame against the exact Sequence rate, and removes unimplemented
 Feet+Frames values from persisted author data.
+Version 12 replaces the closed three-value audio-layout enum with one canonical
+signal-layout value: Mono, a validated named-speaker set, or a bounded Discrete
+bus. Standard Stereo and surround layouts serialize by semantic positions, so
+5.1(side), 5.1(back), and equal-count custom layouts cannot alias. Alpha does
+not guess a v11 layout migration.
 
 SQLite schema ownership remains in `mondrian-assets`; the current version is
 v2. Its ordered Registry uses
@@ -157,7 +162,7 @@ Future split-entry layouts require an archive migration and new
 SQLite migrates only in the extracted runtime copy. The source `.mdp` is never
 rewritten by open.
 
-Current document schema v11 persists canonical rational `TimelineTime` values
+Current document schema v12 persists canonical rational `TimelineTime` values
 directly and requires the shared visual/audio `ParameterSchema`. It does not
 contain frame-oriented `TimeCode`, `TimeTicks`, descriptor-level duplicate
 defaults/types, editor-preset interpolation capabilities, or compatibility

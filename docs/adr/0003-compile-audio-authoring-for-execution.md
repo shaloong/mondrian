@@ -16,6 +16,14 @@ same three-stage Interface:
 3. `AudioRenderSession` owns exclusive mutable buffers and processor state for
    one run. It renders exact integer-sample windows into caller-owned storage.
 
+The Render Contract carries one canonical `AudioChannelLayout`, never a bare
+channel count. The value is Mono, a validated named-speaker set in canonical
+interleaving order, or a bounded Discrete bus with deliberately absent speaker
+meaning. Standard 5.1(side), 5.1(back), and 7.1 are distinct values even where
+their extents match another layout. Representability does not grant execution:
+media, plugin, device, and export Adapters must negotiate an exact layout or
+fail closed, and may not select a matrix from channel count alone.
+
 `AudioProgramRuntime` is the shared high-level Implementation used by playback
 and export. It recursively instantiates nested public outputs and binds media
 through the narrow `AudioMediaResolver`/`AudioDecodedSource` Adapter Seam.

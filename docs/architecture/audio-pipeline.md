@@ -75,21 +75,33 @@ unclaimed stream index receives a new ID, while a changed stream at a claimed
 index remains unresolved until an explicit future rebind operation; neither
 language nor current default disposition may silently retarget authored edits.
 
-The Sequence persists one semantic `AudioChannelLayout`; it does not persist a
-second channel count. The same layout crosses preparation, nested Runtime,
-Playback PCM requests, decoded-source cache, PCM buffers, and Export. Supported
-standard orders are mono `[M]`, stereo `[L, R]`, and 5.1
-`[L, R, C, LFE, Ls, Rs]`. Channel capacity is derived from this value. The
-media Adapter selects the absolute physical stream with `-map 0:<index>`,
+The Sequence persists one validated semantic `AudioChannelLayout`; it does not
+persist a second channel count. The value is either independent Mono, a
+canonical non-empty set of named speaker positions, or a bounded 1–64 channel
+Discrete bus whose speaker meaning is deliberately absent. Standard Stereo,
+5.1(side), 5.1(back), and 7.1 are canonical speaker-set values, so discovery
+order cannot change plan/cache identity and the integer six can never alias the
+two 5.1 meanings. The same layout crosses preparation, nested Runtime,
+Playback PCM requests, decoded-source cache, PCM buffers, and Export. DSP
+capacity and canonical interleaving are derived from this value; custom speaker
+and Discrete layouts already pass through the common float Runtime without
+being relabelled.
+
+Representability is not execution admission. The media Adapter selects the
+absolute physical stream with `-map 0:<index>`,
 requests the output sample rate, and installs one explicit FFmpeg `pan` matrix
 before PCM enters the Runtime. All mono/stereo/5.1(side) input/output pairs are
 defined. Stereo fold-down averages L/R; 5.1 fold-down uses -3 dB center and
 side coefficients and deliberately omits LFE. Mono feeds stereo L/R or 5.1
 center; stereo feeds 5.1 L/R. Unlabelled one- and two-channel sources retain an
 `Unspecified` probe fact but use the same explicit discrete defaults required
-for ordinary PCM WAVE compatibility. Unspecified 3+ channel, 5.1(back), 7.1,
-and other layouts fail closed. Custom layouts and user-authored mix matrices
-remain future authoring work; FFmpeg defaults are never that policy.
+for ordinary PCM WAVE compatibility. Probe can faithfully project 5.1(back),
+7.1, and bounded unspecified layouts into named or Discrete signal values, but
+current FFmpeg execution still rejects unspecified 3+, 5.1(back), 7.1, custom
+speaker, and Discrete outputs because no approved matrix exists. Product
+authoring of custom layouts, user-authored mix matrices, plugin Bus negotiation,
+and device/output packaging remain incomplete; FFmpeg defaults are never that
+policy.
 
 ### Processing scopes
 
