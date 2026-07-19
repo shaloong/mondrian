@@ -78,18 +78,13 @@ impl AppUiPreviewService {
             height,
             &working_frame,
         );
-        Some(MediaPreviewFrame {
-            width,
-            height,
-            logical_width: sequence.settings.resolution.width,
-            logical_height: sequence.settings.resolution.height,
-            frame: Some(working_frame),
-            gpu_source: None,
-            native_source: None,
+        Some(MediaPreviewFrame::from_working(
+            working_frame,
+            sequence.settings.resolution,
             signature,
             presentation_quality,
             decode_execution,
-        })
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]

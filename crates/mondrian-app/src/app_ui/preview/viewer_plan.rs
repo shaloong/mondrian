@@ -65,7 +65,7 @@ pub(super) fn viewer_preview_cache_key_for_resolved_plan(
                 frame_seed,
             } => {
                 2u8.hash(&mut hasher);
-                frame.signature.hash(&mut hasher);
+                frame.signature().hash(&mut hasher);
                 frame.width().hash(&mut hasher);
                 frame.height().hash(&mut hasher);
                 opacity.to_bits().hash(&mut hasher);
@@ -127,21 +127,7 @@ pub(super) fn gpu_composite_layers_for_resolved(
                     return Err(GpuCompositingBlockerReason::UnsupportedBlendMode);
                 }
                 let layer_working_color_space = frame
-                    .frame
-                    .as_ref()
-                    .and_then(|working| working.descriptor().color_space.working())
-                    .or_else(|| {
-                        frame
-                            .gpu_source
-                            .as_ref()
-                            .map(|source| source.input_transform.working_color_space)
-                    })
-                    .or_else(|| {
-                        frame
-                            .native_source
-                            .as_ref()
-                            .map(|source| source.input_transform.working_color_space)
-                    })
+                    .working_color_space()
                     .ok_or(GpuCompositingBlockerReason::GpuUnavailable)?;
                 if layer_working_color_space != working_color_space {
                     return Err(GpuCompositingBlockerReason::UnsupportedTransform);
@@ -150,7 +136,7 @@ pub(super) fn gpu_composite_layers_for_resolved(
                     return Err(GpuCompositingBlockerReason::UnsupportedTransform);
                 }
                 layers.push(mondrian_renderer::ViewerGpuExecutionLayer::Media {
-                    frame: frame.frame.clone(),
+                    frame: frame.working_payload(),
                     gpu_source: frame.gpu_source(),
                     native_source: frame.native_source(),
                     opacity: *opacity,

@@ -301,20 +301,13 @@ pub(super) fn decode_media_preview(
             );
             MediaPreviewResult {
                 key: job.key,
-                frame: Some(MediaPreviewFrame {
-                    width,
-                    height,
-                    logical_width,
-                    logical_height,
-                    frame: None,
-                    gpu_source: Some(gpu_source),
-                    native_source: None,
+                frame: Some(MediaPreviewFrame::from_source(
+                    gpu_source,
+                    Resolution { width: logical_width, height: logical_height },
                     signature,
                     presentation_quality,
-                    decode_execution: AppUiPreviewDecodeExecutionSummary::from_path(
-                        decode_execution,
-                    ),
-                }),
+                    AppUiPreviewDecodeExecutionSummary::from_path(decode_execution),
+                )),
                 error: None,
                 failure_reason: None,
                 generation: job.generation,
@@ -373,20 +366,13 @@ pub(super) fn decode_media_preview(
             );
             MediaPreviewResult {
                 key: job.key,
-                frame: Some(MediaPreviewFrame {
-                    width,
-                    height,
-                    logical_width,
-                    logical_height,
-                    frame: None,
-                    gpu_source: Some(gpu_source),
-                    native_source: None,
+                frame: Some(MediaPreviewFrame::from_source(
+                    gpu_source,
+                    Resolution { width: logical_width, height: logical_height },
                     signature,
                     presentation_quality,
-                    decode_execution: AppUiPreviewDecodeExecutionSummary::from_path(
-                        decode_execution,
-                    ),
-                }),
+                    AppUiPreviewDecodeExecutionSummary::from_path(decode_execution),
+                )),
                 error: None,
                 failure_reason: None,
                 generation: job.generation,
@@ -420,8 +406,6 @@ pub(super) fn decode_media_preview(
             }
             let decode_execution = decode_diagnostics.execution_path();
             let presentation_quality = preview_decode_presentation_quality(&decode_diagnostics);
-            let width = frame.width;
-            let height = frame.height;
             let input_transform = RenderInputTransform::to_working_gpu(
                 job.key.working_color_space,
                 job.key.tone_map,
@@ -434,20 +418,13 @@ pub(super) fn decode_media_preview(
             );
             MediaPreviewResult {
                 key: job.key,
-                frame: Some(MediaPreviewFrame {
-                    width,
-                    height,
-                    logical_width,
-                    logical_height,
-                    frame: None,
-                    gpu_source: None,
-                    native_source: Some(native_source),
+                frame: Some(MediaPreviewFrame::from_native(
+                    native_source,
+                    Resolution { width: logical_width, height: logical_height },
                     signature,
                     presentation_quality,
-                    decode_execution: AppUiPreviewDecodeExecutionSummary::from_path(
-                        decode_execution,
-                    ),
-                }),
+                    AppUiPreviewDecodeExecutionSummary::from_path(decode_execution),
+                )),
                 error: None,
                 failure_reason: None,
                 generation: job.generation,

@@ -22,56 +22,137 @@ use super::preview_execution::PreviewDecodeExecutionSummary;
 
 #[derive(Debug, Clone)]
 pub(crate) struct MediaPreviewFrame {
-    pub(crate) frame: Option<CpuColorFrame>,
-    pub(crate) gpu_source: Option<MediaPreviewGpuSourceFrame>,
-    pub(crate) native_source: Option<MediaPreviewNativeSourceFrame>,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) logical_width: u32,
-    pub(crate) logical_height: u32,
-    pub(crate) signature: u64,
-    pub(crate) presentation_quality: FramePresentationQuality,
-    pub(crate) decode_execution: PreviewDecodeExecutionSummary,
+    payload: MediaPreviewPayload,
+    sampled_resolution: Resolution,
+    logical_resolution: Resolution,
+    signature: u64,
+    presentation_quality: FramePresentationQuality,
+    decode_execution: PreviewDecodeExecutionSummary,
+}
+
+#[derive(Debug, Clone)]
+enum MediaPreviewPayload {
+    Working(CpuColorFrame),
+    Source(MediaPreviewGpuSourceFrame),
+    Native(MediaPreviewNativeSourceFrame),
 }
 
 impl MediaPreviewFrame {
+    pub(crate) fn from_working(
+        frame: CpuColorFrame,
+        logical_resolution: Resolution,
+        signature: u64,
+        presentation_quality: FramePresentationQuality,
+        decode_execution: PreviewDecodeExecutionSummary,
+    ) -> Self {
+        let descriptor = frame.descriptor();
+        Self {
+            payload: MediaPreviewPayload::Working(frame),
+            sampled_resolution: Resolution { width: descriptor.width, height: descriptor.height },
+            logical_resolution,
+            signature,
+            presentation_quality,
+            decode_execution,
+        }
+    }
+
+    pub(crate) fn from_source(
+        source: MediaPreviewGpuSourceFrame,
+        logical_resolution: Resolution,
+        signature: u64,
+        presentation_quality: FramePresentationQuality,
+        decode_execution: PreviewDecodeExecutionSummary,
+    ) -> Self {
+        let descriptor = source.source.descriptor();
+        Self {
+            payload: MediaPreviewPayload::Source(source),
+            sampled_resolution: Resolution { width: descriptor.width, height: descriptor.height },
+            logical_resolution,
+            signature,
+            presentation_quality,
+            decode_execution,
+        }
+    }
+
+    pub(crate) fn from_native(
+        source: MediaPreviewNativeSourceFrame,
+        logical_resolution: Resolution,
+        signature: u64,
+        presentation_quality: FramePresentationQuality,
+        decode_execution: PreviewDecodeExecutionSummary,
+    ) -> Self {
+        let sampled_resolution = Resolution {
+            width: source.native_frame.width,
+            height: source.native_frame.height,
+        };
+        Self {
+            payload: MediaPreviewPayload::Native(source),
+            sampled_resolution,
+            logical_resolution,
+            signature,
+            presentation_quality,
+            decode_execution,
+        }
+    }
     pub(crate) fn reserved_cpu_bytes(&self) -> usize {
-        let linear_bytes = self
-            .frame
-            .as_ref()
-            .map(|frame| std::mem::size_of_val(frame.rgba_f32().data.as_slice()))
-            .unwrap_or(0);
-        let source_and_lazy_working_bytes = self
-            .gpu_source
-            .as_ref()
-            .map(|source| {
-                let working_reservation = (self.width as usize)
-                    .saturating_mul(self.height as usize)
+        match &self.payload {
+            MediaPreviewPayload::Working(frame) => {
+                std::mem::size_of_val(frame.rgba_f32().data.as_slice())
+            }
+            MediaPreviewPayload::Source(source) => {
+                let working_reservation = (self.sampled_resolution.width as usize)
+                    .saturating_mul(self.sampled_resolution.height as usize)
                     .saturating_mul(4)
                     .saturating_mul(std::mem::size_of::<f32>());
                 source.source.retained_bytes().saturating_add(working_reservation)
-            })
-            .unwrap_or(0);
-        linear_bytes.saturating_add(source_and_lazy_working_bytes)
+            }
+            MediaPreviewPayload::Native(_) => 0,
+        }
     }
 
     pub(crate) fn decoder_resource_units(&self) -> usize {
-        usize::from(self.native_source.is_some())
+        usize::from(matches!(self.payload, MediaPreviewPayload::Native(_)))
     }
 
     pub(crate) fn width(&self) -> u32 {
-        self.width
+        self.sampled_resolution.width
     }
 
     pub(crate) fn height(&self) -> u32 {
-        self.height
+        self.sampled_resolution.height
     }
 
     fn logical_resolution(&self) -> Resolution {
-        Resolution {
-            width: self.logical_width,
-            height: self.logical_height,
+        self.logical_resolution
+    }
+
+    pub(crate) fn signature(&self) -> u64 {
+        self.signature
+    }
+
+    pub(crate) fn working_payload(&self) -> Option<CpuColorFrame> {
+        match &self.payload {
+            MediaPreviewPayload::Working(frame) => Some(frame.clone()),
+            MediaPreviewPayload::Source(_) | MediaPreviewPayload::Native(_) => None,
         }
+    }
+
+    pub(crate) fn working_color_space(&self) -> Option<mondrian_core::WorkingColorSpace> {
+        match &self.payload {
+            MediaPreviewPayload::Working(frame) => frame.descriptor().color_space.working(),
+            MediaPreviewPayload::Source(source) => Some(source.input_transform.working_color_space),
+            MediaPreviewPayload::Native(source) => Some(source.input_transform.working_color_space),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_logical_resolution(&mut self, resolution: Resolution) {
+        self.logical_resolution = resolution;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_presentation_quality(&mut self, quality: FramePresentationQuality) {
+        self.presentation_quality = quality;
     }
 
     pub(crate) fn presentation_quality(&self) -> FramePresentationQuality {
@@ -83,7 +164,10 @@ impl MediaPreviewFrame {
     }
 
     pub(crate) fn gpu_source(&self) -> Option<ViewerGpuMediaSource> {
-        self.gpu_source.as_ref().map(|source| ViewerGpuMediaSource {
+        let MediaPreviewPayload::Source(source) = &self.payload else {
+            return None;
+        };
+        Some(ViewerGpuMediaSource {
             source: Arc::clone(&source.source),
             input_transform: source.input_transform.clone(),
             decoder_residency: source.decoder_residency,
@@ -94,7 +178,10 @@ impl MediaPreviewFrame {
     }
 
     pub(crate) fn native_source(&self) -> Option<ViewerGpuNativeSource> {
-        self.native_source.as_ref().map(|source| ViewerGpuNativeSource {
+        let MediaPreviewPayload::Native(source) = &self.payload else {
+            return None;
+        };
+        Some(ViewerGpuNativeSource {
             source_color_space: source.source_color_space,
             input_transform: source.input_transform.clone(),
             native_frame: source.native_frame.clone(),
@@ -102,48 +189,48 @@ impl MediaPreviewFrame {
     }
 
     pub(crate) fn working_frame(&self) -> Result<MediaPreviewWorkingFrame, String> {
-        if let Some(frame) = self.frame.as_ref() {
-            return Ok(MediaPreviewWorkingFrame {
+        match &self.payload {
+            MediaPreviewPayload::Working(frame) => Ok(MediaPreviewWorkingFrame {
                 frame: frame.clone(),
                 color_diagnostics: None,
                 stage_diagnostics: RenderColorStageDiagnostics::default(),
-            });
-        }
-        let Some(source) = self.gpu_source.as_ref() else {
-            if let Some(native) = self.native_source.as_ref() {
-                return Err(format!(
+            }),
+            MediaPreviewPayload::Native(native) => Err(format!(
                     "media preview frame is native GPU decoded ({} {:?}) and requires renderer native import; no CPU working fallback exists",
                     native.native_frame.handle_kind().as_str(),
                     native.native_frame.surface_format
-                ));
+                )),
+            MediaPreviewPayload::Source(source) => {
+                let cached_before = source.working_cache.get().is_some();
+                let entry = source
+                    .working_cache
+                    .get_or_init(|| {
+                        execute_cpu_source_input_stage(
+                            source.source.as_ref(),
+                            &source.input_transform,
+                        )
+                        .map(|output| MediaPreviewWorkingFrameCacheEntry {
+                            frame: output.result.frame,
+                            color_diagnostics: output.result.diagnostics,
+                            stage_diagnostics: output.stage_diagnostics,
+                        })
+                        .map_err(|err| {
+                            format!("viewer preview lazy input color transform failed: {err}")
+                        })
+                    })
+                    .as_ref()
+                    .map_err(Clone::clone)?;
+                Ok(MediaPreviewWorkingFrame {
+                    frame: entry.frame.clone(),
+                    color_diagnostics: (!cached_before).then_some(entry.color_diagnostics),
+                    stage_diagnostics: if cached_before {
+                        RenderColorStageDiagnostics::default()
+                    } else {
+                        entry.stage_diagnostics
+                    },
+                })
             }
-            return Err("media preview frame has no CPU working frame or GPU source".to_owned());
-        };
-        let cached_before = source.working_cache.get().is_some();
-        let entry = source
-            .working_cache
-            .get_or_init(|| {
-                execute_cpu_source_input_stage(source.source.as_ref(), &source.input_transform)
-                    .map(|output| MediaPreviewWorkingFrameCacheEntry {
-                        frame: output.result.frame,
-                        color_diagnostics: output.result.diagnostics,
-                        stage_diagnostics: output.stage_diagnostics,
-                    })
-                    .map_err(|err| {
-                        format!("viewer preview lazy input color transform failed: {err}")
-                    })
-            })
-            .as_ref()
-            .map_err(Clone::clone)?;
-        Ok(MediaPreviewWorkingFrame {
-            frame: entry.frame.clone(),
-            color_diagnostics: (!cached_before).then_some(entry.color_diagnostics),
-            stage_diagnostics: if cached_before {
-                RenderColorStageDiagnostics::default()
-            } else {
-                entry.stage_diagnostics
-            },
-        })
+        }
     }
 }
 

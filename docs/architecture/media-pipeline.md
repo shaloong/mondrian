@@ -403,7 +403,9 @@ not depend on thread abort to preempt synchronous packet decode.
 Decoded Preview payload ownership is UI-independent:
 `app::preview_media_frame` owns decoded CPU/source/native residency, lazy CPU
 working adaptation, logical and sampled geometry, presentation quality, decode
-provenance, and exact host/decoder reservation. The concrete worker loop,
+provenance, and exact host/decoder reservation. Its closed payload enum admits
+exactly one of working CPU, source-domain CPU/GPU-capable, or native decoder
+surface residency; no frame can be empty or claim contradictory residency. The concrete worker loop,
 cancellation checkpoints, result publication, and FFmpeg Preview Adapter live
 together in `app_ui::preview::media_execution`. Timeline evaluation, media adaptation,
 Viewer planning, final presentation arbitration, and diagnostics live in

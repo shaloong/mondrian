@@ -610,8 +610,7 @@ fn gpu_composite_layers_accept_transformed_media_frame() {
 #[test]
 fn preview_transform_projection_does_not_double_apply_resolution_scale() {
     let mut media = test_media_frame_with_size(180, 960, 540, 42);
-    media.logical_width = 3840;
-    media.logical_height = 2160;
+    media.set_logical_resolution(Resolution { width: 3840, height: 2160 });
 
     let projected = project_preview_media_transform(
         [0.5, 0.0, 0.0, 0.0, 0.5, 0.0],
@@ -756,20 +755,13 @@ fn gpu_composite_layers_accept_source_only_media_frame() {
         false,
         ColorEngine::mondrian_standard(),
     );
-    let media = MediaPreviewFrame {
-        width: 320,
-        height: 180,
-        logical_width: 320,
-        logical_height: 180,
-        frame: None,
-        gpu_source: Some(MediaPreviewGpuSourceFrame::new(source, input_transform)),
-        native_source: None,
-        signature: 44,
-        presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
-        decode_execution: AppUiPreviewDecodeExecutionSummary::from_path(
-            PreviewDecodeExecutionPath::SoftwareCpu,
-        ),
-    };
+    let media = MediaPreviewFrame::from_source(
+        MediaPreviewGpuSourceFrame::new(source, input_transform),
+        Resolution { width: 320, height: 180 },
+        44,
+        mondrian_playback::FramePresentationQuality::Ready,
+        AppUiPreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
+    );
     let effect_graph = mondrian_effects::get_or_compile_scheduled_effect_graph(
         &mondrian_effects::EffectRenderPlan::default(),
     )
@@ -801,18 +793,13 @@ fn gpu_composite_layers_accept_source_only_media_frame() {
 
 #[test]
 fn gpu_composite_layers_preserve_native_source_only_media_frame() {
-    let media = MediaPreviewFrame {
-        width: 320,
-        height: 180,
-        logical_width: 320,
-        logical_height: 180,
-        frame: None,
-        gpu_source: None,
-        native_source: Some(test_native_source_frame(320, 180)),
-        signature: 45,
-        presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
-        decode_execution: AppUiPreviewDecodeExecutionSummary::default(),
-    };
+    let media = MediaPreviewFrame::from_native(
+        test_native_source_frame(320, 180),
+        Resolution { width: 320, height: 180 },
+        45,
+        mondrian_playback::FramePresentationQuality::Ready,
+        AppUiPreviewDecodeExecutionSummary::default(),
+    );
     let effect_graph = mondrian_effects::get_or_compile_scheduled_effect_graph(
         &mondrian_effects::EffectRenderPlan::default(),
     )
@@ -879,18 +866,13 @@ fn gpu_composite_layers_preserve_native_source_only_media_frame() {
 
 #[test]
 fn native_source_only_media_frame_fails_cpu_working_fallback() {
-    let frame = MediaPreviewFrame {
-        width: 320,
-        height: 180,
-        logical_width: 320,
-        logical_height: 180,
-        frame: None,
-        gpu_source: None,
-        native_source: Some(test_native_source_frame(320, 180)),
-        signature: 46,
-        presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
-        decode_execution: AppUiPreviewDecodeExecutionSummary::default(),
-    };
+    let frame = MediaPreviewFrame::from_native(
+        test_native_source_frame(320, 180),
+        Resolution { width: 320, height: 180 },
+        46,
+        mondrian_playback::FramePresentationQuality::Ready,
+        AppUiPreviewDecodeExecutionSummary::default(),
+    );
 
     let err = match frame.working_frame() {
         Ok(_) => panic!("native source must not be reinterpreted as CPU RGBA"),
@@ -6015,23 +5997,13 @@ fn preview_camera_log_input_matches_export_frame_hash() {
         false,
         ColorEngine::mondrian_standard(),
     );
-    let media = MediaPreviewFrame {
-        width: 2,
-        height: 2,
-        logical_width: 2,
-        logical_height: 2,
-        frame: None,
-        gpu_source: Some(MediaPreviewGpuSourceFrame::new(
-            source.clone(),
-            input_transform.clone(),
-        )),
-        native_source: None,
-        signature: 3_003,
-        presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
-        decode_execution: AppUiPreviewDecodeExecutionSummary::from_path(
-            PreviewDecodeExecutionPath::SoftwareCpu,
-        ),
-    };
+    let media = MediaPreviewFrame::from_source(
+        MediaPreviewGpuSourceFrame::new(source.clone(), input_transform.clone()),
+        Resolution { width: 2, height: 2 },
+        3_003,
+        mondrian_playback::FramePresentationQuality::Ready,
+        AppUiPreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
+    );
     let mut color_context = test_color_context(ColorSpace::Srgb);
     color_context.working_color_space = WorkingColorSpace::LinearRec2020;
     color_context.tone_map = true;
@@ -6130,20 +6102,17 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
     .expect("media input transform")
     .result
     .frame;
-    let media = MediaPreviewFrame {
+    let logical_resolution = Resolution {
         width: frame.descriptor().width,
         height: frame.descriptor().height,
-        logical_width: frame.descriptor().width,
-        logical_height: frame.descriptor().height,
-        frame: Some(frame),
-        gpu_source: None,
-        native_source: None,
-        signature: 2_020,
-        presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
-        decode_execution: AppUiPreviewDecodeExecutionSummary::from_path(
-            PreviewDecodeExecutionPath::SoftwareCpu,
-        ),
     };
+    let media = MediaPreviewFrame::from_working(
+        frame,
+        logical_resolution,
+        2_020,
+        mondrian_playback::FramePresentationQuality::Ready,
+        AppUiPreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
+    );
     let solid = TimelineSolidColorLayer {
         color: Color::from_rgba8(32, 180, 220, 255),
         opacity: 0.35,
@@ -7484,8 +7453,11 @@ fn preview_service_stages_presentable_hardware_fallback_until_presentation() {
         PreviewHardwareDecodeDecision::CpuRgbaHardwareUnavailable,
         PreviewHardwareDecodeBlocker::TextureResidencyNotConnected,
     );
-    result.frame.as_mut().expect("decoded frame").presentation_quality =
-        preview_decode_presentation_quality(&decode_diagnostics);
+    result
+        .frame
+        .as_mut()
+        .expect("decoded frame")
+        .set_presentation_quality(preview_decode_presentation_quality(&decode_diagnostics));
     result.decode_diagnostics = Some(decode_diagnostics);
     result_tx.send(result).expect("send degraded successful result");
 
@@ -7920,23 +7892,13 @@ fn test_media_frame_rgba(
         false,
         ColorEngine::mondrian_standard(),
     );
-    let frame =
-        execute_cpu_input_stage(&source, &input_transform).expect("test media input transform");
-    let frame = frame.result.frame;
-    MediaPreviewFrame {
-        width,
-        height,
-        logical_width: width,
-        logical_height: height,
-        frame: Some(frame),
-        gpu_source: Some(MediaPreviewGpuSourceFrame::new(source, input_transform)),
-        native_source: None,
+    MediaPreviewFrame::from_source(
+        MediaPreviewGpuSourceFrame::new(source, input_transform),
+        Resolution { width, height },
         signature,
-        presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
-        decode_execution: AppUiPreviewDecodeExecutionSummary::from_path(
-            PreviewDecodeExecutionPath::SoftwareCpu,
-        ),
-    }
+        mondrian_playback::FramePresentationQuality::Ready,
+        AppUiPreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
+    )
 }
 
 #[derive(Debug)]
@@ -8027,20 +7989,13 @@ fn media_preview_gpu_source_caches_lazy_cpu_working_transform() {
         false,
         ColorEngine::mondrian_standard(),
     );
-    let frame = MediaPreviewFrame {
-        width: 1,
-        height: 1,
-        logical_width: 1,
-        logical_height: 1,
-        frame: None,
-        gpu_source: Some(MediaPreviewGpuSourceFrame::new(source, input_transform)),
-        native_source: None,
-        signature: 42,
-        presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
-        decode_execution: AppUiPreviewDecodeExecutionSummary::from_path(
-            PreviewDecodeExecutionPath::SoftwareCpu,
-        ),
-    };
+    let frame = MediaPreviewFrame::from_source(
+        MediaPreviewGpuSourceFrame::new(source, input_transform),
+        Resolution { width: 1, height: 1 },
+        42,
+        mondrian_playback::FramePresentationQuality::Ready,
+        AppUiPreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
+    );
 
     let first = frame.working_frame().expect("first lazy working transform");
     let second = frame.working_frame().expect("cached lazy working transform");
@@ -8069,20 +8024,13 @@ fn media_preview_scene_linear_source_stays_gpu_eligible_and_lazily_caches_cpu_fa
         false,
         ColorEngine::mondrian_standard(),
     );
-    let frame = MediaPreviewFrame {
-        width: 2,
-        height: 1,
-        logical_width: 2,
-        logical_height: 1,
-        frame: None,
-        gpu_source: Some(MediaPreviewGpuSourceFrame::new(source, input_transform)),
-        native_source: None,
-        signature: 43,
-        presentation_quality: mondrian_playback::FramePresentationQuality::Ready,
-        decode_execution: AppUiPreviewDecodeExecutionSummary::from_path(
-            PreviewDecodeExecutionPath::SoftwareCpu,
-        ),
-    };
+    let frame = MediaPreviewFrame::from_source(
+        MediaPreviewGpuSourceFrame::new(source, input_transform),
+        Resolution { width: 2, height: 1 },
+        43,
+        mondrian_playback::FramePresentationQuality::Ready,
+        AppUiPreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::SoftwareCpu),
+    );
 
     let gpu_source = frame.gpu_source().expect("scene-linear GPU source");
     let CpuSourceColorFrame::LinearFloat(gpu_float) = gpu_source.source.as_ref() else {
