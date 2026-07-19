@@ -64,8 +64,8 @@ pub use preview::{
 };
 pub use proxy::{
     ProxyArtifactManifest, ProxyArtifactSettings, ProxyCodec, ProxyColorContract,
-    ProxyColorContractError, ProxyConfig, ProxyEncodingProfile, ProxyGenerator, ProxyResolution,
-    ProxySourceFingerprint, ProxyStatus,
+    ProxyColorContractError, ProxyConfig, ProxyEncodingProfile, ProxyGenerationOutcome,
+    ProxyGenerator, ProxyResolution, ProxySourceFingerprint, ProxyStatus,
 };
 pub use waveform::{
     WaveformAnalysisError, WaveformEnvelope, WaveformEnvelopeBuilder, MAX_WAVEFORM_WIDTH,

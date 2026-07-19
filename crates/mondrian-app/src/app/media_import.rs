@@ -7,7 +7,9 @@ use mondrian_core::events::AppEvent;
 use mondrian_core::types::AssetId;
 use mondrian_core::{MondrianError, Result};
 
-use super::proxy_generation::{request_proxy_generation, resolve_app_state_proxy_color_contract};
+use super::proxy_generation::{
+    resolve_app_state_proxy_color_contract, ProxyGenerationOrigin, ProxyGenerationRequestOutcome,
+};
 use super::AppState;
 
 pub(super) struct MediaImportResult {
@@ -168,8 +170,29 @@ impl AppState {
             }
         };
         self.set_asset_proxy_mode(asset_id, true);
-        request_proxy_generation(asset_id, asset.path, self.proxy_config(), proxy_color);
-        true
+        match self.request_proxy_generation(
+            asset_id,
+            asset.path,
+            self.proxy_config(),
+            proxy_color,
+            ProxyGenerationOrigin::Import,
+        ) {
+            ProxyGenerationRequestOutcome::AlreadyFresh => false,
+            ProxyGenerationRequestOutcome::Admitted { .. }
+            | ProxyGenerationRequestOutcome::Deduplicated { .. } => true,
+            ProxyGenerationRequestOutcome::RetainedFailure(failure)
+            | ProxyGenerationRequestOutcome::Failed(failure) => {
+                tracing::warn!(
+                    target: "mondrian::proxy",
+                    asset_id = %asset_id,
+                    reason = failure.reason.code(),
+                    detail = %failure.detail,
+                    "automatic proxy generation was not admitted"
+                );
+                self.set_asset_proxy_mode(asset_id, false);
+                false
+            }
+        }
     }
 
     fn finish_media_import_batch(&mut self, batch: PendingMediaImportBatch) {

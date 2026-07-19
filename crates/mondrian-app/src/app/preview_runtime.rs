@@ -6,7 +6,7 @@
 //! their usable GPU output and project the resulting state.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 #[cfg(test)]
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
@@ -54,9 +54,7 @@ use crate::app::preview_media_frame::MediaPreviewFrame;
 use crate::app::preview_media_frame::{
     project_preview_media_transform, MediaPreviewGpuSourceFrame, MediaPreviewNativeSourceFrame,
 };
-use crate::app::preview_media_source::{
-    resolve_preview_input_color_space, PreviewProxyGenerationRequestKey,
-};
+use crate::app::preview_media_source::resolve_preview_input_color_space;
 #[cfg(test)]
 use crate::app::preview_media_task::{
     media_preview_canceled_result, MediaPreviewCancellationPhase,
@@ -90,7 +88,9 @@ use crate::app::preview_viewer_plan::{
 use crate::app::preview_viewer_plan::{
     viewer_preview_cache_key_for_resolved_plan, ResolvedPreviewElement,
 };
-use crate::app::proxy_generation::{request_proxy_generation, resolve_asset_proxy_color_contract};
+use crate::app::proxy_generation::{
+    resolve_asset_proxy_color_contract, ProxyGenerationOrigin, ProxyGenerationRequestOutcome,
+};
 use crate::app::AppState;
 use mondrian_assets::AssetKind;
 use mondrian_core::display_contract::{DisplayOutputSnapshot, MonitorProfileStatus};
@@ -175,7 +175,6 @@ pub struct PreviewProductionRuntime<O: Clone> {
     workers: RefCell<Vec<JoinHandle<()>>>,
     shutdown: Arc<PreviewShutdownSignal>,
     frame_store: RefCell<PreviewFrameStoreAdapter>,
-    requested_proxy_generations: RefCell<HashSet<PreviewProxyGenerationRequestKey>>,
     scrub_adaptation: RefCell<PreviewScrubAdaptationState>,
     execution:
         RefCell<PreviewExecutionCoordinator<ViewerPreviewGenerationKey, ViewerPreviewCacheKey, O>>,
@@ -246,7 +245,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             workers: RefCell::new(workers),
             shutdown,
             frame_store: RefCell::new(PreviewFrameStoreAdapter::default()),
-            requested_proxy_generations: RefCell::new(HashSet::new()),
             scrub_adaptation: RefCell::new(PreviewScrubAdaptationState::default()),
             execution: RefCell::new(PreviewExecutionCoordinator::default()),
             playback_pressure: Cell::new(PlaybackPressureState::default()),

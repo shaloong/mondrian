@@ -201,13 +201,14 @@ If a later generation requests the same media-preview key while a worker is
 already decoding it, that in-flight decode remains current: generation changes
 alone must not cancel identical frame/key work, or the viewer can livelock in a
 permanent "preparing" state under repeated UI refreshes.
-Proxy generation is an app service, not an action-handler detail. Import,
-manual proxy-mode toggles, and preview playback pressure enqueue work through
-the same `app::proxy_generation` dispatcher, while the preview service only
-requests generation for already proxy-enabled video assets whose proxy path is
-missing or stale. The preview service records request and dedupe counters so
-deadline-driven proxy work is diagnosable without coupling viewer scheduling to
-the asset panel UI.
+Proxy generation is an `AppState`-owned service, not an action-handler or
+Window detail. Import, manual proxy-mode toggles, and preview playback pressure
+submit typed origins to the same instance-owned `app::proxy_generation`
+Module. The Preview Adapter does not retain its own request set: exact dedupe,
+queued priority promotion, retained failure, and project generation belong to
+the service. Background polling observes one completion revision and refreshes
+models so a newly fresh proxy can replace source fallback; no Widget owns a
+worker, retry rule, or FFmpeg process.
 
 Media preview frames are held in a bounded LRU cache keyed by asset identity,
 media file fingerprint (file length plus modification timestamp), source

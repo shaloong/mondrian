@@ -453,6 +453,7 @@ impl AppState {
     }
 
     pub fn close_project(&mut self) {
+        self.proxy_generation.bind_project(None);
         if let Some(runtime) = self.project_runtime_dir.as_ref() {
             let _ = fs::remove_dir_all(runtime);
         }

@@ -1125,16 +1125,35 @@ Generation must also use `ProxyStatus`: a `Fresh` proxy is reused, while a
 `Stale` proxy is regenerated in the background. Failed regeneration must not
 delete the previous proxy file, because preview can keep falling back to source
 until a fresh proxy is finalized.
-`ProxyConfig.concurrent_jobs` is an execution contract, not a UI preference:
-`mondrian-media` must limit expensive FFmpeg proxy transcodes per proxy cache
-root before launching the transcode work. Fresh proxy reuse does not consume a
-transcode slot. App code may schedule proxy requests, but it must not bypass the
-media-layer limiter when starting background generation.
-The app layer must enqueue proxy generation requests onto a shared background
-dispatcher instead of creating one OS thread/runtime per asset. Dispatcher
-workers are allowed to keep proxy requests moving, but expensive transcode
-parallelism remains owned by the media-layer `ProxyConfig.concurrent_jobs`
-limiter so batch imports cannot starve preview playback, UI, or export work.
+`ProxyConfig.concurrent_jobs` is an execution contract, not a UI preference.
+`app::proxy_generation::ProxyGenerationService` acquires cache-root capacity
+before an attempt leaves Queued and enters Running; workers therefore cannot
+hide a batch of imports behind the media limiter and block a later explicit
+user request. `mondrian-media` retains its per-cache-root limiter as a
+cross-caller resource safety valve before FFmpeg launch. Fresh proxy reuse
+consumes neither application nor media transcode capacity.
+
+The App service is owned by `AppState` and starts workers lazily; it is not a
+process-global singleton. Its exact key includes asset, source path and live
+file fingerprint, artifact-affecting config, and versioned color contract while
+excluding the non-semantic concurrency count. It admits at most 512 attempts,
+deduplicates exact work, promotes queued Import requests when Playback recovery
+or a user requests the same artifact, and schedules User, Playback-recovery,
+and Import queues in that order with a forced Import turn after eight foreground
+attempts. Up to 256 exact failures suppress automatic retry storms; an explicit
+user request clears that failure and retries. Terminal evidence is bounded to
+512 attempts and records origin, generation, priority, source fingerprint,
+elapsed time, disposition, and structured failure.
+
+Opening, creating, closing, or replacing a project rotates the service
+generation. Queued attempts terminate immediately as Canceled; running attempts
+receive the same monotonic `ExecutionCancellationToken`. Media observes that
+token while waiting for its cache-root safety permit, every 10 ms while FFmpeg
+runs, and immediately before artifact publication. Cancellation kills and
+waits for the child, always drains stderr into a bounded 64 KiB tail, removes
+partial outputs, and returns Canceled rather than poisoning failure memory.
+Only an exact current-generation attempt may publish success into service
+evidence. UI/event-loop code never joins a proxy worker or child process.
 `MultiLevelCache` must not weaken this contract: L1 memory hits and L2 proxy
 index hits are valid only while the referenced proxy still resolves to
 `ProxyStatus::Fresh`. A cached source fallback must be re-evaluated when a
@@ -1484,11 +1503,13 @@ This keeps automated recovery policy clock-driven without inflating pressure
 metrics from overlapping hardware diagnostics.
 When playback pressure resolves an asset that is already in proxy mode but the
 proxy is missing or stale, the app preview service may request proxy generation
-through the shared app-layer proxy dispatcher. The request is deduplicated by
-asset, source fingerprint, and missing/stale reason so a late playback frame
-does not enqueue proxy work every refresh. Preview must not spawn FFmpeg
-directly, change media color interpretation, or silently enable proxy mode; the
-media crate still owns only proxy file generation and status probing.
+through the instance-owned Proxy Generation Service. Its exact artifact key and
+retained failure memory prevent a late playback frame from enqueueing work on
+every refresh; Playback recovery may promote matching queued Import work but
+cannot bypass cache-root capacity or project generation. Preview must not spawn
+FFmpeg directly, change media color interpretation, silently enable proxy mode,
+or retain a parallel request registry; the media crate still owns proxy file
+generation and status probing.
 Interactive scrub uses app-selected adaptive hints rather than a separate decode
 API. The app preview service observes recent scrub seek locality and scrub
 decode latency, then tags `PreviewDecodeRequest` with a

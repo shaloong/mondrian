@@ -85,7 +85,7 @@ pub(crate) mod preview_scheduler_policy;
 pub(crate) mod preview_timeline_execution;
 pub(crate) mod preview_viewer_plan;
 mod project_lifecycle;
-pub(crate) mod proxy_generation;
+pub mod proxy_generation;
 mod selection;
 pub mod thumbnail_service;
 mod timeline_commands;
@@ -97,6 +97,10 @@ use self::ui_actions::TimelineSeekSource;
 use audio_rendering::*;
 use exporting::TimelineExportDraft;
 use media_import::*;
+use proxy_generation::{
+    ProxyGenerationDiagnostics, ProxyGenerationOrigin, ProxyGenerationRequestOutcome,
+    ProxyGenerationService,
+};
 pub use selection::{SelectedClipRef, SelectedEffectRef, SelectedTrackRef};
 use timeline_editing::*;
 
@@ -309,6 +313,7 @@ pub struct AppState {
     // 代理策略
     pub auto_proxy_enabled: bool,
     pub proxy_mode_assets: HashSet<AssetId>,
+    proxy_generation: ProxyGenerationService,
 
     // 音频时钟与 A/V 同步
     pub audio_sample_rate: u32,
@@ -364,6 +369,7 @@ impl AppState {
             active_clipboard_kind: None,
             auto_proxy_enabled: false,
             proxy_mode_assets: HashSet::new(),
+            proxy_generation: ProxyGenerationService::new(),
             audio_sample_rate,
             audio_playback: AudioPlayback::product_default(),
             audio_source_cache,
@@ -405,6 +411,40 @@ impl AppState {
 
     pub fn set_auto_proxy_enabled(&mut self, enabled: bool) {
         self.auto_proxy_enabled = enabled;
+    }
+
+    pub(crate) fn request_proxy_generation(
+        &self,
+        asset_id: AssetId,
+        source_path: PathBuf,
+        config: mondrian_media::ProxyConfig,
+        color: mondrian_media::ProxyColorContract,
+        origin: ProxyGenerationOrigin,
+    ) -> ProxyGenerationRequestOutcome {
+        self.proxy_generation.request(asset_id, source_path, config, color, origin)
+    }
+
+    /// Observe completed/canceled proxy work for background UI refresh.
+    pub fn poll_proxy_generation(&mut self) -> bool {
+        if !self.proxy_generation.poll_finished() {
+            return false;
+        }
+        let terminal = self.proxy_generation.diagnostics().terminal_records.last().cloned();
+        if let Some(terminal) = terminal {
+            if terminal.evidence.disposition == mondrian_core::ExecutionTerminalDisposition::Failed
+                && terminal.executed
+            {
+                if let Some(detail) = terminal.failure_detail {
+                    self.set_status_hint(format!("代理生成失败：{detail}"), true);
+                }
+            }
+        }
+        true
+    }
+
+    /// Snapshot bounded proxy-generation execution evidence.
+    pub fn proxy_generation_diagnostics(&self) -> ProxyGenerationDiagnostics {
+        self.proxy_generation.diagnostics()
     }
 
     /// Whether newly imported video media should enter proxy playback and start proxy generation.

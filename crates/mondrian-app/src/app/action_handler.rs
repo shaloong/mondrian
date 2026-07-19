@@ -9,7 +9,7 @@
 use crate::app::exporting::TimelineExportRequest;
 use crate::app::preview_quality::normalize_preview_resolution_scale;
 use crate::app::proxy_generation::{
-    request_proxy_generation, resolve_app_state_proxy_color_contract,
+    resolve_app_state_proxy_color_contract, ProxyGenerationOrigin, ProxyGenerationRequestOutcome,
 };
 use crate::app::selection::resolve_track_selection;
 use crate::app::timeline_editing::{
@@ -512,7 +512,6 @@ impl AppState {
             });
         }
 
-        self.set_asset_proxy_mode(payload.asset_id, payload.enabled);
         let mut status = if payload.enabled {
             format!("已开启代理模式：{}", asset.name)
         } else {
@@ -528,29 +527,42 @@ impl AppState {
                         reason,
                     }
                 })?;
-            let proxy_generator = mondrian_media::ProxyGenerator::new(proxy_config.clone());
-            match proxy_generator.proxy_status(&asset.path, proxy_color) {
-                mondrian_media::ProxyStatus::Fresh => {}
-                mondrian_media::ProxyStatus::Missing => {
-                    request_proxy_generation(
-                        payload.asset_id,
-                        asset.path,
-                        proxy_config,
-                        proxy_color,
-                    );
+            match self.request_proxy_generation(
+                payload.asset_id,
+                asset.path,
+                proxy_config,
+                proxy_color,
+                ProxyGenerationOrigin::User,
+            ) {
+                ProxyGenerationRequestOutcome::AlreadyFresh => {}
+                ProxyGenerationRequestOutcome::Admitted {
+                    prior_status: mondrian_media::ProxyStatus::Missing,
+                } => {
                     status.push_str("（后台生成中）");
                 }
-                mondrian_media::ProxyStatus::Stale => {
-                    request_proxy_generation(
-                        payload.asset_id,
-                        asset.path,
-                        proxy_config,
-                        proxy_color,
-                    );
+                ProxyGenerationRequestOutcome::Admitted {
+                    prior_status: mondrian_media::ProxyStatus::Stale,
+                } => {
                     status.push_str("（代理过期，后台重新生成中）");
+                }
+                ProxyGenerationRequestOutcome::Admitted {
+                    prior_status: mondrian_media::ProxyStatus::Fresh,
+                } => {}
+                ProxyGenerationRequestOutcome::Deduplicated { .. } => {
+                    status.push_str("（后台生成中）");
+                }
+                ProxyGenerationRequestOutcome::RetainedFailure(failure)
+                | ProxyGenerationRequestOutcome::Failed(failure) => {
+                    let reason = failure.detail;
+                    self.set_status_hint(format!("无法启用代理：{reason}"), true);
+                    return Err(MondrianError::WorkflowStepFailed {
+                        step_id: "set_asset_proxy_mode".to_owned(),
+                        reason,
+                    });
                 }
             }
         }
+        self.set_asset_proxy_mode(payload.asset_id, payload.enabled);
         let _ = self.save_project_file();
         self.set_status_hint(status, false);
         Ok(())

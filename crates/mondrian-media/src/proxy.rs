@@ -4,16 +4,20 @@
 //! 导出时自动切换回原始文件。
 
 use crate::{DecodedVideoRange, PreviewFileFingerprint};
-use mondrian_core::{types::AssetId, types::ColorSpace, MondrianError, Result};
+use mondrian_core::{
+    types::AssetId, types::ColorSpace, ExecutionCancellationToken, MondrianError, Result,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// 代理分辨率预设
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProxyResolution {
     P360,
     P480,
@@ -33,7 +37,7 @@ impl ProxyResolution {
 }
 
 /// 代理编码格式
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProxyCodec {
     /// Select H.264 for ordinary 8-bit SDR and H.265 Main10 for HDR, Log, or high-bit sources.
     Auto,
@@ -46,7 +50,7 @@ pub enum ProxyCodec {
 }
 
 /// 代理生成配置
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ProxyConfig {
     pub resolution: ProxyResolution,
     pub codec: ProxyCodec,
@@ -247,6 +251,17 @@ pub struct ProxyProgress {
     pub error: Option<String>,
 }
 
+/// Terminal result of one cancellable proxy-generation execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProxyGenerationOutcome {
+    /// A new artifact and matching manifest were published.
+    Completed(PathBuf),
+    /// The exact artifact was already fresh and no transcode ran.
+    Reused(PathBuf),
+    /// Cooperative cancellation won before artifact publication.
+    Canceled,
+}
+
 /// Freshness state for a project's expected proxy media file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProxyStatus {
@@ -408,23 +423,42 @@ impl ProxyGenerator {
 
     /// Returns the freshness state for the configured proxy of `source_path`.
     pub fn proxy_status(&self, source_path: &Path, color: ProxyColorContract) -> ProxyStatus {
-        let Ok(proxy_path) = self.proxy_path(source_path, color) else {
-            return ProxyStatus::Stale;
-        };
+        self.proxy_status_for_source_fingerprint(
+            source_path,
+            PreviewFileFingerprint::capture(source_path),
+            color,
+        )
+        .unwrap_or(ProxyStatus::Stale)
+    }
+
+    /// Resolve freshness against the exact source revision admitted by an
+    /// application scheduler. Source drift is an error, not a stale/fresh guess.
+    pub fn proxy_status_for_source_fingerprint(
+        &self,
+        source_path: &Path,
+        admitted_source: PreviewFileFingerprint,
+        color: ProxyColorContract,
+    ) -> Result<ProxyStatus> {
+        let proxy_path = self.proxy_path(source_path, color)?;
         if !proxy_path.exists() {
-            return ProxyStatus::Missing;
+            return Ok(ProxyStatus::Missing);
         }
-        let Ok(expected) = self.expected_manifest(source_path, color) else {
-            return ProxyStatus::Stale;
-        };
+        let expected = self.expected_manifest(source_path, color)?;
+        if expected.source != admitted_source.into() {
+            return Err(MondrianError::ProxyGenerationFailed {
+                reason: "source file changed while resolving exact proxy freshness".to_owned(),
+            });
+        }
         let manifest_path = proxy_manifest_path(&proxy_path);
         let Ok(bytes) = std::fs::read(manifest_path) else {
-            return ProxyStatus::Stale;
+            return Ok(ProxyStatus::Stale);
         };
-        match serde_json::from_slice::<ProxyArtifactManifest>(&bytes) {
-            Ok(actual) if actual == expected => ProxyStatus::Fresh,
-            _ => ProxyStatus::Stale,
-        }
+        Ok(
+            match serde_json::from_slice::<ProxyArtifactManifest>(&bytes) {
+                Ok(actual) if actual == expected => ProxyStatus::Fresh,
+                _ => ProxyStatus::Stale,
+            },
+        )
     }
 
     /// Returns true when the configured proxy exists and is safe to decode.
@@ -442,10 +476,52 @@ impl ProxyGenerator {
         color: ProxyColorContract,
         progress_tx: mpsc::Sender<ProxyProgress>,
     ) -> Result<PathBuf> {
+        match self
+            .generate_cancellable(
+                asset_id,
+                source_path.clone(),
+                PreviewFileFingerprint::capture(&source_path),
+                color,
+                progress_tx,
+                ExecutionCancellationToken::new(),
+            )
+            .await?
+        {
+            ProxyGenerationOutcome::Completed(path) | ProxyGenerationOutcome::Reused(path) => {
+                Ok(path)
+            }
+            ProxyGenerationOutcome::Canceled => Err(MondrianError::ProxyGenerationFailed {
+                reason: "proxy generation was canceled".to_owned(),
+            }),
+        }
+    }
+
+    /// Generate one proxy while observing a monotonic cancellation token at
+    /// concurrency admission, FFmpeg execution, and artifact publication.
+    pub async fn generate_cancellable(
+        &self,
+        asset_id: AssetId,
+        source_path: PathBuf,
+        admitted_source: PreviewFileFingerprint,
+        color: ProxyColorContract,
+        progress_tx: mpsc::Sender<ProxyProgress>,
+        cancellation: ExecutionCancellationToken,
+    ) -> Result<ProxyGenerationOutcome> {
+        if cancellation.is_canceled() {
+            return Ok(ProxyGenerationOutcome::Canceled);
+        }
         if !source_path.exists() {
             return Err(mondrian_core::MondrianError::MediaOpen {
                 path: source_path.display().to_string(),
                 reason: "source file not found".to_string(),
+            });
+        }
+        let execution_source = PreviewFileFingerprint::capture(&source_path);
+        if execution_source != admitted_source {
+            return Err(MondrianError::ProxyGenerationFailed {
+                reason: format!(
+                    "source file changed before proxy execution (admitted={admitted_source:?}, execution={execution_source:?})"
+                ),
             });
         }
 
@@ -455,13 +531,21 @@ impl ProxyGenerator {
             output_path.with_extension(format!("{}.part", encoding.output_extension()));
         let manifest_path = proxy_manifest_path(&output_path);
         let tmp_manifest_path = manifest_path.with_extension("json.part");
+        let manifest = self.expected_manifest(&source_path, color)?;
+        if manifest.source != admitted_source.into() {
+            return Err(MondrianError::ProxyGenerationFailed {
+                reason: "source file changed while proxy request was entering execution".to_owned(),
+            });
+        }
 
         // 确保输出目录存在
         if let Some(parent) = output_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        if self.proxy_status(&source_path, color) == ProxyStatus::Fresh {
+        if self.proxy_status_for_source_fingerprint(&source_path, admitted_source, color)?
+            == ProxyStatus::Fresh
+        {
             let _ = progress_tx
                 .send(ProxyProgress {
                     asset_id,
@@ -470,7 +554,7 @@ impl ProxyGenerator {
                     error: None,
                 })
                 .await;
-            return Ok(output_path);
+            return Ok(ProxyGenerationOutcome::Reused(output_path));
         }
 
         if tmp_output_path.exists() {
@@ -499,24 +583,31 @@ impl ProxyGenerator {
         let crf = self.config.crf.min(51);
         let source_for_cmd = source_path.clone();
         let output_for_cmd = tmp_output_path.clone();
-        let manifest = self.expected_manifest(&source_path, color)?;
         let concurrent_jobs = self.config.concurrent_jobs;
         let limiter = proxy_generation_limiter(self.config.cache_dir.clone());
-        let permit = tokio::task::spawn_blocking(move || limiter.acquire(concurrent_jobs))
-            .await
-            .map_err(|e| mondrian_core::MondrianError::ProxyGenerationFailed {
-                reason: format!("proxy concurrency permit task join failed: {e}"),
-            })?;
+        let permit_cancellation = cancellation.clone();
+        let permit = tokio::task::spawn_blocking(move || {
+            limiter.acquire(concurrent_jobs, &permit_cancellation)
+        })
+        .await
+        .map_err(|e| mondrian_core::MondrianError::ProxyGenerationFailed {
+            reason: format!("proxy concurrency permit task join failed: {e}"),
+        })?;
+        let Some(permit) = permit else {
+            return Ok(ProxyGenerationOutcome::Canceled);
+        };
 
+        let transcode_cancellation = cancellation.clone();
         let transcode_result = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            run_ffmpeg_proxy_transcode(
+            run_ffmpeg_proxy_transcode_cancellable(
                 encoding,
                 crf,
                 height,
                 color,
                 &source_for_cmd,
                 &output_for_cmd,
+                &transcode_cancellation,
             )
         })
         .await
@@ -524,28 +615,45 @@ impl ProxyGenerator {
             reason: format!("proxy task join failed: {e}"),
         })?;
 
-        let transcode_result = transcode_result.and_then(|()| {
+        let transcode_result = transcode_result.and_then(|outcome| {
+            if outcome == ProxyTranscodeOutcome::Canceled || cancellation.is_canceled() {
+                return Ok(ProxyTranscodeOutcome::Canceled);
+            }
             let completed_manifest = self.expected_manifest(&source_path, color)?;
             if completed_manifest.source != manifest.source {
                 return Err(MondrianError::ProxyGenerationFailed {
                     reason: "source file changed while proxy generation was in progress".to_owned(),
                 });
             }
-            Ok(())
+            Ok(ProxyTranscodeOutcome::Completed)
         });
 
-        if let Err(err) = transcode_result {
+        match transcode_result {
+            Ok(ProxyTranscodeOutcome::Completed) => {}
+            Ok(ProxyTranscodeOutcome::Canceled) => {
+                let _ = std::fs::remove_file(&tmp_output_path);
+                let _ = std::fs::remove_file(&tmp_manifest_path);
+                return Ok(ProxyGenerationOutcome::Canceled);
+            }
+            Err(err) => {
+                let _ = std::fs::remove_file(&tmp_output_path);
+                let _ = std::fs::remove_file(&tmp_manifest_path);
+                let _ = progress_tx
+                    .send(ProxyProgress {
+                        asset_id,
+                        progress: 1.0,
+                        is_done: true,
+                        error: Some(err.to_string()),
+                    })
+                    .await;
+                return Err(err);
+            }
+        }
+
+        if cancellation.is_canceled() {
             let _ = std::fs::remove_file(&tmp_output_path);
             let _ = std::fs::remove_file(&tmp_manifest_path);
-            let _ = progress_tx
-                .send(ProxyProgress {
-                    asset_id,
-                    progress: 1.0,
-                    is_done: true,
-                    error: Some(err.to_string()),
-                })
-                .await;
-            return Err(err);
+            return Ok(ProxyGenerationOutcome::Canceled);
         }
 
         finalize_proxy_output(&tmp_output_path, &output_path)?;
@@ -560,7 +668,7 @@ impl ProxyGenerator {
             })
             .await;
 
-        Ok(output_path)
+        Ok(ProxyGenerationOutcome::Completed(output_path))
     }
 }
 
@@ -583,20 +691,30 @@ impl ProxyConcurrencyLimiter {
         }
     }
 
-    fn acquire(self: Arc<Self>, concurrent_jobs: u8) -> ProxyConcurrencyPermit {
+    fn acquire(
+        self: Arc<Self>,
+        concurrent_jobs: u8,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Option<ProxyConcurrencyPermit> {
         let max_jobs = usize::from(concurrent_jobs.max(1));
         let mut state = lock_proxy_concurrency_state(&self.state);
         state.max_jobs = max_jobs;
         while state.active_jobs >= state.max_jobs {
-            state = match self.changed.wait(state) {
-                Ok(state) => state,
-                Err(poisoned) => poisoned.into_inner(),
+            if cancellation.is_canceled() {
+                return None;
+            }
+            state = match self.changed.wait_timeout(state, Duration::from_millis(10)) {
+                Ok((state, _)) => state,
+                Err(poisoned) => poisoned.into_inner().0,
             };
             state.max_jobs = max_jobs;
         }
+        if cancellation.is_canceled() {
+            return None;
+        }
         state.active_jobs = state.active_jobs.saturating_add(1);
         drop(state);
-        ProxyConcurrencyPermit { limiter: self }
+        Some(ProxyConcurrencyPermit { limiter: self })
     }
 }
 
@@ -635,21 +753,72 @@ fn proxy_generation_limiter(cache_dir: PathBuf) -> Arc<ProxyConcurrencyLimiter> 
         .clone()
 }
 
-fn run_ffmpeg_proxy_transcode(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProxyTranscodeOutcome {
+    Completed,
+    Canceled,
+}
+
+const PROXY_FFMPEG_CANCEL_POLL: Duration = Duration::from_millis(10);
+const PROXY_FFMPEG_STDERR_TAIL_CAPACITY: usize = 64 * 1024;
+
+fn run_ffmpeg_proxy_transcode_cancellable(
     encoding: ProxyEncodingProfile,
     crf: u8,
     height: u32,
     color: ProxyColorContract,
     source_path: &Path,
     output_path: &Path,
-) -> Result<()> {
+    cancellation: &ExecutionCancellationToken,
+) -> Result<ProxyTranscodeOutcome> {
+    if cancellation.is_canceled() {
+        return Ok(ProxyTranscodeOutcome::Canceled);
+    }
     let mut cmd = ffmpeg_proxy_command(encoding, crf, height, color, source_path, output_path)?;
-    let output = cmd.output().map_err(|e| mondrian_core::MondrianError::ProxyGenerationFailed {
-        reason: format!("failed to invoke ffmpeg (is ffmpeg in PATH?): {}", e),
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    let mut child =
+        cmd.spawn().map_err(|e| mondrian_core::MondrianError::ProxyGenerationFailed {
+            reason: format!("failed to invoke ffmpeg (is ffmpeg in PATH?): {}", e),
+        })?;
+    let stderr = child.stderr.take().ok_or_else(|| MondrianError::ProxyGenerationFailed {
+        reason: "failed to capture proxy FFmpeg stderr".to_owned(),
     })?;
+    let stderr_reader = std::thread::Builder::new()
+        .name("mondrian-proxy-stderr".to_owned())
+        .spawn(move || read_bounded_stderr_tail(stderr))
+        .map_err(|error| {
+            let _ = child.kill();
+            let _ = child.wait();
+            MondrianError::ProxyGenerationFailed {
+                reason: format!("failed to start proxy FFmpeg stderr drain: {error}"),
+            }
+        })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let status = loop {
+        if cancellation.is_canceled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stderr_reader.join();
+            return Ok(ProxyTranscodeOutcome::Canceled);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(PROXY_FFMPEG_CANCEL_POLL),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stderr_reader.join();
+                return Err(MondrianError::ProxyGenerationFailed {
+                    reason: format!("failed while waiting for proxy FFmpeg: {error}"),
+                });
+            }
+        }
+    };
+    let stderr = stderr_reader.join().map_err(|_| MondrianError::ProxyGenerationFailed {
+        reason: "proxy FFmpeg stderr drain panicked".to_owned(),
+    })??;
+
+    if !status.success() {
         return Err(mondrian_core::MondrianError::ProxyGenerationFailed {
             reason: format!("ffmpeg failed: {}", stderr.trim()),
         });
@@ -661,7 +830,34 @@ fn run_ffmpeg_proxy_transcode(
         });
     }
 
-    Ok(())
+    Ok(ProxyTranscodeOutcome::Completed)
+}
+
+fn read_bounded_stderr_tail(mut stderr: impl Read) -> std::io::Result<String> {
+    let mut tail = Vec::with_capacity(PROXY_FFMPEG_STDERR_TAIL_CAPACITY);
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let read = stderr.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        if read >= PROXY_FFMPEG_STDERR_TAIL_CAPACITY {
+            tail.clear();
+            tail.extend_from_slice(
+                &buffer[read - PROXY_FFMPEG_STDERR_TAIL_CAPACITY.min(read)..read],
+            );
+            continue;
+        }
+        let overflow = tail
+            .len()
+            .saturating_add(read)
+            .saturating_sub(PROXY_FFMPEG_STDERR_TAIL_CAPACITY);
+        if overflow > 0 {
+            tail.drain(..overflow);
+        }
+        tail.extend_from_slice(&buffer[..read]);
+    }
+    Ok(String::from_utf8_lossy(&tail).into_owned())
 }
 
 fn ffmpeg_proxy_command(
@@ -856,12 +1052,13 @@ fn finalize_proxy_output(tmp_output_path: &Path, output_path: &Path) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::{
-        ffmpeg_proxy_command, finalize_proxy_output, ProxyCodec, ProxyColorContract,
-        ProxyColorContractError, ProxyConcurrencyLimiter, ProxyConfig, ProxyEncodingProfile,
-        ProxyGenerator, ProxyStatus, PROXY_COLOR_CONTRACT_VERSION,
+        ffmpeg_proxy_command, finalize_proxy_output, read_bounded_stderr_tail, ProxyCodec,
+        ProxyColorContract, ProxyColorContractError, ProxyConcurrencyLimiter, ProxyConfig,
+        ProxyEncodingProfile, ProxyGenerationOutcome, ProxyGenerator, ProxyStatus,
+        PROXY_COLOR_CONTRACT_VERSION, PROXY_FFMPEG_STDERR_TAIL_CAPACITY,
     };
-    use crate::DecodedVideoRange;
-    use mondrian_core::types::ColorSpace;
+    use crate::{DecodedVideoRange, PreviewFileFingerprint};
+    use mondrian_core::{types::ColorSpace, ExecutionCancellationToken};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1105,14 +1302,14 @@ mod tests {
     #[test]
     fn proxy_concurrency_limiter_blocks_when_single_job_is_active() {
         let limiter = Arc::new(ProxyConcurrencyLimiter::new());
-        let first_permit = limiter.clone().acquire(1);
+        let first_permit = limiter.clone().acquire(1, &ExecutionCancellationToken::new());
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
         let worker_limiter = Arc::clone(&limiter);
 
         let worker = std::thread::spawn(move || {
             ready_tx.send(()).expect("ready");
-            let _second_permit = worker_limiter.acquire(1);
+            let _second_permit = worker_limiter.acquire(1, &ExecutionCancellationToken::new());
             acquired_tx.send(()).expect("acquired");
         });
 
@@ -1129,15 +1326,15 @@ mod tests {
     #[test]
     fn proxy_concurrency_limiter_allows_configured_parallel_jobs() {
         let limiter = Arc::new(ProxyConcurrencyLimiter::new());
-        let first_permit = limiter.clone().acquire(2);
-        let second_permit = limiter.clone().acquire(2);
+        let first_permit = limiter.clone().acquire(2, &ExecutionCancellationToken::new());
+        let second_permit = limiter.clone().acquire(2, &ExecutionCancellationToken::new());
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
         let worker_limiter = Arc::clone(&limiter);
 
         let worker = std::thread::spawn(move || {
             ready_tx.send(()).expect("ready");
-            let _third_permit = worker_limiter.acquire(2);
+            let _third_permit = worker_limiter.acquire(2, &ExecutionCancellationToken::new());
             acquired_tx.send(()).expect("acquired");
         });
 
@@ -1150,5 +1347,84 @@ mod tests {
             .expect("third permit acquired after one release");
         worker.join().expect("worker");
         drop(second_permit);
+    }
+
+    #[test]
+    fn proxy_concurrency_wait_observes_cancellation() {
+        let limiter = Arc::new(ProxyConcurrencyLimiter::new());
+        let first = limiter
+            .clone()
+            .acquire(1, &ExecutionCancellationToken::new())
+            .expect("first permit");
+        let cancellation = ExecutionCancellationToken::new();
+        let worker_cancellation = cancellation.clone();
+        let worker_limiter = Arc::clone(&limiter);
+        let worker =
+            std::thread::spawn(move || worker_limiter.acquire(1, &worker_cancellation).is_none());
+        std::thread::sleep(Duration::from_millis(20));
+        cancellation.cancel();
+        assert!(worker.join().expect("cancellation waiter"));
+        drop(first);
+    }
+
+    #[test]
+    fn pre_canceled_generation_does_not_probe_or_open_source() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let generator = ProxyGenerator::new(test_proxy_config(root.path().to_path_buf()));
+        let cancellation = ExecutionCancellationToken::new();
+        cancellation.cancel();
+        let (progress_tx, _progress_rx) = tokio::sync::mpsc::channel(1);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let outcome = runtime
+            .block_on(generator.generate_cancellable(
+                mondrian_core::AssetId::new(),
+                root.path().join("missing.mov"),
+                PreviewFileFingerprint {
+                    len: None,
+                    modified_secs: None,
+                    modified_nanos: None,
+                },
+                rec709_contract(),
+                progress_tx,
+                cancellation,
+            ))
+            .expect("cancellation is not an execution failure");
+        assert_eq!(outcome, ProxyGenerationOutcome::Canceled);
+    }
+
+    #[test]
+    fn generation_rejects_source_replaced_after_admission_before_ffmpeg() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let source = root.path().join("source.mov");
+        std::fs::write(&source, b"admitted").expect("source");
+        let admitted = PreviewFileFingerprint::capture(&source);
+        std::fs::write(&source, b"replacement with different length").expect("replace source");
+        let generator = ProxyGenerator::new(test_proxy_config(root.path().to_path_buf()));
+        let (progress_tx, _progress_rx) = tokio::sync::mpsc::channel(1);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let error = runtime
+            .block_on(generator.generate_cancellable(
+                mondrian_core::AssetId::new(),
+                source,
+                admitted,
+                rec709_contract(),
+                progress_tx,
+                ExecutionCancellationToken::new(),
+            ))
+            .expect_err("source revision drift must fail before FFmpeg");
+        assert!(error.to_string().contains("changed before proxy execution"));
+    }
+
+    #[test]
+    fn ffmpeg_stderr_capture_retains_only_bounded_tail() {
+        let input = vec![b'x'; PROXY_FFMPEG_STDERR_TAIL_CAPACITY + 4096];
+        let tail = read_bounded_stderr_tail(input.as_slice()).expect("stderr tail");
+        assert_eq!(tail.len(), PROXY_FFMPEG_STDERR_TAIL_CAPACITY);
     }
 }

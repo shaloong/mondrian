@@ -142,7 +142,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     }
                 }
                 self.record_input_color_resolution(resolved.input_color_resolution.source);
-                self.maybe_request_preview_proxy_generation(resolved.proxy_generation);
+                self.maybe_request_preview_proxy_generation(state, resolved.proxy_generation);
                 Some((resolved.key, resolved.source_seconds))
             }
             PreviewMediaSourceOutcome::ColorRejected(rejection) => {
@@ -185,22 +185,40 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
     }
 
-    fn maybe_request_preview_proxy_generation(&self, intent: Option<PreviewProxyGenerationIntent>) {
+    fn maybe_request_preview_proxy_generation(
+        &self,
+        state: &AppState,
+        intent: Option<PreviewProxyGenerationIntent>,
+    ) {
         let Some(intent) = intent else {
             return;
         };
 
-        if !self.requested_proxy_generations.borrow_mut().insert(intent.key) {
-            bump(&self.metrics.media_proxy_generation_request_dedupes);
-            return;
-        }
-
-        bump(&self.metrics.media_proxy_generation_requests);
-        request_proxy_generation(
+        let outcome = state.request_proxy_generation(
             intent.key.asset_id,
             intent.source_path,
             intent.config,
             intent.color,
+            ProxyGenerationOrigin::PlaybackRecovery,
         );
+        match outcome {
+            ProxyGenerationRequestOutcome::Admitted { .. } => {
+                bump(&self.metrics.media_proxy_generation_requests);
+            }
+            ProxyGenerationRequestOutcome::AlreadyFresh
+            | ProxyGenerationRequestOutcome::Deduplicated { .. }
+            | ProxyGenerationRequestOutcome::RetainedFailure(_) => {
+                bump(&self.metrics.media_proxy_generation_request_dedupes);
+            }
+            ProxyGenerationRequestOutcome::Failed(failure) => {
+                tracing::warn!(
+                    target: "mondrian::proxy",
+                    asset_id = %intent.key.asset_id,
+                    reason = failure.reason.code(),
+                    detail = %failure.detail,
+                    "preview proxy generation request failed"
+                );
+            }
+        }
     }
 }

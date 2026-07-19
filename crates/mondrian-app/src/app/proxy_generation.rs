@@ -1,14 +1,404 @@
-//! App-layer proxy generation dispatcher shared by import actions and preview pressure.
+//! Instance-owned proxy-generation execution service.
+//!
+//! This deep Module is the sole application owner of proxy demand admission,
+//! deduplication, priority promotion, project generations, failure memory, and
+//! terminal evidence. `mondrian-media` owns artifact identity and FFmpeg work;
+//! callers only submit typed intent and consume structured outcomes.
 
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 use mondrian_assets::AssetRecord;
-use mondrian_core::types::{AssetId, ColorSpace};
-use mondrian_media::{resolve_decoded_video_range, ProxyColorContract};
+use mondrian_core::types::{AssetId, ColorSpace, ProjectId};
+use mondrian_core::{ExecutionPriority, ExecutionTerminalEvidence};
+use mondrian_media::{
+    resolve_decoded_video_range, PreviewFileFingerprint, ProxyColorContract, ProxyConfig,
+    ProxyStatus,
+};
 use mondrian_timeline::sequence::{ColorContext, ResolvedInputColor};
+use parking_lot::{Condvar, Mutex};
 
+use self::backend::{MediaProxyGenerationBackend, ProxyGenerationBackend};
+use self::state::{
+    bind_project_generation, cancel_for_shutdown, diagnostics_snapshot, preflight_request,
+    record_immediate_failure, request_admission, ProxyGenerationInner, ProxyGenerationKey,
+    ProxyGenerationRequest, ProxyGenerationState,
+};
 use super::AppState;
+
+mod backend;
+mod state;
+#[cfg(test)]
+mod tests;
+
+const PROXY_PENDING_CAPACITY: usize = 512;
+const PROXY_FAILURE_CAPACITY: usize = 256;
+const PROXY_TERMINAL_CAPACITY: usize = 512;
+const MAX_PROXY_GENERATION_WORKERS: usize = 8;
+const PROXY_FOREGROUND_BURST: usize = 8;
+
+/// Why proxy generation was requested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProxyGenerationOrigin {
+    /// Explicit user request or retry.
+    User,
+    /// Playback pressure requested optimized media for future frames.
+    PlaybackRecovery,
+    /// Import policy requested background optimized media.
+    Import,
+}
+
+impl ProxyGenerationOrigin {
+    const fn priority(self) -> ExecutionPriority {
+        match self {
+            Self::User => ExecutionPriority::UserInitiated,
+            Self::PlaybackRecovery | Self::Import => ExecutionPriority::Background,
+        }
+    }
+
+    const fn rank(self) -> u8 {
+        match self {
+            Self::User => 0,
+            Self::PlaybackRecovery => 1,
+            Self::Import => 2,
+        }
+    }
+}
+
+/// Stable machine-readable proxy service failure category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProxyGenerationFailureReason {
+    /// The source path disappeared or is inaccessible.
+    MissingSourceFile,
+    /// Source color or requested proxy encoding cannot form a valid artifact.
+    InvalidProxyContract,
+    /// No execution worker could be started.
+    WorkerUnavailable,
+    /// The bounded service demand capacity was exhausted.
+    AdmissionRejected,
+    /// Media generation failed after admission.
+    GenerationFailed,
+}
+
+impl ProxyGenerationFailureReason {
+    /// Stable diagnostic code for logs, evidence, and support tooling.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::MissingSourceFile => "missing_source_file",
+            Self::InvalidProxyContract => "invalid_proxy_contract",
+            Self::WorkerUnavailable => "worker_unavailable",
+            Self::AdmissionRejected => "admission_rejected",
+            Self::GenerationFailed => "generation_failed",
+        }
+    }
+}
+
+/// Structured proxy service failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProxyGenerationFailure {
+    pub(crate) reason: ProxyGenerationFailureReason,
+    pub(crate) detail: String,
+}
+
+impl ProxyGenerationFailure {
+    fn new(reason: ProxyGenerationFailureReason, detail: impl Into<String>) -> Self {
+        Self { reason, detail: detail.into() }
+    }
+}
+
+/// Outcome of one nonblocking proxy request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProxyGenerationRequestOutcome {
+    /// The exact proxy artifact is already reusable.
+    AlreadyFresh,
+    /// A new bounded attempt was admitted.
+    Admitted { prior_status: ProxyStatus },
+    /// An existing exact attempt owns the work; it may have been promoted.
+    Deduplicated { promoted: bool },
+    /// Automatic work remains suppressed after an exact retained failure.
+    RetainedFailure(ProxyGenerationFailure),
+    /// The request could not be admitted or validated.
+    Failed(ProxyGenerationFailure),
+}
+
+/// One bounded terminal record for Headless and product diagnostics.
+#[derive(Debug, Clone)]
+pub struct ProxyGenerationTerminalRecord {
+    /// Shared priority, generation, disposition, and deadline classification.
+    pub evidence: ExecutionTerminalEvidence,
+    /// Module-local monotonic attempt identity.
+    pub attempt_id: u64,
+    /// Asset that owned the request.
+    pub asset_id: AssetId,
+    /// Exact source revision admitted by the attempt.
+    pub source_fingerprint: PreviewFileFingerprint,
+    /// Product origin used by domain scheduling.
+    pub origin: ProxyGenerationOrigin,
+    /// Wall duration after worker dispatch.
+    pub elapsed: Duration,
+    /// Whether the attempt crossed the worker execution boundary.
+    pub executed: bool,
+    /// Structured failure category, when applicable.
+    pub failure: Option<ProxyGenerationFailureReason>,
+    /// Bounded human-readable diagnostic detail, when applicable.
+    pub failure_detail: Option<String>,
+}
+
+/// Immutable bounded proxy execution evidence.
+#[derive(Debug, Clone, Default)]
+pub struct ProxyGenerationDiagnostics {
+    /// Current project execution generation.
+    pub generation: u64,
+    /// Admitted attempts waiting for a worker.
+    pub queued: usize,
+    /// Attempts currently executing in a worker.
+    pub running: usize,
+    /// Exact failures suppressing automatic retry storms.
+    pub retained_failures: usize,
+    /// Newly admitted attempts.
+    pub admissions: u64,
+    /// Exact requests joined to existing attempts.
+    pub deduplications: u64,
+    /// Queued requests promoted by a higher-priority origin.
+    pub promotions: u64,
+    /// Requests satisfied by an already-fresh artifact.
+    pub fresh_hits: u64,
+    /// Current-generation successful attempts.
+    pub completions: u64,
+    /// Current-generation failed attempts.
+    pub failures: u64,
+    /// Cooperatively canceled attempts.
+    pub cancellations: u64,
+    /// Completed work made ineligible by a newer binding.
+    pub superseded: u64,
+    /// Attempts rejected by bounded admission.
+    pub rejections: u64,
+    /// Bounded terminal attempt evidence.
+    pub terminal_records: Vec<ProxyGenerationTerminalRecord>,
+}
+
+/// Lazily-started, instance-owned proxy execution service.
+pub(crate) struct ProxyGenerationService {
+    inner: Arc<ProxyGenerationInner>,
+    requested_worker_count: usize,
+    started_workers: OnceLock<usize>,
+    worker_handles: Mutex<Vec<JoinHandle<()>>>,
+    observed_revision: AtomicU64,
+}
+
+impl ProxyGenerationService {
+    pub(crate) fn new() -> Self {
+        Self::with_backend(
+            proxy_generation_worker_count(),
+            Arc::new(MediaProxyGenerationBackend),
+        )
+    }
+
+    fn with_backend(
+        requested_worker_count: usize,
+        backend: Arc<dyn ProxyGenerationBackend>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(ProxyGenerationInner {
+                state: Mutex::new(ProxyGenerationState::default()),
+                available: Condvar::new(),
+                backend,
+                changed_revision: AtomicU64::new(0),
+                shutdown: AtomicBool::new(false),
+            }),
+            requested_worker_count,
+            started_workers: OnceLock::new(),
+            worker_handles: Mutex::new(Vec::new()),
+            observed_revision: AtomicU64::new(0),
+        }
+    }
+
+    /// Rotate the owning project generation and cancel all obsolete attempts.
+    pub(crate) fn bind_project(&self, project_id: Option<ProjectId>) {
+        let changed = {
+            let mut state = self.inner.state.lock();
+            bind_project_generation(&mut state, project_id)
+        };
+        if changed {
+            self.inner.mark_changed();
+            self.inner.available.notify_all();
+        }
+    }
+
+    /// Resolve freshness and admit one exact request without blocking on FFmpeg.
+    pub(crate) fn request(
+        &self,
+        asset_id: AssetId,
+        source_path: PathBuf,
+        config: ProxyConfig,
+        color: ProxyColorContract,
+        origin: ProxyGenerationOrigin,
+    ) -> ProxyGenerationRequestOutcome {
+        let metadata = match std::fs::metadata(&source_path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                return self.immediate_failure(
+                    None,
+                    asset_id,
+                    PreviewFileFingerprint {
+                        len: None,
+                        modified_secs: None,
+                        modified_nanos: None,
+                    },
+                    origin,
+                    ProxyGenerationFailure::new(
+                        ProxyGenerationFailureReason::MissingSourceFile,
+                        format!("proxy source is unavailable: {error}"),
+                    ),
+                );
+            }
+        };
+        let request = ProxyGenerationRequest::new(
+            asset_id,
+            source_path,
+            PreviewFileFingerprint::from_metadata(&metadata),
+            config,
+            color,
+        );
+        if let Some(outcome) = {
+            let mut state = self.inner.state.lock();
+            preflight_request(&mut state, &request.key, origin)
+        } {
+            return outcome;
+        }
+        let prior_status = match self.inner.backend.status(&request) {
+            Ok(ProxyStatus::Fresh) => {
+                let mut state = self.inner.state.lock();
+                state.remove_failure(&request.key);
+                state.counters.fresh_hits = state.counters.fresh_hits.saturating_add(1);
+                return ProxyGenerationRequestOutcome::AlreadyFresh;
+            }
+            Ok(status) => status,
+            Err(failure) => {
+                return self.immediate_failure(
+                    Some(request.key.clone()),
+                    asset_id,
+                    request.key.source_fingerprint,
+                    origin,
+                    failure,
+                );
+            }
+        };
+        if self.ensure_workers_started() == 0 {
+            return self.immediate_failure(
+                Some(request.key.clone()),
+                asset_id,
+                request.key.source_fingerprint,
+                origin,
+                ProxyGenerationFailure::new(
+                    ProxyGenerationFailureReason::WorkerUnavailable,
+                    "proxy generation service has no live workers",
+                ),
+            );
+        }
+
+        let outcome = {
+            let mut state = self.inner.state.lock();
+            request_admission(&mut state, request, origin, prior_status)
+        };
+        if matches!(outcome, ProxyGenerationRequestOutcome::Admitted { .. }) {
+            self.inner.available.notify_one();
+        }
+        if matches!(outcome, ProxyGenerationRequestOutcome::Failed(_)) {
+            self.inner.mark_changed();
+        }
+        outcome
+    }
+
+    /// Observe service changes since the previous event-loop poll.
+    pub(crate) fn poll_finished(&self) -> bool {
+        let current = self.inner.changed_revision.load(Ordering::Acquire);
+        let previous = self.observed_revision.swap(current, Ordering::AcqRel);
+        current != previous
+    }
+
+    pub(crate) fn diagnostics(&self) -> ProxyGenerationDiagnostics {
+        diagnostics_snapshot(&self.inner.state.lock())
+    }
+
+    fn immediate_failure(
+        &self,
+        key: Option<ProxyGenerationKey>,
+        asset_id: AssetId,
+        fingerprint: PreviewFileFingerprint,
+        origin: ProxyGenerationOrigin,
+        failure: ProxyGenerationFailure,
+    ) -> ProxyGenerationRequestOutcome {
+        let mut state = self.inner.state.lock();
+        record_immediate_failure(
+            &mut state,
+            key,
+            asset_id,
+            fingerprint,
+            origin,
+            failure.clone(),
+        );
+        drop(state);
+        self.inner.mark_changed();
+        ProxyGenerationRequestOutcome::Failed(failure)
+    }
+
+    fn ensure_workers_started(&self) -> usize {
+        *self.started_workers.get_or_init(|| {
+            let mut started = 0;
+            let mut handles = self.worker_handles.lock();
+            for index in 0..self.requested_worker_count {
+                let runtime =
+                    match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                        Ok(runtime) => runtime,
+                        Err(error) => {
+                            tracing::error!(
+                                target: "mondrian::proxy",
+                                worker_index = index,
+                                %error,
+                                "failed to build proxy generation worker runtime"
+                            );
+                            continue;
+                        }
+                    };
+                let inner = Arc::clone(&self.inner);
+                match std::thread::Builder::new()
+                    .name(format!("mondrian-proxy-generator-{index}"))
+                    .spawn(move || state::proxy_generation_worker(inner, runtime))
+                {
+                    Ok(handle) => {
+                        handles.push(handle);
+                        started += 1;
+                    }
+                    Err(error) => tracing::error!(
+                        target: "mondrian::proxy",
+                        worker_index = index,
+                        %error,
+                        "failed to start proxy generation worker"
+                    ),
+                }
+            }
+            started
+        })
+    }
+}
+
+impl Default for ProxyGenerationService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for ProxyGenerationService {
+    fn drop(&mut self) {
+        self.inner.shutdown.store(true, Ordering::Release);
+        cancel_for_shutdown(&mut self.inner.state.lock());
+        self.inner.available.notify_all();
+    }
+}
 
 /// Resolve the source-referred color identity used by proxy generation and lookup.
 pub(crate) fn resolve_asset_proxy_color_contract(
@@ -58,118 +448,6 @@ pub(crate) fn resolve_app_state_proxy_color_contract(
     resolve_asset_proxy_color_contract(asset, &color_context)
 }
 
-/// Queue proxy generation for a video asset on the app proxy worker pool.
-pub(crate) fn request_proxy_generation(
-    asset_id: AssetId,
-    source_path: PathBuf,
-    proxy_config: mondrian_media::ProxyConfig,
-    color: ProxyColorContract,
-) {
-    proxy_generation_dispatcher().enqueue(ProxyGenerationJob {
-        asset_id,
-        source_path,
-        proxy_config,
-        color,
-    });
-}
-
-struct ProxyGenerationJob {
-    asset_id: AssetId,
-    source_path: PathBuf,
-    proxy_config: mondrian_media::ProxyConfig,
-    color: ProxyColorContract,
-}
-
-struct ProxyGenerationDispatcher {
-    sender: mpsc::Sender<ProxyGenerationJob>,
-}
-
-impl ProxyGenerationDispatcher {
-    fn start(worker_count: usize) -> Self {
-        let (sender, receiver) = mpsc::channel::<ProxyGenerationJob>();
-        let receiver = Arc::new(Mutex::new(receiver));
-        for index in 0..worker_count.max(1) {
-            let receiver = Arc::clone(&receiver);
-            let spawn_result = std::thread::Builder::new()
-                .name(format!("mondrian-proxy-generator-{index}"))
-                .spawn(move || proxy_generation_worker_loop(receiver));
-            if let Err(err) = spawn_result {
-                tracing::error!(
-                    target: "mondrian::proxy",
-                    worker_index = index,
-                    "failed to start proxy generation worker: {err}"
-                );
-            }
-        }
-        Self { sender }
-    }
-
-    fn enqueue(&self, job: ProxyGenerationJob) {
-        if let Err(err) = self.sender.send(job) {
-            tracing::warn!(
-                target: "mondrian::proxy",
-                asset_id = %err.0.asset_id,
-                path = %err.0.source_path.display(),
-                "proxy generation dispatcher is unavailable"
-            );
-        }
-    }
-}
-
-fn proxy_generation_dispatcher() -> &'static ProxyGenerationDispatcher {
-    static DISPATCHER: OnceLock<ProxyGenerationDispatcher> = OnceLock::new();
-    DISPATCHER.get_or_init(|| ProxyGenerationDispatcher::start(proxy_generation_worker_count()))
-}
-
-fn proxy_generation_worker_loop(receiver: Arc<Mutex<mpsc::Receiver<ProxyGenerationJob>>>) {
-    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        Ok(runtime) => runtime,
-        Err(err) => {
-            tracing::error!(
-                target: "mondrian::proxy",
-                "failed to build proxy generation worker runtime: {err}"
-            );
-            return;
-        }
-    };
-
-    loop {
-        let job = {
-            let receiver = match receiver.lock() {
-                Ok(receiver) => receiver,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            receiver.recv()
-        };
-        let Ok(job) = job else {
-            break;
-        };
-
-        runtime.block_on(async move {
-            let generator = mondrian_media::ProxyGenerator::new(job.proxy_config);
-            let (progress_tx, _progress_rx) = tokio::sync::mpsc::channel(8);
-            if let Err(err) = generator
-                .generate(
-                    job.asset_id,
-                    job.source_path.clone(),
-                    job.color,
-                    progress_tx,
-                )
-                .await
-            {
-                tracing::warn!(
-                    target: "mondrian::proxy",
-                    asset_id = %job.asset_id,
-                    path = %job.source_path.display(),
-                    "proxy generation failed: {err}"
-                );
-            }
-        });
-    }
-}
-
-const MAX_PROXY_GENERATION_WORKERS: usize = 8;
-
 fn proxy_generation_worker_count() -> usize {
     std::thread::available_parallelism()
         .map(|parallelism| proxy_generation_worker_count_for(parallelism.get()))
@@ -178,21 +456,4 @@ fn proxy_generation_worker_count() -> usize {
 
 fn proxy_generation_worker_count_for(parallelism: usize) -> usize {
     parallelism.saturating_sub(2).clamp(1, MAX_PROXY_GENERATION_WORKERS)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn proxy_generation_worker_count_reserves_capacity_for_preview() {
-        assert_eq!(proxy_generation_worker_count_for(0), 1);
-        assert_eq!(proxy_generation_worker_count_for(1), 1);
-        assert_eq!(proxy_generation_worker_count_for(2), 1);
-        assert_eq!(proxy_generation_worker_count_for(4), 2);
-        assert_eq!(
-            proxy_generation_worker_count_for(16),
-            MAX_PROXY_GENERATION_WORKERS
-        );
-    }
 }
