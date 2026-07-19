@@ -821,8 +821,10 @@ spatial processing, output transformation, calibration, and renderer resource
 lifetime. App preview planning produces `ViewerGpuExecutionLayer` directly.
 There are no App-named compatibility aliases or App-local execution wrapper.
 The Window Adapter separately owns only UI texture registration and published
-presentation identity; the headless Adapter separately owns submission and GPU
-completion waiting. Both call the renderer Interface directly.
+presentation identity. The UI-independent App Headless Adapter owns the real
+no-Surface device, full-frame spatial request, submission, and GPU completion
+wait; it cannot import Widget geometry or Window publication contracts. Both
+Adapters call the renderer Interface directly.
 Frame-scoped renderer resources clear through one Interface while pipelines and
 device capability state remain resident. On device/display invalidation, the
 Window Adapter first unregisters its external texture and then resets renderer

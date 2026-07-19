@@ -16,6 +16,9 @@ use super::playback_acceptance::{
 };
 use super::playback_preview::{observe_playback_video_preroll, pump_playback_preview};
 use super::*;
+use crate::app::headless_viewer_gpu::{
+    HeadlessViewerGpuAdapter, HeadlessViewerGpuAdapterInfo, HeadlessViewerGpuExecution,
+};
 use crate::app::native_video_import::resolve_playback_hardware_decode_admission;
 use crate::app::preview_access_mode::MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT;
 use crate::app::preview_execution::PreviewDecodeExecutionSummary as AppUiPreviewDecodeExecutionSummary;
@@ -40,9 +43,6 @@ use crate::app_ui::shell::AppUiAppRoot;
 use crate::app_ui::viewer_gpu_output_budget::{
     build_health_report, evaluate_jsonl, ViewerGpuOutputBudget, ViewerGpuOutputHealthReport,
     ViewerGpuOutputHealthVerdict,
-};
-use crate::app_ui::viewer_gpu_preview_headless::{
-    HeadlessViewerGpuAdapter, HeadlessViewerGpuAdapterInfo, HeadlessViewerGpuExecution,
 };
 use anyhow::Context;
 use serde::Serialize;
@@ -3225,9 +3225,9 @@ fn execute_headless_gpu_candidate(
         crate::app::preview_execution::PreviewGpuFrameState::Ready(frame) => {
             let execution = match gpu_adapter.execute(&frame) {
                 Ok(execution) => execution,
-                Err(crate::app_ui::viewer_gpu_preview_headless::HeadlessViewerGpuError::Backpressure(
-                    _,
-                )) => return Ok(HeadlessGpuCandidateStatus::Backpressured),
+                Err(crate::app::headless_viewer_gpu::HeadlessViewerGpuError::Backpressure(_)) => {
+                    return Ok(HeadlessGpuCandidateStatus::Backpressured)
+                }
                 Err(error) => {
                     return Err(error)
                         .context("execute current Viewer frame on the real headless GPU Adapter");

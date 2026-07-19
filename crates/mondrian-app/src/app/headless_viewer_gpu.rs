@@ -8,8 +8,7 @@
 use std::time::Instant;
 
 use crate::app::preview_execution::{
-    PreviewDecodeExecutionSummary as AppUiPreviewDecodeExecutionSummary,
-    PreviewGpuFrame as AppUiGpuPreviewFrame, PreviewGpuWorkingInput as AppUiGpuPreviewWorkingInput,
+    PreviewDecodeExecutionSummary, PreviewGpuFrame, PreviewGpuWorkingInput,
 };
 use mondrian_renderer::{
     native_video_texture_device_features, ocio_lut_filtering_device_features,
@@ -24,8 +23,6 @@ use mondrian_renderer::{
     ViewerGpuExecutionRequest, ViewerGpuExecutionRuntime, ViewerGpuExecutionStageMarker,
     ViewerGpuOutputPrecision, ViewerSourceRect,
 };
-use mondrian_ui_widgets::ViewerExternalTexturePresentation;
-
 const HEADLESS_GPU_TIMESTAMP_RING_CAPACITY: usize = 16;
 
 /// Evidence for one real headless Viewer GPU execution.
@@ -62,7 +59,7 @@ pub(crate) struct HeadlessViewerGpuExecution {
     /// Explicit native/GPU-input fallback reasons for a newly rendered output.
     pub fallback_reasons: Vec<String>,
     /// Frame-local decode provenance bound to this exact Viewer candidate.
-    pub decode_execution: AppUiPreviewDecodeExecutionSummary,
+    pub decode_execution: PreviewDecodeExecutionSummary,
     /// Native-import contract pools retained after this execution.
     pub native_import_contract_pools: usize,
     /// Native-import bridge entries retained after this execution.
@@ -205,7 +202,7 @@ impl HeadlessViewerGpuAdapter {
     /// Execute or reuse the exact output represented by `frame`.
     pub(crate) fn execute(
         &mut self,
-        frame: &AppUiGpuPreviewFrame,
+        frame: &PreviewGpuFrame,
     ) -> Result<HeadlessViewerGpuExecution, HeadlessViewerGpuError> {
         let started = Instant::now();
         let output_key = frame.external_texture_key();
@@ -235,11 +232,12 @@ impl HeadlessViewerGpuAdapter {
                 native_import_bridge_entries,
             });
         }
-        let presentation = ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
-            .ok_or(HeadlessViewerGpuError::InvalidPresentation {
+        if frame.width == 0 || frame.height == 0 {
+            return Err(HeadlessViewerGpuError::InvalidPresentation {
                 width: frame.width,
                 height: frame.height,
-            })?;
+            });
+        }
         self.runtime.clear_frame_resources();
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("headless_viewer_gpu_preview_encoder"),
@@ -252,9 +250,8 @@ impl HeadlessViewerGpuAdapter {
             .map_err(|error| HeadlessViewerGpuError::Timestamp(error.to_string()))?
             .flatten();
         let layers = match &frame.working_input {
-            AppUiGpuPreviewWorkingInput::GpuComposite { layers } => layers,
+            PreviewGpuWorkingInput::GpuComposite { layers } => layers,
         };
-        let source_rect = presentation.normalized_source_rect();
         let request = ViewerGpuExecutionRequest {
             sequence_id: frame.sequence_id,
             timeline_frame: frame.frame,
@@ -264,14 +261,9 @@ impl HeadlessViewerGpuAdapter {
             layers,
             program_output_boundary: &frame.program_output_boundary,
             monitor_adaptation: &frame.monitor_adaptation,
-            source_rect: ViewerSourceRect {
-                x: source_rect.x,
-                y: source_rect.y,
-                width: source_rect.width,
-                height: source_rect.height,
-            },
-            output_width: presentation.output_width,
-            output_height: presentation.output_height,
+            source_rect: ViewerSourceRect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 },
+            output_width: frame.width,
+            output_height: frame.height,
             output_precision: ViewerGpuOutputPrecision::minimum_for_display(
                 frame.monitor_adaptation.monitor_color_space(),
                 false,

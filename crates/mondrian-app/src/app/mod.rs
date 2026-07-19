@@ -60,6 +60,8 @@ mod audio_playback_acceptance;
 mod audio_rendering;
 mod clip_clipboard;
 pub(crate) mod exporting;
+#[cfg(test)]
+pub(crate) mod headless_viewer_gpu;
 mod media_import;
 pub(crate) mod native_video_import;
 mod playback;

@@ -370,7 +370,9 @@ effects and compositing, Viewer crop/resize, the display boundary, and optional
 proven calibration; `ViewerGpuExecutionRecord` returns the retained output plus
 stage, compositor, spatial, residency, and fallback evidence. Window and
 headless Adapters resolve the texture view from this same runtime, then perform
-their distinct registration or completion obligations themselves.
+their distinct registration or completion obligations themselves. The
+headless Implementation lives in the UI-independent App layer, uses a
+full-frame spatial contract, and imports no Widget or Window publication type.
 The Adapter also supplies a typed `ViewerGpuOutputPrecision`: SDR without
 calibration may use the lower-bandwidth `Encoded8` carrier, while HLG, PQ,
 high-bit validation, and any display-calibration route use `EncodedFloat16`.
