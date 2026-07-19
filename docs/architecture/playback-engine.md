@@ -534,6 +534,11 @@ the Viewer preserves one deterministic test surface for Window and Headless
 Adapters.
 
 The Preview Adapter must execute that policy rather than merely report it. It
+uses the single UI-independent `app::preview_quality` contract to normalize the
+authored scale to `[0.125, 1.0]` (with a fail-safe `0.5` for non-finite input)
+both when applying an author mutation and when consuming persisted state. UI
+labels may format this value but cannot define a second clamp or fallback.
+It then
 multiplies the sequence's user-authored preview scale by the runtime
 `Full`/`Half`/`Quarter` divisor before constructing decode, composite, nested
 sequence, prefetch, and GPU-output keys. Integer dimensions round upward and

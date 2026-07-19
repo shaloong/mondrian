@@ -7,6 +7,7 @@
 //! 其余 Action 记录日志后忽略。每个 Stage 逐步增加映射。
 
 use crate::app::exporting::TimelineExportRequest;
+use crate::app::preview_quality::normalize_preview_resolution_scale;
 use crate::app::proxy_generation::{
     request_proxy_generation, resolve_app_state_proxy_color_contract,
 };
@@ -1613,7 +1614,7 @@ impl AppState {
     }
 
     fn set_preview_resolution_scale_from_ui(&mut self, scale: f32) -> Result<()> {
-        let scale = normalize_viewer_preview_resolution_scale(scale);
+        let scale = normalize_preview_resolution_scale(scale);
         self.sync_current_sequence_into_collection();
         let sequence_id = self
             .active_sequence_id
@@ -1635,8 +1636,7 @@ impl AppState {
                 reason: format!("序列不存在: {sequence_id}"),
             })?;
 
-        let current =
-            normalize_viewer_preview_resolution_scale(before.settings.preview.resolution_scale);
+        let current = normalize_preview_resolution_scale(before.settings.preview.resolution_scale);
         if (current - scale).abs() <= f32::EPSILON {
             return Ok(());
         }
@@ -2368,16 +2368,8 @@ fn unknown_ui_action_error(step_prefix: &'static str, name: &str) -> MondrianErr
     }
 }
 
-fn normalize_viewer_preview_resolution_scale(scale: f32) -> f32 {
-    if scale.is_finite() {
-        scale.clamp(0.125, 1.0)
-    } else {
-        0.5
-    }
-}
-
 fn preview_resolution_scale_label(scale: f32) -> String {
-    let percent = normalize_viewer_preview_resolution_scale(scale) * 100.0;
+    let percent = normalize_preview_resolution_scale(scale) * 100.0;
     if (percent.fract()).abs() <= f32::EPSILON {
         format!("{}%", percent.round() as u32)
     } else {

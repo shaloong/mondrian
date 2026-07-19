@@ -1,12 +1,6 @@
-//! Shared preview-resolution scale helpers for app UI adapters.
+//! Preview-resolution scale presentation helpers for UI adapters.
 
-pub(crate) fn normalize_preview_resolution_scale(scale: f32) -> f32 {
-    if scale.is_finite() {
-        scale.clamp(0.125, 1.0)
-    } else {
-        0.5
-    }
-}
+pub(crate) use crate::app::preview_quality::normalize_preview_resolution_scale;
 
 pub(crate) fn preview_scale_percent_label(scale: f32) -> String {
     let percent = normalize_preview_resolution_scale(scale) * 100.0;

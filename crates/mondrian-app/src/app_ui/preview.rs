@@ -99,6 +99,7 @@ use crate::app::preview_execution::{
     PreviewGpuWorkingInput as AppUiGpuPreviewWorkingInput,
 };
 use crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
+use crate::app::preview_quality::normalize_preview_resolution_scale;
 use crate::app::preview_scheduler_policy::{
     media_preview_forward_prefetch_window_frames, playback_frame_delivery_kind,
     playback_hardware_recovery_signals, preview_decode_presentation_quality,
@@ -120,7 +121,6 @@ use crate::app_ui::panels::{
 use crate::app_ui::preview_frame_store::PreviewCpuFrameStore;
 #[cfg(test)]
 use crate::app_ui::preview_frame_store::PreviewCpuFrameStoreConfig;
-use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 
 const MEDIA_PREVIEW_PLAYBACK_BUFFERING_STALL_TIMEOUT_US: u64 = 250_000;
 const MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
