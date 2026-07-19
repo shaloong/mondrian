@@ -67,6 +67,12 @@ observations, snapshots, Frame Demands/Deliveries, presentation tickets,
 semantic scheduling classes, and bounded scheduling evidence. Concrete media
 keys remain opaque generic Adapter values.
 
+White-box tests live in adjacent module files (`playback_engine/tests.rs`,
+`work_broker/tests.rs`, and the App Adapter's `preview_access_mode/tests.rs`).
+The production files therefore retain cohesive Engine/Broker/Adapter
+Implementations without carrying thousands of lines of test fixtures; this is
+source organization only and does not add another runtime Interface.
+
 ## Runtime flow
 
 ```text
