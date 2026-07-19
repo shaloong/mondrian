@@ -35,6 +35,7 @@ use crate::app::ui_actions::{
     APP_SHELL_QUIT, APP_SHELL_RECOVER_PROJECT, APP_SHELL_WINDOW_DRAG, APP_SHELL_WINDOW_MINIMIZE,
     APP_SHELL_WINDOW_TOGGLE_MAXIMIZE, ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER,
 };
+use crate::app::waveform_service::AudioWaveformService;
 use crate::app::{discover_crash_recovery_candidates, AppState, CrashRecoveryCandidate};
 use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::action_queue::PendingUiActions;
@@ -52,7 +53,6 @@ use crate::app_ui::shortcuts::{
     AppUiShortcutOverride,
 };
 use crate::app_ui::startup::{AppUiStartupScreen, StartupRecentProject, StartupRecoveryProject};
-use crate::app_ui::waveform_cache::AudioWaveformCache;
 use mondrian_editor_state::Action;
 
 /// Window-host commands produced while draining app UI actions.
@@ -91,7 +91,7 @@ pub struct AppUiHost {
     preferences_path: PathBuf,
     recovery_candidates: Vec<CrashRecoveryCandidate>,
     asset_thumbnails: AssetThumbnailCache,
-    waveform_cache: AudioWaveformCache,
+    waveform_service: Arc<AudioWaveformService>,
     preview_service: WindowPreviewAdapter,
     playback_feedback: ViewerPlaybackFeedback,
     mode: AppUiMode,
@@ -120,16 +120,15 @@ impl AppUiHost {
         set_theme_preset(preferences.theme_preference.resolve(system_theme_preset));
         let asset_thumbnails = AssetThumbnailCache::new();
         asset_thumbnails.set_color_context(thumbnail_color_context(&app_state));
-        let waveform_cache = AudioWaveformCache::new();
-        if let Some(ref library) = app_state.asset_library {
-            waveform_cache.set_library(Arc::clone(library));
-        }
+        let waveform_service = AudioWaveformService::new();
+        waveform_service.set_library(app_state.asset_library.clone());
         let preview_service = WindowPreviewAdapter::new();
         let root = AppUiAppRoot::from_app_state_with_preferences_thumbnails_and_preview(
             &app_state,
             &preferences,
             Some(&asset_thumbnails),
             Some(&preview_service),
+            Some(waveform_service.source()),
         );
         let playback_feedback = root.viewer_playback_feedback();
         let mode = if app_state.has_open_project() {
@@ -151,7 +150,7 @@ impl AppUiHost {
             preferences_path,
             recovery_candidates,
             asset_thumbnails,
-            waveform_cache,
+            waveform_service,
             preview_service,
             playback_feedback,
             mode,
@@ -379,6 +378,7 @@ impl AppUiHost {
             &self.preferences,
             Some(&self.asset_thumbnails),
             Some(&self.preview_service),
+            Some(self.waveform_service.source()),
         );
         self.sync_mode_from_app_state(bounds);
         TreeWalker::layout(self.active_root_mut(), bounds);
@@ -387,16 +387,14 @@ impl AppUiHost {
     /// Poll background host tasks. Returns true when a repaint was requested by
     /// refreshed model data.
     pub fn poll_background_tasks(&mut self, bounds: Rect) -> bool {
-        // Keep the waveform cache's library reference in sync with the
+        // Keep the waveform service's library reference in sync with the
         // current app state (e.g. when a new project opens).
-        if let Some(ref library) = self.app_state.borrow().asset_library {
-            self.waveform_cache.set_library(Arc::clone(library));
-        }
+        self.waveform_service.set_library(self.app_state.borrow().asset_library.clone());
         let media_imports_changed = self.app_state.borrow_mut().poll_media_imports();
         let thumbnails_changed = self.asset_thumbnails.poll_finished();
         let preview_outcome =
             pump_playback_preview(&mut self.app_state.borrow_mut(), &self.preview_service);
-        let waveform_changed = self.waveform_cache.poll_finished();
+        let waveform_changed = self.waveform_service.poll_finished();
         let transport_model_changed = preview_outcome.transport_change;
         if transport_model_changed {
             self.refresh_transport_state_without_preview();
@@ -602,6 +600,7 @@ impl AppUiHost {
                 &self.preferences,
                 Some(&self.asset_thumbnails),
                 Some(&self.preview_service),
+                Some(self.waveform_service.source()),
             );
             TreeWalker::layout(self.active_root_mut(), bounds);
         }
@@ -841,6 +840,7 @@ impl AppUiHost {
                     &self.preferences,
                     Some(&self.asset_thumbnails),
                     Some(&self.preview_service),
+                    Some(self.waveform_service.source()),
                 );
                 TreeWalker::layout(&mut self.root, bounds);
                 true
@@ -869,6 +869,7 @@ impl AppUiHost {
                     &self.preferences,
                     Some(&self.asset_thumbnails),
                     Some(&self.preview_service),
+                    Some(self.waveform_service.source()),
                 );
                 TreeWalker::layout(&mut self.root, bounds);
                 true

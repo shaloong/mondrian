@@ -5,6 +5,8 @@
 //! factories so real `AppState` / `EditorState` adapters can replace it without
 //! changing dock layout or widget construction.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -97,12 +99,12 @@ use crate::app::ui_actions::{
     TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
     ViewerSetPreviewResolutionScalePayload, ViewerSetZoomScalePayload,
 };
+use crate::app::waveform_service::AudioWaveformSource;
 use crate::app::{AppState, SelectedClipRef};
 use crate::app_ui::action_availability::app_state_action_enabled;
 use crate::app_ui::icons::AppIcon;
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 use crate::app_ui::shortcuts::shortcut_label_for_action;
-use crate::app_ui::waveform_cache::AudioWaveformCache;
 use crate::app_ui::workspace_layout::AppUiWorkspaceLayout;
 
 /// Supplies already-decoded thumbnails for asset-grid cards.
@@ -907,6 +909,7 @@ pub struct TimelinePanelModel {
     clip_refs: Vec<Vec<ClipId>>,
     nested_sequence_refs: Vec<Vec<Option<SequenceId>>>,
     pub waveform_display: WaveformDisplay,
+    pub(crate) waveform_source: Option<AudioWaveformSource>,
 }
 
 impl Default for TimelinePanelModel {
@@ -924,6 +927,7 @@ impl Default for TimelinePanelModel {
             clip_refs: Vec::new(),
             nested_sequence_refs: Vec::new(),
             waveform_display: WaveformDisplay::BottomAligned,
+            waveform_source: None,
         }
     }
 }
@@ -1131,6 +1135,7 @@ impl TimelinePanelModel {
             clip_refs,
             nested_sequence_refs,
             waveform_display: WaveformDisplay::BottomAligned,
+            waveform_source: None,
         }
     }
 
@@ -1149,6 +1154,7 @@ impl TimelinePanelModel {
             clip_refs: Vec::new(),
             nested_sequence_refs: Vec::new(),
             waveform_display: WaveformDisplay::BottomAligned,
+            waveform_source: None,
         }
     }
 
@@ -2235,6 +2241,7 @@ fn timeline_clip_from_sequence_clip(
             if let Ok(Some(record)) = lib.get_asset(clip.asset_id) {
                 view = view.with_source_identity(
                     record.id,
+                    waveform_source_revision(&record),
                     clip.source_in.to_f64(),
                     clip.source_out.to_f64(),
                 );
@@ -2242,6 +2249,25 @@ fn timeline_clip_from_sequence_clip(
         }
     }
     Some(view)
+}
+
+fn waveform_source_revision(record: &AssetRecord) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    record.id.hash(&mut hasher);
+    record.path.hash(&mut hasher);
+    record.updated_at.hash(&mut hasher);
+    record.media_info.file_size.hash(&mut hasher);
+    if let Ok(metadata) = std::fs::metadata(&record.path) {
+        metadata.len().hash(&mut hasher);
+        metadata.modified().ok().hash(&mut hasher);
+    }
+    if let Some(audio) = record.media_info.primary_audio() {
+        audio.index.hash(&mut hasher);
+        audio.duration.hash(&mut hasher);
+        audio.sample_rate.hash(&mut hasher);
+        audio.channels.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn default_clip_label(clip: &Clip) -> String {
@@ -3204,13 +3230,16 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
             })
         })
         .on_seek(timeline_seek_action_from_widget)
-        .with_waveform_lookup(|asset_id, start_secs, end_secs, pixel_width| {
-            AudioWaveformCache::try_with(|cache| {
-                cache.lookup(asset_id, 0, start_secs, end_secs, pixel_width)
-            })
-            .flatten()
-        })
         .with_waveform_display(model.waveform_display);
+    let timeline = if let Some(source) = model.waveform_source.clone() {
+        timeline.with_waveform_lookup(
+            move |asset_id, revision, start_secs, end_secs, pixel_width| {
+                source.lookup(asset_id, revision, start_secs, end_secs, pixel_width)
+            },
+        )
+    } else {
+        timeline
+    };
     let timeline = if let Some(message) = model.empty_message.clone() {
         timeline.with_empty_message(message)
     } else {

@@ -168,6 +168,18 @@ Playback-frame refreshes use a narrow UI update path: the host advances
 `AppState`, then refreshes viewer playback chrome/frame data and the timeline
 playhead without rebuilding the full dock tree.
 
+Timeline audio waveforms are not a Widget or Window execution feature.
+`AppUiHost` owns one UI-independent `AudioWaveformService` composition instance,
+polls its bounded completion pump, and injects an `AudioWaveformSource` handle
+into the Timeline model. The Widget supplies `AssetId`, a source revision
+derived from the immutable asset record, current file length/modification time,
+and probed primary-audio facts, the visible source interval, and presentation
+width. The handle returns only a
+resident envelope or `None`; it cannot expose FFmpeg, worker channels, cache
+mutation, generation state, or failure policy to paint/layout code. Project
+library replacement rotates service generation, and source revision prevents a
+same-asset relink from presenting stale waveform data.
+
 `app::preview_runtime::PreviewProductionRuntime` owns media preview scheduling.
 `WindowPreviewAdapter` is only its Window output specialization. Each viewer preview request
 starts a monotonic generation, and background media jobs check that their key is

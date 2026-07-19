@@ -3,7 +3,9 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_queue::ArrayQueue;
 use mondrian_core::{MondrianError, Result};
+#[cfg(test)]
 use std::path::Path;
+#[cfg(test)]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -569,7 +571,8 @@ fn callback_playback_delay(info: &cpal::OutputCallbackInfo) -> Duration {
     timestamp.playback.duration_since(&timestamp.callback).unwrap_or(Duration::ZERO)
 }
 
-pub fn decode_audio_file_with_ffmpeg_cli(
+#[cfg(test)]
+pub(crate) fn decode_audio_file_with_ffmpeg_cli(
     path: &Path,
     sample_rate: u32,
     channels: u8,

@@ -359,10 +359,11 @@ pub enum TimelineClipKind {
 
 /// Callback for paint-time waveform peak lookup.
 ///
-/// The app wires this to [`AudioWaveformCache::lookup`] so the widget
+/// The app wires this to its waveform source Adapter so the widget
 /// layer stays decoupled from the audio infrastructure.
 pub type WaveformLookupFn = dyn Fn(
     mondrian_core::AssetId,
+    u64, // source_revision
     f64, // source_start_secs
     f64, // source_end_secs
     u32, // pixel_width
@@ -394,6 +395,8 @@ pub struct TimelineClip {
     /// Audio source identity for paint-time waveform lookup.
     /// `None` for non-audio or unlinked clips.
     pub asset_id: Option<AssetId>,
+    /// App-resolved media revision used to reject stale waveform artifacts.
+    pub source_revision: u64,
     /// Source time range (seconds) covered by this clip.
     /// Used to extract the correct portion of the waveform envelope.
     pub source_start_secs: f64,
@@ -417,6 +420,7 @@ impl TimelineClip {
             disabled: false,
             nested: false,
             asset_id: None,
+            source_revision: 0,
             source_start_secs: 0.0,
             source_end_secs: 1.0,
             waveform_peaks: Vec::new(),
@@ -464,10 +468,12 @@ impl TimelineClip {
     pub fn with_source_identity(
         mut self,
         asset_id: AssetId,
+        source_revision: u64,
         source_start_secs: f64,
         source_end_secs: f64,
     ) -> Self {
         self.asset_id = Some(asset_id);
+        self.source_revision = source_revision;
         self.source_start_secs = source_start_secs;
         self.source_end_secs = source_end_secs;
         self
@@ -933,7 +939,7 @@ impl TimelineView {
     /// Set a paint-time waveform lookup callback for rendering audio clip peaks.
     pub fn with_waveform_lookup(
         mut self,
-        lookup: impl Fn(mondrian_core::AssetId, f64, f64, u32) -> Option<Vec<f32>> + 'static,
+        lookup: impl Fn(mondrian_core::AssetId, u64, f64, f64, u32) -> Option<Vec<f32>> + 'static,
     ) -> Self {
         self.waveform_lookup = Some(Box::new(lookup));
         self
@@ -3581,6 +3587,7 @@ impl TimelineView {
             {
                 lookup(
                     asset_id,
+                    clip.source_revision,
                     clip.source_start_secs,
                     clip.source_end_secs,
                     rect.width as u32,

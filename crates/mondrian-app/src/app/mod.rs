@@ -90,6 +90,7 @@ mod selection;
 mod timeline_commands;
 mod timeline_editing;
 pub mod ui_actions;
+pub mod waveform_service;
 
 use self::ui_actions::TimelineSeekSource;
 use audio_rendering::*;

@@ -49,6 +49,7 @@ use crate::app::ui_actions::{
     APP_SHELL_SEQUENCE_SETTINGS_TAB_CHANGED, VIEWER_CYCLE_ZOOM, VIEWER_NAMESPACE,
     VIEWER_SET_ZOOM_SCALE,
 };
+use crate::app::waveform_service::AudioWaveformSource;
 use crate::app::AppState;
 use crate::app_ui::interpret_asset_dialog::AppUiInterpretAssetDraft;
 use crate::app_ui::menu_bar::MenuBar;
@@ -596,6 +597,7 @@ impl AppUiAppRoot {
             preferences,
             thumbnails,
             None,
+            None,
         )
     }
 
@@ -606,12 +608,14 @@ impl AppUiAppRoot {
         preferences: &AppUiPreferences,
         thumbnails: Option<&dyn AssetThumbnailSource>,
         preview: Option<&dyn ViewerPreviewSource>,
+        waveform_source: Option<AudioWaveformSource>,
     ) -> Self {
         let viewer_zoom_mode = ViewerZoomMode::Fit;
         let mut models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
             state, None, thumbnails, preview,
         );
         models.timeline.waveform_display = preferences.waveform_display;
+        models.timeline.waveform_source = waveform_source;
         apply_viewer_zoom_mode(&mut models, viewer_zoom_mode);
         let mut root = Self::new_with_preferences(
             TitleBar::new(
@@ -915,6 +919,7 @@ impl AppUiAppRoot {
             preferences,
             thumbnails,
             None,
+            None,
         );
     }
 
@@ -926,6 +931,7 @@ impl AppUiAppRoot {
         preferences: &AppUiPreferences,
         thumbnails: Option<&dyn AssetThumbnailSource>,
         preview: Option<&dyn ViewerPreviewSource>,
+        waveform_source: Option<AudioWaveformSource>,
     ) {
         self.title_bar = TitleBar::new(
             window_title_for_app_state(state),
@@ -941,6 +947,7 @@ impl AppUiAppRoot {
             preview,
         );
         models.timeline.waveform_display = preferences.waveform_display;
+        models.timeline.waveform_source = waveform_source;
         apply_viewer_zoom_mode(&mut models, self.viewer_zoom_mode);
         self.set_models(models);
         let preferences_model = AppUiPreferencesModel::from_app_state_with_shortcut_overrides(

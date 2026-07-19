@@ -67,4 +67,6 @@ pub use proxy::{
     ProxyColorContractError, ProxyConfig, ProxyEncodingProfile, ProxyGenerator, ProxyResolution,
     ProxySourceFingerprint, ProxyStatus,
 };
-pub use waveform::{compute_waveform, WaveformCache, WaveformData};
+pub use waveform::{
+    WaveformAnalysisError, WaveformEnvelope, WaveformEnvelopeBuilder, MAX_WAVEFORM_WIDTH,
+};

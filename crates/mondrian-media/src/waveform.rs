@@ -1,114 +1,108 @@
-//! Audio waveform computation and caching for timeline display.
+//! Streaming audio-waveform analysis primitives.
 //!
-//! Produces peak amplitude data at multiple resolutions so the waveform
-//! renders correctly regardless of zoom level.
+//! This Module owns only deterministic PCM-to-envelope math. Asset identity,
+//! source revision, execution admission, cancellation, cache policy, and
+//! terminal evidence belong to the calling service.
 
-use crate::audio::AudioBuffer;
-use mondrian_core::types::AssetId;
-use std::collections::HashMap;
+use std::sync::Arc;
 
-/// Pre-computed waveform peaks for a single resolution level.
-#[derive(Debug, Clone)]
-pub struct WaveformData {
-    /// Positive peaks, normalized to 0..1. One value per output column.
-    pub peaks: Vec<f32>,
-    /// Number of audio samples aggregated into each column.
-    pub samples_per_column: u32,
-}
-
-/// Maximum pixel width for waveform computation.
-/// Clips wider than this get downsampled to avoid OOM on extreme zoom.
+/// Maximum number of retained columns in one waveform envelope.
 pub const MAX_WAVEFORM_WIDTH: u32 = 4096;
 
-/// Multi-resolution waveform cache keyed by (asset_id, pixel_width).
-#[derive(Debug, Default)]
-pub struct WaveformCache {
-    entries: HashMap<(AssetId, u32), WaveformData>,
-    /// Tracks insertion order for bounded eviction (oldest first).
-    order: Vec<(AssetId, u32)>,
-    max_entries: usize,
+/// Immutable positive-peak envelope over one complete source duration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WaveformEnvelope {
+    /// Positive absolute peaks in source-time order.
+    pub peaks: Arc<[f32]>,
+    /// Exact source-frame span represented by the envelope.
+    pub total_frames: u64,
 }
 
-impl WaveformCache {
-    pub fn new() -> Self {
-        Self {
-            entries: HashMap::new(),
-            order: Vec::new(),
-            max_entries: 64,
-        }
-    }
-
-    pub fn get_or_compute(
-        &mut self,
-        asset_id: AssetId,
-        buffer: &AudioBuffer,
-        pixel_width: u32,
-    ) -> &WaveformData {
-        let capped_width = pixel_width.clamp(1, MAX_WAVEFORM_WIDTH);
-        let key = (asset_id, capped_width);
-
-        // Fast path: already cached.
-        if self.entries.contains_key(&key) {
-            // SAFETY: key exists, get returns Some. The reference is valid
-            // because we only evict before inserting, never during reads.
-            return self.entries.get(&key).expect("just checked contains_key");
-        }
-
-        // Evict oldest entries before inserting to stay within budget.
-        while self.order.len() >= self.max_entries {
-            if let Some(oldest) = self.order.first().copied() {
-                self.entries.remove(&oldest);
-                self.order.remove(0);
-            } else {
-                break;
-            }
-        }
-
-        let data = compute_waveform(buffer, capped_width);
-        self.entries.insert(key, data);
-        self.order.push(key);
-        self.entries.get(&key).expect("just inserted")
-    }
-
-    pub fn clear(&mut self) {
-        self.entries.clear();
-        self.order.clear();
-    }
+/// Invalid streaming input supplied to waveform analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum WaveformAnalysisError {
+    /// A complete-source envelope requires a positive frame span.
+    #[error("waveform source duration must contain at least one frame")]
+    EmptySource,
+    /// Interleaved PCM requires at least one channel.
+    #[error("waveform PCM channel count must be positive")]
+    InvalidChannelCount,
+    /// The sample slice did not end on an interleaved frame boundary.
+    #[error("waveform PCM sample count is not divisible by its channel count")]
+    PartialInterleavedFrame,
+    /// The submitted source-frame range exceeded the declared source span.
+    #[error("waveform PCM range exceeds the declared source duration")]
+    SourceRangeExceeded,
 }
 
-/// Compute waveform peaks from an audio buffer at the given pixel resolution.
+/// Bounded streaming peak accumulator for one complete source.
 ///
-/// For each output column, records the maximum absolute sample value as the
-/// positive peak. Returns `WaveformData` with one peak per column.
-pub fn compute_waveform(buffer: &AudioBuffer, pixel_width: u32) -> WaveformData {
-    let width = pixel_width.clamp(1, MAX_WAVEFORM_WIDTH) as usize;
-    let mut peaks = vec![0.0f32; width];
+/// Chunks may be submitted at arbitrary non-overlapping or overlapping source
+/// coordinates. Every frame maps directly to its final column, so partitioning
+/// the same PCM into different decode windows produces the same envelope.
+#[derive(Debug)]
+pub struct WaveformEnvelopeBuilder {
+    total_frames: u64,
+    peaks: Vec<f32>,
+}
 
-    if buffer.samples.is_empty() || buffer.frame_count() == 0 {
-        return WaveformData { peaks, samples_per_column: 0 };
-    }
-
-    let total_frames = buffer.frame_count();
-    let channels = buffer.channels as usize;
-    let samples_per_column = (total_frames as u32).div_ceil(width as u32).max(1);
-    let frames_per_column = samples_per_column as usize;
-
-    for (col, peak) in peaks.iter_mut().enumerate() {
-        let start_frame = col * frames_per_column;
-        let end_frame = (start_frame + frames_per_column).min(total_frames);
-
-        let mut max_abs = 0.0f32;
-        for frame in start_frame..end_frame {
-            let base = frame * channels;
-            for ch in 0..channels {
-                let s = buffer.samples.get(base + ch).copied().unwrap_or(0.0);
-                max_abs = max_abs.max(s.abs());
-            }
+impl WaveformEnvelopeBuilder {
+    /// Create an accumulator for one positive source span and requested width.
+    pub fn new(total_frames: u64, requested_width: u32) -> Result<Self, WaveformAnalysisError> {
+        if total_frames == 0 {
+            return Err(WaveformAnalysisError::EmptySource);
         }
-        *peak = max_abs.clamp(0.0, 1.0);
+        let width = requested_width.clamp(1, MAX_WAVEFORM_WIDTH) as usize;
+        Ok(Self { total_frames, peaks: vec![0.0; width] })
     }
 
-    WaveformData { peaks, samples_per_column }
+    /// Accumulate an interleaved PCM chunk at its exact source-frame position.
+    pub fn accumulate_interleaved(
+        &mut self,
+        start_frame: u64,
+        channels: usize,
+        samples: &[f32],
+    ) -> Result<(), WaveformAnalysisError> {
+        if channels == 0 {
+            return Err(WaveformAnalysisError::InvalidChannelCount);
+        }
+        if !samples.len().is_multiple_of(channels) {
+            return Err(WaveformAnalysisError::PartialInterleavedFrame);
+        }
+        let frame_count = samples.len() / channels;
+        let end_frame = start_frame
+            .checked_add(
+                u64::try_from(frame_count)
+                    .map_err(|_| WaveformAnalysisError::SourceRangeExceeded)?,
+            )
+            .ok_or(WaveformAnalysisError::SourceRangeExceeded)?;
+        if end_frame > self.total_frames {
+            return Err(WaveformAnalysisError::SourceRangeExceeded);
+        }
+
+        let width = self.peaks.len();
+        for (frame_offset, frame) in samples.chunks_exact(channels).enumerate() {
+            let absolute_frame = start_frame
+                + u64::try_from(frame_offset)
+                    .map_err(|_| WaveformAnalysisError::SourceRangeExceeded)?;
+            let column = usize::try_from(
+                (u128::from(absolute_frame) * width as u128) / u128::from(self.total_frames),
+            )
+            .unwrap_or(width - 1)
+            .min(width - 1);
+            let peak = frame.iter().copied().map(f32::abs).fold(0.0_f32, f32::max).clamp(0.0, 1.0);
+            self.peaks[column] = self.peaks[column].max(peak);
+        }
+        Ok(())
+    }
+
+    /// Finish the immutable envelope without copying its peak payload.
+    pub fn finish(self) -> WaveformEnvelope {
+        WaveformEnvelope {
+            peaks: Arc::from(self.peaks),
+            total_frames: self.total_frames,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -116,71 +110,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_buffer_returns_zero_peaks() {
-        let buffer = AudioBuffer { samples: vec![], sample_rate: 48000, channels: 2 };
-        let data = compute_waveform(&buffer, 100);
-        assert_eq!(data.peaks.len(), 100);
-        assert!(data.peaks.iter().all(|&p| p == 0.0));
+    fn partitioning_does_not_change_envelope() {
+        let samples = [0.1_f32, -0.4, 0.8, -0.2, 1.0, 0.3, -0.7, 0.2];
+        let mut whole = WaveformEnvelopeBuilder::new(4, 2).expect("valid envelope");
+        whole.accumulate_interleaved(0, 2, &samples).expect("valid whole chunk");
+
+        let mut partitioned = WaveformEnvelopeBuilder::new(4, 2).expect("valid envelope");
+        partitioned
+            .accumulate_interleaved(0, 2, &samples[..4])
+            .expect("valid first chunk");
+        partitioned
+            .accumulate_interleaved(2, 2, &samples[4..])
+            .expect("valid second chunk");
+
+        assert_eq!(whole.finish(), partitioned.finish());
     }
 
     #[test]
-    fn silent_buffer_returns_near_zero_peaks() {
-        let buffer = AudioBuffer::silent(48000, 2, 48000);
-        let data = compute_waveform(&buffer, 50);
-        assert_eq!(data.peaks.len(), 50);
-        assert!(data.peaks.iter().all(|&p| (p - 0.0).abs() < f32::EPSILON));
-    }
-
-    #[test]
-    fn full_scale_tone_produces_measurable_peaks() {
-        // 1kHz sine at -3dBFS in 48kHz stereo for 1 second
-        let sample_rate = 48000u32;
-        let frames = sample_rate as usize;
-        let mut samples = vec![0.0f32; frames * 2];
-        for f in 0..frames {
-            let t = f as f32 / sample_rate as f32;
-            let val = (std::f32::consts::TAU * 1000.0 * t).sin() * 0.707;
-            samples[f * 2] = val;
-            samples[f * 2 + 1] = val * 0.9;
-        }
-        let buffer = AudioBuffer { samples, sample_rate, channels: 2 };
-
-        let data = compute_waveform(&buffer, 100);
-        assert_eq!(data.peaks.len(), 100);
-        let max_peak = data.peaks.iter().cloned().fold(0.0f32, f32::max);
-        assert!(
-            max_peak > 0.5,
-            "sine tone should produce peaks > 0.5, got {max_peak}"
+    fn rejects_invalid_interleaving_and_source_range() {
+        let mut builder = WaveformEnvelopeBuilder::new(2, 2).expect("valid envelope");
+        assert_eq!(
+            builder.accumulate_interleaved(0, 2, &[0.0]),
+            Err(WaveformAnalysisError::PartialInterleavedFrame)
+        );
+        assert_eq!(
+            builder.accumulate_interleaved(2, 1, &[0.0]),
+            Err(WaveformAnalysisError::SourceRangeExceeded)
         );
     }
 
     #[test]
-    fn single_column_aggregates_all_samples() {
-        let buffer = AudioBuffer {
-            samples: vec![0.9, -0.9, 0.5, -0.5],
-            sample_rate: 48000,
-            channels: 1,
-        };
-        let data = compute_waveform(&buffer, 1);
-        assert_eq!(data.peaks.len(), 1);
-        assert!((data.peaks[0] - 0.9).abs() < 1e-5);
-    }
-
-    #[test]
-    fn waveform_cache_hits_return_same_data() {
-        let mut cache = WaveformCache::new();
-        let buffer = AudioBuffer::silent(44100, 1, 4410);
-        let asset_id = AssetId::new();
-
-        let len_a = cache.get_or_compute(asset_id, &buffer, 100).peaks.len();
-        let len_b = cache.get_or_compute(asset_id, &buffer, 100).peaks.len();
-        assert_eq!(len_a, len_b);
-    }
-
-    #[test]
-    fn width_capped_to_max_avoids_oom() {
-        let buffer = AudioBuffer::silent(48000, 2, 48000);
-        let data = compute_waveform(&buffer, 100_000);
-        assert!(data.peaks.len() <= MAX_WAVEFORM_WIDTH as usize);
+    fn width_is_bounded_and_peak_is_preserved() {
+        let mut builder =
+            WaveformEnvelopeBuilder::new(3, u32::MAX).expect("valid bounded envelope");
+        builder.accumulate_interleaved(0, 1, &[0.25, -1.2, 0.5]).expect("valid samples");
+        let envelope = builder.finish();
+        assert_eq!(envelope.peaks.len(), MAX_WAVEFORM_WIDTH as usize);
+        assert!(envelope.peaks.contains(&1.0));
     }
 }

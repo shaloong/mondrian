@@ -206,6 +206,29 @@ impl AudioSourceCache {
         )
     }
 
+    /// Create an independently scheduled source cache with explicit hard limits.
+    ///
+    /// Derived-media services such as waveform analysis use this constructor so
+    /// their sequential decode windows cannot consume the realtime playback or
+    /// export cache budget. Limits are normalized to at least one window, entry,
+    /// and byte; callers should expose the effective values through diagnostics.
+    pub fn new_bounded(
+        sample_rate: u32,
+        channels: u8,
+        window_seconds: usize,
+        entry_capacity: usize,
+        byte_budget: usize,
+    ) -> Self {
+        Self::with_decoder(
+            sample_rate,
+            channels,
+            window_seconds,
+            entry_capacity,
+            byte_budget,
+            Arc::new(PersistentFfmpegAudioWindowDecoder::default()),
+        )
+    }
+
     fn with_decoder(
         sample_rate: u32,
         channels: u8,
@@ -803,6 +826,16 @@ mod tests {
         assert_eq!(diagnostics.reserved_bytes, window_bytes);
         assert_eq!(diagnostics.evictions, 2);
         assert_eq!(decoder.calls.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn independently_bounded_cache_reports_effective_hard_limits() {
+        let cache = AudioSourceCache::new_bounded(48_000, 1, 10, 4, 16 * 1024 * 1024);
+        let diagnostics = cache.diagnostics();
+        assert_eq!(diagnostics.entry_capacity, 4);
+        assert_eq!(diagnostics.byte_budget, 16 * 1024 * 1024);
+        assert_eq!(diagnostics.entries, 0);
+        assert_eq!(diagnostics.reserved_bytes, 0);
     }
 
     #[test]

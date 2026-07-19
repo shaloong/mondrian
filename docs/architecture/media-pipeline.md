@@ -54,8 +54,8 @@ child and both pump threads. Partial EOF is accepted only on a complete
 interleaved frame boundary. The cache additionally provides single-flight per
 complete source-window key, so concurrent consumers share one decode result
 instead of serially reopening the Session. None of this work runs in the CPAL
-callback or UI thread. The older whole-file helper remains only for
-waveform/reference jobs and is not the playback/export PCM source path.
+callback or UI thread. The whole-file FFmpeg helper is compiled only for parity
+tests; no product Preview, waveform, Playback, or Export path may call it.
 
 The block contract now carries the generation-owned
 `ExecutionCancellationToken` all the way into `AudioWindowDecoder`. Cancellation
@@ -66,6 +66,33 @@ Session diagnostics separate cold opens, sequential reuse, and random-seek
 restarts and expose resident/peak/capacity, evictions, cancellations, and each
 class's worst wall duration. Acceptance may constrain steady sequential
 latency without falsely relabeling cold-open or random-seek cost.
+
+## Waveform analysis
+
+`mondrian-media::WaveformEnvelopeBuilder` is a streaming, partition-invariant
+PCM-to-peak Implementation. It accepts exact source-frame coordinates and
+interleaved chunks, validates channel/frame boundaries and declared source
+extent, caps retained output at 4096 columns, and never owns asset identity,
+threads, caches, or UI state. Peak assignment is computed against the complete
+source span, so changing FFmpeg window boundaries cannot change the envelope.
+
+`app::waveform_service::AudioWaveformService` owns the product execution
+lifecycle. It resolves the primary audio stream and finite duration from the
+bound asset library; keys artifacts by `AssetId + source_revision`, where the
+revision includes current file length/modification time plus probed audio facts;
+admits at most 512 demands and feeds a dedicated 16-job worker transport without
+paint-time retry storms; rotates a monotonic generation on
+project-library changes; cooperatively checks cancellation at no more than
+4096 decoded mono samples; and decodes through a private four-window/16 MiB
+`AudioSourceCache`. This cache is deliberately separate from realtime Playback
+and Export budgets. The service retains bounded source LRU, failure memory, and
+terminal evidence and exposes immutable diagnostics for Headless tests.
+
+Timeline paint receives only `AudioWaveformSource`, a shallow nonblocking
+lookup Adapter. A cache miss may request work and returns `None`; no Widget,
+layout pass, or event callback opens FFmpeg, blocks for PCM, owns a worker, or
+reconstructs generation/failure policy. The presentation-width resampler uses
+max aggregation while reducing resolution so a narrow transient cannot vanish.
 
 ## Probe
 
@@ -126,7 +153,7 @@ paint/layout code.
 
 ## Decode and Cache
 
-Decoding and frame caching belong to media/renderer/export paths, not UI widgets. UI panels may request thumbnails or waveform data through app adapters, but must not own FFmpeg state.
+Decoding and frame caching belong to media/renderer/export paths, not UI widgets. UI panels may request thumbnails or waveform data through app adapters, but must not own FFmpeg state. Waveform execution is owned by the UI-independent App service described above; the media crate owns only its decode and streaming-analysis primitives.
 
 The media decode layer exposes three access contracts, matching the way mature
 NLEs separate playback, interactive navigation, and precise still extraction:
@@ -624,10 +651,12 @@ completion poll calls, drained results, count-budget exhaustions, time-budget
 exhaustions, and poll durations. This keeps worker bursts, cache insertion, and
 decode diagnostic aggregation from delaying transport controls or close/quit
 events during buffering.
-The same event-loop rule applies to app-owned thumbnail and waveform completion
-queues consumed by `AppUiHost::poll_background_tasks`: they may request another
-tick when backlog remains, but they must not drain an unbounded worker burst on
-the UI thread.
+The same event-loop rule applies to thumbnail and waveform completion queues
+consumed by `AppUiHost::poll_background_tasks`: they may request another tick
+when backlog remains, but they must not drain an unbounded worker burst on the
+UI thread. Waveform polling drains at most eight results or two milliseconds
+per turn; execution lifecycle and publication remain in
+`AudioWaveformService`, not `AppUiHost`.
 App preview decode timeout is access-mode-specific, not a single global
 playback policy. `ScrubCursor` has the shortest caller-release budget because
 interactive latest-wins work must not leave the UI waiting behind pathological

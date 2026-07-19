@@ -52,6 +52,14 @@ _Avoid_: UI counter families, full worker lifetime as cancellation latency, one 
 Monotonic, cloneable generation authority shared by schedulers, runtimes, and concrete media Adapters. Cancellation never resets a token; a new generation receives a new token. Canceled execution may not populate success caches or terminal failure memory.
 _Avoid_: Resettable flags, Adapter-owned generation truth, caching canceled results
 
+**Execution Work Intent**:
+The minimal cross-domain value language for priority, an optional Adapter-lowered deadline, generation cancellation, and terminal disposition. It is not a scheduler: Preview frames, waveform analysis, thumbnails, proxies, and Export retain domain-owned admission, capacity, worker, and resource policy.
+_Avoid_: Universal media worker pool, cross-domain job enum, one global capacity or eviction policy
+
+**Execution Terminal Evidence**:
+One immutable terminal classification for a Module-local execution attempt: generation, cross-domain priority, completed/failed/canceled/superseded/rejected disposition, and deadline status. Domain diagnostics retain the detailed reason and resource evidence.
+_Avoid_: Boolean success, tracing log as completion truth, UI-inferred cancellation, shared type owning domain failure taxonomy
+
 **Playback Quality Policy**:
 The allowed temporary preview resolution and user-selected proxy/original policy for a Playback Session.
 _Avoid_: Quality flag
@@ -107,6 +115,10 @@ _Avoid_: Window-owned recursion, Headless-specific evaluator, scheduler-specific
 **Preview Production Runtime**:
 The UI-independent App composition root that binds the Frame Work Broker, Preview media workers, Frame Store, execution coordinator, Timeline/Viewer evaluation, result pump, evidence, and final application presentation arbitration. Its generic output payload is opaque: Window and Headless Adapters register their own usable GPU output while sharing generation, cache identity, pending state, stale scope, CPU raster, cancellation, and Frame Delivery semantics.
 _Avoid_: `WindowPreviewAdapter` as the Headless composition root, Window-owned result pumping or cache policy, a second Headless scheduler, Widget payloads in production state
+
+**Waveform Analysis Service**:
+The UI-independent App Module that resolves asset/source revision, admits bounded background work, owns generation cancellation, decodes through a private bounded audio-source cache, retains revision-keyed envelopes and failures, and publishes bounded terminal evidence. The media Module owns only streaming PCM-to-envelope math; the Timeline receives a shallow nonblocking lookup Adapter.
+_Avoid_: Widget-owned FFmpeg state, whole-file PCM, path-only or asset-only cache key, unbounded channel, global thread-local cache
 
 **Window Preview Adapter**:
 The shallow `app_ui::preview` Adapter that constructs a renderer-registered external-texture Widget payload, converts `PreviewRasterFrame` to `ViewerFrameImage` without copying pixels, and projects immutable diagnostics into panel models. It owns no worker, generation, scheduling, cache, output-selection, color, or transport policy.
@@ -270,6 +282,8 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - The current **Frame Demand** is the sole source of truth for terminal identity and target. Playback position changes refresh that demand atomically; the Engine cannot retain a parallel target field that can diverge under Audio Device Clock updates.
 - A **Frame Request Binding** is resolved atomically at completion. If the same semantic frame key is rebound while work is in flight, a reusable result adopts the latest binding; a canceled or incompatible old execution leaves the newer binding pending.
 - Every queued or executing frame request belongs to exactly one **Frame Work Broker** lifecycle. Admission and queue capacity cannot disagree, and only an execution lease or explicit synchronous Adapter completion may resolve its Frame Request Binding.
+- **Execution Work Intent** is shared language, not shared scheduling ownership. Every consumer Module must define its own bounded admission, cancellation checkpoints, resource budget, publication rule, and domain evidence; Export may never contend in a realtime pool merely to reuse the Interface.
+- Every admitted background analysis attempt reaches exactly one **Execution Terminal Evidence** disposition. Rejected admission, dependency failure, cooperative cancellation, and stale publication are distinct and cannot collapse into a missing cache entry.
 - `app::preview_access_mode` is the application scheduling Adapter over the **Frame Work Broker**. It owns media keys, access-mode admission, bounded job transport, and worker-lane mapping without depending on Widget or Window modules; `app_ui` consumes it and cannot host a second scheduler.
 - `app::preview_scheduler_policy` is the sole application policy for Frame Demand deadline classification, executed decode quality, frame-local hardware recovery signals, bounded playback prefetch depth, scrub-locality/latency adaptation, and the consecutive-late decode-pressure guard. The production Adapter supplies one explicit monotonic observation instant per scrub request; UI code cannot own adaptation thresholds or sample time internally. These local guards may alter decode strategy or suppress speculative/duplicate work but cannot enter Playback Transport `Recovering`, change Clock Master, mutate authored quality, or accept an inexact settled frame. Preview UI Adapters consume these decisions and increment diagnostics but cannot reconstruct hardware fallback or redefine `Ready`, `Degraded`, or `Late`.
 - The **Frame Work Broker** records the selected worker lane on the execution lease at dequeue and derives priority, class, lane residency, and cross-lane evidence from that same lifecycle state. Adapters may rename fields for their report schema but cannot maintain parallel activity counters.
@@ -307,6 +321,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - `app::preview_timeline_execution` owns **Preview Timeline Execution** for Window and Headless consumers. It is the only Preview traversal and nested-composition implementation; Adapters supply typed media readiness, consume its canonical media-demand collection, and may record returned facts but cannot duplicate recursion, child sizing, working-space conversion, or cache identity.
 - `app::preview_frame_store::PreviewFrameStoreAdapter` is the sole Frame Store policy Adapter inside `PreviewProductionRuntime`, over the playback-owned generic Store. Window and Headless specializations share it; `app_ui` cannot own another cache or residency policy.
 - `app::preview_raster_frame` owns the validated RGBA8 extent, encoded color identity, exact byte reservation, and stable resource key for a final CPU Preview raster. Cache and stale-reuse paths retain that application contract; the Window Presentation Adapter performs the only conversion to `ViewerFrameImage`, sharing the pixel allocation rather than copying it.
+- The **Waveform Analysis Service** is the sole product owner of Timeline waveform execution. Its key includes asset identity and source revision; project rebinding rotates generation, relink/removal can evict one asset, canceled/stale results cannot populate the success or failure cache, and paint/layout code can only issue a nonblocking lookup.
 - `app::preview_viewer_plan` owns the **Preview Viewer Plan** representation, stable cache identity, frame-local quality/provenance aggregation, and GPU lowering. It is pure and UI-independent; Window and Headless Adapters cannot rebuild these rules.
 - `app::preview_cpu_execution` owns **Preview CPU Execution** for both nested working-linear output and final CPU raster output. Its result retains input/output/monitor color facts, composite diagnostics, and execution durations; Window and Headless Adapters may record or assert those facts but cannot execute alternate color/composite rules.
 - A **Viewer GPU Preview Runtime** owns GPU execution resources independently of a Window; production Window and headless validation must adapt the same execution lifetime and must not duplicate color or compositing interpretation.
