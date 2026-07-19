@@ -1,6 +1,7 @@
 //! Bounded completion, expiry, and terminal-delivery pump for Preview media work.
 
 use super::*;
+use crate::app::preview_media_task::MediaPreviewCancellationPhase;
 
 impl AppUiPreviewService {
     /// Poll completed background media preview decodes.

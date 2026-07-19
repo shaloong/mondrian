@@ -1,12 +1,95 @@
 //! Preview media decode worker and cooperative-cancellation implementation.
 //!
-//! This child Module owns codec execution and result publication while its
-//! parent Preview Adapter owns render planning, caches, and diagnostics.
+//! This App Module owns codec execution, cooperative cancellation observation,
+//! result publication, and bounded worker shutdown. Window and Headless
+//! Adapters may consume its results, but neither owns an alternate decode loop.
 
-use super::*;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
 
-pub(super) fn media_preview_worker(
+use mondrian_core::{MondrianError, Resolution};
+use mondrian_media::{
+    decode_preview_frame_cancellable, HwAccelDeviceSelector, PreviewDecodeAccessMode,
+    PreviewDecodeAdaptiveHints, PreviewDecodeDiagnostics, PreviewDecodeOutcome,
+    PreviewDecodeRequest, PreviewFileFingerprint, PreviewHardwareDecodeRequest,
+    PreviewSourceColorContract,
+};
+use mondrian_playback::{FrameDemandIdentity, FrameExecutionId};
+use mondrian_renderer::{
+    CpuEncodedColorFrame, CpuSourceColorFrame, LinearFloatSource, RenderColorStageDiagnostics,
+    RenderColorTransformDiagnostics, RenderInputTransform,
+};
+
+use super::preview_access_mode::{
+    media_preview_cancel_reason_at_checkpoint, media_preview_cancel_reason_from_execution,
+    media_preview_cancel_request_to_observed_us, MediaPreviewCancelReason, MediaPreviewJob,
+    MediaPreviewJobQueueReceive, MediaPreviewJobQueueReceiver, MediaPreviewJobQueueWait,
+    MediaPreviewKey, MediaPreviewRequestPriority, MediaPreviewScheduler, MediaPreviewWorkerLane,
+    MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT,
+};
+use super::preview_execution::PreviewDecodeExecutionSummary;
+use super::preview_media_frame::{
+    MediaPreviewFrame, MediaPreviewGpuSourceFrame, MediaPreviewNativeSourceFrame,
+};
+use super::preview_scheduler_policy::{
+    preview_decode_presentation_quality, MediaPreviewFailureReason,
+};
+
+/// Terminal or presentable result published by one Preview media task.
+#[derive(Debug)]
+pub(crate) struct MediaPreviewResult {
+    pub(crate) key: MediaPreviewKey,
+    pub(crate) frame: Option<MediaPreviewFrame>,
+    pub(crate) error: Option<String>,
+    pub(crate) failure_reason: Option<MediaPreviewFailureReason>,
+    pub(crate) generation: u64,
+    pub(crate) priority: MediaPreviewRequestPriority,
+    pub(crate) access_mode: PreviewDecodeAccessMode,
+    pub(crate) queue_wait_us: u64,
+    pub(crate) decode_elapsed_us: u64,
+    pub(crate) deadline_at: Option<Instant>,
+    pub(crate) cancel_observed_elapsed_us: Option<u64>,
+    pub(crate) cancel_request_to_observed_us: Option<u64>,
+    pub(crate) canceled: bool,
+    pub(crate) cancellation_phase: Option<MediaPreviewCancellationPhase>,
+    pub(crate) cancel_reason: Option<MediaPreviewCancelReason>,
+    pub(crate) decode_diagnostics: Option<PreviewDecodeDiagnostics>,
+    pub(crate) color_diagnostics: Option<RenderColorTransformDiagnostics>,
+    pub(crate) color_stage_diagnostics: Option<RenderColorStageDiagnostics>,
+    pub(crate) demand_identity: Option<FrameDemandIdentity>,
+    pub(crate) execution_id: Option<FrameExecutionId>,
+}
+
+/// Point at which cooperative cancellation became observable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MediaPreviewCancellationPhase {
+    /// Deadline or obsolescence was resolved before codec work began.
+    Queued,
+    /// A worker lease began and cancellation was observed cooperatively.
+    Executing,
+}
+
+/// Shared stop signal for one bounded Preview media worker group.
+#[derive(Default)]
+pub(crate) struct PreviewShutdownSignal {
+    requested: AtomicBool,
+}
+
+impl PreviewShutdownSignal {
+    pub(crate) fn request(&self) -> bool {
+        self.requested.swap(true, Ordering::AcqRel)
+    }
+
+    pub(crate) fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+}
+
+pub(crate) fn media_preview_worker(
     lane: MediaPreviewWorkerLane,
     jobs: MediaPreviewJobQueueReceiver,
     results: mpsc::Sender<MediaPreviewResult>,
@@ -195,7 +278,7 @@ fn lock_media_preview_cancel_observation(
     observation.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-pub(super) fn media_preview_canceled_result(
+pub(crate) fn media_preview_canceled_result(
     job: MediaPreviewJob,
     queue_wait_us: u64,
     reason: MediaPreviewCancelReason,
@@ -229,7 +312,7 @@ pub(super) fn media_preview_canceled_result(
     }
 }
 
-pub(super) fn decode_media_preview(
+pub(crate) fn decode_media_preview(
     job: MediaPreviewJob,
     queue_wait_us: u64,
     should_cancel: impl Fn() -> bool + Send + Sync + 'static,
@@ -306,7 +389,7 @@ pub(super) fn decode_media_preview(
                     Resolution { width: logical_width, height: logical_height },
                     signature,
                     presentation_quality,
-                    AppUiPreviewDecodeExecutionSummary::from_path(decode_execution),
+                    PreviewDecodeExecutionSummary::from_path(decode_execution),
                 )),
                 error: None,
                 failure_reason: None,
@@ -371,7 +454,7 @@ pub(super) fn decode_media_preview(
                     Resolution { width: logical_width, height: logical_height },
                     signature,
                     presentation_quality,
-                    AppUiPreviewDecodeExecutionSummary::from_path(decode_execution),
+                    PreviewDecodeExecutionSummary::from_path(decode_execution),
                 )),
                 error: None,
                 failure_reason: None,
@@ -423,7 +506,7 @@ pub(super) fn decode_media_preview(
                     Resolution { width: logical_width, height: logical_height },
                     signature,
                     presentation_quality,
-                    AppUiPreviewDecodeExecutionSummary::from_path(decode_execution),
+                    PreviewDecodeExecutionSummary::from_path(decode_execution),
                 )),
                 error: None,
                 failure_reason: None,
@@ -559,3 +642,17 @@ fn decode_media_preview_for_access_mode(
     }
     decode_preview_frame_cancellable(request, should_cancel)
 }
+
+fn app_duration_us(duration: Duration) -> u64 {
+    duration.as_micros().min(u128::from(u64::MAX)) as u64
+}
+
+fn media_preview_frame_signature(key: &MediaPreviewKey) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[cfg(test)]
+#[path = "preview_media_task/tests.rs"]
+mod tests;

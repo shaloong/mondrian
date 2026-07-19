@@ -904,20 +904,22 @@ controlled handoff.
 Consolidate frame-work scheduling in the Frame Work Broker; extract Frame Store
 and Evidence from `app_ui::preview` by behavioral ownership, not file size. The
 Playback Preview Pump is extracted and Window/Headless duplicate orchestration
-is deleted. Timeline evaluation, media adaptation, resolved Viewer planning,
-media execution, final presentation arbitration, and immutable diagnostics now
-each have private deep Modules.
-The concrete media worker, cooperative cancellation, result publication, and
-FFmpeg Adapter remain isolated in `app_ui::preview::media_execution`; private
-modules deliberately reuse parent payloads rather than exposing a broad
-cross-layer Interface. `app_ui::preview::presentation` selects exact registered
+is deleted. Timeline evaluation, media adaptation, final presentation
+arbitration, and immutable diagnostics have private Window deep Modules;
+resolved Viewer planning and media execution have UI-independent App Modules.
+The concrete media worker, cooperative cancellation, result publication,
+bounded shutdown, and FFmpeg Adapter are isolated in the UI-independent
+`app::preview_media_task` deep Module. Its structured task result is the only
+Window/Headless consumption seam; there is no second decoder loop or UI-owned
+cancellation authority. `app_ui::preview::presentation` selects exact registered
 GPU output, raster-cache hits, same-scope stale reuse, deferred playback
 composites, and the CPU output boundary. It owns no generation, candidate,
 cache-residency, scheduling, or transport authority. Retain one public request
 seam into media and continue moving only behavior with clear ownership.
-The Preview service regression suite lives in the sibling private
-`app_ui::preview::tests` module, so production coordination remains reviewable
-without weakening module-private coverage or exposing test seams publicly.
+Window composition regressions live in the sibling private
+`app_ui::preview::tests` module. Media worker failure, cancellation, queue
+deadline, execution-lease settlement, and shutdown behavior live with
+`app::preview_media_task`, where they run without a Window or Widget.
 
 ### Phase 5 — Realtime policy
 

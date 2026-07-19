@@ -73,6 +73,7 @@ pub(crate) mod preview_frame_store;
 pub(crate) mod preview_gpu_output_blocker;
 pub(crate) mod preview_hardware_admission;
 pub(crate) mod preview_media_frame;
+pub(crate) mod preview_media_task;
 pub(crate) mod preview_quality;
 pub(crate) mod preview_raster_frame;
 pub(crate) mod preview_scheduler_policy;

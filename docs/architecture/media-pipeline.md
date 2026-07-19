@@ -406,10 +406,12 @@ working adaptation, logical and sampled geometry, presentation quality, decode
 provenance, and exact host/decoder reservation. Its closed payload enum admits
 exactly one of working CPU, source-domain CPU/GPU-capable, or native decoder
 surface residency; no frame can be empty or claim contradictory residency. The
-concrete worker loop,
-cancellation checkpoints, result publication, and FFmpeg Preview Adapter live
-together in `app_ui::preview::media_execution`. Timeline evaluation and media
-adaptation remain private Window Adapter Modules.
+concrete worker loop, cancellation checkpoints, result publication, bounded
+shutdown signal, and FFmpeg Preview Adapter live together in the UI-independent
+`app::preview_media_task` Module. Window and Headless Adapters consume the same
+structured terminal result and may not implement a second decode loop. Timeline
+evaluation and media adaptation remain private Window Adapter Modules until a
+real non-Window composition root needs their complete behavior.
 The UI-independent `app::preview_viewer_plan` Module owns resolved element
 representation, stable cache identity, quality/provenance aggregation, deferred
 composite classification, and renderer GPU-layer lowering. Final presentation
@@ -431,9 +433,11 @@ and stable resource naming therefore remain available to Headless presentation
 without importing Widget types. `app_ui::preview::result_pump` exclusively
 performs the bounded UI-thread drain of completed work, Broker resolution,
 deadline expiry, cache admission, and terminal Frame Delivery projection; it may
-record facts but cannot invent generation or deadline authority. Worker shutdown
-and project/switch cancellation live separately in `service_lifecycle`, so teardown
-cannot become an alternate completion policy. The one concrete App composition
+record facts but cannot invent generation or deadline authority. Window lifecycle
+code initiates project/switch shutdown in `service_lifecycle`, while the shutdown
+signal, worker observation, and bounded exit behavior stay in
+`app::preview_media_task`; teardown cannot become an alternate completion policy.
+The one concrete App composition
 root is `app::preview_frame_store::PreviewFrameStoreAdapter`; its generic storage
 and residency algorithm remains owned by `mondrian-playback::PreviewFrameStore`,
 while diagnostic aggregation remains in the Preview Adapter. This is a
@@ -471,9 +475,10 @@ The app Adapter converts its remaining monotonic lifetime to an `Instant` budget
 at enqueue/promotion time. `app::preview_scheduler_policy` owns the pure
 worker-deadline eligibility, executed decode-quality classification, and bounded
 frame-rate-to-prefetch-window policy;
-`app::preview_access_mode` owns Broker admission/job transport, while
-`app_ui::preview` still owns decode execution and evidence aggregation. None of
-them duplicate clock math.
+`app::preview_access_mode` owns Broker admission/job transport,
+`app::preview_media_task` owns concrete decode execution and cooperative
+cancellation observation, while `app_ui::preview` owns media adaptation and
+Window diagnostics projection. None of them duplicate clock math.
 
 The same current request carries an opaque Frame Demand identity end-to-end.
 The preview queue and worker may transport but must not interpret that identity;

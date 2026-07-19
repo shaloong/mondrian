@@ -11,8 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 #[cfg(test)]
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -22,17 +21,16 @@ use mondrian_core::timeline_data::{AlphaInterpretation, AssetMediaInterpretation
 use mondrian_core::types::{AssetId, ColorSpace, Rational, SequenceId};
 #[cfg(test)]
 use mondrian_core::types::{BlendMode, ColorEngine};
-use mondrian_core::{MondrianError, Resolution, WorkingColorSpace};
+use mondrian_core::{Resolution, WorkingColorSpace};
 use mondrian_media::{
-    decode_preview_frame_cancellable, preview_decode_cpu_budget, DecodedFrameResidency,
-    DecodedVideoRange, DecodedVideoRangeContract, DecodedVideoSurfaceFormat, HwAccelBackend,
-    HwAccelDeviceSelector, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
-    PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath,
-    PreviewDecodeRequest, PreviewDecodeSeekStrategy, PreviewDecodeStageDurations,
+    preview_decode_cpu_budget, DecodedFrameResidency, DecodedVideoRange, DecodedVideoRangeContract,
+    DecodedVideoSurfaceFormat, HwAccelBackend, HwAccelDeviceSelector, PreviewDecodeAccessMode,
+    PreviewDecodeAdaptiveHints, PreviewDecodeCpuBudget, PreviewDecodeDiagnostics,
+    PreviewDecodePath, PreviewDecodeSeekStrategy, PreviewDecodeStageDurations,
     PreviewDecodeThreadingKind, PreviewFileFingerprint, PreviewHardwareDecodeBlocker,
     PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
     PreviewHardwareDecodeRequest, PreviewScrubAdaptiveClass, PreviewSeekIndexSource,
-    PreviewSourceColorContract, VideoColorDiagnostic, VideoColorDiagnosticIssueSummary,
+    VideoColorDiagnostic, VideoColorDiagnosticIssueSummary,
 };
 #[cfg(test)]
 use mondrian_media::{
@@ -41,20 +39,22 @@ use mondrian_media::{
 };
 use mondrian_renderer::{
     color_report_vocab, evaluate_timeline_render_plan, execute_cpu_working_transform,
-    CpuColorFrame, CpuEncodedColorFrame, CpuSourceColorFrame, GpuCompositingDiagnostics,
-    LinearFloatSource, RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
-    RenderColorTransformDiagnostics, RenderColorTransformDirection, RenderInputTransform,
-    RenderMonitorAdaptation, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
-    TimelineCompositeDiagnostics, TimelineCompositeDomainBlockerBreakdown,
-    TimelineCompositeLegacyBreakdown, TimelineCompositeScratch, TimelineEvaluationRequest,
-    TimelineRenderPlanElement, TimelineSolidColorLayer,
+    CpuColorFrame, GpuCompositingDiagnostics, RenderColorStageDiagnostics,
+    RenderColorStageGpuBlockerBreakdown, RenderColorTransformDiagnostics,
+    RenderColorTransformDirection, RenderMonitorAdaptation, TimelineAdjustmentLayer,
+    TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
+    TimelineCompositeDomainBlockerBreakdown, TimelineCompositeLegacyBreakdown,
+    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineRenderPlanElement,
+    TimelineSolidColorLayer,
 };
 #[cfg(test)]
 use mondrian_renderer::{
-    execute_cpu_input_stage, GpuCompositingBlockerReason, GpuNativeDecodedFrameImportSource,
-    GpuNativeDecodedFrameTextureFormat, RenderOutputColorBoundary, TimelineCompositeColorPath,
-    TimelineCompositeElement, TimelineCompositeOptions, TimelineEffectColorRuntime,
-    TimelineMediaLayer, ViewerGpuExecutionLayer,
+    execute_cpu_input_stage, CpuEncodedColorFrame, CpuSourceColorFrame,
+    GpuCompositingBlockerReason, GpuNativeDecodedFrameImportSource,
+    GpuNativeDecodedFrameTextureFormat, LinearFloatSource, RenderInputTransform,
+    RenderOutputColorBoundary, TimelineCompositeColorPath, TimelineCompositeElement,
+    TimelineCompositeOptions, TimelineEffectColorRuntime, TimelineMediaLayer,
+    ViewerGpuExecutionLayer,
 };
 use mondrian_timeline::sequence::{
     ColorContext, InputColorResolution, InputColorResolutionSource,
@@ -71,28 +71,27 @@ use crate::app::native_video_import::PlaybackHardwareDecodeAdmission;
 use crate::app::native_video_import::PreviewHardwareDecodeAdmissionBlocker;
 use crate::app::playback_preview::{PlaybackPreviewAdapter, PreviewVideoPreroll, PreviewWorkPoll};
 use crate::app::preview_access_mode::{
-    media_preview_access_mode_for_intent, media_preview_cancel_reason_at_checkpoint,
-    media_preview_cancel_reason_from_execution, media_preview_cancel_request_to_observed_us,
-    media_preview_frame_work_class, media_preview_viewer_access_intent, media_preview_worker_count,
-    media_preview_worker_lane, MediaPreviewCancelReason, MediaPreviewJob,
-    MediaPreviewJobQueueDiagnostics, MediaPreviewJobQueueReceive, MediaPreviewJobQueueReceiver,
-    MediaPreviewJobQueueSender, MediaPreviewJobQueueWait, MediaPreviewKey,
-    MediaPreviewNativeSurfaceHint, MediaPreviewRequestPriority, MediaPreviewRequestStatus,
-    MediaPreviewScheduler, MediaPreviewSchedulerDiagnostics, MediaPreviewWorkerLane,
-    MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT,
+    media_preview_access_mode_for_intent, media_preview_frame_work_class,
+    media_preview_viewer_access_intent, media_preview_worker_count, media_preview_worker_lane,
+    MediaPreviewCancelReason, MediaPreviewJob, MediaPreviewJobQueueDiagnostics,
+    MediaPreviewJobQueueSender, MediaPreviewKey, MediaPreviewNativeSurfaceHint,
+    MediaPreviewRequestPriority, MediaPreviewRequestStatus, MediaPreviewScheduler,
+    MediaPreviewSchedulerDiagnostics,
 };
 #[cfg(test)]
 use crate::app::preview_access_mode::{
-    media_preview_cancel_reason, MediaPreviewJobEnqueueStatus,
-    MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US,
+    media_preview_cancel_reason, media_preview_cancel_reason_at_checkpoint,
+    media_preview_cancel_request_to_observed_us, MediaPreviewJobEnqueueStatus,
+    MediaPreviewWorkerLane, MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US,
 };
 use crate::app::preview_cpu_execution::{
     composite_resolved_preview, composite_resolved_preview_working,
     output_boundary_from_color_context, PreviewCompositeOutput, PreviewCpuExecutionDurations,
 };
+#[cfg(test)]
+use crate::app::preview_execution::PreviewDecodeExecutionSummary as AppUiPreviewDecodeExecutionSummary;
 use crate::app::preview_execution::{PreviewCandidateDecision, PreviewExecutionCoordinator};
 use crate::app::preview_execution::{
-    PreviewDecodeExecutionSummary as AppUiPreviewDecodeExecutionSummary,
     PreviewGpuFrame as AppUiGpuPreviewFrame, PreviewGpuFrameState as AppUiGpuPreviewFrameState,
     PreviewGpuWorkingInput as AppUiGpuPreviewWorkingInput,
 };
@@ -102,9 +101,15 @@ use crate::app::preview_frame_store::PreviewFrameStoreAdapterConfig;
 use crate::app::preview_frame_store::ScopedPreviewRasterFrame;
 use crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
 use crate::app::preview_hardware_admission::PreviewHardwareDecodeAdmissionState;
-use crate::app::preview_media_frame::{
-    project_preview_media_transform, MediaPreviewFrame, MediaPreviewGpuSourceFrame,
-    MediaPreviewNativeSourceFrame,
+use crate::app::preview_media_frame::{project_preview_media_transform, MediaPreviewFrame};
+#[cfg(test)]
+use crate::app::preview_media_frame::{MediaPreviewGpuSourceFrame, MediaPreviewNativeSourceFrame};
+#[cfg(test)]
+use crate::app::preview_media_task::{
+    media_preview_canceled_result, MediaPreviewCancellationPhase,
+};
+use crate::app::preview_media_task::{
+    media_preview_worker, MediaPreviewResult, PreviewShutdownSignal,
 };
 use crate::app::preview_quality::normalize_preview_resolution_scale;
 use crate::app::preview_raster_frame::{
@@ -113,15 +118,15 @@ use crate::app::preview_raster_frame::{
 };
 use crate::app::preview_scheduler_policy::{
     media_preview_forward_prefetch_window_frames, playback_frame_delivery_kind,
-    playback_hardware_recovery_signals, preview_decode_presentation_quality,
-    MediaPreviewFailureReason, PlaybackDecodeExecution, PlaybackPressureState,
-    PlaybackPressureTransition, PreviewScrubAdaptationState,
+    playback_hardware_recovery_signals, MediaPreviewFailureReason, PlaybackDecodeExecution,
+    PlaybackPressureState, PlaybackPressureTransition, PreviewScrubAdaptationState,
     MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US, MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES,
     MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
 };
 #[cfg(test)]
 use crate::app::preview_scheduler_policy::{
-    MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD, PREVIEW_SCRUB_SLOW_LATENCY_US,
+    preview_decode_presentation_quality, MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD,
+    PREVIEW_SCRUB_SLOW_LATENCY_US,
 };
 use crate::app::preview_viewer_plan::{
     gpu_composite_layers_for_resolved, preview_elements_require_deferred_composite,
@@ -775,53 +780,6 @@ impl Drop for AppUiPreviewService {
     }
 }
 
-#[derive(Debug)]
-struct MediaPreviewResult {
-    key: MediaPreviewKey,
-    frame: Option<MediaPreviewFrame>,
-    error: Option<String>,
-    failure_reason: Option<MediaPreviewFailureReason>,
-    generation: u64,
-    priority: MediaPreviewRequestPriority,
-    access_mode: PreviewDecodeAccessMode,
-    queue_wait_us: u64,
-    decode_elapsed_us: u64,
-    deadline_at: Option<Instant>,
-    cancel_observed_elapsed_us: Option<u64>,
-    cancel_request_to_observed_us: Option<u64>,
-    canceled: bool,
-    cancellation_phase: Option<MediaPreviewCancellationPhase>,
-    cancel_reason: Option<MediaPreviewCancelReason>,
-    decode_diagnostics: Option<PreviewDecodeDiagnostics>,
-    color_diagnostics: Option<RenderColorTransformDiagnostics>,
-    color_stage_diagnostics: Option<RenderColorStageDiagnostics>,
-    demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
-    execution_id: Option<mondrian_playback::FrameExecutionId>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MediaPreviewCancellationPhase {
-    /// Deadline or obsolescence was resolved before codec work began.
-    Queued,
-    /// A worker lease began and cancellation was observed cooperatively.
-    Executing,
-}
-
-#[derive(Default)]
-struct PreviewShutdownSignal {
-    requested: AtomicBool,
-}
-
-impl PreviewShutdownSignal {
-    fn request(&self) -> bool {
-        self.requested.swap(true, Ordering::AcqRel)
-    }
-
-    fn is_requested(&self) -> bool {
-        self.requested.load(Ordering::Acquire)
-    }
-}
-
 impl AppUiPreviewService {
     fn record_color_rejection(&self, rejection: AppUiPreviewColorRejection) {
         self.last_color_rejection.replace(Some(rejection));
@@ -1111,12 +1069,6 @@ fn app_duration_us(duration: Duration) -> u64 {
     duration.as_micros().min(u128::from(u64::MAX)) as u64
 }
 
-fn media_preview_frame_signature(key: &MediaPreviewKey) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    key.hash(&mut hasher);
-    hasher.finish()
-}
-
 fn nested_preview_frame_signature(
     sequence_id: SequenceId,
     frame: i64,
@@ -1262,8 +1214,6 @@ fn media_preview_result_is_startup_preroll(result: &MediaPreviewResult) -> bool 
         && result.deadline_at.is_some()
 }
 
-mod media_execution;
-use media_execution::*;
 #[cfg(test)]
 #[path = "preview/tests.rs"]
 mod tests;
