@@ -635,7 +635,7 @@ mathematics remain renderer-owned. Within the concrete Adapter, timeline
 traversal and nested Sequence evaluation live in
 `preview::timeline_evaluation`, media-key/path/proxy/decode adaptation lives in
 `preview::media_adapter`, decoded/native payload ownership and the single lazy
-CPU working-frame adaptation live in `preview::media_frame`, resolved Viewer
+CPU working-frame adaptation live in `app::preview_media_frame`, resolved Viewer
 identity plus GPU execution-layer lowering lives in `preview::viewer_plan`, and
 working-linear CPU composition plus the encoded raster boundary live in
 `preview::composite`. Final exact GPU/raster/stale/CPU output arbitration remains
@@ -793,8 +793,9 @@ surface and zero for CPU frames. LRU eviction enforces count, byte, and resource
 budgets together, and diagnostics expose both current resource units and the
 configured limit.
 
-The App's `PreviewCpuFrameStore` is a thin Adapter and policy composition root:
-it computes the reservation for `MediaPreviewFrame`, admits the validated
+`app::preview_frame_store::PreviewFrameStoreAdapter` is the one concrete App
+Adapter and policy composition root. It computes the reservation for
+`MediaPreviewFrame`, admits the validated
 UI-independent `PreviewRasterFrame` by its exact encoded byte size, aligns
 native-resource residency with the configured maximum prefetch window, and
 constructs the `(SequenceId, width, height)` presentation scope. All residency

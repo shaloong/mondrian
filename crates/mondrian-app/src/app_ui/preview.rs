@@ -12,7 +12,7 @@ use std::hash::{Hash, Hasher};
 #[cfg(test)]
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -28,25 +28,24 @@ use mondrian_effects::{
 };
 use mondrian_media::{
     decode_preview_frame_cancellable, preview_decode_cpu_budget, DecodedFrameResidency,
-    DecodedGpuFrameHandleKind, DecodedVideoRange, DecodedVideoRangeContract, DecodedVideoSampling,
-    DecodedVideoSurfaceFormat, HwAccelBackend, HwAccelDeviceSelector, PreviewDecodeAccessMode,
-    PreviewDecodeAdaptiveHints, PreviewDecodeCpuBudget, PreviewDecodeDiagnostics,
-    PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
-    PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewFileFingerprint,
-    PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
-    PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest, PreviewNativeDecodedFrame,
-    PreviewScrubAdaptiveClass, PreviewSeekIndexSource, PreviewSourceColorContract,
-    VideoColorDiagnostic, VideoColorDiagnosticIssueSummary,
+    DecodedVideoRange, DecodedVideoRangeContract, DecodedVideoSurfaceFormat, HwAccelBackend,
+    HwAccelDeviceSelector, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
+    PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodePath,
+    PreviewDecodeRequest, PreviewDecodeSeekStrategy, PreviewDecodeStageDurations,
+    PreviewDecodeThreadingKind, PreviewFileFingerprint, PreviewHardwareDecodeBlocker,
+    PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
+    PreviewHardwareDecodeRequest, PreviewScrubAdaptiveClass, PreviewSeekIndexSource,
+    PreviewSourceColorContract, VideoColorDiagnostic, VideoColorDiagnosticIssueSummary,
 };
 #[cfg(test)]
 use mondrian_media::{
-    DecodedVideoChromaLocation, PreviewDecodeExecutionPath, PreviewNativeDecodedFrameHandle,
+    DecodedGpuFrameHandleKind, DecodedVideoChromaLocation, DecodedVideoSampling,
+    PreviewDecodeExecutionPath, PreviewNativeDecodedFrame, PreviewNativeDecodedFrameHandle,
 };
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
     evaluate_timeline_render_plan, execute_cpu_program_monitor_boundary_rgba8,
-    execute_cpu_source_input_stage, execute_cpu_working_transform,
-    project_affine_to_sampled_extents, CpuColorFrame, CpuEncodedColorFrame, CpuSourceColorFrame,
+    execute_cpu_working_transform, CpuColorFrame, CpuEncodedColorFrame, CpuSourceColorFrame,
     GpuCompositingBlockerReason, GpuCompositingDiagnostics, LinearFloatSource,
     RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
     RenderColorTransformDiagnostics, RenderColorTransformDirection, RenderInputTransform,
@@ -98,8 +97,16 @@ use crate::app::preview_execution::{
     PreviewGpuFrame as AppUiGpuPreviewFrame, PreviewGpuFrameState as AppUiGpuPreviewFrameState,
     PreviewGpuWorkingInput as AppUiGpuPreviewWorkingInput,
 };
+use crate::app::preview_frame_store::PreviewFrameStoreAdapter;
+#[cfg(test)]
+use crate::app::preview_frame_store::PreviewFrameStoreAdapterConfig;
+use crate::app::preview_frame_store::ScopedPreviewRasterFrame;
 use crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
 use crate::app::preview_hardware_admission::PreviewHardwareDecodeAdmissionState;
+use crate::app::preview_media_frame::{
+    project_preview_media_transform, MediaPreviewFrame, MediaPreviewGpuSourceFrame,
+    MediaPreviewNativeSourceFrame,
+};
 use crate::app::preview_quality::normalize_preview_resolution_scale;
 use crate::app::preview_raster_frame::{
     preview_raster_presentation_contract, preview_raster_resource_key,
@@ -123,10 +130,6 @@ use crate::app_ui::panels::{
     ViewerColorPipelineStatus, ViewerPreviewColorRejectionModel, ViewerPreviewSource,
     ViewerPreviewState,
 };
-use crate::app_ui::preview_frame_store::PreviewCpuFrameStore;
-#[cfg(test)]
-use crate::app_ui::preview_frame_store::PreviewCpuFrameStoreConfig;
-use crate::app_ui::preview_frame_store::ScopedPreviewRasterFrame;
 
 const MEDIA_PREVIEW_PLAYBACK_BUFFERING_STALL_TIMEOUT_US: u64 = 250_000;
 const MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
@@ -142,7 +145,7 @@ pub struct AppUiPreviewService {
     results: RefCell<mpsc::Receiver<MediaPreviewResult>>,
     workers: RefCell<Vec<JoinHandle<()>>>,
     shutdown: Arc<PreviewShutdownSignal>,
-    frame_store: RefCell<PreviewCpuFrameStore>,
+    frame_store: RefCell<PreviewFrameStoreAdapter>,
     requested_proxy_generations: RefCell<HashSet<PreviewProxyGenerationRequestKey>>,
     scrub_adaptation: RefCell<PreviewScrubAdaptationState>,
     execution: RefCell<
@@ -218,7 +221,7 @@ impl AppUiPreviewService {
             results: RefCell::new(result_rx),
             workers: RefCell::new(workers),
             shutdown,
-            frame_store: RefCell::new(PreviewCpuFrameStore::default()),
+            frame_store: RefCell::new(PreviewFrameStoreAdapter::default()),
             requested_proxy_generations: RefCell::new(HashSet::new()),
             scrub_adaptation: RefCell::new(PreviewScrubAdaptationState::default()),
             execution: RefCell::new(PreviewExecutionCoordinator::default()),
@@ -685,11 +688,6 @@ use media_adapter::PreviewProxyGenerationRequestKey;
 use media_adapter::{
     resolve_preview_media_decode_path, should_request_preview_proxy_generation, source_micros,
     PreviewMediaDecodePathResolution,
-};
-mod media_frame;
-pub(crate) use media_frame::MediaPreviewFrame;
-use media_frame::{
-    project_preview_media_transform, MediaPreviewGpuSourceFrame, MediaPreviewNativeSourceFrame,
 };
 mod presentation;
 mod request_scheduler;

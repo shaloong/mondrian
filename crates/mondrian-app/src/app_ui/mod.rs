@@ -23,7 +23,6 @@ pub mod playback_feedback;
 pub mod preferences_dialog;
 pub mod preferences_store;
 pub mod preview;
-pub(crate) mod preview_frame_store;
 pub(crate) mod preview_scale;
 pub mod project_settings_dialog;
 pub mod rendering;

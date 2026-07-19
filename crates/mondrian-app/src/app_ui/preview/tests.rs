@@ -94,7 +94,7 @@ fn playback_generation_survives_frame_advance_but_not_discontinuity() {
 
 #[test]
 fn app_frame_store_residency_covers_the_prefetch_window() {
-    let diagnostics = PreviewCpuFrameStore::default().diagnostics();
+    let diagnostics = PreviewFrameStoreAdapter::default().diagnostics();
     assert!(diagnostics.media_resource_unit_budget >= MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES);
 }
 
@@ -7840,8 +7840,8 @@ fn test_cpu_frame_store(
     media_entry_capacity: usize,
     media_byte_budget: usize,
     failure_entry_capacity: usize,
-) -> PreviewCpuFrameStore {
-    PreviewCpuFrameStore::new(PreviewCpuFrameStoreConfig {
+) -> PreviewFrameStoreAdapter {
+    PreviewFrameStoreAdapter::new(PreviewFrameStoreAdapterConfig {
         media_entry_capacity,
         media_byte_budget,
         media_resource_unit_budget: 4,
@@ -8576,8 +8576,8 @@ fn scrub_adaptation_switches_for_hot_region_and_slow_latency() {
 }
 
 #[test]
-fn cpu_frame_store_evicts_least_recently_used_media_frame() {
-    let mut store = PreviewCpuFrameStore::new(PreviewCpuFrameStoreConfig {
+fn preview_frame_store_evicts_least_recently_used_media_frame() {
+    let mut store = PreviewFrameStoreAdapter::new(PreviewFrameStoreAdapterConfig {
         media_entry_capacity: 2,
         media_byte_budget: 1_024,
         media_resource_unit_budget: 4,
@@ -8602,8 +8602,8 @@ fn cpu_frame_store_evicts_least_recently_used_media_frame() {
 }
 
 #[test]
-fn cpu_frame_store_updates_existing_media_frame_without_growing() {
-    let mut store = PreviewCpuFrameStore::new(PreviewCpuFrameStoreConfig {
+fn preview_frame_store_updates_existing_media_frame_without_growing() {
+    let mut store = PreviewFrameStoreAdapter::new(PreviewFrameStoreAdapterConfig {
         media_entry_capacity: 2,
         media_byte_budget: 1_024,
         media_resource_unit_budget: 4,
@@ -8622,7 +8622,7 @@ fn cpu_frame_store_updates_existing_media_frame_without_growing() {
 }
 
 #[test]
-fn cpu_frame_store_stays_within_budget_across_one_hundred_media_regions() {
+fn preview_frame_store_stays_within_budget_across_one_hundred_media_regions() {
     let frame_bytes = test_media_frame(0).reserved_cpu_bytes();
     let byte_budget = frame_bytes.saturating_mul(3);
     let mut store = test_cpu_frame_store(100, byte_budget, 8);
@@ -8649,7 +8649,7 @@ fn cpu_frame_store_stays_within_budget_across_one_hundred_media_regions() {
 }
 
 #[test]
-fn cpu_frame_store_pins_only_an_oversize_current_media_frame() {
+fn preview_frame_store_pins_only_an_oversize_current_media_frame() {
     let current_key = test_media_key(200);
     let current_frame = test_media_frame(7);
     let frame_bytes = current_frame.reserved_cpu_bytes();
@@ -8673,8 +8673,8 @@ fn cpu_frame_store_pins_only_an_oversize_current_media_frame() {
 }
 
 #[test]
-fn cpu_frame_store_clear_releases_frames_failures_and_reserved_bytes() {
-    let mut store = PreviewCpuFrameStore::new(PreviewCpuFrameStoreConfig {
+fn preview_frame_store_clear_releases_frames_failures_and_reserved_bytes() {
+    let mut store = PreviewFrameStoreAdapter::new(PreviewFrameStoreAdapterConfig {
         media_entry_capacity: 2,
         media_byte_budget: 1_024,
         media_resource_unit_budget: 4,

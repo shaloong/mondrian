@@ -4,20 +4,34 @@
 //! frame, or an opaque native decoder surface. Conversion is centralized here
 //! so schedulers and presentation code cannot invent a second color path.
 
-use super::*;
+use std::sync::{Arc, OnceLock};
+
+use mondrian_core::types::{ColorSpace, Resolution};
+use mondrian_media::{
+    DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoSampling,
+    DecodedVideoSurfaceFormat, PreviewDecodeDiagnostics, PreviewNativeDecodedFrame,
+};
+use mondrian_playback::FramePresentationQuality;
+use mondrian_renderer::{
+    execute_cpu_source_input_stage, project_affine_to_sampled_extents, CpuColorFrame,
+    CpuSourceColorFrame, RenderColorStageDiagnostics, RenderColorTransformDiagnostics,
+    RenderInputTransform, ViewerGpuMediaSource, ViewerGpuNativeSource,
+};
+
+use super::preview_execution::PreviewDecodeExecutionSummary;
 
 #[derive(Debug, Clone)]
 pub(crate) struct MediaPreviewFrame {
-    pub(super) frame: Option<CpuColorFrame>,
-    pub(super) gpu_source: Option<MediaPreviewGpuSourceFrame>,
-    pub(super) native_source: Option<MediaPreviewNativeSourceFrame>,
-    pub(super) width: u32,
-    pub(super) height: u32,
-    pub(super) logical_width: u32,
-    pub(super) logical_height: u32,
-    pub(super) signature: u64,
-    pub(super) presentation_quality: mondrian_playback::FramePresentationQuality,
-    pub(super) decode_execution: AppUiPreviewDecodeExecutionSummary,
+    pub(crate) frame: Option<CpuColorFrame>,
+    pub(crate) gpu_source: Option<MediaPreviewGpuSourceFrame>,
+    pub(crate) native_source: Option<MediaPreviewNativeSourceFrame>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) logical_width: u32,
+    pub(crate) logical_height: u32,
+    pub(crate) signature: u64,
+    pub(crate) presentation_quality: FramePresentationQuality,
+    pub(crate) decode_execution: PreviewDecodeExecutionSummary,
 }
 
 impl MediaPreviewFrame {
@@ -45,11 +59,11 @@ impl MediaPreviewFrame {
         usize::from(self.native_source.is_some())
     }
 
-    pub(super) fn width(&self) -> u32 {
+    pub(crate) fn width(&self) -> u32 {
         self.width
     }
 
-    pub(super) fn height(&self) -> u32 {
+    pub(crate) fn height(&self) -> u32 {
         self.height
     }
 
@@ -60,16 +74,16 @@ impl MediaPreviewFrame {
         }
     }
 
-    pub(super) fn presentation_quality(&self) -> mondrian_playback::FramePresentationQuality {
+    pub(crate) fn presentation_quality(&self) -> FramePresentationQuality {
         self.presentation_quality
     }
 
-    pub(super) fn decode_execution(&self) -> AppUiPreviewDecodeExecutionSummary {
+    pub(crate) fn decode_execution(&self) -> PreviewDecodeExecutionSummary {
         self.decode_execution
     }
 
-    pub(super) fn gpu_source(&self) -> Option<mondrian_renderer::ViewerGpuMediaSource> {
-        self.gpu_source.as_ref().map(|source| mondrian_renderer::ViewerGpuMediaSource {
+    pub(crate) fn gpu_source(&self) -> Option<ViewerGpuMediaSource> {
+        self.gpu_source.as_ref().map(|source| ViewerGpuMediaSource {
             source: Arc::clone(&source.source),
             input_transform: source.input_transform.clone(),
             decoder_residency: source.decoder_residency,
@@ -79,17 +93,15 @@ impl MediaPreviewFrame {
         })
     }
 
-    pub(super) fn native_source(&self) -> Option<mondrian_renderer::ViewerGpuNativeSource> {
-        self.native_source
-            .as_ref()
-            .map(|source| mondrian_renderer::ViewerGpuNativeSource {
-                source_color_space: source.source_color_space,
-                input_transform: source.input_transform.clone(),
-                native_frame: source.native_frame.clone(),
-            })
+    pub(crate) fn native_source(&self) -> Option<ViewerGpuNativeSource> {
+        self.native_source.as_ref().map(|source| ViewerGpuNativeSource {
+            source_color_space: source.source_color_space,
+            input_transform: source.input_transform.clone(),
+            native_frame: source.native_frame.clone(),
+        })
     }
 
-    pub(super) fn working_frame(&self) -> Result<MediaPreviewWorkingFrame, String> {
+    pub(crate) fn working_frame(&self) -> Result<MediaPreviewWorkingFrame, String> {
         if let Some(frame) = self.frame.as_ref() {
             return Ok(MediaPreviewWorkingFrame {
                 frame: frame.clone(),
@@ -135,7 +147,7 @@ impl MediaPreviewFrame {
     }
 }
 
-pub(super) fn project_preview_media_transform(
+pub(crate) fn project_preview_media_transform(
     transform: [f32; 6],
     frame: &MediaPreviewFrame,
     output_authoring: Resolution,
@@ -150,32 +162,32 @@ pub(super) fn project_preview_media_transform(
     )
 }
 
-pub(super) struct MediaPreviewWorkingFrame {
-    pub(super) frame: CpuColorFrame,
-    pub(super) color_diagnostics: Option<RenderColorTransformDiagnostics>,
-    pub(super) stage_diagnostics: RenderColorStageDiagnostics,
+pub(crate) struct MediaPreviewWorkingFrame {
+    pub(crate) frame: CpuColorFrame,
+    pub(crate) color_diagnostics: Option<RenderColorTransformDiagnostics>,
+    pub(crate) stage_diagnostics: RenderColorStageDiagnostics,
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct MediaPreviewGpuSourceFrame {
-    pub(super) source: Arc<CpuSourceColorFrame>,
-    pub(super) input_transform: RenderInputTransform,
-    pub(super) decoder_residency: DecodedFrameResidency,
-    pub(super) decoder_handle_kind: Option<DecodedGpuFrameHandleKind>,
-    pub(super) decoded_surface_format: DecodedVideoSurfaceFormat,
-    pub(super) decoded_video_sampling: DecodedVideoSampling,
+pub(crate) struct MediaPreviewGpuSourceFrame {
+    pub(crate) source: Arc<CpuSourceColorFrame>,
+    pub(crate) input_transform: RenderInputTransform,
+    pub(crate) decoder_residency: DecodedFrameResidency,
+    pub(crate) decoder_handle_kind: Option<DecodedGpuFrameHandleKind>,
+    pub(crate) decoded_surface_format: DecodedVideoSurfaceFormat,
+    pub(crate) decoded_video_sampling: DecodedVideoSampling,
     working_cache: Arc<OnceLock<Result<MediaPreviewWorkingFrameCacheEntry, String>>>,
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct MediaPreviewNativeSourceFrame {
-    pub(super) source_color_space: ColorSpace,
-    pub(super) input_transform: RenderInputTransform,
-    pub(super) native_frame: Arc<PreviewNativeDecodedFrame>,
+pub(crate) struct MediaPreviewNativeSourceFrame {
+    pub(crate) source_color_space: ColorSpace,
+    pub(crate) input_transform: RenderInputTransform,
+    pub(crate) native_frame: Arc<PreviewNativeDecodedFrame>,
 }
 
 impl MediaPreviewNativeSourceFrame {
-    pub(super) fn from_native_frame(
+    pub(crate) fn from_native_frame(
         native_frame: PreviewNativeDecodedFrame,
         source_color_space: ColorSpace,
         input_transform: RenderInputTransform,
@@ -190,7 +202,7 @@ impl MediaPreviewNativeSourceFrame {
 
 impl MediaPreviewGpuSourceFrame {
     #[cfg(test)]
-    pub(super) fn new(
+    pub(crate) fn new(
         source: impl Into<CpuSourceColorFrame>,
         input_transform: RenderInputTransform,
     ) -> Self {
@@ -205,7 +217,7 @@ impl MediaPreviewGpuSourceFrame {
         }
     }
 
-    pub(super) fn from_decode_diagnostics(
+    pub(crate) fn from_decode_diagnostics(
         source: impl Into<CpuSourceColorFrame>,
         input_transform: RenderInputTransform,
         diagnostics: PreviewDecodeDiagnostics,

@@ -400,9 +400,12 @@ prefetch workers pass a cooperative cancellation predicate into
 `PreviewDecodeRequest`, and the media loop checks that predicate before
 open, seek, packet decode, frame receive, EOF drain, and RGBA conversion. Do
 not depend on thread abort to preempt synchronous packet decode.
-The concrete worker loop, cancellation checkpoints, result publication, and
-FFmpeg Preview Adapter now live together in
-`app_ui::preview::media_execution`. Timeline evaluation, media adaptation,
+Decoded Preview payload ownership is UI-independent:
+`app::preview_media_frame` owns decoded CPU/source/native residency, lazy CPU
+working adaptation, logical and sampled geometry, presentation quality, decode
+provenance, and exact host/decoder reservation. The concrete worker loop,
+cancellation checkpoints, result publication, and FFmpeg Preview Adapter live
+together in `app_ui::preview::media_execution`. Timeline evaluation, media adaptation,
 Viewer planning, final presentation arbitration, and diagnostics live in
 separate private deep Modules. `app_ui::preview::presentation` exclusively
 chooses exact registered GPU output, raster cache, scoped stale reuse, deferred
@@ -415,9 +418,11 @@ and stable resource naming therefore remain available to Headless presentation
 without importing Widget types. `app_ui::preview::result_pump` exclusively
 performs the bounded UI-thread drain of completed work, Broker resolution,
 deadline expiry, cache admission, and terminal Frame Delivery projection; it may
-record facts but cannot invent generation or deadline authority. Worker shutdown and
-project/switch cancellation live separately in `service_lifecycle`, so teardown
-cannot become an alternate completion policy. Frame cache storage remains owned by `PreviewFrameStore`,
+record facts but cannot invent generation or deadline authority. Worker shutdown
+and project/switch cancellation live separately in `service_lifecycle`, so teardown
+cannot become an alternate completion policy. The one concrete App composition
+root is `app::preview_frame_store::PreviewFrameStoreAdapter`; its generic storage
+and residency algorithm remains owned by `mondrian-playback::PreviewFrameStore`,
 while diagnostic aggregation remains in the Preview Adapter. This is a
 behavioral module boundary, not a second scheduler: all admission, deadline,
 generation, and worker-lane authority still comes from `app::preview_access_mode`

@@ -6,15 +6,16 @@
 
 use mondrian_core::types::SequenceId;
 
-use super::preview::MediaPreviewFrame;
-use crate::app::preview_access_mode::MediaPreviewKey;
-use crate::app::preview_execution::PreviewOutputKey as ViewerPreviewCacheKey;
-use crate::app::preview_raster_frame::PreviewRasterFrame;
-use crate::app::preview_scheduler_policy::MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES;
+use super::preview_access_mode::MediaPreviewKey;
+use super::preview_execution::PreviewOutputKey as ViewerPreviewCacheKey;
+use super::preview_media_frame::MediaPreviewFrame;
+use super::preview_raster_frame::PreviewRasterFrame;
+use super::preview_scheduler_policy::MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES;
 
 #[cfg(test)]
-pub(crate) type PreviewCpuFrameStoreConfig = mondrian_playback::PreviewFrameStoreConfig;
-pub(crate) type PreviewCpuFrameStoreDiagnostics = mondrian_playback::PreviewFrameStoreDiagnostics;
+pub(crate) type PreviewFrameStoreAdapterConfig = mondrian_playback::PreviewFrameStoreConfig;
+pub(crate) type PreviewFrameStoreAdapterDiagnostics =
+    mondrian_playback::PreviewFrameStoreDiagnostics;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ViewerFrameScope {
@@ -41,11 +42,11 @@ pub(crate) struct ScopedPreviewRasterFrame {
 }
 
 /// Thin App Adapter over the playback-owned Preview Frame Store Interface.
-pub(crate) struct PreviewCpuFrameStore {
+pub(crate) struct PreviewFrameStoreAdapter {
     store: PlaybackFrameStore,
 }
 
-impl Default for PreviewCpuFrameStore {
+impl Default for PreviewFrameStoreAdapter {
     fn default() -> Self {
         let mut config = mondrian_playback::PreviewFrameStoreConfig::default();
         // The composition root must keep speculative scheduling and decoder
@@ -58,10 +59,10 @@ impl Default for PreviewCpuFrameStore {
     }
 }
 
-impl PreviewCpuFrameStore {
+impl PreviewFrameStoreAdapter {
     /// Create a test Adapter with explicit budgets.
     #[cfg(test)]
-    pub(crate) fn new(config: PreviewCpuFrameStoreConfig) -> Self {
+    pub(crate) fn new(config: PreviewFrameStoreAdapterConfig) -> Self {
         Self { store: PlaybackFrameStore::new(config) }
     }
 
@@ -159,7 +160,7 @@ impl PreviewCpuFrameStore {
     }
 
     /// Return playback-owned residency and admission evidence.
-    pub(crate) fn diagnostics(&self) -> PreviewCpuFrameStoreDiagnostics {
+    pub(crate) fn diagnostics(&self) -> PreviewFrameStoreAdapterDiagnostics {
         self.store.diagnostics()
     }
 }
