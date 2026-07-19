@@ -409,9 +409,14 @@ surface residency; no frame can be empty or claim contradictory residency. The
 concrete worker loop, cancellation checkpoints, result publication, bounded
 shutdown signal, and FFmpeg Preview Adapter live together in the UI-independent
 `app::preview_media_task` Module. Window and Headless Adapters consume the same
-structured terminal result and may not implement a second decode loop. Timeline
-evaluation and media adaptation remain private Window Adapter Modules until a
-real non-Window composition root needs their complete behavior.
+structured terminal result and may not implement a second decode loop.
+`app::preview_media_source` independently resolves an immutable asset record and
+complete Viewer intent into one canonical key, explicit color rejection, or
+structured unavailable outcome. It owns source/proxy fingerprinting,
+color/range/Alpha interpretation, native-surface classification, proxy intent,
+and decode-geometry canonicalization. Window code retains only asset-library
+lookup, proxy dispatch/deduplication, and evidence projection. Timeline
+evaluation remains a private Window Adapter Module at this boundary.
 The UI-independent `app::preview_viewer_plan` Module owns resolved element
 representation, stable cache identity, quality/provenance aggregation, deferred
 composite classification, and renderer GPU-layer lowering. Final presentation
@@ -477,8 +482,10 @@ worker-deadline eligibility, executed decode-quality classification, and bounded
 frame-rate-to-prefetch-window policy;
 `app::preview_access_mode` owns Broker admission/job transport,
 `app::preview_media_task` owns concrete decode execution and cooperative
-cancellation observation, while `app_ui::preview` owns media adaptation and
-Window diagnostics projection. None of them duplicate clock math.
+cancellation observation, `app::preview_media_source` owns canonical source
+interpretation, while `app_ui::preview` owns asset-library and proxy-dispatch
+side effects plus Window diagnostics projection. None of them duplicate clock
+math or construct a second media key.
 
 The same current request carries an opaque Frame Demand identity end-to-end.
 The preview queue and worker may transport but must not interpret that identity;

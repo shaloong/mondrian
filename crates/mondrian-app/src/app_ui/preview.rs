@@ -10,7 +10,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 #[cfg(test)]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -23,19 +23,20 @@ use mondrian_core::types::{AssetId, ColorSpace, Rational, SequenceId};
 use mondrian_core::types::{BlendMode, ColorEngine};
 use mondrian_core::{Resolution, WorkingColorSpace};
 use mondrian_media::{
-    preview_decode_cpu_budget, DecodedFrameResidency, DecodedVideoRange, DecodedVideoRangeContract,
-    DecodedVideoSurfaceFormat, HwAccelBackend, HwAccelDeviceSelector, PreviewDecodeAccessMode,
-    PreviewDecodeAdaptiveHints, PreviewDecodeCpuBudget, PreviewDecodeDiagnostics,
-    PreviewDecodePath, PreviewDecodeSeekStrategy, PreviewDecodeStageDurations,
-    PreviewDecodeThreadingKind, PreviewFileFingerprint, PreviewHardwareDecodeBlocker,
+    preview_decode_cpu_budget, DecodedFrameResidency, DecodedVideoSurfaceFormat, HwAccelBackend,
+    HwAccelDeviceSelector, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
+    PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodePath, PreviewDecodeSeekStrategy,
+    PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewHardwareDecodeBlocker,
     PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
     PreviewHardwareDecodeRequest, PreviewScrubAdaptiveClass, PreviewSeekIndexSource,
-    VideoColorDiagnostic, VideoColorDiagnosticIssueSummary,
+    VideoColorDiagnosticIssueSummary,
 };
 #[cfg(test)]
 use mondrian_media::{
-    DecodedGpuFrameHandleKind, DecodedVideoChromaLocation, DecodedVideoSampling,
-    PreviewDecodeExecutionPath, PreviewNativeDecodedFrame, PreviewNativeDecodedFrameHandle,
+    DecodedGpuFrameHandleKind, DecodedVideoChromaLocation, DecodedVideoRange,
+    DecodedVideoRangeContract, DecodedVideoSampling, PreviewDecodeExecutionPath,
+    PreviewFileFingerprint, PreviewNativeDecodedFrame, PreviewNativeDecodedFrameHandle,
+    VideoColorDiagnostic,
 };
 use mondrian_renderer::{
     color_report_vocab, evaluate_timeline_render_plan, execute_cpu_working_transform,
@@ -56,9 +57,11 @@ use mondrian_renderer::{
     TimelineCompositeOptions, TimelineEffectColorRuntime, TimelineMediaLayer,
     ViewerGpuExecutionLayer,
 };
+#[cfg(test)]
+use mondrian_timeline::sequence::ResolvedInputColor;
 use mondrian_timeline::sequence::{
     ColorContext, InputColorResolution, InputColorResolutionSource,
-    InputColorResolutionSourceCounts, MissingColorMetadataPolicy, ResolvedInputColor, Sequence,
+    InputColorResolutionSourceCounts, MissingColorMetadataPolicy, Sequence,
     MAX_NESTED_SEQUENCE_RENDER_DEPTH,
 };
 use mondrian_ui_widgets::{
@@ -74,15 +77,14 @@ use crate::app::preview_access_mode::{
     media_preview_access_mode_for_intent, media_preview_frame_work_class,
     media_preview_viewer_access_intent, media_preview_worker_count, media_preview_worker_lane,
     MediaPreviewCancelReason, MediaPreviewJob, MediaPreviewJobQueueDiagnostics,
-    MediaPreviewJobQueueSender, MediaPreviewKey, MediaPreviewNativeSurfaceHint,
-    MediaPreviewRequestPriority, MediaPreviewRequestStatus, MediaPreviewScheduler,
-    MediaPreviewSchedulerDiagnostics,
+    MediaPreviewJobQueueSender, MediaPreviewKey, MediaPreviewRequestPriority,
+    MediaPreviewRequestStatus, MediaPreviewScheduler, MediaPreviewSchedulerDiagnostics,
 };
 #[cfg(test)]
 use crate::app::preview_access_mode::{
     media_preview_cancel_reason, media_preview_cancel_reason_at_checkpoint,
     media_preview_cancel_request_to_observed_us, MediaPreviewJobEnqueueStatus,
-    MediaPreviewWorkerLane, MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US,
+    MediaPreviewNativeSurfaceHint, MediaPreviewWorkerLane, MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US,
 };
 use crate::app::preview_cpu_execution::{
     composite_resolved_preview, composite_resolved_preview_working,
@@ -104,6 +106,9 @@ use crate::app::preview_hardware_admission::PreviewHardwareDecodeAdmissionState;
 use crate::app::preview_media_frame::{project_preview_media_transform, MediaPreviewFrame};
 #[cfg(test)]
 use crate::app::preview_media_frame::{MediaPreviewGpuSourceFrame, MediaPreviewNativeSourceFrame};
+use crate::app::preview_media_source::{
+    resolve_preview_input_color_space, PreviewProxyGenerationRequestKey,
+};
 #[cfg(test)]
 use crate::app::preview_media_task::{
     media_preview_canceled_result, MediaPreviewCancellationPhase,
@@ -688,12 +693,6 @@ pub use diagnostics::*;
 mod evidence;
 mod hardware_admission;
 mod media_adapter;
-use media_adapter::PreviewProxyGenerationRequestKey;
-#[cfg(test)]
-use media_adapter::{
-    resolve_preview_media_decode_path, should_request_preview_proxy_generation, source_micros,
-    PreviewMediaDecodePathResolution,
-};
 mod presentation;
 mod request_scheduler;
 mod result_pump;
@@ -784,20 +783,6 @@ impl AppUiPreviewService {
     fn record_color_rejection(&self, rejection: AppUiPreviewColorRejection) {
         self.last_color_rejection.replace(Some(rejection));
     }
-}
-
-fn resolve_preview_input_color_space(
-    override_color_space: Option<ColorSpace>,
-    asset_interpretation: AssetMediaInterpretation,
-    detected_color_space: Option<ColorSpace>,
-    color_context: &ColorContext,
-) -> InputColorResolution {
-    color_context.missing_metadata_policy.resolve_asset_input_decision(
-        override_color_space,
-        asset_interpretation,
-        detected_color_space,
-        color_context.working_color_space,
-    )
 }
 
 /// Collect preview input color-resolution source counts for one timeline frame.

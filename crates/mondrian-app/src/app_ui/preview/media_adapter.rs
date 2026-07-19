@@ -1,113 +1,14 @@
 //! Application media adaptation for Viewer preview.
 //!
-//! This Module owns asset lookup, proxy/source selection, media fingerprinting,
-//! input-color interpretation, decode-key construction, and cache admission.
+//! This Window Adapter owns asset-library lookup, cache observation, proxy-job
+//! dispatch, and diagnostics projection. Canonical media-source interpretation
+//! lives in `app::preview_media_source`.
 
 use super::*;
-use std::path::{Path, PathBuf};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct PreviewMediaDecodePath {
-    pub(super) path: PathBuf,
-    pub(super) resolution: PreviewMediaDecodePathResolution,
-    pub(super) fingerprint: PreviewFileFingerprint,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) enum PreviewMediaDecodePathResolution {
-    Source,
-    Proxy,
-    ProxyMissing,
-    ProxyStale,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct PreviewProxyGenerationRequestKey {
-    pub(super) asset_id: AssetId,
-    pub(super) source_fingerprint: PreviewFileFingerprint,
-    pub(super) resolution: PreviewMediaDecodePathResolution,
-    pub(super) color: mondrian_media::ProxyColorContract,
-}
-
-pub(super) fn should_request_preview_proxy_generation(
-    request_missing_proxy_generation: bool,
-    project_proxy_enabled: bool,
-    asset_proxy_mode: bool,
-    resolution: PreviewMediaDecodePathResolution,
-) -> bool {
-    request_missing_proxy_generation
-        && project_proxy_enabled
-        && asset_proxy_mode
-        && matches!(
-            resolution,
-            PreviewMediaDecodePathResolution::ProxyMissing
-                | PreviewMediaDecodePathResolution::ProxyStale
-        )
-}
-
-pub(super) fn resolve_preview_media_decode_path(
-    prefer_proxy: bool,
-    source_has_alpha: bool,
-    source_path: &Path,
-    proxy_config: &mondrian_media::ProxyConfig,
-    proxy_color: Option<mondrian_media::ProxyColorContract>,
-) -> Option<PreviewMediaDecodePath> {
-    let source_metadata = media_path_metadata(source_path)?;
-    if !prefer_proxy || source_has_alpha {
-        return Some(PreviewMediaDecodePath {
-            path: source_path.to_path_buf(),
-            resolution: PreviewMediaDecodePathResolution::Source,
-            fingerprint: source_metadata.fingerprint,
-        });
-    }
-    let Some(proxy_color) = proxy_color else {
-        return Some(PreviewMediaDecodePath {
-            path: source_path.to_path_buf(),
-            resolution: PreviewMediaDecodePathResolution::Source,
-            fingerprint: source_metadata.fingerprint,
-        });
-    };
-    let proxy_generator = mondrian_media::ProxyGenerator::new(proxy_config.clone());
-    let proxy_path = proxy_generator.proxy_path(source_path, proxy_color).ok()?;
-    match (
-        proxy_generator.proxy_status(source_path, proxy_color),
-        media_path_metadata(&proxy_path),
-    ) {
-        (mondrian_media::ProxyStatus::Fresh, Some(proxy_metadata)) => {
-            Some(PreviewMediaDecodePath {
-                path: proxy_path,
-                resolution: PreviewMediaDecodePathResolution::Proxy,
-                fingerprint: proxy_metadata.fingerprint,
-            })
-        }
-        (mondrian_media::ProxyStatus::Missing, _) => Some(PreviewMediaDecodePath {
-            path: source_path.to_path_buf(),
-            resolution: PreviewMediaDecodePathResolution::ProxyMissing,
-            fingerprint: source_metadata.fingerprint,
-        }),
-        (mondrian_media::ProxyStatus::Stale, _) | (_, None) => Some(PreviewMediaDecodePath {
-            path: source_path.to_path_buf(),
-            resolution: PreviewMediaDecodePathResolution::ProxyStale,
-            fingerprint: source_metadata.fingerprint,
-        }),
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MediaPathMetadata {
-    fingerprint: PreviewFileFingerprint,
-}
-
-fn media_path_metadata(path: &Path) -> Option<MediaPathMetadata> {
-    let metadata = std::fs::metadata(path).ok()?;
-    Some(MediaPathMetadata {
-        fingerprint: PreviewFileFingerprint::from_metadata(&metadata),
-    })
-}
-
-pub(super) fn source_micros(source_secs: f64) -> i64 {
-    (source_secs.max(0.0) * 1_000_000.0).round() as i64
-}
+use crate::app::preview_media_source::{
+    resolve_preview_media_source, PreviewMediaDecodePathResolution, PreviewMediaSourceOutcome,
+    PreviewMediaSourceRequest, PreviewProxyGenerationIntent,
+};
 
 impl AppUiPreviewService {
     #[allow(clippy::too_many_arguments)]
@@ -208,211 +109,98 @@ impl AppUiPreviewService {
             }
         };
         let proxy_config = state.proxy_config();
-        let source_has_alpha =
-            asset.media_info.primary_video().is_some_and(|video| video.has_alpha);
         let proxy_color = resolve_asset_proxy_color_contract(&asset, color_context).ok();
-        let resolved_path = resolve_preview_media_decode_path(
-            state.project_settings.proxy_enabled && state.is_asset_proxy_mode(*asset_id),
-            source_has_alpha,
-            &asset.path,
-            &proxy_config,
-            proxy_color,
-        )?;
-        match resolved_path.resolution {
-            PreviewMediaDecodePathResolution::Proxy => bump(&self.metrics.media_proxy_path_hits),
-            PreviewMediaDecodePathResolution::ProxyMissing => {
-                bump(&self.metrics.media_proxy_path_misses);
-            }
-            PreviewMediaDecodePathResolution::ProxyStale => {
-                bump(&self.metrics.media_proxy_path_stale);
-            }
-            PreviewMediaDecodePathResolution::Source => {
-                bump(&self.metrics.media_proxy_path_bypasses);
-            }
-        }
-        self.maybe_request_preview_proxy_generation(
-            request_missing_proxy_generation,
-            state,
-            *asset_id,
-            &asset.path,
-            &proxy_config,
-            &resolved_path,
-            proxy_color,
-        );
-
-        let detected_color_space = asset
-            .media_info
-            .video_streams
-            .first()
-            .and_then(|video| video.detected_color_space);
-        let input_color_resolution = resolve_preview_input_color_space(
+        let prefer_proxy =
+            state.project_settings.proxy_enabled && state.is_asset_proxy_mode(*asset_id);
+        match resolve_preview_media_source(PreviewMediaSourceRequest {
+            asset: &asset,
             color_space_override,
-            asset.interpretation,
-            detected_color_space,
+            alpha_interpretation,
+            source_frame,
+            source_seconds: source_secs,
+            target_resolution: Resolution { width: target_width, height: target_height },
             color_context,
-        );
-        self.record_input_color_resolution(input_color_resolution.source);
-        let input_color_space = match input_color_resolution.resolved {
-            ResolvedInputColor::Color(color_space) => color_space,
-            ResolvedInputColor::Data | ResolvedInputColor::Rejected => {
-                let diagnostic = asset
-                    .media_info
-                    .primary_video()
-                    .map(VideoColorDiagnostic::from_stream)
-                    .unwrap_or_else(|| VideoColorDiagnostic {
-                        detected_color_space: None,
-                        color_range: mondrian_media::DecodedVideoRange::Unknown,
-                        interpretation: mondrian_media::DetectedColorInterpretation {
-                            color_space: None,
-                            confidence: mondrian_media::VideoColorInterpretationConfidence::None,
-                            source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
-                            method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
-                            evidence: Vec::new(),
-                            warnings: Vec::new(),
-                            user_overridable: true,
-                        },
-                        source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
-                        method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
-                        metadata: None,
-                        metadata_hints: Vec::new(),
-                        hdr_metadata: Vec::new(),
-                    });
-                let diagnostic_summary = diagnostic.summary();
-                let diagnostic_issue_summary = diagnostic.issue_summary();
+            prefer_proxy,
+            request_missing_proxy_generation,
+            proxy_config: &proxy_config,
+            proxy_color,
+            hardware_admission: self.hardware_decode_admission.get(),
+        }) {
+            PreviewMediaSourceOutcome::Ready(resolved) => {
+                match resolved.path_resolution {
+                    PreviewMediaDecodePathResolution::Proxy => {
+                        bump(&self.metrics.media_proxy_path_hits);
+                    }
+                    PreviewMediaDecodePathResolution::ProxyMissing => {
+                        bump(&self.metrics.media_proxy_path_misses);
+                    }
+                    PreviewMediaDecodePathResolution::ProxyStale => {
+                        bump(&self.metrics.media_proxy_path_stale);
+                    }
+                    PreviewMediaDecodePathResolution::Source => {
+                        bump(&self.metrics.media_proxy_path_bypasses);
+                    }
+                }
+                self.record_input_color_resolution(resolved.input_color_resolution.source);
+                self.maybe_request_preview_proxy_generation(resolved.proxy_generation);
+                Some((resolved.key, resolved.source_seconds))
+            }
+            PreviewMediaSourceOutcome::ColorRejected(rejection) => {
+                let resolution = rejection.input_color_resolution;
+                self.record_input_color_resolution(resolution.source);
+                let diagnostic_summary = rejection.diagnostic.summary();
+                let diagnostic_issue_summary = rejection.diagnostic.issue_summary();
                 if record_color_rejection {
                     self.record_color_rejection(AppUiPreviewColorRejection::new(
-                        *asset_id,
-                        asset.path.clone(),
-                        input_color_resolution,
+                        rejection.asset_id,
+                        rejection.path.clone(),
+                        resolution,
                         diagnostic_summary.clone(),
                         diagnostic_issue_summary,
                     ));
                 }
                 tracing::warn!(
-                    asset_id = %asset_id,
-                    path = %asset.path.display(),
+                    asset_id = %rejection.asset_id,
+                    path = %rejection.path.display(),
                     missing_metadata_policy = ?color_context.missing_metadata_policy,
-                    color_resolution_source = ?input_color_resolution.source,
-                    override_color_space = ?input_color_resolution.override_color_space,
-                    detected_color_space = ?input_color_resolution.detected_color_space,
-                    working_color_space = ?input_color_resolution.working_color_space,
+                    color_resolution_source = ?resolution.source,
+                    override_color_space = ?resolution.override_color_space,
+                    detected_color_space = ?resolution.detected_color_space,
+                    working_color_space = ?resolution.working_color_space,
                     color_diagnostic = %diagnostic_summary,
                     color_diagnostic_issue_summary = ?diagnostic_issue_summary,
                     "viewer preview rejected media with missing color metadata"
                 );
-                return None;
+                None
             }
-        };
-        let key = MediaPreviewKey {
-            asset_id: *asset_id,
-            path: resolved_path.path,
-            fingerprint: Some(resolved_path.fingerprint),
-            source_frame: source_frame.max(0),
-            source_micros: source_micros(source_secs),
-            target_width,
-            target_height,
-            source_width: asset
-                .media_info
-                .primary_video()
-                .map_or(target_width, |video| video.width.max(1)),
-            source_height: asset
-                .media_info
-                .primary_video()
-                .map_or(target_height, |video| video.height.max(1)),
-            input_color_space,
-            input_video_range: DecodedVideoRangeContract::from_interpretation(
-                asset.interpretation.range,
-                asset
-                    .media_info
-                    .primary_video()
-                    .map(|video| video.color_range)
-                    .unwrap_or(DecodedVideoRange::Unknown),
-            ),
-            native_surface_hint: asset.media_info.primary_video().and_then(|video| {
-                match video.pixel_format {
-                    mondrian_media::info::PixelFormat::Yuv420p
-                    | mondrian_media::info::PixelFormat::Nv12 => {
-                        Some(MediaPreviewNativeSurfaceHint::Nv12)
-                    }
-                    mondrian_media::info::PixelFormat::Yuv420p10le
-                    | mondrian_media::info::PixelFormat::P010 => {
-                        Some(MediaPreviewNativeSurfaceHint::P010)
-                    }
-                    _ => None,
-                }
-            }),
-            source_has_alpha,
-            alpha_interpretation,
-            working_color_space: color_context.working_color_space,
-            tone_map: color_context.tone_map,
-            engine: color_context.engine.clone(),
-            ocio_generation: mondrian_core::ocio_config_generation(),
-        };
-        Some((
-            self.canonicalize_media_decode_geometry(key),
-            source_secs.max(0.0),
-        ))
+            PreviewMediaSourceOutcome::Unavailable(unavailable) => {
+                tracing::debug!(
+                    asset_id = %unavailable.asset_id,
+                    path = %unavailable.path.display(),
+                    reason = %unavailable.reason,
+                    "viewer preview media source is unavailable"
+                );
+                None
+            }
+        }
     }
 
-    /// Keep native decoded-surface identity independent of Viewer output scale.
-    ///
-    /// A GPU-resident NV12/P010 decode is source-sized; Half/Quarter playback
-    /// quality changes only the later Viewer presentation extent. Encoding the
-    /// presentation size in that decode key would discard valid lookahead and
-    /// turn one late presentation into a cache-invalidating feedback loop.
-    pub(super) fn canonicalize_media_decode_geometry(
-        &self,
-        mut key: MediaPreviewKey,
-    ) -> MediaPreviewKey {
-        let native_source_decode = !key.source_has_alpha
-            && self.hardware_decode_request_for_key(PreviewDecodeAccessMode::PlaybackCursor, &key)
-                == PreviewHardwareDecodeRequest::PreferGpuResident;
-        if native_source_decode {
-            key.target_width = key.source_width;
-            key.target_height = key.source_height;
-        }
-        key
-    }
-
-    fn maybe_request_preview_proxy_generation(
-        &self,
-        request_missing_proxy_generation: bool,
-        state: &AppState,
-        asset_id: AssetId,
-        source_path: &Path,
-        proxy_config: &mondrian_media::ProxyConfig,
-        resolved_path: &PreviewMediaDecodePath,
-        proxy_color: Option<mondrian_media::ProxyColorContract>,
-    ) {
-        if !should_request_preview_proxy_generation(
-            request_missing_proxy_generation,
-            state.project_settings.proxy_enabled,
-            state.is_asset_proxy_mode(asset_id),
-            resolved_path.resolution,
-        ) {
-            return;
-        }
-        let Some(proxy_color) = proxy_color else {
+    fn maybe_request_preview_proxy_generation(&self, intent: Option<PreviewProxyGenerationIntent>) {
+        let Some(intent) = intent else {
             return;
         };
 
-        let request_key = PreviewProxyGenerationRequestKey {
-            asset_id,
-            source_fingerprint: resolved_path.fingerprint,
-            resolution: resolved_path.resolution,
-            color: proxy_color,
-        };
-        if !self.requested_proxy_generations.borrow_mut().insert(request_key) {
+        if !self.requested_proxy_generations.borrow_mut().insert(intent.key) {
             bump(&self.metrics.media_proxy_generation_request_dedupes);
             return;
         }
 
         bump(&self.metrics.media_proxy_generation_requests);
         request_proxy_generation(
-            asset_id,
-            source_path.to_path_buf(),
-            proxy_config.clone(),
-            proxy_color,
+            intent.key.asset_id,
+            intent.source_path,
+            intent.config,
+            intent.color,
         );
     }
 }

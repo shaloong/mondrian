@@ -904,9 +904,10 @@ controlled handoff.
 Consolidate frame-work scheduling in the Frame Work Broker; extract Frame Store
 and Evidence from `app_ui::preview` by behavioral ownership, not file size. The
 Playback Preview Pump is extracted and Window/Headless duplicate orchestration
-is deleted. Timeline evaluation, media adaptation, final presentation
-arbitration, and immutable diagnostics have private Window deep Modules;
-resolved Viewer planning and media execution have UI-independent App Modules.
+is deleted. Timeline evaluation, asset-library/proxy-dispatch adaptation, final
+presentation arbitration, and immutable diagnostics have private Window deep
+Modules; canonical media-source resolution, resolved Viewer planning, and media
+execution have UI-independent App Modules.
 The concrete media worker, cooperative cancellation, result publication,
 bounded shutdown, and FFmpeg Adapter are isolated in the UI-independent
 `app::preview_media_task` deep Module. Its structured task result is the only
