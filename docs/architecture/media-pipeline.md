@@ -417,6 +417,10 @@ while diagnostic aggregation remains in the Preview Adapter. This is a
 behavioral module boundary, not a second scheduler: all admission, deadline,
 generation, and worker-lane authority still comes from `app::preview_access_mode`
 and `mondrian-playback::FrameWorkBroker`.
+The cross-Adapter GPU output blocker taxonomy and its aggregate breakdown live
+in UI-independent `app::preview_gpu_output_blocker`. Renderer, display-contract,
+Window, and Headless Adapters may contribute typed facts to it, but no Widget
+module owns or reinterprets those diagnostic identities.
 Mutable counter accumulation and point-in-time diagnostics projection are
 localized in `app_ui::preview::evidence`. It records facts selected elsewhere;
 it cannot schedule, change pressure state, or derive pass/fail verdicts.

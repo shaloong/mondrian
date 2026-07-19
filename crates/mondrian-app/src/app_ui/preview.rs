@@ -95,6 +95,7 @@ use crate::app::preview_execution::{
     PreviewGpuFrame as AppUiGpuPreviewFrame, PreviewGpuFrameState as AppUiGpuPreviewFrameState,
     PreviewGpuWorkingInput as AppUiGpuPreviewWorkingInput,
 };
+use crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
 use crate::app::preview_scheduler_policy::{
     media_preview_forward_prefetch_window_frames, playback_frame_delivery_kind,
     playback_hardware_recovery_signals, preview_decode_presentation_quality,
@@ -117,7 +118,6 @@ use crate::app_ui::panels::{
 use crate::app_ui::preview_frame_store::PreviewCpuFrameStore;
 #[cfg(test)]
 use crate::app_ui::preview_frame_store::PreviewCpuFrameStoreConfig;
-use crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
 use crate::app_ui::preview_scale::normalize_preview_resolution_scale;
 
 const MEDIA_PREVIEW_PLAYBACK_BUFFERING_STALL_TIMEOUT_US: u64 = 250_000;
@@ -1105,7 +1105,7 @@ struct AppUiPreviewMetrics {
     cpu_output_fallback_pixels: Cell<u64>,
     preview_gpu_output_blocker_frames: Cell<u64>,
     preview_gpu_output_blocker_breakdown:
-        RefCell<crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlockerBreakdown>,
+        RefCell<crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlockerBreakdown>,
     gpu_compositing: RefCell<mondrian_renderer::GpuCompositingDiagnostics>,
 }
 
@@ -1179,7 +1179,7 @@ fn preview_display_color_space(
     sequence: &Sequence,
     project_cm: &mondrian_core::ProjectColorManagement,
     display_snapshot: Option<&DisplayOutputSnapshot>,
-) -> Result<ColorSpace, crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker> {
+) -> Result<ColorSpace, crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker> {
     let sequence_output = sequence.settings.color_management.output_color_space;
     let display_management = if sequence.settings.color_management.inherit {
         &project_cm.display_management
@@ -1210,10 +1210,10 @@ fn preview_display_color_space(
 
 fn preview_icc_display_color_space(
     display_snapshot: Option<&DisplayOutputSnapshot>,
-) -> Result<ColorSpace, crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker> {
+) -> Result<ColorSpace, crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker> {
     let Some(snapshot) = display_snapshot else {
         return Err(
-            crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
+            crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
                 feature: "icc_preview_color_space_resolution".to_owned(),
                 reason: "MonitorProfileReference::IccProfile requires the display output contract to provide a resolved monitor color space before preview scheduling".to_owned(),
             },
@@ -1225,7 +1225,7 @@ fn preview_icc_display_color_space(
             .into_iter()
             .next()
             .unwrap_or_else(|| {
-                crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
+                crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
                     feature: "display_output_contract_invalid".to_owned(),
                     reason: "display output contract is invalid for ICC preview scheduling"
                         .to_owned(),
@@ -1241,13 +1241,13 @@ fn preview_icc_display_color_space(
             source: mondrian_core::display_contract::MonitorProfileSource::OsIccProfile,
             ..
         } => Err(
-            crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
+            crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
                 feature: "icc_monitor_calibration_processor".to_owned(),
                 reason: "OS ICC profile was marked managed without a renderer calibration processor; preview refuses the uncalibrated output".to_owned(),
             },
         ),
         ref status => Err(
-            crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
+            crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
                 feature: "icc_preview_color_space_resolution".to_owned(),
                 reason: format!(
                     "display output contract did not resolve ICC profile to a managed color space: {status}"

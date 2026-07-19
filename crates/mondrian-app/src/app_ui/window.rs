@@ -15,6 +15,9 @@ use crate::app::preview_execution::{
     PreviewGpuFrame as AppUiGpuPreviewFrame, PreviewGpuFrameState as AppUiGpuPreviewFrameState,
     PreviewGpuWorkingInput as AppUiGpuPreviewWorkingInput,
 };
+use crate::app::preview_gpu_output_blocker::{
+    PreviewGpuOutputBlocker, PreviewGpuOutputBlockerBreakdown,
+};
 use crate::app::ui_actions::app_shell_quit_action;
 use crate::app::AppState;
 use crate::app_ui::action_queue::PendingUiActions;
@@ -24,9 +27,6 @@ use crate::app_ui::native_video_import::{
     AppUiNativeVideoImportReadinessInput,
 };
 use crate::app_ui::preview::AppUiPreviewColorRejection;
-use crate::app_ui::preview_gpu_output_blocker::{
-    PreviewGpuOutputBlocker, PreviewGpuOutputBlockerBreakdown,
-};
 use crate::app_ui::rendering::{
     AppUiBackendEvent, AppUiFramePressure, AppUiFrameRenderer, AppUiRenderDiagnosticReporter,
 };

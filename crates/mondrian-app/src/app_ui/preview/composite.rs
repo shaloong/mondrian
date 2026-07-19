@@ -192,7 +192,7 @@ pub(super) fn composite_resolved_preview(
         service.record_color_stage(composite.input_color_stage_diagnostics);
     }
     if composite.composite_diagnostics.legacy_rgba8_composites > 0 {
-        use crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
+        use crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
         service.record_preview_gpu_output_blocker(
             &PreviewGpuOutputBlocker::LegacyRgba8CompositeBoundary {
                 legacy_composites: composite.composite_diagnostics.legacy_rgba8_composites,

@@ -865,7 +865,7 @@ impl AppUiPreviewService {
 
     pub(crate) fn record_preview_gpu_output_blocker(
         &self,
-        blocker: &crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker,
+        blocker: &crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker,
     ) {
         bump(&self.metrics.preview_gpu_output_blocker_frames);
         self.metrics.preview_gpu_output_blocker_breakdown.borrow_mut().record(blocker);
@@ -873,7 +873,7 @@ impl AppUiPreviewService {
 
     pub(crate) fn record_preview_gpu_output_blocker_breakdown(
         &self,
-        breakdown: crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlockerBreakdown,
+        breakdown: crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlockerBreakdown,
     ) {
         if breakdown.is_empty() {
             return;

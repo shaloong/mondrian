@@ -377,7 +377,7 @@ fn preview_display_color_space_rejects_icc_before_display_contract_resolution() 
 
     assert!(matches!(
         err,
-        crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
+        crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
             ref feature,
             ..
         } if feature == "icc_preview_color_space_resolution"
@@ -406,7 +406,7 @@ fn preview_display_color_space_rejects_uncalibrated_managed_icc_status() {
     .expect_err("ICC status without a renderer calibration processor must fail closed");
     assert!(matches!(
         err,
-        crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
+        crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
             ref feature,
             ..
         } if feature == "icc_monitor_calibration_processor"

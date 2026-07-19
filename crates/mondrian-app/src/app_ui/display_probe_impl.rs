@@ -517,8 +517,8 @@ fn current_platform() -> DisplayPlatform {
 /// `PreviewGpuOutputBlocker` taxonomy used by the preview GPU output path.
 pub fn preview_blockers_from_snapshot(
     snapshot: &DisplayOutputSnapshot,
-) -> Vec<super::preview_gpu_output_blocker::PreviewGpuOutputBlocker> {
-    use super::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
+) -> Vec<crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker> {
+    use crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
 
     snapshot
         .blockers

@@ -528,7 +528,7 @@ pub struct AppUiPreviewDiagnostics {
     pub preview_gpu_output_blocker_frames: u64,
     /// Structured GPU output blocker breakdown across preview frames.
     pub preview_gpu_output_blocker_breakdown:
-        crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlockerBreakdown,
+        crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlockerBreakdown,
     /// GPU compositing capability diagnostics.
     pub gpu_compositing: mondrian_renderer::GpuCompositingDiagnostics,
 }
@@ -609,7 +609,7 @@ pub struct AppUiPreviewColorHealthSummary {
     pub cpu_output_fallback_pixels: u64,
     /// Structured GPU output blocker breakdown across preview frames.
     pub preview_gpu_output_blocker_breakdown:
-        crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlockerBreakdown,
+        crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlockerBreakdown,
     /// GPU compositing capability diagnostics.
     pub gpu_compositing: mondrian_renderer::GpuCompositingDiagnostics,
 }

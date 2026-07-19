@@ -303,7 +303,7 @@ impl AppUiHost {
     /// Record a structured GPU output blocker from the window/GPU path.
     pub(crate) fn record_preview_gpu_output_blocker(
         &self,
-        blocker: &crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlocker,
+        blocker: &crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker,
     ) {
         self.preview_service.record_preview_gpu_output_blocker(blocker);
     }
@@ -311,7 +311,7 @@ impl AppUiHost {
     /// Record a structured GPU output blocker breakdown from the window/GPU path.
     pub(crate) fn record_preview_gpu_output_blocker_breakdown(
         &self,
-        breakdown: crate::app_ui::preview_gpu_output_blocker::PreviewGpuOutputBlockerBreakdown,
+        breakdown: crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlockerBreakdown,
     ) {
         self.preview_service.record_preview_gpu_output_blocker_breakdown(breakdown);
     }

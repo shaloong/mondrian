@@ -1,7 +1,8 @@
-//! Structured GPU output blocker taxonomy for the preview/viewer path.
+//! UI-independent GPU output blocker taxonomy for preview execution.
 //!
 //! Every reason the GPU color output path cannot execute is captured as a typed
-//! enum variant.  Blockers are recorded per-frame so that health reports,
+//! enum variant. Blockers are recorded per-frame so that Window and Headless
+//! presentation Adapters, health reports,
 //! JSONL diagnostics, and tests can inspect individual failure modes without
 //! opaque counters.
 //!
@@ -12,7 +13,7 @@
 //! 2. **Display contract blockers** — surface format / color space / HDR
 //!    constraints detected by the app-window before GPU recording.
 //! 3. **Frame residency / scheduling blockers** — working-frame or external
-//!    texture lifecycle issues detected during app-window scheduling.
+//!    texture lifecycle issues detected during presentation scheduling.
 
 use mondrian_renderer::RenderColorStageGpuBlockerBreakdown;
 use serde::{Deserialize, Serialize};
