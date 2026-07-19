@@ -471,7 +471,7 @@ fn solid_color_sequence_returns_preview_frame_at_preview_scale() {
     assert_eq!(frame.width, 960);
     assert_eq!(frame.height, 540);
     assert_eq!(frame.rgba.len(), 960 * 540 * 4);
-    assert!(frame.key.starts_with("app-ui.viewer.raster:"));
+    assert!(frame.key.starts_with("preview.raster:"));
     assert!(frame.key.contains(":960x540:"));
 }
 

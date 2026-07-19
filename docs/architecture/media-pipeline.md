@@ -415,8 +415,16 @@ complete Viewer intent into one canonical key, explicit color rejection, or
 structured unavailable outcome. It owns source/proxy fingerprinting,
 color/range/Alpha interpretation, native-surface classification, proxy intent,
 and decode-geometry canonicalization. Window code retains only asset-library
-lookup, proxy dispatch/deduplication, and evidence projection. Timeline
-evaluation remains a private Window Adapter Module at this boundary.
+lookup, proxy dispatch/deduplication, and evidence projection.
+`app::preview_timeline_execution` owns the UI-independent canonical render-plan
+traversal, nested Sequence lookup/depth, per-Sequence execution resolution,
+nested working-space composition/conversion, typed pending/unavailable
+propagation, mandatory ready-plan cache identity, and ordered execution facts.
+Window and Headless Adapters supply the same typed media outcome seam and may
+project facts; neither may maintain a second recursion or child-sizing rule.
+The same Module exposes a read-only media-demand collection over that graph.
+Prefetch, preroll readiness, and input-color evidence consume it instead of
+re-evaluating nested plans inside the Window Adapter.
 The UI-independent `app::preview_viewer_plan` Module owns resolved element
 representation, stable cache identity, quality/provenance aggregation, deferred
 composite classification, and renderer GPU-layer lowering. Final presentation
@@ -464,9 +472,9 @@ The sibling private `performance` Module derives versioned Decode/Render
 budget checks, verdicts, bottleneck classification, root causes, and actions
 from immutable summaries. Public report builders are re-exported unchanged;
 the Module owns no counters, scheduler feedback, or acceptance thresholds.
-`app_ui::preview::request_scheduler` is the concrete Adapter for traversing
-current/nested prefetch needs, querying preroll residency, applying the already
-selected adaptive hints, and submitting Broker work. It does not own pressure
+`app_ui::preview::request_scheduler` is the concrete Adapter that consumes
+canonical current/nested media demands, queries preroll residency, applies the
+already selected adaptive hints, and submits Broker work. It does not own pressure
 thresholds, access-mode mapping, deadlines, or generation identity; those
 remain in the UI-independent policy/Broker Modules.
 Viewer lifecycle is adapted through `app_ui::playback_feedback` into typed Frame
@@ -483,9 +491,10 @@ frame-rate-to-prefetch-window policy;
 `app::preview_access_mode` owns Broker admission/job transport,
 `app::preview_media_task` owns concrete decode execution and cooperative
 cancellation observation, `app::preview_media_source` owns canonical source
-interpretation, while `app_ui::preview` owns asset-library and proxy-dispatch
-side effects plus Window diagnostics projection. None of them duplicate clock
-math or construct a second media key.
+interpretation, `app::preview_timeline_execution` owns canonical Timeline and
+nested-Sequence execution, while `app_ui::preview` owns asset-library and
+proxy-dispatch side effects plus Window diagnostics projection. None of them
+duplicate clock math, construct a second media key, or reinterpret nesting.
 
 The same current request carries an opaque Frame Demand identity end-to-end.
 The preview queue and worker may transport but must not interpret that identity;

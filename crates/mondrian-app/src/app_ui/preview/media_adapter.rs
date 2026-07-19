@@ -9,44 +9,44 @@ use crate::app::preview_media_source::{
     resolve_preview_media_source, PreviewMediaDecodePathResolution, PreviewMediaSourceOutcome,
     PreviewMediaSourceRequest, PreviewProxyGenerationIntent,
 };
+use crate::app::preview_timeline_execution::{
+    PreviewTimelineMediaFrame, PreviewTimelineMediaRequest,
+};
 
 impl AppUiPreviewService {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn media_frame_for_plan(
         &self,
         state: &AppState,
-        asset_id: &AssetId,
-        color_space_override: Option<ColorSpace>,
-        alpha_interpretation: AlphaInterpretation,
-        source_frame: i64,
-        source_secs: f64,
-        target_width: u32,
-        target_height: u32,
-        color_context: &ColorContext,
-        _sequence_frame_rate: Rational,
-    ) -> Option<MediaPreviewFrame> {
+        request: PreviewTimelineMediaRequest,
+    ) -> PreviewTimelineMediaFrame {
         let access_mode = media_preview_access_mode_for_intent(media_preview_viewer_access_intent(
             state.is_playing(),
             state.last_timeline_seek_source,
         ));
-        let (key, source_secs) = self.media_preview_key_for_asset(
+        let Some((key, source_secs)) = self.media_preview_key_for_asset(
             state,
-            asset_id,
-            color_space_override,
-            alpha_interpretation,
-            source_frame,
-            source_secs,
-            target_width,
-            target_height,
-            color_context,
+            &request.asset_id,
+            request.color_space_override,
+            request.alpha_interpretation,
+            request.source_frame,
+            request.source_seconds,
+            request.target_resolution.width,
+            request.target_resolution.height,
+            &request.color_context,
             true,
             access_mode == PreviewDecodeAccessMode::PlaybackCursor,
-        )?;
+        ) else {
+            return PreviewTimelineMediaFrame::Unavailable {
+                reason: "media source resolution failed".to_owned(),
+            };
+        };
         if let Some(frame) = self.cached_media_frame(&key) {
-            return Some(frame);
+            return PreviewTimelineMediaFrame::Ready(frame);
         }
         if self.failed_media_key(&key) {
-            return None;
+            return PreviewTimelineMediaFrame::Unavailable {
+                reason: "media key is in terminal failure memory".to_owned(),
+            };
         }
         self.execution.borrow_mut().set_pending(true);
         let adaptive_hints = self.preview_decode_adaptive_hints(access_mode, &key);
@@ -63,7 +63,7 @@ impl AppUiPreviewService {
                 .flatten(),
             adaptive_hints,
         );
-        None
+        PreviewTimelineMediaFrame::Pending
     }
 
     pub(super) fn cached_media_frame(&self, key: &MediaPreviewKey) -> Option<MediaPreviewFrame> {

@@ -1,14 +1,12 @@
 //! Viewer preview service for the app UI host.
 //!
-//! The service coordinates private timeline-evaluation, media-adaptation,
-//! Viewer-plan, media-execution, and diagnostics Modules through one host-facing
-//! Interface. Panels stay read-only and only consume renderer-ready Viewer
-//! frame content.
+//! The service adapts UI-independent Timeline execution, media-source/task,
+//! Viewer-plan, and CPU/GPU execution Modules to asset-library/proxy side
+//! effects, diagnostics, and final Window presentation. Panels stay read-only
+//! and only consume renderer-ready Viewer frame content.
 
 use std::cell::{Cell, RefCell};
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 #[cfg(test)]
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
@@ -18,9 +16,9 @@ use std::time::{Duration, Instant};
 use mondrian_assets::AssetKind;
 use mondrian_core::display_contract::{DisplayOutputSnapshot, MonitorProfileStatus};
 use mondrian_core::timeline_data::{AlphaInterpretation, AssetMediaInterpretation};
-use mondrian_core::types::{AssetId, ColorSpace, Rational, SequenceId};
+use mondrian_core::types::{AssetId, ColorSpace, SequenceId};
 #[cfg(test)]
-use mondrian_core::types::{BlendMode, ColorEngine};
+use mondrian_core::types::{BlendMode, ColorEngine, Rational};
 use mondrian_core::{Resolution, WorkingColorSpace};
 use mondrian_media::{
     preview_decode_cpu_budget, DecodedFrameResidency, DecodedVideoSurfaceFormat, HwAccelBackend,
@@ -39,30 +37,27 @@ use mondrian_media::{
     VideoColorDiagnostic,
 };
 use mondrian_renderer::{
-    color_report_vocab, evaluate_timeline_render_plan, execute_cpu_working_transform,
-    CpuColorFrame, GpuCompositingDiagnostics, RenderColorStageDiagnostics,
+    color_report_vocab, GpuCompositingDiagnostics, RenderColorStageDiagnostics,
     RenderColorStageGpuBlockerBreakdown, RenderColorTransformDiagnostics,
-    RenderColorTransformDirection, RenderMonitorAdaptation, TimelineAdjustmentLayer,
-    TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
-    TimelineCompositeDomainBlockerBreakdown, TimelineCompositeLegacyBreakdown,
-    TimelineCompositeScratch, TimelineEvaluationRequest, TimelineRenderPlanElement,
-    TimelineSolidColorLayer,
+    RenderColorTransformDirection, RenderMonitorAdaptation, TimelineCompositeColorPathSummary,
+    TimelineCompositeDiagnostics, TimelineCompositeDomainBlockerBreakdown,
+    TimelineCompositeLegacyBreakdown, TimelineCompositeScratch,
 };
 #[cfg(test)]
 use mondrian_renderer::{
-    execute_cpu_input_stage, CpuEncodedColorFrame, CpuSourceColorFrame,
-    GpuCompositingBlockerReason, GpuNativeDecodedFrameImportSource,
+    evaluate_timeline_render_plan, execute_cpu_input_stage, CpuEncodedColorFrame,
+    CpuSourceColorFrame, GpuCompositingBlockerReason, GpuNativeDecodedFrameImportSource,
     GpuNativeDecodedFrameTextureFormat, LinearFloatSource, RenderInputTransform,
-    RenderOutputColorBoundary, TimelineCompositeColorPath, TimelineCompositeElement,
-    TimelineCompositeOptions, TimelineEffectColorRuntime, TimelineMediaLayer,
-    ViewerGpuExecutionLayer,
+    RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineCompositeColorPath,
+    TimelineCompositeElement, TimelineCompositeOptions, TimelineEffectColorRuntime,
+    TimelineEvaluationRequest, TimelineMediaLayer, TimelineRenderPlanElement,
+    TimelineSolidColorLayer, ViewerGpuExecutionLayer,
 };
 #[cfg(test)]
 use mondrian_timeline::sequence::ResolvedInputColor;
 use mondrian_timeline::sequence::{
     ColorContext, InputColorResolution, InputColorResolutionSource,
     InputColorResolutionSourceCounts, MissingColorMetadataPolicy, Sequence,
-    MAX_NESTED_SEQUENCE_RENDER_DEPTH,
 };
 use mondrian_ui_widgets::{
     ViewerExternalTextureFrame, ViewerExternalTexturePresentation, ViewerFrameContent,
@@ -86,9 +81,11 @@ use crate::app::preview_access_mode::{
     media_preview_cancel_request_to_observed_us, MediaPreviewJobEnqueueStatus,
     MediaPreviewNativeSurfaceHint, MediaPreviewWorkerLane, MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US,
 };
+#[cfg(test)]
+use crate::app::preview_cpu_execution::composite_resolved_preview_working;
 use crate::app::preview_cpu_execution::{
-    composite_resolved_preview, composite_resolved_preview_working,
-    output_boundary_from_color_context, PreviewCompositeOutput, PreviewCpuExecutionDurations,
+    composite_resolved_preview, output_boundary_from_color_context, PreviewCompositeOutput,
+    PreviewCpuExecutionDurations,
 };
 #[cfg(test)]
 use crate::app::preview_execution::PreviewDecodeExecutionSummary as AppUiPreviewDecodeExecutionSummary;
@@ -103,9 +100,11 @@ use crate::app::preview_frame_store::PreviewFrameStoreAdapterConfig;
 use crate::app::preview_frame_store::ScopedPreviewRasterFrame;
 use crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
 use crate::app::preview_hardware_admission::PreviewHardwareDecodeAdmissionState;
-use crate::app::preview_media_frame::{project_preview_media_transform, MediaPreviewFrame};
+use crate::app::preview_media_frame::MediaPreviewFrame;
 #[cfg(test)]
-use crate::app::preview_media_frame::{MediaPreviewGpuSourceFrame, MediaPreviewNativeSourceFrame};
+use crate::app::preview_media_frame::{
+    project_preview_media_transform, MediaPreviewGpuSourceFrame, MediaPreviewNativeSourceFrame,
+};
 use crate::app::preview_media_source::{
     resolve_preview_input_color_space, PreviewProxyGenerationRequestKey,
 };
@@ -116,10 +115,12 @@ use crate::app::preview_media_task::{
 use crate::app::preview_media_task::{
     media_preview_worker, MediaPreviewResult, PreviewShutdownSignal,
 };
+#[cfg(test)]
 use crate::app::preview_quality::normalize_preview_resolution_scale;
+use crate::app::preview_quality::preview_execution_resolution;
 use crate::app::preview_raster_frame::{
-    preview_raster_presentation_contract, preview_raster_resource_key,
-    uncached_preview_raster_resource_key, PreviewRasterColorSpace, PreviewRasterFrame,
+    preview_raster_presentation_contract, preview_raster_resource_key, PreviewRasterColorSpace,
+    PreviewRasterFrame,
 };
 use crate::app::preview_scheduler_policy::{
     media_preview_forward_prefetch_window_frames, playback_frame_delivery_kind,
@@ -136,6 +137,9 @@ use crate::app::preview_scheduler_policy::{
 use crate::app::preview_viewer_plan::{
     gpu_composite_layers_for_resolved, preview_elements_require_deferred_composite,
     resolved_preview_decode_execution, resolved_preview_presentation_quality,
+};
+#[cfg(test)]
+use crate::app::preview_viewer_plan::{
     viewer_preview_cache_key_for_resolved_plan, ResolvedPreviewElement,
 };
 use crate::app::proxy_generation::{request_proxy_generation, resolve_asset_proxy_color_contract};
@@ -428,7 +432,6 @@ impl AppUiPreviewService {
             frame,
             width,
             height,
-            0,
             color_context,
         ) {
             Some(resolved) => resolved,
@@ -452,18 +455,11 @@ impl AppUiPreviewService {
                 };
             }
         };
-        if let Some(cache_key) = resolved.cache_key.as_mut() {
-            *cache_key = cache_key.with_monitor_adaptation(&monitor_adaptation);
-        }
+        resolved.cache_key = resolved.cache_key.with_monitor_adaptation(&monitor_adaptation);
         self.execution
             .borrow_mut()
             .set_presentation_quality(resolved_preview_presentation_quality(&resolved.elements));
-        let Some(cache_key) = resolved.cache_key.clone() else {
-            self.scheduler.prune_obsolete();
-            self.execution.borrow_mut().clear_output();
-            bump(&self.metrics.gpu_preview_candidate_unavailable);
-            return AppUiGpuPreviewFrameState::Unavailable;
-        };
+        let cache_key = resolved.cache_key.clone();
         let candidate_id = match self.execution.borrow_mut().plan_candidate(Some(&cache_key)) {
             PreviewCandidateDecision::Current => {
                 self.schedule_media_prefetches(state, sequence, frame, width, height);
@@ -636,13 +632,6 @@ impl MediaPrerollFrameReadiness {
     const fn required_not_ready() -> Self {
         Self { has_media: true, ready: false }
     }
-
-    fn merge(&mut self, other: Self) {
-        if other.has_media {
-            self.has_media = true;
-            self.ready &= other.ready;
-        }
-    }
 }
 
 impl Default for MediaPrerollFrameReadiness {
@@ -803,75 +792,32 @@ pub fn preview_input_color_resolution_counts_for_frame(
     let color_context = sequence
         .settings
         .root_preview_color_context(project_color_management, display_color_space);
-    preview_sequence_input_color_resolution_counts(
+    let target_resolution = preview_execution_resolution(
+        sequence.settings.resolution,
+        sequence.settings.preview.resolution_scale,
+        mondrian_playback::PreviewResolutionScale::Full,
+    );
+    let demands = crate::app::preview_timeline_execution::collect_preview_timeline_media_demands(
         sequence,
         sequences,
-        asset_color_spaces,
-        asset_interpretations,
         frame,
+        target_resolution,
+        mondrian_playback::PreviewResolutionScale::Full,
         color_context,
-        0,
     )
-}
-
-fn preview_sequence_input_color_resolution_counts(
-    sequence: &Sequence,
-    sequences: &[Sequence],
-    asset_color_spaces: &HashMap<AssetId, ColorSpace>,
-    asset_interpretations: &HashMap<AssetId, AssetMediaInterpretation>,
-    frame: i64,
-    color_context: ColorContext,
-    depth: usize,
-) -> Result<InputColorResolutionSourceCounts, String> {
-    if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
-        return Err("预览序列嵌套层级过深，已停止统计输入色彩解析".to_string());
-    }
-
-    let render_plan = evaluate_timeline_render_plan(
-        sequence,
-        TimelineEvaluationRequest::preview(
-            frame,
-            normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale),
-        ),
-    )
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| error.reason)?;
     let mut counts = InputColorResolutionSourceCounts::default();
-    for element in render_plan.elements {
-        match element {
-            TimelineRenderPlanElement::Media(media) => {
-                let detected_color_space = asset_color_spaces.get(&media.asset_id).copied();
-                let asset_interpretation =
-                    asset_interpretations.get(&media.asset_id).copied().unwrap_or_default();
-                let resolution = resolve_preview_input_color_space(
-                    media.color_space_override,
-                    asset_interpretation,
-                    detected_color_space,
-                    &color_context,
-                );
-                counts.record(resolution.source);
-            }
-            TimelineRenderPlanElement::NestedSequence(nested) => {
-                let Some(nested_sequence) =
-                    sequences.iter().find(|sequence| sequence.id == nested.sequence_id)
-                else {
-                    return Err(format!("嵌套序列不存在: {}", nested.sequence_id));
-                };
-                let nested_context =
-                    nested_sequence.settings.nested_render_color_context(color_context.clone());
-                let nested_counts = preview_sequence_input_color_resolution_counts(
-                    nested_sequence,
-                    sequences,
-                    asset_color_spaces,
-                    asset_interpretations,
-                    nested.source_frame,
-                    nested_context,
-                    depth + 1,
-                )?;
-                counts.accumulate(nested_counts);
-            }
-            TimelineRenderPlanElement::Adjustment(_) | TimelineRenderPlanElement::SolidColor(_) => {
-            }
-        }
+    for demand in demands {
+        let detected_color_space = asset_color_spaces.get(&demand.asset_id).copied();
+        let asset_interpretation =
+            asset_interpretations.get(&demand.asset_id).copied().unwrap_or_default();
+        let resolution = resolve_preview_input_color_space(
+            demand.color_space_override,
+            asset_interpretation,
+            detected_color_space,
+            &demand.color_context,
+        );
+        counts.record(resolution.source);
     }
     Ok(counts)
 }
@@ -1054,27 +1000,6 @@ fn app_duration_us(duration: Duration) -> u64 {
     duration.as_micros().min(u128::from(u64::MAX)) as u64
 }
 
-fn nested_preview_frame_signature(
-    sequence_id: SequenceId,
-    frame: i64,
-    width: u32,
-    height: u32,
-    working: &CpuColorFrame,
-) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    sequence_id.hash(&mut hasher);
-    frame.hash(&mut hasher);
-    width.hash(&mut hasher);
-    height.hash(&mut hasher);
-    working.descriptor().hash(&mut hasher);
-    for pixel in &working.rgba_f32().data {
-        for channel in pixel {
-            channel.to_bits().hash(&mut hasher);
-        }
-    }
-    hasher.finish()
-}
-
 #[cfg(test)]
 fn preview_dimensions_for_sequence(sequence: &Sequence) -> (u32, u32) {
     preview_dimensions_for_sequence_at_runtime_scale(
@@ -1094,12 +1019,12 @@ fn preview_dimensions_for_sequence_at_runtime_scale(
     sequence: &Sequence,
     runtime_scale: mondrian_playback::PreviewResolutionScale,
 ) -> (u32, u32) {
-    let resolution = sequence.settings.resolution;
-    let scale = normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale);
-    let divisor = runtime_scale.dimension_divisor();
-    let width = ((resolution.width as f32 * scale).round() as u32).max(1).div_ceil(divisor);
-    let height = ((resolution.height as f32 * scale).round() as u32).max(1).div_ceil(divisor);
-    (width, height)
+    let resolution = preview_execution_resolution(
+        sequence.settings.resolution,
+        sequence.settings.preview.resolution_scale,
+        runtime_scale,
+    );
+    (resolution.width, resolution.height)
 }
 
 fn preview_display_color_space(

@@ -78,6 +78,7 @@ pub(crate) mod preview_media_task;
 pub(crate) mod preview_quality;
 pub(crate) mod preview_raster_frame;
 pub(crate) mod preview_scheduler_policy;
+pub(crate) mod preview_timeline_execution;
 pub(crate) mod preview_viewer_plan;
 mod project_lifecycle;
 pub(crate) mod proxy_generation;

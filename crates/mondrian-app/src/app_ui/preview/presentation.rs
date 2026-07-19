@@ -50,7 +50,7 @@ impl AppUiPreviewService {
         let render_started_at = Instant::now();
         let resolve_started_at = Instant::now();
         let resolved =
-            self.resolve_sequence_elements(state, sequence, frame, width, height, 0, color_context);
+            self.resolve_sequence_elements(state, sequence, frame, width, height, color_context);
         let mut render_stage_durations = AppUiPreviewRenderStageDurations {
             resolve_us: app_duration_us(resolve_started_at.elapsed()),
             ..AppUiPreviewRenderStageDurations::default()
@@ -64,17 +64,19 @@ impl AppUiPreviewService {
                 // GPU outputs include monitor adaptation; raster cache identity
                 // remains display-independent because CPU packaging already
                 // records its concrete presentation color space.
-                let external_cache_key = resolved.cache_key.as_ref().and_then(|cache_key| {
-                    let program_output_color_space =
-                        resolved.color_context.output_color_space.color()?;
-                    RenderMonitorAdaptation::new(
-                        program_output_color_space,
-                        display_color_space,
-                        resolved.color_context.engine.clone(),
-                    )
-                    .ok()
-                    .map(|adaptation| cache_key.with_monitor_adaptation(&adaptation))
-                });
+                let external_cache_key = resolved
+                    .color_context
+                    .output_color_space
+                    .color()
+                    .and_then(|program_output_color_space| {
+                        RenderMonitorAdaptation::new(
+                            program_output_color_space,
+                            display_color_space,
+                            resolved.color_context.engine.clone(),
+                        )
+                        .ok()
+                        .map(|adaptation| resolved.cache_key.with_monitor_adaptation(&adaptation))
+                    });
                 if let Some(frame) = external_cache_key
                     .as_ref()
                     .and_then(|cache_key| self.external_viewer_frame_for_key(cache_key))
@@ -86,11 +88,7 @@ impl AppUiPreviewService {
                         render_stage_durations,
                     );
                     ViewerPreviewState::Ready(ViewerFrameContent::ExternalTexture(frame))
-                } else if let Some(frame) = resolved
-                    .cache_key
-                    .as_ref()
-                    .and_then(|cache_key| self.cached_viewer_frame(cache_key))
-                {
+                } else if let Some(frame) = self.cached_viewer_frame(&resolved.cache_key) {
                     render_stage_durations.final_cache_lookup_us =
                         app_duration_us(final_cache_lookup_started_at.elapsed());
                     self.record_render_stage_durations(
@@ -154,13 +152,7 @@ impl AppUiPreviewService {
                     }
                     self.record_color_stage(output.color_stage_diagnostics);
                     let frame_packaging_started_at = Instant::now();
-                    let key = resolved
-                        .cache_key
-                        .as_ref()
-                        .map(preview_raster_resource_key)
-                        .unwrap_or_else(|| {
-                            uncached_preview_raster_resource_key(sequence.id, frame, width, height)
-                        });
+                    let key = preview_raster_resource_key(&resolved.cache_key);
                     match PreviewRasterFrame::new(
                         key,
                         width,
@@ -169,11 +161,9 @@ impl AppUiPreviewService {
                         output.rgba,
                     ) {
                         Some(frame) => {
-                            if let Some(cache_key) = resolved.cache_key {
-                                self.frame_store
-                                    .borrow_mut()
-                                    .insert_viewer_frame(cache_key, frame.clone());
-                            }
+                            self.frame_store
+                                .borrow_mut()
+                                .insert_viewer_frame(resolved.cache_key, frame.clone());
                             render_stage_durations.frame_packaging_us =
                                 app_duration_us(frame_packaging_started_at.elapsed());
                             self.record_render_stage_durations(

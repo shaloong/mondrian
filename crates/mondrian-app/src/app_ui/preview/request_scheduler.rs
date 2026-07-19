@@ -1,6 +1,7 @@
 //! Preview prefetch, preroll, adaptive-hint, and Broker-admission Adapter.
 
 use super::*;
+use crate::app::preview_timeline_execution::collect_preview_timeline_media_demands;
 
 impl AppUiPreviewService {
     pub(super) fn schedule_media_prefetches(
@@ -68,7 +69,6 @@ impl AppUiPreviewService {
                 frame.saturating_add(offset),
                 target_width,
                 target_height,
-                0,
                 color_context.clone(),
                 &mut remaining_prefetch_jobs,
                 preroll_deadline_at,
@@ -83,83 +83,57 @@ impl AppUiPreviewService {
         frame: i64,
         target_width: u32,
         target_height: u32,
-        depth: usize,
         color_context: ColorContext,
         remaining_prefetch_jobs: &mut usize,
         preroll_deadline_at: Option<Instant>,
     ) {
-        if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH || *remaining_prefetch_jobs == 0 {
+        if *remaining_prefetch_jobs == 0 {
             return;
         }
-        let evaluation = evaluate_timeline_render_plan(
+        let demands = collect_preview_timeline_media_demands(
             sequence,
-            TimelineEvaluationRequest::preview(
-                frame.max(0),
-                normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale),
-            ),
+            &state.sequences,
+            frame,
+            Resolution { width: target_width, height: target_height },
+            state.playback_preview_resolution_scale(),
+            color_context,
         );
-        let Ok(evaluation) = evaluation else {
+        let Ok(demands) = demands else {
             return;
         };
 
-        for element in evaluation.elements {
+        for demand in demands {
             if *remaining_prefetch_jobs == 0 {
                 break;
             }
-            match element {
-                TimelineRenderPlanElement::Media(media) => {
-                    let Some((key, source_secs)) = self.media_preview_key_for_asset(
-                        state,
-                        &media.asset_id,
-                        media.color_space_override,
-                        media.alpha_interpretation,
-                        media.source_frame,
-                        media.source_secs,
-                        target_width,
-                        target_height,
-                        &color_context,
-                        false,
-                        false,
-                    ) else {
-                        continue;
-                    };
-                    if self.cached_media_frame(&key).is_none() && !self.failed_media_key(&key) {
-                        let enqueued = self.request_media_preview(
-                            key,
-                            source_secs,
-                            MediaPreviewRequestPriority::Prefetch,
-                            PreviewDecodeAccessMode::PlaybackCursor,
-                            preroll_deadline_at,
-                            None,
-                            PreviewDecodeAdaptiveHints::default(),
-                        );
-                        if enqueued {
-                            *remaining_prefetch_jobs = (*remaining_prefetch_jobs).saturating_sub(1);
-                        }
-                    }
+            let Some((key, source_secs)) = self.media_preview_key_for_asset(
+                state,
+                &demand.asset_id,
+                demand.color_space_override,
+                demand.alpha_interpretation,
+                demand.source_frame,
+                demand.source_seconds,
+                demand.target_resolution.width,
+                demand.target_resolution.height,
+                &demand.color_context,
+                false,
+                false,
+            ) else {
+                continue;
+            };
+            if self.cached_media_frame(&key).is_none() && !self.failed_media_key(&key) {
+                let enqueued = self.request_media_preview(
+                    key,
+                    source_secs,
+                    MediaPreviewRequestPriority::Prefetch,
+                    PreviewDecodeAccessMode::PlaybackCursor,
+                    preroll_deadline_at,
+                    None,
+                    PreviewDecodeAdaptiveHints::default(),
+                );
+                if enqueued {
+                    *remaining_prefetch_jobs = (*remaining_prefetch_jobs).saturating_sub(1);
                 }
-                TimelineRenderPlanElement::NestedSequence(nested) => {
-                    if let Some(nested_sequence) = state.sequence_by_id(nested.sequence_id) {
-                        let (nested_width, nested_height) =
-                            preview_dimensions_for_state(state, nested_sequence);
-                        let nested_context = nested_sequence
-                            .settings
-                            .nested_render_color_context(color_context.clone());
-                        self.schedule_media_prefetch_for_sequence(
-                            state,
-                            nested_sequence,
-                            nested.source_frame,
-                            nested_width,
-                            nested_height,
-                            depth + 1,
-                            nested_context,
-                            remaining_prefetch_jobs,
-                            preroll_deadline_at,
-                        );
-                    }
-                }
-                TimelineRenderPlanElement::SolidColor(_)
-                | TimelineRenderPlanElement::Adjustment(_) => {}
             }
         }
     }
@@ -210,7 +184,6 @@ impl AppUiPreviewService {
                 future_frame,
                 width,
                 height,
-                0,
                 color_context.clone(),
             );
             if !readiness.has_media {
@@ -232,67 +205,38 @@ impl AppUiPreviewService {
         frame: i64,
         target_width: u32,
         target_height: u32,
-        depth: usize,
         color_context: ColorContext,
     ) -> MediaPrerollFrameReadiness {
-        if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
-            return MediaPrerollFrameReadiness::required_not_ready();
-        }
-        let Ok(evaluation) = evaluate_timeline_render_plan(
+        let Ok(demands) = collect_preview_timeline_media_demands(
             sequence,
-            TimelineEvaluationRequest::preview(
-                frame.max(0),
-                normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale),
-            ),
+            &state.sequences,
+            frame,
+            Resolution { width: target_width, height: target_height },
+            state.playback_preview_resolution_scale(),
+            color_context,
         ) else {
             return MediaPrerollFrameReadiness::required_not_ready();
         };
 
         let mut readiness = MediaPrerollFrameReadiness::default();
-        for element in evaluation.elements {
-            match element {
-                TimelineRenderPlanElement::Media(media) => {
-                    readiness.has_media = true;
-                    let cached = self
-                        .media_preview_key_for_asset(
-                            state,
-                            &media.asset_id,
-                            media.color_space_override,
-                            media.alpha_interpretation,
-                            media.source_frame,
-                            media.source_secs,
-                            target_width,
-                            target_height,
-                            &color_context,
-                            false,
-                            false,
-                        )
-                        .is_some_and(|(key, _)| {
-                            self.frame_store.borrow_mut().media_frame(&key).is_some()
-                        });
-                    readiness.ready &= cached;
-                }
-                TimelineRenderPlanElement::NestedSequence(nested) => {
-                    let Some(nested_sequence) = state.sequence_by_id(nested.sequence_id) else {
-                        return MediaPrerollFrameReadiness::required_not_ready();
-                    };
-                    let (nested_width, nested_height) =
-                        preview_dimensions_for_state(state, nested_sequence);
-                    let nested_context =
-                        nested_sequence.settings.nested_render_color_context(color_context.clone());
-                    readiness.merge(self.media_preroll_frame_readiness(
-                        state,
-                        nested_sequence,
-                        nested.source_frame,
-                        nested_width,
-                        nested_height,
-                        depth + 1,
-                        nested_context,
-                    ));
-                }
-                TimelineRenderPlanElement::SolidColor(_)
-                | TimelineRenderPlanElement::Adjustment(_) => {}
-            }
+        for demand in demands {
+            readiness.has_media = true;
+            let cached = self
+                .media_preview_key_for_asset(
+                    state,
+                    &demand.asset_id,
+                    demand.color_space_override,
+                    demand.alpha_interpretation,
+                    demand.source_frame,
+                    demand.source_seconds,
+                    demand.target_resolution.width,
+                    demand.target_resolution.height,
+                    &demand.color_context,
+                    false,
+                    false,
+                )
+                .is_some_and(|(key, _)| self.frame_store.borrow_mut().media_frame(&key).is_some());
+            readiness.ready &= cached;
         }
         readiness
     }

@@ -631,10 +631,15 @@ complete output key and GPU execution contract consumed by both Window and
 Headless Adapters, and atomically coordinates generation binding, pending state,
 executed quality, candidate IDs, and exact registered-output reuse. Cache
 residency/eviction remains in the playback-owned `PreviewFrameStore`; GPU/color
-mathematics remain renderer-owned. Within the concrete Adapter, timeline
-traversal and nested Sequence evaluation live in
-`preview::timeline_evaluation`, media-key/path/proxy/decode adaptation lives in
-`preview::media_adapter`, decoded/native payload ownership and the single lazy
+mathematics remain renderer-owned. Canonical timeline traversal, nested Sequence
+lookup/depth, per-Sequence runtime sizing, nested working-space composition,
+typed media readiness, and mandatory ready-plan identity live in the
+UI-independent `app::preview_timeline_execution` Module. The Window
+`preview::timeline_evaluation` file is only an Adapter that supplies media
+outcomes and records returned execution facts. Prefetch, preroll, and input-color
+evidence consume the same Module's read-only media-demand collection instead of
+walking nested plans in Window code. Media library/proxy side effects
+live in `preview::media_adapter`; decoded/native payload ownership and the single lazy
 CPU working-frame adaptation live in `app::preview_media_frame`; resolved Viewer
 identity plus GPU execution-layer lowering live in `app::preview_viewer_plan`;
 working-linear CPU composition plus Program Output and monitor-adapted raster
@@ -904,10 +909,10 @@ controlled handoff.
 Consolidate frame-work scheduling in the Frame Work Broker; extract Frame Store
 and Evidence from `app_ui::preview` by behavioral ownership, not file size. The
 Playback Preview Pump is extracted and Window/Headless duplicate orchestration
-is deleted. Timeline evaluation, asset-library/proxy-dispatch adaptation, final
-presentation arbitration, and immutable diagnostics have private Window deep
-Modules; canonical media-source resolution, resolved Viewer planning, and media
-execution have UI-independent App Modules.
+is deleted. Canonical Timeline/nested execution, media-source resolution,
+resolved Viewer planning, and concrete media execution have UI-independent App
+Modules. Asset-library/proxy-dispatch adaptation, final presentation arbitration,
+and immutable diagnostics remain private Window deep Modules.
 The concrete media worker, cooperative cancellation, result publication,
 bounded shutdown, and FFmpeg Adapter are isolated in the UI-independent
 `app::preview_media_task` deep Module. Its structured task result is the only

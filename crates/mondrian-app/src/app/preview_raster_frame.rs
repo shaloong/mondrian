@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use mondrian_core::types::{ColorSpace, SequenceId};
+use mondrian_core::types::ColorSpace;
 use mondrian_renderer::RenderMonitorAdaptation;
 use mondrian_timeline::sequence::ColorContext;
 
@@ -61,19 +61,6 @@ pub(crate) fn preview_raster_resource_key(output: &PreviewOutputKey) -> String {
     format!(
         "preview.raster:{}:{}x{}:{:016x}",
         output.sequence_id, output.width, output.height, output.plan_signature
-    )
-}
-
-/// Stable presentation-resource identity for an uncached Preview raster.
-pub(crate) fn uncached_preview_raster_resource_key(
-    sequence_id: SequenceId,
-    frame: i64,
-    width: u32,
-    height: u32,
-) -> String {
-    format!(
-        "preview.raster-uncached:{sequence_id}:{width}x{height}:f{}",
-        frame.max(0)
     )
 }
 
