@@ -11,7 +11,7 @@ use std::hash::{Hash, Hasher};
 
 use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::types::{AssetId, ColorSpace, SequenceId};
-use mondrian_core::Resolution;
+use mondrian_core::{FrameRounding, Resolution, TimelineTime};
 use mondrian_playback::PreviewResolutionScale;
 use mondrian_renderer::{
     evaluate_timeline_render_plan, execute_cpu_working_transform, CpuColorFrame,
@@ -38,8 +38,9 @@ pub(crate) struct PreviewTimelineMediaRequest {
     pub(crate) asset_id: AssetId,
     pub(crate) color_space_override: Option<ColorSpace>,
     pub(crate) alpha_interpretation: AlphaInterpretation,
-    pub(crate) source_frame: i64,
-    pub(crate) source_seconds: f64,
+    /// Exact source-local decode target. The media Adapter alone lowers this
+    /// value into an FFmpeg stream PTS.
+    pub(crate) source_time: TimelineTime,
     pub(crate) target_resolution: Resolution,
     pub(crate) color_context: ColorContext,
 }
@@ -235,10 +236,11 @@ fn collect_sequence_media_demands(
             }
             TimelineRenderPlanElement::NestedSequence(nested_plan) => {
                 let nested = graph.nested(nested_plan.sequence_id, &color_context)?;
+                let nested_frame = nested_sequence_frame(nested_plan.source_time, nested.sequence)?;
                 collect_sequence_media_demands(
                     graph,
                     nested.sequence,
-                    nested_plan.source_frame.max(0),
+                    nested_frame,
                     nested.target_resolution,
                     depth + 1,
                     nested.color_context,
@@ -337,11 +339,13 @@ where
                     .nested(nested.sequence_id, &color_context)
                     .map_err(|error| PreviewTimelineAbort::Unavailable { reason: error.reason })?;
                 let nested_sequence = nested_execution.sequence;
+                let nested_frame = nested_sequence_frame(nested.source_time, nested_sequence)
+                    .map_err(|error| PreviewTimelineAbort::Unavailable { reason: error.reason })?;
                 let parent_working_color_space = color_context.working_color_space;
                 let nested_elements = resolve_sequence_elements(
                     execution,
                     nested_sequence,
-                    nested.source_frame.max(0),
+                    nested_frame,
                     nested_execution.target_resolution,
                     depth + 1,
                     nested_execution.color_context.clone(),
@@ -354,7 +358,7 @@ where
                 })?;
                 let frame = render_nested_sequence(
                     nested_sequence,
-                    nested.source_frame,
+                    nested_frame,
                     nested_execution.target_resolution,
                     parent_working_color_space,
                     nested_execution.color_context,
@@ -473,11 +477,25 @@ fn preview_timeline_media_request(
         asset_id: media.asset_id,
         color_space_override: media.color_space_override,
         alpha_interpretation: media.alpha_interpretation,
-        source_frame: media.source_frame,
-        source_seconds: media.source_secs,
+        source_time: media.source_time,
         target_resolution,
         color_context: color_context.clone(),
     }
+}
+
+fn nested_sequence_frame(
+    source_time: TimelineTime,
+    sequence: &Sequence,
+) -> Result<i64, PreviewTimelineDemandError> {
+    source_time
+        .to_frame_position(sequence.settings.frame_rate, FrameRounding::Floor)
+        .map(|position| position.frame.max(0))
+        .map_err(|error| PreviewTimelineDemandError {
+            reason: format!(
+                "nested Sequence {} source target {source_time} is invalid: {error}",
+                sequence.id
+            ),
+        })
 }
 
 fn validate_nested_depth(

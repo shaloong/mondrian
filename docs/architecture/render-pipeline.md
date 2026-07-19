@@ -57,6 +57,17 @@ thumbnail, and analysis paths cannot accidentally share ambiguous defaults.
 
 Each element carries opacity, blend mode, transforms where applicable, effect graph, frame seed, and color/media interpretation data.
 
+`TimelineMediaPlan::source_time` is the sole media-decode target emitted by
+Timeline evaluation. It remains exact through Preview scheduling, frame-store
+identity, Export decode caching, and `PreviewDecodeRequest`; those consumers do
+not rebuild seconds or microseconds. Without a media frame-rate override, the
+Clip Time Transform result is preserved exactly. An explicit override creates
+one declared source Evaluation Grid and applies `Floor` once. A
+`TimelineNestedSequencePlan` likewise retains child-local exact time; Preview
+and Export project it onto the referenced child Sequence's own frame rate when
+they recursively evaluate that child. Parent frame numbers are never reused as
+child frame numbers.
+
 `timeline_composite` exposes one color-managed composition contract:
 `composite_timeline_elements_color_frame(...)`. It returns a typed
 `CpuColorFrame` whose descriptor records domain, encoding, residency, dimensions,

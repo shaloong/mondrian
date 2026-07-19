@@ -12,7 +12,7 @@ use crate::decoder::{
 };
 use ffmpeg_next as ffmpeg;
 use mondrian_core::types::ColorSpace;
-use mondrian_core::{ColorMatrixCoefficients, MondrianError, Result};
+use mondrian_core::{ColorMatrixCoefficients, MondrianError, Result, TimelineTime};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
@@ -308,8 +308,8 @@ impl PreviewDecodeAccessMode {
 pub struct PreviewDecodeRequest<'a> {
     /// Source media path to decode.
     pub path: &'a Path,
-    /// Source timestamp in seconds.
-    pub timestamp_secs: f64,
+    /// Exact media-source-local target; FFmpeg PTS lowering occurs inside the Adapter.
+    pub source_time: TimelineTime,
     /// Optional maximum output width.
     pub max_width: Option<u32>,
     /// Optional maximum output height.
@@ -368,13 +368,13 @@ impl<'a> PreviewDecodeRequest<'a> {
     /// Create a request for one scaled preview decode outcome.
     pub fn new(
         path: &'a Path,
-        timestamp_secs: f64,
+        source_time: TimelineTime,
         access_mode: PreviewDecodeAccessMode,
         source_color: PreviewSourceColorContract,
     ) -> Self {
         Self {
             path,
-            timestamp_secs,
+            source_time,
             max_width: None,
             max_height: None,
             access_mode,
@@ -2045,7 +2045,7 @@ pub fn decode_preview_frame_cancellable(
     let should_cancel: PreviewDecodeCancelProbe = Arc::new(should_cancel);
     decode_preview_frame_outcome(
         request.path,
-        request.timestamp_secs,
+        request.source_time,
         request.max_width,
         request.max_height,
         request.access_mode,
@@ -2472,6 +2472,8 @@ struct PreviewDecodeSession {
     scaler_source_format: Option<ffmpeg::util::format::pixel::Pixel>,
     stream_index: usize,
     stream_tb: ffmpeg::Rational,
+    /// Absolute stream PTS representing media-source-local time zero.
+    stream_start_pts: i64,
     frame_duration_pts: i64,
     hit_tolerance_pts: i64,
     target_width: u32,
@@ -3190,11 +3192,15 @@ impl PreviewDecodeSession {
         hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
         source_color: PreviewSourceColorContract,
     ) -> Result<Self> {
-        let (stream_index, parameters, stream_tb, stream_rate, seek_index) = {
+        let (stream_index, parameters, stream_tb, stream_start_pts, stream_rate, seek_index) = {
             let stream = input.streams().best(ffmpeg::media::Type::Video).ok_or_else(|| {
                 MondrianError::UnsupportedFormat { format: "no video stream".to_string() }
             })?;
             let stream_index = stream.index();
+            let stream_start_pts = match stream.start_time() {
+                value if value == ffmpeg::ffi::AV_NOPTS_VALUE => 0,
+                value => value,
+            };
             let seek_index = preview_seek_index_cache_get(path, fingerprint, stream_index)
                 .unwrap_or_else(|| {
                     let seek_index = preview_seek_index_from_stream(&stream);
@@ -3212,6 +3218,7 @@ impl PreviewDecodeSession {
                 stream_index,
                 stream.parameters(),
                 stream.time_base(),
+                stream_start_pts,
                 stream.rate(),
                 seek_index,
             )
@@ -3341,6 +3348,7 @@ impl PreviewDecodeSession {
             scaler_source_format,
             stream_index,
             stream_tb,
+            stream_start_pts,
             frame_duration_pts,
             hit_tolerance_pts,
             target_width,
@@ -3380,7 +3388,7 @@ impl PreviewDecodeSession {
 
     fn decode_at(
         &mut self,
-        timestamp_secs: f64,
+        source_time: TimelineTime,
         access_mode: PreviewDecodeAccessMode,
         adaptive_hints: PreviewDecodeAdaptiveHints,
         should_cancel: &(dyn Fn() -> bool + Send + Sync),
@@ -3388,7 +3396,13 @@ impl PreviewDecodeSession {
         if should_cancel() {
             return Ok(PreviewDecodeOutcome::Canceled);
         }
-        let target_pts = timestamp_to_stream_pts(timestamp_secs, self.stream_tb);
+        let target_pts =
+            source_time_to_stream_pts(source_time, self.stream_tb, self.stream_start_pts).map_err(
+                |reason| MondrianError::DecodeFailed {
+                    asset_id: self.path.display().to_string(),
+                    reason,
+                },
+            )?;
         let policy = PreviewDecodeAccessPolicy::for_access_mode(access_mode).adapt_for_request(
             &self.seek_index,
             target_pts,
@@ -4148,7 +4162,7 @@ impl PreviewDecodeSession {
 
 fn decode_preview_frame_outcome(
     path: &Path,
-    timestamp_secs: f64,
+    source_time: TimelineTime,
     max_width: Option<u32>,
     max_height: Option<u32>,
     access_mode: PreviewDecodeAccessMode,
@@ -4231,7 +4245,7 @@ fn decode_preview_frame_outcome(
             let external_started_at = Instant::now();
             if let Some(result) = try_decode_with_external_ffmpeg_cpu_rgba(
                 path,
-                timestamp_secs,
+                source_time,
                 session.target_width,
                 session.target_height,
                 source_color,
@@ -4280,7 +4294,7 @@ fn decode_preview_frame_outcome(
         }
 
         let outcome = session.decode_at(
-            timestamp_secs,
+            source_time,
             access_mode,
             adaptive_hints,
             should_cancel.as_ref(),
@@ -4568,7 +4582,7 @@ fn ensure_ffmpeg_initialized(path: &Path) -> Result<()> {
 
 fn try_decode_with_external_ffmpeg_cpu_rgba(
     path: &Path,
-    timestamp_secs: f64,
+    source_time: TimelineTime,
     width: u32,
     height: u32,
     source_color: PreviewSourceColorContract,
@@ -4618,6 +4632,15 @@ fn try_decode_with_external_ffmpeg_cpu_rgba(
         "scale={width}:{height}:flags=fast_bilinear:in_color_matrix={matrix_name}:out_color_matrix={matrix_name}:in_range={range_name}:out_range=pc"
     );
 
+    let source_time_arg = match ffmpeg_source_time_arg(source_time) {
+        Ok(value) => value,
+        Err(reason) => {
+            return Some(Err(MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason,
+            }));
+        }
+    };
     let mut command = Command::new("ffmpeg");
     command
         .arg("-v")
@@ -4625,7 +4648,7 @@ fn try_decode_with_external_ffmpeg_cpu_rgba(
         .arg("-hwaccel")
         .arg(hwaccel)
         .arg("-ss")
-        .arg(format!("{:.6}", timestamp_secs.max(0.0)))
+        .arg(source_time_arg)
         .arg("-i")
         .arg(path)
         .arg("-frames:v")
@@ -4977,22 +5000,67 @@ fn configure_preview_rgba_scaler(
     Ok(())
 }
 
-fn timestamp_to_stream_pts(timestamp_secs: f64, stream_tb: ffmpeg::Rational) -> i64 {
-    if stream_tb.denominator() == 0 {
-        return 0;
-    }
-
-    let timestamp_us = (timestamp_secs.max(0.0) * ffmpeg::ffi::AV_TIME_BASE as f64).round() as i64;
-    unsafe {
-        ffmpeg::ffi::av_rescale_q(
-            timestamp_us,
-            ffmpeg::ffi::AVRational { num: 1, den: ffmpeg::ffi::AV_TIME_BASE },
-            ffmpeg::ffi::AVRational {
-                num: stream_tb.numerator(),
-                den: stream_tb.denominator(),
-            },
+fn source_time_to_stream_pts(
+    source_time: TimelineTime,
+    stream_tb: ffmpeg::Rational,
+    stream_start_pts: i64,
+) -> std::result::Result<i64, String> {
+    let relative = source_time_to_time_base_ticks(
+        source_time,
+        i64::from(stream_tb.numerator()),
+        i64::from(stream_tb.denominator()),
+    )?;
+    stream_start_pts.checked_add(relative).ok_or_else(|| {
+        format!(
+            "source target PTS overflow: time={source_time} stream_time_base={}/{} start_pts={stream_start_pts}",
+            stream_tb.numerator(),
+            stream_tb.denominator()
         )
+    })
+}
+
+fn source_time_to_time_base_ticks(
+    source_time: TimelineTime,
+    time_base_num: i64,
+    time_base_den: i64,
+) -> std::result::Result<i64, String> {
+    if source_time.is_negative() {
+        return Err(format!(
+            "negative media source target is invalid: {source_time}"
+        ));
     }
+    if time_base_num <= 0 || time_base_den <= 0 {
+        return Err(format!(
+            "invalid FFmpeg time base {time_base_num}/{time_base_den} for source target {source_time}"
+        ));
+    }
+    let scaled_numerator = i128::from(source_time.numerator())
+        .checked_mul(i128::from(time_base_den))
+        .ok_or_else(|| format!("source target numerator overflow: {source_time}"))?;
+    let scaled_denominator = i128::from(source_time.denominator())
+        .checked_mul(i128::from(time_base_num))
+        .ok_or_else(|| format!("source target denominator overflow: {source_time}"))?;
+    let quotient = scaled_numerator / scaled_denominator;
+    let remainder = scaled_numerator % scaled_denominator;
+    let doubled_remainder = remainder
+        .checked_mul(2)
+        .ok_or_else(|| format!("source target rounding overflow: {source_time}"))?;
+    let rounded = if doubled_remainder >= scaled_denominator {
+        quotient
+            .checked_add(1)
+            .ok_or_else(|| format!("source target rounding overflow: {source_time}"))?
+    } else {
+        quotient
+    };
+    i64::try_from(rounded).map_err(|_| format!("source target exceeds FFmpeg PTS: {source_time}"))
+}
+
+fn ffmpeg_source_time_arg(source_time: TimelineTime) -> std::result::Result<String, String> {
+    let micros =
+        source_time_to_time_base_ticks(source_time, 1, i64::from(ffmpeg::ffi::AV_TIME_BASE))?;
+    let seconds = micros / i64::from(ffmpeg::ffi::AV_TIME_BASE);
+    let fractional = micros % i64::from(ffmpeg::ffi::AV_TIME_BASE);
+    Ok(format!("{seconds}.{fractional:06}"))
 }
 
 struct DecodedVideoFrame {
@@ -5558,6 +5626,7 @@ mod tests {
     };
     use ffmpeg_next as ffmpeg;
     use mondrian_core::types::ColorSpace;
+    use mondrian_core::TimelineTime;
     use serde::Serialize;
     use std::any::Any;
     use std::ffi::c_void;
@@ -5819,7 +5888,7 @@ mod tests {
     fn preview_decode_request_defaults_to_auto_hardware_decode() {
         let request = PreviewDecodeRequest::new(
             Path::new("clip.mov"),
-            0.0,
+            TimelineTime::ZERO,
             PreviewDecodeAccessMode::PlaybackCursor,
             test_source_color(),
         );
@@ -5839,6 +5908,68 @@ mod tests {
                 .with_hardware_decode_request(PreviewHardwareDecodeRequest::PreferGpuResident)
                 .hardware_decode_request,
             PreviewHardwareDecodeRequest::PreferGpuResident
+        );
+    }
+
+    #[test]
+    fn exact_source_time_lowers_to_stream_pts_with_start_offset() {
+        assert_eq!(
+            super::source_time_to_stream_pts(
+                TimelineTime::new(1, 3).expect("exact source time"),
+                ffmpeg::Rational(1, 90_000),
+                9_000,
+            )
+            .expect("valid stream target"),
+            39_000
+        );
+    }
+
+    #[test]
+    fn exact_source_time_rounds_half_ticks_away_from_zero() {
+        assert_eq!(
+            super::source_time_to_stream_pts(
+                TimelineTime::new(1, 2).expect("exact source time"),
+                ffmpeg::Rational(1, 1),
+                0,
+            )
+            .expect("valid stream target"),
+            1
+        );
+    }
+
+    #[test]
+    fn exact_source_time_preserves_long_duration_without_float_drift() {
+        assert_eq!(
+            super::source_time_to_stream_pts(
+                TimelineTime::new(360_000, 1).expect("exact source time"),
+                ffmpeg::Rational(1, 90_000),
+                0,
+            )
+            .expect("valid stream target"),
+            32_400_000_000
+        );
+    }
+
+    #[test]
+    fn exact_source_time_rejects_negative_targets_and_invalid_time_bases() {
+        assert!(super::source_time_to_stream_pts(
+            TimelineTime::new(-1, 1).expect("exact source time"),
+            ffmpeg::Rational(1, 90_000),
+            0,
+        )
+        .is_err());
+        assert!(
+            super::source_time_to_stream_pts(TimelineTime::ZERO, ffmpeg::Rational(0, 1), 0,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn external_ffmpeg_argument_is_lowered_only_at_the_cli_adapter() {
+        assert_eq!(
+            super::ffmpeg_source_time_arg(TimelineTime::new(5, 4).expect("exact source time"))
+                .expect("valid CLI target"),
+            "1.250000"
         );
     }
 
@@ -6117,7 +6248,7 @@ mod tests {
         };
         let request = PreviewDecodeRequest::new(
             path.as_path(),
-            1.25,
+            TimelineTime::new(5, 4).expect("exact source time"),
             PreviewDecodeAccessMode::ScrubCursor,
             test_source_color(),
         )
@@ -6128,7 +6259,10 @@ mod tests {
         });
 
         assert_eq!(request.path, path.as_path());
-        assert_eq!(request.timestamp_secs, 1.25);
+        assert_eq!(
+            request.source_time,
+            TimelineTime::new(5, 4).expect("exact source time")
+        );
         assert_eq!(request.max_width, Some(640));
         assert_eq!(request.max_height, Some(360));
         assert_eq!(request.access_mode, PreviewDecodeAccessMode::ScrubCursor);
@@ -7617,7 +7751,7 @@ mod tests {
         let path = PathBuf::from("E:/definitely-missing/canceled-preview.mov");
         let request = PreviewDecodeRequest::new(
             path.as_path(),
-            0.0,
+            TimelineTime::ZERO,
             PreviewDecodeAccessMode::RandomAccessStillFrame,
             test_source_color(),
         )
@@ -7665,7 +7799,7 @@ mod tests {
         for index in 5..20 {
             let request = PreviewDecodeRequest::new(
                 path.as_path(),
-                f64::from(index) / 25.0,
+                TimelineTime::new(i64::from(index), 25).expect("exact source time"),
                 PreviewDecodeAccessMode::PlaybackCursor,
                 test_source_color(),
             )
@@ -7822,7 +7956,8 @@ mod tests {
         let started = Instant::now();
         let request = PreviewDecodeRequest::new(
             path.as_path(),
-            timestamp_secs,
+            TimelineTime::from_f64_quantized(timestamp_secs, 1_000_000)
+                .expect("quantized diagnostic source time"),
             PreviewDecodeAccessMode::RandomAccessStillFrame,
             test_source_color(),
         )
@@ -7917,7 +8052,8 @@ mod tests {
             let frame_started = Instant::now();
             let request = PreviewDecodeRequest::new(
                 path.as_path(),
-                timestamp_secs,
+                TimelineTime::from_f64_quantized(timestamp_secs, 1_000_000)
+                    .expect("quantized diagnostic source time"),
                 PreviewDecodeAccessMode::PlaybackCursor,
                 test_source_color(),
             )

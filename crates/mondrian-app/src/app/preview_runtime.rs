@@ -306,8 +306,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             asset_id: AssetId::new(),
             path: PathBuf::from("E:/media/pending-preview.mov"),
             fingerprint: None,
-            source_frame: 0,
-            source_micros: 0,
+            source_time: mondrian_core::TimelineTime::ZERO,
             target_width: 1920,
             target_height: 1080,
             source_width: 1920,
@@ -335,7 +334,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let hardware_decode_request = self.hardware_decode_request_for_key(access_mode, &key);
         let _ = self.jobs.enqueue(MediaPreviewJob {
             key,
-            source_secs: 0.0,
             generation,
             priority: MediaPreviewRequestPriority::Current,
             access_mode,

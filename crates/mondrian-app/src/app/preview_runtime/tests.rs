@@ -11,10 +11,6 @@ fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::Timeline
     mondrian_core::TimelineTime::new(numerator, time_base.den).expect("valid test time")
 }
 
-fn source_micros(source_seconds: f64) -> i64 {
-    (source_seconds.max(0.0) * 1_000_000.0).round() as i64
-}
-
 fn cancellation_evidence(
     work_class: mondrian_playback::FrameWorkClass,
     cause: mondrian_playback::FrameCancellationCause,
@@ -2138,14 +2134,13 @@ fn playback_video_preroll_requires_next_media_payload_and_observes_cache_residen
         &state.project_settings.color_management,
         display_color_space,
     );
-    let (key, _) = service
+    let key = service
         .media_preview_key_for_asset(
             &state,
             &media.asset_id,
             media.color_space_override,
             media.alpha_interpretation,
-            media.source_frame,
-            media.source_secs,
+            media.source_time,
             width,
             height,
             &color_context,
@@ -6482,7 +6477,6 @@ fn playback_pressure_skips_new_current_decode_when_realtime_work_is_pending() {
     assert_eq!(
         service.jobs.enqueue(MediaPreviewJob {
             key,
-            source_secs: 1.0,
             generation: service.execution.borrow().generation(),
             priority: MediaPreviewRequestPriority::Current,
             access_mode: PreviewDecodeAccessMode::PlaybackCursor,
@@ -6501,7 +6495,6 @@ fn playback_pressure_skips_new_current_decode_when_realtime_work_is_pending() {
 
     assert!(!service.request_media_preview(
         test_media_key(201),
-        1.0,
         MediaPreviewRequestPriority::Current,
         PreviewDecodeAccessMode::PlaybackCursor,
         Some(Instant::now() + Duration::from_millis(33)),
@@ -6530,7 +6523,6 @@ fn playback_pressure_allows_recovery_decode_when_no_realtime_work_is_pending() {
 
     assert!(service.request_media_preview(
         test_media_key(202),
-        1.0,
         MediaPreviewRequestPriority::Current,
         PreviewDecodeAccessMode::PlaybackCursor,
         Some(Instant::now() + Duration::from_millis(33)),
@@ -6555,7 +6547,6 @@ fn realtime_current_preempts_queued_still_work_before_queue_is_full() {
 
     assert!(service.request_media_preview(
         still_key.clone(),
-        1.0,
         MediaPreviewRequestPriority::Current,
         PreviewDecodeAccessMode::RandomAccessStillFrame,
         None,
@@ -6564,7 +6555,6 @@ fn realtime_current_preempts_queued_still_work_before_queue_is_full() {
     ));
     assert!(service.request_media_preview(
         scrub_key.clone(),
-        1.0,
         MediaPreviewRequestPriority::Current,
         PreviewDecodeAccessMode::ScrubCursor,
         Some(Instant::now() + Duration::from_millis(33)),
@@ -6605,7 +6595,6 @@ fn realtime_current_keeps_in_flight_still_pending_for_structured_preemption() {
         .expect("still work should be in flight before realtime admission");
     assert!(service.request_media_preview(
         scrub_key.clone(),
-        1.0,
         MediaPreviewRequestPriority::Current,
         PreviewDecodeAccessMode::ScrubCursor,
         Some(Instant::now() + Duration::from_millis(33)),
@@ -6680,7 +6669,6 @@ fn playback_prefetch_yields_while_current_work_is_queued() {
     assert_eq!(
         service.jobs.enqueue(MediaPreviewJob {
             key: current_key,
-            source_secs: 1.0,
             generation: 1,
             priority: MediaPreviewRequestPriority::Current,
             access_mode: PreviewDecodeAccessMode::ScrubCursor,
@@ -6748,7 +6736,6 @@ fn playback_prefetch_yields_when_prefetch_backlog_already_covers_window() {
         assert_eq!(
             service.jobs.enqueue(MediaPreviewJob {
                 key: test_media_key(200 + offset),
-                source_secs: offset as f64,
                 generation: 1,
                 priority: MediaPreviewRequestPriority::Prefetch,
                 access_mode: PreviewDecodeAccessMode::PlaybackCursor,
@@ -6828,7 +6815,6 @@ fn playback_prefetch_tops_up_only_remaining_window_slots() {
     assert_eq!(
         service.jobs.enqueue(MediaPreviewJob {
             key: test_media_key(300),
-            source_secs: 0.0,
             generation: 1,
             priority: MediaPreviewRequestPriority::Prefetch,
             access_mode: PreviewDecodeAccessMode::PlaybackCursor,
@@ -6911,7 +6897,6 @@ fn playback_prefetch_tops_up_by_actual_jobs_across_tracks() {
     assert_eq!(
         service.jobs.enqueue(MediaPreviewJob {
             key: test_media_key(400),
-            source_secs: 0.0,
             generation: 1,
             priority: MediaPreviewRequestPriority::Prefetch,
             access_mode: PreviewDecodeAccessMode::PlaybackCursor,
@@ -6963,7 +6948,6 @@ fn queued_expiry_completes_matching_demand_without_cancellation_latency_evidence
     let mut result = media_preview_canceled_result(
         MediaPreviewJob {
             key,
-            source_secs: 76.0,
             generation,
             priority: MediaPreviewRequestPriority::Current,
             access_mode: PreviewDecodeAccessMode::PlaybackCursor,
@@ -7027,7 +7011,6 @@ fn preview_service_poll_releases_expired_playback_deadline_without_preview_refre
     let result = media_preview_canceled_result(
         MediaPreviewJob {
             key: key.clone(),
-            source_secs: 77.0,
             generation,
             priority: MediaPreviewRequestPriority::Current,
             access_mode: PreviewDecodeAccessMode::PlaybackCursor,
@@ -7385,7 +7368,6 @@ fn preview_service_poll_separates_canceled_backlog_from_visible_change() {
             .send(media_preview_canceled_result(
                 MediaPreviewJob {
                     key,
-                    source_secs: index as f64,
                     generation,
                     priority: MediaPreviewRequestPriority::Current,
                     access_mode: PreviewDecodeAccessMode::PlaybackCursor,
@@ -7437,7 +7419,6 @@ fn canceled_current_scrub_requests_follow_up_render_for_settled_frame() {
         .send(media_preview_canceled_result(
             MediaPreviewJob {
                 key,
-                source_secs: 3.0,
                 generation,
                 priority: MediaPreviewRequestPriority::Current,
                 access_mode: PreviewDecodeAccessMode::ScrubCursor,
@@ -7475,14 +7456,13 @@ fn failed_current_media_preview_cache_does_not_leave_viewer_loading() {
     let color_context = sequence
         .settings
         .root_preview_color_context(&state.project_settings.color_management, ColorSpace::Rec709);
-    let (key, _) = service
+    let key = service
         .media_preview_key_for_asset(
             &state,
             &asset_id,
             None,
             AlphaInterpretation::Straight,
-            0,
-            0.0,
+            mondrian_core::TimelineTime::ZERO,
             width,
             height,
             &color_context,
@@ -7519,8 +7499,7 @@ fn media_preview_cache_identity_changes_with_range_override() {
                 &asset_id,
                 None,
                 AlphaInterpretation::Straight,
-                0,
-                0.0,
+                mondrian_core::TimelineTime::ZERO,
                 width,
                 height,
                 &color_context,
@@ -7528,7 +7507,6 @@ fn media_preview_cache_identity_changes_with_range_override() {
                 false,
             )
             .expect("media preview key")
-            .0
     };
 
     let auto_key = key_for_state();
@@ -7573,14 +7551,13 @@ fn playing_cached_media_preview_defers_sync_raster_composite() {
     let color_context = sequence
         .settings
         .root_preview_color_context(&state.project_settings.color_management, ColorSpace::Rec709);
-    let (key, _) = service
+    let key = service
         .media_preview_key_for_asset(
             &state,
             &asset_id,
             None,
             AlphaInterpretation::Straight,
-            0,
-            0.0,
+            mondrian_core::TimelineTime::ZERO,
             width,
             height,
             &color_context,
@@ -7619,8 +7596,7 @@ fn test_media_key(source_frame: i64) -> MediaPreviewKey {
         asset_id: AssetId::new(),
         path: PathBuf::from(format!("E:/media/{source_frame}.mov")),
         fingerprint: None,
-        source_frame,
-        source_micros: source_micros(source_frame as f64),
+        source_time: mondrian_core::TimelineTime::new(source_frame, 1).expect("exact source time"),
         target_width: 320,
         target_height: 180,
         source_width: 320,
@@ -7647,11 +7623,9 @@ fn begin_test_media_execution(
     access_mode: PreviewDecodeAccessMode,
     lane: MediaPreviewWorkerLane,
 ) -> mondrian_playback::FrameExecutionId {
-    let source_secs = key.source_micros as f64 / 1_000_000.0;
     assert_eq!(
         service.jobs.enqueue(MediaPreviewJob {
             key,
-            source_secs,
             generation,
             priority,
             access_mode,
@@ -8004,27 +7978,33 @@ fn scrub_adaptation_switches_for_hot_region_and_slow_latency() {
 
     assert_eq!(
         adaptation
-            .observe_request(key.asset_id, key.source_micros, observed_at)
+            .observe_request(key.asset_id, key.source_time, observed_at)
             .scrub_class,
         PreviewScrubAdaptiveClass::Normal
     );
-    key.source_micros += 100_000;
+    key.source_time = key
+        .source_time
+        .checked_add(mondrian_core::TimelineTime::new(1, 10).expect("exact source delta"))
+        .expect("source time remains valid");
     assert_eq!(
         adaptation
             .observe_request(
                 key.asset_id,
-                key.source_micros,
+                key.source_time,
                 observed_at + Duration::from_millis(1),
             )
             .scrub_class,
         PreviewScrubAdaptiveClass::Normal
     );
-    key.source_micros += 100_000;
+    key.source_time = key
+        .source_time
+        .checked_add(mondrian_core::TimelineTime::new(1, 10).expect("exact source delta"))
+        .expect("source time remains valid");
     assert_eq!(
         adaptation
             .observe_request(
                 key.asset_id,
-                key.source_micros,
+                key.source_time,
                 observed_at + Duration::from_millis(2),
             )
             .scrub_class,
@@ -8085,12 +8065,15 @@ fn scrub_adaptation_switches_for_hot_region_and_slow_latency() {
     };
     adaptation.observe_decode(slow_decode);
     adaptation.observe_decode(slow_decode);
-    key.source_micros += 100_000;
+    key.source_time = key
+        .source_time
+        .checked_add(mondrian_core::TimelineTime::new(1, 10).expect("exact source delta"))
+        .expect("source time remains valid");
     assert_eq!(
         adaptation
             .observe_request(
                 key.asset_id,
-                key.source_micros,
+                key.source_time,
                 observed_at + Duration::from_millis(3),
             )
             .scrub_class,
@@ -8106,7 +8089,7 @@ fn scrub_adaptation_switches_for_hot_region_and_slow_latency() {
         failed_adaptation
             .observe_request(
                 key.asset_id,
-                key.source_micros,
+                key.source_time,
                 observed_at + Duration::from_millis(4),
             )
             .scrub_class,
@@ -8342,7 +8325,6 @@ fn preview_service_cancel_interactive_work_clears_pending_and_cached_state() {
     assert_eq!(
         service.jobs.enqueue(MediaPreviewJob {
             key: key.clone(),
-            source_secs: 1.0,
             generation,
             priority: MediaPreviewRequestPriority::Current,
             access_mode: PreviewDecodeAccessMode::ScrubCursor,

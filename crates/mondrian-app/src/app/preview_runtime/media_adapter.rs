@@ -12,6 +12,7 @@ use crate::app::preview_media_source::{
 use crate::app::preview_timeline_execution::{
     PreviewTimelineMediaFrame, PreviewTimelineMediaRequest,
 };
+use mondrian_core::TimelineTime;
 
 impl<O: Clone> PreviewProductionRuntime<O> {
     pub(super) fn media_frame_for_plan(
@@ -23,13 +24,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             state.is_playing(),
             state.last_timeline_seek_source,
         ));
-        let Some((key, source_secs)) = self.media_preview_key_for_asset(
+        let Some(key) = self.media_preview_key_for_asset(
             state,
             &request.asset_id,
             request.color_space_override,
             request.alpha_interpretation,
-            request.source_frame,
-            request.source_seconds,
+            request.source_time,
             request.target_resolution.width,
             request.target_resolution.height,
             &request.color_context,
@@ -52,7 +52,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let adaptive_hints = self.preview_decode_adaptive_hints(access_mode, &key);
         self.request_media_preview(
             key,
-            source_secs,
             MediaPreviewRequestPriority::Current,
             access_mode,
             (access_mode == PreviewDecodeAccessMode::PlaybackCursor)
@@ -91,14 +90,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         asset_id: &AssetId,
         color_space_override: Option<ColorSpace>,
         alpha_interpretation: AlphaInterpretation,
-        source_frame: i64,
-        source_secs: f64,
+        source_time: TimelineTime,
         target_width: u32,
         target_height: u32,
         color_context: &ColorContext,
         record_color_rejection: bool,
         request_missing_proxy_generation: bool,
-    ) -> Option<(MediaPreviewKey, f64)> {
+    ) -> Option<MediaPreviewKey> {
         let library = state.asset_library.as_ref()?;
         let asset = match library.get_asset(*asset_id) {
             Ok(Some(asset)) if asset.kind == AssetKind::Video => asset,
@@ -116,8 +114,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             asset: &asset,
             color_space_override,
             alpha_interpretation,
-            source_frame,
-            source_seconds: source_secs,
+            source_time,
             target_resolution: Resolution { width: target_width, height: target_height },
             color_context,
             prefer_proxy,
@@ -143,7 +140,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 }
                 self.record_input_color_resolution(resolved.input_color_resolution.source);
                 self.maybe_request_preview_proxy_generation(state, resolved.proxy_generation);
-                Some((resolved.key, resolved.source_seconds))
+                Some(resolved.key)
             }
             PreviewMediaSourceOutcome::ColorRejected(rejection) => {
                 let resolution = rejection.input_color_resolution;

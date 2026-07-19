@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use mondrian_assets::{AssetKind, AssetRecord};
 use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::types::{AssetId, ColorSpace};
-use mondrian_core::Resolution;
+use mondrian_core::{Resolution, TimelineTime};
 use mondrian_media::info::PixelFormat;
 use mondrian_media::{
     DecodedVideoRange, DecodedVideoRangeContract, MediaFileFingerprint,
@@ -64,8 +64,7 @@ pub(crate) struct PreviewMediaSourceRequest<'a> {
     pub(crate) asset: &'a AssetRecord,
     pub(crate) color_space_override: Option<ColorSpace>,
     pub(crate) alpha_interpretation: AlphaInterpretation,
-    pub(crate) source_frame: i64,
-    pub(crate) source_seconds: f64,
+    pub(crate) source_time: TimelineTime,
     pub(crate) target_resolution: Resolution,
     pub(crate) color_context: &'a ColorContext,
     pub(crate) prefer_proxy: bool,
@@ -79,7 +78,6 @@ pub(crate) struct PreviewMediaSourceRequest<'a> {
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedPreviewMediaSource {
     pub(crate) key: MediaPreviewKey,
-    pub(crate) source_seconds: f64,
     pub(crate) path_resolution: PreviewMediaDecodePathResolution,
     pub(crate) input_color_resolution: InputColorResolution,
     pub(crate) proxy_generation: Option<PreviewProxyGenerationIntent>,
@@ -116,6 +114,12 @@ pub(crate) fn resolve_preview_media_source(
 ) -> PreviewMediaSourceOutcome {
     if request.asset.kind != AssetKind::Video {
         return unavailable(&request, "asset is not a video source".to_owned());
+    }
+    if request.source_time.is_negative() {
+        return unavailable(
+            &request,
+            format!("negative source target is invalid: {}", request.source_time),
+        );
     }
 
     let primary_video = request.asset.media_info.primary_video();
@@ -163,8 +167,7 @@ pub(crate) fn resolve_preview_media_source(
         asset_id: request.asset.id,
         path: resolved_path.path,
         fingerprint: Some(resolved_path.fingerprint),
-        source_frame: request.source_frame.max(0),
-        source_micros: source_micros(request.source_seconds),
+        source_time: request.source_time,
         target_width: request.target_resolution.width,
         target_height: request.target_resolution.height,
         source_width: source_resolution.width,
@@ -191,7 +194,6 @@ pub(crate) fn resolve_preview_media_source(
     );
     PreviewMediaSourceOutcome::Ready(ResolvedPreviewMediaSource {
         key,
-        source_seconds: request.source_seconds.max(0.0),
         path_resolution: resolved_path.resolution,
         input_color_resolution,
         proxy_generation,
@@ -310,10 +312,6 @@ fn canonicalize_media_decode_geometry(
         key.target_width = key.source_width;
         key.target_height = key.source_height;
     }
-}
-
-fn source_micros(source_seconds: f64) -> i64 {
-    (source_seconds.max(0.0) * 1_000_000.0).round() as i64
 }
 
 fn unavailable(

@@ -123,7 +123,9 @@ A session contains:
 
 - monotonically increasing `epoch`;
 - active `sequence_id` and immutable timeline revision/signature;
-- exact `TimelineTime` anchor in the active Sequence domain;
+- exact grid-aligned anchor in the active Sequence domain, currently stored as
+  a validated `FramePosition` whose time base is fixed by the immutable
+  Timeline binding and exactly projects to `TimelineTime`;
 - signed rational rate and direction;
 - Playback Quality Policy revision;
 - Clock Master and clock-handoff state;

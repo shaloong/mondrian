@@ -179,6 +179,52 @@ fn nested_sequence_keeps_its_own_canvas_under_shared_runtime_quality() {
 }
 
 #[test]
+fn nested_sequence_projects_exact_time_onto_the_child_evaluation_grid() {
+    let mut child = Sequence::new("30 fps child");
+    child.settings.frame_rate = Rational::new(30, 1);
+    let asset_id = AssetId::new();
+    let child_time_base = child.time_base();
+    child.video_tracks[0]
+        .add_clip(
+            Clip::new(asset_id, tt(0, child_time_base), tt(30, child_time_base))
+                .expect("child media clip"),
+        )
+        .expect("insert child media");
+
+    let mut parent = Sequence::new("24 fps parent");
+    parent.settings.frame_rate = Rational::new(24, 1);
+    let parent_time_base = parent.time_base();
+    parent.video_tracks[0]
+        .add_clip(
+            Clip::new_nested_sequence(
+                child.id,
+                tt(0, parent_time_base),
+                tt(24, parent_time_base),
+                Some("30 fps child".to_owned()),
+            )
+            .expect("nested clip"),
+        )
+        .expect("insert nested clip");
+
+    let demands = collect_preview_timeline_media_demands(
+        &parent,
+        std::slice::from_ref(&child),
+        12,
+        Resolution { width: 64, height: 36 },
+        PreviewResolutionScale::Full,
+        color_context(&parent),
+    )
+    .expect("mixed-rate nested media demands");
+
+    assert_eq!(demands.len(), 1);
+    assert_eq!(demands[0].asset_id, asset_id);
+    assert_eq!(
+        demands[0].source_time,
+        mondrian_core::TimelineTime::new(1, 2).expect("exact half second")
+    );
+}
+
+#[test]
 fn media_pending_and_unavailable_are_distinct_terminal_shapes() {
     let mut sequence = Sequence::new("media");
     let asset_id = AssetId::new();

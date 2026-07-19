@@ -239,17 +239,25 @@ developer-specific `PATH`.
 `PreviewDecodeAccessMode` intentionally has no default value, and serialized
 decode diagnostics must include it. Missing access-mode evidence is a diagnostic
 coverage bug, not a reason to assume still-frame semantics.
-Current Preview cache and in-flight identities include the requested access
-mode, source media path, file fingerprint, output dimensions, and source time in
-microseconds. A bare timeline frame number is not a media identity: the same
-frame index can represent different source times under different time bases,
-and relink/proxy/source path changes must not reuse stale RGBA frames.
-Microseconds are the current implementation bridge, not the long-term semantic
-key: distinct exact source instants can quantize to the same microsecond. The
-target cache identity carries canonical source Timeline Time or exact stream
-PTS plus stream time base and the declared rounding/seek contract. A lossy
-derived timestamp may remain diagnostic metadata but cannot independently
-authorize cache reuse.
+Preview cache, in-flight, Broker-job, and decode-request identities include the
+requested access mode, source media path, file fingerprint, output dimensions,
+and one canonical nonnegative source-local `TimelineTime`. A bare timeline
+frame number is not a media identity: the same frame index can represent
+different source times under different Sequence grids, and relink/proxy/source
+path changes must not reuse stale decoded frames. Render-plan evaluation
+preserves the exact result of the Clip Time Transform; only an explicit media
+frame-rate override quantizes once, with `Floor`, onto that declared source
+Evaluation Grid. Nested Sequence time is projected onto the child Sequence's
+grid, never the parent's.
+
+The FFmpeg Adapter lowers the exact source target once to stream PTS using
+checked integer arithmetic and nearest rounding with exact half-tick ties away
+from zero, then adds the stream's declared start PTS. Invalid/negative targets,
+invalid time bases, and overflow fail closed. The external FFmpeg still-frame
+Adapter formats a microsecond command-line argument at the process boundary;
+that lossy value is neither a cache key nor scheduling authority. Distinct exact
+source instants therefore cannot collapse into one request before FFmpeg's
+declared stream-time-base quantization.
 CPU `RgbaFrame` payloads are explicitly source-encoded RGB with straight alpha,
 not implicit sRGB or working-linear pixels. Their applied YUV matrix/range and
 source contract travel with the payload. Decode sessions, the playback ring,

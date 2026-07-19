@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use mondrian_core::{MondrianError, Resolution};
+use mondrian_core::{MondrianError, Resolution, TimelineTime};
 use mondrian_media::{
     decode_preview_frame_cancellable, HwAccelDeviceSelector, MediaFileFingerprint,
     PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeDiagnostics,
@@ -333,7 +333,7 @@ pub(crate) fn decode_media_preview(
     };
     let decode_outcome = decode_media_preview_for_access_mode(
         job.key.path.as_path(),
-        job.source_secs,
+        job.key.source_time,
         Some(job.key.target_width.max(1)),
         Some(job.key.target_height.max(1)),
         access_mode,
@@ -621,7 +621,7 @@ fn media_preview_failure_reason(err: &MondrianError) -> MediaPreviewFailureReaso
 
 fn decode_media_preview_for_access_mode(
     path: &Path,
-    source_secs: f64,
+    source_time: TimelineTime,
     max_width: Option<u32>,
     max_height: Option<u32>,
     access_mode: PreviewDecodeAccessMode,
@@ -632,7 +632,7 @@ fn decode_media_preview_for_access_mode(
     source_color: PreviewSourceColorContract,
     should_cancel: impl Fn() -> bool + Send + Sync + 'static,
 ) -> mondrian_core::Result<PreviewDecodeOutcome> {
-    let mut request = PreviewDecodeRequest::new(path, source_secs, access_mode, source_color)
+    let mut request = PreviewDecodeRequest::new(path, source_time, access_mode, source_color)
         .with_max_size(max_width, max_height)
         .with_adaptive_hints(adaptive_hints)
         .with_hardware_decode_request(hardware_decode_request)

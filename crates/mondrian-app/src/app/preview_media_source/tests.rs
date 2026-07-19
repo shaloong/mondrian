@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use mondrian_assets::{AssetKind, AssetRecord};
 use mondrian_core::timeline_data::{AlphaInterpretation, AssetMediaInterpretation};
 use mondrian_core::types::{AssetId, ColorSpace, Rational};
-use mondrian_core::{ProjectColorManagement, Resolution};
+use mondrian_core::{ProjectColorManagement, Resolution, TimelineTime};
 use mondrian_media::info::{PixelFormat, VideoCodec};
 use mondrian_media::{
     DetectedColorInterpretation, MediaInfo, VideoCodecProfile, VideoColorDetectionMethod,
@@ -198,8 +198,7 @@ fn complete_resolution_emits_one_canonical_key_and_proxy_intent() {
         asset: &asset,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Straight,
-        source_frame: 12,
-        source_seconds: 0.5,
+        source_time: TimelineTime::new(1, 2).expect("exact source time"),
         target_resolution: Resolution { width: 960, height: 540 },
         color_context: &context,
         prefer_proxy: true,
@@ -217,7 +216,10 @@ fn complete_resolution_emits_one_canonical_key_and_proxy_intent() {
         PreviewMediaDecodePathResolution::ProxyMissing
     );
     assert_eq!(resolved.key.path, source);
-    assert_eq!(resolved.key.source_micros, 500_000);
+    assert_eq!(
+        resolved.key.source_time,
+        TimelineTime::new(1, 2).expect("exact source time")
+    );
     assert_eq!(
         (resolved.key.target_width, resolved.key.target_height),
         (3840, 2160)
@@ -242,8 +244,7 @@ fn unavailable_and_color_rejected_sources_are_explicit_outcomes() {
         asset: &asset,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Straight,
-        source_frame: 0,
-        source_seconds: 0.0,
+        source_time: TimelineTime::ZERO,
         target_resolution: Resolution { width: 320, height: 180 },
         color_context: &context,
         prefer_proxy: false,
@@ -266,8 +267,7 @@ fn unavailable_and_color_rejected_sources_are_explicit_outcomes() {
         asset: &untagged,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Straight,
-        source_frame: 0,
-        source_seconds: 0.0,
+        source_time: TimelineTime::ZERO,
         target_resolution: Resolution { width: 320, height: 180 },
         color_context: &context,
         prefer_proxy: false,

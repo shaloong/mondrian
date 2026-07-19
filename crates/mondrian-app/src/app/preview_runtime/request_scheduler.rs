@@ -106,13 +106,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             if *remaining_prefetch_jobs == 0 {
                 break;
             }
-            let Some((key, source_secs)) = self.media_preview_key_for_asset(
+            let Some(key) = self.media_preview_key_for_asset(
                 state,
                 &demand.asset_id,
                 demand.color_space_override,
                 demand.alpha_interpretation,
-                demand.source_frame,
-                demand.source_seconds,
+                demand.source_time,
                 demand.target_resolution.width,
                 demand.target_resolution.height,
                 &demand.color_context,
@@ -124,7 +123,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             if self.cached_media_frame(&key).is_none() && !self.failed_media_key(&key) {
                 let enqueued = self.request_media_preview(
                     key,
-                    source_secs,
                     MediaPreviewRequestPriority::Prefetch,
                     PreviewDecodeAccessMode::PlaybackCursor,
                     preroll_deadline_at,
@@ -227,15 +225,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     &demand.asset_id,
                     demand.color_space_override,
                     demand.alpha_interpretation,
-                    demand.source_frame,
-                    demand.source_seconds,
+                    demand.source_time,
                     demand.target_resolution.width,
                     demand.target_resolution.height,
                     &demand.color_context,
                     false,
                     false,
                 )
-                .is_some_and(|(key, _)| self.frame_store.borrow_mut().media_frame(&key).is_some());
+                .is_some_and(|key| self.frame_store.borrow_mut().media_frame(&key).is_some());
             readiness.ready &= cached;
         }
         readiness
@@ -251,7 +248,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
         let hints = self.scrub_adaptation.borrow_mut().observe_request(
             key.asset_id,
-            key.source_micros,
+            key.source_time,
             Instant::now(),
         );
         match hints.scrub_class {
@@ -274,7 +271,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     pub(super) fn request_media_preview(
         &self,
         key: MediaPreviewKey,
-        source_secs: f64,
         priority: MediaPreviewRequestPriority,
         access_mode: PreviewDecodeAccessMode,
         playback_current_deadline_at: Option<Instant>,
@@ -291,7 +287,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             self.record_playback_current_sustained_pressure_skip();
             tracing::trace!(
                 asset_id = %key.asset_id,
-                source_frame = key.source_frame,
+                source_time = %key.source_time,
                 "viewer preview skipped current playback decode while sustained pressure recovery has realtime work pending"
             );
             return false;
@@ -306,7 +302,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             self.hardware_decode_device_selector_for_access_mode(access_mode);
         let submission = self.scheduler.submit_job(MediaPreviewJob {
             key: key.clone(),
-            source_secs,
             generation,
             priority,
             access_mode,
@@ -352,7 +347,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 bump(&self.metrics.queue_full_drops);
                 tracing::trace!(
                     asset_id = %key.asset_id,
-                    source_frame = key.source_frame,
+                    source_time = %key.source_time,
                     "viewer preview request dropped by backpressure"
                 );
                 false
@@ -361,7 +356,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 bump(&self.metrics.queue_invalid_access_mode_drops);
                 tracing::warn!(
                     asset_id = %key.asset_id,
-                    source_frame = key.source_frame,
+                    source_time = %key.source_time,
                     priority = ?priority,
                     access_mode = access_mode.as_str(),
                     "viewer preview request dropped because priority/access-mode pair is invalid"

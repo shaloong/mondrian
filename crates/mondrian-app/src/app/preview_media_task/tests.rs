@@ -2,7 +2,7 @@ use std::thread;
 
 use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
-use mondrian_core::WorkingColorSpace;
+use mondrian_core::{TimelineTime, WorkingColorSpace};
 use mondrian_media::{DecodedVideoRange, DecodedVideoRangeContract};
 
 use super::*;
@@ -16,8 +16,7 @@ fn test_media_key(label: &str) -> MediaPreviewKey {
             AssetId::new()
         )),
         fingerprint: None,
-        source_frame: 12,
-        source_micros: 500_000,
+        source_time: TimelineTime::new(1, 2).expect("exact source time"),
         target_width: 320,
         target_height: 180,
         source_width: 320,
@@ -43,7 +42,6 @@ fn test_media_job(
 ) -> MediaPreviewJob {
     MediaPreviewJob {
         key,
-        source_secs: 0.5,
         generation: 7,
         priority,
         access_mode,

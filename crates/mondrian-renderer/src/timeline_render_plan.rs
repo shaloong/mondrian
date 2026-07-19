@@ -178,9 +178,8 @@ pub struct TimelineMediaPlan {
     pub pixel_aspect_ratio_override: Option<PixelAspectRatio>,
     pub field_order_override: Option<FieldOrder>,
     pub alpha_interpretation: AlphaInterpretation,
-    pub source_frame: i64,
-    pub source_secs: f64,
-    pub source_time_base: Rational,
+    /// Exact source-domain decode target after any explicit interpretation grid.
+    pub source_time: TimelineTime,
     pub opacity: f32,
     pub blend_mode: BlendMode,
     pub transform: [f32; 6],
@@ -211,7 +210,7 @@ pub struct TimelineSolidColorPlan {
 #[derive(Debug, Clone)]
 pub struct TimelineNestedSequencePlan {
     pub sequence_id: SequenceId,
-    pub source_frame: i64,
+    /// Exact child-Sequence-local source time; consumers resolve the child grid.
     pub source_time: TimelineTime,
     pub nested_processing: NestedColorProcessing,
     pub opacity: f32,
@@ -245,8 +244,7 @@ pub struct TimelineColorDiagnostic {
     pub pixel_aspect_ratio_override: Option<PixelAspectRatio>,
     pub field_order_override: Option<FieldOrder>,
     pub alpha_interpretation: AlphaInterpretation,
-    pub source_frame: i64,
-    pub source_secs: f64,
+    pub source_time: TimelineTime,
 }
 
 pub fn collect_timeline_color_diagnostics(
@@ -292,8 +290,7 @@ pub fn collect_timeline_color_diagnostics_with_display_view(
                     pixel_aspect_ratio_override: media.pixel_aspect_ratio_override,
                     field_order_override: media.field_order_override,
                     alpha_interpretation: media.alpha_interpretation,
-                    source_frame: media.source_frame,
-                    source_secs: media.source_secs,
+                    source_time: media.source_time,
                 }),
                 _ => None,
             })
@@ -338,14 +335,6 @@ pub fn evaluate_timeline_render_plan(
                 elements.push(TimelineRenderPlanElement::NestedSequence(
                     TimelineNestedSequencePlan {
                         sequence_id,
-                        source_frame: ac
-                            .source_time
-                            .to_frame_position(
-                                Rational::new(time_base.den, time_base.num),
-                                FrameRounding::Floor,
-                            )?
-                            .frame
-                            .max(0),
                         source_time: ac.source_time.max(TimelineTime::ZERO),
                         nested_processing: source.nested_color_processing(),
                         opacity,
@@ -392,14 +381,14 @@ pub fn evaluate_timeline_render_plan(
                     diagnostics.skipped_unrenderable += 1;
                     continue;
                 };
-                let source_frame_rate = ac
-                    .interpretation
-                    .frame_rate_override
-                    .unwrap_or(Rational::new(time_base.den, time_base.num));
-                let source_position =
-                    ac.source_time.to_frame_position(source_frame_rate, FrameRounding::Floor)?;
-                let source_frame = source_position.frame.max(0);
-                let source_time_base = source_position.time_base;
+                let source_time = if let Some(frame_rate) = ac.interpretation.frame_rate_override {
+                    TimelineTime::from_frame_position(
+                        ac.source_time.to_frame_position(frame_rate, FrameRounding::Floor)?,
+                    )?
+                } else {
+                    ac.source_time
+                }
+                .max(TimelineTime::ZERO);
                 let transform = apply_pixel_aspect_to_affine(
                     ac.transform_matrix,
                     ac.interpretation.pixel_aspect_ratio_override,
@@ -410,9 +399,7 @@ pub fn evaluate_timeline_render_plan(
                     pixel_aspect_ratio_override: ac.interpretation.pixel_aspect_ratio_override,
                     field_order_override: ac.interpretation.field_order_override,
                     alpha_interpretation: ac.interpretation.alpha,
-                    source_frame,
-                    source_secs: (source_frame as f64 * source_time_base.to_f64()).max(0.0),
-                    source_time_base,
+                    source_time,
                     opacity,
                     blend_mode: ac.blend_mode,
                     transform,
@@ -678,9 +665,28 @@ mod tests {
         let TimelineRenderPlanElement::Media(media) = &plan[0] else {
             panic!("expected media plan");
         };
-        assert_eq!(media.source_frame, 18);
-        assert_eq!(media.source_time_base, Rational::new(1, 30));
-        assert!((media.source_secs - 0.6).abs() < 1.0e-9);
+        assert_eq!(
+            media.source_time,
+            TimelineTime::new(3, 5).expect("exact source time")
+        );
+    }
+
+    #[test]
+    fn render_plan_preserves_exact_source_time_without_an_override_grid() {
+        let mut seq = Sequence::new("render-plan-native-source-time");
+        let tb = seq.time_base();
+        let mut clip = Clip::new(AssetId::new(), tt(0, tb), tt(30, tb)).expect("valid clip");
+        clip.source_in = TimelineTime::new(1, 7).expect("exact source offset");
+        seq.video_tracks[0].add_clip(clip).expect("add clip");
+
+        let plan = analysis_elements(&seq, 15);
+        let TimelineRenderPlanElement::Media(media) = &plan[0] else {
+            panic!("expected media plan");
+        };
+        assert_eq!(
+            media.source_time,
+            TimelineTime::new(26, 35).expect("exact source time")
+        );
     }
 
     #[test]
@@ -904,9 +910,7 @@ mod tests {
             pixel_aspect_ratio_override: Option<PixelAspectRatio>,
             field_order_override: Option<FieldOrder>,
             alpha_interpretation: AlphaInterpretation,
-            source_frame: i64,
-            source_micros: i64,
-            source_time_base: Rational,
+            source_time: TimelineTime,
             opacity: f32,
             blend_mode: BlendMode,
             transform: [f32; 6],
@@ -927,8 +931,7 @@ mod tests {
         },
         NestedSequence {
             sequence_id: SequenceId,
-            source_frame: i64,
-            source_micros: i64,
+            source_time: TimelineTime,
             nested_processing: NestedColorProcessing,
             opacity: f32,
             blend_mode: BlendMode,
@@ -947,9 +950,7 @@ mod tests {
                     pixel_aspect_ratio_override: media.pixel_aspect_ratio_override,
                     field_order_override: media.field_order_override,
                     alpha_interpretation: media.alpha_interpretation,
-                    source_frame: media.source_frame,
-                    source_micros: micros(media.source_secs),
-                    source_time_base: media.source_time_base,
+                    source_time: media.source_time,
                     opacity: media.opacity,
                     blend_mode: media.blend_mode,
                     transform: media.transform,
@@ -975,8 +976,7 @@ mod tests {
                 TimelineRenderPlanElement::NestedSequence(nested) => {
                     RenderPlanSemanticElement::NestedSequence {
                         sequence_id: nested.sequence_id,
-                        source_frame: nested.source_frame,
-                        source_micros: micros(nested.source_time.to_f64()),
+                        source_time: nested.source_time,
                         nested_processing: nested.nested_processing,
                         opacity: nested.opacity,
                         blend_mode: nested.blend_mode,
@@ -986,9 +986,5 @@ mod tests {
                 }
             })
             .collect()
-    }
-
-    fn micros(seconds: f64) -> i64 {
-        (seconds * 1_000_000.0).round() as i64
     }
 }

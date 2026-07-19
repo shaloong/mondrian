@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use crate::app::ui_actions::TimelineSeekSource;
 use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
-use mondrian_core::WorkingColorSpace;
+use mondrian_core::{TimelineTime, WorkingColorSpace};
 use mondrian_media::{
     preview_decode_cpu_budget, DecodedVideoRangeContract, HwAccelDeviceSelector,
     MediaFileFingerprint, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
@@ -36,8 +36,8 @@ pub(crate) struct MediaPreviewKey {
     pub(crate) asset_id: AssetId,
     pub(crate) path: PathBuf,
     pub(crate) fingerprint: Option<MediaFileFingerprint>,
-    pub(crate) source_frame: i64,
-    pub(crate) source_micros: i64,
+    /// Exact source-local decode target and part of cache identity.
+    pub(crate) source_time: TimelineTime,
     pub(crate) target_width: u32,
     pub(crate) target_height: u32,
     /// Full-resolution source width represented by the decoded sample.
@@ -316,7 +316,6 @@ pub struct MediaPreviewSchedulerDiagnostics {
 /// Queued media preview decode job with access-mode scheduling evidence.
 pub(crate) struct MediaPreviewJob {
     pub(crate) key: MediaPreviewKey,
-    pub(crate) source_secs: f64,
     pub(crate) generation: u64,
     pub(crate) priority: MediaPreviewRequestPriority,
     pub(crate) access_mode: PreviewDecodeAccessMode,
@@ -501,7 +500,6 @@ impl MediaPreviewJobQueueSender {
         priority: MediaPreviewRequestPriority,
         access_mode: PreviewDecodeAccessMode,
         generation: u64,
-        source_secs: f64,
         enqueued_at: Instant,
         deadline_at: Option<Instant>,
         demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
@@ -517,7 +515,6 @@ impl MediaPreviewJobQueueSender {
         }
         match self.broker.submit(frame_work_request(MediaPreviewJob {
             key: key.clone(),
-            source_secs,
             generation,
             priority,
             access_mode,
@@ -903,7 +900,6 @@ impl MediaPreviewScheduler {
         deadline_at: Option<Instant>,
     ) -> MediaPreviewRequestStatus {
         let status = self.submit_job(MediaPreviewJob {
-            source_secs: key.source_micros as f64 / 1_000_000.0,
             key,
             generation,
             priority,
@@ -1300,17 +1296,12 @@ mod tests {
         );
     }
 
-    fn source_micros(source_secs: f64) -> i64 {
-        (source_secs.max(0.0) * 1_000_000.0).round() as i64
-    }
-
     fn test_media_key(source_frame: i64) -> MediaPreviewKey {
         MediaPreviewKey {
             asset_id: AssetId::new(),
             path: PathBuf::from(format!("E:/media/{source_frame}.mov")),
             fingerprint: None,
-            source_frame,
-            source_micros: source_micros(source_frame as f64),
+            source_time: TimelineTime::new(source_frame, 1).expect("exact source time"),
             target_width: 320,
             target_height: 180,
             source_width: 320,
@@ -1331,21 +1322,18 @@ mod tests {
 
     fn test_media_job(
         key: MediaPreviewKey,
-        source_secs: f64,
         priority: MediaPreviewRequestPriority,
     ) -> MediaPreviewJob {
-        test_media_job_with_generation(key, source_secs, 1, priority)
+        test_media_job_with_generation(key, 1, priority)
     }
 
     fn test_media_job_with_generation(
         key: MediaPreviewKey,
-        source_secs: f64,
         generation: u64,
         priority: MediaPreviewRequestPriority,
     ) -> MediaPreviewJob {
         MediaPreviewJob {
             key,
-            source_secs,
             generation,
             priority,
             access_mode: test_access_mode_for_priority(priority),
@@ -1357,6 +1345,17 @@ mod tests {
             demand_identity: None,
             execution_id: None,
         }
+    }
+
+    #[test]
+    fn media_preview_key_does_not_collapse_distinct_exact_source_targets() {
+        let mut exact_third = test_media_key(0);
+        exact_third.source_time = TimelineTime::ONE_THIRD;
+        let mut microsecond_approximation = exact_third.clone();
+        microsecond_approximation.source_time =
+            TimelineTime::new(333_333, 1_000_000).expect("exact approximation");
+
+        assert_ne!(exact_third, microsecond_approximation);
     }
 
     fn test_access_mode_for_priority(
@@ -2307,10 +2306,8 @@ mod tests {
         let (sender, receiver) = media_preview_job_queue(1);
         let prefetch = test_media_key(1);
         let current = test_media_key(2);
-        let prefetch_job =
-            test_media_job(prefetch.clone(), 1.0, MediaPreviewRequestPriority::Prefetch);
-        let current_job =
-            test_media_job(current.clone(), 2.0, MediaPreviewRequestPriority::Current);
+        let prefetch_job = test_media_job(prefetch.clone(), MediaPreviewRequestPriority::Prefetch);
+        let current_job = test_media_job(current.clone(), MediaPreviewRequestPriority::Current);
 
         assert_eq!(
             sender.enqueue(prefetch_job),
@@ -2333,11 +2330,9 @@ mod tests {
         let (sender, receiver) = media_preview_job_queue(1);
         let still = test_media_key(1);
         let scrub = test_media_key(2);
-        let mut still_job =
-            test_media_job(still.clone(), 1.0, MediaPreviewRequestPriority::Current);
+        let mut still_job = test_media_job(still.clone(), MediaPreviewRequestPriority::Current);
         still_job.access_mode = PreviewDecodeAccessMode::RandomAccessStillFrame;
-        let mut scrub_job =
-            test_media_job(scrub.clone(), 2.0, MediaPreviewRequestPriority::Current);
+        let mut scrub_job = test_media_job(scrub.clone(), MediaPreviewRequestPriority::Current);
         scrub_job.access_mode = PreviewDecodeAccessMode::ScrubCursor;
 
         assert_eq!(
@@ -2362,11 +2357,9 @@ mod tests {
         let (sender, receiver) = media_preview_job_queue(2);
         let still = test_media_key(1);
         let scrub = test_media_key(2);
-        let mut still_job =
-            test_media_job(still.clone(), 1.0, MediaPreviewRequestPriority::Current);
+        let mut still_job = test_media_job(still.clone(), MediaPreviewRequestPriority::Current);
         still_job.access_mode = PreviewDecodeAccessMode::RandomAccessStillFrame;
-        let mut scrub_job =
-            test_media_job(scrub.clone(), 2.0, MediaPreviewRequestPriority::Current);
+        let mut scrub_job = test_media_job(scrub.clone(), MediaPreviewRequestPriority::Current);
         scrub_job.access_mode = PreviewDecodeAccessMode::ScrubCursor;
 
         assert_eq!(
@@ -2390,7 +2383,7 @@ mod tests {
     fn media_preview_job_queue_rejects_non_playback_prefetch_jobs() {
         let (sender, receiver) = media_preview_job_queue(2);
         let key = test_media_key(1);
-        let mut job = test_media_job(key, 1.0, MediaPreviewRequestPriority::Prefetch);
+        let mut job = test_media_job(key, MediaPreviewRequestPriority::Prefetch);
         job.access_mode = PreviewDecodeAccessMode::RandomAccessStillFrame;
 
         assert_eq!(
@@ -2412,7 +2405,6 @@ mod tests {
         assert_eq!(
             sender.enqueue(test_media_job(
                 first_prefetch.clone(),
-                1.0,
                 MediaPreviewRequestPriority::Prefetch,
             )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
@@ -2420,7 +2412,6 @@ mod tests {
         assert_eq!(
             sender.enqueue(test_media_job(
                 current.clone(),
-                2.0,
                 MediaPreviewRequestPriority::Current
             )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
@@ -2428,7 +2419,6 @@ mod tests {
         assert_eq!(
             sender.enqueue(test_media_job(
                 second_prefetch.clone(),
-                3.0,
                 MediaPreviewRequestPriority::Prefetch,
             )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
@@ -2448,10 +2438,9 @@ mod tests {
         let playback = test_media_key(1);
         let still = test_media_key(2);
         let mut playback_job =
-            test_media_job(playback.clone(), 1.0, MediaPreviewRequestPriority::Current);
+            test_media_job(playback.clone(), MediaPreviewRequestPriority::Current);
         playback_job.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
-        let mut still_job =
-            test_media_job(still.clone(), 2.0, MediaPreviewRequestPriority::Current);
+        let mut still_job = test_media_job(still.clone(), MediaPreviewRequestPriority::Current);
         still_job.access_mode = PreviewDecodeAccessMode::RandomAccessStillFrame;
 
         assert_eq!(
@@ -2487,10 +2476,9 @@ mod tests {
         let (sender, receiver) = media_preview_job_queue(2);
         let scrub = test_media_key(1);
         let playback_prefetch = test_media_key(2);
-        let scrub_job = test_media_job(scrub.clone(), 1.0, MediaPreviewRequestPriority::Current);
+        let scrub_job = test_media_job(scrub.clone(), MediaPreviewRequestPriority::Current);
         let mut playback_job = test_media_job(
             playback_prefetch.clone(),
-            2.0,
             MediaPreviewRequestPriority::Prefetch,
         );
         playback_job.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
@@ -2527,17 +2515,13 @@ mod tests {
         let fresh_scrub = test_media_key(2);
         let mut expired_playback_job = test_media_job(
             expired_playback.clone(),
-            1.0,
             MediaPreviewRequestPriority::Current,
         );
         expired_playback_job.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
         expired_playback_job.deadline_at =
             Some(Instant::now() - std::time::Duration::from_millis(1));
-        let mut fresh_scrub_job = test_media_job(
-            fresh_scrub.clone(),
-            2.0,
-            MediaPreviewRequestPriority::Current,
-        );
+        let mut fresh_scrub_job =
+            test_media_job(fresh_scrub.clone(), MediaPreviewRequestPriority::Current);
         fresh_scrub_job.access_mode = PreviewDecodeAccessMode::ScrubCursor;
 
         assert_eq!(
@@ -2582,13 +2566,13 @@ mod tests {
         let expired = test_media_key(1);
         let fresh = test_media_key(2);
         let scrub = test_media_key(3);
-        let mut expired_job = test_media_job(expired, 1.0, MediaPreviewRequestPriority::Current);
+        let mut expired_job = test_media_job(expired, MediaPreviewRequestPriority::Current);
         expired_job.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
         expired_job.deadline_at = Some(Instant::now() - std::time::Duration::from_millis(1));
-        let mut fresh_job = test_media_job(fresh, 2.0, MediaPreviewRequestPriority::Current);
+        let mut fresh_job = test_media_job(fresh, MediaPreviewRequestPriority::Current);
         fresh_job.access_mode = PreviewDecodeAccessMode::PlaybackCursor;
         fresh_job.deadline_at = Some(Instant::now() + std::time::Duration::from_secs(1));
-        let mut scrub_job = test_media_job(scrub, 3.0, MediaPreviewRequestPriority::Current);
+        let mut scrub_job = test_media_job(scrub, MediaPreviewRequestPriority::Current);
         scrub_job.access_mode = PreviewDecodeAccessMode::ScrubCursor;
 
         assert_eq!(
@@ -2617,11 +2601,9 @@ mod tests {
         let (sender, receiver) = media_preview_job_queue(2);
         let still = test_media_key(1);
         let scrub = test_media_key(2);
-        let mut still_job =
-            test_media_job(still.clone(), 1.0, MediaPreviewRequestPriority::Current);
+        let mut still_job = test_media_job(still.clone(), MediaPreviewRequestPriority::Current);
         still_job.access_mode = PreviewDecodeAccessMode::RandomAccessStillFrame;
-        let mut scrub_job =
-            test_media_job(scrub.clone(), 2.0, MediaPreviewRequestPriority::Current);
+        let mut scrub_job = test_media_job(scrub.clone(), MediaPreviewRequestPriority::Current);
         scrub_job.access_mode = PreviewDecodeAccessMode::ScrubCursor;
 
         assert_eq!(
@@ -2666,7 +2648,6 @@ mod tests {
         assert_eq!(
             sender.enqueue(test_media_job(
                 promoted.clone(),
-                1.0,
                 MediaPreviewRequestPriority::Prefetch
             )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
@@ -2674,7 +2655,6 @@ mod tests {
         assert_eq!(
             sender.enqueue(test_media_job(
                 other_prefetch.clone(),
-                2.0,
                 MediaPreviewRequestPriority::Prefetch,
             )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
@@ -2705,7 +2685,6 @@ mod tests {
             MediaPreviewRequestPriority::Current,
             PreviewDecodeAccessMode::ScrubCursor,
             7,
-            1.25,
             promoted_at,
             None,
             Some(demand_identity),
@@ -2726,7 +2705,7 @@ mod tests {
         assert_eq!(promoted_job.key, promoted);
         assert_eq!(promoted_job.priority, MediaPreviewRequestPriority::Current);
         assert_eq!(promoted_job.generation, 7);
-        assert_eq!(promoted_job.source_secs, 1.25);
+        assert_eq!(promoted_job.key.source_time, promoted.source_time);
         assert_eq!(promoted_job.enqueued_at, promoted_at);
         assert_eq!(promoted_job.deadline_at, None);
         assert_eq!(promoted_job.demand_identity, Some(demand_identity));
@@ -2752,7 +2731,6 @@ mod tests {
         assert_eq!(
             sender.enqueue(test_media_job_with_generation(
                 key.clone(),
-                1.0,
                 2,
                 MediaPreviewRequestPriority::Current,
             )),
@@ -2766,7 +2744,6 @@ mod tests {
             MediaPreviewRequestPriority::Current,
             PreviewDecodeAccessMode::ScrubCursor,
             5,
-            1.0,
             refreshed_at,
             refreshed_deadline,
             None,
@@ -2804,7 +2781,6 @@ mod tests {
         assert_eq!(
             sender.enqueue(test_media_job_with_generation(
                 old_current.clone(),
-                1.0,
                 1,
                 MediaPreviewRequestPriority::Current,
             )),
@@ -2813,7 +2789,6 @@ mod tests {
         assert_eq!(
             sender.enqueue(test_media_job_with_generation(
                 old_prefetch.clone(),
-                2.0,
                 1,
                 MediaPreviewRequestPriority::Prefetch,
             )),
@@ -2822,7 +2797,6 @@ mod tests {
         assert_eq!(
             sender.enqueue(test_media_job_with_generation(
                 fresh_prefetch.clone(),
-                3.0,
                 3,
                 MediaPreviewRequestPriority::Prefetch,
             )),
@@ -2833,7 +2807,6 @@ mod tests {
         assert_eq!(
             sender.enqueue(test_media_job_with_generation(
                 current.clone(),
-                4.0,
                 3,
                 MediaPreviewRequestPriority::Current,
             )),
@@ -2853,7 +2826,6 @@ mod tests {
         assert_eq!(
             sender.enqueue(test_media_job(
                 canceled.clone(),
-                1.0,
                 MediaPreviewRequestPriority::Prefetch
             )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
@@ -2861,7 +2833,6 @@ mod tests {
         assert_eq!(
             sender.enqueue(test_media_job(
                 retained.clone(),
-                2.0,
                 MediaPreviewRequestPriority::Prefetch
             )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
@@ -2869,7 +2840,6 @@ mod tests {
         assert_eq!(
             sender.enqueue(test_media_job(
                 canceled.clone(),
-                3.0,
                 MediaPreviewRequestPriority::Current
             )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
@@ -2892,17 +2862,12 @@ mod tests {
         let second = test_media_key(2);
 
         assert_eq!(
-            sender.enqueue(test_media_job(
-                first,
-                1.0,
-                MediaPreviewRequestPriority::Current,
-            )),
+            sender.enqueue(test_media_job(first, MediaPreviewRequestPriority::Current,)),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
         assert_eq!(
             sender.enqueue(test_media_job(
                 second,
-                2.0,
                 MediaPreviewRequestPriority::Prefetch,
             )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
@@ -2924,23 +2889,17 @@ mod tests {
         assert_eq!(
             sender.enqueue(test_media_job(
                 playback,
-                1.0,
                 MediaPreviewRequestPriority::Prefetch
             )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
         assert_eq!(
-            sender.enqueue(test_media_job(
-                scrub,
-                2.0,
-                MediaPreviewRequestPriority::Current
-            )),
+            sender.enqueue(test_media_job(scrub, MediaPreviewRequestPriority::Current)),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
         assert_eq!(
             sender.enqueue(MediaPreviewJob {
                 key: still,
-                source_secs: 3.0,
                 generation: 1,
                 priority: MediaPreviewRequestPriority::Current,
                 access_mode: PreviewDecodeAccessMode::RandomAccessStillFrame,
@@ -3014,7 +2973,6 @@ mod tests {
                 MediaPreviewRequestPriority::Current,
                 PreviewDecodeAccessMode::ScrubCursor,
                 1,
-                1.0,
                 Instant::now(),
                 None,
                 None,
@@ -3030,7 +2988,6 @@ mod tests {
                 MediaPreviewRequestPriority::Prefetch,
                 PreviewDecodeAccessMode::PlaybackCursor,
                 1,
-                1.0,
                 Instant::now(),
                 None,
                 None,
@@ -3049,17 +3006,12 @@ mod tests {
         let second = test_media_key(2);
 
         assert_eq!(
-            sender.enqueue(test_media_job(
-                first,
-                1.0,
-                MediaPreviewRequestPriority::Prefetch
-            )),
+            sender.enqueue(test_media_job(first, MediaPreviewRequestPriority::Prefetch)),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
         );
         assert_eq!(
             sender.enqueue(test_media_job(
                 second,
-                2.0,
                 MediaPreviewRequestPriority::Prefetch
             )),
             MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
@@ -3072,7 +3024,6 @@ mod tests {
         assert_eq!(
             sender.enqueue(test_media_job(
                 test_media_key(3),
-                3.0,
                 MediaPreviewRequestPriority::Current
             )),
             MediaPreviewJobEnqueueStatus::Closed

@@ -3,7 +3,7 @@
 use crate::app::preview_access_mode::MediaPreviewRequestPriority;
 use std::time::Instant;
 
-use mondrian_core::{types::AssetId, Rational};
+use mondrian_core::{types::AssetId, Rational, TimelineTime};
 use mondrian_media::{
     PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeDiagnostics,
     PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest,
@@ -20,7 +20,6 @@ pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES: usize =
 /// Consecutive current-frame late results required to declare sustained pressure.
 pub(crate) const MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD: u64 = 2;
 pub(crate) const PREVIEW_SCRUB_HOT_REQUEST_WINDOW_US: u64 = 250_000;
-pub(crate) const PREVIEW_SCRUB_HOT_SOURCE_WINDOW_US: i64 = 750_000;
 pub(crate) const PREVIEW_SCRUB_SLOW_LATENCY_US: u64 = 40_000;
 pub(crate) const PREVIEW_SCRUB_RECOVERY_LATENCY_US: u64 = 25_000;
 const PREVIEW_SCRUB_SLOW_SCORE_MAX: u8 = 3;
@@ -36,7 +35,7 @@ pub(crate) enum MediaPreviewFailureReason {
 #[derive(Debug, Clone, Copy)]
 struct PreviewScrubRequestObservation {
     asset_id: AssetId,
-    source_micros: i64,
+    source_time: TimelineTime,
     observed_at: Instant,
 }
 
@@ -53,7 +52,7 @@ impl PreviewScrubAdaptationState {
     pub(crate) fn observe_request(
         &mut self,
         asset_id: AssetId,
-        source_micros: i64,
+        source_time: TimelineTime,
         observed_at: Instant,
     ) -> PreviewDecodeAdaptiveHints {
         let is_hot_region = self
@@ -62,8 +61,8 @@ impl PreviewScrubAdaptationState {
                 last.asset_id == asset_id
                     && observed_at.saturating_duration_since(last.observed_at).as_micros()
                         <= u128::from(PREVIEW_SCRUB_HOT_REQUEST_WINDOW_US)
-                    && source_micros.saturating_sub(last.source_micros).abs()
-                        <= PREVIEW_SCRUB_HOT_SOURCE_WINDOW_US
+                    && exact_time_distance(source_time, last.source_time)
+                        .is_some_and(source_time_is_within_scrub_hot_window)
             })
             .unwrap_or(false);
         self.hot_request_streak = if is_hot_region {
@@ -72,7 +71,7 @@ impl PreviewScrubAdaptationState {
             0
         };
         self.last_request =
-            Some(PreviewScrubRequestObservation { asset_id, source_micros, observed_at });
+            Some(PreviewScrubRequestObservation { asset_id, source_time, observed_at });
 
         let scrub_class = if self.slow_latency_score >= 2 {
             mondrian_media::PreviewScrubAdaptiveClass::SlowLatency
@@ -111,6 +110,18 @@ impl PreviewScrubAdaptationState {
             self.slow_latency_score = self.slow_latency_score.max(2);
         }
     }
+}
+
+fn exact_time_distance(left: TimelineTime, right: TimelineTime) -> Option<TimelineTime> {
+    if left >= right {
+        left.checked_sub(right).ok()
+    } else {
+        right.checked_sub(left).ok()
+    }
+}
+
+fn source_time_is_within_scrub_hot_window(distance: TimelineTime) -> bool {
+    i128::from(distance.numerator()) * 4 <= i128::from(distance.denominator()) * 3
 }
 
 /// Edge emitted when playback pressure changes acceptance state.
@@ -423,14 +434,14 @@ mod tests {
         let mut adaptation = PreviewScrubAdaptationState::default();
 
         assert_eq!(
-            adaptation.observe_request(asset_id, 0, started_at).scrub_class,
+            adaptation.observe_request(asset_id, TimelineTime::ZERO, started_at).scrub_class,
             mondrian_media::PreviewScrubAdaptiveClass::Normal
         );
         assert_eq!(
             adaptation
                 .observe_request(
                     asset_id,
-                    100_000,
+                    TimelineTime::new(1, 10).expect("exact source time"),
                     started_at + std::time::Duration::from_millis(1)
                 )
                 .scrub_class,
@@ -440,7 +451,7 @@ mod tests {
             adaptation
                 .observe_request(
                     asset_id,
-                    200_000,
+                    TimelineTime::new(1, 5).expect("exact source time"),
                     started_at + std::time::Duration::from_millis(2)
                 )
                 .scrub_class,
@@ -455,7 +466,7 @@ mod tests {
             adaptation
                 .observe_request(
                     asset_id,
-                    300_000,
+                    TimelineTime::new(3, 10).expect("exact source time"),
                     started_at + std::time::Duration::from_millis(3)
                 )
                 .scrub_class,

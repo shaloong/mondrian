@@ -2401,8 +2401,7 @@ fn render_sequence_frame_into(
         HashMap::<
             (
                 AssetId,
-                i64,
-                Rational,
+                TimelineTime,
                 ColorSpace,
                 DecodedVideoRangeContract,
                 AlphaInterpretation,
@@ -2464,8 +2463,7 @@ fn render_sequence_frame_into(
             resolve_export_input_video_range(timeline, media.asset_id, asset_interpretation);
         let cache_key = (
             media.asset_id,
-            media.source_frame,
-            media.source_time_base,
+            media.source_time,
             input_color_space,
             input_video_range,
             media.alpha_interpretation,
@@ -2483,7 +2481,7 @@ fn render_sequence_frame_into(
                     color_context.working_color_space,
                     &color_context.engine,
                     color_context.tone_map,
-                    media.source_secs,
+                    media.source_time,
                     width,
                     height,
                 )?;
@@ -2503,7 +2501,7 @@ fn render_sequence_frame_into(
                 color_context.working_color_space,
                 &color_context.engine,
                 color_context.tone_map,
-                media.source_secs,
+                media.source_time,
                 width,
                 height,
             )?;
@@ -2797,13 +2795,13 @@ fn decode_video_layer_scaled(
     working_color_space: WorkingColorSpace,
     engine: &ColorEngine,
     tone_map: bool,
-    source_secs: f64,
+    source_time: TimelineTime,
     width: u32,
     height: u32,
 ) -> Result<Arc<DecodedVideoLayer>, String> {
     let request = PreviewDecodeRequest::new(
         path,
-        source_secs,
+        source_time,
         PreviewDecodeAccessMode::RandomAccessStillFrame,
         PreviewSourceColorContract::new(input_color_space, input_video_range),
     )
