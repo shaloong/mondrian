@@ -257,27 +257,24 @@ fn test_color_context(output_color_space: ColorSpace) -> ColorContext {
 }
 
 #[test]
-fn cpu_raster_presentation_contract_encodes_sdr_video_for_srgb_atlas() {
+fn preview_raster_presentation_contract_encodes_sdr_video_for_srgb_atlas() {
     let requested = test_color_context(ColorSpace::Rec709);
 
-    let contract = cpu_raster_presentation_contract(&requested)
+    let contract = preview_raster_presentation_contract(&requested)
         .expect("Rec.709 viewer output has an sRGB raster presentation contract");
 
     assert_eq!(requested.output_color_space, ColorSpace::Rec709.into());
-    assert_eq!(
-        contract.raster_color_space,
-        mondrian_ui_core::RasterImageColorSpace::Srgb
-    );
+    assert_eq!(contract.color_space, PreviewRasterColorSpace::Srgb);
 }
 
 #[test]
-fn cpu_raster_presentation_contract_adapts_wide_gamut_sdr_and_rejects_hdr() {
+fn preview_raster_presentation_contract_adapts_wide_gamut_sdr_and_rejects_hdr() {
     let p3 = test_color_context(ColorSpace::DisplayP3);
-    assert!(cpu_raster_presentation_contract(&p3).is_ok());
+    assert!(preview_raster_presentation_contract(&p3).is_ok());
 
     for output in [ColorSpace::Rec2100Pq, ColorSpace::Rec2100Hlg] {
         let requested = test_color_context(output);
-        let error = cpu_raster_presentation_contract(&requested)
+        let error = preview_raster_presentation_contract(&requested)
             .expect_err("HDR to sRGB raster requires an explicit rendering policy");
         assert!(error.contains("dynamic-range class"));
     }
@@ -6320,7 +6317,9 @@ fn stale_viewer_frame_is_scoped_to_sequence_and_dimensions() {
     let same_scope = service
         .stale_frame_for_sequence(sequence, width, height)
         .expect("same sequence can reuse stale frame");
-    assert_eq!(same_scope.key, ready.key);
+    assert_eq!(same_scope.resource_key, ready.key);
+    assert_eq!(same_scope.color_space, PreviewRasterColorSpace::Srgb);
+    assert!(Arc::ptr_eq(&same_scope.rgba, &ready.rgba));
 
     let different_sequence = Sequence::new("other");
     assert!(service.stale_frame_for_sequence(&different_sequence, width, height).is_none());

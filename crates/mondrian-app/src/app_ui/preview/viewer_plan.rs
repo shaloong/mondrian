@@ -254,22 +254,3 @@ fn is_preview_gpu_media_transform_supported(transform: [f32; 6]) -> bool {
     let det = transform[0] * transform[4] - transform[3] * transform[1];
     det.abs() > 1.0e-8
 }
-
-pub(super) fn viewer_raster_frame_key(cache_key: &ViewerPreviewCacheKey) -> String {
-    format!(
-        "app-ui.viewer.raster:{}:{}x{}:{:016x}",
-        cache_key.sequence_id, cache_key.width, cache_key.height, cache_key.plan_signature
-    )
-}
-
-pub(super) fn uncached_viewer_raster_frame_key(
-    sequence_id: SequenceId,
-    frame: i64,
-    width: u32,
-    height: u32,
-) -> String {
-    format!(
-        "app-ui.viewer.raster-uncached:{sequence_id}:{width}x{height}:f{}",
-        frame.max(0)
-    )
-}

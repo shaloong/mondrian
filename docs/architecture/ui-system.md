@@ -381,7 +381,9 @@ content, deferred playback composites, CPU output transformation, packaging,
 and pinning. The parent Preview Adapter coordinates scheduling and diagnostics;
 `app::preview_execution` remains the sole generation/candidate/registered-output
 lifecycle owner. This Locality prevents UI redraw code from reconstructing a
-second output-selection policy.
+second output-selection policy. Raster cache and stale pinning retain the
+UI-independent `PreviewRasterFrame`; this final Window Adapter performs the only
+conversion to `ViewerFrameImage` and shares the existing pixel allocation.
 The same rule applies while a pause, seek, or exact-still request replaces the
 current frame: `Stale` prefers the last presented external GPU frame for the
 same sequence and output extent, then falls back to the pinned CPU raster. A
@@ -416,11 +418,13 @@ fail visibly and are reported through `unsupported_raster_color_spaces`, which
 the app promotes into frame diagnostics and resource-failure logs. Adding a P3
 atlas later requires a separate compatible texture/pipeline path; it must not
 silently reinterpret P3 bytes through the sRGB atlas.
-The CPU Viewer adapter owns a `CpuRasterPresentationContract`: Rec.709 and sRGB
-SDR requests are output-transformed to an sRGB atlas payload and labeled
-`RasterImageColorSpace::Srgb`; P3/PQ/HLG requests fail closed instead of being
-tone-mapped or relabeled by the widget layer. GPU viewer candidates retain the
-original monitor/output contract and continue through the native output/surface
+The application-layer `PreviewRasterPresentationContract` resolves the CPU
+boundary before any Widget object exists: Rec.709, sRGB, and Display P3 SDR
+requests are monitor-adapted to an sRGB atlas payload; PQ/HLG requests fail
+closed until an explicit SDR tone-mapping policy exists. The Window Adapter then
+maps the proven encoding to `RasterImageColorSpace::Srgb`; the widget layer never
+tone-maps or relabels bytes. GPU Viewer candidates retain the original
+monitor/output contract and continue through the native output/surface
 validation path.
 
 GPU preview candidate counters are intentionally scoped to the headless service

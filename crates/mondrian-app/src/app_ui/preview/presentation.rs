@@ -97,13 +97,15 @@ impl AppUiPreviewService {
                         app_duration_us(render_started_at.elapsed()),
                         render_stage_durations,
                     );
-                    self.frame_store.borrow_mut().pin_viewer_frame(ScopedViewerFrame {
+                    self.frame_store.borrow_mut().pin_viewer_frame(ScopedPreviewRasterFrame {
                         sequence_id: sequence.id,
                         width,
                         height,
                         frame: frame.clone(),
                     });
-                    ViewerPreviewState::Ready(ViewerFrameContent::Raster(frame))
+                    viewer_frame_image(&frame)
+                        .map(|frame| ViewerPreviewState::Ready(ViewerFrameContent::Raster(frame)))
+                        .unwrap_or(ViewerPreviewState::Unavailable)
                 } else if state.is_playing()
                     && preview_elements_require_deferred_composite(&resolved.elements)
                 {
@@ -120,7 +122,7 @@ impl AppUiPreviewService {
                     render_stage_durations.final_cache_lookup_us =
                         app_duration_us(final_cache_lookup_started_at.elapsed());
                     let raster_contract =
-                        match cpu_raster_presentation_contract(&resolved.color_context) {
+                        match preview_raster_presentation_contract(&resolved.color_context) {
                             Ok(contract) => contract,
                             Err(output_color_space) => {
                                 tracing::warn!(
@@ -152,15 +154,18 @@ impl AppUiPreviewService {
                     }
                     self.record_color_stage(output.color_stage_diagnostics);
                     let frame_packaging_started_at = Instant::now();
-                    let key =
-                        resolved.cache_key.as_ref().map(viewer_raster_frame_key).unwrap_or_else(
-                            || uncached_viewer_raster_frame_key(sequence.id, frame, width, height),
-                        );
-                    match ViewerFrameImage::new(
+                    let key = resolved
+                        .cache_key
+                        .as_ref()
+                        .map(preview_raster_resource_key)
+                        .unwrap_or_else(|| {
+                            uncached_preview_raster_resource_key(sequence.id, frame, width, height)
+                        });
+                    match PreviewRasterFrame::new(
                         key,
                         width,
                         height,
-                        raster_contract.raster_color_space,
+                        raster_contract.color_space,
                         output.rgba,
                     ) {
                         Some(frame) => {
@@ -175,13 +180,19 @@ impl AppUiPreviewService {
                                 app_duration_us(render_started_at.elapsed()),
                                 render_stage_durations,
                             );
-                            self.frame_store.borrow_mut().pin_viewer_frame(ScopedViewerFrame {
-                                sequence_id: sequence.id,
-                                width,
-                                height,
-                                frame: frame.clone(),
-                            });
-                            ViewerPreviewState::Ready(ViewerFrameContent::Raster(frame))
+                            self.frame_store.borrow_mut().pin_viewer_frame(
+                                ScopedPreviewRasterFrame {
+                                    sequence_id: sequence.id,
+                                    width,
+                                    height,
+                                    frame: frame.clone(),
+                                },
+                            );
+                            viewer_frame_image(&frame)
+                                .map(|frame| {
+                                    ViewerPreviewState::Ready(ViewerFrameContent::Raster(frame))
+                                })
+                                .unwrap_or(ViewerPreviewState::Unavailable)
                         }
                         None => ViewerPreviewState::Unavailable,
                     }
@@ -199,7 +210,7 @@ impl AppUiPreviewService {
         preview_state
     }
 
-    fn cached_viewer_frame(&self, key: &ViewerPreviewCacheKey) -> Option<ViewerFrameImage> {
+    fn cached_viewer_frame(&self, key: &ViewerPreviewCacheKey) -> Option<PreviewRasterFrame> {
         let frame = self.frame_store.borrow_mut().viewer_frame(key);
         if frame.is_some() {
             bump(&self.metrics.viewer_frame_cache_hits);
@@ -222,6 +233,8 @@ impl AppUiPreviewService {
             .map(|(_, output)| ViewerFrameContent::ExternalTexture(output.clone()))
             .or_else(|| {
                 self.stale_frame_for_sequence(sequence, width, height)
+                    .as_ref()
+                    .and_then(viewer_frame_image)
                     .map(ViewerFrameContent::Raster)
             })
     }
@@ -234,4 +247,20 @@ impl AppUiPreviewService {
             ViewerPreviewState::Unavailable => bump(&self.metrics.unavailable_frames),
         }
     }
+}
+
+/// Final Window Adapter conversion. Cached and pinned Preview state never
+/// retains Widget payloads; only an about-to-be-presented raster crosses this
+/// boundary.
+fn viewer_frame_image(frame: &PreviewRasterFrame) -> Option<ViewerFrameImage> {
+    let color_space = match frame.color_space {
+        PreviewRasterColorSpace::Srgb => mondrian_ui_core::RasterImageColorSpace::Srgb,
+    };
+    ViewerFrameImage::new(
+        frame.resource_key.clone(),
+        frame.width,
+        frame.height,
+        color_space,
+        Arc::clone(&frame.rgba),
+    )
 }

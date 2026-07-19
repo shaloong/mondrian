@@ -135,27 +135,6 @@ pub(super) fn composite_resolved_preview_working(
     })
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct CpuRasterPresentationContract {
-    pub(super) raster_color_space: mondrian_ui_core::RasterImageColorSpace,
-}
-
-pub(super) fn cpu_raster_presentation_contract(
-    requested: &ColorContext,
-) -> Result<CpuRasterPresentationContract, String> {
-    let program_output = requested.output_color_space.color().ok_or_else(|| {
-        format!(
-            "Program Output {:?} is not an encoded color identity",
-            requested.output_color_space
-        )
-    })?;
-    RenderMonitorAdaptation::new(program_output, ColorSpace::Srgb, requested.engine.clone())
-        .map_err(|error| error.to_string())?;
-    Ok(CpuRasterPresentationContract {
-        raster_color_space: mondrian_ui_core::RasterImageColorSpace::Srgb,
-    })
-}
-
 pub(super) fn output_boundary_from_color_context(
     color_context: &ColorContext,
 ) -> Result<RenderOutputColorBoundary, String> {

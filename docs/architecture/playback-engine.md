@@ -793,13 +793,18 @@ surface and zero for CPU frames. LRU eviction enforces count, byte, and resource
 budgets together, and diagnostics expose both current resource units and the
 configured limit.
 
-The App's `PreviewCpuFrameStore` is now a thin Adapter and policy composition
-root: it computes the
-reservation for `MediaPreviewFrame`, maps `ViewerFrameImage` to its encoded byte
-size, aligns native-resource residency with the configured maximum prefetch
-window, and constructs the `(SequenceId, width, height)` presentation scope. All
-residency and failure state lives in the playback-owned Module. A headless
-Adapter must instantiate the same Interface rather than reproduce cache policy.
+The App's `PreviewCpuFrameStore` is a thin Adapter and policy composition root:
+it computes the reservation for `MediaPreviewFrame`, admits the validated
+UI-independent `PreviewRasterFrame` by its exact encoded byte size, aligns
+native-resource residency with the configured maximum prefetch window, and
+constructs the `(SequenceId, width, height)` presentation scope. All residency
+and failure state lives in the playback-owned Module. It never stores a Widget
+payload. `app::preview_raster_frame` owns RGBA8 validation, encoded color
+identity, stable presentation-resource naming, and the CPU raster output
+contract. The Window presentation Adapter alone maps that value to
+`ViewerFrameImage`, reusing the same `Arc<[u8]>`; a headless Adapter can consume
+the application contract directly and must instantiate the same Store Interface
+rather than reproduce cache policy.
 
 Viewer execution now has one renderer-owned Interface and Implementation.
 `ViewerGpuExecutionRequest` supplies working-space layers, the exact output

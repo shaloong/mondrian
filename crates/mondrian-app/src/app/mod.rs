@@ -71,6 +71,7 @@ pub(crate) mod preview_execution;
 pub(crate) mod preview_gpu_output_blocker;
 pub(crate) mod preview_hardware_admission;
 pub(crate) mod preview_quality;
+pub(crate) mod preview_raster_frame;
 pub(crate) mod preview_scheduler_policy;
 mod project_lifecycle;
 pub(crate) mod proxy_generation;

@@ -101,6 +101,10 @@ use crate::app::preview_execution::{
 use crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker;
 use crate::app::preview_hardware_admission::PreviewHardwareDecodeAdmissionState;
 use crate::app::preview_quality::normalize_preview_resolution_scale;
+use crate::app::preview_raster_frame::{
+    preview_raster_presentation_contract, preview_raster_resource_key,
+    uncached_preview_raster_resource_key, PreviewRasterColorSpace, PreviewRasterFrame,
+};
 use crate::app::preview_scheduler_policy::{
     media_preview_forward_prefetch_window_frames, playback_frame_delivery_kind,
     playback_hardware_recovery_signals, preview_decode_presentation_quality,
@@ -122,6 +126,7 @@ use crate::app_ui::panels::{
 use crate::app_ui::preview_frame_store::PreviewCpuFrameStore;
 #[cfg(test)]
 use crate::app_ui::preview_frame_store::PreviewCpuFrameStoreConfig;
+use crate::app_ui::preview_frame_store::ScopedPreviewRasterFrame;
 
 const MEDIA_PREVIEW_PLAYBACK_BUFFERING_STALL_TIMEOUT_US: u64 = 250_000;
 const MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
@@ -589,7 +594,7 @@ impl AppUiPreviewService {
         sequence: &Sequence,
         width: u32,
         height: u32,
-    ) -> Option<ViewerFrameImage> {
+    ) -> Option<PreviewRasterFrame> {
         self.frame_store.borrow().stale_viewer_frame(sequence.id, width, height)
     }
 }
@@ -697,8 +702,7 @@ use crate::app::preview_execution::PreviewOutputKey as ViewerPreviewCacheKey;
 use viewer_plan::{
     gpu_composite_layers_for_resolved, preview_elements_require_deferred_composite,
     resolved_preview_decode_execution, resolved_preview_presentation_quality,
-    uncached_viewer_raster_frame_key, viewer_preview_cache_key_for_resolved_plan,
-    viewer_raster_frame_key, ResolvedPreviewElement,
+    viewer_preview_cache_key_for_resolved_plan, ResolvedPreviewElement,
 };
 impl ViewerPreviewSource for AppUiPreviewService {
     fn viewer_preview_for_state(&self, state: &AppState) -> ViewerPreviewState {
@@ -777,14 +781,6 @@ impl Drop for AppUiPreviewService {
     fn drop(&mut self) {
         self.shutdown();
     }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ScopedViewerFrame {
-    pub(crate) sequence_id: SequenceId,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) frame: ViewerFrameImage,
 }
 
 #[derive(Debug)]

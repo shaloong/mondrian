@@ -407,10 +407,15 @@ Viewer planning, final presentation arbitration, and diagnostics live in
 separate private deep Modules. `app_ui::preview::presentation` exclusively
 chooses exact registered GPU output, raster cache, scoped stale reuse, deferred
 playback composite, or the CPU output boundary; it cannot schedule media work
-or mutate transport. `app_ui::preview::result_pump` exclusively performs the
-bounded UI-thread drain of completed work, Broker resolution, deadline expiry,
-cache admission, and terminal Frame Delivery projection; it may record facts
-but cannot invent generation or deadline authority. Worker shutdown and
+or mutate transport. CPU raster cache and stale state use the validated,
+UI-independent `app::preview_raster_frame::PreviewRasterFrame`; only this final
+Window Adapter converts it to a Widget `ViewerFrameImage`, without copying the
+shared pixel allocation. Raster extent, encoded color identity, byte reservation,
+and stable resource naming therefore remain available to Headless presentation
+without importing Widget types. `app_ui::preview::result_pump` exclusively
+performs the bounded UI-thread drain of completed work, Broker resolution,
+deadline expiry, cache admission, and terminal Frame Delivery projection; it may
+record facts but cannot invent generation or deadline authority. Worker shutdown and
 project/switch cancellation live separately in `service_lifecycle`, so teardown
 cannot become an alternate completion policy. Frame cache storage remains owned by `PreviewFrameStore`,
 while diagnostic aggregation remains in the Preview Adapter. This is a

@@ -1,15 +1,15 @@
 //! App Adapter for the playback-owned Preview Frame Store.
 //!
-//! This Module maps Mondrian media and Viewer payloads to opaque playback keys,
+//! This Module maps Mondrian media and Preview raster payloads to opaque playback keys,
 //! exact byte reservations, and an exact presentation scope. Residency,
 //! admission, eviction, failure memory, and pinning remain playback-owned.
 
 use mondrian_core::types::SequenceId;
-use mondrian_ui_widgets::ViewerFrameImage;
 
-use super::preview::{MediaPreviewFrame, ScopedViewerFrame};
+use super::preview::MediaPreviewFrame;
 use crate::app::preview_access_mode::MediaPreviewKey;
 use crate::app::preview_execution::PreviewOutputKey as ViewerPreviewCacheKey;
+use crate::app::preview_raster_frame::PreviewRasterFrame;
 use crate::app::preview_scheduler_policy::MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES;
 
 #[cfg(test)]
@@ -27,9 +27,18 @@ type PlaybackFrameStore = mondrian_playback::PreviewFrameStore<
     MediaPreviewKey,
     MediaPreviewFrame,
     ViewerPreviewCacheKey,
-    ViewerFrameImage,
+    PreviewRasterFrame,
     ViewerFrameScope,
 >;
+
+/// One final raster pinned for exact-scope stale reuse.
+#[derive(Debug, Clone)]
+pub(crate) struct ScopedPreviewRasterFrame {
+    pub(crate) sequence_id: SequenceId,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) frame: PreviewRasterFrame,
+}
 
 /// Thin App Adapter over the playback-owned Preview Frame Store Interface.
 pub(crate) struct PreviewCpuFrameStore {
@@ -75,18 +84,21 @@ impl PreviewCpuFrameStore {
             .is_resident()
     }
 
-    /// Return and touch one final Viewer raster.
-    pub(crate) fn viewer_frame(&mut self, key: &ViewerPreviewCacheKey) -> Option<ViewerFrameImage> {
+    /// Return and touch one final Preview raster.
+    pub(crate) fn viewer_frame(
+        &mut self,
+        key: &ViewerPreviewCacheKey,
+    ) -> Option<PreviewRasterFrame> {
         self.store.viewer_frame(key)
     }
 
-    /// Admit one final Viewer raster under its encoded byte reservation.
+    /// Admit one final Preview raster under its encoded byte reservation.
     pub(crate) fn insert_viewer_frame(
         &mut self,
         key: ViewerPreviewCacheKey,
-        frame: ViewerFrameImage,
+        frame: PreviewRasterFrame,
     ) -> bool {
-        let reserved_bytes = frame.rgba.len();
+        let reserved_bytes = frame.reserved_bytes();
         self.store.admit_viewer_frame(key, frame, reserved_bytes).is_resident()
     }
 
@@ -105,14 +117,14 @@ impl PreviewCpuFrameStore {
         self.store.contains_failure(key)
     }
 
-    /// Pin the current Viewer raster with its exact stale-reuse scope.
-    pub(crate) fn pin_viewer_frame(&mut self, frame: ScopedViewerFrame) {
+    /// Pin the current Preview raster with its exact stale-reuse scope.
+    pub(crate) fn pin_viewer_frame(&mut self, frame: ScopedPreviewRasterFrame) {
         let scope = ViewerFrameScope {
             sequence_id: frame.sequence_id,
             width: frame.width,
             height: frame.height,
         };
-        let reserved_bytes = frame.frame.rgba.len();
+        let reserved_bytes = frame.frame.reserved_bytes();
         self.store.pin_viewer_frame(scope, frame.frame, reserved_bytes);
     }
 
@@ -122,7 +134,7 @@ impl PreviewCpuFrameStore {
         sequence_id: SequenceId,
         width: u32,
         height: u32,
-    ) -> Option<ViewerFrameImage> {
+    ) -> Option<PreviewRasterFrame> {
         self.store.stale_viewer_frame(&ViewerFrameScope { sequence_id, width, height })
     }
 
