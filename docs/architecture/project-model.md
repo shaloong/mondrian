@@ -94,7 +94,11 @@ user interpretation. The catalog owns stable logical audio Component IDs,
 conservative physical-stream signatures, and the source fingerprint that
 authorized them. Timeline and Project JSON never persist FFmpeg stream indices;
 Export copies validated reachable selections into its immutable execution
-snapshot.
+snapshot. Explicit stream repair is committed atomically with refreshed probe
+metadata and fingerprint evidence while preserving the logical Component ID.
+Automatic reconcile does not retarget an existing ID or create physical-stream
+aliases; only an explicit rebind may alias a stream, so another Project's stable
+reference never has to be deleted as a side effect of repair.
 
 ## Format Evolution
 

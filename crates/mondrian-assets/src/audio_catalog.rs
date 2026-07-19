@@ -114,6 +114,37 @@ impl AssetAudioComponentCatalog {
         Ok(catalog)
     }
 
+    /// Explicitly bind one existing logical Component to a probed physical stream.
+    ///
+    /// Rebinding preserves `component_id`, so Timeline edits and projects that
+    /// reference it do not need to be rewritten. Another logical Component may
+    /// already name the same physical stream: explicit aliases are valid, while
+    /// [`Self::reconcile`] never creates one implicitly.
+    pub fn rebind(
+        &self,
+        component_id: AudioSourceComponentId,
+        stream_index: u32,
+        info: &MediaInfo,
+        source_fingerprint: MediaFileFingerprint,
+    ) -> Result<Self, AudioComponentCatalogError> {
+        self.validate()?;
+        let stream = info
+            .audio_streams
+            .iter()
+            .find(|stream| stream.index == stream_index)
+            .ok_or(AudioComponentCatalogError::UnknownPhysicalStream { stream_index })?;
+        let mut components = self.components.clone();
+        let component = components
+            .iter_mut()
+            .find(|component| component.id == component_id)
+            .ok_or(AudioComponentCatalogError::UnknownComponent { component_id })?;
+        component.binding = AssetAudioStreamBinding::from_stream(stream);
+        sort_components(&mut components);
+        let catalog = Self { source_fingerprint, components };
+        catalog.validate()?;
+        Ok(catalog)
+    }
+
     /// Resolve a stable logical Component against current probe evidence.
     pub fn resolve<'a>(
         &self,
@@ -167,19 +198,17 @@ impl AssetAudioComponentCatalog {
         self.resolve_selection(component_id, info)
     }
 
-    /// Validate Component identity and physical-stream binding uniqueness.
+    /// Validate stable logical Component identity uniqueness.
+    ///
+    /// Multiple IDs may deliberately alias one physical stream after explicit
+    /// rebinding. Automatic import/reconciliation still creates at most one ID
+    /// per discovered stream.
     pub fn validate(&self) -> Result<(), AudioComponentCatalogError> {
         let mut ids = BTreeSet::new();
-        let mut stream_indices = BTreeSet::new();
         for component in &self.components {
             if !ids.insert(component.id) {
                 return Err(AudioComponentCatalogError::DuplicateComponent {
                     component_id: component.id,
-                });
-            }
-            if !stream_indices.insert(component.binding.stream_index) {
-                return Err(AudioComponentCatalogError::DuplicateStreamBinding {
-                    stream_index: component.binding.stream_index,
                 });
             }
         }
@@ -199,17 +228,17 @@ pub enum AudioComponentCatalogError {
         /// Conflicting stable identity.
         component_id: AudioSourceComponentId,
     },
-    /// Two logical Components claimed the same physical stream index.
-    #[error("duplicate audio stream binding at stream index {stream_index}")]
-    DuplicateStreamBinding {
-        /// Conflicting physical stream index.
-        stream_index: u32,
-    },
     /// The Timeline references a Component absent from this Asset catalog.
     #[error("unknown audio component {component_id}")]
     UnknownComponent {
         /// Missing stable identity.
         component_id: AudioSourceComponentId,
+    },
+    /// The current probe has no stream at the requested physical index.
+    #[error("unknown physical audio stream index {stream_index}")]
+    UnknownPhysicalStream {
+        /// Requested absolute container stream index.
+        stream_index: u32,
     },
     /// The expected physical stream is absent from current probe evidence.
     #[error("audio component {component_id} expects missing stream index {stream_index}")]
@@ -352,6 +381,66 @@ mod tests {
             .components
             .iter()
             .any(|component| component.binding.stream_index == 7));
+    }
+
+    #[test]
+    fn explicit_rebind_preserves_identity_and_may_alias_a_discovered_stream() {
+        let original = media_info(vec![
+            stream(1, 10, "eng", ChannelLayout::Stereo, true),
+            stream(3, 30, "fra", ChannelLayout::Stereo, false),
+        ]);
+        let catalog = AssetAudioComponentCatalog::from_media_info(&original, fingerprint(1));
+        let replacement = media_info(vec![
+            stream(1, 11, "jpn", ChannelLayout::Surround51Side, true),
+            stream(7, 70, "deu", ChannelLayout::Mono, false),
+        ]);
+        let reconciled = catalog.reconcile(&replacement, fingerprint(2)).expect("reconcile");
+        let discovered_id = reconciled
+            .components
+            .iter()
+            .find(|component| component.binding.stream_index == 7)
+            .expect("newly discovered stream")
+            .id;
+
+        let rebound = reconciled
+            .rebind(
+                AudioSourceComponentId::primary(),
+                7,
+                &replacement,
+                fingerprint(2),
+            )
+            .expect("explicit rebind");
+
+        assert_eq!(
+            rebound
+                .resolve(AudioSourceComponentId::primary(), &replacement)
+                .expect("rebound primary")
+                .index,
+            7
+        );
+        assert_eq!(
+            rebound
+                .resolve(discovered_id, &replacement)
+                .expect("existing discovered alias")
+                .index,
+            7
+        );
+        assert_eq!(rebound.components.len(), reconciled.components.len());
+    }
+
+    #[test]
+    fn explicit_rebind_rejects_unknown_logical_or_physical_identity() {
+        let info = media_info(vec![stream(2, 20, "eng", ChannelLayout::Stereo, true)]);
+        let catalog = AssetAudioComponentCatalog::from_media_info(&info, fingerprint(1));
+
+        assert!(matches!(
+            catalog.rebind(AudioSourceComponentId::new(), 2, &info, fingerprint(1)),
+            Err(AudioComponentCatalogError::UnknownComponent { .. })
+        ));
+        assert_eq!(
+            catalog.rebind(AudioSourceComponentId::primary(), 99, &info, fingerprint(1)),
+            Err(AudioComponentCatalogError::UnknownPhysicalStream { stream_index: 99 })
+        );
     }
 
     #[test]

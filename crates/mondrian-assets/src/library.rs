@@ -4,7 +4,7 @@ use crate::{audio_catalog::AssetAudioComponentCatalog, migration::migrate_asset_
 use mondrian_core::{
     timeline_data::AssetMediaInterpretation,
     types::{AssetId, AssetSource},
-    MondrianError, Result,
+    AudioSourceComponentId, MondrianError, Result,
 };
 use mondrian_media::{MediaFileFingerprint, MediaInfo};
 use parking_lot::Mutex;
@@ -337,6 +337,115 @@ impl AssetLibrary {
             return Err(MondrianError::AssetNotFound { asset_id: asset_id.to_string() });
         }
 
+        Ok(())
+    }
+
+    /// Explicitly bind one stable Asset audio Component to a physical stream
+    /// from the Asset's current file revision.
+    pub fn rebind_audio_component(
+        &self,
+        asset_id: AssetId,
+        component_id: AudioSourceComponentId,
+        stream_index: u32,
+    ) -> Result<()> {
+        let asset = self
+            .get_asset(asset_id)?
+            .ok_or_else(|| MondrianError::AssetNotFound { asset_id: asset_id.to_string() })?;
+        let fingerprint_before = MediaFileFingerprint::capture(&asset.path);
+        let info = MediaInfo::probe(&asset.path)?;
+        let fingerprint_after = MediaFileFingerprint::capture(&asset.path);
+        if fingerprint_before != fingerprint_after {
+            return Err(MondrianError::AssetDbError {
+                reason: "audio source changed while probing Component rebind candidates".to_owned(),
+            });
+        }
+        self.rebind_audio_component_with_info(
+            asset_id,
+            component_id,
+            stream_index,
+            &asset.path,
+            info,
+            fingerprint_after,
+        )
+    }
+
+    fn rebind_audio_component_with_info(
+        &self,
+        asset_id: AssetId,
+        component_id: AudioSourceComponentId,
+        stream_index: u32,
+        expected_path: &Path,
+        mut info: MediaInfo,
+        source_fingerprint: MediaFileFingerprint,
+    ) -> Result<()> {
+        let current_fingerprint = MediaFileFingerprint::capture(expected_path);
+        if current_fingerprint != source_fingerprint {
+            return Err(MondrianError::AssetDbError {
+                reason: "audio source changed before Component rebind commit".to_owned(),
+            });
+        }
+        info.path = expected_path.to_path_buf();
+        let kind = detect_asset_kind(&info, expected_path)?;
+        let metadata_json = serde_json::to_string(&info)?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let db = self.db.lock();
+        let existing = db
+            .query_row(
+                "SELECT path, asset_type, audio_components FROM assets WHERE id = ?1 LIMIT 1",
+                rusqlite::params![asset_id.0.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+        let Some((stored_path, stored_kind, existing_catalog)) = existing else {
+            return Err(MondrianError::AssetNotFound { asset_id: asset_id.to_string() });
+        };
+        if Path::new(&stored_path) != expected_path {
+            return Err(MondrianError::AssetDbError {
+                reason: "Asset path changed before audio Component rebind commit".to_owned(),
+            });
+        }
+        if AssetKind::from_str(&stored_kind) != kind {
+            return Err(MondrianError::AssetDbError {
+                reason: "Asset type changed before audio Component rebind commit".to_owned(),
+            });
+        }
+
+        let audio_components =
+            serde_json::from_str::<AssetAudioComponentCatalog>(&existing_catalog)
+                .map_err(|error| MondrianError::AssetDbError {
+                    reason: format!("invalid audio Component catalog in db: {error}"),
+                })?
+                .reconcile(&info, source_fingerprint)
+                .and_then(|catalog| {
+                    catalog.rebind(component_id, stream_index, &info, source_fingerprint)
+                })
+                .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+        let audio_components_json = serde_json::to_string(&audio_components)?;
+        let changed = db
+            .execute(
+                "UPDATE assets SET metadata = ?1, audio_components = ?2, updated_at = ?3 \
+                 WHERE id = ?4 AND path = ?5",
+                rusqlite::params![
+                    metadata_json,
+                    audio_components_json,
+                    now,
+                    asset_id.0.to_string(),
+                    stored_path
+                ],
+            )
+            .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+        if changed != 1 {
+            return Err(MondrianError::AssetDbError {
+                reason: "Asset changed before audio Component rebind commit".to_owned(),
+            });
+        }
         Ok(())
     }
 
@@ -1038,6 +1147,44 @@ mod tests {
                 .collect::<Vec<_>>(),
             original_component_ids
         );
+    }
+
+    #[test]
+    fn explicit_component_rebind_is_committed_with_current_probe_evidence() {
+        let lib = open_test_library();
+        let media_dir = tempfile::tempdir().expect("media tempdir");
+        let media_path = media_dir.path().join("rebind-audio.mov");
+        std::fs::write(&media_path, [0u8]).expect("media file");
+        let asset_id = lib
+            .upsert_media_file_with_info(&media_path, lightweight_audio_info(&media_path))
+            .expect("initial upsert");
+        let original = lib.get_asset(asset_id).expect("get").expect("asset");
+        let mut replacement = lightweight_audio_info(&original.path);
+        replacement.audio_streams[0].index = 7;
+        replacement.audio_streams[0].stream_id = Some(70);
+        replacement.audio_streams[1].stream_id = Some(31);
+        let fingerprint = MediaFileFingerprint::capture(&original.path);
+
+        lib.rebind_audio_component_with_info(
+            asset_id,
+            AudioSourceComponentId::primary(),
+            7,
+            &original.path,
+            replacement,
+            fingerprint,
+        )
+        .expect("rebind Component");
+
+        let rebound = lib.get_asset(asset_id).expect("get").expect("asset");
+        assert_eq!(
+            rebound
+                .audio_components
+                .resolve(AudioSourceComponentId::primary(), &rebound.media_info)
+                .expect("primary binding")
+                .index,
+            7
+        );
+        assert_eq!(rebound.audio_components.source_fingerprint, fingerprint);
     }
 
     #[test]

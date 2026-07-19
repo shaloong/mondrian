@@ -72,8 +72,13 @@ before PCM decode.
 
 Reprobe/relink preserves existing logical IDs and their signatures. A new
 unclaimed stream index receives a new ID, while a changed stream at a claimed
-index remains unresolved until an explicit future rebind operation; neither
-language nor current default disposition may silently retarget authored edits.
+index remains unresolved until an explicit rebind; neither language nor current
+default disposition may silently retarget authored edits. Rebind is an atomic
+Asset-library operation against current probe and file-fingerprint evidence. It
+changes only the selected logical Component's physical binding and preserves its
+ID. Two logical Components may deliberately alias one physical stream after
+explicit repair because deleting or retargeting the other ID could invalidate a
+different Project; automatic import and reconcile never create such aliases.
 
 The Sequence persists one validated semantic `AudioChannelLayout`; it does not
 persist a second channel count. The value is either independent Mono, a
