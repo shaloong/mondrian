@@ -1,7 +1,7 @@
 use crate::plan::{
     AudioCompileRequest, CompiledAudioContribution, CompiledAudioProgram, CompiledAudioSource,
-    CompiledChannelStrip, CompiledProcessingScope, CompiledProcessor, CompiledRack,
-    CompiledSourceTimeMap, CompiledTrackChannel, CompiledTransition,
+    CompiledChannelStrip, CompiledProcessingScope, CompiledProcessor, CompiledProcessorOperation,
+    CompiledRack, CompiledSourceTimeMap, CompiledTrackChannel, CompiledTransition,
 };
 use mondrian_core::{AudioProcessingScopeId, MixBusId, ProgramOutputId, TrackId};
 use mondrian_timeline::audio::{
@@ -211,7 +211,10 @@ fn compile_rack(rack: &AudioProcessorRack) -> Result<CompiledRack, AudioCompileE
                     return Err(AudioCompileError::UnsupportedBuiltInParameter);
                 }
                 let automation = parameter.automation.clone();
-                processors.push(CompiledProcessor::Gain { automation });
+                processors.push(CompiledProcessor {
+                    instance_id: processor.id,
+                    operation: CompiledProcessorOperation::Gain { parameter_id, automation },
+                });
             }
             AudioProcessorDefinitionRef::BuiltIn { definition_id, .. } => {
                 return Err(AudioCompileError::UnsupportedBuiltIn(definition_id.clone()));

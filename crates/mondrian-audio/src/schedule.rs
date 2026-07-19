@@ -3,12 +3,13 @@
 use crate::latency::{solve_prepared_latency, PreparedLatencyNodeInput, PreparedNodeLatency};
 use crate::plan::{
     AudioRenderContract, CompiledAudioContribution, CompiledAudioProgram, CompiledChannelStrip,
-    CompiledProcessingScope, CompiledProcessor, CompiledRack, CompiledTransition,
+    CompiledProcessingScope, CompiledProcessorOperation, CompiledRack, CompiledTransition,
 };
 use crate::AudioCompileError;
 use mondrian_core::{
-    AudioSamplePosition, AudioSampleRate, AudioSampleRounding, ExactAutomationCurve,
-    ExactAutomationSegment, MixBusId, ProgramOutputId, TimelineTime, TrackId,
+    AudioComponentEditId, AudioProcessingScopeId, AudioProcessorInstanceId, AudioSamplePosition,
+    AudioSampleRate, AudioSampleRounding, ExactAutomationCurve, ExactAutomationSegment, MixBusId,
+    ParameterId, ProgramOutputId, TimelineTime, TrackId,
 };
 use mondrian_timeline::audio::{
     AudioChannelStripOutputPort, AudioRouteDestination, AudioRouteSource, AudioTransitionCurve,
@@ -100,10 +101,16 @@ pub struct PreparedAudioScheduleSummary {
     pub route_count: usize,
     /// Contribution-local Transition bindings.
     pub transition_binding_count: usize,
-    /// Validated non-constant automation curves lowered into the schedule.
+    /// Validated automation curves lowered into the schedule.
     pub automation_curve_count: usize,
     /// Exact interpolation spans selected before Session execution.
     pub automation_event_span_count: usize,
+    /// Generated processor occurrences with independent Session state.
+    pub processor_occurrence_count: usize,
+    /// Stable parameter lanes across all generated processor occurrences.
+    pub processor_parameter_lane_count: usize,
+    /// Largest sample-accurate event batch required by one processor block.
+    pub maximum_parameter_events_per_block: usize,
     /// Scratch slots after interval-liveness reuse.
     pub scratch_slot_count: usize,
     /// Total intrinsic/PDC latency at the selected Program Output.
@@ -152,7 +159,10 @@ impl PreparedAudioPlan {
         kernel_backend: AudioKernelBackend,
         dependencies: &AudioPreparationDependencies,
     ) -> Result<Self, AudioCompileError> {
-        if contract.sample_rate == 0 || contract.max_block_frames == 0 {
+        if contract.sample_rate == 0
+            || contract.max_block_frames == 0
+            || u32::try_from(contract.max_block_frames).is_err()
+        {
             return Err(AudioCompileError::InvalidRenderContract);
         }
         let schedule = PreparedAudioSchedule::build(program.as_ref(), contract, dependencies)?;
@@ -195,6 +205,7 @@ pub(crate) struct PreparedAudioSchedule {
     pub(crate) nodes: Vec<PreparedNode>,
     pub(crate) routes: Vec<PreparedRoute>,
     pub(crate) contributions: Vec<PreparedContribution>,
+    pub(crate) processors: Vec<PreparedProcessor>,
     pub(crate) scopes: Vec<CompiledProcessingScope>,
     pub(crate) transitions: Vec<PreparedTransitionBinding>,
     pub(crate) output_slot: usize,
@@ -216,11 +227,9 @@ pub(crate) struct PreparedNode {
     pub(crate) incoming: Range<usize>,
     pub(crate) contributions: Range<usize>,
     pub(crate) scratch_slot: usize,
-    pub(crate) constant_pre_gain: Option<f32>,
-    pub(crate) constant_post_gain: Option<f32>,
-    pub(crate) pre_rack_automation: Vec<PreparedAutomationCurve>,
+    pub(crate) pre_rack: PreparedRack,
     pub(crate) fader_automation: Option<PreparedAutomationCurve>,
-    pub(crate) post_rack_automation: Vec<PreparedAutomationCurve>,
+    pub(crate) post_rack: PreparedRack,
     pub(crate) latency: PreparedNodeLatency,
 }
 
@@ -240,15 +249,58 @@ pub(crate) struct PreparedContribution {
     pub(crate) transitions: Range<usize>,
     pub(crate) sequence_start_sample: i64,
     pub(crate) sequence_end_sample: i64,
-    pub(crate) constant_gain_pan: Option<(f32, f64)>,
+    pub(crate) constant_scope_gain: Option<f32>,
+    pub(crate) constant_edit_gain_pan: Option<(f32, f64)>,
     pub(crate) scope_input_automation: Option<PreparedAutomationCurve>,
-    pub(crate) scope_rack_automation: Vec<PreparedAutomationCurve>,
+    pub(crate) scope_rack: PreparedRack,
     pub(crate) volume_automation: Option<PreparedAutomationCurve>,
     pub(crate) pan_automation: Option<PreparedAutomationCurve>,
     pub(crate) source_latency_frames: usize,
     pub(crate) source_requires_state_entry: bool,
-    pub(crate) scope_rack_latency_frames: usize,
     pub(crate) compensation_delay_frames: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedRack {
+    pub(crate) processors: Range<usize>,
+    pub(crate) latency_frames: usize,
+    pub(crate) requires_state_entry: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedProcessor {
+    pub(crate) origin: PreparedProcessorOrigin,
+    pub(crate) parameter_ids: Vec<ParameterId>,
+    pub(crate) parameter_curves: Vec<PreparedAutomationCurve>,
+    pub(crate) operation: PreparedProcessorOperation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreparedProcessorOperation {
+    Gain { parameter_slot: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PreparedProcessorOrigin {
+    pub(crate) instance_id: AudioProcessorInstanceId,
+    pub(crate) owner: PreparedProcessorOwner,
+    pub(crate) insertion: PreparedProcessorInsertion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreparedProcessorOwner {
+    Contribution {
+        edit_id: AudioComponentEditId,
+        scope_id: AudioProcessingScopeId,
+    },
+    Node(PreparedNodeOrigin),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreparedProcessorInsertion {
+    Scope,
+    PreFader,
+    PostFader,
 }
 
 /// One author curve lowered into exact sample-grid event spans.
@@ -257,6 +309,7 @@ pub(crate) struct PreparedAutomationCurve {
     owner_time_offset: TimelineTime,
     segments: Vec<PreparedAutomationSegment>,
     constant_value: f64,
+    constant: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -300,11 +353,24 @@ impl PreparedAutomationCurve {
             .sample();
             segments.push(PreparedAutomationSegment { end_sample, evaluator });
         }
-        Ok(Self { owner_time_offset, segments, constant_value })
+        Ok(Self {
+            owner_time_offset,
+            segments,
+            constant_value,
+            constant: curve.keyframes.len() <= 1,
+        })
     }
 
     pub(crate) fn event_span_count(&self) -> usize {
         self.segments.len().saturating_add(1)
+    }
+
+    pub(crate) const fn is_constant(&self) -> bool {
+        self.constant
+    }
+
+    pub(crate) const fn constant_value(&self) -> f64 {
+        self.constant_value
     }
 
     pub(crate) fn initial_cursor(&self, sample: i64) -> usize {
@@ -356,15 +422,30 @@ impl PreparedAudioSchedule {
         let track_count = program.track_channels.len();
         let bus_count = program.bus_order.len();
         let mut nodes = Vec::with_capacity(track_count.saturating_add(bus_count).saturating_add(1));
+        let mut processors = Vec::new();
         let mut track_slots = BTreeMap::new();
         let mut bus_slots = BTreeMap::new();
 
         for (track_id, channel) in &program.track_channels {
             let slot = nodes.len();
             track_slots.insert(*track_id, slot);
-            let (constant_pre_gain, constant_post_gain) =
-                prepared_strip_constant_gains(&channel.strip);
-            let automation = prepared_strip_automation(&channel.strip, sample_rate)?;
+            let origin = PreparedProcessorOwner::Node(PreparedNodeOrigin::Track(*track_id));
+            let pre_rack = prepare_rack(
+                &channel.strip.pre_fader,
+                origin,
+                PreparedProcessorInsertion::PreFader,
+                TimelineTime::ZERO,
+                sample_rate,
+                &mut processors,
+            )?;
+            let post_rack = prepare_rack(
+                &channel.strip.post_fader,
+                origin,
+                PreparedProcessorInsertion::PostFader,
+                TimelineTime::ZERO,
+                sample_rate,
+                &mut processors,
+            )?;
             nodes.push(PreparedNode {
                 origin: PreparedNodeOrigin::Track(*track_id),
                 strip: channel.strip.clone(),
@@ -372,11 +453,13 @@ impl PreparedAudioSchedule {
                 incoming: 0..0,
                 contributions: 0..0,
                 scratch_slot: 0,
-                constant_pre_gain,
-                constant_post_gain,
-                pre_rack_automation: automation.pre_rack,
-                fader_automation: automation.fader,
-                post_rack_automation: automation.post_rack,
+                pre_rack,
+                fader_automation: prepare_optional_curve(
+                    channel.strip.fader_automation.as_ref(),
+                    TimelineTime::ZERO,
+                    sample_rate,
+                )?,
+                post_rack,
                 latency: PreparedNodeLatency::default(),
             });
         }
@@ -388,8 +471,23 @@ impl PreparedAudioSchedule {
             })?;
             let slot = nodes.len();
             bus_slots.insert(*bus_id, slot);
-            let (constant_pre_gain, constant_post_gain) = prepared_strip_constant_gains(strip);
-            let automation = prepared_strip_automation(strip, sample_rate)?;
+            let origin = PreparedProcessorOwner::Node(PreparedNodeOrigin::Bus(*bus_id));
+            let pre_rack = prepare_rack(
+                &strip.pre_fader,
+                origin,
+                PreparedProcessorInsertion::PreFader,
+                TimelineTime::ZERO,
+                sample_rate,
+                &mut processors,
+            )?;
+            let post_rack = prepare_rack(
+                &strip.post_fader,
+                origin,
+                PreparedProcessorInsertion::PostFader,
+                TimelineTime::ZERO,
+                sample_rate,
+                &mut processors,
+            )?;
             nodes.push(PreparedNode {
                 origin: PreparedNodeOrigin::Bus(*bus_id),
                 strip: strip.clone(),
@@ -397,18 +495,34 @@ impl PreparedAudioSchedule {
                 incoming: 0..0,
                 contributions: 0..0,
                 scratch_slot: 0,
-                constant_pre_gain,
-                constant_post_gain,
-                pre_rack_automation: automation.pre_rack,
-                fader_automation: automation.fader,
-                post_rack_automation: automation.post_rack,
+                pre_rack,
+                fader_automation: prepare_optional_curve(
+                    strip.fader_automation.as_ref(),
+                    TimelineTime::ZERO,
+                    sample_rate,
+                )?,
+                post_rack,
                 latency: PreparedNodeLatency::default(),
             });
         }
         let output_slot = nodes.len();
-        let (constant_pre_gain, constant_post_gain) =
-            prepared_strip_constant_gains(&program.output);
-        let automation = prepared_strip_automation(&program.output, sample_rate)?;
+        let origin = PreparedProcessorOwner::Node(PreparedNodeOrigin::Output(program.output_id));
+        let pre_rack = prepare_rack(
+            &program.output.pre_fader,
+            origin,
+            PreparedProcessorInsertion::PreFader,
+            TimelineTime::ZERO,
+            sample_rate,
+            &mut processors,
+        )?;
+        let post_rack = prepare_rack(
+            &program.output.post_fader,
+            origin,
+            PreparedProcessorInsertion::PostFader,
+            TimelineTime::ZERO,
+            sample_rate,
+            &mut processors,
+        )?;
         nodes.push(PreparedNode {
             origin: PreparedNodeOrigin::Output(program.output_id),
             strip: program.output.clone(),
@@ -416,11 +530,13 @@ impl PreparedAudioSchedule {
             incoming: 0..0,
             contributions: 0..0,
             scratch_slot: 0,
-            constant_pre_gain,
-            constant_post_gain,
-            pre_rack_automation: automation.pre_rack,
-            fader_automation: automation.fader,
-            post_rack_automation: automation.post_rack,
+            pre_rack,
+            fader_automation: prepare_optional_curve(
+                program.output.fader_automation.as_ref(),
+                TimelineTime::ZERO,
+                sample_rate,
+            )?,
+            post_rack,
             latency: PreparedNodeLatency::default(),
         });
 
@@ -489,9 +605,13 @@ impl PreparedAudioSchedule {
                 ))
             })?
             .sample();
-            let constant_gain_pan = prepared_contribution_constant_gain_pan(
+            let constant_scope_gain = constant_curve_value(
+                scopes[scope_slot].input_gain_automation.as_ref(),
+                scopes[scope_slot].input_gain_db,
+            )
+            .map(crate::dsp::db_to_linear);
+            let constant_edit_gain_pan = prepared_contribution_constant_edit_gain_pan(
                 &semantic,
-                &scopes[scope_slot],
                 transition_start == transition_end,
             );
             let scope_time_offset =
@@ -515,8 +635,17 @@ impl PreparedAudioSchedule {
                 scope_time_offset,
                 sample_rate,
             )?;
-            let scope_rack_automation =
-                prepare_rack_automation(&scopes[scope_slot].rack, scope_time_offset, sample_rate)?;
+            let scope_rack = prepare_rack(
+                &scopes[scope_slot].rack,
+                PreparedProcessorOwner::Contribution {
+                    edit_id: semantic.edit_id,
+                    scope_id: scopes[scope_slot].id,
+                },
+                PreparedProcessorInsertion::Scope,
+                scope_time_offset,
+                sample_rate,
+                &mut processors,
+            )?;
             let volume_automation = prepare_optional_curve(
                 semantic.volume_automation.as_ref(),
                 edit_time_offset,
@@ -532,14 +661,6 @@ impl PreparedAudioSchedule {
                 source_latency_frames: nested_source.map_or(0, |source| source.latency_frames),
                 source_requires_state_entry: nested_source
                     .is_some_and(|source| source.requires_state_entry),
-                scope_rack_latency_frames: scopes[scope_slot].rack.latency_frames().ok_or_else(
-                    || {
-                        AudioCompileError::InvalidPreparedGraph(format!(
-                            "Contribution {} processor latency overflowed",
-                            semantic.edit_id
-                        ))
-                    },
-                )?,
                 compensation_delay_frames: 0,
                 semantic,
                 track_slot,
@@ -547,9 +668,10 @@ impl PreparedAudioSchedule {
                 transitions: transition_start..transition_end,
                 sequence_start_sample,
                 sequence_end_sample,
-                constant_gain_pan,
+                constant_scope_gain,
+                constant_edit_gain_pan,
                 scope_input_automation,
-                scope_rack_automation,
+                scope_rack,
                 volume_automation,
                 pan_automation,
             });
@@ -624,20 +746,8 @@ impl PreparedAudioSchedule {
                     contribution_end: node.contributions.end,
                     route_start: node.incoming.start,
                     route_end: node.incoming.end,
-                    pre_rack_latency_frames: node.strip.pre_fader.latency_frames().ok_or_else(
-                        || {
-                            AudioCompileError::InvalidPreparedGraph(
-                                "pre-fader processor latency overflowed".to_owned(),
-                            )
-                        },
-                    )?,
-                    post_rack_latency_frames: node.strip.post_fader.latency_frames().ok_or_else(
-                        || {
-                            AudioCompileError::InvalidPreparedGraph(
-                                "post-fader processor latency overflowed".to_owned(),
-                            )
-                        },
-                    )?,
+                    pre_rack_latency_frames: node.pre_rack.latency_frames,
+                    post_rack_latency_frames: node.post_rack.latency_frames,
                 })
             })
             .collect::<Result<Vec<_>, AudioCompileError>>()?;
@@ -646,7 +756,7 @@ impl PreparedAudioSchedule {
             .map(|contribution| {
                 contribution
                     .source_latency_frames
-                    .checked_add(contribution.scope_rack_latency_frames)
+                    .checked_add(contribution.scope_rack.latency_frames)
                     .ok_or_else(|| {
                         AudioCompileError::InvalidPreparedGraph(format!(
                             "Contribution {} total latency overflowed",
@@ -685,21 +795,38 @@ impl PreparedAudioSchedule {
         let scratch_slot_count = assign_liveness_scratch(&mut nodes, &last_consumer);
         let automation_curves = nodes
             .iter()
-            .flat_map(|node| {
-                node.pre_rack_automation
-                    .iter()
-                    .chain(node.fader_automation.iter())
-                    .chain(node.post_rack_automation.iter())
-            })
+            .flat_map(|node| node.fader_automation.iter())
             .chain(contributions.iter().flat_map(|contribution| {
                 contribution
                     .scope_input_automation
                     .iter()
-                    .chain(contribution.scope_rack_automation.iter())
                     .chain(contribution.volume_automation.iter())
                     .chain(contribution.pan_automation.iter())
             }))
+            .chain(processors.iter().flat_map(|processor| processor.parameter_curves.iter()))
             .collect::<Vec<_>>();
+        let processor_parameter_lane_count =
+            processors.iter().map(|processor| processor.parameter_curves.len()).sum();
+        let maximum_parameter_events_per_block = processors
+            .iter()
+            .map(|processor| {
+                processor.parameter_curves.iter().try_fold(0_usize, |count, parameter| {
+                    count.checked_add(if parameter.is_constant() {
+                        1
+                    } else {
+                        contract.max_block_frames
+                    })
+                })
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                AudioCompileError::InvalidPreparedGraph(
+                    "processor parameter event capacity overflowed".to_owned(),
+                )
+            })?
+            .into_iter()
+            .max()
+            .unwrap_or(0);
         let summary = PreparedAudioScheduleSummary {
             node_count: nodes.len(),
             track_count,
@@ -712,23 +839,26 @@ impl PreparedAudioSchedule {
                 .iter()
                 .map(|curve| curve.event_span_count())
                 .sum(),
+            processor_occurrence_count: processors.len(),
+            processor_parameter_lane_count,
+            maximum_parameter_events_per_block,
             scratch_slot_count,
             output_latency_frames: latency.output_latency_frames,
             maximum_compensation_frames: latency.maximum_compensation_frames,
             requires_state_entry: latency.maximum_compensation_frames > 0
                 || contributions.iter().any(|contribution| {
                     contribution.source_requires_state_entry
-                        || scopes[contribution.scope_slot].rack.requires_state_entry()
+                        || contribution.scope_rack.requires_state_entry
                 })
                 || nodes.iter().any(|node| {
-                    node.strip.pre_fader.requires_state_entry()
-                        || node.strip.post_fader.requires_state_entry()
+                    node.pre_rack.requires_state_entry || node.post_rack.requires_state_entry
                 }),
         };
         Ok(Self {
             nodes,
             routes,
             contributions,
+            processors,
             scopes,
             transitions,
             output_slot,
@@ -737,39 +867,49 @@ impl PreparedAudioSchedule {
     }
 }
 
-struct PreparedStripAutomation {
-    pre_rack: Vec<PreparedAutomationCurve>,
-    fader: Option<PreparedAutomationCurve>,
-    post_rack: Vec<PreparedAutomationCurve>,
-}
-
-fn prepared_strip_automation(
-    strip: &CompiledChannelStrip,
-    sample_rate: AudioSampleRate,
-) -> Result<PreparedStripAutomation, AudioCompileError> {
-    Ok(PreparedStripAutomation {
-        pre_rack: prepare_rack_automation(&strip.pre_fader, TimelineTime::ZERO, sample_rate)?,
-        fader: prepare_optional_curve(
-            strip.fader_automation.as_ref(),
-            TimelineTime::ZERO,
-            sample_rate,
-        )?,
-        post_rack: prepare_rack_automation(&strip.post_fader, TimelineTime::ZERO, sample_rate)?,
-    })
-}
-
-fn prepare_rack_automation(
+fn prepare_rack(
     rack: &CompiledRack,
+    owner: PreparedProcessorOwner,
+    insertion: PreparedProcessorInsertion,
     owner_time_offset: TimelineTime,
     sample_rate: AudioSampleRate,
-) -> Result<Vec<PreparedAutomationCurve>, AudioCompileError> {
-    rack.processors
-        .iter()
-        .map(|processor| match processor {
-            CompiledProcessor::Gain { automation } => automation,
-        })
-        .map(|curve| PreparedAutomationCurve::build(curve, owner_time_offset, sample_rate))
-        .collect()
+    destination: &mut Vec<PreparedProcessor>,
+) -> Result<PreparedRack, AudioCompileError> {
+    let start = destination.len();
+    for processor in &rack.processors {
+        match &processor.operation {
+            CompiledProcessorOperation::Gain { parameter_id, automation } => {
+                if parameter_id != &automation.parameter_id {
+                    return Err(AudioCompileError::InvalidPreparedGraph(format!(
+                        "processor {} parameter identity drifted during preparation",
+                        processor.instance_id
+                    )));
+                }
+                destination.push(PreparedProcessor {
+                    origin: PreparedProcessorOrigin {
+                        instance_id: processor.instance_id,
+                        owner,
+                        insertion,
+                    },
+                    parameter_ids: vec![parameter_id.clone()],
+                    parameter_curves: vec![PreparedAutomationCurve::build(
+                        automation,
+                        owner_time_offset,
+                        sample_rate,
+                    )?],
+                    operation: PreparedProcessorOperation::Gain { parameter_slot: 0 },
+                });
+            }
+        }
+    }
+    let latency_frames = rack.latency_frames().ok_or_else(|| {
+        AudioCompileError::InvalidPreparedGraph("processor rack latency overflowed".to_owned())
+    })?;
+    Ok(PreparedRack {
+        processors: start..destination.len(),
+        latency_frames,
+        requires_state_entry: rack.requires_state_entry(),
+    })
 }
 
 fn prepare_optional_curve(
@@ -782,41 +922,20 @@ fn prepare_optional_curve(
         .transpose()
 }
 
-fn prepared_strip_constant_gains(strip: &CompiledChannelStrip) -> (Option<f32>, Option<f32>) {
-    let pre = constant_rack_gain_db(&strip.pre_fader)
-        .map(|rack_db| db_to_linear(strip.input_trim_db + rack_db));
-    let fader = constant_curve_value(strip.fader_automation.as_ref(), strip.fader_db);
-    let post = fader
-        .zip(constant_rack_gain_db(&strip.post_fader))
-        .map(|(fader_db, rack_db)| db_to_linear(fader_db + rack_db));
-    (pre, post)
-}
-
-fn prepared_contribution_constant_gain_pan(
+fn prepared_contribution_constant_edit_gain_pan(
     contribution: &CompiledAudioContribution,
-    scope: &CompiledProcessingScope,
     has_no_transitions: bool,
 ) -> Option<(f32, f64)> {
     if contribution.fade_in.is_some() || contribution.fade_out.is_some() || !has_no_transitions {
         return None;
     }
-    let scope_db = constant_curve_value(scope.input_gain_automation.as_ref(), scope.input_gain_db)?
-        + constant_rack_gain_db(&scope.rack)?;
     let volume_db = constant_curve_value(
         contribution.volume_automation.as_ref(),
         contribution.volume_db,
     )?;
     let pan = constant_curve_value(contribution.pan_automation.as_ref(), contribution.pan)?
         .clamp(-1.0, 1.0);
-    Some((db_to_linear(scope_db + volume_db), pan))
-}
-
-fn constant_rack_gain_db(rack: &CompiledRack) -> Option<f64> {
-    rack.processors.iter().try_fold(0.0, |sum, processor| match processor {
-        CompiledProcessor::Gain { automation } => {
-            Some(sum + constant_curve_value(Some(automation), 0.0)?)
-        }
-    })
+    Some((crate::dsp::db_to_linear(volume_db), pan))
 }
 
 fn constant_curve_value(curve: Option<&ExactAutomationCurve>, fallback: f64) -> Option<f64> {
@@ -826,10 +945,6 @@ fn constant_curve_value(curve: Option<&ExactAutomationCurve>, fallback: f64) -> 
         Some(curve) if curve.keyframes.len() == 1 => Some(curve.keyframes[0].value),
         Some(_) => None,
     }
-}
-
-fn db_to_linear(db: f64) -> f32 {
-    10.0_f64.powf(db / 20.0) as f32
 }
 
 fn append_transition_bindings(

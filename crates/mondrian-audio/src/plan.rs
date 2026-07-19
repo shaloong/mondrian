@@ -1,6 +1,7 @@
 use mondrian_core::{
-    AudioChannelLayout, AudioComponentEditId, AudioProcessingScopeId, ExactAutomationCurve,
-    MixBusId, ProgramOutputId, SequenceId, TimelineTime, TimelineTimeRange, TrackId,
+    AudioChannelLayout, AudioComponentEditId, AudioProcessingScopeId, AudioProcessorInstanceId,
+    ExactAutomationCurve, MixBusId, ParameterId, ProgramOutputId, SequenceId, TimelineTime,
+    TimelineTimeRange, TrackId,
 };
 use mondrian_timeline::audio::{AudioFadeCurve, AudioRoute, AudioTransitionCurve};
 use mondrian_timeline::clip::SpeedMap;
@@ -80,26 +81,36 @@ pub enum CompiledAudioSource {
     },
 }
 
-/// Built-in processor operations currently admitted by the common executor.
+/// One immutable semantic processor instance retained from authoring.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum CompiledProcessor {
-    Gain { automation: ExactAutomationCurve },
+pub(crate) struct CompiledProcessor {
+    pub(crate) instance_id: AudioProcessorInstanceId,
+    pub(crate) operation: CompiledProcessorOperation,
+}
+
+/// Processor definition resolved without choosing a concrete runtime instance.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CompiledProcessorOperation {
+    Gain {
+        parameter_id: ParameterId,
+        automation: ExactAutomationCurve,
+    },
 }
 
 impl CompiledProcessor {
     /// Render-Contract-specific intrinsic latency after processor realization.
     /// Built-in Gain is strictly zero-latency.
     pub(crate) const fn latency_frames(&self) -> usize {
-        match self {
-            Self::Gain { .. } => 0,
+        match &self.operation {
+            CompiledProcessorOperation::Gain { .. } => 0,
         }
     }
 
     /// Whether execution owns history that requires an explicit continuity entry.
     pub(crate) const fn requires_state_entry(&self) -> bool {
         self.latency_frames() > 0
-            || match self {
-                Self::Gain { .. } => false,
+            || match &self.operation {
+                CompiledProcessorOperation::Gain { .. } => false,
             }
     }
 }

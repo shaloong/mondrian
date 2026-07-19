@@ -10,12 +10,15 @@ mod delay;
 mod dsp;
 mod latency;
 mod plan;
+mod processor;
+mod processor_execution;
 mod render;
 mod runtime;
 mod schedule;
 
 pub use compiler::{compile_audio_program, AudioCompileError};
 pub use plan::*;
+pub use processor::{AudioParameterEvent, AudioParameterEventBatch};
 pub use render::{
     render_audio, AudioContinuityEpoch, AudioExecutionError, AudioPcmSource, AudioRenderCapacity,
     AudioRenderRequest, AudioRenderSession, AudioStateEntry,

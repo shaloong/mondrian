@@ -245,6 +245,14 @@ _Avoid_: Video EffectNode, plugin file path, registry index, opaque JSON effect
 An ordered collection of Audio Processor Instances at one explicit insertion point of an Audio Processing Scope, Track Mixer Channel, Mix Bus, or Program Output.
 _Avoid_: Unordered effect set, format-specific VST chain, hidden master effect
 
+**Generated Audio Processor Occurrence**:
+One non-persistent prepared execution instance derived from an authored Audio Processor Instance plus its exact Contribution or Routing Node owner and insertion point. A shared Processing Scope may produce several occurrences; each owns independent mutable Session state.
+_Avoid_: Sharing DSP state because author definitions match, flattening a Rack into aggregate gain, processor array index as identity
+
+**Audio Parameter Event Batch**:
+A borrowed, Session-backed block of stable Parameter-ID lanes and exact sample-offset value events for one Generated Audio Processor Occurrence. Static values use one offset-zero event; varying curves are lowered sample-accurately without callback allocation.
+_Avoid_: UI-rate parameter polling, per-block heap construction, plugin parameter index as semantic identity
+
 **Audio Transition**:
 An explicit Sequence-time-bounded relationship between two Audio Component Edits that applies a declared pair of sample-domain gain curves after their component/scope-local processing.
 _Avoid_: Overlap inferred as crossfade, unary fade plugin, Track-wide dissolve
@@ -386,7 +394,9 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - An **Audio Route** connects stable typed endpoints and can never target a **Generated Audio Stage**.
 - Every independently processable **Audio Processing Scope** and every **Audio Routing Node** may own explicitly placed **Audio Processor Racks** using the same **Audio Processor Instance** author model for built-ins, VST3, CLAP, and future host adapters.
 - An **Audio Processor Instance** addresses automation by stable instance and parameter identity; display names, property-path suffixes, plugin file paths, and parameter indexes are never authoritative.
+- Audio Processor Instance IDs are unique across every Scope/Track/Bus/Output Rack in one Sequence. Preparation preserves Rack order and creates one **Generated Audio Processor Occurrence** per execution owner; sharing an Audio Processing Scope never shares mutable DSP state between Contributions.
 - Each Audio Processor parameter persists one validated **Parameter Schema** snapshot and one exact curve keyed by the same `ParameterId`; built-in compilation additionally requires an exact match to its canonical definition schema, while unavailable external dependencies retain the snapshot and opaque state but fail execution closed unless bypassed.
+- Every generated processor receives an allocation-free **Audio Parameter Event Batch** whose lanes retain stable `ParameterId` order and whose sample offsets are block-local. ABI normalization and capability reduction belong only to the concrete processor Adapter and must fail closed when exact delivery is unavailable.
 - Component automation uses Audio Component Edit-local rational time, Scope automation uses Audio Processing Scope-local rational time, Track/Bus/Output automation uses Sequence-local rational time, and an **Audio Transition** interval is Sequence-local; compilation maps each domain once to exact sample offsets.
 - An **Audio Transition** names exactly two Audio Component Edits and does not affect other overlapping material; overlap without a Transition remains ordinary summing.
 - Every parallel input to a sum or Transition is delay-compensated from declared processor and nested latency; internal floating-point mixing neither normalizes, soft-clips, nor limits without an explicit authored processor.

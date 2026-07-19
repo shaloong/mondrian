@@ -170,9 +170,15 @@ The current common executor admits built-in Gain schema 1 only when its complete
 captured parameter schema equals the canonical definition. The required Gain
 parameter is never synthesized during compilation. Its hard interval is
 `[-120, +24] dB`, its ordinary editor interval is `[-60, +12] dB`, and invalid
-persisted values are rejected. VST3/CLAP loading, process isolation, plugin-bus
-layout negotiation, state entry, latency, and parameter-delivery capabilities
-remain required work; no dry or flat fallback claims support.
+persisted values are rejected. Compilation retains Processor Instance and
+Parameter IDs instead of folding Rack gain into one scalar. Preparation emits
+ordered generated occurrences for every exact owner/insertion point; a shared
+Scope therefore creates independent Session state for each Contribution.
+Built-in Gain consumes the same preallocated sample-accurate parameter batch
+contract intended for hosted processors. VST3/CLAP loading, process isolation,
+plugin-bus/layout negotiation, ABI value normalization, plugin state restore,
+latency binding, and parameter-delivery capability negotiation remain required
+work; no dry or flat fallback claims support.
 
 ### Fades and transitions
 
@@ -228,23 +234,30 @@ Preparation now lowers the semantic graph into one dense execution schedule:
   downstream consumer;
 - a checked latency solution for every Contribution-to-Track and Route-to-node
   sum, including the exact `PreFader` versus post-fader source port;
-- constant gain/pan and rack-gain fast paths;
+- ordered dense Processor ranges for every Scope/pre-fader/post-fader Rack,
+  with deterministic author origin plus generated owner/insertion identity;
+- constant Scope/edit/fader fast paths that do not erase Processor boundaries;
 - one explicitly selected scalar-reference or runtime-vectorized CPU kernel.
 
 The prepared schedule contains no authoring maps and the Session performs no
-Route search. Non-constant automation is validated once and lowered to ordered
-sample event spans; the Session advances span cursors instead of searching or
-validating author curves per sample. Latency is accumulated through each
+Route search. Automation is validated once and lowered to ordered sample event
+spans; the Session advances span cursors instead of searching or validating
+author curves per sample. Each generated Processor has stable Parameter-ID
+lanes. Static lanes produce one offset-zero event per block; varying lanes
+produce exact values at every sample offset in Session-reused storage. Latency
+is accumulated through each
 pre-/post-fader rack and resolved independently at every real summing point;
 the selected Program Output exposes the resulting total latency. Recursive
 preparation is bottom-up: a parent Contribution receives the already-prepared,
 instance-specific child-output latency. Missing nested latency fails closed and
-can never be guessed as zero. Layout negotiation, processor realization, plugin
-parameter-event batching, compensation-delay execution, and state entry also
-belong here. The present executable processor set is zero-latency, so the
-runtime does not yet claim general plugin delay compensation. Any admitted
-non-zero-latency processor must arrive with its processor execution state and
-discontinuity contract as one change.
+can never be guessed as zero. Layout negotiation, processor realization,
+plugin-specific batch lowering, and each realized processor's latency/state-
+entry facts also belong here. Generic compensation execution and root Session
+entry already operate below this boundary, but the present executable
+processor set is zero-latency; the runtime therefore does not claim plugin
+delay compensation until a concrete hosted or built-in non-zero-latency
+processor supplies its execution state and discontinuity contract in the same
+change.
 
 ### Stage 3: exclusive mutable Session
 
@@ -253,6 +266,19 @@ rendering; it does not allocate one permanent buffer per author node or Route.
 `render_into` accepts an exact signed start sample and exact frame count and
 writes caller-owned interleaved float storage. The Session is exclusive mutable
 state; plans may be shared, Sessions may not.
+
+Session construction also allocates one state slot per generated Processor
+occurrence plus the largest Parameter-lane and sample-event batch required by
+any one Processor block. Racks execute in authored order and reuse that bounded
+batch storage sequentially. Capacity evidence reports occurrence count,
+maximum lane count, and event capacity. Shared immutable Scope definitions do
+not merge these state slots.
+
+The `processor_execution` Module exclusively owns occurrence state, parameter
+batch construction, state entry, and built-in/host Adapter dispatch. The
+`render` Module owns graph traversal, PCM flow, summing, envelopes, and delay
+placement; it neither reconstructs processor batches nor reaches into a
+processor's mutable state.
 
 The immutable Plan and recursive Runtime both report selected-output latency.
 This is execution scheduling information, not an instruction to rewrite author
@@ -579,12 +605,13 @@ gates rather than implied support:
    Component selection/rebind, deterministic custom-layout mapping, and
    authored mix-matrix policy. Unknown identities and unsupported layouts must
    continue to fail instead of being guessed.
-2. Add processor capability negotiation, real built-in stateful processors,
-   latency propagation/PDC, seek entry/preroll, discontinuity tests, and nested
-   latency evidence.
+2. Add processor capability negotiation and real built-in stateful processors
+   with declared latency/deadline behavior; extend the implemented PDC,
+   seek-entry/preroll, discontinuity, and nested-latency evidence to each one.
 3. Implement isolated VST3 and CLAP host Adapters with scanning, stable native
-   IDs, state chunks, bus/layout negotiation, sample-accurate parameter events,
-   crash/hang containment, and realtime/offline capability reporting.
+   IDs, state chunks, bus/layout negotiation, exact consumption/lowering of the
+   common sample-accurate parameter batches, crash/hang containment, and
+   realtime/offline capability reporting.
 4. Add typed sends and sidechains without weakening Route types; add meters and
    loudness analysis as explicit downstream/processor stages.
 5. Execute Semantic Projection outputs and delivery mappings without cloning
@@ -599,12 +626,13 @@ gates rather than implied support:
    reference machine: cold open, sequential boundary, random restart,
    cancellation return, cross-source LRU pressure, and source-cache bytes must
    appear in the same long-run evidence report.
-9. Non-constant built-in automation is presegmented during preparation and the
-   realtime Session exposes its fixed allocation envelope. Extend the existing
-   scalar/SIMD matrix to Buses, Transitions, dense automation, nested Sequences,
-   decoder pressure, and stateful processors; add plugin event batches, declared
-   latency/PDC, and state-entry obligations. Only then evaluate qualified GPU
-   batch processors against measured CPU SIMD headroom and added latency.
+9. Built-in automation is presegmented during preparation; ordered generated
+   Processor occurrences consume Session-preallocated sample-accurate event
+   batches, and the fixed allocation envelope is observable. Extend the
+   existing scalar/SIMD matrix to Buses, Transitions, dense automation, nested
+   Sequences, decoder pressure, hosted adapters, and stateful processors. Only
+   then evaluate qualified GPU batch processors against measured CPU SIMD
+   headroom and added latency.
 
 No item may be closed by adding only schema, an effect enum, a disconnected UI,
 or a consumer-specific fallback mixer.

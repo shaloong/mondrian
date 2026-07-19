@@ -79,6 +79,9 @@ identities, invalid strong linked-Clip references, duplicate effect-local
 Parameter identities, duplicate animation-track identities in one property
 owner, and duplicate keyframe identities in one exact automation curve. Audio
 Program validation owns the corresponding typed audio-entity uniqueness rules.
+`AudioProcessorInstanceId` is unique across all Scope, Track, Bus, and Output
+Racks in one Sequence; a shared Scope is referenced once in author data and may
+materialize several independent generated execution occurrences.
 Copy and razor operations must fork the identities specified by the Sequence
 audio ADR; Sequence duplication forks every Sequence-owned identity and resets
 only the new Sequence revision.
@@ -203,6 +206,8 @@ Audio Program. An audio Clip owns placement-local `AudioComponentEdit` values;
 their Track and Sequence range are always derived from the owning Track/Clip.
 They bind to Sequence-owned `AudioProcessingScope` values for Clip-level
 processor continuity. The visual `Clip.effects` vector is not an audio rack.
+Rack order and Processor Instance identity are author semantics and cannot be
+collapsed into an aggregate gain or array-index address during compilation.
 Track creation/removal updates the keyed mixer state and default route in the
 same Sequence mutation. Validation rejects a snapshot when the two sets differ.
 See [Audio Pipeline](audio-pipeline.md) for the author/compiler boundary.

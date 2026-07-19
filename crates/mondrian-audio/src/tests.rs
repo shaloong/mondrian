@@ -427,6 +427,9 @@ fn clip_track_bus_output_math_is_unclipped_and_block_invariant() {
             transition_binding_count: 0,
             automation_curve_count: 1,
             automation_event_span_count: 2,
+            processor_occurrence_count: 1,
+            processor_parameter_lane_count: 1,
+            maximum_parameter_events_per_block: 8,
             scratch_slot_count: 2,
             output_latency_frames: 0,
             maximum_compensation_frames: 0,
@@ -522,6 +525,100 @@ fn prepared_automation_event_spans_preserve_hold_bezier_and_block_partitioning()
         )
         .expect("render within fixed allocation envelope");
     assert_eq!(session.capacity(), capacity);
+}
+
+#[test]
+fn processor_parameter_batches_are_sample_accurate_and_preallocated() {
+    let mut sequence = sequence_with_audio_clip();
+    let scope = sequence.audio_program.processing_scopes.first_mut().expect("scope");
+    let mut processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+    processor
+        .set_parameter_automation(gain_curve(0.0, 6.0))
+        .expect("gain automation");
+    scope.processors.processors.push(processor);
+
+    let plan = prepared(&sequence, 8);
+    assert_eq!(plan.schedule_summary().processor_occurrence_count, 1);
+    assert_eq!(plan.schedule_summary().processor_parameter_lane_count, 1);
+    assert_eq!(
+        plan.schedule_summary().maximum_parameter_events_per_block,
+        8
+    );
+    let mut session = AudioRenderSession::new(plan).expect("Session");
+    assert_eq!(session.capacity().processor_occurrences, 1);
+    assert_eq!(session.capacity().maximum_processor_parameter_lanes, 1);
+    assert_eq!(session.capacity().parameter_event_capacity, 8);
+
+    let lanes = session
+        .processor_parameter_events_for_test(0, AudioRenderRequest { start_sample: 0, frames: 4 })
+        .expect("parameter batch");
+    assert_eq!(lanes.len(), 1);
+    assert_eq!(lanes[0].0.as_str(), GAIN_DB_PARAMETER_ID);
+    assert_eq!(
+        lanes[0].1.iter().map(|event| event.sample_offset).collect::<Vec<_>>(),
+        vec![0, 1, 2, 3]
+    );
+    assert_eq!(
+        lanes[0].1.iter().map(|event| event.value).collect::<Vec<_>>(),
+        vec![0.0, 3.0, 6.0, 6.0]
+    );
+}
+
+#[test]
+fn shared_scope_definition_materializes_independent_processor_occurrences() {
+    let mut sequence = sequence_with_audio_clip();
+    let track_id = sequence.audio_tracks[0].id;
+    let shared_scope_id = sequence.audio_program.processing_scopes[0].id;
+    let processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+    let processor_id = processor.id;
+    sequence.audio_program.processing_scopes[0]
+        .processors
+        .processors
+        .push(processor);
+
+    let second_clip = Clip::new(AssetId::new(), TimelineTime::ZERO, tt(4, 1)).expect("second Clip");
+    let second_clip_id = sequence
+        .add_media_audio_clip(track_id, second_clip, AudioSourceComponentId::primary())
+        .expect("second audio Clip");
+    let second_edit_id = {
+        let clip = sequence.audio_tracks[0]
+            .clips
+            .iter_mut()
+            .find(|clip| clip.id == second_clip_id)
+            .expect("second Clip");
+        clip.audio_components[0].processing.scope_id = shared_scope_id;
+        clip.audio_components[0].id
+    };
+    let first_edit_id = sequence.audio_tracks[0].clips[0].audio_components[0].id;
+    sequence.audio_program.compact_for_tracks(&sequence.audio_tracks);
+
+    let plan = prepared(&sequence, 8);
+    assert_eq!(plan.schedule_summary().processor_occurrence_count, 2);
+    assert_eq!(plan.schedule_summary().processor_parameter_lane_count, 2);
+    assert_eq!(
+        plan.schedule_summary().maximum_parameter_events_per_block,
+        1
+    );
+    let origins = plan
+        .schedule
+        .processors
+        .iter()
+        .map(|processor| processor.origin)
+        .collect::<Vec<_>>();
+    assert!(origins.iter().all(|origin| origin.instance_id == processor_id));
+    assert!(origins.iter().any(|origin| matches!(
+        origin.owner,
+        crate::schedule::PreparedProcessorOwner::Contribution { edit_id, scope_id }
+            if edit_id == first_edit_id && scope_id == shared_scope_id
+    )));
+    assert!(origins.iter().any(|origin| matches!(
+        origin.owner,
+        crate::schedule::PreparedProcessorOwner::Contribution { edit_id, scope_id }
+            if edit_id == second_edit_id && scope_id == shared_scope_id
+    )));
+
+    let session = AudioRenderSession::new(plan).expect("Session");
+    assert_eq!(session.capacity().processor_occurrences, 2);
 }
 
 #[test]

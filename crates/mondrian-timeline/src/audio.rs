@@ -718,6 +718,32 @@ impl AudioProgram {
             return Err(AudioAuthoringError::MissingProgramOutput);
         }
 
+        let mut processor_ids = BTreeSet::new();
+        for rack in self
+            .processing_scopes
+            .iter()
+            .map(|scope| &scope.processors)
+            .chain(
+                self.track_channels
+                    .values()
+                    .flat_map(|channel| [&channel.strip.pre_fader, &channel.strip.post_fader]),
+            )
+            .chain(self.buses.iter().flat_map(|bus| [&bus.strip.pre_fader, &bus.strip.post_fader]))
+            .chain(
+                self.outputs
+                    .iter()
+                    .flat_map(|output| [&output.strip.pre_fader, &output.strip.post_fader]),
+            )
+        {
+            for processor in &rack.processors {
+                if !processor_ids.insert(processor.id) {
+                    return Err(AudioAuthoringError::DuplicateProcessorInstance(
+                        processor.id,
+                    ));
+                }
+            }
+        }
+
         for scope in &self.processing_scopes {
             scope.validate()?;
         }
@@ -1144,6 +1170,24 @@ mod tests {
         assert_eq!(
             processor.validate(),
             Err(AudioAuthoringError::UnsupportedParameterInterpolation)
+        );
+    }
+
+    #[test]
+    fn processor_identity_is_unique_across_all_author_insertion_points() {
+        let track = Track::new_audio("Audio");
+        let mut program = AudioProgram::for_tracks([track.id]);
+        let processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        let processor_id = processor.id;
+        let channel = program.track_channels.get_mut(&track.id).expect("channel");
+        channel.strip.pre_fader.processors.push(processor.clone());
+        channel.strip.post_fader.processors.push(processor);
+
+        assert_eq!(
+            program.validate(&[track], &[]),
+            Err(AudioAuthoringError::DuplicateProcessorInstance(
+                processor_id
+            ))
         );
     }
 

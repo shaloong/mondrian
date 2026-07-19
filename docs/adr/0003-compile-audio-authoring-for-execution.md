@@ -37,6 +37,15 @@ It combines those facts with the attached `AudioComponentEdit` and referenced
 not persistent routable entities. Every generated operation retains typed
 author origins for diagnostics and future state allocation.
 
+An authored Processor Instance is unique across all Sequence insertion points.
+Preparation preserves Rack order and materializes generated processor
+occurrences keyed by the author instance plus exact Contribution or Routing
+Node owner and insertion point. Sharing one Processing Scope shares definition
+intent only: overlapping Contributions receive independent mutable processor
+state. Algebraically combining Gain processors is forbidden even when it would
+produce the same scalar result, because that would erase the boundary required
+by state, latency, parameter delivery, bypass, and diagnostics.
+
 The admitted signal order is normative:
 
 ```text
@@ -60,6 +69,13 @@ the concrete Evaluation Grid. Each output sample is mapped through Clip speed,
 source in, edit-local offset, Scope-local offset, and nested boundaries without
 floating-point-seconds chunk boundaries. Exact automation evaluation must be
 invariant under block partitioning.
+
+Each generated processor receives a borrowed parameter-event batch from
+Session-preallocated storage. Lanes use stable `ParameterId` order. A constant
+lane emits one event at block offset zero; a varying lane emits exact
+definition-domain values at every sample offset. VST3/CLAP/native/GPU Adapters
+may lower that batch only after capability and schema negotiation; parameter
+array indexes and normalized ABI values never become author identity.
 
 Route closure is selected from the requested stable Program Output. Canonical
 compilation contains no consumer-purpose flag. Solo is an explicit audition
@@ -127,6 +143,7 @@ implemented and tested together.
   epoch, watermark, and recovery authority.
 - `mondrian-app` and `mondrian-export` provide media Adapters and consume the
   same Runtime; neither contains a private Timeline mixer.
-- Semantic Projection outputs, real VST3/CLAP hosts, PDC, richer channel
-  layouts, sends/sidechains, meters, loudness, and state entry must deepen this
-  pipeline. They must not create alternate author or execution paths.
+- Semantic Projection outputs, real VST3/CLAP hosts, additional Adapter layout
+  lowering, sends/sidechains, meters, loudness, and concrete stateful
+  processors must deepen this pipeline. They must not create alternate author
+  or execution paths.
