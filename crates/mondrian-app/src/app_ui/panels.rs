@@ -13,10 +13,11 @@ use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
 use mondrian_core::automation::{ParameterResourceReference, ParameterSchema, PropertyValue};
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::types::{
-    AssetId, ClipId, ColorSpace, EffectId, FramePosition, JobId, Rational, SequenceId, TrackId,
+    AssetId, ClipId, ColorSpace, EffectId, JobId, Rational, SequenceId, TrackId,
 };
 use mondrian_core::{
-    Color, FrameRounding, SmpteCountingMode, SmpteDisplayTimecode, TimelineTime, WorkingColorSpace,
+    Color, FrameRounding, TimelineDisplayContract, TimelineDisplayFormat, TimelineTime,
+    WorkingColorSpace,
 };
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
@@ -673,8 +674,7 @@ pub struct ViewerPanelModel {
     pub status: String,
     pub status_tone: ViewerStatusTone,
     pub resolution_label: String,
-    pub timecode_label: String,
-    pub frame_label: String,
+    pub position_label: String,
     pub duration_label: String,
     pub zoom_label: String,
     pub zoom_scale: Option<f32>,
@@ -741,13 +741,20 @@ impl ViewerPanelModel {
             return Self::empty();
         };
         let resolution = sequence.settings.resolution;
-        let current_frame = state.current_frame().max(0);
-        let timecode_label = SmpteDisplayTimecode::from_frame_position(
-            FramePosition::new(current_frame, sequence.time_base()),
-            SmpteCountingMode::NonDropFrame,
-        )
-        .map(SmpteDisplayTimecode::label)
-        .unwrap_or_else(|_| "--:--:--:--".to_owned());
+        let current_frame = state.current_frame();
+        let position_label = sequence
+            .settings
+            .timeline_display_contract()
+            .ok()
+            .and_then(|display| {
+                display.format_frame_offset(current_frame).ok().map(|label| {
+                    match display.format() {
+                        TimelineDisplayFormat::Frames => format!("F{label}"),
+                        TimelineDisplayFormat::Timecode(_) => label,
+                    }
+                })
+            })
+            .unwrap_or_else(|| "--:--:--:--".to_owned());
         let Ok(duration_frame) = sequence.total_duration().and_then(|time| {
             time.to_frame_position(sequence.settings.frame_rate, FrameRounding::Ceil)
                 .map_err(Into::into)
@@ -798,8 +805,7 @@ impl ViewerPanelModel {
                 "{}x{} @ {:.2} fps",
                 resolution.width, resolution.height, fps
             ),
-            timecode_label,
-            frame_label: format!("F{current_frame}"),
+            position_label,
             duration_label: format!("{duration_frame} 帧"),
             zoom_label: "适合".into(),
             zoom_scale: None,
@@ -833,8 +839,7 @@ impl ViewerPanelModel {
             status: "没有序列".into(),
             status_tone: ViewerStatusTone::Neutral,
             resolution_label: "无信号".into(),
-            timecode_label: "00:00:00:00".into(),
-            frame_label: "F0".into(),
+            position_label: "00:00:00:00".into(),
             duration_label: String::new(),
             zoom_label: "适合".into(),
             zoom_scale: None,
@@ -894,7 +899,7 @@ pub struct TimelinePanelModel {
     pub playhead_frame: i64,
     pub in_point_frame: i64,
     pub out_point_frame: Option<i64>,
-    pub frame_rate: Rational,
+    pub timeline_display: TimelineDisplayContract,
     pub enabled: bool,
     pub empty_message: Option<String>,
     edit_availability: Option<TimelineEditAvailability>,
@@ -911,7 +916,7 @@ impl Default for TimelinePanelModel {
             playhead_frame: 0,
             in_point_frame: 0,
             out_point_frame: None,
-            frame_rate: Rational::FPS_30,
+            timeline_display: TimelineDisplayContract::default(),
             enabled: false,
             empty_message: None,
             edit_availability: None,
@@ -1092,9 +1097,15 @@ impl TimelinePanelModel {
             nested_sequence_refs.push(nested_ids);
             tracks.push(track);
         }
-        let empty_message = tracks
-            .is_empty()
-            .then(|| "当前序列没有轨道\n添加视频轨道或音频轨道后开始编辑".to_owned());
+        let display = sequence.settings.timeline_display_contract();
+        let display_valid = display.is_ok();
+        let display_error =
+            display.as_ref().err().map(|error| format!("序列时间显示设置无效\n{error}"));
+        let empty_message = display_error.or_else(|| {
+            tracks
+                .is_empty()
+                .then(|| "当前序列没有轨道\n添加视频轨道或音频轨道后开始编辑".to_owned())
+        });
         Self {
             tracks,
             playhead_frame: sequence
@@ -1112,8 +1123,8 @@ impl TimelinePanelModel {
                     .ok()
                     .map(|position| position.frame.max(0))
             }),
-            frame_rate: sequence.settings.frame_rate,
-            enabled: true,
+            timeline_display: display.unwrap_or_default(),
+            enabled: display_valid,
             empty_message,
             edit_availability: None,
             track_refs,
@@ -1130,7 +1141,7 @@ impl TimelinePanelModel {
             playhead_frame: 0,
             in_point_frame: 0,
             out_point_frame: None,
-            frame_rate: Rational::FPS_30,
+            timeline_display: TimelineDisplayContract::default(),
             enabled: false,
             empty_message: Some("未载入序列\n打开项目或创建序列以开始编辑".into()),
             edit_availability: Some(TimelineEditAvailability::from_app_state(&AppState::new())),
@@ -2047,8 +2058,7 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
         .with_status(model.status.clone())
         .with_status_tone(model.status_tone)
         .with_resolution_label(model.resolution_label.clone())
-        .with_timecode_label(model.timecode_label.clone())
-        .with_frame_label(model.frame_label.clone())
+        .with_position_label(model.position_label.clone())
         .with_duration_label(model.duration_label.clone())
         .with_zoom_label(model.zoom_label.clone())
         .with_zoom_scale(model.zoom_scale)
@@ -3101,7 +3111,7 @@ fn timeline_panel(model: &TimelinePanelModel) -> TimelineView {
     let timeline = TimelineView::new(model.tracks.clone())
         .enabled(model.enabled)
         .with_header_width(144.0)
-        .with_frame_rate(model.frame_rate)
+        .with_timeline_display(model.timeline_display)
         .with_playhead(model.playhead_frame)
         .with_in_out_points(model.in_point_frame, model.out_point_frame)
         .on_clip_select({
@@ -4624,6 +4634,7 @@ mod tests {
     use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::types::AssetId;
+    use mondrian_core::{SmpteCountingMode, TimelineDisplaySettings};
     use mondrian_effects::EffectNodeExt;
     use mondrian_ui_core::tree::WidgetTreeView;
     use mondrian_ui_core::types::{
@@ -4912,7 +4923,7 @@ mod tests {
         assert_eq!(models.viewer.status_tone, ViewerStatusTone::Neutral);
         assert_eq!(models.viewer.empty_message.as_deref(), Some("未载入序列"));
         assert_eq!(models.viewer.resolution_label, "无信号");
-        assert_eq!(models.viewer.timecode_label, "00:00:00:00");
+        assert_eq!(models.viewer.position_label, "00:00:00:00");
         assert_eq!(models.viewer.zoom_label, "适合");
         assert_eq!(models.viewer.preview_quality_label, "1/1");
         assert_eq!(models.inspector.selected_clip, None);
@@ -7118,8 +7129,7 @@ mod tests {
         let colors = current_theme().colors.clone();
 
         assert_eq!(models.viewer.title, "edit");
-        assert_eq!(models.viewer.frame_label, "F7");
-        assert!(models.viewer.timecode_label.ends_with(":07"));
+        assert_eq!(models.viewer.position_label, "F7");
         assert_eq!(models.viewer.status_tone, ViewerStatusTone::Neutral);
         assert_eq!(models.viewer.empty_message, None);
         assert!(models.viewer.resolution_label.contains("1920x1080"));
@@ -7217,6 +7227,30 @@ mod tests {
         assert_eq!(
             models.node_graph.edges[1],
             NodeGraphEdge::new(format!("effect:{effect_id}"), "output")
+        );
+    }
+
+    #[test]
+    fn viewer_and_timeline_share_the_sequence_drop_frame_display_contract() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("drop-frame");
+        sequence.settings.frame_rate = Rational::FPS_2997;
+        sequence.settings.timeline_display =
+            TimelineDisplaySettings::timecode(SmpteCountingMode::DropFrame, 107_892);
+        state.sequence = Some(sequence);
+        state.seek(1_800);
+
+        let models = AppUiPanelModels::from_app_state(&state);
+
+        assert_eq!(models.viewer.position_label, "01:01:00;02");
+        assert_eq!(
+            models
+                .timeline
+                .timeline_display
+                .format_frame_offset(models.timeline.playhead_frame)
+                .expect("Timeline display label"),
+            models.viewer.position_label
         );
     }
 

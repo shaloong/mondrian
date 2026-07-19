@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "vfr": {
+    "sequence_rate": { "num": 30000, "den": 1001 },
+    "samples": [
+      {
+        "time": { "numerator": 0, "denominator": 1 },
+        "floor_frame": 0,
+        "nearest_frame": 0,
+        "drop_frame_label": "00:00:00;00"
+      },
+      {
+        "time": { "numerator": 1001, "denominator": 24000 },
+        "floor_frame": 1,
+        "nearest_frame": 1,
+        "drop_frame_label": "00:00:00;01"
+      },
+      {
+        "time": { "numerator": 1, "denominator": 10 },
+        "floor_frame": 2,
+        "nearest_frame": 3,
+        "drop_frame_label": "00:00:00;03"
+      },
+      {
+        "time": { "numerator": 1001, "denominator": 12000 },
+        "floor_frame": 2,
+        "nearest_frame": 3,
+        "drop_frame_label": "00:00:00;03"
+      }
+    ]
+  },
+  "mixed_rate_nested": {
+    "child_rate": { "num": 24000, "den": 1001 },
+    "child_frame": 24,
+    "parent_rate": { "num": 30000, "den": 1001 },
+    "parent_anchor": { "numerator": 1001, "denominator": 100 },
+    "expected_parent_time": { "numerator": 11011, "denominator": 1000 },
+    "expected_parent_frame": 330,
+    "expected_parent_label": "00:00:11;00"
+  },
+  "negative": {
+    "rate": { "num": 30000, "den": 1001 },
+    "time": { "numerator": -1001, "denominator": 30000 },
+    "start_frame": 107892,
+    "expected_frame": -1,
+    "expected_label": "00:59:59;29"
+  },
+  "long_project": {
+    "rate": { "num": 25, "den": 1 },
+    "time": { "numerator": 360000, "denominator": 1 },
+    "expected_frame": 9000000,
+    "expected_wrapped_timecode": "04:00:00:00",
+    "expected_frame_label": "9000000"
+  }
+}

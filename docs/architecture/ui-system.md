@@ -111,6 +111,21 @@ color-space and range dropdowns must preserve the existing payload value while
 changing only their owned interpretation field; they must never create or clear
 `AssetColorPayload::NonColorData`.
 
+## Timeline Position Presentation
+
+Sequence settings persist one `TimelineDisplaySettings` value and resolve it
+through the core `TimelineDisplayContract`. Viewer playback chrome and Timeline
+ruler receive that resolved Interface from the app panel Adapter. Widgets may
+choose compact label density, but may not infer NDF/DF, apply an origin, clamp
+negative time, or split/reassemble a formatted timecode string.
+
+Changing Frames/SMPTE presentation is an undoable Sequence-settings edit, not a
+transport or media-time mutation. If persisted settings do not validate against
+the Sequence frame rate, the domain rejects the snapshot; a forged invalid
+runtime state fails visibly instead of silently selecting another counting
+mode. The product menu exposes only formats with implemented parsing/formatting
+and reference tests.
+
 ## Playback Tick Ownership
 
 The winit host may wake the application while playback is running, but playback

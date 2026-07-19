@@ -29,6 +29,29 @@ A `Sequence` contains:
 
 Default sequences create `V1..V3` and `A1..A3`. `SequenceSettings` validates resolution, frame rate, audio sample rate/layout, preview settings, and color-management constraints.
 
+### Position Display
+
+`SequenceSettings.timeline_display` is the sole persisted position-display
+choice. It contains a `TimelineDisplayFormat` and a signed actual-frame offset
+for the Sequence timecode origin. Resolving it with the Sequence video
+evaluation rate produces one validated `TimelineDisplayContract`; Viewer and
+Timeline ruler consume that same Interface and may not reconstruct counting or
+origin arithmetic.
+
+`Frames` displays signed Sequence-relative evaluation-frame offsets and ignores
+the retained timecode origin. `Timecode` projects exact `TimelineTime` onto the
+Sequence grid using an explicit rounding policy, then applies the origin and
+formats SMPTE NDF or DF labels. Drop-frame is accepted only for exact
+30000/1001 and 60000/1001 rates. Negative positions remain signed; conventional
+SMPTE labels wrap after 24 hours while author time and frame display remain
+exact and unbounded within their integer contract.
+
+Display settings never change Clip placement, automation, nesting transforms,
+or audio sample positions. Unsupported formats such as Feet+Frames are absent
+from the persisted enum and product menu until their film gauge, footage
+counting, origin, parsing, and reference fixtures are implemented as one real
+contract.
+
 ## Author Identity, Revision, and Undo
 
 `SequenceId` is stable identity; `SequenceRevision` is the persisted, nonzero,

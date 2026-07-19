@@ -287,8 +287,7 @@ pub struct ViewerSurface {
     status: String,
     status_tone: ViewerStatusTone,
     resolution_label: String,
-    timecode_label: String,
-    frame_label: String,
+    position_label: String,
     duration_label: String,
     zoom_label: String,
     zoom_scale: Option<f32>,
@@ -329,8 +328,7 @@ impl ViewerSurface {
             status: "无信号".into(),
             status_tone: ViewerStatusTone::Neutral,
             resolution_label: String::new(),
-            timecode_label: "00:00:00:00".into(),
-            frame_label: "F0".into(),
+            position_label: "00:00:00:00".into(),
             duration_label: String::new(),
             zoom_label: "适合".into(),
             zoom_scale: None,
@@ -380,15 +378,9 @@ impl ViewerSurface {
         self
     }
 
-    /// Set the SMPTE-style current timecode label.
-    pub fn with_timecode_label(mut self, label: impl Into<String>) -> Self {
-        self.timecode_label = label.into();
-        self
-    }
-
-    /// Set the formatted current frame label.
-    pub fn with_frame_label(mut self, label: impl Into<String>) -> Self {
-        self.frame_label = label.into();
+    /// Set the current position label resolved by the Sequence display contract.
+    pub fn with_position_label(mut self, label: impl Into<String>) -> Self {
+        self.position_label = label.into();
         self
     }
 
@@ -458,8 +450,7 @@ impl ViewerSurface {
         &mut self,
         status: impl Into<String>,
         status_tone: ViewerStatusTone,
-        timecode_label: impl Into<String>,
-        frame_label: impl Into<String>,
+        position_label: impl Into<String>,
         playing: bool,
         frame_image: Option<ViewerFrameImage>,
         empty_message: Option<String>,
@@ -467,8 +458,7 @@ impl ViewerSurface {
         self.set_playback_frame_content_state(
             status,
             status_tone,
-            timecode_label,
-            frame_label,
+            position_label,
             playing,
             frame_image.map(ViewerFrameContent::Raster),
             empty_message,
@@ -480,16 +470,14 @@ impl ViewerSurface {
         &mut self,
         status: impl Into<String>,
         status_tone: ViewerStatusTone,
-        timecode_label: impl Into<String>,
-        frame_label: impl Into<String>,
+        position_label: impl Into<String>,
         playing: bool,
         frame_content: Option<ViewerFrameContent>,
         empty_message: Option<String>,
     ) {
         self.status = status.into();
         self.status_tone = status_tone;
-        self.timecode_label = timecode_label.into();
-        self.frame_label = frame_label.into();
+        self.position_label = position_label.into();
         self.playing = playing;
         self.frame_content = frame_content;
         self.empty_message = empty_message;
@@ -577,7 +565,7 @@ impl ViewerSurface {
     }
 
     fn metadata_text(&self) -> String {
-        self.timecode_label.clone()
+        self.position_label.clone()
     }
 
     fn should_paint_status_badge(&self) -> bool {
@@ -1535,8 +1523,7 @@ mod tests {
         let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
             .with_status("Playing")
             .with_resolution_label("1920x1080")
-            .with_timecode_label("00:00:01:18")
-            .with_frame_label("F42")
+            .with_position_label("00:00:01:18")
             .with_duration_label("240 frames")
             .with_zoom_label("适合")
             .with_preview_quality_label("1/1")
@@ -1618,7 +1605,6 @@ mod tests {
             "预览准备中",
             ViewerStatusTone::Warning,
             "00:00:00:00",
-            "F0",
             true,
             None,
             Some("预览准备中".into()),
@@ -1630,7 +1616,6 @@ mod tests {
             "就绪",
             ViewerStatusTone::Neutral,
             "00:00:00:00",
-            "F0",
             false,
             None,
             None,

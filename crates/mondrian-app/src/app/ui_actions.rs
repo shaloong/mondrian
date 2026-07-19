@@ -7,7 +7,8 @@ use mondrian_core::effect_data::EffectType;
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, ClipId, EffectId, JobId, SequenceId, TrackId};
 use mondrian_core::{
-    ColorEngine, ColorSpace, ProjectSettings, Rational, Resolution, WorkingColorSpace,
+    ColorEngine, ColorSpace, ProjectSettings, Rational, Resolution, TimelineDisplayFormat,
+    WorkingColorSpace,
 };
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
@@ -19,7 +20,7 @@ use mondrian_timeline::{
         VideoRange,
     },
     AudioChannelLayout, AudioDisplayFormat, EditingMode, FieldOrder, PixelAspectRatio,
-    PreviewRenderFormat, SequenceSettings, VideoDisplayFormat,
+    PreviewRenderFormat, SequenceSettings,
 };
 use mondrian_ui_theme::ThemePreference;
 use mondrian_ui_widgets::WaveformDisplay;
@@ -1008,9 +1009,9 @@ pub enum SequenceSettingsDraftUpdatePayload {
     PixelAspectRatio(PixelAspectRatio),
     /// Active sequence field order.
     FieldOrder(FieldOrder),
-    /// Timeline/video display format.
-    VideoDisplayFormat(VideoDisplayFormat),
-    /// Sequence start timecode frame.
+    /// Sequence position-display format.
+    TimelineDisplayFormat(TimelineDisplayFormat),
+    /// Signed actual-frame offset used as the Sequence timecode origin.
     StartTimecodeFrame(i64),
     /// Sequence working color space.
     WorkingColorSpace(WorkingColorSpace),

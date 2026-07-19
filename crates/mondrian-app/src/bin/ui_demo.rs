@@ -921,7 +921,7 @@ fn demo_viewer_surface() -> ViewerSurface {
     ViewerSurface::new("Demo edit", 3840, 2160)
         .with_status("Ready")
         .with_resolution_label("3840x2160 @ 29.97 fps")
-        .with_frame_label("F68")
+        .with_position_label("F68")
         .with_duration_label("224 frames")
 }
 

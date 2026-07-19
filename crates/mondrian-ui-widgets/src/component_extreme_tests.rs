@@ -530,7 +530,6 @@ fn panel_surfaces_extreme_scroll_keyboard_and_paint_remain_stable() {
 
     let mut viewer = ViewerSurface::new("Viewer with extremely narrow chrome", 1, 10_000)
         .with_status("No signal")
-        .with_frame_label("F999999")
         .disabled();
     viewer.layout(Rect::new(0.0, 0.0, 20.0, 36.0));
     let viewer_paint = paint_widget(&viewer, Rect::new(0.0, 0.0, 32.0, 48.0));
@@ -540,7 +539,7 @@ fn panel_surfaces_extreme_scroll_keyboard_and_paint_remain_stable() {
     );
     assert!(
         viewer_paint.texts.iter().any(|text| text.text.contains("00:00:00:00")),
-        "viewer should still issue bounded timecode text when chrome collapses"
+        "viewer should still issue bounded position text when chrome collapses"
     );
 }
 

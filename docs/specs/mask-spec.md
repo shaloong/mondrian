@@ -30,7 +30,11 @@ mask.<mask_id>.<property>
 
 ## Shape Animation
 
-Shape keyframes are stored separately as `(TimeTicks, MaskShape)`. When `shape_animation_enabled` is false, the first shape keyframe is used.
+Shape keyframes are stored separately as `(TimelineTime, MaskShape)` in the
+owning Clip's authoring time domain. When `shape_animation_enabled` is false,
+the first shape keyframe is used. Evaluation maps that exact author time onto
+the requesting render grid; mask storage never adopts a frame or fixed-tick
+time base.
 
 ## Operations
 

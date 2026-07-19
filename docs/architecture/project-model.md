@@ -106,7 +106,7 @@ is written with that field explicitly.
 
 Archive and document JSON pass through separate version registries before typed
 deserialization. During Alpha there are deliberately no legacy document steps:
-schema v10 is the sole accepted author schema, and older/future versions fail
+schema v11 is the sole accepted author schema, and older/future versions fail
 instead of being guessed. Version 5 introduced the explicit tagged
 `mondrian_standard` / `aces` / `custom_ocio` project contract and makes every
 Mondrian Standard package-identity field mandatory: product ID/version, config
@@ -133,6 +133,11 @@ product promise.
 Version 10 adds the nonzero persisted Sequence author revision and makes author
 identity validation fail closed for duplicate identities and dangling strong
 Clip references.
+Version 11 replaces the independent `video_display_format` and
+`start_timecode_frame` fields with mandatory `timeline_display`. The resolved
+contract is shared by Viewer and Timeline, permits signed origins, validates
+drop-frame against the exact Sequence rate, and removes unimplemented
+Feet+Frames values from persisted author data.
 
 SQLite schema ownership remains in `mondrian-assets`. Its ordered Registry uses
 `PRAGMA user_version`, applies each step in a transaction, validates the current
@@ -144,7 +149,7 @@ Future split-entry layouts require an archive migration and new
 SQLite migrates only in the extracted runtime copy. The source `.mdp` is never
 rewritten by open.
 
-Current document schema v10 persists canonical rational `TimelineTime` values
+Current document schema v11 persists canonical rational `TimelineTime` values
 directly and requires the shared visual/audio `ParameterSchema`. It does not
 contain frame-oriented `TimeCode`, `TimeTicks`, descriptor-level duplicate
 defaults/types, editor-preset interpolation capabilities, or compatibility

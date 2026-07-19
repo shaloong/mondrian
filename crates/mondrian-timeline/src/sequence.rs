@@ -2,7 +2,8 @@
 
 use crate::{clip::ActiveClip, track::Track};
 use mondrian_core::{
-    types::*, DisplayManagementPolicy, TimelineTime, VideoContentLightMetadata,
+    types::*, DisplayManagementPolicy, SmpteCountingMode, TimelineDisplayContract,
+    TimelineDisplayFormat, TimelineDisplaySettings, TimelineTime, VideoContentLightMetadata,
     VideoMasteringDisplayMetadata,
 };
 use serde::{Deserialize, Serialize};
@@ -30,16 +31,6 @@ pub enum EditingMode {
 // Re-exported from mondrian_core::timeline_data.
 use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
 pub use mondrian_core::timeline_data::{FieldOrder, PixelAspectRatio};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum VideoDisplayFormat {
-    Timecode2997DropFrame,
-    Timecode2997NonDropFrame,
-    FeetAndFrames16mm,
-    FeetAndFrames35mm,
-    #[default]
-    Frames,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum AudioDisplayFormat {
@@ -524,16 +515,14 @@ pub struct SequenceSettings {
     pub pixel_aspect_ratio: PixelAspectRatio,
     #[serde(default)]
     pub field_order: FieldOrder,
-    #[serde(default)]
-    pub video_display_format: VideoDisplayFormat,
+    /// Sequence position presentation; never an author-time coordinate.
+    pub timeline_display: TimelineDisplaySettings,
     pub audio_sample_rate: u32,
     pub audio_channels: u8,
     #[serde(default)]
     pub audio_display_format: AudioDisplayFormat,
     #[serde(default)]
     pub audio_channel_layout: AudioChannelLayout,
-    #[serde(default)]
-    pub start_timecode_frame: i64,
     #[serde(default)]
     pub preview: SequencePreviewSettings,
     pub working_color_space: WorkingColorSpace,
@@ -564,12 +553,11 @@ impl Default for SequenceSettings {
             frame_rate: Rational::FPS_25,
             pixel_aspect_ratio: PixelAspectRatio::Square,
             field_order: FieldOrder::Progressive,
-            video_display_format: VideoDisplayFormat::Frames,
+            timeline_display: TimelineDisplaySettings::default(),
             audio_sample_rate: 48000,
             audio_channels: AudioChannelLayout::Stereo.channels(),
             audio_display_format: AudioDisplayFormat::AudioSamples,
             audio_channel_layout: AudioChannelLayout::Stereo,
-            start_timecode_frame: 0,
             preview: SequencePreviewSettings::default(),
             working_color_space: WorkingColorSpace::LinearRec2020,
             auto_tone_map_media: true,
@@ -620,12 +608,12 @@ impl SequenceSettings {
                 ),
             });
         }
-        if self.start_timecode_frame < 0 {
-            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+        self.timeline_display.resolve(self.frame_rate).map_err(|error| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "sequence_settings_validate".to_string(),
-                reason: "序列起始时间码不能为负数".to_string(),
-            });
-        }
+                reason: format!("序列时间显示合同无效: {error}"),
+            }
+        })?;
         if !(0.125..=1.0).contains(&self.preview.resolution_scale) {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "sequence_settings_validate".to_string(),
@@ -856,6 +844,16 @@ impl SequenceSettings {
         self
     }
 
+    /// Resolve the single Viewer/Timeline position-display contract.
+    pub fn timeline_display_contract(&self) -> mondrian_core::Result<TimelineDisplayContract> {
+        self.timeline_display.resolve(self.frame_rate).map_err(|error| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "sequence_timeline_display_resolve".to_owned(),
+                reason: error.to_string(),
+            }
+        })
+    }
+
     pub fn from_editing_mode(mode: EditingMode) -> Self {
         let mut settings = Self { editing_mode: mode, ..Default::default() };
         match mode {
@@ -863,19 +861,20 @@ impl SequenceSettings {
             EditingMode::Dslr1080p => {
                 settings.resolution = Resolution::FHD;
                 settings.frame_rate = Rational::FPS_23976;
-                settings.video_display_format = VideoDisplayFormat::Frames;
+                settings.timeline_display.format = TimelineDisplayFormat::Frames;
                 settings
             }
             EditingMode::Dslr720p => {
                 settings.resolution = Resolution::HD;
                 settings.frame_rate = Rational::FPS_5994;
-                settings.video_display_format = VideoDisplayFormat::Frames;
+                settings.timeline_display.format = TimelineDisplayFormat::Frames;
                 settings
             }
             EditingMode::Avchd1080p => {
                 settings.resolution = Resolution::FHD;
                 settings.frame_rate = Rational::FPS_2997;
-                settings.video_display_format = VideoDisplayFormat::Timecode2997DropFrame;
+                settings.timeline_display.format =
+                    TimelineDisplayFormat::Timecode(SmpteCountingMode::DropFrame);
                 settings
             }
             EditingMode::DigitalCinema4k => {
@@ -886,7 +885,7 @@ impl SequenceSettings {
             EditingMode::SocialVertical1080p => {
                 settings.resolution = Resolution { width: 1080, height: 1920 };
                 settings.frame_rate = Rational::FPS_30;
-                settings.video_display_format = VideoDisplayFormat::Frames;
+                settings.timeline_display.format = TimelineDisplayFormat::Frames;
                 settings
             }
         }
@@ -897,7 +896,7 @@ impl SequenceSettings {
         let audio_channels = self.audio_channels;
         let audio_display_format = self.audio_display_format;
         let audio_channel_layout = self.audio_channel_layout;
-        let start_timecode_frame = self.start_timecode_frame;
+        let start_timecode_frame = self.timeline_display.timecode_start_frame;
         let preview = self.preview.clone();
         let working_color_space = self.working_color_space;
         let color_management = self.color_management.clone();
@@ -907,7 +906,7 @@ impl SequenceSettings {
         self.audio_channels = audio_channels;
         self.audio_display_format = audio_display_format;
         self.audio_channel_layout = audio_channel_layout;
-        self.start_timecode_frame = start_timecode_frame;
+        self.timeline_display.timecode_start_frame = start_timecode_frame;
         self.preview = preview;
         self.working_color_space = working_color_space;
         self.color_management = color_management;
@@ -2011,13 +2010,15 @@ mod tests {
             frame_rate: Rational::FPS_23976,
             pixel_aspect_ratio: PixelAspectRatio::D1DvNtscWidescreen,
             field_order: FieldOrder::Progressive,
-            video_display_format: VideoDisplayFormat::Timecode2997DropFrame,
+            timeline_display: TimelineDisplaySettings::timecode(
+                SmpteCountingMode::NonDropFrame,
+                24 * 60 * 60,
+            ),
             working_color_space: WorkingColorSpace::LinearRec2020,
             audio_sample_rate: 96_000,
             audio_display_format: AudioDisplayFormat::Milliseconds,
             audio_channel_layout: AudioChannelLayout::Surround51,
             audio_channels: AudioChannelLayout::Surround51.channels(),
-            start_timecode_frame: 24 * 60 * 60,
             preview: SequencePreviewSettings {
                 format: PreviewRenderFormat::ProResProxy,
                 resolution_scale: 0.5,

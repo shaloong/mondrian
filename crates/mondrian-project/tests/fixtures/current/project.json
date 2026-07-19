@@ -1,5 +1,5 @@
 {
-  "schema_version": 10,
+  "schema_version": 11,
   "project_id": "97f12455-ec34-4b5d-a696-3da93cd914d7",
   "document_revision": 1,
   "meta": {
@@ -61,12 +61,16 @@
           },
           "pixel_aspect_ratio": "Square",
           "field_order": "Progressive",
-          "video_display_format": "Frames",
+          "timeline_display": {
+            "format": {
+              "kind": "frames"
+            },
+            "timecode_start_frame": 0
+          },
           "audio_sample_rate": 48000,
           "audio_channels": 2,
           "audio_display_format": "AudioSamples",
           "audio_channel_layout": "Stereo",
-          "start_timecode_frame": 0,
           "preview": {
             "format": "IFrameOnly",
             "resolution_scale": 0.5,

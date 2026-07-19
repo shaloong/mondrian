@@ -328,6 +328,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - Video automation and audio automation share the same exact curve and stable parameter-identity foundation; their Evaluation Grids, supported value types, and delivery cadence remain domain-specific.
 - Every renderer-stage exchange uses a **Color Frame Contract**. OCIO transforms process RGB only and require straight/opaque coverage; spatial filtering may materialize a typed premultiplied internal frame but must restore the declared public association before the next Module.
 - **Display Timecode** formats a Timeline Time but never owns it; changing drop-frame display or start timecode cannot move authored media.
+- One Sequence persists exactly one position-display setting and resolves it with its video Evaluation Grid into one validated display contract shared by Viewer and Timeline ruler. Frames ignore the retained timecode origin; drop-frame is valid only for its exact supported rational rates, and neither negative positions nor SMPTE 24-hour label wrapping alter Timeline Time.
 - Each Sequence exclusively owns one **Audio Program**; ordinary PCM routes cannot cross Sequence ownership.
 - An **Audio Program** presents one typed routing graph of **Audio Routing Nodes** without forcing Track, Bus, and Output to share an untyped identity or lifecycle; a Track Mixer Channel uses its owning audio Track identity.
 - An **Audio Route** connects stable typed endpoints and can never target a **Generated Audio Stage**.

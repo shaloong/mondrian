@@ -40,7 +40,7 @@ values cannot be mixed into an unregistered hybrid identity. Archive and preview
 fingerprints, OCIO CPU processor keys, and renderer GPU shader keys all include
 the exact package identity.
 
-Document schema v10 retains the v5 Custom OCIO reproducibility contract and the
+Document schema v11 retains the v5 Custom OCIO reproducibility contract and the
 v6 removal of the redundant sequence-level ACES workflow selector. It also
 requires the Mondrian Standard package identity to pin both the SDR and
 1000-nit HDR View Transform IDs and versions; the old single default-View field
@@ -63,6 +63,11 @@ establishes stable parameter identity, and v9 completes the cross-media
 parameter definition contract. Version 10 separates the persisted monotonic
 Sequence author revision from the Project document's successful-save revision
 and rejects invalid author identity graphs before they enter runtime state.
+Version 11 replaces the two legacy Sequence position-display fields with one
+mandatory `TimelineDisplaySettings` payload. It preserves a signed actual-frame
+timecode origin independently from Frames/SMPTE presentation, rejects invalid
+drop-frame/rate combinations, and deliberately provides no Alpha migration from
+v10.
 Current new sequences default to SceneReferred and persist the selected engine's
 package-pinned rendering View intent; DisplayReferred is the explicit
 direct-colorimetric bypass.

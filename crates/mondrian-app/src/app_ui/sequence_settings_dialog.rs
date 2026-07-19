@@ -4,14 +4,16 @@
 //! only on Apply, keeping editor mutations in `AppState`.
 
 use mondrian_core::display_labels::color_space_label;
-use mondrian_core::{ColorSpace, Rational, Resolution, WorkingColorSpace};
+use mondrian_core::{
+    ColorSpace, Rational, Resolution, SmpteCountingMode, TimelineDisplayFormat, WorkingColorSpace,
+};
 use mondrian_timeline::{
     sequence::{
         ColorWorkflow, DeliveryBitDepth, MissingColorMetadataPolicy, NestedColorProcessing,
         StaticHdrMetadataPolicy, VideoRange,
     },
     AudioChannelLayout, AudioDisplayFormat, EditingMode, FieldOrder, PixelAspectRatio,
-    PreviewRenderFormat, Sequence, SequenceSettings, VideoDisplayFormat,
+    PreviewRenderFormat, Sequence, SequenceSettings,
 };
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{EventContext, PaintContext};
@@ -86,6 +88,10 @@ impl AppUiSequenceSettingsDraft {
             SequenceSettingsDraftUpdatePayload::FrameRate(frame_rate) => {
                 if Rational::SEQUENCE_FRAME_RATES.contains(&frame_rate) {
                     self.settings.frame_rate = frame_rate;
+                    if self.settings.timeline_display.resolve(frame_rate).is_err() {
+                        self.settings.timeline_display.format =
+                            TimelineDisplayFormat::Timecode(SmpteCountingMode::NonDropFrame);
+                    }
                 }
             }
             SequenceSettingsDraftUpdatePayload::PixelAspectRatio(pixel_aspect_ratio) => {
@@ -94,11 +100,11 @@ impl AppUiSequenceSettingsDraft {
             SequenceSettingsDraftUpdatePayload::FieldOrder(field_order) => {
                 self.settings.field_order = field_order;
             }
-            SequenceSettingsDraftUpdatePayload::VideoDisplayFormat(display_format) => {
-                self.settings.video_display_format = display_format;
+            SequenceSettingsDraftUpdatePayload::TimelineDisplayFormat(display_format) => {
+                self.settings.timeline_display.format = display_format;
             }
             SequenceSettingsDraftUpdatePayload::StartTimecodeFrame(frame) => {
-                self.settings.start_timecode_frame = frame.max(0);
+                self.settings.timeline_display.timecode_start_frame = frame;
             }
             SequenceSettingsDraftUpdatePayload::WorkingColorSpace(color_space) => {
                 if self.can_edit_working_color_space() {
@@ -224,12 +230,10 @@ const FIELD_ORDER_OPTIONS: [FieldOrder; 3] = [
     FieldOrder::LowerFirst,
 ];
 
-const VIDEO_DISPLAY_FORMAT_OPTIONS: [VideoDisplayFormat; 5] = [
-    VideoDisplayFormat::Timecode2997DropFrame,
-    VideoDisplayFormat::Timecode2997NonDropFrame,
-    VideoDisplayFormat::FeetAndFrames16mm,
-    VideoDisplayFormat::FeetAndFrames35mm,
-    VideoDisplayFormat::Frames,
+const TIMELINE_DISPLAY_FORMAT_OPTIONS: [TimelineDisplayFormat; 3] = [
+    TimelineDisplayFormat::Timecode(SmpteCountingMode::NonDropFrame),
+    TimelineDisplayFormat::Timecode(SmpteCountingMode::DropFrame),
+    TimelineDisplayFormat::Frames,
 ];
 
 const AUDIO_CHANNEL_LAYOUT_OPTIONS: [AudioChannelLayout; 3] = [
@@ -354,13 +358,11 @@ fn field_order_label(value: FieldOrder) -> &'static str {
     }
 }
 
-fn video_display_format_label(value: VideoDisplayFormat) -> &'static str {
+fn timeline_display_format_label(value: TimelineDisplayFormat) -> &'static str {
     match value {
-        VideoDisplayFormat::Timecode2997DropFrame => "29.97 drop-frame",
-        VideoDisplayFormat::Timecode2997NonDropFrame => "29.97 non-drop",
-        VideoDisplayFormat::FeetAndFrames16mm => "Feet + Frames 16mm",
-        VideoDisplayFormat::FeetAndFrames35mm => "Feet + Frames 35mm",
-        VideoDisplayFormat::Frames => "帧",
+        TimelineDisplayFormat::Timecode(SmpteCountingMode::DropFrame) => "SMPTE drop-frame",
+        TimelineDisplayFormat::Timecode(SmpteCountingMode::NonDropFrame) => "SMPTE non-drop-frame",
+        TimelineDisplayFormat::Frames => "序列帧",
     }
 }
 
@@ -508,14 +510,20 @@ fn field_order_items() -> Vec<MenuItem> {
         .collect()
 }
 
-fn video_display_format_items() -> Vec<MenuItem> {
-    VIDEO_DISPLAY_FORMAT_OPTIONS
+fn timeline_display_format_items(frame_rate: Rational) -> Vec<MenuItem> {
+    TIMELINE_DISPLAY_FORMAT_OPTIONS
         .into_iter()
+        .filter(|format| {
+            !matches!(
+                format,
+                TimelineDisplayFormat::Timecode(SmpteCountingMode::DropFrame)
+            ) || matches!(frame_rate, Rational::FPS_2997 | Rational::FPS_5994)
+        })
         .map(|display_format| {
             MenuItem::new(
-                video_display_format_label(display_format),
+                timeline_display_format_label(display_format),
                 app_shell_sequence_settings_draft_changed_action(
-                    SequenceSettingsDraftUpdatePayload::VideoDisplayFormat(display_format),
+                    SequenceSettingsDraftUpdatePayload::TimelineDisplayFormat(display_format),
                 ),
             )
         })
@@ -754,8 +762,8 @@ fn frame_rate_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
 
 fn start_timecode_input_for(draft: &AppUiSequenceSettingsDraft) -> NumberInput {
     NumberInput::new(
-        draft.settings.start_timecode_frame as f64,
-        0.0,
+        draft.settings.timeline_display.timecode_start_frame as f64,
+        -(24 * 60 * 60 * 240) as f64,
         (24 * 60 * 60 * 240) as f64,
     )
     .with_placeholder("起始帧")
@@ -783,10 +791,10 @@ fn field_order_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     .with_max_visible_items(3)
 }
 
-fn video_display_format_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
+fn timeline_display_format_dropdown_for(draft: &AppUiSequenceSettingsDraft) -> Dropdown {
     Dropdown::new(
-        video_display_format_label(draft.settings.video_display_format),
-        video_display_format_items(),
+        timeline_display_format_label(draft.settings.timeline_display.format),
+        timeline_display_format_items(draft.settings.frame_rate),
     )
     .with_max_visible_items(5)
 }
@@ -1037,7 +1045,7 @@ pub struct SequenceSettingsDialog {
     frame_rate_dropdown: Dropdown,
     pixel_aspect_ratio_dropdown: Dropdown,
     field_order_dropdown: Dropdown,
-    video_display_format_dropdown: Dropdown,
+    timeline_display_format_dropdown: Dropdown,
     start_timecode_input: NumberInput,
     color_space_dropdown: Dropdown,
     output_color_space_dropdown: Dropdown,
@@ -1090,7 +1098,7 @@ impl SequenceSettingsDialog {
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
-        let start_timecode_label = Label::new("起始时间码帧")
+        let start_timecode_label = Label::new("时间码起点（实际帧）")
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0);
@@ -1125,7 +1133,7 @@ impl SequenceSettingsDialog {
         let frame_rate_dropdown = frame_rate_dropdown_for(&draft);
         let pixel_aspect_ratio_dropdown = pixel_aspect_ratio_dropdown_for(&draft);
         let field_order_dropdown = field_order_dropdown_for(&draft);
-        let video_display_format_dropdown = video_display_format_dropdown_for(&draft);
+        let timeline_display_format_dropdown = timeline_display_format_dropdown_for(&draft);
         let start_timecode_input = start_timecode_input_for(&draft);
         let color_space_dropdown = color_space_dropdown_for(&draft);
         let output_color_space_dropdown = output_color_space_dropdown_for(&draft);
@@ -1173,7 +1181,7 @@ impl SequenceSettingsDialog {
             frame_rate_dropdown,
             pixel_aspect_ratio_dropdown,
             field_order_dropdown,
-            video_display_format_dropdown,
+            timeline_display_format_dropdown,
             start_timecode_input,
             color_space_dropdown,
             output_color_space_dropdown,
@@ -1210,7 +1218,8 @@ impl SequenceSettingsDialog {
             self.frame_rate_dropdown = frame_rate_dropdown_for(&self.draft);
             self.pixel_aspect_ratio_dropdown = pixel_aspect_ratio_dropdown_for(&self.draft);
             self.field_order_dropdown = field_order_dropdown_for(&self.draft);
-            self.video_display_format_dropdown = video_display_format_dropdown_for(&self.draft);
+            self.timeline_display_format_dropdown =
+                timeline_display_format_dropdown_for(&self.draft);
             self.start_timecode_input = start_timecode_input_for(&self.draft);
             self.color_space_dropdown = color_space_dropdown_for(&self.draft);
             self.output_color_space_dropdown = output_color_space_dropdown_for(&self.draft);
@@ -1362,7 +1371,7 @@ impl Widget for SequenceSettingsDialog {
                     half,
                     DROPDOWN_HEIGHT,
                 ));
-                self.video_display_format_dropdown.layout(Rect::new(
+                self.timeline_display_format_dropdown.layout(Rect::new(
                     right_x,
                     content.y + FORMAT_ROW_4_Y,
                     half,
@@ -1563,7 +1572,8 @@ impl Widget for SequenceSettingsDialog {
                     || self.frame_rate_dropdown.event(event, ctx) == EventResult::Handled
                     || self.pixel_aspect_ratio_dropdown.event(event, ctx) == EventResult::Handled
                     || self.field_order_dropdown.event(event, ctx) == EventResult::Handled
-                    || self.video_display_format_dropdown.event(event, ctx) == EventResult::Handled
+                    || self.timeline_display_format_dropdown.event(event, ctx)
+                        == EventResult::Handled
                     || self.start_timecode_input.event(event, ctx) == EventResult::Handled
                     || self.audio_sample_rate_dropdown.event(event, ctx) == EventResult::Handled
                     || self.audio_channel_layout_dropdown.event(event, ctx) == EventResult::Handled
@@ -1622,7 +1632,7 @@ impl Widget for SequenceSettingsDialog {
                 self.frame_rate_dropdown.paint(ctx);
                 self.pixel_aspect_ratio_dropdown.paint(ctx);
                 self.field_order_dropdown.paint(ctx);
-                self.video_display_format_dropdown.paint(ctx);
+                self.timeline_display_format_dropdown.paint(ctx);
                 self.start_timecode_label.paint(ctx);
                 self.start_timecode_input.paint(ctx);
                 self.audio_label.paint(ctx);
@@ -1684,7 +1694,7 @@ impl Widget for SequenceSettingsDialog {
             18 => Some(&self.frame_rate_dropdown),
             19 => Some(&self.pixel_aspect_ratio_dropdown),
             20 => Some(&self.field_order_dropdown),
-            21 => Some(&self.video_display_format_dropdown),
+            21 => Some(&self.timeline_display_format_dropdown),
             22 => Some(&self.start_timecode_input),
             23 => Some(&self.color_space_dropdown),
             24 => Some(&self.output_color_space_dropdown),
@@ -1729,7 +1739,7 @@ impl Widget for SequenceSettingsDialog {
             18 => Some(&mut self.frame_rate_dropdown),
             19 => Some(&mut self.pixel_aspect_ratio_dropdown),
             20 => Some(&mut self.field_order_dropdown),
-            21 => Some(&mut self.video_display_format_dropdown),
+            21 => Some(&mut self.timeline_display_format_dropdown),
             22 => Some(&mut self.start_timecode_input),
             23 => Some(&mut self.color_space_dropdown),
             24 => Some(&mut self.output_color_space_dropdown),
@@ -1813,5 +1823,43 @@ mod tests {
             WorkingColorSpace::AcesCg,
         ));
         assert_eq!(aces.settings.working_color_space, WorkingColorSpace::AcesCg);
+    }
+
+    #[test]
+    fn timeline_display_draft_keeps_a_signed_origin_and_repairs_invalid_drop_frame_rate() {
+        let mut sequence = Sequence::new("Drop frame");
+        sequence.settings.frame_rate = Rational::FPS_2997;
+        sequence.settings.timeline_display.format =
+            TimelineDisplayFormat::Timecode(SmpteCountingMode::DropFrame);
+        let mut draft = AppUiSequenceSettingsDraft::from_sequence(&sequence);
+
+        draft.apply_update(SequenceSettingsDraftUpdatePayload::StartTimecodeFrame(
+            -1_800,
+        ));
+        assert_eq!(draft.settings.timeline_display.timecode_start_frame, -1_800);
+
+        draft.apply_update(SequenceSettingsDraftUpdatePayload::FrameRate(
+            Rational::FPS_25,
+        ));
+        assert_eq!(draft.settings.frame_rate, Rational::FPS_25);
+        assert_eq!(
+            draft.settings.timeline_display.format,
+            TimelineDisplayFormat::Timecode(SmpteCountingMode::NonDropFrame)
+        );
+        draft.settings.validate().expect("repaired draft must remain valid");
+    }
+
+    #[test]
+    fn drop_frame_menu_is_available_only_for_exact_supported_rates() {
+        let has_drop_frame = |rate| {
+            timeline_display_format_items(rate)
+                .iter()
+                .any(|item| item.label == "SMPTE drop-frame")
+        };
+
+        assert!(has_drop_frame(Rational::FPS_2997));
+        assert!(has_drop_frame(Rational::FPS_5994));
+        assert!(!has_drop_frame(Rational::FPS_25));
+        assert!(!has_drop_frame(Rational::FPS_30));
     }
 }

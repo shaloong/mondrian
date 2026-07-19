@@ -59,8 +59,8 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 
 | 能力域 | 已有事实 | 仍不足以宣称完成的部分 | 当前判断 |
 | --- | --- | --- | --- |
-| 核心时间与 ID | 作者位置/范围/曲线已迁移为 canonical `TimelineTime`，已有显式 Time Domain/Transform、稳定 ParameterId；`FramePosition` 仅作求值适配，SMPTE NDF/DF 已有独立 display contract | 仍需补齐 VFR/混合帧率、嵌套和长项目 corpus，并把 display mode 完整接入序列/UI 设置 | L1- |
-| 项目持久化 | `.mdp` manifest、schema v10 精确时间/跨媒体参数/Sequence author revision 文档、当前 fixture、SQLite 素材库、临时文件写入、自动保存、恢复候选和重连已接入 | Alpha 明确拒绝旧 schema、不承诺兼容迁移；替换目标文件前的持久化/崩溃语义仍需压力验证 | L1- |
+| 核心时间与 ID | 作者位置/范围/曲线使用 canonical `TimelineTime` 与显式 Time Domain/Transform；`FramePosition` 仅作求值/显示 Adapter。Sequence 持久化一个显示设置并解析为 Viewer/时间轴共享的 NDF/DF/Frames 契约；版本化 fixture 覆盖 VFR PTS、23.976→29.97 嵌套、负时间和 100 小时项目 | 素材源 timecode、用户输入/解析、time-of-day/reel 语义及未来真正的 Feet+Frames 仍须各自完整产品契约，不能从显示格式化器反推“已支持” | L1 |
+| 项目持久化 | `.mdp` manifest、schema v11 精确时间/跨媒体参数/Sequence author revision/统一时间显示设置文档、当前 fixture、SQLite 素材库、临时文件写入、自动保存、恢复候选和重连已接入 | Alpha 明确拒绝旧 schema、不承诺兼容迁移；替换目标文件前的持久化/崩溃语义仍需压力验证 | L1- |
 | Undo/Redo | UI 外的活动 Sequence 命令历史可工作；主要编辑动作有回归测试，完整快照已改为可计量的序列化载荷，并受 200 条/128 MiB 双重硬预算和结构化淘汰诊断约束 | 跨 Sequence/Project 聚合事务仍需独立设计；超大项目是否引入 delta command 取决于基准证据，不能另建一套语义 | L1- |
 | 素材管理 | 文件夹/Bin 层级、移动/重命名/删除、缩略图、离线提示、单文件/目录重连、代理模式已接入产品 UI | tags/metadata 字段尚未形成检索产品；素材使用位置反查和批量诊断不足 | L1- |
 | 时间线编辑 | 多轨、移动、分割、普通 Trim、Ripple Delete、Insert/Overwrite、Roll/Slip/Slide、跨轨移动、链接片段跟随、锁定、吸附、多选和嵌套序列已有实现与测试 | Lift/Extract、显式 Link/Unlink、Track Targeting、转场 handles、反向/冻结/完整 time remap、VFR/混合帧率边界和复杂 ripple 传播未形成完整验收 | L1- |
@@ -340,10 +340,10 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 **项目与编辑**
 
-- [x] 建立 archive/document/SQLite version registry，并提供 schema v10 current document fixture、v0 SQLite fixture、幂等打开、事务回滚和失败不覆盖测试；Alpha 不保留旧 document schema 兼容。
+- [x] 建立 archive/document/SQLite version registry，并提供 schema v11 current document fixture、v0 SQLite fixture、幂等打开、事务回滚和失败不覆盖测试；Alpha 不保留旧 document schema 兼容。
 - [x] Project document save revision 与持久化 `SequenceRevision` 已分离；每次作者事务、Undo/Redo 及继承的 Project 语义变化单调推进 Sequence revision，Playback 不再拿保存代次冒充 Timeline revision。Track/Clip/Effect/Mask/Parameter/Keyframe 与全部音频作者实体保留稳定强类型 ID，以 Sequence revision 作保守失效、以定义/内容/资源指纹作精细失效；当前文档会拒绝零 revision、重复 Sequence/Track/Clip/Effect/Mask/动画轨身份、重复 effect-local Parameter/曲线 keyframe 身份和悬空强 Clip 引用。
 - [x] 高频 Timeline、Inspector、Viewer 变换与关键帧编辑统一提交 Sequence snapshot command；历史 Module 按目标 Sequence 失败关闭，默认同时硬限制 200 条与 128 MiB command-owned retained bytes，使用可精确计量的序列化快照和 `VecDeque` 常数时间淘汰，累计报告预算淘汰、分支 Redo 丢弃和超大命令未保留。历史构造/入栈失败会回滚作者 Sequence，Undo/Redo 失败不吞命令；选择和导航仍明确不是作者事务。
-- [ ] 精确 Timeline Time、显式 Time Domain/Transform、Frame/Sample Evaluation Grid 和独立 SMPTE NDF/DF display contract 已落地并删除旧 `TimeCode`/`TimeTicks`；仍须完整接入显示设置，并补齐 VFR、混合帧率、负时间、嵌套与长项目 fixture。
+- [x] 精确 Timeline Time、显式 Time Domain/Transform、Frame/Sample Evaluation Grid 已落地并删除旧 `TimeCode`/`TimeTicks`。Sequence schema v11 只持久化一个 `TimelineDisplaySettings`，领域层解析为 Viewer/时间轴共享的有效 `TimelineDisplayContract`；Frames 与 SMPTE NDF/DF、signed timecode origin、负位置和 24 小时标签回绕均不改变作者时间。版本化 `timeline_time_contract_v1` fixture 通过不规则 VFR PTS、23.976 child→29.97 parent 显式嵌套变换、负时间和 100 小时项目验证精确投影；未实现完整电影尺语义的 Feet+Frames 已从类型和 UI 删除而非虚假暴露。
 
 **播放与任务**
 
@@ -368,7 +368,7 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 ### 退出门槛
 
-- schema v10 current fixture 可保存、重开；旧/未来 schema 明确拒绝；故意失败不会破坏源文件。
+- schema v11 current fixture 可保存、重开；旧/未来 schema 明确拒绝；故意失败不会破坏源文件。
 - Headless 测试可驱动 play/seek/cancel，并以手动 Monotonic Runtime Clock 精确验证请求年龄、过期边界、最早取消原因、同键 rebind、worker 完成与 UI 轮询解耦以及回退证据，而不构造 Widget 或 native window。
 - 一个参数从 schema → UI → animation → save/reopen → preview/export → cache invalidation 全链通过。
 - 音频时钟、video target selection 和 fallback 决策可由结构化报告关联到同一次播放。
@@ -510,7 +510,7 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 ### 第 3–5 周：迁移、所有权与音频时钟
 
-- 落地项目 version registry 与 schema v10 current fixture；Alpha 旧 schema 明确拒绝。
+- 落地项目 version registry 与 schema v11 current fixture；Alpha 旧 schema 明确拒绝。
 - 将可 headless 驱动的播放/任务核心从 UI 适配器中收敛出来，保留现有成熟调度逻辑。
 - 冻结 Timeline Time/Time Domain、稳定 ParameterId、统一曲线 schema 和 cache semantic revision；旧 `TimeCode`/`TimeTicks` 不作为兼容格式保留。
 - 将 audio master、video late-frame、buffering 和 underrun 证据统一到播放报告。

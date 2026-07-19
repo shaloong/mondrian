@@ -8,8 +8,10 @@
 mod model;
 mod paint;
 
-use mondrian_core::types::{AssetId, Rational};
-use mondrian_core::Color;
+use mondrian_core::types::AssetId;
+#[cfg(test)]
+use mondrian_core::types::Rational;
+use mondrian_core::{Color, TimelineDisplayContract};
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
@@ -575,7 +577,7 @@ pub struct TimelineView {
     playhead_frame: i64,
     in_point_frame: i64,
     out_point_frame: Option<i64>,
-    frame_rate: Rational,
+    timeline_display: TimelineDisplayContract,
     snapping_enabled: bool,
     active_snap: Option<TimelineSnapResult>,
     pixels_per_frame: f32,
@@ -707,7 +709,7 @@ impl TimelineView {
             playhead_frame: 0,
             in_point_frame: 0,
             out_point_frame: None,
-            frame_rate: Rational::FPS_30,
+            timeline_display: TimelineDisplayContract::default(),
             snapping_enabled: true,
             active_snap: None,
             pixels_per_frame: metrics.default_pixels_per_frame,
@@ -771,13 +773,9 @@ impl TimelineView {
         self
     }
 
-    /// Set the frame rate used for ruler labels and SMPTE display.
-    pub fn with_frame_rate(mut self, frame_rate: Rational) -> Self {
-        self.frame_rate = if frame_rate.num <= 0 || frame_rate.den <= 0 {
-            Rational::FPS_30
-        } else {
-            frame_rate
-        };
+    /// Set the validated frame-grid and position-label display contract.
+    pub fn with_timeline_display(mut self, display: TimelineDisplayContract) -> Self {
+        self.timeline_display = display;
         self
     }
 
@@ -2557,15 +2555,19 @@ impl TimelineView {
     }
 
     fn tick_step_frames(&self) -> i64 {
-        timeline_model::tick_step_frames(self.pixels_per_frame, self.frame_rate)
+        timeline_model::tick_step_frames(self.pixels_per_frame, self.timeline_display.frame_rate())
     }
 
     fn major_tick_step_frames(&self, minor_step: i64) -> i64 {
-        timeline_model::major_tick_step_frames(self.pixels_per_frame, self.frame_rate, minor_step)
+        timeline_model::major_tick_step_frames(
+            self.pixels_per_frame,
+            self.timeline_display.frame_rate(),
+            minor_step,
+        )
     }
 
     fn ruler_label_for_frame(&self, frame: i64, major_step: i64) -> String {
-        timeline_model::ruler_label_for_frame(frame, major_step, self.frame_rate)
+        timeline_model::ruler_label_for_frame(frame, major_step, self.timeline_display)
     }
 
     fn paint_ruler(&self, ctx: &mut PaintContext) {
@@ -4480,6 +4482,15 @@ mod tests {
             TimelineTrack::audio("A1", vec![TimelineClip::new("Music", 12, 90)]),
         ])
         .with_playhead(12)
+    }
+
+    fn timecode_display(frame_rate: Rational) -> TimelineDisplayContract {
+        mondrian_core::TimelineDisplaySettings::timecode(
+            mondrian_core::SmpteCountingMode::NonDropFrame,
+            0,
+        )
+        .resolve(frame_rate)
+        .expect("valid test timecode display")
     }
 
     fn old_timeline_point(x: f32, y: f32) -> Point {
@@ -8330,15 +8341,31 @@ mod tests {
 
     #[test]
     fn ruler_labels_follow_configured_frame_rate_instead_of_defaulting_to_thirty() {
-        let view = timeline().with_frame_rate(Rational::FPS_25);
+        let view = timeline().with_timeline_display(timecode_display(Rational::FPS_25));
 
         assert_eq!(view.ruler_label_for_frame(250, 25), "00:00:10:00");
         assert_eq!(view.ruler_label_for_frame(250, 125), "00:10");
     }
 
     #[test]
+    fn ruler_labels_use_the_resolved_drop_frame_origin_contract() {
+        let display = mondrian_core::TimelineDisplaySettings::timecode(
+            mondrian_core::SmpteCountingMode::DropFrame,
+            107_892,
+        )
+        .resolve(Rational::FPS_2997)
+        .expect("drop-frame display");
+        let view = timeline().with_timeline_display(display);
+
+        assert_eq!(view.ruler_label_for_frame(0, 1), "01:00:00;00");
+        assert_eq!(view.ruler_label_for_frame(1_800, 1), "01:01:00;02");
+    }
+
+    #[test]
     fn ruler_tick_steps_use_dense_minor_marks_and_meaningful_major_labels() {
-        let view = timeline().with_frame_rate(Rational::FPS_25).with_pixels_per_frame(0.5);
+        let view = timeline()
+            .with_timeline_display(timecode_display(Rational::FPS_25))
+            .with_pixels_per_frame(0.5);
 
         let minor_step = view.tick_step_frames();
         let major_step = view.major_tick_step_frames(minor_step);

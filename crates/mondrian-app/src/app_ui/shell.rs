@@ -1564,8 +1564,7 @@ fn update_viewer_widgets(widget: &mut dyn Widget, model: &ViewerPanelModel) -> b
         viewer.set_playback_frame_content_state(
             model.status.clone(),
             model.status_tone,
-            model.timecode_label.clone(),
-            model.frame_label.clone(),
+            model.position_label.clone(),
             model.playing,
             model.frame_content.clone(),
             model.empty_message.clone(),
@@ -1972,14 +1971,14 @@ mod tests {
     use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
     use mondrian_core::types::AssetId;
     use mondrian_core::{
-        ColorSpace, Rational, Resolution, VideoContentLightMetadata, VideoMasteringDisplayMetadata,
-        WorkingColorSpace,
+        ColorSpace, Rational, Resolution, SmpteCountingMode, TimelineDisplayFormat,
+        VideoContentLightMetadata, VideoMasteringDisplayMetadata, WorkingColorSpace,
     };
     use mondrian_platform::ClipboardError;
     use mondrian_timeline::sequence::{
         AudioChannelLayout, AudioDisplayFormat, ColorWorkflow, DeliveryBitDepth, EditingMode,
         FieldOrder, MissingColorMetadataPolicy, NestedColorProcessing, PixelAspectRatio,
-        PreviewRenderFormat, Sequence, StaticHdrMetadataPolicy, VideoDisplayFormat, VideoRange,
+        PreviewRenderFormat, Sequence, StaticHdrMetadataPolicy, VideoRange,
     };
     use mondrian_ui_core::tree::WidgetTreeView;
     use mondrian_ui_core::widget::{DrawCommandEncoder, PaintContext};
@@ -3237,8 +3236,8 @@ mod tests {
         );
         root.handle_shell_action(
             app_shell_sequence_settings_draft_changed_action(
-                SequenceSettingsDraftUpdatePayload::VideoDisplayFormat(
-                    VideoDisplayFormat::Timecode2997DropFrame,
+                SequenceSettingsDraftUpdatePayload::TimelineDisplayFormat(
+                    TimelineDisplayFormat::Timecode(SmpteCountingMode::DropFrame),
                 ),
             ),
             &platform,
@@ -3406,10 +3405,10 @@ mod tests {
         );
         assert_eq!(payload.settings.field_order, FieldOrder::UpperFirst);
         assert_eq!(
-            payload.settings.video_display_format,
-            VideoDisplayFormat::Timecode2997DropFrame
+            payload.settings.timeline_display.format,
+            TimelineDisplayFormat::Timecode(SmpteCountingMode::DropFrame)
         );
-        assert_eq!(payload.settings.start_timecode_frame, 120);
+        assert_eq!(payload.settings.timeline_display.timecode_start_frame, 120);
         assert_eq!(
             payload.settings.working_color_space,
             WorkingColorSpace::LinearRec2020
@@ -3590,7 +3589,7 @@ mod tests {
         let preview_waiting = root.refresh_playback_frame_from_app_state(&state, None);
 
         assert_eq!(root.models.timeline.playhead_frame, 48);
-        assert_eq!(root.models.viewer.frame_label, "F48");
+        assert_eq!(root.models.viewer.position_label, "F48");
         assert!(root.models.viewer.playing);
         assert!(!preview_waiting);
     }

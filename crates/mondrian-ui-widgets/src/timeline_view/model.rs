@@ -1,5 +1,5 @@
-use mondrian_core::types::{FramePosition, Rational};
-use mondrian_core::{SmpteCountingMode, SmpteDisplayTimecode};
+use mondrian_core::types::Rational;
+use mondrian_core::TimelineDisplayContract;
 use mondrian_ui_core::types::{KeyCode, Modifiers, Point, Rect};
 
 use super::{
@@ -653,10 +653,6 @@ pub(super) fn ruler_fps(frame_rate: Rational) -> i64 {
     frame_rate.to_f64().round().max(1.0) as i64
 }
 
-pub(super) fn frame_time_base(frame_rate: Rational) -> Rational {
-    Rational::new(frame_rate.den, frame_rate.num)
-}
-
 pub(super) fn pick_ruler_step_frames(
     pixels_per_frame: f32,
     frame_rate: Rational,
@@ -717,25 +713,26 @@ pub(super) fn major_tick_step_frames(
     pick_ruler_step_frames(pixels_per_frame, frame_rate, 96.0, minor_step.max(1))
 }
 
-pub(super) fn ruler_label_for_frame(frame: i64, major_step: i64, frame_rate: Rational) -> String {
-    let frame = frame.max(0);
+pub(super) fn ruler_label_for_frame(
+    frame: i64,
+    major_step: i64,
+    display: TimelineDisplayContract,
+) -> String {
+    let frame_rate = display.frame_rate();
     let fps = ruler_fps(frame_rate).max(1);
-    let smpte = SmpteDisplayTimecode::from_frame_position(
-        FramePosition::new(frame, frame_time_base(frame_rate)),
-        SmpteCountingMode::NonDropFrame,
-    )
-    .map(SmpteDisplayTimecode::label)
-    .unwrap_or_else(|_| "--:--:--:--".to_owned());
-    let total_seconds = (frame as f64 / frame_rate.to_f64()).floor().max(0.0) as i64;
-    let hours = total_seconds / 3600;
-    let parts = smpte.split(':').collect::<Vec<_>>();
+    let Some(timecode) = display.timecode_contract() else {
+        return frame.to_string();
+    };
+    let Ok(timecode) = timecode.timecode_at_frame(frame) else {
+        return "--:--:--:--".to_owned();
+    };
 
     if major_step < fps * 2 {
-        smpte
-    } else if hours > 0 || major_step >= fps * 60 * 10 {
-        format!("{}:{}:{}", parts[0], parts[1], parts[2])
+        timecode.label()
+    } else if timecode.hours > 0 || major_step >= fps * 60 * 10 {
+        timecode.clock_label()
     } else {
-        format!("{}:{}", parts[1], parts[2])
+        timecode.minute_second_label()
     }
 }
 
@@ -846,6 +843,15 @@ fn finite_or(value: f32, fallback: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn timecode_display(frame_rate: Rational) -> TimelineDisplayContract {
+        mondrian_core::TimelineDisplaySettings::timecode(
+            mondrian_core::SmpteCountingMode::NonDropFrame,
+            0,
+        )
+        .resolve(frame_rate)
+        .expect("valid test timecode display")
+    }
 
     fn assert_rect_eq(rect: Rect, expected: Rect) {
         assert!(
@@ -1389,20 +1395,19 @@ mod tests {
     #[test]
     fn ruler_labels_use_configured_frame_rate_and_density() {
         assert_eq!(ruler_fps(Rational::FPS_25), 25);
-        assert_eq!(frame_time_base(Rational::FPS_25), Rational::new(1, 25));
+        let display = timecode_display(Rational::FPS_25);
+        assert_eq!(ruler_label_for_frame(250, 25, display), "00:00:10:00");
+        assert_eq!(ruler_label_for_frame(250, 125, display), "00:10");
         assert_eq!(
-            ruler_label_for_frame(250, 25, Rational::FPS_25),
-            "00:00:10:00"
-        );
-        assert_eq!(ruler_label_for_frame(250, 125, Rational::FPS_25), "00:10");
-        assert_eq!(
-            ruler_label_for_frame(25 * 60 * 60 + 250, 25 * 60 * 10, Rational::FPS_25),
+            ruler_label_for_frame(25 * 60 * 60 + 250, 25 * 60 * 10, display),
             "01:00:10"
         );
-        assert_eq!(
-            ruler_label_for_frame(-10, 25, Rational::FPS_25),
-            "00:00:00:00"
-        );
+        assert_eq!(ruler_label_for_frame(-10, 25, display), "-00:00:00:10");
+
+        let frames = mondrian_core::TimelineDisplaySettings::frames(10_000)
+            .resolve(Rational::FPS_25)
+            .expect("frame display");
+        assert_eq!(ruler_label_for_frame(-10, 25, frames), "-10");
     }
 
     #[test]

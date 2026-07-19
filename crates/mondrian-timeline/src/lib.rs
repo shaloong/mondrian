@@ -26,6 +26,6 @@ pub use keyframe::{InterpolationType, Keyframe, KeyframeTrack};
 pub use sequence::{
     AudioChannelLayout, AudioDisplayFormat, EditingMode, FieldOrder, PixelAspectRatio,
     PreviewRenderFormat, Sequence, SequenceCollection, SequencePreset, SequencePreviewSettings,
-    SequenceRole, SequenceSettings, VideoDisplayFormat,
+    SequenceRole, SequenceSettings,
 };
 pub use track::{Track, TrackType};
