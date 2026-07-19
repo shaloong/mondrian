@@ -23,9 +23,7 @@ use mondrian_core::timeline_data::{AlphaInterpretation, AssetMediaInterpretation
 use mondrian_core::types::ColorEngine;
 use mondrian_core::types::{AssetId, BlendMode, ColorSpace, Rational, SequenceId};
 use mondrian_core::{MondrianError, Resolution, WorkingColorSpace};
-use mondrian_effects::{
-    get_or_lower_effect_graph_to_gpu_plan, CompiledEffectGraph, EffectCachePolicy,
-};
+use mondrian_effects::CompiledEffectGraph;
 use mondrian_media::{
     decode_preview_frame_cancellable, preview_decode_cpu_budget, DecodedFrameResidency,
     DecodedVideoRange, DecodedVideoRangeContract, DecodedVideoSurfaceFormat, HwAccelBackend,
@@ -46,20 +44,19 @@ use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
     evaluate_timeline_render_plan, execute_cpu_program_monitor_boundary_rgba8,
     execute_cpu_working_transform, CpuColorFrame, CpuEncodedColorFrame, CpuSourceColorFrame,
-    GpuCompositingBlockerReason, GpuCompositingDiagnostics, LinearFloatSource,
-    RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
-    RenderColorTransformDiagnostics, RenderColorTransformDirection, RenderInputTransform,
-    RenderMonitorAdaptation, RenderOutputColorBoundary, TimelineAdjustmentLayer,
-    TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
-    TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement,
-    TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineEffectColorRuntime, TimelineEvaluationRequest, TimelineMediaLayer,
-    TimelineRenderPlanElement, TimelineSolidColorLayer,
+    GpuCompositingDiagnostics, LinearFloatSource, RenderColorStageDiagnostics,
+    RenderColorStageGpuBlockerBreakdown, RenderColorTransformDiagnostics,
+    RenderColorTransformDirection, RenderInputTransform, RenderMonitorAdaptation,
+    RenderOutputColorBoundary, TimelineAdjustmentLayer, TimelineCompositeColorPathSummary,
+    TimelineCompositeDiagnostics, TimelineCompositeDomainBlockerBreakdown,
+    TimelineCompositeElement, TimelineCompositeLegacyBreakdown, TimelineCompositeOptions,
+    TimelineCompositeScratch, TimelineEffectColorRuntime, TimelineEvaluationRequest,
+    TimelineMediaLayer, TimelineRenderPlanElement, TimelineSolidColorLayer,
 };
 #[cfg(test)]
 use mondrian_renderer::{
-    execute_cpu_input_stage, GpuNativeDecodedFrameImportSource, GpuNativeDecodedFrameTextureFormat,
-    TimelineCompositeColorPath, ViewerGpuExecutionLayer,
+    execute_cpu_input_stage, GpuCompositingBlockerReason, GpuNativeDecodedFrameImportSource,
+    GpuNativeDecodedFrameTextureFormat, TimelineCompositeColorPath, ViewerGpuExecutionLayer,
 };
 use mondrian_timeline::sequence::{
     ColorContext, InputColorResolution, InputColorResolutionSource,
@@ -123,6 +120,11 @@ use crate::app::preview_scheduler_policy::{
 #[cfg(test)]
 use crate::app::preview_scheduler_policy::{
     MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD, PREVIEW_SCRUB_SLOW_LATENCY_US,
+};
+use crate::app::preview_viewer_plan::{
+    gpu_composite_layers_for_resolved, preview_elements_require_deferred_composite,
+    resolved_preview_decode_execution, resolved_preview_presentation_quality,
+    viewer_preview_cache_key_for_resolved_plan, ResolvedPreviewElement,
 };
 use crate::app::proxy_generation::{request_proxy_generation, resolve_asset_proxy_color_contract};
 use crate::app::AppState;
@@ -470,8 +472,6 @@ impl AppUiPreviewService {
         };
         let decode_execution = resolved_preview_decode_execution(&resolved.elements);
         let working_input = match gpu_composite_layers_for_resolved(
-            width,
-            height,
             &resolved.elements,
             resolved.color_context.working_color_space,
         ) {
@@ -694,14 +694,8 @@ mod request_scheduler;
 mod result_pump;
 mod service_lifecycle;
 mod timeline_evaluation;
-mod viewer_plan;
 
 use crate::app::preview_execution::PreviewOutputKey as ViewerPreviewCacheKey;
-use viewer_plan::{
-    gpu_composite_layers_for_resolved, preview_elements_require_deferred_composite,
-    resolved_preview_decode_execution, resolved_preview_presentation_quality,
-    viewer_preview_cache_key_for_resolved_plan, ResolvedPreviewElement,
-};
 impl ViewerPreviewSource for AppUiPreviewService {
     fn viewer_preview_for_state(&self, state: &AppState) -> ViewerPreviewState {
         self.render_preview(state)

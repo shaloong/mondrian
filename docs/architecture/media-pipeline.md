@@ -405,11 +405,16 @@ Decoded Preview payload ownership is UI-independent:
 working adaptation, logical and sampled geometry, presentation quality, decode
 provenance, and exact host/decoder reservation. Its closed payload enum admits
 exactly one of working CPU, source-domain CPU/GPU-capable, or native decoder
-surface residency; no frame can be empty or claim contradictory residency. The concrete worker loop,
+surface residency; no frame can be empty or claim contradictory residency. The
+concrete worker loop,
 cancellation checkpoints, result publication, and FFmpeg Preview Adapter live
-together in `app_ui::preview::media_execution`. Timeline evaluation, media adaptation,
-Viewer planning, final presentation arbitration, and diagnostics live in
-separate private deep Modules. `app_ui::preview::presentation` exclusively
+together in `app_ui::preview::media_execution`. Timeline evaluation and media
+adaptation remain private Window Adapter Modules.
+The UI-independent `app::preview_viewer_plan` Module owns resolved element
+representation, stable cache identity, quality/provenance aggregation, deferred
+composite classification, and renderer GPU-layer lowering. Final presentation
+arbitration and diagnostics live in separate private deep Modules.
+`app_ui::preview::presentation` exclusively
 chooses exact registered GPU output, raster cache, scoped stale reuse, deferred
 playback composite, or the CPU output boundary; it cannot schedule media work
 or mutate transport. CPU raster cache and stale state use the validated,

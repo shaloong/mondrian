@@ -5,9 +5,26 @@
 //! renderer-owned GPU execution layers. It deliberately contains no decode,
 //! scheduling, presentation, or diagnostics side effects.
 
-use super::*;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
-pub(super) enum ResolvedPreviewElement {
+use mondrian_core::types::{BlendMode, SequenceId};
+use mondrian_core::WorkingColorSpace;
+use mondrian_effects::{
+    get_or_lower_effect_graph_to_gpu_plan, CompiledEffectGraph, EffectCachePolicy,
+};
+use mondrian_playback::FramePresentationQuality;
+use mondrian_renderer::{
+    GpuCompositingBlockerReason, TimelineAdjustmentLayer, TimelineSolidColorLayer,
+    ViewerGpuExecutionLayer,
+};
+use mondrian_timeline::sequence::ColorContext;
+
+use super::preview_execution::{PreviewDecodeExecutionSummary, PreviewOutputKey};
+use super::preview_media_frame::MediaPreviewFrame;
+
+pub(crate) enum ResolvedPreviewElement {
     SolidColor(TimelineSolidColorLayer),
     Adjustment(TimelineAdjustmentLayer),
     Media {
@@ -20,13 +37,13 @@ pub(super) enum ResolvedPreviewElement {
     },
 }
 
-pub(super) fn viewer_preview_cache_key_for_resolved_plan(
+pub(crate) fn viewer_preview_cache_key_for_resolved_plan(
     sequence_id: SequenceId,
     width: u32,
     height: u32,
     elements: &[ResolvedPreviewElement],
     color_context: &ColorContext,
-) -> ViewerPreviewCacheKey {
+) -> PreviewOutputKey {
     let mut hasher = DefaultHasher::new();
     color_context.working_color_space.hash(&mut hasher);
     color_context.output_color_space.hash(&mut hasher);
@@ -75,7 +92,7 @@ pub(super) fn viewer_preview_cache_key_for_resolved_plan(
             }
         }
     }
-    ViewerPreviewCacheKey::new(sequence_id, width, height, hasher.finish())
+    PreviewOutputKey::new(sequence_id, width, height, hasher.finish())
 }
 
 fn hash_color(color: mondrian_core::Color, hasher: &mut impl Hasher) {
@@ -103,12 +120,10 @@ fn hash_effect_graph_signature(
     }
 }
 
-pub(super) fn gpu_composite_layers_for_resolved(
-    _width: u32,
-    _height: u32,
+pub(crate) fn gpu_composite_layers_for_resolved(
     resolved: &[ResolvedPreviewElement],
     working_color_space: WorkingColorSpace,
-) -> Result<Vec<mondrian_renderer::ViewerGpuExecutionLayer>, GpuCompositingBlockerReason> {
+) -> Result<Vec<ViewerGpuExecutionLayer>, GpuCompositingBlockerReason> {
     let mut layers = Vec::with_capacity(resolved.len());
     let mut has_composited_layer = false;
     for element in resolved {
@@ -135,7 +150,7 @@ pub(super) fn gpu_composite_layers_for_resolved(
                 if !is_preview_gpu_media_transform_supported(*transform) {
                     return Err(GpuCompositingBlockerReason::UnsupportedTransform);
                 }
-                layers.push(mondrian_renderer::ViewerGpuExecutionLayer::Media {
+                layers.push(ViewerGpuExecutionLayer::Media {
                     frame: frame.working_payload(),
                     gpu_source: frame.gpu_source(),
                     native_source: frame.native_source(),
@@ -155,7 +170,7 @@ pub(super) fn gpu_composite_layers_for_resolved(
                 if !is_preview_identity_transform(layer.transform) {
                     return Err(GpuCompositingBlockerReason::UnsupportedTransform);
                 }
-                layers.push(mondrian_renderer::ViewerGpuExecutionLayer::SolidColor {
+                layers.push(ViewerGpuExecutionLayer::SolidColor {
                     layer: layer.clone(),
                     effect_plan,
                 });
@@ -174,7 +189,7 @@ pub(super) fn gpu_composite_layers_for_resolved(
                 }
                 let effect_plan = get_or_lower_effect_graph_to_gpu_plan(&layer.effect_graph)
                     .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
-                layers.push(mondrian_renderer::ViewerGpuExecutionLayer::Adjustment {
+                layers.push(ViewerGpuExecutionLayer::Adjustment {
                     effect_plan,
                     opacity: layer.opacity,
                     blend_mode,
@@ -189,7 +204,7 @@ pub(super) fn gpu_composite_layers_for_resolved(
     Ok(layers)
 }
 
-pub(super) fn preview_elements_require_deferred_composite(
+pub(crate) fn preview_elements_require_deferred_composite(
     resolved: &[ResolvedPreviewElement],
 ) -> bool {
     resolved
@@ -197,27 +212,27 @@ pub(super) fn preview_elements_require_deferred_composite(
         .any(|element| matches!(element, ResolvedPreviewElement::Media { .. }))
 }
 
-pub(super) fn resolved_preview_presentation_quality(
+pub(crate) fn resolved_preview_presentation_quality(
     resolved: &[ResolvedPreviewElement],
-) -> mondrian_playback::FramePresentationQuality {
+) -> FramePresentationQuality {
     if resolved.iter().any(|element| {
         matches!(
             element,
             ResolvedPreviewElement::Media { frame, .. }
                 if frame.presentation_quality()
-                    == mondrian_playback::FramePresentationQuality::Degraded
+                    == FramePresentationQuality::Degraded
         )
     }) {
-        mondrian_playback::FramePresentationQuality::Degraded
+        FramePresentationQuality::Degraded
     } else {
-        mondrian_playback::FramePresentationQuality::Ready
+        FramePresentationQuality::Ready
     }
 }
 
-pub(super) fn resolved_preview_decode_execution(
+pub(crate) fn resolved_preview_decode_execution(
     resolved: &[ResolvedPreviewElement],
-) -> AppUiPreviewDecodeExecutionSummary {
-    let mut summary = AppUiPreviewDecodeExecutionSummary::default();
+) -> PreviewDecodeExecutionSummary {
+    let mut summary = PreviewDecodeExecutionSummary::default();
     for element in resolved {
         if let ResolvedPreviewElement::Media { frame, .. } = element {
             summary.accumulate(frame.decode_execution());

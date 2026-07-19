@@ -635,8 +635,8 @@ mathematics remain renderer-owned. Within the concrete Adapter, timeline
 traversal and nested Sequence evaluation live in
 `preview::timeline_evaluation`, media-key/path/proxy/decode adaptation lives in
 `preview::media_adapter`, decoded/native payload ownership and the single lazy
-CPU working-frame adaptation live in `app::preview_media_frame`, resolved Viewer
-identity plus GPU execution-layer lowering lives in `preview::viewer_plan`, and
+CPU working-frame adaptation live in `app::preview_media_frame`; resolved Viewer
+identity plus GPU execution-layer lowering live in `app::preview_viewer_plan`;
 working-linear CPU composition plus the encoded raster boundary live in
 `preview::composite`. Final exact GPU/raster/stale/CPU output arbitration remains
 in `preview::presentation`. These are private deep Modules over the existing

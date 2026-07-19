@@ -80,6 +80,10 @@ _Avoid_: Window-owned result policy, Headless-only orchestration, separately sam
 The UI-independent App Module that atomically binds complete Viewer intent to one media generation, pending state, executed presentation quality, monotonic candidate identity, and the exact currently registered output. Window and Headless presentation are Adapters over its opaque GPU execution contract; neither may reconstruct candidate/cache lifecycle.
 _Avoid_: Window-owned candidate counter, separate Headless output identity, UI-owned generation/pending booleans, cache hit inferred from texture presence alone
 
+**Preview Viewer Plan**:
+The UI-independent resolved element representation and pure lowering Module that owns stable cache identity, aggregate presentation quality and decode provenance, deferred-composite detection, and renderer GPU-layer admission. Window and Headless Adapters consume the same result and blocker semantics.
+_Avoid_: Window-owned plan hashing, Headless-specific lowering, cache identity derived from rendered pixels, presentation side effects during lowering
+
 **Preview Presentation Module**:
 The private Window Adapter Module that selects an exact registered GPU output, exact Viewer raster cache entry, same-scope stale content, deferred playback composite, or explicit CPU output boundary for one resolved Viewer plan. It owns packaging and pinning but no generation, scheduling, cache-residency, or transport authority.
 _Avoid_: Redraw-local output priority, UI transport mutation, a second candidate lifecycle, stale reuse across sequence/display/geometry identity
@@ -273,6 +277,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - `app::preview_media_frame` owns decoded Preview payload residency, lazy CPU working adaptation, frame-local quality/provenance, sampled versus logical geometry, and exact host/decoder reservations. Each frame contains exactly one closed residency payload—working CPU, source-domain CPU/GPU-capable, or native decoder surface—so empty and contradictory combinations are unrepresentable. Window media execution may construct it, but Widget and Window resource types cannot enter it.
 - `app::preview_frame_store::PreviewFrameStoreAdapter` is the one concrete application composition root over the playback-owned generic Store. Window and Headless consumers share it; `app_ui` cannot own another cache or residency policy.
 - `app::preview_raster_frame` owns the validated RGBA8 extent, encoded color identity, exact byte reservation, and stable resource key for a final CPU Preview raster. Cache and stale-reuse paths retain that application contract; the Window Presentation Adapter performs the only conversion to `ViewerFrameImage`, sharing the pixel allocation rather than copying it.
+- `app::preview_viewer_plan` owns the **Preview Viewer Plan** representation, stable cache identity, frame-local quality/provenance aggregation, and GPU lowering. It is pure and UI-independent; Window and Headless Adapters cannot rebuild these rules.
 - A **Viewer GPU Preview Runtime** owns GPU execution resources independently of a Window; production Window and headless validation must adapt the same execution lifetime and must not duplicate color or compositing interpretation.
 - Window presentation becomes usable after external-texture registration and ordered submission to the same GPU queue used by the subsequent Viewer draw; it does not claim fence completion. Headless validation credits readiness only after the real GPU submission completes. Both complete the same **Frame Presentation Ticket**, and device capability alone is not execution evidence.
 - **Audio Playback** may offer an Audio Device Clock Master only after stream health, PCM preroll, and media phase satisfy Playback Policy.

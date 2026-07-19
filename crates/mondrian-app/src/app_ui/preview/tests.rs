@@ -591,9 +591,8 @@ fn gpu_composite_layers_accept_transformed_media_frame() {
         frame_seed: 7,
     }];
 
-    let layers =
-        gpu_composite_layers_for_resolved(960, 540, &elements, WorkingColorSpace::LinearRec709)
-            .expect("affine transformed media should stay on GPU composite path");
+    let layers = gpu_composite_layers_for_resolved(&elements, WorkingColorSpace::LinearRec709)
+        .expect("affine transformed media should stay on GPU composite path");
 
     assert_eq!(layers.len(), 1);
     match &layers[0] {
@@ -643,9 +642,8 @@ fn gpu_composite_layers_lower_supported_working_effects() {
         frame_seed: 19,
     }];
 
-    let layers =
-        gpu_composite_layers_for_resolved(320, 180, &elements, WorkingColorSpace::LinearRec709)
-            .expect("supported effects should stay on GPU composite path");
+    let layers = gpu_composite_layers_for_resolved(&elements, WorkingColorSpace::LinearRec709)
+        .expect("supported effects should stay on GPU composite path");
 
     match &layers[0] {
         ViewerGpuExecutionLayer::Media { effect_plan, frame_seed, .. } => {
@@ -685,9 +683,8 @@ fn gpu_composite_layers_lower_solid_and_adjustment_effects() {
         }),
     ];
 
-    let layers =
-        gpu_composite_layers_for_resolved(320, 180, &elements, WorkingColorSpace::LinearRec709)
-            .expect("solid and adjustment point effects should remain GPU-native");
+    let layers = gpu_composite_layers_for_resolved(&elements, WorkingColorSpace::LinearRec709)
+        .expect("solid and adjustment point effects should remain GPU-native");
 
     assert_eq!(layers.len(), 2);
     match &layers[0] {
@@ -735,9 +732,8 @@ fn gpu_composite_layers_skip_leading_adjustment_before_layer_limit() {
         },
     ));
 
-    let layers =
-        gpu_composite_layers_for_resolved(320, 180, &elements, WorkingColorSpace::LinearRec709)
-            .expect("non-rendering leading adjustments should not consume GPU layer capacity");
+    let layers = gpu_composite_layers_for_resolved(&elements, WorkingColorSpace::LinearRec709)
+        .expect("non-rendering leading adjustments should not consume GPU layer capacity");
 
     assert_eq!(layers.len(), 1);
     assert!(matches!(
@@ -775,9 +771,8 @@ fn gpu_composite_layers_accept_source_only_media_frame() {
         frame_seed: 7,
     }];
 
-    let layers =
-        gpu_composite_layers_for_resolved(960, 540, &elements, WorkingColorSpace::LinearRec709)
-            .expect("source-only media should stay on GPU input/composite path");
+    let layers = gpu_composite_layers_for_resolved(&elements, WorkingColorSpace::LinearRec709)
+        .expect("source-only media should stay on GPU input/composite path");
 
     match &layers[0] {
         ViewerGpuExecutionLayer::Media { frame, gpu_source, native_source, .. } => {
@@ -813,9 +808,8 @@ fn gpu_composite_layers_preserve_native_source_only_media_frame() {
         frame_seed: 7,
     }];
 
-    let layers =
-        gpu_composite_layers_for_resolved(960, 540, &elements, WorkingColorSpace::LinearRec709)
-            .expect("native source-only media should reach GPU composite admission");
+    let layers = gpu_composite_layers_for_resolved(&elements, WorkingColorSpace::LinearRec709)
+        .expect("native source-only media should reach GPU composite admission");
 
     match &layers[0] {
         ViewerGpuExecutionLayer::Media { frame, gpu_source, native_source, .. } => {
@@ -899,12 +893,7 @@ fn gpu_composite_layers_reject_singular_media_transform() {
         frame_seed: 7,
     }];
 
-    let err = match gpu_composite_layers_for_resolved(
-        960,
-        540,
-        &elements,
-        WorkingColorSpace::LinearRec709,
-    ) {
+    let err = match gpu_composite_layers_for_resolved(&elements, WorkingColorSpace::LinearRec709) {
         Ok(_) => panic!("singular transform cannot stay on GPU composite path"),
         Err(err) => err,
     };
