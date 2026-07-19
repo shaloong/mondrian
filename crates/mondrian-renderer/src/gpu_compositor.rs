@@ -447,6 +447,12 @@ pub enum GpuCompositeError {
         /// Actual descriptor.
         actual: ColorFrameDescriptor,
     },
+    /// Public compositing and point-effect inputs must be straight-compatible.
+    #[error("GPU composite input must carry straight-compatible coverage, got {actual:?}")]
+    InputNotStraightCompatibleAlpha {
+        /// Rejected RGB/coverage association.
+        actual: crate::ColorFrameAlpha,
+    },
     /// An adjustment layer did not provide a non-identity GPU effect plan.
     #[error("GPU adjustment layer requires a non-identity effect plan")]
     AdjustmentMissingEffectPlan,
@@ -766,6 +772,7 @@ impl GpuFrameCompositor {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
         };
         let target_a = create_working_resource(
             device,
@@ -1076,6 +1083,7 @@ impl GpuFrameCompositor {
                 domain: ColorFrameDomain::Working,
                 encoding: ColorFrameEncoding::LinearFloat,
                 residency: ColorFrameResidency::Gpu,
+                alpha: crate::ColorFrameAlpha::StraightCoverage,
             },
             "gpu-solid-source-output",
             resource_pool,
@@ -1223,6 +1231,7 @@ fn validate_point_effect_input(
     plan: &CompiledEffectGpuPlan,
 ) -> Result<(), GpuCompositeError> {
     let actual = input.descriptor();
+    require_straight_compatible_alpha(actual.alpha)?;
     let (color_space, encoding) = match plan.processing_domain() {
         EffectColorDomain::LogPerceptualRgb { color_space }
         | EffectColorDomain::DisplayEncodedRgb { color_space } => {
@@ -1244,6 +1253,7 @@ fn validate_point_effect_input(
         domain: ColorFrameDomain::Effect,
         encoding,
         residency: ColorFrameResidency::Gpu,
+        alpha: actual.alpha,
     };
     if actual != expected {
         return Err(GpuCompositeError::PointEffectDescriptorMismatch { expected, actual });
@@ -1357,13 +1367,25 @@ fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuComposit
                 domain: ColorFrameDomain::Working,
                 encoding: ColorFrameEncoding::LinearFloat,
                 residency: expected_residency,
+                alpha: actual.alpha,
             };
+            require_straight_compatible_alpha(actual.alpha)?;
             if actual != expected {
                 return Err(GpuCompositeError::SourceDescriptorMismatch { expected, actual });
             }
         }
     }
     Ok(())
+}
+
+fn require_straight_compatible_alpha(
+    alpha: crate::ColorFrameAlpha,
+) -> Result<(), GpuCompositeError> {
+    if alpha.is_straight_compatible() {
+        Ok(())
+    } else {
+        Err(GpuCompositeError::InputNotStraightCompatibleAlpha { actual: alpha })
+    }
 }
 
 fn layer_has_zero_contribution(layer: &GpuCompositeLayer<'_>) -> bool {
@@ -1569,6 +1591,7 @@ mod tests {
                 domain: ColorFrameDomain::Working,
                 encoding: ColorFrameEncoding::LinearFloat,
                 residency: ColorFrameResidency::Gpu,
+                alpha: crate::ColorFrameAlpha::StraightCoverage,
             },
             GpuColorFrameTextureFormat::Rgba32Float,
             "passthrough-test",
@@ -1741,6 +1764,7 @@ mod tests {
                 domain: ColorFrameDomain::Effect,
                 encoding: ColorFrameEncoding::EncodedFloat,
                 residency: ColorFrameResidency::Gpu,
+                alpha: crate::ColorFrameAlpha::StraightCoverage,
             },
             GpuColorFrameTextureFormat::Rgba32Float,
             "display-effect-input",
@@ -1748,6 +1772,37 @@ mod tests {
         .expect("effect input");
 
         validate_point_effect_input(&input, &plan).expect("matching point effect input");
+
+        let opaque = GpuColorFrameHandle::new(
+            crate::GpuColorFrameId::from_raw(121),
+            ColorFrameDescriptor {
+                alpha: crate::ColorFrameAlpha::Opaque,
+                ..input.descriptor()
+            },
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "opaque-display-effect-input",
+        )
+        .expect("opaque effect input");
+        validate_point_effect_input(&opaque, &plan)
+            .expect("opaque effect input is straight-compatible");
+
+        let premultiplied = GpuColorFrameHandle::new(
+            crate::GpuColorFrameId::from_raw(122),
+            ColorFrameDescriptor {
+                alpha: crate::ColorFrameAlpha::PremultipliedCoverage,
+                ..input.descriptor()
+            },
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "premultiplied-display-effect-input",
+        )
+        .expect("premultiplied effect input handle");
+        assert_eq!(
+            validate_point_effect_input(&premultiplied, &plan)
+                .expect_err("premultiplied RGB must not cross the point-effect seam"),
+            GpuCompositeError::InputNotStraightCompatibleAlpha {
+                actual: crate::ColorFrameAlpha::PremultipliedCoverage,
+            }
+        );
     }
 
     #[tokio::test]
@@ -1946,6 +2001,7 @@ mod tests {
                 domain: ColorFrameDomain::Working,
                 encoding: ColorFrameEncoding::LinearFloat,
                 residency: ColorFrameResidency::Gpu,
+                alpha: crate::ColorFrameAlpha::StraightCoverage,
             }
         );
         let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
@@ -2066,6 +2122,7 @@ mod tests {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
         };
         let mut inputs = insert_inputs(&context.device, &mut ids, &mut table, &pool, descriptor);
         let mut after_first = None;
@@ -2170,6 +2227,7 @@ mod tests {
             domain: ColorFrameDomain::Effect,
             encoding: ColorFrameEncoding::EncodedFloat,
             residency: ColorFrameResidency::Gpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
         };
         let input = GpuColorFrameHandle::new(
             crate::GpuColorFrameId::from_raw(900),
@@ -2448,6 +2506,52 @@ mod tests {
     }
 
     #[test]
+    fn gpu_composite_request_accepts_opaque_and_rejects_premultiplied_input() {
+        let opaque = gpu_working_handle_with_alpha(
+            12,
+            WorkingColorSpace::LinearRec709,
+            crate::ColorFrameAlpha::Opaque,
+        );
+        let opaque_layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::GpuFrame(&opaque),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: None,
+            frame_seed: 0,
+        };
+        let opaque_layers = [opaque_layer];
+        let opaque_request = GpuCompositeRequest {
+            width: 8,
+            height: 8,
+            working_color_space: WorkingColorSpace::LinearRec709,
+            layers: &opaque_layers,
+        };
+        validate_request(&opaque_request).expect("opaque RGB is straight-compatible");
+
+        let premultiplied = gpu_working_handle_with_alpha(
+            13,
+            WorkingColorSpace::LinearRec709,
+            crate::ColorFrameAlpha::PremultipliedCoverage,
+        );
+        let premultiplied_layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::GpuFrame(&premultiplied),
+            ..opaque_layer
+        };
+        let premultiplied_layers = [premultiplied_layer];
+        let premultiplied_request =
+            GpuCompositeRequest { layers: &premultiplied_layers, ..opaque_request };
+
+        assert_eq!(
+            validate_request(&premultiplied_request)
+                .expect_err("premultiplied RGB must not cross the compositor seam"),
+            GpuCompositeError::InputNotStraightCompatibleAlpha {
+                actual: crate::ColorFrameAlpha::PremultipliedCoverage,
+            }
+        );
+    }
+
+    #[test]
     fn gpu_composite_request_rejects_gpu_frame_color_space_mismatch() {
         let handle = gpu_working_handle(11, WorkingColorSpace::LinearP3D65);
         let layer = GpuCompositeLayer {
@@ -2539,6 +2643,14 @@ mod tests {
     }
 
     fn gpu_working_handle(id: u64, color_space: WorkingColorSpace) -> GpuColorFrameHandle {
+        gpu_working_handle_with_alpha(id, color_space, crate::ColorFrameAlpha::StraightCoverage)
+    }
+
+    fn gpu_working_handle_with_alpha(
+        id: u64,
+        color_space: WorkingColorSpace,
+        alpha: crate::ColorFrameAlpha,
+    ) -> GpuColorFrameHandle {
         GpuColorFrameHandle::new(
             crate::GpuColorFrameId::from_raw(id),
             ColorFrameDescriptor {
@@ -2548,6 +2660,7 @@ mod tests {
                 domain: ColorFrameDomain::Working,
                 encoding: ColorFrameEncoding::LinearFloat,
                 residency: ColorFrameResidency::Gpu,
+                alpha,
             },
             GpuColorFrameTextureFormat::Rgba16Float,
             "test-gpu-working-layer",

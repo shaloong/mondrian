@@ -72,6 +72,10 @@ _Avoid_: Filename-based fixture label, capability-only hardware claim
 The bounded runtime store for decoded preview payloads, including CPU pixels or opaque native decoder-resource leases, UI-independent final Preview rasters, failure memory, the explicitly pinned current/stale Preview raster, and an oversize current-media exception that remains visible in evidence. CPU bytes, entry count, and decoder-resource units are independent budgets. Widget payloads are constructed only by the final Window Presentation Adapter and are never cache state.
 _Avoid_: Entry-count-only cache, treating zero-host-byte native surfaces as free, a residency budget smaller than the configured prefetch window, unbounded last frame, dropped oversize current delivery, retaining `ViewerFrameImage` in the Store
 
+**Color Frame Contract**:
+The typed per-frame identity of extent, render-graph domain, color or working-space identity, sample encoding, CPU/GPU residency, and RGB/coverage alpha association. Public working frames carry straight or opaque coverage; premultiplied frames exist only inside an explicitly typed spatial operation and may not cross OCIO, effect, composite, display, or export seams.
+_Avoid_: Bare RGBA buffer, texture format as color identity, shader-only premultiplied flag, alpha inferred from codec or pixel values
+
 **Playback Preview Pump**:
 The UI-independent App Module coordinator that samples one pending Frame Demand, applies bounded preview-work completions and expirations, submits their exact terminal Frame Deliveries, then observes current-epoch video preroll in that order.
 _Avoid_: Window-owned result policy, Headless-only orchestration, separately sampled demand identities for completion and expiration
@@ -322,6 +326,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - **Timeline Time** equality, ordering, arithmetic, and hashing use checked canonical rational semantics; serialized numerator/denominator field order can never define chronology.
 - Timeline Times from different **Authoring Time Domains** cannot be compared or combined until an explicit **Time Transform** maps one domain into the other.
 - Video automation and audio automation share the same exact curve and stable parameter-identity foundation; their Evaluation Grids, supported value types, and delivery cadence remain domain-specific.
+- Every renderer-stage exchange uses a **Color Frame Contract**. OCIO transforms process RGB only and require straight/opaque coverage; spatial filtering may materialize a typed premultiplied internal frame but must restore the declared public association before the next Module.
 - **Display Timecode** formats a Timeline Time but never owns it; changing drop-frame display or start timecode cannot move authored media.
 - Each Sequence exclusively owns one **Audio Program**; ordinary PCM routes cannot cross Sequence ownership.
 - An **Audio Program** presents one typed routing graph of **Audio Routing Nodes** without forcing Track, Bus, and Output to share an untyped identity or lifecycle; a Track Mixer Channel uses its owning audio Track identity.

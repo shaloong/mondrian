@@ -513,13 +513,19 @@ are also distinct: `EncodedRgbaF32Frame` carries nonlinear boundary samples,
 while `WorkingRgbaF32Frame` is reserved for linear-light pixels and carries a
 `WorkingColorSpace` identity.
 
-`ColorFrameDescriptor` stores `ColorFrameSpace::{Color, Working, Device}`. Frame
+`ColorFrameDescriptor` stores `ColorFrameSpace::{Color, Working, Device}` plus
+`ColorFrameAlpha::{StraightCoverage, PremultipliedCoverage, Opaque}`. Frame
 domain validation and OCIO processor planning therefore share the same role
-distinction instead of inferring it from transfer characteristics.
+distinction instead of inferring it from transfer characteristics, and no
+shader-local boolean may become a second alpha-association truth. Native
+NV12/P010 source frames declare opaque coverage. Source normalization produces
+straight or opaque coverage before OCIO; public color, effect, composite,
+display-calibration and output stages reject premultiplied input rather than
+processing associated RGB as color.
 
 Renderer stages must carry typed color-frame metadata. `CpuColorFrame` is the
-CPU-resident linear working-frame contract; future GPU frames must expose the
-same domain/encoding/residency/color-space descriptor. RGBA8 is a boundary
+CPU-resident linear working-frame contract; GPU frames expose the same
+domain/encoding/residency/color-space/alpha descriptor. RGBA8 is a boundary
 format, not an intermediate color-management contract.
 Timeline compositing must therefore prefer direct float/linear operations for
 supported working-space media, solid-color layers, and float-capable unary

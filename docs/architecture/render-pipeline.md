@@ -60,7 +60,7 @@ Each element carries opacity, blend mode, transforms where applicable, effect gr
 `timeline_composite` exposes one color-managed composition contract:
 `composite_timeline_elements_color_frame(...)`. It returns a typed
 `CpuColorFrame` whose descriptor records domain, encoding, residency, dimensions,
-and color space. Viewer preview and export must consume this typed working-frame
+color space, and RGB/coverage alpha association. Viewer preview and export must consume this typed working-frame
 contract, then apply their respective working -> output boundary through
 `RenderOutputColorBoundary` and renderer color stage execution helpers.
 Bare RGBA8 buffers are valid only at source import, debug/golden snapshot, UI
@@ -102,7 +102,11 @@ final output boundary. Every existing built-in unary render operation, including
 color adjustment, white balance, blur, sharpen, vignette, chromatic aberration,
 grain, and LUT, runs in this path through the same `mondrian-effects` float
 contract. Spatial effects use premultiplied-alpha sampling internally while the
-typed frame remains straight-alpha. Affine geometric transforms (scale, rotate,
+typed public frame remains straight-alpha. The Viewer spatial Module records its
+horizontal RGBA32F intermediate as `PremultipliedCoverage`; shader uniforms are
+derived from the input/output descriptors, and the vertical pass restores the
+declared straight/opaque output contract. Premultiplied frames are rejected at
+OCIO, effect, composite, display-calibration and output seams. Affine geometric transforms (scale, rotate,
 translate) are implemented
 in the float/linear path using inverse-affine mapping with bilinear sampling,
 so media and solid layers with non-identity transforms no longer require legacy

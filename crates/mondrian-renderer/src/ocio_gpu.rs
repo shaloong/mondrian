@@ -7357,6 +7357,7 @@ mod tests {
                 domain: ColorFrameDomain::Working,
                 encoding: ColorFrameEncoding::LinearFloat,
                 residency: ColorFrameResidency::Gpu,
+                alpha: crate::ColorFrameAlpha::StraightCoverage,
             },
             GpuColorFrameTextureFormat::Rgba32Float,
             "ocio-wrapper-binding-cache-input",

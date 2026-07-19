@@ -4040,6 +4040,7 @@ pub fn execute_cpu_program_monitor_boundary_rgba8(
                 domain: ColorFrameDomain::Display,
                 encoding: ColorFrameEncoding::EncodedRgba8,
                 residency: ColorFrameResidency::Cpu,
+                alpha: crate::ColorFrameAlpha::StraightCoverage,
             },
             reason: format!(
                 "Program Output {:?} does not match monitor adaptation input {:?}",
@@ -4119,6 +4120,7 @@ impl<'a> RenderColorStagePlanner<'a> {
         if input.domain != ColorFrameDomain::Source {
             return Err(RenderColorTransformError::UnsupportedInputDomain { domain: input.domain });
         }
+        crate::color_transform::require_straight_compatible_color_alpha(input)?;
 
         match self.mode {
             RenderColorStageMode::CpuOnly => Ok(self.cpu_input_stage(input, transform)),
@@ -4138,6 +4140,7 @@ impl<'a> RenderColorStagePlanner<'a> {
         if input.domain != ColorFrameDomain::Working {
             return Err(RenderColorTransformError::UnsupportedInputDomain { domain: input.domain });
         }
+        crate::color_transform::require_straight_compatible_color_alpha(input)?;
 
         match self.mode {
             RenderColorStageMode::CpuOnly => Ok(self.cpu_output_stage(input, transform)),
@@ -4158,6 +4161,7 @@ impl<'a> RenderColorStagePlanner<'a> {
         if input.domain != ColorFrameDomain::Working {
             return Err(RenderColorTransformError::UnsupportedInputDomain { domain: input.domain });
         }
+        crate::color_transform::require_straight_compatible_color_alpha(input)?;
 
         match self.mode {
             RenderColorStageMode::CpuOnly => Ok(self.cpu_output_stage_with_encoding(
@@ -4198,6 +4202,7 @@ impl<'a> RenderColorStagePlanner<'a> {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Cpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
         };
         RenderColorStagePlan {
             stages: vec![RenderColorStage::CpuInputTransform {
@@ -4230,6 +4235,7 @@ impl<'a> RenderColorStagePlanner<'a> {
             domain: transform.output_domain,
             encoding,
             residency: ColorFrameResidency::Cpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
         };
         RenderColorStagePlan {
             stages: vec![RenderColorStage::CpuOutputTransform {
@@ -4900,6 +4906,7 @@ mod tests {
             domain: ColorFrameDomain::Source,
             encoding: ColorFrameEncoding::EncodedRgba8,
             residency,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
         }
     }
 
@@ -4911,6 +4918,7 @@ mod tests {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
         }
     }
 
@@ -6644,6 +6652,7 @@ mod tests {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
         };
         let input = gpu_handle_with_format(
             650,
@@ -6795,6 +6804,7 @@ mod tests {
             domain: ColorFrameDomain::Source,
             encoding: ColorFrameEncoding::EncodedFloat,
             residency: ColorFrameResidency::Gpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
         };
         let input = gpu_handle_with_format(
             710,
@@ -7442,6 +7452,7 @@ mod tests {
                 domain: ColorFrameDomain::Working,
                 encoding: ColorFrameEncoding::LinearFloat,
                 residency: ColorFrameResidency::Gpu,
+                alpha: crate::ColorFrameAlpha::StraightCoverage,
             },
             GpuColorFrameTextureFormat::Rgba32Float,
             "effect-round-trip-working-input",
@@ -7613,6 +7624,7 @@ mod tests {
                 domain: ColorFrameDomain::Working,
                 encoding: ColorFrameEncoding::LinearFloat,
                 residency: ColorFrameResidency::Gpu,
+                alpha: crate::ColorFrameAlpha::StraightCoverage,
             },
             GpuColorFrameTextureFormat::Rgba32Float,
             "external-adjustment-working-input",
@@ -8263,6 +8275,7 @@ mod tests {
                 domain: ColorFrameDomain::Working,
                 encoding: ColorFrameEncoding::LinearFloat,
                 residency: ColorFrameResidency::Gpu,
+                alpha: crate::ColorFrameAlpha::StraightCoverage,
             },
             GpuColorFrameTextureFormat::Rgba32Float,
             "zero-opacity-adjustment-input",

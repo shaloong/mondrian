@@ -502,6 +502,7 @@ impl CpuColorTransformExecutor {
                 domain: descriptor.domain,
             });
         }
+        require_straight_compatible_color_alpha(descriptor)?;
         if descriptor.encoding != ColorFrameEncoding::LinearFloat {
             return Err(RenderColorTransformError::ExecutionFailed {
                 direction: RenderColorTransformDirection::InputToWorking,
@@ -513,6 +514,7 @@ impl CpuColorTransformExecutor {
                     domain: ColorFrameDomain::Working,
                     encoding: ColorFrameEncoding::LinearFloat,
                     residency: ColorFrameResidency::Cpu,
+                    alpha: crate::ColorFrameAlpha::StraightCoverage,
                 },
                 reason: "LinearFloatSource must have LinearFloat encoding".to_string(),
             });
@@ -525,6 +527,7 @@ impl CpuColorTransformExecutor {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Cpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
         };
 
         let mut data = frame.data().to_vec();
@@ -587,6 +590,7 @@ impl CpuColorTransformExecutor {
                 domain: descriptor.domain,
             });
         }
+        require_straight_compatible_color_alpha(descriptor)?;
         let output_descriptor = ColorFrameDescriptor {
             width: descriptor.width,
             height: descriptor.height,
@@ -594,6 +598,7 @@ impl CpuColorTransformExecutor {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Cpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
         };
 
         let source = descriptor.color_space.color().ok_or_else(|| {
@@ -657,6 +662,7 @@ impl CpuColorTransformExecutor {
                 domain: descriptor.domain,
             });
         }
+        require_straight_compatible_color_alpha(descriptor)?;
         let output_descriptor = ColorFrameDescriptor {
             width: descriptor.width,
             height: descriptor.height,
@@ -664,6 +670,7 @@ impl CpuColorTransformExecutor {
             domain: transform.output_domain,
             encoding: ColorFrameEncoding::EncodedRgba8,
             residency: ColorFrameResidency::Cpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
         };
 
         let encoded_float = Self::transform_float(frame, transform)?;
@@ -713,6 +720,7 @@ impl CpuColorTransformExecutor {
                 domain: descriptor.domain,
             });
         }
+        require_straight_compatible_color_alpha(descriptor)?;
 
         let output_descriptor = ColorFrameDescriptor {
             width: descriptor.width,
@@ -721,6 +729,7 @@ impl CpuColorTransformExecutor {
             domain: transform.output_domain,
             encoding: ColorFrameEncoding::EncodedFloat,
             residency: ColorFrameResidency::Cpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
         };
 
         // Flatten borrowed typed pixels into the contiguous f32 buffer OCIO expects.
@@ -795,6 +804,7 @@ impl CpuColorTransformExecutor {
         adaptation: &RenderMonitorAdaptation,
     ) -> Result<RenderOutputTransformFloatResult, RenderColorTransformError> {
         let descriptor = frame.descriptor();
+        require_straight_compatible_color_alpha(descriptor)?;
         let output_descriptor = ColorFrameDescriptor {
             width: descriptor.width,
             height: descriptor.height,
@@ -802,6 +812,7 @@ impl CpuColorTransformExecutor {
             domain: ColorFrameDomain::Display,
             encoding: ColorFrameEncoding::EncodedFloat,
             residency: ColorFrameResidency::Cpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
         };
         if !matches!(
             descriptor.domain,
@@ -905,6 +916,7 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
         if input.domain != ColorFrameDomain::Source {
             return Err(RenderColorTransformError::UnsupportedInputDomain { domain: input.domain });
         }
+        require_straight_compatible_color_alpha(input)?;
 
         let output = ColorFrameDescriptor {
             width: input.width,
@@ -913,6 +925,7 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: self.options.output_residency,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
         };
         let working = transform.working_color_space;
         let source = input.color_space.color().ok_or_else(|| {
@@ -956,6 +969,7 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
         if input.domain != ColorFrameDomain::Working {
             return Err(RenderColorTransformError::UnsupportedInputDomain { domain: input.domain });
         }
+        require_straight_compatible_color_alpha(input)?;
 
         let output = ColorFrameDescriptor {
             width: input.width,
@@ -964,6 +978,7 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
             domain: transform.output_domain,
             encoding: output_encoding,
             residency: self.options.output_residency,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
         };
         let working = input.color_space.working().ok_or_else(|| {
             RenderColorTransformError::ExecutionFailed {
@@ -1006,6 +1021,7 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
         input: ColorFrameDescriptor,
         transform: &RenderIntermediateColorTransform,
     ) -> Result<RenderColorTransformGpuPlan, RenderColorTransformError> {
+        require_straight_compatible_color_alpha(input)?;
         let source_identity = frame_space_identity(input.color_space).ok_or_else(|| {
             RenderColorTransformError::ExecutionFailed {
                 direction: RenderColorTransformDirection::Intermediate,
@@ -1021,6 +1037,7 @@ impl<'a> RenderColorTransformGpuPlanner<'a> {
             domain: transform.output_domain,
             encoding: transform.output_encoding,
             residency: input.residency,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
         };
         let request = OcioGpuShaderRequest::ColorSpace {
             engine: transform.engine.clone(),
@@ -1078,6 +1095,16 @@ fn identity_frame_space(identity: OcioColorSpaceIdentity) -> ColorFrameSpace {
     }
 }
 
+pub(crate) fn require_straight_compatible_color_alpha(
+    descriptor: ColorFrameDescriptor,
+) -> Result<(), RenderColorTransformError> {
+    if descriptor.alpha.is_straight_compatible() {
+        Ok(())
+    } else {
+        Err(RenderColorTransformError::UnsupportedInputAlpha { alpha: descriptor.alpha })
+    }
+}
+
 /// Error returned by render color transform execution.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RenderColorTransformError {
@@ -1092,6 +1119,12 @@ pub enum RenderColorTransformError {
     UnsupportedWorkingIdentity {
         /// Actual typed frame identity.
         identity: crate::ColorFrameSpace,
+    },
+    /// OCIO and public effect/composite stages accept straight coverage only.
+    #[error("render color transform requires straight coverage alpha, got {alpha:?}")]
+    UnsupportedInputAlpha {
+        /// Rejected RGB/coverage association.
+        alpha: crate::ColorFrameAlpha,
     },
     /// The selected color engine failed.
     #[error("render color transform failed ({direction:?}, {input:?} -> {output:?}): {reason}")]
@@ -1378,6 +1411,35 @@ mod tests {
     }
 
     #[test]
+    fn gpu_planner_rejects_premultiplied_input_before_ocio_planning() {
+        let mut input =
+            CpuEncodedColorFrame::source_rgba8(2, 2, ColorSpace::Rec709, vec![128; 2 * 2 * 4])
+                .descriptor();
+        input.alpha = crate::ColorFrameAlpha::PremultipliedCoverage;
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorTransformGpuPlanner::new(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+
+        let error = planner
+            .plan_input_to_working(input, &transform)
+            .expect_err("premultiplied RGB must be normalized before OCIO");
+
+        assert_eq!(
+            error,
+            RenderColorTransformError::UnsupportedInputAlpha {
+                alpha: crate::ColorFrameAlpha::PremultipliedCoverage,
+            }
+        );
+    }
+
+    #[test]
     fn gpu_planner_builds_output_shader_plan_from_working_descriptor() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let source = CpuColorFrame::working(WorkingRgbaF32Frame {
@@ -1435,6 +1497,7 @@ mod tests {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
         };
         let transform = RenderIntermediateColorTransform {
             output_identity: OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
@@ -1507,6 +1570,7 @@ mod tests {
             domain: ColorFrameDomain::Display,
             encoding: ColorFrameEncoding::EncodedFloat,
             residency: ColorFrameResidency::Gpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
         };
         let mut cache = OcioGpuShaderCache::default();
         let mut planner = RenderColorTransformGpuPlanner::new(
@@ -1629,6 +1693,7 @@ mod tests {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
         };
         let domain = mondrian_effects::EffectColorDomain::DisplayEncodedRgb {
             color_space: ColorSpace::Rec709,

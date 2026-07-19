@@ -354,7 +354,7 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 **帧、参数与音频**
 
-- [ ] 冻结 Frame/Color/Alpha contract，给所有 CPU/GPU/legacy boundary 分配结构化原因和能力状态。
+- [x] Frame/Color/Alpha contract 已冻结为统一 `ColorFrameDescriptor`：画幅、图域、外部/working/device 颜色身份、sample encoding、CPU/GPU residency 与 `StraightCoverage`/`PremultipliedCoverage`/`Opaque` alpha association 缺一不可。CPU typed frame、GPU handle/resource table、native NV12/P010 import、OCIO stage、working composite、Viewer spatial、ICC calibration 与 export/readback 均传播或验证该契约；公共 working/color seam 只接受 straight/opaque，premultiplied 只允许作为显式空间滤波内部帧，shader flags 从 descriptor 推导。非法 alpha 在 OCIO、Viewer 与 calibration 规划期以结构化错误失败关闭；legacy RGBA8 composite、GPU output fallback 和 stage blocker 继续由 renderer-owned typed path/reason breakdown 报告，类型存在或 shader 可创建不等于能力可用。
 - [x] 视觉与音频 Processor 参数共用稳定 ParameterId、定义默认值/可动画能力、独立实例地址、单位、enum/resource、hard/soft range、Hold/Linear/Bezier 执行语义、cache impact、schema version/message ID；UI 编辑预设只生成 Bezier handles。视觉链已贯通 UI、精确动画、持久化、编译图和 Viewer cache；音频实例持久化 Schema 快照与单一 exact curve，内建编译要求规范 Schema 精确匹配；项目加载与效果注册拒绝非法 schema。颜色域、CPU/GPU、确定性、时间范围与 ROI 仍只由 Processor/Effect Definition 和编译图拥有。
 - [x] Track/Clip placement → Component Edit/Scope → Track/Bus/Program Output、Gain/pan/fade/Transition、headless compiler、recursive nested Runtime 和 reference PCM 已进入 `mondrian-audio`；播放/导出共用 decoder Adapter 和执行语义，旧 flat mixer 已删除。
 - [x] `AudioDecodedSource` 已改为可失败的精确 interleaved block Interface；播放/导出共用文件指纹与 128 项/256 MiB 加权 LRU 的十秒 PCM 窗口，Runtime 仅保留对齐 4096 帧热窗，不再以整文件 PCM 作为产品执行源。

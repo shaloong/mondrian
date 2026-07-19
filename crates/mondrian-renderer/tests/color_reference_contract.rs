@@ -1,5 +1,5 @@
 use mondrian_renderer::{
-    import_external_color_reference, ColorReferenceAlpha, ColorReferenceDecoder,
+    import_external_color_reference, ColorFrameAlpha, ColorReferenceDecoder,
     ColorReferenceDescriptor, ColorReferenceEncoding, ColorReferenceOrigin,
     ColorReferencePayloadFormat, ColorReferencePixels, ColorReferenceValidationError,
 };
@@ -41,7 +41,7 @@ fn descriptor() -> ColorReferenceDescriptor {
         width: 1,
         height: 1,
         encoding: ColorReferenceEncoding::Bt2100PqRgbaF32,
-        alpha: ColorReferenceAlpha::Opaque,
+        alpha: ColorFrameAlpha::Opaque,
         reference_white_nits: Some(203.0),
         nominal_peak_nits: Some(1_000.0),
     }
@@ -65,7 +65,7 @@ fn image_decoder_imports_a_real_pinned_png_without_promoting_it_to_independent_e
         width: 64,
         height: 64,
         encoding: ColorReferenceEncoding::SrgbDisplayRgba8,
-        alpha: ColorReferenceAlpha::Opaque,
+        alpha: ColorFrameAlpha::Opaque,
         reference_white_nits: None,
         nominal_peak_nits: None,
     };
@@ -102,7 +102,7 @@ fn image_decoder_imports_float_openexr_without_clipping_scene_linear_range() {
         width: 2,
         height: 1,
         encoding: ColorReferenceEncoding::SceneLinearRec2020RgbaF32,
-        alpha: ColorReferenceAlpha::Opaque,
+        alpha: ColorFrameAlpha::Opaque,
         reference_white_nits: None,
         nominal_peak_nits: None,
     };

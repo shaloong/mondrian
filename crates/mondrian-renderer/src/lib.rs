@@ -41,7 +41,7 @@ pub use color_accuracy::{
     SrgbDisplayAccuracyError, SrgbDisplayAccuracyReport, SrgbDisplayAccuracyStatistics,
 };
 pub use color_frame::{
-    execute_native_decoded_frame_import, ColorFrameDescriptor, ColorFrameDomain,
+    execute_native_decoded_frame_import, ColorFrameAlpha, ColorFrameDescriptor, ColorFrameDomain,
     ColorFrameEncoding, ColorFrameResidency, ColorFrameSpace, CpuColorFrame, CpuEncodedColorFrame,
     CpuEncodedFloatColorFrame, CpuSourceColorFrame, EncodedRgbaF32Frame,
     GpuColorFrameAllocationPlan, GpuColorFrameContract, GpuColorFrameHandle,
@@ -60,9 +60,9 @@ pub use color_frame::{
     GpuVideoRange, LinearFloatSource, SourceAlphaInterpretationError,
 };
 pub use color_reference::{
-    import_external_color_reference, ColorReferenceAlpha, ColorReferenceDecoder,
-    ColorReferenceDescriptor, ColorReferenceEncoding, ColorReferenceFrame, ColorReferenceOrigin,
-    ColorReferencePayloadFormat, ColorReferencePixels, ColorReferenceValidationError,
+    import_external_color_reference, ColorReferenceDecoder, ColorReferenceDescriptor,
+    ColorReferenceEncoding, ColorReferenceFrame, ColorReferenceOrigin, ColorReferencePayloadFormat,
+    ColorReferencePixels, ColorReferenceValidationError,
 };
 pub use color_stage::{
     execute_cpu_input_stage, execute_cpu_input_stage_float, execute_cpu_output_boundary,

@@ -8,10 +8,10 @@
 use std::sync::Arc;
 
 use crate::{
-    ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency,
-    ColorFrameSpace, GpuColorFrameAllocationPlan, GpuColorFrameHandle, GpuColorFrameHandleError,
-    GpuColorFrameIdAllocator, GpuColorFrameResource, GpuColorFrameTextureFormat,
-    GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool,
+    ColorFrameAlpha, ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding,
+    ColorFrameResidency, ColorFrameSpace, GpuColorFrameAllocationPlan, GpuColorFrameHandle,
+    GpuColorFrameHandleError, GpuColorFrameIdAllocator, GpuColorFrameResource,
+    GpuColorFrameTextureFormat, GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool,
 };
 use bytemuck::{Pod, Zeroable};
 use thiserror::Error;
@@ -249,6 +249,11 @@ fn validate_spatial_request(
             actual: input.texture_format(),
         });
     }
+    if !descriptor.alpha.is_straight_compatible() {
+        return Err(GpuViewerSpatialPlanError::InputNotStraightCompatibleAlpha {
+            actual: descriptor.alpha,
+        });
+    }
     let source_width = f64::from(descriptor.width) * f64::from(source_rect.width);
     let source_height = f64::from(descriptor.height) * f64::from(source_rect.height);
     let scale_x = f64::from(output_width) / source_width;
@@ -288,6 +293,12 @@ pub enum GpuViewerSpatialPlanError {
     InputNotRgba32Float {
         /// Rejected storage format.
         actual: GpuColorFrameTextureFormat,
+    },
+    /// Public Viewer spatial input must use straight or opaque coverage.
+    #[error("Viewer spatial input must carry straight-compatible coverage, got {actual:?}")]
+    InputNotStraightCompatibleAlpha {
+        /// Rejected RGB/coverage association.
+        actual: ColorFrameAlpha,
     },
     /// Viewer reconstruction is intentionally aspect-preserving.
     #[error("Viewer spatial scale anisotropy exceeds the supported 2:1 bound")]
@@ -408,6 +419,7 @@ impl GpuViewerSpatialRuntime {
         let mut selected_view = input_view;
         let mut selected_width = plan.input.descriptor().width;
         let mut selected_height = plan.input.descriptor().height;
+        let mut selected_alpha = plan.input.descriptor().alpha;
         while should_prefilter(
             selected_width,
             selected_height,
@@ -422,6 +434,7 @@ impl GpuViewerSpatialRuntime {
                 &self.resource_pool,
                 ids,
                 plan.input.descriptor().color_space,
+                selected_alpha,
                 next_width,
                 next_height,
                 "viewer-working-spatial-prefilter",
@@ -445,6 +458,15 @@ impl GpuViewerSpatialRuntime {
                 .texture_view;
             selected_width = next_width;
             selected_height = next_height;
+            selected_alpha = self
+                .prefilters
+                .last()
+                .ok_or(GpuViewerSpatialRuntimeError::InternalResourceMissing(
+                    "prefilter",
+                ))?
+                .handle()
+                .descriptor()
+                .alpha;
             self.diagnostics.prefilter_passes = self.diagnostics.prefilter_passes.saturating_add(1);
         }
 
@@ -453,10 +475,12 @@ impl GpuViewerSpatialRuntime {
             &self.resource_pool,
             ids,
             plan.input.descriptor().color_space,
+            ColorFrameAlpha::PremultipliedCoverage,
             output_width,
             selected_height,
             "viewer-working-spatial-horizontal",
         )?;
+        let horizontal_alpha = horizontal.handle().descriptor().alpha;
         pipeline.record_lanczos(
             device,
             encoder,
@@ -466,6 +490,8 @@ impl GpuViewerSpatialRuntime {
             (output_width, selected_height),
             source_rect,
             SpatialAxis::Horizontal,
+            selected_alpha,
+            horizontal_alpha,
         );
         self.horizontal = Some(horizontal);
 
@@ -473,6 +499,16 @@ impl GpuViewerSpatialRuntime {
             device,
             &GpuColorFrameAllocationPlan::for_handle(plan.output.clone()),
         );
+        let horizontal_alpha = self
+            .horizontal
+            .as_ref()
+            .ok_or(GpuViewerSpatialRuntimeError::InternalResourceMissing(
+                "horizontal",
+            ))?
+            .handle()
+            .descriptor()
+            .alpha;
+        let output_alpha = output.handle().descriptor().alpha;
         pipeline.record_lanczos(
             device,
             encoder,
@@ -489,6 +525,8 @@ impl GpuViewerSpatialRuntime {
             (output_width, output_height),
             source_rect,
             SpatialAxis::Vertical,
+            horizontal_alpha,
+            output_alpha,
         );
         self.output = Some(output);
         self.diagnostics.records = self.diagnostics.records.saturating_add(1);
@@ -712,15 +750,12 @@ impl GpuViewerSpatialPipeline {
         output_size: (u32, u32),
         source_rect: ViewerSourceRect,
         axis: SpatialAxis,
+        input_alpha: ColorFrameAlpha,
+        output_alpha: ColorFrameAlpha,
     ) {
         let uniforms = SpatialUniforms {
             input_output_size: [input_size.0, input_size.1, output_size.0, output_size.1],
-            axis_flags: [
-                axis as u32,
-                u32::from(axis == SpatialAxis::Vertical),
-                u32::from(axis == SpatialAxis::Horizontal),
-                MAX_LANCZOS_SAMPLES,
-            ],
+            axis_flags: spatial_axis_flags(axis, input_alpha, output_alpha),
             source_rect: [
                 source_rect.x,
                 source_rect.y,
@@ -796,6 +831,19 @@ enum SpatialAxis {
     Vertical = 1,
 }
 
+fn spatial_axis_flags(
+    axis: SpatialAxis,
+    input_alpha: ColorFrameAlpha,
+    output_alpha: ColorFrameAlpha,
+) -> [u32; 4] {
+    [
+        axis as u32,
+        u32::from(input_alpha.is_premultiplied()),
+        u32::from(output_alpha.is_premultiplied()),
+        MAX_LANCZOS_SAMPLES,
+    ]
+}
+
 fn should_prefilter(
     input_width: u32,
     input_height: u32,
@@ -815,6 +863,7 @@ fn allocate_private_working_resource(
     resource_pool: &GpuColorFrameWgpuResourcePool,
     ids: &mut GpuColorFrameIdAllocator,
     color_space: ColorFrameSpace,
+    alpha: ColorFrameAlpha,
     width: u32,
     height: u32,
     label: &'static str,
@@ -828,6 +877,7 @@ fn allocate_private_working_resource(
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
+            alpha,
         },
         GpuColorFrameTextureFormat::Rgba32Float,
         label,
@@ -859,6 +909,7 @@ mod tests {
                 domain: ColorFrameDomain::Display,
                 encoding: ColorFrameEncoding::EncodedFloat,
                 residency: ColorFrameResidency::Gpu,
+                alpha: ColorFrameAlpha::StraightCoverage,
             },
             GpuColorFrameTextureFormat::Rgba16Float,
             "encoded",
@@ -881,6 +932,61 @@ mod tests {
             GpuViewerSpatialPlan::new(&mut ids, anisotropic, ViewerSourceRect::FULL, 1, 100,),
             Err(GpuViewerSpatialPlanError::ExcessiveScaleAnisotropy)
         ));
+    }
+
+    #[test]
+    fn plan_rejects_premultiplied_public_working_input() {
+        let mut ids = GpuColorFrameIdAllocator::new(1);
+        let input = GpuColorFrameHandle::new(
+            ids.allocate(),
+            ColorFrameDescriptor {
+                width: 4,
+                height: 4,
+                color_space: ColorFrameSpace::Working(WorkingColorSpace::LinearRec709),
+                domain: ColorFrameDomain::Working,
+                encoding: ColorFrameEncoding::LinearFloat,
+                residency: ColorFrameResidency::Gpu,
+                alpha: ColorFrameAlpha::PremultipliedCoverage,
+            },
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "premultiplied-public-input",
+        )
+        .expect("structurally valid GPU handle");
+
+        assert!(matches!(
+            GpuViewerSpatialPlan::new(&mut ids, input, ViewerSourceRect::FULL, 2, 2),
+            Err(GpuViewerSpatialPlanError::InputNotStraightCompatibleAlpha {
+                actual: ColorFrameAlpha::PremultipliedCoverage
+            })
+        ));
+    }
+
+    #[test]
+    fn shader_alpha_flags_are_derived_from_frame_contracts() {
+        assert_eq!(
+            spatial_axis_flags(
+                SpatialAxis::Horizontal,
+                ColorFrameAlpha::StraightCoverage,
+                ColorFrameAlpha::PremultipliedCoverage,
+            ),
+            [0, 0, 1, MAX_LANCZOS_SAMPLES]
+        );
+        assert_eq!(
+            spatial_axis_flags(
+                SpatialAxis::Vertical,
+                ColorFrameAlpha::PremultipliedCoverage,
+                ColorFrameAlpha::StraightCoverage,
+            ),
+            [1, 1, 0, MAX_LANCZOS_SAMPLES]
+        );
+        assert_eq!(
+            spatial_axis_flags(
+                SpatialAxis::Vertical,
+                ColorFrameAlpha::Opaque,
+                ColorFrameAlpha::Opaque,
+            ),
+            [1, 0, 0, MAX_LANCZOS_SAMPLES]
+        );
     }
 
     #[test]
@@ -1222,6 +1328,7 @@ mod tests {
                 domain: ColorFrameDomain::Working,
                 encoding: ColorFrameEncoding::LinearFloat,
                 residency: ColorFrameResidency::Gpu,
+                alpha: ColorFrameAlpha::StraightCoverage,
             },
             format,
             "working",

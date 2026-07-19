@@ -5,6 +5,7 @@
 //! codecs to the realtime renderer. This module owns provenance, integrity, and
 //! decoded pixel-domain validation before accuracy metrics consume a frame.
 
+use crate::color_frame::ColorFrameAlpha;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -63,18 +64,6 @@ impl ColorReferenceEncoding {
     }
 }
 
-/// Alpha interpretation attached to a reference frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ColorReferenceAlpha {
-    /// Every pixel is required to carry fully opaque alpha.
-    Opaque,
-    /// RGB is straight and alpha represents coverage.
-    StraightCoverage,
-    /// RGB is premultiplied by coverage alpha.
-    PremultipliedCoverage,
-}
-
 /// Strict metadata required before an external frame can serve as quality evidence.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -104,7 +93,7 @@ pub struct ColorReferenceDescriptor {
     /// Pixel encoding and color-domain interpretation.
     pub encoding: ColorReferenceEncoding,
     /// Alpha interpretation.
-    pub alpha: ColorReferenceAlpha,
+    pub alpha: ColorFrameAlpha,
     /// Display reference white in cd/m² when the encoding has display luminance semantics.
     pub reference_white_nits: Option<f32>,
     /// Nominal display peak in cd/m² when the encoding has HDR luminance semantics.
@@ -429,10 +418,10 @@ fn validate_pixel_storage(
 }
 
 fn validate_rgba8_alpha(
-    alpha: ColorReferenceAlpha,
+    alpha: ColorFrameAlpha,
     pixels: &[u8],
 ) -> Result<(), ColorReferenceValidationError> {
-    if alpha == ColorReferenceAlpha::Opaque {
+    if alpha == ColorFrameAlpha::Opaque {
         if let Some((pixel_index, pixel)) =
             pixels.chunks_exact(4).enumerate().find(|(_, pixel)| pixel[3] != u8::MAX)
         {
@@ -475,7 +464,7 @@ fn validate_rgba_f32(
                 value: pixel[3],
             });
         }
-        if descriptor.alpha == ColorReferenceAlpha::Opaque && pixel[3] != 1.0 {
+        if descriptor.alpha == ColorFrameAlpha::Opaque && pixel[3] != 1.0 {
             return Err(ColorReferenceValidationError::OpaqueAlphaMismatch {
                 pixel_index,
                 value: pixel[3],

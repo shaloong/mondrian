@@ -463,7 +463,11 @@ ICC device transform. Strong downscales first build full-frame 2x box-prefilter
 levels in working-linear light until the final reconstruction footprint is
 bounded, then use two separable Lanczos3 passes over the requested visible
 source region. Filtering is performed on premultiplied RGB and alpha and the
-public output is restored to the compositor's straight-alpha contract.
+public output is restored to the compositor's straight/opaque-alpha contract.
+The horizontal reconstruction texture is a typed
+`PremultipliedCoverage` frame; pass uniforms are derived from frame descriptors
+rather than axis-specific assumptions, so a resource cannot be premultiplied in
+the shader while remaining mislabeled in the renderer resource table.
 Plans reject more than 2:1 scale anisotropy, and prefiltering continues while
 either axis exceeds the bounded 4x reconstruction footprint, so the shader
 never silently truncates taps for malformed non-Viewer requests.

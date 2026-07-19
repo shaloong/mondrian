@@ -40,6 +40,13 @@ impl GpuDisplayCalibrationPlan {
                 actual: descriptor,
             });
         }
+        if !descriptor.alpha.is_straight_compatible() {
+            return Err(
+                GpuDisplayCalibrationPlanError::InputNotStraightCompatibleAlpha {
+                    actual: descriptor.alpha,
+                },
+            );
+        }
         if !matches!(
             input.texture_format(),
             GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float
@@ -477,6 +484,12 @@ pub enum GpuDisplayCalibrationPlanError {
     /// Input is not an encoded GPU display frame matching the LUT source.
     #[error("invalid display calibration input contract {actual:?}")]
     InvalidInputContract { actual: ColorFrameDescriptor },
+    /// ICC calibration consumes encoded RGB with straight or opaque coverage.
+    #[error("display calibration input must carry straight-compatible coverage, got {actual:?}")]
+    InputNotStraightCompatibleAlpha {
+        /// Rejected RGB/coverage association.
+        actual: crate::ColorFrameAlpha,
+    },
     /// Input storage cannot carry float display values.
     #[error("unsupported display calibration input texture {0:?}")]
     UnsupportedInputTextureFormat(GpuColorFrameTextureFormat),
@@ -859,6 +872,7 @@ mod tests {
                 domain: ColorFrameDomain::Display,
                 encoding: ColorFrameEncoding::EncodedFloat,
                 residency: ColorFrameResidency::Gpu,
+                alpha: crate::ColorFrameAlpha::StraightCoverage,
             },
             GpuColorFrameTextureFormat::Rgba32Float,
             "display-calibration-input",

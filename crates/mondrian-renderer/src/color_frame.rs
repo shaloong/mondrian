@@ -8,6 +8,7 @@ use mondrian_media::{
     DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, PreviewNativeDecodedFrame,
 };
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -53,6 +54,34 @@ pub enum ColorFrameResidency {
     Cpu,
     /// Pixels are resident in GPU memory and represented by a renderer handle.
     Gpu,
+}
+
+/// Association of RGB samples with linear coverage alpha.
+///
+/// Alpha is never color-managed. This value is nevertheless part of the frame
+/// contract because filtering and compositing must know whether RGB is stored
+/// independently from coverage or already multiplied by it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColorFrameAlpha {
+    /// RGB is independent of alpha and alpha carries coverage.
+    StraightCoverage,
+    /// RGB has been multiplied by coverage alpha.
+    PremultipliedCoverage,
+    /// Every pixel is guaranteed fully opaque.
+    Opaque,
+}
+
+impl ColorFrameAlpha {
+    /// Return whether RGB is stored premultiplied by coverage.
+    pub const fn is_premultiplied(self) -> bool {
+        matches!(self, Self::PremultipliedCoverage)
+    }
+
+    /// Return whether this contract can be consumed as straight RGB without conversion.
+    pub const fn is_straight_compatible(self) -> bool {
+        matches!(self, Self::StraightCoverage | Self::Opaque)
+    }
 }
 
 /// Color identity carried by a renderer frame.
@@ -111,6 +140,8 @@ pub struct ColorFrameDescriptor {
     pub encoding: ColorFrameEncoding,
     /// CPU/GPU residency.
     pub residency: ColorFrameResidency,
+    /// RGB/coverage association carried by the pixels.
+    pub alpha: ColorFrameAlpha,
 }
 
 impl ColorFrameDescriptor {
@@ -1392,6 +1423,7 @@ impl GpuNativeDecodedFrameImportPlan {
             domain: ColorFrameDomain::Source,
             encoding: ColorFrameEncoding::EncodedFloat,
             residency: ColorFrameResidency::Gpu,
+            alpha: ColorFrameAlpha::Opaque,
         };
         let encoded_source_frame = GpuColorFrameHandle::new(
             ids.allocate(),
@@ -1407,6 +1439,7 @@ impl GpuNativeDecodedFrameImportPlan {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
+            alpha: ColorFrameAlpha::StraightCoverage,
         };
         let working_frame = GpuColorFrameHandle::new(
             ids.allocate(),
@@ -1980,6 +2013,7 @@ impl CpuColorFrame {
             domain,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Cpu,
+            alpha: ColorFrameAlpha::StraightCoverage,
         };
         Self { descriptor, frame: Arc::new(frame) }
     }
@@ -2042,6 +2076,7 @@ impl CpuEncodedFloatColorFrame {
             domain,
             encoding: ColorFrameEncoding::EncodedFloat,
             residency: ColorFrameResidency::Cpu,
+            alpha: ColorFrameAlpha::StraightCoverage,
         };
         Self { descriptor, frame: Arc::new(frame) }
     }
@@ -2096,6 +2131,7 @@ impl CpuEncodedColorFrame {
             domain,
             encoding: ColorFrameEncoding::EncodedRgba8,
             residency: ColorFrameResidency::Cpu,
+            alpha: ColorFrameAlpha::StraightCoverage,
         };
         Self { descriptor, rgba }
     }
@@ -2200,6 +2236,7 @@ impl LinearFloatSource {
             domain: ColorFrameDomain::Source,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Cpu,
+            alpha: ColorFrameAlpha::StraightCoverage,
         };
         Self { descriptor, data }
     }
@@ -2304,21 +2341,43 @@ impl CpuSourceColorFrame {
         interpretation: AlphaInterpretation,
     ) -> Result<Self, SourceAlphaInterpretationError> {
         match (self, interpretation) {
-            (frame, AlphaInterpretation::Straight) => Ok(frame),
+            (mut frame, AlphaInterpretation::Straight) => {
+                frame.set_alpha_contract(ColorFrameAlpha::StraightCoverage);
+                Ok(frame)
+            }
             (Self::EncodedRgba8(frame), interpretation) => {
-                let descriptor = frame.descriptor;
+                let mut descriptor = frame.descriptor;
+                descriptor.alpha = match interpretation {
+                    AlphaInterpretation::Ignore => ColorFrameAlpha::Opaque,
+                    AlphaInterpretation::Straight | AlphaInterpretation::Premultiplied => {
+                        ColorFrameAlpha::StraightCoverage
+                    }
+                };
                 let mut rgba = frame.into_rgba();
                 normalize_rgba8_alpha(&mut rgba, interpretation);
                 let frame = CpuEncodedColorFrame { descriptor, rgba: Arc::new(rgba) };
                 Ok(Self::EncodedRgba8(frame))
             }
             (Self::LinearFloat(frame), interpretation) => {
-                let descriptor = frame.descriptor;
+                let mut descriptor = frame.descriptor;
+                descriptor.alpha = match interpretation {
+                    AlphaInterpretation::Ignore => ColorFrameAlpha::Opaque,
+                    AlphaInterpretation::Straight | AlphaInterpretation::Premultiplied => {
+                        ColorFrameAlpha::StraightCoverage
+                    }
+                };
                 let mut rgba = frame.into_data();
                 normalize_rgba_f32_alpha(&mut rgba, interpretation)?;
                 let frame = LinearFloatSource { descriptor, data: Arc::new(rgba) };
                 Ok(Self::LinearFloat(frame))
             }
+        }
+    }
+
+    fn set_alpha_contract(&mut self, alpha: ColorFrameAlpha) {
+        match self {
+            Self::EncodedRgba8(frame) => frame.descriptor.alpha = alpha,
+            Self::LinearFloat(frame) => frame.descriptor.alpha = alpha,
         }
     }
 }
@@ -2521,6 +2580,10 @@ mod tests {
         };
 
         assert_eq!(normalized.rgba(), &[128, 64, 32, 128]);
+        assert_eq!(
+            normalized.descriptor().alpha,
+            ColorFrameAlpha::StraightCoverage
+        );
     }
 
     #[test]
@@ -2540,6 +2603,10 @@ mod tests {
         };
 
         assert_eq!(normalized.data(), &[2.0, -0.5, 0.25, 0.25]);
+        assert_eq!(
+            normalized.descriptor().alpha,
+            ColorFrameAlpha::StraightCoverage
+        );
     }
 
     #[test]
@@ -2559,6 +2626,7 @@ mod tests {
         };
 
         assert_eq!(normalized.rgba(), &[12, 34, 56, 255]);
+        assert_eq!(normalized.descriptor().alpha, ColorFrameAlpha::Opaque);
     }
 
     #[test]
@@ -2575,6 +2643,7 @@ mod tests {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Cpu,
+            alpha: ColorFrameAlpha::StraightCoverage,
         };
 
         let err = GpuColorFrameHandle::new(
@@ -2597,6 +2666,7 @@ mod tests {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
+            alpha: ColorFrameAlpha::StraightCoverage,
         };
 
         let handle = GpuColorFrameHandle::new(
@@ -2820,6 +2890,7 @@ mod tests {
                 domain: ColorFrameDomain::Source,
                 encoding: ColorFrameEncoding::EncodedFloat,
                 residency: ColorFrameResidency::Gpu,
+                alpha: ColorFrameAlpha::Opaque,
             }
         );
         assert_eq!(
@@ -2836,6 +2907,7 @@ mod tests {
                 domain: ColorFrameDomain::Working,
                 encoding: ColorFrameEncoding::LinearFloat,
                 residency: ColorFrameResidency::Gpu,
+                alpha: ColorFrameAlpha::StraightCoverage,
             }
         );
         assert_eq!(
@@ -3516,6 +3588,7 @@ mod tests {
             domain: ColorFrameDomain::Display,
             encoding: ColorFrameEncoding::EncodedRgba8,
             residency: ColorFrameResidency::Gpu,
+            alpha: ColorFrameAlpha::StraightCoverage,
         };
         let handle = gpu_handle(300, descriptor, GpuColorFrameTextureFormat::Rgba8Unorm);
 
@@ -3587,6 +3660,7 @@ mod tests {
             domain: ColorFrameDomain::Export,
             encoding: ColorFrameEncoding::EncodedRgba8,
             residency: ColorFrameResidency::Gpu,
+            alpha: ColorFrameAlpha::StraightCoverage,
         };
         let handle = gpu_handle(303, descriptor, GpuColorFrameTextureFormat::Rgba8Unorm);
         let plan = GpuColorFrameReadbackPlan::encoded_rgba8(handle).expect("readback plan");
@@ -3610,6 +3684,7 @@ mod tests {
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Gpu,
+            alpha: ColorFrameAlpha::StraightCoverage,
         }
     }
 
