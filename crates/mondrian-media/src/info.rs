@@ -918,13 +918,53 @@ impl VideoHdrMetadataSummary {
 
 // ─── 声道布局 ─────────────────────────────────────────────────────────────────
 
+/// Decoder-probed native channel layout.
+///
+/// This is source evidence, not a requested render layout. Unsupported or
+/// unspecified layouts remain explicit and must not be inferred from their
+/// channel count.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChannelLayout {
+    /// FFmpeg exposed no semantic channel layout; the count is retained only
+    /// as diagnostic evidence.
+    Unspecified(u8),
+    /// One mono program channel.
     Mono,
+    /// Front-left and front-right.
     Stereo,
-    Surround51,
+    /// FL, FR, FC, LFE, SL, SR (`5.1(side)`).
+    Surround51Side,
+    /// FL, FR, FC, LFE, BL, BR (`5.1`).
+    Surround51Back,
+    /// FL, FR, FC, LFE, BL, BR, SL, SR.
     Surround71,
+    /// A declared layout not currently represented by the product contract.
+    /// The count is evidence only and never authorizes a guessed mapping.
     Other(u8),
+}
+
+impl ChannelLayout {
+    /// Channel extent reported for this native layout.
+    pub const fn channel_count(&self) -> u8 {
+        match self {
+            Self::Unspecified(channels) | Self::Other(channels) => *channels,
+            Self::Mono => 1,
+            Self::Stereo => 2,
+            Self::Surround51Side | Self::Surround51Back => 6,
+            Self::Surround71 => 8,
+        }
+    }
+
+    /// Resolve only native layouts whose semantics exactly match a supported
+    /// Mondrian render layout.
+    pub const fn exact_render_layout(&self) -> Option<mondrian_core::AudioChannelLayout> {
+        match self {
+            Self::Mono => Some(mondrian_core::AudioChannelLayout::Mono),
+            Self::Stereo => Some(mondrian_core::AudioChannelLayout::Stereo),
+            Self::Surround51Side => Some(mondrian_core::AudioChannelLayout::Surround51),
+            Self::Unspecified(_) | Self::Surround51Back | Self::Surround71 | Self::Other(_) => None,
+        }
+    }
 }
 
 // ─── 流信息 ───────────────────────────────────────────────────────────────────
@@ -979,7 +1019,16 @@ pub struct VideoStreamInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioStreamInfo {
+    /// Absolute stream index used by an explicit FFmpeg `-map 0:<index>`.
     pub index: u32,
+    /// Container stream identifier when FFmpeg reports a nonnegative value.
+    pub stream_id: Option<i32>,
+    /// Normalized stream language metadata, if declared.
+    pub language: Option<String>,
+    /// Human-readable stream title metadata, if declared.
+    pub title: Option<String>,
+    /// Whether the container marks this stream as its default selection.
+    pub is_default: bool,
     pub codec: AudioCodec,
     /// Declared duration of this audio stream, independent of container duration.
     #[serde(default)]
@@ -1199,7 +1248,7 @@ impl MediaInfo {
                         duration_from_stream_ticks(stream.duration(), stream.time_base());
                     let mut sample_rate = 0u32;
                     let mut channels = 0u8;
-                    let mut channel_layout = ChannelLayout::Other(0);
+                    let mut channel_layout = ChannelLayout::Unspecified(0);
                     let mut bit_depth = 16u16;
 
                     if let Ok(context) =
@@ -1208,13 +1257,24 @@ impl MediaInfo {
                         if let Ok(decoder) = context.decoder().audio() {
                             sample_rate = decoder.rate();
                             channels = decoder.channels() as u8;
-                            channel_layout = map_channel_layout(channels);
+                            channel_layout = map_channel_layout(decoder.channel_layout(), channels);
                             bit_depth = 16;
                         }
                     }
 
+                    let metadata = stream.metadata();
+                    let language = normalized_stream_metadata(metadata.get("language"));
+                    let title = normalized_stream_metadata(metadata.get("title"));
+                    let stream_id = (stream.id() >= 0).then_some(stream.id());
+                    let is_default =
+                        stream.disposition().contains(ffmpeg::format::stream::Disposition::DEFAULT);
+
                     audio_streams.push(AudioStreamInfo {
                         index: stream.index() as u32,
+                        stream_id,
+                        language,
+                        title,
+                        is_default,
                         codec: map_audio_codec(params.id()),
                         duration: stream_duration,
                         sample_rate,
@@ -2205,14 +2265,26 @@ fn map_video_codec_profile(profile: ffmpeg::codec::Profile) -> VideoCodecProfile
     }
 }
 
-fn map_channel_layout(channels: u8) -> ChannelLayout {
-    match channels {
-        1 => ChannelLayout::Mono,
-        2 => ChannelLayout::Stereo,
-        6 => ChannelLayout::Surround51,
-        8 => ChannelLayout::Surround71,
-        _ => ChannelLayout::Other(channels),
+fn map_channel_layout(layout: ffmpeg::ChannelLayout, reported_channels: u8) -> ChannelLayout {
+    if layout == ffmpeg::ChannelLayout::MONO {
+        ChannelLayout::Mono
+    } else if layout == ffmpeg::ChannelLayout::STEREO {
+        ChannelLayout::Stereo
+    } else if layout == ffmpeg::ChannelLayout::_5POINT1 {
+        ChannelLayout::Surround51Side
+    } else if layout == ffmpeg::ChannelLayout::_5POINT1_BACK {
+        ChannelLayout::Surround51Back
+    } else if layout == ffmpeg::ChannelLayout::_7POINT1 {
+        ChannelLayout::Surround71
+    } else if layout.channels() <= 0 {
+        ChannelLayout::Unspecified(reported_channels)
+    } else {
+        ChannelLayout::Other(reported_channels)
     }
+}
+
+fn normalized_stream_metadata(value: Option<&str>) -> Option<String> {
+    value.map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned)
 }
 
 fn map_video_codec(id: ffmpeg::codec::Id) -> VideoCodec {
@@ -3657,6 +3729,37 @@ mod tests {
             content_light,
             Some(VideoHdrMetadataPayload::ContentLightLevel(_))
         ));
+    }
+
+    #[test]
+    fn audio_layout_probe_preserves_side_back_and_nonstandard_six_channel_semantics() {
+        assert_eq!(
+            map_channel_layout(ffmpeg::ChannelLayout::_5POINT1, 6),
+            ChannelLayout::Surround51Side
+        );
+        assert_eq!(
+            map_channel_layout(ffmpeg::ChannelLayout::_5POINT1_BACK, 6),
+            ChannelLayout::Surround51Back
+        );
+        assert_eq!(
+            map_channel_layout(ffmpeg::ChannelLayout::_6POINT0, 6),
+            ChannelLayout::Other(6)
+        );
+        assert_eq!(
+            ChannelLayout::Surround51Side.exact_render_layout(),
+            Some(mondrian_core::AudioChannelLayout::Surround51)
+        );
+        assert_eq!(ChannelLayout::Surround51Back.exact_render_layout(), None);
+    }
+
+    #[test]
+    fn audio_stream_metadata_normalization_does_not_invent_missing_labels() {
+        assert_eq!(
+            normalized_stream_metadata(Some("  eng ")),
+            Some("eng".to_owned())
+        );
+        assert_eq!(normalized_stream_metadata(Some("  ")), None);
+        assert_eq!(normalized_stream_metadata(None), None);
     }
 
     const fn raw_q(num: i32, den: i32) -> FfmpegRational {

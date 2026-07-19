@@ -55,6 +55,15 @@ buffer whose layout differs even when its raw sample extent happens to match.
 Native stream selection beyond the stable primary component and general
 up/down-mix policy remain audio-domain work, not decoder guesses.
 
+Audio probing reads FFmpeg's declared channel layout rather than deriving it
+from channel count. `5.1(side)` and back-surround `5.1` remain distinct;
+nonstandard six-channel, unspecified, and unsupported layouts stay explicit
+probe facts and cannot be promoted to a render contract. Each probed audio
+stream also retains its absolute stream index, optional container stream ID,
+language/title metadata, and default disposition. These are selection evidence
+for the Asset Component Catalog, not permission to auto-retarget an authored
+Component when a relinked file differs.
+
 Stdout has two bounded 64 KiB look-ahead chunks and stderr retains only its
 latest 64 KiB while always draining the pipe. Generation cancellation is
 polled every 5 ms while waiting for output, then kills, waits, and joins the
