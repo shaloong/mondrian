@@ -214,11 +214,19 @@ pub struct AudioRenderContract {
     pub processing_mode: AudioProcessingMode,
     /// Maximum processor-private bytes retained by one prepared Session.
     pub processor_session_scratch_budget_bytes: usize,
+    /// Maximum internal frames evaluated before Timeline-aligned public PCM.
+    pub public_output_lookahead_budget_frames: usize,
+    /// Maximum interleaved PDC storage retained by one prepared Session.
+    pub compensation_delay_scratch_budget_bytes: usize,
 }
 
 impl AudioRenderContract {
     /// Conservative default admission budget for processor-private Session state.
     pub const DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+    /// Conservative default admission budget for public-output lookahead.
+    pub const DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES: usize = 480_000;
+    /// Conservative default admission budget for PDC delay-line storage.
+    pub const DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 
     /// Channel count derived from the sole layout authority.
     pub const fn channel_count(self) -> usize {

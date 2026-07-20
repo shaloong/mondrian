@@ -46,6 +46,10 @@ impl TimelineAudioPcmRenderer {
             processing_mode: AudioProcessingMode::Realtime,
             processor_session_scratch_budget_bytes:
                 AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+            public_output_lookahead_budget_frames:
+                AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+            compensation_delay_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
         };
         let resolver = PlaybackMediaResolver { library, source_cache };
         let runtime = AudioProgramRuntime::build(

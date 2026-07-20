@@ -130,14 +130,18 @@ history; it reports zero compensable latency so PDC cannot erase its audible
 effect, and a finite tail equal to that delay so a Scope occurrence can flush
 after source silence. A non-zero-latency test Adapter proves generic Host instantiation, PDC,
 mode admission, entry failure, and partition invariance, but is not a product
-processor claim. The first production lookahead or group-delay Processor must
-also freeze public-output lookahead/latency normalization so Playback, Export,
-and nested pull evaluation return the same Timeline-aligned samples rather than
-leading silence or a truncated tail.
+processor claim. Public-output lookahead normalization is now common Host
+semantics: Playback, Export, and nested pull evaluation receive Timeline-aligned
+samples rather than leading silence or a truncated tail. The first production
+lookahead or group-delay Processor must prove that existing contract rather
+than create a processor-specific output path.
 
-Preparation already solves checked Contribution and port-specific Route
-compensation at every sum and propagates child-output latency bottom-up; a
-missing child preparation dependency fails closed. Prepared Contribution and
+Preparation solves checked Contribution and port-specific Route compensation
+at every sum. Each prepared stage retains its input-signal delay, and all
+downstream automation/parameter delivery evaluates the signal coordinate rather
+than the later execution coordinate. A nested child public output is already
+Timeline-aligned, enters its parent with zero algorithmic latency, and still
+propagates its state-entry obligation. Prepared Contribution and
 Route compensation executes through Session-preallocated,
 block-partition-invariant delay lines. Preparation propagates a state-entry
 obligation through nested outputs; stateful Sessions require a fresh continuity
@@ -150,6 +154,16 @@ Stateless child outputs remain arbitrarily indexable. Generic stateful reverse
 mapping fails closed until a processor-specific reverse contract, checkpoint
 replay, or materialized child output can prove block-partition-invariant
 results.
+
+The selected Program Output's total algorithmic latency is exposed only as
+bounded `public_output_lookahead_frames`. A fresh epoch keeps separate public
+and internal execution cursors. Its first non-empty request evaluates and
+discards that lookahead in Render-Contract-sized blocks, then returns the exact
+requested Timeline interval; subsequent execution stays the fixed lookahead
+ahead. Meter time remains public time. Preparation fails before Session creation
+when either lookahead frames or aggregate interleaved compensation storage
+exceeds its explicit Render Contract budget, and Session construction rechecks
+the admitted delay-line sample total.
 
 Contribution execution is causal rather than equivalent to source activity.
 Preparation extends the half-open source interval by checked source/rack

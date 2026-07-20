@@ -297,6 +297,14 @@ fail compilation explicitly; only `RoutedInputs` is executable.
 - maximum admitted block frames;
 - `Realtime` or `Offline` processing mode;
 - maximum processor-private bytes admitted for one Session.
+- maximum internal public-output lookahead frames and maximum PDC delay-line
+  bytes admitted for one Session.
+
+The current product contracts admit at most 480,000 internal lookahead frames,
+256 MiB of aggregate interleaved compensation storage, and 256 MiB of
+processor-private Session storage. These are independent ceilings. A consumer
+may lower either ceiling to zero when its selected graph requires none; zero is
+not an invalid contract and never grants an implicit fallback.
 
 Preparation now lowers the semantic graph into one dense execution schedule:
 
@@ -330,14 +338,18 @@ lanes. Static lanes produce one offset-zero event per block; varying lanes
 produce exact values at every sample offset in Session-reused storage. Latency
 is accumulated through each
 pre-/post-fader rack and resolved independently at every real summing point;
-the selected Program Output exposes the resulting total latency. Recursive
-preparation is bottom-up: a parent Contribution receives the already-prepared,
-instance-specific child-output latency. Missing nested latency fails closed and
-can never be guessed as zero. Layout negotiation, processor realization,
+the selected Program Output exposes the resulting internal lookahead. Every
+automation and Processor occurrence also receives its checked input-signal
+delay: Scope input, each Rack prefix, edit envelope, channel fader, and Route
+send evaluate `execution sample - stage delay`, so PDC cannot move a keyframe
+relative to audible content. Recursive preparation is bottom-up. A child
+public output is already Timeline-aligned and therefore enters its parent with
+zero algorithmic latency; its state-entry obligation still propagates. Layout negotiation, processor realization,
 plugin-specific batch lowering, and each realized processor's algorithmic-
-latency/tail/state-entry/mode/scratch facts also belong here. Preparation checked-sums every
 realized occurrence's private scratch requirement and fails with required and
-admitted byte counts before any Session is constructed. Generic compensation
+admitted byte counts before any Session is constructed. It also rejects public
+lookahead or aggregate interleaved compensation storage beyond the explicit
+Render Contract budgets. Generic compensation
 execution and root Session entry consume the remaining realized facts. Ordinary
 tests use a custom stateful non-zero-latency Host Adapter to prove PDC,
 whole/partitioned PCM, explicit entry, mode rejection, and failed-entry
@@ -378,9 +390,15 @@ called; explicit zero input flushes the occurrence. Edit gain/pan/fades remain
 after the Scope Rack by normative order, so a Clip fade-out gates any Scope tail
 beyond the Clip while an unfaded edit preserves it.
 
-The immutable Plan and recursive Runtime both report selected-output latency.
-This is execution scheduling information, not an instruction to rewrite author
-time, Clip placement, automation coordinates, or nested source mappings.
+The immutable Plan and recursive Runtime report
+`public_output_lookahead_frames`, not public PCM latency. On the first non-empty
+request of a fresh epoch, the Session evaluates that many internal frames in
+bounded Render-Contract-sized blocks and discards their output, then returns the
+requested block at its original Timeline coordinate. Later requests retain one
+internal cursor exactly `lookahead` frames ahead of the public cursor. Meter
+timestamps and consumer continuity remain public coordinates. The lookahead is
+fixed admission/capacity evidence; it never rewrites author time, Clip
+placement, automation coordinates, or nested source mappings.
 
 Session construction allocates one fixed interleaved delay line for every
 prepared Contribution and Route compensation input; zero-delay lines retain no
@@ -389,7 +407,8 @@ maximum block. The capacity report exposes both obligations. Contribution
 compensation executes after contribution-local processing and before the Track
 sum. A Route first delays the selected source-port signal for compensation,
 then applies its level at the destination's Sequence sample time while summing;
-automation therefore does not shift backward with source history. Neither path
+automation is evaluated at the aligned destination signal time rather than the
+raw execution cursor. Neither path
 allocates or grows during a block. Scalar/SIMD execution shares these same
 state lines, and reference tests require whole-block and partitioned-block PCM
 identity within the stated floating-point tolerance.
@@ -490,8 +509,8 @@ segment evaluators; block execution advances a local span cursor and never
 validates or searches the author curve per sample. Hold, Linear, and Bezier
 semantics remain core-owned and are exactly block-partition invariant. Realtime
 rendering does not scan author Routes or use tree/map lookup in sample loops.
-Future plugin event lowering, public-output latency/lookahead normalization, and
-additional state-entry obligations must deepen this schedule without
+Future plugin ABI event lowering and additional state-entry obligations must
+deepen this schedule without
 reintroducing author graph interpretation.
 
 `AudioRenderSession::new` establishes a typed fixed `AudioRenderCapacity` for
@@ -740,11 +759,11 @@ gates rather than implied support:
    Unknown identities and unsupported layouts must continue to fail instead of
    being guessed.
 2. Extend the stateful built-ins beyond Sample Delay and the implemented common
-   tail contract with processor deadline contracts. Before admitting a production non-zero algorithmic-
-   latency definition, normalize public-output lookahead/latency for Playback,
-   Export, and nested pull evaluation so returned PCM remains Timeline-aligned;
-   then extend PDC, seek-entry/preroll, discontinuity, and nested evidence to
-   each production definition.
+   tail/Timeline-aligned lookahead contracts with processor deadline contracts.
+   The first production non-zero algorithmic-latency definition must extend the
+   existing PDC, stage-local automation, seek-entry/preroll, discontinuity,
+   public-output alignment, budget, and nested evidence rather than adding a
+   processor-specific scheduling path.
 3. Implement isolated VST3 and CLAP host Adapters with scanning, stable native
    IDs, state chunks, bus/layout negotiation, exact consumption/lowering of the
    common sample-accurate parameter batches, crash/hang containment, and

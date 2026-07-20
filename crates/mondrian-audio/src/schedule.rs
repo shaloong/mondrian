@@ -184,8 +184,10 @@ pub struct PreparedAudioScheduleSummary {
     pub processor_session_scratch_bytes: usize,
     /// Scratch slots after interval-liveness reuse.
     pub scratch_slot_count: usize,
-    /// Total intrinsic/PDC latency at the selected Program Output.
-    pub output_latency_frames: usize,
+    /// Interleaved sample storage retained by all PDC delay lines.
+    pub compensation_delay_samples: usize,
+    /// Internal lookahead needed to return a Timeline-aligned Program Output.
+    pub public_output_lookahead_frames: usize,
     /// Largest compensation delay inserted at any prepared summing input.
     pub maximum_compensation_frames: usize,
     /// Whether mutable DSP history requires explicit continuity entry.
@@ -282,9 +284,9 @@ impl PreparedAudioPlan {
         self.schedule.summary
     }
 
-    /// Total prepared Program Output latency on this plan's Evaluation Grid.
-    pub fn output_latency_frames(&self) -> usize {
-        self.schedule.summary.output_latency_frames
+    /// Internal lookahead needed to return Timeline-aligned public PCM.
+    pub fn public_output_lookahead_frames(&self) -> usize {
+        self.schedule.summary.public_output_lookahead_frames
     }
 
     /// Whether Sessions must enter a continuity epoch before rendering.
@@ -371,6 +373,8 @@ pub(crate) struct PreparedProcessor {
     pub(crate) occurrence: AudioProcessorOccurrence,
     pub(crate) parameter_ids: Vec<ParameterId>,
     pub(crate) parameter_curves: Vec<PreparedAutomationCurve>,
+    pub(crate) rack_prefix_algorithmic_latency_frames: usize,
+    pub(crate) input_signal_delay_frames: usize,
     pub(crate) factory: PreparedProcessorFactoryBinding,
 }
 
@@ -921,6 +925,25 @@ impl PreparedAudioSchedule {
         for (node, node_latency) in nodes.iter_mut().zip(latency.node_latencies.iter().copied()) {
             node.latency = node_latency;
         }
+        for contribution in &contributions {
+            assign_rack_processor_signal_delays(
+                &mut processors,
+                &contribution.scope_rack,
+                contribution.source_algorithmic_latency_frames,
+            )?;
+        }
+        for node in &nodes {
+            assign_rack_processor_signal_delays(
+                &mut processors,
+                &node.pre_rack,
+                node.latency.input_frames,
+            )?;
+            assign_rack_processor_signal_delays(
+                &mut processors,
+                &node.post_rack,
+                node.latency.pre_fader_frames,
+            )?;
+        }
 
         let mut last_consumer = (0..nodes.len()).collect::<Vec<_>>();
         for route in &routes {
@@ -979,6 +1002,41 @@ impl PreparedAudioSchedule {
                 budget_bytes: contract.processor_session_scratch_budget_bytes,
             });
         }
+        if latency.output_algorithmic_latency_frames
+            > contract.public_output_lookahead_budget_frames
+        {
+            return Err(AudioCompileError::PublicOutputLookaheadBudgetExceeded {
+                required_frames: latency.output_algorithmic_latency_frames,
+                budget_frames: contract.public_output_lookahead_budget_frames,
+            });
+        }
+        let compensation_delay_samples = latency
+            .contribution_compensation_frames
+            .iter()
+            .chain(&latency.route_compensation_frames)
+            .try_fold(0_usize, |samples, frames| {
+                frames
+                    .checked_mul(contract.channel_count())
+                    .and_then(|delay_samples| samples.checked_add(delay_samples))
+            })
+            .ok_or_else(|| {
+                AudioCompileError::InvalidPreparedGraph(
+                    "compensation delay storage overflowed".to_owned(),
+                )
+            })?;
+        let compensation_delay_scratch_bytes = compensation_delay_samples
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| {
+                AudioCompileError::InvalidPreparedGraph(
+                    "compensation delay byte extent overflowed".to_owned(),
+                )
+            })?;
+        if compensation_delay_scratch_bytes > contract.compensation_delay_scratch_budget_bytes {
+            return Err(AudioCompileError::CompensationScratchBudgetExceeded {
+                required_bytes: compensation_delay_scratch_bytes,
+                budget_bytes: contract.compensation_delay_scratch_budget_bytes,
+            });
+        }
         let summary = PreparedAudioScheduleSummary {
             node_count: nodes.len(),
             track_count,
@@ -1005,9 +1063,11 @@ impl PreparedAudioSchedule {
             maximum_parameter_events_per_block,
             processor_session_scratch_bytes,
             scratch_slot_count,
-            output_latency_frames: latency.output_latency_frames,
+            compensation_delay_samples,
+            public_output_lookahead_frames: latency.output_algorithmic_latency_frames,
             maximum_compensation_frames: latency.maximum_compensation_frames,
-            requires_state_entry: latency.maximum_compensation_frames > 0
+            requires_state_entry: latency.output_algorithmic_latency_frames > 0
+                || latency.maximum_compensation_frames > 0
                 || contributions.iter().any(|contribution| {
                     contribution.source_requires_state_entry
                         || contribution.scope_rack.requires_state_entry
@@ -1040,6 +1100,7 @@ fn prepare_rack(
     destination: &mut Vec<PreparedProcessor>,
 ) -> Result<PreparedRack, AudioCompileError> {
     let start = destination.len();
+    let mut algorithmic_latency_frames = 0_usize;
     for processor in &rack.processors {
         let occurrence = AudioProcessorOccurrence {
             instance_id: processor.instance_id,
@@ -1048,6 +1109,7 @@ fn prepare_rack(
         };
         let factory =
             prepare_processor_factory(processor_resolver, processor, occurrence, contract)?;
+        let processor_algorithmic_latency_frames = factory.contract().algorithmic_latency_frames();
         let mut parameter_ids = Vec::with_capacity(processor.parameters.len());
         let mut parameter_curves = Vec::with_capacity(processor.parameters.len());
         for (parameter_id, parameter) in &processor.parameters {
@@ -1070,18 +1132,19 @@ fn prepare_rack(
             occurrence,
             parameter_ids,
             parameter_curves,
+            rack_prefix_algorithmic_latency_frames: algorithmic_latency_frames,
+            input_signal_delay_frames: 0,
             factory,
         });
+        algorithmic_latency_frames = algorithmic_latency_frames
+            .checked_add(processor_algorithmic_latency_frames)
+            .ok_or_else(|| {
+                AudioCompileError::InvalidPreparedGraph(
+                    "processor rack algorithmic latency overflowed".to_owned(),
+                )
+            })?;
     }
     let prepared = &destination[start..];
-    let algorithmic_latency_frames = prepared
-        .iter()
-        .try_fold(0_usize, |latency, processor| {
-            latency.checked_add(processor.factory.contract().algorithmic_latency_frames())
-        })
-        .ok_or_else(|| {
-            AudioCompileError::InvalidPreparedGraph("processor rack latency overflowed".to_owned())
-        })?;
     let tail = prepared.iter().try_fold(AudioProcessorTail::None, |accumulated, processor| {
         accumulate_sequential_tail(accumulated, processor.factory.contract().tail())
     })?;
@@ -1093,6 +1156,28 @@ fn prepare_rack(
             .iter()
             .any(|processor| processor.factory.contract().requires_state_entry()),
     })
+}
+
+fn assign_rack_processor_signal_delays(
+    processors: &mut [PreparedProcessor],
+    rack: &PreparedRack,
+    rack_input_signal_delay_frames: usize,
+) -> Result<(), AudioCompileError> {
+    let rack_processors = processors.get_mut(rack.processors.clone()).ok_or_else(|| {
+        AudioCompileError::InvalidPreparedGraph(
+            "processor Rack range is outside the prepared schedule".to_owned(),
+        )
+    })?;
+    for processor in rack_processors {
+        processor.input_signal_delay_frames = rack_input_signal_delay_frames
+            .checked_add(processor.rack_prefix_algorithmic_latency_frames)
+            .ok_or_else(|| {
+                AudioCompileError::InvalidPreparedGraph(
+                    "processor input signal delay overflowed".to_owned(),
+                )
+            })?;
+    }
+    Ok(())
 }
 
 fn accumulate_sequential_tail(

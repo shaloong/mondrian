@@ -30,7 +30,7 @@ pub(crate) struct PreparedLatencyPlan {
     pub(crate) contribution_compensation_frames: Vec<usize>,
     pub(crate) route_compensation_frames: Vec<usize>,
     pub(crate) node_latencies: Vec<PreparedNodeLatency>,
-    pub(crate) output_latency_frames: usize,
+    pub(crate) output_algorithmic_latency_frames: usize,
     pub(crate) maximum_compensation_frames: usize,
 }
 
@@ -109,7 +109,7 @@ pub(crate) fn solve_prepared_latency(
         contribution_compensation_frames,
         route_compensation_frames,
         node_latencies: node_latencies.clone(),
-        output_latency_frames: node_latencies[output_slot].post_fader_frames,
+        output_algorithmic_latency_frames: node_latencies[output_slot].post_fader_frames,
         maximum_compensation_frames,
     })
 }
@@ -193,7 +193,7 @@ mod tests {
         assert_eq!(plan.route_compensation_frames[0..2], [0, 9]);
         assert_eq!(plan.node_latencies[2].post_fader_frames, 19);
         assert_eq!(plan.route_compensation_frames[2..4], [2, 0]);
-        assert_eq!(plan.output_latency_frames, 30);
+        assert_eq!(plan.output_algorithmic_latency_frames, 30);
         assert_eq!(plan.maximum_compensation_frames, 9);
     }
 

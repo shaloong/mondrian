@@ -8,7 +8,8 @@ use mondrian_core::{
 use mondrian_timeline::audio::{
     AudioChannelStripOutputPort, AudioComponentChannelMapping, AudioMixBus, AudioProcessorInstance,
     AudioRoute, AudioRouteDestination, AudioRouteSource, BUILTIN_GAIN_DEFINITION_ID,
-    BUILTIN_SAMPLE_DELAY_DEFINITION_ID, GAIN_DB_PARAMETER_ID, ROUTE_GAIN_DB_PARAMETER_ID,
+    BUILTIN_SAMPLE_DELAY_DEFINITION_ID, CLIP_VOLUME_DB_PARAMETER_ID, FADER_DB_PARAMETER_ID,
+    GAIN_DB_PARAMETER_ID, INPUT_GAIN_DB_PARAMETER_ID, ROUTE_GAIN_DB_PARAMETER_ID,
     SAMPLE_DELAY_FRAMES_PARAMETER_ID,
 };
 use mondrian_timeline::{Clip, Sequence};
@@ -74,9 +75,7 @@ impl AudioProcessorResolver for TestDelayProcessorResolver {
             mondrian_timeline::AudioProcessorDefinitionRef::Clap { plugin_id, .. }
                 if plugin_id == "test.mondrian.delay"
         ) {
-            return Err(AudioProcessorHostError::Unavailable(
-                "test resolver only realizes test.mondrian.delay".to_owned(),
-            ));
+            return BuiltInAudioProcessorResolver.prepare(request);
         }
         if !matches!(
             request.occurrence(),
@@ -84,10 +83,14 @@ impl AudioProcessorResolver for TestDelayProcessorResolver {
                 owner: AudioProcessorOccurrenceOwner::Bus(_),
                 insertion: AudioProcessorInsertionPoint::PreFader,
                 ..
+            } | AudioProcessorOccurrence {
+                owner: AudioProcessorOccurrenceOwner::Contribution { .. },
+                insertion: AudioProcessorInsertionPoint::Scope,
+                ..
             }
         ) {
             return Err(AudioProcessorHostError::InvalidContract(
-                "test Delay must be realized on a Bus pre-fader rack".to_owned(),
+                "test Delay must be realized on a Scope or Bus pre-fader rack".to_owned(),
             ));
         }
         if !request.parameters().is_empty() || request.opaque_state().is_some() {
@@ -309,6 +312,21 @@ fn route_gain_curve(start_db: f64, end_db: f64) -> ExactAutomationCurve {
     curve
 }
 
+fn db_curve(parameter_id: &'static str, start_db: f64, end_db: f64) -> ExactAutomationCurve {
+    let parameter = ParameterId::new_static(parameter_id);
+    let mut curve = ExactAutomationCurve::new(parameter, start_db).expect("curve");
+    curve
+        .set_keyframe(ExactAutomationKeyframe::linear(
+            TimelineTime::ZERO,
+            start_db,
+        ))
+        .expect("first key");
+    curve
+        .set_keyframe(ExactAutomationKeyframe::linear(TimelineTime::ONE, end_db))
+        .expect("second key");
+    curve
+}
+
 fn hold_then_bezier_gain_curve() -> ExactAutomationCurve {
     let parameter = ParameterId::new(GAIN_DB_PARAMETER_ID).expect("gain parameter");
     let mut curve = ExactAutomationCurve::new(parameter, 0.0).expect("curve");
@@ -460,6 +478,10 @@ fn prepared_with_backend(
                 processing_mode: AudioProcessingMode::Offline,
                 processor_session_scratch_budget_bytes:
                     AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+                public_output_lookahead_budget_frames:
+                    AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+                compensation_delay_scratch_budget_bytes:
+                    AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
             },
             backend,
         )
@@ -520,7 +542,8 @@ fn session_executes_preallocated_contribution_and_route_compensation_block_invar
         prepared.schedule.contributions[0].compensation_delay_frames = 2;
         prepared.schedule.routes[contribution_route].compensation_delay_frames = 2;
         prepared.schedule.summary.maximum_compensation_frames = 2;
-        prepared.schedule.summary.output_latency_frames = 4;
+        prepared.schedule.summary.compensation_delay_samples = 4;
+        prepared.schedule.summary.public_output_lookahead_frames = 4;
         prepared.schedule.summary.requires_state_entry = true;
         plan
     }
@@ -579,7 +602,7 @@ fn session_executes_preallocated_contribution_and_route_compensation_block_invar
 
     assert_eq!(
         whole,
-        [0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 0.0, 0.0, 0.0, 0.0]
     );
     assert_eq!(split, whole);
 
@@ -609,7 +632,7 @@ fn session_executes_preallocated_contribution_and_route_compensation_block_invar
             &mut reset_output,
         )
         .expect("reset render");
-    assert_eq!(reset_output, [0.0, 0.0]);
+    assert_eq!(reset_output, [5.0, 6.0]);
 
     let poisoned_epoch = AudioContinuityEpoch::new(10);
     split_session
@@ -735,7 +758,8 @@ fn clip_track_bus_output_math_is_unclipped_and_block_invariant() {
             maximum_parameter_events_per_block: 8,
             processor_session_scratch_bytes: 96,
             scratch_slot_count: 2,
-            output_latency_frames: 0,
+            compensation_delay_samples: 0,
+            public_output_lookahead_frames: 0,
             maximum_compensation_frames: 0,
             requires_state_entry: false,
         }
@@ -1141,6 +1165,10 @@ fn unresolved_plugin_survives_semantic_ir_and_fails_at_preparation() {
             processing_mode: AudioProcessingMode::Realtime,
             processor_session_scratch_budget_bytes:
                 AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+            public_output_lookahead_budget_frames:
+                AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+            compensation_delay_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
         },
     )
     .expect_err("default resolver must fail closed");
@@ -1165,6 +1193,10 @@ fn built_in_sample_delay_preserves_audible_delay_state_and_partitioned_pcm() {
         processing_mode: AudioProcessingMode::Realtime,
         processor_session_scratch_budget_bytes:
             AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
     };
     let plan = Arc::new(
         PreparedAudioPlan::prepare_with_backend(
@@ -1174,7 +1206,7 @@ fn built_in_sample_delay_preserves_audible_delay_state_and_partitioned_pcm() {
         )
         .expect("sample-delay plan"),
     );
-    assert_eq!(plan.output_latency_frames(), 0);
+    assert_eq!(plan.public_output_lookahead_frames(), 0);
     assert!(plan.requires_state_entry());
     assert_eq!(plan.schedule_summary().processor_occurrence_count, 1);
     assert_eq!(plan.schedule_summary().maximum_compensation_frames, 0);
@@ -1182,6 +1214,7 @@ fn built_in_sample_delay_preserves_audible_delay_state_and_partitioned_pcm() {
 
     let mut whole = AudioRenderSession::new(Arc::clone(&plan)).expect("whole Session");
     assert_eq!(whole.capacity().processor_session_scratch_bytes, 8);
+    assert_eq!(whole.capacity().public_output_lookahead_frames, 0);
     assert_eq!(whole.capacity().meter_channel_state_count, 1);
     whole
         .enter_state(AudioStateEntry {
@@ -1366,6 +1399,10 @@ fn hosted_algorithmic_latency_drives_pdc_and_partitioned_pcm() {
         processing_mode: AudioProcessingMode::Realtime,
         processor_session_scratch_budget_bytes:
             AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
     };
     let resolver = TestDelayProcessorResolver {
         latency_frames: 2,
@@ -1381,11 +1418,12 @@ fn hosted_algorithmic_latency_drives_pdc_and_partitioned_pcm() {
         )
         .expect("hosted latency plan"),
     );
-    assert_eq!(plan.output_latency_frames(), 2);
+    assert_eq!(plan.public_output_lookahead_frames(), 2);
     assert_eq!(plan.schedule_summary().maximum_compensation_frames, 2);
     assert!(plan.requires_state_entry());
 
     let mut whole = AudioRenderSession::new(Arc::clone(&plan)).expect("whole Session");
+    assert_eq!(whole.capacity().public_output_lookahead_frames, 2);
     whole
         .enter_state(AudioStateEntry {
             epoch: AudioContinuityEpoch::new(20),
@@ -1401,7 +1439,7 @@ fn hosted_algorithmic_latency_drives_pdc_and_partitioned_pcm() {
             &mut whole_pcm,
         )
         .expect("whole block");
-    assert_eq!(whole_pcm, vec![0.0, 0.0, 2.0, 4.0, 6.0]);
+    assert_eq!(whole_pcm, vec![2.0, 4.0, 6.0, 8.0, 10.0]);
 
     let mut split = AudioRenderSession::new(plan).expect("split Session");
     split
@@ -1428,6 +1466,166 @@ fn hosted_algorithmic_latency_drives_pdc_and_partitioned_pcm() {
         )
         .expect("second partition");
     assert_eq!([first, second].concat(), whole_pcm);
+
+    let long_resolver = TestDelayProcessorResolver {
+        latency_frames: 7,
+        realtime_capable: true,
+        fail_first_state_entry: false,
+    };
+    let long_sequence = sequence_with_parallel_hosted_delay();
+    let long_output = long_sequence.audio_program.outputs[0].id;
+    let long_program = Arc::new(
+        compile_audio_program(&long_sequence, AudioCompileRequest::program(long_output))
+            .expect("long-lookahead semantic program"),
+    );
+    let long_plan = Arc::new(
+        PreparedAudioPlan::prepare_with_processor_resolver(
+            long_program,
+            AudioRenderContract {
+                sample_rate: 2,
+                channel_layout: AudioChannelLayout::Mono,
+                max_block_frames: 3,
+                processing_mode: AudioProcessingMode::Realtime,
+                processor_session_scratch_budget_bytes:
+                    AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+                public_output_lookahead_budget_frames:
+                    AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+                compensation_delay_scratch_budget_bytes:
+                    AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+            },
+            AudioKernelBackend::RuntimeVectorized,
+            &long_resolver,
+        )
+        .expect("long-lookahead plan"),
+    );
+    assert_eq!(long_plan.public_output_lookahead_frames(), 7);
+    let mut long_session = AudioRenderSession::new(long_plan).expect("long Session");
+    long_session
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(22),
+            start_sample: 0,
+        })
+        .expect("long entry");
+    let mut long_source = RampSource::default();
+    let mut aligned = [0.0; 3];
+    long_session
+        .render_into(
+            &mut long_source,
+            AudioRenderRequest { start_sample: 0, frames: 3 },
+            &mut aligned,
+        )
+        .expect("lookahead larger than max block");
+    assert_eq!(aligned, [2.0, 4.0, 6.0]);
+}
+
+#[test]
+fn algorithmic_latency_preserves_signal_time_for_every_downstream_automation_stage() {
+    let mut sequence = sequence_with_audio_clip();
+    let track_id = sequence.audio_tracks[0].id;
+    let scope_id = sequence.audio_tracks[0].clips[0].audio_components[0].processing.scope_id;
+    sequence.audio_tracks[0].clips[0].audio_components[0].volume_automation =
+        Some(db_curve(CLIP_VOLUME_DB_PARAMETER_ID, 0.0, 6.0));
+    sequence
+        .audio_program
+        .track_channels
+        .get_mut(&track_id)
+        .expect("Track channel")
+        .strip
+        .fader_automation = Some(db_curve(FADER_DB_PARAMETER_ID, 0.0, 6.0));
+    sequence.audio_program.routes[0].gain_automation = Some(route_gain_curve(0.0, 6.0));
+
+    let scope = sequence
+        .audio_program
+        .processing_scopes
+        .iter_mut()
+        .find(|scope| scope.id == scope_id)
+        .expect("processing Scope");
+    scope.input_gain_automation = Some(db_curve(INPUT_GAIN_DB_PARAMETER_ID, 0.0, 6.0));
+    scope.processors.processors.push(AudioProcessorInstance {
+        id: mondrian_core::AudioProcessorInstanceId::new(),
+        definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
+            plugin_id: "test.mondrian.delay".to_owned(),
+            schema_version: 1,
+        },
+        bypassed: false,
+        parameters: BTreeMap::new(),
+        opaque_state: None,
+    });
+    let mut gain = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+    gain.set_parameter_automation(gain_curve(0.0, 6.0)).expect("Gain automation");
+    scope.processors.processors.push(gain);
+
+    let output = sequence.audio_program.outputs[0].id;
+    let compiled = Arc::new(
+        compile_audio_program(&sequence, AudioCompileRequest::program(output))
+            .expect("semantic program"),
+    );
+    let resolver = TestDelayProcessorResolver {
+        latency_frames: 2,
+        realtime_capable: true,
+        fail_first_state_entry: false,
+    };
+    let plan = Arc::new(
+        PreparedAudioPlan::prepare_with_processor_resolver(
+            compiled,
+            AudioRenderContract {
+                sample_rate: 2,
+                channel_layout: AudioChannelLayout::Mono,
+                max_block_frames: 5,
+                processing_mode: AudioProcessingMode::Realtime,
+                processor_session_scratch_budget_bytes:
+                    AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+                public_output_lookahead_budget_frames:
+                    AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+                compensation_delay_scratch_budget_bytes:
+                    AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+            },
+            AudioKernelBackend::RuntimeVectorized,
+            &resolver,
+        )
+        .expect("stage-time plan"),
+    );
+    assert_eq!(plan.public_output_lookahead_frames(), 2);
+    assert_eq!(plan.schedule.processors.len(), 2);
+    assert_eq!(plan.schedule.processors[0].input_signal_delay_frames, 0);
+    assert_eq!(plan.schedule.processors[1].input_signal_delay_frames, 2);
+
+    let mut session = AudioRenderSession::new(plan).expect("Session");
+    let gain_events = session
+        .processor_parameter_events_for_test(1, AudioRenderRequest { start_sample: 2, frames: 3 })
+        .expect("stage-local Gain events");
+    assert_eq!(
+        gain_events[0].1.iter().map(|event| event.value).collect::<Vec<_>>(),
+        vec![0.0, 3.0, 6.0]
+    );
+    session
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(50),
+            start_sample: 0,
+        })
+        .expect("entry");
+    let mut source = RampSource::default();
+    let mut pcm = [0.0; 5];
+    session
+        .render_into(
+            &mut source,
+            AudioRenderRequest { start_sample: 0, frames: 5 },
+            &mut pcm,
+        )
+        .expect("Timeline-aligned render");
+    for (sample, (source_value, db)) in pcm.iter().zip([
+        (1.0_f32, 0.0),
+        (2.0, 3.0),
+        (3.0, 6.0),
+        (4.0, 6.0),
+        (5.0, 6.0),
+    ]) {
+        let expected = source_value * crate::dsp::db_to_linear(db).powi(5);
+        assert!(
+            (sample - expected).abs() <= 1.0e-4,
+            "sample={sample} expected={expected}"
+        );
+    }
 }
 
 #[test]
@@ -1446,12 +1644,100 @@ fn processor_session_scratch_budget_fails_closed_during_preparation() {
             max_block_frames: 5,
             processing_mode: AudioProcessingMode::Realtime,
             processor_session_scratch_budget_bytes: 7,
+            public_output_lookahead_budget_frames:
+                AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+            compensation_delay_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
         },
     )
     .expect_err("eight bytes cannot fit a seven-byte budget");
     assert_eq!(
         error,
         AudioCompileError::ProcessorScratchBudgetExceeded { required_bytes: 8, budget_bytes: 7 }
+    );
+}
+
+#[test]
+fn public_lookahead_and_compensation_storage_fail_closed_at_preparation() {
+    let identity_sequence = sequence_with_audio_clip();
+    let identity_output = identity_sequence.audio_program.outputs[0].id;
+    let identity_program = Arc::new(
+        compile_audio_program(
+            &identity_sequence,
+            AudioCompileRequest::program(identity_output),
+        )
+        .expect("identity semantic program"),
+    );
+    PreparedAudioPlan::prepare(
+        identity_program,
+        AudioRenderContract {
+            sample_rate: 2,
+            channel_layout: AudioChannelLayout::Mono,
+            max_block_frames: 5,
+            processing_mode: AudioProcessingMode::Realtime,
+            processor_session_scratch_budget_bytes: 0,
+            public_output_lookahead_budget_frames: 0,
+            compensation_delay_scratch_budget_bytes: 0,
+        },
+    )
+    .expect("zero budgets admit a plan with no corresponding storage or lookahead");
+
+    let sequence = sequence_with_parallel_hosted_delay();
+    let output = sequence.audio_program.outputs[0].id;
+    let compiled = Arc::new(
+        compile_audio_program(&sequence, AudioCompileRequest::program(output))
+            .expect("semantic program"),
+    );
+    let resolver = TestDelayProcessorResolver {
+        latency_frames: 2,
+        realtime_capable: true,
+        fail_first_state_entry: false,
+    };
+    let lookahead_error = PreparedAudioPlan::prepare_with_processor_resolver(
+        Arc::clone(&compiled),
+        AudioRenderContract {
+            sample_rate: 2,
+            channel_layout: AudioChannelLayout::Mono,
+            max_block_frames: 5,
+            processing_mode: AudioProcessingMode::Realtime,
+            processor_session_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+            public_output_lookahead_budget_frames: 1,
+            compensation_delay_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+        },
+        AudioKernelBackend::RuntimeVectorized,
+        &resolver,
+    )
+    .expect_err("two frames cannot fit a one-frame public lookahead budget");
+    assert_eq!(
+        lookahead_error,
+        AudioCompileError::PublicOutputLookaheadBudgetExceeded {
+            required_frames: 2,
+            budget_frames: 1,
+        }
+    );
+
+    let compensation_error = PreparedAudioPlan::prepare_with_processor_resolver(
+        compiled,
+        AudioRenderContract {
+            sample_rate: 2,
+            channel_layout: AudioChannelLayout::Mono,
+            max_block_frames: 5,
+            processing_mode: AudioProcessingMode::Realtime,
+            processor_session_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+            public_output_lookahead_budget_frames:
+                AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+            compensation_delay_scratch_budget_bytes: 7,
+        },
+        AudioKernelBackend::RuntimeVectorized,
+        &resolver,
+    )
+    .expect_err("two mono PDC frames require eight bytes");
+    assert_eq!(
+        compensation_error,
+        AudioCompileError::CompensationScratchBudgetExceeded { required_bytes: 8, budget_bytes: 7 }
     );
 }
 
@@ -1477,6 +1763,10 @@ fn processor_mode_capability_is_enforced_during_preparation() {
             processing_mode: AudioProcessingMode::Realtime,
             processor_session_scratch_budget_bytes:
                 AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+            public_output_lookahead_budget_frames:
+                AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+            compensation_delay_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
         },
         AudioKernelBackend::RuntimeVectorized,
         &resolver,
@@ -1511,6 +1801,10 @@ fn failed_processor_state_entry_poisons_the_new_epoch_before_partial_reset() {
                 processing_mode: AudioProcessingMode::Realtime,
                 processor_session_scratch_budget_bytes:
                     AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+                public_output_lookahead_budget_frames:
+                    AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+                compensation_delay_scratch_budget_bytes:
+                    AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
             },
             AudioKernelBackend::RuntimeVectorized,
             &resolver,
@@ -1553,7 +1847,7 @@ fn failed_processor_state_entry_poisons_the_new_epoch_before_partial_reset() {
             &mut pcm,
         )
         .expect("recovered render");
-    assert_eq!(pcm, vec![0.0, 0.0, 2.0, 4.0]);
+    assert_eq!(pcm, vec![2.0, 4.0, 6.0, 8.0]);
 }
 
 #[test]
@@ -1581,15 +1875,77 @@ fn nested_public_output_uses_an_independent_recursive_session() {
         processing_mode: AudioProcessingMode::Offline,
         processor_session_scratch_budget_bytes:
             AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
     };
     let mut runtime = AudioProgramRuntime::build(&root, &[child], &RampResolver, contract, None)
         .expect("recursive runtime");
-    assert_eq!(runtime.output_latency_frames(), 0);
+    assert_eq!(runtime.public_output_lookahead_frames(), 0);
     let mut pcm = vec![0.0; 4];
     runtime
         .render_into(AudioRenderRequest { start_sample: 0, frames: 4 }, &mut pcm)
         .expect("nested render");
     assert_eq!(pcm, vec![1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn nested_public_output_hides_child_lookahead_without_double_compensation() {
+    let child = sequence_with_parallel_hosted_delay();
+    let child_output = child.audio_program.outputs[0].id;
+    let mut root = Sequence::new("root");
+    root.settings.audio_channel_layout = AudioChannelLayout::Mono;
+    let root_track = root.audio_tracks[0].id;
+    let nested_clip = Clip::new_nested_sequence(
+        child.id,
+        TimelineTime::ZERO,
+        tt(4, 1),
+        Some("lookahead child".to_owned()),
+    )
+    .expect("nested Clip");
+    root.add_nested_audio_clip(root_track, nested_clip, child_output)
+        .expect("nested audio authoring");
+
+    let contract = AudioRenderContract {
+        sample_rate: 2,
+        channel_layout: AudioChannelLayout::Mono,
+        max_block_frames: 4,
+        processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+    };
+    let resolver = TestDelayProcessorResolver {
+        latency_frames: 2,
+        realtime_capable: true,
+        fail_first_state_entry: false,
+    };
+    let mut runtime = AudioProgramRuntime::build_with_processor_resolver(
+        &root,
+        &[child],
+        &RampResolver,
+        &resolver,
+        contract,
+        None,
+    )
+    .expect("recursive lookahead runtime");
+    assert_eq!(runtime.public_output_lookahead_frames(), 0);
+    assert!(runtime.requires_state_entry());
+    runtime
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(60),
+            start_sample: 0,
+        })
+        .expect("root entry");
+    let mut pcm = [0.0; 4];
+    runtime
+        .render_into(AudioRenderRequest { start_sample: 0, frames: 4 }, &mut pcm)
+        .expect("nested normalized render");
+    assert_eq!(pcm, [2.0, 4.0, 6.0, 8.0]);
 }
 
 #[test]
@@ -1603,6 +1959,10 @@ fn standard_component_mapping_converts_native_media_before_sequence_processing()
         processing_mode: AudioProcessingMode::Offline,
         processor_session_scratch_budget_bytes:
             AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
     };
     let mut runtime = AudioProgramRuntime::build(&sequence, &[], &RampResolver, contract, None)
         .expect("mono source mapped to stereo Sequence");
@@ -1640,6 +2000,10 @@ fn explicit_component_matrix_executes_in_the_shared_prepared_schedule() {
         processing_mode: AudioProcessingMode::Offline,
         processor_session_scratch_budget_bytes:
             AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
     };
     let mut runtime =
         AudioProgramRuntime::build(&sequence, &[], &StereoRampResolver, contract, None)
@@ -1673,6 +2037,10 @@ fn nested_output_uses_child_layout_then_parent_component_mapping() {
         processing_mode: AudioProcessingMode::Offline,
         processor_session_scratch_budget_bytes:
             AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
     };
     let mut runtime = AudioProgramRuntime::build(&root, &[child], &RampResolver, contract, None)
         .expect("child output mapped to parent layout");
@@ -1709,6 +2077,10 @@ fn stateless_nested_runtime_preserves_fractional_reverse_mapping() {
         processing_mode: AudioProcessingMode::Offline,
         processor_session_scratch_budget_bytes:
             AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
     };
     let mut runtime = AudioProgramRuntime::build(&root, &[child], &RampResolver, contract, None)
         .expect("stateless recursive runtime");
@@ -1746,6 +2118,10 @@ fn stateful_nested_runtime_replays_forward_mapping_across_child_blocks() {
         processing_mode: AudioProcessingMode::Offline,
         processor_session_scratch_budget_bytes:
             AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
     };
     let mut runtime = AudioProgramRuntime::build(&root, &[child], &RampResolver, contract, None)
         .expect("recursive runtime");
@@ -1802,6 +2178,10 @@ fn stateful_nested_runtime_rejects_reverse_state_evaluation() {
         processing_mode: AudioProcessingMode::Offline,
         processor_session_scratch_budget_bytes:
             AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
     };
     let mut runtime = AudioProgramRuntime::build(&root, &[child], &RampResolver, contract, None)
         .expect("recursive runtime");
@@ -1850,6 +2230,10 @@ fn stateful_nested_runtime_reenters_after_root_discontinuity() {
         processing_mode: AudioProcessingMode::Offline,
         processor_session_scratch_budget_bytes:
             AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
     };
     let mut runtime = AudioProgramRuntime::build(&root, &[child], &RampResolver, contract, None)
         .expect("recursive runtime");
@@ -1916,6 +2300,10 @@ fn direct_plan_preparation_rejects_unprepared_nested_source_dependency() {
             processing_mode: AudioProcessingMode::Offline,
             processor_session_scratch_budget_bytes:
                 AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+            public_output_lookahead_budget_frames:
+                AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+            compensation_delay_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
         },
     )
     .expect_err("nested source facts must be supplied by recursive preparation");
@@ -1953,6 +2341,10 @@ fn nested_runtime_rejects_depth_beyond_the_shared_sequence_contract() {
         processing_mode: AudioProcessingMode::Offline,
         processor_session_scratch_budget_bytes:
             AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
     };
     let error = match AudioProgramRuntime::build(&child, &children, &RampResolver, contract, None) {
         Ok(_) => panic!("depth above contract must fail"),
@@ -2005,6 +2397,10 @@ fn clip_balance_targets_semantic_front_pair_without_touching_surround_channels()
                     processing_mode: AudioProcessingMode::Offline,
                     processor_session_scratch_budget_bytes:
                         AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+                    public_output_lookahead_budget_frames:
+                        AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+                    compensation_delay_scratch_budget_bytes:
+                        AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
                 },
             )
             .expect("layout-specific plan"),

@@ -325,6 +325,22 @@ pub enum AudioCompileError {
         required_bytes: usize,
         budget_bytes: usize,
     },
+    /// Timeline alignment would exceed the consumer's admitted lookahead.
+    #[error(
+        "audio public output requires {required_frames} lookahead frames but the Render Contract admits {budget_frames}"
+    )]
+    PublicOutputLookaheadBudgetExceeded {
+        required_frames: usize,
+        budget_frames: usize,
+    },
+    /// PDC delay lines would exceed the consumer's Session memory budget.
+    #[error(
+        "audio compensation requires {required_bytes} Session scratch bytes but the Render Contract admits {budget_bytes}"
+    )]
+    CompensationScratchBudgetExceeded {
+        required_bytes: usize,
+        budget_bytes: usize,
+    },
     /// Semantic IR could not be lowered into a closed dense execution schedule.
     #[error("invalid prepared audio graph: {0}")]
     InvalidPreparedGraph(String),

@@ -1851,6 +1851,10 @@ fn render_timeline_audio_to_pcm_f32(
         processing_mode: AudioProcessingMode::Offline,
         processor_session_scratch_budget_bytes:
             AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
     };
     let mut runtime = match AudioProgramRuntime::build(
         &timeline.sequence,

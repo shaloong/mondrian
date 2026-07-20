@@ -215,10 +215,12 @@ impl PreparedProcessorHost {
             ) {
                 instance.continuity = HostedProcessorContinuity::Pending { epoch: entry.epoch };
             } else {
-                instance.processor.enter_state(entry.start_sample)?;
+                let signal_start_sample =
+                    subtract_signal_delay(entry.start_sample, processor.input_signal_delay_frames)?;
+                instance.processor.enter_state(signal_start_sample)?;
                 instance.continuity = HostedProcessorContinuity::Active {
                     epoch: entry.epoch,
-                    next_sample: entry.start_sample,
+                    next_sample: signal_start_sample,
                 };
             }
         }
@@ -247,13 +249,6 @@ impl PreparedProcessorHost {
         {
             return Err(AudioExecutionError::InvalidPreparedSchedule);
         }
-        let context = AudioProcessorProcessContext::new(
-            request,
-            sample_rate,
-            channel_layout,
-            self.render_contract.processing_mode,
-            backend,
-        );
         let instances = &mut self.instances;
         let parameter_events = &mut self.parameter_events;
         for processor_index in rack.processors.clone() {
@@ -266,6 +261,13 @@ impl PreparedProcessorHost {
             if instance.occurrence != processor.occurrence {
                 return Err(AudioExecutionError::InvalidPreparedSchedule);
             }
+            let signal_request = AudioRenderRequest {
+                start_sample: subtract_signal_delay(
+                    request.start_sample,
+                    processor.input_signal_delay_frames,
+                )?,
+                frames: request.frames,
+            };
             match instance.continuity {
                 HostedProcessorContinuity::Stateless => {
                     if processor.factory.contract().requires_state_entry() {
@@ -276,25 +278,36 @@ impl PreparedProcessorHost {
                     return Err(AudioExecutionError::StateEntryRequired);
                 }
                 HostedProcessorContinuity::Pending { epoch } => {
-                    instance.processor.enter_state(request.start_sample)?;
+                    instance.processor.enter_state(signal_request.start_sample)?;
                     instance.continuity = HostedProcessorContinuity::Active {
                         epoch,
-                        next_sample: request.start_sample,
+                        next_sample: signal_request.start_sample,
                     };
                 }
                 HostedProcessorContinuity::Active { next_sample, .. }
-                    if next_sample != request.start_sample =>
+                    if next_sample != signal_request.start_sample =>
                 {
                     return Err(AudioExecutionError::InvalidPreparedSchedule);
                 }
                 HostedProcessorContinuity::Active { .. } => {}
             }
-            let batch =
-                prepare_parameter_event_batch(processor, request, sample_rate, parameter_events)?;
+            let batch = prepare_parameter_event_batch(
+                processor,
+                signal_request,
+                sample_rate,
+                parameter_events,
+            )?;
+            let context = AudioProcessorProcessContext::new(
+                signal_request,
+                sample_rate,
+                channel_layout,
+                self.render_contract.processing_mode,
+                backend,
+            );
             let mut audio = MainBusAudioIo { channel_layout, frames: request.frames, pcm };
             instance.processor.process(context, &mut audio, batch)?;
             if let HostedProcessorContinuity::Active { epoch, .. } = instance.continuity {
-                let next_sample = request
+                let next_sample = signal_request
                     .start_sample
                     .checked_add(
                         i64::try_from(request.frames)
@@ -318,9 +331,16 @@ impl PreparedProcessorHost {
         let processor = processors
             .get(processor_index)
             .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+        let signal_request = AudioRenderRequest {
+            start_sample: subtract_signal_delay(
+                request.start_sample,
+                processor.input_signal_delay_frames,
+            )?,
+            frames: request.frames,
+        };
         let batch = prepare_parameter_event_batch(
             processor,
-            request,
+            signal_request,
             sample_rate,
             &mut self.parameter_events,
         )?;
@@ -338,6 +358,17 @@ impl PreparedProcessorHost {
             })
             .collect()
     }
+}
+
+fn subtract_signal_delay(
+    execution_sample: i64,
+    signal_delay_frames: usize,
+) -> Result<i64, AudioExecutionError> {
+    let signal_delay =
+        i64::try_from(signal_delay_frames).map_err(|_| AudioExecutionError::BufferTooLarge)?;
+    execution_sample
+        .checked_sub(signal_delay)
+        .ok_or(AudioExecutionError::BufferTooLarge)
 }
 
 impl fmt::Debug for PreparedProcessorHost {

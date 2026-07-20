@@ -92,6 +92,8 @@ pub struct AudioRenderCapacity {
     pub maximum_processor_parameter_lanes: usize,
     /// Reused sample-accurate event storage for one processor block.
     pub parameter_event_capacity: usize,
+    /// Internal priming frames required before Timeline-aligned public PCM.
+    pub public_output_lookahead_frames: usize,
     /// Processor-private Session scratch declared by all realized factories.
     pub processor_session_scratch_bytes: usize,
     /// Fixed per-channel Program Output meter state.
@@ -179,7 +181,9 @@ enum SessionContinuity {
     Unentered,
     Active {
         epoch: AudioContinuityEpoch,
-        next_sample: i64,
+        next_public_sample: i64,
+        next_execution_sample: i64,
+        alignment_primed: bool,
     },
     Poisoned {
         epoch: AudioContinuityEpoch,
@@ -233,6 +237,15 @@ impl AudioRenderSession {
                     .checked_add(line.sample_capacity())
                     .ok_or(AudioExecutionError::BufferTooLarge)
             })?;
+        if compensation_delay_samples != plan.schedule.summary.compensation_delay_samples
+            || plan.public_output_lookahead_frames()
+                > contract.public_output_lookahead_budget_frames
+            || compensation_delay_samples
+                .checked_mul(std::mem::size_of::<f32>())
+                .is_none_or(|bytes| bytes > contract.compensation_delay_scratch_budget_bytes)
+        {
+            return Err(AudioExecutionError::InvalidPreparedSchedule);
+        }
         let processor_host = PreparedProcessorHost::new(&plan.schedule, contract)?;
         let output_meter = ProgramOutputMeter::new(contract.channel_layout);
         let capacity = AudioRenderCapacity {
@@ -248,6 +261,7 @@ impl AudioRenderSession {
             processor_occurrences: processor_host.occurrence_count(),
             maximum_processor_parameter_lanes: processor_host.maximum_parameter_lanes(),
             parameter_event_capacity: processor_host.parameter_event_capacity(),
+            public_output_lookahead_frames: plan.public_output_lookahead_frames(),
             processor_session_scratch_bytes: processor_host.session_scratch_bytes(),
             meter_channel_state_count: output_meter.channel_state_count(),
         };
@@ -264,9 +278,9 @@ impl AudioRenderSession {
         })
     }
 
-    /// Total prepared latency of the selected Program Output.
-    pub fn output_latency_frames(&self) -> usize {
-        self.plan.output_latency_frames()
+    /// Internal lookahead needed to return Timeline-aligned public PCM.
+    pub fn public_output_lookahead_frames(&self) -> usize {
+        self.plan.public_output_lookahead_frames()
     }
 
     /// Whether this Plan owns history and therefore rejects unentered or
@@ -322,7 +336,9 @@ impl AudioRenderSession {
         self.processor_host.enter_state(&self.plan.schedule.processors, entry)?;
         self.continuity = SessionContinuity::Active {
             epoch: entry.epoch,
-            next_sample: entry.start_sample,
+            next_public_sample: entry.start_sample,
+            next_execution_sample: entry.start_sample,
+            alignment_primed: self.public_output_lookahead_frames() == 0,
         };
         Ok(())
     }
@@ -369,13 +385,8 @@ impl AudioRenderSession {
         }
         destination.fill(0.0);
 
-        let next_sample = request
-            .start_sample
-            .checked_add(
-                i64::try_from(request.frames).map_err(|_| AudioExecutionError::BufferTooLarge)?,
-            )
-            .ok_or(AudioExecutionError::BufferTooLarge)?;
-        let active_epoch = if self.requires_state_entry() {
+        let next_public_sample = checked_advance_sample(request.start_sample, request.frames)?;
+        let active = if self.requires_state_entry() {
             match self.continuity {
                 SessionContinuity::Unentered => {
                     return Err(AudioExecutionError::StateEntryRequired);
@@ -383,26 +394,97 @@ impl AudioRenderSession {
                 SessionContinuity::Poisoned { epoch } => {
                     return Err(AudioExecutionError::ContinuityPoisoned(epoch));
                 }
-                SessionContinuity::Active { epoch, next_sample }
-                    if next_sample != request.start_sample =>
+                SessionContinuity::Active { epoch, next_public_sample, .. }
+                    if next_public_sample != request.start_sample =>
                 {
                     return Err(AudioExecutionError::NonContiguousBlock {
                         epoch,
-                        expected_start_sample: next_sample,
+                        expected_start_sample: next_public_sample,
                         actual_start_sample: request.start_sample,
                     });
                 }
-                SessionContinuity::Active { epoch, .. } => Some(epoch),
+                SessionContinuity::Active {
+                    epoch,
+                    next_execution_sample,
+                    alignment_primed,
+                    ..
+                } => Some((epoch, next_execution_sample, alignment_primed)),
             }
         } else {
+            if self.public_output_lookahead_frames() != 0 {
+                return Err(AudioExecutionError::InvalidPreparedSchedule);
+            }
             None
         };
-        if let Some(epoch) = active_epoch {
+        if let Some((epoch, _, _)) = active {
             // Any later `?` leaves the epoch poisoned: mutable processors or
             // delay lines may already have consumed a prefix of this block.
             self.continuity = SessionContinuity::Poisoned { epoch };
         }
 
+        let mut execution_start_sample = active
+            .map_or(request.start_sample, |(_, next_execution_sample, _)| {
+                next_execution_sample
+            });
+        let mut alignment_primed = active.is_none_or(|(_, _, primed)| primed);
+        if !alignment_primed && request.frames > 0 {
+            let mut remaining = self.public_output_lookahead_frames();
+            while remaining > 0 {
+                let frames = remaining.min(contract.max_block_frames);
+                self.render_internal(
+                    source,
+                    AudioRenderRequest { start_sample: execution_start_sample, frames },
+                )?;
+                execution_start_sample = checked_advance_sample(execution_start_sample, frames)?;
+                remaining -= frames;
+            }
+            alignment_primed = true;
+        }
+        self.render_internal(
+            source,
+            AudioRenderRequest {
+                start_sample: execution_start_sample,
+                frames: request.frames,
+            },
+        )?;
+        let output_scratch = self
+            .plan
+            .schedule
+            .nodes
+            .get(self.plan.schedule.output_slot)
+            .ok_or(AudioExecutionError::InvalidPreparedSchedule)?
+            .scratch_slot;
+        destination.copy_from_slice(&self.node_buffers[output_scratch].post_mute[..samples]);
+        if !self.output_meter.observe(request.start_sample, request.frames, destination) {
+            return Err(AudioExecutionError::InvalidPreparedSchedule);
+        }
+        if let Some((epoch, _, _)) = active {
+            self.continuity = SessionContinuity::Active {
+                epoch,
+                next_public_sample,
+                next_execution_sample: checked_advance_sample(
+                    execution_start_sample,
+                    request.frames,
+                )?,
+                alignment_primed,
+            };
+        }
+        Ok(())
+    }
+
+    fn render_internal(
+        &mut self,
+        source: &mut impl AudioPcmSource,
+        request: AudioRenderRequest,
+    ) -> Result<(), AudioExecutionError> {
+        let contract = self.plan.contract();
+        if request.frames > contract.max_block_frames {
+            return Err(AudioExecutionError::BlockTooLarge);
+        }
+        let samples = request
+            .frames
+            .checked_mul(contract.channel_count())
+            .ok_or(AudioExecutionError::BufferTooLarge)?;
         let schedule = &self.plan.schedule;
         let backend = self.plan.kernel_backend();
         let sample_rate = AudioSampleRate::new(contract.sample_rate)?;
@@ -457,17 +539,14 @@ impl AudioRenderSession {
                 &mut self.processor_host,
             )?;
         }
-
-        let output_scratch = schedule.nodes[schedule.output_slot].scratch_slot;
-        destination.copy_from_slice(&self.node_buffers[output_scratch].post_mute[..samples]);
-        if !self.output_meter.observe(request.start_sample, request.frames, destination) {
-            return Err(AudioExecutionError::InvalidPreparedSchedule);
-        }
-        if let Some(epoch) = active_epoch {
-            self.continuity = SessionContinuity::Active { epoch, next_sample };
-        }
         Ok(())
     }
+}
+
+fn checked_advance_sample(start_sample: i64, frames: usize) -> Result<i64, AudioExecutionError> {
+    start_sample
+        .checked_add(i64::try_from(frames).map_err(|_| AudioExecutionError::BufferTooLarge)?)
+        .ok_or(AudioExecutionError::BufferTooLarge)
 }
 
 /// Allocation-owning deterministic reference entry point.
@@ -543,6 +622,16 @@ fn render_track_contributions(
         let execution_sample_end = execution_sample_start
             .checked_add(execution_samples)
             .ok_or(AudioExecutionError::BufferTooLarge)?;
+        let scope_signal_start_sample = subtract_signal_delay(
+            execution_start_sample,
+            contribution.source_algorithmic_latency_frames,
+        )?;
+        let edit_signal_delay_frames = contribution
+            .source_algorithmic_latency_frames
+            .checked_add(contribution.scope_rack.algorithmic_latency_frames)
+            .ok_or(AudioExecutionError::BufferTooLarge)?;
+        let edit_signal_start_sample =
+            subtract_signal_delay(execution_start_sample, edit_signal_delay_frames)?;
 
         if prepare_source_frames(
             contribution,
@@ -582,7 +671,7 @@ fn render_track_contributions(
             );
         } else {
             if let Some(curve) = &contribution.scope_input_automation {
-                fill_prepared_curve(curve, execution_start_sample, sample_rate, scope_gain_db)?;
+                fill_prepared_curve(curve, scope_signal_start_sample, sample_rate, scope_gain_db)?;
             } else {
                 scope_gain_db.fill(scope.input_gain_db);
             }
@@ -624,24 +713,23 @@ fn render_track_contributions(
             let gain_db = &mut scratch.frame_gain_db[..execution_frame_count];
             let pan_values = &mut scratch.frame_pan[..execution_frame_count];
             if let Some(curve) = &contribution.volume_automation {
-                fill_prepared_curve(curve, execution_start_sample, sample_rate, gain_db)?;
+                fill_prepared_curve(curve, edit_signal_start_sample, sample_rate, gain_db)?;
             } else {
                 gain_db.fill(contribution.semantic.volume_db);
             }
             if let Some(curve) = &contribution.pan_automation {
-                fill_prepared_curve(curve, execution_start_sample, sample_rate, pan_values)?;
+                fill_prepared_curve(curve, edit_signal_start_sample, sample_rate, pan_values)?;
             } else {
                 pan_values.fill(contribution.semantic.pan);
             }
-            for (local_index, frame) in execution_frames.clone().enumerate() {
-                let absolute_sample = request
-                    .start_sample
+            for local_index in 0..execution_frame_count {
+                let signal_sample = edit_signal_start_sample
                     .checked_add(
-                        i64::try_from(frame).map_err(|_| AudioExecutionError::BufferTooLarge)?,
+                        i64::try_from(local_index)
+                            .map_err(|_| AudioExecutionError::BufferTooLarge)?,
                     )
                     .ok_or(AudioExecutionError::BufferTooLarge)?;
-                let sequence_time =
-                    TimelineTime::new(absolute_sample, i64::from(sample_rate.hz()))?;
+                let sequence_time = TimelineTime::new(signal_sample, i64::from(sample_rate.hz()))?;
                 let clip_local =
                     sequence_time.checked_sub(contribution.semantic.sequence_range.start)?;
                 let pan = pan_values[local_index].clamp(-1.0, 1.0);
@@ -788,7 +876,15 @@ fn sum_prepared_route(
         .ok_or(AudioExecutionError::BufferTooLarge)?;
     let automated_gains = if let Some(curve) = &route.gain_automation {
         let frame_db = &mut scratch.frame_gain_db[..request.frames];
-        fill_prepared_curve(curve, request.start_sample, sample_rate, frame_db)?;
+        let destination_input_delay = schedule
+            .nodes
+            .get(route.destination_slot)
+            .ok_or(AudioExecutionError::InvalidPreparedSchedule)?
+            .latency
+            .input_frames;
+        let destination_signal_start =
+            subtract_signal_delay(request.start_sample, destination_input_delay)?;
+        fill_prepared_curve(curve, destination_signal_start, sample_rate, frame_db)?;
         let gains = &mut scratch.route_gains[..samples];
         dsp::expand_frame_db_to_interleaved_gains(frame_db, channels, gains);
         Some(&gains[..])
@@ -894,7 +990,9 @@ fn process_strip(
 
     if let Some(curve) = &node.fader_automation {
         let frame_db = &mut scratch.frame_gain_db[..request.frames];
-        fill_prepared_curve(curve, request.start_sample, sample_rate, frame_db)?;
+        let fader_signal_start =
+            subtract_signal_delay(request.start_sample, node.latency.pre_fader_frames)?;
+        fill_prepared_curve(curve, fader_signal_start, sample_rate, frame_db)?;
         dsp::expand_frame_db_to_interleaved_gains(
             frame_db,
             channels,
@@ -945,6 +1043,17 @@ fn fill_prepared_curve(
         *value = curve.evaluate_sample(sample, sample_rate, &mut cursor)?;
     }
     Ok(())
+}
+
+fn subtract_signal_delay(
+    execution_sample: i64,
+    signal_delay_frames: usize,
+) -> Result<i64, AudioExecutionError> {
+    let signal_delay =
+        i64::try_from(signal_delay_frames).map_err(|_| AudioExecutionError::BufferTooLarge)?;
+    execution_sample
+        .checked_sub(signal_delay)
+        .ok_or(AudioExecutionError::BufferTooLarge)
 }
 
 fn contribution_envelope(

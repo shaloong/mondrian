@@ -222,7 +222,9 @@ impl AudioProgramRuntime {
                             contribution.edit_id,
                             child_contract.channel_layout,
                             channel_mix,
-                            runtime.output_latency_frames(),
+                            // A public child Runtime already consumes its own
+                            // lookahead and returns Timeline-aligned PCM.
+                            0,
                             runtime.requires_state_entry(),
                         )?;
                         RuntimeSource::Nested(NestedRuntimeSource {
@@ -268,9 +270,9 @@ impl AudioProgramRuntime {
         self.render_into_cancellable(request, destination, &ExecutionCancellationToken::new())
     }
 
-    /// Total prepared latency of this selected public output.
-    pub fn output_latency_frames(&self) -> usize {
-        self.session.output_latency_frames()
+    /// Internal lookahead needed to return Timeline-aligned public PCM.
+    pub fn public_output_lookahead_frames(&self) -> usize {
+        self.session.public_output_lookahead_frames()
     }
 
     /// Latest successfully completed root Program Output meter block.
