@@ -1268,6 +1268,16 @@ the float path, and both the playback ring and process-global frame cache retain
 the payload kind. Unsupported scene-linear decoder formats fail closed instead
 of silently quantizing. App preview, thumbnails, and export route this outcome
 through the renderer's `LinearFloatSource` input contract.
+
+`mondrian_media::preview::frame_contract` is the single media-layer Adapter for
+turning FFmpeg pixel format, matrix, range, chroma location, and bit depth into
+Mondrian's decoded-frame facts and applied CPU RGBA conversion contract. It also
+configures the exact swscale matrix/range; implicit FFmpeg defaults are not an
+allowed fallback. In-process decode and the external still-frame Adapter call
+the same resolver. Decode Session state, resizing, pixel copying, hardware-plan
+selection, and renderer color interpretation remain outside this Module, so
+the color seam is narrow without creating a second frame object model.
+
 `PreviewNativeDecodedFrame` must carry a
 `PreviewNativeDecodedFrameHandle` minted by the media backend that owns the
 native decoder resource. The handle is a shared lease over an
