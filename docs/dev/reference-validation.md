@@ -95,8 +95,21 @@ automatically harvested hardware identifier:
 
 ```powershell
 pwsh -File scripts/validation/capture-windows-reference.ps1 -MachineId edit-bay-a
-pwsh -File scripts/validation/validate-windows-reference.ps1 -RequireBaselineEligibility
+pwsh -File scripts/validation/validate-windows-reference.ps1 `
+  -RequiredMemoryClass standard-playback `
+  -RequireBaselineEligibility
 ```
+
+The Windows Alpha memory contract has three explicit classes: 8 GiB is the
+minimum supported memory class, 16 GiB is the standard playback/reference class,
+and 32 GiB is recommended for large professional projects. Minimum-class systems
+must remain correct, bounded, and capable of explicit proxy or reduced-quality
+fallback, but are not required to satisfy native 4K Main10 real-time thresholds.
+The M0 Video+Audio baseline requires the standard class; an 8 GiB machine can
+run it only as an explicitly unqualified diagnostic. Qualification
+uses the summed memory-module capacity, while the report also records OS-visible
+memory, so firmware or integrated-GPU reservation does not falsely reject a
+nominal memory class or hide memory actually available to the process.
 
 Generate the disposable canonical workload media when needed:
 
@@ -115,7 +128,16 @@ pwsh -File scripts/validation/invoke-playback-reference-gates.ps1 `
 ```
 
 Use `-Gate Video` or `-Gate Audio` for a partial diagnostic. Use
-`-AllowDirtyDiagnostic` only when results are intentionally non-baseline.
+`-AllowDirtyDiagnostic` only when results are intentionally non-baseline. A
+machine below the reference performance class may use
+`-AllowUnqualifiedDiagnostic`, but only when every failed qualification code is
+explicitly listed by the versioned playback plan as diagnostic-waivable. The
+current plan permits only `machine.memory-class`; memory below the 8 GiB support
+floor, missing GPU identity, unsupported OS
+or architecture, wrong toolchain, missing FFmpeg/FFprobe, invalid Git identity,
+and every other execution prerequisite still stop the run. This switch always
+disqualifies the result from becoming a baseline, even if the machine happened
+to satisfy the profile.
 Reports belong under `target/validation/runs/`. Baseline eligibility requires
 the complete two-gate set, a qualified machine, a clean tree, the same Git
 revision before and after the run, attested artifacts, zero process failures,

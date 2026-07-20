@@ -27,7 +27,11 @@ jobs:
 
       - name: 校验 Windows 参考机资格契约
         shell: pwsh
-        run: ./scripts/validation/validate-windows-reference.ps1 -MachineReportPath tests/validation/fixtures/windows-machine-qualified-v2.json -RequireBaselineEligibility -OutputPath target/validation/reference-machine-contract.json
+        run: ./scripts/validation/validate-windows-reference.ps1 -MachineReportPath tests/validation/fixtures/windows-machine-qualified-v3.json -RequiredMemoryClass standard-playback -RequireBaselineEligibility -OutputPath target/validation/reference-machine-contract.json
+
+      - name: 校验 8 GiB 最低支持内存契约
+        shell: pwsh
+        run: ./scripts/validation/validate-windows-reference.ps1 -MachineReportPath tests/validation/fixtures/windows-machine-minimum-memory-v3.json -RequiredMemoryClass minimum-supported -OutputPath target/validation/minimum-memory-contract.json
 
   # ───────────────────────────────────────────────────────────────────────────
   # 代码格式 & 风格检查（最快，优先失败）

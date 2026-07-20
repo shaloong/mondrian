@@ -96,12 +96,16 @@ _Avoid_: Debug log
 Bounded fixed-cadence observations from a native current-process probe. Private committed bytes are the ownership/plateau metric; resident or working-set bytes are diagnostic because the OS may reclaim them independently.
 _Avoid_: Frame-cache byte totals presented as whole-process memory, one start/end sample, OS peak since process launch as gate-local growth
 
+**Playback Memory Class**:
+A versioned qualification of physically installed memory for one validation workload: `minimum-supported` (8 GiB correctness, boundedness, and explicit fallback), `standard-playback` (16 GiB M0 Video+Audio baseline), or `professional-large-project` (32 GiB large-project recommendation). OS-visible memory is separate evidence and cannot silently change the class.
+_Avoid_: One universal RAM threshold, treating 8 GiB as native-4K performance proof, rejecting nominal memory because firmware reserved a small region, diagnostic override presented as baseline
+
 **Professional Playback Acceptance**:
 A versioned fail-closed contract that binds decoder-proven media identity to frame-local decode provenance, the exact Viewer candidate for a Frame Demand, and completed GPU presentation evidence.
 _Avoid_: Filename-based fixture label, capability-only hardware claim
 
 **Reference Playback Run**:
-One immutable evidence bundle binding a versioned gate plan, source revision and cleanliness, an operator-assigned non-hardware machine identity, a validated machine-class report, corpus revision, generated-recipe identities, run-local artifact hashes, exact gate commands, and structured execution reports. A partial or dirty run may diagnose behavior but cannot become a baseline.
+One immutable evidence bundle binding a versioned gate plan, source revision and cleanliness, an operator-assigned non-hardware machine identity, the required and observed Playback Memory Class plus validated machine report, corpus revision, generated-recipe identities, run-local artifact hashes, exact gate commands, and structured execution reports. A partial, dirty, or explicitly under-class run may diagnose behavior but cannot become a baseline.
 _Avoid_: Loose log directory, filename-selected media, mutable “latest” fixture, machine serial capture, successful process exit without a passing execution report
 
 **Preview Frame Store**:

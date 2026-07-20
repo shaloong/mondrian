@@ -19,6 +19,8 @@ $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../.."))
 $absoluteOutputPath = if ([IO.Path]::IsPathRooted($OutputPath)) { [IO.Path]::GetFullPath($OutputPath) } else { [IO.Path]::GetFullPath((Join-Path $repositoryRoot $OutputPath)) }
 $os = Get-CimInstance Win32_OperatingSystem
 $cpu = @(Get-CimInstance Win32_Processor)
+$memoryModules = @(Get-CimInstance Win32_PhysicalMemory)
+$installedMemoryBytes = ($memoryModules | Measure-Object Capacity -Sum).Sum
 $gpus = @(Get-CimInstance Win32_VideoController | ForEach-Object {
     [ordered]@{
         name = [string]$_.Name
@@ -57,9 +59,9 @@ if ($LASTEXITCODE -ne 0) { throw "Cannot read Git working-tree state." }
 $gitRevision = (git -C $repositoryRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0) { throw "Cannot resolve Git revision." }
 $report = [ordered]@{
-    schema_version = 2
+    schema_version = 3
     captured_at_utc = [DateTime]::UtcNow.ToString("o")
-    profile = "windows-alpha-reference-v1"
+    profile = "windows-alpha-reference-v2"
     machine_id = $MachineId
     privacy = [ordered]@{
         hardware_serials_collected = $false
@@ -80,7 +82,8 @@ $report = [ordered]@{
         physical_cores = [int](($cpu | Measure-Object NumberOfCores -Sum).Sum)
         logical_processors = [int](($cpu | Measure-Object NumberOfLogicalProcessors -Sum).Sum)
     }
-    memory_bytes = [uint64]$os.TotalVisibleMemorySize * 1024
+    installed_memory_bytes = if ($null -eq $installedMemoryBytes) { $null } else { [uint64]$installedMemoryBytes }
+    visible_memory_bytes = [uint64]$os.TotalVisibleMemorySize * 1024
     gpus = $gpus
     storage = $storage
     volumes = $volumes

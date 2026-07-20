@@ -1,9 +1,18 @@
 {
-  "schema_version": 1,
-  "id": "windows-playback-m0-v1",
-  "machine_profile": "windows-alpha-reference-v1",
+  "schema_version": 2,
+  "id": "windows-playback-m0-v2",
+  "machine_profile": "windows-alpha-reference-v2",
   "build_profile": "release",
   "requires_clean_tree_for_baseline": true,
+  "baseline_machine_requirements": {
+    "memory_class": "standard-playback"
+  },
+  "diagnostic_execution": {
+    "explicit_unqualified_machine_opt_in_required": true,
+    "waivable_machine_issue_codes": [
+      "machine.memory-class"
+    ]
+  },
   "gates": [
     {
       "id": "video",

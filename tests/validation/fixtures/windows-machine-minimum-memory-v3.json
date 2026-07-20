@@ -1,14 +1,14 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "captured_at_utc": "2026-07-20T00:00:00Z",
-  "profile": "windows-alpha-reference-v1",
-  "machine_id": "contract-fixture",
+  "profile": "windows-alpha-reference-v2",
+  "machine_id": "minimum-memory-contract-fixture",
   "privacy": {
     "hardware_serials_collected": false,
     "machine_id_is_operator_assigned": true
   },
   "git": {
-    "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "dirty": false
   },
   "os": {
@@ -18,34 +18,35 @@
     "architecture": "64-bit"
   },
   "cpu": {
-    "names": ["Reference contract fixture CPU"],
+    "names": ["Minimum memory contract fixture CPU"],
     "physical_cores": 8,
     "logical_processors": 16
   },
-  "memory_bytes": 68719476736,
+  "installed_memory_bytes": 8589934592,
+  "visible_memory_bytes": 8455716864,
   "gpus": [
     {
-      "name": "Reference contract fixture GPU",
+      "name": "Minimum memory contract fixture GPU",
       "driver_version": "1.2.3.4",
-      "adapter_ram_bytes": 8589934592,
-      "video_processor": "Reference contract fixture GPU"
+      "adapter_ram_bytes": 4294967296,
+      "video_processor": "Minimum memory contract fixture GPU"
     }
   ],
   "storage": [
     {
-      "model": "Reference contract fixture NVMe",
+      "model": "Minimum memory contract fixture NVMe",
       "firmware_revision": "1.0",
       "interface_type": "SCSI",
       "media_type": "Fixed hard disk media",
-      "size_bytes": 1099511627776
+      "size_bytes": 549755813888
     }
   ],
   "volumes": [
     {
       "drive": "C:",
       "file_system": "NTFS",
-      "size_bytes": 1099511627776,
-      "free_bytes": 549755813888
+      "size_bytes": 549755813888,
+      "free_bytes": 274877906944
     }
   ],
   "displays": [],

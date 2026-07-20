@@ -294,7 +294,7 @@ M0 建立可重现的 corpus manifest。固定文件由 manifest 固定 SHA-256/
 
 ### 5.4 性能与正确性基线
 
-M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR 状态、驱动、FFmpeg 和构建 profile；实际机器由操作员提供不含硬件序列号的稳定 opaque ID。一次可作为基线的 Reference Playback Run 必须把同一清洁 Git revision、机器报告与资格判定、corpus/配方/实际产物哈希、完整 Video+Audio gate 命令和结构化通过报告封装为不可混淆的 evidence bundle；部分门禁或脏树运行只能诊断。数值在参考机固定前是初始目标；固定后只能通过有理由的基线变更调整，不能为让回归变绿而放宽。
+M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR 状态、驱动、FFmpeg 和构建 profile；内存合同明确分为 8 GiB `minimum-supported`、16 GiB `standard-playback` 和 32 GiB `professional-large-project`：8 GiB 必须正确、有界且可显式降级，但不承担原生 4K Main10 实时阈值；完整 M0 Playback baseline 要求 16 GiB 档，32 GiB 是大型专业项目推荐档。物理安装容量决定档位，OS 可见容量仍单独留证据。实际机器由操作员提供不含硬件序列号的稳定 opaque ID。一次可作为基线的 Reference Playback Run 必须把同一清洁 Git revision、机器报告与资格判定、corpus/配方/实际产物哈希、完整 Video+Audio gate 命令和结构化通过报告封装为不可混淆的 evidence bundle；部分门禁、脏树或低于所选门禁档位的运行只能诊断。数值在参考机固定前是初始目标；固定后只能通过有理由的基线变更调整，不能为让回归变绿而放宽。
 
 | 指标 | Alpha/Beta 门槛 |
 | --- | --- |
@@ -369,7 +369,7 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 
 **验证基础**
 
-- [x] 建立版本化 Reference Corpus manifest、Golden/Stress Project 机器可读契约、Windows 参考机 profile、机器证据采集与资格验证、分层校验门禁；generated fixture 采用“固定 recipe、run-local artifact hash”而非伪造跨 encoder 位级稳定性。`windows-playback-m0-v1` 将完整 Video+Audio gate、素材用途、环境绑定和预期报告 profile 固化，编排器只允许清洁且首尾同 revision、完整门禁、合格机器和全部结构化报告通过的运行成为 baseline；部分/脏树运行只能诊断。完整 Golden/Stress 素材角色与真实工作流仍按 M1/M2 退出门槛验收。
+- [x] 建立版本化 Reference Corpus manifest、Golden/Stress Project 机器可读契约、Windows 参考机 profile、机器证据采集与资格验证、分层校验门禁；generated fixture 采用“固定 recipe、run-local artifact hash”而非伪造跨 encoder 位级稳定性。`windows-playback-m0-v2` 将完整 Video+Audio gate、素材用途、环境绑定、16 GiB baseline 内存档位和预期报告 profile 固化；编排器只允许清洁且首尾同 revision、完整门禁、合格机器和全部结构化报告通过的运行成为 baseline。低于门禁档位只有在所有资格问题均被版本化合同显式列为可诊断、且操作员显式 opt-in 时才可继续，结果必为 diagnostic；缺 GPU/工具链/系统等执行前提仍失败关闭。完整 Golden/Stress 素材角色与真实工作流仍按 M1/M2 退出门槛验收。
 - [x] 将 capability probe、逐帧 decode provenance、最终 Viewer GPU completion 与 fallback/blocker 写入同一结构化报告，同时保持 media/renderer/playback 的诊断所有权；预取 aggregate 不得代替已呈现帧证据。
 - [x] 路线图、效果规格与色彩规格已统一五级能力口径：作者模型存在、产品可选择、图可执行、具体 backend 可执行、真实 preview/export 已验证。效果库只暴露可构图 definition；共享 Render Plan 对启用但未实现/缺失定义/运行时不可用/资源无效/构图崩溃失败关闭；CPU、GPU、颜色 reference 与产品发布证据分别列示，类型、OCIO 映射、shader 创建或单次 lower 成功均不得自动写成产品支持。
 

@@ -3,6 +3,7 @@ param(
     [ValidateSet("All", "Video", "Audio")][string]$Gate = "All",
     [switch]$RegenerateGeneratedFixtures,
     [switch]$AllowDirtyDiagnostic,
+    [switch]$AllowUnqualifiedDiagnostic,
     [string]$RunRoot = "target/validation/runs"
 )
 
@@ -99,9 +100,14 @@ $machineProfilePath = Join-Path $repositoryRoot "tests/validation/windows-alpha-
 $plan = Get-Content -LiteralPath $planPath -Raw | ConvertFrom-Json
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $machineProfile = Get-Content -LiteralPath $machineProfilePath -Raw | ConvertFrom-Json
-if ($plan.schema_version -ne 1) { throw "Unsupported playback reference gate plan schema." }
+if ($plan.schema_version -ne 2) { throw "Unsupported playback reference gate plan schema." }
 if ($manifest.schema_version -ne 2) { throw "Unsupported corpus manifest schema." }
 if ($machineProfile.id -ne $plan.machine_profile) { throw "Playback plan and machine profile disagree." }
+$baselineMemoryClass = [string]$plan.baseline_machine_requirements.memory_class
+$diagnosticWaivableMachineIssueCodes = @($plan.diagnostic_execution.waivable_machine_issue_codes | ForEach-Object { [string]$_ })
+if ($plan.diagnostic_execution.explicit_unqualified_machine_opt_in_required -ne $true) {
+    throw "Playback plan must require explicit opt-in for unqualified-machine diagnostics."
+}
 
 $selectedGateIds = @(switch ($Gate) {
     "All" { @("video", "audio") }
@@ -126,6 +132,8 @@ $machineValidation = $null
 $assetValidation = $null
 $failurePhase = $null
 $failureMessage = $null
+$machineValidationExitCode = $null
+$unqualifiedDiagnosticApplied = $false
 try {
     $failurePhase = "machine-capture"
     Invoke-ScriptChecked (Join-Path $PSScriptRoot "capture-windows-reference.ps1") @{
@@ -139,10 +147,24 @@ try {
         ProfilePath = $machineProfilePath
         MachineReportPath = $machineReportPath
         OutputPath = $machineValidationPath
+        RequiredMemoryClass = $baselineMemoryClass
         RequireBaselineEligibility = (-not $AllowDirtyDiagnostic -and $Gate -eq "All")
     }
-    Invoke-ScriptChecked (Join-Path $PSScriptRoot "validate-windows-reference.ps1") $machineValidationArguments
+    $global:LASTEXITCODE = 0
+    & (Join-Path $PSScriptRoot "validate-windows-reference.ps1") @machineValidationArguments
+    $machineValidationExitCode = $LASTEXITCODE
     $machineValidation = Get-Content -LiteralPath $machineValidationPath -Raw | ConvertFrom-Json
+    if ($machineValidationExitCode -ne 0) {
+        $observedIssueCodes = @($machineValidation.issues | ForEach-Object { [string]$_.code })
+        $unwaivableIssueCodes = @($observedIssueCodes | Where-Object { $_ -notin $diagnosticWaivableMachineIssueCodes })
+        if (-not $AllowUnqualifiedDiagnostic) {
+            throw "Reference machine is not qualified; use -AllowUnqualifiedDiagnostic only for an explicitly waivable diagnostic run. Issues: $($observedIssueCodes -join ', ')"
+        }
+        if ($unwaivableIssueCodes.Count -gt 0) {
+            throw "Reference machine has non-waivable execution-prerequisite issues: $($unwaivableIssueCodes -join ', ')"
+        }
+        $unqualifiedDiagnosticApplied = $true
+    }
 
     if ($RegenerateGeneratedFixtures) {
         $failurePhase = "fixture-generation"
@@ -189,10 +211,11 @@ $completeGateSet = @($plan.baseline_acceptance.required_gate_ids | Where-Object 
 $preflightPassed = $null -ne $assetValidation -and $assetValidation.status -eq "passed" -and $null -ne $machineValidation -and $machineValidation.status -eq "passed"
 $startingRevision = if ($null -eq $machineReport) { $null } else { [string]$machineReport.git.revision }
 $startingDirty = if ($null -eq $machineReport) { $null } else { [bool]$machineReport.git.dirty }
-$baselineEligible = $null -eq $failureMessage -and $preflightPassed -and $allGatesPassed -and $completeGateSet -and -not $AllowDirtyDiagnostic -and $startingDirty -eq $false -and -not $endingDirty -and $endingRevision -eq $startingRevision
+$baselineEligible = $null -eq $failureMessage -and $preflightPassed -and $allGatesPassed -and $completeGateSet -and -not $AllowDirtyDiagnostic -and -not $AllowUnqualifiedDiagnostic -and $startingDirty -eq $false -and -not $endingDirty -and $endingRevision -eq $startingRevision
 $status = if ($null -ne $failureMessage) { "failed" } elseif (-not $allGatesPassed) { "failed" } elseif ($baselineEligible) { "passed-baseline" } else { "passed-diagnostic" }
+$machineValidationIssueCodes = if ($null -eq $machineValidation) { @() } else { @($machineValidation.issues | ForEach-Object { [string]$_.code }) }
 $evidence = [ordered]@{
-    schema_version = 1
+    schema_version = 2
     run_id = $runId
     plan = [ordered]@{
         id = $plan.id
@@ -218,8 +241,21 @@ $evidence = [ordered]@{
         starting_dirty = $startingDirty
         ending_dirty = $endingDirty
     }
+    diagnostic_execution = [ordered]@{
+        allow_dirty_requested = [bool]$AllowDirtyDiagnostic
+        allow_unqualified_machine_requested = [bool]$AllowUnqualifiedDiagnostic
+        unqualified_machine_override_applied = $unqualifiedDiagnosticApplied
+        contract_waivable_machine_issue_codes = $diagnosticWaivableMachineIssueCodes
+        observed_machine_issue_codes = $machineValidationIssueCodes
+    }
     machine_report = [ordered]@{ path = $machineReportPath; present = Test-Path -LiteralPath $machineReportPath -PathType Leaf }
-    machine_validation = [ordered]@{ path = $machineValidationPath; status = if ($null -eq $machineValidation) { $null } else { $machineValidation.status } }
+    machine_validation = [ordered]@{
+        path = $machineValidationPath
+        exit_code = $machineValidationExitCode
+        status = if ($null -eq $machineValidation) { $null } else { $machineValidation.status }
+        required_memory_class = if ($null -eq $machineValidation) { $baselineMemoryClass } else { $machineValidation.required_memory_class }
+        observed_memory_class = if ($null -eq $machineValidation) { $null } else { $machineValidation.observed_memory_class }
+    }
     asset_validation = [ordered]@{ path = $assetReportPath; status = if ($null -eq $assetValidation) { $null } else { $assetValidation.status } }
     gates = @($gateResults)
     all_selected_gates_ran = $allSelectedGatesRan

@@ -53,9 +53,50 @@ $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $playbackPlan = Get-Content -LiteralPath $playbackPlanPath -Raw | ConvertFrom-Json
 $machineProfile = Get-Content -LiteralPath $machineProfilePath -Raw | ConvertFrom-Json
 if ($manifest.schema_version -ne 2) { Add-Issue "error" "schema.unsupported" "Unsupported corpus schema version: $($manifest.schema_version)" }
-if ($playbackPlan.schema_version -ne 1) { Add-Issue "error" "playback-plan.schema-unsupported" "Unsupported playback gate-plan schema: $($playbackPlan.schema_version)" }
-if ($machineProfile.schema_version -ne 2) { Add-Issue "error" "machine-profile.schema-unsupported" "Unsupported Windows machine-profile schema: $($machineProfile.schema_version)" }
+if ($playbackPlan.schema_version -ne 2) { Add-Issue "error" "playback-plan.schema-unsupported" "Unsupported playback gate-plan schema: $($playbackPlan.schema_version)" }
+if ($machineProfile.schema_version -ne 3) { Add-Issue "error" "machine-profile.schema-unsupported" "Unsupported Windows machine-profile schema: $($machineProfile.schema_version)" }
 if ($playbackPlan.machine_profile -ne $machineProfile.id) { Add-Issue "error" "playback-plan.machine-profile-mismatch" "Playback plan references '$($playbackPlan.machine_profile)' but the configured profile is '$($machineProfile.id)'" }
+$diagnosticExecution = if (Has-Property $playbackPlan "diagnostic_execution") { $playbackPlan.diagnostic_execution } else { $null }
+$safeDiagnosticMachineIssueCodes = @("machine.logical-cpu", "machine.memory-class")
+if ($null -eq $diagnosticExecution) {
+    Add-Issue "error" "playback-plan.diagnostic-execution-missing" "Playback plan must define its diagnostic machine-qualification policy"
+} else {
+    if (-not (Has-Property $diagnosticExecution "explicit_unqualified_machine_opt_in_required") -or $diagnosticExecution.explicit_unqualified_machine_opt_in_required -ne $true) {
+        Add-Issue "error" "playback-plan.diagnostic-opt-in-required" "Unqualified-machine diagnostics must require explicit operator opt-in"
+    }
+    if (-not (Has-Property $diagnosticExecution "waivable_machine_issue_codes")) {
+        Add-Issue "error" "playback-plan.diagnostic-waivers-missing" "Playback plan must explicitly list diagnostic-waivable machine issues"
+    } else {
+        $diagnosticWaivers = @($diagnosticExecution.waivable_machine_issue_codes | ForEach-Object { [string]$_ })
+        foreach ($code in $diagnosticWaivers) {
+            if ([string]::IsNullOrWhiteSpace($code)) {
+                Add-Issue "error" "playback-plan.diagnostic-waiver-empty" "Diagnostic machine issue codes must be non-empty"
+            } elseif ($code -notin $safeDiagnosticMachineIssueCodes) {
+                Add-Issue "error" "playback-plan.diagnostic-waiver-unsafe" "Machine issue '$code' is an execution prerequisite and cannot be waived for diagnostics"
+            }
+        }
+        if (@($diagnosticWaivers | Select-Object -Unique).Count -ne $diagnosticWaivers.Count) {
+            Add-Issue "error" "playback-plan.diagnostic-waiver-duplicate" "Diagnostic machine issue codes must be unique"
+        }
+    }
+}
+$supportedMemoryClasses = @("minimum-supported", "standard-playback", "professional-large-project")
+if (-not (Has-Property $playbackPlan "baseline_machine_requirements") -or -not (Has-Property $playbackPlan.baseline_machine_requirements "memory_class")) {
+    Add-Issue "error" "playback-plan.baseline-memory-class-missing" "Playback plan must declare the memory class required for baseline evidence"
+} elseif ([string]$playbackPlan.baseline_machine_requirements.memory_class -notin $supportedMemoryClasses) {
+    Add-Issue "error" "playback-plan.baseline-memory-class-unknown" "Playback plan declares an unknown baseline memory class"
+}
+$memoryClassContract = if (Has-Property $machineProfile.hardware "memory_classes_gib") { $machineProfile.hardware.memory_classes_gib } else { $null }
+if ($null -eq $memoryClassContract) {
+    Add-Issue "error" "machine-profile.memory-classes-missing" "Windows machine profile must define memory support classes"
+} else {
+    $minimumMemory = [int]$memoryClassContract.'minimum-supported'
+    $standardMemory = [int]$memoryClassContract.'standard-playback'
+    $professionalMemory = [int]$memoryClassContract.'professional-large-project'
+    if ($minimumMemory -ne 8 -or $minimumMemory -ge $standardMemory -or $standardMemory -ge $professionalMemory) {
+        Add-Issue "error" "machine-profile.memory-classes-invalid" "Memory classes must start at the 8 GiB support floor and increase from minimum to standard to professional"
+    }
+}
 $playbackFixtureIds = @($playbackPlan.gates | ForEach-Object { [string]$_.fixture_id })
 
 $ids = @{}

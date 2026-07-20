@@ -1,6 +1,6 @@
 {
-  "schema_version": 2,
-  "id": "windows-alpha-reference-v1",
+  "schema_version": 3,
+  "id": "windows-alpha-reference-v2",
   "identity": {
     "explicit_machine_id_required": true,
     "hardware_serials_must_not_be_collected": true
@@ -13,7 +13,11 @@
   },
   "hardware": {
     "minimum_logical_cpu_count": 8,
-    "minimum_memory_gib": 32,
+    "memory_classes_gib": {
+      "minimum-supported": 8,
+      "standard-playback": 16,
+      "professional-large-project": 32
+    },
     "gpu_api": "d3d12",
     "dedicated_gpu_required": true,
     "storage_identity_must_be_recorded": true,
