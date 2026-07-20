@@ -41,6 +41,18 @@ persists the definition-stable `ParameterId`. It must not recreate ranges,
 accept enum keys absent from the schema, or flatten a resource reference into a
 generic text parameter.
 
+Inspector audio source controls project existing author state rather than own
+it. Each row addresses one stable `AudioComponentEditId`; media choices carry
+only Asset `AudioSourceComponentId` values and nested choices carry only child
+`ProgramOutputId` values. The application validates source domain, Asset/child
+membership, track lock, and the complete audio author aggregate before it
+records one undoable Sequence snapshot. A neighboring Asset stream-mapping row
+is intentionally a different command family: refresh acquires current probe
+evidence without retargeting, and rebind atomically changes one Asset catalog
+binding while preserving its logical ID. UI labels may describe physical stream
+indices, language, title, and layout, but those indices never enter Timeline
+authoring payloads.
+
 ## Focus and Accessibility
 
 Focus ownership is not the same as visible focus indication. `FocusSource::Keyboard` may show a focus ring; pointer/programmatic focus owns keyboard input but normally does not show the ring.

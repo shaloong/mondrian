@@ -19,12 +19,14 @@ use crate::app::ui_actions::{
     AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
     AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload, AssetsImportFilesPayload,
     AssetsMoveAssetPayload, AssetsMoveFolderPayload, AssetsMoveSelectionPayload,
-    AssetsPrepareDragPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
+    AssetsPrepareDragPayload, AssetsRebindAudioComponentPayload,
+    AssetsRefreshAudioComponentsPayload, AssetsRelinkAssetPayload, AssetsRenameAssetPayload,
     AssetsRenameFolderPayload, AssetsSetInterpretationPayload, AssetsSetProxyModePayload,
     EffectsAddToClipPayload, ExportDraftUpdatePayload, ExportEnqueuePayload,
-    ExportJobTargetPayload, InspectorClipTransformField, InspectorRemoveEffectPayload,
-    InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
-    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    ExportJobTargetPayload, InspectorAudioComponentSourcePayload, InspectorClipTransformField,
+    InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
+    InspectorSetAudioComponentSourcePayload, InspectorSetClipCurvePayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
     ProjectRecoverFromAutosavePayload, ProjectSetColorEnginePayload, SequenceTargetPayload,
@@ -38,22 +40,23 @@ use crate::app::ui_actions::{
     ViewerSetPreviewResolutionScalePayload, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
     ASSETS_CREATE_SOLID_COLOR, ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION,
     ASSETS_IMPORT_FILES, ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION,
-    ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET,
+    ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, ASSETS_REBIND_AUDIO_COMPONENT,
+    ASSETS_REFRESH_AUDIO_COMPONENTS, ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET,
     ASSETS_RENAME_FOLDER, ASSETS_SET_INTERPRETATION, ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP,
     EFFECTS_NAMESPACE, EXPORT_CANCEL_JOB, EXPORT_CLEAR_COMPLETED, EXPORT_ENQUEUE, EXPORT_NAMESPACE,
     EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT,
-    INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
-    INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_ENABLED,
-    INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
-    PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_SET_COLOR_ENGINE, SEQUENCE_DELETE, SEQUENCE_DUPLICATE,
-    SEQUENCE_NAMESPACE, SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT,
-    SEQUENCE_SWITCH_ACTIVE, SEQUENCE_UPDATE_SETTINGS, TIMELINE_ADD_TRACK,
-    TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK,
-    TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD,
-    TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT,
-    TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL, TIMELINE_TRIM_CLIPS,
-    TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, VIEWER_NAMESPACE, VIEWER_SET_CLIP_TRANSFORM,
-    VIEWER_SET_PREVIEW_RESOLUTION_SCALE,
+    INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED,
+    INSPECTOR_SET_CLIP_OPACITY, INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
+    INSPECTOR_SET_EFFECT_ENABLED, INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS,
+    PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_SET_COLOR_ENGINE, SEQUENCE_DELETE,
+    SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT,
+    SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE, SEQUENCE_UPDATE_SETTINGS,
+    TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP,
+    TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE,
+    TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
+    TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
+    TIMELINE_TRIM_CLIPS, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, VIEWER_NAMESPACE,
+    VIEWER_SET_CLIP_TRANSFORM, VIEWER_SET_PREVIEW_RESOLUTION_SCALE,
 };
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
@@ -63,6 +66,7 @@ use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, Proper
 use mondrian_core::events::AppEvent;
 use mondrian_core::types::{ClipId, EffectId, FramePosition, Rational};
 use mondrian_core::{FrameRounding, MondrianError, Result, TimeScale, TimelineTime};
+use mondrian_timeline::audio::AudioComponentSource;
 use mondrian_timeline::clip::{Clip, Transform2D, TrimEdge};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -399,6 +403,76 @@ impl AppState {
         self.event_bus.publish(mondrian_core::events::AppEvent::AssetLibraryReloaded);
         self.set_status_hint(
             format!("已重新链接素材：{asset_name} → {}", payload.path.display()),
+            false,
+        );
+        Ok(())
+    }
+
+    fn refresh_audio_components_from_ui(
+        &mut self,
+        payload: AssetsRefreshAudioComponentsPayload,
+    ) -> Result<()> {
+        let library = self.asset_library.clone().ok_or_else(|| {
+            let reason = "素材库未连接".to_string();
+            self.set_status_hint(format!("音频 Component 探测失败：{reason}"), true);
+            MondrianError::WorkflowStepFailed {
+                step_id: "assets_refresh_audio_components".to_string(),
+                reason,
+            }
+        })?;
+        let asset_name = library
+            .get_asset(payload.asset_id)?
+            .map(|asset| asset.name)
+            .unwrap_or_else(|| payload.asset_id.to_string());
+        library.refresh_audio_components(payload.asset_id).map_err(|error| {
+            let reason = error.to_string();
+            self.set_status_hint(format!("音频 Component 探测失败：{reason}"), true);
+            MondrianError::WorkflowStepFailed {
+                step_id: "assets_refresh_audio_components".to_string(),
+                reason,
+            }
+        })?;
+        self.refresh_audio_playback_after_authoring_change();
+        self.event_bus.publish(AppEvent::AssetLibraryReloaded);
+        let _ = self.save_project_file();
+        self.set_status_hint(format!("已刷新 {asset_name} 的音频流候选"), false);
+        Ok(())
+    }
+
+    fn rebind_audio_component_from_ui(
+        &mut self,
+        payload: AssetsRebindAudioComponentPayload,
+    ) -> Result<()> {
+        let library = self.asset_library.clone().ok_or_else(|| {
+            let reason = "素材库未连接".to_string();
+            self.set_status_hint(format!("音频 Component 重绑定失败：{reason}"), true);
+            MondrianError::WorkflowStepFailed {
+                step_id: "assets_rebind_audio_component".to_string(),
+                reason,
+            }
+        })?;
+        let asset_name = library
+            .get_asset(payload.asset_id)?
+            .map(|asset| asset.name)
+            .unwrap_or_else(|| payload.asset_id.to_string());
+        library
+            .rebind_audio_component(payload.asset_id, payload.component_id, payload.stream_index)
+            .map_err(|error| {
+                let reason = error.to_string();
+                self.set_status_hint(format!("音频 Component 重绑定失败：{reason}"), true);
+                MondrianError::WorkflowStepFailed {
+                    step_id: "assets_rebind_audio_component".to_string(),
+                    reason,
+                }
+            })?;
+        self.refresh_audio_playback_after_authoring_change();
+        self.event_bus.publish(AppEvent::AssetLibraryReloaded);
+        let _ = self.save_project_file();
+        self.set_status_hint(
+            format!(
+                "已将 {asset_name} 的音频 Component 映射到流 #{}",
+                payload.stream_index
+            ),
             false,
         );
         Ok(())
@@ -1244,6 +1318,14 @@ impl AppState {
                 )?;
                 self.set_clip_curve_from_ui(payload)
             }
+            INSPECTOR_SET_AUDIO_COMPONENT_SOURCE => {
+                let payload = parse_ui_payload::<InspectorSetAudioComponentSourcePayload>(
+                    "inspector_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.set_audio_component_source_from_ui(payload)
+            }
             INSPECTOR_SELECT_EFFECT => {
                 let payload = parse_ui_payload::<InspectorSelectEffectPayload>(
                     "inspector_ui_action",
@@ -1387,6 +1469,22 @@ impl AppState {
                     payload,
                 )?;
                 self.relink_asset_from_ui(payload)
+            }
+            ASSETS_REBIND_AUDIO_COMPONENT => {
+                let payload = parse_ui_payload::<AssetsRebindAudioComponentPayload>(
+                    "assets_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.rebind_audio_component_from_ui(payload)
+            }
+            ASSETS_REFRESH_AUDIO_COMPONENTS => {
+                let payload = parse_ui_payload::<AssetsRefreshAudioComponentsPayload>(
+                    "assets_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.refresh_audio_components_from_ui(payload)
             }
             ASSETS_RENAME_ASSET => {
                 let payload = parse_ui_payload::<AssetsRenameAssetPayload>(
@@ -2169,6 +2267,158 @@ impl AppState {
         Ok(())
     }
 
+    fn set_audio_component_source_from_ui(
+        &mut self,
+        payload: InspectorSetAudioComponentSourcePayload,
+    ) -> Result<()> {
+        const STEP_ID: &str = "inspector_set_audio_component_source";
+        self.ensure_clip_track_unlocked(STEP_ID, payload.clip.clip_id)?;
+        let (_, is_video_track, _) = self
+            .sequence
+            .as_ref()
+            .and_then(|sequence| find_clip_track_lock(sequence, payload.clip.clip_id))
+            .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip.clip_id))?;
+        if is_video_track {
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: STEP_ID.to_string(),
+                reason: "audio Component Edit must belong to an audio Track Clip".to_string(),
+            });
+        }
+
+        let target_source = {
+            let sequence = self.sequence.as_ref().ok_or_else(|| missing_sequence_error(STEP_ID))?;
+            let clip = find_clip(sequence, payload.clip.clip_id)
+                .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip.clip_id))?;
+            let current_source = clip
+                .audio_components
+                .iter()
+                .find(|edit| edit.id == payload.edit_id)
+                .map(|edit| edit.source.clone())
+                .ok_or_else(|| MondrianError::WorkflowStepFailed {
+                    step_id: STEP_ID.to_string(),
+                    reason: format!(
+                        "audio Component Edit {} is absent from Clip {}",
+                        payload.edit_id, payload.clip.clip_id
+                    ),
+                })?;
+            let requested_source = match payload.source {
+                InspectorAudioComponentSourcePayload::Media { component_id } => {
+                    AudioComponentSource::Media { component_id }
+                }
+                InspectorAudioComponentSourcePayload::NestedOutput { output_id } => {
+                    AudioComponentSource::NestedOutput { output_id }
+                }
+            };
+            if current_source == requested_source {
+                return Ok(());
+            }
+            match payload.source {
+                InspectorAudioComponentSourcePayload::Media { component_id } => {
+                    if clip.is_nested_sequence() {
+                        return Err(MondrianError::WorkflowStepFailed {
+                            step_id: STEP_ID.to_string(),
+                            reason: "nested Sequence Clip cannot select an Asset Component"
+                                .to_string(),
+                        });
+                    }
+                    let library = self.asset_library.as_ref().ok_or_else(|| {
+                        MondrianError::WorkflowStepFailed {
+                            step_id: STEP_ID.to_string(),
+                            reason: "asset library is unavailable".to_string(),
+                        }
+                    })?;
+                    let asset = library.get_asset(clip.asset_id)?.ok_or_else(|| {
+                        MondrianError::AssetNotFound { asset_id: clip.asset_id.to_string() }
+                    })?;
+                    asset.audio_components.validate().map_err(|error| {
+                        MondrianError::WorkflowStepFailed {
+                            step_id: STEP_ID.to_string(),
+                            reason: format!("invalid Asset audio Component catalog: {error}"),
+                        }
+                    })?;
+                    if !asset
+                        .audio_components
+                        .components
+                        .iter()
+                        .any(|component| component.id == component_id)
+                    {
+                        return Err(MondrianError::WorkflowStepFailed {
+                            step_id: STEP_ID.to_string(),
+                            reason: format!(
+                                "Asset {} does not expose audio Component {component_id}",
+                                clip.asset_id
+                            ),
+                        });
+                    }
+                    requested_source
+                }
+                InspectorAudioComponentSourcePayload::NestedOutput { output_id } => {
+                    let child_id = clip.nested_sequence_id.ok_or_else(|| {
+                        MondrianError::WorkflowStepFailed {
+                            step_id: STEP_ID.to_string(),
+                            reason: "media Clip cannot select a nested Sequence output".to_string(),
+                        }
+                    })?;
+                    let child = self
+                        .sequences
+                        .iter()
+                        .find(|candidate| candidate.id == child_id)
+                        .ok_or_else(|| MondrianError::WorkflowStepFailed {
+                            step_id: STEP_ID.to_string(),
+                            reason: format!("nested Sequence {child_id} is unavailable"),
+                        })?;
+                    if !child.audio_program.outputs.iter().any(|output| output.id == output_id) {
+                        return Err(MondrianError::WorkflowStepFailed {
+                            step_id: STEP_ID.to_string(),
+                            reason: format!(
+                                "nested Sequence {child_id} does not expose output {output_id}"
+                            ),
+                        });
+                    }
+                    requested_source
+                }
+            }
+        };
+
+        let Some(sequence) = self.sequence.as_mut() else {
+            return Err(missing_sequence_error(STEP_ID));
+        };
+        let before = sequence.clone();
+        let changed = {
+            let clip = find_clip_mut(sequence, payload.clip.clip_id)
+                .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip.clip_id))?;
+            let edit = clip
+                .audio_components
+                .iter_mut()
+                .find(|edit| edit.id == payload.edit_id)
+                .ok_or_else(|| MondrianError::WorkflowStepFailed {
+                    step_id: STEP_ID.to_string(),
+                    reason: format!("audio Component Edit {} disappeared", payload.edit_id),
+                })?;
+            if edit.source == target_source {
+                false
+            } else {
+                edit.source = target_source;
+                true
+            }
+        };
+        if !changed {
+            return Ok(());
+        }
+        if let Err(error) =
+            sequence.audio_program.validate(&sequence.audio_tracks, &sequence.audio_roles)
+        {
+            *sequence = before.clone();
+            return Err(MondrianError::WorkflowStepFailed {
+                step_id: STEP_ID.to_string(),
+                reason: format!("audio authoring rejected source selection: {error}"),
+            });
+        }
+        self.record_timeline_edit_snapshot("切换片段音频 Component", before)?;
+        self.refresh_audio_playback_after_authoring_change();
+        Ok(())
+    }
+
     fn ensure_clip_track_unlocked(&self, step_id: &'static str, clip_id: ClipId) -> Result<()> {
         let Some(seq) = self.sequence.as_ref() else {
             return Err(missing_sequence_error(step_id));
@@ -2445,17 +2695,18 @@ mod tests {
         assets_create_solid_color_action, assets_delete_asset_action, assets_delete_folder_action,
         assets_delete_selection_action, assets_import_files_action, assets_move_asset_action,
         assets_move_folder_action, assets_move_selection_action, assets_prepare_drag_action,
+        assets_rebind_audio_component_action, assets_refresh_audio_components_action,
         assets_relink_asset_action, assets_rename_asset_action, assets_rename_folder_action,
         assets_set_interpretation_action, assets_set_proxy_mode_action, effects_add_to_clip_action,
         export_cancel_job_action, export_clear_completed_action, export_enqueue_action,
         export_set_draft_action, inspector_remove_effect_action, inspector_select_effect_action,
-        inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
-        inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
-        inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
-        inspector_set_effect_property_action, project_create_with_settings_action,
-        project_recover_from_autosave_action, project_set_color_engine_action,
-        sequence_delete_action, sequence_duplicate_action, sequence_new_action,
-        sequence_return_to_parent_action, sequence_set_active_default_action,
+        inspector_set_audio_component_source_action, inspector_set_clip_curve_action,
+        inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
+        inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
+        inspector_set_effect_enabled_action, inspector_set_effect_property_action,
+        project_create_with_settings_action, project_recover_from_autosave_action,
+        project_set_color_engine_action, sequence_delete_action, sequence_duplicate_action,
+        sequence_new_action, sequence_return_to_parent_action, sequence_set_active_default_action,
         sequence_switch_active_action, sequence_update_settings_action, timeline_add_track_action,
         timeline_clear_in_out_points_action, timeline_drop_asset_action, timeline_move_clip_action,
         timeline_move_track_action, timeline_open_nested_sequence_action,
@@ -2468,11 +2719,13 @@ mod tests {
         AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
         AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
         AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsPrepareDragPayload,
+        AssetsRebindAudioComponentPayload, AssetsRefreshAudioComponentsPayload,
         AssetsRelinkAssetPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
         AssetsSetInterpretationPayload, AssetsSetProxyModePayload, EffectsAddToClipPayload,
         ExportDraftUpdatePayload, ExportEnqueuePayload, ExportJobTargetPayload,
-        InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
-        InspectorRemoveEffectPayload, InspectorSelectEffectPayload, InspectorSetClipCurvePayload,
+        InspectorAudioComponentSourcePayload, InspectorClipRefPayload, InspectorClipTransformField,
+        InspectorCurvePointPayload, InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
+        InspectorSetAudioComponentSourcePayload, InspectorSetClipCurvePayload,
         InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload,
         InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
         InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
@@ -2488,10 +2741,14 @@ mod tests {
     };
     use mondrian_assets::AssetLibrary;
     use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
-    use mondrian_core::types::{AssetId, EffectId, FramePosition, MaskId, TrackId};
+    use mondrian_core::types::{
+        AssetId, AudioSourceComponentId, EffectId, FramePosition, MaskId, TrackId,
+    };
     use mondrian_core::{Color, ColorSpace};
     use mondrian_core::{ProjectSettings, Rational, Resolution, WorkingColorSpace};
     use mondrian_effects::EffectType;
+    use mondrian_media::info::{AudioCodec, ChannelLayout};
+    use mondrian_media::{AudioStreamInfo, MediaInfo};
     use mondrian_timeline::clip::Clip;
     use mondrian_timeline::sequence::{
         PreviewRenderFormat, Sequence, SequencePreviewSettings, SequenceSettings,
@@ -2537,6 +2794,72 @@ mod tests {
         sequence.video_tracks[0].add_clip(clip).expect("add clip");
         state.sequence = Some(sequence);
         (state, track_id, clip_id)
+    }
+
+    fn audio_test_media_info(path: &std::path::Path) -> MediaInfo {
+        let stream = |index, stream_id, language: &str, is_default| AudioStreamInfo {
+            index,
+            stream_id: Some(stream_id),
+            language: Some(language.to_owned()),
+            title: None,
+            is_default,
+            codec: AudioCodec::Aac,
+            duration: Some(Duration::from_secs(1)),
+            sample_rate: 48_000,
+            channels: 2,
+            channel_layout: ChannelLayout::Stereo,
+            bit_depth: 24,
+            avg_bitrate: 256_000,
+        };
+        MediaInfo {
+            path: path.to_path_buf(),
+            duration: Duration::from_secs(1),
+            file_size: 1,
+            container: "mov".to_string(),
+            video_streams: Vec::new(),
+            audio_streams: vec![stream(1, 10, "eng", false), stream(3, 30, "jpn", true)],
+            has_video: false,
+            has_audio: true,
+        }
+    }
+
+    fn state_with_audio_asset() -> (
+        PathBuf,
+        AppState,
+        TrackId,
+        mondrian_core::ClipId,
+        mondrian_core::AudioComponentEditId,
+        AudioSourceComponentId,
+    ) {
+        let root = unique_temp_path("audio-component-action");
+        let library = AssetLibrary::open(root.join("library")).expect("asset library");
+        let media_path = root.join("component-source.mov");
+        std::fs::write(&media_path, [0u8]).expect("media fixture");
+        let asset_id = library
+            .upsert_media_file_with_info(&media_path, audio_test_media_info(&media_path))
+            .expect("register audio asset");
+        let asset = library.get_asset(asset_id).expect("asset query").expect("asset");
+        let alternate_component = asset
+            .audio_components
+            .components
+            .iter()
+            .find(|component| component.id != AudioSourceComponentId::primary())
+            .expect("secondary Component")
+            .id;
+
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("audio source selection");
+        let track_id = sequence.audio_tracks[0].id;
+        let clip = Clip::new(asset_id, TimelineTime::ZERO, tt(25, sequence.time_base()))
+            .expect("audio Clip");
+        let clip_id = clip.id;
+        sequence
+            .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
+            .expect("add audio Clip");
+        let edit_id = sequence.audio_tracks[0].clips[0].audio_components[0].id;
+        state.sequence = Some(sequence);
+        state.asset_library = Some(library);
+        (root, state, track_id, clip_id, edit_id, alternate_component)
     }
 
     fn inspector_clip_payload(
@@ -3852,6 +4175,46 @@ mod tests {
 
         assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
         assert!(state.dragging_asset().is_none());
+        assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
+    }
+
+    #[test]
+    fn dispatch_assets_audio_component_rebind_reports_missing_library() {
+        let mut state = AppState::new();
+
+        let error = state
+            .dispatch_action(assets_rebind_audio_component_action(
+                AssetsRebindAudioComponentPayload {
+                    asset_id: AssetId::new(),
+                    component_id: AudioSourceComponentId::new(),
+                    stream_index: 3,
+                },
+            ))
+            .expect_err("missing asset library should fail");
+
+        assert!(matches!(
+            error,
+            MondrianError::WorkflowStepFailed { step_id, .. }
+                if step_id == "assets_rebind_audio_component"
+        ));
+        assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
+    }
+
+    #[test]
+    fn dispatch_assets_audio_component_refresh_reports_missing_library() {
+        let mut state = AppState::new();
+
+        let error = state
+            .dispatch_action(assets_refresh_audio_components_action(
+                AssetsRefreshAudioComponentsPayload { asset_id: AssetId::new() },
+            ))
+            .expect_err("missing asset library should fail");
+
+        assert!(matches!(
+            error,
+            MondrianError::WorkflowStepFailed { step_id, .. }
+                if step_id == "assets_refresh_audio_components"
+        ));
         assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
     }
 
@@ -5415,6 +5778,128 @@ mod tests {
         let clip = &sequence.video_tracks[0].clips[0];
         assert!((clip.transform.evaluate_opacity(sequence.playhead) - 0.42).abs() < 1.0e-6);
         assert!(state.can_undo_action());
+    }
+
+    #[test]
+    fn dispatch_inspector_audio_source_selection_is_validated_and_undoable() {
+        let (root, mut state, track_id, clip_id, edit_id, alternate_component) =
+            state_with_audio_asset();
+        let clip = InspectorClipRefPayload { track_id, is_video_track: false, clip_id };
+
+        state
+            .dispatch_action(inspector_set_audio_component_source_action(
+                InspectorSetAudioComponentSourcePayload {
+                    clip,
+                    edit_id,
+                    source: InspectorAudioComponentSourcePayload::Media {
+                        component_id: alternate_component,
+                    },
+                },
+            ))
+            .expect("select alternate Component");
+
+        assert_eq!(
+            state.sequence.as_ref().expect("sequence").audio_tracks[0].clips[0].audio_components[0]
+                .source,
+            AudioComponentSource::Media { component_id: alternate_component }
+        );
+        assert!(state.can_undo_action());
+        assert!(state.undo_timeline().expect("undo source selection"));
+        assert_eq!(
+            state.sequence.as_ref().expect("sequence").audio_tracks[0].clips[0].audio_components[0]
+                .source,
+            AudioComponentSource::Media { component_id: AudioSourceComponentId::primary() }
+        );
+        drop(state);
+        remove_temp_path(&root);
+    }
+
+    #[test]
+    fn dispatch_inspector_audio_source_rejects_unknown_component_without_mutation() {
+        let (root, mut state, track_id, clip_id, edit_id, _) = state_with_audio_asset();
+        let before = serde_json::to_vec(state.sequence.as_ref().expect("sequence"))
+            .expect("serialize before Sequence");
+
+        let error = state
+            .dispatch_action(inspector_set_audio_component_source_action(
+                InspectorSetAudioComponentSourcePayload {
+                    clip: InspectorClipRefPayload { track_id, is_video_track: false, clip_id },
+                    edit_id,
+                    source: InspectorAudioComponentSourcePayload::Media {
+                        component_id: AudioSourceComponentId::new(),
+                    },
+                },
+            ))
+            .expect_err("unknown Component must fail closed");
+
+        assert!(matches!(
+            error,
+            MondrianError::WorkflowStepFailed { step_id, .. }
+                if step_id == "inspector_set_audio_component_source"
+        ));
+        assert_eq!(
+            serde_json::to_vec(state.sequence.as_ref().expect("sequence"))
+                .expect("serialize after Sequence"),
+            before
+        );
+        assert!(!state.can_undo_action());
+        drop(state);
+        remove_temp_path(&root);
+    }
+
+    #[test]
+    fn dispatch_inspector_nested_audio_source_accepts_only_child_public_output() {
+        let mut child = Sequence::new("child");
+        let initial_output = child.audio_program.outputs[0].id;
+        let alternate_output = mondrian_core::ProgramOutputId::new();
+        child.audio_program.outputs.push(mondrian_timeline::audio::AudioProgramOutput {
+            id: alternate_output,
+            name: "Dialogue".to_owned(),
+            main_source: mondrian_timeline::audio::ProgramOutputMainSource::RoutedInputs,
+            strip: mondrian_timeline::audio::AudioChannelStrip::default(),
+        });
+
+        let mut parent = Sequence::new("parent");
+        let track_id = parent.audio_tracks[0].id;
+        let clip = Clip::new_nested_sequence(
+            child.id,
+            TimelineTime::ZERO,
+            tt(25, parent.time_base()),
+            None,
+        )
+        .expect("nested Clip");
+        let clip_id = clip.id;
+        parent
+            .add_nested_audio_clip(track_id, clip, initial_output)
+            .expect("nested audio Clip");
+        let edit_id = parent.audio_tracks[0].clips[0].audio_components[0].id;
+        let mut state = AppState::new();
+        state.sequence = Some(parent);
+        state.sequences = vec![child];
+
+        state
+            .dispatch_action(inspector_set_audio_component_source_action(
+                InspectorSetAudioComponentSourcePayload {
+                    clip: InspectorClipRefPayload { track_id, is_video_track: false, clip_id },
+                    edit_id,
+                    source: InspectorAudioComponentSourcePayload::NestedOutput {
+                        output_id: alternate_output,
+                    },
+                },
+            ))
+            .expect("select child public output");
+
+        assert_eq!(
+            state.sequence.as_ref().expect("parent").audio_tracks[0].clips[0].audio_components[0]
+                .source,
+            AudioComponentSource::NestedOutput { output_id: alternate_output }
+        );
+        assert!(state.undo_timeline().expect("undo nested source selection"));
+        assert_eq!(
+            state.sequence.as_ref().expect("parent").audio_tracks[0].clips[0].audio_components[0]
+                .source,
+            AudioComponentSource::NestedOutput { output_id: initial_output }
+        );
     }
 
     #[test]

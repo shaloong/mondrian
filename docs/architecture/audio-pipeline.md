@@ -79,6 +79,21 @@ changes only the selected logical Component's physical binding and preserves its
 ID. Two logical Components may deliberately alias one physical stream after
 explicit repair because deleting or retargeting the other ID could invalidate a
 different Project; automatic import and reconcile never create such aliases.
+The repair workflow is deliberately two-step when the stored probe is stale:
+refresh current stream candidates by conservative reconcile, then explicitly
+rebind one stable Component. Refresh may add IDs for newly discovered unclaimed
+streams but cannot repair or remove an existing binding. Rebind changes only the
+chosen binding. This keeps automatic evidence acquisition separate from user
+authoring intent.
+
+The Inspector selects the logical source of each `AudioComponentEdit` by its
+stable edit ID. Media Clips offer Asset Component IDs; nested Clips offer only
+the child Sequence's stable public outputs. The typed action is validated by the
+application boundary, committed as one Sequence snapshot, and is undoable.
+Physical stream refresh/rebind remains an Asset-library action and is never put
+into Timeline JSON or Timeline Undo. Either operation invalidates a prepared
+audio Runtime at the current transport anchor; running playback re-prepares,
+while paused/stopped playback releases the stale source.
 
 The Sequence persists one validated semantic `AudioChannelLayout`; it does not
 persist a second channel count. The value is either independent Mono, a

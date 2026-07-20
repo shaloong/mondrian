@@ -418,6 +418,17 @@ impl AppState {
         }
     }
 
+    /// Invalidate prepared audio after Timeline audio authoring or Asset source
+    /// binding changes without changing transport authority.
+    pub(super) fn refresh_audio_playback_after_authoring_change(&mut self) {
+        let anchor = FramePosition::new(self.current_frame().max(0), self.playback_time_base());
+        if self.is_playing() {
+            self.prepare_audio_playback(anchor);
+        } else {
+            self.audio_playback.clear_source(anchor);
+        }
+    }
+
     fn warm_audio_cache_when_idle(&mut self) {
         let now = std::time::Instant::now();
         if let Some(last) = self.audio_idle_warmup_last {

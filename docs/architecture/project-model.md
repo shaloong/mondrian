@@ -98,7 +98,10 @@ snapshot. Explicit stream repair is committed atomically with refreshed probe
 metadata and fingerprint evidence while preserving the logical Component ID.
 Automatic reconcile does not retarget an existing ID or create physical-stream
 aliases; only an explicit rebind may alias a stream, so another Project's stable
-reference never has to be deleted as a side effect of repair.
+reference never has to be deleted as a side effect of repair. A separate refresh
+operation re-probes and conservatively reconciles current candidates without
+retargeting; this is required before selecting a newly discovered stream whose
+index was absent from stored metadata.
 
 ## Format Evolution
 

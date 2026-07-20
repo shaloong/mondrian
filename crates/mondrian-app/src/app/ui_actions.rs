@@ -5,7 +5,10 @@
 
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::timeline_data::AssetMediaInterpretation;
-use mondrian_core::types::{AssetId, ClipId, EffectId, JobId, SequenceId, TrackId};
+use mondrian_core::types::{
+    AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, EffectId, JobId,
+    ProgramOutputId, SequenceId, TrackId,
+};
 use mondrian_core::{
     ColorEngine, ColorSpace, ProjectSettings, Rational, Resolution, TimelineDisplayFormat,
     WorkingColorSpace,
@@ -72,6 +75,8 @@ pub const INSPECTOR_SET_CLIP_TINT: &str = "set_clip_tint";
 pub const INSPECTOR_SET_CLIP_TRANSFORM_FIELD: &str = "set_clip_transform_field";
 /// Action name for changing a selected clip's animation curve draft.
 pub const INSPECTOR_SET_CLIP_CURVE: &str = "set_clip_curve";
+/// Action name for selecting the logical source of one Clip audio Component Edit.
+pub const INSPECTOR_SET_AUDIO_COMPONENT_SOURCE: &str = "set_audio_component_source";
 /// Action name for selecting one effect inside the selected clip.
 pub const INSPECTOR_SELECT_EFFECT: &str = "select_effect";
 /// Action name for toggling one effect on a selected clip.
@@ -92,6 +97,10 @@ pub const ASSETS_NAMESPACE: &str = "ui.assets";
 
 /// Action name for preparing an asset for timeline drag/drop.
 pub const ASSETS_PREPARE_DRAG: &str = "prepare_drag";
+/// Action name for re-probing one Asset's audio Component candidates.
+pub const ASSETS_REFRESH_AUDIO_COMPONENTS: &str = "refresh_audio_components";
+/// Action name for explicitly rebinding one stable Asset audio Component.
+pub const ASSETS_REBIND_AUDIO_COMPONENT: &str = "rebind_audio_component";
 /// Action name for creating an adjustment-layer asset in the library.
 pub const ASSETS_CREATE_ADJUSTMENT_LAYER: &str = "create_adjustment_layer";
 /// Action name for creating a solid-color asset in the library.
@@ -668,6 +677,32 @@ pub struct InspectorSetClipCurvePayload {
     pub points: Vec<InspectorCurvePointPayload>,
 }
 
+/// Logical source selected for one placement-local audio Component Edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InspectorAudioComponentSourcePayload {
+    /// Stable audio Component owned by the media Clip's Asset.
+    Media {
+        /// Asset-owned logical Component identity.
+        component_id: AudioSourceComponentId,
+    },
+    /// Stable public output owned by the nested Sequence.
+    NestedOutput {
+        /// Child Sequence output identity.
+        output_id: ProgramOutputId,
+    },
+}
+
+/// Change the logical source of one placement-local audio Component Edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectorSetAudioComponentSourcePayload {
+    /// Clip that owns the edit.
+    pub clip: InspectorClipRefPayload,
+    /// Stable edit being changed; source identity is not edit identity.
+    pub edit_id: AudioComponentEditId,
+    /// New logical source in the owning Clip's source domain.
+    pub source: InspectorAudioComponentSourcePayload,
+}
+
 /// Select one effect instance inside a clip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InspectorSelectEffectPayload {
@@ -724,6 +759,24 @@ pub struct EffectsAddToClipPayload {
 pub struct AssetsPrepareDragPayload {
     /// Asset selected from the app UI asset browser.
     pub asset_id: AssetId,
+}
+
+/// Re-probe one Asset without retargeting any existing logical Component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetsRefreshAudioComponentsPayload {
+    /// Asset whose current file supplies fresh stream evidence.
+    pub asset_id: AssetId,
+}
+
+/// Explicitly repair one Asset audio Component's physical stream binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetsRebindAudioComponentPayload {
+    /// Asset that owns the stable logical Component.
+    pub asset_id: AssetId,
+    /// Logical Component identity preserved by the operation.
+    pub component_id: AudioSourceComponentId,
+    /// Absolute stream index selected from current probe evidence.
+    pub stream_index: u32,
 }
 
 /// Delete one asset-library record and any timeline clips that reference it.
@@ -1167,6 +1220,13 @@ pub fn inspector_set_clip_curve_action(payload: InspectorSetClipCurvePayload) ->
     custom_inspector_action(INSPECTOR_SET_CLIP_CURVE, payload)
 }
 
+/// Build an action that changes one Clip audio Component Edit's logical source.
+pub fn inspector_set_audio_component_source_action(
+    payload: InspectorSetAudioComponentSourcePayload,
+) -> Action {
+    custom_inspector_action(INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, payload)
+}
+
 /// Build an action that selects an effect in the inspector scope.
 pub fn inspector_select_effect_action(payload: InspectorSelectEffectPayload) -> Action {
     custom_inspector_action(INSPECTOR_SELECT_EFFECT, payload)
@@ -1195,6 +1255,18 @@ pub fn effects_add_to_clip_action(payload: EffectsAddToClipPayload) -> Action {
 /// Build an action that prepares an asset for timeline drag/drop.
 pub fn assets_prepare_drag_action(payload: AssetsPrepareDragPayload) -> Action {
     custom_assets_action(ASSETS_PREPARE_DRAG, payload)
+}
+
+/// Build an action that refreshes one Asset's audio stream candidates.
+pub fn assets_refresh_audio_components_action(
+    payload: AssetsRefreshAudioComponentsPayload,
+) -> Action {
+    custom_assets_action(ASSETS_REFRESH_AUDIO_COMPONENTS, payload)
+}
+
+/// Build an action that explicitly repairs an Asset audio Component binding.
+pub fn assets_rebind_audio_component_action(payload: AssetsRebindAudioComponentPayload) -> Action {
+    custom_assets_action(ASSETS_REBIND_AUDIO_COMPONENT, payload)
 }
 
 /// Build an action that deletes one asset from the library.

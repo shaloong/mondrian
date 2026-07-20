@@ -15,7 +15,8 @@ use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
 use mondrian_core::automation::{ParameterResourceReference, ParameterSchema, PropertyValue};
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::types::{
-    AssetId, ClipId, ColorSpace, EffectId, JobId, Rational, SequenceId, TrackId,
+    AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, ColorSpace, EffectId, JobId,
+    Rational, SequenceId, TrackId,
 };
 use mondrian_core::{
     Color, FrameRounding, TimelineDisplayContract, TimelineDisplayFormat, TimelineTime,
@@ -29,7 +30,11 @@ use mondrian_export::queue::{
     ExportColorHealthSeverity, ExportJobColorDiagnostics, ExportProgress, ExportProgressDetail,
     ExportProgressPhase, JobStatus,
 };
-use mondrian_media::{VideoColorDiagnosticIssueAggregate, VideoColorDiagnosticIssueSummary};
+use mondrian_media::info::ChannelLayout;
+use mondrian_media::{
+    AudioStreamInfo, VideoColorDiagnosticIssueAggregate, VideoColorDiagnosticIssueSummary,
+};
+use mondrian_timeline::audio::AudioComponentSource;
 use mondrian_timeline::clip::{Clip, Transform2D};
 use mondrian_timeline::sequence::{
     InputColorResolutionSource, MissingColorMetadataPolicy, Sequence,
@@ -68,16 +73,17 @@ use crate::app::ui_actions::{
     assets_create_solid_color_action, assets_delete_asset_action, assets_delete_folder_action,
     assets_delete_selection_action, assets_import_files_action, assets_move_asset_action,
     assets_move_folder_action, assets_move_selection_action, assets_open_folder_action,
-    assets_prepare_drag_action, assets_rename_asset_action, assets_rename_folder_action,
-    assets_set_proxy_mode_action, effects_add_to_clip_action, export_cancel_job_action,
-    export_clear_completed_action, export_enqueue_action, export_set_draft_action,
-    inspector_remove_effect_action, inspector_select_effect_action,
-    inspector_set_clip_curve_action, inspector_set_clip_enabled_action,
-    inspector_set_clip_opacity_action, inspector_set_clip_tint_action,
-    inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
-    inspector_set_effect_property_action, timeline_add_track_action,
-    timeline_clear_in_out_points_action, timeline_drop_asset_action, timeline_move_clip_action,
-    timeline_move_track_action, timeline_open_nested_sequence_action,
+    assets_prepare_drag_action, assets_rebind_audio_component_action,
+    assets_refresh_audio_components_action, assets_rename_asset_action,
+    assets_rename_folder_action, assets_set_proxy_mode_action, effects_add_to_clip_action,
+    export_cancel_job_action, export_clear_completed_action, export_enqueue_action,
+    export_set_draft_action, inspector_remove_effect_action, inspector_select_effect_action,
+    inspector_set_audio_component_source_action, inspector_set_clip_curve_action,
+    inspector_set_clip_enabled_action, inspector_set_clip_opacity_action,
+    inspector_set_clip_tint_action, inspector_set_clip_transform_field_action,
+    inspector_set_effect_enabled_action, inspector_set_effect_property_action,
+    timeline_add_track_action, timeline_clear_in_out_points_action, timeline_drop_asset_action,
+    timeline_move_clip_action, timeline_move_track_action, timeline_open_nested_sequence_action,
     timeline_roll_selected_cut_to_playhead_action, timeline_seek_with_source_action,
     timeline_select_clip_action, timeline_set_in_out_point_action,
     timeline_set_selected_clips_enabled_action, timeline_set_track_control_action,
@@ -89,13 +95,15 @@ use crate::app::ui_actions::{
     AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
     AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
     AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsOpenFolderPayload,
-    AssetsPrepareDragPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
+    AssetsPrepareDragPayload, AssetsRebindAudioComponentPayload,
+    AssetsRefreshAudioComponentsPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
     AssetsSetProxyModePayload, DockDropAreaPayload, EffectsAddToClipPayload,
     ExportDraftUpdatePayload, ExportEnqueuePayload, ExportJobTargetPayload,
-    ExportOutputDialogPayload, ImportMediaDialogPayload, InspectorClipRefPayload,
-    InspectorClipTransformField, InspectorCurvePointPayload, InspectorRemoveEffectPayload,
-    InspectorSelectEffectPayload, InspectorSetClipCurvePayload, InspectorSetClipEnabledPayload,
-    InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
+    ExportOutputDialogPayload, ImportMediaDialogPayload, InspectorAudioComponentSourcePayload,
+    InspectorClipRefPayload, InspectorClipTransformField, InspectorCurvePointPayload,
+    InspectorRemoveEffectPayload, InspectorSelectEffectPayload,
+    InspectorSetAudioComponentSourcePayload, InspectorSetClipCurvePayload,
+    InspectorSetClipEnabledPayload, InspectorSetClipOpacityPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
     TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineMoveClipPayload,
@@ -1270,8 +1278,60 @@ pub struct InspectorPanelModel {
     pub tint_area_mode: ColorPickerAreaMode,
     /// Opacity animation curve points normalized over the selected clip span.
     pub curve_points: Vec<CurvePoint>,
+    /// Placement-local audio Component Edits and their source choices.
+    pub audio_components: Vec<InspectorAudioComponentModel>,
     /// Effects currently attached to the selected clip.
     pub effects: Vec<InspectorEffectModel>,
+}
+
+/// One placement-local audio Component Edit shown by the Inspector.
+#[derive(Debug, Clone)]
+pub struct InspectorAudioComponentModel {
+    /// Stable edit identity targeted by source-selection actions.
+    pub edit_id: AudioComponentEditId,
+    /// Trigger text for the selected logical source.
+    pub source_label: String,
+    /// Valid logical sources from the owning Asset or nested Sequence.
+    pub source_options: Vec<InspectorAudioSourceOptionModel>,
+    /// Asset-global physical binding editor for media Components only.
+    pub binding: Option<InspectorAudioBindingModel>,
+}
+
+/// One logical source option for a Clip audio Component Edit.
+#[derive(Debug, Clone)]
+pub struct InspectorAudioSourceOptionModel {
+    /// Human-readable Component or public-output label.
+    pub label: String,
+    /// Typed target; physical media indices never enter Timeline authoring.
+    pub source: InspectorAudioComponentSourcePayload,
+    /// Whether this option is the edit's current source.
+    pub selected: bool,
+    /// Whether selecting it preserves the Clip's author invariants.
+    pub selectable: bool,
+}
+
+/// Asset-global physical stream mapping shown under one media Component Edit.
+#[derive(Debug, Clone)]
+pub struct InspectorAudioBindingModel {
+    /// Asset that owns the Component catalog.
+    pub asset_id: AssetId,
+    /// Stable Component identity preserved by a rebind.
+    pub component_id: AudioSourceComponentId,
+    /// Trigger text describing the current physical binding.
+    pub label: String,
+    /// Current stored probe candidates. Rebind re-probes before committing.
+    pub options: Vec<InspectorAudioStreamOptionModel>,
+}
+
+/// One physical stream candidate for an explicit Asset Component repair.
+#[derive(Debug, Clone)]
+pub struct InspectorAudioStreamOptionModel {
+    /// Human-readable stream evidence.
+    pub label: String,
+    /// Absolute container stream index passed to the Asset rebind transaction.
+    pub stream_index: u32,
+    /// Whether current stored evidence matches the Component binding exactly.
+    pub selected: bool,
 }
 
 /// Effect row data shown by the app UI inspector.
@@ -1368,6 +1428,7 @@ impl InspectorPanelModel {
                 .unwrap_or(1.0),
             tint_area_mode: ColorPickerAreaMode::Wheel,
             curve_points: opacity_curve_points_for_clip(clip, time),
+            audio_components: inspector_audio_components(state, clip),
             effects: clip
                 .effects
                 .iter()
@@ -1421,6 +1482,7 @@ impl InspectorPanelModel {
             max_frame: 1.0,
             tint_area_mode: ColorPickerAreaMode::Wheel,
             curve_points: vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)],
+            audio_components: Vec::new(),
             effects: Vec::new(),
         }
     }
@@ -1450,6 +1512,7 @@ impl InspectorPanelModel {
                 CurvePoint::new(0.72, 0.42),
                 CurvePoint::new(1.0, 1.0),
             ],
+            audio_components: Vec::new(),
             effects: Vec::new(),
         }
     }
@@ -2633,6 +2696,202 @@ fn clip_for_selection<'a>(
     None
 }
 
+fn inspector_audio_components(state: &AppState, clip: &Clip) -> Vec<InspectorAudioComponentModel> {
+    let asset = (!clip.is_nested_sequence())
+        .then(|| {
+            state
+                .asset_library
+                .as_ref()
+                .and_then(|library| library.get_asset(clip.asset_id).ok().flatten())
+        })
+        .flatten();
+    let child = clip
+        .nested_sequence_id
+        .and_then(|sequence_id| state.sequences.iter().find(|sequence| sequence.id == sequence_id));
+
+    clip.audio_components
+        .iter()
+        .map(|edit| match edit.source {
+            AudioComponentSource::Media { component_id } => {
+                let Some(asset) = asset.as_ref() else {
+                    return InspectorAudioComponentModel {
+                        edit_id: edit.id,
+                        source_label: format!("Component {component_id}（素材不可用）"),
+                        source_options: Vec::new(),
+                        binding: None,
+                    };
+                };
+                let source_options = asset
+                    .audio_components
+                    .components
+                    .iter()
+                    .map(|component| {
+                        let selected = component.id == component_id;
+                        let used_by_sibling = clip.audio_components.iter().any(|sibling| {
+                            sibling.id != edit.id
+                                && matches!(
+                                    sibling.source,
+                                    AudioComponentSource::Media {
+                                        component_id: sibling_id
+                                    } if sibling_id == component.id
+                                )
+                        });
+                        InspectorAudioSourceOptionModel {
+                            label: asset_audio_component_label(asset, component.id),
+                            source: InspectorAudioComponentSourcePayload::Media {
+                                component_id: component.id,
+                            },
+                            selected,
+                            selectable: selected || !used_by_sibling,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let source_label = source_options
+                    .iter()
+                    .find(|option| option.selected)
+                    .map(|option| option.label.clone())
+                    .unwrap_or_else(|| format!("Component {component_id}（目录中不存在）"));
+                let binding = asset
+                    .audio_components
+                    .components
+                    .iter()
+                    .find(|component| component.id == component_id)
+                    .map(|component| InspectorAudioBindingModel {
+                        asset_id: asset.id,
+                        component_id,
+                        label: asset_audio_binding_label(asset, component_id),
+                        options: asset
+                            .media_info
+                            .audio_streams
+                            .iter()
+                            .map(|stream| InspectorAudioStreamOptionModel {
+                                label: audio_stream_label(stream),
+                                stream_index: stream.index,
+                                selected: component.binding.matches_stream(stream),
+                            })
+                            .collect(),
+                    });
+                InspectorAudioComponentModel {
+                    edit_id: edit.id,
+                    source_label,
+                    source_options,
+                    binding,
+                }
+            }
+            AudioComponentSource::NestedOutput { output_id } => {
+                let source_options = child
+                    .map(|sequence| {
+                        sequence
+                            .audio_program
+                            .outputs
+                            .iter()
+                            .map(|output| InspectorAudioSourceOptionModel {
+                                label: format!("{} · {}", output.name, output.id),
+                                source: InspectorAudioComponentSourcePayload::NestedOutput {
+                                    output_id: output.id,
+                                },
+                                selected: output.id == output_id,
+                                selectable: true,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let source_label = source_options
+                    .iter()
+                    .find(|option| option.selected)
+                    .map(|option| option.label.clone())
+                    .unwrap_or_else(|| format!("嵌套输出 {output_id}（不可用）"));
+                InspectorAudioComponentModel {
+                    edit_id: edit.id,
+                    source_label,
+                    source_options,
+                    binding: None,
+                }
+            }
+        })
+        .collect()
+}
+
+fn asset_audio_component_label(
+    asset: &AssetRecord,
+    component_id: AudioSourceComponentId,
+) -> String {
+    let Some(component) = asset
+        .audio_components
+        .components
+        .iter()
+        .find(|component| component.id == component_id)
+    else {
+        return format!("Component {component_id}（目录中不存在）");
+    };
+    let primary = (component_id == AudioSourceComponentId::primary()).then_some("Primary · ");
+    let stream = asset
+        .media_info
+        .audio_streams
+        .iter()
+        .find(|stream| component.binding.matches_stream(stream));
+    match stream {
+        Some(stream) => format!(
+            "{}{}",
+            primary.unwrap_or_default(),
+            audio_stream_label(stream)
+        ),
+        None => format!(
+            "{}流 #{} · {}（需重绑定）",
+            primary.unwrap_or_default(),
+            component.binding.stream_index,
+            native_audio_layout_label(&component.binding.channel_layout)
+        ),
+    }
+}
+
+fn asset_audio_binding_label(asset: &AssetRecord, component_id: AudioSourceComponentId) -> String {
+    asset
+        .audio_components
+        .components
+        .iter()
+        .find(|component| component.id == component_id)
+        .map(|component| {
+            asset
+                .media_info
+                .audio_streams
+                .iter()
+                .find(|stream| component.binding.matches_stream(stream))
+                .map(audio_stream_label)
+                .unwrap_or_else(|| format!("流 #{}（需重绑定）", component.binding.stream_index))
+        })
+        .unwrap_or_else(|| "无有效物理映射".to_owned())
+}
+
+fn audio_stream_label(stream: &AudioStreamInfo) -> String {
+    let mut details = vec![
+        format!("流 #{}", stream.index),
+        native_audio_layout_label(&stream.channel_layout),
+    ];
+    if let Some(language) = stream.language.as_deref().filter(|value| !value.trim().is_empty()) {
+        details.push(language.to_owned());
+    }
+    if let Some(title) = stream.title.as_deref().filter(|value| !value.trim().is_empty()) {
+        details.push(title.to_owned());
+    }
+    if stream.is_default {
+        details.push("Default".to_owned());
+    }
+    details.join(" · ")
+}
+
+fn native_audio_layout_label(layout: &ChannelLayout) -> String {
+    match layout {
+        ChannelLayout::Unspecified(channels) => format!("未指定 {channels}ch"),
+        ChannelLayout::Mono => "Mono".to_owned(),
+        ChannelLayout::Stereo => "Stereo".to_owned(),
+        ChannelLayout::Surround51Side => "5.1(side)".to_owned(),
+        ChannelLayout::Surround51Back => "5.1(back)".to_owned(),
+        ChannelLayout::Surround71 => "7.1".to_owned(),
+        ChannelLayout::Other(channels) => format!("其他 {channels}ch"),
+    }
+}
+
 fn selected_clip_track_is_locked(state: &AppState, selection: SelectedClipRef) -> bool {
     let Some(sequence) = state.sequence.as_ref() else {
         return false;
@@ -3761,6 +4020,78 @@ fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                 )),
         );
 
+    if !model.audio_components.is_empty() {
+        let mut section = PropertySection::new("音频 Component");
+        for (index, component) in model.audio_components.iter().enumerate() {
+            let edit_id = component.edit_id;
+            let source_items = component
+                .source_options
+                .iter()
+                .map(|option| {
+                    let mut item = MenuItem::new(
+                        option.label.clone(),
+                        inspector_audio_source_action(selected_clip, edit_id, option.source),
+                    )
+                    .checked(option.selected);
+                    if !option.selectable {
+                        item = item.disabled();
+                    }
+                    item
+                })
+                .collect::<Vec<_>>();
+            let source_enabled = can_edit && !source_items.is_empty();
+            let source_row_label = if model.audio_components.len() == 1 {
+                "逻辑源".to_owned()
+            } else {
+                format!("逻辑源 {}", index + 1)
+            };
+            section = section.with_row(PropertyRow::new(
+                source_row_label,
+                Box::new(
+                    Dropdown::new(component.source_label.clone(), source_items)
+                        .with_max_visible_items(8)
+                        .enabled(source_enabled),
+                ),
+            ));
+
+            if let Some(binding) = &component.binding {
+                let mut binding_items = vec![
+                    MenuItem::new(
+                        "重新探测当前文件…",
+                        inspector_audio_refresh_action(binding.asset_id),
+                    ),
+                    MenuItem::separator(),
+                ];
+                binding_items.extend(binding.options.iter().map(|option| {
+                    MenuItem::new(
+                        option.label.clone(),
+                        inspector_audio_rebind_action(
+                            binding.asset_id,
+                            binding.component_id,
+                            option.stream_index,
+                        ),
+                    )
+                    .checked(option.selected)
+                }));
+                let binding_enabled = can_edit;
+                let binding_row_label = if model.audio_components.len() == 1 {
+                    "资产流映射".to_owned()
+                } else {
+                    format!("资产流映射 {}", index + 1)
+                };
+                section = section.with_row(PropertyRow::new(
+                    binding_row_label,
+                    Box::new(
+                        Dropdown::new(binding.label.clone(), binding_items)
+                            .with_max_visible_items(8)
+                            .enabled(binding_enabled),
+                    ),
+                ));
+            }
+        }
+        panel = panel.with_section(section);
+    }
+
     panel = panel.with_section(
         PropertySection::new("变换")
             .with_row(PropertyRow::new(
@@ -4024,6 +4355,38 @@ fn inspector_bool_action(selection: Option<SelectedClipRef>, value: bool) -> Act
         });
     }
     Action::NoOp
+}
+
+fn inspector_audio_source_action(
+    selection: Option<SelectedClipRef>,
+    edit_id: AudioComponentEditId,
+    source: InspectorAudioComponentSourcePayload,
+) -> Action {
+    selection
+        .map(|selection| {
+            inspector_set_audio_component_source_action(InspectorSetAudioComponentSourcePayload {
+                clip: inspector_clip_payload(selection),
+                edit_id,
+                source,
+            })
+        })
+        .unwrap_or(Action::NoOp)
+}
+
+fn inspector_audio_rebind_action(
+    asset_id: AssetId,
+    component_id: AudioSourceComponentId,
+    stream_index: u32,
+) -> Action {
+    assets_rebind_audio_component_action(AssetsRebindAudioComponentPayload {
+        asset_id,
+        component_id,
+        stream_index,
+    })
+}
+
+fn inspector_audio_refresh_action(asset_id: AssetId) -> Action {
+    assets_refresh_audio_components_action(AssetsRefreshAudioComponentsPayload { asset_id })
 }
 
 fn inspector_color_action(selection: Option<SelectedClipRef>, color: Color) -> Action {
@@ -4596,11 +4959,12 @@ mod tests {
         ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
         ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
         ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
-        ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG, ASSETS_RENAME_ASSET, ASSETS_SET_PROXY_MODE,
+        ASSETS_OPEN_FOLDER, ASSETS_PREPARE_DRAG, ASSETS_REBIND_AUDIO_COMPONENT,
+        ASSETS_REFRESH_AUDIO_COMPONENTS, ASSETS_RENAME_ASSET, ASSETS_SET_PROXY_MODE,
         EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, INSPECTOR_NAMESPACE, INSPECTOR_SELECT_EFFECT,
-        INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
-        INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
-        TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
+        INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, INSPECTOR_SET_CLIP_CURVE,
+        INSPECTOR_SET_CLIP_TRANSFORM_FIELD, INSPECTOR_SET_EFFECT_PROPERTY, TIMELINE_ADD_TRACK,
+        TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_DROP_ASSET, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
         TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT,
         TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
     };
@@ -4720,6 +5084,74 @@ mod tests {
         assert!(!models.timeline.tracks.is_empty());
         assert!(!models.inspector.curve_points.is_empty());
         assert!(!models.node_graph.nodes.is_empty());
+    }
+
+    #[test]
+    fn inspector_model_projects_asset_components_and_physical_binding_separately() {
+        let root = unique_temp_dir("inspector-audio-components");
+        let library = AssetLibrary::open(root.join("library")).expect("asset library");
+        let media_path = root.join("dual-audio.mov");
+        std::fs::write(&media_path, [0u8]).expect("media fixture");
+        let stream = |index, stream_id, language: &str, is_default| AudioStreamInfo {
+            index,
+            stream_id: Some(stream_id),
+            language: Some(language.to_owned()),
+            title: None,
+            is_default,
+            codec: mondrian_media::info::AudioCodec::Aac,
+            duration: Some(std::time::Duration::from_secs(1)),
+            sample_rate: 48_000,
+            channels: 2,
+            channel_layout: ChannelLayout::Stereo,
+            bit_depth: 24,
+            avg_bitrate: 256_000,
+        };
+        let info = mondrian_media::MediaInfo {
+            path: media_path.clone(),
+            duration: std::time::Duration::from_secs(1),
+            file_size: 1,
+            container: "mov".to_owned(),
+            video_streams: Vec::new(),
+            audio_streams: vec![stream(1, 10, "eng", false), stream(3, 30, "jpn", true)],
+            has_video: false,
+            has_audio: true,
+        };
+        let asset_id =
+            library.upsert_media_file_with_info(&media_path, info).expect("register Asset");
+        let mut sequence = Sequence::new("Inspector audio");
+        let track_id = sequence.audio_tracks[0].id;
+        let clip = Clip::new(asset_id, TimelineTime::ZERO, tt(25, sequence.time_base()))
+            .expect("audio Clip");
+        let clip_id = clip.id;
+        sequence
+            .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
+            .expect("add audio Clip");
+        let mut state = AppState::new();
+        state.sequence = Some(sequence);
+        state.asset_library = Some(library);
+        state.selection.selected_clips =
+            vec![SelectedClipRef { track_id, is_video_track: false, clip_id }];
+
+        let model = InspectorPanelModel::from_app_state(&state);
+
+        assert_eq!(model.audio_components.len(), 1);
+        let component = &model.audio_components[0];
+        assert_eq!(component.source_options.len(), 2);
+        assert_eq!(
+            component.source_options.iter().filter(|option| option.selected).count(),
+            1
+        );
+        let binding = component.binding.as_ref().expect("media binding editor");
+        assert_eq!(binding.asset_id, asset_id);
+        assert_eq!(binding.options.len(), 2);
+        assert_eq!(
+            binding.options.iter().filter(|option| option.selected).count(),
+            1
+        );
+
+        drop(model);
+        drop(state);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -8962,9 +9394,71 @@ mod tests {
     }
 
     #[test]
+    fn inspector_audio_actions_keep_logical_selection_separate_from_asset_rebind() {
+        let selection = SelectedClipRef {
+            track_id: TrackId::new(),
+            is_video_track: false,
+            clip_id: ClipId::new(),
+        };
+        let edit_id = AudioComponentEditId::new();
+        let component_id = AudioSourceComponentId::new();
+        let source_action = inspector_audio_source_action(
+            Some(selection),
+            edit_id,
+            InspectorAudioComponentSourcePayload::Media { component_id },
+        );
+        let Action::Custom { namespace, name, payload } = source_action else {
+            panic!("expected typed Inspector audio source action");
+        };
+        assert_eq!(namespace, INSPECTOR_NAMESPACE);
+        assert_eq!(name, INSPECTOR_SET_AUDIO_COMPONENT_SOURCE);
+        let payload: InspectorSetAudioComponentSourcePayload =
+            serde_json::from_value(payload).expect("audio source payload");
+        assert_eq!(payload.clip.clip_id, selection.clip_id);
+        assert_eq!(payload.edit_id, edit_id);
+        assert_eq!(
+            payload.source,
+            InspectorAudioComponentSourcePayload::Media { component_id }
+        );
+
+        let asset_id = AssetId::new();
+        let rebind_action = inspector_audio_rebind_action(asset_id, component_id, 7);
+        let Action::Custom { namespace, name, payload } = rebind_action else {
+            panic!("expected typed Asset audio rebind action");
+        };
+        assert_eq!(namespace, ASSETS_NAMESPACE);
+        assert_eq!(name, ASSETS_REBIND_AUDIO_COMPONENT);
+        let payload: AssetsRebindAudioComponentPayload =
+            serde_json::from_value(payload).expect("audio rebind payload");
+        assert_eq!(payload.asset_id, asset_id);
+        assert_eq!(payload.component_id, component_id);
+        assert_eq!(payload.stream_index, 7);
+
+        let refresh_action = inspector_audio_refresh_action(asset_id);
+        let Action::Custom { namespace, name, payload } = refresh_action else {
+            panic!("expected typed Asset audio refresh action");
+        };
+        assert_eq!(namespace, ASSETS_NAMESPACE);
+        assert_eq!(name, ASSETS_REFRESH_AUDIO_COMPONENTS);
+        let payload: AssetsRefreshAudioComponentsPayload =
+            serde_json::from_value(payload).expect("audio refresh payload");
+        assert_eq!(payload.asset_id, asset_id);
+    }
+
+    #[test]
     fn inspector_actions_without_selection_are_noops() {
         assert_eq!(inspector_value_action(None, "opacity", 42.0), Action::NoOp);
         assert_eq!(inspector_bool_action(None, true), Action::NoOp);
+        assert_eq!(
+            inspector_audio_source_action(
+                None,
+                AudioComponentEditId::new(),
+                InspectorAudioComponentSourcePayload::Media {
+                    component_id: AudioSourceComponentId::new(),
+                },
+            ),
+            Action::NoOp
+        );
         assert_eq!(
             inspector_color_action(None, Color::from_rgba8(1, 2, 3, 4)),
             Action::NoOp
@@ -9026,6 +9520,7 @@ mod tests {
             max_frame: 60.0,
             tint_area_mode: ColorPickerAreaMode::Wheel,
             curve_points: vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 1.0)],
+            audio_components: Vec::new(),
             effects: Vec::new(),
         };
         let mut panel = inspector_panel(&model);
@@ -9094,6 +9589,7 @@ mod tests {
             max_frame: 60.0,
             tint_area_mode: ColorPickerAreaMode::Wheel,
             curve_points: vec![CurvePoint::new(0.0, 1.0), CurvePoint::new(1.0, 1.0)],
+            audio_components: Vec::new(),
             effects: vec![InspectorEffectModel {
                 effect_id,
                 label: "Gaussian Blur".to_owned(),
