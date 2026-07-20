@@ -148,6 +148,14 @@ _Avoid_: Redraw-local output priority, Widget types in `app::preview_runtime`, U
 The device-scoped owner of native video import, working-linear compositing, spatial processing, display output, calibration, and current external-texture presentation resources for Viewer execution.
 _Avoid_: Window-owned GPU grab bag, separate headless rendering semantics
 
+**Viewer GPU Output Health**:
+The UI-independent policy that maps one typed presentation-attempt outcome plus renderer stage facts into the canonical Waiting, Blocked, Failed, Rejected, Degraded, or Ready status and cumulative counts. Window telemetry, Headless gates, performance smoke, and the budget CLI consume this single classifier and report schema.
+_Avoid_: Window-local Ready rules, duplicated health enums, treating texture registration without presentation/native-boundary proof as Ready
+
+**Viewer GPU Output Residency**:
+The UI-independent projection of declared Preview layers or completed renderer execution into typed decode, input-transform, working-residency, zero/low-copy, upload/readback, and native-import evidence. Planned and executed residency are distinct; one immutable platform capability snapshot is shared with hardware-decode admission for the lifetime of a renderer/Window Session.
+_Avoid_: Planned zero-copy success, capability probe as execution evidence, per-frame platform re-probe, mixing capability generations inside one frame record
+
 **Audio Playback**:
 The realtime path that owns output-device lifecycle, PCM preroll and consumption, render generations, underrun recovery, and consumed-media-position evidence for a Playback Session.
 _Avoid_: Audio clock, UI-owned output stream

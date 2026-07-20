@@ -8,10 +8,11 @@ authoritative Playback Snapshot plus bounded work directives. UI, Viewer,
 decode, renderer, and audio adapters execute directives; none of them may
 independently advance, pause, buffer, or end transport.
 
-This design replaces the current distributed ownership across `AppState`,
-`app::playback`, `app_ui::host`, and `app_ui::preview`. Migration is incremental:
-existing decode, render, cache, and audio implementations remain usable behind
-the new seams.
+This design is the active production boundary. The former distributed
+transport ownership across `AppState`, `app::playback`, `app_ui::host`, and
+`app_ui::preview` has been removed: those modules now adapt commands,
+observations, media execution, and presentation around the shared Engine and
+Preview Production Runtime.
 
 ## Goals
 
@@ -913,7 +914,11 @@ decode capability probes.
 - sustained 4K/Long-GOP pressure reaches bounded memory and reports drops;
 - Golden/Stress Project runs use real media and structured evidence.
 
-## Migration plan
+## Historical implementation sequence
+
+This section records how the current boundary was reached; Phases 0–5 are not
+open migration tasks and must not be used to justify compatibility authorities.
+Only Phase 6 remains deferred.
 
 ### Phase 0 — Characterize
 
@@ -978,8 +983,10 @@ compatibility authorities during Alpha.
 
 ## Current integration status
 
-Phase 1 is complete; Phase 2 and Phase 4 are active; and the first Phase 3 Clock
-Master slice is integrated through the `mondrian-playback` crate. The pure Engine now owns
+Phases 0–5 are integrated in the production architecture; Phase 6 remains
+explicitly deferred. Phase 5 still lacks release-grade fixed-corpus,
+multi-driver, and device-matrix evidence, which is a verification gap rather
+than permission for a second transport or scheduling authority. The pure Engine now owns
 the app's transport position/state, Synthetic Clock Master, epoch invalidation,
 exact rational clock advancement, stale-delivery rejection, and bounded
 temporary-resolution recovery policy. `AppState` projects current frame and
