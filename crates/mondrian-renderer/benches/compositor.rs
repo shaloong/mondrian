@@ -82,7 +82,8 @@ fn bench_layers(c: &mut Criterion, name: &str, w: u32, h: u32, n: usize) {
                 TimelineCompositeOptions::default(),
                 TimelineEffectColorRuntime::new(&color_engine, WorkingColorSpace::LinearRec709),
                 &mut scratch,
-            );
+            )
+            .expect("benchmark timeline composite");
             execute_cpu_output_stage(
                 &frame,
                 &RenderColorTransform::display(

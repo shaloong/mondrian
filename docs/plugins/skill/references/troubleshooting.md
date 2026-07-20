@@ -16,8 +16,8 @@
 **Common causes:**
 - Plugin crate's `register()` function not called in app init
 - Plugin API version incompatible with runtime (major mismatch, or plugin minor > runtime minor)
-- Plugin was disabled by a previous runtime failure (if using `DisablePluginDefinition`)
-- Degradation policy is `HideFromEffectLibrary` and plugin is not compatible
+- Plugin was disabled by a previous runtime failure (if using `DisableDefinition`)
+- Library policy is `HideWhenUnavailable` and plugin is not compatible
 
 ## Effect applies but no visual change
 
@@ -34,7 +34,7 @@
 - Parameters default to values that produce no visual effect (e.g., radius=0, opacity=0)
 - Graph builder returns early when parameters are below threshold — check the early-return condition
 - Effect's `evaluate_into` path is taken but evaluator is not set up correctly
-- For custom render: `params_builder` returns `None`, so the processor is never invoked
+- For custom render: `params_builder` returns `Ok(None)`, the definition's explicit identity result
 
 ## Custom processor not being called
 
@@ -43,12 +43,12 @@
 **Checklist:**
 
 1. Verify `register_custom_render_processor()` was called (done automatically by `with_custom_render_backend`)
-2. Check `params_builder` returns `Some(...)` — if it returns `None`, processor is skipped
+2. Check `params_builder` returns `Ok(Some(...))`; `Ok(None)` intentionally skips the processor and `Err` fails graph construction
 3. Check `effect_plugin_is_runtime_available()` — disabled plugins skip all execution
 4. Check that the `EffectRenderOp::Custom` node appears in the compiled graph
 
 **Common causes:**
-- `params_builder` returns `None` because a required property is missing or evaluates to `None`
+- `params_builder` returns `Ok(None)` because the definition deliberately treats current parameters as identity; missing required state should instead return `EffectGraphBuildError`
 - Plugin was disabled by a previous failure (check runtime status)
 - The effect's `evaluate_render_into` is never called because the graph builder path is preferred
 

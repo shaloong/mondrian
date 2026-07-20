@@ -5,7 +5,11 @@ Condensed API reference for the mondrian-effects crate. For complete docs, see `
 ## EffectPluginDefinitionBuilder
 
 ```rust
-EffectPluginDefinitionBuilder::new(key: impl Into<String>, display_name: impl Into<String>) -> Self
+EffectPluginDefinitionBuilder::new(
+    key: impl Into<String>,
+    display_name: impl Into<String>,
+    color_domain_contract: EffectColorDomainContract,
+) -> Self
 
 // Properties
 .property(descriptor: PropertyDescriptor) -> Self
@@ -14,11 +18,16 @@ EffectPluginDefinitionBuilder::new(key: impl Into<String>, display_name: impl In
 // Graph builders (choose ONE)
 .with_graph(build: F) -> Self              // Linear chain of ops
 .with_branching_graph(build: F) -> Self    // Branch/blend/mask support
+.try_with_graph(build: F) -> Self          // Fallible linear builder
+.try_with_branching_graph(build: F) -> Self // Fallible branching builder
 // where F: for<'a> Fn(&EffectNode, EffectEvalContext, &mut EffectGraphDsl<'a>) + Send + Sync + 'static
+// try_* builders return Result<(), EffectGraphBuildError>
 
 // Custom render (advanced)
 .with_custom_render_backend(params_builder, cache_key_builder, cache_policy, processor) -> Self
 .with_custom_render_processor(params_builder, processor) -> Self  // Simplified, no explicit cache_key
+// params_builder returns Result<Option<serde_json::Value>, EffectGraphBuildError>
+// Ok(None) is intentional identity; missing/invalid state returns Err
 
 // Contract
 .with_plugin_contract(contract: EffectPluginContract) -> Self
@@ -74,24 +83,27 @@ FrameDependent   // Depends on frame seed or temporal noise. Cache includes fram
 ```rust
 EffectPluginContract::new(plugin_version: impl Into<String>) -> Self
     .with_api_version(api_version: EffectPluginApiVersion) -> Self
-    .with_failure_policy(policy: EffectPluginFailurePolicy) -> Self
-    .with_degradation_policy(policy: EffectPluginDegradationPolicy) -> Self
+    .with_runtime_failure_policy(policy: EffectPluginRuntimeFailurePolicy) -> Self
+    .with_library_policy(policy: EffectPluginLibraryPolicy) -> Self
     .is_api_compatible() -> bool
 ```
 
-## EffectPluginFailurePolicy
+## EffectPluginRuntimeFailurePolicy
 
 ```rust
-BypassEffect              // Failed instance → identity. Other instances unaffected.
-DisablePluginDefinition   // Any failure → disable entire plugin definition for session.
+KeepDefinitionAvailable  // Report failure; definition remains available for repair/retry.
+DisableDefinition        // Any failure disables the definition for this process.
 ```
 
-## EffectPluginDegradationPolicy
+## EffectPluginLibraryPolicy
 
 ```rust
-IdentityFallback         // Failed/incompatible → silently bypass (no-op).
-HideFromEffectLibrary    // Failed/incompatible → hide from effects library panel.
+KeepVisible             // Keep unavailable definition visible for inspection/development.
+HideWhenUnavailable     // Hide unavailable definition from new-insertion UI.
 ```
+
+Neither policy permits a failed effect to render as identity. Graph and custom
+processor failures remain structured execution errors.
 
 ## Registration Functions
 

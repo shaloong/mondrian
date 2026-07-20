@@ -5997,7 +5997,8 @@ fn preview_single_media_color_output_matches_export_composite_contract() {
         TimelineCompositeOptions::default(),
         TimelineEffectColorRuntime::new(&color_context.engine, color_context.working_color_space),
         &mut export_scratch,
-    );
+    )
+    .expect("composite expected export frame");
     assert_eq!(
         expected_frame.descriptor().color_space,
         color_context.working_color_space.into()
@@ -6087,7 +6088,8 @@ fn preview_camera_log_input_matches_export_frame_hash() {
         TimelineCompositeOptions::default(),
         TimelineEffectColorRuntime::new(&color_context.engine, color_context.working_color_space),
         &mut export_scratch,
-    );
+    )
+    .expect("composite camera-log export frame");
     let export_boundary = RenderOutputColorBoundary::from_intent(
         mondrian_renderer::RenderOutputColorBoundaryTarget::Export,
         ColorSpace::Srgb,
@@ -6208,7 +6210,8 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
                 color_context.working_color_space,
             ),
             &mut export_scratch,
-        );
+        )
+        .expect("composite multilayer export frame");
     let export_boundary = RenderOutputColorBoundary::from_intent(
         mondrian_renderer::RenderOutputColorBoundaryTarget::Export,
         color_context.output_color_space.color().expect("encoded export output"),

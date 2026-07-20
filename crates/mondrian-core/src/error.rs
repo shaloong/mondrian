@@ -66,6 +66,9 @@ pub enum MondrianError {
     #[error("纹理上传失败: {reason}")]
     TextureUploadFailed { reason: String },
 
+    #[error("效果图求值失败: {reason}")]
+    EffectGraphEvaluationFailed { reason: String },
+
     // ── 素材库 ────────────────────────────────────────────────────────────────
     #[error("素材不存在: {asset_id}")]
     AssetNotFound { asset_id: String },

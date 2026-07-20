@@ -1,6 +1,9 @@
 # Color Space Spec
 
-Supported color spaces currently include:
+## Recognized identities and product verification
+
+The persisted model and the pinned Mondrian Standard OCIO contract currently
+recognize the following color-space identities:
 
 - Rec.709
 - Rec.2100 HLG
@@ -11,6 +14,23 @@ Supported color spaces currently include:
 - Apple Log
 - S-Log3
 - ARRI LogC4
+
+Recognition means the identity can be represented and has an exact intended
+OCIO mapping. It does not, by itself, mean metadata detection, decode, input
+transform, working-space processing, display, export encoding and output tags
+have all been product-verified. Capability reports must distinguish at least:
+
+- recognized identity and configured processor mapping;
+- media metadata detected, overridden, conflicting or unresolved;
+- CPU/GPU input and output transform executable for the exact frame contract;
+- preview/export golden-reference verified for a named corpus role;
+- explicit fallback or blocker.
+
+An unresolved or conflicting Log/HDR interpretation must stop the color-managed
+path or require an explicit user override. It must not select a nearby transform
+or label unchanged samples with the recognized identity. The M1 release floor
+and its required reference evidence are defined in `docs/ROADMAP.md`; this list
+is not a release-support matrix.
 
 ## Engine
 
@@ -27,8 +47,9 @@ if it is unset or points to a missing file, the selected source is invalid.
 
 The embedded Standard config is also exposed through
 `mondrian_default_ocio_contract()`. That contract is the authoritative list of
-Mondrian `ColorSpace` to OCIO name mappings plus the default and supported
-display/view pairs for product UI and renderer integration.
+Mondrian `ColorSpace` to OCIO name mappings plus the display/view pairs admitted
+by product UI and renderer integration. Admission still requires the selected
+config, processor, frame contract and output path to pass their runtime checks.
 Rec.2020 resolves to `Camera Rec.2020` at source/input boundaries and to the
 display-referred `Rec.2020 SDR - Display` endpoint for a Mondrian Standard
 program output; these reference-domain roles must not be aliased.

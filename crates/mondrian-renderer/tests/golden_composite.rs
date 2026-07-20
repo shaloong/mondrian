@@ -106,7 +106,8 @@ fn composite_single_layer(w: u32, h: u32, rgba: &[u8], opacity: f32, blend: Blen
         TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
-    );
+    )
+    .expect("composite reference frame");
     encode_rec709(&frame)
 }
 
@@ -177,7 +178,8 @@ fn golden_transparent_canvas() {
         TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
-    );
+    )
+    .expect("composite transparent frame");
     let result = encode_rec709(&frame);
     check_golden("transparent_canvas_64x64.png", w, h, &result);
 }
@@ -243,7 +245,8 @@ fn golden_two_layers_normal() {
         TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
-    );
+    )
+    .expect("composite two-layer frame");
     let result = encode_rec709(&frame);
     check_golden("two_layers_normal_64x64.png", w, h, &result);
 }
@@ -280,7 +283,8 @@ fn preview_display_and_export_delivery_boundaries_match_with_stable_hash() {
         TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
-    );
+    )
+    .expect("composite display/export parity frame");
 
     let preview = execute_cpu_output_boundary_rgba8(
         &frame,
@@ -394,7 +398,8 @@ fn golden_multilayer_float_linear_blend() {
         TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
-    );
+    )
+    .expect("composite screen-blend frame");
     let result = encode_rec709(&frame);
     check_golden("multilayer_screen_blend_32x24.png", w, h, &result);
 }
@@ -420,7 +425,8 @@ fn golden_non_identity_transform_float_path() {
         TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
-    );
+    )
+    .expect("composite transformed frame");
     let result = encode_rec709(&frame);
     check_golden("scaled_transform_float_32x24.png", w, h, &result);
 }
@@ -457,7 +463,8 @@ fn golden_preview_export_parity_across_color_spaces() {
         TimelineCompositeOptions::default(),
         test_color_runtime(),
         &mut scratch,
-    );
+    )
+    .expect("composite HDR parity frame");
 
     let preview = execute_cpu_output_boundary_rgba8(
         &frame,

@@ -2699,7 +2699,8 @@ fn render_sequence_frame_into(
         composite_options,
         TimelineEffectColorRuntime::new(&color_context.engine, color_context.working_color_space),
         &mut scratch,
-    );
+    )
+    .map_err(|error| format!("timeline composite failed: {error}"))?;
     if let Some(diagnostics) = composite_diagnostics {
         diagnostics.accumulate(rendered.diagnostics);
     }

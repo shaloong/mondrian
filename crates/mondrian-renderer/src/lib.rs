@@ -203,9 +203,9 @@ pub use timeline_composite::{
     is_identity_transform, quantize_transform_signature, TimelineAdjustmentLayer,
     TimelineCompositeBackground, TimelineCompositeColorPath, TimelineCompositeColorPathSummary,
     TimelineCompositeDiagnostics, TimelineCompositeDomainBlockerBreakdown,
-    TimelineCompositeElement, TimelineCompositeFrame, TimelineCompositeLegacyBreakdown,
-    TimelineCompositeOptions, TimelineCompositeScratch, TimelineEffectColorRuntime,
-    TimelineMediaLayer, TimelineSolidColorLayer,
+    TimelineCompositeElement, TimelineCompositeError, TimelineCompositeFrame,
+    TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineEffectColorRuntime, TimelineMediaLayer, TimelineSolidColorLayer,
 };
 pub use timeline_render_plan::{
     collect_timeline_color_diagnostics, collect_timeline_color_diagnostics_with_display_view,

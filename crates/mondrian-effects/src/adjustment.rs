@@ -1,6 +1,6 @@
 use crate::execution::custom_render_processor_registry;
-use crate::EffectRenderOp;
 use crate::{effect_definition, plugin_contract, record_plugin_runtime_failure};
+use crate::{EffectExecutionError, EffectRenderOp};
 use mondrian_core::types::BlendMode;
 use serde::{Deserialize, Serialize};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -135,7 +135,7 @@ pub(crate) fn apply_render_op(
     height: u32,
     op: &EffectRenderOp,
     frame_seed: i64,
-) {
+) -> Result<(), EffectExecutionError> {
     match op {
         EffectRenderOp::ColorAdjust { exposure, contrast, saturation } => {
             apply_primary_color_adjustments(
@@ -223,25 +223,35 @@ pub(crate) fn apply_render_op(
                 match result {
                     Ok(Ok(())) => *working = staged,
                     Ok(Err(error)) => {
-                        record_plugin_runtime_failure(key, contract.as_ref(), format!("{error}"));
+                        let reason = error.to_string();
+                        record_plugin_runtime_failure(key, contract.as_ref(), reason.clone());
+                        return Err(EffectExecutionError::CustomProcessorFailed {
+                            key: key.clone(),
+                            reason,
+                        });
                     }
                     Err(_) => {
-                        record_plugin_runtime_failure(
-                            key,
-                            contract.as_ref(),
-                            "custom render processor panicked",
-                        );
+                        let reason = "custom render processor panicked".to_string();
+                        record_plugin_runtime_failure(key, contract.as_ref(), reason.clone());
+                        return Err(EffectExecutionError::CustomProcessorFailed {
+                            key: key.clone(),
+                            reason,
+                        });
                     }
                 }
-            } else if let Some(definition) = effect_definition(&crate::EffectType::from_key(key)) {
-                record_plugin_runtime_failure(
-                    key,
-                    definition.plugin_contract(),
-                    "custom render processor missing",
-                );
+            } else {
+                if let Some(definition) = effect_definition(&crate::EffectType::from_key(key)) {
+                    record_plugin_runtime_failure(
+                        key,
+                        definition.plugin_contract(),
+                        "custom render processor missing",
+                    );
+                }
+                return Err(EffectExecutionError::CustomProcessorUnavailable { key: key.clone() });
             }
         }
     }
+    Ok(())
 }
 
 pub(crate) fn apply_render_op_f32(
@@ -1687,8 +1697,9 @@ mod tests {
         let key = "plugin.render.fail_safe";
         crate::register_plugin_contract(
             key,
-            crate::EffectPluginContract::new("1.0.0")
-                .with_failure_policy(crate::EffectPluginFailurePolicy::BypassEffect),
+            crate::EffectPluginContract::new("1.0.0").with_runtime_failure_policy(
+                crate::EffectPluginRuntimeFailurePolicy::KeepDefinitionAvailable,
+            ),
         );
         register_custom_render_processor(
             key,
@@ -1704,7 +1715,7 @@ mod tests {
         );
 
         let input = vec![32u8, 48, 64, 255];
-        let output = apply_effect_render_plan(
+        let error = apply_effect_render_plan(
             &input,
             1,
             1,
@@ -1718,9 +1729,13 @@ mod tests {
             },
             0,
         )
-        .expect("execute fail-safe custom effect");
+        .expect_err("failed custom effect must fail closed");
 
-        assert_eq!(output, input);
+        assert!(matches!(
+            error,
+            crate::EffectExecutionError::CustomProcessorFailed { ref key, .. }
+                if key == "plugin.render.fail_safe"
+        ));
     }
 
     #[test]

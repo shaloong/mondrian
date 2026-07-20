@@ -1,7 +1,7 @@
 use crate::{
     effect::{
         EffectCacheKeyBuilder, EffectCachePolicy, EffectDefinition, EffectEvalContext,
-        EffectGraphBuilder, EffectNode, EffectRenderParamsBuilder,
+        EffectGraphBuildError, EffectGraphBuilder, EffectNode, EffectRenderParamsBuilder,
     },
     graph::{EffectGraphBuilderState, EffectGraphValue},
     CustomEffectRenderProcessor, EffectPluginContract, EffectRenderOp,
@@ -149,6 +149,28 @@ impl EffectPluginDefinitionBuilder {
         let graph_builder: EffectGraphBuilder = Arc::new(move |effect, context, builder| {
             let mut dsl = EffectGraphDsl::new(builder);
             build(effect, context, &mut dsl);
+            Ok(())
+        });
+        self.definition = self.definition.with_graph_builder(graph_builder);
+        self
+    }
+
+    /// Register a linear graph builder that can reject unavailable resources
+    /// or another effect-specific evaluation failure without panicking.
+    pub fn try_with_graph<F>(mut self, build: F) -> Self
+    where
+        F: for<'a> Fn(
+                &EffectNode,
+                EffectEvalContext,
+                &mut EffectGraphDsl<'a>,
+            ) -> Result<(), EffectGraphBuildError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let graph_builder: EffectGraphBuilder = Arc::new(move |effect, context, builder| {
+            let mut dsl = EffectGraphDsl::new(builder);
+            build(effect, context, &mut dsl)
         });
         self.definition = self.definition.with_graph_builder(graph_builder);
         self
@@ -164,6 +186,27 @@ impl EffectPluginDefinitionBuilder {
         let graph_builder: EffectGraphBuilder = Arc::new(move |effect, context, builder| {
             let mut dsl = EffectGraphDsl::new(builder);
             build(effect, context, &mut dsl);
+            Ok(())
+        });
+        self.definition = self.definition.with_branching_graph_builder(graph_builder);
+        self
+    }
+
+    /// Register a branching graph builder with explicit evaluation failures.
+    pub fn try_with_branching_graph<F>(mut self, build: F) -> Self
+    where
+        F: for<'a> Fn(
+                &EffectNode,
+                EffectEvalContext,
+                &mut EffectGraphDsl<'a>,
+            ) -> Result<(), EffectGraphBuildError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let graph_builder: EffectGraphBuilder = Arc::new(move |effect, context, builder| {
+            let mut dsl = EffectGraphDsl::new(builder);
+            build(effect, context, &mut dsl)
         });
         self.definition = self.definition.with_branching_graph_builder(graph_builder);
         self
@@ -264,7 +307,7 @@ mod tests {
         register_effect_definition(definition).expect("register SDK definition");
 
         let effect = crate::EffectNode::with_defaults(plugin_type.clone());
-        let graph = build_effect_render_graph(&[effect], tt(0));
+        let graph = build_effect_render_graph(&[effect], tt(0)).expect("build plugin SDK graph");
         assert_eq!(graph.nodes.len(), 3);
 
         let caps = effect_definition(&plugin_type).expect("effect definition").capabilities();

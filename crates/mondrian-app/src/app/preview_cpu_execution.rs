@@ -145,7 +145,8 @@ pub(crate) fn composite_resolved_preview_working(
         TimelineCompositeOptions::default(),
         TimelineEffectColorRuntime::new(&color_context.engine, color_context.working_color_space),
         scratch,
-    );
+    )
+    .map_err(|error| format!("timeline composite failed: {error}"))?;
     let cpu_composite_us = duration_us(cpu_composite_started_at.elapsed());
     Ok(PreviewWorkingCompositeOutput {
         frame: composite.frame,

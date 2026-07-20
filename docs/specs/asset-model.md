@@ -4,12 +4,16 @@ Assets are project-library records. Timeline clips reference assets by `AssetId`
 
 ## Asset Kinds
 
-Implemented `AssetKind` values:
+Current persisted `AssetKind` discriminants are:
 
 - `Video`
 - `Audio`
 - `AdjustmentLayer`
 - `SolidColor`
+
+This list describes model identities only. Import/probe, decode, relink,
+thumbnail, proxy, timeline, preview and export capability must be reported and
+verified separately for each real codec/container or generated kind.
 
 Planned/spec-level kinds:
 

@@ -72,8 +72,8 @@
 
 ### 版本与容错
 
-- [ ] 开发期用 `BypassEffect`
-- [ ] 发布前切换到 `DisablePluginDefinition` + `HideFromEffectLibrary`
+- [ ] 开发期用 `KeepDefinitionAvailable` + `KeepVisible`，但仍处理并显示每次求值错误
+- [ ] 发布前切换到 `DisableDefinition` + `HideWhenUnavailable`
 - [ ] 不在处理器中 panic（运行时已有隔离，但 panic 仍是应该避免的）
 
 ## 3. 反模式

@@ -22,8 +22,9 @@ pub use effect::{
     build_effect_render_graph, compile_clip_effect_graph, effect_category_tree, effect_definition,
     effect_display_name, effect_library_types, register_effect_definition, EffectCacheKeyBuilder,
     EffectCachePolicy, EffectCapabilities, EffectCategoryNode, EffectColorDomain,
-    EffectColorDomainContract, EffectDefinition, EffectEvalContext, EffectGraphBuilder, EffectNode,
-    EffectNodeExt, EffectRenderOp, EffectRenderParamsBuilder, EffectRenderPlan, EffectType,
+    EffectColorDomainContract, EffectDefinition, EffectEvalContext, EffectGraphBuildError,
+    EffectGraphBuilder, EffectNode, EffectNodeExt, EffectRenderOp, EffectRenderParamsBuilder,
+    EffectRenderPlan, EffectType,
 };
 pub use execution::{
     apply_compiled_effect_graph, apply_compiled_effect_graph_pass,
@@ -57,7 +58,7 @@ pub use plugin_contract::{
     effect_plugin_is_library_visible, effect_plugin_is_runtime_available,
     effect_plugin_runtime_status, plugin_contract, record_plugin_runtime_failure,
     register_plugin_contract, EffectPluginApiVersion, EffectPluginContract,
-    EffectPluginDegradationPolicy, EffectPluginFailurePolicy, EffectPluginRuntimeStatus,
+    EffectPluginLibraryPolicy, EffectPluginRuntimeFailurePolicy, EffectPluginRuntimeStatus,
     CURRENT_EFFECT_PLUGIN_API_VERSION,
 };
 pub use plugin_sdk::{EffectGraphDsl, EffectPluginDefinitionBuilder};

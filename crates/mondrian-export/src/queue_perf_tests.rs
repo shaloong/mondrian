@@ -202,6 +202,7 @@ fn compose_frame_layers_with_diagnostics(
         ),
         &mut scratch,
     )
+    .expect("composite export simulation frame")
     .diagnostics
 }
 

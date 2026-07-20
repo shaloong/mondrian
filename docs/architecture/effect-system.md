@@ -71,6 +71,26 @@ topology-impacting parameter forces those capabilities to be resolved again.
 
 `CompiledEffectGraph` stores schedule, node use counts, cache policies, estimated cost, subtree signatures, output cache flags, and a compiled color-domain plan.
 
+Graph construction is fallible. `EffectGraphBuildError` identifies an enabled
+instance by persistent `EffectId` and stable definition key when the definition
+is missing, modeled but not executable, runtime-disabled, missing a required
+resource, panics, or produces an invalid graph. Builders stage mutations in a
+temporary graph and commit only after successful return. Built-in and plugin
+builders share this boundary; the plugin SDK additionally exposes fallible
+builder registration for definition-specific resource checks.
+
+Disabled instances are the only implicit identity operation. An enabled
+modeled-only effect, missing plugin definition, unbound/invalid LUT, or failed
+builder never becomes an unchanged frame. The shared timeline render-plan
+compiler maps these failures into `MondrianError::EffectGraphEvaluationFailed`,
+so preview and export both stop before publishing a misleading result. Any
+future operator-approved plugin bypass must be an explicit, diagnosable policy
+above this compiler seam rather than a warning followed by identity output.
+`EffectPluginRuntimeFailurePolicy` controls whether a failed definition remains
+callable or becomes disabled; `EffectPluginLibraryPolicy` controls only whether
+an unavailable definition appears in new-insertion UI. Neither contract changes
+frame semantics or authorizes identity fallback.
+
 ## Effect Color Domains
 
 Every `EffectDefinition`, including plugin-authored definitions, declares an
@@ -179,6 +199,12 @@ execution. The encoded executor returns `EffectExecutionError` for any domain
 plan because it has no typed OCIO runtime. Custom/plugin processors remain
 unsupported until their ABI declares a float implementation. CPU float support
 does not imply GPU execution support.
+
+The encoded custom-processor fallback is also fail-closed. Missing processors,
+processor errors and processor panics return `EffectExecutionError`; staged
+pixels are discarded. `timeline_composite` wraps encoded, float and unresolved
+domain failures in `TimelineCompositeError`, and production preview/export
+propagate that error instead of substituting black or unchanged pixels.
 
 `lower_effect_graph_to_gpu_plan(...)` is the backend-neutral GPU boundary. It
 accepts only a compiled single-source unary chain and emits an immutable fused

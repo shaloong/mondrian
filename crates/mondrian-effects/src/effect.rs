@@ -32,10 +32,73 @@ pub struct EffectEvalContext {
     pub time: TimelineTime,
 }
 
-pub type EffectGraphBuilder =
-    Arc<dyn Fn(&EffectNode, EffectEvalContext, &mut EffectGraphBuilderState) + Send + Sync>;
-pub type EffectRenderParamsBuilder =
-    Arc<dyn Fn(&EffectNode, EffectEvalContext) -> Option<serde_json::Value> + Send + Sync>;
+/// Failure to turn an enabled authored effect into an executable render graph.
+///
+/// Enabled effects never silently degrade to identity. Callers may present the
+/// error, disable or repair the effect explicitly, or abort export.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EffectGraphBuildError {
+    /// The project references an effect key that has no registered definition.
+    #[error("effect `{effect_key}` ({effect_id}) has no registered definition")]
+    DefinitionUnavailable {
+        effect_key: String,
+        effect_id: EffectId,
+    },
+    /// A definition exists for authoring/serialization but has no evaluator.
+    #[error("effect `{effect_key}` ({effect_id}) has no executable render graph")]
+    EvaluationUnsupported {
+        effect_key: String,
+        effect_id: EffectId,
+    },
+    /// The registered plugin cannot execute in the current process.
+    #[error("effect runtime `{effect_key}` ({effect_id}) is unavailable")]
+    RuntimeUnavailable {
+        effect_key: String,
+        effect_id: EffectId,
+    },
+    /// A required resource is unbound, unreadable, or invalid.
+    #[error(
+        "effect `{effect_key}` ({effect_id}) cannot resolve resource `{parameter_id}`: {reason}"
+    )]
+    ResourceUnavailable {
+        effect_key: String,
+        effect_id: EffectId,
+        parameter_id: ParameterId,
+        reason: String,
+    },
+    /// Third-party evaluator code panicked while producing its graph.
+    #[error("effect graph builder `{effect_key}` ({effect_id}) panicked")]
+    BuilderPanicked {
+        effect_key: String,
+        effect_id: EffectId,
+    },
+    /// The produced graph violated graph or color-domain invariants.
+    #[error("compiled effect graph is invalid")]
+    InvalidGraph,
+}
+
+/// Fallible graph builder shared by built-in and plugin effect definitions.
+pub type EffectGraphBuilder = Arc<
+    dyn Fn(
+            &EffectNode,
+            EffectEvalContext,
+            &mut EffectGraphBuilderState,
+        ) -> Result<(), EffectGraphBuildError>
+        + Send
+        + Sync,
+>;
+/// Lower a custom effect instance into backend parameters.
+///
+/// `Ok(None)` is an intentional identity result, such as a zero-strength
+/// processor. Missing resources or invalid state must return `Err`.
+pub type EffectRenderParamsBuilder = Arc<
+    dyn Fn(
+            &EffectNode,
+            EffectEvalContext,
+        ) -> Result<Option<serde_json::Value>, EffectGraphBuildError>
+        + Send
+        + Sync,
+>;
 pub type EffectCacheKeyBuilder =
     Arc<dyn Fn(&EffectNode, EffectEvalContext) -> Option<String> + Send + Sync>;
 
@@ -426,7 +489,7 @@ impl EffectDefinition {
         let effect_key_for_graph = effect_key.clone();
         let cache_key_builder_for_graph = cache_key_builder.clone();
         self.graph_builder = Some(Arc::new(move |effect, context, graph| {
-            if let Some(params) = params_builder_for_graph(effect, context) {
+            if let Some(params) = params_builder_for_graph(effect, context)? {
                 let cache_key = cache_key_builder_for_graph
                     .as_ref()
                     .and_then(|builder| builder(effect, context));
@@ -437,6 +500,7 @@ impl EffectDefinition {
                     cache_policy,
                 });
             }
+            Ok(())
         }));
         self.capabilities.supports_render_graph = true;
         self.capabilities.supports_custom_render_processor = true;
@@ -657,13 +721,20 @@ fn sort_category_tree(nodes: &mut [EffectCategoryNode]) {
     }
 }
 
-pub fn build_effect_render_graph(effects: &[EffectNode], time: TimelineTime) -> EffectRenderGraph {
+/// Evaluate enabled authored effects into one render graph.
+///
+/// Disabled effects are explicit identity operations. Every enabled effect
+/// must have an available evaluator and all required resources.
+pub fn build_effect_render_graph(
+    effects: &[EffectNode],
+    time: TimelineTime,
+) -> Result<EffectRenderGraph, EffectGraphBuildError> {
     let mut builder = EffectGraphBuilderState::new();
     let context = EffectEvalContext { time };
     for effect in effects.iter().filter(|effect| effect.is_enabled) {
-        effect.evaluate_graph_into(context, &mut builder);
+        effect.evaluate_graph_into(context, &mut builder)?;
     }
-    builder.finish()
+    Ok(builder.finish())
 }
 
 /// Build, mask-inject, and compile the effect graph for a clip.
@@ -675,14 +746,14 @@ pub fn compile_clip_effect_graph(
     effects: &[EffectNode],
     masks: &[MaskComponent],
     time: TimelineTime,
-) -> Option<Arc<CompiledEffectGraph>> {
+) -> Result<Arc<CompiledEffectGraph>, EffectGraphBuildError> {
     use crate::graph::{get_or_compile_scheduled_render_graph, identity_compiled_effect_graph};
     use crate::graph::{EffectGraphNode, EffectGraphNodeId, EffectGraphNodeKind};
     if effects.iter().all(|effect| !effect.is_enabled) && masks.iter().all(|mask| !mask.enabled) {
-        return identity_compiled_effect_graph();
+        return identity_compiled_effect_graph().ok_or(EffectGraphBuildError::InvalidGraph);
     }
 
-    let mut graph = build_effect_render_graph(effects, time);
+    let mut graph = build_effect_render_graph(effects, time)?;
 
     // Inject mask nodes after effects for each enabled mask.
     let mut current_output = graph.output;
@@ -723,7 +794,7 @@ pub fn compile_clip_effect_graph(
     }
 
     graph.output = current_output;
-    get_or_compile_scheduled_render_graph(graph)
+    get_or_compile_scheduled_render_graph(graph).ok_or(EffectGraphBuildError::InvalidGraph)
 }
 
 /// Extension trait for EffectNode methods that require the effect registry.
@@ -733,7 +804,7 @@ pub trait EffectNodeExt {
         &self,
         context: EffectEvalContext,
         builder: &mut EffectGraphBuilderState,
-    );
+    ) -> Result<(), EffectGraphBuildError>;
 }
 
 impl EffectNodeExt for EffectNode {
@@ -754,26 +825,43 @@ impl EffectNodeExt for EffectNode {
         &self,
         context: EffectEvalContext,
         builder: &mut EffectGraphBuilderState,
-    ) {
-        if let Some(definition) = effect_definition(&self.effect_type) {
-            if !effect_plugin_is_runtime_available(definition.key(), definition.plugin_contract()) {
-                return;
+    ) -> Result<(), EffectGraphBuildError> {
+        let effect_key = self.effect_type.key();
+        let definition = effect_definition(&self.effect_type).ok_or_else(|| {
+            EffectGraphBuildError::DefinitionUnavailable {
+                effect_key: effect_key.clone(),
+                effect_id: self.id,
             }
-            if let Some(graph_builder) = definition.graph_builder.as_ref() {
-                let mut staged = builder.clone();
-                staged.set_active_domain_contract(definition.color_domain_contract());
-                let result = catch_unwind(AssertUnwindSafe(|| {
-                    graph_builder(self, context, &mut staged)
-                }));
-                if result.is_ok() {
-                    *builder = staged;
-                } else {
-                    record_plugin_runtime_failure(
-                        definition.key(),
-                        definition.plugin_contract(),
-                        "effect graph builder panicked",
-                    );
-                }
+        })?;
+        if !effect_plugin_is_runtime_available(definition.key(), definition.plugin_contract()) {
+            return Err(EffectGraphBuildError::RuntimeUnavailable {
+                effect_key,
+                effect_id: self.id,
+            });
+        }
+        let graph_builder = definition.graph_builder.as_ref().ok_or_else(|| {
+            EffectGraphBuildError::EvaluationUnsupported {
+                effect_key: effect_key.clone(),
+                effect_id: self.id,
+            }
+        })?;
+        let mut staged = builder.clone();
+        staged.set_active_domain_contract(definition.color_domain_contract());
+        match catch_unwind(AssertUnwindSafe(|| {
+            graph_builder(self, context, &mut staged)
+        })) {
+            Ok(Ok(())) => {
+                *builder = staged;
+                Ok(())
+            }
+            Ok(Err(error)) => Err(error),
+            Err(_) => {
+                record_plugin_runtime_failure(
+                    definition.key(),
+                    definition.plugin_contract(),
+                    "effect graph builder panicked",
+                );
+                Err(EffectGraphBuildError::BuilderPanicked { effect_key, effect_id: self.id })
             }
         }
     }
@@ -1220,6 +1308,7 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                         saturation,
                     });
                 }
+                Ok(())
             }))
         }
         EffectType::WhiteBalance => {
@@ -1231,6 +1320,7 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 if temperature.abs() > 1.0e-4 || tint.abs() > 1.0e-4 {
                     graph.append_unary(EffectRenderOp::WhiteBalance { temperature, tint });
                 }
+                Ok(())
             }))
         }
         EffectType::Lut3D => {
@@ -1239,20 +1329,29 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
             Some(Arc::new(move |effect, context, graph| {
                 let intensity = effect.evaluate_f32_parameter(&intensity_id, context.time, 1.0);
                 if intensity <= 1.0e-4 {
-                    return;
+                    return Ok(());
                 }
                 let Some(ParameterResourceReference::ExternalFile { path }) =
                     effect.evaluate_resource_parameter(&path_id, context.time)
                 else {
-                    return;
+                    return Err(EffectGraphBuildError::ResourceUnavailable {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        parameter_id: path_id.clone(),
+                        reason: "resource is not bound to an external LUT file".to_string(),
+                    });
                 };
                 match Lut3D::from_cube_file_cached(&path) {
                     Ok(lut) => {
                         graph.append_unary(EffectRenderOp::Lut3D { lut, intensity });
+                        Ok(())
                     }
-                    Err(err) => {
-                        tracing::warn!(path = %path.display(), "failed to load LUT graph file: {err}")
-                    }
+                    Err(error) => Err(EffectGraphBuildError::ResourceUnavailable {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        parameter_id: path_id.clone(),
+                        reason: format!("{}: {error}", path.display()),
+                    }),
                 }
             }))
         }
@@ -1263,6 +1362,7 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 if radius.abs() > 1.0e-4 {
                     graph.append_unary(EffectRenderOp::GaussianBlur { radius });
                 }
+                Ok(())
             }))
         }
         EffectType::Sharpen => {
@@ -1272,6 +1372,7 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 if amount.abs() > 1.0e-4 {
                     graph.append_unary(EffectRenderOp::Sharpen { amount });
                 }
+                Ok(())
             }))
         }
         EffectType::Vignette => {
@@ -1283,6 +1384,7 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 if intensity.abs() > 1.0e-4 {
                     graph.append_unary(EffectRenderOp::Vignette { intensity, feather });
                 }
+                Ok(())
             }))
         }
         EffectType::ChromaticAberration => {
@@ -1292,6 +1394,7 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 if amount.abs() > 1.0e-4 {
                     graph.append_unary(EffectRenderOp::ChromaticAberration { amount });
                 }
+                Ok(())
             }))
         }
         EffectType::Grain => {
@@ -1301,6 +1404,7 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 if amount.abs() > 1.0e-4 {
                     graph.append_unary(EffectRenderOp::Grain { amount });
                 }
+                Ok(())
             }))
         }
         _ => None,
@@ -1434,6 +1538,84 @@ mod tests {
     }
 
     #[test]
+    fn effect_library_exposes_only_builtins_with_executable_graphs() {
+        let expected = [
+            EffectType::BasicCorrection,
+            EffectType::WhiteBalance,
+            EffectType::Lut3D,
+            EffectType::GaussianBlur,
+            EffectType::Sharpen,
+            EffectType::Vignette,
+            EffectType::ChromaticAberration,
+            EffectType::Grain,
+        ]
+        .into_iter()
+        .map(|effect_type| effect_type.key())
+        .collect::<std::collections::BTreeSet<_>>();
+        let actual = effect_library_types()
+            .into_iter()
+            .filter(|effect_type| !matches!(effect_type, EffectType::Plugin(_)))
+            .map(|effect_type| effect_type.key())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(actual, expected);
+        for modeled_only in [
+            EffectType::ColorWheel,
+            EffectType::Curves,
+            EffectType::HueSaturationLightness,
+            EffectType::ChromaKey,
+            EffectType::LumaKey,
+        ] {
+            let definition = effect_definition(&modeled_only).expect("built-in definition");
+            assert!(!definition.supports_visual_evaluation());
+        }
+    }
+
+    #[test]
+    fn enabled_modeled_only_effect_fails_instead_of_rendering_identity() {
+        let effect = EffectNode::with_defaults(EffectType::ColorWheel);
+
+        let error = build_effect_render_graph(&[effect], tt(0))
+            .expect_err("modeled-only effect must not render as identity");
+
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::EvaluationUnsupported { effect_key, .. }
+                if effect_key == "builtin.color_wheel"
+        ));
+    }
+
+    #[test]
+    fn enabled_lut_with_unbound_resource_fails_instead_of_rendering_identity() {
+        let effect = EffectNode::with_defaults(EffectType::Lut3D);
+
+        let error = build_effect_render_graph(&[effect], tt(0))
+            .expect_err("unbound LUT must not render as identity");
+
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::ResourceUnavailable { effect_key, .. }
+                if effect_key == "builtin.lut_3d"
+        ));
+    }
+
+    #[test]
+    fn enabled_unknown_plugin_effect_fails_instead_of_rendering_identity() {
+        let effect = EffectNode::new(EffectType::Plugin(
+            "plugin.missing.persisted-definition".to_string(),
+        ));
+
+        let error = build_effect_render_graph(&[effect], tt(0))
+            .expect_err("missing plugin definition must not render as identity");
+
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::DefinitionUnavailable { effect_key, .. }
+                if effect_key == "plugin.missing.persisted-definition"
+        ));
+    }
+
+    #[test]
     fn builtin_execution_uses_parameter_identity_and_value_invalidates_graph_signature() {
         let mut effect = EffectNode::with_defaults(EffectType::GaussianBlur);
         let radius_id = builtin_parameter_id(&EffectType::GaussianBlur, "radius");
@@ -1514,7 +1696,7 @@ mod tests {
             .set_static_value_by_parameter(&intensity_id, PropertyValue::Float(0.75))
             .expect("set intensity");
 
-        let graph = build_effect_render_graph(&[effect], tt(0));
+        let graph = build_effect_render_graph(&[effect], tt(0)).expect("build LUT graph");
         assert!(graph.nodes.iter().any(|n| matches!(
             &n.kind,
             EffectGraphNodeKind::UnaryEffect { op: EffectRenderOp::Lut3D { .. }, .. }
@@ -1554,6 +1736,7 @@ mod tests {
                         saturation: 1.0,
                     });
                 }
+                Ok(())
             })),
         )
         .expect("register auto exposure definition");
@@ -1573,7 +1756,7 @@ mod tests {
         assert!((value - 0.85).abs() < 0.001);
 
         // Verify the effect produces a graph node
-        let graph = build_effect_render_graph(&[effect], tt(0));
+        let graph = build_effect_render_graph(&[effect], tt(0)).expect("build plugin graph");
         assert!(!graph.nodes.is_empty());
         assert_eq!(effect_display_name(&plugin_type), "AI 自动曝光".to_string());
     }
@@ -1602,9 +1785,9 @@ mod tests {
                 Arc::new(move |effect, context| {
                     let amount = effect.evaluate_f32_parameter(&amount_id, context.time, 0.0);
                     if amount > 0.0 {
-                        Some(serde_json::json!({ "amount": amount }))
+                        Ok(Some(serde_json::json!({ "amount": amount })))
                     } else {
-                        None
+                        Ok(None)
                     }
                 }),
                 Arc::new(|_, _, _, _, _| Ok(())),
@@ -1613,7 +1796,7 @@ mod tests {
         .expect("register custom render definition");
 
         let effect = EffectNode::with_defaults(plugin_type);
-        let graph = build_effect_render_graph(&[effect], tt(0));
+        let graph = build_effect_render_graph(&[effect], tt(0)).expect("build custom graph");
         let custom_node = graph.nodes.iter().find(|n| {
             matches!(
                 &n.kind,
@@ -1669,7 +1852,7 @@ mod tests {
                 let opacity =
                     effect.evaluate_f32_parameter(&opacity_id, context.time, 0.0).clamp(0.0, 1.0);
                 if radius <= 1.0e-4 || opacity <= 1.0e-4 {
-                    return;
+                    return Ok(());
                 }
 
                 graph.blend_current_with(
@@ -1679,12 +1862,13 @@ mod tests {
                         graph.add_unary_from(source, EffectRenderOp::GaussianBlur { radius })
                     },
                 );
+                Ok(())
             })),
         )
         .expect("register branching definition");
 
         let effect = EffectNode::with_defaults(plugin_type.clone());
-        let graph = build_effect_render_graph(&[effect], tt(0));
+        let graph = build_effect_render_graph(&[effect], tt(0)).expect("build branching graph");
         assert_eq!(graph.nodes.len(), 3);
         assert!(matches!(
             graph.node(crate::graph::EffectGraphNodeId(1)).map(|node| &node.kind),
@@ -1733,7 +1917,7 @@ mod tests {
                             _ => None,
                         })
                         .unwrap_or_default();
-                    Some(serde_json::json!({ "asset_path": path }))
+                    Ok(Some(serde_json::json!({ "asset_path": path })))
                 }),
                 Some(Arc::new(move |effect, context| {
                     effect
@@ -1751,7 +1935,7 @@ mod tests {
         .expect("register cached render definition");
 
         let effect = EffectNode::with_defaults(plugin_type.clone());
-        let graph = build_effect_render_graph(&[effect], tt(0));
+        let graph = build_effect_render_graph(&[effect], tt(0)).expect("build cached graph");
         let custom_node = graph.nodes.iter().find_map(|n| match &n.kind {
             EffectGraphNodeKind::UnaryEffect {
                 op: EffectRenderOp::Custom { cache_key, cache_policy, .. },
@@ -1780,10 +1964,10 @@ mod tests {
             )
             .with_plugin_contract(
                 crate::EffectPluginContract::new("1.0.0")
-                    .with_failure_policy(crate::EffectPluginFailurePolicy::DisablePluginDefinition)
-                    .with_degradation_policy(
-                        crate::EffectPluginDegradationPolicy::HideFromEffectLibrary,
-                    ),
+                    .with_runtime_failure_policy(
+                        crate::EffectPluginRuntimeFailurePolicy::DisableDefinition,
+                    )
+                    .with_library_policy(crate::EffectPluginLibraryPolicy::HideWhenUnavailable),
             )
             .with_graph_builder(Arc::new(|_, _, _| {
                 panic!("unstable graph builder");
@@ -1792,8 +1976,11 @@ mod tests {
         .expect("register unstable definition");
 
         let effect = EffectNode::new(plugin_type.clone());
-        let graph = build_effect_render_graph(&[effect], tt(0));
-        assert!(graph.is_identity());
+        let error = build_effect_render_graph(&[effect], tt(0)).expect_err("builder must fail");
+        assert!(matches!(
+            error,
+            EffectGraphBuildError::BuilderPanicked { .. }
+        ));
 
         let status =
             crate::effect_plugin_runtime_status(&plugin_type.key()).expect("plugin runtime status");

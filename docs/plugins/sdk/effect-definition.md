@@ -297,30 +297,39 @@ pub fn effect_library_types() -> Vec<EffectType>;
 ## 构建与求值函数
 
 ```rust
-/// 为一组特效节点构建渲染计划
-pub fn build_effect_render_plan(effects: &[EffectNode], time: TimeCode) -> EffectRenderPlan;
-
 /// 为一组特效节点构建渲染图
-pub fn build_effect_render_graph(effects: &[EffectNode], time: TimeCode) -> EffectRenderGraph;
+pub fn build_effect_render_graph(
+    effects: &[EffectNode],
+    time: TimelineTime,
+) -> Result<EffectRenderGraph, EffectGraphBuildError>;
 
-/// 为一组特效节点求值参数
-pub fn evaluate_effect_stack(effects: &[EffectNode], time: TimeCode) -> EffectStackEvaluation;
+/// 构图、注入 Clip Mask 并编译为可执行图
+pub fn compile_clip_effect_graph(
+    effects: &[EffectNode],
+    masks: &[MaskComponent],
+    time: TimelineTime,
+) -> Result<Arc<CompiledEffectGraph>, EffectGraphBuildError>;
 ```
 
 ## 类型别名
 
 ```rust
-pub type EffectEvaluator =
-    Arc<dyn Fn(&EffectNode, EffectEvalContext, &mut EffectStackEvaluation) + Send + Sync>;
 pub type EffectGraphBuilder =
-    Arc<dyn Fn(&EffectNode, EffectEvalContext, &mut EffectGraphBuilderState) + Send + Sync>;
-pub type EffectRenderBuilder =
-    Arc<dyn Fn(&EffectNode, EffectEvalContext, &mut EffectRenderPlan) + Send + Sync>;
+    Arc<dyn Fn(
+        &EffectNode,
+        EffectEvalContext,
+        &mut EffectGraphBuilderState,
+    ) -> Result<(), EffectGraphBuildError> + Send + Sync>;
 pub type EffectRenderParamsBuilder =
-    Arc<dyn Fn(&EffectNode, EffectEvalContext) -> Option<serde_json::Value> + Send + Sync>;
+    Arc<dyn Fn(
+        &EffectNode,
+        EffectEvalContext,
+    ) -> Result<Option<serde_json::Value>, EffectGraphBuildError> + Send + Sync>;
 pub type EffectCacheKeyBuilder =
     Arc<dyn Fn(&EffectNode, EffectEvalContext) -> Option<String> + Send + Sync>;
 ```
+
+`Ok(None)` 仅表示定义主动选择 identity（例如零强度）；缺失资源或非法作者状态必须返回 `Err`。
 
 ## 相关
 

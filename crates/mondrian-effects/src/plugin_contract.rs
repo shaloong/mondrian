@@ -24,23 +24,27 @@ pub const CURRENT_EFFECT_PLUGIN_API_VERSION: EffectPluginApiVersion =
     EffectPluginApiVersion::new(1, 0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum EffectPluginFailurePolicy {
-    BypassEffect,
-    DisablePluginDefinition,
+pub enum EffectPluginRuntimeFailurePolicy {
+    /// Report the failed instance while keeping the definition available for repair/retry.
+    KeepDefinitionAvailable,
+    /// Disable the definition for the rest of the process after any runtime failure.
+    DisableDefinition,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum EffectPluginDegradationPolicy {
-    IdentityFallback,
-    HideFromEffectLibrary,
+pub enum EffectPluginLibraryPolicy {
+    /// Keep an unavailable definition visible so persisted instances can be inspected or repaired.
+    KeepVisible,
+    /// Hide an unavailable definition from new-insertion UI.
+    HideWhenUnavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectPluginContract {
     pub plugin_version: String,
     pub api_version: EffectPluginApiVersion,
-    pub failure_policy: EffectPluginFailurePolicy,
-    pub degradation_policy: EffectPluginDegradationPolicy,
+    pub runtime_failure_policy: EffectPluginRuntimeFailurePolicy,
+    pub library_policy: EffectPluginLibraryPolicy,
 }
 
 impl EffectPluginContract {
@@ -48,8 +52,8 @@ impl EffectPluginContract {
         Self {
             plugin_version: plugin_version.into(),
             api_version: CURRENT_EFFECT_PLUGIN_API_VERSION,
-            failure_policy: EffectPluginFailurePolicy::BypassEffect,
-            degradation_policy: EffectPluginDegradationPolicy::IdentityFallback,
+            runtime_failure_policy: EffectPluginRuntimeFailurePolicy::DisableDefinition,
+            library_policy: EffectPluginLibraryPolicy::HideWhenUnavailable,
         }
     }
 
@@ -58,16 +62,16 @@ impl EffectPluginContract {
         self
     }
 
-    pub fn with_failure_policy(mut self, failure_policy: EffectPluginFailurePolicy) -> Self {
-        self.failure_policy = failure_policy;
+    pub fn with_runtime_failure_policy(
+        mut self,
+        runtime_failure_policy: EffectPluginRuntimeFailurePolicy,
+    ) -> Self {
+        self.runtime_failure_policy = runtime_failure_policy;
         self
     }
 
-    pub fn with_degradation_policy(
-        mut self,
-        degradation_policy: EffectPluginDegradationPolicy,
-    ) -> Self {
-        self.degradation_policy = degradation_policy;
+    pub fn with_library_policy(mut self, library_policy: EffectPluginLibraryPolicy) -> Self {
+        self.library_policy = library_policy;
         self
     }
 
@@ -163,7 +167,7 @@ pub fn effect_plugin_is_library_visible(
     if effect_plugin_is_runtime_available(key, Some(contract)) {
         return true;
     }
-    contract.degradation_policy != EffectPluginDegradationPolicy::HideFromEffectLibrary
+    contract.library_policy != EffectPluginLibraryPolicy::HideWhenUnavailable
 }
 
 pub fn record_plugin_runtime_failure(
@@ -178,8 +182,8 @@ pub fn record_plugin_runtime_failure(
     let state = registry.entry(key.to_string()).or_default();
     state.last_error = Some(reason.into());
     if matches!(
-        contract.failure_policy,
-        EffectPluginFailurePolicy::DisablePluginDefinition
+        contract.runtime_failure_policy,
+        EffectPluginRuntimeFailurePolicy::DisableDefinition
     ) {
         state.disabled = true;
     }
@@ -204,7 +208,7 @@ mod tests {
             key,
             EffectPluginContract::new("1.2.3")
                 .with_api_version(EffectPluginApiVersion::new(2, 0))
-                .with_degradation_policy(EffectPluginDegradationPolicy::HideFromEffectLibrary),
+                .with_library_policy(EffectPluginLibraryPolicy::HideWhenUnavailable),
         );
 
         let contract = plugin_contract(key).expect("plugin contract");
@@ -213,13 +217,13 @@ mod tests {
     }
 
     #[test]
-    fn disable_failure_policy_marks_plugin_unavailable_after_error() {
+    fn disable_definition_policy_marks_plugin_unavailable_after_error() {
         let key = "plugin.contract.disable_on_failure";
         reset_plugin_runtime_state(key);
         register_plugin_contract(
             key,
             EffectPluginContract::new("1.0.0")
-                .with_failure_policy(EffectPluginFailurePolicy::DisablePluginDefinition),
+                .with_runtime_failure_policy(EffectPluginRuntimeFailurePolicy::DisableDefinition),
         );
 
         let contract = plugin_contract(key).expect("plugin contract");

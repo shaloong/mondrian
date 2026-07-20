@@ -110,8 +110,12 @@ pub fn register() {
     let definition = EffectPluginDefinitionBuilder::new(plugin_type.key(), "LUT Loader")
         .with_plugin_contract(
             EffectPluginContract::new("0.1.0")
-                .with_failure_policy(mondrian_effects::EffectPluginFailurePolicy::BypassEffect)
-                .with_degradation_policy(mondrian_effects::EffectPluginDegradationPolicy::IdentityFallback),
+                .with_runtime_failure_policy(
+                    mondrian_effects::EffectPluginRuntimeFailurePolicy::KeepDefinitionAvailable,
+                )
+                .with_library_policy(
+                    mondrian_effects::EffectPluginLibraryPolicy::KeepVisible,
+                ),
         )
         .property(PropertyDescriptor::new(
             "plugin.example.lut_loader.path",
@@ -126,16 +130,23 @@ pub fn register() {
         .with_custom_render_backend(
             // Params builder
             Arc::new(|effect, context| {
-                let path = effect.evaluate_property(
-                    "plugin.example.lut_loader.path", context.time
-                )?.as_str()?.to_string();
+                let path_id = effect.effect_type.parameter_id("path")
+                    .expect("definition parameter ID");
+                let path = effect.evaluate_parameter(&path_id, context.time)
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .ok_or_else(|| EffectGraphBuildError::ResourceUnavailable {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        parameter_id: path_id,
+                        reason: "LUT path is unbound".to_string(),
+                    })?;
                 let intensity = effect.evaluate_f32_by_suffix(
                     "plugin.example.lut_loader.intensity", context.time, 1.0
                 );
-                Some(serde_json::json!({
+                Ok(Some(serde_json::json!({
                     "lut_path": path,
                     "intensity": intensity,
-                }))
+                })))
             }),
             // Cache key builder
             Some(Arc::new(|effect, context| {

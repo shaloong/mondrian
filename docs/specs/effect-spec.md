@@ -1,35 +1,112 @@
 # Effect Spec
 
-An effect instance is `EffectNode`.
+An `EffectNode` is one persisted visual-effect instance. A serializable
+`EffectType` is an authoring identity, not by itself a product-support claim.
 
-## Fields
+## Capability levels
 
-- `id: EffectId`
-- `effect_type: EffectType`
-- `properties: PropertyBag`
-- `params: serde_json::Value`
-- `is_enabled: bool`
+Effect capability must be reported at the narrowest level actually proven:
 
-## Effect Types
+1. **Modeled** — the type and persisted parameter schema exist.
+2. **Selectable** — the registered definition is intentionally visible in the
+   product effect library.
+3. **Graph executable** — an enabled instance can build and compile a valid
+   `CompiledEffectGraph` with its required resources.
+4. **Backend executable** — a named CPU or GPU backend can execute that exact
+   graph and color-domain contract. CPU support never implies GPU support.
+5. **Product verified** — preview and export have matching golden/reference
+   evidence for the intended media, parameters, color domains, masks and
+   failure cases.
 
-Built-in effect types include basic correction, white balance, LUT, color wheel, curves, HSL, blur/sharpen, vignette, chromatic aberration, grain, chroma key, and luma key.
+Documentation, UI labels and capability reports must not collapse these levels
+into a generic “supported” state. Shader creation, definition registration or
+successful graph lowering is evidence only for the corresponding level.
 
-Plugin effects use `EffectType::Plugin(key)`.
+## Current built-in matrix
 
-## Property Paths
+| Effect family | Modeled | Product-library selectable | Graph executable | Current backend scope |
+| --- | --- | --- | --- | --- |
+| Basic correction | yes | yes | yes | float CPU; bounded point-op GPU |
+| White balance | yes | yes | yes | float CPU; bounded point-op GPU |
+| LUT 3D | yes | yes | yes when a valid LUT resource is bound | float CPU; GPU lowering blocked |
+| Gaussian blur | yes | yes | yes | float CPU; GPU lowering blocked |
+| Sharpen | yes | yes | yes | float CPU; GPU lowering blocked |
+| Vignette | yes | yes | yes | float CPU; bounded point-op GPU |
+| Chromatic aberration | yes | yes | yes | float CPU; GPU lowering blocked |
+| Grain | yes | yes | yes | float CPU; bounded point-op GPU |
+| Color wheel, curves, HSL | yes | no | no | none |
+| Chroma key, luma key | yes | no | no | none |
 
-Definition defaults may use effect-local paths. Once inserted into a clip, properties are namespaced as:
+This table describes the current implementation boundary, not an M1 acceptance
+claim. Product verification remains governed by the Reference Corpus and
+Golden Project gates in `docs/ROADMAP.md`.
+
+Plugin effects use `EffectType::Plugin(key)`. Registration, API compatibility,
+runtime availability, graph construction and the chosen execution backend are
+separate checks. An unavailable persisted plugin definition remains authored
+intent and must produce a structured execution failure; it is not silently
+reinterpreted as identity.
+
+## Instance fields
+
+- `id: EffectId` is stable for persistence, automation, diagnostics and cache
+  invalidation.
+- `effect_type: EffectType` resolves a registered definition by stable key.
+- `properties: PropertyBag` contains validated, typed parameter state.
+- `params: serde_json::Value` is opaque definition-owned state; new product
+  parameters should use the typed property schema.
+- `is_enabled: bool` is the only author-controlled identity bypass.
+
+Definition defaults may use effect-local paths. Once inserted into a clip,
+properties are namespaced as:
 
 ```text
 effect.<effect_id>.<effect_namespace>.<parameter>
 ```
 
-This is not idempotent; code must instantiate an effect once per clip placement.
+Namespacing is performed once per clip placement. Reapplying it is invalid.
+Stable `ParameterId`, rather than the display/address string, identifies a
+parameter across Inspector, automation, persistence and execution.
 
-## Execution Contract
+## Authoring and execution contract
 
-Effects compile to `CompiledEffectGraph`. Each graph node declares operation, inputs, cache policy, and cost. CPU fallback is allowed; GPU execution should be used where supported without changing results.
+Effects execute in clip-stack order. Disabled instances are explicit identity
+operations and may be omitted. Every enabled instance must satisfy all of the
+following before a frame can be accepted:
 
-## Color Behavior
+- its definition is registered and runtime-available;
+- its definition exposes an executable graph builder;
+- required resources resolve to the exact authored identity;
+- graph construction returns normally and satisfies graph/color-domain
+  invariants;
+- the selected renderer can execute the compiled graph or selects an explicit,
+  semantically equivalent fallback.
 
-Unless an effect explicitly declares otherwise, effects operate in the sequence working color space after input conversion and before output/display transform.
+Failure of any condition returns `EffectGraphBuildError` or a typed backend
+blocker. Preview and export consume the same timeline render-plan compiler, so
+an enabled unknown/unimplemented effect, unbound or invalid LUT, plugin builder
+panic, or invalid graph aborts plan evaluation instead of silently producing an
+unchanged image. A future user-approved bypass must remain explicit in project
+or session state and visible in diagnostics; merely logging a warning is not a
+bypass contract.
+
+`CompiledEffectGraph` owns node order, inputs, color-domain plan, cache policy,
+cost, liveness and signatures. Preview and export may schedule/cache it
+differently but may not interpret authoring semantics differently.
+
+## Color and alpha behavior
+
+Every definition declares an `EffectColorDomainContract`. Current built-ins
+declare scene-linear working RGB. The compiler inserts only legal RGB-domain
+transitions; data/alpha crossings and unavailable OCIO processors fail closed.
+Display transforms occur after effects and composition. Spatial filters use
+premultiplied intermediates internally while public working-frame seams remain
+straight/opaque as required by the frame contract.
+
+## Masks, branching and adjustment layers
+
+Masks compile to typed graph inputs/nodes; they are not UI-only flags. Branches
+and multi-input nodes preserve dependency order and buffer liveness.
+Adjustment-layer effects consume the accumulated lower image. A backend that
+cannot execute one of these graph forms reports a blocker rather than treating
+the layer as absent.

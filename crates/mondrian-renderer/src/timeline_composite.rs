@@ -10,7 +10,8 @@ use mondrian_effects::{
     apply_compiled_effect_graph_rgba_f32,
     apply_compiled_effect_graph_rgba_f32_with_domain_processor, blend_rgba_f32_pixel_seeded,
     blend_rgba_pixel_seeded, compiled_effect_graph_supports_rgba_f32_with_domain_processor,
-    CompiledEffectGraph, EffectColorDomain, EffectDomainTransition, EffectFloatExecutionError,
+    CompiledEffectGraph, EffectColorDomain, EffectDomainTransition, EffectExecutionError,
+    EffectFloatExecutionError,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -209,6 +210,32 @@ pub struct TimelineCompositeDomainBlockerBreakdown {
     pub solid_effect: u64,
     /// Adjustment effects with unresolved domain transitions or invalid domain edges.
     pub adjustment_effect: u64,
+}
+
+/// Failure to composite a timeline frame without changing authored semantics.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TimelineCompositeError {
+    /// The legacy encoded executor rejected the compiled effect graph.
+    #[error(transparent)]
+    EncodedEffect(#[from] EffectExecutionError),
+    /// The float/linear executor rejected a node or failed to produce output.
+    #[error("float effect execution failed: {reason:?}")]
+    FloatEffect { reason: EffectFloatExecutionError },
+    /// The graph contains unresolved or non-convertible effect-domain edges.
+    #[error(
+        "effect color domain is blocked (media={media_effect}, solid={solid_effect}, adjustment={adjustment_effect})"
+    )]
+    EffectDomainBlocked {
+        media_effect: u64,
+        solid_effect: u64,
+        adjustment_effect: u64,
+    },
+}
+
+impl From<EffectFloatExecutionError> for TimelineCompositeError {
+    fn from(reason: EffectFloatExecutionError) -> Self {
+        Self::FloatEffect { reason }
+    }
 }
 
 impl TimelineCompositeDomainBlockerBreakdown {
@@ -431,11 +458,11 @@ pub fn composite_timeline_elements_color_frame(
     options: TimelineCompositeOptions,
     runtime: TimelineEffectColorRuntime<'_>,
     scratch: &mut TimelineCompositeScratch,
-) -> CpuColorFrame {
+) -> Result<CpuColorFrame, TimelineCompositeError> {
     composite_timeline_elements_color_frame_with_diagnostics(
         width, height, elements, options, runtime, scratch,
     )
-    .frame
+    .map(|composite| composite.frame)
 }
 
 /// Composite timeline elements and return both the working frame and
@@ -447,16 +474,21 @@ pub fn composite_timeline_elements_color_frame_with_diagnostics(
     options: TimelineCompositeOptions,
     runtime: TimelineEffectColorRuntime<'_>,
     scratch: &mut TimelineCompositeScratch,
-) -> TimelineCompositeFrame {
-    let mut diagnostics = composite_path_diagnostics(elements);
-    let frame = if diagnostics.is_color_domain_blocked() {
-        blocked_working_frame(width, height, runtime.working_color_space)
-    } else if diagnostics.uses_legacy_rgba8() {
-        let rgba = composite_timeline_elements(width, height, elements, options, scratch)
-            .unwrap_or_else(|_| vec![0; width as usize * height as usize * 4]);
+) -> Result<TimelineCompositeFrame, TimelineCompositeError> {
+    let diagnostics = composite_path_diagnostics(elements);
+    if diagnostics.is_color_domain_blocked() {
+        let blockers = diagnostics.domain_blockers();
+        return Err(TimelineCompositeError::EffectDomainBlocked {
+            media_effect: blockers.media_effect,
+            solid_effect: blockers.solid_effect,
+            adjustment_effect: blockers.adjustment_effect,
+        });
+    }
+    let frame = if diagnostics.uses_legacy_rgba8() {
+        let rgba = composite_timeline_elements(width, height, elements, options, scratch)?;
         working_frame_from_normalized_rgba8(width, height, &rgba, runtime.working_color_space)
     } else {
-        match composite_supported_elements_to_working_frame(
+        composite_supported_elements_to_working_frame(
             width,
             height,
             elements,
@@ -464,28 +496,9 @@ pub fn composite_timeline_elements_color_frame_with_diagnostics(
             runtime.working_color_space,
             runtime,
             scratch,
-        ) {
-            Ok(frame) => frame,
-            Err(_) => {
-                mark_effect_domain_execution_blocked(elements, &mut diagnostics);
-                blocked_working_frame(width, height, runtime.working_color_space)
-            }
-        }
+        )?
     };
-    TimelineCompositeFrame { frame: CpuColorFrame::working(frame), diagnostics }
-}
-
-fn blocked_working_frame(
-    width: u32,
-    height: u32,
-    working_color_space: WorkingColorSpace,
-) -> WorkingRgbaF32Frame {
-    WorkingRgbaF32Frame {
-        width,
-        height,
-        data: vec![[0.0, 0.0, 0.0, 1.0]; width as usize * height as usize],
-        color_space: working_color_space,
-    }
+    Ok(TimelineCompositeFrame { frame: CpuColorFrame::working(frame), diagnostics })
 }
 
 fn composite_supported_elements_to_working_frame(
@@ -763,38 +776,6 @@ fn effect_domain_is_blocked(graph: &CompiledEffectGraph) -> bool {
     !graph.domain_plan.blockers.is_empty()
         || (graph.domain_plan.requires_conversion()
             && !compiled_effect_graph_supports_rgba_f32_with_domain_processor(graph))
-}
-
-fn mark_effect_domain_execution_blocked(
-    elements: &[TimelineCompositeElement<'_>],
-    diagnostics: &mut TimelineCompositeDiagnostics,
-) {
-    diagnostics.float_linear_composites = 0;
-    diagnostics.legacy_rgba8_composites = 0;
-    diagnostics.blocked_color_domain_composites = 1;
-    for element in elements {
-        match element {
-            TimelineCompositeElement::Media(layer)
-                if layer.effect_graph.domain_plan.requires_conversion() =>
-            {
-                diagnostics.blocked_media_effect_domain =
-                    diagnostics.blocked_media_effect_domain.saturating_add(1);
-            }
-            TimelineCompositeElement::SolidColor(layer)
-                if layer.effect_graph.domain_plan.requires_conversion() =>
-            {
-                diagnostics.blocked_solid_effect_domain =
-                    diagnostics.blocked_solid_effect_domain.saturating_add(1);
-            }
-            TimelineCompositeElement::Adjustment(layer)
-                if layer.effect_graph.domain_plan.requires_conversion() =>
-            {
-                diagnostics.blocked_adjustment_effect_domain =
-                    diagnostics.blocked_adjustment_effect_domain.saturating_add(1);
-            }
-            _ => {}
-        }
-    }
 }
 
 fn alpha_blend_f32_solid(
@@ -1443,7 +1424,8 @@ mod tests {
             TimelineCompositeOptions::default(),
             test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch,
-        );
+        )
+        .expect("composite float media");
         assert_eq!(frame.descriptor().domain, crate::ColorFrameDomain::Working);
         let output = frame
             .rgba_f32()
@@ -1471,7 +1453,8 @@ mod tests {
             TimelineCompositeOptions::default(),
             test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch,
-        );
+        )
+        .expect("composite transparent canvas");
         let pixels = &frame.rgba_f32().data;
 
         assert!((pixels[0][0] - 1.0).abs() <= 1.0 / 255.0);
@@ -1503,7 +1486,8 @@ mod tests {
             TimelineCompositeOptions::default(),
             test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch,
-        );
+        )
+        .expect("composite extended solid");
 
         let px = frame.rgba_f32().data[0];
         assert_eq!(
@@ -1548,7 +1532,8 @@ mod tests {
             TimelineCompositeOptions::default(),
             test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch,
-        );
+        )
+        .expect("composite color adjustment");
 
         let px = frame.rgba_f32().data[0];
         assert!((px[0] - 2.5).abs() <= 1.0e-6);
@@ -1590,7 +1575,8 @@ mod tests {
             TimelineCompositeOptions::default(),
             test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch,
-        );
+        )
+        .expect("composite adjustment");
 
         let px = frame.rgba_f32().data[0];
         assert!((px[0] - 1.875).abs() <= 1.0e-6);
@@ -1636,7 +1622,8 @@ mod tests {
             TimelineCompositeOptions::default(),
             test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch,
-        );
+        )
+        .expect("composite blend modes");
 
         assert_eq!(output.diagnostics.float_linear_composites, 1);
         assert_eq!(output.diagnostics.legacy_rgba8_composites, 0);
@@ -1673,7 +1660,8 @@ mod tests {
             TimelineCompositeOptions::default(),
             test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut float_scratch,
-        );
+        )
+        .expect("composite adjustment blend mode");
 
         let diagnostics = output.diagnostics;
         assert_eq!(diagnostics.float_linear_composites, 1);
@@ -1719,7 +1707,8 @@ mod tests {
             TimelineCompositeOptions::default(),
             test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut float_scratch,
-        );
+        )
+        .expect("composite spatial effects");
 
         assert_eq!(output.diagnostics.float_linear_composites, 1);
         assert_eq!(output.diagnostics.legacy_rgba8_composites, 0);
@@ -1784,7 +1773,8 @@ mod tests {
             TimelineCompositeOptions::default(),
             test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch,
-        );
+        )
+        .expect("composite clip mask");
         let pixel = output.frame.rgba_f32().data[0];
 
         assert_eq!(output.diagnostics.float_linear_composites, 1);
@@ -1818,7 +1808,8 @@ mod tests {
             TimelineCompositeOptions::default(),
             test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch,
-        );
+        )
+        .expect("composite solid transform");
         let pixels = &output.rgba_f32().data;
 
         assert_eq!(pixels[0], [0.0, 0.0, 0.0, 0.0]);
@@ -1848,6 +1839,46 @@ mod tests {
         let diagnostics = composite_path_diagnostics(&elements);
         assert_eq!(diagnostics.legacy_rgba8_composites, 1);
         assert_eq!(diagnostics.legacy_media_effect, 1);
+    }
+
+    #[test]
+    fn missing_custom_processor_fails_composite_instead_of_returning_unchanged_pixels() {
+        let media = working_frame(&[120, 80, 40, 255], 1, 1);
+        let elements = [TimelineCompositeElement::Media(TimelineMediaLayer {
+            frame: &media,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_graph: get_or_compile_scheduled_effect_graph(&EffectRenderPlan {
+                ops: vec![mondrian_effects::EffectRenderOp::Custom {
+                    key: "test.custom.missing-processor".to_owned(),
+                    params: serde_json::json!({}),
+                    cache_key: None,
+                    cache_policy: mondrian_effects::EffectCachePolicy::Deterministic,
+                }],
+            })
+            .expect("compile missing custom processor graph"),
+            frame_seed: 0,
+        })];
+
+        let error = composite_timeline_elements_color_frame_with_diagnostics(
+            1,
+            1,
+            &elements,
+            TimelineCompositeOptions::default(),
+            test_color_runtime(WorkingColorSpace::LinearRec709),
+            &mut TimelineCompositeScratch::default(),
+        )
+        .expect_err("missing custom processor must fail closed");
+
+        assert_eq!(
+            error,
+            TimelineCompositeError::EncodedEffect(
+                EffectExecutionError::CustomProcessorUnavailable {
+                    key: "test.custom.missing-processor".to_owned(),
+                }
+            )
+        );
     }
 
     #[test]
@@ -1882,24 +1913,17 @@ mod tests {
             name: "test.invalid.effect-domain-config".to_owned(),
         });
 
-        let output = composite_timeline_elements_color_frame_with_diagnostics(
+        let error = composite_timeline_elements_color_frame_with_diagnostics(
             1,
             1,
             &elements,
             TimelineCompositeOptions::default(),
             TimelineEffectColorRuntime::new(&unavailable_engine, WorkingColorSpace::LinearRec709),
             &mut scratch,
-        );
+        )
+        .expect_err("unavailable OCIO processor must fail composite");
 
-        assert_eq!(output.diagnostics.blocked_color_domain_composites, 1);
-        assert_eq!(output.diagnostics.blocked_media_effect_domain, 1);
-        assert_eq!(output.diagnostics.legacy_rgba8_composites, 0);
-        assert_eq!(output.diagnostics.legacy_media_effect, 0);
-        assert_eq!(
-            output.diagnostics.color_path(),
-            TimelineCompositeColorPath::Blocked
-        );
-        assert_eq!(output.frame.rgba_f32().data[0], [0.0, 0.0, 0.0, 1.0]);
+        assert!(matches!(error, TimelineCompositeError::FloatEffect { .. }));
         assert_eq!(
             composite_timeline_elements(
                 1,
@@ -1955,7 +1979,8 @@ mod tests {
             TimelineCompositeOptions::default(),
             TimelineEffectColorRuntime::new(&engine, WorkingColorSpace::LinearRec709),
             &mut scratch,
-        );
+        )
+        .expect("execute display-domain effect");
 
         let mut expected = [input];
         engine
@@ -2023,22 +2048,24 @@ mod tests {
             frame_seed: 0,
         })];
 
-        let output = composite_timeline_elements_color_frame_with_diagnostics(
+        let error = composite_timeline_elements_color_frame_with_diagnostics(
             1,
             1,
             &elements,
             TimelineCompositeOptions::default(),
             TimelineEffectColorRuntime::new(&engine, WorkingColorSpace::LinearRec709),
             &mut TimelineCompositeScratch::default(),
-        );
+        )
+        .expect_err("custom display-domain graph must fail closed");
 
         assert_eq!(
-            output.diagnostics.color_path(),
-            TimelineCompositeColorPath::Blocked
+            error,
+            TimelineCompositeError::EffectDomainBlocked {
+                media_effect: 1,
+                solid_effect: 0,
+                adjustment_effect: 0,
+            }
         );
-        assert_eq!(output.diagnostics.blocked_media_effect_domain, 1);
-        assert_eq!(output.diagnostics.legacy_media_effect, 0);
-        assert_eq!(output.frame.rgba_f32().data[0], [0.0, 0.0, 0.0, 1.0]);
     }
 
     #[test]
@@ -2054,7 +2081,8 @@ mod tests {
             TimelineCompositeOptions::default(),
             test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch,
-        );
+        )
+        .expect("composite clean float path");
 
         assert_eq!(output.diagnostics.elements, 1);
         assert_eq!(output.diagnostics.float_linear_composites, 1);
@@ -2130,7 +2158,8 @@ mod tests {
             TimelineCompositeOptions::default(),
             test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch,
-        );
+        )
+        .expect("composite transformed media");
 
         assert_eq!(output.diagnostics.float_linear_composites, 1);
         assert_eq!(output.diagnostics.legacy_rgba8_composites, 0);
@@ -2178,7 +2207,8 @@ mod tests {
             TimelineCompositeOptions::default(),
             test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch_a,
-        );
+        )
+        .expect("composite identity transform");
         let out_b = composite_timeline_elements_color_frame_with_diagnostics(
             2,
             2,
@@ -2186,7 +2216,8 @@ mod tests {
             TimelineCompositeOptions::default(),
             test_color_runtime(WorkingColorSpace::LinearRec709),
             &mut scratch_b,
-        );
+        )
+        .expect("composite equivalent scale");
 
         assert_eq!(out_a.frame.rgba_f32().data, out_b.frame.rgba_f32().data);
     }

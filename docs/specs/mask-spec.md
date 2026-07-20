@@ -4,7 +4,8 @@ Masks are clip components. Data lives in `mondrian-core::mask_data`; rasterizati
 
 ## Shapes
 
-Supported `MaskShape`:
+The current authoring model and float mask rasterizer execute these `MaskShape`
+variants:
 
 - Rectangle
 - Ellipse
@@ -38,4 +39,6 @@ time base.
 
 ## Operations
 
-`MaskOp` supports Add, Subtract, Intersect, and Difference. Masks compile into effect graph `MaskSource` and `Mask` nodes.
+`MaskOp` executes Add, Subtract, Intersect, and Difference. Masks compile into
+effect graph `MaskSource` and `Mask` nodes. This execution statement does not
+claim every UI editing workflow or GPU backend is product-verified.

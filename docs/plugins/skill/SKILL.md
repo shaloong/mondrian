@@ -161,7 +161,7 @@ Use when built-in `EffectRenderOp` variants cannot express the pixel algorithm.
         let path = effect.evaluate_str_by_suffix(
             "plugin.<author>.<name>.asset_path", context.time, ""
         );
-        Some(serde_json::json!({ "asset_path": path }))
+        Ok(Some(serde_json::json!({ "asset_path": path })))
     }),
     // 2. Cache key builder — stable key for caching (None if not cacheable)
     Some(Arc::new(|effect, context| {
@@ -176,7 +176,7 @@ Use when built-in `EffectRenderOp` variants cannot express the pixel algorithm.
     Arc::new(|buffer, width, height, params, frame_seed| {
         // buffer: &mut Vec<u8> — RGBA pixel data, length = width * height * 4
         // Process pixels in-place. Return Ok(()) on success.
-        // On Err or panic, staged result is discarded and contract policy applies.
+        // On Err or panic, staged result is discarded and execution fails.
         Ok(())
     }),
 )
@@ -225,16 +225,19 @@ Every plugin effect should declare a contract:
 ```rust
 .with_plugin_contract(
     EffectPluginContract::new("0.1.0")  // plugin version (semver)
-        .with_failure_policy(EffectPluginFailurePolicy::BypassEffect)
-        .with_degradation_policy(EffectPluginDegradationPolicy::IdentityFallback),
+        .with_runtime_failure_policy(EffectPluginRuntimeFailurePolicy::KeepDefinitionAvailable)
+        .with_library_policy(EffectPluginLibraryPolicy::KeepVisible),
 )
 ```
 
-| Stage | failure_policy | degradation_policy |
-|-------|---------------|-------------------|
-| Development | `BypassEffect` | `IdentityFallback` |
-| Pre-release | `BypassEffect` | `HideFromEffectLibrary` |
-| Stable release | `DisablePluginDefinition` | `HideFromEffectLibrary` |
+| Stage | runtime_failure_policy | library_policy |
+|-------|------------------------|----------------|
+| Development | `KeepDefinitionAvailable` | `KeepVisible` |
+| Pre-release / stable | `DisableDefinition` | `HideWhenUnavailable` |
+
+These policies never authorize identity output after failure. Builders and
+custom processors must return a structured error; preview/export callers stop
+until the instance is repaired or explicitly disabled.
 
 ## Step 6: Register and verify
 
@@ -258,7 +261,7 @@ Every plugin effect should declare a contract:
 
 ### Custom processor not called
 - Check `register_custom_render_processor()` is called (done automatically by builder)
-- Verify params_builder returns `Some(...)` — if it returns `None`, the processor is skipped
+- Verify params_builder returns `Ok(Some(...))`; `Ok(None)` is an intentional identity and `Err` is a structured build failure
 - Check `effect_plugin_is_runtime_available()` — disabled plugins skip execution
 
 ### Performance issues

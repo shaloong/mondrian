@@ -57,6 +57,14 @@ thumbnail, and analysis paths cannot accidentally share ambiguous defaults.
 
 Each element carries opacity, blend mode, transforms where applicable, effect graph, frame seed, and color/media interpretation data.
 
+Effect graph construction is part of render-plan evaluation and is fallible.
+An enabled effect with no executable definition, unavailable runtime, invalid
+resource, panicking builder, or invalid graph returns
+`MondrianError::EffectGraphEvaluationFailed`. Preview and export therefore
+receive no plan for that frame; only an explicitly disabled effect is omitted as
+identity. Backend-specific blockers remain separate from this authoring/compile
+admission decision.
+
 `TimelineMediaPlan::source_time` is the sole media-decode target emitted by
 Timeline evaluation. It remains exact through Preview scheduling, frame-store
 identity, Export decode caching, and `PreviewDecodeRequest`; those consumers do
@@ -148,10 +156,10 @@ named effect domains to exact OCIO identities, and the CPU timeline compositor
 executes each planned edge in-place around the relevant graph node. Preview and
 export both supply their project `ColorContext` to this renderer-owned boundary.
 The float effect-output cache includes the engine/config/working-space identity.
-If a processor cannot be resolved, `timeline_composite` returns an opaque black
-working frame and records media, solid, and adjustment-layer domain blocker
-counters. It must never execute those nodes in scene-linear by accident or
-route them through the RGBA8 compositor. Data and alpha-domain graph errors
+If a processor cannot be resolved, `timeline_composite` returns a structured
+`TimelineCompositeError` identifying execution or media/solid/adjustment domain
+blockers and publishes no working frame. It must never execute those nodes in
+scene-linear by accident or route them through the RGBA8 compositor. Data and alpha-domain graph errors
 remain blockers rather than color-conversion requests. GPU graph lowering also
 remains blocked until the GPU scheduler materializes the same OCIO edges.
 

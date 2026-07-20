@@ -67,7 +67,7 @@ fn clip_with_effect_graph_compiles() {
         tt(50, time_base),
     );
     assert!(
-        graph.is_some(),
+        graph.is_ok(),
         "Effect graph should compile for a clip with GaussianBlur"
     );
 }

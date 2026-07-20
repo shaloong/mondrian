@@ -4,7 +4,7 @@ use mondrian_core::{
         RenderPlanSource,
     },
     types::{AssetId, BlendMode, Color, ColorSpace, FramePosition, Rational, SequenceId},
-    ColorEncodingSpec, FrameRounding, Result, TimelineTime, WorkingColorSpace,
+    ColorEncodingSpec, FrameRounding, MondrianError, Result, TimelineTime, WorkingColorSpace,
 };
 use mondrian_effects::CompiledEffectGraph;
 use std::sync::Arc;
@@ -320,15 +320,14 @@ pub fn evaluate_timeline_render_plan(
         }
 
         let effect_graph =
-            mondrian_effects::compile_clip_effect_graph(&ac.effects, &ac.masks, current_time);
+            mondrian_effects::compile_clip_effect_graph(&ac.effects, &ac.masks, current_time)
+                .map_err(|error| MondrianError::EffectGraphEvaluationFailed {
+                    reason: error.to_string(),
+                })?;
 
         match ac.kind {
             ClipKind::NestedSequence => {
                 let Some(sequence_id) = ac.nested_sequence_id else {
-                    diagnostics.skipped_unrenderable += 1;
-                    continue;
-                };
-                let Some(eg) = effect_graph else {
                     diagnostics.skipped_unrenderable += 1;
                     continue;
                 };
@@ -340,19 +339,15 @@ pub fn evaluate_timeline_render_plan(
                         opacity,
                         blend_mode: ac.blend_mode,
                         transform: ac.transform_matrix,
-                        effect_graph: eg,
+                        effect_graph,
                         frame_seed: timeline_frame.max(0),
                     },
                 ));
             }
             ClipKind::AdjustmentLayer => {
-                let Some(eg) = effect_graph else {
-                    diagnostics.skipped_unrenderable += 1;
-                    continue;
-                };
                 elements.push(TimelineRenderPlanElement::Adjustment(
                     TimelineAdjustmentPlan {
-                        effect_graph: eg,
+                        effect_graph,
                         opacity,
                         blend_mode: ac.blend_mode,
                         frame_seed: timeline_frame.max(0),
@@ -360,10 +355,6 @@ pub fn evaluate_timeline_render_plan(
                 ));
             }
             ClipKind::SolidColor => {
-                let Some(eg) = effect_graph else {
-                    diagnostics.skipped_unrenderable += 1;
-                    continue;
-                };
                 let color = ac.solid_color.unwrap_or(Color::BLACK);
                 elements.push(TimelineRenderPlanElement::SolidColor(
                     TimelineSolidColorPlan {
@@ -371,16 +362,12 @@ pub fn evaluate_timeline_render_plan(
                         opacity,
                         blend_mode: ac.blend_mode,
                         transform: ac.transform_matrix,
-                        effect_graph: eg,
+                        effect_graph,
                         frame_seed: timeline_frame.max(0),
                     },
                 ));
             }
             ClipKind::Media => {
-                let Some(eg) = effect_graph else {
-                    diagnostics.skipped_unrenderable += 1;
-                    continue;
-                };
                 let source_time = if let Some(frame_rate) = ac.interpretation.frame_rate_override {
                     TimelineTime::from_frame_position(
                         ac.source_time.to_frame_position(frame_rate, FrameRounding::Floor)?,
@@ -403,7 +390,7 @@ pub fn evaluate_timeline_render_plan(
                     opacity,
                     blend_mode: ac.blend_mode,
                     transform,
-                    effect_graph: eg,
+                    effect_graph,
                     frame_seed: timeline_frame.max(0),
                     auto_tone_map: source.auto_tone_map_media(),
                 }));

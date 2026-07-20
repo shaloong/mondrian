@@ -26,7 +26,14 @@ The `EffectGraphDsl` exposes source/current nodes, unary ops, branches, blends, 
 
 ## Runtime Safety
 
-Effect runtime failures should be recorded through plugin contract/runtime availability paths. Plugin processors must not panic across the host boundary; custom processors are isolated by the effect execution layer where applicable.
+Graph builders and custom processors execute against staged state. Builder
+errors/panics return `EffectGraphBuildError`; processor errors/panics return
+`EffectExecutionError`, and neither commits partial graph or pixel state.
+Failures are recorded through the plugin runtime-status path. The runtime
+failure policy decides only whether the definition remains callable; the
+library policy decides only new-insertion visibility. Neither policy permits a
+failed instance to become identity output. Plugin code must still avoid panic
+across the host boundary.
 
 ## Future UI Plugins
 

@@ -40,6 +40,12 @@ pub enum EffectExecutionError {
     /// The authored linear plan could not compile into a schedulable graph.
     #[error("effect render plan could not compile into a schedulable graph")]
     InvalidGraph,
+    /// A custom processor required by the compiled graph is not registered.
+    #[error("custom effect processor `{key}` is unavailable")]
+    CustomProcessorUnavailable { key: String },
+    /// A custom processor returned an error or panicked without committing its staged pixels.
+    #[error("custom effect processor `{key}` failed: {reason}")]
+    CustomProcessorFailed { key: String, reason: String },
 }
 
 /// Error returned when an effect graph cannot execute on the float/linear CPU path.
@@ -429,7 +435,7 @@ pub fn apply_effect_render_graph(
     }
 
     let node_use_counts = effect_graph_node_use_counts(graph);
-    Ok(execute_effect_graph(
+    execute_effect_graph(
         input,
         width,
         height,
@@ -438,7 +444,7 @@ pub fn apply_effect_render_graph(
         &node_use_counts,
         None, // compiled: Option<&CompiledEffectGraph>
         frame_seed,
-    ))
+    )
 }
 
 fn execute_effect_graph(
@@ -450,7 +456,7 @@ fn execute_effect_graph(
     node_use_counts: &HashMap<EffectGraphNodeId, usize>,
     compiled: Option<&CompiledEffectGraph>,
     frame_seed: i64,
-) -> Vec<u8> {
+) -> std::result::Result<Vec<u8>, EffectExecutionError> {
     let required_len = width as usize * height as usize * 4;
     let source_input_signature = compiled.map(|_| frame_buffer_signature(input));
     let mut outputs = HashMap::<EffectGraphNodeId, Vec<u8>>::with_capacity(graph.nodes.len());
@@ -458,7 +464,7 @@ fn execute_effect_graph(
     let mut buffer_pool = Vec::<Vec<u8>>::new();
     for node_id in &schedule.ordered_nodes {
         let Some(node) = graph.node(*node_id) else {
-            return input.to_vec();
+            return Err(EffectExecutionError::InvalidGraph);
         };
         match &node.kind {
             EffectGraphNodeKind::Source => {
@@ -496,10 +502,10 @@ fn execute_effect_graph(
                     *input_id,
                     required_len,
                 ) else {
-                    return input.to_vec();
+                    return Err(EffectExecutionError::InvalidGraph);
                 };
 
-                apply_render_op(&mut source, width, height, op, frame_seed);
+                apply_render_op(&mut source, width, height, op, frame_seed)?;
                 if let (Some(compiled), Some(input_signature)) = (compiled, source_input_signature)
                 {
                     put_cached_node_output(
@@ -543,7 +549,7 @@ fn execute_effect_graph(
                     *base,
                     required_len,
                 ) else {
-                    return input.to_vec();
+                    return Err(EffectExecutionError::InvalidGraph);
                 };
                 let Some(overlay_frame) = take_graph_input(
                     &mut outputs,
@@ -552,7 +558,7 @@ fn execute_effect_graph(
                     *overlay,
                     required_len,
                 ) else {
-                    return input.to_vec();
+                    return Err(EffectExecutionError::InvalidGraph);
                 };
                 blend_graph_inputs_in_place(
                     &mut base_frame,
@@ -619,7 +625,7 @@ fn execute_effect_graph(
                     *input_id,
                     required_len,
                 ) else {
-                    return input.to_vec();
+                    return Err(EffectExecutionError::InvalidGraph);
                 };
                 let Some(mask_frame) = take_graph_input(
                     &mut outputs,
@@ -628,7 +634,7 @@ fn execute_effect_graph(
                     *mask,
                     required_len,
                 ) else {
-                    return input.to_vec();
+                    return Err(EffectExecutionError::InvalidGraph);
                 };
                 apply_alpha_mask_in_place(&mut source, &mask_frame, *invert, *mask_op);
                 release_execution_buffer(&mut buffer_pool, mask_frame);
@@ -648,7 +654,7 @@ fn execute_effect_graph(
             }
             EffectGraphNodeKind::MultiInput { ref inputs, blend_mode, opacity } => {
                 let Some(first_id) = inputs.first().copied() else {
-                    return input.to_vec();
+                    return Err(EffectExecutionError::InvalidGraph);
                 };
                 let first = take_graph_input(
                     &mut outputs,
@@ -657,25 +663,25 @@ fn execute_effect_graph(
                     first_id,
                     required_len,
                 )
-                .unwrap_or_else(|| input.to_vec());
+                .ok_or(EffectExecutionError::InvalidGraph)?;
                 let mut result = first;
                 for overlay_id in &inputs[1..] {
-                    if let Some(overlay) = take_graph_input(
+                    let overlay = take_graph_input(
                         &mut outputs,
                         &mut remaining_uses,
                         &mut buffer_pool,
                         *overlay_id,
                         required_len,
-                    ) {
-                        blend_graph_inputs_in_place(
-                            &mut result,
-                            &overlay,
-                            *opacity,
-                            *blend_mode,
-                            frame_seed,
-                        );
-                        release_execution_buffer(&mut buffer_pool, overlay);
-                    }
+                    )
+                    .ok_or(EffectExecutionError::InvalidGraph)?;
+                    blend_graph_inputs_in_place(
+                        &mut result,
+                        &overlay,
+                        *opacity,
+                        *blend_mode,
+                        frame_seed,
+                    );
+                    release_execution_buffer(&mut buffer_pool, overlay);
                 }
                 outputs.insert(node.id, result);
             }
@@ -685,7 +691,7 @@ fn execute_effect_graph(
     graph
         .output
         .and_then(|output| outputs.remove(&output))
-        .unwrap_or_else(|| input.to_vec())
+        .ok_or(EffectExecutionError::InvalidGraph)
 }
 
 /// Execute a compiled effect graph on encoded RGBA8, failing on unresolved domains.
@@ -710,7 +716,7 @@ pub fn apply_compiled_effect_graph(
         &compiled.node_use_counts,
         Some(compiled),
         frame_seed,
-    );
+    )?;
 
     put_cached_effect_output(input, width, height, compiled, frame_seed, &output);
     Ok(output)

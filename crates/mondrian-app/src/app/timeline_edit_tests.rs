@@ -323,7 +323,8 @@ fn video_clip_is_disabled(state: &AppState, clip_id: ClipId) -> bool {
 }
 
 fn exposure_from_clip(clip: &Clip, time: TimelineTime) -> f32 {
-    let graph = mondrian_effects::build_effect_render_graph(&clip.effects, time);
+    let graph = mondrian_effects::build_effect_render_graph(&clip.effects, time)
+        .expect("build effect graph");
     graph
         .nodes
         .iter()

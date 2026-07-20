@@ -127,7 +127,7 @@ let branch_result = graph.branch(some_input, |graph, input| {
         let path = effect.evaluate_str_by_suffix(
             "plugin.example.lut.path", context.time, ""
         );
-        Some(serde_json::json!({ "lut_path": path }))
+        Ok(Some(serde_json::json!({ "lut_path": path })))
     }),
 
     // 2. 缓存 key 构建器 —— 声明缓存标识（可选）
@@ -156,9 +156,10 @@ let branch_result = graph.branch(some_input, |graph, input| {
 
 ### 4.2 处理器约定
 
+- 参数构建器返回 `Ok(Some(params))` 才创建自定义节点；`Ok(None)` 只表示定义主动判定该实例为 identity（例如强度为零），资源缺失或非法状态必须返回 `EffectGraphBuildError`
 - 处理器在**独立 staged buffer** 上执行，不是帧主链 buffer
 - `Ok(())` 返回时，staged 结果提交到渲染管线
-- `Err(...)` 或 panic 时，staged 结果被丢弃，按插件契约降级
+- `Err(...)` 或 panic 时，staged 结果被丢弃并返回结构化执行错误；插件契约只决定定义后续是否禁用和是否在效果库可见
 - 不要在处理器中半途报错却仍然写回部分像素结果
 
 ### 4.3 何时提供 cache_key
@@ -228,4 +229,4 @@ PropertyDescriptor::new(
 ## 下一步
 
 - [性能与缓存](./04-performance-and-caching.md) —— 让你的特效在预览和导出中都高效
-- [版本契约](./05-versioning-and-compatibility.md) —— 管理版本兼容与错误降级
+- [版本契约](./05-versioning-and-compatibility.md) —— 管理版本兼容、错误传播、定义状态与效果库可见性
