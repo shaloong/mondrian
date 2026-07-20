@@ -1,11 +1,11 @@
 use mondrian_core::{
     AudioChannelLayout, AudioComponentEditId, AudioProcessingScopeId, AudioProcessorInstanceId,
-    ExactAutomationCurve, MixBusId, ParameterId, ProgramOutputId, SequenceId, TimelineTime,
-    TimelineTimeRange, TrackId,
+    ExactAutomationCurve, MixBusId, ProgramOutputId, SequenceId, TimelineTime, TimelineTimeRange,
+    TrackId,
 };
 use mondrian_timeline::audio::{
-    AudioComponentChannelMapping, AudioFadeCurve, AudioRouteDestination, AudioRouteSource,
-    AudioTransitionCurve,
+    AudioComponentChannelMapping, AudioFadeCurve, AudioProcessorDefinitionRef,
+    AudioProcessorParameter, AudioRouteDestination, AudioRouteSource, AudioTransitionCurve,
 };
 use mondrian_timeline::clip::SpeedMap;
 use std::collections::{BTreeMap, BTreeSet};
@@ -88,52 +88,15 @@ pub enum CompiledAudioSource {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CompiledProcessor {
     pub(crate) instance_id: AudioProcessorInstanceId,
-    pub(crate) operation: CompiledProcessorOperation,
-}
-
-/// Processor definition resolved without choosing a concrete runtime instance.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum CompiledProcessorOperation {
-    Gain {
-        parameter_id: ParameterId,
-        automation: ExactAutomationCurve,
-    },
-}
-
-impl CompiledProcessor {
-    /// Render-Contract-specific intrinsic latency after processor realization.
-    /// Built-in Gain is strictly zero-latency.
-    pub(crate) const fn latency_frames(&self) -> usize {
-        match &self.operation {
-            CompiledProcessorOperation::Gain { .. } => 0,
-        }
-    }
-
-    /// Whether execution owns history that requires an explicit continuity entry.
-    pub(crate) const fn requires_state_entry(&self) -> bool {
-        self.latency_frames() > 0
-            || match &self.operation {
-                CompiledProcessorOperation::Gain { .. } => false,
-            }
-    }
+    pub(crate) definition: AudioProcessorDefinitionRef,
+    pub(crate) parameters: BTreeMap<mondrian_core::ParameterId, AudioProcessorParameter>,
+    pub(crate) opaque_state: Option<Vec<u8>>,
 }
 
 /// Ordered, immutable processor operations.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct CompiledRack {
     pub(crate) processors: Vec<CompiledProcessor>,
-}
-
-impl CompiledRack {
-    pub(crate) fn latency_frames(&self) -> Option<usize> {
-        self.processors.iter().try_fold(0_usize, |latency, processor| {
-            latency.checked_add(processor.latency_frames())
-        })
-    }
-
-    pub(crate) fn requires_state_entry(&self) -> bool {
-        self.processors.iter().any(CompiledProcessor::requires_state_entry)
-    }
 }
 
 /// Non-placement processing scope compiled from one author definition.

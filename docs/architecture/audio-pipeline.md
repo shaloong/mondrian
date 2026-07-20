@@ -209,12 +209,15 @@ definition is built-in, VST3, CLAP, or a future host format. Author data keeps:
 - opaque versioned external-plugin state.
 
 An unavailable dependency remains serializable and editable but is not
-executable. Compilation fails closed unless the instance is explicitly
-bypassed. Plugin path, scan order, parameter array index, and display name are
-never identity. Parameter map key, schema identity, and curve identity must be
-identical. Project validation rejects non-finite values, values and Bezier
-control points outside the hard range, disallowed interpolation mathematics,
-and keyframes on non-animatable parameters before an immutable snapshot exists.
+executable. Semantic compilation preserves its definition, schema/curves, and
+opaque state; concrete plan preparation fails closed unless a resolver realizes
+it for the exact sample-rate/layout/block/mode contract or the author instance
+is explicitly bypassed. Plugin path, scan order, parameter array index, and
+display name are never identity. Parameter map key, schema identity, and curve
+identity must be identical. Project validation rejects non-finite values,
+values and Bezier control points outside the hard range, disallowed
+interpolation mathematics, and keyframes on non-animatable parameters before
+an immutable snapshot exists.
 
 The current common executor admits built-in Gain schema 1 only when its complete
 captured parameter schema equals the canonical definition. The required Gain
@@ -225,10 +228,17 @@ Parameter IDs instead of folding Rack gain into one scalar. Preparation emits
 ordered generated occurrences for every exact owner/insertion point; a shared
 Scope therefore creates independent Session state for each Contribution.
 Built-in Gain consumes the same preallocated sample-accurate parameter batch
-contract intended for hosted processors. VST3/CLAP loading, process isolation,
-plugin-bus/layout negotiation, ABI value normalization, plugin state restore,
-latency binding, and parameter-delivery capability negotiation remain required
-work; no dry or flat fallback claims support.
+contract intended for hosted processors. `AudioProcessorResolver` now runs only
+during preparation and returns a Render-Contract-bound immutable factory with
+fixed latency, continuity, realtime/offline admission, and per-Session scratch
+facts. `AudioRenderSession` creates one exclusive instance per generated
+occurrence before callback execution. The callback receives exact block facts,
+one in-place main-bus Interface, stable-key auxiliary-input lookup, and borrowed
+parameter batches; it cannot discover or instantiate dependencies. The default
+resolver supports canonical built-in Gain and rejects external definitions.
+VST3/CLAP scanning/loading, isolated-process adapters, concrete bus negotiation,
+ABI value normalization, crash/hang deadline containment, and production state
+restore remain required work; no dry or flat fallback claims support.
 
 ### Fades and transitions
 
@@ -308,12 +318,12 @@ preparation is bottom-up: a parent Contribution receives the already-prepared,
 instance-specific child-output latency. Missing nested latency fails closed and
 can never be guessed as zero. Layout negotiation, processor realization,
 plugin-specific batch lowering, and each realized processor's latency/state-
-entry facts also belong here. Generic compensation execution and root Session
-entry already operate below this boundary, but the present executable
-processor set is zero-latency; the runtime therefore does not claim plugin
-delay compensation until a concrete hosted or built-in non-zero-latency
-processor supplies its execution state and discontinuity contract in the same
-change.
+entry/mode/scratch facts also belong here. Generic compensation execution and
+root Session entry already consume those realized facts. Ordinary tests use a
+stateful non-zero-latency Host Adapter to prove PDC, whole/partitioned PCM,
+explicit entry, mode rejection, and failed-entry poisoning; this is
+architecture evidence, not a claim that a production VST3/CLAP or stateful
+built-in effect ships today.
 
 ### Stage 3: exclusive mutable Session
 
@@ -327,14 +337,16 @@ Session construction also allocates one state slot per generated Processor
 occurrence plus the largest Parameter-lane and sample-event batch required by
 any one Processor block. Racks execute in authored order and reuse that bounded
 batch storage sequentially. Capacity evidence reports occurrence count,
-maximum lane count, and event capacity. Shared immutable Scope definitions do
-not merge these state slots.
+maximum lane/event capacity, and the sum of processor-declared private scratch
+bytes. Shared immutable Scope definitions do not merge these state slots.
 
-The `processor_execution` Module exclusively owns occurrence state, parameter
-batch construction, state entry, and built-in/host Adapter dispatch. The
-`render` Module owns graph traversal, PCM flow, summing, envelopes, and delay
-placement; it neither reconstructs processor batches nor reaches into a
-processor's mutable state.
+The `processor_host` Module exclusively owns factory binding, occurrence state,
+state entry, main/auxiliary bus dispatch, and built-in/host Adapter calls.
+`processor_parameters` owns preallocated event-batch lowering. The `render`
+Module owns graph traversal, PCM flow, summing, envelopes, and delay placement;
+it neither reconstructs processor batches nor reaches into a processor's
+mutable state. A failed entry consumes and poisons its new epoch before any
+instance resets, so partial multi-processor reset can never resume old history.
 
 The immutable Plan and recursive Runtime both report selected-output latency.
 This is execution scheduling information, not an instruction to rewrite author
@@ -417,6 +429,18 @@ All internal PCM is floating point. Values outside `[-1, 1]` are legal.
 Nothing normalizes, clips, applies `tanh`, or inserts a limiter. A limiter,
 loudness target, dither, channel packager, or monitor calibration must be an
 explicit processor or downstream contract.
+
+Every successful Session block publishes fixed-size Program Output observation
+state after the final strip. A shared read-only `AudioMeterObserver` is obtained
+before callback ownership transfers and allows control/analysis threads to read
+an internally consistent owned `AudioMeterFrame`: exact Sequence sample range,
+a monotonic block serial, and per-channel finite sample peak, RMS,
+over-full-scale count, and non-finite count. Callback publication uses fixed
+atomic slots and allocates and locks nothing; snapshot allocation is confined
+to the reader. This is deliberately not labelled true peak or loudness: EBU
+R128/ATSC A/85 filtering, windows, gating, channel weighting, oversampled true
+peak, hold/decay presentation, and offline normalization remain separate
+versioned observation or processing stages.
 
 Exact automation is evaluated in its owner domain and is invariant under block
 partition. Timeline-to-sample conversion uses `AudioSamplePosition` with an
@@ -634,7 +658,12 @@ Automated tests currently prove:
 - Clip/Track/Bus/Output gain and automation are block-invariant;
 - internal PCM is not clipped or `tanh`-shaped;
 - Track mute gates the post-mute route;
-- unresolved VST3/CLAP instances fail closed;
+- unresolved VST3/CLAP instances survive semantic IR and fail closed at default
+  plan preparation;
+- a custom stateful non-zero-latency factory drives Host instantiation, PDC,
+  continuity entry, realtime-mode admission, and partition-invariant PCM;
+- Program Output sample-peak/RMS observation preserves unclipped and non-finite
+  evidence without claiming loudness/true-peak conformance;
 - timeline/audio crates compile and test independently;
 - app playback and export compile against the shared Runtime.
 - dense schedule lowering produces topological node slots, contiguous Route and
@@ -672,16 +701,19 @@ gates rather than implied support:
    matrix presets, custom media-layout probing, and device/encoder negotiation.
    Unknown identities and unsupported layouts must continue to fail instead of
    being guessed.
-2. Add processor capability negotiation and real built-in stateful processors
-   with declared latency/deadline behavior; extend the implemented PDC,
-   seek-entry/preroll, discontinuity, and nested-latency evidence to each one.
+2. Add real built-in stateful processors with declared deadline/tail behavior;
+   extend the implemented resolver capability/mode/latency/state/scratch
+   contract, PDC, seek-entry/preroll, discontinuity, and nested evidence to each
+   production definition.
 3. Implement isolated VST3 and CLAP host Adapters with scanning, stable native
    IDs, state chunks, bus/layout negotiation, exact consumption/lowering of the
    common sample-accurate parameter batches, crash/hang containment, and
    realtime/offline capability reporting.
-4. Extend the implemented typed, level-automatable Route/send edge with typed
-   processor sidechain-input endpoints and negotiated auxiliary buses; add
-   meters and loudness analysis as explicit observation/downstream stages.
+4. Extend the implemented typed, level-automatable Route/send edge and Host
+   auxiliary-input lookup with authorable processor sidechain endpoints and
+   negotiated buses. Extend the implemented output sample-peak/RMS block meter
+   with true-peak, ballistic presentation, and standards-conformant loudness as
+   explicit observation/downstream stages.
 5. Execute Semantic Projection outputs and delivery mappings without cloning
    or reinterpreting the canonical Program graph.
 6. Add editor commands/UI for Clip/Track/Bus/Output racks, automation, fades,

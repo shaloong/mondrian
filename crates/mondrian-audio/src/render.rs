@@ -1,6 +1,7 @@
 use crate::delay::FixedDelayLine;
 use crate::dsp;
-use crate::processor_execution::PreparedProcessorRuntime;
+use crate::meter::ProgramOutputMeter;
+use crate::processor_host::PreparedProcessorHost;
 use crate::schedule::{
     PreparedAudioPlan, PreparedAudioSchedule, PreparedAutomationCurve, PreparedContribution,
     PreparedNode, PreparedNodeOrigin, PreparedTransitionBinding, PreparedTransitionDirection,
@@ -91,6 +92,10 @@ pub struct AudioRenderCapacity {
     pub maximum_processor_parameter_lanes: usize,
     /// Reused sample-accurate event storage for one processor block.
     pub parameter_event_capacity: usize,
+    /// Processor-private Session scratch declared by all realized factories.
+    pub processor_session_scratch_bytes: usize,
+    /// Fixed per-channel Program Output meter state.
+    pub meter_channel_state_count: usize,
 }
 
 #[derive(Debug)]
@@ -134,7 +139,6 @@ struct RenderScratch {
     contribution_pcm: Vec<f32>,
     contribution_processed: Vec<f32>,
     contribution_sample_gains: Vec<f32>,
-    strip_pre_gains: Vec<f32>,
     strip_post_gains: Vec<f32>,
     route_gains: Vec<f32>,
     frame_gain_db: Vec<f64>,
@@ -149,7 +153,6 @@ impl RenderScratch {
             contribution_pcm: vec![0.0; samples],
             contribution_processed: vec![0.0; samples],
             contribution_sample_gains: vec![0.0; samples],
-            strip_pre_gains: vec![0.0; samples],
             strip_post_gains: vec![0.0; samples],
             route_gains: vec![0.0; samples],
             frame_gain_db: vec![0.0; max_frames],
@@ -165,7 +168,8 @@ pub struct AudioRenderSession {
     scratch: RenderScratch,
     contribution_delay_lines: Vec<FixedDelayLine>,
     route_delay_lines: Vec<FixedDelayLine>,
-    processor_runtime: PreparedProcessorRuntime,
+    processor_host: PreparedProcessorHost,
+    output_meter: ProgramOutputMeter,
     continuity: SessionContinuity,
     capacity: AudioRenderCapacity,
 }
@@ -229,7 +233,8 @@ impl AudioRenderSession {
                     .checked_add(line.sample_capacity())
                     .ok_or(AudioExecutionError::BufferTooLarge)
             })?;
-        let processor_runtime = PreparedProcessorRuntime::new(&plan.schedule)?;
+        let processor_host = PreparedProcessorHost::new(&plan.schedule, contract)?;
+        let output_meter = ProgramOutputMeter::new(contract.channel_layout);
         let capacity = AudioRenderCapacity {
             max_block_frames: contract.max_block_frames,
             channels: contract.channel_count(),
@@ -240,9 +245,11 @@ impl AudioRenderSession {
             route_gain_scratch_samples: samples,
             compensation_delay_line_count,
             compensation_delay_samples,
-            processor_occurrences: processor_runtime.occurrence_count(),
-            maximum_processor_parameter_lanes: processor_runtime.maximum_parameter_lanes(),
-            parameter_event_capacity: processor_runtime.parameter_event_capacity(),
+            processor_occurrences: processor_host.occurrence_count(),
+            maximum_processor_parameter_lanes: processor_host.maximum_parameter_lanes(),
+            parameter_event_capacity: processor_host.parameter_event_capacity(),
+            processor_session_scratch_bytes: processor_host.session_scratch_bytes(),
+            meter_channel_state_count: output_meter.channel_state_count(),
         };
         Ok(Self {
             plan,
@@ -250,7 +257,8 @@ impl AudioRenderSession {
             scratch: RenderScratch::new(contract.max_block_frames, samples, source_samples),
             contribution_delay_lines,
             route_delay_lines,
-            processor_runtime,
+            processor_host,
+            output_meter,
             continuity: SessionContinuity::Unentered,
             capacity,
         })
@@ -281,7 +289,7 @@ impl AudioRenderSession {
         Vec<(mondrian_core::ParameterId, Vec<crate::AudioParameterEvent>)>,
         AudioExecutionError,
     > {
-        self.processor_runtime.parameter_events_for_test(
+        self.processor_host.parameter_events_for_test(
             &self.plan.schedule.processors,
             processor_index,
             request,
@@ -300,6 +308,10 @@ impl AudioRenderSession {
         if previous_epoch == Some(entry.epoch) {
             return Err(AudioExecutionError::ReusedContinuityEpoch(entry.epoch));
         }
+        // State entry can reset several delay/processor instances before one
+        // later instance fails. Consume and poison the new epoch first so a
+        // partially reset Session can never resume either old or new history.
+        self.continuity = SessionContinuity::Poisoned { epoch: entry.epoch };
         for delay in self
             .contribution_delay_lines
             .iter_mut()
@@ -307,7 +319,7 @@ impl AudioRenderSession {
         {
             delay.reset();
         }
-        self.processor_runtime.enter_state(&self.plan.schedule.processors)?;
+        self.processor_host.enter_state(&self.plan.schedule.processors, entry)?;
         self.continuity = SessionContinuity::Active {
             epoch: entry.epoch,
             next_sample: entry.start_sample,
@@ -318,6 +330,22 @@ impl AudioRenderSession {
     /// Return the fixed allocation envelope owned by this Session.
     pub const fn capacity(&self) -> AudioRenderCapacity {
         self.capacity
+    }
+
+    /// Clone the latest successfully completed Program Output meter block.
+    ///
+    /// Cloning allocates and is therefore an observation/control-thread API,
+    /// not part of `render_into`'s realtime contract.
+    pub fn latest_meter_frame(&self) -> crate::AudioMeterFrame {
+        self.output_meter.snapshot()
+    }
+
+    /// Obtain a lock-free observation handle for another thread.
+    ///
+    /// Clone this before moving the Session into an audio callback. Snapshot
+    /// allocation occurs only when the observer is read, never while publishing.
+    pub fn meter_observer(&self) -> crate::AudioMeterObserver {
+        self.output_meter.observer()
     }
 
     /// Render into caller-owned interleaved float storage without Session-owned
@@ -395,7 +423,7 @@ impl AudioRenderSession {
                     &mut self.node_buffers[scratch_slot],
                     &mut self.scratch,
                     &mut self.contribution_delay_lines,
-                    &mut self.processor_runtime,
+                    &mut self.processor_host,
                 )?;
             } else {
                 for route_index in node.incoming.clone() {
@@ -422,16 +450,19 @@ impl AudioRenderSession {
                 node,
                 request,
                 contract.sample_rate,
-                contract.channel_count(),
+                contract.channel_layout,
                 backend,
                 &mut self.node_buffers[scratch_slot],
                 &mut self.scratch,
-                &mut self.processor_runtime,
+                &mut self.processor_host,
             )?;
         }
 
         let output_scratch = schedule.nodes[schedule.output_slot].scratch_slot;
         destination.copy_from_slice(&self.node_buffers[output_scratch].post_mute[..samples]);
+        if !self.output_meter.observe(request.start_sample, request.frames, destination) {
+            return Err(AudioExecutionError::InvalidPreparedSchedule);
+        }
         if let Some(epoch) = active_epoch {
             self.continuity = SessionContinuity::Active { epoch, next_sample };
         }
@@ -473,7 +504,7 @@ fn render_track_contributions(
     track: &mut NodeBuffers,
     scratch: &mut RenderScratch,
     delay_lines: &mut [FixedDelayLine],
-    processor_runtime: &mut PreparedProcessorRuntime,
+    processor_host: &mut PreparedProcessorHost,
 ) -> Result<(), AudioExecutionError> {
     let channels = channel_layout.channel_count();
     let samples = request
@@ -563,7 +594,7 @@ fn render_track_contributions(
             );
         }
 
-        processor_runtime.process_rack(
+        processor_host.process_rack(
             &contribution.scope_rack,
             &schedule.processors,
             AudioRenderRequest {
@@ -571,11 +602,9 @@ fn render_track_contributions(
                 frames: active_frame_count,
             },
             sample_rate,
-            channels,
+            channel_layout,
             backend,
             &mut scratch.contribution_processed[active_sample_start..active_sample_end],
-            &mut scratch.frame_gain_db[..active_frame_count],
-            &mut scratch.contribution_sample_gains[..active_samples],
         )?;
 
         scratch.contribution_sample_gains[..active_samples].fill(0.0);
@@ -803,12 +832,13 @@ fn process_strip(
     node: &PreparedNode,
     request: AudioRenderRequest,
     sample_rate: u32,
-    channels: usize,
+    channel_layout: AudioChannelLayout,
     backend: crate::AudioKernelBackend,
     buffers: &mut NodeBuffers,
     scratch: &mut RenderScratch,
-    processor_runtime: &mut PreparedProcessorRuntime,
+    processor_host: &mut PreparedProcessorHost,
 ) -> Result<(), AudioExecutionError> {
+    let channels = channel_layout.channel_count();
     let samples = request
         .frames
         .checked_mul(channels)
@@ -820,16 +850,14 @@ fn process_strip(
         dsp::db_to_linear(node.strip.input_trim_db),
     );
     let sample_rate = AudioSampleRate::new(sample_rate)?;
-    processor_runtime.process_rack(
+    processor_host.process_rack(
         &node.pre_rack,
         &schedule.processors,
         request,
         sample_rate,
-        channels,
+        channel_layout,
         backend,
         &mut buffers.pre_fader[..samples],
-        &mut scratch.frame_gain_db[..request.frames],
-        &mut scratch.strip_pre_gains[..samples],
     )?;
 
     if let Some(curve) = &node.fader_automation {
@@ -854,16 +882,14 @@ fn process_strip(
             dsp::db_to_linear(node.strip.fader_db),
         );
     }
-    processor_runtime.process_rack(
+    processor_host.process_rack(
         &node.post_rack,
         &schedule.processors,
         request,
         sample_rate,
-        channels,
+        channel_layout,
         backend,
         &mut buffers.post_fader_pre_mute[..samples],
-        &mut scratch.frame_gain_db[..request.frames],
-        &mut scratch.strip_post_gains[..samples],
     )?;
     if node.muted {
         buffers.post_mute[..samples].fill(0.0);
@@ -1022,6 +1048,9 @@ pub enum AudioExecutionError {
     /// A media or nested source Adapter could not provide required PCM.
     #[error("audio source is unavailable: {0}")]
     SourceUnavailable(String),
+    /// A realized processor failed to instantiate, reset, or execute.
+    #[error(transparent)]
+    ProcessorHost(#[from] crate::AudioProcessorHostError),
     /// Exact timeline arithmetic failed.
     #[error(transparent)]
     Time(#[from] TimelineTimeError),

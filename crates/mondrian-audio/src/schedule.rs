@@ -3,14 +3,19 @@
 use crate::latency::{solve_prepared_latency, PreparedLatencyNodeInput, PreparedNodeLatency};
 use crate::plan::{
     AudioRenderContract, CompiledAudioContribution, CompiledAudioProgram, CompiledChannelStrip,
-    CompiledProcessingScope, CompiledProcessorOperation, CompiledRack, CompiledTransition,
+    CompiledProcessingScope, CompiledRack, CompiledTransition,
 };
-use crate::{AudioCompileError, PreparedAudioChannelMixer};
+use crate::processor_host::{
+    default_processor_resolver, prepare_processor_factory, PreparedProcessorFactoryBinding,
+};
+use crate::{
+    AudioCompileError, AudioProcessorInsertionPoint, AudioProcessorOccurrence,
+    AudioProcessorOccurrenceOwner, AudioProcessorResolver, PreparedAudioChannelMixer,
+};
 use mondrian_core::{
-    AudioChannelLayout, AudioChannelMixMatrix, AudioComponentEditId, AudioProcessingScopeId,
-    AudioProcessorInstanceId, AudioSamplePosition, AudioSampleRate, AudioSampleRounding,
-    ExactAutomationCurve, ExactAutomationSegment, MixBusId, ParameterId, ProgramOutputId,
-    TimelineTime, TrackId,
+    AudioChannelLayout, AudioChannelMixMatrix, AudioSamplePosition, AudioSampleRate,
+    AudioSampleRounding, ExactAutomationCurve, ExactAutomationSegment, MixBusId, ParameterId,
+    ProgramOutputId, TimelineTime, TrackId,
 };
 use mondrian_timeline::audio::{
     AudioChannelStripOutputPort, AudioComponentChannelMapping, AudioRouteDestination,
@@ -204,11 +209,27 @@ impl PreparedAudioPlan {
         contract: AudioRenderContract,
         kernel_backend: AudioKernelBackend,
     ) -> Result<Self, AudioCompileError> {
+        Self::prepare_with_processor_resolver(
+            program,
+            contract,
+            kernel_backend,
+            default_processor_resolver(),
+        )
+    }
+
+    /// Prepare with one explicit non-realtime processor resolver.
+    pub fn prepare_with_processor_resolver(
+        program: Arc<CompiledAudioProgram>,
+        contract: AudioRenderContract,
+        kernel_backend: AudioKernelBackend,
+        processor_resolver: &dyn AudioProcessorResolver,
+    ) -> Result<Self, AudioCompileError> {
         Self::prepare_with_dependencies(
             program,
             contract,
             kernel_backend,
             &AudioPreparationDependencies::default(),
+            processor_resolver,
         )
     }
 
@@ -217,6 +238,7 @@ impl PreparedAudioPlan {
         contract: AudioRenderContract,
         kernel_backend: AudioKernelBackend,
         dependencies: &AudioPreparationDependencies,
+        processor_resolver: &dyn AudioProcessorResolver,
     ) -> Result<Self, AudioCompileError> {
         if contract.sample_rate == 0
             || contract.max_block_frames == 0
@@ -224,7 +246,12 @@ impl PreparedAudioPlan {
         {
             return Err(AudioCompileError::InvalidRenderContract);
         }
-        let schedule = PreparedAudioSchedule::build(program.as_ref(), contract, dependencies)?;
+        let schedule = PreparedAudioSchedule::build(
+            program.as_ref(),
+            contract,
+            dependencies,
+            processor_resolver,
+        )?;
         Ok(Self { program, contract, kernel_backend, schedule })
     }
 
@@ -331,38 +358,10 @@ pub(crate) struct PreparedRack {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedProcessor {
-    pub(crate) origin: PreparedProcessorOrigin,
+    pub(crate) occurrence: AudioProcessorOccurrence,
     pub(crate) parameter_ids: Vec<ParameterId>,
     pub(crate) parameter_curves: Vec<PreparedAutomationCurve>,
-    pub(crate) operation: PreparedProcessorOperation,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PreparedProcessorOperation {
-    Gain { parameter_slot: usize },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PreparedProcessorOrigin {
-    pub(crate) instance_id: AudioProcessorInstanceId,
-    pub(crate) owner: PreparedProcessorOwner,
-    pub(crate) insertion: PreparedProcessorInsertion,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PreparedProcessorOwner {
-    Contribution {
-        edit_id: AudioComponentEditId,
-        scope_id: AudioProcessingScopeId,
-    },
-    Node(PreparedNodeOrigin),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PreparedProcessorInsertion {
-    Scope,
-    PreFader,
-    PostFader,
+    pub(crate) factory: PreparedProcessorFactoryBinding,
 }
 
 /// One author curve lowered into exact sample-grid event spans.
@@ -475,6 +474,7 @@ impl PreparedAudioSchedule {
         program: &CompiledAudioProgram,
         contract: AudioRenderContract,
         dependencies: &AudioPreparationDependencies,
+        processor_resolver: &dyn AudioProcessorResolver,
     ) -> Result<Self, AudioCompileError> {
         let sample_rate = AudioSampleRate::new(contract.sample_rate).map_err(|error| {
             AudioCompileError::InvalidPreparedGraph(format!(
@@ -491,21 +491,25 @@ impl PreparedAudioSchedule {
         for (track_id, channel) in &program.track_channels {
             let slot = nodes.len();
             track_slots.insert(*track_id, slot);
-            let origin = PreparedProcessorOwner::Node(PreparedNodeOrigin::Track(*track_id));
+            let owner = AudioProcessorOccurrenceOwner::Track(*track_id);
             let pre_rack = prepare_rack(
                 &channel.strip.pre_fader,
-                origin,
-                PreparedProcessorInsertion::PreFader,
+                owner,
+                AudioProcessorInsertionPoint::PreFader,
                 TimelineTime::ZERO,
                 sample_rate,
+                contract,
+                processor_resolver,
                 &mut processors,
             )?;
             let post_rack = prepare_rack(
                 &channel.strip.post_fader,
-                origin,
-                PreparedProcessorInsertion::PostFader,
+                owner,
+                AudioProcessorInsertionPoint::PostFader,
                 TimelineTime::ZERO,
                 sample_rate,
+                contract,
+                processor_resolver,
                 &mut processors,
             )?;
             nodes.push(PreparedNode {
@@ -533,21 +537,25 @@ impl PreparedAudioSchedule {
             })?;
             let slot = nodes.len();
             bus_slots.insert(*bus_id, slot);
-            let origin = PreparedProcessorOwner::Node(PreparedNodeOrigin::Bus(*bus_id));
+            let owner = AudioProcessorOccurrenceOwner::Bus(*bus_id);
             let pre_rack = prepare_rack(
                 &strip.pre_fader,
-                origin,
-                PreparedProcessorInsertion::PreFader,
+                owner,
+                AudioProcessorInsertionPoint::PreFader,
                 TimelineTime::ZERO,
                 sample_rate,
+                contract,
+                processor_resolver,
                 &mut processors,
             )?;
             let post_rack = prepare_rack(
                 &strip.post_fader,
-                origin,
-                PreparedProcessorInsertion::PostFader,
+                owner,
+                AudioProcessorInsertionPoint::PostFader,
                 TimelineTime::ZERO,
                 sample_rate,
+                contract,
+                processor_resolver,
                 &mut processors,
             )?;
             nodes.push(PreparedNode {
@@ -568,21 +576,25 @@ impl PreparedAudioSchedule {
             });
         }
         let output_slot = nodes.len();
-        let origin = PreparedProcessorOwner::Node(PreparedNodeOrigin::Output(program.output_id));
+        let owner = AudioProcessorOccurrenceOwner::Output(program.output_id);
         let pre_rack = prepare_rack(
             &program.output.pre_fader,
-            origin,
-            PreparedProcessorInsertion::PreFader,
+            owner,
+            AudioProcessorInsertionPoint::PreFader,
             TimelineTime::ZERO,
             sample_rate,
+            contract,
+            processor_resolver,
             &mut processors,
         )?;
         let post_rack = prepare_rack(
             &program.output.post_fader,
-            origin,
-            PreparedProcessorInsertion::PostFader,
+            owner,
+            AudioProcessorInsertionPoint::PostFader,
             TimelineTime::ZERO,
             sample_rate,
+            contract,
+            processor_resolver,
             &mut processors,
         )?;
         nodes.push(PreparedNode {
@@ -699,13 +711,15 @@ impl PreparedAudioSchedule {
             )?;
             let scope_rack = prepare_rack(
                 &scopes[scope_slot].rack,
-                PreparedProcessorOwner::Contribution {
+                AudioProcessorOccurrenceOwner::Contribution {
                     edit_id: semantic.edit_id,
                     scope_id: scopes[scope_slot].id,
                 },
-                PreparedProcessorInsertion::Scope,
+                AudioProcessorInsertionPoint::Scope,
                 scope_time_offset,
                 sample_rate,
+                contract,
+                processor_resolver,
                 &mut processors,
             )?;
             let volume_automation = prepare_optional_curve(
@@ -950,46 +964,63 @@ impl PreparedAudioSchedule {
 
 fn prepare_rack(
     rack: &CompiledRack,
-    owner: PreparedProcessorOwner,
-    insertion: PreparedProcessorInsertion,
+    owner: AudioProcessorOccurrenceOwner,
+    insertion: AudioProcessorInsertionPoint,
     owner_time_offset: TimelineTime,
     sample_rate: AudioSampleRate,
+    contract: AudioRenderContract,
+    processor_resolver: &dyn AudioProcessorResolver,
     destination: &mut Vec<PreparedProcessor>,
 ) -> Result<PreparedRack, AudioCompileError> {
     let start = destination.len();
     for processor in &rack.processors {
-        match &processor.operation {
-            CompiledProcessorOperation::Gain { parameter_id, automation } => {
-                if parameter_id != &automation.parameter_id {
-                    return Err(AudioCompileError::InvalidPreparedGraph(format!(
-                        "processor {} parameter identity drifted during preparation",
-                        processor.instance_id
-                    )));
-                }
-                destination.push(PreparedProcessor {
-                    origin: PreparedProcessorOrigin {
-                        instance_id: processor.instance_id,
-                        owner,
-                        insertion,
-                    },
-                    parameter_ids: vec![parameter_id.clone()],
-                    parameter_curves: vec![PreparedAutomationCurve::build(
-                        automation,
-                        owner_time_offset,
-                        sample_rate,
-                    )?],
-                    operation: PreparedProcessorOperation::Gain { parameter_slot: 0 },
-                });
+        let occurrence = AudioProcessorOccurrence {
+            instance_id: processor.instance_id,
+            owner,
+            insertion,
+        };
+        let factory =
+            prepare_processor_factory(processor_resolver, processor, occurrence, contract)?;
+        let mut parameter_ids = Vec::with_capacity(processor.parameters.len());
+        let mut parameter_curves = Vec::with_capacity(processor.parameters.len());
+        for (parameter_id, parameter) in &processor.parameters {
+            if parameter_id != &parameter.schema.parameter_id
+                || parameter_id != &parameter.automation.parameter_id
+            {
+                return Err(AudioCompileError::InvalidPreparedGraph(format!(
+                    "processor {} parameter identity drifted during preparation",
+                    processor.instance_id
+                )));
             }
+            parameter_ids.push(parameter_id.clone());
+            parameter_curves.push(PreparedAutomationCurve::build(
+                &parameter.automation,
+                owner_time_offset,
+                sample_rate,
+            )?);
         }
+        destination.push(PreparedProcessor {
+            occurrence,
+            parameter_ids,
+            parameter_curves,
+            factory,
+        });
     }
-    let latency_frames = rack.latency_frames().ok_or_else(|| {
-        AudioCompileError::InvalidPreparedGraph("processor rack latency overflowed".to_owned())
-    })?;
+    let prepared = &destination[start..];
+    let latency_frames = prepared
+        .iter()
+        .try_fold(0_usize, |latency, processor| {
+            latency.checked_add(processor.factory.contract().latency_frames())
+        })
+        .ok_or_else(|| {
+            AudioCompileError::InvalidPreparedGraph("processor rack latency overflowed".to_owned())
+        })?;
     Ok(PreparedRack {
         processors: start..destination.len(),
         latency_frames,
-        requires_state_entry: rack.requires_state_entry(),
+        requires_state_entry: prepared
+            .iter()
+            .any(|processor| processor.factory.contract().requires_state_entry()),
     })
 }
 

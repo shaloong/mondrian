@@ -1,8 +1,9 @@
+use crate::processor_host::default_processor_resolver;
 use crate::schedule::{resolve_channel_mapping, AudioKernelBackend, AudioPreparationDependencies};
 use crate::{
     compile_audio_program, AudioCompileRequest, AudioContinuityEpoch, AudioExecutionError,
-    AudioPcmSource, AudioRenderContract, AudioRenderRequest, AudioRenderSession, AudioStateEntry,
-    CompiledAudioSource, PreparedAudioPlan,
+    AudioPcmSource, AudioProcessorResolver, AudioRenderContract, AudioRenderRequest,
+    AudioRenderSession, AudioStateEntry, CompiledAudioSource, PreparedAudioPlan,
 };
 use mondrian_core::{
     AssetId, AudioChannelLayout, AudioComponentEditId, AudioSourceComponentId,
@@ -79,6 +80,25 @@ impl AudioProgramRuntime {
         contract: AudioRenderContract,
         output_id: Option<ProgramOutputId>,
     ) -> Result<Self, AudioRuntimeBuildError> {
+        Self::build_with_processor_resolver(
+            root,
+            sequences,
+            resolver,
+            default_processor_resolver(),
+            contract,
+            output_id,
+        )
+    }
+
+    /// Build with an explicit processor resolver shared by the complete nested closure.
+    pub fn build_with_processor_resolver(
+        root: &Sequence,
+        sequences: &[Sequence],
+        resolver: &dyn AudioMediaResolver,
+        processor_resolver: &dyn AudioProcessorResolver,
+        contract: AudioRenderContract,
+        output_id: Option<ProgramOutputId>,
+    ) -> Result<Self, AudioRuntimeBuildError> {
         if contract.channel_layout != root.settings.audio_channel_layout {
             return Err(AudioRuntimeBuildError::ProgramLayoutMismatch {
                 sequence_id: root.id,
@@ -88,7 +108,14 @@ impl AudioProgramRuntime {
         }
         let mut stack = BTreeSet::new();
         Self::build_inner(
-            root, sequences, resolver, contract, output_id, &mut stack, 0,
+            root,
+            sequences,
+            resolver,
+            processor_resolver,
+            contract,
+            output_id,
+            &mut stack,
+            0,
         )
     }
 
@@ -96,6 +123,7 @@ impl AudioProgramRuntime {
         sequence: &Sequence,
         sequences: &[Sequence],
         resolver: &dyn AudioMediaResolver,
+        processor_resolver: &dyn AudioProcessorResolver,
         contract: AudioRenderContract,
         output_id: Option<ProgramOutputId>,
         stack: &mut BTreeSet<SequenceId>,
@@ -170,6 +198,7 @@ impl AudioProgramRuntime {
                             child,
                             sequences,
                             resolver,
+                            processor_resolver,
                             child_contract,
                             Some(output_id),
                             stack,
@@ -216,6 +245,7 @@ impl AudioProgramRuntime {
                 contract,
                 AudioKernelBackend::default(),
                 &dependencies,
+                processor_resolver,
             )?);
             Ok(Self {
                 session: AudioRenderSession::new(plan)?,
@@ -241,6 +271,16 @@ impl AudioProgramRuntime {
     /// Total prepared latency of this selected public output.
     pub fn output_latency_frames(&self) -> usize {
         self.session.output_latency_frames()
+    }
+
+    /// Latest successfully completed root Program Output meter block.
+    pub fn latest_meter_frame(&self) -> crate::AudioMeterFrame {
+        self.session.latest_meter_frame()
+    }
+
+    /// Obtain a lock-free root Program Output observation handle.
+    pub fn meter_observer(&self) -> crate::AudioMeterObserver {
+        self.session.meter_observer()
     }
 
     /// Whether the selected root/child closure owns mutable continuity state.

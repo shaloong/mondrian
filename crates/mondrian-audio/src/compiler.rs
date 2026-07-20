@@ -1,13 +1,12 @@
 use crate::plan::{
     AudioCompileRequest, CompiledAudioContribution, CompiledAudioProgram, CompiledAudioSource,
-    CompiledChannelStrip, CompiledProcessingScope, CompiledProcessor, CompiledProcessorOperation,
-    CompiledRack, CompiledRoute, CompiledSourceTimeMap, CompiledTrackChannel, CompiledTransition,
+    CompiledChannelStrip, CompiledProcessingScope, CompiledProcessor, CompiledRack, CompiledRoute,
+    CompiledSourceTimeMap, CompiledTrackChannel, CompiledTransition,
 };
 use mondrian_core::{AudioProcessingScopeId, MixBusId, ProgramOutputId, TrackId};
 use mondrian_timeline::audio::{
-    gain_parameter_schema, AudioChannelStrip, AudioComponentSource, AudioProcessorDefinitionRef,
-    AudioProcessorRack, AudioProgramOutput, AudioRoute, AudioRouteDestination, AudioRouteSource,
-    ProgramOutputMainSource, BUILTIN_GAIN_DEFINITION_ID, GAIN_DB_PARAMETER_ID,
+    AudioChannelStrip, AudioComponentSource, AudioProcessorRack, AudioProgramOutput, AudioRoute,
+    AudioRouteDestination, AudioRouteSource, ProgramOutputMainSource,
 };
 use mondrian_timeline::{AudioAuthoringError, Sequence};
 use std::collections::{BTreeMap, BTreeSet};
@@ -195,47 +194,17 @@ fn compile_strip(strip: &AudioChannelStrip) -> Result<CompiledChannelStrip, Audi
 }
 
 fn compile_rack(rack: &AudioProcessorRack) -> Result<CompiledRack, AudioCompileError> {
-    let mut processors = Vec::new();
-    for processor in &rack.processors {
-        if processor.bypassed {
-            continue;
-        }
-        match &processor.definition {
-            AudioProcessorDefinitionRef::BuiltIn { definition_id, schema_version }
-                if definition_id == BUILTIN_GAIN_DEFINITION_ID && *schema_version == 1 =>
-            {
-                if processor.parameters.len() != 1 {
-                    return Err(AudioCompileError::UnsupportedBuiltInParameter);
-                }
-                let parameter_id = mondrian_core::ParameterId::new_static(GAIN_DB_PARAMETER_ID);
-                let parameter = processor
-                    .parameters
-                    .get(&parameter_id)
-                    .ok_or(AudioCompileError::UnsupportedBuiltInParameter)?;
-                if parameter.schema != gain_parameter_schema() {
-                    return Err(AudioCompileError::UnsupportedBuiltInParameter);
-                }
-                let automation = parameter.automation.clone();
-                processors.push(CompiledProcessor {
-                    instance_id: processor.id,
-                    operation: CompiledProcessorOperation::Gain { parameter_id, automation },
-                });
-            }
-            AudioProcessorDefinitionRef::BuiltIn { definition_id, .. } => {
-                return Err(AudioCompileError::UnsupportedBuiltIn(definition_id.clone()));
-            }
-            AudioProcessorDefinitionRef::Vst3 { class_id, .. } => {
-                return Err(AudioCompileError::UnresolvedPlugin(format!(
-                    "VST3:{class_id}"
-                )));
-            }
-            AudioProcessorDefinitionRef::Clap { plugin_id, .. } => {
-                return Err(AudioCompileError::UnresolvedPlugin(format!(
-                    "CLAP:{plugin_id}"
-                )));
-            }
-        }
-    }
+    let processors = rack
+        .processors
+        .iter()
+        .filter(|processor| !processor.bypassed)
+        .map(|processor| CompiledProcessor {
+            instance_id: processor.id,
+            definition: processor.definition.clone(),
+            parameters: processor.parameters.clone(),
+            opaque_state: processor.opaque_state.clone(),
+        })
+        .collect();
     Ok(CompiledRack { processors })
 }
 
@@ -336,15 +305,6 @@ pub enum AudioCompileError {
     /// Clip placement or source mapping is invalid.
     #[error("invalid audio placement: {0}")]
     InvalidPlacement(String),
-    /// Built-in processor is not implemented by the common executor.
-    #[error("unsupported built-in audio processor {0}")]
-    UnsupportedBuiltIn(String),
-    /// Gain processor contains a parameter outside its versioned schema.
-    #[error("unsupported built-in Gain parameter")]
-    UnsupportedBuiltInParameter,
-    /// Plugin author intent is valid but the runtime dependency is unresolved.
-    #[error("audio plugin dependency is unresolved: {0}")]
-    UnresolvedPlugin(String),
     /// Semantic projection authoring is preserved but not executable yet.
     #[error("semantic audio output projection is not executable yet")]
     SemanticProjectionNotExecutableYet,
@@ -354,6 +314,9 @@ pub enum AudioCompileError {
     /// Render Contract contains zero or unbounded values.
     #[error("invalid audio Render Contract")]
     InvalidRenderContract,
+    /// A processor definition could not be realized for the concrete Render Contract.
+    #[error(transparent)]
+    ProcessorPreparation(#[from] crate::AudioProcessorHostError),
     /// Semantic IR could not be lowered into a closed dense execution schedule.
     #[error("invalid prepared audio graph: {0}")]
     InvalidPreparedGraph(String),

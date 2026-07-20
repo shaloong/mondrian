@@ -57,6 +57,146 @@ impl AudioPcmSource for FailingSource {
     }
 }
 
+struct TestDelayProcessorResolver {
+    latency_frames: usize,
+    realtime_capable: bool,
+    fail_first_state_entry: bool,
+}
+
+impl AudioProcessorResolver for TestDelayProcessorResolver {
+    fn prepare(
+        &self,
+        request: AudioProcessorPrepareRequest<'_>,
+    ) -> Result<Arc<dyn AudioProcessorFactory>, AudioProcessorHostError> {
+        if !matches!(
+            request.definition(),
+            mondrian_timeline::AudioProcessorDefinitionRef::Clap { plugin_id, .. }
+                if plugin_id == "test.mondrian.delay"
+        ) {
+            return Err(AudioProcessorHostError::Unavailable(
+                "test resolver only realizes test.mondrian.delay".to_owned(),
+            ));
+        }
+        if !matches!(
+            request.occurrence(),
+            AudioProcessorOccurrence {
+                owner: AudioProcessorOccurrenceOwner::Bus(_),
+                insertion: AudioProcessorInsertionPoint::PreFader,
+                ..
+            }
+        ) {
+            return Err(AudioProcessorHostError::InvalidContract(
+                "test Delay must be realized on a Bus pre-fader rack".to_owned(),
+            ));
+        }
+        if !request.parameters().is_empty() || request.opaque_state().is_some() {
+            return Err(AudioProcessorHostError::InvalidContract(
+                "test Delay requires no author parameters or state chunk".to_owned(),
+            ));
+        }
+        let scratch_samples = self
+            .latency_frames
+            .checked_mul(request.render_contract().channel_count())
+            .ok_or_else(|| {
+                AudioProcessorHostError::InvalidContract(
+                    "test Delay scratch capacity overflowed".to_owned(),
+                )
+            })?;
+        let scratch_bytes =
+            scratch_samples.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| {
+                AudioProcessorHostError::InvalidContract(
+                    "test Delay scratch bytes overflowed".to_owned(),
+                )
+            })?;
+        let contract = AudioProcessorExecutionContract::new(
+            self.latency_frames,
+            self.latency_frames > 0,
+            self.realtime_capable,
+            true,
+            scratch_bytes,
+        )?;
+        Ok(Arc::new(TestDelayProcessorFactory {
+            contract,
+            delay_samples: scratch_samples,
+            fail_first_state_entry: self.fail_first_state_entry,
+        }))
+    }
+}
+
+struct TestDelayProcessorFactory {
+    contract: AudioProcessorExecutionContract,
+    delay_samples: usize,
+    fail_first_state_entry: bool,
+}
+
+impl AudioProcessorFactory for TestDelayProcessorFactory {
+    fn execution_contract(&self) -> AudioProcessorExecutionContract {
+        self.contract
+    }
+
+    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+        Ok(Box::new(TestDelayProcessor {
+            samples: vec![0.0; self.delay_samples],
+            cursor: 0,
+            fail_first_state_entry: self.fail_first_state_entry,
+        }))
+    }
+}
+
+struct TestDelayProcessor {
+    samples: Vec<f32>,
+    cursor: usize,
+    fail_first_state_entry: bool,
+}
+
+impl AudioProcessor for TestDelayProcessor {
+    fn enter_state(&mut self, _start_sample: i64) -> Result<(), AudioProcessorHostError> {
+        if self.fail_first_state_entry {
+            self.fail_first_state_entry = false;
+            return Err(AudioProcessorHostError::StateEntry(
+                "injected first-entry failure".to_owned(),
+            ));
+        }
+        self.samples.fill(0.0);
+        self.cursor = 0;
+        Ok(())
+    }
+
+    fn process(
+        &mut self,
+        context: AudioProcessorProcessContext,
+        audio: &mut dyn AudioProcessorAudioIo,
+        _parameters: AudioParameterEventBatch<'_>,
+    ) -> Result<(), AudioProcessorHostError> {
+        let expected = context
+            .request()
+            .frames
+            .checked_mul(context.channel_layout().channel_count())
+            .ok_or_else(|| {
+                AudioProcessorHostError::Process("test Delay block overflowed".to_owned())
+            })?;
+        if audio.main_layout() != context.channel_layout()
+            || audio.frames() != context.request().frames
+            || audio.main_interleaved().len() != expected
+        {
+            return Err(AudioProcessorHostError::Process(
+                "test Delay received a mismatched main bus".to_owned(),
+            ));
+        }
+        if self.samples.is_empty() {
+            return Ok(());
+        }
+        for sample in audio.main_interleaved() {
+            std::mem::swap(sample, &mut self.samples[self.cursor]);
+            self.cursor += 1;
+            if self.cursor == self.samples.len() {
+                self.cursor = 0;
+            }
+        }
+        Ok(())
+    }
+}
+
 struct RampDecodedSource;
 
 impl AudioDecodedSource for RampDecodedSource {
@@ -192,6 +332,54 @@ fn sequence_with_audio_clip() -> Sequence {
     sequence
         .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
         .expect("authored audio Clip");
+    sequence
+}
+
+fn sequence_with_parallel_hosted_delay() -> Sequence {
+    let mut sequence = sequence_with_audio_clip();
+    let track_id = sequence.audio_tracks[0].id;
+    let output_id = sequence.audio_program.outputs[0].id;
+    let bus_id = mondrian_core::MixBusId::new();
+    let mut strip = mondrian_timeline::AudioChannelStrip::default();
+    strip.pre_fader.processors.push(AudioProcessorInstance {
+        id: mondrian_core::AudioProcessorInstanceId::new(),
+        definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
+            plugin_id: "test.mondrian.delay".to_owned(),
+            schema_version: 1,
+        },
+        bypassed: false,
+        parameters: BTreeMap::new(),
+        opaque_state: None,
+    });
+    sequence.audio_program.buses.push(AudioMixBus {
+        id: bus_id,
+        name: "Delayed parallel".to_owned(),
+        strip,
+    });
+    sequence.audio_program.routes.clear();
+    sequence.audio_program.routes.extend([
+        AudioRoute::new(
+            AudioRouteSource::Track {
+                track_id,
+                port: AudioChannelStripOutputPort::PostMute,
+            },
+            AudioRouteDestination::Output(output_id),
+        ),
+        AudioRoute::new(
+            AudioRouteSource::Track {
+                track_id,
+                port: AudioChannelStripOutputPort::PostMute,
+            },
+            AudioRouteDestination::Bus(bus_id),
+        ),
+        AudioRoute::new(
+            AudioRouteSource::Bus {
+                bus_id,
+                port: AudioChannelStripOutputPort::PostMute,
+            },
+            AudioRouteDestination::Output(output_id),
+        ),
+    ]);
     sequence
 }
 
@@ -715,6 +903,8 @@ fn processor_parameter_batches_are_sample_accurate_and_preallocated() {
     assert_eq!(session.capacity().processor_occurrences, 1);
     assert_eq!(session.capacity().maximum_processor_parameter_lanes, 1);
     assert_eq!(session.capacity().parameter_event_capacity, 8);
+    assert_eq!(session.capacity().processor_session_scratch_bytes, 96);
+    assert_eq!(session.capacity().meter_channel_state_count, 1);
 
     let lanes = session
         .processor_parameter_events_for_test(0, AudioRenderRequest { start_sample: 0, frames: 4 })
@@ -766,21 +956,21 @@ fn shared_scope_definition_materializes_independent_processor_occurrences() {
         plan.schedule_summary().maximum_parameter_events_per_block,
         1
     );
-    let origins = plan
+    let occurrences = plan
         .schedule
         .processors
         .iter()
-        .map(|processor| processor.origin)
+        .map(|processor| processor.occurrence)
         .collect::<Vec<_>>();
-    assert!(origins.iter().all(|origin| origin.instance_id == processor_id));
-    assert!(origins.iter().any(|origin| matches!(
-        origin.owner,
-        crate::schedule::PreparedProcessorOwner::Contribution { edit_id, scope_id }
+    assert!(occurrences.iter().all(|occurrence| occurrence.instance_id == processor_id));
+    assert!(occurrences.iter().any(|occurrence| matches!(
+        occurrence.owner,
+        crate::AudioProcessorOccurrenceOwner::Contribution { edit_id, scope_id }
             if edit_id == first_edit_id && scope_id == shared_scope_id
     )));
-    assert!(origins.iter().any(|origin| matches!(
-        origin.owner,
-        crate::schedule::PreparedProcessorOwner::Contribution { edit_id, scope_id }
+    assert!(occurrences.iter().any(|occurrence| matches!(
+        occurrence.owner,
+        crate::AudioProcessorOccurrenceOwner::Contribution { edit_id, scope_id }
             if edit_id == second_edit_id && scope_id == shared_scope_id
     )));
 
@@ -843,7 +1033,7 @@ fn track_mute_zeros_post_mute_route_without_reinterpreting_the_graph() {
 }
 
 #[test]
-fn unresolved_plugin_fails_closed_and_preserves_author_data() {
+fn unresolved_plugin_survives_semantic_ir_and_fails_at_preparation() {
     let mut sequence = sequence_with_audio_clip();
     let track_id = sequence.audio_tracks[0].id;
     sequence
@@ -865,9 +1055,222 @@ fn unresolved_plugin_fails_closed_and_preserves_author_data() {
             opaque_state: Some(vec![1, 2, 3]),
         });
     let output = sequence.audio_program.outputs[0].id;
-    let error = compile_audio_program(&sequence, AudioCompileRequest::program(output))
-        .expect_err("unresolved plugin must block");
-    assert!(matches!(error, AudioCompileError::UnresolvedPlugin(_)));
+    let compiled = compile_audio_program(&sequence, AudioCompileRequest::program(output))
+        .expect("semantic compilation preserves unresolved plugin intent");
+    let processor = &compiled
+        .track_channels
+        .get(&track_id)
+        .expect("compiled Track channel")
+        .strip
+        .pre_fader
+        .processors[0];
+    assert!(matches!(
+        processor.definition,
+        mondrian_timeline::AudioProcessorDefinitionRef::Clap { ref plugin_id, .. }
+            if plugin_id == "com.example.effect"
+    ));
+    assert_eq!(
+        processor.opaque_state.as_deref(),
+        Some([1, 2, 3].as_slice())
+    );
+
+    let error = PreparedAudioPlan::prepare(
+        Arc::new(compiled),
+        AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Mono,
+            max_block_frames: 256,
+            processing_mode: AudioProcessingMode::Realtime,
+        },
+    )
+    .expect_err("default resolver must fail closed");
+    assert!(matches!(
+        error,
+        AudioCompileError::ProcessorPreparation(AudioProcessorHostError::Unavailable(_))
+    ));
+}
+
+#[test]
+fn realized_stateful_processor_drives_pdc_state_entry_and_partitioned_pcm() {
+    let sequence = sequence_with_parallel_hosted_delay();
+    let output = sequence.audio_program.outputs[0].id;
+    let compiled = Arc::new(
+        compile_audio_program(&sequence, AudioCompileRequest::program(output))
+            .expect("semantic program"),
+    );
+    let contract = AudioRenderContract {
+        sample_rate: 2,
+        channel_layout: AudioChannelLayout::Mono,
+        max_block_frames: 5,
+        processing_mode: AudioProcessingMode::Realtime,
+    };
+    let resolver = TestDelayProcessorResolver {
+        latency_frames: 2,
+        realtime_capable: true,
+        fail_first_state_entry: false,
+    };
+    let plan = Arc::new(
+        PreparedAudioPlan::prepare_with_processor_resolver(
+            compiled,
+            contract,
+            AudioKernelBackend::RuntimeVectorized,
+            &resolver,
+        )
+        .expect("hosted plan"),
+    );
+    assert_eq!(plan.output_latency_frames(), 2);
+    assert!(plan.requires_state_entry());
+    assert_eq!(plan.schedule_summary().processor_occurrence_count, 1);
+    assert_eq!(plan.schedule_summary().maximum_compensation_frames, 2);
+
+    let mut whole = AudioRenderSession::new(Arc::clone(&plan)).expect("whole Session");
+    assert_eq!(whole.capacity().processor_session_scratch_bytes, 8);
+    assert_eq!(whole.capacity().meter_channel_state_count, 1);
+    whole
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(1),
+            start_sample: 0,
+        })
+        .expect("state entry");
+    let mut source = RampSource::default();
+    let mut whole_pcm = vec![0.0; 5];
+    whole
+        .render_into(
+            &mut source,
+            AudioRenderRequest { start_sample: 0, frames: 5 },
+            &mut whole_pcm,
+        )
+        .expect("whole hosted block");
+    assert_eq!(whole_pcm, vec![0.0, 0.0, 2.0, 4.0, 6.0]);
+    let meter = whole.latest_meter_frame();
+    assert_eq!(meter.block_serial, 1);
+    assert_eq!(meter.start_sample, 0);
+    assert_eq!(meter.channels[0].sample_peak_linear, 6.0);
+    assert_eq!(meter.channels[0].clipped_sample_count, 3);
+
+    let mut split = AudioRenderSession::new(plan).expect("split Session");
+    split
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(2),
+            start_sample: 0,
+        })
+        .expect("split state entry");
+    let mut split_source = RampSource::default();
+    let mut first = vec![0.0; 2];
+    let mut second = vec![0.0; 3];
+    split
+        .render_into(
+            &mut split_source,
+            AudioRenderRequest { start_sample: 0, frames: 2 },
+            &mut first,
+        )
+        .expect("first partition");
+    split
+        .render_into(
+            &mut split_source,
+            AudioRenderRequest { start_sample: 2, frames: 3 },
+            &mut second,
+        )
+        .expect("second partition");
+    assert_eq!([first, second].concat(), whole_pcm);
+    assert_eq!(split.latest_meter_frame().block_serial, 2);
+}
+
+#[test]
+fn processor_mode_capability_is_enforced_during_preparation() {
+    let sequence = sequence_with_parallel_hosted_delay();
+    let output = sequence.audio_program.outputs[0].id;
+    let compiled = Arc::new(
+        compile_audio_program(&sequence, AudioCompileRequest::program(output))
+            .expect("semantic program"),
+    );
+    let resolver = TestDelayProcessorResolver {
+        latency_frames: 2,
+        realtime_capable: false,
+        fail_first_state_entry: false,
+    };
+    let error = PreparedAudioPlan::prepare_with_processor_resolver(
+        compiled,
+        AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Mono,
+            max_block_frames: 256,
+            processing_mode: AudioProcessingMode::Realtime,
+        },
+        AudioKernelBackend::RuntimeVectorized,
+        &resolver,
+    )
+    .expect_err("offline-only processor cannot enter realtime plan");
+    assert!(matches!(
+        error,
+        AudioCompileError::ProcessorPreparation(AudioProcessorHostError::InvalidContract(_))
+    ));
+}
+
+#[test]
+fn failed_processor_state_entry_poisons_the_new_epoch_before_partial_reset() {
+    let sequence = sequence_with_parallel_hosted_delay();
+    let output = sequence.audio_program.outputs[0].id;
+    let compiled = Arc::new(
+        compile_audio_program(&sequence, AudioCompileRequest::program(output))
+            .expect("semantic program"),
+    );
+    let resolver = TestDelayProcessorResolver {
+        latency_frames: 2,
+        realtime_capable: true,
+        fail_first_state_entry: true,
+    };
+    let plan = Arc::new(
+        PreparedAudioPlan::prepare_with_processor_resolver(
+            compiled,
+            AudioRenderContract {
+                sample_rate: 2,
+                channel_layout: AudioChannelLayout::Mono,
+                max_block_frames: 4,
+                processing_mode: AudioProcessingMode::Realtime,
+            },
+            AudioKernelBackend::RuntimeVectorized,
+            &resolver,
+        )
+        .expect("hosted plan"),
+    );
+    let mut session = AudioRenderSession::new(plan).expect("Session");
+    let first_epoch = AudioContinuityEpoch::new(10);
+    assert!(matches!(
+        session.enter_state(AudioStateEntry { epoch: first_epoch, start_sample: 0 }),
+        Err(AudioExecutionError::ProcessorHost(
+            AudioProcessorHostError::StateEntry(_)
+        ))
+    ));
+    let mut source = RampSource::default();
+    let mut pcm = vec![0.0; 4];
+    assert_eq!(
+        session.render_into(
+            &mut source,
+            AudioRenderRequest { start_sample: 0, frames: 4 },
+            &mut pcm,
+        ),
+        Err(AudioExecutionError::ContinuityPoisoned(first_epoch))
+    );
+    assert_eq!(
+        session.enter_state(AudioStateEntry { epoch: first_epoch, start_sample: 0 }),
+        Err(AudioExecutionError::ReusedContinuityEpoch(first_epoch))
+    );
+
+    session
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(11),
+            start_sample: 0,
+        })
+        .expect("fresh epoch recovers");
+    session
+        .render_into(
+            &mut source,
+            AudioRenderRequest { start_sample: 0, frames: 4 },
+            &mut pcm,
+        )
+        .expect("recovered render");
+    assert_eq!(pcm, vec![0.0, 0.0, 2.0, 4.0]);
 }
 
 #[test]

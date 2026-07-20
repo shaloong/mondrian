@@ -10,16 +10,19 @@ mod compiler;
 mod delay;
 mod dsp;
 mod latency;
+mod meter;
 mod plan;
 mod processor;
-mod processor_execution;
+mod processor_host;
+mod processor_parameters;
 mod render;
 mod runtime;
 mod schedule;
 
 pub use compiler::{compile_audio_program, AudioCompileError};
+pub use meter::{AudioChannelMeterReading, AudioMeterFrame, AudioMeterObserver};
 pub use plan::*;
-pub use processor::{AudioParameterEvent, AudioParameterEventBatch};
+pub use processor::*;
 pub use render::{
     render_audio, AudioContinuityEpoch, AudioExecutionError, AudioPcmSource, AudioRenderCapacity,
     AudioRenderRequest, AudioRenderSession, AudioStateEntry,
