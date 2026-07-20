@@ -361,6 +361,12 @@ it. `app::viewer_gpu_output_health` owns the shared attempt-outcome vocabulary,
 health flags, cumulative counts, and pure classifier; production JSONL,
 Headless tests, the budget CLI, and performance gates therefore cannot disagree
 on what qualifies as `Ready` or silently downgrade a terminal failure.
+Residency classification follows the same ownership rule. The Window passes
+platform-probe and renderer-execution facts to
+`app::viewer_gpu_output_residency`; it does not infer zero-copy from a planned
+native input. Planned and executed working residency are distinct serialized
+states, and execution-only counters remain zero until the renderer supplies an
+actual completion record.
 Telemetry must also expose a stable display issue summary that names the reason,
 target output color space, current or selected surface contract, desired surface
 contract, payload blocker, and whether the target surface color space is

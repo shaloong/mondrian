@@ -92,6 +92,7 @@ mod timeline_commands;
 mod timeline_editing;
 pub mod ui_actions;
 pub mod viewer_gpu_output_health;
+pub(crate) mod viewer_gpu_output_residency;
 pub mod waveform_service;
 
 use self::ui_actions::TimelineSeekSource;

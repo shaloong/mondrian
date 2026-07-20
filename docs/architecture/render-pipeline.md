@@ -596,6 +596,13 @@ facts, but it must not redefine `Ready`, `Degraded`, or terminal failure
 classification. The ignored `viewer_gpu_output_budget_smoke` test reads
 `MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT`, writes the same health report into
 `MONDRIAN_PERF_OUTPUT` when configured, and fails the test on budget violations.
+`app::viewer_gpu_output_residency` separately owns the canonical lowering from
+declared preview layers and completed renderer execution into residency
+evidence. Pre-execution records are explicitly `GpuWorkingCompositePlanned`
+with `execution_observed=false`; only a completed renderer record may publish
+`GpuWorkingCompositeExecuted`, zero-copy success, or observed upload/readback
+counts. Platform import capability is an explicit input, never a hidden test
+dependency or a substitute for frame execution.
 Export diagnostics may expose additional preflight helpers, but final job-level
 counters must be produced from the frame render path.
 Preview exposes the same frame-level input color-resolution source counts from

@@ -11,10 +11,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::app::native_video_import::{
-    evaluate_native_video_import_readiness, NativeVideoImportReadiness,
-    NativeVideoImportReadinessInput,
-};
 use crate::app::preview_execution::{
     PreviewGpuFrame, PreviewGpuFrameState, PreviewGpuWorkingInput,
 };
@@ -29,6 +25,11 @@ use crate::app::viewer_gpu_output_health::{
     ViewerGpuOutputHealthCounts as AppUiViewerGpuOutputHealthCounts,
     ViewerGpuOutputHealthStatus as AppUiViewerGpuOutputHealthStatus,
     ViewerGpuOutputHealthSummary as AppUiViewerGpuOutputHealthSummary,
+};
+use crate::app::viewer_gpu_output_residency::{
+    declared_viewer_gpu_output_residency,
+    executed_viewer_gpu_output_residency as preview_gpu_composite_frame_residency,
+    ViewerGpuOutputFrameResidency as AppUiViewerGpuOutputFrameResidency,
 };
 use crate::app::AppState;
 use crate::app_ui::action_queue::PendingUiActions;
@@ -50,14 +51,12 @@ use mondrian_platform::{NativeVideoTextureImportProbe, SystemPlatformService};
 use mondrian_renderer::RenderOutputColorBoundary;
 use mondrian_renderer::{
     native_video_texture_device_features, ocio_lut_filtering_device_features,
-    request_adapter_with_native_video_preference, GpuNativeDecodedFrameImportSupport,
-    GpuProgramScopesRequest, RenderColorStageDiagnostics,
-    RenderGpuOutputBoundaryRuntimeDiagnostics, RenderGpuOutputBoundaryRuntimeRecordError,
-    RenderGpuOutputRuntimeDiagnosticsReport, RenderGpuOutputStageDiagnosticsReport,
-    RenderGpuOutputStageResourcePlanError, RenderOutputColorBoundaryTarget,
-    ViewerGpuExecutionError, ViewerGpuExecutionLayer, ViewerGpuExecutionRequest,
-    ViewerGpuExecutionResidency, ViewerGpuExecutionRuntime, ViewerGpuNativeVideoFacts,
-    ViewerGpuOutputPrecision, ViewerSourceRect,
+    request_adapter_with_native_video_preference, GpuProgramScopesRequest,
+    RenderColorStageDiagnostics, RenderGpuOutputBoundaryRuntimeDiagnostics,
+    RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputRuntimeDiagnosticsReport,
+    RenderGpuOutputStageDiagnosticsReport, RenderGpuOutputStageResourcePlanError,
+    RenderOutputColorBoundaryTarget, ViewerGpuExecutionError, ViewerGpuExecutionRequest,
+    ViewerGpuExecutionRuntime, ViewerGpuOutputPrecision, ViewerSourceRect,
 };
 use mondrian_ui_core::focus::FocusManager;
 use mondrian_ui_core::shortcut::{ShortcutManager, ShortcutScope};
@@ -291,49 +290,6 @@ enum AppUiViewerGpuOutputTarget {
 struct AppUiViewerGpuOutputDisplayView {
     display: String,
     view: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-struct AppUiViewerGpuOutputFrameResidency {
-    decode_residency: AppUiViewerGpuOutputDecodeResidency,
-    working_residency: AppUiViewerGpuOutputWorkingResidency,
-    input_transform_path: AppUiViewerGpuOutputInputTransformPath,
-    zero_copy: bool,
-    low_copy: bool,
-    upload_count: u32,
-    readback_count: u32,
-    reason: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    native_video_import: Option<NativeVideoImportReadiness>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-enum AppUiViewerGpuOutputDecodeResidency {
-    CpuDecodedRgba,
-    NativeGpuDecoded,
-    ProceduralGpuNative,
-    MixedCpuAndProcedural,
-    MixedNativeGpuAndCpuDecoded,
-    MixedNativeGpuAndProcedural,
-    MixedNativeGpuCpuAndProcedural,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-enum AppUiViewerGpuOutputWorkingResidency {
-    GpuWorkingComposite,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-enum AppUiViewerGpuOutputInputTransformPath {
-    CpuOcio,
-    GpuOcio,
-    GpuNativeVideoImport,
-    GpuNativeProcedural,
-    MixedNativeVideoImportAndGpuNative,
-    MixedCpuOcioAndGpuNative,
-    MixedGpuOcioAndGpuNative,
-    MixedCpuOcioAndGpuOcio,
-    MixedInputTransforms,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -764,100 +720,10 @@ impl AppUiViewerGpuOutputFrameContext {
                     view: display_view.view.clone(),
                 }
             }),
-            frame_residency: AppUiViewerGpuOutputFrameResidency::from_frame(frame),
-        }
-    }
-}
-
-impl AppUiViewerGpuOutputFrameResidency {
-    fn from_frame(frame: &PreviewGpuFrame) -> Self {
-        match &frame.working_input {
-            PreviewGpuWorkingInput::GpuComposite { layers } => {
-                let media_layers = layers
-                    .iter()
-                    .filter(|layer| matches!(layer, ViewerGpuExecutionLayer::Media { .. }))
-                    .count() as u32;
-                let gpu_input_eligible_layers = layers
-                    .iter()
-                    .filter(|layer| {
-                        matches!(
-                            layer,
-                            ViewerGpuExecutionLayer::Media { gpu_source: Some(_), .. }
-                        )
-                    })
-                    .count() as u32;
-                let native_media_layers = layers
-                    .iter()
-                    .filter(|layer| {
-                        matches!(
-                            layer,
-                            ViewerGpuExecutionLayer::Media { native_source: Some(_), .. }
-                        )
-                    })
-                    .count() as u32;
-                let procedural_layers = layers.len() as u32 - media_layers;
-                let has_media = media_layers > 0;
-                let has_procedural = procedural_layers > 0;
-                let all_media_gpu_input_eligible =
-                    has_media && gpu_input_eligible_layers == media_layers;
-                let all_media_native = has_media && native_media_layers == media_layers;
-                Self {
-                    decode_residency: match (has_media, has_procedural, all_media_native) {
-                        (true, true, true) => {
-                            AppUiViewerGpuOutputDecodeResidency::MixedNativeGpuAndProcedural
-                        }
-                        (true, false, true) => AppUiViewerGpuOutputDecodeResidency::NativeGpuDecoded,
-                        (true, true, false) => {
-                            AppUiViewerGpuOutputDecodeResidency::MixedCpuAndProcedural
-                        }
-                        (true, false, false) => AppUiViewerGpuOutputDecodeResidency::CpuDecodedRgba,
-                        (false, _, _) => AppUiViewerGpuOutputDecodeResidency::ProceduralGpuNative,
-                    },
-                    working_residency: AppUiViewerGpuOutputWorkingResidency::GpuWorkingComposite,
-                    input_transform_path: match (
-                        all_media_native,
-                        all_media_gpu_input_eligible,
-                        has_media,
-                        has_procedural,
-                    ) {
-                        (true, _, true, true) => {
-                            AppUiViewerGpuOutputInputTransformPath::MixedNativeVideoImportAndGpuNative
-                        }
-                        (true, _, true, false) => {
-                            AppUiViewerGpuOutputInputTransformPath::GpuNativeVideoImport
-                        }
-                        (false, true, true, true) => {
-                            AppUiViewerGpuOutputInputTransformPath::MixedGpuOcioAndGpuNative
-                        }
-                        (false, true, true, false) => AppUiViewerGpuOutputInputTransformPath::GpuOcio,
-                        (false, false, true, true) => {
-                            AppUiViewerGpuOutputInputTransformPath::MixedCpuOcioAndGpuNative
-                        }
-                        (false, false, true, false) => AppUiViewerGpuOutputInputTransformPath::CpuOcio,
-                        (_, _, false, _) => {
-                            AppUiViewerGpuOutputInputTransformPath::GpuNativeProcedural
-                        }
-                    },
-                    zero_copy: !has_media || all_media_native,
-                    low_copy: has_media && !all_media_native,
-                    upload_count: media_layers.saturating_sub(native_media_layers),
-                    readback_count: 0,
-                    reason: if all_media_native {
-                        "Native decoded media layers require renderer native video import before preview can remain GPU-resident".to_owned()
-                    } else if all_media_gpu_input_eligible {
-                        "GPU working composite is eligible to upload CPU decoded source media once, run GPU OCIO input, and keep working/output frames GPU-resident".to_owned()
-                    } else if has_media {
-                        "GPU working composite uploads CPU working media layers; hardware decode texture residency is not active".to_owned()
-                    } else {
-                        "Procedural layers are generated and composited on the GPU without media uploads".to_owned()
-                    },
-                    native_video_import: preview_gpu_composite_native_video_import_readiness(
-                        has_media,
-                        None,
-                        GpuNativeDecodedFrameImportSupport::unavailable(),
-                    ),
-                }
-            }
+            frame_residency: declared_viewer_gpu_output_residency(
+                frame,
+                SystemPlatformService.native_video_texture_import(),
+            ),
         }
     }
 }
@@ -3401,6 +3267,7 @@ fn prepare_viewer_gpu_preview(
         preview_gpu_composite_frame_residency(
             record.residency,
             session.viewer_gpu_execution.native_import_support(),
+            SystemPlatformService.native_video_texture_import(),
         ),
     );
     for reason in &record.fallback_reasons {
@@ -3593,141 +3460,6 @@ fn validate_display_calibration_proof(
             "display calibration LUT does not match snapshot processor proof: {status}"
         )),
     }
-}
-
-fn preview_gpu_composite_frame_residency(
-    summary: ViewerGpuExecutionResidency,
-    renderer_support: GpuNativeDecodedFrameImportSupport,
-) -> AppUiViewerGpuOutputFrameResidency {
-    let has_media = summary.media_layers > 0;
-    let has_procedural = summary.procedural_layers > 0;
-    let native_video_import = preview_gpu_composite_native_video_import_readiness(
-        has_media,
-        summary.native_video_import,
-        renderer_support,
-    );
-    let all_media_native_gpu =
-        has_media && summary.native_decoder_gpu_layers == summary.media_layers;
-    let has_native_gpu_media = summary.native_decoder_gpu_layers > 0;
-    let native_zero_copy_ready = native_video_import
-        .as_ref()
-        .map(|readiness| readiness.zero_copy_ready && all_media_native_gpu)
-        .unwrap_or(false);
-    AppUiViewerGpuOutputFrameResidency {
-        decode_residency: match (
-            has_media,
-            has_procedural,
-            has_native_gpu_media,
-            all_media_native_gpu,
-        ) {
-            (false, _, _, _) => AppUiViewerGpuOutputDecodeResidency::ProceduralGpuNative,
-            (true, false, true, true) => AppUiViewerGpuOutputDecodeResidency::NativeGpuDecoded,
-            (true, true, true, true) => {
-                AppUiViewerGpuOutputDecodeResidency::MixedNativeGpuAndProcedural
-            }
-            (true, false, true, false) => {
-                AppUiViewerGpuOutputDecodeResidency::MixedNativeGpuAndCpuDecoded
-            }
-            (true, true, true, false) => {
-                AppUiViewerGpuOutputDecodeResidency::MixedNativeGpuCpuAndProcedural
-            }
-            (true, true, false, _) => AppUiViewerGpuOutputDecodeResidency::MixedCpuAndProcedural,
-            (true, false, false, _) => AppUiViewerGpuOutputDecodeResidency::CpuDecodedRgba,
-        },
-        working_residency: AppUiViewerGpuOutputWorkingResidency::GpuWorkingComposite,
-        input_transform_path: preview_gpu_composite_input_transform_path(summary),
-        zero_copy: !has_media || native_zero_copy_ready,
-        low_copy: has_media && !native_zero_copy_ready,
-        upload_count: summary.gpu_input_layers.saturating_add(summary.cpu_upload_layers),
-        readback_count: 0,
-        reason: preview_gpu_composite_residency_reason(summary),
-        native_video_import,
-    }
-}
-fn preview_gpu_composite_native_video_import_readiness(
-    has_media: bool,
-    facts: Option<ViewerGpuNativeVideoFacts>,
-    renderer_support: GpuNativeDecodedFrameImportSupport,
-) -> Option<NativeVideoImportReadiness> {
-    let facts = facts.unwrap_or_default();
-    has_media.then(|| {
-        evaluate_native_video_import_readiness(NativeVideoImportReadinessInput {
-            decoder_residency: facts.decoder_residency,
-            decoder_handle_kind: facts.decoder_handle_kind,
-            source_texture_format: facts.source_texture_format,
-            source_video_sampling: facts.source_video_sampling,
-            platform_probe: SystemPlatformService.native_video_texture_import(),
-            renderer_support,
-        })
-    })
-}
-
-fn preview_gpu_composite_input_transform_path(
-    summary: ViewerGpuExecutionResidency,
-) -> AppUiViewerGpuOutputInputTransformPath {
-    let has_native_video = summary.native_decoder_gpu_layers > 0;
-    match (
-        has_native_video,
-        summary.gpu_input_layers > 0,
-        summary.cpu_upload_layers > 0,
-        summary.procedural_layers > 0,
-    ) {
-        (true, false, false, false) => AppUiViewerGpuOutputInputTransformPath::GpuNativeVideoImport,
-        (true, false, false, true) => {
-            AppUiViewerGpuOutputInputTransformPath::MixedNativeVideoImportAndGpuNative
-        }
-        (true, _, _, _) => AppUiViewerGpuOutputInputTransformPath::MixedInputTransforms,
-        (false, false, false, true) => AppUiViewerGpuOutputInputTransformPath::GpuNativeProcedural,
-        (false, true, false, false) => AppUiViewerGpuOutputInputTransformPath::GpuOcio,
-        (false, false, true, false) => AppUiViewerGpuOutputInputTransformPath::CpuOcio,
-        (false, true, false, true) => {
-            AppUiViewerGpuOutputInputTransformPath::MixedGpuOcioAndGpuNative
-        }
-        (false, false, true, true) => {
-            AppUiViewerGpuOutputInputTransformPath::MixedCpuOcioAndGpuNative
-        }
-        (false, true, true, false) => {
-            AppUiViewerGpuOutputInputTransformPath::MixedCpuOcioAndGpuOcio
-        }
-        (false, true, true, true) => AppUiViewerGpuOutputInputTransformPath::MixedInputTransforms,
-        (false, false, false, false) => AppUiViewerGpuOutputInputTransformPath::GpuNativeProcedural,
-    }
-}
-
-fn preview_gpu_composite_residency_reason(summary: ViewerGpuExecutionResidency) -> String {
-    if summary.media_layers == 0 {
-        return "Procedural layers are generated and composited on the GPU without media uploads"
-            .to_owned();
-    }
-    if summary.native_decoder_gpu_layers == summary.media_layers {
-        return "Native decoded media layers are GPU-resident; renderer import readiness determines whether playback can remain zero-copy".to_owned();
-    }
-    if summary.native_decoder_gpu_layers > 0 {
-        return format!(
-            "{} media layer(s) reported native GPU decoder residency; {} media layer(s) still require CPU decoded upload",
-            summary.native_decoder_gpu_layers,
-            summary
-                .media_layers
-                .saturating_sub(summary.native_decoder_gpu_layers)
-        );
-    }
-    if summary.gpu_input_layers == summary.media_layers {
-        return "CPU decoded source media uploads once for GPU OCIO input; working composite and output boundary stay GPU-resident".to_owned();
-    }
-    if summary.gpu_input_layers > 0 {
-        return format!(
-            "GPU OCIO input succeeded for {} media layer(s); {} media layer(s) used CPU working upload after {} GPU input failure(s)",
-            summary.gpu_input_layers, summary.cpu_upload_layers, summary.gpu_input_failures
-        );
-    }
-    if summary.gpu_input_failures > 0 {
-        return format!(
-            "GPU OCIO input failed for {} media layer(s); preview used CPU working uploads for this frame",
-            summary.gpu_input_failures
-        );
-    }
-    "GPU working composite uploads CPU working media layers; hardware decode texture residency is not active"
-        .to_owned()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4467,12 +4199,19 @@ mod platform_window_chrome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::viewer_gpu_output_residency::{
+        ViewerGpuOutputDecodeResidency as AppUiViewerGpuOutputDecodeResidency,
+        ViewerGpuOutputInputTransformPath as AppUiViewerGpuOutputInputTransformPath,
+        ViewerGpuOutputWorkingResidency as AppUiViewerGpuOutputWorkingResidency,
+    };
     use mondrian_core::WorkingColorSpace;
     use mondrian_editor_state::Action;
     use mondrian_media::{DecodedFrameResidency, DecodedGpuFrameHandleKind};
+    use mondrian_platform::{NativeVideoTextureHandleKind, NativeVideoTextureImportProbeResult};
     use mondrian_renderer::{
-        GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling,
-        GpuVideoChromaLocation, GpuVideoRange,
+        GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
+        GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation, GpuVideoRange,
+        ViewerGpuExecutionResidency, ViewerGpuNativeVideoFacts,
     };
     use mondrian_ui_core::widget::{EventContext, PaintContext};
     use mondrian_ui_core::Widget;
@@ -4603,6 +4342,14 @@ mod tests {
 
     fn native_import_support_unavailable() -> GpuNativeDecodedFrameImportSupport {
         GpuNativeDecodedFrameImportSupport::unavailable()
+    }
+
+    fn test_native_video_import_probe() -> NativeVideoTextureImportProbeResult {
+        NativeVideoTextureImportProbeResult::found(
+            vec![NativeVideoTextureHandleKind::D3D11Texture2D],
+            true,
+            true,
+        )
     }
 
     fn native_video_sampling() -> GpuNativeDecodedFrameVideoSampling {
@@ -5877,6 +5624,7 @@ mod tests {
                 ..ViewerGpuExecutionResidency::default()
             },
             native_import_support_unavailable(),
+            test_native_video_import_probe(),
         );
 
         assert_eq!(
@@ -5885,7 +5633,7 @@ mod tests {
         );
         assert_eq!(
             residency.working_residency,
-            AppUiViewerGpuOutputWorkingResidency::GpuWorkingComposite
+            AppUiViewerGpuOutputWorkingResidency::GpuWorkingCompositeExecuted
         );
         assert_eq!(
             residency.input_transform_path,
@@ -5921,6 +5669,7 @@ mod tests {
                 ..ViewerGpuExecutionResidency::default()
             },
             native_import_support_unavailable(),
+            test_native_video_import_probe(),
         );
 
         assert_eq!(
@@ -5959,6 +5708,7 @@ mod tests {
                 ..ViewerGpuExecutionResidency::default()
             },
             native_import_support_unavailable(),
+            test_native_video_import_probe(),
         );
 
         assert_eq!(
@@ -6000,6 +5750,7 @@ mod tests {
                 vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
                 vec![GpuNativeDecodedFrameTextureFormat::Nv12],
             ),
+            test_native_video_import_probe(),
         );
 
         assert_eq!(
@@ -6029,6 +5780,7 @@ mod tests {
                 ..ViewerGpuExecutionResidency::default()
             },
             native_import_support_unavailable(),
+            test_native_video_import_probe(),
         );
 
         assert_eq!(
@@ -6048,6 +5800,7 @@ mod tests {
                 ..ViewerGpuExecutionResidency::default()
             },
             native_import_support_unavailable(),
+            test_native_video_import_probe(),
         );
 
         assert_eq!(
@@ -6241,8 +5994,10 @@ mod tests {
             }),
             frame_residency: AppUiViewerGpuOutputFrameResidency {
                 decode_residency: AppUiViewerGpuOutputDecodeResidency::CpuDecodedRgba,
-                working_residency: AppUiViewerGpuOutputWorkingResidency::GpuWorkingComposite,
+                working_residency:
+                    AppUiViewerGpuOutputWorkingResidency::GpuWorkingCompositeExecuted,
                 input_transform_path: AppUiViewerGpuOutputInputTransformPath::CpuOcio,
+                execution_observed: true,
                 zero_copy: false,
                 low_copy: true,
                 upload_count: 1,
@@ -6360,7 +6115,11 @@ mod tests {
         );
         assert_eq!(
             json["last_frame_context"]["frame_residency"]["working_residency"],
-            "GpuWorkingComposite"
+            "GpuWorkingCompositeExecuted"
+        );
+        assert_eq!(
+            json["last_frame_context"]["frame_residency"]["execution_observed"],
+            true
         );
         assert_eq!(
             json["last_frame_context"]["frame_residency"]["input_transform_path"],
