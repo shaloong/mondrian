@@ -6,7 +6,7 @@ use crate::{
     AudioParameterEventBatch, AudioProcessor, AudioProcessorAudioIo,
     AudioProcessorExecutionContract, AudioProcessorFactory, AudioProcessorHostError,
     AudioProcessorPrepareRequest, AudioProcessorProcessContext, AudioProcessorResolver,
-    BuiltInAudioProcessorResolver,
+    AudioProcessorTail, BuiltInAudioProcessorResolver,
 };
 use mondrian_core::{AudioChannelLayout, ParameterId};
 use mondrian_timeline::audio::{
@@ -95,8 +95,14 @@ fn prepare_gain(
                 "built-in Gain scratch capacity overflowed".to_owned(),
             )
         })?;
-    let execution_contract =
-        AudioProcessorExecutionContract::new(0, false, true, true, session_scratch_bytes)?;
+    let execution_contract = AudioProcessorExecutionContract::new(
+        0,
+        AudioProcessorTail::None,
+        false,
+        true,
+        true,
+        session_scratch_bytes,
+    )?;
     Ok(Arc::new(BuiltInGainFactory {
         parameter_slot,
         max_block_frames: request.render_contract().max_block_frames,
@@ -157,6 +163,11 @@ fn prepare_sample_delay(
     // Reporting it as compensable latency would make PDC cancel the effect.
     let execution_contract = AudioProcessorExecutionContract::new(
         0,
+        if delay_frames == 0 {
+            AudioProcessorTail::None
+        } else {
+            AudioProcessorTail::Finite(delay_frames)
+        },
         delay_frames > 0,
         true,
         true,

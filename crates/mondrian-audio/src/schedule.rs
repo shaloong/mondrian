@@ -10,7 +10,8 @@ use crate::processor_host::{
 };
 use crate::{
     AudioCompileError, AudioProcessorInsertionPoint, AudioProcessorOccurrence,
-    AudioProcessorOccurrenceOwner, AudioProcessorResolver, PreparedAudioChannelMixer,
+    AudioProcessorOccurrenceOwner, AudioProcessorResolver, AudioProcessorTail,
+    PreparedAudioChannelMixer,
 };
 use mondrian_core::{
     AudioChannelLayout, AudioChannelMixMatrix, AudioSamplePosition, AudioSampleRate,
@@ -37,7 +38,7 @@ pub(crate) struct AudioPreparationDependencies {
 #[derive(Debug, Clone)]
 struct PreparedSourceDependency {
     channel_mix: AudioChannelMixMatrix,
-    latency_frames: usize,
+    algorithmic_latency_frames: usize,
     requires_state_entry: bool,
 }
 
@@ -47,7 +48,7 @@ impl AudioPreparationDependencies {
         edit_id: mondrian_core::AudioComponentEditId,
         channel_layout: AudioChannelLayout,
         channel_mix: AudioChannelMixMatrix,
-        latency_frames: usize,
+        algorithmic_latency_frames: usize,
         requires_state_entry: bool,
     ) -> Result<(), AudioCompileError> {
         if channel_mix.source_layout() != channel_layout {
@@ -59,7 +60,11 @@ impl AudioPreparationDependencies {
             .sources
             .insert(
                 edit_id,
-                PreparedSourceDependency { channel_mix, latency_frames, requires_state_entry },
+                PreparedSourceDependency {
+                    channel_mix,
+                    algorithmic_latency_frames,
+                    requires_state_entry,
+                },
             )
             .is_some()
         {
@@ -96,7 +101,7 @@ impl AudioPreparationDependencies {
                         channel_layout,
                         destination_layout,
                     )?,
-                    latency_frames: 0,
+                    algorithmic_latency_frames: 0,
                     requires_state_entry: false,
                 })
             }
@@ -340,13 +345,15 @@ pub(crate) struct PreparedContribution {
     pub(crate) channel_mixer: PreparedAudioChannelMixer,
     pub(crate) sequence_start_sample: i64,
     pub(crate) sequence_end_sample: i64,
+    /// Exclusive end of causal execution, or `None` for an infinite tail.
+    pub(crate) execution_end_sample: Option<i64>,
     pub(crate) constant_scope_gain: Option<f32>,
     pub(crate) constant_edit_gain_pan: Option<(f32, f64)>,
     pub(crate) scope_input_automation: Option<PreparedAutomationCurve>,
     pub(crate) scope_rack: PreparedRack,
     pub(crate) volume_automation: Option<PreparedAutomationCurve>,
     pub(crate) pan_automation: Option<PreparedAutomationCurve>,
-    pub(crate) source_latency_frames: usize,
+    pub(crate) source_algorithmic_latency_frames: usize,
     pub(crate) source_requires_state_entry: bool,
     pub(crate) compensation_delay_frames: usize,
 }
@@ -354,7 +361,8 @@ pub(crate) struct PreparedContribution {
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedRack {
     pub(crate) processors: Range<usize>,
-    pub(crate) latency_frames: usize,
+    pub(crate) algorithmic_latency_frames: usize,
+    pub(crate) tail: AudioProcessorTail,
     pub(crate) requires_state_entry: bool,
 }
 
@@ -735,8 +743,47 @@ impl PreparedAudioSchedule {
                 sample_rate,
             )?;
             let source = dependencies.source(&semantic, contract.channel_layout)?;
+            let intrinsic_algorithmic_latency_frames = source
+                .algorithmic_latency_frames
+                .checked_add(scope_rack.algorithmic_latency_frames)
+                .ok_or_else(|| {
+                    AudioCompileError::InvalidPreparedGraph(format!(
+                        "Contribution {} total algorithmic latency overflowed",
+                        semantic.edit_id
+                    ))
+                })?;
+            let execution_extension_frames = match scope_rack.tail {
+                AudioProcessorTail::None => Some(intrinsic_algorithmic_latency_frames),
+                AudioProcessorTail::Finite(tail_frames) => Some(
+                    intrinsic_algorithmic_latency_frames.checked_add(tail_frames).ok_or_else(
+                        || {
+                            AudioCompileError::InvalidPreparedGraph(format!(
+                                "Contribution {} execution extent overflowed",
+                                semantic.edit_id
+                            ))
+                        },
+                    )?,
+                ),
+                AudioProcessorTail::Infinite => None,
+            };
+            let execution_end_sample = execution_extension_frames
+                .map(|extension_frames| {
+                    let extension_samples = i64::try_from(extension_frames).map_err(|_| {
+                        AudioCompileError::InvalidPreparedGraph(format!(
+                            "Contribution {} execution extent cannot fit the Evaluation Grid",
+                            semantic.edit_id
+                        ))
+                    })?;
+                    sequence_end_sample.checked_add(extension_samples).ok_or_else(|| {
+                        AudioCompileError::InvalidPreparedGraph(format!(
+                            "Contribution {} execution end overflowed the Evaluation Grid",
+                            semantic.edit_id
+                        ))
+                    })
+                })
+                .transpose()?;
             contributions.push(PreparedContribution {
-                source_latency_frames: source.latency_frames,
+                source_algorithmic_latency_frames: source.algorithmic_latency_frames,
                 source_requires_state_entry: source.requires_state_entry,
                 compensation_delay_frames: 0,
                 channel_mixer: PreparedAudioChannelMixer::new(source.channel_mix),
@@ -746,6 +793,7 @@ impl PreparedAudioSchedule {
                 transitions: transition_start..transition_end,
                 sequence_start_sample,
                 sequence_end_sample,
+                execution_end_sample,
                 constant_scope_gain,
                 constant_edit_gain_pan,
                 scope_input_automation,
@@ -833,8 +881,8 @@ impl PreparedAudioSchedule {
                     contribution_end: node.contributions.end,
                     route_start: node.incoming.start,
                     route_end: node.incoming.end,
-                    pre_rack_latency_frames: node.pre_rack.latency_frames,
-                    post_rack_latency_frames: node.post_rack.latency_frames,
+                    pre_rack_latency_frames: node.pre_rack.algorithmic_latency_frames,
+                    post_rack_latency_frames: node.post_rack.algorithmic_latency_frames,
                 })
             })
             .collect::<Result<Vec<_>, AudioCompileError>>()?;
@@ -842,8 +890,8 @@ impl PreparedAudioSchedule {
             .iter()
             .map(|contribution| {
                 contribution
-                    .source_latency_frames
-                    .checked_add(contribution.scope_rack.latency_frames)
+                    .source_algorithmic_latency_frames
+                    .checked_add(contribution.scope_rack.algorithmic_latency_frames)
                     .ok_or_else(|| {
                         AudioCompileError::InvalidPreparedGraph(format!(
                             "Contribution {} total latency overflowed",
@@ -1026,21 +1074,44 @@ fn prepare_rack(
         });
     }
     let prepared = &destination[start..];
-    let latency_frames = prepared
+    let algorithmic_latency_frames = prepared
         .iter()
         .try_fold(0_usize, |latency, processor| {
-            latency.checked_add(processor.factory.contract().latency_frames())
+            latency.checked_add(processor.factory.contract().algorithmic_latency_frames())
         })
         .ok_or_else(|| {
             AudioCompileError::InvalidPreparedGraph("processor rack latency overflowed".to_owned())
         })?;
+    let tail = prepared.iter().try_fold(AudioProcessorTail::None, |accumulated, processor| {
+        accumulate_sequential_tail(accumulated, processor.factory.contract().tail())
+    })?;
     Ok(PreparedRack {
         processors: start..destination.len(),
-        latency_frames,
+        algorithmic_latency_frames,
+        tail,
         requires_state_entry: prepared
             .iter()
             .any(|processor| processor.factory.contract().requires_state_entry()),
     })
+}
+
+fn accumulate_sequential_tail(
+    accumulated: AudioProcessorTail,
+    next: AudioProcessorTail,
+) -> Result<AudioProcessorTail, AudioCompileError> {
+    match (accumulated, next) {
+        (AudioProcessorTail::Infinite, _) | (_, AudioProcessorTail::Infinite) => {
+            Ok(AudioProcessorTail::Infinite)
+        }
+        (AudioProcessorTail::None, tail) | (tail, AudioProcessorTail::None) => Ok(tail),
+        (AudioProcessorTail::Finite(left), AudioProcessorTail::Finite(right)) => {
+            left.checked_add(right).map(AudioProcessorTail::Finite).ok_or_else(|| {
+                AudioCompileError::InvalidPreparedGraph(
+                    "processor rack tail extent overflowed".to_owned(),
+                )
+            })
+        }
+    }
 }
 
 fn prepare_optional_curve(

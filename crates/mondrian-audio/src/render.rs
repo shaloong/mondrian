@@ -518,79 +518,84 @@ fn render_track_contributions(
             .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
         let scope = &schedule.scopes[contribution.scope_slot];
         scratch.source_frames[..request.frames].fill(-1);
+        scratch.contribution_pcm[..samples].fill(0.0);
+        scratch.contribution_processed[..samples].fill(0.0);
         scratch.contribution_sample_gains[..samples].fill(0.0);
-        let Some(active_frames) = prepare_source_frames(
+        let Some(execution_frames) = contribution_execution_frames(contribution, request)? else {
+            advance_silent_compensation(delay_line, track, scratch, samples)?;
+            continue;
+        };
+        let execution_start_sample = request
+            .start_sample
+            .checked_add(
+                i64::try_from(execution_frames.start)
+                    .map_err(|_| AudioExecutionError::BufferTooLarge)?,
+            )
+            .ok_or(AudioExecutionError::BufferTooLarge)?;
+        let execution_frame_count = execution_frames.len();
+        let execution_samples = execution_frame_count
+            .checked_mul(channels)
+            .ok_or(AudioExecutionError::BufferTooLarge)?;
+        let execution_sample_start = execution_frames
+            .start
+            .checked_mul(channels)
+            .ok_or(AudioExecutionError::BufferTooLarge)?;
+        let execution_sample_end = execution_sample_start
+            .checked_add(execution_samples)
+            .ok_or(AudioExecutionError::BufferTooLarge)?;
+
+        if prepare_source_frames(
             contribution,
             request,
             sample_rate,
             &mut scratch.source_frames[..request.frames],
         )?
-        else {
-            advance_silent_compensation(delay_line, track, scratch, samples)?;
-            continue;
-        };
-        let active_start_sample = request
-            .start_sample
-            .checked_add(
-                i64::try_from(active_frames.start)
-                    .map_err(|_| AudioExecutionError::BufferTooLarge)?,
-            )
-            .ok_or(AudioExecutionError::BufferTooLarge)?;
-        let active_frame_count = active_frames.len();
-        let active_samples = active_frame_count
-            .checked_mul(channels)
-            .ok_or(AudioExecutionError::BufferTooLarge)?;
-        let active_sample_start = active_frames
-            .start
-            .checked_mul(channels)
-            .ok_or(AudioExecutionError::BufferTooLarge)?;
-        let active_sample_end = active_sample_start
-            .checked_add(active_samples)
-            .ok_or(AudioExecutionError::BufferTooLarge)?;
+        .is_some()
+        {
+            let source_layout = contribution.channel_mixer.source_layout();
+            let source_samples = request
+                .frames
+                .checked_mul(source_layout.channel_count())
+                .ok_or(AudioExecutionError::BufferTooLarge)?;
+            scratch.source_pcm[..source_samples].fill(0.0);
+            source.read_indexed_interleaved(
+                contribution.semantic.edit_id,
+                &scratch.source_frames[..request.frames],
+                source_layout,
+                &mut scratch.source_pcm[..source_samples],
+            )?;
+            contribution.channel_mixer.mix_into(
+                backend,
+                request.frames,
+                &scratch.source_pcm[..source_samples],
+                &mut scratch.contribution_pcm[..samples],
+            )?;
+        }
 
-        let source_layout = contribution.channel_mixer.source_layout();
-        let source_samples = request
-            .frames
-            .checked_mul(source_layout.channel_count())
-            .ok_or(AudioExecutionError::BufferTooLarge)?;
-        scratch.source_pcm[..source_samples].fill(0.0);
-        source.read_indexed_interleaved(
-            contribution.semantic.edit_id,
-            &scratch.source_frames[..request.frames],
-            source_layout,
-            &mut scratch.source_pcm[..source_samples],
-        )?;
-        contribution.channel_mixer.mix_into(
-            backend,
-            request.frames,
-            &scratch.source_pcm[..source_samples],
-            &mut scratch.contribution_pcm[..samples],
-        )?;
-
-        let scope_gain_db = &mut scratch.frame_gain_db[..active_frame_count];
+        let scope_gain_db = &mut scratch.frame_gain_db[..execution_frame_count];
         if let Some(gain) = contribution.constant_scope_gain {
             dsp::multiply_constant_into(
                 backend,
-                &mut scratch.contribution_processed[active_sample_start..active_sample_end],
-                &scratch.contribution_pcm[active_sample_start..active_sample_end],
+                &mut scratch.contribution_processed[execution_sample_start..execution_sample_end],
+                &scratch.contribution_pcm[execution_sample_start..execution_sample_end],
                 gain,
             );
         } else {
             if let Some(curve) = &contribution.scope_input_automation {
-                fill_prepared_curve(curve, active_start_sample, sample_rate, scope_gain_db)?;
+                fill_prepared_curve(curve, execution_start_sample, sample_rate, scope_gain_db)?;
             } else {
                 scope_gain_db.fill(scope.input_gain_db);
             }
             dsp::expand_frame_db_to_interleaved_gains(
                 scope_gain_db,
                 channels,
-                &mut scratch.contribution_sample_gains[..active_samples],
+                &mut scratch.contribution_sample_gains[..execution_samples],
             );
             dsp::multiply_into(
                 backend,
-                &mut scratch.contribution_processed[active_sample_start..active_sample_end],
-                &scratch.contribution_pcm[active_sample_start..active_sample_end],
-                &scratch.contribution_sample_gains[..active_samples],
+                &mut scratch.contribution_processed[execution_sample_start..execution_sample_end],
+                &scratch.contribution_pcm[execution_sample_start..execution_sample_end],
+                &scratch.contribution_sample_gains[..execution_samples],
             );
         }
 
@@ -598,37 +603,37 @@ fn render_track_contributions(
             &contribution.scope_rack,
             &schedule.processors,
             AudioRenderRequest {
-                start_sample: active_start_sample,
-                frames: active_frame_count,
+                start_sample: execution_start_sample,
+                frames: execution_frame_count,
             },
             sample_rate,
             channel_layout,
             backend,
-            &mut scratch.contribution_processed[active_sample_start..active_sample_end],
+            &mut scratch.contribution_processed[execution_sample_start..execution_sample_end],
         )?;
 
-        scratch.contribution_sample_gains[..active_samples].fill(0.0);
+        scratch.contribution_sample_gains[..execution_samples].fill(0.0);
         if let Some((gain, pan)) = contribution.constant_edit_gain_pan {
-            for frame in 0..active_frame_count {
+            for frame in 0..execution_frame_count {
                 for channel in 0..channels {
                     scratch.contribution_sample_gains[frame * channels + channel] =
                         gain * stereo_balance_gain(channel_layout, channel, pan);
                 }
             }
         } else {
-            let gain_db = &mut scratch.frame_gain_db[..active_frame_count];
-            let pan_values = &mut scratch.frame_pan[..active_frame_count];
+            let gain_db = &mut scratch.frame_gain_db[..execution_frame_count];
+            let pan_values = &mut scratch.frame_pan[..execution_frame_count];
             if let Some(curve) = &contribution.volume_automation {
-                fill_prepared_curve(curve, active_start_sample, sample_rate, gain_db)?;
+                fill_prepared_curve(curve, execution_start_sample, sample_rate, gain_db)?;
             } else {
                 gain_db.fill(contribution.semantic.volume_db);
             }
             if let Some(curve) = &contribution.pan_automation {
-                fill_prepared_curve(curve, active_start_sample, sample_rate, pan_values)?;
+                fill_prepared_curve(curve, execution_start_sample, sample_rate, pan_values)?;
             } else {
                 pan_values.fill(contribution.semantic.pan);
             }
-            for (local_index, frame) in active_frames.clone().enumerate() {
+            for (local_index, frame) in execution_frames.clone().enumerate() {
                 let absolute_sample = request
                     .start_sample
                     .checked_add(
@@ -655,9 +660,9 @@ fn render_track_contributions(
         }
         dsp::multiply_into(
             backend,
-            &mut scratch.contribution_pcm[active_sample_start..active_sample_end],
-            &scratch.contribution_processed[active_sample_start..active_sample_end],
-            &scratch.contribution_sample_gains[..active_samples],
+            &mut scratch.contribution_pcm[execution_sample_start..execution_sample_end],
+            &scratch.contribution_processed[execution_sample_start..execution_sample_end],
+            &scratch.contribution_sample_gains[..execution_samples],
         );
         if delay_line.sample_capacity() == 0 {
             dsp::add(
@@ -689,6 +694,33 @@ fn advance_silent_compensation(
         &scratch.contribution_processed[..samples],
         &mut track.input[..samples],
     )
+}
+
+fn contribution_execution_frames(
+    contribution: &PreparedContribution,
+    request: AudioRenderRequest,
+) -> Result<Option<std::ops::Range<usize>>, AudioExecutionError> {
+    let request_frames =
+        i64::try_from(request.frames).map_err(|_| AudioExecutionError::BufferTooLarge)?;
+    let request_end = request
+        .start_sample
+        .checked_add(request_frames)
+        .ok_or(AudioExecutionError::BufferTooLarge)?;
+    let execution_start = request.start_sample.max(contribution.sequence_start_sample);
+    let execution_end = contribution
+        .execution_end_sample
+        .map_or(request_end, |end| request_end.min(end));
+    if execution_start >= execution_end {
+        return Ok(None);
+    }
+    let first_index = usize::try_from(execution_start - request.start_sample)
+        .map_err(|_| AudioExecutionError::BufferTooLarge)?;
+    let execution_len = usize::try_from(execution_end - execution_start)
+        .map_err(|_| AudioExecutionError::BufferTooLarge)?;
+    let end_index = first_index
+        .checked_add(execution_len)
+        .ok_or(AudioExecutionError::BufferTooLarge)?;
+    Ok(Some(first_index..end_index))
 }
 
 fn prepare_source_frames(
@@ -932,7 +964,10 @@ fn contribution_envelope(
             let remaining =
                 contribution.semantic.sequence_range.duration.checked_sub(clip_local)?;
             if remaining < duration {
-                gain *= falling_curve(remaining.to_f64() / duration.to_f64(), curve);
+                gain *= falling_curve(
+                    (remaining.to_f64() / duration.to_f64()).clamp(0.0, 1.0),
+                    curve,
+                );
             }
         }
     }

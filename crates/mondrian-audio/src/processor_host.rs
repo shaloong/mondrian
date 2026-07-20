@@ -7,9 +7,9 @@ use crate::AudioParameterEvent;
 use crate::{
     AudioExecutionError, AudioKernelBackend, AudioProcessor, AudioProcessorAudioIo,
     AudioProcessorExecutionContract, AudioProcessorFactory, AudioProcessorHostError,
-    AudioProcessorInputBus, AudioProcessorOccurrence, AudioProcessorPrepareRequest,
-    AudioProcessorProcessContext, AudioProcessorResolver, AudioRenderContract, AudioRenderRequest,
-    AudioStateEntry, BuiltInAudioProcessorResolver,
+    AudioProcessorInputBus, AudioProcessorOccurrence, AudioProcessorOccurrenceOwner,
+    AudioProcessorPrepareRequest, AudioProcessorProcessContext, AudioProcessorResolver,
+    AudioRenderContract, AudioRenderRequest, AudioStateEntry, BuiltInAudioProcessorResolver,
 };
 #[cfg(test)]
 use mondrian_core::ParameterId;
@@ -90,6 +90,20 @@ impl AudioProcessorAudioIo for MainBusAudioIo<'_> {
 struct HostedProcessorInstance {
     occurrence: AudioProcessorOccurrence,
     processor: Box<dyn AudioProcessor>,
+    continuity: HostedProcessorContinuity,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum HostedProcessorContinuity {
+    Stateless,
+    Unentered,
+    Pending {
+        epoch: crate::AudioContinuityEpoch,
+    },
+    Active {
+        epoch: crate::AudioContinuityEpoch,
+        next_sample: i64,
+    },
 }
 
 pub(crate) struct PreparedProcessorHost {
@@ -136,9 +150,15 @@ impl PreparedProcessorHost {
             .processors
             .iter()
             .map(|processor| {
+                let continuity = if processor.factory.contract().requires_state_entry() {
+                    HostedProcessorContinuity::Unentered
+                } else {
+                    HostedProcessorContinuity::Stateless
+                };
                 Ok(HostedProcessorInstance {
                     occurrence: processor.occurrence,
                     processor: processor.factory.create()?,
+                    continuity,
                 })
             })
             .collect::<Result<Vec<_>, AudioExecutionError>>()?;
@@ -183,7 +203,24 @@ impl PreparedProcessorHost {
             if processor.occurrence != instance.occurrence {
                 return Err(AudioExecutionError::InvalidPreparedSchedule);
             }
-            instance.processor.enter_state(entry.start_sample)?;
+            if !processor.factory.contract().requires_state_entry() {
+                if !matches!(instance.continuity, HostedProcessorContinuity::Stateless) {
+                    return Err(AudioExecutionError::InvalidPreparedSchedule);
+                }
+                continue;
+            }
+            if matches!(
+                processor.occurrence.owner,
+                AudioProcessorOccurrenceOwner::Contribution { .. }
+            ) {
+                instance.continuity = HostedProcessorContinuity::Pending { epoch: entry.epoch };
+            } else {
+                instance.processor.enter_state(entry.start_sample)?;
+                instance.continuity = HostedProcessorContinuity::Active {
+                    epoch: entry.epoch,
+                    next_sample: entry.start_sample,
+                };
+            }
         }
         Ok(())
     }
@@ -229,10 +266,43 @@ impl PreparedProcessorHost {
             if instance.occurrence != processor.occurrence {
                 return Err(AudioExecutionError::InvalidPreparedSchedule);
             }
+            match instance.continuity {
+                HostedProcessorContinuity::Stateless => {
+                    if processor.factory.contract().requires_state_entry() {
+                        return Err(AudioExecutionError::InvalidPreparedSchedule);
+                    }
+                }
+                HostedProcessorContinuity::Unentered => {
+                    return Err(AudioExecutionError::StateEntryRequired);
+                }
+                HostedProcessorContinuity::Pending { epoch } => {
+                    instance.processor.enter_state(request.start_sample)?;
+                    instance.continuity = HostedProcessorContinuity::Active {
+                        epoch,
+                        next_sample: request.start_sample,
+                    };
+                }
+                HostedProcessorContinuity::Active { next_sample, .. }
+                    if next_sample != request.start_sample =>
+                {
+                    return Err(AudioExecutionError::InvalidPreparedSchedule);
+                }
+                HostedProcessorContinuity::Active { .. } => {}
+            }
             let batch =
                 prepare_parameter_event_batch(processor, request, sample_rate, parameter_events)?;
             let mut audio = MainBusAudioIo { channel_layout, frames: request.frames, pcm };
             instance.processor.process(context, &mut audio, batch)?;
+            if let HostedProcessorContinuity::Active { epoch, .. } = instance.continuity {
+                let next_sample = request
+                    .start_sample
+                    .checked_add(
+                        i64::try_from(request.frames)
+                            .map_err(|_| AudioExecutionError::BufferTooLarge)?,
+                    )
+                    .ok_or(AudioExecutionError::BufferTooLarge)?;
+                instance.continuity = HostedProcessorContinuity::Active { epoch, next_sample };
+            }
         }
         Ok(())
     }

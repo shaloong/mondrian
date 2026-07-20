@@ -111,6 +111,7 @@ impl AudioProcessorResolver for TestDelayProcessorResolver {
             })?;
         let contract = AudioProcessorExecutionContract::new(
             self.latency_frames,
+            AudioProcessorTail::None,
             self.latency_frames > 0,
             self.realtime_capable,
             true,
@@ -361,6 +362,41 @@ fn sequence_with_parallel_sample_delay(delay_frames: i64) -> Sequence {
         )
         .expect("valid sample delay");
     sequence_with_parallel_processor(processor)
+}
+
+fn sequence_with_scope_sample_delay(
+    position: TimelineTime,
+    duration: TimelineTime,
+    delay_frames: i64,
+) -> Sequence {
+    let mut sequence = Sequence::new("scope delay");
+    sequence.settings.audio_channel_layout = AudioChannelLayout::Mono;
+    let track_id = sequence.audio_tracks[0].id;
+    let clip = Clip::new(AssetId::new(), position, duration).expect("Clip");
+    sequence
+        .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
+        .expect("authored audio Clip");
+    let scope_id = sequence.audio_tracks[0].clips[0].audio_components[0].processing.scope_id;
+    let mut processor = AudioProcessorInstance::built_in(BUILTIN_SAMPLE_DELAY_DEFINITION_ID, 1);
+    processor
+        .set_parameter_automation(
+            ExactAutomationCurve::new(
+                ParameterId::new_static(SAMPLE_DELAY_FRAMES_PARAMETER_ID),
+                delay_frames as f64,
+            )
+            .expect("exact sample delay"),
+        )
+        .expect("valid sample delay");
+    sequence
+        .audio_program
+        .processing_scopes
+        .iter_mut()
+        .find(|scope| scope.id == scope_id)
+        .expect("processing Scope")
+        .processors
+        .processors
+        .push(processor);
+    sequence
 }
 
 fn sequence_with_parallel_processor(processor: AudioProcessorInstance) -> Sequence {
@@ -1211,6 +1247,108 @@ fn built_in_sample_delay_preserves_audible_delay_state_and_partitioned_pcm() {
         )
         .expect("render after seek");
     assert_eq!(after_seek, vec![1.0, 2.0]);
+}
+
+#[test]
+fn contribution_processor_activates_lazily_and_flushes_its_declared_tail() {
+    let sequence = sequence_with_scope_sample_delay(tt(2, 1), tt(1, 1), 2);
+    let plan = prepared(&sequence, 4);
+    let contribution = &plan.schedule.contributions[0];
+    assert_eq!(contribution.sequence_start_sample, 4);
+    assert_eq!(contribution.sequence_end_sample, 6);
+    assert_eq!(contribution.execution_end_sample, Some(8));
+    assert_eq!(contribution.scope_rack.algorithmic_latency_frames, 0);
+    assert_eq!(contribution.scope_rack.tail, AudioProcessorTail::Finite(2));
+
+    let mut session = AudioRenderSession::new(Arc::clone(&plan)).expect("Session");
+    session
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(40),
+            start_sample: 0,
+        })
+        .expect("root entry");
+    let mut source = RampSource::default();
+    for start_sample in [0, 2] {
+        let mut silence = [1.0; 2];
+        session
+            .render_into(
+                &mut source,
+                AudioRenderRequest { start_sample, frames: 2 },
+                &mut silence,
+            )
+            .expect("pre-Contribution block");
+        assert_eq!(silence, [0.0, 0.0]);
+    }
+    assert_eq!(source.block_reads, 0);
+
+    let mut active_and_tail = [0.0; 4];
+    session
+        .render_into(
+            &mut source,
+            AudioRenderRequest { start_sample: 4, frames: 4 },
+            &mut active_and_tail,
+        )
+        .expect("active interval and declared tail");
+    assert_eq!(active_and_tail, [0.0, 0.0, 1.0, 2.0]);
+    assert_eq!(source.block_reads, 1);
+
+    session
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(41),
+            start_sample: 5,
+        })
+        .expect("seek into Contribution");
+    let mut seek_output = [0.0; 3];
+    session
+        .render_into(
+            &mut source,
+            AudioRenderRequest { start_sample: 5, frames: 3 },
+            &mut seek_output,
+        )
+        .expect("cold Contribution-local entry");
+    assert_eq!(seek_output, [0.0, 0.0, 2.0]);
+
+    let immediate = sequence_with_scope_sample_delay(TimelineTime::ZERO, tt(1, 1), 2);
+    let immediate_plan = prepared(&immediate, 4);
+    let mut whole = AudioRenderSession::new(Arc::clone(&immediate_plan)).expect("whole Session");
+    whole
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(42),
+            start_sample: 0,
+        })
+        .expect("whole entry");
+    let mut whole_source = RampSource::default();
+    let mut whole_pcm = [0.0; 4];
+    whole
+        .render_into(
+            &mut whole_source,
+            AudioRenderRequest { start_sample: 0, frames: 4 },
+            &mut whole_pcm,
+        )
+        .expect("whole interval");
+
+    let mut split = AudioRenderSession::new(immediate_plan).expect("split Session");
+    split
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(43),
+            start_sample: 0,
+        })
+        .expect("split entry");
+    let mut split_source = RampSource::default();
+    let mut split_pcm = Vec::new();
+    for start_sample in 0..4 {
+        let mut sample = [0.0; 1];
+        split
+            .render_into(
+                &mut split_source,
+                AudioRenderRequest { start_sample, frames: 1 },
+                &mut sample,
+            )
+            .expect("single-frame partition");
+        split_pcm.push(sample[0]);
+    }
+    assert_eq!(whole_pcm, [0.0, 0.0, 1.0, 2.0]);
+    assert_eq!(split_pcm, whole_pcm);
 }
 
 #[test]

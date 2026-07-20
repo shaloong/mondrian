@@ -13,7 +13,8 @@ use std::sync::Arc;
 /// Realized processor behavior that affects scheduling and admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioProcessorExecutionContract {
-    latency_frames: usize,
+    algorithmic_latency_frames: usize,
+    tail: AudioProcessorTail,
     requires_state_entry: bool,
     realtime_capable: bool,
     offline_capable: bool,
@@ -23,21 +24,26 @@ pub struct AudioProcessorExecutionContract {
 impl AudioProcessorExecutionContract {
     /// Construct and validate one realized execution contract.
     pub fn new(
-        latency_frames: usize,
+        algorithmic_latency_frames: usize,
+        tail: AudioProcessorTail,
         requires_state_entry: bool,
         realtime_capable: bool,
         offline_capable: bool,
         session_scratch_bytes: usize,
     ) -> Result<Self, AudioProcessorHostError> {
-        if (!realtime_capable && !offline_capable) || (latency_frames > 0 && !requires_state_entry)
+        if (!realtime_capable && !offline_capable)
+            || ((algorithmic_latency_frames > 0 || tail != AudioProcessorTail::None)
+                && !requires_state_entry)
+            || matches!(tail, AudioProcessorTail::Finite(0))
         {
             return Err(AudioProcessorHostError::InvalidContract(
-                "processor must support at least one mode and non-zero latency requires state entry"
+                "processor must support at least one mode; algorithmic latency and tail require state entry; finite tail must be non-zero"
                     .to_owned(),
             ));
         }
         Ok(Self {
-            latency_frames,
+            algorithmic_latency_frames,
+            tail,
             requires_state_entry,
             realtime_capable,
             offline_capable,
@@ -48,7 +54,8 @@ impl AudioProcessorExecutionContract {
     /// Zero-latency stateless processor admitted in realtime and offline modes.
     pub const fn stateless() -> Self {
         Self {
-            latency_frames: 0,
+            algorithmic_latency_frames: 0,
+            tail: AudioProcessorTail::None,
             requires_state_entry: false,
             realtime_capable: true,
             offline_capable: true,
@@ -56,9 +63,14 @@ impl AudioProcessorExecutionContract {
         }
     }
 
-    /// Intrinsic processor latency on the prepared sample grid.
-    pub const fn latency_frames(self) -> usize {
-        self.latency_frames
+    /// Hidden group delay/lookahead that the Host must compensate.
+    pub const fn algorithmic_latency_frames(self) -> usize {
+        self.algorithmic_latency_frames
+    }
+
+    /// Meaningful output after input silence, excluding compensated latency.
+    pub const fn tail(self) -> AudioProcessorTail {
+        self.tail
     }
 
     /// Whether a fresh continuity epoch must explicitly reset processor state.
@@ -87,6 +99,22 @@ impl AudioProcessorExecutionContract {
             AudioProcessingMode::Offline => self.offline_capable,
         }
     }
+}
+
+/// Processor output extent after its input becomes silent.
+///
+/// Tail is distinct from algorithmic latency: latency is hidden group delay
+/// aligned by PDC, while tail is audible signal semantics such as delay or
+/// reverb decay. External Adapters map their native finite/infinite sentinel to
+/// this value during preparation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioProcessorTail {
+    /// No meaningful output after the input interval.
+    None,
+    /// A finite non-zero number of sample frames.
+    Finite(usize),
+    /// No finite bound is declared by the Processor.
+    Infinite,
 }
 
 /// Failure while resolving, instantiating, resetting, or executing a processor.

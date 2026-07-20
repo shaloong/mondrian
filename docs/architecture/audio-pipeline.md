@@ -236,8 +236,13 @@ lane, owns a preallocated interleaved ring, clears it only on fresh epoch entry,
 and is exact across block partitioning. Its delay is intentional audible signal
 semantics, so it declares zero PDC latency; reporting it as hidden implementation
 latency would cause the host to erase the effect by delaying parallel paths.
+It instead declares a finite tail equal to the authored delay. Every realized
+processor contract separates checked algorithmic latency from `None`, finite
+non-zero, or infinite tail. Sequential Rack preparation conservatively sums
+finite tails, propagates infinity, and rejects overflow; native VST3/CLAP
+sentinels must be normalized into that common contract by their Adapter.
 `AudioProcessorResolver` runs only during preparation and returns a
-Render-Contract-bound immutable factory with fixed latency, continuity,
+Render-Contract-bound immutable factory with fixed algorithmic latency, tail, continuity,
 realtime/offline admission, and per-Session scratch facts.
 `AudioRenderSession` creates one exclusive instance per generated occurrence
 before callback execution. The callback receives exact block facts, one
@@ -299,7 +304,10 @@ Preparation now lowers the semantic graph into one dense execution schedule:
 - destination-contiguous incoming Route ranges and Track-contiguous
   Contribution ranges;
 - dense Processing Scope slots and Contribution-local Transition bindings;
-- half-open active sample spans lowered once for the Render Contract;
+- half-open source-active and causal-execution sample spans lowered once for
+  the Render Contract; a Contribution executes through its checked
+  source/rack algorithmic latency plus finite tail, or remains unbounded for an
+  infinite tail;
 - liveness-assigned scratch slots whose lifetime extends through the last
   downstream consumer;
 - a checked latency solution for every Contribution-to-Track and Route-to-node
@@ -326,8 +334,8 @@ the selected Program Output exposes the resulting total latency. Recursive
 preparation is bottom-up: a parent Contribution receives the already-prepared,
 instance-specific child-output latency. Missing nested latency fails closed and
 can never be guessed as zero. Layout negotiation, processor realization,
-plugin-specific batch lowering, and each realized processor's latency/state-
-entry/mode/scratch facts also belong here. Preparation checked-sums every
+plugin-specific batch lowering, and each realized processor's algorithmic-
+latency/tail/state-entry/mode/scratch facts also belong here. Preparation checked-sums every
 realized occurrence's private scratch requirement and fails with required and
 admitted byte counts before any Session is constructed. Generic compensation
 execution and root Session entry consume the remaining realized facts. Ordinary
@@ -360,6 +368,15 @@ Module owns graph traversal, PCM flow, summing, envelopes, and delay placement;
 it neither reconstructs processor batches nor reaches into a processor's
 mutable state. A failed entry consumes and poisons its new epoch before any
 instance resets, so partial multi-processor reset can never resume old history.
+At root entry, stateful Track/Bus/Output occurrences enter immediately because
+their strips evaluate every requested block. A stateful Contribution occurrence
+remains pending until its causal execution span first intersects a request,
+enters at that exact sample, then receives contiguous zero-padded callbacks
+through its declared tail. Pre-Clip silence is not synthesized as hidden
+processor work. Once the source interval ends, the source Adapter is no longer
+called; explicit zero input flushes the occurrence. Edit gain/pan/fades remain
+after the Scope Rack by normative order, so a Clip fade-out gates any Scope tail
+beyond the Clip while an unfaded edit preserves it.
 
 The immutable Plan and recursive Runtime both report selected-output latency.
 This is execution scheduling information, not an instruction to rewrite author
@@ -722,8 +739,8 @@ gates rather than implied support:
    matrix presets, custom media-layout probing, and device/encoder negotiation.
    Unknown identities and unsupported layouts must continue to fail instead of
    being guessed.
-2. Extend the first stateful built-in beyond Sample Delay with explicit tail and
-   deadline contracts. Before admitting a production non-zero algorithmic-
+2. Extend the stateful built-ins beyond Sample Delay and the implemented common
+   tail contract with processor deadline contracts. Before admitting a production non-zero algorithmic-
    latency definition, normalize public-output lookahead/latency for Playback,
    Export, and nested pull evaluation so returned PCM remains Timeline-aligned;
    then extend PDC, seek-entry/preroll, discontinuity, and nested evidence to

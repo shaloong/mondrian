@@ -112,11 +112,14 @@ position; replay/preroll is still required to reach a later state. Plugins
 default to no checkpoint, replay, or state transfer capability until a host
 Adapter proves it.
 
-Every processor must declare compensable implementation latency and supported
+Every processor must separately declare compensable algorithmic latency,
+meaningful tail (`None`, finite non-zero frames, or `Infinite`), and supported
 layouts/automation cadence. Parallel paths are delay-compensated before sums
 and Transitions. Intentional audible delay is signal-processing semantics, not
-implementation latency, and must not be reported to PDC merely because both use
-sample history. A latency, layout, or Session-storage capability change causes
+algorithmic latency, and must not be reported to PDC merely because both use
+sample history. Sequential Rack tails are conservatively combined with checked
+arithmetic; native plugin sentinel values are normalized by the concrete
+Adapter. A latency, tail, layout, or Session-storage capability change causes
 re-preparation and controlled re-entry; it cannot mutate the live graph inside
 a block.
 
@@ -124,7 +127,8 @@ The current executable built-ins are canonical Gain and stateful Sample Delay.
 Sample Delay owns an exact non-negative integer-sample parameter, bounded
 Session storage, explicit fresh-epoch reset, and block-partition-invariant
 history; it reports zero compensable latency so PDC cannot erase its audible
-effect. A non-zero-latency test Adapter proves generic Host instantiation, PDC,
+effect, and a finite tail equal to that delay so a Scope occurrence can flush
+after source silence. A non-zero-latency test Adapter proves generic Host instantiation, PDC,
 mode admission, entry failure, and partition invariance, but is not a product
 processor claim. The first production lookahead or group-delay Processor must
 also freeze public-output lookahead/latency normalization so Playback, Export,
@@ -146,6 +150,18 @@ Stateless child outputs remain arbitrarily indexable. Generic stateful reverse
 mapping fails closed until a processor-specific reverse contract, checkpoint
 replay, or materialized child output can prove block-partition-invariant
 results.
+
+Contribution execution is causal rather than equivalent to source activity.
+Preparation extends the half-open source interval by checked source/rack
+algorithmic latency and declared Scope-Rack tail; an infinite tail remains
+consumer-bounded. Source silence after the Clip is explicit and does not call
+the media Adapter. Stateful Contribution occurrences remain pending at root
+entry, enter lazily at the first exact intersecting sample, and then receive
+strictly contiguous callbacks through that causal interval. Track, Bus, and
+Output occurrences enter immediately because their strips execute every
+requested block. This prevents both truncated Clip tails and fake pre-Clip
+history. Edit envelopes remain after Scope processing, so their authored fade
+law may gate the Scope tail without changing processor lifetime semantics.
 
 ## Consequences
 
