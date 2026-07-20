@@ -154,24 +154,32 @@ mod tests {
                 source_slot: 0,
                 destination_slot: 2,
                 source_port: AudioChannelStripOutputPort::PreFader,
+                constant_gain: Some(1.0),
+                gain_automation: None,
                 compensation_delay_frames: 0,
             },
             PreparedRoute {
                 source_slot: 1,
                 destination_slot: 2,
                 source_port: AudioChannelStripOutputPort::PostMute,
+                constant_gain: Some(1.0),
+                gain_automation: None,
                 compensation_delay_frames: 0,
             },
             PreparedRoute {
                 source_slot: 0,
                 destination_slot: 3,
                 source_port: AudioChannelStripOutputPort::PostMute,
+                constant_gain: Some(1.0),
+                gain_automation: None,
                 compensation_delay_frames: 0,
             },
             PreparedRoute {
                 source_slot: 2,
                 destination_slot: 3,
                 source_port: AudioChannelStripOutputPort::PostMute,
+                constant_gain: Some(1.0),
+                gain_automation: None,
                 compensation_delay_frames: 0,
             },
         ];
@@ -197,6 +205,8 @@ mod tests {
             source_slot: 0,
             destination_slot: 0,
             source_port: AudioChannelStripOutputPort::PostMute,
+            constant_gain: Some(1.0),
+            gain_automation: None,
             compensation_delay_frames: 0,
         }];
         assert!(solve_prepared_latency(&nodes, &routes, &[], 0).is_err());

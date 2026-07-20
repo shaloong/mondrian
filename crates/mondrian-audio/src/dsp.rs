@@ -92,6 +92,41 @@ pub(crate) fn add(backend: AudioKernelBackend, destination: &mut [f32], source: 
     }
 }
 
+pub(crate) fn multiply_add(
+    backend: AudioKernelBackend,
+    destination: &mut [f32],
+    source: &[f32],
+    gains: &[f32],
+) {
+    debug_assert_eq!(destination.len(), source.len());
+    debug_assert_eq!(destination.len(), gains.len());
+    match backend {
+        AudioKernelBackend::ScalarReference => multiply_add_scalar(destination, source, gains),
+        AudioKernelBackend::RuntimeVectorized => {
+            Arch::new().dispatch(MultiplyAdd { destination, source, gains });
+        }
+    }
+}
+
+pub(crate) fn multiply_add_constant(
+    backend: AudioKernelBackend,
+    destination: &mut [f32],
+    source: &[f32],
+    gain: f32,
+) {
+    debug_assert_eq!(destination.len(), source.len());
+    match backend {
+        AudioKernelBackend::ScalarReference => {
+            for (destination, source) in destination.iter_mut().zip(source) {
+                *destination += *source * gain;
+            }
+        }
+        AudioKernelBackend::RuntimeVectorized => {
+            Arch::new().dispatch(MultiplyAddConstant { destination, source, gain });
+        }
+    }
+}
+
 fn multiply_into_scalar(destination: &mut [f32], source: &[f32], gains: &[f32]) {
     for ((destination, source), gain) in destination.iter_mut().zip(source).zip(gains) {
         *destination = *source * *gain;
@@ -107,6 +142,12 @@ fn multiply_in_place_scalar(samples: &mut [f32], gains: &[f32]) {
 fn add_scalar(destination: &mut [f32], source: &[f32]) {
     for (destination, source) in destination.iter_mut().zip(source) {
         *destination += *source;
+    }
+}
+
+fn multiply_add_scalar(destination: &mut [f32], source: &[f32], gains: &[f32]) {
+    for ((destination, source), gain) in destination.iter_mut().zip(source).zip(gains) {
+        *destination += *source * *gain;
     }
 }
 
@@ -140,6 +181,18 @@ impl WithSimd for MultiplyInto<'_> {
 struct Add<'a> {
     destination: &'a mut [f32],
     source: &'a [f32],
+}
+
+struct MultiplyAdd<'a> {
+    destination: &'a mut [f32],
+    source: &'a [f32],
+    gains: &'a [f32],
+}
+
+struct MultiplyAddConstant<'a> {
+    destination: &'a mut [f32],
+    source: &'a [f32],
+    gain: f32,
 }
 
 struct MultiplyConstant<'a> {
@@ -218,9 +271,51 @@ impl WithSimd for Add<'_> {
     }
 }
 
+impl WithSimd for MultiplyAdd<'_> {
+    type Output = ();
+
+    #[inline(always)]
+    fn with_simd<S: Simd>(self, simd: S) {
+        let (destination, destination_tail) = S::as_mut_simd_f32s(self.destination);
+        let (source, source_tail) = S::as_simd_f32s(self.source);
+        let (gains, gains_tail) = S::as_simd_f32s(self.gains);
+        for ((destination, source), gain) in destination.iter_mut().zip(source).zip(gains) {
+            *destination = simd.mul_add_f32s(*source, *gain, *destination);
+        }
+        multiply_add_scalar(destination_tail, source_tail, gains_tail);
+    }
+}
+
+impl WithSimd for MultiplyAddConstant<'_> {
+    type Output = ();
+
+    #[inline(always)]
+    fn with_simd<S: Simd>(self, simd: S) {
+        let (destination, destination_tail) = S::as_mut_simd_f32s(self.destination);
+        let (source, source_tail) = S::as_simd_f32s(self.source);
+        let gain = simd.splat_f32s(self.gain);
+        for (destination, source) in destination.iter_mut().zip(source) {
+            *destination = simd.mul_add_f32s(*source, gain, *destination);
+        }
+        for (destination, source) in destination_tail.iter_mut().zip(source_tail) {
+            *destination += *source * self.gain;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_fma_equivalent(left: &[f32], right: &[f32]) {
+        assert_eq!(left.len(), right.len());
+        for (index, (left, right)) in left.iter().zip(right).enumerate() {
+            assert!(
+                (left - right).abs() <= 1.0e-6,
+                "sample {index}: scalar={left}, vectorized={right}"
+            );
+        }
+    }
 
     #[test]
     fn runtime_vectorized_kernels_match_scalar_reference() {
@@ -243,7 +338,39 @@ mod tests {
             &source,
             &gains,
         );
-        assert_eq!(scalar, vectorized);
+        assert_fma_equivalent(&scalar, &vectorized);
+
+        scalar.fill(0.5);
+        vectorized.fill(0.5);
+        multiply_add(
+            AudioKernelBackend::ScalarReference,
+            &mut scalar,
+            &source,
+            &gains,
+        );
+        multiply_add(
+            AudioKernelBackend::RuntimeVectorized,
+            &mut vectorized,
+            &source,
+            &gains,
+        );
+        assert_fma_equivalent(&scalar, &vectorized);
+
+        scalar.fill(0.5);
+        vectorized.fill(0.5);
+        multiply_add_constant(
+            AudioKernelBackend::ScalarReference,
+            &mut scalar,
+            &source,
+            0.375,
+        );
+        multiply_add_constant(
+            AudioKernelBackend::RuntimeVectorized,
+            &mut vectorized,
+            &source,
+            0.375,
+        );
+        assert_fma_equivalent(&scalar, &vectorized);
 
         scalar.copy_from_slice(&source);
         vectorized.copy_from_slice(&source);

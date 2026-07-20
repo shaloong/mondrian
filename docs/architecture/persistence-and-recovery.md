@@ -46,7 +46,7 @@ values cannot be mixed into an unregistered hybrid identity. Archive and preview
 fingerprints, OCIO CPU processor keys, and renderer GPU shader keys all include
 the exact package identity.
 
-Document schema v13 retains the v5 Custom OCIO reproducibility contract and the
+Document schema v14 retains the v5 Custom OCIO reproducibility contract and the
 v6 removal of the redundant sequence-level ACES workflow selector. It also
 requires the Mondrian Standard package identity to pin both the SDR and
 1000-nit HDR View Transform IDs and versions; the old single default-View field
@@ -83,6 +83,10 @@ explicit as either the versioned fail-closed Standard policy or one canonical
 sparse matrix. Matrix source/destination layouts, channel bounds, coefficient
 finiteness and duplicate edges are validated at deserialization and Sequence
 closure boundaries; v12 is deliberately not inferred during Alpha.
+Version 14 makes `AudioRoute.enabled`, `gain_db`, and optional exact
+Sequence-time `gain_automation` mandatory. Route curves use a stable Parameter
+ID, and static/keyed/Bezier-control values must remain in the supported dB
+range. There is no implicit v13 unity-gain migration during Alpha.
 Current new sequences default to SceneReferred and persist the selected engine's
 package-pinned rendering View intent; DisplayReferred is the explicit
 direct-colorimetric bypass.

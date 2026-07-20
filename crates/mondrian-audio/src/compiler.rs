@@ -1,7 +1,7 @@
 use crate::plan::{
     AudioCompileRequest, CompiledAudioContribution, CompiledAudioProgram, CompiledAudioSource,
     CompiledChannelStrip, CompiledProcessingScope, CompiledProcessor, CompiledProcessorOperation,
-    CompiledRack, CompiledSourceTimeMap, CompiledTrackChannel, CompiledTransition,
+    CompiledRack, CompiledRoute, CompiledSourceTimeMap, CompiledTrackChannel, CompiledTransition,
 };
 use mondrian_core::{AudioProcessingScopeId, MixBusId, ProgramOutputId, TrackId};
 use mondrian_timeline::audio::{
@@ -242,17 +242,24 @@ fn compile_rack(rack: &AudioProcessorRack) -> Result<CompiledRack, AudioCompileE
 fn resolve_signal_closure(
     routes: &[AudioRoute],
     output_id: ProgramOutputId,
-) -> (Vec<AudioRoute>, BTreeSet<TrackId>, BTreeSet<MixBusId>) {
+) -> (Vec<CompiledRoute>, BTreeSet<TrackId>, BTreeSet<MixBusId>) {
     let mut required_buses = BTreeSet::new();
     let mut required_tracks = BTreeSet::new();
     let mut selected = Vec::new();
     let mut pending_destinations = vec![AudioRouteDestination::Output(output_id)];
     while let Some(destination) = pending_destinations.pop() {
-        for route in routes.iter().filter(|route| route.destination == destination) {
-            if selected.iter().any(|selected: &AudioRoute| selected.id == route.id) {
+        for route in routes.iter().filter(|route| route.enabled && route.destination == destination)
+        {
+            if selected.iter().any(|selected: &CompiledRoute| selected.id == route.id) {
                 continue;
             }
-            selected.push(route.clone());
+            selected.push(CompiledRoute {
+                id: route.id,
+                source: route.source,
+                destination: route.destination,
+                gain_db: route.gain_db,
+                gain_automation: route.gain_automation.clone(),
+            });
             match route.source {
                 AudioRouteSource::Track { track_id, .. } => {
                     required_tracks.insert(track_id);
@@ -270,7 +277,7 @@ fn resolve_signal_closure(
 }
 
 fn topological_bus_order(
-    routes: &[AudioRoute],
+    routes: &[CompiledRoute],
     buses: &BTreeSet<MixBusId>,
 ) -> Result<Vec<MixBusId>, AudioCompileError> {
     let mut indegree = buses.iter().map(|id| (*id, 0_usize)).collect::<BTreeMap<_, _>>();

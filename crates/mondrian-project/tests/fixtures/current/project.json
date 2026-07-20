@@ -1,5 +1,5 @@
 {
-  "schema_version": 13,
+  "schema_version": 14,
   "project_id": "97f12455-ec34-4b5d-a696-3da93cd914d7",
   "document_revision": 1,
   "meta": {
@@ -520,7 +520,10 @@
               },
               "destination": {
                 "Output": "afdda4ee-152b-4fab-9527-b91121d56393"
-              }
+              },
+              "enabled": true,
+              "gain_db": 0.0,
+              "gain_automation": null
             },
             {
               "id": "a8e58d56-6eca-4339-9a14-bf9748e4ffa5",
@@ -532,7 +535,10 @@
               },
               "destination": {
                 "Output": "afdda4ee-152b-4fab-9527-b91121d56393"
-              }
+              },
+              "enabled": true,
+              "gain_db": 0.0,
+              "gain_automation": null
             },
             {
               "id": "4b4efa4b-3c0c-47c5-a7f1-166fa8a2b608",
@@ -544,7 +550,10 @@
               },
               "destination": {
                 "Output": "afdda4ee-152b-4fab-9527-b91121d56393"
-              }
+              },
+              "enabled": true,
+              "gain_db": 0.0,
+              "gain_automation": null
             }
           ]
         },

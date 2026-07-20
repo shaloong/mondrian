@@ -4,8 +4,8 @@ use mondrian_audio::{
     AudioRenderSession, PreparedAudioPlan,
 };
 use mondrian_core::{
-    AssetId, AudioChannelLayout, AudioComponentEditId, AudioRouteId, AudioSourceComponentId,
-    MixBusId, TimelineTime,
+    AssetId, AudioChannelLayout, AudioComponentEditId, AudioSourceComponentId, MixBusId,
+    TimelineTime,
 };
 use mondrian_timeline::audio::{
     AudioChannelStrip, AudioChannelStripOutputPort, AudioMixBus, AudioRoute, AudioRouteDestination,
@@ -152,24 +152,22 @@ fn multitrack_sequence(track_count: usize, bus_count: usize) -> Sequence {
             })
             .collect::<Vec<_>>();
         for (index, track_id) in sequence.audio_tracks.iter().map(|track| track.id).enumerate() {
-            sequence.audio_program.routes.push(AudioRoute {
-                id: AudioRouteId::new(),
-                source: AudioRouteSource::Track {
+            sequence.audio_program.routes.push(AudioRoute::new(
+                AudioRouteSource::Track {
                     track_id,
                     port: AudioChannelStripOutputPort::PostMute,
                 },
-                destination: AudioRouteDestination::Bus(bus_ids[index % bus_ids.len()]),
-            });
+                AudioRouteDestination::Bus(bus_ids[index % bus_ids.len()]),
+            ));
         }
         for bus_id in bus_ids {
-            sequence.audio_program.routes.push(AudioRoute {
-                id: AudioRouteId::new(),
-                source: AudioRouteSource::Bus {
+            sequence.audio_program.routes.push(AudioRoute::new(
+                AudioRouteSource::Bus {
                     bus_id,
                     port: AudioChannelStripOutputPort::PostMute,
                 },
-                destination: AudioRouteDestination::Output(output_id),
-            });
+                AudioRouteDestination::Output(output_id),
+            ));
         }
     }
     sequence

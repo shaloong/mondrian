@@ -174,8 +174,23 @@ the post-fader rack.
 Routes use stable typed endpoints. Source ports are `PreFader`,
 `PostFaderPreMute`, or `PostMute`; destinations are Bus or Program Output.
 Routes never name array indexes, display names, generated Clip stages, or child
-internals. Instantaneous cycles are rejected. Feedback will require an explicit
-delay/state operator with defined initialization and latency.
+internals. The same edge represents both a channel's principal route and a
+parallel send: there is no second Send graph. Each Route owns an explicit
+enabled flag, a static level, and optional Sequence-time level automation using
+the stable `mondrian.audio.route_gain.db` Parameter ID. The automation curve is
+the value authority when present; static level is used only when it is absent.
+Levels, keys, and Bezier controls are confined to `[-120, +24] dB` before a
+snapshot can compile. Disabled Routes are retained as author intent but do not
+enter the selected output's signal closure. Instantaneous cycles are rejected
+across the complete author graph, including disabled edges. Feedback will
+require an explicit delay/state operator with defined initialization and
+latency.
+
+This minimal edge contract already covers dry paths, pre/post-fader auxiliary
+sends, submixes, stems, and multiple parallel paths. Sidechain inputs are not
+ordinary summing destinations: they require a typed processor-input endpoint
+and processor bus negotiation, and must not be simulated by weakening Route
+destination types.
 
 Disabled Clip or disabled Component Edit is absent from compilation. Persistent
 Track mute gates `PostMute` while preserving pre-mute taps. Solo is not stored
@@ -273,6 +288,8 @@ Preparation now lowers the semantic graph into one dense execution schedule:
 - ordered dense Processor ranges for every Scope/pre-fader/post-fader Rack,
   with deterministic author origin plus generated owner/insertion identity;
 - constant Scope/edit/fader fast paths that do not erase Processor boundaries;
+- constant Route-level fast paths plus prepared Route automation spans and one
+  Session-preallocated interleaved gain lane;
 - one explicitly selected scalar-reference or runtime-vectorized CPU kernel.
 - one resolved native source layout and canonical prepared channel mixer per
   Contribution, with coefficient count and maximum native channel width in the
@@ -325,12 +342,15 @@ time, Clip placement, automation coordinates, or nested source mappings.
 
 Session construction allocates one fixed interleaved delay line for every
 prepared Contribution and Route compensation input; zero-delay lines retain no
-sample storage. The capacity report exposes the non-zero line count and exact
-retained sample count. Contribution compensation executes after contribution-
-local processing and before the Track sum; Route compensation executes after
-the selected source port and before the destination sum. Neither path allocates
-or grows during a block. Scalar/SIMD execution shares these same state lines,
-and reference tests require whole-block and partitioned-block PCM identity.
+sample storage. It also allocates one interleaved Route-gain lane sized to the
+maximum block. The capacity report exposes both obligations. Contribution
+compensation executes after contribution-local processing and before the Track
+sum. A Route first delays the selected source-port signal for compensation,
+then applies its level at the destination's Sequence sample time while summing;
+automation therefore does not shift backward with source history. Neither path
+allocates or grows during a block. Scalar/SIMD execution shares these same
+state lines, and reference tests require whole-block and partitioned-block PCM
+identity within the stated floating-point tolerance.
 These compensation lines are real mutable history, so arbitrary discontinuous
 requests are not admitted once a plan contains one. Preparation marks the whole
 closure `requires_state_entry` when any local processor, compensation input, or
@@ -659,8 +679,9 @@ gates rather than implied support:
    IDs, state chunks, bus/layout negotiation, exact consumption/lowering of the
    common sample-accurate parameter batches, crash/hang containment, and
    realtime/offline capability reporting.
-4. Add typed sends and sidechains without weakening Route types; add meters and
-   loudness analysis as explicit downstream/processor stages.
+4. Extend the implemented typed, level-automatable Route/send edge with typed
+   processor sidechain-input endpoints and negotiated auxiliary buses; add
+   meters and loudness analysis as explicit observation/downstream stages.
 5. Execute Semantic Projection outputs and delivery mappings without cloning
    or reinterpreting the canonical Program graph.
 6. Add editor commands/UI for Clip/Track/Bus/Output racks, automation, fades,

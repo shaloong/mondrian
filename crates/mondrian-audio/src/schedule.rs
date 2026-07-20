@@ -292,11 +292,13 @@ pub(crate) struct PreparedNode {
     pub(crate) latency: PreparedNodeLatency,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct PreparedRoute {
     pub(crate) source_slot: usize,
     pub(crate) destination_slot: usize,
     pub(crate) source_port: AudioChannelStripOutputPort,
+    pub(crate) constant_gain: Option<f32>,
+    pub(crate) gain_automation: Option<PreparedAutomationCurve>,
     pub(crate) compensation_delay_frames: usize,
 }
 
@@ -786,10 +788,19 @@ impl PreparedAudioSchedule {
                             route.id
                         )));
                     }
+                    let gain_automation = prepare_optional_curve(
+                        route.gain_automation.as_ref(),
+                        TimelineTime::ZERO,
+                        sample_rate,
+                    )?;
                     routes.push(PreparedRoute {
                         source_slot,
                         destination_slot,
                         source_port,
+                        constant_gain: gain_automation
+                            .is_none()
+                            .then(|| crate::dsp::db_to_linear(route.gain_db)),
+                        gain_automation,
                         compensation_delay_frames: 0,
                     });
                 }
@@ -863,6 +874,7 @@ impl PreparedAudioSchedule {
                     .chain(contribution.volume_automation.iter())
                     .chain(contribution.pan_automation.iter())
             }))
+            .chain(routes.iter().flat_map(|route| route.gain_automation.iter()))
             .chain(processors.iter().flat_map(|processor| processor.parameter_curves.iter()))
             .collect::<Vec<_>>();
         let processor_parameter_lane_count =

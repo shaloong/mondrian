@@ -28,6 +28,12 @@ pub const CLIP_VOLUME_DB_PARAMETER_ID: &str = "mondrian.audio.clip_volume.db";
 pub const CLIP_PAN_PARAMETER_ID: &str = "mondrian.audio.clip_pan";
 /// Stable parameter identity for a channel-strip fader in decibels.
 pub const FADER_DB_PARAMETER_ID: &str = "mondrian.audio.fader.db";
+/// Stable parameter identity for one Route edge's send level.
+pub const ROUTE_GAIN_DB_PARAMETER_ID: &str = "mondrian.audio.route_gain.db";
+/// Lowest admitted authored gain. Values at this floor remain finite linear PCM.
+pub const AUDIO_GAIN_DB_MIN: f64 = -120.0;
+/// Highest admitted authored gain. This matches the built-in Gain hard limit.
+pub const AUDIO_GAIN_DB_MAX: f64 = 24.0;
 
 /// Definition contract for the built-in gain processor's decibel parameter.
 ///
@@ -42,7 +48,7 @@ pub fn gain_parameter_schema() -> ParameterSchema {
     .with_numeric_contract(
         ParameterUnit::Decibels,
         ParameterNumericContract {
-            hard_range: ParameterNumericRange { min: -120.0, max: 24.0 },
+            hard_range: ParameterNumericRange { min: AUDIO_GAIN_DB_MIN, max: AUDIO_GAIN_DB_MAX },
             soft_range: ParameterNumericRange { min: -60.0, max: 12.0 },
             step: Some(0.1),
             invalid_value_policy: ParameterInvalidValuePolicy::Reject,
@@ -271,11 +277,11 @@ impl Default for AudioChannelStrip {
 
 impl AudioChannelStrip {
     fn validate(&self) -> Result<(), AudioAuthoringError> {
-        validate_finite(self.input_trim_db)?;
-        validate_finite(self.fader_db)?;
+        validate_gain_db(self.input_trim_db)?;
+        validate_gain_db(self.fader_db)?;
         self.pre_fader.validate()?;
         self.post_fader.validate()?;
-        validate_optional_curve(&self.fader_automation, FADER_DB_PARAMETER_ID)
+        validate_optional_gain_curve(&self.fader_automation, FADER_DB_PARAMETER_ID)
     }
 }
 
@@ -404,7 +410,7 @@ impl AudioComponentEdit {
         if self.processing.scope_in.is_negative() || self.local_time_in.is_negative() {
             return Err(AudioAuthoringError::NegativeProcessingScopeIn(self.id));
         }
-        validate_finite(self.volume_db)?;
+        validate_gain_db(self.volume_db)?;
         if !self.pan.is_finite() || !(-1.0..=1.0).contains(&self.pan) {
             return Err(AudioAuthoringError::InvalidPan(self.id));
         }
@@ -415,7 +421,7 @@ impl AudioComponentEdit {
                 ));
             }
         }
-        validate_optional_curve(&self.volume_automation, CLIP_VOLUME_DB_PARAMETER_ID)?;
+        validate_optional_gain_curve(&self.volume_automation, CLIP_VOLUME_DB_PARAMETER_ID)?;
         validate_optional_curve(&self.pan_automation, CLIP_PAN_PARAMETER_ID)?;
         for fade in [self.fades.fade_in, self.fades.fade_out].into_iter().flatten() {
             if fade.duration.is_negative() || fade.duration > clip.duration {
@@ -451,8 +457,8 @@ impl AudioProcessingScope {
     }
 
     fn validate(&self) -> Result<(), AudioAuthoringError> {
-        validate_finite(self.input_gain_db)?;
-        validate_optional_curve(&self.input_gain_automation, INPUT_GAIN_DB_PARAMETER_ID)?;
+        validate_gain_db(self.input_gain_db)?;
+        validate_optional_gain_curve(&self.input_gain_automation, INPUT_GAIN_DB_PARAMETER_ID)?;
         self.processors.validate()
     }
 }
@@ -561,8 +567,8 @@ pub enum AudioRouteDestination {
     Output(ProgramOutputId),
 }
 
-/// Explicit signal Route.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Explicit signal Route and its Sequence-local edge controls.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioRoute {
     /// Stable Route identity.
     pub id: AudioRouteId,
@@ -570,6 +576,31 @@ pub struct AudioRoute {
     pub source: AudioRouteSource,
     /// Typed author destination.
     pub destination: AudioRouteDestination,
+    /// Whether this edge contributes to the compiled Signal Closure.
+    pub enabled: bool,
+    /// Static Route/send level used when no automation curve is present.
+    pub gain_db: f64,
+    /// Optional Sequence-local Route/send-level automation.
+    pub gain_automation: Option<ExactAutomationCurve>,
+}
+
+impl AudioRoute {
+    /// Construct one enabled unity-gain Route edge.
+    pub fn new(source: AudioRouteSource, destination: AudioRouteDestination) -> Self {
+        Self {
+            id: AudioRouteId::new(),
+            source,
+            destination,
+            enabled: true,
+            gain_db: 0.0,
+            gain_automation: None,
+        }
+    }
+
+    fn validate(&self) -> Result<(), AudioAuthoringError> {
+        validate_gain_db(self.gain_db)?;
+        validate_optional_gain_curve(&self.gain_automation, ROUTE_GAIN_DB_PARAMETER_ID)
+    }
 }
 
 /// Transition curve contract for a two-input crossfade.
@@ -626,14 +657,13 @@ impl AudioProgram {
         let mut routes = Vec::new();
         for track_id in track_ids {
             track_channels.insert(track_id, AudioTrackMixerChannel::default());
-            routes.push(AudioRoute {
-                id: AudioRouteId::new(),
-                source: AudioRouteSource::Track {
+            routes.push(AudioRoute::new(
+                AudioRouteSource::Track {
                     track_id,
                     port: AudioChannelStripOutputPort::PostMute,
                 },
-                destination: AudioRouteDestination::Output(output.id),
-            });
+                AudioRouteDestination::Output(output.id),
+            ));
         }
         Self {
             processing_scopes: Vec::new(),
@@ -657,14 +687,13 @@ impl AudioProgram {
         self.track_channels.entry(track_id).or_default();
         if let Some(output) = self.outputs.first() {
             if !self.routes.iter().any(|route| route.source.track_id() == Some(track_id)) {
-                self.routes.push(AudioRoute {
-                    id: AudioRouteId::new(),
-                    source: AudioRouteSource::Track {
+                self.routes.push(AudioRoute::new(
+                    AudioRouteSource::Track {
                         track_id,
                         port: AudioChannelStripOutputPort::PostMute,
                     },
-                    destination: AudioRouteDestination::Output(output.id),
-                });
+                    AudioRouteDestination::Output(output.id),
+                ));
             }
         }
     }
@@ -834,6 +863,7 @@ impl AudioProgram {
             .ok_or(AudioAuthoringError::DuplicateRoute)?;
         let _ = route_ids;
         for route in &self.routes {
+            route.validate()?;
             if route.source.track_id().is_some_and(|id| !expected_tracks.contains(&id))
                 || route.source.bus_id().is_some_and(|id| !bus_ids.contains(&id))
             {
@@ -928,11 +958,29 @@ fn validate_optional_curve(
     Ok(())
 }
 
-fn validate_finite(value: f64) -> Result<(), AudioAuthoringError> {
-    if value.is_finite() {
+fn validate_optional_gain_curve(
+    curve: &Option<ExactAutomationCurve>,
+    expected_parameter: &str,
+) -> Result<(), AudioAuthoringError> {
+    validate_optional_curve(curve, expected_parameter)?;
+    let Some(curve) = curve else {
+        return Ok(());
+    };
+    validate_gain_db(curve.default_value)?;
+    for keyframe in &curve.keyframes {
+        validate_gain_db(keyframe.value)?;
+        for handle in [keyframe.in_handle, keyframe.out_handle].into_iter().flatten() {
+            validate_gain_db(keyframe.value + handle.value_offset)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_gain_db(value: f64) -> Result<(), AudioAuthoringError> {
+    if value.is_finite() && (AUDIO_GAIN_DB_MIN..=AUDIO_GAIN_DB_MAX).contains(&value) {
         Ok(())
     } else {
-        Err(AudioAuthoringError::NonFiniteGain)
+        Err(AudioAuthoringError::InvalidGain)
     }
 }
 
@@ -1041,9 +1089,9 @@ pub enum AudioAuthoringError {
     /// An automation curve used the wrong stable parameter identity.
     #[error("audio automation must use parameter {expected}")]
     WrongAutomationParameter { expected: String },
-    /// Static gain values must be finite.
-    #[error("audio gain must be finite")]
-    NonFiniteGain,
+    /// Static, keyed, and Bezier-control gain values must fit the DSP hard range.
+    #[error("audio gain must be finite and lie within the supported dB range")]
+    InvalidGain,
     /// Rack contains one processor identity more than once.
     #[error("duplicate audio processor instance {0}")]
     DuplicateProcessorInstance(AudioProcessorInstanceId),
@@ -1179,6 +1227,59 @@ mod tests {
     }
 
     #[test]
+    fn route_gain_contract_rejects_wrong_identity_and_out_of_range_values() {
+        let track = Track::new_audio("Audio");
+        let mut program = AudioProgram::for_tracks([track.id]);
+        program.routes[0].gain_db = AUDIO_GAIN_DB_MAX + 1.0;
+        assert_eq!(
+            program.validate(
+                std::slice::from_ref(&track),
+                &[],
+                AudioChannelLayout::Stereo
+            ),
+            Err(AudioAuthoringError::InvalidGain)
+        );
+
+        program.routes[0].gain_db = 0.0;
+        program.routes[0].gain_automation = Some(
+            ExactAutomationCurve::new(ParameterId::new_static(GAIN_DB_PARAMETER_ID), 0.0)
+                .expect("finite curve"),
+        );
+        assert_eq!(
+            program.validate(
+                std::slice::from_ref(&track),
+                &[],
+                AudioChannelLayout::Stereo
+            ),
+            Err(AudioAuthoringError::WrongAutomationParameter {
+                expected: ROUTE_GAIN_DB_PARAMETER_ID.to_owned(),
+            })
+        );
+
+        let mut curve =
+            ExactAutomationCurve::new(ParameterId::new_static(ROUTE_GAIN_DB_PARAMETER_ID), 0.0)
+                .expect("curve");
+        let mut first = mondrian_core::ExactAutomationKeyframe::linear(TimelineTime::ZERO, 0.0);
+        first.interpolation_to_next = mondrian_core::AutomationSegmentInterpolation::Bezier;
+        first.out_handle = Some(mondrian_core::ExactBezierHandle {
+            time_offset: TimelineTime::new(1, 4).expect("handle time"),
+            value_offset: AUDIO_GAIN_DB_MAX + 1.0,
+        });
+        let mut last = mondrian_core::ExactAutomationKeyframe::linear(TimelineTime::ONE, 0.0);
+        last.in_handle = Some(mondrian_core::ExactBezierHandle {
+            time_offset: TimelineTime::new(-1, 4).expect("handle time"),
+            value_offset: 0.0,
+        });
+        curve.set_keyframe(first).expect("first key");
+        curve.set_keyframe(last).expect("last key");
+        program.routes[0].gain_automation = Some(curve);
+        assert_eq!(
+            program.validate(&[track], &[], AudioChannelLayout::Stereo),
+            Err(AudioAuthoringError::InvalidGain)
+        );
+    }
+
+    #[test]
     fn processor_parameter_schema_governs_automation_and_interpolation() {
         let parameter_id = ParameterId::new_static(GAIN_DB_PARAMETER_ID);
         let mut processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
@@ -1310,22 +1411,20 @@ mod tests {
             },
         ]);
         program.routes.extend([
-            AudioRoute {
-                id: AudioRouteId::new(),
-                source: AudioRouteSource::Bus {
+            AudioRoute::new(
+                AudioRouteSource::Bus {
                     bus_id: first,
                     port: AudioChannelStripOutputPort::PostMute,
                 },
-                destination: AudioRouteDestination::Bus(second),
-            },
-            AudioRoute {
-                id: AudioRouteId::new(),
-                source: AudioRouteSource::Bus {
+                AudioRouteDestination::Bus(second),
+            ),
+            AudioRoute::new(
+                AudioRouteSource::Bus {
                     bus_id: second,
                     port: AudioChannelStripOutputPort::PostMute,
                 },
-                destination: AudioRouteDestination::Bus(first),
-            },
+                AudioRouteDestination::Bus(first),
+            ),
         ]);
         assert_eq!(
             program.validate(&[track], &[], AudioChannelLayout::Stereo),

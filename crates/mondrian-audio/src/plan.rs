@@ -4,7 +4,8 @@ use mondrian_core::{
     TimelineTimeRange, TrackId,
 };
 use mondrian_timeline::audio::{
-    AudioComponentChannelMapping, AudioFadeCurve, AudioRoute, AudioTransitionCurve,
+    AudioComponentChannelMapping, AudioFadeCurve, AudioRouteDestination, AudioRouteSource,
+    AudioTransitionCurve,
 };
 use mondrian_timeline::clip::SpeedMap;
 use std::collections::{BTreeMap, BTreeSet};
@@ -192,6 +193,16 @@ pub(crate) struct CompiledTrackChannel {
     pub(crate) strip: CompiledChannelStrip,
 }
 
+/// One enabled Route edge retained by the selected Signal Closure.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CompiledRoute {
+    pub(crate) id: mondrian_core::AudioRouteId,
+    pub(crate) source: AudioRouteSource,
+    pub(crate) destination: AudioRouteDestination,
+    pub(crate) gain_db: f64,
+    pub(crate) gain_automation: Option<ExactAutomationCurve>,
+}
+
 /// One compiled explicit Transition relationship.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CompiledTransition {
@@ -212,7 +223,7 @@ pub struct CompiledAudioProgram {
     pub(crate) buses: BTreeMap<MixBusId, CompiledChannelStrip>,
     pub(crate) bus_order: Vec<MixBusId>,
     pub(crate) output: CompiledChannelStrip,
-    pub(crate) routes: Vec<AudioRoute>,
+    pub(crate) routes: Vec<CompiledRoute>,
 }
 
 impl CompiledAudioProgram {

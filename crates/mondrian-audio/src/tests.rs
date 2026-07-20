@@ -1,14 +1,14 @@
 use super::*;
 use mondrian_core::{
     AssetId, AudioChannelLayout, AudioChannelMixEntry, AudioChannelMixMatrix, AudioChannelPosition,
-    AudioComponentEditId, AudioRouteId, AudioSourceComponentId, AutomationSegmentInterpolation,
+    AudioComponentEditId, AudioSourceComponentId, AutomationSegmentInterpolation,
     ExactAutomationCurve, ExactAutomationKeyframe, ExactBezierHandle, ExecutionCancellationToken,
     ParameterId, TimeScale, TimelineTime,
 };
 use mondrian_timeline::audio::{
     AudioChannelStripOutputPort, AudioComponentChannelMapping, AudioMixBus, AudioProcessorInstance,
     AudioRoute, AudioRouteDestination, AudioRouteSource, BUILTIN_GAIN_DEFINITION_ID,
-    GAIN_DB_PARAMETER_ID,
+    GAIN_DB_PARAMETER_ID, ROUTE_GAIN_DB_PARAMETER_ID,
 };
 use mondrian_timeline::{Clip, Sequence};
 use std::collections::BTreeMap;
@@ -139,6 +139,21 @@ fn tt(numerator: i64, denominator: i64) -> TimelineTime {
 
 fn gain_curve(start_db: f64, end_db: f64) -> ExactAutomationCurve {
     let parameter = ParameterId::new(GAIN_DB_PARAMETER_ID).expect("gain parameter");
+    let mut curve = ExactAutomationCurve::new(parameter, start_db).expect("curve");
+    curve
+        .set_keyframe(ExactAutomationKeyframe::linear(
+            TimelineTime::ZERO,
+            start_db,
+        ))
+        .expect("first key");
+    curve
+        .set_keyframe(ExactAutomationKeyframe::linear(TimelineTime::ONE, end_db))
+        .expect("second key");
+    curve
+}
+
+fn route_gain_curve(start_db: f64, end_db: f64) -> ExactAutomationCurve {
+    let parameter = ParameterId::new(ROUTE_GAIN_DB_PARAMETER_ID).expect("Route gain parameter");
     let mut curve = ExactAutomationCurve::new(parameter, start_db).expect("curve");
     curve
         .set_keyframe(ExactAutomationKeyframe::linear(
@@ -440,22 +455,20 @@ fn clip_track_bus_output_math_is_unclipped_and_block_invariant() {
         strip: mondrian_timeline::AudioChannelStrip::default(),
     });
     sequence.audio_program.routes.extend([
-        AudioRoute {
-            id: AudioRouteId::new(),
-            source: AudioRouteSource::Track {
+        AudioRoute::new(
+            AudioRouteSource::Track {
                 track_id,
                 port: AudioChannelStripOutputPort::PostMute,
             },
-            destination: AudioRouteDestination::Bus(bus_id),
-        },
-        AudioRoute {
-            id: AudioRouteId::new(),
-            source: AudioRouteSource::Bus {
+            AudioRouteDestination::Bus(bus_id),
+        ),
+        AudioRoute::new(
+            AudioRouteSource::Bus {
                 bus_id,
                 port: AudioChannelStripOutputPort::PostMute,
             },
-            destination: AudioRouteDestination::Output(output_id),
-        },
+            AudioRouteDestination::Output(output_id),
+        ),
     ]);
 
     let plan = prepared(&sequence, 8);
@@ -505,6 +518,115 @@ fn clip_track_bus_output_math_is_unclipped_and_block_invariant() {
         whole[2] > 3.0,
         "internal float PCM must not be clipped or tanh-shaped"
     );
+}
+
+#[test]
+fn parallel_route_is_a_sample_accurate_block_invariant_send() {
+    let mut sequence = sequence_with_audio_clip();
+    let track_id = sequence.audio_tracks[0].id;
+    let output_id = sequence.audio_program.outputs[0].id;
+    let bus_id = mondrian_core::MixBusId::new();
+    sequence.audio_program.buses.push(AudioMixBus {
+        id: bus_id,
+        name: "Parallel".to_owned(),
+        strip: mondrian_timeline::AudioChannelStrip::default(),
+    });
+    sequence.audio_program.routes.clear();
+    let direct = AudioRoute::new(
+        AudioRouteSource::Track {
+            track_id,
+            port: AudioChannelStripOutputPort::PostMute,
+        },
+        AudioRouteDestination::Output(output_id),
+    );
+    let curve = route_gain_curve(0.0, -6.020_599_913_279_624);
+    let mut send = AudioRoute::new(
+        AudioRouteSource::Track {
+            track_id,
+            port: AudioChannelStripOutputPort::PostMute,
+        },
+        AudioRouteDestination::Bus(bus_id),
+    );
+    send.gain_automation = Some(curve.clone());
+    let return_route = AudioRoute::new(
+        AudioRouteSource::Bus {
+            bus_id,
+            port: AudioChannelStripOutputPort::PostMute,
+        },
+        AudioRouteDestination::Output(output_id),
+    );
+    sequence.audio_program.routes.extend([direct, send, return_route]);
+
+    let runtime_plan = prepared_with_backend(&sequence, 4, AudioKernelBackend::RuntimeVectorized);
+    assert_eq!(runtime_plan.schedule_summary().route_count, 3);
+    assert_eq!(runtime_plan.schedule_summary().automation_curve_count, 1);
+    assert_eq!(
+        runtime_plan.schedule_summary().automation_event_span_count,
+        2
+    );
+    let scalar_plan = prepared_with_backend(&sequence, 4, AudioKernelBackend::ScalarReference);
+
+    let mut runtime_source = RampSource::default();
+    let runtime = render_audio(
+        runtime_plan,
+        &mut runtime_source,
+        AudioRenderRequest { start_sample: 0, frames: 4 },
+    )
+    .expect("runtime send");
+    let mut scalar_source = RampSource::default();
+    let scalar = render_audio(
+        scalar_plan,
+        &mut scalar_source,
+        AudioRenderRequest { start_sample: 0, frames: 4 },
+    )
+    .expect("scalar send");
+
+    for (sample, (runtime, scalar)) in runtime.iter().zip(&scalar).enumerate() {
+        let time = tt(i64::try_from(sample).expect("sample index"), 2);
+        let send_gain = dsp::db_to_linear(curve.evaluate(time).expect("Route automation"));
+        let source = sample as f32 + 1.0;
+        let expected = source * (1.0 + send_gain);
+        assert!((runtime - expected).abs() <= 1.0e-6);
+        assert!((scalar - expected).abs() <= 1.0e-6);
+    }
+
+    let split_plan = prepared(&sequence, 2);
+    let mut split_source = RampSource::default();
+    let first = render_audio(
+        Arc::clone(&split_plan),
+        &mut split_source,
+        AudioRenderRequest { start_sample: 0, frames: 2 },
+    )
+    .expect("first partition");
+    let second = render_audio(
+        split_plan,
+        &mut split_source,
+        AudioRenderRequest { start_sample: 2, frames: 2 },
+    )
+    .expect("second partition");
+    assert_eq!([first, second].concat(), runtime);
+}
+
+#[test]
+fn disabled_route_is_absent_from_the_compiled_signal_closure() {
+    let mut sequence = sequence_with_audio_clip();
+    for route in &mut sequence.audio_program.routes {
+        route.enabled = false;
+    }
+    let plan = prepared(&sequence, 4);
+
+    assert_eq!(plan.schedule_summary().track_count, 0);
+    assert_eq!(plan.schedule_summary().contribution_count, 0);
+    assert_eq!(plan.schedule_summary().route_count, 0);
+    let mut source = RampSource::default();
+    let rendered = render_audio(
+        plan,
+        &mut source,
+        AudioRenderRequest { start_sample: 0, frames: 4 },
+    )
+    .expect("disabled Route");
+    assert_eq!(rendered, vec![0.0; 4]);
+    assert_eq!(source.block_reads, 0);
 }
 
 #[test]

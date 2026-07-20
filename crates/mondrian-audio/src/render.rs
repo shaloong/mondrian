@@ -79,6 +79,8 @@ pub struct AudioRenderCapacity {
     pub maximum_source_channels: usize,
     /// Reused native-source sample storage retained by the Session.
     pub source_scratch_samples: usize,
+    /// Preallocated interleaved gain lane shared by Route automation.
+    pub route_gain_scratch_samples: usize,
     /// Non-zero Contribution and Route compensation lines.
     pub compensation_delay_line_count: usize,
     /// Interleaved sample storage retained by all compensation lines.
@@ -134,6 +136,7 @@ struct RenderScratch {
     contribution_sample_gains: Vec<f32>,
     strip_pre_gains: Vec<f32>,
     strip_post_gains: Vec<f32>,
+    route_gains: Vec<f32>,
     frame_gain_db: Vec<f64>,
     frame_pan: Vec<f64>,
 }
@@ -148,6 +151,7 @@ impl RenderScratch {
             contribution_sample_gains: vec![0.0; samples],
             strip_pre_gains: vec![0.0; samples],
             strip_post_gains: vec![0.0; samples],
+            route_gains: vec![0.0; samples],
             frame_gain_db: vec![0.0; max_frames],
             frame_pan: vec![0.0; max_frames],
         }
@@ -233,6 +237,7 @@ impl AudioRenderSession {
             samples_per_node_slot: samples,
             maximum_source_channels: plan.schedule.summary.maximum_source_channels,
             source_scratch_samples: source_samples,
+            route_gain_scratch_samples: samples,
             compensation_delay_line_count,
             compensation_delay_samples,
             processor_occurrences: processor_runtime.occurrence_count(),
@@ -401,10 +406,13 @@ impl AudioRenderSession {
                     sum_prepared_route(
                         schedule,
                         route_index,
-                        samples,
+                        request,
+                        sample_rate,
+                        contract.channel_count(),
                         backend,
                         &mut self.node_buffers,
                         delay_line,
+                        &mut self.scratch,
                     )?;
                 }
             }
@@ -701,15 +709,31 @@ fn prepare_source_frames(
 fn sum_prepared_route(
     schedule: &PreparedAudioSchedule,
     route_index: usize,
-    samples: usize,
+    request: AudioRenderRequest,
+    sample_rate: AudioSampleRate,
+    channels: usize,
     backend: crate::AudioKernelBackend,
     buffers: &mut [NodeBuffers],
     delay_line: &mut FixedDelayLine,
+    scratch: &mut RenderScratch,
 ) -> Result<(), AudioExecutionError> {
     let route = schedule
         .routes
         .get(route_index)
         .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+    let samples = request
+        .frames
+        .checked_mul(channels)
+        .ok_or(AudioExecutionError::BufferTooLarge)?;
+    let automated_gains = if let Some(curve) = &route.gain_automation {
+        let frame_db = &mut scratch.frame_gain_db[..request.frames];
+        fill_prepared_curve(curve, request.start_sample, sample_rate, frame_db)?;
+        let gains = &mut scratch.route_gains[..samples];
+        dsp::expand_frame_db_to_interleaved_gains(frame_db, channels, gains);
+        Some(&gains[..])
+    } else {
+        None
+    };
     let source_scratch = schedule.nodes[route.source_slot].scratch_slot;
     let destination_scratch = schedule.nodes[route.destination_slot].scratch_slot;
     if source_scratch == destination_scratch {
@@ -718,20 +742,57 @@ fn sum_prepared_route(
     if source_scratch < destination_scratch {
         let (left, right) = buffers.split_at_mut(destination_scratch);
         let source = left[source_scratch].port(route.source_port, samples);
-        if delay_line.sample_capacity() == 0 {
-            dsp::add(backend, &mut right[0].input[..samples], source);
-        } else {
-            delay_line.add_interleaved(source, &mut right[0].input[..samples])?;
-        }
+        sum_route_signal(
+            route,
+            source,
+            &mut right[0].input[..samples],
+            automated_gains,
+            backend,
+            delay_line,
+        )?;
     } else {
         let (left, right) = buffers.split_at_mut(source_scratch);
         let destination = &mut left[destination_scratch].input[..samples];
         let source = right[0].port(route.source_port, samples);
+        sum_route_signal(
+            route,
+            source,
+            destination,
+            automated_gains,
+            backend,
+            delay_line,
+        )?;
+    }
+    Ok(())
+}
+
+fn sum_route_signal(
+    route: &crate::schedule::PreparedRoute,
+    source: &[f32],
+    destination: &mut [f32],
+    automated_gains: Option<&[f32]>,
+    backend: crate::AudioKernelBackend,
+    delay_line: &mut FixedDelayLine,
+) -> Result<(), AudioExecutionError> {
+    if let Some(gains) = automated_gains {
         if delay_line.sample_capacity() == 0 {
+            dsp::multiply_add(backend, destination, source, gains);
+        } else {
+            delay_line.add_interleaved_with_gains(source, destination, gains)?;
+        }
+        return Ok(());
+    }
+    let gain = route.constant_gain.ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+    if delay_line.sample_capacity() == 0 {
+        if gain == 1.0 {
             dsp::add(backend, destination, source);
         } else {
-            delay_line.add_interleaved(source, destination)?;
+            dsp::multiply_add_constant(backend, destination, source, gain);
         }
+    } else if gain == 1.0 {
+        delay_line.add_interleaved(source, destination)?;
+    } else {
+        delay_line.add_interleaved_constant(source, destination, gain)?;
     }
     Ok(())
 }

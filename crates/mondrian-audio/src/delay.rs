@@ -45,6 +45,67 @@ impl FixedDelayLine {
         Ok(())
     }
 
+    /// Delay one block and add it with a target-time constant gain.
+    pub(crate) fn add_interleaved_constant(
+        &mut self,
+        source: &[f32],
+        destination: &mut [f32],
+        gain: f32,
+    ) -> Result<(), AudioExecutionError> {
+        if source.len() != destination.len() {
+            return Err(AudioExecutionError::InvalidPreparedSchedule);
+        }
+        if self.samples.is_empty() {
+            for (destination, source) in destination.iter_mut().zip(source.iter().copied()) {
+                *destination += source * gain;
+            }
+            return Ok(());
+        }
+        for (destination, source) in destination.iter_mut().zip(source.iter().copied()) {
+            let delayed = self.samples[self.cursor];
+            self.samples[self.cursor] = source;
+            self.advance_cursor();
+            *destination += delayed * gain;
+        }
+        Ok(())
+    }
+
+    /// Delay one block and add it with gains aligned to destination sample time.
+    pub(crate) fn add_interleaved_with_gains(
+        &mut self,
+        source: &[f32],
+        destination: &mut [f32],
+        gains: &[f32],
+    ) -> Result<(), AudioExecutionError> {
+        if source.len() != destination.len() || source.len() != gains.len() {
+            return Err(AudioExecutionError::InvalidPreparedSchedule);
+        }
+        if self.samples.is_empty() {
+            for ((destination, source), gain) in
+                destination.iter_mut().zip(source.iter().copied()).zip(gains)
+            {
+                *destination += source * *gain;
+            }
+            return Ok(());
+        }
+        for ((destination, source), gain) in
+            destination.iter_mut().zip(source.iter().copied()).zip(gains)
+        {
+            let delayed = self.samples[self.cursor];
+            self.samples[self.cursor] = source;
+            self.advance_cursor();
+            *destination += delayed * *gain;
+        }
+        Ok(())
+    }
+
+    fn advance_cursor(&mut self) {
+        self.cursor += 1;
+        if self.cursor == self.samples.len() {
+            self.cursor = 0;
+        }
+    }
+
     pub(crate) fn reset(&mut self) {
         self.samples.fill(0.0);
         self.cursor = 0;
@@ -74,5 +135,16 @@ mod tests {
 
         assert_eq!(whole_output, [0.0, 0.0, 0.0, 0.0, 1.0, 10.0, 2.0, 20.0]);
         assert_eq!([first, second].concat(), whole_output);
+    }
+
+    #[test]
+    fn delayed_route_gains_follow_destination_time_not_source_history() {
+        let mut delay = FixedDelayLine::new(1, 1).expect("delay");
+        let mut output = vec![0.0; 3];
+        delay
+            .add_interleaved_with_gains(&[1.0, 2.0, 3.0], &mut output, &[1.0, 2.0, 3.0])
+            .expect("gained delay");
+
+        assert_eq!(output, [0.0, 2.0, 6.0]);
     }
 }
