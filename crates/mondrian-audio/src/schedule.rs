@@ -175,6 +175,8 @@ pub struct PreparedAudioScheduleSummary {
     pub processor_parameter_lane_count: usize,
     /// Largest sample-accurate event batch required by one processor block.
     pub maximum_parameter_events_per_block: usize,
+    /// Processor-private Session bytes admitted during preparation.
+    pub processor_session_scratch_bytes: usize,
     /// Scratch slots after interval-liveness reuse.
     pub scratch_slot_count: usize,
     /// Total intrinsic/PDC latency at the selected Program Output.
@@ -913,6 +915,22 @@ impl PreparedAudioSchedule {
             .into_iter()
             .max()
             .unwrap_or(0);
+        let processor_session_scratch_bytes = processors
+            .iter()
+            .try_fold(0_usize, |bytes, processor| {
+                bytes.checked_add(processor.factory.contract().session_scratch_bytes())
+            })
+            .ok_or_else(|| {
+                AudioCompileError::InvalidPreparedGraph(
+                    "processor Session scratch capacity overflowed".to_owned(),
+                )
+            })?;
+        if processor_session_scratch_bytes > contract.processor_session_scratch_budget_bytes {
+            return Err(AudioCompileError::ProcessorScratchBudgetExceeded {
+                required_bytes: processor_session_scratch_bytes,
+                budget_bytes: contract.processor_session_scratch_budget_bytes,
+            });
+        }
         let summary = PreparedAudioScheduleSummary {
             node_count: nodes.len(),
             track_count,
@@ -937,6 +955,7 @@ impl PreparedAudioSchedule {
             processor_occurrence_count: processors.len(),
             processor_parameter_lane_count,
             maximum_parameter_events_per_block,
+            processor_session_scratch_bytes,
             scratch_slot_count,
             output_latency_frames: latency.output_latency_frames,
             maximum_compensation_frames: latency.maximum_compensation_frames,

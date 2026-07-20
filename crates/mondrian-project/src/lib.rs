@@ -22,7 +22,7 @@ use migration::JsonMigrationRegistry;
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 14;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 15;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 2;
 
@@ -435,9 +435,12 @@ mod tests {
     use super::*;
     use mondrian_core::automation::{PropertyDescriptor, PropertyValue};
     use mondrian_core::effect_data::{EffectNode, EffectType};
-    use mondrian_core::{ExactAutomationKeyframe, ParameterId, TimelineTime};
+    use mondrian_core::{
+        ExactAutomationCurve, ExactAutomationKeyframe, ParameterId, ParameterUnit, TimelineTime,
+    };
     use mondrian_timeline::audio::{
-        AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID, GAIN_DB_PARAMETER_ID,
+        AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID, BUILTIN_SAMPLE_DELAY_DEFINITION_ID,
+        GAIN_DB_PARAMETER_ID, SAMPLE_DELAY_FRAMES_PARAMETER_ID,
     };
     use mondrian_timeline::{Clip, Sequence};
 
@@ -630,6 +633,15 @@ mod tests {
             .set_keyframe(ExactAutomationKeyframe::linear(TimelineTime::ZERO, -6.0))
             .expect("gain key");
         processor.set_parameter_automation(curve).expect("schema-compatible curve");
+        let mut sample_delay =
+            AudioProcessorInstance::built_in(BUILTIN_SAMPLE_DELAY_DEFINITION_ID, 1);
+        let delay_parameter_id = ParameterId::new_static(SAMPLE_DELAY_FRAMES_PARAMETER_ID);
+        sample_delay
+            .set_parameter_automation(
+                ExactAutomationCurve::new(delay_parameter_id.clone(), 128.0)
+                    .expect("exact delay value"),
+            )
+            .expect("schema-compatible sample delay");
         sequence
             .audio_program
             .track_channels
@@ -639,6 +651,15 @@ mod tests {
             .pre_fader
             .processors
             .push(processor);
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track_id)
+            .expect("track channel")
+            .strip
+            .pre_fader
+            .processors
+            .push(sample_delay);
 
         save_project_archive(&document, &db_path, &project_path).expect("save project");
         let reopened = read_project_document_from_archive(&project_path).expect("reopen project");
@@ -650,6 +671,13 @@ mod tests {
         assert_eq!(parameter.schema.parameter_id, parameter_id);
         assert_eq!(parameter.schema.default_value, PropertyValue::Double(0.0));
         assert_eq!(parameter.automation.keyframes[0].value, -6.0);
+        let delay = &sequence.audio_program.track_channels[&track_id].strip.pre_fader.processors[1]
+            .parameters[&delay_parameter_id];
+        assert_eq!(delay.schema.default_value, PropertyValue::Int(0));
+        assert_eq!(delay.schema.unit, ParameterUnit::Samples);
+        assert!(!delay.schema.is_animatable);
+        assert_eq!(delay.automation.default_value, 128.0);
+        assert!(delay.automation.keyframes.is_empty());
     }
 
     #[test]
@@ -851,7 +879,7 @@ mod tests {
     #[test]
     fn older_schemas_are_rejected_without_an_alpha_compatibility_migration() {
         let mut legacy = serde_json::to_value(test_document()).expect("serialize document");
-        for version in [5, 6, 10] {
+        for version in [5, 6, 10, 14] {
             legacy["schema_version"] = serde_json::json!(version);
             let err = DOCUMENT_MIGRATIONS
                 .migrate(legacy.clone())

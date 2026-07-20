@@ -388,6 +388,8 @@ pub enum ParameterUnit {
     Stops,
     Nits,
     Decibels,
+    /// Exact integer audio sample frames on the active Evaluation Grid.
+    Samples,
 }
 
 /// Closed numeric interval used by hard and soft parameter bounds.

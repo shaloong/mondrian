@@ -1,24 +1,19 @@
 //! Plan-time processor resolution and Session-owned callback dispatch.
 
-use crate::dsp;
-use crate::processor_parameters::{
-    fill_parameter_lane_values, prepare_parameter_event_batch, ProcessorParameterEventScratch,
-};
+use crate::processor_parameters::{prepare_parameter_event_batch, ProcessorParameterEventScratch};
 use crate::schedule::{PreparedAudioSchedule, PreparedProcessor, PreparedRack};
 #[cfg(test)]
 use crate::AudioParameterEvent;
 use crate::{
-    AudioExecutionError, AudioKernelBackend, AudioParameterEventBatch, AudioProcessor,
-    AudioProcessorAudioIo, AudioProcessorExecutionContract, AudioProcessorFactory,
-    AudioProcessorHostError, AudioProcessorInputBus, AudioProcessorOccurrence,
-    AudioProcessorPrepareRequest, AudioProcessorProcessContext, AudioProcessorResolver,
-    AudioRenderContract, AudioRenderRequest, AudioStateEntry, BuiltInAudioProcessorResolver,
+    AudioExecutionError, AudioKernelBackend, AudioProcessor, AudioProcessorAudioIo,
+    AudioProcessorExecutionContract, AudioProcessorFactory, AudioProcessorHostError,
+    AudioProcessorInputBus, AudioProcessorOccurrence, AudioProcessorPrepareRequest,
+    AudioProcessorProcessContext, AudioProcessorResolver, AudioRenderContract, AudioRenderRequest,
+    AudioStateEntry, BuiltInAudioProcessorResolver,
 };
-use mondrian_core::{AudioChannelLayout, AudioSampleRate, ParameterId};
-use mondrian_timeline::audio::{
-    gain_parameter_schema, AudioProcessorDefinitionRef, BUILTIN_GAIN_DEFINITION_ID,
-    GAIN_DB_PARAMETER_ID,
-};
+#[cfg(test)]
+use mondrian_core::ParameterId;
+use mondrian_core::{AudioChannelLayout, AudioSampleRate};
 use std::fmt;
 use std::sync::Arc;
 
@@ -65,189 +60,6 @@ impl fmt::Debug for PreparedProcessorFactoryBinding {
             .debug_struct("PreparedProcessorFactoryBinding")
             .field("contract", &self.contract)
             .finish_non_exhaustive()
-    }
-}
-
-impl AudioProcessorResolver for BuiltInAudioProcessorResolver {
-    fn prepare(
-        &self,
-        request: AudioProcessorPrepareRequest<'_>,
-    ) -> Result<Arc<dyn AudioProcessorFactory>, AudioProcessorHostError> {
-        match request.definition() {
-            AudioProcessorDefinitionRef::BuiltIn { definition_id, schema_version }
-                if definition_id == BUILTIN_GAIN_DEFINITION_ID && *schema_version == 1 =>
-            {
-                let parameter_id = ParameterId::new_static(GAIN_DB_PARAMETER_ID);
-                let Some((parameter_slot, parameter)) = request
-                    .parameters()
-                    .iter()
-                    .enumerate()
-                    .find(|(_, (candidate, _))| *candidate == &parameter_id)
-                    .map(|(slot, (_, parameter))| (slot, parameter))
-                else {
-                    return Err(AudioProcessorHostError::InvalidContract(
-                        "built-in Gain is missing its canonical parameter".to_owned(),
-                    ));
-                };
-                if request.parameters().len() != 1
-                    || parameter.schema != gain_parameter_schema()
-                    || parameter.automation.parameter_id != parameter_id
-                    || request.opaque_state().is_some()
-                {
-                    return Err(AudioProcessorHostError::InvalidContract(
-                        "built-in Gain definition snapshot or state is not canonical".to_owned(),
-                    ));
-                }
-                let session_scratch_bytes = request
-                    .render_contract()
-                    .max_block_frames
-                    .checked_mul(std::mem::size_of::<f64>())
-                    .and_then(|bytes| {
-                        request
-                            .render_contract()
-                            .max_block_frames
-                            .checked_mul(request.render_contract().channel_count())
-                            .and_then(|samples| {
-                                samples
-                                    .checked_mul(std::mem::size_of::<f32>())
-                                    .and_then(|gain_bytes| bytes.checked_add(gain_bytes))
-                            })
-                    })
-                    .ok_or_else(|| {
-                        AudioProcessorHostError::InvalidContract(
-                            "built-in Gain scratch capacity overflowed".to_owned(),
-                        )
-                    })?;
-                let execution_contract = AudioProcessorExecutionContract::new(
-                    0,
-                    false,
-                    true,
-                    true,
-                    session_scratch_bytes,
-                )?;
-                Ok(Arc::new(BuiltInGainFactory {
-                    parameter_slot,
-                    max_block_frames: request.render_contract().max_block_frames,
-                    channel_layout: request.render_contract().channel_layout,
-                    execution_contract,
-                }))
-            }
-            AudioProcessorDefinitionRef::BuiltIn { definition_id, schema_version } => {
-                Err(AudioProcessorHostError::Unavailable(format!(
-                    "built-in {definition_id} schema {schema_version}"
-                )))
-            }
-            AudioProcessorDefinitionRef::Vst3 { class_id, schema_version, .. } => {
-                Err(AudioProcessorHostError::Unavailable(format!(
-                    "VST3 class {class_id} schema {schema_version}"
-                )))
-            }
-            AudioProcessorDefinitionRef::Clap { plugin_id, schema_version } => {
-                Err(AudioProcessorHostError::Unavailable(format!(
-                    "CLAP plugin {plugin_id} schema {schema_version}"
-                )))
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-struct BuiltInGainFactory {
-    parameter_slot: usize,
-    max_block_frames: usize,
-    channel_layout: AudioChannelLayout,
-    execution_contract: AudioProcessorExecutionContract,
-}
-
-impl AudioProcessorFactory for BuiltInGainFactory {
-    fn execution_contract(&self) -> AudioProcessorExecutionContract {
-        self.execution_contract
-    }
-
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
-        let samples = self
-            .max_block_frames
-            .checked_mul(self.channel_layout.channel_count())
-            .ok_or_else(|| {
-                AudioProcessorHostError::InstanceCreation(
-                    "built-in Gain scratch capacity overflowed".to_owned(),
-                )
-            })?;
-        Ok(Box::new(BuiltInGainProcessor {
-            parameter_slot: self.parameter_slot,
-            frame_values: vec![0.0; self.max_block_frames],
-            interleaved_gains: vec![0.0; samples],
-        }))
-    }
-}
-
-struct BuiltInGainProcessor {
-    parameter_slot: usize,
-    frame_values: Vec<f64>,
-    interleaved_gains: Vec<f32>,
-}
-
-impl AudioProcessor for BuiltInGainProcessor {
-    fn enter_state(&mut self, _start_sample: i64) -> Result<(), AudioProcessorHostError> {
-        Ok(())
-    }
-
-    fn process(
-        &mut self,
-        context: AudioProcessorProcessContext,
-        audio: &mut dyn AudioProcessorAudioIo,
-        parameters: AudioParameterEventBatch<'_>,
-    ) -> Result<(), AudioProcessorHostError> {
-        let request = context.request();
-        let channels = context.channel_layout().channel_count();
-        let samples = request.frames.checked_mul(channels).ok_or_else(|| {
-            AudioProcessorHostError::Process("built-in Gain block size overflowed".to_owned())
-        })?;
-        if audio.main_layout() != context.channel_layout()
-            || audio.frames() != request.frames
-            || audio.main_interleaved().len() != samples
-            || parameters.block_start_sample() != request.start_sample
-            || parameters.block_frames() != request.frames
-            || request.frames > self.frame_values.len()
-            || samples > self.interleaved_gains.len()
-        {
-            return Err(AudioProcessorHostError::Process(
-                "built-in Gain received an inconsistent prepared block".to_owned(),
-            ));
-        }
-        let events = parameters.events(self.parameter_slot).ok_or_else(|| {
-            AudioProcessorHostError::Process("built-in Gain parameter lane is absent".to_owned())
-        })?;
-        if let [event] = events {
-            if event.sample_offset != 0 {
-                return Err(AudioProcessorHostError::Process(
-                    "built-in Gain constant event is not at offset zero".to_owned(),
-                ));
-            }
-            dsp::multiply_constant_in_place(
-                context.kernel_backend(),
-                audio.main_interleaved(),
-                dsp::db_to_linear(event.value),
-            );
-        } else {
-            fill_parameter_lane_values(
-                parameters,
-                self.parameter_slot,
-                &mut self.frame_values[..request.frames],
-            )
-            .map_err(|error| AudioProcessorHostError::Process(error.to_string()))?;
-            dsp::expand_frame_db_to_interleaved_gains(
-                &self.frame_values[..request.frames],
-                channels,
-                &mut self.interleaved_gains[..samples],
-            );
-            dsp::multiply_in_place(
-                context.kernel_backend(),
-                audio.main_interleaved(),
-                &self.interleaved_gains[..samples],
-            );
-        }
-        Ok(())
     }
 }
 
@@ -300,19 +112,13 @@ impl PreparedProcessorHost {
             .map(|processor| processor.parameter_ids.len())
             .max()
             .unwrap_or(0);
-        let instances = schedule
+        if schedule
             .processors
             .iter()
-            .map(|processor| {
-                if processor.parameter_ids.len() != processor.parameter_curves.len() {
-                    return Err(AudioExecutionError::InvalidPreparedSchedule);
-                }
-                Ok(HostedProcessorInstance {
-                    occurrence: processor.occurrence,
-                    processor: processor.factory.create()?,
-                })
-            })
-            .collect::<Result<Vec<_>, AudioExecutionError>>()?;
+            .any(|processor| processor.parameter_ids.len() != processor.parameter_curves.len())
+        {
+            return Err(AudioExecutionError::InvalidPreparedSchedule);
+        }
         let parameter_event_capacity = schedule.summary.maximum_parameter_events_per_block;
         let session_scratch_bytes = schedule
             .processors
@@ -321,6 +127,21 @@ impl PreparedProcessorHost {
                 bytes.checked_add(processor.factory.contract().session_scratch_bytes())
             })
             .ok_or(AudioExecutionError::BufferTooLarge)?;
+        if session_scratch_bytes != schedule.summary.processor_session_scratch_bytes
+            || session_scratch_bytes > render_contract.processor_session_scratch_budget_bytes
+        {
+            return Err(AudioExecutionError::InvalidPreparedSchedule);
+        }
+        let instances = schedule
+            .processors
+            .iter()
+            .map(|processor| {
+                Ok(HostedProcessorInstance {
+                    occurrence: processor.occurrence,
+                    processor: processor.factory.create()?,
+                })
+            })
+            .collect::<Result<Vec<_>, AudioExecutionError>>()?;
         Ok(Self {
             instances,
             parameter_events: ProcessorParameterEventScratch::new(

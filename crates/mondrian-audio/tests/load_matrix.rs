@@ -189,6 +189,8 @@ fn prepared(
                 channel_layout: AudioChannelLayout::Stereo,
                 max_block_frames,
                 processing_mode: AudioProcessingMode::Realtime,
+                processor_session_scratch_budget_bytes:
+                    AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
             },
             backend,
         )

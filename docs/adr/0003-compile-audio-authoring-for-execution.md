@@ -12,7 +12,8 @@ same three-stage Interface:
 1. `compile_audio_program` validates a Sequence and resolves one Program Output
    plus an optional transient audition overlay into immutable semantic IR.
 2. `PreparedAudioPlan` binds that IR to one explicit Render Contract: sample
-   rate, semantic channel layout, maximum block size, and realtime/offline mode.
+   rate, semantic channel layout, maximum block size, realtime/offline mode,
+   and a processor-private Session scratch admission budget.
 3. `AudioRenderSession` owns exclusive mutable buffers and processor state for
    one run. It renders exact integer-sample windows into caller-owned storage.
 
@@ -88,12 +89,15 @@ independent mutable Session and cache. Missing children and cycles fail before
 rendering. Nesting beyond the shared 16-level Sequence render contract also
 fails. The parent never reaches into child Tracks, Buses, Roles, or Routes.
 
-Unresolved or unsupported processors fail compilation while their complete
-author data remains intact. Bypass is explicit authored intent. There is no
-implicit “plugin missing, therefore dry” rule. Realtime render failure is
-reported to Audio Playback, which may preserve scheduled media position with
-same-duration silence; that scheduling protection is not a second DSP
-interpretation. Offline export fails the job and reports the reason.
+Unresolved or unsupported processors survive semantic compilation with their
+complete author data intact, then fail concrete plan preparation when no
+Resolver can bind them to the Render Contract. Bypass is explicit authored
+intent. There is no implicit “plugin missing, therefore dry” rule. Realtime
+render failure is reported to Audio Playback, which may preserve scheduled
+media position with same-duration silence only for an independent-window
+renderer; a stateful generation fails as a whole. That scheduling protection
+is not a second DSP interpretation. Offline export fails the job and reports
+the reason.
 
 ## Mutable state and future processors
 
@@ -108,29 +112,40 @@ position; replay/preroll is still required to reach a later state. Plugins
 default to no checkpoint, replay, or state transfer capability until a host
 Adapter proves it.
 
-Every processor must declare latency and supported layouts/automation cadence.
-Parallel paths are delay-compensated before sums and Transitions. A latency or
-layout capability change causes recompile and controlled re-entry; it cannot
-mutate the live graph inside a block. The current executable processor set is
-zero-latency built-in Gain. Preparation already solves checked Contribution and
-port-specific Route compensation at every sum and propagates child-output
-latency bottom-up; a missing child preparation dependency fails closed. It does
-not admit an unimplemented non-zero processor path: processor state and
-explicit discontinuity entry must be implemented together before such a
-processor becomes executable. Prepared Contribution and Route compensation
-already executes through Session-preallocated, block-partition-invariant delay
-lines. Preparation propagates a state-entry obligation through nested outputs;
-stateful Sessions require a fresh continuity epoch, exact first sample, and
-strictly contiguous blocks, poison the epoch after execution failure, and reset
-history only on a new epoch. Realtime Playback binds one explicit entry to each
-render generation. Each nested instance owns a private epoch stream: a
-nondecreasing parent time map enters at the first exact child sample and replays
-all skipped child samples in order. Stateless child outputs remain arbitrarily
-indexable. Generic stateful reverse mapping fails closed until a processor-
-specific reverse contract, checkpoint replay, or materialized child output can
-prove block-partition-invariant results. This still does not authorize a new
-non-zero processor: its own state, entry, latency, and deadline behavior must be
-implemented and tested together.
+Every processor must declare compensable implementation latency and supported
+layouts/automation cadence. Parallel paths are delay-compensated before sums
+and Transitions. Intentional audible delay is signal-processing semantics, not
+implementation latency, and must not be reported to PDC merely because both use
+sample history. A latency, layout, or Session-storage capability change causes
+re-preparation and controlled re-entry; it cannot mutate the live graph inside
+a block.
+
+The current executable built-ins are canonical Gain and stateful Sample Delay.
+Sample Delay owns an exact non-negative integer-sample parameter, bounded
+Session storage, explicit fresh-epoch reset, and block-partition-invariant
+history; it reports zero compensable latency so PDC cannot erase its audible
+effect. A non-zero-latency test Adapter proves generic Host instantiation, PDC,
+mode admission, entry failure, and partition invariance, but is not a product
+processor claim. The first production lookahead or group-delay Processor must
+also freeze public-output lookahead/latency normalization so Playback, Export,
+and nested pull evaluation return the same Timeline-aligned samples rather than
+leading silence or a truncated tail.
+
+Preparation already solves checked Contribution and port-specific Route
+compensation at every sum and propagates child-output latency bottom-up; a
+missing child preparation dependency fails closed. Prepared Contribution and
+Route compensation executes through Session-preallocated,
+block-partition-invariant delay lines. Preparation propagates a state-entry
+obligation through nested outputs; stateful Sessions require a fresh continuity
+epoch, exact first sample, and strictly contiguous blocks, poison the epoch
+after execution failure, and reset history only on a new epoch. Realtime
+Playback binds one explicit entry to each render generation. Each nested
+instance owns a private epoch stream: a nondecreasing parent time map enters at
+the first exact child sample and replays all skipped child samples in order.
+Stateless child outputs remain arbitrarily indexable. Generic stateful reverse
+mapping fails closed until a processor-specific reverse contract, checkpoint
+replay, or materialized child output can prove block-partition-invariant
+results.
 
 ## Consequences
 
@@ -144,6 +159,6 @@ implemented and tested together.
 - `mondrian-app` and `mondrian-export` provide media Adapters and consume the
   same Runtime; neither contains a private Timeline mixer.
 - Semantic Projection outputs, real VST3/CLAP hosts, additional Adapter layout
-  lowering, sends/sidechains, meters, loudness, and concrete stateful
-  processors must deepen this pipeline. They must not create alternate author
-  or execution paths.
+  lowering, processor sidechains, true-peak/loudness observation, and further
+  stateful/lookahead processors must deepen this pipeline. They must not create
+  alternate author or execution paths.

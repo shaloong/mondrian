@@ -46,7 +46,7 @@ values cannot be mixed into an unregistered hybrid identity. Archive and preview
 fingerprints, OCIO CPU processor keys, and renderer GPU shader keys all include
 the exact package identity.
 
-Document schema v14 retains the v5 Custom OCIO reproducibility contract and the
+Document schema v15 retains the v5 Custom OCIO reproducibility contract and the
 v6 removal of the redundant sequence-level ACES workflow selector. It also
 requires the Mondrian Standard package identity to pin both the SDR and
 1000-nit HDR View Transform IDs and versions; the old single default-View field
@@ -87,6 +87,10 @@ Version 14 makes `AudioRoute.enabled`, `gain_db`, and optional exact
 Sequence-time `gain_automation` mandatory. Route curves use a stable Parameter
 ID, and static/keyed/Bezier-control values must remain in the supported dB
 range. There is no implicit v13 unity-gain migration during Alpha.
+Version 15 adds the exact `Samples` unit to the shared Parameter Schema and
+admits exactly representable integer audio-processor values. The canonical
+Sample Delay definition uses a non-animatable integer sample-frame parameter;
+v14 documents are not reinterpreted under this expanded schema during Alpha.
 Current new sequences default to SceneReferred and persist the selected engine's
 package-pinned rendering View intent; DisplayReferred is the explicit
 direct-colorimetric bypass.

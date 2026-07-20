@@ -219,23 +219,31 @@ values and Bezier control points outside the hard range, disallowed
 interpolation mathematics, and keyframes on non-animatable parameters before
 an immutable snapshot exists.
 
-The current common executor admits built-in Gain schema 1 only when its complete
-captured parameter schema equals the canonical definition. The required Gain
-parameter is never synthesized during compilation. Its hard interval is
-`[-120, +24] dB`, its ordinary editor interval is `[-60, +12] dB`, and invalid
-persisted values are rejected. Compilation retains Processor Instance and
-Parameter IDs instead of folding Rack gain into one scalar. Preparation emits
+The current common executor admits canonical built-in Gain and Sample Delay
+schema 1 definitions only when each complete captured parameter schema equals
+its canonical definition. Required parameters are never synthesized during
+compilation. Gain's hard interval is `[-120, +24] dB` and its ordinary editor
+interval is `[-60, +12] dB`. Sample Delay uses one non-animatable exact integer
+sample-frame value in `[0, 192000]`; changing it requires re-preparation because
+it changes Session history storage and continuity behavior. Invalid persisted
+values are rejected. Compilation retains Processor Instance and Parameter IDs
+instead of folding Rack gain into one scalar. Preparation emits
 ordered generated occurrences for every exact owner/insertion point; a shared
 Scope therefore creates independent Session state for each Contribution.
 Built-in Gain consumes the same preallocated sample-accurate parameter batch
-contract intended for hosted processors. `AudioProcessorResolver` now runs only
-during preparation and returns a Render-Contract-bound immutable factory with
-fixed latency, continuity, realtime/offline admission, and per-Session scratch
-facts. `AudioRenderSession` creates one exclusive instance per generated
-occurrence before callback execution. The callback receives exact block facts,
-one in-place main-bus Interface, stable-key auxiliary-input lookup, and borrowed
+contract intended for hosted processors. Sample Delay consumes its constant
+lane, owns a preallocated interleaved ring, clears it only on fresh epoch entry,
+and is exact across block partitioning. Its delay is intentional audible signal
+semantics, so it declares zero PDC latency; reporting it as hidden implementation
+latency would cause the host to erase the effect by delaying parallel paths.
+`AudioProcessorResolver` runs only during preparation and returns a
+Render-Contract-bound immutable factory with fixed latency, continuity,
+realtime/offline admission, and per-Session scratch facts.
+`AudioRenderSession` creates one exclusive instance per generated occurrence
+before callback execution. The callback receives exact block facts, one
+in-place main-bus Interface, stable-key auxiliary-input lookup, and borrowed
 parameter batches; it cannot discover or instantiate dependencies. The default
-resolver supports canonical built-in Gain and rejects external definitions.
+resolver supports those canonical built-ins and rejects external definitions.
 VST3/CLAP scanning/loading, isolated-process adapters, concrete bus negotiation,
 ABI value normalization, crash/hang deadline containment, and production state
 restore remain required work; no dry or flat fallback claims support.
@@ -282,7 +290,8 @@ fail compilation explicitly; only `RoutedInputs` is executable.
 - positive sample rate;
 - one supported semantic channel layout with count and order derived from it;
 - maximum admitted block frames;
-- `Realtime` or `Offline` processing mode.
+- `Realtime` or `Offline` processing mode;
+- maximum processor-private bytes admitted for one Session.
 
 Preparation now lowers the semantic graph into one dense execution schedule:
 
@@ -318,12 +327,14 @@ preparation is bottom-up: a parent Contribution receives the already-prepared,
 instance-specific child-output latency. Missing nested latency fails closed and
 can never be guessed as zero. Layout negotiation, processor realization,
 plugin-specific batch lowering, and each realized processor's latency/state-
-entry/mode/scratch facts also belong here. Generic compensation execution and
-root Session entry already consume those realized facts. Ordinary tests use a
-stateful non-zero-latency Host Adapter to prove PDC, whole/partitioned PCM,
-explicit entry, mode rejection, and failed-entry poisoning; this is
-architecture evidence, not a claim that a production VST3/CLAP or stateful
-built-in effect ships today.
+entry/mode/scratch facts also belong here. Preparation checked-sums every
+realized occurrence's private scratch requirement and fails with required and
+admitted byte counts before any Session is constructed. Generic compensation
+execution and root Session entry consume the remaining realized facts. Ordinary
+tests use a custom stateful non-zero-latency Host Adapter to prove PDC,
+whole/partitioned PCM, explicit entry, mode rejection, and failed-entry
+poisoning. The built-in Sample Delay separately proves a production stateful
+definition without mislabelling audible delay as compensable latency.
 
 ### Stage 3: exclusive mutable Session
 
@@ -341,7 +352,9 @@ maximum lane/event capacity, and the sum of processor-declared private scratch
 bytes. Shared immutable Scope definitions do not merge these state slots.
 
 The `processor_host` Module exclusively owns factory binding, occurrence state,
-state entry, main/auxiliary bus dispatch, and built-in/host Adapter calls.
+state entry, and main/auxiliary bus dispatch. `built_in_processors` owns native
+definition validation, factories, and DSP instances; adding a built-in cannot
+grow graph traversal or callback orchestration into a definition registry.
 `processor_parameters` owns preallocated event-batch lowering. The `render`
 Module owns graph traversal, PCM flow, summing, envelopes, and delay placement;
 it neither reconstructs processor batches nor reaches into a processor's
@@ -460,8 +473,9 @@ segment evaluators; block execution advances a local span cursor and never
 validates or searches the author curve per sample. Hold, Linear, and Bezier
 semantics remain core-owned and are exactly block-partition invariant. Realtime
 rendering does not scan author Routes or use tree/map lookup in sample loops.
-Future plugin event batches, latency/PDC, and state-entry obligations must deepen
-this schedule without reintroducing author graph interpretation.
+Future plugin event lowering, public-output latency/lookahead normalization, and
+additional state-entry obligations must deepen this schedule without
+reintroducing author graph interpretation.
 
 `AudioRenderSession::new` establishes a typed fixed `AudioRenderCapacity` for
 maximum frames, channels, liveness scratch slots, and samples per slot.
@@ -636,6 +650,10 @@ local development facts, not the fixed-machine 30-minute acceptance report.
 - A Transition's full range lies inside both endpoint Clips.
 - Route cycles, duplicate strong IDs, unknown Roles, and missing ports fail.
 - Unresolved processors fail closed and preserve author data.
+- Intentional audible delay is never reported as PDC-compensable implementation
+  latency; the two semantics require distinct evidence.
+- Processor-private Session storage is admitted during preparation against the
+  explicit Render Contract budget and rechecked at Session construction.
 - Block partition cannot change PCM results.
 - Internal summing has no implicit nonlinear operation.
 - Playback and export compile and execute the same Program semantics.
@@ -662,6 +680,9 @@ Automated tests currently prove:
   plan preparation;
 - a custom stateful non-zero-latency factory drives Host instantiation, PDC,
   continuity entry, realtime-mode admission, and partition-invariant PCM;
+- built-in Sample Delay validates exact integer authoring, keeps audible delay
+  outside PDC, resets on seek entry, remains partition invariant, and fails plan
+  preparation when its exact Session storage exceeds the Render Contract;
 - Program Output sample-peak/RMS observation preserves unclipped and non-finite
   evidence without claiming loudness/true-peak conformance;
 - timeline/audio crates compile and test independently;
@@ -701,10 +722,12 @@ gates rather than implied support:
    matrix presets, custom media-layout probing, and device/encoder negotiation.
    Unknown identities and unsupported layouts must continue to fail instead of
    being guessed.
-2. Add real built-in stateful processors with declared deadline/tail behavior;
-   extend the implemented resolver capability/mode/latency/state/scratch
-   contract, PDC, seek-entry/preroll, discontinuity, and nested evidence to each
-   production definition.
+2. Extend the first stateful built-in beyond Sample Delay with explicit tail and
+   deadline contracts. Before admitting a production non-zero algorithmic-
+   latency definition, normalize public-output lookahead/latency for Playback,
+   Export, and nested pull evaluation so returned PCM remains Timeline-aligned;
+   then extend PDC, seek-entry/preroll, discontinuity, and nested evidence to
+   each production definition.
 3. Implement isolated VST3 and CLAP host Adapters with scanning, stable native
    IDs, state chunks, bus/layout negotiation, exact consumption/lowering of the
    common sample-accurate parameter batches, crash/hang containment, and

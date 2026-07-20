@@ -8,8 +8,8 @@ use crate::{clip::Clip, track::Track};
 use mondrian_core::{
     AudioChannelLayout, AudioChannelMixMatrix, AudioComponentEditId, AudioProcessingScopeId,
     AudioProcessorInstanceId, AudioRoleId, AudioRouteId, AudioSourceComponentId, AudioTransitionId,
-    AutomationSegmentInterpolation, ClipId, ExactAutomationCurve, MixBusId, ParameterId,
-    ParameterInterpolation, ParameterInvalidValuePolicy, ParameterNumericContract,
+    AutomationSegmentInterpolation, ClipId, ExactAutomationCurve, MixBusId, ParameterCacheImpact,
+    ParameterId, ParameterInterpolation, ParameterInvalidValuePolicy, ParameterNumericContract,
     ParameterNumericRange, ParameterSchema, ParameterUnit, ProgramOutputId, PropertyValue,
     PropertyValueType, TimelineTime, TimelineTimeRange, TrackId,
 };
@@ -20,6 +20,12 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const BUILTIN_GAIN_DEFINITION_ID: &str = "mondrian.audio.gain";
 /// Stable parameter identity for a gain processor in decibels.
 pub const GAIN_DB_PARAMETER_ID: &str = "mondrian.audio.gain.db";
+/// Stable built-in definition identity for a causal sample delay.
+pub const BUILTIN_SAMPLE_DELAY_DEFINITION_ID: &str = "mondrian.audio.sample_delay";
+/// Stable parameter identity for a sample delay's exact delay length.
+pub const SAMPLE_DELAY_FRAMES_PARAMETER_ID: &str = "mondrian.audio.sample_delay.frames";
+/// Largest authorable delay retained by one built-in Sample Delay instance.
+pub const SAMPLE_DELAY_MAX_FRAMES: i64 = 192_000;
 /// Stable parameter identity for processing-scope input trim.
 pub const INPUT_GAIN_DB_PARAMETER_ID: &str = "mondrian.audio.input_gain.db";
 /// Stable parameter identity for placement-local volume.
@@ -54,6 +60,30 @@ pub fn gain_parameter_schema() -> ParameterSchema {
             invalid_value_policy: ParameterInvalidValuePolicy::Reject,
         },
     )
+}
+
+/// Definition contract for the built-in Sample Delay's exact delay length.
+///
+/// The value is a non-negative integer count on the active audio Evaluation
+/// Grid. It is deliberately non-animatable because changing it alters retained
+/// history, Session storage, audible time behavior, and continuity obligations and
+/// therefore requires a newly prepared plan rather than a live parameter event.
+pub fn sample_delay_frames_parameter_schema() -> ParameterSchema {
+    ParameterSchema::v1(
+        ParameterId::new_static(SAMPLE_DELAY_FRAMES_PARAMETER_ID),
+        PropertyValue::Int(0),
+    )
+    .with_numeric_contract(
+        ParameterUnit::Samples,
+        ParameterNumericContract {
+            hard_range: ParameterNumericRange { min: 0.0, max: SAMPLE_DELAY_MAX_FRAMES as f64 },
+            soft_range: ParameterNumericRange { min: 0.0, max: 4_800.0 },
+            step: Some(1.0),
+            invalid_value_policy: ParameterInvalidValuePolicy::Reject,
+        },
+    )
+    .with_animatable(false)
+    .with_cache_impact(ParameterCacheImpact::Topology)
 }
 
 /// A persistent reference to one processor definition.
@@ -93,10 +123,7 @@ pub struct AudioProcessorParameter {
 impl AudioProcessorParameter {
     /// Create an unkeyed parameter from a validated numeric schema.
     pub fn from_schema(schema: ParameterSchema) -> Result<Self, AudioAuthoringError> {
-        let default_value = schema
-            .default_value
-            .as_f64()
-            .ok_or(AudioAuthoringError::UnsupportedProcessorParameterType)?;
+        let default_value = processor_parameter_default_value(&schema.default_value)?;
         let automation = ExactAutomationCurve::new(schema.parameter_id.clone(), default_value)
             .map_err(|error| AudioAuthoringError::InvalidAutomation {
                 reason: error.to_string(),
@@ -123,7 +150,10 @@ impl AudioProcessorParameter {
             .map_err(|error| AudioAuthoringError::InvalidParameterSchema {
                 reason: error.to_string(),
             })?;
-        if self.schema.value_type != PropertyValueType::Double {
+        if !matches!(
+            self.schema.value_type,
+            PropertyValueType::Double | PropertyValueType::Int
+        ) {
             return Err(AudioAuthoringError::UnsupportedProcessorParameterType);
         }
         if self.schema.parameter_id != self.automation.parameter_id {
@@ -184,6 +214,15 @@ impl AudioProcessorInstance {
         let mut parameters = BTreeMap::new();
         if definition_id == BUILTIN_GAIN_DEFINITION_ID && schema_version == 1 {
             let schema = gain_parameter_schema();
+            let parameter_id = schema.parameter_id.clone();
+            let automation = ExactAutomationCurve {
+                parameter_id: parameter_id.clone(),
+                default_value: 0.0,
+                keyframes: Vec::new(),
+            };
+            parameters.insert(parameter_id, AudioProcessorParameter { schema, automation });
+        } else if definition_id == BUILTIN_SAMPLE_DELAY_DEFINITION_ID && schema_version == 1 {
+            let schema = sample_delay_frames_parameter_schema();
             let parameter_id = schema.parameter_id.clone();
             let automation = ExactAutomationCurve {
                 parameter_id: parameter_id.clone(),
@@ -934,6 +973,11 @@ fn validate_parameter_value(
     if !value.is_finite() {
         return Err(AudioAuthoringError::InvalidProcessorParameterValue);
     }
+    if schema.value_type == PropertyValueType::Int
+        && (value.fract() != 0.0 || value.abs() > 9_007_199_254_740_992.0)
+    {
+        return Err(AudioAuthoringError::InvalidProcessorParameterValue);
+    }
     if schema
         .numeric
         .is_some_and(|numeric| value < numeric.hard_range.min || value > numeric.hard_range.max)
@@ -941,6 +985,17 @@ fn validate_parameter_value(
         return Err(AudioAuthoringError::InvalidProcessorParameterValue);
     }
     Ok(())
+}
+
+fn processor_parameter_default_value(value: &PropertyValue) -> Result<f64, AudioAuthoringError> {
+    match value {
+        PropertyValue::Double(value) => Ok(*value),
+        PropertyValue::Int(value) if value.unsigned_abs() <= 9_007_199_254_740_992_u64 => {
+            Ok(*value as f64)
+        }
+        PropertyValue::Int(_) => Err(AudioAuthoringError::InvalidProcessorParameterValue),
+        _ => Err(AudioAuthoringError::UnsupportedProcessorParameterType),
+    }
 }
 
 fn validate_optional_curve(
@@ -1068,8 +1123,8 @@ pub enum AudioAuthoringError {
     /// A captured processor parameter schema is malformed.
     #[error("invalid audio processor parameter schema: {reason}")]
     InvalidParameterSchema { reason: String },
-    /// Processor parameters use exact double-precision host values.
-    #[error("audio processor parameters require a double-precision numeric schema")]
+    /// Processor parameters use doubles or exactly representable integer host values.
+    #[error("audio processor parameters require a double or exactly representable integer schema")]
     UnsupportedProcessorParameterType,
     /// A parameter curve was supplied for an identity absent from the definition snapshot.
     #[error("audio processor parameter is not present in the instance definition")]
@@ -1204,6 +1259,54 @@ mod tests {
         assert_eq!(parameter.automation.parameter_id, parameter_id);
         assert_eq!(parameter.automation.default_value, 0.0);
         processor.validate().expect("valid built-in definition snapshot");
+    }
+
+    #[test]
+    fn built_in_sample_delay_owns_an_exact_non_animatable_integer_contract() {
+        let processor = AudioProcessorInstance::built_in(BUILTIN_SAMPLE_DELAY_DEFINITION_ID, 1);
+        let parameter_id = ParameterId::new_static(SAMPLE_DELAY_FRAMES_PARAMETER_ID);
+        let parameter = processor.parameters.get(&parameter_id).expect("delay parameter");
+
+        assert_eq!(processor.parameters.len(), 1);
+        assert_eq!(parameter.schema, sample_delay_frames_parameter_schema());
+        assert_eq!(parameter.schema.value_type, PropertyValueType::Int);
+        assert_eq!(parameter.schema.unit, ParameterUnit::Samples);
+        assert!(!parameter.schema.is_animatable);
+        assert_eq!(
+            parameter.schema.cache_impact,
+            ParameterCacheImpact::Topology
+        );
+        assert_eq!(parameter.automation.default_value, 0.0);
+        assert_eq!(
+            AudioProcessorParameter::from_schema(sample_delay_frames_parameter_schema())
+                .expect("integer schema bridge"),
+            *parameter
+        );
+        processor.validate().expect("valid built-in definition snapshot");
+    }
+
+    #[test]
+    fn sample_delay_rejects_fractional_values_and_live_length_automation() {
+        let mut processor = AudioProcessorInstance::built_in(BUILTIN_SAMPLE_DELAY_DEFINITION_ID, 1);
+        let parameter_id = ParameterId::new_static(SAMPLE_DELAY_FRAMES_PARAMETER_ID);
+        let fractional =
+            ExactAutomationCurve::new(parameter_id.clone(), 1.5).expect("finite curve");
+        assert_eq!(
+            processor.set_parameter_automation(fractional),
+            Err(AudioAuthoringError::InvalidProcessorParameterValue)
+        );
+
+        let mut keyed = ExactAutomationCurve::new(parameter_id, 2.0).expect("finite curve");
+        keyed
+            .set_keyframe(mondrian_core::ExactAutomationKeyframe::linear(
+                TimelineTime::ZERO,
+                2.0,
+            ))
+            .expect("valid exact key");
+        assert_eq!(
+            processor.set_parameter_automation(keyed),
+            Err(AudioAuthoringError::ParameterDoesNotAdmitAutomation)
+        );
     }
 
     #[test]

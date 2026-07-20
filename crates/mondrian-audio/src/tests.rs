@@ -8,7 +8,8 @@ use mondrian_core::{
 use mondrian_timeline::audio::{
     AudioChannelStripOutputPort, AudioComponentChannelMapping, AudioMixBus, AudioProcessorInstance,
     AudioRoute, AudioRouteDestination, AudioRouteSource, BUILTIN_GAIN_DEFINITION_ID,
-    GAIN_DB_PARAMETER_ID, ROUTE_GAIN_DB_PARAMETER_ID,
+    BUILTIN_SAMPLE_DELAY_DEFINITION_ID, GAIN_DB_PARAMETER_ID, ROUTE_GAIN_DB_PARAMETER_ID,
+    SAMPLE_DELAY_FRAMES_PARAMETER_ID,
 };
 use mondrian_timeline::{Clip, Sequence};
 use std::collections::BTreeMap;
@@ -336,12 +337,7 @@ fn sequence_with_audio_clip() -> Sequence {
 }
 
 fn sequence_with_parallel_hosted_delay() -> Sequence {
-    let mut sequence = sequence_with_audio_clip();
-    let track_id = sequence.audio_tracks[0].id;
-    let output_id = sequence.audio_program.outputs[0].id;
-    let bus_id = mondrian_core::MixBusId::new();
-    let mut strip = mondrian_timeline::AudioChannelStrip::default();
-    strip.pre_fader.processors.push(AudioProcessorInstance {
+    sequence_with_parallel_processor(AudioProcessorInstance {
         id: mondrian_core::AudioProcessorInstanceId::new(),
         definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
             plugin_id: "test.mondrian.delay".to_owned(),
@@ -350,7 +346,30 @@ fn sequence_with_parallel_hosted_delay() -> Sequence {
         bypassed: false,
         parameters: BTreeMap::new(),
         opaque_state: None,
-    });
+    })
+}
+
+fn sequence_with_parallel_sample_delay(delay_frames: i64) -> Sequence {
+    let mut processor = AudioProcessorInstance::built_in(BUILTIN_SAMPLE_DELAY_DEFINITION_ID, 1);
+    processor
+        .set_parameter_automation(
+            ExactAutomationCurve::new(
+                ParameterId::new_static(SAMPLE_DELAY_FRAMES_PARAMETER_ID),
+                delay_frames as f64,
+            )
+            .expect("exact sample delay"),
+        )
+        .expect("valid sample delay");
+    sequence_with_parallel_processor(processor)
+}
+
+fn sequence_with_parallel_processor(processor: AudioProcessorInstance) -> Sequence {
+    let mut sequence = sequence_with_audio_clip();
+    let track_id = sequence.audio_tracks[0].id;
+    let output_id = sequence.audio_program.outputs[0].id;
+    let bus_id = mondrian_core::MixBusId::new();
+    let mut strip = mondrian_timeline::AudioChannelStrip::default();
+    strip.pre_fader.processors.push(processor);
     sequence.audio_program.buses.push(AudioMixBus {
         id: bus_id,
         name: "Delayed parallel".to_owned(),
@@ -403,6 +422,8 @@ fn prepared_with_backend(
                 channel_layout: AudioChannelLayout::Mono,
                 max_block_frames: max_frames,
                 processing_mode: AudioProcessingMode::Offline,
+                processor_session_scratch_budget_bytes:
+                    AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
             },
             backend,
         )
@@ -676,6 +697,7 @@ fn clip_track_bus_output_math_is_unclipped_and_block_invariant() {
             processor_occurrence_count: 1,
             processor_parameter_lane_count: 1,
             maximum_parameter_events_per_block: 8,
+            processor_session_scratch_bytes: 96,
             scratch_slot_count: 2,
             output_latency_frames: 0,
             maximum_compensation_frames: 0,
@@ -1081,6 +1103,8 @@ fn unresolved_plugin_survives_semantic_ir_and_fails_at_preparation() {
             channel_layout: AudioChannelLayout::Mono,
             max_block_frames: 256,
             processing_mode: AudioProcessingMode::Realtime,
+            processor_session_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
         },
     )
     .expect_err("default resolver must fail closed");
@@ -1091,8 +1115,8 @@ fn unresolved_plugin_survives_semantic_ir_and_fails_at_preparation() {
 }
 
 #[test]
-fn realized_stateful_processor_drives_pdc_state_entry_and_partitioned_pcm() {
-    let sequence = sequence_with_parallel_hosted_delay();
+fn built_in_sample_delay_preserves_audible_delay_state_and_partitioned_pcm() {
+    let sequence = sequence_with_parallel_sample_delay(2);
     let output = sequence.audio_program.outputs[0].id;
     let compiled = Arc::new(
         compile_audio_program(&sequence, AudioCompileRequest::program(output))
@@ -1103,25 +1127,22 @@ fn realized_stateful_processor_drives_pdc_state_entry_and_partitioned_pcm() {
         channel_layout: AudioChannelLayout::Mono,
         max_block_frames: 5,
         processing_mode: AudioProcessingMode::Realtime,
-    };
-    let resolver = TestDelayProcessorResolver {
-        latency_frames: 2,
-        realtime_capable: true,
-        fail_first_state_entry: false,
+        processor_session_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
     };
     let plan = Arc::new(
-        PreparedAudioPlan::prepare_with_processor_resolver(
+        PreparedAudioPlan::prepare_with_backend(
             compiled,
             contract,
             AudioKernelBackend::RuntimeVectorized,
-            &resolver,
         )
-        .expect("hosted plan"),
+        .expect("sample-delay plan"),
     );
-    assert_eq!(plan.output_latency_frames(), 2);
+    assert_eq!(plan.output_latency_frames(), 0);
     assert!(plan.requires_state_entry());
     assert_eq!(plan.schedule_summary().processor_occurrence_count, 1);
-    assert_eq!(plan.schedule_summary().maximum_compensation_frames, 2);
+    assert_eq!(plan.schedule_summary().maximum_compensation_frames, 0);
+    assert_eq!(plan.schedule_summary().processor_session_scratch_bytes, 8);
 
     let mut whole = AudioRenderSession::new(Arc::clone(&plan)).expect("whole Session");
     assert_eq!(whole.capacity().processor_session_scratch_bytes, 8);
@@ -1141,12 +1162,12 @@ fn realized_stateful_processor_drives_pdc_state_entry_and_partitioned_pcm() {
             &mut whole_pcm,
         )
         .expect("whole hosted block");
-    assert_eq!(whole_pcm, vec![0.0, 0.0, 2.0, 4.0, 6.0]);
+    assert_eq!(whole_pcm, vec![1.0, 2.0, 4.0, 6.0, 8.0]);
     let meter = whole.latest_meter_frame();
     assert_eq!(meter.block_serial, 1);
     assert_eq!(meter.start_sample, 0);
-    assert_eq!(meter.channels[0].sample_peak_linear, 6.0);
-    assert_eq!(meter.channels[0].clipped_sample_count, 3);
+    assert_eq!(meter.channels[0].sample_peak_linear, 8.0);
+    assert_eq!(meter.channels[0].clipped_sample_count, 4);
 
     let mut split = AudioRenderSession::new(plan).expect("split Session");
     split
@@ -1174,6 +1195,126 @@ fn realized_stateful_processor_drives_pdc_state_entry_and_partitioned_pcm() {
         .expect("second partition");
     assert_eq!([first, second].concat(), whole_pcm);
     assert_eq!(split.latest_meter_frame().block_serial, 2);
+
+    split
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(3),
+            start_sample: 0,
+        })
+        .expect("fresh seek entry");
+    let mut after_seek = vec![0.0; 2];
+    split
+        .render_into(
+            &mut split_source,
+            AudioRenderRequest { start_sample: 0, frames: 2 },
+            &mut after_seek,
+        )
+        .expect("render after seek");
+    assert_eq!(after_seek, vec![1.0, 2.0]);
+}
+
+#[test]
+fn hosted_algorithmic_latency_drives_pdc_and_partitioned_pcm() {
+    let sequence = sequence_with_parallel_hosted_delay();
+    let output = sequence.audio_program.outputs[0].id;
+    let compiled = Arc::new(
+        compile_audio_program(&sequence, AudioCompileRequest::program(output))
+            .expect("semantic program"),
+    );
+    let contract = AudioRenderContract {
+        sample_rate: 2,
+        channel_layout: AudioChannelLayout::Mono,
+        max_block_frames: 5,
+        processing_mode: AudioProcessingMode::Realtime,
+        processor_session_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+    };
+    let resolver = TestDelayProcessorResolver {
+        latency_frames: 2,
+        realtime_capable: true,
+        fail_first_state_entry: false,
+    };
+    let plan = Arc::new(
+        PreparedAudioPlan::prepare_with_processor_resolver(
+            compiled,
+            contract,
+            AudioKernelBackend::RuntimeVectorized,
+            &resolver,
+        )
+        .expect("hosted latency plan"),
+    );
+    assert_eq!(plan.output_latency_frames(), 2);
+    assert_eq!(plan.schedule_summary().maximum_compensation_frames, 2);
+    assert!(plan.requires_state_entry());
+
+    let mut whole = AudioRenderSession::new(Arc::clone(&plan)).expect("whole Session");
+    whole
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(20),
+            start_sample: 0,
+        })
+        .expect("whole entry");
+    let mut source = RampSource::default();
+    let mut whole_pcm = vec![0.0; 5];
+    whole
+        .render_into(
+            &mut source,
+            AudioRenderRequest { start_sample: 0, frames: 5 },
+            &mut whole_pcm,
+        )
+        .expect("whole block");
+    assert_eq!(whole_pcm, vec![0.0, 0.0, 2.0, 4.0, 6.0]);
+
+    let mut split = AudioRenderSession::new(plan).expect("split Session");
+    split
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(21),
+            start_sample: 0,
+        })
+        .expect("split entry");
+    let mut split_source = RampSource::default();
+    let mut first = vec![0.0; 2];
+    let mut second = vec![0.0; 3];
+    split
+        .render_into(
+            &mut split_source,
+            AudioRenderRequest { start_sample: 0, frames: 2 },
+            &mut first,
+        )
+        .expect("first partition");
+    split
+        .render_into(
+            &mut split_source,
+            AudioRenderRequest { start_sample: 2, frames: 3 },
+            &mut second,
+        )
+        .expect("second partition");
+    assert_eq!([first, second].concat(), whole_pcm);
+}
+
+#[test]
+fn processor_session_scratch_budget_fails_closed_during_preparation() {
+    let sequence = sequence_with_parallel_sample_delay(2);
+    let output = sequence.audio_program.outputs[0].id;
+    let compiled = Arc::new(
+        compile_audio_program(&sequence, AudioCompileRequest::program(output))
+            .expect("semantic program"),
+    );
+    let error = PreparedAudioPlan::prepare(
+        compiled,
+        AudioRenderContract {
+            sample_rate: 2,
+            channel_layout: AudioChannelLayout::Mono,
+            max_block_frames: 5,
+            processing_mode: AudioProcessingMode::Realtime,
+            processor_session_scratch_budget_bytes: 7,
+        },
+    )
+    .expect_err("eight bytes cannot fit a seven-byte budget");
+    assert_eq!(
+        error,
+        AudioCompileError::ProcessorScratchBudgetExceeded { required_bytes: 8, budget_bytes: 7 }
+    );
 }
 
 #[test]
@@ -1196,6 +1337,8 @@ fn processor_mode_capability_is_enforced_during_preparation() {
             channel_layout: AudioChannelLayout::Mono,
             max_block_frames: 256,
             processing_mode: AudioProcessingMode::Realtime,
+            processor_session_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
         },
         AudioKernelBackend::RuntimeVectorized,
         &resolver,
@@ -1228,6 +1371,8 @@ fn failed_processor_state_entry_poisons_the_new_epoch_before_partial_reset() {
                 channel_layout: AudioChannelLayout::Mono,
                 max_block_frames: 4,
                 processing_mode: AudioProcessingMode::Realtime,
+                processor_session_scratch_budget_bytes:
+                    AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
             },
             AudioKernelBackend::RuntimeVectorized,
             &resolver,
@@ -1296,6 +1441,8 @@ fn nested_public_output_uses_an_independent_recursive_session() {
         channel_layout: AudioChannelLayout::Mono,
         max_block_frames: 8,
         processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
     };
     let mut runtime = AudioProgramRuntime::build(&root, &[child], &RampResolver, contract, None)
         .expect("recursive runtime");
@@ -1316,6 +1463,8 @@ fn standard_component_mapping_converts_native_media_before_sequence_processing()
         channel_layout: AudioChannelLayout::Stereo,
         max_block_frames: 8,
         processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
     };
     let mut runtime = AudioProgramRuntime::build(&sequence, &[], &RampResolver, contract, None)
         .expect("mono source mapped to stereo Sequence");
@@ -1351,6 +1500,8 @@ fn explicit_component_matrix_executes_in_the_shared_prepared_schedule() {
         channel_layout: AudioChannelLayout::Stereo,
         max_block_frames: 8,
         processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
     };
     let mut runtime =
         AudioProgramRuntime::build(&sequence, &[], &StereoRampResolver, contract, None)
@@ -1382,6 +1533,8 @@ fn nested_output_uses_child_layout_then_parent_component_mapping() {
         channel_layout: AudioChannelLayout::Stereo,
         max_block_frames: 8,
         processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
     };
     let mut runtime = AudioProgramRuntime::build(&root, &[child], &RampResolver, contract, None)
         .expect("child output mapped to parent layout");
@@ -1416,6 +1569,8 @@ fn stateless_nested_runtime_preserves_fractional_reverse_mapping() {
         channel_layout: AudioChannelLayout::Mono,
         max_block_frames: 4,
         processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
     };
     let mut runtime = AudioProgramRuntime::build(&root, &[child], &RampResolver, contract, None)
         .expect("stateless recursive runtime");
@@ -1451,6 +1606,8 @@ fn stateful_nested_runtime_replays_forward_mapping_across_child_blocks() {
         channel_layout: AudioChannelLayout::Mono,
         max_block_frames: 4,
         processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
     };
     let mut runtime = AudioProgramRuntime::build(&root, &[child], &RampResolver, contract, None)
         .expect("recursive runtime");
@@ -1505,6 +1662,8 @@ fn stateful_nested_runtime_rejects_reverse_state_evaluation() {
         channel_layout: AudioChannelLayout::Mono,
         max_block_frames: 4,
         processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
     };
     let mut runtime = AudioProgramRuntime::build(&root, &[child], &RampResolver, contract, None)
         .expect("recursive runtime");
@@ -1551,6 +1710,8 @@ fn stateful_nested_runtime_reenters_after_root_discontinuity() {
         channel_layout: AudioChannelLayout::Mono,
         max_block_frames: 2,
         processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
     };
     let mut runtime = AudioProgramRuntime::build(&root, &[child], &RampResolver, contract, None)
         .expect("recursive runtime");
@@ -1615,6 +1776,8 @@ fn direct_plan_preparation_rejects_unprepared_nested_source_dependency() {
             channel_layout: AudioChannelLayout::Mono,
             max_block_frames: 8,
             processing_mode: AudioProcessingMode::Offline,
+            processor_session_scratch_budget_bytes:
+                AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
         },
     )
     .expect_err("nested source facts must be supplied by recursive preparation");
@@ -1650,6 +1813,8 @@ fn nested_runtime_rejects_depth_beyond_the_shared_sequence_contract() {
         channel_layout: AudioChannelLayout::Mono,
         max_block_frames: 8,
         processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
     };
     let error = match AudioProgramRuntime::build(&child, &children, &RampResolver, contract, None) {
         Ok(_) => panic!("depth above contract must fail"),
@@ -1700,6 +1865,8 @@ fn clip_balance_targets_semantic_front_pair_without_touching_surround_channels()
                     channel_layout: layout,
                     max_block_frames: 1,
                     processing_mode: AudioProcessingMode::Offline,
+                    processor_session_scratch_budget_bytes:
+                        AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
                 },
             )
             .expect("layout-specific plan"),

@@ -1849,6 +1849,8 @@ fn render_timeline_audio_to_pcm_f32(
         channel_layout: program_channel_layout,
         max_block_frames: 16_384,
         processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
     };
     let mut runtime = match AudioProgramRuntime::build(
         &timeline.sequence,

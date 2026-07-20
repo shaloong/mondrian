@@ -5,6 +5,7 @@
 //! specific plan, and creates exclusive mutable render Sessions. Playback,
 //! export, audition, and analysis use the same Interface and DSP mathematics.
 
+mod built_in_processors;
 mod channel_mix;
 mod compiler;
 mod delay;

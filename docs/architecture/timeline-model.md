@@ -238,7 +238,11 @@ and interpolation before the project enters execution. Visual and audio
 automation share exact curve primitives, stable Parameter IDs, and the same
 Parameter Schema language. Audio Processor instances capture a schema snapshot
 beside the exact curve so missing plugins remain editable; a known built-in must
-still match its canonical definition schema exactly before compilation.
+still match its canonical definition schema exactly before compilation. Numeric
+audio schemas may use exact integer sample-frame units; values must remain
+exactly representable in the shared curve domain, and a parameter that changes
+storage or continuity topology is non-animatable and forces plan re-preparation
+rather than a live callback event.
 
 `ExactAutomationCurve::prepared_segments` validates author order, finite values,
 and Bezier time monotonicity once, then returns immutable interpolation segments

@@ -317,6 +317,14 @@ pub enum AudioCompileError {
     /// A processor definition could not be realized for the concrete Render Contract.
     #[error(transparent)]
     ProcessorPreparation(#[from] crate::AudioProcessorHostError),
+    /// Realized processor instances exceed the consumer's Session memory admission budget.
+    #[error(
+        "audio processors require {required_bytes} Session scratch bytes but the Render Contract admits {budget_bytes}"
+    )]
+    ProcessorScratchBudgetExceeded {
+        required_bytes: usize,
+        budget_bytes: usize,
+    },
     /// Semantic IR could not be lowered into a closed dense execution schedule.
     #[error("invalid prepared audio graph: {0}")]
     InvalidPreparedGraph(String),

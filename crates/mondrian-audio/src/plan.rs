@@ -212,9 +212,14 @@ pub struct AudioRenderContract {
     pub max_block_frames: usize,
     /// Realtime or offline processor contract.
     pub processing_mode: AudioProcessingMode,
+    /// Maximum processor-private bytes retained by one prepared Session.
+    pub processor_session_scratch_budget_bytes: usize,
 }
 
 impl AudioRenderContract {
+    /// Conservative default admission budget for processor-private Session state.
+    pub const DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+
     /// Channel count derived from the sole layout authority.
     pub const fn channel_count(self) -> usize {
         self.channel_layout.channel_count()

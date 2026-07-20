@@ -222,7 +222,7 @@ One non-persistent PCM-bearing execution branch derived from an owning Track/Cli
 _Avoid_: Persisted placement authority, user-routable graph node
 
 **Prepared Audio Schedule**:
-One immutable Render-Contract-bound lowering of compiled audio semantics into dense topological node slots, destination-contiguous Route and Contribution ranges, Transition bindings, exact sample spans, validated automation event spans, liveness-assigned scratch slots, and a selected processor kernel backend. It is execution data, never author data, and a Render Session may scan neither author collections nor routing maps after preparation.
+One immutable Render-Contract-bound lowering of compiled audio semantics into dense topological node slots, destination-contiguous Route and Contribution ranges, Transition bindings, exact sample spans, validated automation event spans, liveness-assigned scratch slots, admitted processor-private Session storage, and a selected processor kernel backend. It is execution data, never author data, and a Render Session may scan neither author collections nor routing maps after preparation.
 _Avoid_: Compiled Audio Program, runtime graph wrapper
 
 **Audio Program**:
@@ -397,6 +397,8 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - Audio Processor Instance IDs are unique across every Scope/Track/Bus/Output Rack in one Sequence. Preparation preserves Rack order and creates one **Generated Audio Processor Occurrence** per execution owner; sharing an Audio Processing Scope never shares mutable DSP state between Contributions.
 - Each Audio Processor parameter persists one validated **Parameter Schema** snapshot and one exact curve keyed by the same `ParameterId`; built-in compilation additionally requires an exact match to its canonical definition schema, while unavailable external dependencies retain the snapshot and opaque state but fail execution closed unless bypassed.
 - Every generated processor receives an allocation-free **Audio Parameter Event Batch** whose lanes retain stable `ParameterId` order and whose sample offsets are block-local. ABI normalization and capability reduction belong only to the concrete processor Adapter and must fail closed when exact delivery is unavailable.
+- An intentional audible delay is Processor signal semantics, not PDC-compensable implementation latency. A Processor may declare nonzero latency only when the host must align that hidden lookahead/group delay; equal sample-history lengths do not make the meanings interchangeable.
+- Audio plan preparation checked-sums every realized occurrence's processor-private Session bytes against the explicit **Audio Render Contract** budget. Session construction must reproduce the admitted total; overflow, excess, or Factory contract drift fails before callback execution.
 - Component automation uses Audio Component Edit-local rational time, Scope automation uses Audio Processing Scope-local rational time, Track/Bus/Output automation uses Sequence-local rational time, and an **Audio Transition** interval is Sequence-local; compilation maps each domain once to exact sample offsets.
 - An **Audio Transition** names exactly two Audio Component Edits and does not affect other overlapping material; overlap without a Transition remains ordinary summing.
 - Every parallel input to a sum or Transition is delay-compensated from declared processor and nested latency; internal floating-point mixing neither normalizes, soft-clips, nor limits without an explicit authored processor.
