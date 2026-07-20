@@ -4,6 +4,7 @@
 //! 事件总线和项目数据模型。
 
 pub mod audio_layout;
+pub mod audio_mix;
 pub mod audio_time;
 pub mod automation;
 pub mod color;
@@ -31,6 +32,7 @@ pub mod timeline_time;
 pub mod types;
 
 pub use audio_layout::*;
+pub use audio_mix::*;
 pub use audio_time::*;
 pub use automation::*;
 pub use color::*;

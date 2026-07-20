@@ -2405,9 +2405,11 @@ impl AppState {
         if !changed {
             return Ok(());
         }
-        if let Err(error) =
-            sequence.audio_program.validate(&sequence.audio_tracks, &sequence.audio_roles)
-        {
+        if let Err(error) = sequence.audio_program.validate(
+            &sequence.audio_tracks,
+            &sequence.audio_roles,
+            sequence.settings.audio_channel_layout,
+        ) {
             *sequence = before.clone();
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: STEP_ID.to_string(),

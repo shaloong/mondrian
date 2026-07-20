@@ -48,6 +48,7 @@ Each audio Clip owns one or more `AudioComponentEdit` values. An edit contains:
 
 - a stable `AudioComponentEditId`;
 - a media `AudioSourceComponentId` or nested `ProgramOutputId`;
+- a `Standard` or exact explicit source-to-Sequence channel mapping;
 - optional Sequence-local `AudioRoleId`;
 - enabled state;
 - exact edit-local origin (`local_time_in`);
@@ -108,20 +109,34 @@ and Discrete layouts already pass through the common float Runtime without
 being relabelled.
 
 Representability is not execution admission. The media Adapter selects the
-absolute physical stream with `-map 0:<index>`,
-requests the output sample rate, and installs one explicit FFmpeg `pan` matrix
-before PCM enters the Runtime. All mono/stereo/5.1(side) input/output pairs are
-defined. Stereo fold-down averages L/R; 5.1 fold-down uses -3 dB center and
-side coefficients and deliberately omits LFE. Mono feeds stereo L/R or 5.1
-center; stereo feeds 5.1 L/R. Unlabelled one- and two-channel sources retain an
-`Unspecified` probe fact but use the same explicit discrete defaults required
-for ordinary PCM WAVE compatibility. Probe can faithfully project 5.1(back),
-7.1, and bounded unspecified layouts into named or Discrete signal values, but
-current FFmpeg execution still rejects unspecified 3+, 5.1(back), 7.1, custom
-speaker, and Discrete outputs because no approved matrix exists. Product
-authoring of custom layouts, user-authored mix matrices, plugin Bus negotiation,
-and device/output packaging remain incomplete; FFmpeg defaults are never that
-policy.
+absolute physical stream with `-map 0:<index>`, requests the output sample rate,
+and installs only an ordinal identity `pan=<N>c|c0=c0...` filter. Decoded-window
+and persistent Session identity therefore contain the source revision, physical
+selection, sample rate, and native semantic layout, but never a Clip-specific
+downmix. Two edits using one source with different authored matrices share
+native PCM safely.
+
+Each Component Edit persists either `Standard` policy or one canonical sparse
+`AudioChannelMixMatrix`. A matrix includes exact source/destination layouts and
+destination-major non-zero coefficients; construction/deserialization rejects
+duplicate or out-of-range edges, non-finite values, and magnitudes above 16.
+Zero edges are omitted and absent edges are silence. No matrix adds implicit
+normalization, clipping, limiting, or LFE policy. `Standard` resolves only after
+the exact source layout is bound. Equal layouts use ordinal identity; approved
+mono/stereo/5.1(side) conversions retain the documented averaging/-3 dB laws
+and omit LFE from fold-down. Explicit one/two-channel Discrete compatibility is
+versioned; ambiguous or unsupported pairs fail closed.
+
+The prepared Contribution, not FFmpeg or UI, owns the resolved matrix and native
+source layout. It reads native interleaved PCM into one Session-preallocated
+maximum-source scratch region, then maps into the Sequence layout before Clip
+Scope processing, volume/pan, fades, Transitions, and Track summing. Nested
+Sequences render their public output in the child Sequence layout and cross the
+same matrix boundary at the parent Component. A child can no longer be silently
+re-rendered in the parent's layout. The selected root Program likewise renders
+in its authored Sequence layout; Playback and Export apply a separate standard
+delivery matrix only after the public output. Unsupported device/export pairs
+fail instead of changing Program semantics.
 
 ### Processing scopes
 
@@ -229,6 +244,7 @@ records deterministic origins:
 - media component or nested public output identity;
 - Processing Scope and exact edit/scope origins;
 - edit automation, fades, and relevant Transitions.
+- standard/explicit Component channel-mapping intent.
 
 Only generated IR uses the term “Compiled Audio Contribution”. It is never
 persisted and users cannot route to it. Semantic Projection outputs currently
@@ -258,6 +274,9 @@ Preparation now lowers the semantic graph into one dense execution schedule:
   with deterministic author origin plus generated owner/insertion identity;
 - constant Scope/edit/fader fast paths that do not erase Processor boundaries;
 - one explicitly selected scalar-reference or runtime-vectorized CPU kernel.
+- one resolved native source layout and canonical prepared channel mixer per
+  Contribution, with coefficient count and maximum native channel width in the
+  schedule/capacity evidence.
 
 The prepared schedule contains no authoring maps and the Session performs no
 Route search. Automation is validated once and lowered to ordered sample event
@@ -576,6 +595,10 @@ local development facts, not the fixed-machine 30-minute acceptance report.
 - Block partition cannot change PCM results.
 - Internal summing has no implicit nonlinear operation.
 - Playback and export compile and execute the same Program semantics.
+- Native decoded PCM cache identity is independent of Clip channel mapping.
+- Every explicit matrix targets the owning Sequence layout; nested matrices
+  also name the exact child public-output layout.
+- Delivery layout adaptation occurs only after the selected root Program Output.
 - Nested instances do not share mutable Session state.
 - Old-generation cancellation is observable inside executing source work and
   cannot poison decoded-window success or failure residency.
@@ -603,8 +626,11 @@ Automated tests currently prove:
 - the ignored fixed-reference load matrix exercises 1/8/32/64 Tracks at
   64/256/1024-frame blocks, compares scalar and SIMD PCM, and fails when p99
   exceeds the block deadline;
-- decoded-media block reads cross aligned windows exactly, reuse hits, evict by
-  global PCM bytes, and invalidate after file replacement;
+- decoded-media block reads native-layout PCM across aligned windows exactly,
+  reuse hits, evict by global PCM bytes, and invalidate after file replacement;
+- standard mono-to-stereo, explicit stereo swap, and child-mono-to-parent-stereo
+  paths execute through the shared prepared matrix boundary; scalar/reference
+  matrix results are sample-identical;
 - a manual external AAC parity gate compares a cold window, sequential boundary,
   and evicted-window random restart against one sequential reference decode;
 - a manual real-child cancellation gate requires kill/wait/join observation
@@ -621,10 +647,11 @@ The architecture is now on the product path, but these are explicit remaining
 gates rather than implied support:
 
 1. Extend the implemented fingerprinted Component Catalog, stable non-primary
-   binding, and explicit mono/stereo/5.1 standard matrices with user-visible
-   Component selection/rebind, deterministic custom-layout mapping, and
-   authored mix-matrix policy. Unknown identities and unsupported layouts must
-   continue to fail instead of being guessed.
+   binding, user-visible selection/rebind, canonical standard/explicit matrix
+   execution, and native-layout cache separation with a full matrix editor,
+   matrix presets, custom media-layout probing, and device/encoder negotiation.
+   Unknown identities and unsupported layouts must continue to fail instead of
+   being guessed.
 2. Add processor capability negotiation and real built-in stateful processors
    with declared latency/deadline behavior; extend the implemented PDC,
    seek-entry/preroll, discontinuity, and nested-latency evidence to each one.

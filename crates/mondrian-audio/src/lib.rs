@@ -5,6 +5,7 @@
 //! specific plan, and creates exclusive mutable render Sessions. Playback,
 //! export, audition, and analysis use the same Interface and DSP mathematics.
 
+mod channel_mix;
 mod compiler;
 mod delay;
 mod dsp;
@@ -25,8 +26,10 @@ pub use render::{
 };
 pub use runtime::{
     AudioDecodedSource, AudioMediaResolver, AudioProgramRuntime, AudioRuntimeBuildError,
+    ResolvedAudioSource,
 };
 pub use schedule::{AudioKernelBackend, PreparedAudioPlan, PreparedAudioScheduleSummary};
 
 #[cfg(test)]
 mod tests;
+pub use channel_mix::PreparedAudioChannelMixer;

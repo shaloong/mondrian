@@ -7,8 +7,7 @@ use mondrian_media::{AudioSourceCache, WaveformEnvelopeBuilder};
 
 use super::state::{WaveformFailure, WaveformJob, WaveformResult, WaveformSource};
 use super::{
-    WaveformFailureReason, WAVEFORM_DECODE_WINDOW_SECONDS, WAVEFORM_LAYOUT, WAVEFORM_MAX_WIDTH,
-    WAVEFORM_SAMPLE_RATE,
+    WaveformFailureReason, WAVEFORM_DECODE_WINDOW_SECONDS, WAVEFORM_MAX_WIDTH, WAVEFORM_SAMPLE_RATE,
 };
 
 pub(super) fn waveform_worker(
@@ -52,7 +51,8 @@ fn build_waveform_source(
             )
         })?;
     let window_frames = WAVEFORM_SAMPLE_RATE as usize * WAVEFORM_DECODE_WINDOW_SECONDS;
-    let mut samples = vec![0.0_f32; window_frames];
+    let channels = reader.channel_layout().channel_count();
+    let mut samples = vec![0.0_f32; window_frames * channels];
     let mut start = 0_u64;
     while start < job.total_frames {
         if job.cancellation.is_canceled() {
@@ -69,7 +69,7 @@ fn build_waveform_source(
                     )
                 })?,
                 frames,
-                &mut samples[..frames],
+                &mut samples[..frames * channels],
                 &job.cancellation,
             )
             .map_err(|error| {
@@ -79,16 +79,15 @@ fn build_waveform_source(
                     WaveformFailure::new(WaveformFailureReason::DecodeFailed, error.to_string())
                 }
             })?;
-        for (chunk_index, chunk) in samples[..frames].chunks(4096).enumerate() {
+        for (chunk_index, chunk) in samples[..frames * channels].chunks(4096 * channels).enumerate()
+        {
             if job.cancellation.is_canceled() {
                 return Err(canceled_failure());
             }
             let chunk_start = start + (chunk_index * 4096) as u64;
-            envelope
-                .accumulate_interleaved(chunk_start, WAVEFORM_LAYOUT.channel_count(), chunk)
-                .map_err(|error| {
-                    WaveformFailure::new(WaveformFailureReason::DecodeFailed, error.to_string())
-                })?;
+            envelope.accumulate_interleaved(chunk_start, channels, chunk).map_err(|error| {
+                WaveformFailure::new(WaveformFailureReason::DecodeFailed, error.to_string())
+            })?;
         }
         start = start.saturating_add(frames as u64);
     }

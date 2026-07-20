@@ -1,10 +1,12 @@
 use super::*;
 use mondrian_audio::{
-    AudioContinuityEpoch, AudioDecodedSource, AudioMediaResolver, AudioProcessingMode,
-    AudioProgramRuntime, AudioRenderContract, AudioRenderRequest, AudioStateEntry,
+    AudioContinuityEpoch, AudioDecodedSource, AudioKernelBackend, AudioMediaResolver,
+    AudioProcessingMode, AudioProgramRuntime, AudioRenderContract, AudioRenderRequest,
+    AudioStateEntry, PreparedAudioChannelMixer, ResolvedAudioSource,
 };
 use mondrian_core::{
-    AudioChannelLayout, AudioSourceComponentId, ExecutionCancellationToken, ProgramOutputId,
+    AudioChannelLayout, AudioChannelMixMatrix, AudioSourceComponentId, ExecutionCancellationToken,
+    ProgramOutputId,
 };
 use mondrian_media::AudioSourceReader;
 use parking_lot::Mutex;
@@ -16,12 +18,15 @@ pub(super) struct TimelineAudioPcmRenderer {
     continuity_model: AudioPcmContinuityModel,
     sample_rate: u32,
     channel_layout: AudioChannelLayout,
+    program_channel_layout: AudioChannelLayout,
+    delivery_mixer: PreparedAudioChannelMixer,
 }
 
 struct TimelineAudioRenderState {
     runtime: AudioProgramRuntime,
     generation: Option<AudioPcmRenderGeneration>,
     next_sample: Option<i64>,
+    program_pcm: Vec<f32>,
 }
 
 impl TimelineAudioPcmRenderer {
@@ -33,9 +38,10 @@ impl TimelineAudioPcmRenderer {
         sample_rate: u32,
         channel_layout: AudioChannelLayout,
     ) -> mondrian_core::Result<Self> {
+        let program_channel_layout = sequence.settings.audio_channel_layout;
         let contract = AudioRenderContract {
             sample_rate,
-            channel_layout,
+            channel_layout: program_channel_layout,
             max_block_frames: MAX_AUDIO_RENDER_BLOCK_FRAMES,
             processing_mode: AudioProcessingMode::Realtime,
         };
@@ -53,15 +59,31 @@ impl TimelineAudioPcmRenderer {
         } else {
             AudioPcmContinuityModel::IndependentWindows
         };
+        let delivery_mixer = PreparedAudioChannelMixer::new(
+            AudioChannelMixMatrix::standard(program_channel_layout, channel_layout).map_err(
+                |error| audio_render_error("playback_audio_delivery_mapping", error.to_string()),
+            )?,
+        );
+        let program_samples = MAX_AUDIO_RENDER_BLOCK_FRAMES
+            .checked_mul(program_channel_layout.channel_count())
+            .ok_or_else(|| {
+                audio_render_error(
+                    "playback_audio_delivery_mapping",
+                    "program audio scratch extent is too large",
+                )
+            })?;
         Ok(Self {
             state: Mutex::new(TimelineAudioRenderState {
                 runtime,
                 generation: None,
                 next_sample: None,
+                program_pcm: vec![0.0; program_samples],
             }),
             continuity_model,
             sample_rate,
             channel_layout,
+            program_channel_layout,
+            delivery_mixer,
         })
     }
 }
@@ -160,17 +182,33 @@ impl AudioPcmRenderer for TimelineAudioPcmRenderer {
                 ),
             ));
         }
-        state
-            .runtime
+        let program_samples = request
+            .frame_count
+            .checked_mul(self.program_channel_layout.channel_count())
+            .ok_or_else(|| {
+                audio_render_error("timeline_audio_sample_range", "audio window is too large")
+            })?;
+        let TimelineAudioRenderState { runtime, program_pcm, .. } = &mut *state;
+        runtime
             .render_into_cancellable(
                 AudioRenderRequest {
                     start_sample: request.start_sample,
                     frames: request.frame_count,
                 },
-                &mut output,
+                &mut program_pcm[..program_samples],
                 cancellation,
             )
             .map_err(|error| audio_render_error("timeline_audio_execute", error.to_string()))?;
+        self.delivery_mixer
+            .mix_into(
+                AudioKernelBackend::RuntimeVectorized,
+                request.frame_count,
+                &program_pcm[..program_samples],
+                &mut output,
+            )
+            .map_err(|error| {
+                audio_render_error("playback_audio_delivery_mapping", error.to_string())
+            })?;
         state.next_sample = Some(next_sample);
         Ok(AudioBuffer {
             samples: output,
@@ -190,13 +228,13 @@ impl AudioMediaResolver for PlaybackMediaResolver {
         &self,
         asset_id: AssetId,
         component_id: AudioSourceComponentId,
-        contract: AudioRenderContract,
-    ) -> Result<Arc<dyn AudioDecodedSource>, String> {
-        if self.source_cache.channel_layout() != contract.channel_layout {
+        sample_rate: u32,
+    ) -> Result<ResolvedAudioSource, String> {
+        if self.source_cache.sample_rate() != sample_rate {
             return Err(format!(
-                "audio source cache layout {:?} does not match render layout {:?}",
-                self.source_cache.channel_layout(),
-                contract.channel_layout
+                "audio source cache rate {} does not match render rate {}",
+                self.source_cache.sample_rate(),
+                sample_rate
             ));
         }
         let asset = self
@@ -220,7 +258,10 @@ impl AudioMediaResolver for PlaybackMediaResolver {
                 asset.path.display()
             )
         })?;
-        Ok(Arc::new(PlaybackDecodedAudioSource(source)))
+        Ok(ResolvedAudioSource::new(
+            source.channel_layout(),
+            Arc::new(PlaybackDecodedAudioSource(source)),
+        ))
     }
 }
 
@@ -265,7 +306,7 @@ mod tests {
             sequence,
             Vec::new(),
             AssetLibrary::open(root.clone()).expect("asset library"),
-            Arc::new(AudioSourceCache::new(48_000, AudioChannelLayout::Stereo)),
+            Arc::new(AudioSourceCache::new(48_000)),
             48_000,
             AudioChannelLayout::Stereo,
         )
@@ -318,6 +359,43 @@ mod tests {
                 &cancellation,
             )
             .expect("fresh generation entry");
+        drop(renderer);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn timeline_pcm_adapter_maps_sequence_program_layout_at_the_delivery_boundary() {
+        let root = std::env::temp_dir().join(format!(
+            "mondrian-audio-delivery-layout-{}",
+            mondrian_core::ProjectId::new()
+        ));
+        let mut sequence = Sequence::new("mono program");
+        sequence.settings.audio_channel_layout = AudioChannelLayout::Mono;
+        let renderer = TimelineAudioPcmRenderer::new(
+            sequence,
+            Vec::new(),
+            AssetLibrary::open(root.clone()).expect("asset library"),
+            Arc::new(AudioSourceCache::new(48_000)),
+            48_000,
+            AudioChannelLayout::Stereo,
+        )
+        .expect("mono program with stereo delivery");
+
+        let output = renderer
+            .render(
+                AudioPcmRenderRequest {
+                    start_sample: 0,
+                    frame_count: 4,
+                    sample_rate: 48_000,
+                    channel_layout: AudioChannelLayout::Stereo,
+                    continuity: AudioPcmContinuity::Enter(AudioPcmRenderGeneration::new(1)),
+                },
+                &ExecutionCancellationToken::new(),
+            )
+            .expect("delivery block");
+
+        assert_eq!(output.channel_layout, AudioChannelLayout::Stereo);
+        assert_eq!(output.samples, vec![0.0; 8]);
         drop(renderer);
         let _ = std::fs::remove_dir_all(root);
     }

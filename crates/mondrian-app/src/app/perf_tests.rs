@@ -1659,7 +1659,7 @@ fn audio_bounded_source_external_render_smoke() -> anyhow::Result<()> {
             Clip::new(asset_id, TimelineTime::ZERO, duration)?,
             AudioSourceComponentId::primary(),
         )?;
-        let cache = Arc::new(AudioSourceCache::new(48_000, AudioChannelLayout::Stereo));
+        let cache = Arc::new(AudioSourceCache::new(48_000));
         let renderer = TimelineAudioPcmRenderer::new(
             sequence.clone(),
             vec![sequence],

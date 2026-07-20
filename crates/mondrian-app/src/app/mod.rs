@@ -332,10 +332,7 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         let audio_sample_rate = 48_000;
-        let audio_source_cache = Arc::new(AudioSourceCache::new(
-            audio_sample_rate,
-            AUDIO_OUTPUT_LAYOUT,
-        ));
+        let audio_source_cache = Arc::new(AudioSourceCache::new(audio_sample_rate));
         let (media_import_tx, media_import_rx) = mpsc::channel::<MediaImportResult>();
         let playback_presentation_wall_anchor = Instant::now();
 

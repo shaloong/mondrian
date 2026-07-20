@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use mondrian_assets::AssetLibrary;
 use mondrian_core::{
-    AssetId, AudioChannelLayout, AudioSourceComponentId, ExecutionCancellationToken,
-    ExecutionTerminalDisposition, ExecutionTerminalEvidence,
+    AssetId, AudioSourceComponentId, ExecutionCancellationToken, ExecutionTerminalDisposition,
+    ExecutionTerminalEvidence,
 };
 pub use mondrian_media::MAX_WAVEFORM_WIDTH as WAVEFORM_MAX_WIDTH;
 use mondrian_media::{AudioSourceCache, AudioSourceCacheDiagnostics};
@@ -31,7 +31,6 @@ mod state;
 mod tests;
 
 const WAVEFORM_SAMPLE_RATE: u32 = 48_000;
-const WAVEFORM_LAYOUT: AudioChannelLayout = AudioChannelLayout::Mono;
 const WAVEFORM_DECODE_WINDOW_SECONDS: usize = 10;
 const WAVEFORM_SOURCE_CACHE_ENTRIES: usize = 512;
 const WAVEFORM_FAILURE_CAPACITY: usize = 128;
@@ -149,7 +148,6 @@ impl AudioWaveformService {
     pub fn new() -> Arc<Self> {
         let source_cache = Arc::new(AudioSourceCache::new_bounded(
             WAVEFORM_SAMPLE_RATE,
-            WAVEFORM_LAYOUT,
             WAVEFORM_DECODE_WINDOW_SECONDS,
             WAVEFORM_SOURCE_WINDOW_ENTRIES,
             WAVEFORM_SOURCE_WINDOW_BYTES,

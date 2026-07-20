@@ -482,12 +482,14 @@ absolute physical stream index, native layout, and the source fingerprint that
 authorized it. Export resolution cannot consult the live Asset Library, fall
 back to `0:a:0`, or reinterpret a missing Component; it uses the same standard
 channel-matrix lowering as realtime Playback and fails the job when the frozen
-binding or file revision no longer matches.
-The frozen Sequence `AudioChannelLayout` is also authoritative for output
-packaging. The common DSP may carry named/custom or Discrete layouts, but the
-current FFmpeg export Adapter publishes only mono, stereo, and 5.1(side), for
-which it has exact layout names and media-input matrices. Every other layout
-fails before encoder launch instead of being reduced to a matching `-ac` count.
+binding or file revision no longer matches. Media decode returns native-layout
+PCM; the shared prepared Contribution applies the same canonical Component
+matrix used by Playback before any Sequence processing.
+The frozen Sequence `AudioChannelLayout` is authoritative for Program
+execution. Export's requested packaging layout is a distinct delivery contract
+applied after the selected Program Output. The current Adapter admits only
+versioned standard delivery pairs; unsupported named/custom or Discrete pairs
+fail before encoding instead of being reduced to a matching `-ac` count.
 
 Preview media decoding must convert source media into the sequence working
 color space before compositing. The source color space resolves from clip

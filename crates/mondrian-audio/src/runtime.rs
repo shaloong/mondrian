@@ -1,4 +1,4 @@
-use crate::schedule::{AudioKernelBackend, AudioPreparationDependencies};
+use crate::schedule::{resolve_channel_mapping, AudioKernelBackend, AudioPreparationDependencies};
 use crate::{
     compile_audio_program, AudioCompileRequest, AudioContinuityEpoch, AudioExecutionError,
     AudioPcmSource, AudioRenderContract, AudioRenderRequest, AudioRenderSession, AudioStateEntry,
@@ -17,10 +17,10 @@ const MEDIA_SOURCE_CACHE_FRAMES: usize = 4_096;
 
 /// Consumer-owned decoded PCM exposed at the media/source Adapter Seam.
 pub trait AudioDecodedSource: Send + Sync + 'static {
-    /// Fill one exact interleaved block on the prepared contract's Evaluation Grid.
+    /// Fill one exact native-layout interleaved block on the requested sample grid.
     ///
     /// `destination` is pre-zeroed and has exactly `frames` multiplied by the
-    /// resolved Render Contract layout's channel count samples.
+    /// resolved source layout's channel count samples.
     /// Implementations must preserve silence outside the source range and return
     /// an error rather than publish a partial or shifted block.
     fn read_interleaved(
@@ -32,15 +32,33 @@ pub trait AudioDecodedSource: Send + Sync + 'static {
     ) -> Result<(), String>;
 }
 
+/// One media dependency bound to native-layout PCM at the requested sample rate.
+pub struct ResolvedAudioSource {
+    channel_layout: AudioChannelLayout,
+    source: Arc<dyn AudioDecodedSource>,
+}
+
+impl ResolvedAudioSource {
+    /// Bind a decoded source to its exact native semantic signal layout.
+    pub fn new(channel_layout: AudioChannelLayout, source: Arc<dyn AudioDecodedSource>) -> Self {
+        Self { channel_layout, source }
+    }
+
+    /// Exact layout produced by every decoded block.
+    pub const fn channel_layout(&self) -> AudioChannelLayout {
+        self.channel_layout
+    }
+}
+
 /// Resolve stable authoring source identities into decoded PCM.
 pub trait AudioMediaResolver {
-    /// Resolve and, when useful, cache one media component at the render contract.
+    /// Resolve one media component at the requested rate without changing its layout.
     fn resolve(
         &self,
         asset_id: AssetId,
         component_id: AudioSourceComponentId,
-        contract: AudioRenderContract,
-    ) -> Result<Arc<dyn AudioDecodedSource>, String>;
+        sample_rate: u32,
+    ) -> Result<ResolvedAudioSource, String>;
 }
 
 /// Shared compiled runtime used by Playback, Export, Audition, and Analysis.
@@ -61,6 +79,13 @@ impl AudioProgramRuntime {
         contract: AudioRenderContract,
         output_id: Option<ProgramOutputId>,
     ) -> Result<Self, AudioRuntimeBuildError> {
+        if contract.channel_layout != root.settings.audio_channel_layout {
+            return Err(AudioRuntimeBuildError::ProgramLayoutMismatch {
+                sequence_id: root.id,
+                authored: root.settings.audio_channel_layout,
+                prepared: contract.channel_layout,
+            });
+        }
         let mut stack = BTreeSet::new();
         Self::build_inner(
             root, sequences, resolver, contract, output_id, &mut stack, 0,
@@ -100,21 +125,36 @@ impl AudioProgramRuntime {
             for contribution in program.contributions() {
                 let source = match contribution.source {
                     CompiledAudioSource::Media { asset_id, component_id } => {
-                        let source = resolver.resolve(asset_id, component_id, contract).map_err(
-                            |reason| AudioRuntimeBuildError::Media {
+                        let resolved = resolver
+                            .resolve(asset_id, component_id, contract.sample_rate)
+                            .map_err(|reason| AudioRuntimeBuildError::Media {
                                 asset_id,
                                 component_id,
                                 reason,
-                            },
+                            })?;
+                        let channel_mix = resolve_channel_mapping(
+                            &contribution.channel_mapping,
+                            resolved.channel_layout,
+                            contract.channel_layout,
+                        )?;
+                        dependencies.insert_source(
+                            contribution.edit_id,
+                            resolved.channel_layout,
+                            channel_mix,
+                            0,
+                            false,
                         )?;
                         let cache_frames =
                             contract.max_block_frames.clamp(1, MEDIA_SOURCE_CACHE_FRAMES);
                         RuntimeSource::Media(MediaRuntimeSource {
-                            source,
+                            source: resolved.source,
                             cache_start: i64::MIN,
                             cache_frames,
-                            cache: vec![0.0; cache_frames * contract.channel_count()],
-                            channel_layout: contract.channel_layout,
+                            cache: vec![
+                                0.0;
+                                cache_frames * resolved.channel_layout.channel_count()
+                            ],
+                            channel_layout: resolved.channel_layout,
                         })
                     }
                     CompiledAudioSource::NestedOutput { sequence_id, output_id } => {
@@ -122,11 +162,15 @@ impl AudioProgramRuntime {
                             .iter()
                             .find(|candidate| candidate.id == sequence_id)
                             .ok_or(AudioRuntimeBuildError::MissingNestedSequence(sequence_id))?;
+                        let child_contract = AudioRenderContract {
+                            channel_layout: child.settings.audio_channel_layout,
+                            ..contract
+                        };
                         let runtime = Self::build_inner(
                             child,
                             sequences,
                             resolver,
-                            contract,
+                            child_contract,
                             Some(output_id),
                             stack,
                             depth + 1,
@@ -140,8 +184,15 @@ impl AudioProgramRuntime {
                                 ),
                             );
                         }
-                        dependencies.insert_nested_source(
+                        let channel_mix = resolve_channel_mapping(
+                            &contribution.channel_mapping,
+                            child_contract.channel_layout,
+                            contract.channel_layout,
+                        )?;
+                        dependencies.insert_source(
                             contribution.edit_id,
+                            child_contract.channel_layout,
+                            channel_mix,
                             runtime.output_latency_frames(),
                             runtime.requires_state_entry(),
                         )?;
@@ -149,8 +200,8 @@ impl AudioProgramRuntime {
                             runtime: Box::new(runtime),
                             cache_start: i64::MIN,
                             cache_frames: nested_cache_frames,
-                            cache: vec![0.0; nested_cache_frames * contract.channel_count()],
-                            channel_layout: contract.channel_layout,
+                            cache: vec![0.0; nested_cache_frames * child_contract.channel_count()],
+                            channel_layout: child_contract.channel_layout,
                             next_sample: None,
                             next_epoch: 1,
                             last_demanded_sample: None,
@@ -540,6 +591,16 @@ pub enum AudioRuntimeBuildError {
     /// The selected Sequence has no public output.
     #[error("Sequence {0} has no audio Program Output")]
     MissingProgramOutput(SequenceId),
+    /// A Sequence Program must execute in its authored semantic layout; device
+    /// or export adaptation belongs after the selected public output.
+    #[error(
+        "Sequence {sequence_id} audio layout is {authored}, but preparation requested {prepared}"
+    )]
+    ProgramLayoutMismatch {
+        sequence_id: SequenceId,
+        authored: AudioChannelLayout,
+        prepared: AudioChannelLayout,
+    },
     /// A nested author reference cannot be resolved.
     #[error("nested Sequence {0} is unavailable")]
     MissingNestedSequence(SequenceId),

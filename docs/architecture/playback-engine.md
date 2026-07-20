@@ -95,11 +95,14 @@ Timeline PCM Adapter maps the generation to the audio Runtime continuity epoch
 and validates exact next-sample progression. A changed coordinate can never be
 treated as an implicit seek/reset.
 
-The same request carries one semantic `AudioChannelLayout`. The Timeline PCM
-Adapter, prepared Runtime, decoded source cache, and returned `AudioBuffer`
-must agree on the complete layout, not merely its channel count. Only the final
-device Adapter lowers it to a concrete CPAL channel count; a mismatched PCM
-layout invalidates the render result before enqueue.
+The same request carries one device-facing semantic `AudioChannelLayout`. The
+Timeline PCM Adapter prepares the root Program in the active Sequence's authored
+layout, then applies a separate prepared delivery matrix into the requested
+device layout. Each decoded source retains its own native layout and crosses its
+Component matrix before Sequence processing. Every boundary validates complete
+layout identity rather than channel count; an unsupported source/Sequence or
+Sequence/device pair invalidates preparation instead of invoking a platform
+default downmix.
 
 The Runtime propagates that discontinuity into independent nested-instance
 state domains. Child entry is lazy because the parent time map, not the root

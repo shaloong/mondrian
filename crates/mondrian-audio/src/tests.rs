@@ -1,13 +1,14 @@
 use super::*;
 use mondrian_core::{
-    AssetId, AudioChannelLayout, AudioChannelPosition, AudioComponentEditId, AudioRouteId,
-    AudioSourceComponentId, AutomationSegmentInterpolation, ExactAutomationCurve,
-    ExactAutomationKeyframe, ExactBezierHandle, ExecutionCancellationToken, ParameterId, TimeScale,
-    TimelineTime,
+    AssetId, AudioChannelLayout, AudioChannelMixEntry, AudioChannelMixMatrix, AudioChannelPosition,
+    AudioComponentEditId, AudioRouteId, AudioSourceComponentId, AutomationSegmentInterpolation,
+    ExactAutomationCurve, ExactAutomationKeyframe, ExactBezierHandle, ExecutionCancellationToken,
+    ParameterId, TimeScale, TimelineTime,
 };
 use mondrian_timeline::audio::{
-    AudioChannelStripOutputPort, AudioMixBus, AudioProcessorInstance, AudioRoute,
-    AudioRouteDestination, AudioRouteSource, BUILTIN_GAIN_DEFINITION_ID, GAIN_DB_PARAMETER_ID,
+    AudioChannelStripOutputPort, AudioComponentChannelMapping, AudioMixBus, AudioProcessorInstance,
+    AudioRoute, AudioRouteDestination, AudioRouteSource, BUILTIN_GAIN_DEFINITION_ID,
+    GAIN_DB_PARAMETER_ID,
 };
 use mondrian_timeline::{Clip, Sequence};
 use std::collections::BTreeMap;
@@ -85,9 +86,50 @@ impl AudioMediaResolver for RampResolver {
         &self,
         _asset_id: AssetId,
         _component_id: AudioSourceComponentId,
-        _contract: AudioRenderContract,
-    ) -> Result<Arc<dyn AudioDecodedSource>, String> {
-        Ok(Arc::new(RampDecodedSource))
+        _sample_rate: u32,
+    ) -> Result<ResolvedAudioSource, String> {
+        Ok(ResolvedAudioSource::new(
+            AudioChannelLayout::Mono,
+            Arc::new(RampDecodedSource),
+        ))
+    }
+}
+
+struct StereoRampDecodedSource;
+
+impl AudioDecodedSource for StereoRampDecodedSource {
+    fn read_interleaved(
+        &self,
+        start_frame: i64,
+        frames: usize,
+        destination: &mut [f32],
+        _cancellation: &ExecutionCancellationToken,
+    ) -> Result<(), String> {
+        if destination.len() != frames.saturating_mul(2) {
+            return Err("invalid stereo destination extent".to_owned());
+        }
+        for frame in 0..frames {
+            let value = start_frame.saturating_add(frame as i64).max(0) as f32 + 1.0;
+            destination[frame * 2] = value;
+            destination[frame * 2 + 1] = -value;
+        }
+        Ok(())
+    }
+}
+
+struct StereoRampResolver;
+
+impl AudioMediaResolver for StereoRampResolver {
+    fn resolve(
+        &self,
+        _asset_id: AssetId,
+        _component_id: AudioSourceComponentId,
+        _sample_rate: u32,
+    ) -> Result<ResolvedAudioSource, String> {
+        Ok(ResolvedAudioSource::new(
+            AudioChannelLayout::Stereo,
+            Arc::new(StereoRampDecodedSource),
+        ))
     }
 }
 
@@ -128,6 +170,7 @@ fn hold_then_bezier_gain_curve() -> ExactAutomationCurve {
 
 fn sequence_with_audio_clip() -> Sequence {
     let mut sequence = Sequence::new("audio");
+    sequence.settings.audio_channel_layout = AudioChannelLayout::Mono;
     let track_id = sequence.audio_tracks[0].id;
     let clip =
         Clip::new(mondrian_core::AssetId::new(), TimelineTime::ZERO, tt(4, 1)).expect("clip");
@@ -423,6 +466,8 @@ fn clip_track_bus_output_math_is_unclipped_and_block_invariant() {
             track_count: 1,
             bus_count: 1,
             contribution_count: 1,
+            maximum_source_channels: 1,
+            channel_mix_coefficient_count: 1,
             route_count: 2,
             transition_binding_count: 0,
             automation_curve_count: 1,
@@ -709,6 +754,7 @@ fn nested_public_output_uses_an_independent_recursive_session() {
     let child_output = child.audio_program.outputs[0].id;
 
     let mut root = Sequence::new("root");
+    root.settings.audio_channel_layout = AudioChannelLayout::Mono;
     let root_track = root.audio_tracks[0].id;
     let nested_clip = Clip::new_nested_sequence(
         child.id,
@@ -737,10 +783,96 @@ fn nested_public_output_uses_an_independent_recursive_session() {
 }
 
 #[test]
+fn standard_component_mapping_converts_native_media_before_sequence_processing() {
+    let mut sequence = sequence_with_audio_clip();
+    sequence.settings.audio_channel_layout = AudioChannelLayout::Stereo;
+    let contract = AudioRenderContract {
+        sample_rate: 2,
+        channel_layout: AudioChannelLayout::Stereo,
+        max_block_frames: 8,
+        processing_mode: AudioProcessingMode::Offline,
+    };
+    let mut runtime = AudioProgramRuntime::build(&sequence, &[], &RampResolver, contract, None)
+        .expect("mono source mapped to stereo Sequence");
+    let mut pcm = vec![0.0; 6];
+    runtime
+        .render_into(AudioRenderRequest { start_sample: 0, frames: 3 }, &mut pcm)
+        .expect("mapped media render");
+    assert_eq!(pcm, vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0]);
+}
+
+#[test]
+fn explicit_component_matrix_executes_in_the_shared_prepared_schedule() {
+    let mut sequence = Sequence::new("explicit matrix");
+    let track_id = sequence.audio_tracks[0].id;
+    let clip = Clip::new(AssetId::new(), TimelineTime::ZERO, tt(4, 1)).expect("clip");
+    sequence
+        .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
+        .expect("audio Clip");
+    sequence.audio_tracks[0].clips[0].audio_components[0].channel_mapping =
+        AudioComponentChannelMapping::Explicit(
+            AudioChannelMixMatrix::new(
+                AudioChannelLayout::Stereo,
+                AudioChannelLayout::Stereo,
+                [
+                    AudioChannelMixEntry::new(1, 0, 1.0).expect("right to left"),
+                    AudioChannelMixEntry::new(0, 1, 1.0).expect("left to right"),
+                ],
+            )
+            .expect("swap matrix"),
+        );
+    let contract = AudioRenderContract {
+        sample_rate: 2,
+        channel_layout: AudioChannelLayout::Stereo,
+        max_block_frames: 8,
+        processing_mode: AudioProcessingMode::Offline,
+    };
+    let mut runtime =
+        AudioProgramRuntime::build(&sequence, &[], &StereoRampResolver, contract, None)
+            .expect("explicit matrix runtime");
+    let mut pcm = vec![0.0; 4];
+    runtime
+        .render_into(AudioRenderRequest { start_sample: 0, frames: 2 }, &mut pcm)
+        .expect("explicit matrix render");
+    assert_eq!(pcm, vec![-1.0, 1.0, -2.0, 2.0]);
+}
+
+#[test]
+fn nested_output_uses_child_layout_then_parent_component_mapping() {
+    let child = sequence_with_audio_clip();
+    let child_output = child.audio_program.outputs[0].id;
+    let mut root = Sequence::new("stereo parent");
+    let track_id = root.audio_tracks[0].id;
+    let nested = Clip::new_nested_sequence(
+        child.id,
+        TimelineTime::ZERO,
+        tt(4, 1),
+        Some("mono child".to_owned()),
+    )
+    .expect("nested Clip");
+    root.add_nested_audio_clip(track_id, nested, child_output)
+        .expect("nested audio");
+    let contract = AudioRenderContract {
+        sample_rate: 2,
+        channel_layout: AudioChannelLayout::Stereo,
+        max_block_frames: 8,
+        processing_mode: AudioProcessingMode::Offline,
+    };
+    let mut runtime = AudioProgramRuntime::build(&root, &[child], &RampResolver, contract, None)
+        .expect("child output mapped to parent layout");
+    let mut pcm = vec![0.0; 4];
+    runtime
+        .render_into(AudioRenderRequest { start_sample: 0, frames: 2 }, &mut pcm)
+        .expect("nested mapped render");
+    assert_eq!(pcm, vec![1.0, 1.0, 2.0, 2.0]);
+}
+
+#[test]
 fn stateless_nested_runtime_preserves_fractional_reverse_mapping() {
     let child = sequence_with_audio_clip();
     let child_output = child.audio_program.outputs[0].id;
     let mut root = Sequence::new("root");
+    root.settings.audio_channel_layout = AudioChannelLayout::Mono;
     let root_track = root.audio_tracks[0].id;
     let mut nested_clip = Clip::new_nested_sequence(
         child.id,
@@ -775,6 +907,7 @@ fn stateful_nested_runtime_replays_forward_mapping_across_child_blocks() {
     let child_output = child.audio_program.outputs[0].id;
 
     let mut root = Sequence::new("root");
+    root.settings.audio_channel_layout = AudioChannelLayout::Mono;
     let root_track = root.audio_tracks[0].id;
     let mut nested_clip = Clip::new_nested_sequence(
         child.id,
@@ -828,6 +961,7 @@ fn stateful_nested_runtime_rejects_reverse_state_evaluation() {
     let child = sequence_with_audio_clip();
     let child_output = child.audio_program.outputs[0].id;
     let mut root = Sequence::new("root");
+    root.settings.audio_channel_layout = AudioChannelLayout::Mono;
     let root_track = root.audio_tracks[0].id;
     let mut nested_clip = Clip::new_nested_sequence(
         child.id,
@@ -875,6 +1009,7 @@ fn stateful_nested_runtime_reenters_after_root_discontinuity() {
     let child = sequence_with_audio_clip();
     let child_output = child.audio_program.outputs[0].id;
     let mut root = Sequence::new("root");
+    root.settings.audio_channel_layout = AudioChannelLayout::Mono;
     let root_track = root.audio_tracks[0].id;
     let nested_clip = Clip::new_nested_sequence(
         child.id,
@@ -928,10 +1063,11 @@ fn stateful_nested_runtime_reenters_after_root_discontinuity() {
 }
 
 #[test]
-fn direct_plan_preparation_rejects_unprepared_nested_latency() {
+fn direct_plan_preparation_rejects_unprepared_nested_source_dependency() {
     let child = sequence_with_audio_clip();
     let child_output = child.audio_program.outputs[0].id;
     let mut root = Sequence::new("root");
+    root.settings.audio_channel_layout = AudioChannelLayout::Mono;
     let root_track = root.audio_tracks[0].id;
     let nested_clip = Clip::new_nested_sequence(
         child.id,
@@ -956,9 +1092,9 @@ fn direct_plan_preparation_rejects_unprepared_nested_latency() {
             processing_mode: AudioProcessingMode::Offline,
         },
     )
-    .expect_err("nested latency must be supplied by recursive preparation");
+    .expect_err("nested source facts must be supplied by recursive preparation");
     assert!(matches!(error, AudioCompileError::InvalidPreparedGraph(_)));
-    assert!(error.to_string().contains("no prepared child-output latency"));
+    assert!(error.to_string().contains("no prepared child-output dependency"));
 }
 
 #[test]
@@ -968,6 +1104,7 @@ fn nested_runtime_rejects_depth_beyond_the_shared_sequence_contract() {
     for index in 0..=mondrian_timeline::sequence::MAX_NESTED_SEQUENCE_RENDER_DEPTH {
         let child_output = child.audio_program.outputs[0].id;
         let mut parent = Sequence::new(format!("nested-{index}"));
+        parent.settings.audio_channel_layout = AudioChannelLayout::Mono;
         let parent_track = parent.audio_tracks[0].id;
         let nested_clip = Clip::new_nested_sequence(
             child.id,

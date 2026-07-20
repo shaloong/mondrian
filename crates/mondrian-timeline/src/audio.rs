@@ -6,12 +6,12 @@
 
 use crate::{clip::Clip, track::Track};
 use mondrian_core::{
-    AudioComponentEditId, AudioProcessingScopeId, AudioProcessorInstanceId, AudioRoleId,
-    AudioRouteId, AudioSourceComponentId, AudioTransitionId, AutomationSegmentInterpolation,
-    ClipId, ExactAutomationCurve, MixBusId, ParameterId, ParameterInterpolation,
-    ParameterInvalidValuePolicy, ParameterNumericContract, ParameterNumericRange, ParameterSchema,
-    ParameterUnit, ProgramOutputId, PropertyValue, PropertyValueType, TimelineTime,
-    TimelineTimeRange, TrackId,
+    AudioChannelLayout, AudioChannelMixMatrix, AudioComponentEditId, AudioProcessingScopeId,
+    AudioProcessorInstanceId, AudioRoleId, AudioRouteId, AudioSourceComponentId, AudioTransitionId,
+    AutomationSegmentInterpolation, ClipId, ExactAutomationCurve, MixBusId, ParameterId,
+    ParameterInterpolation, ParameterInvalidValuePolicy, ParameterNumericContract,
+    ParameterNumericRange, ParameterSchema, ParameterUnit, ProgramOutputId, PropertyValue,
+    PropertyValueType, TimelineTime, TimelineTimeRange, TrackId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -290,6 +290,18 @@ pub enum AudioComponentSource {
     NestedOutput { output_id: ProgramOutputId },
 }
 
+/// Author intent for mapping one Component signal into its owning Sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AudioComponentChannelMapping {
+    /// Resolve Mondrian's versioned, fail-closed standard matrix after the
+    /// source dependency's exact semantic layout is known.
+    #[default]
+    Standard,
+    /// Apply this exact authored sparse matrix. Source and destination layouts
+    /// are part of the author contract and cannot be inferred from extent.
+    Explicit(AudioChannelMixMatrix),
+}
+
 /// The deliberately restricted mapping into a non-placement processing scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioProcessingBinding {
@@ -333,6 +345,8 @@ pub struct AudioComponentEdit {
     pub id: AudioComponentEditId,
     /// Media component or nested public output selected from the owning Clip.
     pub source: AudioComponentSource,
+    /// Mapping from the selected source layout into the Sequence signal layout.
+    pub channel_mapping: AudioComponentChannelMapping,
     /// Optional Sequence-local semantic Role.
     pub role_id: Option<AudioRoleId>,
     /// Whether this component contributes signal.
@@ -369,6 +383,7 @@ impl AudioComponentEdit {
         Self {
             id: AudioComponentEditId::new(),
             source,
+            channel_mapping: AudioComponentChannelMapping::Standard,
             role_id: None,
             enabled: true,
             local_time_in: TimelineTime::ZERO,
@@ -381,13 +396,24 @@ impl AudioComponentEdit {
         }
     }
 
-    fn validate(&self, clip: &Clip) -> Result<(), AudioAuthoringError> {
+    fn validate(
+        &self,
+        clip: &Clip,
+        sequence_layout: AudioChannelLayout,
+    ) -> Result<(), AudioAuthoringError> {
         if self.processing.scope_in.is_negative() || self.local_time_in.is_negative() {
             return Err(AudioAuthoringError::NegativeProcessingScopeIn(self.id));
         }
         validate_finite(self.volume_db)?;
         if !self.pan.is_finite() || !(-1.0..=1.0).contains(&self.pan) {
             return Err(AudioAuthoringError::InvalidPan(self.id));
+        }
+        if let AudioComponentChannelMapping::Explicit(matrix) = &self.channel_mapping {
+            if matrix.destination_layout() != sequence_layout {
+                return Err(AudioAuthoringError::ChannelMappingDestinationMismatch(
+                    self.id,
+                ));
+            }
         }
         validate_optional_curve(&self.volume_automation, CLIP_VOLUME_DB_PARAMETER_ID)?;
         validate_optional_curve(&self.pan_automation, CLIP_PAN_PARAMETER_ID)?;
@@ -699,6 +725,7 @@ impl AudioProgram {
         &self,
         audio_tracks: &[Track],
         audio_roles: &[AudioRole],
+        sequence_layout: AudioChannelLayout,
     ) -> Result<(), AudioAuthoringError> {
         let expected_tracks = audio_tracks.iter().map(|track| track.id).collect::<BTreeSet<_>>();
         let actual_tracks = self.track_channels.keys().copied().collect::<BTreeSet<_>>();
@@ -798,7 +825,7 @@ impl AudioProgram {
                             }
                         }
                     }
-                    edit.validate(clip)?;
+                    edit.validate(clip, sequence_layout)?;
                 }
             }
         }
@@ -1035,6 +1062,9 @@ pub enum AudioAuthoringError {
     /// Component source is incompatible with its owning Clip.
     #[error("audio component edit {0} has an invalid source for its owning Clip")]
     InvalidComponentSource(AudioComponentEditId),
+    /// Explicit Component matrix must terminate in the owning Sequence layout.
+    #[error("audio component edit {0} channel mapping does not target the Sequence layout")]
+    ChannelMappingDestinationMismatch(AudioComponentEditId),
     /// Component names a Role absent from this Sequence.
     #[error("audio component edit {0} targets an unknown Role")]
     UnknownComponentRole(AudioComponentEditId),
@@ -1104,7 +1134,9 @@ mod tests {
             track.id = id;
             track
         });
-        program.validate(&authored_tracks, &[]).expect("valid program");
+        program
+            .validate(&authored_tracks, &[], AudioChannelLayout::Stereo)
+            .expect("valid program");
         assert_eq!(program.track_channels.len(), 2);
         assert!(program.routes.iter().all(|route| matches!(
             route.source,
@@ -1184,7 +1216,7 @@ mod tests {
         channel.strip.post_fader.processors.push(processor);
 
         assert_eq!(
-            program.validate(&[track], &[]),
+            program.validate(&[track], &[], AudioChannelLayout::Stereo),
             Err(AudioAuthoringError::DuplicateProcessorInstance(
                 processor_id
             ))
@@ -1204,7 +1236,7 @@ mod tests {
         track.add_clip(clip).expect("add clip");
         let program = AudioProgram::for_tracks([track.id]);
         assert_eq!(
-            program.validate(&[track], &[]),
+            program.validate(&[track], &[], AudioChannelLayout::Stereo),
             Err(AudioAuthoringError::MissingAudioComponents(clip_id))
         );
     }
@@ -1226,7 +1258,37 @@ mod tests {
         track.add_clip(clip).expect("add clip");
         let mut program = AudioProgram::for_tracks([track.id]);
         program.add_processing_scope(scope);
-        program.validate(&[track], &[]).expect("closed authoring");
+        program
+            .validate(&[track], &[], AudioChannelLayout::Stereo)
+            .expect("closed authoring");
+    }
+
+    #[test]
+    fn explicit_component_matrix_must_target_the_owning_sequence_layout() {
+        let mut track = Track::new_audio("Audio");
+        let scope = AudioProcessingScope::identity();
+        let mut clip = Clip::new(
+            mondrian_core::AssetId::new(),
+            TimelineTime::ZERO,
+            TimelineTime::ONE,
+        )
+        .expect("clip");
+        let mut edit = AudioComponentEdit::media(AudioSourceComponentId::primary(), scope.id);
+        let edit_id = edit.id;
+        edit.channel_mapping = AudioComponentChannelMapping::Explicit(
+            AudioChannelMixMatrix::identity(AudioChannelLayout::Mono),
+        );
+        clip.audio_components.push(edit);
+        track.add_clip(clip).expect("add clip");
+        let mut program = AudioProgram::for_tracks([track.id]);
+        program.add_processing_scope(scope);
+
+        assert_eq!(
+            program.validate(&[track], &[], AudioChannelLayout::Stereo),
+            Err(AudioAuthoringError::ChannelMappingDestinationMismatch(
+                edit_id
+            ))
+        );
     }
 
     #[test]
@@ -1266,7 +1328,7 @@ mod tests {
             },
         ]);
         assert_eq!(
-            program.validate(&[track], &[]),
+            program.validate(&[track], &[], AudioChannelLayout::Stereo),
             Err(AudioAuthoringError::RouteCycle)
         );
     }

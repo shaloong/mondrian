@@ -9,15 +9,16 @@ use crate::validator::{
 };
 use mondrian_audio::{
     compile_audio_program, AudioCompileRequest, AudioContinuityEpoch, AudioDecodedSource,
-    AudioMediaResolver, AudioProcessingMode, AudioProgramRuntime, AudioRenderContract,
-    AudioRenderRequest, AudioStateEntry,
+    AudioKernelBackend, AudioMediaResolver, AudioProcessingMode, AudioProgramRuntime,
+    AudioRenderContract, AudioRenderRequest, AudioStateEntry, PreparedAudioChannelMixer,
+    ResolvedAudioSource,
 };
 use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace, FramePosition, JobId, Rational};
 use mondrian_core::{
-    AudioChannelLayout, AudioSamplePosition, AudioSampleRate, AudioSampleRounding,
-    AudioSourceComponentId, ExecutionCancellationToken, FrameRounding, TimelineTime,
-    WorkingColorSpace, WorkingRgbaF32Frame,
+    AudioChannelLayout, AudioChannelMixMatrix, AudioSamplePosition, AudioSampleRate,
+    AudioSampleRounding, AudioSourceComponentId, ExecutionCancellationToken, FrameRounding,
+    TimelineTime, WorkingColorSpace, WorkingRgbaF32Frame,
 };
 use mondrian_media::AudioSourceCache;
 use mondrian_media::{
@@ -1840,11 +1841,12 @@ fn render_timeline_audio_to_pcm_f32(
             ));
         }
     };
-    let cache = Arc::new(AudioSourceCache::new(sample_rate, channel_layout));
+    let cache = Arc::new(AudioSourceCache::new(sample_rate));
     let resolver = ExportAudioMediaResolver { timeline, cache: Arc::clone(&cache) };
+    let program_channel_layout = timeline.sequence.settings.audio_channel_layout;
     let contract = AudioRenderContract {
         sample_rate,
-        channel_layout,
+        channel_layout: program_channel_layout,
         max_block_frames: 16_384,
         processing_mode: AudioProcessingMode::Offline,
     };
@@ -1862,6 +1864,13 @@ fn render_timeline_audio_to_pcm_f32(
             ));
         }
     };
+    let delivery_mixer =
+        match AudioChannelMixMatrix::standard(program_channel_layout, channel_layout) {
+            Ok(matrix) => PreparedAudioChannelMixer::new(matrix),
+            Err(error) => {
+                return JobExecutionResult::Failed(format!("导出音频输出布局映射不可用: {error}"));
+            }
+        };
 
     let (start_sample, total_samples) = match timeline_audio_sample_range(range, sample_rate) {
         Ok(sample_range) => sample_range,
@@ -1884,6 +1893,8 @@ fn render_timeline_audio_to_pcm_f32(
     let channels = channel_layout.channel_count();
     let mut sample_bytes = Vec::<u8>::with_capacity(chunk_frames_target * channels * 4);
     let mut pcm = vec![0.0_f32; chunk_frames_target * channels];
+    let program_channels = program_channel_layout.channel_count();
+    let mut program_pcm = vec![0.0_f32; chunk_frames_target * program_channels];
 
     while rendered_samples < total_samples {
         if cancel.is_canceled() {
@@ -1905,11 +1916,20 @@ fn render_timeline_audio_to_pcm_f32(
             }
         };
         let chunk_samples = chunk_frames * channels;
+        let program_samples = chunk_frames * program_channels;
         if let Err(error) = runtime.render_into(
             AudioRenderRequest { start_sample: chunk_start, frames: chunk_frames },
-            &mut pcm[..chunk_samples],
+            &mut program_pcm[..program_samples],
         ) {
             return JobExecutionResult::Failed(format!("执行导出音频 Program 失败: {error}"));
+        }
+        if let Err(error) = delivery_mixer.mix_into(
+            AudioKernelBackend::RuntimeVectorized,
+            chunk_frames,
+            &program_pcm[..program_samples],
+            &mut pcm[..chunk_samples],
+        ) {
+            return JobExecutionResult::Failed(format!("执行导出音频输出布局映射失败: {error}"));
         }
 
         sample_bytes.clear();
@@ -1974,13 +1994,13 @@ impl AudioMediaResolver for ExportAudioMediaResolver<'_> {
         &self,
         asset_id: AssetId,
         component_id: AudioSourceComponentId,
-        contract: AudioRenderContract,
-    ) -> Result<Arc<dyn AudioDecodedSource>, String> {
-        if self.cache.channel_layout() != contract.channel_layout {
+        sample_rate: u32,
+    ) -> Result<ResolvedAudioSource, String> {
+        if self.cache.sample_rate() != sample_rate {
             return Err(format!(
-                "audio source cache layout {:?} does not match export render layout {:?}",
-                self.cache.channel_layout(),
-                contract.channel_layout
+                "audio source cache rate {} does not match export render rate {}",
+                self.cache.sample_rate(),
+                sample_rate
             ));
         }
         let dependency = self
@@ -2000,7 +2020,10 @@ impl AudioMediaResolver for ExportAudioMediaResolver<'_> {
                     dependency.path.display()
                 )
             })?;
-        Ok(Arc::new(ExportDecodedAudioSource(source)))
+        Ok(ResolvedAudioSource::new(
+            source.channel_layout(),
+            Arc::new(ExportDecodedAudioSource(source)),
+        ))
     }
 }
 
@@ -4472,33 +4495,11 @@ mod tests {
         );
         let mut timeline = timeline_input_with_output_color(ColorSpace::Rec709);
         timeline.media.insert(asset_id, dependency);
-        let cache = Arc::new(AudioSourceCache::new(48_000, AudioChannelLayout::Stereo));
+        let cache = Arc::new(AudioSourceCache::new(48_000));
         let resolver = ExportAudioMediaResolver { timeline: &timeline, cache };
 
-        assert!(resolver
-            .resolve(
-                asset_id,
-                component_id,
-                AudioRenderContract {
-                    sample_rate: 48_000,
-                    channel_layout: AudioChannelLayout::Stereo,
-                    max_block_frames: 1_024,
-                    processing_mode: AudioProcessingMode::Offline,
-                },
-            )
-            .is_ok());
-        assert!(resolver
-            .resolve(
-                asset_id,
-                AudioSourceComponentId::new(),
-                AudioRenderContract {
-                    sample_rate: 48_000,
-                    channel_layout: AudioChannelLayout::Stereo,
-                    max_block_frames: 1_024,
-                    processing_mode: AudioProcessingMode::Offline,
-                },
-            )
-            .is_err());
+        assert!(resolver.resolve(asset_id, component_id, 48_000,).is_ok());
+        assert!(resolver.resolve(asset_id, AudioSourceComponentId::new(), 48_000,).is_err());
     }
 
     #[test]

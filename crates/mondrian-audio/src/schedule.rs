@@ -5,74 +5,129 @@ use crate::plan::{
     AudioRenderContract, CompiledAudioContribution, CompiledAudioProgram, CompiledChannelStrip,
     CompiledProcessingScope, CompiledProcessorOperation, CompiledRack, CompiledTransition,
 };
-use crate::AudioCompileError;
+use crate::{AudioCompileError, PreparedAudioChannelMixer};
 use mondrian_core::{
-    AudioComponentEditId, AudioProcessingScopeId, AudioProcessorInstanceId, AudioSamplePosition,
-    AudioSampleRate, AudioSampleRounding, ExactAutomationCurve, ExactAutomationSegment, MixBusId,
-    ParameterId, ProgramOutputId, TimelineTime, TrackId,
+    AudioChannelLayout, AudioChannelMixMatrix, AudioComponentEditId, AudioProcessingScopeId,
+    AudioProcessorInstanceId, AudioSamplePosition, AudioSampleRate, AudioSampleRounding,
+    ExactAutomationCurve, ExactAutomationSegment, MixBusId, ParameterId, ProgramOutputId,
+    TimelineTime, TrackId,
 };
 use mondrian_timeline::audio::{
-    AudioChannelStripOutputPort, AudioRouteDestination, AudioRouteSource, AudioTransitionCurve,
+    AudioChannelStripOutputPort, AudioComponentChannelMapping, AudioRouteDestination,
+    AudioRouteSource, AudioTransitionCurve,
 };
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
-/// Instance-specific facts supplied only after child render plans are prepared.
+/// Instance-specific source facts supplied after media and child plans resolve.
 ///
 /// Semantic compilation deliberately cannot guess these values because plugin
 /// realization and the selected Render Contract may change processor latency.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AudioPreparationDependencies {
-    nested_sources: BTreeMap<mondrian_core::AudioComponentEditId, PreparedNestedSource>,
+    sources: BTreeMap<mondrian_core::AudioComponentEditId, PreparedSourceDependency>,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct PreparedNestedSource {
+#[derive(Debug, Clone)]
+struct PreparedSourceDependency {
+    channel_mix: AudioChannelMixMatrix,
     latency_frames: usize,
     requires_state_entry: bool,
 }
 
 impl AudioPreparationDependencies {
-    pub(crate) fn insert_nested_source(
+    pub(crate) fn insert_source(
         &mut self,
         edit_id: mondrian_core::AudioComponentEditId,
+        channel_layout: AudioChannelLayout,
+        channel_mix: AudioChannelMixMatrix,
         latency_frames: usize,
         requires_state_entry: bool,
     ) -> Result<(), AudioCompileError> {
+        if channel_mix.source_layout() != channel_layout {
+            return Err(AudioCompileError::InvalidPreparedGraph(format!(
+                "source dependency {edit_id} matrix does not accept its resolved layout"
+            )));
+        }
         if self
-            .nested_sources
+            .sources
             .insert(
                 edit_id,
-                PreparedNestedSource { latency_frames, requires_state_entry },
+                PreparedSourceDependency { channel_mix, latency_frames, requires_state_entry },
             )
             .is_some()
         {
             return Err(AudioCompileError::InvalidPreparedGraph(format!(
-                "duplicate nested latency dependency for contribution {edit_id}"
+                "duplicate source dependency for contribution {edit_id}"
             )));
         }
         Ok(())
     }
 
-    fn nested_source(
+    fn source(
         &self,
         contribution: &CompiledAudioContribution,
-    ) -> Result<Option<PreparedNestedSource>, AudioCompileError> {
-        match contribution.source {
-            crate::CompiledAudioSource::Media { .. } => Ok(None),
-            crate::CompiledAudioSource::NestedOutput { .. } => self
-                .nested_sources
-                .get(&contribution.edit_id)
-                .copied()
-                .map(Some)
-                .ok_or_else(|| {
-                    AudioCompileError::InvalidPreparedGraph(format!(
-                        "nested contribution {} has no prepared child-output latency",
-                        contribution.edit_id
-                    ))
-                }),
+        destination_layout: AudioChannelLayout,
+    ) -> Result<PreparedSourceDependency, AudioCompileError> {
+        if let Some(source) = self.sources.get(&contribution.edit_id) {
+            if source.channel_mix.destination_layout() != destination_layout {
+                return Err(AudioCompileError::InvalidPreparedGraph(format!(
+                    "source dependency {} matrix does not target the Render Contract layout",
+                    contribution.edit_id
+                )));
+            }
+            return Ok(source.clone());
         }
+        match contribution.source {
+            crate::CompiledAudioSource::Media { .. } => {
+                let channel_layout = match &contribution.channel_mapping {
+                    AudioComponentChannelMapping::Standard => destination_layout,
+                    AudioComponentChannelMapping::Explicit(matrix) => matrix.source_layout(),
+                };
+                Ok(PreparedSourceDependency {
+                    channel_mix: resolve_channel_mapping(
+                        &contribution.channel_mapping,
+                        channel_layout,
+                        destination_layout,
+                    )?,
+                    latency_frames: 0,
+                    requires_state_entry: false,
+                })
+            }
+            crate::CompiledAudioSource::NestedOutput { .. } => {
+                Err(AudioCompileError::InvalidPreparedGraph(format!(
+                    "nested contribution {} has no prepared child-output dependency",
+                    contribution.edit_id
+                )))
+            }
+        }
+    }
+}
+
+pub(crate) fn resolve_channel_mapping(
+    mapping: &AudioComponentChannelMapping,
+    source_layout: AudioChannelLayout,
+    destination_layout: AudioChannelLayout,
+) -> Result<AudioChannelMixMatrix, AudioCompileError> {
+    match mapping {
+        AudioComponentChannelMapping::Standard => {
+            AudioChannelMixMatrix::standard(source_layout, destination_layout).map_err(|error| {
+                AudioCompileError::InvalidPreparedGraph(format!(
+                    "standard Component channel mapping is unavailable: {error}"
+                ))
+            })
+        }
+        AudioComponentChannelMapping::Explicit(matrix)
+            if matrix.source_layout() == source_layout
+                && matrix.destination_layout() == destination_layout =>
+        {
+            Ok(matrix.clone())
+        }
+        AudioComponentChannelMapping::Explicit(_) => Err(AudioCompileError::InvalidPreparedGraph(
+            "explicit Component channel mapping does not match the resolved source and destination layouts"
+                .to_owned(),
+        )),
     }
 }
 
@@ -97,6 +152,10 @@ pub struct PreparedAudioScheduleSummary {
     pub bus_count: usize,
     /// Generated PCM contributions grouped by Track slot.
     pub contribution_count: usize,
+    /// Largest native source layout admitted by any Contribution.
+    pub maximum_source_channels: usize,
+    /// Non-zero coefficients across all prepared Component matrices.
+    pub channel_mix_coefficient_count: usize,
     /// Incoming routes stored in contiguous destination ranges.
     pub route_count: usize,
     /// Contribution-local Transition bindings.
@@ -247,6 +306,7 @@ pub(crate) struct PreparedContribution {
     pub(crate) track_slot: usize,
     pub(crate) scope_slot: usize,
     pub(crate) transitions: Range<usize>,
+    pub(crate) channel_mixer: PreparedAudioChannelMixer,
     pub(crate) sequence_start_sample: i64,
     pub(crate) sequence_end_sample: i64,
     pub(crate) constant_scope_gain: Option<f32>,
@@ -656,12 +716,12 @@ impl PreparedAudioSchedule {
                 edit_time_offset,
                 sample_rate,
             )?;
-            let nested_source = dependencies.nested_source(&semantic)?;
+            let source = dependencies.source(&semantic, contract.channel_layout)?;
             contributions.push(PreparedContribution {
-                source_latency_frames: nested_source.map_or(0, |source| source.latency_frames),
-                source_requires_state_entry: nested_source
-                    .is_some_and(|source| source.requires_state_entry),
+                source_latency_frames: source.latency_frames,
+                source_requires_state_entry: source.requires_state_entry,
                 compensation_delay_frames: 0,
+                channel_mixer: PreparedAudioChannelMixer::new(source.channel_mix),
                 semantic,
                 track_slot,
                 scope_slot,
@@ -832,6 +892,15 @@ impl PreparedAudioSchedule {
             track_count,
             bus_count,
             contribution_count: contributions.len(),
+            maximum_source_channels: contributions
+                .iter()
+                .map(|contribution| contribution.channel_mixer.source_layout().channel_count())
+                .max()
+                .unwrap_or(contract.channel_count()),
+            channel_mix_coefficient_count: contributions
+                .iter()
+                .map(|contribution| contribution.channel_mixer.coefficient_count())
+                .sum(),
             route_count: routes.len(),
             transition_binding_count: transitions.len(),
             automation_curve_count: automation_curves.len(),

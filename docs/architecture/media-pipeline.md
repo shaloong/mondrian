@@ -29,7 +29,7 @@ decode requests and reports facts; it does not pause or advance transport.
 Playback and Export do not decode complete audio sources into resident memory.
 `AudioSourceCache` opens fingerprinted source readers and supplies exact
 interleaved PCM through aligned ten-second windows. One weighted LRU spans all
-readers at the prepared sample-rate/semantic-layout contract: 128 entries, 256 MiB
+readers at the prepared sample-rate/native-layout contract: 128 entries, 256 MiB
 payload, and 64 bounded terminal failures. Path + file length + modification
 timestamp is the current source revision boundary. Cache diagnostics expose
 bytes, entry pressure, hits/misses, decode results, oversize windows,
@@ -37,8 +37,8 @@ single-flight leaders, and evictions; an entry-count-only claim is insufficient.
 
 The concrete miss Adapter owns a bounded pool of at most eight persistent
 FFmpeg child-process Sessions. A Session is keyed by the complete source
-fingerprint, absolute selected stream/native layout, and output
-sample-rate/layout contract, opens at the first requested sample, and
+fingerprint, absolute selected stream/native layout, and output sample-rate
+contract, opens at the first requested sample, and
 continuously emits interleaved `f32le`. Consecutive
 windows reuse that stream; a non-contiguous miss terminates and reopens only
 that source Session using at most ten seconds of input-side coarse preroll plus
@@ -48,20 +48,19 @@ evicts an idle least-recently-used Session. This is an intentionally isolated pr
 Adapter, not an in-process FFmpeg claim; a linked FFmpeg Adapter may replace it
 behind the same Interface without changing cache or sample semantics.
 
-The cache and every returned `AudioBuffer` carry the validated
-`AudioChannelLayout`, not an independent channel count. Mono, canonical named
+The cache, reader, and every returned `AudioBuffer` carry the selected stream's
+validated native `AudioChannelLayout`, not an independent channel count. Mono, canonical named
 speaker sets, and bounded Discrete buses are distinct signal facts; 5.1(side),
-5.1(back), and 7.1 therefore cannot alias by extent. The DSP contract can retain
-all of those meanings, while the current FFmpeg Adapter admits only the standard
-mono/stereo/5.1(side) execution matrix. It selects
-`-map 0:<absolute stream index>` and installs an
-explicit `pan` matrix before setting the declared output layout/count, with 5.1
-lowered specifically to `5.1(side)`. Cache validation rejects a decoded buffer
+5.1(back), and 7.1 therefore cannot alias by extent. The Adapter selects
+`-map 0:<absolute stream index>` and installs only an explicit ordinal identity
+`pan=<N>c|c0=c0...` matrix before setting the raw output count. Component
+standard/explicit conversion executes later in `mondrian-audio` and therefore
+cannot fragment or corrupt the native PCM cache. Cache validation rejects a decoded buffer
 whose layout differs even when its raw sample extent happens to match. The
-selection, including its authorizing source fingerprint, participates in
-window single-flight and persistent Session identity, so two Components of one
-file cannot alias the same PCM entry and a file replacement cannot reuse an old
-selection.
+selection, including its authorizing source fingerprint and exact native
+layout, participates in window single-flight and persistent Session identity,
+so two distinct physical selections cannot alias the same PCM entry and a file
+replacement cannot reuse an old selection.
 
 Audio probing reads FFmpeg's declared channel layout rather than deriving it
 from channel count. `5.1(side)`, `5.1(back)`, and 7.1 project to distinct shared

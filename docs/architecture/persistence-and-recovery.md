@@ -46,7 +46,7 @@ values cannot be mixed into an unregistered hybrid identity. Archive and preview
 fingerprints, OCIO CPU processor keys, and renderer GPU shader keys all include
 the exact package identity.
 
-Document schema v12 retains the v5 Custom OCIO reproducibility contract and the
+Document schema v13 retains the v5 Custom OCIO reproducibility contract and the
 v6 removal of the redundant sequence-level ACES workflow selector. It also
 requires the Mondrian Standard package identity to pin both the SDR and
 1000-nit HDR View Transform IDs and versions; the old single default-View field
@@ -78,6 +78,11 @@ Version 12 replaces the closed audio-layout enum with canonical named-speaker
 sets and bounded Discrete buses. Standard layouts serialize their speaker
 positions; invalid, empty, duplicate, or over-capacity layouts fail during
 deserialization, and v11 is deliberately not inferred during Alpha.
+Version 13 makes each persisted audio Component's source-to-Sequence mapping
+explicit as either the versioned fail-closed Standard policy or one canonical
+sparse matrix. Matrix source/destination layouts, channel bounds, coefficient
+finiteness and duplicate edges are validated at deserialization and Sequence
+closure boundaries; v12 is deliberately not inferred during Alpha.
 Current new sequences default to SceneReferred and persist the selected engine's
 package-pinned rendering View intent; DisplayReferred is the explicit
 direct-colorimetric bypass.

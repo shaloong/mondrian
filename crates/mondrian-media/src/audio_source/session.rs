@@ -1,7 +1,7 @@
 //! Bounded persistent FFmpeg child-process sessions for decoded source windows.
 
 use super::{
-    audio_frame_timestamp, canceled_audio_decode, mapping::standard_pan_filter,
+    audio_frame_timestamp, canceled_audio_decode, mapping::identity_pan_filter,
     AudioSourceIdentity, AudioWindowDecoder, AudioWindowDecoderDiagnostics,
 };
 use crate::audio::AudioBuffer;
@@ -309,25 +309,7 @@ impl DecodeSession {
     fn spawn(key: &SessionKey, start_frame: i64) -> Result<Self> {
         let (input_start_frame, exact_trim_frames) =
             exact_seek_partition(start_frame, key.sample_rate);
-        let pan_filter =
-            standard_pan_filter(key.source.selection.source_layout(), key.channel_layout)
-                .ok_or_else(|| MondrianError::DecodeFailed {
-                    asset_id: key.source.path.display().to_string(),
-                    reason: format!(
-                        "no explicit standard channel mapping from {:?} to {:?}",
-                        key.source.selection.source_layout(),
-                        key.channel_layout
-                    ),
-                })?;
-        let output_layout = ffmpeg_channel_layout(key.channel_layout).ok_or_else(|| {
-            MondrianError::DecodeFailed {
-                asset_id: key.source.path.display().to_string(),
-                reason: format!(
-                    "audio output layout {:?} has no explicit FFmpeg lowering",
-                    key.channel_layout
-                ),
-            }
-        })?;
+        let pan_filter = identity_pan_filter(key.channel_layout);
         let mut command = Command::new("ffmpeg");
         command.arg("-v").arg("error").arg("-nostdin");
         if input_start_frame > 0 {
@@ -353,8 +335,6 @@ impl DecodeSession {
             .arg("pcm_f32le")
             .arg("-filter:a")
             .arg(pan_filter)
-            .arg("-channel_layout")
-            .arg(output_layout)
             .arg("-ac")
             .arg(key.channel_layout.channel_count().to_string())
             .arg("-ar")
@@ -592,15 +572,6 @@ impl DecodeSession {
     }
 }
 
-fn ffmpeg_channel_layout(layout: AudioChannelLayout) -> Option<&'static str> {
-    match layout {
-        AudioChannelLayout::Mono => Some("mono"),
-        AudioChannelLayout::Stereo => Some("stereo"),
-        AudioChannelLayout::Surround51Side => Some("5.1(side)"),
-        AudioChannelLayout::Speakers(_) | AudioChannelLayout::Discrete(_) => None,
-    }
-}
-
 fn ffmpeg_stream_map(stream_index: u32) -> String {
     format!("0:{stream_index}")
 }
@@ -718,26 +689,6 @@ mod tests {
         let (input, trim) = exact_seek_partition(i64::MAX, sample_rate);
         assert_eq!(input.saturating_add(trim), i64::MAX);
         assert!(trim <= 480_000);
-    }
-
-    #[test]
-    fn ffmpeg_layout_names_preserve_semantic_surround_positions() {
-        assert_eq!(
-            ffmpeg_channel_layout(AudioChannelLayout::Mono),
-            Some("mono")
-        );
-        assert_eq!(
-            ffmpeg_channel_layout(AudioChannelLayout::Stereo),
-            Some("stereo")
-        );
-        assert_eq!(
-            ffmpeg_channel_layout(AudioChannelLayout::Surround51Side),
-            Some("5.1(side)")
-        );
-        assert_eq!(
-            ffmpeg_channel_layout(AudioChannelLayout::Surround51Back),
-            None
-        );
     }
 
     #[test]

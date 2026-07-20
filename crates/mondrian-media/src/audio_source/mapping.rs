@@ -54,57 +54,17 @@ impl AudioSourceSelection {
     }
 }
 
-/// Resolve the deterministic standard mix matrix for one source/output pair.
+/// Lower an exact native layout to an ordinal FFmpeg identity `pan` filter.
 ///
-/// Coefficients are linear-amplitude values. LFE is deliberately omitted from
-/// standard downmixes; no hidden normalization, clipping, or limiter is added.
-pub(super) fn standard_pan_filter(
-    source: &ChannelLayout,
-    output: AudioChannelLayout,
-) -> Option<&'static str> {
-    match (source, output) {
-        (ChannelLayout::Mono | ChannelLayout::Unspecified(1), AudioChannelLayout::Mono) => {
-            Some("pan=mono|c0=c0")
-        }
-        (ChannelLayout::Mono | ChannelLayout::Unspecified(1), AudioChannelLayout::Stereo) => {
-            Some("pan=stereo|c0=c0|c1=c0")
-        }
-        (
-            ChannelLayout::Mono | ChannelLayout::Unspecified(1),
-            AudioChannelLayout::Surround51Side,
-        ) => Some(
-            "pan=5.1(side)|c0=0*c0|c1=0*c0|c2=c0|c3=0*c0|c4=0*c0|c5=0*c0",
-        ),
-        (ChannelLayout::Stereo | ChannelLayout::Unspecified(2), AudioChannelLayout::Mono) => {
-            Some("pan=mono|c0=0.5*c0+0.5*c1")
-        }
-        (ChannelLayout::Stereo | ChannelLayout::Unspecified(2), AudioChannelLayout::Stereo) => {
-            Some("pan=stereo|c0=c0|c1=c1")
-        }
-        (
-            ChannelLayout::Stereo | ChannelLayout::Unspecified(2),
-            AudioChannelLayout::Surround51Side,
-        ) => Some(
-            "pan=5.1(side)|c0=c0|c1=c1|c2=0*c0|c3=0*c0|c4=0*c0|c5=0*c0",
-        ),
-        (ChannelLayout::Surround51Side, AudioChannelLayout::Mono) => Some(
-            "pan=mono|c0=0.5*c0+0.5*c1+0.7071067811865476*c2+0.3535533905932738*c4+0.3535533905932738*c5",
-        ),
-        (ChannelLayout::Surround51Side, AudioChannelLayout::Stereo) => Some(
-            "pan=stereo|c0=c0+0.7071067811865476*c2+0.7071067811865476*c4|c1=c1+0.7071067811865476*c2+0.7071067811865476*c5",
-        ),
-        (ChannelLayout::Surround51Side, AudioChannelLayout::Surround51Side) => {
-            Some("pan=5.1(side)|c0=c0|c1=c1|c2=c2|c3=c3|c4=c4|c5=c5")
-        }
-        (
-            ChannelLayout::Unspecified(_)
-            | ChannelLayout::Surround51Back
-            | ChannelLayout::Surround71
-            | ChannelLayout::Other(_),
-            _,
-        ) => None,
-        (_, AudioChannelLayout::Speakers(_) | AudioChannelLayout::Discrete(_)) => None,
+/// Channel conversion belongs to the prepared audio graph. The media Adapter
+/// only proves native interleaving and never bakes Clip-specific downmix policy
+/// into decoded-window cache identity.
+pub(super) fn identity_pan_filter(layout: AudioChannelLayout) -> String {
+    let mut filter = format!("pan={}c", layout.channel_count());
+    for channel in 0..layout.channel_count() {
+        filter.push_str(&format!("|c{channel}=c{channel}"));
     }
+    filter
 }
 
 #[cfg(test)]
@@ -112,68 +72,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_supported_standard_layout_pairs_have_an_explicit_matrix() {
-        for source in [
-            ChannelLayout::Mono,
-            ChannelLayout::Stereo,
-            ChannelLayout::Surround51Side,
-        ] {
-            for output in [
-                AudioChannelLayout::Mono,
-                AudioChannelLayout::Stereo,
-                AudioChannelLayout::Surround51Side,
-            ] {
-                assert!(standard_pan_filter(&source, output).is_some());
-            }
-        }
-    }
-
-    #[test]
-    fn unsupported_or_ambiguous_native_layouts_fail_closed() {
-        for source in [
-            ChannelLayout::Unspecified(3),
-            ChannelLayout::Surround51Back,
-            ChannelLayout::Surround71,
-            ChannelLayout::Other(4),
-        ] {
-            assert_eq!(
-                standard_pan_filter(&source, AudioChannelLayout::Stereo),
-                None
-            );
-        }
+    fn identity_filter_preserves_every_ordinal_without_conversion() {
         assert_eq!(
-            standard_pan_filter(&ChannelLayout::Stereo, AudioChannelLayout::Surround51Back),
-            None
+            identity_pan_filter(AudioChannelLayout::Mono),
+            "pan=1c|c0=c0"
         );
         assert_eq!(
-            standard_pan_filter(
-                &ChannelLayout::Stereo,
-                AudioChannelLayout::discrete(2).expect("discrete layout")
-            ),
-            None
+            identity_pan_filter(AudioChannelLayout::Surround51Side),
+            "pan=6c|c0=c0|c1=c1|c2=c2|c3=c3|c4=c4|c5=c5"
         );
-    }
-
-    #[test]
-    fn unspecified_one_and_two_channel_sources_use_explicit_discrete_defaults() {
-        assert_eq!(
-            standard_pan_filter(&ChannelLayout::Unspecified(1), AudioChannelLayout::Stereo),
-            Some("pan=stereo|c0=c0|c1=c0")
-        );
-        assert_eq!(
-            standard_pan_filter(&ChannelLayout::Unspecified(2), AudioChannelLayout::Stereo),
-            Some("pan=stereo|c0=c0|c1=c1")
-        );
-    }
-
-    #[test]
-    fn surround_downmix_omits_lfe_and_uses_semantic_side_channels() {
-        let stereo =
-            standard_pan_filter(&ChannelLayout::Surround51Side, AudioChannelLayout::Stereo)
-                .expect("5.1 side to stereo");
-
-        assert!(!stereo.contains("c3"));
-        assert!(stereo.contains("c4"));
-        assert!(stereo.contains("c5"));
     }
 }

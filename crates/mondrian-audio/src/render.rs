@@ -25,7 +25,7 @@ pub trait AudioPcmSource {
         &mut self,
         edit: AudioComponentEditId,
         source_frames: &[i64],
-        channel_layout: AudioChannelLayout,
+        source_layout: AudioChannelLayout,
         destination: &mut [f32],
     ) -> Result<(), AudioExecutionError>;
 }
@@ -75,6 +75,10 @@ pub struct AudioRenderCapacity {
     pub node_scratch_slots: usize,
     /// Preallocated interleaved samples in every node buffer.
     pub samples_per_node_slot: usize,
+    /// Largest native source channel count prepared for one Contribution.
+    pub maximum_source_channels: usize,
+    /// Reused native-source sample storage retained by the Session.
+    pub source_scratch_samples: usize,
     /// Non-zero Contribution and Route compensation lines.
     pub compensation_delay_line_count: usize,
     /// Interleaved sample storage retained by all compensation lines.
@@ -124,6 +128,7 @@ impl NodeBuffers {
 #[derive(Debug)]
 struct RenderScratch {
     source_frames: Vec<i64>,
+    source_pcm: Vec<f32>,
     contribution_pcm: Vec<f32>,
     contribution_processed: Vec<f32>,
     contribution_sample_gains: Vec<f32>,
@@ -134,9 +139,10 @@ struct RenderScratch {
 }
 
 impl RenderScratch {
-    fn new(max_frames: usize, samples: usize) -> Self {
+    fn new(max_frames: usize, samples: usize, source_samples: usize) -> Self {
         Self {
             source_frames: vec![-1; max_frames],
+            source_pcm: vec![0.0; source_samples],
             contribution_pcm: vec![0.0; samples],
             contribution_processed: vec![0.0; samples],
             contribution_sample_gains: vec![0.0; samples],
@@ -180,6 +186,10 @@ impl AudioRenderSession {
             .max_block_frames
             .checked_mul(contract.channel_count())
             .ok_or(AudioExecutionError::BufferTooLarge)?;
+        let source_samples = contract
+            .max_block_frames
+            .checked_mul(plan.schedule.summary.maximum_source_channels)
+            .ok_or(AudioExecutionError::BufferTooLarge)?;
         let node_buffers = (0..plan.schedule.summary.scratch_slot_count)
             .map(|_| NodeBuffers::new(samples))
             .collect();
@@ -221,6 +231,8 @@ impl AudioRenderSession {
             channels: contract.channel_count(),
             node_scratch_slots: plan.schedule.summary.scratch_slot_count,
             samples_per_node_slot: samples,
+            maximum_source_channels: plan.schedule.summary.maximum_source_channels,
+            source_scratch_samples: source_samples,
             compensation_delay_line_count,
             compensation_delay_samples,
             processor_occurrences: processor_runtime.occurrence_count(),
@@ -230,7 +242,7 @@ impl AudioRenderSession {
         Ok(Self {
             plan,
             node_buffers,
-            scratch: RenderScratch::new(contract.max_block_frames, samples),
+            scratch: RenderScratch::new(contract.max_block_frames, samples, source_samples),
             contribution_delay_lines,
             route_delay_lines,
             processor_runtime,
@@ -497,11 +509,22 @@ fn render_track_contributions(
             .checked_add(active_samples)
             .ok_or(AudioExecutionError::BufferTooLarge)?;
 
-        scratch.contribution_pcm[..samples].fill(0.0);
+        let source_layout = contribution.channel_mixer.source_layout();
+        let source_samples = request
+            .frames
+            .checked_mul(source_layout.channel_count())
+            .ok_or(AudioExecutionError::BufferTooLarge)?;
+        scratch.source_pcm[..source_samples].fill(0.0);
         source.read_indexed_interleaved(
             contribution.semantic.edit_id,
             &scratch.source_frames[..request.frames],
-            channel_layout,
+            source_layout,
+            &mut scratch.source_pcm[..source_samples],
+        )?;
+        contribution.channel_mixer.mix_into(
+            backend,
+            request.frames,
+            &scratch.source_pcm[..source_samples],
             &mut scratch.contribution_pcm[..samples],
         )?;
 
@@ -892,6 +915,12 @@ pub enum AudioExecutionError {
     /// Caller-provided output size disagrees with the Render Contract.
     #[error("audio render output size does not match the request")]
     OutputSizeMismatch,
+    /// Source storage did not match the prepared channel-mix source layout.
+    #[error("audio channel-mix source size does not match its prepared layout")]
+    ChannelMixSourceSizeMismatch,
+    /// Destination storage did not match the prepared channel-mix destination layout.
+    #[error("audio channel-mix destination size does not match its prepared layout")]
+    ChannelMixDestinationSizeMismatch,
     /// A prepared Track was unexpectedly absent.
     #[error("prepared audio Track is missing")]
     MissingPreparedTrack,

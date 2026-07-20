@@ -1548,7 +1548,11 @@ impl SequenceCollection {
             sequence.validate_author_identities()?;
             sequence
                 .audio_program
-                .validate(&sequence.audio_tracks, &sequence.audio_roles)
+                .validate(
+                    &sequence.audio_tracks,
+                    &sequence.audio_roles,
+                    sequence.settings.audio_channel_layout,
+                )
                 .map_err(|error| mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "validate_audio_program".to_owned(),
                     reason: format!(
@@ -1580,6 +1584,19 @@ impl SequenceCollection {
                             step_id: "validate_audio_program".to_owned(),
                             reason: format!("nested audio output does not exist: {output_id}"),
                         });
+                    }
+                    if let crate::audio::AudioComponentChannelMapping::Explicit(matrix) =
+                        &edit.channel_mapping
+                    {
+                        if matrix.source_layout() != child.settings.audio_channel_layout {
+                            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                                step_id: "validate_audio_program".to_owned(),
+                                reason: format!(
+                                    "nested audio edit {} matrix source layout does not match child Sequence {}",
+                                    edit.id, sequence_id
+                                ),
+                            });
+                        }
                     }
                 }
             }

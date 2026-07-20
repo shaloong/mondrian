@@ -17,7 +17,11 @@ pub fn compile_audio_program(
     sequence: &Sequence,
     request: AudioCompileRequest,
 ) -> Result<CompiledAudioProgram, AudioCompileError> {
-    sequence.audio_program.validate(&sequence.audio_tracks, &sequence.audio_roles)?;
+    sequence.audio_program.validate(
+        &sequence.audio_tracks,
+        &sequence.audio_roles,
+        sequence.settings.audio_channel_layout,
+    )?;
     let output = sequence
         .audio_program
         .outputs
@@ -118,6 +122,7 @@ pub fn compile_audio_program(
                         speed: clip.speed,
                     },
                     source,
+                    channel_mapping: edit.channel_mapping.clone(),
                     processing_scope: edit.processing.scope_id,
                     scope_in: edit.processing.scope_in,
                     local_time_in: edit.local_time_in,

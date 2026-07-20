@@ -20,10 +20,9 @@ const AUDIO_SOURCE_CACHE_ENTRY_CAPACITY: usize = 128;
 const AUDIO_SOURCE_CACHE_BYTE_BUDGET: usize = 256 * 1024 * 1024;
 const AUDIO_SOURCE_FAILURE_CAPACITY: usize = 64;
 
-/// Shared weighted-LRU owner for decoded PCM windows at one output contract.
+/// Shared weighted-LRU owner for native-layout decoded PCM windows at one sample rate.
 pub struct AudioSourceCache {
     sample_rate: u32,
-    channel_layout: AudioChannelLayout,
     window_frames: usize,
     entry_capacity: usize,
     byte_budget: usize,
@@ -39,6 +38,7 @@ pub(super) struct AudioSourceIdentity {
     pub(super) modified_secs: Option<u64>,
     pub(super) modified_nanos: Option<u32>,
     pub(super) selection: AudioSourceSelection,
+    pub(super) channel_layout: AudioChannelLayout,
 }
 
 impl AudioSourceIdentity {
@@ -54,10 +54,29 @@ impl AudioSourceIdentity {
                 reason: "audio source revision changed after stream selection".to_owned(),
             });
         }
-        Ok(Self::from_metadata(path, &metadata, selection))
+        let channel_layout = selection.source_layout().exact_signal_layout().ok_or_else(|| {
+            MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason: format!(
+                    "selected audio stream layout {:?} has no exact signal interpretation",
+                    selection.source_layout()
+                ),
+            }
+        })?;
+        Ok(Self::from_metadata(
+            path,
+            &metadata,
+            selection,
+            channel_layout,
+        ))
     }
 
-    fn from_metadata(path: &Path, metadata: &Metadata, selection: AudioSourceSelection) -> Self {
+    fn from_metadata(
+        path: &Path,
+        metadata: &Metadata,
+        selection: AudioSourceSelection,
+        channel_layout: AudioChannelLayout,
+    ) -> Self {
         let modified = metadata
             .modified()
             .ok()
@@ -68,6 +87,7 @@ impl AudioSourceIdentity {
             modified_secs: modified.map(|duration| duration.as_secs()),
             modified_nanos: modified.map(|duration| duration.subsec_nanos()),
             selection,
+            channel_layout,
         }
     }
 }
@@ -137,7 +157,7 @@ pub(super) trait AudioWindowDecoder: Send + Sync {
     }
 }
 
-/// Stable reader for one fingerprinted media source at one output contract.
+/// Stable reader for one fingerprinted media source in its exact native layout.
 ///
 /// Readers are cheap handles. PCM ownership remains in the shared weighted LRU
 /// and a file replacement creates a different identity on the next `open`.
@@ -207,10 +227,9 @@ pub struct AudioSourceCacheDiagnostics {
 impl AudioSourceCache {
     /// Create the product cache: ten-second decode windows, 128 entries, and a
     /// 256 MiB global PCM payload budget across every open source.
-    pub fn new(sample_rate: u32, channel_layout: AudioChannelLayout) -> Self {
+    pub fn new(sample_rate: u32) -> Self {
         Self::with_decoder(
             sample_rate,
-            channel_layout,
             AUDIO_SOURCE_WINDOW_SECONDS,
             AUDIO_SOURCE_CACHE_ENTRY_CAPACITY,
             AUDIO_SOURCE_CACHE_BYTE_BUDGET,
@@ -218,9 +237,9 @@ impl AudioSourceCache {
         )
     }
 
-    /// Semantic layout shared by every decoded window in this cache.
-    pub const fn channel_layout(&self) -> AudioChannelLayout {
-        self.channel_layout
+    /// Sample rate shared by every decoded window in this cache.
+    pub const fn sample_rate(&self) -> u32 {
+        self.sample_rate
     }
 
     /// Create an independently scheduled source cache with explicit hard limits.
@@ -231,14 +250,12 @@ impl AudioSourceCache {
     /// and byte; callers should expose the effective values through diagnostics.
     pub fn new_bounded(
         sample_rate: u32,
-        channel_layout: AudioChannelLayout,
         window_seconds: usize,
         entry_capacity: usize,
         byte_budget: usize,
     ) -> Self {
         Self::with_decoder(
             sample_rate,
-            channel_layout,
             window_seconds,
             entry_capacity,
             byte_budget,
@@ -248,7 +265,6 @@ impl AudioSourceCache {
 
     fn with_decoder(
         sample_rate: u32,
-        channel_layout: AudioChannelLayout,
         window_seconds: usize,
         entry_capacity: usize,
         byte_budget: usize,
@@ -257,7 +273,6 @@ impl AudioSourceCache {
         let sample_rate = sample_rate.max(8_000);
         Self {
             sample_rate,
-            channel_layout,
             window_frames: (sample_rate as usize).saturating_mul(window_seconds.max(1)),
             entry_capacity: entry_capacity.max(1),
             byte_budget: byte_budget.max(1),
@@ -273,16 +288,6 @@ impl AudioSourceCache {
         path: &Path,
         selection: AudioSourceSelection,
     ) -> Result<AudioSourceReader> {
-        if mapping::standard_pan_filter(selection.source_layout(), self.channel_layout).is_none() {
-            return Err(MondrianError::DecodeFailed {
-                asset_id: path.display().to_string(),
-                reason: format!(
-                    "no explicit standard channel mapping from {:?} to {:?}",
-                    selection.source_layout(),
-                    self.channel_layout
-                ),
-            });
-        }
         Ok(AudioSourceReader {
             cache: Arc::clone(self),
             source: AudioSourceIdentity::capture(path, selection)?,
@@ -369,7 +374,7 @@ impl AudioSourceCache {
                 key.start_frame,
                 self.window_frames,
                 self.sample_rate,
-                self.channel_layout,
+                key.source.channel_layout,
                 cancellation,
             )
             .and_then(|buffer| self.validate_window(&key, buffer));
@@ -443,9 +448,9 @@ impl AudioSourceCache {
         key: &AudioSourceWindowKey,
         buffer: AudioBuffer,
     ) -> Result<AudioBuffer> {
-        let channels = self.channel_layout.channel_count();
+        let channels = key.source.channel_layout.channel_count();
         if buffer.sample_rate != self.sample_rate
-            || buffer.channel_layout != self.channel_layout
+            || buffer.channel_layout != key.source.channel_layout
             || !buffer.samples.len().is_multiple_of(channels)
             || buffer.frame_count() > self.window_frames
         {
@@ -456,7 +461,7 @@ impl AudioSourceCache {
                     buffer.sample_rate,
                     self.sample_rate,
                     buffer.channel_layout,
-                    self.channel_layout,
+                    key.source.channel_layout,
                     buffer.frame_count(),
                     self.window_frames,
                 ),
@@ -467,6 +472,11 @@ impl AudioSourceCache {
 }
 
 impl AudioSourceReader {
+    /// Exact native semantic layout produced by this reader.
+    pub const fn channel_layout(&self) -> AudioChannelLayout {
+        self.source.channel_layout
+    }
+
     /// Fill one exact interleaved output block from bounded decoded windows.
     ///
     /// Negative and post-EOF coordinates remain silence. The method never
@@ -496,7 +506,7 @@ impl AudioSourceReader {
         if cancellation.is_canceled() {
             return Err(canceled_audio_decode(&self.source.path));
         }
-        let channels = self.cache.channel_layout.channel_count();
+        let channels = self.source.channel_layout.channel_count();
         let expected_samples = frames.checked_mul(channels).ok_or_else(|| {
             MondrianError::Other(anyhow::anyhow!("audio source block extent overflow"))
         })?;
@@ -702,7 +712,6 @@ mod tests {
         file.write_all(b"source").expect("source identity");
         let cache = Arc::new(AudioSourceCache::with_decoder(
             8_000,
-            AudioChannelLayout::Stereo,
             1,
             entry_capacity,
             byte_budget,
@@ -740,7 +749,6 @@ mod tests {
         let decoder = Arc::new(RampWindowDecoder::new());
         let cache = Arc::new(AudioSourceCache::with_decoder(
             8_000,
-            AudioChannelLayout::Stereo,
             1,
             4,
             4 * 8_000 * 2 * std::mem::size_of::<f32>(),
@@ -769,7 +777,6 @@ mod tests {
         let decoder = Arc::new(BlockingWindowDecoder { entered: AtomicBool::new(false) });
         let cache = Arc::new(AudioSourceCache::with_decoder(
             48_000,
-            AudioChannelLayout::Stereo,
             1,
             2,
             1_000_000,
@@ -817,7 +824,6 @@ mod tests {
         });
         let cache = Arc::new(AudioSourceCache::with_decoder(
             48_000,
-            AudioChannelLayout::Stereo,
             1,
             2,
             1_000_000,
@@ -896,13 +902,7 @@ mod tests {
 
     #[test]
     fn independently_bounded_cache_reports_effective_hard_limits() {
-        let cache = AudioSourceCache::new_bounded(
-            48_000,
-            AudioChannelLayout::Mono,
-            10,
-            4,
-            16 * 1024 * 1024,
-        );
+        let cache = AudioSourceCache::new_bounded(48_000, 10, 4, 16 * 1024 * 1024);
         let diagnostics = cache.diagnostics();
         assert_eq!(diagnostics.entry_capacity, 4);
         assert_eq!(diagnostics.byte_budget, 16 * 1024 * 1024);
@@ -940,7 +940,7 @@ mod tests {
         let selection = stereo_selection(file.path(), 0);
         file.write_all(b"-replacement").expect("replace source identity");
         file.flush().expect("flush replacement");
-        let cache = Arc::new(AudioSourceCache::new(48_000, AudioChannelLayout::Stereo));
+        let cache = Arc::new(AudioSourceCache::new(48_000));
 
         let error = cache
             .open(file.path(), selection)
@@ -957,7 +957,6 @@ mod tests {
         file.write_all(b"source").expect("source identity");
         let cache = Arc::new(AudioSourceCache::with_decoder(
             8_000,
-            AudioChannelLayout::Stereo,
             1,
             2,
             128 * 1024,
@@ -999,7 +998,6 @@ mod tests {
         );
         let cache = Arc::new(AudioSourceCache::with_decoder(
             sample_rate,
-            channel_layout,
             1,
             1,
             sample_rate as usize * usize::from(channels) * std::mem::size_of::<f32>(),
@@ -1055,7 +1053,7 @@ mod tests {
             eprintln!("skipped: MONDRIAN_AUDIO_EXTERNAL_MEDIA_PATH not set");
             return;
         };
-        let cache = Arc::new(AudioSourceCache::new(48_000, AudioChannelLayout::Stereo));
+        let cache = Arc::new(AudioSourceCache::new(48_000));
         let stream = crate::MediaInfo::probe(&path)
             .expect("probe external source")
             .primary_audio()

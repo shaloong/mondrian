@@ -3,7 +3,9 @@ use mondrian_core::{
     ExactAutomationCurve, MixBusId, ParameterId, ProgramOutputId, SequenceId, TimelineTime,
     TimelineTimeRange, TrackId,
 };
-use mondrian_timeline::audio::{AudioFadeCurve, AudioRoute, AudioTransitionCurve};
+use mondrian_timeline::audio::{
+    AudioComponentChannelMapping, AudioFadeCurve, AudioRoute, AudioTransitionCurve,
+};
 use mondrian_timeline::clip::SpeedMap;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -157,6 +159,8 @@ pub struct CompiledAudioContribution {
     pub source_time_map: CompiledSourceTimeMap,
     /// Media component or nested public output.
     pub source: CompiledAudioSource,
+    /// Author-selected standard or explicit source-to-Sequence channel mapping.
+    pub(crate) channel_mapping: AudioComponentChannelMapping,
     /// Referenced non-placement processing definition.
     pub(crate) processing_scope: AudioProcessingScopeId,
     /// Scope-local coordinate at component-local zero.

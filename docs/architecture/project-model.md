@@ -120,7 +120,7 @@ is written with that field explicitly.
 
 Archive and document JSON pass through separate version registries before typed
 deserialization. During Alpha there are deliberately no legacy document steps:
-schema v12 is the sole accepted author schema, and older/future versions fail
+schema v13 is the sole accepted author schema, and older/future versions fail
 instead of being guessed. Version 5 introduced the explicit tagged
 `mondrian_standard` / `aces` / `custom_ocio` project contract and makes every
 Mondrian Standard package-identity field mandatory: product ID/version, config
@@ -157,6 +157,12 @@ signal-layout value: Mono, a validated named-speaker set, or a bounded Discrete
 bus. Standard Stereo and surround layouts serialize by semantic positions, so
 5.1(side), 5.1(back), and equal-count custom layouts cannot alias. Alpha does
 not guess a v11 layout migration.
+Version 13 adds mandatory per-Component channel-mapping intent. `Standard`
+resolves only against an exact source dependency and the owning Sequence
+layout; `Explicit` persists one canonical sparse matrix with both layouts and
+bounded finite coefficients. Native decoded PCM caching, Sequence Program
+layout, and device/export delivery adaptation are separate contracts. Alpha
+does not infer a v12 field or silently migrate an old FFmpeg downmix.
 
 SQLite schema ownership remains in `mondrian-assets`; the current version is
 v2. Its ordered Registry uses
@@ -169,7 +175,7 @@ Future split-entry layouts require an archive migration and new
 SQLite migrates only in the extracted runtime copy. The source `.mdp` is never
 rewritten by open.
 
-Current document schema v12 persists canonical rational `TimelineTime` values
+Current document schema v13 persists canonical rational `TimelineTime` values
 directly and requires the shared visual/audio `ParameterSchema`. It does not
 contain frame-oriented `TimeCode`, `TimeTicks`, descriptor-level duplicate
 defaults/types, editor-preset interpolation capabilities, or compatibility
