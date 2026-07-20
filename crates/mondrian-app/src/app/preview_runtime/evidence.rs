@@ -17,6 +17,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             loading_frames: self.metrics.loading_frames.get(),
             stale_frames: self.metrics.stale_frames.get(),
             unavailable_frames: self.metrics.unavailable_frames.get(),
+            unavailability: self.unavailability_evidence.borrow().snapshot(),
             playback_current_stalled_expirations: self
                 .metrics
                 .playback_current_stalled_expirations
@@ -330,6 +331,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     /// Return the latest color-management rejection captured for the current viewer request.
     pub fn last_color_rejection(&self) -> Option<PreviewColorRejection> {
         self.last_color_rejection.borrow().clone()
+    }
+
+    /// Return the latest typed reason a Preview candidate or presentation was unavailable.
+    pub fn last_unavailability(&self) -> Option<PreviewUnavailability> {
+        self.unavailability_evidence.borrow().last()
     }
 
     pub(super) fn record_input_color_resolution(&self, source: InputColorResolutionSource) {

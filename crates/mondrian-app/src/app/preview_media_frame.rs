@@ -15,7 +15,7 @@ use mondrian_playback::FramePresentationQuality;
 use mondrian_renderer::{
     execute_cpu_source_input_stage, project_affine_to_sampled_extents, CpuColorFrame,
     CpuSourceColorFrame, RenderColorStageDiagnostics, RenderColorTransformDiagnostics,
-    RenderInputTransform, ViewerGpuMediaSource, ViewerGpuNativeSource,
+    RenderColorTransformError, RenderInputTransform, ViewerGpuMediaSource, ViewerGpuNativeSource,
 };
 
 use super::preview_execution::PreviewDecodeExecutionSummary;
@@ -188,18 +188,21 @@ impl MediaPreviewFrame {
         })
     }
 
-    pub(crate) fn working_frame(&self) -> Result<MediaPreviewWorkingFrame, String> {
+    pub(crate) fn working_frame(
+        &self,
+    ) -> Result<MediaPreviewWorkingFrame, MediaPreviewWorkingFrameError> {
         match &self.payload {
             MediaPreviewPayload::Working(frame) => Ok(MediaPreviewWorkingFrame {
                 frame: frame.clone(),
                 color_diagnostics: None,
                 stage_diagnostics: RenderColorStageDiagnostics::default(),
             }),
-            MediaPreviewPayload::Native(native) => Err(format!(
-                    "media preview frame is native GPU decoded ({} {:?}) and requires renderer native import; no CPU working fallback exists",
-                    native.native_frame.handle_kind().as_str(),
-                    native.native_frame.surface_format
-                )),
+            MediaPreviewPayload::Native(native) => {
+                Err(MediaPreviewWorkingFrameError::NativeSurfaceRequiresGpu {
+                    handle_kind: native.native_frame.handle_kind(),
+                    surface_format: native.native_frame.surface_format,
+                })
+            }
             MediaPreviewPayload::Source(source) => {
                 let cached_before = source.working_cache.get().is_some();
                 let entry = source
@@ -214,12 +217,14 @@ impl MediaPreviewFrame {
                             color_diagnostics: output.result.diagnostics,
                             stage_diagnostics: output.stage_diagnostics,
                         })
-                        .map_err(|err| {
-                            format!("viewer preview lazy input color transform failed: {err}")
-                        })
+                        .map_err(Arc::new)
                     })
                     .as_ref()
-                    .map_err(Clone::clone)?;
+                    .map_err(
+                        |source| MediaPreviewWorkingFrameError::InputColorTransform {
+                            source: Arc::clone(source),
+                        },
+                    )?;
                 Ok(MediaPreviewWorkingFrame {
                     frame: entry.frame.clone(),
                     color_diagnostics: (!cached_before).then_some(entry.color_diagnostics),
@@ -255,6 +260,23 @@ pub(crate) struct MediaPreviewWorkingFrame {
     pub(crate) stage_diagnostics: RenderColorStageDiagnostics,
 }
 
+/// Failure to adapt a decoded Preview payload into a CPU working frame.
+#[derive(Debug, Clone, thiserror::Error)]
+pub(crate) enum MediaPreviewWorkingFrameError {
+    #[error(
+        "native decoded surface ({handle_kind:?} {surface_format:?}) requires renderer native import; no CPU working fallback exists"
+    )]
+    NativeSurfaceRequiresGpu {
+        handle_kind: DecodedGpuFrameHandleKind,
+        surface_format: DecodedVideoSurfaceFormat,
+    },
+    #[error("lazy Preview input color transform failed: {source}")]
+    InputColorTransform {
+        #[source]
+        source: Arc<RenderColorTransformError>,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct MediaPreviewGpuSourceFrame {
     pub(crate) source: Arc<CpuSourceColorFrame>,
@@ -263,7 +285,8 @@ pub(crate) struct MediaPreviewGpuSourceFrame {
     pub(crate) decoder_handle_kind: Option<DecodedGpuFrameHandleKind>,
     pub(crate) decoded_surface_format: DecodedVideoSurfaceFormat,
     pub(crate) decoded_video_sampling: DecodedVideoSampling,
-    working_cache: Arc<OnceLock<Result<MediaPreviewWorkingFrameCacheEntry, String>>>,
+    working_cache:
+        Arc<OnceLock<Result<MediaPreviewWorkingFrameCacheEntry, Arc<RenderColorTransformError>>>>,
 }
 
 #[derive(Debug, Clone)]

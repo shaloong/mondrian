@@ -15,9 +15,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let Some(sequence) = state.sequence.as_ref() else {
             self.invalidate_preview_generation();
             self.scheduler.prune_obsolete();
-            self.frame_store.borrow_mut().clear_pinned_viewer_frame();
-            bump(&self.metrics.unavailable_frames);
-            return PreviewPresentationState::Unavailable;
+            return self.observe_preview_state(PreviewPresentationState::Unavailable(
+                PreviewUnavailability::no_content(
+                    PreviewOutputStage::Project,
+                    "no active Sequence",
+                ),
+            ));
         };
         let frame = state.current_frame().max(0);
         let (width, height) = preview_dimensions_for_state(state, sequence);
@@ -31,9 +34,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             Err(blocker) => {
                 self.record_preview_gpu_output_blocker(&blocker);
                 self.scheduler.prune_obsolete();
-                self.frame_store.borrow_mut().clear_pinned_viewer_frame();
-                bump(&self.metrics.unavailable_frames);
-                return PreviewPresentationState::Unavailable;
+                return self.observe_preview_state(PreviewPresentationState::Unavailable(
+                    PreviewUnavailability::blocked(
+                        PreviewOutputStage::DisplayContract,
+                        blocker.description(),
+                    ),
+                ));
             }
         };
         let color_context = sequence
@@ -49,14 +55,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         ));
         let render_started_at = Instant::now();
         let resolve_started_at = Instant::now();
-        let resolved =
-            self.resolve_sequence_elements(state, sequence, frame, width, height, color_context);
+        let resolved = self.resolve_timeline(state, sequence, frame, width, height, color_context);
         let mut render_stage_durations = PreviewRenderStageDurations {
             resolve_us: app_duration_us(resolve_started_at.elapsed()),
             ..PreviewRenderStageDurations::default()
         };
         let preview_state = match resolved {
-            Some(resolved) => {
+            PreviewTimelineResolution::Ready(resolved) => {
+                let resolved = resolved.plan;
                 self.execution.borrow_mut().set_presentation_quality(
                     resolved_preview_presentation_quality(&resolved.elements),
                 );
@@ -120,12 +126,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     let raster_contract =
                         match preview_raster_presentation_contract(&resolved.color_context) {
                             Ok(contract) => contract,
-                            Err(output_color_space) => {
-                                tracing::warn!(
-                                    output_color_space = ?output_color_space,
-                                    "CPU raster viewer has no compatible presentation contract"
+                            Err(error) => {
+                                return self.observe_preview_state(
+                                    PreviewPresentationState::Unavailable(error.unavailability()),
                                 );
-                                return PreviewPresentationState::Unavailable;
                             }
                         };
                     let output = match composite_resolved_preview(
@@ -137,8 +141,15 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     ) {
                         Ok(rgba) => rgba,
                         Err(err) => {
-                            tracing::warn!("viewer preview color render failed: {err}");
-                            return PreviewPresentationState::Unavailable;
+                            let reason = err.unavailability();
+                            tracing::warn!(
+                                code = reason.code(),
+                                detail = reason.detail(),
+                                "viewer Preview CPU execution failed"
+                            );
+                            return self.observe_preview_state(
+                                PreviewPresentationState::Unavailable(reason),
+                            );
                         }
                     };
                     render_stage_durations.accumulate_cpu_execution(output.execution_durations);
@@ -158,7 +169,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         raster_contract.color_space,
                         output.rgba,
                     ) {
-                        Some(frame) => {
+                        Ok(frame) => {
                             self.frame_store
                                 .borrow_mut()
                                 .insert_viewer_frame(resolved.cache_key, frame.clone());
@@ -180,20 +191,32 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                                 frame,
                             ))
                         }
-                        None => PreviewPresentationState::Unavailable,
+                        Err(error) => {
+                            PreviewPresentationState::Unavailable(PreviewUnavailability::failed(
+                                PreviewOutputStage::FramePackaging,
+                                error.to_string(),
+                            ))
+                        }
                     }
                 }
             }
-            None if self.execution.borrow().is_pending() => self
+            PreviewTimelineResolution::Pending { .. } => self
                 .stale_viewer_content_for_sequence(sequence, width, height)
                 .map(PreviewPresentationState::Stale)
                 .unwrap_or(PreviewPresentationState::Loading),
-            None => PreviewPresentationState::Unavailable,
+            PreviewTimelineResolution::Empty => {
+                PreviewPresentationState::Unavailable(PreviewUnavailability::no_content(
+                    PreviewOutputStage::TimelineEvaluation,
+                    "current Timeline position contains no visible elements",
+                ))
+            }
+            PreviewTimelineResolution::Unavailable { reason } => {
+                PreviewPresentationState::Unavailable(reason)
+            }
         };
         self.schedule_media_prefetches(state, sequence, frame, width, height);
         self.scheduler.prune_obsolete();
-        self.record_preview_state(&preview_state);
-        preview_state
+        self.observe_preview_state(preview_state)
     }
 
     fn cached_viewer_frame(&self, key: &ViewerPreviewCacheKey) -> Option<PreviewRasterFrame> {
@@ -223,12 +246,26 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             })
     }
 
+    fn observe_preview_state(
+        &self,
+        state: PreviewPresentationState<O>,
+    ) -> PreviewPresentationState<O> {
+        if matches!(state, PreviewPresentationState::Unavailable(_)) {
+            self.clear_terminal_viewer_state();
+        }
+        self.record_preview_state(&state);
+        state
+    }
+
     fn record_preview_state(&self, state: &PreviewPresentationState<O>) {
         match state {
             PreviewPresentationState::Ready(_) => bump(&self.metrics.ready_frames),
             PreviewPresentationState::Loading => bump(&self.metrics.loading_frames),
             PreviewPresentationState::Stale(_) => bump(&self.metrics.stale_frames),
-            PreviewPresentationState::Unavailable => bump(&self.metrics.unavailable_frames),
+            PreviewPresentationState::Unavailable(reason) => {
+                bump(&self.metrics.unavailable_frames);
+                self.unavailability_evidence.borrow_mut().observe(reason);
+            }
         }
     }
 }

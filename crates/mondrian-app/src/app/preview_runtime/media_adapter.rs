@@ -24,7 +24,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             state.is_playing(),
             state.last_timeline_seek_source,
         ));
-        let Some(key) = self.media_preview_key_for_asset(
+        let key = match self.media_preview_key_for_asset(
             state,
             &request.asset_id,
             request.color_space_override,
@@ -35,17 +35,22 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             &request.color_context,
             true,
             access_mode == PreviewDecodeAccessMode::PlaybackCursor,
-        ) else {
-            return PreviewTimelineMediaFrame::Unavailable {
-                reason: "media source resolution failed".to_owned(),
-            };
+        ) {
+            Ok(key) => key,
+            Err(reason) => return PreviewTimelineMediaFrame::Unavailable { reason },
         };
         if let Some(frame) = self.cached_media_frame(&key) {
             return PreviewTimelineMediaFrame::Ready(frame);
         }
         if self.failed_media_key(&key) {
             return PreviewTimelineMediaFrame::Unavailable {
-                reason: "media key is in terminal failure memory".to_owned(),
+                reason: PreviewUnavailability::failed(
+                    PreviewOutputStage::MediaDecode,
+                    format!(
+                        "media {} is in terminal decode failure memory",
+                        request.asset_id
+                    ),
+                ),
             };
         }
         self.execution.borrow_mut().set_pending(true);
@@ -96,14 +101,32 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         color_context: &ColorContext,
         record_color_rejection: bool,
         request_missing_proxy_generation: bool,
-    ) -> Option<MediaPreviewKey> {
-        let library = state.asset_library.as_ref()?;
+    ) -> Result<MediaPreviewKey, PreviewUnavailability> {
+        let library = state.asset_library.as_ref().ok_or_else(|| {
+            PreviewUnavailability::blocked(
+                PreviewOutputStage::MediaResolution,
+                "project asset library is unavailable",
+            )
+        })?;
         let asset = match library.get_asset(*asset_id) {
             Ok(Some(asset)) if asset.kind == AssetKind::Video => asset,
-            Ok(_) => return None,
+            Ok(Some(_)) => {
+                return Err(PreviewUnavailability::blocked(
+                    PreviewOutputStage::MediaResolution,
+                    format!("asset {asset_id} is not a video source"),
+                ));
+            }
+            Ok(None) => {
+                return Err(PreviewUnavailability::blocked(
+                    PreviewOutputStage::MediaResolution,
+                    format!("asset {asset_id} does not exist in the project library"),
+                ));
+            }
             Err(err) => {
-                tracing::debug!(asset_id = %asset_id, "viewer preview asset lookup failed: {err}");
-                return None;
+                return Err(PreviewUnavailability::failed(
+                    PreviewOutputStage::MediaResolution,
+                    format!("asset {asset_id} lookup failed: {err}"),
+                ));
             }
         };
         let proxy_config = state.proxy_config();
@@ -140,7 +163,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 }
                 self.record_input_color_resolution(resolved.input_color_resolution.source);
                 self.maybe_request_preview_proxy_generation(state, resolved.proxy_generation);
-                Some(resolved.key)
+                Ok(resolved.key)
             }
             PreviewMediaSourceOutcome::ColorRejected(rejection) => {
                 let resolution = rejection.input_color_resolution;
@@ -168,7 +191,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     color_diagnostic_issue_summary = ?diagnostic_issue_summary,
                     "viewer preview rejected media with missing color metadata"
                 );
-                None
+                Err(PreviewUnavailability::blocked(
+                    PreviewOutputStage::InputColor,
+                    format!(
+                        "asset {} input color interpretation was rejected: {}",
+                        rejection.asset_id, diagnostic_summary
+                    ),
+                ))
             }
             PreviewMediaSourceOutcome::Unavailable(unavailable) => {
                 tracing::debug!(
@@ -177,7 +206,15 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     reason = %unavailable.reason,
                     "viewer preview media source is unavailable"
                 );
-                None
+                Err(PreviewUnavailability::blocked(
+                    PreviewOutputStage::MediaResolution,
+                    format!(
+                        "asset {} source {} is unavailable: {}",
+                        unavailable.asset_id,
+                        unavailable.path.display(),
+                        unavailable.reason
+                    ),
+                ))
             }
         }
     }

@@ -9,18 +9,106 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mondrian_core::types::{BlendMode, ColorSpace};
-use mondrian_effects::CompiledEffectGraph;
+use mondrian_core::{OcioColorSpaceIdentity, OutputTransformIntentResolutionError};
+use mondrian_effects::{
+    CompiledEffectGraph, EffectExecutionError, EffectFloatExecutionError,
+    EffectFloatUnsupportedReason,
+};
 use mondrian_renderer::{
     composite_timeline_elements_color_frame_with_diagnostics,
     execute_cpu_program_monitor_boundary_rgba8, CpuColorFrame, RenderColorStageDiagnostics,
-    RenderColorTransformDiagnostics, RenderMonitorAdaptation, RenderOutputColorBoundary,
-    TimelineAdjustmentLayer, TimelineCompositeDiagnostics, TimelineCompositeElement,
+    RenderColorTransformDiagnostics, RenderColorTransformError, RenderMonitorAdaptation,
+    RenderMonitorAdaptationError, RenderOutputColorBoundary, TimelineAdjustmentLayer,
+    TimelineCompositeDiagnostics, TimelineCompositeElement, TimelineCompositeError,
     TimelineCompositeOptions, TimelineCompositeScratch, TimelineEffectColorRuntime,
     TimelineMediaLayer, TimelineSolidColorLayer,
 };
 use mondrian_timeline::sequence::ColorContext;
 
+use super::preview_media_frame::MediaPreviewWorkingFrameError;
+use super::preview_unavailability::{PreviewOutputStage, PreviewUnavailability};
 use super::preview_viewer_plan::ResolvedPreviewElement;
+
+/// Typed failure from the shared CPU Preview execution path.
+#[derive(Debug, Clone, thiserror::Error)]
+pub(crate) enum PreviewCpuExecutionError {
+    #[error(transparent)]
+    WorkingFrame(#[from] MediaPreviewWorkingFrameError),
+    #[error("Timeline composition failed: {0}")]
+    TimelineComposite(#[from] TimelineCompositeError),
+    #[error("Preview Program Output {identity:?} is not an encoded color identity")]
+    ProgramOutputIdentity { identity: OcioColorSpaceIdentity },
+    #[error("Preview Program Output transform is blocked: {0}")]
+    ProgramOutputTransform(#[from] OutputTransformIntentResolutionError),
+    #[error("Preview monitor adaptation is blocked: {0}")]
+    MonitorAdaptation(#[from] RenderMonitorAdaptationError),
+    #[error("Preview final color execution failed: {source}")]
+    FinalColorTransform {
+        #[source]
+        source: std::sync::Arc<RenderColorTransformError>,
+    },
+}
+
+impl PreviewCpuExecutionError {
+    /// Project this execution error into the shared terminal Preview contract.
+    pub(crate) fn unavailability(&self) -> PreviewUnavailability {
+        match self {
+            Self::WorkingFrame(MediaPreviewWorkingFrameError::NativeSurfaceRequiresGpu {
+                ..
+            }) => PreviewUnavailability::blocked(
+                PreviewOutputStage::InputAdaptation,
+                self.to_string(),
+            ),
+            Self::WorkingFrame(MediaPreviewWorkingFrameError::InputColorTransform { .. }) => {
+                PreviewUnavailability::failed(PreviewOutputStage::InputAdaptation, self.to_string())
+            }
+            Self::TimelineComposite(error) if timeline_composite_is_blocked(error) => {
+                PreviewUnavailability::blocked(
+                    PreviewOutputStage::TimelineComposite,
+                    self.to_string(),
+                )
+            }
+            Self::TimelineComposite(_) => PreviewUnavailability::failed(
+                PreviewOutputStage::TimelineComposite,
+                self.to_string(),
+            ),
+            Self::ProgramOutputIdentity { .. } | Self::ProgramOutputTransform(_) => {
+                PreviewUnavailability::blocked(PreviewOutputStage::ProgramOutput, self.to_string())
+            }
+            Self::MonitorAdaptation(_) => PreviewUnavailability::blocked(
+                PreviewOutputStage::MonitorAdaptation,
+                self.to_string(),
+            ),
+            Self::FinalColorTransform { .. } => {
+                PreviewUnavailability::failed(PreviewOutputStage::ProgramOutput, self.to_string())
+            }
+        }
+    }
+}
+
+fn timeline_composite_is_blocked(error: &TimelineCompositeError) -> bool {
+    match error {
+        TimelineCompositeError::EffectDomainBlocked { .. } => true,
+        TimelineCompositeError::EncodedEffect(error) => matches!(
+            error,
+            EffectExecutionError::ColorDomainConversionRequired { .. }
+                | EffectExecutionError::ColorDomainBlocked { .. }
+                | EffectExecutionError::InvalidColorDomainPlan
+                | EffectExecutionError::CustomProcessorUnavailable { .. }
+        ),
+        TimelineCompositeError::FloatEffect {
+            reason: EffectFloatExecutionError::UnsupportedNode { reason, .. },
+        } => !matches!(
+            reason,
+            EffectFloatUnsupportedReason::ColorDomainTransitionFailed { .. }
+        ),
+        TimelineCompositeError::FloatEffect {
+            reason:
+                EffectFloatExecutionError::InputSizeMismatch { .. }
+                | EffectFloatExecutionError::MissingOutput { .. },
+        } => false,
+    }
+}
 
 /// CPU Preview execution timings independent of any diagnostics projection.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -68,7 +156,7 @@ pub(crate) fn composite_resolved_preview_working(
     resolved: &[ResolvedPreviewElement],
     color_context: &ColorContext,
     scratch: &mut TimelineCompositeScratch,
-) -> Result<PreviewWorkingCompositeOutput, String> {
+) -> Result<PreviewWorkingCompositeOutput, PreviewCpuExecutionError> {
     let working_prepare_started_at = Instant::now();
     let mut working_frames = Vec::new();
     let mut working_elements = Vec::with_capacity(resolved.len());
@@ -145,8 +233,7 @@ pub(crate) fn composite_resolved_preview_working(
         TimelineCompositeOptions::default(),
         TimelineEffectColorRuntime::new(&color_context.engine, color_context.working_color_space),
         scratch,
-    )
-    .map_err(|error| format!("timeline composite failed: {error}"))?;
+    )?;
     let cpu_composite_us = duration_us(cpu_composite_started_at.elapsed());
     Ok(PreviewWorkingCompositeOutput {
         frame: composite.frame,
@@ -163,12 +250,11 @@ pub(crate) fn composite_resolved_preview_working(
 
 pub(crate) fn output_boundary_from_color_context(
     color_context: &ColorContext,
-) -> Result<RenderOutputColorBoundary, String> {
-    let output_color_space = color_context.output_color_space.color().ok_or_else(|| {
-        format!(
-            "preview output identity {:?} is not an encoded color space",
-            color_context.output_color_space
-        )
+) -> Result<RenderOutputColorBoundary, PreviewCpuExecutionError> {
+    let output_color_space = color_context.output_color_space.color().ok_or({
+        PreviewCpuExecutionError::ProgramOutputIdentity {
+            identity: color_context.output_color_space,
+        }
     })?;
     RenderOutputColorBoundary::from_intent(
         mondrian_renderer::RenderOutputColorBoundaryTarget::Display,
@@ -177,7 +263,7 @@ pub(crate) fn output_boundary_from_color_context(
         color_context.tone_map,
         color_context.engine.clone(),
     )
-    .map_err(|error| error.to_string())
+    .map_err(PreviewCpuExecutionError::from)
 }
 
 pub(crate) fn composite_resolved_preview(
@@ -186,20 +272,18 @@ pub(crate) fn composite_resolved_preview(
     resolved: &[ResolvedPreviewElement],
     color_context: &ColorContext,
     scratch: &mut TimelineCompositeScratch,
-) -> Result<PreviewCompositeOutput, String> {
+) -> Result<PreviewCompositeOutput, PreviewCpuExecutionError> {
     let composite =
         composite_resolved_preview_working(width, height, resolved, color_context, scratch)?;
     let output_boundary_started_at = Instant::now();
     let mut execution_durations = composite.execution_durations;
-    let boundary = output_boundary_from_color_context(color_context)
-        .map_err(|error| format!("unsupported preview output transform: {error}"))?;
+    let boundary = output_boundary_from_color_context(color_context)?;
     let program_output = boundary.output_color_space;
     let adaptation = RenderMonitorAdaptation::new(
         program_output,
         ColorSpace::Srgb,
         color_context.engine.clone(),
-    )
-    .map_err(|error| format!("unsupported CPU raster monitor adaptation: {error}"))?;
+    )?;
     execute_cpu_program_monitor_boundary_rgba8(&composite.frame, &boundary, &adaptation)
         .map(|output| {
             execution_durations.cpu_output_boundary_us =
@@ -215,9 +299,56 @@ pub(crate) fn composite_resolved_preview(
                 execution_durations,
             }
         })
-        .map_err(|err| format!("viewer preview final color transform failed: {err}"))
+        .map_err(|source| PreviewCpuExecutionError::FinalColorTransform {
+            source: std::sync::Arc::new(source),
+        })
 }
 
 fn duration_us(duration: Duration) -> u64 {
     duration.as_micros().min(u128::from(u64::MAX)) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::preview_unavailability::PreviewUnavailabilityDisposition;
+
+    #[test]
+    fn effect_domain_blocker_keeps_blocked_disposition_and_stage() {
+        let error = PreviewCpuExecutionError::TimelineComposite(
+            TimelineCompositeError::EffectDomainBlocked {
+                media_effect: 1,
+                solid_effect: 0,
+                adjustment_effect: 0,
+            },
+        );
+
+        let unavailable = error.unavailability();
+        assert_eq!(
+            unavailable.disposition(),
+            PreviewUnavailabilityDisposition::Blocked
+        );
+        assert_eq!(unavailable.stage(), PreviewOutputStage::TimelineComposite);
+        assert_eq!(unavailable.code(), "preview.blocked.timeline_composite");
+        assert!(unavailable.detail().contains("effect color domain is blocked"));
+    }
+
+    #[test]
+    fn custom_processor_failure_keeps_failed_disposition_and_stage() {
+        let error = PreviewCpuExecutionError::TimelineComposite(
+            TimelineCompositeError::EncodedEffect(EffectExecutionError::CustomProcessorFailed {
+                key: "vendor.effect".to_owned(),
+                reason: "processor panic isolated".to_owned(),
+            }),
+        );
+
+        let unavailable = error.unavailability();
+        assert_eq!(
+            unavailable.disposition(),
+            PreviewUnavailabilityDisposition::Failed
+        );
+        assert_eq!(unavailable.stage(), PreviewOutputStage::TimelineComposite);
+        assert_eq!(unavailable.code(), "preview.failed.timeline_composite");
+        assert!(unavailable.detail().contains("processor panic isolated"));
+    }
 }

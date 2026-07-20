@@ -61,6 +61,7 @@ use mondrian_ui_widgets::{
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
+use crate::app::preview_unavailability::{PreviewUnavailability, PreviewUnavailabilityDisposition};
 pub use crate::app::thumbnail_service::{
     ThumbnailFailure as AssetThumbnailFailure,
     ThumbnailFailureReason as AssetThumbnailFailureReason,
@@ -155,7 +156,7 @@ pub trait ViewerPreviewSource {
 #[derive(Debug, Clone)]
 pub enum ViewerPreviewState {
     /// No preview frame is expected for the current state.
-    Unavailable,
+    Unavailable(PreviewUnavailability),
     /// A frame request has been queued or is currently rendering/decoding.
     Loading,
     /// The requested frame is not ready, so the viewer may keep the previous frame visible.
@@ -636,6 +637,7 @@ pub struct ViewerPanelModel {
     pub enabled: bool,
     pub frame_content: Option<ViewerFrameContent>,
     pub empty_message: Option<String>,
+    pub preview_unavailability: Option<PreviewUnavailability>,
     pub color_rejection: Option<ViewerPreviewColorRejectionModel>,
     pub color_pipeline_status: Option<ViewerColorPipelineStatus>,
 }
@@ -712,25 +714,33 @@ impl ViewerPanelModel {
         };
         let duration_frame = duration_frame.frame.max(0);
         let fps = sequence.settings.frame_rate.to_f64();
-        let preview_state = preview
-            .map(|preview| preview.viewer_preview_for_state(state))
-            .unwrap_or(ViewerPreviewState::Unavailable);
+        let preview_state = preview.map(|preview| preview.viewer_preview_for_state(state));
         let color_rejection = preview.and_then(ViewerPreviewSource::viewer_color_rejection);
-        let frame_content = match &preview_state {
+        let preview_unavailability = preview_state.as_ref().and_then(|state| match state {
+            ViewerPreviewState::Unavailable(reason) => Some(reason.clone()),
+            ViewerPreviewState::Loading
+            | ViewerPreviewState::Stale(_)
+            | ViewerPreviewState::Ready(_) => None,
+        });
+        let frame_content = preview_state.as_ref().and_then(|state| match state {
             ViewerPreviewState::Ready(frame) | ViewerPreviewState::Stale(frame) => {
                 Some(frame.clone())
             }
-            ViewerPreviewState::Unavailable | ViewerPreviewState::Loading => None,
-        };
+            ViewerPreviewState::Unavailable(_) | ViewerPreviewState::Loading => None,
+        });
         let preview_resolution_scale =
             normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale);
         let preview_quality_label = viewer_preview_quality_label(preview_resolution_scale);
         let preview_waiting = matches!(
-            preview_state,
-            ViewerPreviewState::Loading | ViewerPreviewState::Stale(_)
+            preview_state.as_ref(),
+            Some(ViewerPreviewState::Loading | ViewerPreviewState::Stale(_))
         );
-        let color_rejected =
-            matches!(preview_state, ViewerPreviewState::Unavailable) && color_rejection.is_some();
+        let color_rejected = matches!(
+            preview_state.as_ref(),
+            Some(ViewerPreviewState::Unavailable(_))
+        ) && color_rejection.is_some();
+        let unavailability_disposition =
+            preview_unavailability.as_ref().map(PreviewUnavailability::disposition);
 
         Self {
             title: sequence.name.clone(),
@@ -738,12 +748,29 @@ impl ViewerPanelModel {
                 "预览准备中".into()
             } else if color_rejected {
                 "色彩解释被拒绝".into()
+            } else if unavailability_disposition
+                == Some(PreviewUnavailabilityDisposition::NoContent)
+            {
+                "无可见内容".into()
+            } else if unavailability_disposition == Some(PreviewUnavailabilityDisposition::Blocked)
+            {
+                "预览被阻止".into()
+            } else if unavailability_disposition == Some(PreviewUnavailabilityDisposition::Failed) {
+                "预览失败".into()
             } else if state.is_playing() {
                 "播放中".into()
             } else {
                 "就绪".into()
             },
-            status_tone: if preview_waiting || color_rejected {
+            status_tone: if preview_waiting
+                || color_rejected
+                || matches!(
+                    unavailability_disposition,
+                    Some(
+                        PreviewUnavailabilityDisposition::Blocked
+                            | PreviewUnavailabilityDisposition::Failed
+                    )
+                ) {
                 ViewerStatusTone::Warning
             } else if state.is_playing() {
                 ViewerStatusTone::Accent
@@ -770,11 +797,12 @@ impl ViewerPanelModel {
                 color_rejection.as_ref().filter(|_| color_rejected)
             {
                 Some(viewer_color_rejection_empty_message(rejection))
-            } else if matches!(preview_state, ViewerPreviewState::Loading) {
+            } else if matches!(preview_state.as_ref(), Some(ViewerPreviewState::Loading)) {
                 Some("预览准备中".into())
             } else {
-                None
+                preview_unavailability.as_ref().map(|reason| reason.detail().to_owned())
             },
+            preview_unavailability,
             color_rejection,
             color_pipeline_status: preview
                 .and_then(ViewerPreviewSource::viewer_color_pipeline_status),
@@ -801,6 +829,7 @@ impl ViewerPanelModel {
             enabled: false,
             frame_content: None,
             empty_message: Some("未载入序列".into()),
+            preview_unavailability: None,
             color_rejection: None,
             color_pipeline_status: None,
         }
@@ -4943,6 +4972,7 @@ fn inspector_effect_property_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::preview_unavailability::PreviewOutputStage;
     use mondrian_export::queue::{ExportFailure, ExportFailureReason};
 
     fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::TimelineTime {
@@ -7700,12 +7730,48 @@ mod tests {
     }
 
     #[test]
+    fn app_state_models_project_typed_preview_blocker_without_reclassification() {
+        struct BlockedPreview;
+
+        impl ViewerPreviewSource for BlockedPreview {
+            fn viewer_preview_for_state(&self, _state: &AppState) -> ViewerPreviewState {
+                ViewerPreviewState::Unavailable(PreviewUnavailability::blocked(
+                    PreviewOutputStage::MediaResolution,
+                    "源素材离线",
+                ))
+            }
+        }
+
+        let mut state = AppState::new();
+        state.sequence = Some(Sequence::new("edit"));
+        let models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
+            &state,
+            None,
+            None,
+            Some(&BlockedPreview),
+        );
+
+        assert_eq!(models.viewer.status, "预览被阻止");
+        assert_eq!(models.viewer.status_tone, ViewerStatusTone::Warning);
+        assert_eq!(models.viewer.empty_message.as_deref(), Some("源素材离线"));
+        let reason = models.viewer.preview_unavailability.expect("typed blocker");
+        assert_eq!(
+            reason.disposition(),
+            PreviewUnavailabilityDisposition::Blocked
+        );
+        assert_eq!(reason.stage(), PreviewOutputStage::MediaResolution);
+    }
+
+    #[test]
     fn app_state_models_surface_viewer_color_rejection() {
         struct RejectedPreview;
 
         impl ViewerPreviewSource for RejectedPreview {
             fn viewer_preview_for_state(&self, _state: &AppState) -> ViewerPreviewState {
-                ViewerPreviewState::Unavailable
+                ViewerPreviewState::Unavailable(PreviewUnavailability::blocked(
+                    PreviewOutputStage::InputColor,
+                    "test color rejection",
+                ))
             }
 
             fn viewer_color_rejection(&self) -> Option<ViewerPreviewColorRejectionModel> {

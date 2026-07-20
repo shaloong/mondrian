@@ -7,10 +7,12 @@
 use std::sync::Arc;
 
 use mondrian_core::types::ColorSpace;
-use mondrian_renderer::RenderMonitorAdaptation;
+use mondrian_core::OcioColorSpaceIdentity;
+use mondrian_renderer::{RenderMonitorAdaptation, RenderMonitorAdaptationError};
 use mondrian_timeline::sequence::ColorContext;
 
 use super::preview_execution::PreviewOutputKey;
+use super::preview_unavailability::{PreviewOutputStage, PreviewUnavailability};
 
 /// Encoded color identity of a final Preview RGBA8 raster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -41,18 +43,48 @@ pub(crate) struct PreviewRasterPresentationContract {
     pub(crate) color_space: PreviewRasterColorSpace,
 }
 
+/// Failure to resolve the final CPU raster presentation contract.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum PreviewRasterPresentationContractError {
+    #[error("Program Output {identity:?} is not an encoded color identity")]
+    ProgramOutputIdentity { identity: OcioColorSpaceIdentity },
+    #[error("CPU raster monitor adaptation is blocked: {0}")]
+    MonitorAdaptation(#[from] RenderMonitorAdaptationError),
+}
+
+impl PreviewRasterPresentationContractError {
+    /// Project this contract failure into the shared terminal Preview contract.
+    pub(crate) fn unavailability(&self) -> PreviewUnavailability {
+        let stage = match self {
+            Self::ProgramOutputIdentity { .. } => PreviewOutputStage::ProgramOutput,
+            Self::MonitorAdaptation(_) => PreviewOutputStage::MonitorAdaptation,
+        };
+        PreviewUnavailability::blocked(stage, self.to_string())
+    }
+}
+
+/// Failure to construct a validated final Preview raster.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum PreviewRasterFrameError {
+    #[error("Preview raster extent must be non-zero, got {width}x{height}")]
+    EmptyExtent { width: u32, height: u32 },
+    #[error("Preview raster byte extent overflow for {width}x{height}")]
+    ByteExtentOverflow { width: u32, height: u32 },
+    #[error("Preview raster payload length mismatch: expected {expected}, actual {actual}")]
+    PayloadLengthMismatch { expected: usize, actual: usize },
+}
+
 /// Resolve the final CPU raster contract from the authored Program Output.
 pub(crate) fn preview_raster_presentation_contract(
     requested: &ColorContext,
-) -> Result<PreviewRasterPresentationContract, String> {
-    let program_output = requested.output_color_space.color().ok_or_else(|| {
-        format!(
-            "Program Output {:?} is not an encoded color identity",
-            requested.output_color_space
-        )
+) -> Result<PreviewRasterPresentationContract, PreviewRasterPresentationContractError> {
+    let program_output = requested.output_color_space.color().ok_or({
+        PreviewRasterPresentationContractError::ProgramOutputIdentity {
+            identity: requested.output_color_space,
+        }
     })?;
     RenderMonitorAdaptation::new(program_output, ColorSpace::Srgb, requested.engine.clone())
-        .map_err(|error| error.to_string())?;
+        .map_err(PreviewRasterPresentationContractError::from)?;
     Ok(PreviewRasterPresentationContract { color_space: PreviewRasterColorSpace::Srgb })
 }
 
@@ -72,10 +104,25 @@ impl PreviewRasterFrame {
         height: u32,
         color_space: PreviewRasterColorSpace,
         rgba: impl Into<Arc<[u8]>>,
-    ) -> Option<Self> {
+    ) -> Result<Self, PreviewRasterFrameError> {
         let rgba = rgba.into();
-        let expected = width.checked_mul(height)?.checked_mul(4)? as usize;
-        (width > 0 && height > 0 && rgba.len() == expected).then(|| Self {
+        if width == 0 || height == 0 {
+            return Err(PreviewRasterFrameError::EmptyExtent { width, height });
+        }
+        let expected = usize::try_from(width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(height).ok().and_then(|height| width.checked_mul(height))
+            })
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or(PreviewRasterFrameError::ByteExtentOverflow { width, height })?;
+        if rgba.len() != expected {
+            return Err(PreviewRasterFrameError::PayloadLengthMismatch {
+                expected,
+                actual: rgba.len(),
+            });
+        }
+        Ok(Self {
             resource_key: resource_key.into(),
             width,
             height,
@@ -96,18 +143,20 @@ mod tests {
 
     #[test]
     fn raster_contract_rejects_invalid_extent_or_payload_length() {
-        assert!(PreviewRasterFrame::new(
-            "zero",
-            0,
-            1,
-            PreviewRasterColorSpace::Srgb,
-            Vec::<u8>::new(),
-        )
-        .is_none());
-        assert!(
-            PreviewRasterFrame::new("short", 2, 1, PreviewRasterColorSpace::Srgb, vec![0; 7],)
-                .is_none()
-        );
+        assert!(matches!(
+            PreviewRasterFrame::new(
+                "zero",
+                0,
+                1,
+                PreviewRasterColorSpace::Srgb,
+                Vec::<u8>::new(),
+            ),
+            Err(PreviewRasterFrameError::EmptyExtent { width: 0, height: 1 })
+        ));
+        assert!(matches!(
+            PreviewRasterFrame::new("short", 2, 1, PreviewRasterColorSpace::Srgb, vec![0; 7],),
+            Err(PreviewRasterFrameError::PayloadLengthMismatch { expected: 8, actual: 7 })
+        ));
     }
 
     #[test]

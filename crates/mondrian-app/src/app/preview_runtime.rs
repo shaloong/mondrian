@@ -80,6 +80,10 @@ use crate::app::preview_scheduler_policy::{
     preview_decode_presentation_quality, MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD,
     PREVIEW_SCRUB_SLOW_LATENCY_US,
 };
+use crate::app::preview_timeline_execution::PreviewTimelineResolution;
+use crate::app::preview_unavailability::{
+    PreviewOutputStage, PreviewUnavailability, PreviewUnavailabilityEvidence,
+};
 use crate::app::preview_viewer_plan::{
     gpu_composite_layers_for_resolved, preview_elements_require_deferred_composite,
     resolved_preview_decode_execution, resolved_preview_presentation_quality,
@@ -161,7 +165,7 @@ pub(crate) enum PreviewPresentationState<O> {
     /// Same-scope prior output is explicitly reusable while work is pending.
     Stale(PreviewPresentationContent<O>),
     /// Current intent cannot produce a valid output.
-    Unavailable,
+    Unavailable(PreviewUnavailability),
 }
 
 /// Production Preview composition root shared by Window and Headless Adapters.
@@ -182,6 +186,7 @@ pub struct PreviewProductionRuntime<O: Clone> {
     scheduler: MediaPreviewScheduler,
     scratch: RefCell<TimelineCompositeScratch>,
     last_color_rejection: RefCell<Option<PreviewColorRejection>>,
+    unavailability_evidence: RefCell<PreviewUnavailabilityEvidence>,
     display_snapshot: RefCell<Option<DisplayOutputSnapshot>>,
     hardware_decode_admission: Cell<PreviewHardwareDecodeAdmissionState>,
     decode_cpu_budget: PreviewDecodeCpuBudget,
@@ -251,6 +256,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             scheduler,
             scratch: RefCell::new(TimelineCompositeScratch::default()),
             last_color_rejection: RefCell::new(None),
+            unavailability_evidence: RefCell::new(PreviewUnavailabilityEvidence::default()),
             display_snapshot: RefCell::new(None),
             hardware_decode_admission: Cell::new(PreviewHardwareDecodeAdmissionState::default()),
             decode_cpu_budget,
@@ -361,9 +367,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let Some(sequence) = state.sequence.as_ref() else {
             self.invalidate_preview_generation();
             self.scheduler.prune_obsolete();
-            self.execution.borrow_mut().clear_output();
-            bump(&self.metrics.gpu_preview_candidate_unavailable);
-            return PreviewGpuFrameState::Unavailable;
+            return self.unavailable_gpu_candidate(PreviewUnavailability::no_content(
+                PreviewOutputStage::Project,
+                "no active Sequence",
+            ));
         };
         let frame = state.current_frame().max(0);
         let (width, height) = preview_dimensions_for_state(state, sequence);
@@ -377,9 +384,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             Err(blocker) => {
                 self.record_preview_gpu_output_blocker(&blocker);
                 self.scheduler.prune_obsolete();
-                self.execution.borrow_mut().clear_output();
-                bump(&self.metrics.gpu_preview_candidate_unavailable);
-                return PreviewGpuFrameState::Unavailable;
+                return self.unavailable_gpu_candidate(PreviewUnavailability::blocked(
+                    PreviewOutputStage::DisplayContract,
+                    blocker.description(),
+                ));
             }
         };
         let color_context = sequence
@@ -394,9 +402,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 ),
             });
             self.scheduler.prune_obsolete();
-            self.execution.borrow_mut().clear_output();
-            bump(&self.metrics.gpu_preview_candidate_unavailable);
-            return PreviewGpuFrameState::Unavailable;
+            return self.unavailable_gpu_candidate(PreviewUnavailability::blocked(
+                PreviewOutputStage::ProgramOutput,
+                format!(
+                    "Program Output {:?} is not an encoded color identity",
+                    color_context.output_color_space
+                ),
+            ));
         };
         let monitor_adaptation = match RenderMonitorAdaptation::new(
             program_output_color_space,
@@ -412,9 +424,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     },
                 );
                 self.scheduler.prune_obsolete();
-                self.execution.borrow_mut().clear_output();
-                bump(&self.metrics.gpu_preview_candidate_unavailable);
-                return PreviewGpuFrameState::Unavailable;
+                return self.unavailable_gpu_candidate(PreviewUnavailability::blocked(
+                    PreviewOutputStage::MonitorAdaptation,
+                    error.to_string(),
+                ));
             }
         };
         self.activate_preview_generation(ViewerPreviewGenerationKey::from_state(
@@ -425,35 +438,47 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             height,
             display_color_space,
         ));
-        let mut resolved = match self.resolve_sequence_elements(
-            state,
-            sequence,
-            frame,
-            width,
-            height,
-            color_context,
-        ) {
-            Some(resolved) => resolved,
-            None => {
-                let decision = self.execution.borrow_mut().plan_candidate(None);
-                self.schedule_media_prefetches(state, sequence, frame, width, height);
-                self.scheduler.prune_obsolete();
-                return match decision {
-                    PreviewCandidateDecision::Loading => {
-                        bump(&self.metrics.gpu_preview_candidate_loading);
-                        PreviewGpuFrameState::Loading
-                    }
-                    PreviewCandidateDecision::Unavailable => {
-                        self.execution.borrow_mut().clear_output();
-                        bump(&self.metrics.gpu_preview_candidate_unavailable);
-                        PreviewGpuFrameState::Unavailable
-                    }
-                    PreviewCandidateDecision::Current | PreviewCandidateDecision::Execute(_) => {
-                        unreachable!("unresolved preview intent cannot select an output")
-                    }
-                };
-            }
-        };
+        let mut resolved =
+            match self.resolve_timeline(state, sequence, frame, width, height, color_context) {
+                PreviewTimelineResolution::Ready(resolved) => resolved.plan,
+                PreviewTimelineResolution::Empty => {
+                    let decision = self.execution.borrow_mut().plan_candidate(None);
+                    self.schedule_media_prefetches(state, sequence, frame, width, height);
+                    self.scheduler.prune_obsolete();
+                    debug_assert!(matches!(decision, PreviewCandidateDecision::Unavailable));
+                    return self.unavailable_gpu_candidate(PreviewUnavailability::no_content(
+                        PreviewOutputStage::TimelineEvaluation,
+                        "current Timeline position contains no visible elements",
+                    ));
+                }
+                PreviewTimelineResolution::Pending { .. } => {
+                    let decision = self.execution.borrow_mut().plan_candidate(None);
+                    self.schedule_media_prefetches(state, sequence, frame, width, height);
+                    self.scheduler.prune_obsolete();
+                    return match decision {
+                        PreviewCandidateDecision::Loading => {
+                            bump(&self.metrics.gpu_preview_candidate_loading);
+                            PreviewGpuFrameState::Loading
+                        }
+                        PreviewCandidateDecision::Unavailable => {
+                            self.unavailable_gpu_candidate(PreviewUnavailability::failed(
+                                PreviewOutputStage::TimelineEvaluation,
+                                "Timeline reported pending media without registering pending work",
+                            ))
+                        }
+                        PreviewCandidateDecision::Current
+                        | PreviewCandidateDecision::Execute(_) => {
+                            unreachable!("unresolved preview intent cannot select an output")
+                        }
+                    };
+                }
+                PreviewTimelineResolution::Unavailable { reason } => {
+                    let _ = self.execution.borrow_mut().plan_candidate(None);
+                    self.schedule_media_prefetches(state, sequence, frame, width, height);
+                    self.scheduler.prune_obsolete();
+                    return self.unavailable_gpu_candidate(reason);
+                }
+            };
         resolved.cache_key = resolved.cache_key.with_monitor_adaptation(&monitor_adaptation);
         self.execution
             .borrow_mut()
@@ -471,12 +496,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 unreachable!("resolved preview key must be current or executable")
             }
         };
-        let Ok(program_output_boundary) =
-            output_boundary_from_color_context(&resolved.color_context)
-        else {
-            bump(&self.metrics.gpu_preview_candidate_unavailable);
-            return PreviewGpuFrameState::Unavailable;
-        };
+        let program_output_boundary =
+            match output_boundary_from_color_context(&resolved.color_context) {
+                Ok(boundary) => boundary,
+                Err(error) => {
+                    return self.unavailable_gpu_candidate(error.unavailability());
+                }
+            };
         let decode_execution = resolved_preview_decode_execution(&resolved.elements);
         let working_input = match gpu_composite_layers_for_resolved(
             &resolved.elements,
@@ -499,8 +525,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 });
                 self.schedule_media_prefetches(state, sequence, frame, width, height);
                 self.scheduler.prune_obsolete();
-                bump(&self.metrics.gpu_preview_candidate_unavailable);
-                return PreviewGpuFrameState::Unavailable;
+                return self.unavailable_gpu_candidate(PreviewUnavailability::blocked(
+                    PreviewOutputStage::GpuComposite,
+                    format!("{reason:?}"),
+                ));
             }
         };
         self.schedule_media_prefetches(state, sequence, frame, width, height);
@@ -712,6 +740,20 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     fn record_color_rejection(&self, rejection: PreviewColorRejection) {
         self.last_color_rejection.replace(Some(rejection));
     }
+
+    fn unavailable_gpu_candidate(&self, reason: PreviewUnavailability) -> PreviewGpuFrameState {
+        self.clear_terminal_viewer_state();
+        bump(&self.metrics.gpu_preview_candidate_unavailable);
+        self.unavailability_evidence.borrow_mut().observe(&reason);
+        PreviewGpuFrameState::Unavailable(reason)
+    }
+
+    /// Terminal absence is a content discontinuity. Only pending work may
+    /// retain a same-scope stale output for later presentation.
+    fn clear_terminal_viewer_state(&self) {
+        self.execution.borrow_mut().clear_output();
+        self.frame_store.borrow_mut().clear_pinned_viewer_frame();
+    }
 }
 
 /// Collect preview input color-resolution source counts for one timeline frame.
@@ -728,7 +770,7 @@ pub fn preview_input_color_resolution_counts_for_frame(
     project_color_management: &mondrian_core::ProjectColorManagement,
     display_color_space: ColorSpace,
     frame: i64,
-) -> Result<InputColorResolutionSourceCounts, String> {
+) -> Result<InputColorResolutionSourceCounts, PreviewUnavailability> {
     let color_context = sequence
         .settings
         .root_preview_color_context(project_color_management, display_color_space);
@@ -744,8 +786,7 @@ pub fn preview_input_color_resolution_counts_for_frame(
         target_resolution,
         mondrian_playback::PreviewResolutionScale::Full,
         color_context,
-    )
-    .map_err(|error| error.reason)?;
+    )?;
     let mut counts = InputColorResolutionSourceCounts::default();
     for demand in demands {
         let detected_color_space = asset_color_spaces.get(&demand.asset_id).copied();

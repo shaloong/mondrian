@@ -1,5 +1,6 @@
 use super::*;
 use crate::app::preview_raster_frame::PreviewRasterColorSpace;
+use crate::app::preview_unavailability::PreviewUnavailabilityDisposition;
 use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
 use crate::app_ui::preview::{WindowPreviewAdapter, WindowPreviewOutputRegistration};
 use mondrian_ui_widgets::{
@@ -282,7 +283,7 @@ fn preview_raster_presentation_contract_adapts_wide_gamut_sdr_and_rejects_hdr() 
         let requested = test_color_context(output);
         let error = preview_raster_presentation_contract(&requested)
             .expect_err("HDR to sRGB raster requires an explicit rendering policy");
-        assert!(error.contains("dynamic-range class"));
+        assert!(error.to_string().contains("dynamic-range class"));
     }
 }
 
@@ -446,10 +447,15 @@ fn gpu_preview_frame_for_icc_policy_rejects_uncalibrated_monitor_profile() {
     let snapshot = managed_icc_display_snapshot(ColorSpace::DisplayP3);
     service.set_display_output_snapshot(Some(&snapshot));
 
-    assert!(matches!(
-        service.gpu_preview_frame_for_state(&state),
-        PreviewGpuFrameState::Unavailable
-    ));
+    let PreviewGpuFrameState::Unavailable(reason) = service.gpu_preview_frame_for_state(&state)
+    else {
+        panic!("uncalibrated monitor profile must block GPU Preview");
+    };
+    assert_eq!(
+        reason.disposition(),
+        PreviewUnavailabilityDisposition::Blocked
+    );
+    assert_eq!(reason.stage(), PreviewOutputStage::DisplayContract);
 }
 
 fn ready_frame(state: ViewerPreviewState) -> ViewerFrameImage {
@@ -486,7 +492,7 @@ fn paused_gpu_candidate_carries_untimed_presentation_authority() {
         PreviewGpuFrameState::Ready(frame) => frame,
         PreviewGpuFrameState::Current => panic!("expected new GPU preview candidate"),
         PreviewGpuFrameState::Loading => panic!("expected ready GPU preview candidate"),
-        PreviewGpuFrameState::Unavailable => {
+        PreviewGpuFrameState::Unavailable(_) => {
             panic!("expected available GPU preview candidate")
         }
     };
@@ -877,8 +883,8 @@ fn native_source_only_media_frame_fails_cpu_working_fallback() {
         Err(err) => err,
     };
 
-    assert!(err.contains("native GPU decoded"));
-    assert!(err.contains("requires renderer native import"));
+    assert!(err.to_string().contains("native decoded surface"));
+    assert!(err.to_string().contains("requires renderer native import"));
 }
 
 #[test]
@@ -4170,6 +4176,88 @@ fn preview_render_performance_report_classifies_output_boundary_bound_slow_frame
 }
 
 #[test]
+fn preview_render_performance_report_fails_typed_execution_unavailability() {
+    let diagnostics = PreviewDiagnostics {
+        render_timed_frames: 1,
+        render_total_duration_us: 1_000,
+        render_max_duration_us: 1_000,
+        render_last_duration_us: 1_000,
+        unavailability: crate::app::preview_unavailability::PreviewUnavailabilityEvidenceSnapshot {
+            observations: 1,
+            failed: 1,
+            stages: crate::app::preview_unavailability::PreviewOutputStageBreakdown {
+                timeline_composite: 1,
+                ..Default::default()
+            },
+            last_disposition: Some(PreviewUnavailabilityDisposition::Failed),
+            last_stage: Some(PreviewOutputStage::TimelineComposite),
+            ..Default::default()
+        },
+        ..PreviewDiagnostics::default()
+    };
+
+    let report = build_preview_render_performance_report(
+        diagnostics.render_performance_summary(50_000),
+        "preview-render-failure-test",
+        50_000,
+    );
+
+    assert_eq!(report.verdict, PreviewRenderPerformanceVerdict::Fail);
+    assert!(report.checks.iter().any(|check| {
+        check.code == "preview_render_failed_outputs"
+            && check.severity == PreviewRenderPerformanceSeverity::Fail
+            && check.observed == 1
+    }));
+    assert!(report
+        .root_causes
+        .iter()
+        .any(|root| root.code == "preview_render_execution_failed"));
+    assert!(report
+        .actions
+        .iter()
+        .any(|action| action.code == "inspect_preview_unavailability"));
+}
+
+#[test]
+fn preview_render_performance_report_fails_typed_correctness_blocker() {
+    let diagnostics = PreviewDiagnostics {
+        unavailability: crate::app::preview_unavailability::PreviewUnavailabilityEvidenceSnapshot {
+            observations: 1,
+            blocked: 1,
+            stages: crate::app::preview_unavailability::PreviewOutputStageBreakdown {
+                timeline_composite: 1,
+                ..Default::default()
+            },
+            last_disposition: Some(PreviewUnavailabilityDisposition::Blocked),
+            last_stage: Some(PreviewOutputStage::TimelineComposite),
+            ..Default::default()
+        },
+        ..PreviewDiagnostics::default()
+    };
+
+    let report = build_preview_render_performance_report(
+        diagnostics.render_performance_summary(50_000),
+        "preview-render-blocker-test",
+        50_000,
+    );
+
+    assert_eq!(report.verdict, PreviewRenderPerformanceVerdict::Fail);
+    assert!(report.checks.iter().any(|check| {
+        check.code == "preview_render_blocked_outputs"
+            && check.severity == PreviewRenderPerformanceSeverity::Fail
+            && check.observed == 1
+    }));
+    assert!(report
+        .root_causes
+        .iter()
+        .any(|root| root.code == "preview_render_output_blocked"));
+    assert!(report
+        .actions
+        .iter()
+        .any(|action| action.code == "inspect_preview_unavailability"));
+}
+
+#[test]
 fn preview_performance_reports_classify_slowest_frame_not_aggregate_total() {
     let decode_diagnostics = PreviewDiagnostics {
         decode_successes: 2,
@@ -4845,10 +4933,49 @@ fn unsupported_media_plan_returns_no_partial_preview() {
 
     let service = WindowPreviewAdapter::new();
 
-    assert!(matches!(
-        service.viewer_preview_for_state(&state),
-        ViewerPreviewState::Unavailable
-    ));
+    let ViewerPreviewState::Unavailable(reason) = service.viewer_preview_for_state(&state) else {
+        panic!("missing authored media dependency must be unavailable");
+    };
+    assert_eq!(
+        reason.disposition(),
+        PreviewUnavailabilityDisposition::Blocked
+    );
+    assert_eq!(reason.stage(), PreviewOutputStage::MediaResolution);
+    assert_eq!(reason.code(), "preview.blocked.media_resolution");
+    let diagnostics = service.diagnostics();
+    assert_eq!(diagnostics.unavailability.observations, 1);
+    assert_eq!(diagnostics.unavailability.blocked, 1);
+    assert_eq!(diagnostics.unavailability.stages.media_resolution, 1);
+    assert_eq!(service.last_unavailability(), Some(reason));
+}
+
+#[test]
+fn empty_root_timeline_is_no_content_and_breaks_stale_reuse() {
+    let service = WindowPreviewAdapter::new();
+    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    let _ = ready_frame(service.viewer_preview_for_state(&state));
+    let sequence = state.sequence.as_ref().expect("sequence");
+    let sequence_id = sequence.id;
+    let (width, height) = preview_dimensions_for_sequence(sequence);
+    assert!(service.stale_frame_for_sequence(sequence, width, height).is_some());
+
+    state.sequence.as_mut().expect("sequence").video_tracks[0].clips.clear();
+    let ViewerPreviewState::Unavailable(reason) = service.viewer_preview_for_state(&state) else {
+        panic!("empty root Timeline must have a typed no-content result");
+    };
+
+    assert_eq!(
+        reason.disposition(),
+        PreviewUnavailabilityDisposition::NoContent
+    );
+    assert_eq!(reason.stage(), PreviewOutputStage::TimelineEvaluation);
+    assert_eq!(reason.code(), "preview.no_content.timeline");
+    let sequence = state.sequence.as_ref().expect("sequence");
+    assert_eq!(sequence.id, sequence_id);
+    assert!(service.stale_frame_for_sequence(sequence, width, height).is_none());
+    let diagnostics = service.diagnostics();
+    assert_eq!(diagnostics.unavailability.no_content, 1);
+    assert_eq!(diagnostics.unavailability.stages.timeline_evaluation, 1);
 }
 
 #[test]
@@ -7478,7 +7605,7 @@ fn failed_current_media_preview_cache_does_not_leave_viewer_loading() {
 
     let preview = service.viewer_preview_for_state(&state);
 
-    assert!(matches!(preview, ViewerPreviewState::Unavailable));
+    assert!(matches!(preview, ViewerPreviewState::Unavailable(_)));
     assert!(
         !service.execution.borrow().is_pending(),
         "a cached decode failure is terminal evidence, not pending work"

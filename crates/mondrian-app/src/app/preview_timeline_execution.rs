@@ -27,6 +27,7 @@ use super::preview_cpu_execution::{
 use super::preview_execution::PreviewOutputKey;
 use super::preview_media_frame::{project_preview_media_transform, MediaPreviewFrame};
 use super::preview_quality::{normalize_preview_resolution_scale, preview_execution_resolution};
+use super::preview_unavailability::{PreviewOutputStage, PreviewUnavailability};
 use super::preview_viewer_plan::{
     resolved_preview_decode_execution, resolved_preview_presentation_quality,
     viewer_preview_cache_key_for_resolved_plan, ResolvedPreviewElement,
@@ -49,7 +50,7 @@ pub(crate) struct PreviewTimelineMediaRequest {
 pub(crate) enum PreviewTimelineMediaFrame {
     Ready(MediaPreviewFrame),
     Pending,
-    Unavailable { reason: String },
+    Unavailable { reason: PreviewUnavailability },
 }
 
 /// Resolved root Viewer plan with an always-present semantic cache identity.
@@ -78,13 +79,7 @@ pub(crate) enum PreviewTimelineResolution {
     Ready(ResolvedPreviewTimeline),
     Empty,
     Pending { asset_id: AssetId },
-    Unavailable { reason: String },
-}
-
-/// Why canonical media-demand traversal could not describe a complete frame.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PreviewTimelineDemandError {
-    pub(crate) reason: String,
+    Unavailable { reason: PreviewUnavailability },
 }
 
 /// Collect the media dependencies of one frame without executing or scheduling them.
@@ -98,7 +93,7 @@ pub(crate) fn collect_preview_timeline_media_demands(
     target_resolution: Resolution,
     runtime_scale: PreviewResolutionScale,
     color_context: ColorContext,
-) -> Result<Vec<PreviewTimelineMediaRequest>, PreviewTimelineDemandError> {
+) -> Result<Vec<PreviewTimelineMediaRequest>, PreviewUnavailability> {
     let graph = PreviewTimelineGraph { root_sequence: sequence, sequences, runtime_scale };
     let mut demands = Vec::new();
     collect_sequence_media_demands(
@@ -138,7 +133,7 @@ pub(crate) fn resolve_preview_timeline(
         Err(PreviewTimelineAbort::Pending { asset_id }) => {
             return PreviewTimelineResolution::Pending { asset_id };
         }
-        Err(PreviewTimelineAbort::Unavailable { reason }) => {
+        Err(PreviewTimelineAbort::Unavailable(reason)) => {
             return PreviewTimelineResolution::Unavailable { reason };
         }
     };
@@ -173,7 +168,7 @@ impl<'a> PreviewTimelineGraph<'a> {
         self,
         sequence: &Sequence,
         frame: i64,
-    ) -> Result<TimelineRenderPlan, PreviewTimelineDemandError> {
+    ) -> Result<TimelineRenderPlan, PreviewUnavailability> {
         evaluate_timeline_render_plan(
             sequence,
             TimelineEvaluationRequest::preview(
@@ -181,19 +176,28 @@ impl<'a> PreviewTimelineGraph<'a> {
                 normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale),
             ),
         )
-        .map_err(|error| PreviewTimelineDemandError { reason: error.to_string() })
+        .map_err(|error| {
+            PreviewUnavailability::blocked(
+                PreviewOutputStage::TimelineEvaluation,
+                format!(
+                    "Sequence {} render-plan evaluation failed: {error}",
+                    sequence.id
+                ),
+            )
+        })
     }
 
     fn nested(
         self,
         sequence_id: SequenceId,
         parent_color_context: &ColorContext,
-    ) -> Result<NestedPreviewSequence<'a>, PreviewTimelineDemandError> {
+    ) -> Result<NestedPreviewSequence<'a>, PreviewUnavailability> {
         let sequence =
             sequence_by_id(self.root_sequence, self.sequences, sequence_id).ok_or_else(|| {
-                PreviewTimelineDemandError {
-                    reason: format!("nested Sequence {sequence_id} does not exist"),
-                }
+                PreviewUnavailability::blocked(
+                    PreviewOutputStage::TimelineEvaluation,
+                    format!("nested Sequence {sequence_id} does not exist"),
+                )
             })?;
         Ok(NestedPreviewSequence {
             sequence,
@@ -223,7 +227,7 @@ fn collect_sequence_media_demands(
     depth: usize,
     color_context: ColorContext,
     demands: &mut Vec<PreviewTimelineMediaRequest>,
-) -> Result<(), PreviewTimelineDemandError> {
+) -> Result<(), PreviewUnavailability> {
     validate_nested_depth(sequence, depth)?;
     for element in graph.evaluate(sequence, frame)?.elements {
         match element {
@@ -265,12 +269,11 @@ fn resolve_sequence_elements<MediaFrame>(
 where
     MediaFrame: FnMut(PreviewTimelineMediaRequest) -> PreviewTimelineMediaFrame,
 {
-    validate_nested_depth(sequence, depth)
-        .map_err(|error| PreviewTimelineAbort::Unavailable { reason: error.reason })?;
+    validate_nested_depth(sequence, depth).map_err(PreviewTimelineAbort::Unavailable)?;
     let evaluation = execution
         .graph
         .evaluate(sequence, frame)
-        .map_err(|error| PreviewTimelineAbort::Unavailable { reason: error.reason })?;
+        .map_err(PreviewTimelineAbort::Unavailable)?;
     if evaluation.is_empty() {
         return Ok(None);
     }
@@ -300,9 +303,9 @@ where
                         return Err(PreviewTimelineAbort::Pending { asset_id });
                     }
                     PreviewTimelineMediaFrame::Unavailable { reason } => {
-                        return Err(PreviewTimelineAbort::Unavailable {
-                            reason: format!("media {asset_id} unavailable: {reason}"),
-                        });
+                        return Err(PreviewTimelineAbort::Unavailable(
+                            reason.with_context(format_args!("media {asset_id}")),
+                        ));
                     }
                 };
                 let transform = project_preview_media_transform(
@@ -311,8 +314,11 @@ where
                     sequence.settings.resolution,
                     target_resolution,
                 )
-                .ok_or_else(|| PreviewTimelineAbort::Unavailable {
-                    reason: format!("media {asset_id} has invalid Preview transform geometry"),
+                .ok_or_else(|| {
+                    PreviewTimelineAbort::Unavailable(PreviewUnavailability::blocked(
+                        PreviewOutputStage::TimelineEvaluation,
+                        format!("media {asset_id} has invalid Preview transform geometry"),
+                    ))
                 })?;
                 resolved.push(ResolvedPreviewElement::Media {
                     frame,
@@ -337,10 +343,10 @@ where
                 let graph = execution.graph;
                 let nested_execution = graph
                     .nested(nested.sequence_id, &color_context)
-                    .map_err(|error| PreviewTimelineAbort::Unavailable { reason: error.reason })?;
+                    .map_err(PreviewTimelineAbort::Unavailable)?;
                 let nested_sequence = nested_execution.sequence;
                 let nested_frame = nested_sequence_frame(nested.source_time, nested_sequence)
-                    .map_err(|error| PreviewTimelineAbort::Unavailable { reason: error.reason })?;
+                    .map_err(PreviewTimelineAbort::Unavailable)?;
                 let parent_working_color_space = color_context.working_color_space;
                 let nested_elements = resolve_sequence_elements(
                     execution,
@@ -350,12 +356,7 @@ where
                     depth + 1,
                     nested_execution.color_context.clone(),
                 )?
-                .ok_or_else(|| PreviewTimelineAbort::Unavailable {
-                    reason: format!(
-                        "nested Sequence {} resolved to no elements",
-                        nested.sequence_id
-                    ),
-                })?;
+                .unwrap_or_default();
                 let frame = render_nested_sequence(
                     nested_sequence,
                     nested_frame,
@@ -371,11 +372,14 @@ where
                     sequence.settings.resolution,
                     target_resolution,
                 )
-                .ok_or_else(|| PreviewTimelineAbort::Unavailable {
-                    reason: format!(
-                        "nested Sequence {} has invalid Preview transform geometry",
-                        nested.sequence_id
-                    ),
+                .ok_or_else(|| {
+                    PreviewTimelineAbort::Unavailable(PreviewUnavailability::blocked(
+                        PreviewOutputStage::TimelineEvaluation,
+                        format!(
+                            "nested Sequence {} has invalid Preview transform geometry",
+                            nested.sequence_id
+                        ),
+                    ))
                 })?;
                 resolved.push(ResolvedPreviewElement::Media {
                     frame,
@@ -410,11 +414,12 @@ fn render_nested_sequence(
         &color_context,
         &mut scratch,
     )
-    .map_err(|reason| PreviewTimelineAbort::Unavailable {
-        reason: format!(
-            "nested Sequence {} composition failed: {reason}",
-            sequence.id
-        ),
+    .map_err(|error| {
+        PreviewTimelineAbort::Unavailable(
+            error
+                .unavailability()
+                .with_context(format_args!("nested Sequence {} composition", sequence.id)),
+        )
     })?;
     facts.push(PreviewTimelineExecutionFact::Composite(
         output.composite_diagnostics,
@@ -439,11 +444,14 @@ fn render_nested_sequence(
             parent_working_color_space,
             color_context.engine.clone(),
         )
-        .map_err(|error| PreviewTimelineAbort::Unavailable {
-            reason: format!(
-                "nested Sequence {} working conversion failed: {error}",
-                sequence.id
-            ),
+        .map_err(|error| {
+            PreviewTimelineAbort::Unavailable(PreviewUnavailability::failed(
+                PreviewOutputStage::InputAdaptation,
+                format!(
+                    "nested Sequence {} working conversion failed: {error}",
+                    sequence.id
+                ),
+            ))
         })?;
         facts.push(PreviewTimelineExecutionFact::ColorTransform(
             converted.result.diagnostics,
@@ -486,29 +494,30 @@ fn preview_timeline_media_request(
 fn nested_sequence_frame(
     source_time: TimelineTime,
     sequence: &Sequence,
-) -> Result<i64, PreviewTimelineDemandError> {
+) -> Result<i64, PreviewUnavailability> {
     source_time
         .to_frame_position(sequence.settings.frame_rate, FrameRounding::Floor)
         .map(|position| position.frame.max(0))
-        .map_err(|error| PreviewTimelineDemandError {
-            reason: format!(
-                "nested Sequence {} source target {source_time} is invalid: {error}",
-                sequence.id
-            ),
+        .map_err(|error| {
+            PreviewUnavailability::blocked(
+                PreviewOutputStage::TimelineEvaluation,
+                format!(
+                    "nested Sequence {} source target {source_time} is invalid: {error}",
+                    sequence.id
+                ),
+            )
         })
 }
 
-fn validate_nested_depth(
-    sequence: &Sequence,
-    depth: usize,
-) -> Result<(), PreviewTimelineDemandError> {
+fn validate_nested_depth(sequence: &Sequence, depth: usize) -> Result<(), PreviewUnavailability> {
     if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
-        Err(PreviewTimelineDemandError {
-            reason: format!(
+        Err(PreviewUnavailability::blocked(
+            PreviewOutputStage::TimelineEvaluation,
+            format!(
                 "nested Sequence depth exceeded {} at {}",
                 MAX_NESTED_SEQUENCE_RENDER_DEPTH, sequence.id
             ),
-        })
+        ))
     } else {
         Ok(())
     }
@@ -548,7 +557,7 @@ fn nested_preview_frame_signature(
 
 enum PreviewTimelineAbort {
     Pending { asset_id: AssetId },
-    Unavailable { reason: String },
+    Unavailable(PreviewUnavailability),
 }
 
 #[cfg(test)]

@@ -13,6 +13,7 @@ use mondrian_ui_widgets::{
 use crate::app::preview_execution::PreviewGpuFrame;
 use crate::app::preview_raster_frame::PreviewRasterColorSpace;
 use crate::app::preview_runtime::{PreviewPresentationContent, PreviewPresentationState};
+use crate::app::preview_unavailability::{PreviewOutputStage, PreviewUnavailability};
 use crate::app::AppState;
 use crate::app_ui::panels::{
     ViewerColorPipelineStatus, ViewerPreviewColorRejectionModel, ViewerPreviewSource,
@@ -54,11 +55,15 @@ impl ViewerPreviewSource for WindowPreviewAdapter {
     fn viewer_preview_for_state(&self, state: &AppState) -> ViewerPreviewState {
         match self.presentation_for_state(state) {
             PreviewPresentationState::Ready(content) => viewer_frame_content(content)
-                .map_or(ViewerPreviewState::Unavailable, ViewerPreviewState::Ready),
+                .map(ViewerPreviewState::Ready)
+                .unwrap_or_else(ViewerPreviewState::Unavailable),
             PreviewPresentationState::Loading => ViewerPreviewState::Loading,
             PreviewPresentationState::Stale(content) => viewer_frame_content(content)
-                .map_or(ViewerPreviewState::Unavailable, ViewerPreviewState::Stale),
-            PreviewPresentationState::Unavailable => ViewerPreviewState::Unavailable,
+                .map(ViewerPreviewState::Stale)
+                .unwrap_or_else(ViewerPreviewState::Unavailable),
+            PreviewPresentationState::Unavailable(reason) => {
+                ViewerPreviewState::Unavailable(reason)
+            }
         }
     }
 
@@ -111,11 +116,9 @@ impl ViewerPreviewSource for WindowPreviewAdapter {
 
 fn viewer_frame_content(
     content: PreviewPresentationContent<ViewerExternalTextureFrame>,
-) -> Option<ViewerFrameContent> {
+) -> Result<ViewerFrameContent, PreviewUnavailability> {
     match content {
-        PreviewPresentationContent::Gpu(output) => {
-            Some(ViewerFrameContent::ExternalTexture(output))
-        }
+        PreviewPresentationContent::Gpu(output) => Ok(ViewerFrameContent::ExternalTexture(output)),
         PreviewPresentationContent::Raster(frame) => {
             let color_space = match frame.color_space {
                 PreviewRasterColorSpace::Srgb => mondrian_ui_core::RasterImageColorSpace::Srgb,
@@ -128,6 +131,12 @@ fn viewer_frame_content(
                 frame.rgba,
             )
             .map(ViewerFrameContent::Raster)
+            .ok_or_else(|| {
+                PreviewUnavailability::failed(
+                    PreviewOutputStage::FramePackaging,
+                    "validated Preview raster could not be adapted to a Window image",
+                )
+            })
         }
     }
 }

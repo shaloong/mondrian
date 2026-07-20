@@ -83,6 +83,7 @@ pub(crate) mod preview_raster_frame;
 pub mod preview_runtime;
 pub(crate) mod preview_scheduler_policy;
 pub(crate) mod preview_timeline_execution;
+pub mod preview_unavailability;
 pub(crate) mod preview_viewer_plan;
 mod project_lifecycle;
 pub mod proxy_generation;

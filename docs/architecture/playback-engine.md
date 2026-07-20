@@ -46,6 +46,7 @@ Preview Production Runtime.
 | Preview Frame Store | ready/stale/in-flight identity, source revision, color contract, memory budgets | deadline policy or proxy selection |
 | Playback Preview Pump | one pending-demand sample, ordered completion/expiration delivery application, current-epoch video-preroll observation, Window/Headless-neutral pump outcome | decode/render implementation, Widget refresh, GPU resources |
 | Preview Execution Coordinator | complete generation binding, pending state, executed presentation quality, candidate identity, exact registered output | timeline interpretation, codec payloads, GPU resources, Widget state |
+| Preview Output Unavailability | `NoContent`/`Blocked`/`Failed` disposition, owning production stage, stable code, bounded aggregate evidence | scheduler policy, renderer error details, localized UI wording |
 | Presentation Adapter | GPU import/composite/display, Viewer handoff, presentation evidence | timeline advancement |
 | Playback Evidence | immutable events, aggregates, reports | policy decisions |
 
@@ -963,6 +964,14 @@ GPU output, raster-cache hits, same-scope stale reuse, deferred playback
 composites, and the CPU output boundary. It owns no generation, candidate,
 cache-residency, scheduling, or transport authority. Retain one public request
 seam into media and continue moving only behavior with clear ownership.
+Timeline evaluation, media resolution/decode, CPU/GPU execution, raster
+packaging, and final presentation carry one typed Preview Output Unavailability
+contract without collapsing it to `Option`, unit state, or an error string.
+Expected empty root output, correctness/dependency blockers, and admitted
+execution failures remain distinct through Window, Headless, diagnostics, and
+performance evidence. Empty nested Sequences lower to transparent content;
+every terminal unavailable result clears current/pinned stale eligibility, while
+only pending work may reuse a same-scope prior output.
 Production Runtime regressions live beside `app::preview_runtime`. Media worker failure, cancellation, queue
 deadline, execution-lease settlement, and shutdown behavior live with
 `app::preview_media_task`, where they run without a Window or Widget.
@@ -1002,6 +1011,15 @@ cannot mutate recovery twice. The former
 Viewer-owned `playback_buffering` state and its audio mute/clock hold have been
 removed. Window redraw may still defer duplicate GPU candidate preparation while
 Loading, but that presentation guard has no transport authority.
+
+The production Preview Runtime now preserves typed `NoContent`, `Blocked`, or
+`Failed` output reasons and their owning stage across Timeline traversal, source
+resolution, decode, color/composite execution, GPU lowering, raster packaging,
+and final presentation. Window projects that contract without reclassification;
+Headless and render-performance evidence consume the same bounded counters and
+stage breakdown. Preview render evidence schema v2 fails closed on blocked or
+failed outputs but does not treat expected no-content frames as execution
+failures.
 
 `app::playback_preview` now owns the production result-to-Playback pump used by
 both `AppUiHost` and the real Headless GPU harness. The Preview Adapter returns

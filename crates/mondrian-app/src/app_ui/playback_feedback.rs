@@ -39,7 +39,7 @@ impl ViewerPlaybackFeedback {
     /// Adapt the raw preview lifecycle for headless/perf Adapters.
     pub fn from_preview_state(state: &ViewerPreviewState) -> Self {
         match state {
-            ViewerPreviewState::Unavailable => Self::Unavailable,
+            ViewerPreviewState::Unavailable(_) => Self::Unavailable,
             ViewerPreviewState::Loading => Self::Loading,
             ViewerPreviewState::Stale(_) => Self::Stale,
             ViewerPreviewState::Ready(_) => Self::Ready,
@@ -113,7 +113,12 @@ mod tests {
     #[test]
     fn raw_preview_adapter_preserves_ready_loading_and_stale_meanings() {
         assert_eq!(
-            ViewerPlaybackFeedback::from_preview_state(&ViewerPreviewState::Unavailable),
+            ViewerPlaybackFeedback::from_preview_state(&ViewerPreviewState::Unavailable(
+                crate::app::preview_unavailability::PreviewUnavailability::no_content(
+                    crate::app::preview_unavailability::PreviewOutputStage::TimelineEvaluation,
+                    "test no content",
+                ),
+            )),
             ViewerPlaybackFeedback::Unavailable
         );
         assert_eq!(

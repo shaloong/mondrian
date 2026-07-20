@@ -155,6 +155,8 @@ pub struct PreviewDiagnostics {
     pub stale_frames: u64,
     /// Requests with no renderable preview frame.
     pub unavailable_frames: u64,
+    /// Typed aggregate evidence for unavailable GPU candidates and final presentations.
+    pub unavailability: crate::app::preview_unavailability::PreviewUnavailabilityEvidenceSnapshot,
     /// Playback current-frame requests expired so buffering cannot hold the shell indefinitely.
     pub playback_current_stalled_expirations: u64,
     /// Requests for a CPU working-frame candidate for the app-window GPU output path.
@@ -1489,6 +1491,8 @@ pub struct PreviewRenderPerformanceSummary {
     pub max_frame_stage_durations: PreviewRenderStageDurations,
     /// Dominant post-decode render bottleneck inferred from the slowest-frame timings.
     pub primary_bottleneck: PreviewRenderBottleneck,
+    /// Typed unavailable-output evidence from GPU candidates and final presentation.
+    pub unavailability: crate::app::preview_unavailability::PreviewUnavailabilityEvidenceSnapshot,
 }
 
 /// Dominant post-decode preview render bottleneck.
@@ -1512,7 +1516,7 @@ pub enum PreviewRenderBottleneck {
 }
 
 /// Schema version for preview render performance reports.
-pub const PREVIEW_RENDER_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 1;
+pub const PREVIEW_RENDER_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 2;
 
 /// Default post-decode viewer render budget: one frame should complete in tens of ms.
 pub const PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;
@@ -1831,7 +1835,7 @@ impl PreviewDiagnostics {
         self,
         slow_frame_budget_us: u64,
     ) -> Option<PreviewRenderPerformanceSummary> {
-        if self.render_timed_frames == 0 {
+        if self.render_timed_frames == 0 && self.unavailability.observations == 0 {
             return None;
         }
         let stage_durations = self.render_stage_durations;
@@ -1845,6 +1849,7 @@ impl PreviewDiagnostics {
             stage_durations,
             max_frame_stage_durations,
             primary_bottleneck: classify_preview_render_bottleneck(max_frame_stage_durations),
+            unavailability: self.unavailability,
         })
     }
 

@@ -248,8 +248,9 @@ fn media_pending_and_unavailable_are_distinct_terminal_shapes() {
         PreviewTimelineResolution::Pending { asset_id: pending_id } if pending_id == asset_id
     ));
 
-    let mut unavailable =
-        |_| PreviewTimelineMediaFrame::Unavailable { reason: "offline".to_owned() };
+    let mut unavailable = |_| PreviewTimelineMediaFrame::Unavailable {
+        reason: PreviewUnavailability::blocked(PreviewOutputStage::MediaResolution, "offline"),
+    };
     assert!(matches!(
         resolve_preview_timeline(
             &sequence,
@@ -260,7 +261,7 @@ fn media_pending_and_unavailable_are_distinct_terminal_shapes() {
             color_context(&sequence),
             &mut unavailable,
         ),
-        PreviewTimelineResolution::Unavailable { reason } if reason.contains("offline")
+        PreviewTimelineResolution::Unavailable { reason } if reason.detail().contains("offline")
     ));
 }
 
@@ -286,7 +287,7 @@ fn missing_nested_sequence_is_explicitly_unavailable() {
         color_context(&parent),
     )
     .expect_err("missing nested demand must fail");
-    assert!(demand_error.reason.contains(&missing_id.to_string()));
+    assert!(demand_error.detail().contains(&missing_id.to_string()));
 
     assert!(matches!(
         resolve_preview_timeline(
@@ -298,6 +299,38 @@ fn missing_nested_sequence_is_explicitly_unavailable() {
             color_context(&parent),
             &mut unexpected_media,
         ),
-        PreviewTimelineResolution::Unavailable { reason } if reason.contains(&missing_id.to_string())
+        PreviewTimelineResolution::Unavailable { reason } if reason.detail().contains(&missing_id.to_string())
     ));
+}
+
+#[test]
+fn empty_nested_sequence_is_transparent_instead_of_blocking_parent_output() {
+    let child = Sequence::new("empty-child");
+    let mut parent = Sequence::new("parent");
+    let time_base = parent.time_base();
+    parent.video_tracks[0]
+        .add_clip(
+            Clip::new_nested_sequence(child.id, tt(0, time_base), tt(24, time_base), None)
+                .expect("nested clip"),
+        )
+        .expect("insert nested clip");
+    let mut unexpected_media = |_| panic!("empty nested Sequence must not request media");
+
+    let PreviewTimelineResolution::Ready(resolved) = resolve_preview_timeline(
+        &parent,
+        &[child],
+        0,
+        Resolution { width: 64, height: 36 },
+        PreviewResolutionScale::Full,
+        color_context(&parent),
+        &mut unexpected_media,
+    ) else {
+        panic!("empty nested Sequence must resolve as a transparent layer");
+    };
+    assert_eq!(resolved.plan.elements.len(), 1);
+    let ResolvedPreviewElement::Media { frame, .. } = &resolved.plan.elements[0] else {
+        panic!("nested Sequence must lower to a media layer");
+    };
+    let working = frame.working_frame().expect("transparent working frame");
+    assert!(working.frame.rgba_f32().data.iter().all(|pixel| *pixel == [0.0; 4]));
 }

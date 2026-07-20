@@ -5,6 +5,7 @@
 //! across those Adapters: generation binding, pending state, executed quality,
 //! candidate identity, and the exact currently registered output.
 
+use super::preview_unavailability::PreviewUnavailability;
 use mondrian_core::types::SequenceId;
 use mondrian_core::WorkingColorSpace;
 use mondrian_media::{DecodedVideoSurfaceFormat, PreviewDecodeExecutionPath};
@@ -53,7 +54,7 @@ pub(crate) enum PreviewGpuFrameState {
     /// Required media is still decoding or rendering.
     Loading,
     /// No Viewer output can be produced for the current intent.
-    Unavailable,
+    Unavailable(PreviewUnavailability),
 }
 
 /// Working-space input consumed by either Window or Headless Viewer GPU execution.

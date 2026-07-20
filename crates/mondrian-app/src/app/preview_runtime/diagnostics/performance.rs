@@ -52,6 +52,20 @@ pub fn build_preview_render_performance_report(
             summary.max_duration_us,
             slow_frame_budget_us,
         );
+        push_render_max_check(
+            &mut checks,
+            PreviewRenderPerformanceArea::CaptureIntegrity,
+            "preview_render_blocked_outputs",
+            summary.unavailability.blocked,
+            0,
+        );
+        push_render_max_check(
+            &mut checks,
+            PreviewRenderPerformanceArea::CaptureIntegrity,
+            "preview_render_failed_outputs",
+            summary.unavailability.failed,
+            0,
+        );
         push_preview_render_root_causes_and_actions(summary, &mut root_causes, &mut actions);
 
         let verdict = preview_render_verdict(&checks);
@@ -1955,6 +1969,38 @@ fn push_preview_render_root_causes_and_actions(
     root_causes: &mut Vec<PreviewRenderPerformanceRootCause>,
     actions: &mut Vec<PreviewRenderPerformanceAction>,
 ) {
+    if summary.unavailability.blocked > 0 {
+        push_render_root_cause_with_action(
+            root_causes,
+            actions,
+            PreviewRenderPerformanceArea::CaptureIntegrity,
+            "preview_render_output_blocked",
+            format!(
+                "blocked={} stages={:?} last_stage={:?}",
+                summary.unavailability.blocked,
+                summary.unavailability.stages,
+                summary.unavailability.last_stage
+            ),
+            "inspect_preview_unavailability",
+            "Resolve the typed Preview correctness or dependency blocker before measuring performance.",
+        );
+    }
+    if summary.unavailability.failed > 0 {
+        push_render_root_cause_with_action(
+            root_causes,
+            actions,
+            PreviewRenderPerformanceArea::CaptureIntegrity,
+            "preview_render_execution_failed",
+            format!(
+                "failed={} stages={:?} last_stage={:?}",
+                summary.unavailability.failed,
+                summary.unavailability.stages,
+                summary.unavailability.last_stage
+            ),
+            "inspect_preview_unavailability",
+            "Inspect the typed Preview execution stage and detailed terminal reason before tuning latency.",
+        );
+    }
     if summary.max_duration_us <= summary.slow_frame_budget_us {
         return;
     }

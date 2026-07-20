@@ -106,7 +106,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             if *remaining_prefetch_jobs == 0 {
                 break;
             }
-            let Some(key) = self.media_preview_key_for_asset(
+            let Ok(key) = self.media_preview_key_for_asset(
                 state,
                 &demand.asset_id,
                 demand.color_space_override,
@@ -232,7 +232,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     false,
                     false,
                 )
-                .is_some_and(|key| self.frame_store.borrow_mut().media_frame(&key).is_some());
+                .is_ok_and(|key| self.frame_store.borrow_mut().media_frame(&key).is_some());
             readiness.ready &= cached;
         }
         readiness

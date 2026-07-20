@@ -256,7 +256,10 @@ fn unavailable_and_color_rejected_sources_are_explicit_outcomes() {
     });
     assert!(matches!(
         unavailable,
-        PreviewMediaSourceOutcome::Unavailable(_)
+        PreviewMediaSourceOutcome::Unavailable(UnavailablePreviewMediaSource {
+            reason: PreviewMediaSourceUnavailableReason::SourceMetadataUnavailable { .. },
+            ..
+        })
     ));
 
     std::fs::create_dir_all(&root).expect("test root");

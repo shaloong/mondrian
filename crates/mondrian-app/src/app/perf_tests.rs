@@ -3253,7 +3253,7 @@ fn execute_headless_gpu_candidate(
         crate::app::preview_execution::PreviewGpuFrameState::Loading => {
             Ok(HeadlessGpuCandidateStatus::Loading)
         }
-        crate::app::preview_execution::PreviewGpuFrameState::Unavailable => {
+        crate::app::preview_execution::PreviewGpuFrameState::Unavailable(_) => {
             Ok(HeadlessGpuCandidateStatus::Unavailable)
         }
     }
@@ -3518,7 +3518,7 @@ fn wait_for_preview_ready_until(
                 let _ =
                     preview_service.poll_finished(state.pending_playback_frame_demand_identity());
             }
-            ViewerPreviewState::Unavailable => {
+            ViewerPreviewState::Unavailable(_) => {
                 let _ =
                     preview_service.poll_finished(state.pending_playback_frame_demand_identity());
             }

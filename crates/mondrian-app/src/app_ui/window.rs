@@ -2980,7 +2980,7 @@ fn prepare_viewer_gpu_preview(
             session.viewer_gpu_output_telemetry.record_loading_skip();
             finish_prepare!();
         }
-        PreviewGpuFrameState::Unavailable => {
+        PreviewGpuFrameState::Unavailable(reason) => {
             unregister_program_scopes_textures(session);
             session.program_scopes_refresh_requested = program_scopes_requested;
             session.viewer_gpu_output_telemetry.record_preview_candidate_state(
@@ -2988,6 +2988,12 @@ fn prepare_viewer_gpu_preview(
                 None,
             );
             session.viewer_gpu_output_telemetry.record_unavailable_skip();
+            tracing::warn!(
+                code = reason.code(),
+                stage = ?reason.stage(),
+                detail = reason.detail(),
+                "Viewer GPU Preview candidate is unavailable"
+            );
             finish_prepare!();
         }
     };

@@ -97,7 +97,20 @@ pub(crate) struct RejectedPreviewMediaSource {
 pub(crate) struct UnavailablePreviewMediaSource {
     pub(crate) asset_id: AssetId,
     pub(crate) path: PathBuf,
-    pub(crate) reason: String,
+    pub(crate) reason: PreviewMediaSourceUnavailableReason,
+}
+
+/// Stable reason canonical Preview media-source resolution was blocked.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum PreviewMediaSourceUnavailableReason {
+    #[error("asset is not a video source")]
+    NotVideo,
+    #[error("negative source target is invalid: {source_time}")]
+    NegativeSourceTime { source_time: TimelineTime },
+    #[error("source metadata unavailable: {reason}")]
+    SourceMetadataUnavailable { reason: String },
+    #[error("proxy path resolution failed: {reason}")]
+    ProxyPathResolutionFailed { reason: String },
 }
 
 /// Exhaustive result of adapting one asset into Preview execution semantics.
@@ -113,12 +126,14 @@ pub(crate) fn resolve_preview_media_source(
     request: PreviewMediaSourceRequest<'_>,
 ) -> PreviewMediaSourceOutcome {
     if request.asset.kind != AssetKind::Video {
-        return unavailable(&request, "asset is not a video source".to_owned());
+        return unavailable(&request, PreviewMediaSourceUnavailableReason::NotVideo);
     }
     if request.source_time.is_negative() {
         return unavailable(
             &request,
-            format!("negative source target is invalid: {}", request.source_time),
+            PreviewMediaSourceUnavailableReason::NegativeSourceTime {
+                source_time: request.source_time,
+            },
         );
     }
 
@@ -221,9 +236,10 @@ fn resolve_preview_media_decode_path(
     source_path: &Path,
     proxy_config: &ProxyConfig,
     proxy_color: Option<ProxyColorContract>,
-) -> Result<PreviewMediaDecodePath, String> {
-    let source_fingerprint = media_path_fingerprint(source_path)
-        .map_err(|error| format!("source metadata unavailable: {error}"))?;
+) -> Result<PreviewMediaDecodePath, PreviewMediaSourceUnavailableReason> {
+    let source_fingerprint = media_path_fingerprint(source_path).map_err(|error| {
+        PreviewMediaSourceUnavailableReason::SourceMetadataUnavailable { reason: error.to_string() }
+    })?;
     if !prefer_proxy || source_has_alpha {
         return Ok(source_decode_path(source_path, source_fingerprint));
     }
@@ -232,9 +248,9 @@ fn resolve_preview_media_decode_path(
     };
 
     let proxy_generator = ProxyGenerator::new(proxy_config.clone());
-    let proxy_path = proxy_generator
-        .proxy_path(source_path, proxy_color)
-        .map_err(|error| format!("proxy path resolution failed: {error}"))?;
+    let proxy_path = proxy_generator.proxy_path(source_path, proxy_color).map_err(|error| {
+        PreviewMediaSourceUnavailableReason::ProxyPathResolutionFailed { reason: error.to_string() }
+    })?;
     match (
         proxy_generator.proxy_status(source_path, proxy_color),
         media_path_fingerprint(&proxy_path),
@@ -316,7 +332,7 @@ fn canonicalize_media_decode_geometry(
 
 fn unavailable(
     request: &PreviewMediaSourceRequest<'_>,
-    reason: String,
+    reason: PreviewMediaSourceUnavailableReason,
 ) -> PreviewMediaSourceOutcome {
     PreviewMediaSourceOutcome::Unavailable(UnavailablePreviewMediaSource {
         asset_id: request.asset.id,
