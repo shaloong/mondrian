@@ -277,6 +277,18 @@ first active checkpoint with atomics and never owns a cancellation cause or
 deadline. The App Frame Work Broker remains authority for why and when work was
 canceled; the media fact proves where blocking execution actually yielded.
 
+`mondrian-media::preview` is the public request/outcome facade, not the owner of
+every implementation detail. Its private deep modules separately own the
+request-scoped interrupt protocol, typed CPU frames, one FFmpeg decode Session,
+hardware admission/context state, frame materialization, native-frame resource
+lifetime, the probe/session seek index, the session-local playback ring, the
+process frame cache, and the optional external still process. The FFmpeg Session
+is the sole owner of open → stream-info → seek → packet/codec → materialize
+ordering; the other modules provide narrow stateful services and cannot publish
+a second decode outcome. The external process module always drains both pipes,
+retains only the exact expected RGBA byte count and 64 KiB of stderr, and on
+cancellation performs kill → wait → reader join before returning `Canceled`.
+
 Ordinary CI exercises this contract through a loopback HTTP server that accepts
 FFmpeg's connection and deliberately withholds a response. Both the media
 Interface test and the production Preview worker test must prove bounded return
