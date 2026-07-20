@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
-use mondrian_platform::{NativeVideoTextureImportProbe, PlatformService, SystemPlatformService};
+use mondrian_platform::{NativeVideoTextureImportProbeResult, PlatformService};
 use mondrian_renderer::GpuNativeDecodedFrameImportSupport;
 use mondrian_ui_core::types::{Point, Rect};
 use mondrian_ui_core::{TreeWalker, Widget};
@@ -258,11 +258,9 @@ impl AppUiHost {
     pub(crate) fn set_native_decoded_frame_import_support(
         &self,
         support: GpuNativeDecodedFrameImportSupport,
+        platform_probe: &NativeVideoTextureImportProbeResult,
     ) {
-        let admission = resolve_playback_hardware_decode_admission(
-            &support,
-            &SystemPlatformService.native_video_texture_import(),
-        );
+        let admission = resolve_playback_hardware_decode_admission(&support, platform_probe);
         self.preview_service.set_playback_hardware_decode_admission(admission);
     }
 
@@ -1362,7 +1360,9 @@ mod tests {
     use mondrian_editor_state::state::PanelKind;
     use mondrian_editor_state::Action;
     use mondrian_media::PreviewHardwareDecodeRequest;
-    use mondrian_platform::{ClipboardError, FileFilter, NoopPlatformService};
+    use mondrian_platform::{
+        ClipboardError, FileFilter, NativeVideoTextureImportProbeResult, NoopPlatformService,
+    };
     use mondrian_timeline::Sequence;
     use mondrian_ui_core::tree::TreeWalker;
     use mondrian_ui_core::types::{Modifiers, MouseButton, Point, Rect, SplitDirection};
@@ -1384,6 +1384,7 @@ mod tests {
 
         host.set_native_decoded_frame_import_support(
             GpuNativeDecodedFrameImportSupport::unavailable(),
+            &NativeVideoTextureImportProbeResult::unsupported("test probe unavailable"),
         );
         assert_eq!(
             host.preview_service.playback_hardware_decode_request_for_test(),

@@ -602,7 +602,11 @@ evidence. Pre-execution records are explicitly `GpuWorkingCompositePlanned`
 with `execution_observed=false`; only a completed renderer record may publish
 `GpuWorkingCompositeExecuted`, zero-copy success, or observed upload/readback
 counts. Platform import capability is an explicit input, never a hidden test
-dependency or a substitute for frame execution.
+dependency or a substitute for frame execution. The Window captures one native
+video import probe per renderer/Window Session and supplies that same immutable
+snapshot to hardware-decode admission plus declared and executed residency;
+per-frame re-probing may not splice different capability generations into one
+attempt.
 Export diagnostics may expose additional preflight helpers, but final job-level
 counters must be produced from the frame render path.
 Preview exposes the same frame-level input color-resolution source counts from

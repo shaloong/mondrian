@@ -46,7 +46,9 @@ use crate::app_ui::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
 use mondrian_core::types::ColorSpace;
 use mondrian_core::WaveformMode;
 use mondrian_editor_state::state::PanelKind;
-use mondrian_platform::{NativeVideoTextureImportProbe, SystemPlatformService};
+use mondrian_platform::{
+    NativeVideoTextureImportProbe, NativeVideoTextureImportProbeResult, SystemPlatformService,
+};
 #[cfg(test)]
 use mondrian_renderer::RenderOutputColorBoundary;
 use mondrian_renderer::{
@@ -528,10 +530,16 @@ impl AppUiViewerGpuOutputTelemetry {
         self.last_preview_candidate_state = Some(state);
     }
 
-    fn record_frame_context(&mut self, frame: &PreviewGpuFrame, external_texture_key: String) {
+    fn record_frame_context(
+        &mut self,
+        frame: &PreviewGpuFrame,
+        external_texture_key: String,
+        frame_residency: AppUiViewerGpuOutputFrameResidency,
+    ) {
         self.last_frame_context = Some(AppUiViewerGpuOutputFrameContext::from_frame(
             frame,
             external_texture_key,
+            frame_residency,
         ));
     }
 
@@ -701,7 +709,11 @@ impl AppUiViewerGpuOutputTelemetry {
 }
 
 impl AppUiViewerGpuOutputFrameContext {
-    fn from_frame(frame: &PreviewGpuFrame, external_texture_key: String) -> Self {
+    fn from_frame(
+        frame: &PreviewGpuFrame,
+        external_texture_key: String,
+        frame_residency: AppUiViewerGpuOutputFrameResidency,
+    ) -> Self {
         Self {
             sequence_id: frame.sequence_id.to_string(),
             frame: frame.frame,
@@ -720,10 +732,7 @@ impl AppUiViewerGpuOutputFrameContext {
                     view: display_view.view.clone(),
                 }
             }),
-            frame_residency: declared_viewer_gpu_output_residency(
-                frame,
-                SystemPlatformService.native_video_texture_import(),
-            ),
+            frame_residency,
         }
     }
 }
@@ -1057,6 +1066,7 @@ struct AppUiWindowSession {
     display_calibration: Option<Arc<mondrian_core::display_calibration::DisplayCalibrationLut3d>>,
     color_engine: mondrian_core::ColorEngine,
     display_management_policy: mondrian_core::color_models::DisplayManagementPolicy,
+    native_video_import_probe: NativeVideoTextureImportProbeResult,
     frame_renderer: AppUiFrameRenderer,
     renderer_queue: wgpu::Queue,
     viewer_gpu_execution: ViewerGpuExecutionRuntime,
@@ -2995,9 +3005,13 @@ fn prepare_viewer_gpu_preview(
         host.clear_external_viewer_frame();
         finish_prepare!();
     };
-    session
-        .viewer_gpu_output_telemetry
-        .record_frame_context(&frame, texture_key.as_str().to_owned());
+    let declared_residency =
+        declared_viewer_gpu_output_residency(&frame, session.native_video_import_probe.clone());
+    session.viewer_gpu_output_telemetry.record_frame_context(
+        &frame,
+        texture_key.as_str().to_owned(),
+        declared_residency,
+    );
     session.viewer_gpu_output_telemetry.record_preview_candidate_state(
         AppUiViewerGpuOutputPreviewCandidateState::Ready,
         Some(frame.candidate_id()),
@@ -3267,7 +3281,7 @@ fn prepare_viewer_gpu_preview(
         preview_gpu_composite_frame_residency(
             record.residency,
             session.viewer_gpu_execution.native_import_support(),
-            SystemPlatformService.native_video_texture_import(),
+            session.native_video_import_probe.clone(),
         ),
     );
     for reason in &record.fallback_reasons {
@@ -3698,6 +3712,7 @@ fn refresh_display_output_contract(
         session.frame_renderer = AppUiFrameRenderer::new(device, session.config.format);
         host.set_native_decoded_frame_import_support(
             session.viewer_gpu_execution.native_import_support(),
+            &session.native_video_import_probe,
         );
     }
 
@@ -3792,7 +3807,11 @@ impl AppUiWindowSession {
 
         let frame_renderer = AppUiFrameRenderer::new(device, config.format);
         let viewer_gpu_execution = ViewerGpuExecutionRuntime::new(adapter, device, queue);
-        host.set_native_decoded_frame_import_support(viewer_gpu_execution.native_import_support());
+        let native_video_import_probe = SystemPlatformService.native_video_texture_import();
+        host.set_native_decoded_frame_import_support(
+            viewer_gpu_execution.native_import_support(),
+            &native_video_import_probe,
+        );
 
         Ok(Self {
             role,
@@ -3804,6 +3823,7 @@ impl AppUiWindowSession {
             display_calibration: initial_display_resolution.calibration,
             color_engine,
             display_management_policy,
+            native_video_import_probe,
             frame_renderer,
             renderer_queue: queue.clone(),
             viewer_gpu_execution,

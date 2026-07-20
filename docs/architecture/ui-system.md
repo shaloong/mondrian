@@ -367,6 +367,12 @@ platform-probe and renderer-execution facts to
 native input. Planned and executed working residency are distinct serialized
 states, and execution-only counters remain zero until the renderer supplies an
 actual completion record.
+Native-video capability discovery is sampled once while constructing the
+renderer/Window Session. `AppUiHost` no longer performs an independent probe:
+hardware-decode admission and every residency record consume the same explicit
+snapshot. A new probe generation requires Session/device reconstruction, so a
+single frame cannot combine admission from one platform observation with
+execution evidence from another.
 Telemetry must also expose a stable display issue summary that names the reason,
 target output color space, current or selected surface contract, desired surface
 contract, payload blocker, and whether the target surface color space is
