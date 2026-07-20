@@ -39,7 +39,9 @@ use crate::app::preview_cpu_execution::{
 use crate::app::preview_display_contract::preview_blockers_from_snapshot;
 #[cfg(test)]
 use crate::app::preview_execution::PreviewDecodeExecutionSummary;
-use crate::app::preview_execution::{PreviewCandidateDecision, PreviewExecutionCoordinator};
+use crate::app::preview_execution::{
+    PreviewCandidateDecision, PreviewExecutionCoordinator, PreviewGenerationBinding,
+};
 use crate::app::preview_execution::{
     PreviewGpuFrame, PreviewGpuFrameState, PreviewGpuWorkingInput,
 };
@@ -182,6 +184,7 @@ pub struct PreviewProductionRuntime<O: Clone> {
     scrub_adaptation: RefCell<PreviewScrubAdaptationState>,
     execution:
         RefCell<PreviewExecutionCoordinator<ViewerPreviewGenerationKey, ViewerPreviewCacheKey, O>>,
+    transport_playing: Cell<bool>,
     playback_pressure: Cell<PlaybackPressureState>,
     scheduler: MediaPreviewScheduler,
     scratch: RefCell<TimelineCompositeScratch>,
@@ -252,6 +255,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             frame_store: RefCell::new(PreviewFrameStoreAdapter::default()),
             scrub_adaptation: RefCell::new(PreviewScrubAdaptationState::default()),
             execution: RefCell::new(PreviewExecutionCoordinator::default()),
+            transport_playing: Cell::new(false),
             playback_pressure: Cell::new(PlaybackPressureState::default()),
             scheduler,
             scratch: RefCell::new(TimelineCompositeScratch::default()),
@@ -362,6 +366,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     /// output texture registration, and texture lifetime.
     pub(crate) fn gpu_preview_frame_for_state(&self, state: &AppState) -> PreviewGpuFrameState {
         bump(&self.metrics.gpu_preview_candidate_requests);
+        self.transport_playing.set(state.is_playing());
         self.execution.borrow_mut().set_pending(false);
         self.last_color_rejection.replace(None);
         let Some(sequence) = state.sequence.as_ref() else {
@@ -430,14 +435,25 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 ));
             }
         };
-        self.activate_preview_generation(ViewerPreviewGenerationKey::from_state(
-            state,
-            sequence,
-            frame,
-            width,
-            height,
-            display_color_space,
-        ));
+        let generation_binding =
+            self.activate_preview_generation(ViewerPreviewGenerationKey::from_state(
+                state,
+                sequence,
+                frame,
+                width,
+                height,
+                display_color_space,
+                display_snapshot.as_ref().map(DisplayOutputSnapshot::contract_generation),
+            ));
+        if !state.is_playing()
+            && matches!(generation_binding, PreviewGenerationBinding::Current(_))
+            && self.execution.borrow().has_exact_current_output()
+        {
+            self.scheduler.prune_obsolete();
+            self.try_release_settled_transport_media_residency();
+            bump(&self.metrics.gpu_preview_candidate_current);
+            return PreviewGpuFrameState::Current;
+        }
         let mut resolved =
             match self.resolve_timeline(state, sequence, frame, width, height, color_context) {
                 PreviewTimelineResolution::Ready(resolved) => resolved.plan,
@@ -492,6 +508,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             PreviewCandidateDecision::Current => {
                 self.schedule_media_prefetches(state, sequence, frame, width, height);
                 self.scheduler.prune_obsolete();
+                self.try_release_settled_transport_media_residency();
                 bump(&self.metrics.gpu_preview_candidate_current);
                 return PreviewGpuFrameState::Current;
             }
@@ -570,6 +587,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     /// Register a GPU output made usable by the active presentation Adapter.
     pub(crate) fn register_gpu_output(&self, frame: &PreviewGpuFrame, output: O) -> bool {
         self.execution.borrow_mut().register_output(frame.output_key.clone(), output);
+        self.try_release_settled_transport_media_residency();
         bump(&self.metrics.gpu_preview_external_frames_registered);
         true
     }
@@ -608,11 +626,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.scheduler.prune_obsolete();
     }
 
-    fn activate_preview_generation(&self, key: ViewerPreviewGenerationKey) -> u64 {
+    fn activate_preview_generation(
+        &self,
+        key: ViewerPreviewGenerationKey,
+    ) -> PreviewGenerationBinding {
         self.execution
             .borrow_mut()
             .bind_generation(key, || self.scheduler.begin_generation())
-            .generation()
     }
 
     fn invalidate_preview_generation(&self) {
@@ -620,7 +640,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     }
 
     fn registered_gpu_output_for_key(&self, key: &ViewerPreviewCacheKey) -> Option<O> {
-        self.execution.borrow().output_for(key)
+        self.execution.borrow_mut().output_for(key)
     }
 
     fn stale_frame_for_sequence(
@@ -666,6 +686,10 @@ impl Default for MediaPrerollFrameReadiness {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ViewerPreviewGenerationKey {
     sequence_id: SequenceId,
+    sequence_revision: mondrian_core::SequenceRevision,
+    project_document_revision: u64,
+    ocio_config_generation: u64,
+    display_contract_generation: Option<u64>,
     /// Playback Epoch for a running cursor. `None` identifies an idle/still
     /// cursor, whose exact frame remains part of the generation identity.
     playback_epoch: Option<mondrian_playback::PlaybackEpoch>,
@@ -685,10 +709,15 @@ impl ViewerPreviewGenerationKey {
         width: u32,
         height: u32,
         display_color_space: ColorSpace,
+        display_contract_generation: Option<u64>,
     ) -> Self {
         let playing = state.is_playing();
         Self {
             sequence_id: sequence.id,
+            sequence_revision: sequence.revision,
+            project_document_revision: state.project_document_revision,
+            ocio_config_generation: mondrian_core::ocio_config_generation(),
+            display_contract_generation,
             playback_epoch: playing.then(|| state.playback_epoch()),
             still_frame: (!playing).then_some(frame),
             width,
@@ -717,9 +746,12 @@ impl<O: Clone> PlaybackPreviewAdapter for PreviewProductionRuntime<O> {
     fn poll_playback_work(
         &self,
         pending_demand: Option<mondrian_playback::FrameDemandIdentity>,
+        transport_playing: bool,
     ) -> PreviewWorkPoll {
+        self.transport_playing.set(transport_playing);
         let mut outcome = self.poll_finished_outcome(pending_demand);
         outcome.merge(self.expire_stalled_realtime_current(pending_demand));
+        self.try_release_settled_transport_media_residency();
         outcome
     }
 

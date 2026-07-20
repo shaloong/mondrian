@@ -757,6 +757,8 @@ pub struct PreviewDecodeAccessModeProfile {
     pub budget_exhausted_failures: u64,
     /// Decode requests for this access mode that required a seek.
     pub seeked_frames: u64,
+    /// Results that intentionally selected a non-exact temporal approximation.
+    pub temporal_approximation_frames: u64,
     /// Decode results that used keyframe-before exact seek semantics.
     pub keyframe_seek_strategy_frames: u64,
     /// Decode results that used bounded any-frame low-latency seek semantics.
@@ -918,6 +920,10 @@ impl PreviewDecodeAccessModeProfile {
         self.last_duration_us = diagnostics.elapsed_us;
         if diagnostics.seek_performed {
             self.seeked_frames = self.seeked_frames.saturating_add(1);
+        }
+        if diagnostics.temporal_approximation {
+            self.temporal_approximation_frames =
+                self.temporal_approximation_frames.saturating_add(1);
         }
         match diagnostics.seek_strategy {
             PreviewDecodeSeekStrategy::KeyframeBefore => {

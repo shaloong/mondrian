@@ -1466,6 +1466,20 @@ missing or session-only evidence gets a bounded responsiveness-first budget, and
 playback/still requests keep their larger deterministic budget. The budget
 reported in `PreviewDecodeDiagnostics.forward_decode_budget_frames` is the
 effective budget that was actually used for that request.
+
+`RandomAccessStillFrame` with deterministic keyframe-before seeking may reduce
+long-GOP output work without weakening frame identity. For only the distant
+prefix, the decoder uses FFmpeg's `NonReference` discard policy; it restores
+full decode at least 64 stream-frame durations before the requested timestamp.
+Non-reference pictures cannot be dependencies of later pictures, while the
+prefix's reference pictures continue to populate decoder state. Playback and
+Scrub never use this optimization. A packet without PTS/DTS restores full
+decode immediately, and every submitted video packet counts toward the same
+forward-decode budget even when FFmpeg intentionally emits no picture for it.
+The selected still must still satisfy the ordinary exact-frame rule:
+`temporal_approximation` remains structured diagnostics, and the professional
+accurate-seek gate rejects any nonzero approximation count rather than trading
+correctness for its 500 ms p95 target.
 App-level preview diagnostics aggregate those fields so playback/perf JSON can
 show whether a 4K/HDR test is decode-bound, long-GOP seek-bound, cache-bound,
 single-thread decode-bound, software-scale/copy-bound, worker-queue-bound, or

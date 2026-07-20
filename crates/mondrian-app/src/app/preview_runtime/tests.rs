@@ -71,31 +71,112 @@ fn playback_generation_survives_frame_advance_but_not_discontinuity() {
     let sequence = state.sequence.as_ref().expect("sequence").clone();
     state.play();
 
-    let current =
-        ViewerPreviewGenerationKey::from_state(&state, &sequence, 4, 960, 540, ColorSpace::Srgb);
-    let advanced =
-        ViewerPreviewGenerationKey::from_state(&state, &sequence, 5, 960, 540, ColorSpace::Srgb);
+    let current = ViewerPreviewGenerationKey::from_state(
+        &state,
+        &sequence,
+        4,
+        960,
+        540,
+        ColorSpace::Srgb,
+        None,
+    );
+    let advanced = ViewerPreviewGenerationKey::from_state(
+        &state,
+        &sequence,
+        5,
+        960,
+        540,
+        ColorSpace::Srgb,
+        None,
+    );
     assert_eq!(
         current, advanced,
         "ordinary playback must retain forward prefetch work"
     );
 
     state.seek(6);
-    let after_seek =
-        ViewerPreviewGenerationKey::from_state(&state, &sequence, 6, 960, 540, ColorSpace::Srgb);
+    let after_seek = ViewerPreviewGenerationKey::from_state(
+        &state,
+        &sequence,
+        6,
+        960,
+        540,
+        ColorSpace::Srgb,
+        None,
+    );
     assert_ne!(
         current, after_seek,
         "seek must invalidate the prior playback epoch"
     );
 
     state.pause();
-    let idle_a =
-        ViewerPreviewGenerationKey::from_state(&state, &sequence, 6, 960, 540, ColorSpace::Srgb);
-    let idle_b =
-        ViewerPreviewGenerationKey::from_state(&state, &sequence, 7, 960, 540, ColorSpace::Srgb);
+    let idle_a = ViewerPreviewGenerationKey::from_state(
+        &state,
+        &sequence,
+        6,
+        960,
+        540,
+        ColorSpace::Srgb,
+        None,
+    );
+    let idle_b = ViewerPreviewGenerationKey::from_state(
+        &state,
+        &sequence,
+        7,
+        960,
+        540,
+        ColorSpace::Srgb,
+        None,
+    );
     assert_ne!(
         idle_a, idle_b,
         "idle current-frame work remains latest-wins"
+    );
+
+    let mut revised_sequence = sequence.clone();
+    revised_sequence.revision =
+        revised_sequence.revision.checked_next().expect("test revision can advance");
+    let revised = ViewerPreviewGenerationKey::from_state(
+        &state,
+        &revised_sequence,
+        6,
+        960,
+        540,
+        ColorSpace::Srgb,
+        None,
+    );
+    assert_ne!(
+        idle_a, revised,
+        "Sequence authoring must rotate Preview work"
+    );
+
+    state.project_document_revision = state.project_document_revision.saturating_add(1);
+    let project_revised = ViewerPreviewGenerationKey::from_state(
+        &state,
+        &sequence,
+        6,
+        960,
+        540,
+        ColorSpace::Srgb,
+        None,
+    );
+    assert_ne!(
+        idle_a, project_revised,
+        "Project authoring must rotate Preview work"
+    );
+
+    let display_revised = ViewerPreviewGenerationKey::from_state(
+        &state,
+        &sequence,
+        6,
+        960,
+        540,
+        ColorSpace::Srgb,
+        Some(7),
+    );
+    assert_ne!(
+        project_revised, display_revised,
+        "Display contract changes must rotate Preview work"
     );
 }
 
@@ -8533,6 +8614,48 @@ fn preview_service_cancel_interactive_work_clears_pending_and_cached_state() {
     assert_eq!(frame_store.media_entries, 0);
     assert_eq!(frame_store.media_reserved_bytes, 0);
     assert_eq!(frame_store.failure_entries, 0);
+    service.shutdown();
+}
+
+#[test]
+fn preview_service_idle_release_preserves_failure_memory() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let key = test_media_key(1);
+    service
+        .frame_store
+        .borrow_mut()
+        .insert_media_frame(key.clone(), test_media_frame(1), false);
+    service.frame_store.borrow_mut().remember_failure(key);
+
+    assert!(service.try_release_idle_media_residency());
+
+    let diagnostics = service.frame_store.borrow().diagnostics();
+    assert_eq!(diagnostics.media_entries, 0);
+    assert_eq!(diagnostics.media_reserved_bytes, 0);
+    assert_eq!(diagnostics.failure_entries, 1);
+    service.shutdown();
+}
+
+#[test]
+fn preview_service_idle_release_fails_closed_while_intent_is_pending() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let key = test_media_key(1);
+    service
+        .frame_store
+        .borrow_mut()
+        .insert_media_frame(key, test_media_frame(1), false);
+    service.execution.borrow_mut().set_pending(true);
+
+    assert!(!service.try_release_idle_media_residency());
+    assert_eq!(service.frame_store.borrow().diagnostics().media_entries, 1);
+    service.shutdown();
+}
+
+#[test]
+fn preview_service_settled_release_requires_an_exact_viewer_output() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+
+    assert!(!service.try_release_settled_transport_media_residency());
     service.shutdown();
 }
 

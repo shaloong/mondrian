@@ -10,6 +10,7 @@ use super::*;
 impl<O: Clone> PreviewProductionRuntime<O> {
     pub(crate) fn presentation_for_state(&self, state: &AppState) -> PreviewPresentationState<O> {
         bump(&self.metrics.render_requests);
+        self.transport_playing.set(state.is_playing());
         self.execution.borrow_mut().set_pending(false);
         self.last_color_rejection.replace(None);
         let Some(sequence) = state.sequence.as_ref() else {
@@ -52,6 +53,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             width,
             height,
             display_color_space,
+            display_snapshot.as_ref().map(DisplayOutputSnapshot::contract_generation),
         ));
         let render_started_at = Instant::now();
         let resolve_started_at = Instant::now();
@@ -87,6 +89,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     .as_ref()
                     .and_then(|cache_key| self.registered_gpu_output_for_key(cache_key))
                 {
+                    self.try_release_settled_transport_media_residency();
                     render_stage_durations.final_cache_lookup_us =
                         app_duration_us(final_cache_lookup_started_at.elapsed());
                     self.record_render_stage_durations(

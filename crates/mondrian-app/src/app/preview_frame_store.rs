@@ -154,6 +154,11 @@ impl PreviewFrameStoreAdapter {
         self.store.clear_viewer_frames();
     }
 
+    /// Release decoded-media payloads without invalidating a usable final Viewer output.
+    pub(crate) fn clear_media_frames(&mut self) {
+        self.store.clear_media_frames();
+    }
+
     /// Clear every payload, failure key, and explicit pin.
     pub(crate) fn clear_all(&mut self) {
         self.store.clear_all();

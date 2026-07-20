@@ -87,6 +87,12 @@ const PREVIEW_PLAYBACK_SESSION_RING_CAPACITY: usize = 8;
 // block inside the driver waiting for a surface and never reach its next
 // cooperative checkpoint.
 const PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES: i32 = 32;
+// Exact random access can discard dependency-free non-reference output while
+// traversing the distant prefix of a long GOP. Restore full decode well before
+// the target so reordered output and the exact requested picture remain
+// available. Sixty-four frames exceeds ordinary H.264/HEVC DPB plus decoder
+// thread headroom without turning the optimization into approximate seeking.
+const PREVIEW_EXACT_SEEK_FULL_DECODE_PREROLL_FRAMES: i64 = 64;
 const PREVIEW_HIT_TOLERANCE_SECS: f64 = 0.025;
 const PREVIEW_MAX_SELECT_DISTANCE_SECS: f64 = 0.100;
 const PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES: i64 = 48;
@@ -1238,6 +1244,8 @@ pub use decode_session::clear_thread_local_preview_decode_session;
 use decode_session::{
     decode_preview_frame_outcome, preview_create_rgba_scaler, PreviewDecodedFramePayload,
 };
+#[cfg(test)]
+use decode_session::{exact_seek_non_reference_discard_until_pts, forward_decode_work_units};
 use hardware_decode::{preview_hardware_frame_format, PreviewHardwareDecodePlan};
 #[cfg(test)]
 use playback_ring::PreviewPlaybackRing;

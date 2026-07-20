@@ -3,6 +3,7 @@ use super::{
     clear_thread_local_preview_decode_session, convert_decoded_to_rgba,
     decode_preview_frame_cancellable, decoded_native_surface_format_from_software_format,
     decoded_surface_format_from_pixel, decoded_video_sampling_from_frame, duration_us,
+    exact_seek_non_reference_discard_until_pts, forward_decode_work_units,
     materialize_decoded_frame, preview_cache_get, preview_cache_put_with_fingerprint,
     preview_create_rgba_scaler, preview_decode_interrupt_callback,
     preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_hardware_extra_frames,
@@ -747,6 +748,34 @@ fn preview_decode_access_mode_policies_are_distinct() {
         PreviewDecodeSeekStrategy::KeyframeBefore
     );
     assert_eq!(still.any_seek_window_ms, 0);
+}
+
+#[test]
+fn exact_still_seek_discards_only_the_distant_non_reference_prefix() {
+    let still =
+        PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::RandomAccessStillFrame);
+    let playback =
+        PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::PlaybackCursor);
+    let scrub = PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::ScrubCursor);
+
+    assert_eq!(
+        exact_seek_non_reference_discard_until_pts(still, 10_000, 40),
+        Some(7_440)
+    );
+    assert_eq!(
+        exact_seek_non_reference_discard_until_pts(playback, 10_000, 40),
+        None
+    );
+    assert_eq!(
+        exact_seek_non_reference_discard_until_pts(scrub, 10_000, 40),
+        None
+    );
+}
+
+#[test]
+fn forward_decode_budget_counts_packets_whose_output_was_discarded() {
+    assert_eq!(forward_decode_work_units(48, 400), 400);
+    assert_eq!(forward_decode_work_units(400, 48), 400);
 }
 
 #[test]

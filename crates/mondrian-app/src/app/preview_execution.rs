@@ -212,15 +212,6 @@ pub(crate) enum PreviewCandidateDecision {
     Unavailable,
 }
 
-impl PreviewGenerationBinding {
-    /// Bound generation in either lifecycle case.
-    pub(crate) const fn generation(self) -> u64 {
-        match self {
-            Self::Current(generation) | Self::Rotated(generation) => generation,
-        }
-    }
-}
-
 /// Coherent execution lifecycle shared by Window and Headless Preview Adapters.
 ///
 /// `G` is the complete generation identity, `K` is the resolved Viewer output
@@ -233,6 +224,7 @@ pub(crate) struct PreviewExecutionCoordinator<G, K, O> {
     presentation_quality: FramePresentationQuality,
     next_candidate_id: u64,
     current_output: Option<(K, O)>,
+    current_output_generation: Option<u64>,
 }
 
 impl<G, K, O> Default for PreviewExecutionCoordinator<G, K, O> {
@@ -244,6 +236,7 @@ impl<G, K, O> Default for PreviewExecutionCoordinator<G, K, O> {
             presentation_quality: FramePresentationQuality::Ready,
             next_candidate_id: 0,
             current_output: None,
+            current_output_generation: None,
         }
     }
 }
@@ -273,6 +266,7 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
         self.pending = false;
         self.presentation_quality = FramePresentationQuality::Ready;
         self.current_output = None;
+        self.current_output_generation = None;
         self.generation
     }
 
@@ -323,6 +317,9 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
             };
         };
         if self.current_output.as_ref().is_some_and(|(current, _)| current == key) {
+            // Re-resolving the complete output identity proves that a retained
+            // stale output is exact under the active generation again.
+            self.current_output_generation = Some(self.generation);
             PreviewCandidateDecision::Current
         } else {
             PreviewCandidateDecision::Execute(self.issue_candidate_id())
@@ -332,18 +329,29 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
     /// Register the exact output that a presentation Adapter made usable.
     pub(crate) fn register_output(&mut self, key: K, output: O) {
         self.current_output = Some((key, output));
+        self.current_output_generation = Some(self.generation);
+    }
+
+    /// Whether the registered output was proven under the active generation.
+    pub(crate) fn has_exact_current_output(&self) -> bool {
+        self.current_output.is_some() && self.current_output_generation == Some(self.generation)
     }
 
     /// Return the usable output only when its complete identity matches.
-    pub(crate) fn output_for(&self, key: &K) -> Option<O>
+    pub(crate) fn output_for(&mut self, key: &K) -> Option<O>
     where
         K: PartialEq,
         O: Clone,
     {
-        self.current_output
+        let output = self
+            .current_output
             .as_ref()
             .filter(|(current, _)| current == key)
-            .map(|(_, output)| output.clone())
+            .map(|(_, output)| output.clone());
+        if output.is_some() {
+            self.current_output_generation = Some(self.generation);
+        }
+        output
     }
 
     /// Inspect the one registered output for explicitly scoped stale reuse.
@@ -353,6 +361,7 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
 
     /// Retire the currently registered output without rotating media work.
     pub(crate) fn clear_output(&mut self) -> bool {
+        self.current_output_generation = None;
         self.current_output.take().is_some()
     }
 }
@@ -371,6 +380,7 @@ mod tests {
         coordinator.set_pending(true);
         coordinator.set_presentation_quality(FramePresentationQuality::Degraded);
         coordinator.register_output(9, "texture");
+        assert!(coordinator.has_exact_current_output());
         assert_eq!(
             coordinator.plan_candidate(Some(&9)),
             PreviewCandidateDecision::Current
@@ -398,5 +408,24 @@ mod tests {
             FramePresentationQuality::Ready
         );
         assert_eq!(coordinator.output_for(&9), None);
+        assert!(!coordinator.has_exact_current_output());
+    }
+
+    #[test]
+    fn retained_output_is_stale_until_new_generation_resolves_its_identity() {
+        let mut coordinator = PreviewExecutionCoordinator::<u8, u8, &'static str>::default();
+        coordinator.bind_generation(1, || 41);
+        coordinator.register_output(9, "texture");
+
+        assert_eq!(
+            coordinator.bind_generation(2, || 42),
+            PreviewGenerationBinding::Rotated(42)
+        );
+        assert!(!coordinator.has_exact_current_output());
+        assert_eq!(
+            coordinator.plan_candidate(Some(&9)),
+            PreviewCandidateDecision::Current
+        );
+        assert!(coordinator.has_exact_current_output());
     }
 }

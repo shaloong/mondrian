@@ -1041,6 +1041,15 @@ impl PreviewDecodeSession {
         let mut best_before: Option<(i64, RetainedDecodedFrame)> = None;
         let mut best_after: Option<(i64, RetainedDecodedFrame)> = None;
         let mut frames_decoded: usize = 0;
+        let mut video_packets_submitted: usize = 0;
+        let mut non_reference_discard_until_pts =
+            exact_seek_non_reference_discard_until_pts(policy, target_pts, self.frame_duration_pts);
+        self.decoder.skip_frame(
+            non_reference_discard_until_pts
+                .map_or(ffmpeg::codec::discard::Discard::Default, |_| {
+                    ffmpeg::codec::discard::Discard::NonReference
+                }),
+        );
         let exact_select_distance_pts =
             self.frame_duration_pts.saturating_mul(2).max(1).min(
                 seconds_to_stream_pts(PREVIEW_MAX_SELECT_DISTANCE_SECS, self.stream_tb).max(1),
@@ -1216,7 +1225,10 @@ impl PreviewDecodeSession {
                 }
             }
 
-            if policy.forward_decode_budget_exhausted(frames_decoded) {
+            if policy.forward_decode_budget_exhausted(forward_decode_work_units(
+                frames_decoded,
+                video_packets_submitted,
+            )) {
                 break;
             }
         }
@@ -1235,14 +1247,28 @@ impl PreviewDecodeSession {
                 continue;
             }
             self.seek_index.observe_packet(&packet);
-            if policy.forward_decode_budget_exhausted(frames_decoded) {
+            if policy.forward_decode_budget_exhausted(forward_decode_work_units(
+                frames_decoded,
+                video_packets_submitted,
+            )) {
                 break;
+            }
+
+            if non_reference_discard_until_pts.is_some_and(|switch_pts| {
+                packet
+                    .pts()
+                    .or_else(|| packet.dts())
+                    .is_none_or(|packet_pts| packet_pts >= switch_pts)
+            }) {
+                self.decoder.skip_frame(ffmpeg::codec::discard::Discard::Default);
+                non_reference_discard_until_pts = None;
             }
 
             self.decoder.send_packet(&packet).map_err(|e| MondrianError::DecodeFailed {
                 asset_id: self.path.display().to_string(),
                 reason: e.to_string(),
             })?;
+            video_packets_submitted = video_packets_submitted.saturating_add(1);
 
             while let Some(decoded) = receive_decoded_video_frame(&mut self.decoder)? {
                 if should_cancel() {
@@ -1351,17 +1377,28 @@ impl PreviewDecodeSession {
                     }
                 }
 
-                if policy.forward_decode_budget_exhausted(frames_decoded) {
+                if policy.forward_decode_budget_exhausted(forward_decode_work_units(
+                    frames_decoded,
+                    video_packets_submitted,
+                )) {
                     break;
                 }
             }
 
-            if policy.forward_decode_budget_exhausted(frames_decoded) {
+            if policy.forward_decode_budget_exhausted(forward_decode_work_units(
+                frames_decoded,
+                video_packets_submitted,
+            )) {
                 break;
             }
         }
 
-        if !self.reached_eof && !policy.forward_decode_budget_exhausted(frames_decoded) {
+        if !self.reached_eof
+            && !policy.forward_decode_budget_exhausted(forward_decode_work_units(
+                frames_decoded,
+                video_packets_submitted,
+            ))
+        {
             if should_cancel() {
                 return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
             }
@@ -1446,7 +1483,10 @@ impl PreviewDecodeSession {
                     }
                 }
 
-                if policy.forward_decode_budget_exhausted(frames_decoded) {
+                if policy.forward_decode_budget_exhausted(forward_decode_work_units(
+                    frames_decoded,
+                    video_packets_submitted,
+                )) {
                     break;
                 }
             }
@@ -1484,11 +1524,13 @@ impl PreviewDecodeSession {
         if should_cancel() {
             return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
         }
-        if policy.forward_decode_budget_exhausted(frames_decoded) {
+        let forward_decode_work_units =
+            forward_decode_work_units(frames_decoded, video_packets_submitted);
+        if policy.forward_decode_budget_exhausted(forward_decode_work_units) {
             return Err(MondrianError::DecodeBudgetExhausted {
                 asset_id: self.path.display().to_string(),
                 access_mode: policy.access_mode.as_str().to_owned(),
-                decoded_frames: frames_decoded as u64,
+                decoded_frames: forward_decode_work_units as u64,
                 budget_frames: policy.forward_decode_budget_frames as u64,
                 target_pts,
             });
@@ -1496,6 +1538,30 @@ impl PreviewDecodeSession {
 
         Ok(PreviewDecodeForwardResult::empty(frames_decoded))
     }
+}
+
+pub(super) fn exact_seek_non_reference_discard_until_pts(
+    policy: PreviewDecodeAccessPolicy,
+    target_pts: i64,
+    frame_duration_pts: i64,
+) -> Option<i64> {
+    (policy.access_mode == PreviewDecodeAccessMode::RandomAccessStillFrame
+        && !policy.keyframe_only
+        && policy.seek_strategy == PreviewDecodeSeekStrategy::KeyframeBefore)
+        .then(|| {
+            target_pts.saturating_sub(
+                frame_duration_pts
+                    .max(1)
+                    .saturating_mul(PREVIEW_EXACT_SEEK_FULL_DECODE_PREROLL_FRAMES),
+            )
+        })
+}
+
+pub(super) fn forward_decode_work_units(
+    frames_decoded: usize,
+    video_packets_submitted: usize,
+) -> usize {
+    frames_decoded.max(video_packets_submitted)
 }
 
 pub(super) fn decode_preview_frame_outcome(

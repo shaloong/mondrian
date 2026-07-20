@@ -652,7 +652,7 @@ use this timeout escape.
 `app::playback_preview` is the App Module's UI-independent coordinator between
 the Playback Engine and the production Preview Adapter. One pump turn:
 
-1. samples `pending_frame_demand` exactly once;
+1. samples `pending_frame_demand` and current transport activity exactly once;
 2. asks the Adapter for bounded completion and stalled-current expiration facts
    bound to that identity;
 3. applies every exact terminal Frame Delivery through `AppState`;
@@ -666,7 +666,9 @@ demand samples, and prevents a terminal delivery from being followed by
 preroll for the demand it just consumed. `AppUiHost` decides only how the pump
 outcome affects layout/repaint. The real Headless GPU gate drives the same pump
 and therefore cannot maintain a test-only Delivery or preroll policy. The
-Preview Adapter still owns concrete decode execution, payload adaptation,
+sampled transport activity also prevents an idle-residency release from using
+a stale paused/playing value while a transport transition and result poll race.
+The Preview Adapter still owns concrete decode execution, payload adaptation,
 result diagnostics, and lookahead observation; it does not own Playback state
 transitions or Viewer candidate lifecycle. `app::preview_execution` owns the
 complete output key and GPU execution contract consumed by both Window and
@@ -840,6 +842,30 @@ the decoder pool. App payload adapters charge one unit for each retained native
 surface and zero for CPU frames. LRU eviction enforces count, byte, and resource
 budgets together, and diagnostics expose both current resource units and the
 configured limit.
+
+One retained native `AVFrame` may keep its decoder's complete hardware-surface
+pool resident, so entry/byte/resource-unit limits are necessary but not a
+transport-idle release boundary. Once transport is stopped, Broker
+pending/queued/in-flight work is zero, the current intent is not pending, and a
+final registered GPU Viewer output has been proved for the active Preview
+generation, the Production Runtime clears media payloads and the oversize media pin while
+preserving that Viewer output, its stale-presentation pin, and terminal-failure
+memory. Preview workers independently destroy thread-local FFmpeg sessions
+after their two-second idle timeout; together these two ownership releases let
+the driver surface pool disappear without blanking the paused Viewer. Any
+active or unresolved work makes the release fail closed.
+
+The exact-output shortcut is generation-safe rather than cache-presence based.
+The Preview generation includes Sequence identity/revision, Project document
+revision, playback epoch or stopped frame, output extent, seek intent, effective
+display color identity, display-contract generation, and OCIO configuration
+generation. `PreviewExecutionCoordinator` records which generation proved the
+registered output. A generation rotation retains the old output only as stale;
+only full output-key resolution or a newly registered presentation promotes it
+to exact. Repeated stopped-Viewer queries may therefore reuse the already
+proved output after media release, while any authoring, display, color-config,
+seek, or transport discontinuity must re-evaluate and cannot revive stale
+media semantics.
 
 `app::preview_frame_store::PreviewFrameStoreAdapter` is the sole Frame Store
 policy Adapter inside the Preview Production Runtime. It computes the reservation for
@@ -1337,8 +1363,12 @@ aggregates, pauses transport, completes 50 approximate warm plus 50 exact
 cross-region seeks through the same GPU presentation path, and then schedules a
 100-seek latest-wins burst. The gate
 requires warm p95 at or below 200 ms, accurate p95 at or below 500 ms, at least
-99 superseded-seek observations, no rejected old terminal delivery, and zero
-Broker pending/queued/in-flight residency after the burst.
+99 superseded-seek observations, zero temporally approximate frames from the
+deterministic accurate-seek access mode, no rejected old terminal delivery, and
+zero Broker pending/queued/in-flight residency after the burst. After decoder
+worker idle and media-only Frame Store release, the same report must also show
+zero retained media entries/resource units/pin before its post-stress process
+memory sample; a still-usable final Viewer output remains presentation evidence.
 The same Adapter takes a native whole-process memory sample at a fixed one-second
 cadence. `mondrian-platform-core::ProcessMemoryProbe` defines the OS-neutral
 fact boundary and the Windows implementation uses `GetProcessMemoryInfo`.

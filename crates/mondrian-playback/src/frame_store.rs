@@ -247,6 +247,18 @@ where
         self.pinned_viewer = None;
     }
 
+    /// Release decoder-backed media residency while preserving final Viewer
+    /// output, terminal-failure memory, and the exact stale-presentation pin.
+    ///
+    /// Preview coordinators use this after transport work is quiescent and a
+    /// final Viewer output is independently usable. Decoder workers release
+    /// their own session references at their separate idle boundary; retained
+    /// Store frames must not keep that hardware surface pool alive afterward.
+    pub fn clear_media_frames(&mut self) {
+        self.media.clear();
+        self.pinned_media = None;
+    }
+
     /// Clear every payload, failure key, and explicit pin.
     pub fn clear_all(&mut self) {
         self.media.clear();
@@ -571,5 +583,30 @@ mod tests {
                 ..PreviewFrameStoreDiagnostics::default()
             }
         );
+    }
+
+    #[test]
+    fn clear_media_residency_preserves_viewer_output_and_failure_memory() {
+        let mut store = TestStore::new(config(16));
+        store.admit_media_frame(1, vec![1; 8], 8, 1, false);
+        store.admit_media_frame(2, vec![2; 32], 32, 0, true);
+        store.admit_viewer_frame(1, vec![3; 8], 8);
+        store.pin_viewer_frame((7, 1, 1), vec![4; 4], 4);
+        store.remember_failure(3);
+
+        store.clear_media_frames();
+
+        let diagnostics = store.diagnostics();
+        assert_eq!(diagnostics.media_entries, 0);
+        assert_eq!(diagnostics.media_reserved_bytes, 0);
+        assert_eq!(diagnostics.media_resource_units, 0);
+        assert_eq!(diagnostics.pinned_media_bytes, 0);
+        assert_eq!(diagnostics.viewer_entries, 1);
+        assert_eq!(diagnostics.viewer_reserved_bytes, 8);
+        assert_eq!(diagnostics.pinned_viewer_bytes, 4);
+        assert_eq!(diagnostics.failure_entries, 1);
+        assert_eq!(store.viewer_frame(&1), Some(vec![3; 8]));
+        assert_eq!(store.stale_viewer_frame(&(7, 1, 1)), Some(vec![4; 4]));
+        assert!(store.contains_failure(&3));
     }
 }

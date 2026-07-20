@@ -3,6 +3,36 @@
 use super::*;
 
 impl<O: Clone> PreviewProductionRuntime<O> {
+    /// Release decoder-backed media residency after all Preview work is idle.
+    ///
+    /// This preserves Viewer output and failure memory. A retained native
+    /// media frame can pin its decoder's entire hardware-surface pool, so entry
+    /// and byte budgets alone are not sufficient at a transport-idle boundary.
+    /// The operation fails closed if queued, in-flight, or unresolved work is
+    /// still visible to the Broker.
+    pub(crate) fn try_release_idle_media_residency(&self) -> bool {
+        let scheduler = self.scheduler.diagnostics();
+        let queue = self.jobs.diagnostics();
+        if self.execution.borrow().is_pending()
+            || scheduler.pending_requests != 0
+            || queue.queued_jobs != 0
+            || queue.in_flight_jobs != 0
+        {
+            return false;
+        }
+        self.frame_store.borrow_mut().clear_media_frames();
+        true
+    }
+
+    /// Release idle media only after a stopped transport has a durable final
+    /// GPU Viewer output proved under the active Preview generation.
+    pub(crate) fn try_release_settled_transport_media_residency(&self) -> bool {
+        if self.transport_playing.get() || !self.execution.borrow().has_exact_current_output() {
+            return false;
+        }
+        self.try_release_idle_media_residency()
+    }
+
     /// Cancel outstanding preview decode work without shutting down workers.
     ///
     /// Closing a project, switching projects, or quitting should make any

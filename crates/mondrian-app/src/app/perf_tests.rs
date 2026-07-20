@@ -249,6 +249,10 @@ impl HeadlessViewerGpuExecutionSummary {
         }
     }
 
+    fn record_current_output_presentation(&mut self) {
+        self.cached_frames = self.cached_frames.saturating_add(1);
+    }
+
     fn p95_duration_us(&self) -> u64 {
         p95_sample_us(&self.gpu_duration_samples_us)
     }
@@ -303,6 +307,16 @@ impl HeadlessViewerGpuExecutionSummary {
             display_calibration_us: p95_sample_us(&self.display_calibration_samples_us),
         }
     }
+}
+
+#[test]
+fn current_headless_gpu_output_counts_as_a_cached_presentation() {
+    let mut summary = HeadlessViewerGpuExecutionSummary::default();
+
+    summary.record_current_output_presentation();
+
+    assert_eq!(summary.rendered_frames, 0);
+    assert_eq!(summary.cached_frames, 1);
 }
 
 fn p95_native_video_import(samples: &[NativeVideoImportCpuTimings]) -> NativeVideoImportCpuTimings {
@@ -1561,6 +1575,7 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
         None,
         "preview_media_continuous_playback",
         frame_count,
+        frame_count,
         frame_interval_ns,
         playback_threshold_ms,
         gpu_candidate_threshold_ms,
@@ -2426,12 +2441,23 @@ fn run_external_continuous_playback_gate(
             .unwrap_or_default()
             .min(200)
     };
+    let sequence_frame_count = if professional {
+        frame_count
+    } else {
+        env_usize_clamped(
+            "MONDRIAN_PREVIEW_EXTERNAL_TIMELINE_FRAMES",
+            frame_count,
+            frame_count,
+            200_000,
+        )
+    };
     let result = run_preview_media_continuous_playback_probe(
         &root_dir,
         &video_path,
         Some(media_info),
         scenario,
         frame_count,
+        sequence_frame_count,
         frame_interval_ns,
         playback_threshold_ms,
         gpu_candidate_threshold_ms,
@@ -2729,6 +2755,10 @@ fn professional_runtime_acceptance_evidence(
         viewer_frame_cache_oversize_rejections: diagnostics.viewer_frame_cache_oversize_rejections,
         pinned_viewer_frame_bytes: diagnostics.pinned_viewer_frame_bytes,
         pinned_media_frame_bytes: diagnostics.pinned_media_frame_bytes,
+        accurate_seek_temporal_approximation_frames: diagnostics
+            .decode_access_mode_profiles
+            .random_access_still
+            .temporal_approximation_frames,
         decode_cancellation: diagnostics.decode_cancellation,
         decode_cancellation_checkpoints: diagnostics.decode_cancellation_checkpoints,
     }
@@ -2749,6 +2779,7 @@ fn run_preview_media_continuous_playback_probe(
     media_info: Option<MediaInfo>,
     scenario: &'static str,
     frame_count: usize,
+    sequence_frame_count: usize,
     frame_interval_ns: u64,
     playback_threshold_ms: u128,
     gpu_candidate_threshold_ms: u128,
@@ -2765,7 +2796,7 @@ fn run_preview_media_continuous_playback_probe(
         root_dir,
         video_path,
         Some(media_info),
-        frame_count,
+        sequence_frame_count,
     )?;
     state.begin_playback_evidence_run(mondrian_playback::PlaybackEvidenceConfig::default())?;
     let preview_service = HeadlessPreviewRuntime::new();
@@ -2850,7 +2881,7 @@ fn run_preview_media_continuous_playback_probe(
                         &mut state,
                         &mut gpu_adapter,
                         &mut headless_gpu,
-                        frame_count,
+                        sequence_frame_count,
                         seek_probe_count,
                         ready_timeout,
                     )
@@ -3086,6 +3117,10 @@ fn wait_for_preview_idle_residency_release(
         MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT.saturating_add(Duration::from_millis(50)),
     );
     apply_headless_preview_outcome(preview_service, state);
+    anyhow::ensure!(
+        preview_service.try_release_settled_transport_media_residency(),
+        "Preview output or work state was not settled while releasing decoder-backed media residency"
+    );
     let diagnostics = preview_service.diagnostics();
     anyhow::ensure!(
         diagnostics.scheduler.pending_requests == 0
@@ -3245,6 +3280,7 @@ fn execute_headless_gpu_candidate(
             Ok(HeadlessGpuCandidateStatus::Ready)
         }
         crate::app::preview_execution::PreviewGpuFrameState::Current => {
+            gpu_summary.record_current_output_presentation();
             if let Some(ticket) = preview_service.playback_presentation_ticket(state) {
                 state.complete_frame_presentation(ticket, Instant::now());
             }

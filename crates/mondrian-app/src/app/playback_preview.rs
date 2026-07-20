@@ -46,8 +46,13 @@ pub(crate) struct PreviewVideoPreroll {
 /// Implementations may schedule and cache differently, but cannot apply Frame
 /// Deliveries or decide whether preroll changes Transport State themselves.
 pub(crate) trait PlaybackPreviewAdapter {
-    /// Poll completed and expired work against one sampled pending demand.
-    fn poll_playback_work(&self, pending_demand: Option<FrameDemandIdentity>) -> PreviewWorkPoll;
+    /// Poll completed and expired work against one sampled pending demand and
+    /// the transport activity sampled in the same coordination turn.
+    fn poll_playback_work(
+        &self,
+        pending_demand: Option<FrameDemandIdentity>,
+        transport_playing: bool,
+    ) -> PreviewWorkPoll;
 
     /// Observe current-epoch media lookahead without changing Playback state.
     fn video_preroll(&self, state: &AppState) -> Option<PreviewVideoPreroll>;
@@ -72,7 +77,7 @@ pub(crate) fn pump_playback_preview(
     adapter: &impl PlaybackPreviewAdapter,
 ) -> PlaybackPreviewPumpOutcome {
     let pending_demand = state.pending_playback_frame_demand_identity();
-    let poll = adapter.poll_playback_work(pending_demand);
+    let poll = adapter.poll_playback_work(pending_demand, state.is_playing());
     let delivery_changed =
         poll.frame_deliveries.iter().copied().fold(false, |changed, delivery| {
             // Completion draining and realtime-stall expiry are independent
@@ -110,7 +115,7 @@ pub(crate) fn observe_playback_video_preroll(
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     use mondrian_playback::{FrameDelivery, FrameDeliveryKind};
 
@@ -119,13 +124,16 @@ mod tests {
     struct FakePreviewAdapter {
         poll: RefCell<Option<PreviewWorkPoll>>,
         preroll: Option<PreviewVideoPreroll>,
+        transport_playing: Cell<Option<bool>>,
     }
 
     impl PlaybackPreviewAdapter for FakePreviewAdapter {
         fn poll_playback_work(
             &self,
             _pending_demand: Option<FrameDemandIdentity>,
+            transport_playing: bool,
         ) -> PreviewWorkPoll {
+            self.transport_playing.set(Some(transport_playing));
             self.poll.borrow_mut().take().unwrap_or_default()
         }
 
@@ -145,6 +153,7 @@ mod tests {
                 frame_deliveries: Vec::new(),
             })),
             preroll: None,
+            transport_playing: Cell::new(None),
         };
 
         assert_eq!(
@@ -155,6 +164,7 @@ mod tests {
                 needs_follow_up_poll: true,
             }
         );
+        assert_eq!(adapter.transport_playing.get(), Some(false));
     }
 
     #[test]
@@ -171,12 +181,18 @@ mod tests {
                 ..PreviewWorkPoll::default()
             })),
             preroll: Some(PreviewVideoPreroll { ready_media_frames: 8, available_media_frames: 8 }),
+            transport_playing: Cell::new(None),
         };
 
         let outcome = pump_playback_preview(&mut state, &adapter);
 
         assert!(outcome.transport_change);
         assert!(!state.is_playing());
+        assert_eq!(
+            adapter.transport_playing.get(),
+            Some(true),
+            "transport activity must be sampled before terminal deliveries mutate state"
+        );
     }
 
     #[test]
@@ -193,6 +209,7 @@ mod tests {
                 ..PreviewWorkPoll::default()
             })),
             preroll: None,
+            transport_playing: Cell::new(None),
         };
 
         pump_playback_preview(&mut state, &adapter);
@@ -232,6 +249,7 @@ mod tests {
                 ..PreviewWorkPoll::default()
             })),
             preroll: None,
+            transport_playing: Cell::new(None),
         };
         let outcome = pump_playback_preview(&mut state, &adapter);
         let evidence = state.playback_evidence_report();

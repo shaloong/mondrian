@@ -178,6 +178,7 @@ pub(crate) struct PreviewProfessionalPlaybackGateReport {
     accurate_seek_count: u64,
     accurate_seek_p95_limit_us: u64,
     accurate_seek_p95_observed_us: u64,
+    accurate_seek_temporal_approximation_frames: u64,
     min_superseded_seeks: u64,
     superseded_seek_count: u64,
     rejected_terminal_deliveries: u64,
@@ -382,6 +383,7 @@ pub(crate) struct PreviewRuntimeAcceptanceEvidence {
     pub(crate) viewer_frame_cache_oversize_rejections: u64,
     pub(crate) pinned_viewer_frame_bytes: usize,
     pub(crate) pinned_media_frame_bytes: usize,
+    pub(crate) accurate_seek_temporal_approximation_frames: u64,
     pub(crate) decode_cancellation: mondrian_playback::FrameCancellationEvidenceReport,
     pub(crate) decode_cancellation_checkpoints: mondrian_media::PreviewDecodeCancellationEvidence,
 }
@@ -512,6 +514,7 @@ pub(crate) fn evaluate_professional_playback(
     }
 
     let evidence = observation.playback_evidence;
+    let diagnostics = observation.preview_diagnostics;
     if evidence.observed_duration_us < PROFESSIONAL_MIN_OBSERVED_DURATION_US {
         push_failure(
             &mut failures,
@@ -555,6 +558,15 @@ pub(crate) fn evaluate_professional_playback(
             "Playback Evidence accurate seek latency",
         );
     }
+    if diagnostics.accurate_seek_temporal_approximation_frames > 0 {
+        push_failure(
+            &mut failures,
+            "accurate_seek_temporal_approximation_observed",
+            "0 approximate frames for deterministic accurate seeks",
+            diagnostics.accurate_seek_temporal_approximation_frames.to_string(),
+            "RandomAccessStillFrame decode diagnostics",
+        );
+    }
     if evidence.seek_superseded_count < PROFESSIONAL_MIN_SUPERSEDED_SEEKS {
         push_failure(
             &mut failures,
@@ -573,7 +585,6 @@ pub(crate) fn evaluate_professional_playback(
             "Playback Evidence terminal delivery acceptance",
         );
     }
-    let diagnostics = observation.preview_diagnostics;
     if diagnostics.scheduler.pending_requests > 0
         || diagnostics.worker_queue.queued_jobs > 0
         || diagnostics.worker_queue.in_flight_jobs > 0
@@ -758,6 +769,8 @@ pub(crate) fn evaluate_professional_playback(
         accurate_seek_count: evidence.accurate_seek_latency.count,
         accurate_seek_p95_limit_us: PROFESSIONAL_ACCURATE_SEEK_P95_LIMIT_US,
         accurate_seek_p95_observed_us: evidence.accurate_seek_latency.p95_us,
+        accurate_seek_temporal_approximation_frames: diagnostics
+            .accurate_seek_temporal_approximation_frames,
         min_superseded_seeks: PROFESSIONAL_MIN_SUPERSEDED_SEEKS,
         superseded_seek_count: evidence.seek_superseded_count,
         rejected_terminal_deliveries: evidence.deliveries.rejected,
@@ -1226,6 +1239,38 @@ mod tests {
         let codes: Vec<_> = report.failures.iter().map(|failure| failure.code).collect();
         assert!(codes.contains(&"warm_seek_p95_above_limit"));
         assert!(codes.contains(&"accurate_seek_p95_above_limit"));
+    }
+
+    #[test]
+    fn rejects_temporal_approximation_in_deterministic_accurate_seek() {
+        let media = main10_media();
+        let evidence = passing_playback_evidence();
+        let diagnostics = PreviewDiagnostics {
+            accurate_seek_temporal_approximation_frames: 1,
+            ..PreviewDiagnostics::default()
+        };
+        let observation = ProfessionalPlaybackObservation {
+            media: &media,
+            rendered_decode_execution: PreviewDecodeExecutionSummary {
+                media_layers: 100,
+                hardware_native_layers: 100,
+                p010_10_bit_hardware_layers: 100,
+                ..PreviewDecodeExecutionSummary::default()
+            },
+            viewer_fallback_count: 0,
+            viewer_fallback_reasons: &[],
+            playback_decode: PreviewDecodeAccessModeProfile::default(),
+            playback_evidence: &evidence,
+            preview_diagnostics: &diagnostics,
+            process_memory: &passing_process_memory_evidence(),
+            frames: 45_000,
+            frame_interval_ns: 40_000_000,
+        };
+
+        let report = evaluate_professional_playback(observation);
+
+        let codes: Vec<_> = report.failures.iter().map(|failure| failure.code).collect();
+        assert!(codes.contains(&"accurate_seek_temporal_approximation_observed"));
     }
 
     #[test]
