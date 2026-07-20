@@ -53,7 +53,7 @@ function Invoke-PlaybackGate([object]$GateContract, [object]$Fixture, [string]$R
             "test", "-p", "mondrian-app", "--release", [string]$GateContract.cargo_test,
             "--", "--ignored", "--nocapture", "--test-threads=1"
         )
-        & cargo @cargoArguments 2>&1 | Tee-Object -LiteralPath $logPath
+        & cargo @cargoArguments 2>&1 | Tee-Object -LiteralPath $logPath | Out-Host
         $exitCode = $LASTEXITCODE
     } finally {
         [Environment]::SetEnvironmentVariable([string]$GateContract.media_environment, $oldMedia, "Process")
@@ -187,7 +187,11 @@ try {
     foreach ($gateContract in $selectedGates) {
         $failurePhase = "gate-$($gateContract.id)"
         if (-not $fixtureById.ContainsKey($gateContract.fixture_id)) { throw "Unknown fixture '$($gateContract.fixture_id)'." }
-        $gateResults.Add((Invoke-PlaybackGate $gateContract $fixtureById[$gateContract.fixture_id] $runDirectory))
+        $gateOutput = @(Invoke-PlaybackGate $gateContract $fixtureById[$gateContract.fixture_id] $runDirectory)
+        if ($gateOutput.Count -ne 1 -or $null -eq $gateOutput[0].PSObject.Properties["passed"]) {
+            throw "Gate '$($gateContract.id)' did not return exactly one structured result."
+        }
+        [void]$gateResults.Add($gateOutput[0])
     }
     $failurePhase = $null
 } catch {
