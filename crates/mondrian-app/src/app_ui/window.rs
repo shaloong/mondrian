@@ -23,6 +23,13 @@ use crate::app::preview_gpu_output_blocker::{
 };
 use crate::app::preview_runtime::PreviewColorRejection;
 use crate::app::ui_actions::app_shell_quit_action;
+use crate::app::viewer_gpu_output_health::{
+    classify_viewer_gpu_output_health,
+    ViewerGpuOutputAttemptOutcome as AppUiViewerGpuOutputOutcome,
+    ViewerGpuOutputHealthCounts as AppUiViewerGpuOutputHealthCounts,
+    ViewerGpuOutputHealthStatus as AppUiViewerGpuOutputHealthStatus,
+    ViewerGpuOutputHealthSummary as AppUiViewerGpuOutputHealthSummary,
+};
 use crate::app::AppState;
 use crate::app_ui::action_queue::PendingUiActions;
 use crate::app_ui::host::{AppUiHost, AppUiMode, AppUiShellCommands};
@@ -255,56 +262,6 @@ impl DisplaySnapshotDiagnostics {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-enum AppUiViewerGpuOutputOutcome {
-    NonWorkspace,
-    Current,
-    Loading,
-    Unavailable,
-    InvalidTextureKey,
-    DisplayContractBlocked,
-    RecordFailed,
-    OutputTextureMissing,
-    Registered,
-    ExternalFrameRejected,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
-struct AppUiViewerGpuOutputHealthSummary {
-    status: AppUiViewerGpuOutputHealthStatus,
-    viewer_output_ready: bool,
-    native_gpu_boundary_ready: bool,
-    display_boundary_ready: bool,
-    presentation_ready: bool,
-    stage_sequence_ready: bool,
-    no_gpu_blockers: bool,
-    output_texture_available: bool,
-    external_texture_registered: bool,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
-struct AppUiViewerGpuOutputHealthCounts {
-    no_invocation: u64,
-    waiting: u64,
-    blocked: u64,
-    failed: u64,
-    rejected: u64,
-    degraded: u64,
-    ready: u64,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
-enum AppUiViewerGpuOutputHealthStatus {
-    #[default]
-    NoInvocation,
-    Waiting,
-    Blocked,
-    Failed,
-    Rejected,
-    Degraded,
-    Ready,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 struct AppUiViewerGpuOutputFrameContext {
     sequence_id: String,
@@ -509,7 +466,7 @@ impl AppUiViewerGpuOutputTelemetry {
                     self.last_display_contract_refresh.clone();
             }
         }
-        let health = AppUiViewerGpuOutputHealthSummary::from_telemetry(self);
+        let health = self.health_summary();
         AppUiViewerGpuOutputDiagnostics {
             invocations: self.invocations,
             non_workspace_skips: self.non_workspace_skips,
@@ -592,6 +549,18 @@ impl AppUiViewerGpuOutputTelemetry {
         self.last_display_presentation_readiness = None;
         self.last_display_issue_refresh_generation = None;
         self.last_outcome = None;
+    }
+
+    fn health_summary(&self) -> AppUiViewerGpuOutputHealthSummary {
+        let presentation_ready = self
+            .last_display_presentation_readiness
+            .map(|readiness| readiness.status == AppUiDisplayPresentationReadinessStatus::Current)
+            .unwrap_or(true);
+        classify_viewer_gpu_output_health(
+            self.last_outcome,
+            presentation_ready,
+            self.last_stage_diagnostics,
+        )
     }
 
     fn record_preview_candidate_state(
@@ -759,7 +728,7 @@ impl AppUiViewerGpuOutputTelemetry {
         self.accumulated_stage_diagnostics.accumulate(diagnostics);
         self.last_stage_diagnostics = Some(diagnostics);
         self.last_outcome = Some(AppUiViewerGpuOutputOutcome::Registered);
-        self.record_health_count(AppUiViewerGpuOutputHealthSummary::from_telemetry(self).status);
+        self.record_health_count(self.health_summary().status);
     }
 
     fn record_rejected_external_frame(&mut self, diagnostics: RenderColorStageDiagnostics) {
@@ -772,34 +741,6 @@ impl AppUiViewerGpuOutputTelemetry {
 
     fn record_health_count(&mut self, status: AppUiViewerGpuOutputHealthStatus) {
         self.health_counts.record(status);
-    }
-}
-
-impl AppUiViewerGpuOutputHealthCounts {
-    fn record(&mut self, status: AppUiViewerGpuOutputHealthStatus) {
-        match status {
-            AppUiViewerGpuOutputHealthStatus::NoInvocation => {
-                self.no_invocation = self.no_invocation.saturating_add(1);
-            }
-            AppUiViewerGpuOutputHealthStatus::Waiting => {
-                self.waiting = self.waiting.saturating_add(1);
-            }
-            AppUiViewerGpuOutputHealthStatus::Blocked => {
-                self.blocked = self.blocked.saturating_add(1);
-            }
-            AppUiViewerGpuOutputHealthStatus::Failed => {
-                self.failed = self.failed.saturating_add(1);
-            }
-            AppUiViewerGpuOutputHealthStatus::Rejected => {
-                self.rejected = self.rejected.saturating_add(1);
-            }
-            AppUiViewerGpuOutputHealthStatus::Degraded => {
-                self.degraded = self.degraded.saturating_add(1);
-            }
-            AppUiViewerGpuOutputHealthStatus::Ready => {
-                self.ready = self.ready.saturating_add(1);
-            }
-        }
     }
 }
 
@@ -926,85 +867,6 @@ impl From<RenderOutputColorBoundaryTarget> for AppUiViewerGpuOutputTarget {
         match target {
             RenderOutputColorBoundaryTarget::Display => Self::Display,
             RenderOutputColorBoundaryTarget::Export => Self::Export,
-        }
-    }
-}
-
-impl AppUiViewerGpuOutputHealthSummary {
-    fn from_telemetry(telemetry: &AppUiViewerGpuOutputTelemetry) -> Self {
-        if telemetry.last_outcome.is_none() {
-            return Self::default();
-        }
-        let display_boundary_ready =
-            telemetry.last_outcome != Some(AppUiViewerGpuOutputOutcome::DisplayContractBlocked);
-        let presentation_ready = telemetry
-            .last_display_presentation_readiness
-            .map(|readiness| readiness.status == AppUiDisplayPresentationReadinessStatus::Current)
-            .unwrap_or(true);
-        let stage_sequence_ready = telemetry
-            .last_stage_diagnostics
-            .map(|diagnostics| {
-                diagnostics.total_stages == 2
-                    && diagnostics.upload_stages == 1
-                    && diagnostics.gpu_color_stages == 1
-                    && diagnostics.readback_stages == 0
-            })
-            .unwrap_or(false);
-        let no_gpu_blockers = telemetry
-            .last_stage_diagnostics
-            .map(|diagnostics| {
-                diagnostics.gpu_blockers == 0 && diagnostics.gpu_blocker_breakdown.total() == 0
-            })
-            .unwrap_or(false);
-        let output_texture_available = !matches!(
-            telemetry.last_outcome,
-            Some(AppUiViewerGpuOutputOutcome::OutputTextureMissing)
-        ) && telemetry.last_stage_diagnostics.is_some();
-        let external_texture_registered =
-            telemetry.last_outcome == Some(AppUiViewerGpuOutputOutcome::Registered);
-        let native_gpu_boundary_ready =
-            stage_sequence_ready && no_gpu_blockers && output_texture_available;
-        let viewer_output_ready = native_gpu_boundary_ready
-            && display_boundary_ready
-            && presentation_ready
-            && external_texture_registered;
-        let status = match telemetry.last_outcome {
-            None => AppUiViewerGpuOutputHealthStatus::NoInvocation,
-            Some(
-                AppUiViewerGpuOutputOutcome::NonWorkspace
-                | AppUiViewerGpuOutputOutcome::Current
-                | AppUiViewerGpuOutputOutcome::Loading
-                | AppUiViewerGpuOutputOutcome::Unavailable
-                | AppUiViewerGpuOutputOutcome::InvalidTextureKey,
-            ) => AppUiViewerGpuOutputHealthStatus::Waiting,
-            Some(AppUiViewerGpuOutputOutcome::DisplayContractBlocked) => {
-                AppUiViewerGpuOutputHealthStatus::Blocked
-            }
-            Some(
-                AppUiViewerGpuOutputOutcome::RecordFailed
-                | AppUiViewerGpuOutputOutcome::OutputTextureMissing,
-            ) => AppUiViewerGpuOutputHealthStatus::Failed,
-            Some(AppUiViewerGpuOutputOutcome::ExternalFrameRejected) => {
-                AppUiViewerGpuOutputHealthStatus::Rejected
-            }
-            Some(AppUiViewerGpuOutputOutcome::Registered) if viewer_output_ready => {
-                AppUiViewerGpuOutputHealthStatus::Ready
-            }
-            Some(AppUiViewerGpuOutputOutcome::Registered) => {
-                AppUiViewerGpuOutputHealthStatus::Degraded
-            }
-        };
-
-        Self {
-            status,
-            viewer_output_ready,
-            native_gpu_boundary_ready,
-            display_boundary_ready,
-            presentation_ready,
-            stage_sequence_ready,
-            no_gpu_blockers,
-            output_texture_available,
-            external_texture_registered,
         }
     }
 }

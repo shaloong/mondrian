@@ -356,6 +356,11 @@ selected surface color space, HDR mode, and supported surface-color-space
 capabilities. This is the diagnostic boundary for real monitor/surface issues:
 the model may request HDR, P3, or log output, but the app window must prove that
 the current native wgpu surface can actually present it.
+The Window owns that evidence collection, not the health policy derived from
+it. `app::viewer_gpu_output_health` owns the shared attempt-outcome vocabulary,
+health flags, cumulative counts, and pure classifier; production JSONL,
+Headless tests, the budget CLI, and performance gates therefore cannot disagree
+on what qualifies as `Ready` or silently downgrade a terminal failure.
 Telemetry must also expose a stable display issue summary that names the reason,
 target output color space, current or selected surface contract, desired surface
 contract, payload blocker, and whether the target surface color space is

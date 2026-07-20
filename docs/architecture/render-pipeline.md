@@ -588,8 +588,12 @@ Per-reason display thresholds are part of the contract, so CI can relax one
 failure class for investigation without silently tolerating the rest, and
 unknown future display reasons still fail closed instead of disappearing inside
 an aggregate display-issue allowance. The same evaluator lives in
-`app_ui::viewer_gpu_output_budget` so Rust smoke tests and the CLI share one
-budget implementation; the ignored `viewer_gpu_output_budget_smoke` test reads
+`app::viewer_gpu_output_health` so Rust smoke tests and the CLI share one
+budget implementation. The Module also owns the canonical attempt-outcome,
+health-status, cumulative-count schema and the pure readiness classifier used
+by the Window producer. The Window may collect display and texture-registration
+facts, but it must not redefine `Ready`, `Degraded`, or terminal failure
+classification. The ignored `viewer_gpu_output_budget_smoke` test reads
 `MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT`, writes the same health report into
 `MONDRIAN_PERF_OUTPUT` when configured, and fails the test on budget violations.
 Export diagnostics may expose additional preflight helpers, but final job-level

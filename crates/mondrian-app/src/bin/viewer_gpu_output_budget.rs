@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{bail, Context};
-use mondrian_app::app_ui::viewer_gpu_output_budget::{
+use mondrian_app::app::viewer_gpu_output_health::{
     build_health_report, evaluate_jsonl, ViewerGpuOutputBudget,
 };
 

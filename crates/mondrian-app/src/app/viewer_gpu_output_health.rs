@@ -1,9 +1,10 @@
-//! Budget evaluation for live viewer GPU-output diagnostics JSONL.
+//! Headless health evaluation for live viewer GPU-output diagnostics JSONL.
 
 use anyhow::Context;
 use mondrian_media::{VideoColorDiagnosticIssueAggregate, VideoColorDiagnosticIssueSummary};
 use mondrian_renderer::{
-    RenderGpuOutputRuntimeDiagnosticsReport, RenderGpuOutputStageDiagnosticsReport,
+    RenderColorStageDiagnostics, RenderGpuOutputRuntimeDiagnosticsReport,
+    RenderGpuOutputStageDiagnosticsReport,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1820,6 +1821,105 @@ pub struct ViewerGpuOutputHealthSummary {
     pub external_texture_registered: bool,
 }
 
+/// Terminal or transient outcome observed by one Viewer GPU-output attempt.
+///
+/// Presentation adapters report facts using this vocabulary; the shared
+/// classifier below is the only owner of the resulting health policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum ViewerGpuOutputAttemptOutcome {
+    /// The product is not currently showing a workspace.
+    NonWorkspace,
+    /// The already-registered output is still current.
+    Current,
+    /// The requested preview is still loading.
+    Loading,
+    /// No preview output is available for the request.
+    Unavailable,
+    /// The presentation adapter received an invalid external-texture key.
+    InvalidTextureKey,
+    /// The display contract rejected the requested output.
+    DisplayContractBlocked,
+    /// Renderer output recording failed.
+    RecordFailed,
+    /// Renderer recording succeeded without producing the promised texture.
+    OutputTextureMissing,
+    /// The output texture was registered with the presentation adapter.
+    Registered,
+    /// The presentation adapter rejected the external frame.
+    ExternalFrameRejected,
+}
+
+/// Classify one Viewer GPU-output attempt from adapter facts.
+///
+/// This function deliberately contains no Window, Widget, WGPU-surface, or
+/// environment access, so production presentation and Headless gates cannot
+/// drift on the meaning of `Ready` or `Degraded`.
+pub(crate) fn classify_viewer_gpu_output_health(
+    outcome: Option<ViewerGpuOutputAttemptOutcome>,
+    presentation_ready: bool,
+    last_stage_diagnostics: Option<RenderColorStageDiagnostics>,
+) -> ViewerGpuOutputHealthSummary {
+    let Some(outcome) = outcome else {
+        return ViewerGpuOutputHealthSummary::default();
+    };
+    let display_boundary_ready = outcome != ViewerGpuOutputAttemptOutcome::DisplayContractBlocked;
+    let stage_sequence_ready = last_stage_diagnostics
+        .map(|diagnostics| {
+            diagnostics.total_stages == 2
+                && diagnostics.upload_stages == 1
+                && diagnostics.gpu_color_stages == 1
+                && diagnostics.readback_stages == 0
+        })
+        .unwrap_or(false);
+    let no_gpu_blockers = last_stage_diagnostics
+        .map(|diagnostics| {
+            diagnostics.gpu_blockers == 0 && diagnostics.gpu_blocker_breakdown.total() == 0
+        })
+        .unwrap_or(false);
+    let output_texture_available = outcome != ViewerGpuOutputAttemptOutcome::OutputTextureMissing
+        && last_stage_diagnostics.is_some();
+    let external_texture_registered = outcome == ViewerGpuOutputAttemptOutcome::Registered;
+    let native_gpu_boundary_ready =
+        stage_sequence_ready && no_gpu_blockers && output_texture_available;
+    let viewer_output_ready = native_gpu_boundary_ready
+        && display_boundary_ready
+        && presentation_ready
+        && external_texture_registered;
+    let status = match outcome {
+        ViewerGpuOutputAttemptOutcome::NonWorkspace
+        | ViewerGpuOutputAttemptOutcome::Current
+        | ViewerGpuOutputAttemptOutcome::Loading
+        | ViewerGpuOutputAttemptOutcome::Unavailable
+        | ViewerGpuOutputAttemptOutcome::InvalidTextureKey => ViewerGpuOutputHealthStatus::Waiting,
+        ViewerGpuOutputAttemptOutcome::DisplayContractBlocked => {
+            ViewerGpuOutputHealthStatus::Blocked
+        }
+        ViewerGpuOutputAttemptOutcome::RecordFailed
+        | ViewerGpuOutputAttemptOutcome::OutputTextureMissing => {
+            ViewerGpuOutputHealthStatus::Failed
+        }
+        ViewerGpuOutputAttemptOutcome::ExternalFrameRejected => {
+            ViewerGpuOutputHealthStatus::Rejected
+        }
+        ViewerGpuOutputAttemptOutcome::Registered if viewer_output_ready => {
+            ViewerGpuOutputHealthStatus::Ready
+        }
+        ViewerGpuOutputAttemptOutcome::Registered => ViewerGpuOutputHealthStatus::Degraded,
+    };
+
+    ViewerGpuOutputHealthSummary {
+        status,
+        viewer_output_ready,
+        native_gpu_boundary_ready,
+        display_boundary_ready,
+        presentation_ready,
+        stage_sequence_ready,
+        no_gpu_blockers,
+        output_texture_available,
+        external_texture_registered,
+    }
+}
+
 /// Cumulative color-stage counters observed in viewer GPU-output diagnostics.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ViewerGpuOutputStageCounts {
@@ -2218,7 +2318,7 @@ pub struct ViewerGpuOutputSurfaceFormatColorSpaces {
 }
 
 impl ViewerGpuOutputHealthCounts {
-    fn record(&mut self, status: ViewerGpuOutputHealthStatus) {
+    pub(crate) fn record(&mut self, status: ViewerGpuOutputHealthStatus) {
         match status {
             ViewerGpuOutputHealthStatus::NoInvocation => {
                 self.no_invocation = self.no_invocation.saturating_add(1);
@@ -2303,6 +2403,78 @@ pub enum ViewerGpuOutputPreviewCandidateState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ready_stage_diagnostics() -> RenderColorStageDiagnostics {
+        RenderColorStageDiagnostics {
+            total_stages: 2,
+            upload_stages: 1,
+            gpu_color_stages: 1,
+            ..RenderColorStageDiagnostics::default()
+        }
+    }
+
+    #[test]
+    fn shared_attempt_classifier_requires_registration_presentation_and_native_boundary() {
+        let ready = classify_viewer_gpu_output_health(
+            Some(ViewerGpuOutputAttemptOutcome::Registered),
+            true,
+            Some(ready_stage_diagnostics()),
+        );
+        assert_eq!(ready.status, ViewerGpuOutputHealthStatus::Ready);
+        assert!(ready.viewer_output_ready);
+
+        let presentation_not_ready = classify_viewer_gpu_output_health(
+            Some(ViewerGpuOutputAttemptOutcome::Registered),
+            false,
+            Some(ready_stage_diagnostics()),
+        );
+        assert_eq!(
+            presentation_not_ready.status,
+            ViewerGpuOutputHealthStatus::Degraded
+        );
+        assert!(presentation_not_ready.native_gpu_boundary_ready);
+        assert!(!presentation_not_ready.viewer_output_ready);
+
+        let no_stage_evidence = classify_viewer_gpu_output_health(
+            Some(ViewerGpuOutputAttemptOutcome::Registered),
+            true,
+            None,
+        );
+        assert_eq!(
+            no_stage_evidence.status,
+            ViewerGpuOutputHealthStatus::Degraded
+        );
+        assert!(!no_stage_evidence.native_gpu_boundary_ready);
+    }
+
+    #[test]
+    fn shared_attempt_classifier_preserves_terminal_failure_class() {
+        for (outcome, expected) in [
+            (
+                ViewerGpuOutputAttemptOutcome::DisplayContractBlocked,
+                ViewerGpuOutputHealthStatus::Blocked,
+            ),
+            (
+                ViewerGpuOutputAttemptOutcome::RecordFailed,
+                ViewerGpuOutputHealthStatus::Failed,
+            ),
+            (
+                ViewerGpuOutputAttemptOutcome::OutputTextureMissing,
+                ViewerGpuOutputHealthStatus::Failed,
+            ),
+            (
+                ViewerGpuOutputAttemptOutcome::ExternalFrameRejected,
+                ViewerGpuOutputHealthStatus::Rejected,
+            ),
+        ] {
+            let health = classify_viewer_gpu_output_health(
+                Some(outcome),
+                true,
+                Some(ready_stage_diagnostics()),
+            );
+            assert_eq!(health.status, expected);
+        }
+    }
 
     fn viewer_gpu_output_budget_allow_missing() -> ViewerGpuOutputBudget {
         ViewerGpuOutputBudget {

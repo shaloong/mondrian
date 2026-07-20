@@ -91,6 +91,7 @@ pub mod thumbnail_service;
 mod timeline_commands;
 mod timeline_editing;
 pub mod ui_actions;
+pub mod viewer_gpu_output_health;
 pub mod waveform_service;
 
 use self::ui_actions::TimelineSeekSource;

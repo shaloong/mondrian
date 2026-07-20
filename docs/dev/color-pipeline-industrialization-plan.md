@@ -169,7 +169,7 @@ Required inspection:
 - `crates/mondrian-renderer/src/timeline_composite.rs`
 - `crates/mondrian-app/src/app_ui/preview.rs`
 - `crates/mondrian-app/src/app_ui/window.rs`
-- `crates/mondrian-app/src/app_ui/viewer_gpu_output_budget.rs`
+- `crates/mondrian-app/src/app/viewer_gpu_output_health.rs`
 - `crates/mondrian-export/src/queue/mod.rs`
 - relevant perf tests in `crates/mondrian-app/src/app/perf_tests.rs`
   and `crates/mondrian-export/src/queue_perf_tests.rs`
@@ -240,7 +240,7 @@ Likely files:
 
 - `crates/mondrian-renderer/src/color_stage.rs`
 - `crates/mondrian-app/src/app_ui/window.rs`
-- `crates/mondrian-app/src/app_ui/viewer_gpu_output_budget.rs`
+- `crates/mondrian-app/src/app/viewer_gpu_output_health.rs`
 - `crates/mondrian-app/src/app/perf_tests.rs`
 - `docs/architecture/render-pipeline.md`
 - `docs/architecture/gpu-native-renderer.md`
@@ -486,7 +486,7 @@ Do not:
 Likely files:
 
 - `crates/mondrian-app/src/app_ui/window.rs`
-- `crates/mondrian-app/src/app_ui/viewer_gpu_output_budget.rs`
+- `crates/mondrian-app/src/app/viewer_gpu_output_health.rs`
 - `crates/mondrian-ui-renderer` if external texture compositing changes
 - `docs/architecture/ui-system.md`
 - `docs/architecture/color-management.md`

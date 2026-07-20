@@ -36,13 +36,13 @@ use crate::app::preview_runtime::{
     PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION, PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
 };
 use crate::app::ui_actions::TimelineSeekSource;
-use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
-use crate::app_ui::preview::WindowPreviewAdapter;
-use crate::app_ui::shell::AppUiAppRoot;
-use crate::app_ui::viewer_gpu_output_budget::{
+use crate::app::viewer_gpu_output_health::{
     build_health_report, evaluate_jsonl, ViewerGpuOutputBudget, ViewerGpuOutputHealthReport,
     ViewerGpuOutputHealthVerdict,
 };
+use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
+use crate::app_ui::preview::WindowPreviewAdapter;
+use crate::app_ui::shell::AppUiAppRoot;
 use anyhow::Context;
 use serde::Serialize;
 use std::cmp;
