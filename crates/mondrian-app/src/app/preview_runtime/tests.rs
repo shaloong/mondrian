@@ -962,6 +962,28 @@ fn external_gpu_preview_frame_overrides_raster_preview_for_same_plan() {
 }
 
 #[test]
+fn playing_current_gpu_candidate_releases_execution_borrow_before_prefetch() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    state.play();
+    let frame = match service.gpu_preview_frame_for_state(&state) {
+        PreviewGpuFrameState::Ready(frame) => frame,
+        _ => panic!("expected ready GPU preview candidate"),
+    };
+    assert!(service.set_external_viewer_frame(
+        &frame,
+        frame.external_texture_key(),
+        ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
+            .expect("full-frame presentation"),
+    ));
+
+    assert!(matches!(
+        service.gpu_preview_frame_for_state(&state),
+        PreviewGpuFrameState::Current
+    ));
+}
+
+#[test]
 fn headless_output_uses_the_same_runtime_registration_and_current_lifecycle() {
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct TestHeadlessOutput {

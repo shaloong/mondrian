@@ -484,7 +484,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             .borrow_mut()
             .set_presentation_quality(resolved_preview_presentation_quality(&resolved.elements));
         let cache_key = resolved.cache_key.clone();
-        let candidate_id = match self.execution.borrow_mut().plan_candidate(Some(&cache_key)) {
+        let candidate_decision = {
+            let mut execution = self.execution.borrow_mut();
+            execution.plan_candidate(Some(&cache_key))
+        };
+        let candidate_id = match candidate_decision {
             PreviewCandidateDecision::Current => {
                 self.schedule_media_prefetches(state, sequence, frame, width, height);
                 self.scheduler.prune_obsolete();

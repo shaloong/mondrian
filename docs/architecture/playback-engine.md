@@ -549,6 +549,14 @@ playback-current decode clears it. This value-state machine lives in
 Playback Engine's 8-of-12 Transport recovery policy: it cannot enter
 `Recovering`, change Clock Master, or lower runtime presentation scale.
 
+`PreviewExecutionCoordinator` borrows are confined to one state transition and
+must end before the Adapter invokes prefetch, Broker pruning, presentation, or
+any other operation that can observe execution state. In particular, candidate
+selection first materializes an owned `PreviewCandidateDecision`; branches act
+on that value only after releasing the coordinator borrow. This keeps the
+single-threaded state machine non-reentrant without replacing its explicit
+ownership with a lock or duplicating pending/current policy in callers.
+
 Hardware-path recovery signals are likewise pure scheduling policy. For a
 playback-current completion, `app::preview_scheduler_policy` compares the
 configured hardware request and native-import admission with frame-local decode
