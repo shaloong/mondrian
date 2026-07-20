@@ -1277,6 +1277,15 @@ resource implementation. Handles are neither `Copy` nor serializable. Their
 process-local kind/id values are diagnostics and backend-routing evidence, not
 OS handles or resource ownership by themselves. Equality and hashing use the
 lease object identity so recycled diagnostic ids cannot alias live resources.
+`mondrian_media::preview::native_frame` is the sole owner of this resource
+contract: native payload validation, type-erased lease identity, FFmpeg frame
+retention/release, and the D3D11/D3D12 borrowed ABI views live together behind
+that deep Module. The parent Preview decoder may choose a hardware plan and
+materialize a decoded frame, while renderer code may consume the public handle;
+neither may reach into the retained `AVFrame` or duplicate platform ABI parsing.
+The stable public Interface remains re-exported from
+`mondrian_media::preview`, so this ownership split does not create a second
+native-frame object model.
 The in-process FFmpeg lease is `FfmpegNativeDecodedFrameResource`. It retains
 the decoder frame with `av_frame_clone`, thereby retaining the frame's
 `AVBufferRef`-owned hardware surface, and releases that reference with
