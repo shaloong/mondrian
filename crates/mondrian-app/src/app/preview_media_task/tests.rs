@@ -1,12 +1,17 @@
+use std::net::TcpListener;
 use std::thread;
 
 use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
 use mondrian_core::{TimelineTime, WorkingColorSpace};
 use mondrian_media::{DecodedVideoRange, DecodedVideoRangeContract};
+use mondrian_media::{
+    MediaFileFingerprint, PreviewDecodeCancellation, PreviewDecodeCancellationCheckpoint,
+    PreviewDecodeCancellationSource,
+};
 
 use super::*;
-use crate::app::preview_access_mode::MediaPreviewJobEnqueueStatus;
+use crate::app::preview_access_mode::{MediaPreviewJobEnqueueStatus, MediaPreviewRequestStatus};
 
 fn test_media_key(label: &str) -> MediaPreviewKey {
     MediaPreviewKey {
@@ -165,4 +170,80 @@ fn worker_reports_queued_deadline_without_window_or_widget() {
 
     job_tx.close();
     worker.join().expect("worker should stop after queue close");
+}
+
+#[test]
+fn worker_interrupts_blocked_ffmpeg_input_and_publishes_typed_evidence() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind local stall server");
+    let address = listener.local_addr().expect("stall server address");
+    let (accepted_tx, accepted_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept FFmpeg HTTP connection");
+        accepted_tx.send(()).expect("publish accepted connection");
+        let _stream = stream;
+        let _ = release_rx.recv_timeout(Duration::from_secs(5));
+    });
+
+    let scheduler = MediaPreviewScheduler::default();
+    let (job_tx, job_rx) = scheduler.job_queue();
+    let (result_tx, result_rx) = mpsc::channel();
+    let shutdown = Arc::new(PreviewShutdownSignal::default());
+    let worker_scheduler = scheduler.clone();
+    let worker_shutdown = Arc::clone(&shutdown);
+    let worker = thread::spawn(move || {
+        media_preview_worker(
+            MediaPreviewWorkerLane::Playback,
+            job_rx,
+            result_tx,
+            worker_scheduler,
+            worker_shutdown,
+        );
+    });
+
+    let mut key = test_media_key("blocked-input");
+    key.path = format!("http://{address}/blocked-open.mp4").into();
+    key.fingerprint = Some(MediaFileFingerprint::default());
+    key.source_time = TimelineTime::ZERO;
+    let generation = scheduler.begin_generation();
+    assert!(matches!(
+        scheduler.request(
+            key.clone(),
+            generation,
+            MediaPreviewRequestPriority::Current,
+            PreviewDecodeAccessMode::PlaybackCursor,
+        ),
+        MediaPreviewRequestStatus::Scheduled { .. }
+    ));
+
+    accepted_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker must enter the controlled blocking read");
+    let requested_at = Instant::now();
+    scheduler.cancel(&key);
+    let result = result_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("FFmpeg interrupt must return a terminal worker result");
+    let return_latency = requested_at.elapsed();
+
+    assert!(result.canceled);
+    assert_eq!(result.key, key);
+    assert_eq!(
+        result.decode_cancellation,
+        Some(PreviewDecodeCancellation {
+            checkpoint: PreviewDecodeCancellationCheckpoint::InputOpen,
+            source: PreviewDecodeCancellationSource::FfmpegIoInterrupt,
+        })
+    );
+    assert!(result.cancel_observed_elapsed_us.is_some());
+    assert!(result.cancel_request_to_observed_us.is_some());
+    assert!(
+        return_latency <= Duration::from_millis(500),
+        "blocked input open returned too late after scheduler cancellation: {return_latency:?}"
+    );
+
+    let _ = release_tx.send(());
+    server.join().expect("stall server must return");
+    job_tx.close();
+    worker.join().expect("worker must stop after queue close");
 }

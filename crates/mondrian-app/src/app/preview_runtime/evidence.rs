@@ -104,6 +104,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             decode_timeout_failures: self.metrics.decode_timeout_failures.get(),
             decode_budget_exhausted_failures: self.metrics.decode_budget_exhausted_failures.get(),
             decode_cancellation,
+            decode_cancellation_checkpoints: self.metrics.decode_cancellation_checkpoints.get(),
             decode_canceled_jobs: cancellation.cancellations,
             decode_canceled_shutdown_jobs: cancellation.shutdown,
             decode_canceled_obsolete_jobs: cancellation.superseded,
@@ -560,6 +561,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         &self,
         access_mode: PreviewDecodeAccessMode,
         reason: Option<MediaPreviewCancelReason>,
+        decode_cancellation: Option<mondrian_media::PreviewDecodeCancellation>,
         elapsed_us: u64,
         observed_elapsed_us: Option<u64>,
         request_to_observed_us: Option<u64>,
@@ -568,6 +570,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let reason = reason.unwrap_or(MediaPreviewCancelReason::Unknown);
         if reason == MediaPreviewCancelReason::PlaybackDeadline && owns_pending_playback_demand {
             self.record_playback_current_late_drop(1);
+        }
+        if let Some(decode_cancellation) = decode_cancellation {
+            let mut evidence = self.metrics.decode_cancellation_checkpoints.get();
+            evidence.observe(decode_cancellation);
+            self.metrics.decode_cancellation_checkpoints.set(evidence);
         }
         self.metrics.decode_cancellation.borrow_mut().observe(
             mondrian_playback::FrameCancellationObservation {

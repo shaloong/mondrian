@@ -165,6 +165,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 self.record_preview_decode_cancel(
                     result.access_mode,
                     result.cancel_reason,
+                    result.decode_cancellation,
                     result.decode_elapsed_us,
                     result.cancel_observed_elapsed_us,
                     result.cancel_request_to_observed_us,

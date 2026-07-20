@@ -265,6 +265,26 @@ timeout reporting around that media request. Do not add mode-specific public
 helpers or a second preview decode pool; they become compatibility debt and
 split future hardware/low-copy routing across shallow wrappers.
 
+Cancellation returns a typed `PreviewDecodeCancellation`, never a unit success
+or an error-string classification. Its checkpoint names the first observation
+inside input open, stream-info discovery, cache lookup, seek, packet read,
+codec work, frame materialization, or the optional external process; its source
+distinguishes a normal cooperative checkpoint from `AVIOInterruptCB`. The
+request probe is installed before `avformat_open_input`, remains attached to the
+owned format context through stream discovery, seek, and packet I/O, and is
+reset for every reused Session request. The interrupt callback records only the
+first active checkpoint with atomics and never owns a cancellation cause or
+deadline. The App Frame Work Broker remains authority for why and when work was
+canceled; the media fact proves where blocking execution actually yielded.
+
+Ordinary CI exercises this contract through a loopback HTTP server that accepts
+FFmpeg's connection and deliberately withholds a response. Both the media
+Interface test and the production Preview worker test must prove bounded return
+and an exact `FfmpegIoInterrupt + InputOpen` fact. This deterministic harness is
+not a substitute for fixed-reference-machine stream-info, seek, packet-I/O, or
+driver-stall evidence, but it prevents the blocking-I/O seam from regressing
+into a merely declared callback.
+
 Packaged applications carry their complete non-system media/color runtime
 closure. Windows places vcpkg/`FFMPEG_DIR` DLLs beside the executable, Linux
 places collected shared objects under `lib/` with relative RPATH, and macOS

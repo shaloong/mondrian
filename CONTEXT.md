@@ -48,6 +48,10 @@ _Avoid_: Independent scheduler and worker queue, Adapter-owned worker-activity c
 Playback-owned, all-run evidence from an authoritative cancellation request through the first cooperative execution checkpoint to worker return, partitioned by Playback, Interactive, and Still frame-work class.
 _Avoid_: UI counter families, full worker lifetime as cancellation latency, one cleanup budget for unlike work classes
 
+**Preview Decode Cancellation Fact**:
+The media Adapter's immutable first-observation fact for one canceled decode: one typed execution checkpoint plus either an ordinary cooperative observation or FFmpeg blocking-I/O interruption. It complements Broker-owned cause and timing evidence; it does not own cancellation authority or infer timing.
+_Avoid_: unit `Canceled`, parsing FFmpeg error text, last checkpoint instead of first observation, media-owned cancellation reason
+
 **Execution Cancellation Token**:
 Monotonic, cloneable generation authority shared by schedulers, runtimes, and concrete media Adapters. Cancellation never resets a token; a new generation receives a new token. Canceled execution may not populate success caches or terminal failure memory.
 _Avoid_: Resettable flags, Adapter-owned generation truth, caching canceled results
@@ -129,7 +133,7 @@ The UI-independent App Module that prepares source frames into working-linear in
 _Avoid_: Calling Window diagnostics from execution, Headless-specific color math, discarded input-transform evidence, Widget raster types in the execution result
 
 **Preview Media Task**:
-The UI-independent App Module that consumes admitted Preview media jobs, runs the concrete FFmpeg Preview Adapter, observes Broker cancellation at codec checkpoints, publishes one structured terminal result, and performs bounded worker shutdown. Window and Headless Adapters consume the same task semantics and may not reconstruct a second decode loop.
+The UI-independent App Module that consumes admitted Preview media jobs, runs the concrete FFmpeg Preview Adapter, observes Broker cancellation at cooperative and blocking-I/O checkpoints, publishes one structured terminal result with the media Adapter's first-observation fact, and performs bounded worker shutdown. Window and Headless Adapters consume the same task semantics and may not reconstruct a second decode loop.
 _Avoid_: Window-owned codec worker, Headless-only decoder, cancellation inferred after codec return, task success cached after cancellation
 
 **Preview Media Source Resolution**:
@@ -358,6 +362,7 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - A **Frame Work Deadline** is lowered exactly once at Broker admission. Rebinding the same in-flight key replaces its deadline with the latest binding, while cancellation reports the earliest applicable deadline, invalidation, or preemption request.
 - A worker records completion in the **Frame Work Broker** before crossing its result channel. Later UI polling resolves freshness against the latest binding but cannot change the recorded on-time/missed deadline result.
 - A media **Adapter** contributes the Broker-owned execution-lease age at first checkpoint and return exactly once to **Frame Cancellation Evidence**. `app::preview_access_mode` exclusively maps the Broker's atomic disposition, access mode, and bounded speculative budget into Adapter cancellation reasons and Playback work classes; workers and UI reports cannot reconstruct timing from the later codec-function entry instant. The Playback Module alone aggregates causes and evaluates request-to-checkpoint plus class-specific checkpoint-to-return budgets.
+- The concrete FFmpeg Adapter returns exactly one **Preview Decode Cancellation Fact** when it observes cancellation. `AVIOInterruptCB` records the first active `input_open`, `stream_info`, `seek`, or `packet_read` checkpoint before returning control; ordinary cache, codec, frame-materialization, and external-process checks remain cooperative facts. Reused Sessions reset this observation per request. App Runtime evidence may aggregate the fact but may not replace Broker cause/timing evidence with it.
 - The **Playback Preview Pump** samples the still-pending Frame Demand identity once per runtime turn. A Preview Adapter reports execution facts against that sample but cannot apply Frame Deliveries or mutate Transport State; Window and Headless consumers receive the same pump outcome.
 - The **Playback Preview Pump** applies terminal Frame Deliveries before observing video preroll. A delivery that ends or replaces a demand cannot be followed in the same turn by readiness attributed to that superseded demand.
 - If independent bounded completion sources report the same terminal authority in one pump turn, the first accepted fact consumes it and later losing facts are retired before Playback Evidence; an expected internal race is not a rejected terminal observation.

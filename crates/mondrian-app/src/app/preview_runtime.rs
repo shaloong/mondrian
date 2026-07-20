@@ -850,6 +850,7 @@ struct PreviewMetrics {
     decode_timeout_failures: Cell<u64>,
     decode_budget_exhausted_failures: Cell<u64>,
     decode_cancellation: RefCell<mondrian_playback::FrameCancellationEvidenceCollector>,
+    decode_cancellation_checkpoints: Cell<mondrian_media::PreviewDecodeCancellationEvidence>,
     decode_in_process_cpu_frames: Cell<u64>,
     decode_external_ffmpeg_cpu_rgba_frames: Cell<u64>,
     decode_playback_session_ring_hit_frames: Cell<u64>,

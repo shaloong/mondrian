@@ -2068,7 +2068,168 @@ pub enum PreviewDecodeOutcome {
     /// Decode completed with a GPU-resident native frame.
     NativeGpuFrame(PreviewNativeDecodedFrame),
     /// The caller marked this request obsolete before a frame was returned.
-    Canceled,
+    Canceled(PreviewDecodeCancellation),
+}
+
+/// Execution point at which a Preview decode first observed cancellation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum PreviewDecodeCancellationCheckpoint {
+    /// Cancellation existed before any input work was admitted.
+    BeforeInputOpen = 1,
+    /// FFmpeg was opening the input/protocol.
+    InputOpen = 2,
+    /// FFmpeg was discovering stream information.
+    StreamInfo = 3,
+    /// Preview caches and request policy were being evaluated.
+    CacheLookup = 4,
+    /// FFmpeg was seeking the input.
+    Seek = 5,
+    /// FFmpeg was reading the next demuxed packet.
+    PacketRead = 6,
+    /// The codec was accepting packets or producing frames.
+    Codec = 7,
+    /// A decoded frame was being materialized into its output residency.
+    FrameMaterialization = 8,
+    /// The optional external FFmpeg process was being executed or reaped.
+    ExternalProcess = 9,
+}
+
+impl PreviewDecodeCancellationCheckpoint {
+    /// Stable evidence name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BeforeInputOpen => "before_input_open",
+            Self::InputOpen => "input_open",
+            Self::StreamInfo => "stream_info",
+            Self::CacheLookup => "cache_lookup",
+            Self::Seek => "seek",
+            Self::PacketRead => "packet_read",
+            Self::Codec => "codec",
+            Self::FrameMaterialization => "frame_materialization",
+            Self::ExternalProcess => "external_process",
+        }
+    }
+
+    fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::BeforeInputOpen),
+            2 => Some(Self::InputOpen),
+            3 => Some(Self::StreamInfo),
+            4 => Some(Self::CacheLookup),
+            5 => Some(Self::Seek),
+            6 => Some(Self::PacketRead),
+            7 => Some(Self::Codec),
+            8 => Some(Self::FrameMaterialization),
+            9 => Some(Self::ExternalProcess),
+            _ => None,
+        }
+    }
+}
+
+/// Mechanism that first made a Preview cancellation observable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PreviewDecodeCancellationSource {
+    /// A normal cooperative checkpoint in Mondrian observed cancellation.
+    CooperativeCheckpoint,
+    /// FFmpeg's `AVIOInterruptCB` interrupted blocking format/protocol work.
+    FfmpegIoInterrupt,
+}
+
+/// Typed cancellation fact returned by the concrete Preview decode Adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PreviewDecodeCancellation {
+    /// First execution point that observed cancellation.
+    pub checkpoint: PreviewDecodeCancellationCheckpoint,
+    /// Mechanism that observed cancellation at that point.
+    pub source: PreviewDecodeCancellationSource,
+}
+
+impl PreviewDecodeCancellation {
+    fn cooperative(checkpoint: PreviewDecodeCancellationCheckpoint) -> Self {
+        Self {
+            checkpoint,
+            source: PreviewDecodeCancellationSource::CooperativeCheckpoint,
+        }
+    }
+
+    fn ffmpeg_interrupt(checkpoint: PreviewDecodeCancellationCheckpoint) -> Self {
+        Self {
+            checkpoint,
+            source: PreviewDecodeCancellationSource::FfmpegIoInterrupt,
+        }
+    }
+}
+
+/// Aggregate of concrete decode checkpoints that observed cancellation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewDecodeCancellationEvidence {
+    /// Cancellations returned by the Preview decode Adapter.
+    pub total: u64,
+    /// Cancellations first observed at an ordinary cooperative checkpoint.
+    pub cooperative_checkpoint: u64,
+    /// Cancellations first observed by FFmpeg's blocking-I/O interrupt callback.
+    pub ffmpeg_io_interrupt: u64,
+    /// Per-checkpoint observation counts.
+    pub checkpoints: PreviewDecodeCancellationCheckpointEvidence,
+}
+
+impl PreviewDecodeCancellationEvidence {
+    /// Record one typed cancellation fact.
+    pub fn observe(&mut self, cancellation: PreviewDecodeCancellation) {
+        self.total = self.total.saturating_add(1);
+        match cancellation.source {
+            PreviewDecodeCancellationSource::CooperativeCheckpoint => {
+                self.cooperative_checkpoint = self.cooperative_checkpoint.saturating_add(1);
+            }
+            PreviewDecodeCancellationSource::FfmpegIoInterrupt => {
+                self.ffmpeg_io_interrupt = self.ffmpeg_io_interrupt.saturating_add(1);
+            }
+        }
+        self.checkpoints.observe(cancellation.checkpoint);
+    }
+}
+
+/// Per-checkpoint Preview decode cancellation counts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewDecodeCancellationCheckpointEvidence {
+    /// Requests canceled before input work was admitted.
+    pub before_input_open: u64,
+    /// Requests canceled while opening an input or protocol.
+    pub input_open: u64,
+    /// Requests canceled while discovering stream information.
+    pub stream_info: u64,
+    /// Requests canceled while evaluating caches or request policy.
+    pub cache_lookup: u64,
+    /// Requests canceled while seeking.
+    pub seek: u64,
+    /// Requests canceled while reading a demuxed packet.
+    pub packet_read: u64,
+    /// Requests canceled while interacting with a codec.
+    pub codec: u64,
+    /// Requests canceled while materializing a decoded frame.
+    pub frame_materialization: u64,
+    /// Requests canceled while executing or reaping an external process.
+    pub external_process: u64,
+}
+
+impl PreviewDecodeCancellationCheckpointEvidence {
+    fn observe(&mut self, checkpoint: PreviewDecodeCancellationCheckpoint) {
+        let counter = match checkpoint {
+            PreviewDecodeCancellationCheckpoint::BeforeInputOpen => &mut self.before_input_open,
+            PreviewDecodeCancellationCheckpoint::InputOpen => &mut self.input_open,
+            PreviewDecodeCancellationCheckpoint::StreamInfo => &mut self.stream_info,
+            PreviewDecodeCancellationCheckpoint::CacheLookup => &mut self.cache_lookup,
+            PreviewDecodeCancellationCheckpoint::Seek => &mut self.seek,
+            PreviewDecodeCancellationCheckpoint::PacketRead => &mut self.packet_read,
+            PreviewDecodeCancellationCheckpoint::Codec => &mut self.codec,
+            PreviewDecodeCancellationCheckpoint::FrameMaterialization => {
+                &mut self.frame_materialization
+            }
+            PreviewDecodeCancellationCheckpoint::ExternalProcess => &mut self.external_process,
+        };
+        *counter = counter.saturating_add(1);
+    }
 }
 
 thread_local! {
@@ -2493,14 +2654,27 @@ type PreviewDecodeCancelProbe = Arc<dyn Fn() -> bool + Send + Sync>;
 
 struct PreviewDecodeInterruptState {
     active_probe: Mutex<Option<PreviewDecodeCancelProbe>>,
+    current_checkpoint: AtomicU8,
+    first_interrupt_checkpoint: AtomicU8,
 }
 
 impl PreviewDecodeInterruptState {
     fn new() -> Self {
-        Self { active_probe: Mutex::new(None) }
+        Self {
+            active_probe: Mutex::new(None),
+            current_checkpoint: AtomicU8::new(
+                PreviewDecodeCancellationCheckpoint::BeforeInputOpen as u8,
+            ),
+            first_interrupt_checkpoint: AtomicU8::new(0),
+        }
     }
 
     fn install(self: &Arc<Self>, probe: PreviewDecodeCancelProbe) -> PreviewDecodeInterruptGuard {
+        self.current_checkpoint.store(
+            PreviewDecodeCancellationCheckpoint::BeforeInputOpen as u8,
+            Ordering::Release,
+        );
+        self.first_interrupt_checkpoint.store(0, Ordering::Release);
         match self.active_probe.lock() {
             Ok(mut active_probe) => *active_probe = Some(probe),
             Err(poisoned) => *poisoned.into_inner() = Some(probe),
@@ -2508,12 +2682,38 @@ impl PreviewDecodeInterruptState {
         PreviewDecodeInterruptGuard { state: Arc::clone(self) }
     }
 
+    fn set_checkpoint(&self, checkpoint: PreviewDecodeCancellationCheckpoint) {
+        self.current_checkpoint.store(checkpoint as u8, Ordering::Release);
+    }
+
+    fn cancellation(
+        &self,
+        fallback: PreviewDecodeCancellationCheckpoint,
+    ) -> PreviewDecodeCancellation {
+        PreviewDecodeCancellationCheckpoint::from_u8(
+            self.first_interrupt_checkpoint.load(Ordering::Acquire),
+        )
+        .map(PreviewDecodeCancellation::ffmpeg_interrupt)
+        .unwrap_or_else(|| PreviewDecodeCancellation::cooperative(fallback))
+    }
+
     fn should_cancel(&self) -> bool {
         let probe = match self.active_probe.lock() {
             Ok(active_probe) => active_probe.clone(),
             Err(_) => return true,
         };
-        probe.is_some_and(|probe| panic::catch_unwind(AssertUnwindSafe(|| probe())).unwrap_or(true))
+        let canceled = probe
+            .is_some_and(|probe| panic::catch_unwind(AssertUnwindSafe(|| probe())).unwrap_or(true));
+        if canceled {
+            let checkpoint = self.current_checkpoint.load(Ordering::Acquire);
+            let _ = self.first_interrupt_checkpoint.compare_exchange(
+                0,
+                checkpoint,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
+        canceled
     }
 }
 
@@ -3120,6 +3320,7 @@ fn open_preview_input(
             opaque: Arc::as_ptr(interrupt_state).cast_mut().cast(),
         };
 
+        interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::InputOpen);
         let open_result = ffmpeg::ffi::avformat_open_input(
             &mut input,
             path_c.as_ptr(),
@@ -3136,6 +3337,7 @@ fn open_preview_input(
             });
         }
 
+        interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::StreamInfo);
         let stream_info_result =
             ffmpeg::ffi::avformat_find_stream_info(input, std::ptr::null_mut());
         if stream_info_result < 0 {
@@ -3161,10 +3363,8 @@ impl PreviewDecodeSession {
         hardware_decode_request: PreviewHardwareDecodeRequest,
         hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
         source_color: PreviewSourceColorContract,
-        should_cancel: PreviewDecodeCancelProbe,
+        interrupt_state: Arc<PreviewDecodeInterruptState>,
     ) -> Result<Self> {
-        let interrupt_state = Arc::new(PreviewDecodeInterruptState::new());
-        let _interrupt_guard = interrupt_state.install(should_cancel);
         let input = open_preview_input(path, &interrupt_state)?;
         Self::from_input(
             input,
@@ -3396,7 +3596,10 @@ impl PreviewDecodeSession {
         should_cancel: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<PreviewDecodeOutcome> {
         if should_cancel() {
-            return Ok(PreviewDecodeOutcome::Canceled);
+            return Ok(PreviewDecodeOutcome::Canceled(
+                self.interrupt_state
+                    .cancellation(PreviewDecodeCancellationCheckpoint::BeforeInputOpen),
+            ));
         }
         let target_pts =
             source_time_to_stream_pts(source_time, self.stream_tb, self.stream_start_pts).map_err(
@@ -3422,12 +3625,17 @@ impl PreviewDecodeSession {
             ffmpeg::codec::discard::Discard::Default
         });
 
+        self.interrupt_state
+            .set_checkpoint(PreviewDecodeCancellationCheckpoint::CacheLookup);
         let cache_lookup_started_at = Instant::now();
         let allow_cpu_cache = !self.hardware_decode_request.prefers_gpu_residency();
         if allow_cpu_cache && policy.use_playback_ring {
             if let Some(hit) = self.playback_ring.get(target_pts, self.hit_tolerance_pts) {
                 if should_cancel() {
-                    return Ok(PreviewDecodeOutcome::Canceled);
+                    return Ok(PreviewDecodeOutcome::Canceled(
+                        self.interrupt_state
+                            .cancellation(PreviewDecodeCancellationCheckpoint::CacheLookup),
+                    ));
                 }
                 return Ok(hit
                     .into_playback_ring_hit(cache_lookup_started_at.elapsed())
@@ -3456,7 +3664,10 @@ impl PreviewDecodeSession {
                 self.hit_tolerance_pts,
             ) {
                 if should_cancel() {
-                    return Ok(PreviewDecodeOutcome::Canceled);
+                    return Ok(PreviewDecodeOutcome::Canceled(
+                        self.interrupt_state
+                            .cancellation(PreviewDecodeCancellationCheckpoint::CacheLookup),
+                    ));
                 }
                 if policy.use_playback_ring {
                     self.playback_ring.put(hit.pts, hit.frame.clone());
@@ -3497,24 +3708,36 @@ impl PreviewDecodeSession {
         let mut seek_us = 0;
         if seek_performed {
             if should_cancel() {
-                return Ok(PreviewDecodeOutcome::Canceled);
+                return Ok(PreviewDecodeOutcome::Canceled(
+                    self.interrupt_state.cancellation(PreviewDecodeCancellationCheckpoint::Seek),
+                ));
             }
+            self.interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::Seek);
             let seek_started_at = Instant::now();
             seek_resolution = match self.seek_to_target(decode_target_pts, policy) {
                 Ok(resolution) => resolution,
-                Err(_) if should_cancel() => return Ok(PreviewDecodeOutcome::Canceled),
+                Err(_) if should_cancel() => {
+                    return Ok(PreviewDecodeOutcome::Canceled(
+                        self.interrupt_state
+                            .cancellation(PreviewDecodeCancellationCheckpoint::Seek),
+                    ));
+                }
                 Err(error) => return Err(error),
             };
             seek_us = duration_us(seek_started_at.elapsed());
         }
 
         if should_cancel() {
-            return Ok(PreviewDecodeOutcome::Canceled);
+            return Ok(PreviewDecodeOutcome::Canceled(
+                self.interrupt_state.cancellation(PreviewDecodeCancellationCheckpoint::Codec),
+            ));
         }
         let decode_started_at = Instant::now();
         let result = self.decode_forward_until(decode_target_pts, policy, should_cancel)?;
         if result.canceled {
-            return Ok(PreviewDecodeOutcome::Canceled);
+            return Ok(PreviewDecodeOutcome::Canceled(
+                self.interrupt_state.cancellation(PreviewDecodeCancellationCheckpoint::Codec),
+            ));
         }
         if let Some(frame) = result.frame {
             match frame {
@@ -3747,6 +3970,8 @@ impl PreviewDecodeSession {
         policy: PreviewDecodeAccessPolicy,
         should_cancel: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<PreviewDecodeForwardResult> {
+        let interrupt_state = Arc::clone(&self.interrupt_state);
+        interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::Codec);
         let mut best_before: Option<(i64, RetainedDecodedFrame)> = None;
         let mut best_after: Option<(i64, RetainedDecodedFrame)> = None;
         let mut frames_decoded: usize = 0;
@@ -3803,6 +4028,8 @@ impl PreviewDecodeSession {
                 if should_cancel() {
                     return Ok(None);
                 }
+                interrupt_state
+                    .set_checkpoint(PreviewDecodeCancellationCheckpoint::FrameMaterialization);
                 let frame = materialize_decoded_frame(
                     selected_frame,
                     hardware_decode_plan,
@@ -3849,6 +4076,9 @@ impl PreviewDecodeSession {
                             best_before.as_ref(),
                             None,
                         )? {
+                            if should_cancel() {
+                                return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+                            }
                             return Ok(PreviewDecodeForwardResult::frame(
                                 frame,
                                 selected_pts,
@@ -3857,6 +4087,9 @@ impl PreviewDecodeSession {
                         }
                     }
                     if frame_pts >= target_pts.saturating_sub(self.hit_tolerance_pts) {
+                        interrupt_state.set_checkpoint(
+                            PreviewDecodeCancellationCheckpoint::FrameMaterialization,
+                        );
                         let frame = materialize_decoded_frame(
                             &decoded.frame,
                             &mut self.hardware_decode_plan,
@@ -3867,6 +4100,9 @@ impl PreviewDecodeSession {
                             self.path.as_path(),
                             self.source_color,
                         )?;
+                        if should_cancel() {
+                            return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+                        }
                         frame.cache_cpu_frame(
                             &self.path,
                             self.fingerprint,
@@ -3895,6 +4131,9 @@ impl PreviewDecodeSession {
                         best_before.as_ref(),
                         best_after.as_ref(),
                     )? {
+                        if should_cancel() {
+                            return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+                        }
                         frame.cache_cpu_frame(
                             &self.path,
                             self.fingerprint,
@@ -3916,7 +4155,13 @@ impl PreviewDecodeSession {
             }
         }
 
-        for (s, packet) in self.input.packets() {
+        let mut packets = self.input.packets();
+        loop {
+            interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::PacketRead);
+            let Some((s, packet)) = packets.next() else {
+                break;
+            };
+            interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::Codec);
             if should_cancel() {
                 return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
             }
@@ -3961,6 +4206,11 @@ impl PreviewDecodeSession {
                                 best_before.as_ref(),
                                 None,
                             )? {
+                                if should_cancel() {
+                                    return Ok(PreviewDecodeForwardResult::canceled(
+                                        frames_decoded,
+                                    ));
+                                }
                                 return Ok(PreviewDecodeForwardResult::frame(
                                     frame,
                                     selected_pts,
@@ -3972,6 +4222,9 @@ impl PreviewDecodeSession {
                             if should_cancel() {
                                 return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
                             }
+                            interrupt_state.set_checkpoint(
+                                PreviewDecodeCancellationCheckpoint::FrameMaterialization,
+                            );
                             let frame = materialize_decoded_frame(
                                 &decoded.frame,
                                 &mut self.hardware_decode_plan,
@@ -3982,6 +4235,9 @@ impl PreviewDecodeSession {
                                 self.path.as_path(),
                                 self.source_color,
                             )?;
+                            if should_cancel() {
+                                return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+                            }
                             frame.cache_cpu_frame(
                                 &self.path,
                                 self.fingerprint,
@@ -4010,6 +4266,9 @@ impl PreviewDecodeSession {
                             best_before.as_ref(),
                             best_after.as_ref(),
                         )? {
+                            if should_cancel() {
+                                return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+                            }
                             frame.cache_cpu_frame(
                                 &self.path,
                                 self.fingerprint,
@@ -4073,6 +4332,11 @@ impl PreviewDecodeSession {
                                 best_before.as_ref(),
                                 None,
                             )? {
+                                if should_cancel() {
+                                    return Ok(PreviewDecodeForwardResult::canceled(
+                                        frames_decoded,
+                                    ));
+                                }
                                 self.reached_eof = true;
                                 return Ok(PreviewDecodeForwardResult::frame(
                                     frame,
@@ -4096,6 +4360,9 @@ impl PreviewDecodeSession {
                             best_before.as_ref(),
                             best_after.as_ref(),
                         )? {
+                            if should_cancel() {
+                                return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+                            }
                             frame.cache_cpu_frame(
                                 &self.path,
                                 self.fingerprint,
@@ -4131,6 +4398,9 @@ impl PreviewDecodeSession {
             best_before.as_ref(),
             best_after.as_ref(),
         )? {
+            if should_cancel() {
+                return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+            }
             frame.cache_cpu_frame(
                 &self.path,
                 self.fingerprint,
@@ -4177,7 +4447,11 @@ fn decode_preview_frame_outcome(
 ) -> Result<PreviewDecodeOutcome> {
     let started_at = Instant::now();
     if should_cancel() {
-        return Ok(PreviewDecodeOutcome::Canceled);
+        return Ok(PreviewDecodeOutcome::Canceled(
+            PreviewDecodeCancellation::cooperative(
+                PreviewDecodeCancellationCheckpoint::BeforeInputOpen,
+            ),
+        ));
     }
     ensure_ffmpeg_initialized(path)?;
     let fingerprint = fingerprint.unwrap_or_else(|| MediaFileFingerprint::capture(path));
@@ -4188,7 +4462,11 @@ fn decode_preview_frame_outcome(
         let mut session_open_us = 0;
 
         if should_cancel() {
-            return Ok(PreviewDecodeOutcome::Canceled);
+            return Ok(PreviewDecodeOutcome::Canceled(
+                PreviewDecodeCancellation::cooperative(
+                    PreviewDecodeCancellationCheckpoint::BeforeInputOpen,
+                ),
+            ));
         }
         let current_match = slot
             .as_ref()
@@ -4208,6 +4486,8 @@ fn decode_preview_frame_outcome(
 
         if !current_match {
             let open_started_at = Instant::now();
+            let interrupt_state = Arc::new(PreviewDecodeInterruptState::new());
+            let _interrupt_guard = interrupt_state.install(Arc::clone(&should_cancel));
             let opened = PreviewDecodeSession::open(
                 path,
                 fingerprint,
@@ -4218,11 +4498,17 @@ fn decode_preview_frame_outcome(
                 hardware_decode_request,
                 hardware_decode_device_selector,
                 source_color,
-                Arc::clone(&should_cancel),
+                Arc::clone(&interrupt_state),
             );
             *slot = match opened {
                 Ok(session) => Some(session),
-                Err(_) if should_cancel() => return Ok(PreviewDecodeOutcome::Canceled),
+                Err(_) if should_cancel() => {
+                    return Ok(PreviewDecodeOutcome::Canceled(
+                        interrupt_state.cancellation(
+                            PreviewDecodeCancellationCheckpoint::InputOpen,
+                        ),
+                    ));
+                }
                 Err(error) => return Err(error),
             };
             session_open_us = duration_us(open_started_at.elapsed());
@@ -4241,8 +4527,13 @@ fn decode_preview_frame_outcome(
         );
 
         if preview_external_ffmpeg_cpu_rgba_enabled(access_mode) {
+            interrupt_state
+                .set_checkpoint(PreviewDecodeCancellationCheckpoint::ExternalProcess);
             if should_cancel() {
-                return Ok(PreviewDecodeOutcome::Canceled);
+                return Ok(PreviewDecodeOutcome::Canceled(
+                    interrupt_state
+                        .cancellation(PreviewDecodeCancellationCheckpoint::ExternalProcess),
+                ));
             }
             let external_started_at = Instant::now();
             if let Some(result) = try_decode_with_external_ffmpeg_cpu_rgba(
@@ -4263,7 +4554,11 @@ fn decode_preview_frame_outcome(
                             if !access_mode.preserves_session_on_cancel() {
                                 *slot = None;
                             }
-                            return Ok(PreviewDecodeOutcome::Canceled);
+                            return Ok(PreviewDecodeOutcome::Canceled(
+                                interrupt_state.cancellation(
+                                    PreviewDecodeCancellationCheckpoint::ExternalProcess,
+                                ),
+                            ));
                         }
                         return Ok(PreviewDecodeOutcome::Frame(frame
                             .with_access_mode(access_mode)
@@ -4284,7 +4579,11 @@ fn decode_preview_frame_outcome(
                         if !access_mode.preserves_session_on_cancel() {
                             *slot = None;
                         }
-                        return Ok(PreviewDecodeOutcome::Canceled);
+                        return Ok(PreviewDecodeOutcome::Canceled(
+                            interrupt_state.cancellation(
+                                PreviewDecodeCancellationCheckpoint::ExternalProcess,
+                            ),
+                        ));
                     }
                     Err(err) => {
                         preview_trace(format!(
@@ -4342,11 +4641,11 @@ fn decode_preview_frame_outcome(
                 });
                 Ok(PreviewDecodeOutcome::NativeGpuFrame(frame))
             }
-            PreviewDecodeOutcome::Canceled => {
+            PreviewDecodeOutcome::Canceled(cancellation) => {
                 if !access_mode.preserves_session_on_cancel() {
                     *slot = None;
                 }
-                Ok(PreviewDecodeOutcome::Canceled)
+                Ok(PreviewDecodeOutcome::Canceled(cancellation))
             }
         }
     })
@@ -5604,11 +5903,11 @@ mod tests {
         DecodedRgbaFrameContract, FfmpegAvD3D12VaFrame, FfmpegAvD3D12VaSyncContext,
         FfmpegNativeDecodedFrameResource, FfmpegNativeDecodedFrameResourceError,
         MediaFileFingerprint, PreviewDecodeAccessMode, PreviewDecodeAccessPolicy,
-        PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeDiagnostics,
-        PreviewDecodeExecutionPath, PreviewDecodeInterruptState, PreviewDecodeOutcome,
-        PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
-        PreviewDecodeStageDurations, PreviewDecodeThreadingConfig, PreviewDecodeThreadingKind,
-        PreviewDecodedFramePayload, PreviewHardwareDecodeBlocker,
+        PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeCancellation,
+        PreviewDecodeCancellationCheckpoint, PreviewDecodeDiagnostics, PreviewDecodeExecutionPath,
+        PreviewDecodeInterruptState, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest,
+        PreviewDecodeSeekStrategy, PreviewDecodeStageDurations, PreviewDecodeThreadingConfig,
+        PreviewDecodeThreadingKind, PreviewDecodedFramePayload, PreviewHardwareDecodeBlocker,
         PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
         PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest, PreviewNativeDecodeFallback,
         PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
@@ -5632,11 +5931,13 @@ mod tests {
     use serde::Serialize;
     use std::any::Any;
     use std::ffi::c_void;
+    use std::net::TcpListener;
     use std::num::NonZeroU64;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::thread;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -7761,7 +8062,76 @@ mod tests {
         let outcome = decode_preview_frame_cancellable(request, || true)
             .expect("canceled decode should not fail missing media");
 
-        assert!(matches!(outcome, PreviewDecodeOutcome::Canceled));
+        assert_eq!(
+            match outcome {
+                PreviewDecodeOutcome::Canceled(cancellation) => cancellation,
+                other => panic!("expected cancellation, got {other:?}"),
+            },
+            PreviewDecodeCancellation::cooperative(
+                PreviewDecodeCancellationCheckpoint::BeforeInputOpen,
+            )
+        );
+    }
+
+    #[test]
+    fn ffmpeg_input_open_interrupts_a_blocked_http_read() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind local stall server");
+        let address = listener.local_addr().expect("stall server address");
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept FFmpeg HTTP connection");
+            accepted_tx.send(()).expect("publish accepted connection");
+            let _stream = stream;
+            let _ = release_rx.recv_timeout(Duration::from_secs(5));
+        });
+
+        let canceled = Arc::new(AtomicBool::new(false));
+        let worker_canceled = Arc::clone(&canceled);
+        let url = PathBuf::from(format!("http://{address}/blocked-open.mp4"));
+        let (outcome_tx, outcome_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let request = PreviewDecodeRequest::new(
+                url.as_path(),
+                TimelineTime::ZERO,
+                PreviewDecodeAccessMode::PlaybackCursor,
+                test_source_color(),
+            )
+            .with_fingerprint(MediaFileFingerprint::default())
+            .with_max_size(Some(320), Some(180));
+            let outcome = decode_preview_frame_cancellable(request, move || {
+                worker_canceled.load(Ordering::Acquire)
+            });
+            let _ = outcome_tx.send(outcome);
+        });
+
+        accepted_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("FFmpeg must enter the controlled blocking read");
+        let requested_at = Instant::now();
+        canceled.store(true, Ordering::Release);
+        let outcome = outcome_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("FFmpeg interrupt callback must stop blocked input open")
+            .expect("blocked input cancellation must not become a media failure");
+        let return_latency = requested_at.elapsed();
+
+        let _ = release_tx.send(());
+        worker.join().expect("decode worker must return");
+        server.join().expect("stall server must return");
+        assert_eq!(
+            match outcome {
+                PreviewDecodeOutcome::Canceled(cancellation) => cancellation,
+                other => panic!("expected cancellation, got {other:?}"),
+            },
+            PreviewDecodeCancellation::ffmpeg_interrupt(
+                PreviewDecodeCancellationCheckpoint::InputOpen,
+            )
+        );
+        assert!(
+            return_latency <= Duration::from_millis(500),
+            "blocked input open returned too late after cancellation: {return_latency:?}"
+        );
     }
 
     #[test]
@@ -7968,7 +8338,7 @@ mod tests {
             .expect("decode preview fixture")
         {
             PreviewDecodeOutcome::Frame(frame) => frame,
-            PreviewDecodeOutcome::Canceled => {
+            PreviewDecodeOutcome::Canceled(_) => {
                 panic!("still-frame perf decode canceled")
             }
             PreviewDecodeOutcome::NativeGpuFrame(_) => {
@@ -8065,7 +8435,7 @@ mod tests {
                 .expect("decode preview fixture frame")
             {
                 PreviewDecodeOutcome::Frame(frame) => frame,
-                PreviewDecodeOutcome::Canceled => {
+                PreviewDecodeOutcome::Canceled(_) => {
                     panic!("playback sequence perf decode canceled")
                 }
                 PreviewDecodeOutcome::NativeGpuFrame(_) => {

@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 use mondrian_core::{MondrianError, Resolution, TimelineTime};
 use mondrian_media::{
     decode_preview_frame_cancellable, HwAccelDeviceSelector, MediaFileFingerprint,
-    PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeDiagnostics,
-    PreviewDecodeOutcome, PreviewDecodeRequest, PreviewHardwareDecodeRequest,
-    PreviewSourceColorContract,
+    PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeCancellation,
+    PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodeRequest,
+    PreviewHardwareDecodeRequest, PreviewSourceColorContract,
 };
 use mondrian_playback::{FrameDemandIdentity, FrameExecutionId};
 use mondrian_renderer::{
@@ -57,6 +57,7 @@ pub(crate) struct MediaPreviewResult {
     pub(crate) canceled: bool,
     pub(crate) cancellation_phase: Option<MediaPreviewCancellationPhase>,
     pub(crate) cancel_reason: Option<MediaPreviewCancelReason>,
+    pub(crate) decode_cancellation: Option<PreviewDecodeCancellation>,
     pub(crate) decode_diagnostics: Option<PreviewDecodeDiagnostics>,
     pub(crate) color_diagnostics: Option<RenderColorTransformDiagnostics>,
     pub(crate) color_stage_diagnostics: Option<RenderColorStageDiagnostics>,
@@ -304,6 +305,7 @@ pub(crate) fn media_preview_canceled_result(
         canceled: true,
         cancellation_phase: Some(MediaPreviewCancellationPhase::Executing),
         cancel_reason: Some(reason),
+        decode_cancellation: None,
         decode_diagnostics: None,
         color_diagnostics: None,
         color_stage_diagnostics: None,
@@ -404,6 +406,7 @@ pub(crate) fn decode_media_preview(
                 canceled: false,
                 cancellation_phase: None,
                 cancel_reason: None,
+                decode_cancellation: None,
                 decode_diagnostics: Some(decode_diagnostics),
                 color_diagnostics: None,
                 color_stage_diagnostics: None,
@@ -469,6 +472,7 @@ pub(crate) fn decode_media_preview(
                 canceled: false,
                 cancellation_phase: None,
                 cancel_reason: None,
+                decode_cancellation: None,
                 decode_diagnostics: Some(decode_diagnostics),
                 color_diagnostics: None,
                 color_stage_diagnostics: None,
@@ -521,6 +525,7 @@ pub(crate) fn decode_media_preview(
                 canceled: false,
                 cancellation_phase: None,
                 cancel_reason: None,
+                decode_cancellation: None,
                 decode_diagnostics: Some(decode_diagnostics),
                 color_diagnostics: None,
                 color_stage_diagnostics: None,
@@ -528,7 +533,7 @@ pub(crate) fn decode_media_preview(
                 execution_id,
             }
         }
-        Ok(PreviewDecodeOutcome::Canceled) => MediaPreviewResult {
+        Ok(PreviewDecodeOutcome::Canceled(cancellation)) => MediaPreviewResult {
             key: job.key,
             frame: None,
             error: None,
@@ -544,6 +549,7 @@ pub(crate) fn decode_media_preview(
             canceled: true,
             cancellation_phase: Some(MediaPreviewCancellationPhase::Executing),
             cancel_reason: None,
+            decode_cancellation: Some(cancellation),
             decode_diagnostics: None,
             color_diagnostics: None,
             color_stage_diagnostics: None,
@@ -568,6 +574,7 @@ pub(crate) fn decode_media_preview(
                 canceled: false,
                 cancellation_phase: None,
                 cancel_reason: None,
+                decode_cancellation: None,
                 decode_diagnostics: None,
                 color_diagnostics: None,
                 color_stage_diagnostics: None,
@@ -601,6 +608,7 @@ fn media_preview_alpha_failure(
         canceled: false,
         cancellation_phase: None,
         cancel_reason: None,
+        decode_cancellation: None,
         decode_diagnostics: Some(decode_diagnostics),
         color_diagnostics: None,
         color_stage_diagnostics: None,

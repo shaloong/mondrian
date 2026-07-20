@@ -2871,7 +2871,7 @@ fn decode_video_layer_scaled(
             frame.into_data(),
         )
         .into(),
-        Ok(PreviewDecodeOutcome::Canceled) => {
+        Ok(PreviewDecodeOutcome::Canceled(_)) => {
             return Err(format!(
                 "asset={} path={} err=export still-frame decode canceled unexpectedly",
                 asset_id,

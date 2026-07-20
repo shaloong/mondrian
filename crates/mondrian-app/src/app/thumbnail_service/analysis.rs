@@ -174,7 +174,7 @@ pub(super) fn decode_thumbnail(
                 let rgba = color_manage_float(width, height, frame.into_data(), &job.key.color)?;
                 (width, height, rgba)
             }
-            Ok(PreviewDecodeOutcome::Canceled) => {
+            Ok(PreviewDecodeOutcome::Canceled(_)) => {
                 return Err(failure(
                     ThumbnailFailureReason::DecodeCanceled,
                     "thumbnail still-frame decode was canceled",

@@ -1356,9 +1356,18 @@ fails the gate because clamped timing remains diagnosable but is not valid proof
 In-process FFmpeg sessions now keep
 the request probe installed as an `AVIOInterruptCB` across open, stream-info,
 seek, and packet I/O; the optional external still backend kills and reaps its
-child while draining both pipes. The product gate therefore evaluates each
-class against its fixed return budget rather than deriving a threshold from UI
-slow-frame settings.
+child while draining both pipes. Each canceled decode returns a typed first
+observation containing its execution checkpoint and whether ordinary
+cooperation or the FFmpeg I/O callback yielded. The production Preview worker
+preserves that fact beside, but never in place of, the Broker-owned cause and
+request/checkpoint/return timing. Runtime and professional reports aggregate
+the concrete checkpoint/source facts without reconstructing them from FFmpeg
+errors. A loopback HTTP stall regression drives the real media Interface and
+the production worker through blocked input-open cancellation; fixed-machine
+stream-info, seek, packet-I/O, and driver-stall measurements remain separate
+acceptance obligations. The product gate evaluates each class against its
+fixed return budget rather than deriving a threshold from UI slow-frame
+settings.
 Steady playback is evaluated by p95 plus at least 99.5% current-frame readiness;
 the slowest single decode remains explicit diagnostic evidence but one
 session-open outlier cannot independently fail a 30-minute run whose sustained

@@ -2730,6 +2730,7 @@ fn professional_runtime_acceptance_evidence(
         pinned_viewer_frame_bytes: diagnostics.pinned_viewer_frame_bytes,
         pinned_media_frame_bytes: diagnostics.pinned_media_frame_bytes,
         decode_cancellation: diagnostics.decode_cancellation,
+        decode_cancellation_checkpoints: diagnostics.decode_cancellation_checkpoints,
     }
 }
 

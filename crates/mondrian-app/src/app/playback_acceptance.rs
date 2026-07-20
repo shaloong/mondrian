@@ -190,6 +190,7 @@ pub(crate) struct PreviewProfessionalPlaybackGateReport {
     cpu_frame_store_oversize_rejections: u64,
     process_memory: PreviewProcessMemoryGateReport,
     cancellation_gate: mondrian_playback::FrameCancellationGateReport,
+    decode_cancellation_checkpoints: mondrian_media::PreviewDecodeCancellationEvidence,
     pub(crate) passed: bool,
     pub(crate) failures: Vec<PreviewAcceptanceFailure>,
 }
@@ -382,6 +383,7 @@ pub(crate) struct PreviewRuntimeAcceptanceEvidence {
     pub(crate) pinned_viewer_frame_bytes: usize,
     pub(crate) pinned_media_frame_bytes: usize,
     pub(crate) decode_cancellation: mondrian_playback::FrameCancellationEvidenceReport,
+    pub(crate) decode_cancellation_checkpoints: mondrian_media::PreviewDecodeCancellationEvidence,
 }
 
 pub(crate) struct ProfessionalPlaybackObservation<'a> {
@@ -768,6 +770,7 @@ pub(crate) fn evaluate_professional_playback(
         cpu_frame_store_oversize_rejections,
         process_memory,
         cancellation_gate,
+        decode_cancellation_checkpoints: diagnostics.decode_cancellation_checkpoints,
         passed: failures.is_empty(),
         failures,
     }

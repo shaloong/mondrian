@@ -239,6 +239,8 @@ pub struct PreviewDiagnostics {
     pub decode_budget_exhausted_failures: u64,
     /// Playback-owned cancellation evidence from all semantic frame-work classes.
     pub decode_cancellation: mondrian_playback::FrameCancellationEvidenceReport,
+    /// Concrete media Adapter mechanisms and checkpoints that observed decode cancellation.
+    pub decode_cancellation_checkpoints: mondrian_media::PreviewDecodeCancellationEvidence,
     /// Background media decodes canceled before producing a frame.
     pub decode_canceled_jobs: u64,
     /// Background media decodes canceled because the preview service is shutting down.

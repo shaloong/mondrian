@@ -1478,6 +1478,10 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
     service.record_preview_decode_cancel(
         PreviewDecodeAccessMode::PlaybackCursor,
         Some(MediaPreviewCancelReason::PrefetchDeadline),
+        Some(mondrian_media::PreviewDecodeCancellation {
+            checkpoint: mondrian_media::PreviewDecodeCancellationCheckpoint::PacketRead,
+            source: mondrian_media::PreviewDecodeCancellationSource::FfmpegIoInterrupt,
+        }),
         700,
         Some(600),
         Some(50),
@@ -1486,6 +1490,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
     service.record_preview_decode_cancel(
         PreviewDecodeAccessMode::ScrubCursor,
         Some(MediaPreviewCancelReason::Obsolete),
+        None,
         1_400,
         Some(1_000),
         Some(200),
@@ -1494,6 +1499,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
     service.record_preview_decode_cancel(
         PreviewDecodeAccessMode::RandomAccessStillFrame,
         Some(MediaPreviewCancelReason::Shutdown),
+        None,
         20,
         Some(5),
         Some(5),
@@ -1507,6 +1513,15 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
     assert_eq!(diagnostics.decode_canceled_obsolete_jobs, 1);
     assert_eq!(diagnostics.decode_canceled_prefetch_deadline_jobs, 1);
     assert_eq!(diagnostics.decode_canceled_unknown_jobs, 0);
+    assert_eq!(diagnostics.decode_cancellation_checkpoints.total, 1);
+    assert_eq!(
+        diagnostics.decode_cancellation_checkpoints.ffmpeg_io_interrupt,
+        1
+    );
+    assert_eq!(
+        diagnostics.decode_cancellation_checkpoints.checkpoints.packet_read,
+        1
+    );
     assert_eq!(diagnostics.decode_canceled_total_duration_us, 2_120);
     assert_eq!(diagnostics.decode_canceled_max_duration_us, 1_400);
     assert_eq!(diagnostics.decode_canceled_last_duration_us, 20);
@@ -1826,6 +1841,7 @@ fn preview_diagnostics_count_prefetch_preemptions_by_access_mode() {
     service.record_preview_decode_cancel(
         PreviewDecodeAccessMode::PlaybackCursor,
         Some(MediaPreviewCancelReason::PrefetchPreemptedByCurrent),
+        None,
         120,
         Some(80),
         Some(10),
@@ -1852,6 +1868,7 @@ fn preview_diagnostics_count_playback_deadline_cancellations_by_access_mode() {
     service.record_preview_decode_cancel(
         PreviewDecodeAccessMode::PlaybackCursor,
         Some(MediaPreviewCancelReason::PlaybackDeadline),
+        None,
         0,
         Some(0),
         Some(0),
@@ -1882,6 +1899,7 @@ fn preview_diagnostics_count_still_preemptions_by_access_mode() {
     service.record_preview_decode_cancel(
         PreviewDecodeAccessMode::RandomAccessStillFrame,
         Some(MediaPreviewCancelReason::StillPreemptedByRealtimeCurrent),
+        None,
         320,
         Some(200),
         Some(30),
@@ -7817,6 +7835,7 @@ fn test_successful_media_preview_result(
         canceled: false,
         cancellation_phase: None,
         cancel_reason: None,
+        decode_cancellation: None,
         decode_diagnostics: None,
         color_diagnostics: None,
         color_stage_diagnostics: None,
