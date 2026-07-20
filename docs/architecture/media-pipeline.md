@@ -1278,6 +1278,16 @@ the same resolver. Decode Session state, resizing, pixel copying, hardware-plan
 selection, and renderer color interpretation remain outside this Module, so
 the color seam is narrow without creating a second frame object model.
 
+`mondrian_media::preview::frame_materialization` owns the next execution
+boundary. It consumes a decoded FFmpeg frame plus the prepared hardware plan
+and produces exactly one CPU RGBA8, CPU scene-linear float, or native-resource
+payload. Hardware-to-CPU transfer, native fallback classification, float-plane
+unpacking/resizing, swscale execution, row copying, scaler reuse, and their
+stage timings remain inside this Module. The decode Session owns input, seek,
+demux, codec continuity, and candidate selection only; it cannot implement a
+second pixel-output path. Conversely, materialization cannot seek, read packets,
+or decide request scheduling.
+
 `PreviewNativeDecodedFrame` must carry a
 `PreviewNativeDecodedFrameHandle` minted by the media backend that owns the
 native decoder resource. The handle is a shared lease over an
