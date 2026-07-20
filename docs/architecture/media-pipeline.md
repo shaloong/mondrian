@@ -1474,6 +1474,17 @@ session. The experimental external-process CPU RGBA path follows the same
 policy and terminates/reaps its child when the probe fires. This keeps stale
 work from being cached or marked as a failed source while preserving independent
 playback, scrub, and still-frame session state for subsequent requests.
+
+`mondrian_media::preview::cancellation` is the sole media-layer owner of this
+protocol. It contains the public cancellation fact and aggregate evidence, the
+request guard, panic-isolated probe invocation, first-observation atomics, and
+the FFmpeg C callback. Decode sessions see only three operations: install one
+request probe, publish the current checkpoint, and obtain the resulting fact.
+They must not inspect atomics, retain probes, or reconstruct a cancellation
+source from an FFmpeg error. This keeps the unsafe callback and concurrent
+state behind one deep Module while preserving `mondrian_media::preview` as the
+stable public Interface.
+
 Speculative prefetch decode is also bounded by a short app-level wall-clock
 budget. Current-frame decode is not canceled by this budget, and the deadline
 applies only to playback prefetch work. Scrub and still-frame requests are
