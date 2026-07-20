@@ -25,6 +25,10 @@ jobs:
         shell: pwsh
         run: ./scripts/validation/validate-reference-assets.ps1 -Tier Pr
 
+      - name: 校验 Windows 参考机资格契约
+        shell: pwsh
+        run: ./scripts/validation/validate-windows-reference.ps1 -MachineReportPath tests/validation/fixtures/windows-machine-qualified-v2.json -RequireBaselineEligibility -OutputPath target/validation/reference-machine-contract.json
+
   # ───────────────────────────────────────────────────────────────────────────
   # 代码格式 & 风格检查（最快，优先失败）
   # ───────────────────────────────────────────────────────────────────────────

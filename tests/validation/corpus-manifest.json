@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "corpus_revision": "2026-07-18",
+  "schema_version": 2,
+  "corpus_revision": "2026-07-20",
   "entries": [
     {
       "id": "mondrian-standard-quality-v1",
@@ -8,9 +8,109 @@
       "availability": "committed",
       "sha256": "61a780d20f7b17706168e1ba0f605f8819400d321dbd98e9881412de01ebe7f2",
       "size_bytes": 6951,
-      "provenance": { "source": "Mondrian v1 stimulus recipes plus Colour Science ColorChecker 2005 xyY data under BSD-3-Clause", "redistribution": "permitted" },
-      "media": { "kind": "numeric-color-reference", "container": "json", "codec": "utf-8", "width": null, "height": null, "frame_rate": "not-applicable", "frame_rate_mode": "not-applicable", "bit_depth": "float32-recipes", "primaries": "rec2020-and-cie-xyy", "transfer": "scene-linear-and-reference", "matrix": "not-applicable", "range": "extended-float" },
-      "purposes": ["mondrian-standard-quality", "colorchecker-reference", "sdr-hdr-view-invariants", "gamut-boundary-continuity"]
+      "provenance": {
+        "source": "Mondrian v1 stimulus recipes plus Colour Science ColorChecker 2005 xyY data under BSD-3-Clause",
+        "rights_basis": "project-authored-and-bsd-3-clause",
+        "redistribution": "permitted"
+      },
+      "media": {
+        "kind": "numeric-color-reference",
+        "container": "json",
+        "codec": "utf-8",
+        "width": null,
+        "height": null,
+        "frame_rate": "not-applicable",
+        "frame_rate_mode": "not-applicable",
+        "bit_depth": "float32-recipes",
+        "primaries": "rec2020-and-cie-xyy",
+        "transfer": "scene-linear-and-reference",
+        "matrix": "not-applicable",
+        "range": "extended-float"
+      },
+      "purposes": [
+        "mondrian-standard-quality",
+        "colorchecker-reference",
+        "sdr-hdr-view-invariants",
+        "gamut-boundary-continuity"
+      ]
+    },
+    {
+      "id": "generated-playback-4k25-hevc-main10-rec709-v1",
+      "path": "large/playback-4k25-hevc-main10-rec709-1812s-v1.mp4",
+      "availability": "generated",
+      "sha256": null,
+      "size_bytes": null,
+      "generation": {
+        "recipe_path": "scripts/validation/generate-reference-playback-media.ps1",
+        "recipe_sha256": "25bb8b8b0434f56c5e2a251a72e4577e1c5d9607cc237acb23ecfd0358d71818",
+        "profile": "Video",
+        "attestation_suffix": ".attestation.json",
+        "artifact_hash_scope": "reference-run"
+      },
+      "provenance": {
+        "source": "Deterministic FFmpeg lavfi testsrc2 code-pattern recipe; not a color reference",
+        "rights_basis": "project-generated-synthetic-stimulus",
+        "redistribution": "permitted"
+      },
+      "media": {
+        "kind": "video",
+        "container": "mp4",
+        "codec": "hevc-main10",
+        "width": 3840,
+        "height": 2160,
+        "frame_rate": "25/1",
+        "frame_rate_mode": "constant",
+        "bit_depth": 10,
+        "primaries": "bt709",
+        "transfer": "bt709",
+        "matrix": "bt709",
+        "range": "limited",
+        "minimum_stream_duration_seconds": 1811.9,
+        "color_reference_eligible": false
+      },
+      "purposes": [
+        "professional-video-playback",
+        "long-gop-seek",
+        "10-bit-decode",
+        "cancellation",
+        "whole-process-memory"
+      ]
+    },
+    {
+      "id": "generated-playback-aac-48k-stereo-v1",
+      "path": "large/playback-aac-48k-stereo-1835s-v1.m4a",
+      "availability": "generated",
+      "sha256": null,
+      "size_bytes": null,
+      "generation": {
+        "recipe_path": "scripts/validation/generate-reference-playback-media.ps1",
+        "recipe_sha256": "25bb8b8b0434f56c5e2a251a72e4577e1c5d9607cc237acb23ecfd0358d71818",
+        "profile": "Audio",
+        "attestation_suffix": ".attestation.json",
+        "artifact_hash_scope": "reference-run"
+      },
+      "provenance": {
+        "source": "Deterministic project-authored two-channel analytic tone recipe encoded by FFmpeg AAC",
+        "rights_basis": "project-generated-synthetic-stimulus",
+        "redistribution": "permitted"
+      },
+      "media": {
+        "kind": "audio",
+        "container": "m4a",
+        "codec": "aac",
+        "sample_rate": 48000,
+        "channels": 2,
+        "channel_layout": "stereo",
+        "minimum_stream_duration_seconds": 1834.9,
+        "color_reference_eligible": false
+      },
+      "purposes": [
+        "professional-audio-playback",
+        "device-clock",
+        "av-drift",
+        "decoded-window-cache",
+        "whole-process-memory"
+      ]
     }
   ]
 }

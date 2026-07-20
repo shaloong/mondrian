@@ -1372,12 +1372,27 @@ latency, visibility, readiness, and hardware-execution thresholds; developer
 environment variables apply only to non-professional smoke runs and cannot
 weaken these values.
 It cannot pass from filename labels, hardware candidates/device contexts, or
-PlaybackCursor aggregates containing speculative prefetch. The repository does
-not contain the licensed/reference 4K Main10 fixture, so a successful
-execution on one development machine. The repository still does not contain a
-licensed/reference 4K Main10 fixture, fixed-machine result baseline, driver
-matrix, or Golden Project identity; those remain required before release-level
-professional playback acceptance can be claimed.
+PlaybackCursor aggregates containing speculative prefetch. The canonical
+corpus now contains a project-authored recipe for a disposable 1812-second
+4K25 HEVC Main10 Long-GOP code-pattern artifact and a separate 1835-second
+48 kHz stereo AAC artifact. These are workload fixtures only: the video
+declares its limited-range Rec.709 code contract but is explicitly ineligible
+for color-reference purposes. Generated identity consists of the pinned recipe
+plus semantic probe contract; the concrete encoder-dependent bytes are
+attested and hashed inside each reference run rather than pretending to be
+stable across FFmpeg/x265 builds.
+
+`windows-playback-m0-v1` is the machine-readable execution contract joining
+the two professional gates to those fixture purposes and expected report
+profiles. The validation runner captures an operator-assigned opaque machine
+ID (never a hardware serial), validates the Windows machine class, records
+code/corpus/recipe/artifact hashes, executes the release-profile Video and CPAL
+A/V gates, and writes one evidence bundle. Only the complete two-gate set on a
+qualified machine, with a clean unchanged Git revision and passing structured
+reports, is baseline-eligible. Partial and dirty-tree runs remain useful
+diagnostics but cannot support a professional claim. A qualifying fixed-machine
+result and broader driver/display corpus still remain required before
+release-level professional playback acceptance can be claimed.
 
 On 2026-07-18, a 2.88-second decoder-proven 3840×2160 25 fps HEVC Main10 HLG
 sample completed the external continuous-playback smoke on an NVIDIA RTX 3050

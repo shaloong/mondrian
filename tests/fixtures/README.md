@@ -8,6 +8,8 @@ Recommended layout:
 - `tests/fixtures/lut/` for `.cube` LUT files and LUT cache tests
 - `tests/fixtures/export/` for export validation samples and metadata references
 - `tests/fixtures/sequence/` for nested sequence and timeline interpretation samples
+- `tests/fixtures/large/` for ignored, locally generated or rights-restricted
+  reference-run artifacts; generated attestations live beside their artifacts
 
 Suggested naming:
 - `*_src.*` for source material
@@ -21,6 +23,13 @@ licensed material may enter the canonical manifest. A redistribution-restricted
 fixture may remain outside repository history only when its test usage rights
 are verified; record that restriction as `prohibited`. Never replace an asset
 in place while retaining its fixture ID.
+
+A generated fixture fixes its recipe hash and semantic probe contract in the
+manifest. Its actual media hash is deliberately recorded by each reference run,
+because FFmpeg and codec-library versions need not emit byte-identical output.
+The adjacent attestation must bind the recipe, tool versions, artifact bytes,
+and probe. Never copy an unrelated file into a generated path or use a
+performance-only code-pattern fixture as a color reference.
 
 Downloaded or inherited media with unverified rights is not a fixture. Keep it
 ignored and use it only with explicitly ignored/manual tests through a local

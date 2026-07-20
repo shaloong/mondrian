@@ -1,9 +1,43 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "windows-alpha-reference-v1",
-  "os": { "family": "windows", "minimum_version": "11", "architecture": "x86_64" },
-  "hardware": { "minimum_logical_cpu_count": 8, "minimum_memory_gib": 32, "gpu_api": "d3d12", "dedicated_gpu_required": true, "hdr_display_required_for_hdr_gate": true },
-  "software": { "rust_toolchain": "1.92.0", "build_profile": "release", "ffmpeg_version_must_be_recorded": true, "gpu_driver_must_be_recorded": true },
-  "evidence": { "git_revision_required": true, "dirty_tree_must_be_recorded": true, "machine_report_required": true, "capability_report_required": true, "results_root": "target/validation/runs" },
-  "performance": { "warm_4k25_preview_fps_min": 24.0, "accurate_seek_p95_max_ms": 500, "ui_feedback_p95_max_ms": 50, "av_drift_abs_max_ms": 20 }
+  "identity": {
+    "explicit_machine_id_required": true,
+    "hardware_serials_must_not_be_collected": true
+  },
+  "os": {
+    "family": "windows",
+    "minimum_product": "11",
+    "minimum_build_number": 22000,
+    "architecture": "x86_64"
+  },
+  "hardware": {
+    "minimum_logical_cpu_count": 8,
+    "minimum_memory_gib": 32,
+    "gpu_api": "d3d12",
+    "dedicated_gpu_required": true,
+    "storage_identity_must_be_recorded": true,
+    "display_inventory_must_be_recorded": true,
+    "gpu_api_and_hdr_state_source": "execution-report",
+    "hdr_display_required_for_hdr_output_gate": true
+  },
+  "software": {
+    "rust_toolchain": "1.92.0",
+    "build_profile": "release",
+    "ffmpeg_version_must_be_recorded": true,
+    "gpu_driver_must_be_recorded": true
+  },
+  "evidence": {
+    "git_revision_required": true,
+    "clean_tree_required_for_baseline": true,
+    "machine_report_required": true,
+    "execution_report_required": true,
+    "results_root": "target/validation/runs"
+  },
+  "performance": {
+    "warm_4k25_preview_fps_min": 24.0,
+    "accurate_seek_p95_max_ms": 500,
+    "ui_feedback_p95_max_ms": 50,
+    "av_drift_abs_max_ms": 20
+  }
 }

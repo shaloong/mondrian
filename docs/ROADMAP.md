@@ -257,7 +257,7 @@ Platform Capability Contract
 
 ### 5.1 Reference Corpus
 
-M0 建立可重现的 corpus manifest。规范清单当前只保留许可边界明确的自有/可生成色彩参考，主工作流素材仍不足。每个样本记录来源许可、SHA-256、容器、codec、分辨率、帧率模式、bit depth、CICP/side data、预期解释和可公开性。
+M0 建立可重现的 corpus manifest。固定文件由 manifest 固定 SHA-256/字节数；确定性生成文件固定配方哈希、语义 probe 契约和权利依据，并由每次参考运行的 attestation 固定实际产物哈希，避免把不同 FFmpeg/encoder 版本的输出伪称为同一字节资产。现有规范清单包含许可明确的色彩数值参考，以及可本地生成的 1812 秒 4K25 HEVC Main10 Long-GOP 播放压力码流和 1835 秒 48 kHz stereo AAC 设备时钟压力流；两者只证明播放、Seek、取消、缓存、内存与设备时钟负载，明确不得充当色彩 reference。Golden/Stress 主工作流所需 HLG/PQ、相机 Log、VFR、多声道与损坏素材仍不足。每个样本记录来源许可、身份策略、容器、codec、分辨率、帧率模式、bit depth、CICP/side data、预期解释和可公开性。
 
 最低覆盖：
 
@@ -294,7 +294,7 @@ M0 建立可重现的 corpus manifest。规范清单当前只保留许可边界�
 
 ### 5.4 性能与正确性基线
 
-M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状态、驱动、FFmpeg 和构建 profile。数值在参考机固定前是初始目标；固定后只能通过有理由的基线变更调整，不能为让回归变绿而放宽。
+M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR 状态、驱动、FFmpeg 和构建 profile；实际机器由操作员提供不含硬件序列号的稳定 opaque ID。一次可作为基线的 Reference Playback Run 必须把同一清洁 Git revision、机器报告与资格判定、corpus/配方/实际产物哈希、完整 Video+Audio gate 命令和结构化通过报告封装为不可混淆的 evidence bundle；部分门禁或脏树运行只能诊断。数值在参考机固定前是初始目标；固定后只能通过有理由的基线变更调整，不能为让回归变绿而放宽。
 
 | 指标 | Alpha/Beta 门槛 |
 | --- | --- |
@@ -353,8 +353,8 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 - [x] `PlaybackEngine`、`FrameWorkBroker`、`PreviewFrameStore`、Monotonic Runtime Clock、Playback/Frame Cancellation Evidence 与 Headless GPU Adapter 已从 UI 收敛；Broker execution lease 是优先级/访问类/worker lane 驻留证据的单一事实来源，App activity 原子计数已删除；访问模式/Broker Adapter/有界 job transport 位于 `app::preview_access_mode`，canonical media-source resolution 位于 `app::preview_media_source`，具体 FFmpeg worker、codec checkpoint 取消、终态结果和有界关闭位于 `app::preview_media_task`，Window 与 Headless 的“单次 Demand 采样→完成/过期→终态 Delivery→预卷”统一在 `app::playback_preview`；decoded/native payload 与单一 lazy CPU working adaptation、canonical Timeline/嵌套执行、Viewer plan、working-linear CPU composite/raster boundary 也已分别下沉为 UI 无关 App Module。`app::preview_timeline_execution` 对每个 Sequence 使用自身画布与同一运行时质量，统一嵌套 working-space 合成、typed media outcome、Ready cache identity、有序 execution facts 以及 prefetch/preroll/输入色彩共用的 media-demand collection；asset-library/proxy-dispatch adaptation、request scheduler、bounded result pump、service lifecycle、hardware admission、evidence、presentation 与分层 diagnostics 已按行为所有权迁入 UI 无关 `app::preview_runtime`；timeline evaluation 只适配 media outcome 与 execution facts，request scheduler 只做需求消费与 Broker 准入，Window Adapter 只投影输出。应用层 `PreviewRasterFrame` 已成为 CPU raster cache/stale-reuse 的单一 payload 契约，Window presentation 只在最终呈现时无拷贝转换为 Widget；最终 GPU/Raster/stale/CPU output 仲裁仍只在 presentation Module，且未扩大跨层 Interface。Viewer GPU-output 的预算、报告以及 attempt→health 纯分类已统一到 UI 无关 `app::viewer_gpu_output_health`；Window 只提交显示/纹理注册事实，不再另行定义 Ready/Degraded/终态失败语义。`app::viewer_gpu_output_residency` 统一声明态/执行态 residency 推导：计划帧不得声称 zero-copy、上传或读回成功，只有 renderer 完成记录可发布 executed 事实；平台探测作为显式 Session 快照供硬解准入和 Window/Headless residency 共用，不再逐帧重探或跨 capability generation 拼接证据。
 - [x] Preview 生产输出已统一为版本稳定的 typed unavailability：`NoContent`、正确性/依赖 `Blocked`、已准入执行 `Failed` 与负责阶段从 Timeline/嵌套求值、素材解析/解码、输入色彩、CPU/GPU 合成、Program Output/monitor adaptation 到最终 raster/Window/Headless/evidence 全链路保真传播，不再坍缩为 `Option`、unit `Unavailable` 或依赖字符串反推分类。空根 Timeline 是可预期无内容；空嵌套 Sequence 产生透明层而不阻断父级；任一终态不可用都会撤销 current/pinned stale 资格，只有 `Pending` 可在同一 Sequence/画幅/显示契约作用域复用旧帧。Preview render evidence schema v2 对 blocked/failed fail-closed、按阶段聚合，同时不把正常 no-content 当作执行失败。
 - [x] 帧工作已统一 generation、priority、deadline、原子取消 disposition、请求龄期、资源预算和诊断所有权；deadline 在 Adapter 准入边界以“不透明绝对值 + 当前剩余时长”提交，由 Broker 单次降低、同键 rebind 更新，并在 worker 发布前一次性记录完成时刻；首次 Broker close 同样以 Monotonic Runtime Clock 固定取消时刻，重复 close 不续期，App stop flag 不再拥有计时权；精确 Headless 测试覆盖截止边界、最早取消原因、rebind、close age 和晚轮询不制造 Late，时钟回退会钳制并使性能/专业门禁失败。`mondrian-core::execution_work` 只统一 priority/deadline/terminal evidence 值语义而不拥有调度。独立 Implementation `app::waveform_service` 已取代 UI cache，以 Asset+source revision、512 项 demand/16 项 worker transport、bounded LRU/failure/evidence、generation cancellation、私有 16 MiB windowed decode cache 和流式 peak accumulator 完成生产迁移；`app::thumbnail_service` 已取代 Window worker/cache，以 source fingerprint + 完整色彩 contract、512 项 demand/16 项 worker transport、128 MiB 加权 LRU、bounded failure/evidence、generation cancellation、发布所有权和数量/时间双预算 completion pump 完成迁移；`app::proxy_generation` 已取代进程全局无界 FIFO 与 Preview 私有去重表，以 AppState 实例所有权、source fingerprint + artifact/color contract、512 项准入、User/PlaybackRecovery/Import 公平队列、同键提升、cache-root 出队许可、256 项可恢复失败、512 项终态证据和项目 generation 取消完成迁移，媒体层在 limiter wait、FFmpeg 10 ms checkpoint 与发布前观察同一 token。Export 已使用独立 64 项离线队列、不可变最小 Sequence/媒体闭包、规范化输出占用、单调 attempt generation、统一取消/终态 Evidence、256 项轻量历史、bounded stderr 与 panic isolation；源修订在准备及发布前双重校验，验证后的同目录临时成品通过平台原子发布，UI/Headless 只观察轻量快照。上述 Module 共享值语义而不共享容量、worker、重试或缓存策略。
-- [ ] FFmpeg open/stream-info/seek/packet I/O 已接入 request-scoped interrupt，外部 still 子进程可 kill/wait/join；播放域已统一 5 ms request→checkpoint、50 ms Playback/Interactive return、500 ms Still return 的 fail-closed 门禁，仍须在固定参考机用 pause/seek/close/quit、真实长 GOP、阻塞 I/O 与驱动路径取得最坏延迟证据，且 UI 线程不得 join worker。
-- [ ] `ProcessMemoryProbe` 已建立无 OS 调用的接口与 Windows Process Status Adapter；专业门禁以固定 cadence 聚合 5–10/25–30 分钟 Private Commit 稳定窗、4 GiB 绝对上限和各门禁声明的 terminal stress 静止后收敛，unsupported/缺样/探针错误失败关闭；视频 v4 还要求主视频流时长及声明帧数覆盖，且专业 cadence/timeout/latency/readiness/hardware 阈值不读取 smoke 调参；2026-07-18 本地视频 v4 与 CPAL/A/V v1 均已通过该内存合约，仍须用自有、明确许可或确定性生成的参考素材在固定参考机矩阵复验并据实校准版本化阈值。
+- [ ] FFmpeg open/stream-info/seek/packet I/O 已接入 request-scoped interrupt，外部 still 子进程可 kill/wait/join；播放域已统一 5 ms request→checkpoint、50 ms Playback/Interactive return、500 ms Still return 的 fail-closed 门禁。规范 corpus 已提供不承担色彩正确性声明的确定性 4K25 HEVC Main10 Long-GOP 配方，Reference Playback Run 会绑定 recipe/artifact/机器/报告身份；仍须在合格固定参考机用 pause/seek/close/quit、真实驱动以及可控阻塞 I/O 路径取得最坏延迟证据，且 UI 线程不得 join worker。
+- [ ] `ProcessMemoryProbe` 已建立无 OS 调用的接口与 Windows Process Status Adapter；专业门禁以固定 cadence 聚合 5–10/25–30 分钟 Private Commit 稳定窗、4 GiB 绝对上限和各门禁声明的 terminal stress 静止后收敛，unsupported/缺样/探针错误失败关闭；视频 v4 还要求主视频流时长及声明帧数覆盖，且专业 cadence/timeout/latency/readiness/hardware 阈值不读取 smoke 调参。确定性 1812 秒视频与 1835 秒音频配方、机器资格验证、完整 Video+Audio 编排及 evidence bundle 已闭合；2026-07-18 本地视频 v4 与 CPAL/A/V v1 均已通过该内存合约，仍须在满足 profile 的固定 Windows 参考机生成素材、完整复验并据实校准版本化阈值。
 
 **帧、参数与音频**
 
@@ -369,7 +369,7 @@ M0 固定 Windows 参考机的 CPU、GPU、内存、存储、显示器/HDR 状�
 
 **验证基础**
 
-- [x] 建立版本化 Reference Corpus manifest、Golden/Stress Project 机器可读契约、Windows 参考机 profile、机器证据采集脚本和分层校验门禁；完整素材角色与真实执行仍按 M1/M2 退出门槛验收。
+- [x] 建立版本化 Reference Corpus manifest、Golden/Stress Project 机器可读契约、Windows 参考机 profile、机器证据采集与资格验证、分层校验门禁；generated fixture 采用“固定 recipe、run-local artifact hash”而非伪造跨 encoder 位级稳定性。`windows-playback-m0-v1` 将完整 Video+Audio gate、素材用途、环境绑定和预期报告 profile 固化，编排器只允许清洁且首尾同 revision、完整门禁、合格机器和全部结构化报告通过的运行成为 baseline；部分/脏树运行只能诊断。完整 Golden/Stress 素材角色与真实工作流仍按 M1/M2 退出门槛验收。
 - [x] 将 capability probe、逐帧 decode provenance、最终 Viewer GPU completion 与 fallback/blocker 写入同一结构化报告，同时保持 media/renderer/playback 的诊断所有权；预取 aggregate 不得代替已呈现帧证据。
 - [x] 路线图、效果规格与色彩规格已统一五级能力口径：作者模型存在、产品可选择、图可执行、具体 backend 可执行、真实 preview/export 已验证。效果库只暴露可构图 definition；共享 Render Plan 对启用但未实现/缺失定义/运行时不可用/资源无效/构图崩溃失败关闭；CPU、GPU、颜色 reference 与产品发布证据分别列示，类型、OCIO 映射、shader 创建或单次 lower 成功均不得自动写成产品支持。
 
