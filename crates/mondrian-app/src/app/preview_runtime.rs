@@ -205,7 +205,7 @@ pub struct PreviewProductionRuntime<O: Clone> {
     hardware_decode_admission: Cell<PreviewHardwareDecodeAdmissionState>,
     decode_cpu_budget: PreviewDecodeCpuBudget,
     decode_worker_count: usize,
-    decode_execution_observers: Vec<(MediaPreviewWorkerLane, PreviewDecodeExecutionObserver)>,
+    decode_execution_watch: PreviewDecodeWorkerExecutionWatch,
     metrics: PreviewMetrics,
 }
 
@@ -289,7 +289,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             hardware_decode_admission: Cell::new(PreviewHardwareDecodeAdmissionState::default()),
             decode_cpu_budget,
             decode_worker_count,
-            decode_execution_observers,
+            decode_execution_watch: PreviewDecodeWorkerExecutionWatch::new(
+                decode_execution_observers,
+            ),
             metrics: PreviewMetrics::default(),
         }
     }

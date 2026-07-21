@@ -16,6 +16,8 @@ use super::playback_acceptance::{
 };
 use super::playback_preview::{observe_playback_video_preroll, pump_playback_preview};
 use super::*;
+#[path = "perf_decode_progress.rs"]
+mod perf_decode_progress;
 use crate::app::headless_viewer_gpu::{
     HeadlessViewerGpuAdapter, HeadlessViewerGpuAdapterInfo, HeadlessViewerGpuExecution,
     HeadlessViewerGpuOutput,
@@ -44,6 +46,7 @@ use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
 use crate::app_ui::preview::WindowPreviewAdapter;
 use crate::app_ui::shell::AppUiAppRoot;
 use anyhow::Context;
+use perf_decode_progress::PreviewDecodeExecutionJournal;
 use serde::Serialize;
 use std::cmp;
 use std::fs::OpenOptions;
@@ -2935,6 +2938,10 @@ fn run_preview_media_continuous_playback_probe(
     )?;
     state.begin_playback_evidence_run(mondrian_playback::PlaybackEvidenceConfig::default())?;
     let preview_service = HeadlessPreviewRuntime::new();
+    let decode_execution_journal = PreviewDecodeExecutionJournal::start_from_env(
+        preview_service.decode_execution_watch(),
+        scenario,
+    )?;
     let mut gpu_adapter =
         HeadlessViewerGpuAdapter::new().context("create real headless Viewer GPU Adapter")?;
     configure_headless_gpu_decode_admission(&preview_service, &gpu_adapter);
@@ -3127,6 +3134,9 @@ fn run_preview_media_continuous_playback_probe(
             .collect(),
     };
     validate_executed_adaptive_scaling(&report)?;
+    if let Some(journal) = decode_execution_journal {
+        journal.finish()?;
+    }
     Ok(report)
 }
 

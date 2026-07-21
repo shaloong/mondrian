@@ -53,7 +53,7 @@ $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $playbackPlan = Get-Content -LiteralPath $playbackPlanPath -Raw | ConvertFrom-Json
 $machineProfile = Get-Content -LiteralPath $machineProfilePath -Raw | ConvertFrom-Json
 if ($manifest.schema_version -ne 2) { Add-Issue "error" "schema.unsupported" "Unsupported corpus schema version: $($manifest.schema_version)" }
-if ($playbackPlan.schema_version -ne 2) { Add-Issue "error" "playback-plan.schema-unsupported" "Unsupported playback gate-plan schema: $($playbackPlan.schema_version)" }
+if ($playbackPlan.schema_version -ne 3) { Add-Issue "error" "playback-plan.schema-unsupported" "Unsupported playback gate-plan schema: $($playbackPlan.schema_version)" }
 if ($machineProfile.schema_version -ne 3) { Add-Issue "error" "machine-profile.schema-unsupported" "Unsupported Windows machine-profile schema: $($machineProfile.schema_version)" }
 if ($playbackPlan.machine_profile -ne $machineProfile.id) { Add-Issue "error" "playback-plan.machine-profile-mismatch" "Playback plan references '$($playbackPlan.machine_profile)' but the configured profile is '$($machineProfile.id)'" }
 $diagnosticExecution = if (Has-Property $playbackPlan "diagnostic_execution") { $playbackPlan.diagnostic_execution } else { $null }
@@ -206,7 +206,7 @@ foreach ($project in @($golden, $stress)) {
 
 $gateIds = @{}
 foreach ($gate in $playbackPlan.gates) {
-    $missingGateFields = @("id", "fixture_id", "required_purposes", "cargo_test", "media_environment", "expected_report_profile", "expected_report_path") | Where-Object { -not (Has-Property $gate $_) }
+    $missingGateFields = @("id", "fixture_id", "required_purposes", "cargo_test", "media_environment", "process_timeout_seconds", "expected_report_profile", "expected_report_path") | Where-Object { -not (Has-Property $gate $_) }
     foreach ($field in $missingGateFields) { Add-Issue "error" "playback-plan.gate-field-missing" "Playback gate is missing '$field'" }
     if (@($missingGateFields).Count -gt 0) { continue }
     if ($gateIds.ContainsKey($gate.id)) { Add-Issue "error" "playback-plan.duplicate-gate" "Duplicate playback gate id: $($gate.id)" } else { $gateIds[$gate.id] = $true }
@@ -218,8 +218,30 @@ foreach ($gate in $playbackPlan.gates) {
     foreach ($field in @("cargo_test", "media_environment", "expected_report_profile", "expected_report_path")) {
         if (-not (Has-Property $gate $field) -or [string]::IsNullOrWhiteSpace([string]$gate.$field)) { Add-Issue "error" "playback-plan.gate-field-missing" "Gate '$($gate.id)' requires non-empty '$field'" }
     }
+    $processTimeoutSeconds = 0
+    if (-not [int]::TryParse([string]$gate.process_timeout_seconds, [ref]$processTimeoutSeconds) -or $processTimeoutSeconds -le 0) {
+        Add-Issue "error" "playback-plan.gate-timeout-invalid" "Gate '$($gate.id)' requires a positive process_timeout_seconds"
+    }
+    $decodeProgressRequired = (Has-Property $gate "decode_progress_required") -and $gate.decode_progress_required -eq $true
+    $hasDecodeProgressEnvironment = (Has-Property $gate "decode_progress_environment") -and -not [string]::IsNullOrWhiteSpace([string]$gate.decode_progress_environment)
+    if ($decodeProgressRequired -and -not $hasDecodeProgressEnvironment) {
+        Add-Issue "error" "playback-plan.decode-progress-environment-missing" "Gate '$($gate.id)' requires a decode progress journal but declares no environment binding"
+    }
     foreach ($purpose in $gate.required_purposes) {
         if ($purpose -notin @($fixture.purposes)) { Add-Issue "error" "playback-plan.purpose-missing" "Gate '$($gate.id)' requires purpose '$purpose' on fixture '$($fixture.id)'" }
+    }
+}
+$baselineEvidence = if (Has-Property $playbackPlan "baseline_acceptance") { $playbackPlan.baseline_acceptance } else { $null }
+if ($null -eq $baselineEvidence -or -not (Has-Property $baselineEvidence "external_process_timeout_required") -or $baselineEvidence.external_process_timeout_required -ne $true) {
+    Add-Issue "error" "playback-plan.external-timeout-requirement-missing" "Baseline evidence must require the external gate process timeout"
+}
+if ($null -eq $baselineEvidence -or -not (Has-Property $baselineEvidence "video_decode_progress_journal_required") -or $baselineEvidence.video_decode_progress_journal_required -ne $true) {
+    Add-Issue "error" "playback-plan.decode-progress-requirement-missing" "Baseline evidence must require the Video decode progress journal"
+}
+$videoGate = @($playbackPlan.gates | Where-Object { $_.id -eq "video" }) | Select-Object -First 1
+if ($null -ne $baselineEvidence -and $baselineEvidence.video_decode_progress_journal_required -eq $true) {
+    if ($null -eq $videoGate -or -not (Has-Property $videoGate "decode_progress_required") -or $videoGate.decode_progress_required -ne $true -or -not (Has-Property $videoGate "decode_progress_environment") -or [string]$videoGate.decode_progress_environment -ne "MONDRIAN_PREVIEW_DECODE_EXECUTION_OUTPUT") {
+        Add-Issue "error" "playback-plan.video-decode-progress-binding-invalid" "The Video baseline gate must require the production decode progress journal environment binding"
     }
 }
 foreach ($gateId in $playbackPlan.baseline_acceptance.required_gate_ids) {

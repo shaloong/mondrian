@@ -127,6 +127,15 @@ pwsh -File scripts/validation/invoke-playback-reference-gates.ps1 `
   -RegenerateGeneratedFixtures
 ```
 
+Each plan-v3 gate has an external 45-minute process deadline. Timeout kills the
+complete Cargo/test descendant tree and fails the run even if a partial report
+exists. The Video gate additionally writes a flushed
+`video-decode-progress.jsonl` artifact beside its report; its last record
+identifies the most recently observed media call without granting recovery
+authority. Evidence records the
+configured deadline, elapsed wall time, timeout outcome, journal presence, and
+journal SHA-256.
+
 Use `-Gate Video` or `-Gate Audio` for a partial diagnostic. Use
 `-AllowDirtyDiagnostic` only when results are intentionally non-baseline. A
 machine below the reference performance class may use

@@ -299,6 +299,20 @@ the worker is cooperatively waiting for App/renderer ownership to retire. These
 values are evidence, not a watchdog: do not mark the Broker lease complete or
 restart a codec merely because the stage stopped changing.
 
+The versioned Reference Playback runner sets
+`MONDRIAN_PREVIEW_DECODE_EXECUTION_OUTPUT` for the Video gate. A sampler that
+owns only a clone of the read watch writes schema-v1 JSONL beside the normal
+report. It samples at 100 ms, writes on stage/request changes or a five-second
+heartbeat, and flushes every record so an externally terminated gate retains
+its last observation; a normal finish adds `terminal: true`. The gate plan also
+defines a 45-minute external process deadline. On expiry, the parent runner
+terminates the complete Cargo/test descendant tree, records
+`process_timed_out`, and retains the Cargo log and journal even though the
+normal performance report may be absent. Inspect the last non-terminal journal
+record to identify the request and call family that stopped progressing. This
+mechanism closes the diagnostic feedback loop only; it is not codec recovery or
+proof that an in-process FFmpeg call is cancellable.
+
 Preview media perf artifacts also include `preview_render_report`, which covers
 post-decode viewer work: sequence/media resolution, final-frame cache lookup,
 working-frame preparation, CPU timeline composition, CPU output/color boundary,

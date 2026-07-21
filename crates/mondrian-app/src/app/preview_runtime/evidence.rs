@@ -3,6 +3,12 @@
 use super::*;
 
 impl<O: Clone> PreviewProductionRuntime<O> {
+    /// Clone read-only worker progress authority for independent acceptance sampling.
+    #[cfg(test)]
+    pub(crate) fn decode_execution_watch(&self) -> PreviewDecodeWorkerExecutionWatch {
+        self.decode_execution_watch.clone()
+    }
+
     /// Return a point-in-time snapshot of preview scheduling and cache health.
     pub fn diagnostics(&self) -> PreviewDiagnostics {
         let scheduler = self.scheduler.diagnostics();
@@ -10,17 +16,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let decode_cancellation = self.metrics.decode_cancellation.borrow().report();
         let cancellation = decode_cancellation.all;
         let decode_residency = self.decode_residency.diagnostics();
-        let mut decode_worker_execution = PreviewDecodeWorkerExecutionDiagnostics::default();
-        for (lane, observer) in &self.decode_execution_observers {
-            let progress = Some(observer.snapshot());
-            match lane {
-                MediaPreviewWorkerLane::Any => decode_worker_execution.any = progress,
-                MediaPreviewWorkerLane::Playback => decode_worker_execution.playback = progress,
-                MediaPreviewWorkerLane::NonPlayback => {
-                    decode_worker_execution.non_playback = progress;
-                }
-            }
-        }
+        let decode_worker_execution = self.decode_execution_watch.snapshot();
         let mut decode_access_mode_profiles = self.metrics.decode_access_mode_profiles.get();
         decode_access_mode_profiles.apply_cancellation(decode_cancellation);
         PreviewDiagnostics {

@@ -9,6 +9,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+Import-Module (Join-Path $PSScriptRoot "playback-gate-process.psm1") -Force
 
 function Resolve-RepositoryPath([string]$Path) {
     if ([IO.Path]::IsPathRooted($Path)) { return [IO.Path]::GetFullPath($Path) }
@@ -42,22 +43,34 @@ function Invoke-PlaybackGate([object]$GateContract, [object]$Fixture, [string]$R
     $artifactPath = Resolve-RepositoryPath (Join-Path "tests/fixtures" ([string]$Fixture.path))
     $reportPath = Join-Path $RunDirectory "$($GateContract.id)-report.jsonl"
     $logPath = Join-Path $RunDirectory "$($GateContract.id)-cargo.log"
-    Remove-Item -LiteralPath $reportPath, $logPath -Force -ErrorAction SilentlyContinue
+    $decodeProgressRequired = $null -ne $GateContract.PSObject.Properties["decode_progress_required"] -and $GateContract.decode_progress_required -eq $true
+    $decodeProgressEnvironment = if ($null -eq $GateContract.PSObject.Properties["decode_progress_environment"]) { $null } else { [string]$GateContract.decode_progress_environment }
+    $decodeProgressPath = if ([string]::IsNullOrWhiteSpace($decodeProgressEnvironment)) { $null } else { Join-Path $RunDirectory "$($GateContract.id)-decode-progress.jsonl" }
+    $pathsToRemove = @($reportPath, $logPath)
+    if ($null -ne $decodeProgressPath) { $pathsToRemove += $decodeProgressPath }
+    Remove-Item -LiteralPath $pathsToRemove -Force -ErrorAction SilentlyContinue
 
     $oldMedia = [Environment]::GetEnvironmentVariable([string]$GateContract.media_environment, "Process")
     $oldPerf = [Environment]::GetEnvironmentVariable("MONDRIAN_PERF_OUTPUT", "Process")
+    $oldDecodeProgress = if ($null -eq $decodeProgressEnvironment) { $null } else { [Environment]::GetEnvironmentVariable($decodeProgressEnvironment, "Process") }
     try {
         [Environment]::SetEnvironmentVariable([string]$GateContract.media_environment, $artifactPath, "Process")
         [Environment]::SetEnvironmentVariable("MONDRIAN_PERF_OUTPUT", $reportPath, "Process")
+        if ($null -ne $decodeProgressEnvironment) {
+            [Environment]::SetEnvironmentVariable($decodeProgressEnvironment, $decodeProgressPath, "Process")
+        }
         $cargoArguments = @(
             "test", "-p", "mondrian-app", "--release", [string]$GateContract.cargo_test,
             "--", "--ignored", "--nocapture", "--test-threads=1"
         )
-        & cargo @cargoArguments 2>&1 | Tee-Object -LiteralPath $logPath | Out-Host
-        $exitCode = $LASTEXITCODE
+        $processResult = Invoke-BoundedPlaybackGateProcess "cargo" $cargoArguments $script:repositoryRoot ([int]$GateContract.process_timeout_seconds) $logPath
+        $exitCode = $processResult.exit_code
     } finally {
         [Environment]::SetEnvironmentVariable([string]$GateContract.media_environment, $oldMedia, "Process")
         [Environment]::SetEnvironmentVariable("MONDRIAN_PERF_OUTPUT", $oldPerf, "Process")
+        if ($null -ne $decodeProgressEnvironment) {
+            [Environment]::SetEnvironmentVariable($decodeProgressEnvironment, $oldDecodeProgress, "Process")
+        }
     }
 
     $envelope = $null
@@ -66,7 +79,8 @@ function Invoke-PlaybackGate([object]$GateContract, [object]$Fixture, [string]$R
     $gateReport = Select-GateReport $envelope ([string]$GateContract.expected_report_path)
     $profileObserved = if ($null -eq $gateReport) { $null } else { [string]$gateReport.profile }
     $reportPassed = $null -ne $gateReport -and $gateReport.passed -eq $true
-    $passed = $exitCode -eq 0 -and $reportPassed -and $profileObserved -eq $GateContract.expected_report_profile
+    $decodeProgressPresent = $null -ne $decodeProgressPath -and (Test-Path -LiteralPath $decodeProgressPath -PathType Leaf) -and (Get-Item -LiteralPath $decodeProgressPath).Length -gt 0
+    $passed = -not $processResult.timed_out -and $exitCode -eq 0 -and $reportPassed -and $profileObserved -eq $GateContract.expected_report_profile -and (-not $decodeProgressRequired -or $decodeProgressPresent)
     $artifact = Get-Item -LiteralPath $artifactPath
     $attestationPath = "$artifactPath$($Fixture.generation.attestation_suffix)"
     return [pscustomobject]@{
@@ -83,8 +97,17 @@ function Invoke-PlaybackGate([object]$GateContract, [object]$Fixture, [string]$R
         }
         command = "cargo $($cargoArguments -join ' ')"
         cargo_exit_code = $exitCode
+        process_timeout_seconds = [int]$GateContract.process_timeout_seconds
+        process_elapsed_ms = [int64]$processResult.elapsed_ms
+        process_timed_out = [bool]$processResult.timed_out
         report_path = $reportPath
         log_path = $logPath
+        decode_progress = [ordered]@{
+            required = $decodeProgressRequired
+            path = $decodeProgressPath
+            present = $decodeProgressPresent
+            sha256 = if ($decodeProgressPresent) { (Get-FileHash -LiteralPath $decodeProgressPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
+        }
         report_read_error = $reportReadError
         expected_report_profile = [string]$GateContract.expected_report_profile
         observed_report_profile = $profileObserved
@@ -100,7 +123,7 @@ $machineProfilePath = Join-Path $repositoryRoot "tests/validation/windows-alpha-
 $plan = Get-Content -LiteralPath $planPath -Raw | ConvertFrom-Json
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $machineProfile = Get-Content -LiteralPath $machineProfilePath -Raw | ConvertFrom-Json
-if ($plan.schema_version -ne 2) { throw "Unsupported playback reference gate plan schema." }
+if ($plan.schema_version -ne 3) { throw "Unsupported playback reference gate plan schema." }
 if ($manifest.schema_version -ne 2) { throw "Unsupported corpus manifest schema." }
 if ($machineProfile.id -ne $plan.machine_profile) { throw "Playback plan and machine profile disagree." }
 $baselineMemoryClass = [string]$plan.baseline_machine_requirements.memory_class
@@ -116,6 +139,16 @@ $selectedGateIds = @(switch ($Gate) {
 })
 $selectedGates = @($plan.gates | Where-Object { $_.id -in $selectedGateIds })
 if ($selectedGates.Count -ne $selectedGateIds.Count) { throw "Playback plan does not define every selected gate." }
+foreach ($gateContract in $selectedGates) {
+    if ([int]$gateContract.process_timeout_seconds -le 0) {
+        throw "Gate '$($gateContract.id)' must define a positive external process timeout."
+    }
+    $decodeProgressRequired = $null -ne $gateContract.PSObject.Properties["decode_progress_required"] -and $gateContract.decode_progress_required -eq $true
+    $decodeProgressEnvironment = if ($null -eq $gateContract.PSObject.Properties["decode_progress_environment"]) { $null } else { [string]$gateContract.decode_progress_environment }
+    if ($decodeProgressRequired -and [string]::IsNullOrWhiteSpace($decodeProgressEnvironment)) {
+        throw "Gate '$($gateContract.id)' requires a decode progress journal but defines no environment binding."
+    }
+}
 
 $timestamp = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")
 $runId = "$timestamp-$MachineId-$(([guid]::NewGuid().ToString('N')).Substring(0, 8))"
@@ -219,7 +252,7 @@ $baselineEligible = $null -eq $failureMessage -and $preflightPassed -and $allGat
 $status = if ($null -ne $failureMessage) { "failed" } elseif (-not $allGatesPassed) { "failed" } elseif ($baselineEligible) { "passed-baseline" } else { "passed-diagnostic" }
 $machineValidationIssueCodes = if ($null -eq $machineValidation) { @() } else { @($machineValidation.issues | ForEach-Object { [string]$_.code }) }
 $evidence = [ordered]@{
-    schema_version = 2
+    schema_version = 3
     run_id = $runId
     plan = [ordered]@{
         id = $plan.id

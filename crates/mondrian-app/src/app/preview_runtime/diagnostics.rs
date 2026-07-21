@@ -145,6 +145,39 @@ pub struct PreviewDecodeWorkerExecutionDiagnostics {
     pub non_playback: Option<mondrian_media::PreviewDecodeExecutionProgress>,
 }
 
+/// Cloneable read authority for the bounded Preview workers' media progress.
+///
+/// This watch contains observer handles only. It does not retain the Preview
+/// Runtime, own worker lifecycle, or grant cancellation/recovery authority, so
+/// acceptance infrastructure may sample it from a separate thread even when
+/// the main test or presentation thread is blocked.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PreviewDecodeWorkerExecutionWatch {
+    observers: Vec<(MediaPreviewWorkerLane, PreviewDecodeExecutionObserver)>,
+}
+
+impl PreviewDecodeWorkerExecutionWatch {
+    pub(super) fn new(
+        observers: Vec<(MediaPreviewWorkerLane, PreviewDecodeExecutionObserver)>,
+    ) -> Self {
+        Self { observers }
+    }
+
+    /// Capture one coherent point-in-time snapshot without touching Runtime state.
+    pub(crate) fn snapshot(&self) -> PreviewDecodeWorkerExecutionDiagnostics {
+        let mut snapshot = PreviewDecodeWorkerExecutionDiagnostics::default();
+        for (lane, observer) in &self.observers {
+            let progress = Some(observer.snapshot());
+            match lane {
+                MediaPreviewWorkerLane::Any => snapshot.any = progress,
+                MediaPreviewWorkerLane::Playback => snapshot.playback = progress,
+                MediaPreviewWorkerLane::NonPlayback => snapshot.non_playback = progress,
+            }
+        }
+        snapshot
+    }
+}
+
 impl PreviewHardwareDecodeAdmissionDiagnostics {
     fn playback_native_import_gated(self) -> bool {
         self.renderer_native_import_support_known

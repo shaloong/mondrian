@@ -33,6 +33,7 @@ fn cancellation_evidence(
 #[test]
 fn runtime_diagnostics_exposes_each_bounded_worker_progress_observer() {
     let runtime = PreviewProductionRuntime::<()>::with_worker_count(preview_decode_cpu_budget(), 2);
+    let watch = runtime.decode_execution_watch();
     let diagnostics = runtime.diagnostics();
 
     assert_eq!(diagnostics.decode_worker_count, 2);
@@ -50,6 +51,24 @@ fn runtime_diagnostics_exposes_each_bounded_worker_progress_observer() {
             .decode_worker_execution
             .non_playback
             .expect("non-playback worker progress")
+            .stage,
+        mondrian_media::PreviewDecodeExecutionStage::Idle
+    );
+    assert_eq!(watch.snapshot(), diagnostics.decode_worker_execution);
+
+    drop(runtime);
+    let retired_runtime_snapshot = watch.snapshot();
+    assert_eq!(
+        retired_runtime_snapshot
+            .playback
+            .expect("retired playback observer remains readable")
+            .stage,
+        mondrian_media::PreviewDecodeExecutionStage::Idle
+    );
+    assert_eq!(
+        retired_runtime_snapshot
+            .non_playback
+            .expect("retired non-playback observer remains readable")
             .stage,
         mondrian_media::PreviewDecodeExecutionStage::Idle
     );

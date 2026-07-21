@@ -1519,22 +1519,32 @@ plus semantic probe contract; the concrete encoder-dependent bytes are
 attested and hashed inside each reference run rather than pretending to be
 stable across FFmpeg/x265 builds.
 
-`windows-playback-m0-v2` is the machine-readable execution contract joining
+`windows-playback-m0-v3` is the machine-readable execution contract joining
 the two professional gates to those fixture purposes and expected report
 profiles. The validation runner captures an operator-assigned opaque machine
 ID (never a hardware serial), validates the Windows machine class, records
 code/corpus/recipe/artifact hashes, executes the release-profile Video and CPAL
-A/V gates, and writes one evidence bundle. Only the complete two-gate set on a
-qualified `standard-playback` machine (16 GiB installed memory or higher), with
-a clean unchanged Git revision and passing structured reports, is baseline-
-eligible. The wider product support floor is 8 GiB: that class must remain
-correct, bounded, and capable of explicit quality/proxy fallback, but need not
-meet native 4K Main10 real-time thresholds. A below-baseline memory class may
-continue only through an explicit, contract-listed diagnostic override; missing
-execution prerequisites such as GPU/toolchain identity still fail closed, and
-an override can never produce baseline evidence. A qualifying fixed-machine
-result and broader driver/display corpus still remain required before release-
-level professional playback acceptance can be claimed.
+A/V gates, and writes one evidence bundle. Each gate is launched by a separate
+Reference Playback Gate Supervisor with a plan-owned wall deadline, asynchronous
+stdout/stderr draining, and full descendant-process-tree termination. The Video
+gate also samples a cloneable read-only worker-progress watch into sparse JSONL;
+every transition and five-second heartbeat is flushed independently of the
+blocked test thread. The journal is diagnostic evidence only: it cannot cancel,
+retire, restart, or declare completion for a media execution lease. A timeout
+therefore preserves the last observable FFmpeg/media stage but always fails the
+gate, including when no normal report can be written.
+
+Only the complete two-gate set on a qualified `standard-playback` machine
+(16 GiB installed memory or higher), with a clean unchanged Git revision and
+passing structured reports, is baseline-eligible. The wider product support
+floor is 8 GiB: that class must remain correct, bounded, and capable of explicit
+quality/proxy fallback, but need not meet native 4K Main10 real-time thresholds.
+A below-baseline memory class may continue only through an explicit,
+contract-listed diagnostic override; missing execution prerequisites such as
+GPU/toolchain identity still fail closed, and an override can never produce
+baseline evidence. A qualifying fixed-machine result and broader driver/display
+corpus still remain required before release-level professional playback
+acceptance can be claimed.
 
 On 2026-07-18, a 2.88-second decoder-proven 3840×2160 25 fps HEVC Main10 HLG
 sample completed the external continuous-playback smoke on an NVIDIA RTX 3050

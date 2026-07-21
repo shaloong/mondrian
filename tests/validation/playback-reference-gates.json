@@ -1,6 +1,6 @@
 {
-  "schema_version": 2,
-  "id": "windows-playback-m0-v2",
+  "schema_version": 3,
+  "id": "windows-playback-m0-v3",
   "machine_profile": "windows-alpha-reference-v2",
   "build_profile": "release",
   "requires_clean_tree_for_baseline": true,
@@ -26,6 +26,9 @@
       ],
       "cargo_test": "preview_media_professional_4k_hevc_main10_hardware_playback_gate",
       "media_environment": "MONDRIAN_PREVIEW_PROFESSIONAL_4K_HEVC_MAIN10_MEDIA_PATH",
+      "process_timeout_seconds": 2700,
+      "decode_progress_environment": "MONDRIAN_PREVIEW_DECODE_EXECUTION_OUTPUT",
+      "decode_progress_required": true,
       "expected_report_profile": "uhd_hevc_main10_hardware_1x_v4",
       "expected_report_path": "professional_media_gates"
     },
@@ -41,6 +44,7 @@
       ],
       "cargo_test": "playback_professional_cpal_av_gate",
       "media_environment": "MONDRIAN_PLAYBACK_PROFESSIONAL_AUDIO_MEDIA_PATH",
+      "process_timeout_seconds": 2700,
       "expected_report_profile": "cpal_av_48khz_30min_v1",
       "expected_report_path": "$"
     }
@@ -51,6 +55,8 @@
     "fixture_artifact_hash_required": true,
     "recipe_hash_required_for_generated_fixture": true,
     "machine_report_required": true,
-    "gate_report_required": true
+    "gate_report_required": true,
+    "external_process_timeout_required": true,
+    "video_decode_progress_journal_required": true
   }
 }
