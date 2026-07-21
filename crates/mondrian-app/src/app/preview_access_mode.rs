@@ -21,7 +21,7 @@ use mondrian_media::{
 pub(crate) const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
 pub(crate) const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 50_000;
 pub(crate) const MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
-const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 3;
+const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 2;
 const MEDIA_PREVIEW_MAX_PENDING_REQUESTS: usize = MEDIA_PREVIEW_JOB_QUEUE_CAPACITY;
 
 /// Decoder-native surface family inferred from probed source bit depth/layout.
@@ -749,8 +749,6 @@ fn frame_worker_lane(lane: MediaPreviewWorkerLane) -> mondrian_playback::FrameWo
     match lane {
         MediaPreviewWorkerLane::Any => mondrian_playback::FrameWorkerLane::Any,
         MediaPreviewWorkerLane::Playback => mondrian_playback::FrameWorkerLane::Playback,
-        MediaPreviewWorkerLane::Scrub => mondrian_playback::FrameWorkerLane::Interactive,
-        MediaPreviewWorkerLane::Still => mondrian_playback::FrameWorkerLane::Still,
         MediaPreviewWorkerLane::NonPlayback => mondrian_playback::FrameWorkerLane::NonPlayback,
     }
 }
@@ -810,8 +808,6 @@ pub(crate) fn media_preview_worker_count_for(parallelism: usize) -> usize {
 pub(crate) enum MediaPreviewWorkerLane {
     Any,
     Playback,
-    Scrub,
-    Still,
     NonPlayback,
 }
 
@@ -824,8 +820,6 @@ pub(crate) fn media_preview_worker_lane(
     } else {
         match worker_index {
             0 => MediaPreviewWorkerLane::Playback,
-            1 if worker_count >= 3 => MediaPreviewWorkerLane::Scrub,
-            2 if worker_count >= 3 => MediaPreviewWorkerLane::Still,
             _ => MediaPreviewWorkerLane::NonPlayback,
         }
     }

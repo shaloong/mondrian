@@ -13,9 +13,7 @@ use super::preview_access_mode::MediaPreviewWorkerLane;
 
 const WORKER_ANY: u8 = 1 << 0;
 const WORKER_PLAYBACK: u8 = 1 << 1;
-const WORKER_SCRUB: u8 = 1 << 2;
-const WORKER_STILL: u8 = 1 << 3;
-const WORKER_NON_PLAYBACK: u8 = 1 << 4;
+const WORKER_NON_PLAYBACK: u8 = 1 << 2;
 
 /// Mutually exclusive family of decoder sessions allowed to remain resident.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,17 +182,13 @@ const fn worker_lane_bit(lane: MediaPreviewWorkerLane) -> u8 {
     match lane {
         MediaPreviewWorkerLane::Any => WORKER_ANY,
         MediaPreviewWorkerLane::Playback => WORKER_PLAYBACK,
-        MediaPreviewWorkerLane::Scrub => WORKER_SCRUB,
-        MediaPreviewWorkerLane::Still => WORKER_STILL,
         MediaPreviewWorkerLane::NonPlayback => WORKER_NON_PLAYBACK,
     }
 }
 
 const fn retired_worker_mask(family: PreviewDecodeResidencyFamily) -> u8 {
     match family {
-        PreviewDecodeResidencyFamily::Playback => {
-            WORKER_ANY | WORKER_SCRUB | WORKER_STILL | WORKER_NON_PLAYBACK
-        }
+        PreviewDecodeResidencyFamily::Playback => WORKER_ANY | WORKER_NON_PLAYBACK,
         PreviewDecodeResidencyFamily::Interactive => WORKER_ANY | WORKER_PLAYBACK,
     }
 }
@@ -213,17 +207,15 @@ mod tests {
     fn interactive_admission_waits_for_playback_owner_retirement() {
         let coordinator = PreviewDecodeResidencyCoordinator::new();
         coordinator.register_worker(MediaPreviewWorkerLane::Playback);
-        coordinator.register_worker(MediaPreviewWorkerLane::Scrub);
-        coordinator.register_worker(MediaPreviewWorkerLane::Still);
+        coordinator.register_worker(MediaPreviewWorkerLane::NonPlayback);
         assert!(coordinator.activate(PreviewDecodeResidencyFamily::Playback));
         let playback_revision = coordinator.revision();
-        for lane in [MediaPreviewWorkerLane::Scrub, MediaPreviewWorkerLane::Still] {
-            let directive = coordinator
-                .worker_directive(lane, 0)
-                .expect("non-playback worker should observe playback phase");
-            assert!(directive.retire_context());
-            coordinator.acknowledge_retirement(lane, directive.revision());
-        }
+        let directive = coordinator
+            .worker_directive(MediaPreviewWorkerLane::NonPlayback, 0)
+            .expect("non-playback worker should observe playback phase");
+        assert!(directive.retire_context());
+        coordinator
+            .acknowledge_retirement(MediaPreviewWorkerLane::NonPlayback, directive.revision());
         assert!(coordinator.admits(PreviewDecodeAccessMode::PlaybackCursor));
 
         assert!(coordinator.activate(PreviewDecodeResidencyFamily::Interactive));

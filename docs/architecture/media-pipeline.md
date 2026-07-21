@@ -337,19 +337,19 @@ ingest records a mapped ICC identity only when the shared core parser identifies
 a supported named standard; generic RGB/GRAY profiles remain unmapped evidence
 and enter the explicit missing-metadata policy.
 App preview scheduling preserves decoder-session locality with semantic worker
-lanes. When more than one preview decode worker exists, worker 0 has playback
-affinity and the remaining workers are assigned scrub/still or shared
-non-playback affinity according to the CPU budget. A worker may dequeue current
-work only when its lane accepts that work class; allowing an idle Playback or
-Scrub worker to steal an exact Still request cold-opens additional FFmpeg hardware
-sessions, churns decoder surfaces, and can block realtime work behind a
+lanes. The production App has at most two decode workers: worker 0 has Playback
+affinity and worker 1 is the shared NonPlayback lane for scrub and deterministic
+Still work. A worker may dequeue current work only when its lane accepts that
+work class; this prevents an idle playback worker from cold-opening a second
+interactive FFmpeg hardware session or blocking realtime work behind a
 deterministic seek. `Prefetch` remains playback-only and lower priority than
-every eligible current-frame request. With only one worker, the lane is `Any`;
-the two-worker fallback uses `Playback` plus `NonPlayback`, so reduced machines
-still make progress without a hidden cross-lane exception. Because workers
-filter by lane, enqueue and priority promotion wake all preview workers, not
-just one; otherwise a playback-only queue could wake a non-playback worker and
-leave the playback worker asleep until another request arrives.
+every eligible current-frame request. With only one worker, the lane is `Any`
+and all classes still make progress without a hidden cross-lane exception.
+Because workers filter by lane, enqueue and priority promotion wake all preview
+workers, not just one; otherwise a playback-only queue could wake the
+non-playback worker and leave the playback worker asleep until another request
+arrives. The three semantic access modes remain distinct even though scrub and
+Still share physical execution locality.
 Forward prefetch is a playback-only behavior. Settled still-frame preview and
 active scrubbing must not enqueue `PlaybackCursor` prefetch work, because that
 turns random access or latest-wins interaction into hidden background playback
@@ -413,25 +413,24 @@ bounded decoder could wait for a surface that only the not-yet-possible next
 import would release. Preview generation proves when the Frame Store may forget
 the decoded payload, while the renderer fence proves when GPU command execution
 no longer needs the native resource. Neither proof substitutes for the other.
-The worker-owned context contains one continuous Playback slot, one bounded
-Scrub slot, one physically separate CPU Still slot, and a fixed two-slot ring
-for GPU-resident exact Still work. The two GPU Still slots are a bound, not a
-growing session pool; CPU work cannot reconfigure either of them while its
-native output is retained.
+The worker-owned context contains one continuous Playback slot, one shared
+native-capable Interactive slot for scrub and GPU-resident exact Still work,
+and one physically separate CPU Still slot. Sharing the Interactive slot is an
+execution-locality decision, not a semantic shortcut: every request derives its
+own seek, precision, decode-budget, approximation, and cancellation policy from
+its declared access mode. CPU still extraction cannot reconfigure the native
+Interactive slot.
 Every native output carries a session-output lease inside the retained FFmpeg
 resource; App Frame Store clones and renderer copy-fence clones therefore keep
-the same lease alive. A GPU exact-Still slot may seek/flush again only after
-its weak observer proves that the final downstream clone has dropped. A
-released existing session is preferred over an empty spare, avoiding another
-hardware surface pool after ordinary output retirement. The spare is selected
-only while every existing candidate remains leased; the A/B cursor breaks ties
-between slots with equal availability, and cancellation does not advance it.
-If both slots remain leased, the worker waits at the explicit, cooperatively
-cancellable `OutputLease` checkpoint instead of entering a codec call that may
-block for a decoder surface. Reports include `output_lease_wait_us`, and a wait
-that dominates a frame is classified separately from queue wait, session open,
-seek, or packet decode. Number of completed requests, generation rotation
-alone, cache eviction alone, and fixed delays are not release proofs.
+the same lease alive. The Interactive slot may seek/flush for either scrub or
+exact Still only after its weak observer proves that the final downstream clone
+has dropped. Until then the worker waits at the explicit, cooperatively
+cancellable `OutputLease` checkpoint instead of opening a spare hardware
+context or entering a codec call that may block for a decoder surface. Reports
+include `output_lease_wait_us`, and a wait that dominates a frame is classified
+separately from queue wait, session open, seek, or packet decode. Number of
+completed requests, generation rotation alone, cache eviction alone, and fixed
+delays are not release proofs.
 The app scheduler lowers explicit `MediaPreviewAccessIntent` values to media
 access modes. Viewer playback lowers to `PlaybackCursor`, active playhead/ruler
 dragging lowers to `ScrubCursor`, and settled non-playing viewer frames plus
@@ -446,9 +445,10 @@ that intent layer instead of passing booleans or strategy flags into
 Playback, scrub, and exact-still cancellation are cooperative but
 non-destructive to compatible worker-owned decode sessions: a prefetch budget
 miss or superseded target must not throw away the warmed decoder/device
-context. Canceled partial output is discarded. Scrub and exact Still always
-seek and flush before reuse, but a GPU Still slot cannot begin that reuse until
-its prior native-output lease has retired.
+context. Canceled partial output is discarded. Exact Still always performs an
+indexed exact seek and codec flush; scrub follows its independently derived
+bounded low-latency policy. Neither may reuse the shared Interactive context
+until its prior native-output lease has retired.
 The playback decode session also owns a small forward RGBA ring. Ring hits are
 strictly bounded by the same PTS tolerance as the process-global preview frame
 cache and are reported as `PlaybackSessionRingHit`; they are not available to
@@ -846,13 +846,14 @@ The app scheduler uses that budget for lane count, while the media decoder uses
 the same budget for its default FFmpeg threading request. This avoids the
 dangerous `preview workers * FFmpeg decoder threads` over-subscription pattern
 that can make software decode starve UI input, audio, and render submission.
-Single-worker systems use one `Any` lane; mid-range systems use separate
-`Playback` and non-playback `Interactive` lanes; systems with enough
-parallelism split `Playback`, `Scrub`, and `Still` lanes so exact still-frame
-requests cannot sit ahead of active playhead dragging, and playback prefetch
-cannot consume the only interactive decode lane. Preview diagnostics expose the
-resolved CPU budget and the actually started worker count so perf reports can
-distinguish codec cost from scheduling over-subscription.
+Single-worker systems use one `Any` lane; every multi-worker production system
+uses one `Playback` lane plus one shared `NonPlayback` lane. The Broker's work
+classes and realtime-over-Still preemption keep exact Still work from taking
+priority over active playhead dragging, while the physical two-lane bound avoids
+opening independent scrub and Still hardware surface pools. Playback prefetch
+cannot consume the interactive worker. Preview diagnostics expose the resolved
+CPU budget and the actually started worker count so perf reports can distinguish
+codec cost from scheduling over-subscription.
 Preview completion has separate display and cache semantics. A decode result is
 `Current` only when it still matches pending visible work; same-generation
 results whose pending request was canceled or whose access mode has been
@@ -1571,22 +1572,22 @@ device, geometry, or color-contract change destroys the old session before
 opening its replacement. This avoids repeated non-interruptible
 `avcodec_open2` gaps during latest-wins seek bursts without weakening frame
 exactness. The App separately releases the prior generation's native source
-frame after its final GPU Viewer output is usable. Playback and Scrub keep one
-mode-local decoder/DPB; GPU exact Still keeps the bounded, output-lease-aware
-two-slot ring described above instead of accumulating one surface pool per
-request or reusing a pool whose prior native output is still owned.
-Mode-locality does not authorize all modes to remain hardware-resident at once.
-The App Preview Runtime separates playback from the scrub/exact interactive
-family. A family transition first evicts only native decoder-resource entries
-from the shared Frame Store, wakes worker waits through a Broker-owned revision,
-and defers new-family admission until every opposite-family worker confirms it
-has destroyed its thread-owned `PreviewDecodeSessionContext`. CPU decoded
-frames remain cacheable across the transition, and final Viewer texture/raster
-ownership is unaffected. Workers never destroy another worker's FFmpeg context;
-new work cannot race the retirement acknowledgement; a revision-mismatched
-acknowledgement is ignored. On a three-lane runtime this bounds steady-state
-hardware pools to the active family rather than allowing a warm Playback pool
-to overlap Scrub and exact Still pools after a long run.
+frame after its final GPU Viewer output is usable. Playback keeps one continuous
+decoder; scrub and GPU-resident exact Still share one output-lease-aware
+Interactive decoder rather than accumulating one surface pool per request or
+reusing a pool whose prior native output is still owned. A separate CPU Still
+slot preserves CPU extraction locality without owning native GPU surfaces.
+Slot locality does not authorize Playback and Interactive sessions to remain
+hardware-resident at once. A family transition first evicts only native
+decoder-resource entries from the shared Frame Store, wakes worker waits through
+a Broker-owned revision, and defers new-family admission until every
+opposite-family worker confirms it has destroyed its thread-owned
+`PreviewDecodeSessionContext`. CPU decoded frames remain cacheable across the
+transition, and final Viewer texture/raster ownership is unaffected. Workers
+never destroy another worker's FFmpeg context; new work cannot race the
+retirement acknowledgement; a revision-mismatched acknowledgement is ignored.
+This bounds the production path to the active Playback or Interactive native
+surface pool without forcing a cold-open between scrub and settled exact seeks.
 The experimental external-process CPU RGBA path terminates and reaps only its
 per-request child when the probe fires; the compatible in-process session may
 remain. Stale work is never cached or marked as a failed source.
@@ -1731,11 +1732,15 @@ surfaces are source-sized and Half/Quarter quality is a later Viewer spatial
 operation; including that output extent in the decode key would invalidate
 useful prefetch whenever adaptive presentation scale changes. CPU decode keeps
 its requested decode extent because scaling is part of that media operation.
-Preview decode session reuse is isolated by `PreviewDecodeAccessMode`, and each
-session slot plus the process-global preview frame cache must be keyed by a
-media file fingerprint, not by path alone. Proxy regeneration finalizes fresh
-media at the same proxy path, so same-path cache hits or reused FFmpeg sessions
-are valid only while file length and modification timestamp still match the
+Preview decode session reuse is isolated by physical execution family and the
+full decode contract. Playback has its own slot; GPU-resident scrub and exact
+Still share the Interactive slot while deriving policy anew from each request;
+CPU Still remains separate. Every slot plus the process-global preview frame
+cache must be keyed by a media file fingerprint, not by path alone, and session
+reuse additionally requires matching geometry, backend, hardware request/device
+selector, and source-color contract. Proxy regeneration finalizes fresh media
+at the same proxy path, so same-path cache hits or reused FFmpeg sessions are
+valid only while file length and modification timestamp still match the
 fingerprint captured when the session/cache entry was created.
 FFmpeg's default app log level is fatal for product preview decode. Codec-level
 warnings and recoverable decoder errors, such as HEVC reference-frame messages

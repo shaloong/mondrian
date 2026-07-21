@@ -1,4 +1,4 @@
-//! One access-mode-specific FFmpeg Preview decode Session.
+//! Worker-family-specific FFmpeg Preview decode sessions.
 //!
 //! This deep module owns format/codec setup, request-scoped interrupt state,
 //! stream discovery, seek/index use, packet/codec backpressure, forward reuse,
@@ -16,9 +16,7 @@ thread_local! {
     };
 }
 
-const PREVIEW_GPU_STILL_SESSION_SLOT_COUNT: usize = 2;
-
-/// Explicit owner of access-mode-specific FFmpeg Preview sessions.
+/// Explicit owner of worker-family-specific FFmpeg Preview sessions.
 ///
 /// Production schedulers should create one context per decode worker and keep
 /// it on that worker thread. This makes codec, DPB, and hardware-surface-pool
@@ -33,13 +31,7 @@ impl PreviewDecodeSessionContext {
     /// Create an empty worker-local decode context.
     pub const fn new() -> Self {
         Self {
-            sessions: PreviewDecodeSessions {
-                playback: None,
-                scrub: None,
-                cpu_still: None,
-                gpu_still: [None, None],
-                next_gpu_still: 0,
-            },
+            sessions: PreviewDecodeSessions { playback: None, interactive: None, cpu_still: None },
         }
     }
 
@@ -80,11 +72,11 @@ impl Default for PreviewDecodeSessionContext {
 
 /// Drop the current thread's cached preview decode sessions.
 ///
-/// Preview playback, scrubbing, and still-frame extraction keep independent
-/// thread-local FFmpeg sessions so one access pattern cannot poison another's
-/// decoder state. Call this at explicit lifecycle boundaries, such as perf
-/// probes, project/media shutdown, or tests that intentionally open threaded
-/// software decoders.
+/// Preview playback has an independent FFmpeg session; latest-wins Viewer
+/// scrub and GPU-resident still requests share one interactive session while
+/// CPU still extraction remains physically separate. Call this at explicit
+/// lifecycle boundaries, such as perf probes, project/media shutdown, or tests
+/// that intentionally open threaded software decoders.
 pub fn clear_thread_local_preview_decode_session() {
     THREAD_PREVIEW_DECODE_CONTEXT.with(|context| {
         context.borrow_mut().clear();
@@ -93,10 +85,10 @@ pub fn clear_thread_local_preview_decode_session() {
 
 struct PreviewDecodeSessions {
     playback: Option<PreviewDecodeSession>,
-    scrub: Option<PreviewDecodeSession>,
+    /// Shared latest-wins Viewer session. Scrub and exact Still have distinct
+    /// seek policies but never need simultaneous codec/DPB residency.
+    interactive: Option<PreviewDecodeSession>,
     cpu_still: Option<PreviewDecodeSession>,
-    gpu_still: [Option<PreviewDecodeSession>; PREVIEW_GPU_STILL_SESSION_SLOT_COUNT],
-    next_gpu_still: usize,
 }
 
 impl PreviewDecodeSessions {
@@ -107,20 +99,18 @@ impl PreviewDecodeSessions {
     ) -> Option<PreviewDecodeSessionSlot> {
         match access_mode {
             PreviewDecodeAccessMode::PlaybackCursor => Some(PreviewDecodeSessionSlot::Playback),
-            PreviewDecodeAccessMode::ScrubCursor => Some(PreviewDecodeSessionSlot::Scrub),
+            PreviewDecodeAccessMode::ScrubCursor => self
+                .interactive
+                .as_ref()
+                .is_none_or(PreviewDecodeSession::native_output_released)
+                .then_some(PreviewDecodeSessionSlot::Interactive),
             PreviewDecodeAccessMode::RandomAccessStillFrame
                 if hardware_decode_request.prefers_gpu_residency() =>
             {
-                let availability =
-                    std::array::from_fn(|index| match self.gpu_still[index].as_ref() {
-                        Some(session) if session.native_output_released() => {
-                            PreviewGpuStillSlotAvailability::Reusable
-                        }
-                        Some(_) => PreviewGpuStillSlotAvailability::Leased,
-                        None => PreviewGpuStillSlotAvailability::Empty,
-                    });
-                select_gpu_still_slot(self.next_gpu_still, availability)
-                    .map(PreviewDecodeSessionSlot::GpuStill)
+                self.interactive
+                    .as_ref()
+                    .is_none_or(PreviewDecodeSession::native_output_released)
+                    .then_some(PreviewDecodeSessionSlot::Interactive)
             }
             PreviewDecodeAccessMode::RandomAccessStillFrame => {
                 Some(PreviewDecodeSessionSlot::CpuStill)
@@ -131,69 +121,23 @@ impl PreviewDecodeSessions {
     fn slot_mut(&mut self, slot: PreviewDecodeSessionSlot) -> &mut Option<PreviewDecodeSession> {
         match slot {
             PreviewDecodeSessionSlot::Playback => &mut self.playback,
-            PreviewDecodeSessionSlot::Scrub => &mut self.scrub,
+            PreviewDecodeSessionSlot::Interactive => &mut self.interactive,
             PreviewDecodeSessionSlot::CpuStill => &mut self.cpu_still,
-            PreviewDecodeSessionSlot::GpuStill(index) => &mut self.gpu_still[index],
         }
-    }
-
-    fn record_success(
-        &mut self,
-        slot: PreviewDecodeSessionSlot,
-        access_mode: PreviewDecodeAccessMode,
-        hardware_decode_request: PreviewHardwareDecodeRequest,
-    ) {
-        if access_mode != PreviewDecodeAccessMode::RandomAccessStillFrame
-            || !hardware_decode_request.prefers_gpu_residency()
-        {
-            return;
-        }
-        let PreviewDecodeSessionSlot::GpuStill(index) = slot else {
-            debug_assert!(false, "GPU still request selected a non-still decode slot");
-            return;
-        };
-        self.next_gpu_still = (index + 1) % PREVIEW_GPU_STILL_SESSION_SLOT_COUNT;
     }
 
     fn clear(&mut self) {
         self.playback = None;
-        self.scrub = None;
+        self.interactive = None;
         self.cpu_still = None;
-        self.gpu_still = [None, None];
-        self.next_gpu_still = 0;
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PreviewDecodeSessionSlot {
     Playback,
-    Scrub,
+    Interactive,
     CpuStill,
-    GpuStill(usize),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PreviewGpuStillSlotAvailability {
-    Reusable,
-    Empty,
-    Leased,
-}
-
-fn select_gpu_still_slot(
-    next_gpu_still: usize,
-    availability: [PreviewGpuStillSlotAvailability; PREVIEW_GPU_STILL_SESSION_SLOT_COUNT],
-) -> Option<usize> {
-    let matching_slot = |required| {
-        (0..PREVIEW_GPU_STILL_SESSION_SLOT_COUNT)
-            .map(|offset| (next_gpu_still + offset) % PREVIEW_GPU_STILL_SESSION_SLOT_COUNT)
-            .find(|index| availability[*index] == required)
-    };
-
-    // Reuse a released decoder before opening another hardware surface pool.
-    // The empty slot is a bounded bridge only while every existing session's
-    // last native output is still retained downstream.
-    matching_slot(PreviewGpuStillSlotAvailability::Reusable)
-        .or_else(|| matching_slot(PreviewGpuStillSlotAvailability::Empty))
 }
 
 use hardware_decode::{
@@ -2001,14 +1945,6 @@ fn decode_preview_frame_outcome_in_sessions(
             }
         }
     };
-    if matches!(
-        &outcome,
-        Ok(PreviewDecodeOutcome::Frame(_))
-            | Ok(PreviewDecodeOutcome::FloatFrame(_))
-            | Ok(PreviewDecodeOutcome::NativeGpuFrame(_))
-    ) {
-        sessions.record_success(selected_slot, access_mode, hardware_decode_request);
-    }
     outcome
 }
 
@@ -2017,108 +1953,33 @@ mod session_topology_tests {
     use super::*;
 
     fn empty_sessions() -> PreviewDecodeSessions {
-        PreviewDecodeSessions {
-            playback: None,
-            scrub: None,
-            cpu_still: None,
-            gpu_still: [None, None],
-            next_gpu_still: 0,
-        }
+        PreviewDecodeSessions { playback: None, interactive: None, cpu_still: None }
     }
 
     #[test]
-    fn gpu_exact_success_advances_the_equal_availability_tiebreak() {
-        let mut sessions = empty_sessions();
+    fn gpu_scrub_and_exact_share_one_latest_wins_session_slot() {
+        let sessions = empty_sessions();
         let request = PreviewHardwareDecodeRequest::PreferGpuResident;
 
-        let first = sessions
-            .available_slot(PreviewDecodeAccessMode::RandomAccessStillFrame, request)
-            .expect("first GPU still slot should be available");
-        assert_eq!(first, PreviewDecodeSessionSlot::GpuStill(0));
-        sessions.record_success(
-            first,
-            PreviewDecodeAccessMode::RandomAccessStillFrame,
-            request,
+        assert_eq!(
+            sessions.available_slot(PreviewDecodeAccessMode::ScrubCursor, request),
+            Some(PreviewDecodeSessionSlot::Interactive)
         );
-
-        let second = sessions
-            .available_slot(PreviewDecodeAccessMode::RandomAccessStillFrame, request)
-            .expect("second GPU still slot should be available");
-        assert_eq!(second, PreviewDecodeSessionSlot::GpuStill(1));
-        sessions.record_success(
-            second,
-            PreviewDecodeAccessMode::RandomAccessStillFrame,
-            request,
-        );
-
         assert_eq!(
             sessions.available_slot(PreviewDecodeAccessMode::RandomAccessStillFrame, request),
-            Some(PreviewDecodeSessionSlot::GpuStill(0))
+            Some(PreviewDecodeSessionSlot::Interactive)
         );
     }
 
     #[test]
-    fn gpu_exact_prefers_a_released_session_before_an_empty_spare() {
-        assert_eq!(
-            select_gpu_still_slot(
-                1,
-                [
-                    PreviewGpuStillSlotAvailability::Reusable,
-                    PreviewGpuStillSlotAvailability::Empty,
-                ],
-            ),
-            Some(0)
-        );
-    }
-
-    #[test]
-    fn gpu_exact_uses_the_spare_only_while_the_existing_output_is_leased() {
-        assert_eq!(
-            select_gpu_still_slot(
-                0,
-                [
-                    PreviewGpuStillSlotAvailability::Leased,
-                    PreviewGpuStillSlotAvailability::Empty,
-                ],
-            ),
-            Some(1)
-        );
-        assert_eq!(
-            select_gpu_still_slot(
-                0,
-                [
-                    PreviewGpuStillSlotAvailability::Leased,
-                    PreviewGpuStillSlotAvailability::Leased,
-                ],
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn canceled_or_cpu_exact_work_does_not_advance_gpu_still_slot() {
-        let mut sessions = empty_sessions();
-        let gpu_request = PreviewHardwareDecodeRequest::PreferGpuResident;
-        assert_eq!(
-            sessions.available_slot(PreviewDecodeAccessMode::RandomAccessStillFrame, gpu_request,),
-            Some(PreviewDecodeSessionSlot::GpuStill(0))
-        );
-
+    fn cpu_exact_keeps_a_physically_separate_slot() {
+        let sessions = empty_sessions();
         let cpu_slot = sessions
             .available_slot(
                 PreviewDecodeAccessMode::RandomAccessStillFrame,
                 PreviewHardwareDecodeRequest::Auto,
             )
             .expect("CPU still slot should be available");
-        sessions.record_success(
-            cpu_slot,
-            PreviewDecodeAccessMode::RandomAccessStillFrame,
-            PreviewHardwareDecodeRequest::Auto,
-        );
-        assert_eq!(
-            sessions.available_slot(PreviewDecodeAccessMode::RandomAccessStillFrame, gpu_request,),
-            Some(PreviewDecodeSessionSlot::GpuStill(0))
-        );
         assert_eq!(cpu_slot, PreviewDecodeSessionSlot::CpuStill);
     }
 
@@ -2137,7 +1998,7 @@ mod session_topology_tests {
                 PreviewDecodeAccessMode::ScrubCursor,
                 PreviewHardwareDecodeRequest::PreferGpuResident,
             ),
-            Some(PreviewDecodeSessionSlot::Scrub)
+            Some(PreviewDecodeSessionSlot::Interactive)
         );
     }
 }

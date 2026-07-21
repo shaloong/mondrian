@@ -1396,7 +1396,7 @@ fn media_preview_job_queue_diagnostics_counts_expired_playback_current_jobs() {
 }
 
 #[test]
-fn media_preview_job_queue_splits_scrub_and_still_on_dedicated_lanes() {
+fn media_preview_job_queue_routes_scrub_and_still_through_shared_non_playback_lane() {
     let (sender, receiver) = media_preview_job_queue(2);
     let still = test_media_key(1);
     let scrub = test_media_key(2);
@@ -1415,14 +1415,14 @@ fn media_preview_job_queue_splits_scrub_and_still_on_dedicated_lanes() {
     );
 
     let scrub_job = receiver
-        .recv_for_worker(MediaPreviewWorkerLane::Scrub)
-        .expect("scrub lane should skip still work");
+        .recv_for_worker(MediaPreviewWorkerLane::NonPlayback)
+        .expect("non-playback lane should accept scrub work");
     assert_eq!(scrub_job.key, scrub);
     assert_eq!(scrub_job.access_mode, PreviewDecodeAccessMode::ScrubCursor);
 
     let still_job = receiver
-        .recv_for_worker(MediaPreviewWorkerLane::Still)
-        .expect("still lane should retain still work");
+        .recv_for_worker(MediaPreviewWorkerLane::NonPlayback)
+        .expect("non-playback lane should also accept still work");
     assert_eq!(still_job.key, still);
     assert_eq!(
         still_job.access_mode,
@@ -1433,8 +1433,9 @@ fn media_preview_job_queue_splits_scrub_and_still_on_dedicated_lanes() {
     assert_eq!(diagnostics.in_flight_jobs, 2);
     assert_eq!(diagnostics.in_flight_scrub_cursor_jobs, 1);
     assert_eq!(diagnostics.in_flight_random_access_still_jobs, 1);
-    assert_eq!(diagnostics.in_flight_scrub_lane_jobs, 1);
-    assert_eq!(diagnostics.in_flight_still_lane_jobs, 1);
+    assert_eq!(diagnostics.in_flight_scrub_lane_jobs, 0);
+    assert_eq!(diagnostics.in_flight_still_lane_jobs, 0);
+    assert_eq!(diagnostics.in_flight_non_playback_lane_jobs, 2);
     assert_eq!(diagnostics.in_flight_cross_lane_current_jobs, 0);
 }
 
@@ -1838,8 +1839,8 @@ fn media_preview_worker_count_reserves_cpu_capacity() {
     assert_eq!(media_preview_worker_count_for(7), 2);
     assert_eq!(media_preview_worker_count_for(8), 2);
     assert_eq!(media_preview_worker_count_for(11), 2);
-    assert_eq!(media_preview_worker_count_for(12), 3);
-    assert_eq!(media_preview_worker_count_for(32), 3);
+    assert_eq!(media_preview_worker_count_for(12), 2);
+    assert_eq!(media_preview_worker_count_for(32), 2);
 }
 
 #[test]
@@ -1859,11 +1860,11 @@ fn media_preview_worker_lane_reserves_playback_only_when_parallel() {
     );
     assert_eq!(
         media_preview_worker_lane(1, 3),
-        MediaPreviewWorkerLane::Scrub
+        MediaPreviewWorkerLane::NonPlayback
     );
     assert_eq!(
         media_preview_worker_lane(2, 3),
-        MediaPreviewWorkerLane::Still
+        MediaPreviewWorkerLane::NonPlayback
     );
 }
 

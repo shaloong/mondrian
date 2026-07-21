@@ -717,7 +717,7 @@ pub struct PreviewDecodeCpuBudget {
     pub available_parallelism: usize,
     /// Threads intentionally left for UI, render submission, OS, and audio work.
     pub reserved_interactive_threads: usize,
-    /// App-level preview decode workers to spawn for playback/scrub/still lanes.
+    /// App-level preview decode workers to spawn for playback/non-playback lanes.
     pub preview_worker_count: usize,
     /// Default FFmpeg decoder threads to request per preview worker.
     pub decoder_threads_per_worker: usize,

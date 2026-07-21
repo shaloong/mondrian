@@ -199,7 +199,7 @@ protocol violations, and device errors remain terminal structured failures;
 backpressure must never trigger a surprise CPU transfer or an unbounded pool.
 Decoder device identities are also bounded: the backend retains at most eight
 source-contract pools and evicts the least-recently-used pool only after every
-bridge fence in it has completed. This prevents playback/scrub/still session
+bridge fence in it has completed. This prevents playback/interactive session
 churn from retaining one D3D12 decoder context, shared texture, and NT handle set per
 historical decoder. If every contract pool is still in flight, admission returns
 typed backpressure instead of waiting or allocating a ninth pool. Headless GPU

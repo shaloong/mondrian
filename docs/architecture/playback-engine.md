@@ -439,22 +439,25 @@ Still/NonPlayback/Any. This prevents one request stream from cold-opening a
 decoder/device session on each idle worker and prevents deterministic still
 decode from occupying the realtime playback lane. Parallelism remains
 available through lanes whose declared acceptance spans the class rather than
-through implicit cross-lane stealing.
+through implicit cross-lane stealing. The current App deliberately instantiates
+only Playback plus shared NonPlayback workers (or one Any worker on a constrained
+CPU); dedicated Interactive and Still lanes remain capabilities of the generic
+Broker, not additional production decoder pools.
 
 Worker-lane affinity is necessary but does not by itself bound native decoder
 residency across a transport transition. The App Preview Runtime therefore owns
-a two-family residency phase: `PlaybackCursor` is the playback family;
-`ScrubCursor` and `RandomAccessStillFrame` are the interactive family. When the
-family changes, the Runtime removes only Frame Store entries carrying nonzero
-decoder resource units, publishes a worker-lifecycle revision, and waits for
-the opposite worker family to destroy its own codec context before admitting
-new-family decode. CPU media frames and independently usable final Viewer
-outputs remain resident. The Broker owns only the revision and lost-wakeup-safe
-Condvar interruption; it does not decide which workers retire or interpret
-media access modes. A stale acknowledgement is revision-scoped and cannot
-satisfy a later transition. This prevents long-lived playback, scrub, and exact
-still hardware surface pools from accumulating while preserving thread-affine
-FFmpeg destruction and bounded transition latency.
+two mutually exclusive physical residency families: `PlaybackCursor` belongs
+to Playback; `ScrubCursor` and `RandomAccessStillFrame` belong to Interactive.
+When the family changes, the Runtime removes only Frame Store entries carrying
+nonzero decoder resource units, publishes a worker-lifecycle revision, and
+waits for the opposite worker family to destroy its own codec context before
+admitting new-family decode. CPU media frames and independently usable final
+Viewer outputs remain resident. The Broker owns only the revision and
+lost-wakeup-safe Condvar interruption; it does not decide which workers retire
+or interpret media access modes. A stale acknowledgement is revision-scoped and
+cannot satisfy a later transition. This bounds production to one active native
+decoder family while preserving thread-affine FFmpeg destruction and bounded
+transition latency.
 
 Admission across the pending-binding window and worker queue is transactional.
 The Broker first computes one eviction that can satisfy every active capacity
@@ -881,22 +884,21 @@ exact and can prove that its decoded sources are no longer needed. This is the
 last safe point: after rotation the retained output is stale by definition and
 must not authorize source-residency decisions. The retry remains non-blocking
 and fail-closed when any old work is actually still queued or in flight. Once
-the source lease is released, a compatible mode-local decoder may seek and
-flush for the new generation; decoder reuse does not grant the old media frame
-publication authority or make canceled partial output cacheable.
+the source lease is released, the compatible Interactive decoder may apply the
+current scrub or exact-Still seek/flush policy for the new generation; decoder
+reuse does not grant the old media frame publication authority or make canceled
+partial output cacheable.
 
-GPU-resident exact Still decode additionally uses a fixed two-slot session ring.
-Each native output carries a lease through the Frame Store and renderer source
-copy; a slot is ineligible for seek/flush until the final clone retires. When
-an existing slot is released, it is reused before an empty spare so ordinary
-seek sequences do not accumulate hardware surface pools. The spare is opened
-only to bridge a still-leased prior Viewer output. When both slots are leased,
-the worker remains at a cancellable `OutputLease` backpressure point and records
-`output_lease_wait_us` rather than blocking inside the codec. The A/B cursor
-only breaks ties between equally available slots; cancellation does not advance
-it. This bounds discontinuous decoder residency without assuming that
-generation count, elapsed time, or `avcodec_flush_buffers` alone proves
-downstream surface release.
+GPU-resident scrub and exact Still decode share one Interactive session. Each
+native output carries a lease through the Frame Store and renderer source copy;
+the session is ineligible for seek/flush until the final clone retires. While it
+is leased, the worker remains at a cancellable `OutputLease` backpressure point
+and records `output_lease_wait_us` rather than opening a spare surface pool or
+blocking inside the codec. This bounds discontinuous decoder residency without
+assuming that generation count, elapsed time, cache eviction, or
+`avcodec_flush_buffers` alone proves downstream surface release. The access
+mode still selects independent scrub versus exact precision and seek policy on
+every request; session sharing does not relax exact-Still correctness.
 
 The Frame Store release above is necessary but not sufficient for native video.
 The renderer's D3D12 bridge temporarily retains the imported source resource

@@ -6847,7 +6847,7 @@ fn realtime_current_keeps_in_flight_still_pending_for_structured_preemption() {
     );
     let still_execution = service
         .scheduler
-        .begin_test_execution(MediaPreviewWorkerLane::Still)
+        .begin_test_execution(MediaPreviewWorkerLane::NonPlayback)
         .expect("still work should be in flight before realtime admission");
     assert!(service.request_media_preview(
         scrub_key.clone(),
@@ -6963,7 +6963,7 @@ fn playback_prefetch_yields_while_current_work_is_in_flight() {
         generation,
         MediaPreviewRequestPriority::Current,
         PreviewDecodeAccessMode::ScrubCursor,
-        MediaPreviewWorkerLane::Scrub,
+        MediaPreviewWorkerLane::NonPlayback,
     );
 
     service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
@@ -8679,7 +8679,7 @@ fn stopped_generation_rotation_retries_media_release_after_worker_settles() {
         generation,
         MediaPreviewRequestPriority::Current,
         PreviewDecodeAccessMode::RandomAccessStillFrame,
-        MediaPreviewWorkerLane::Still,
+        MediaPreviewWorkerLane::NonPlayback,
     );
     service
         .frame_store
@@ -8920,7 +8920,7 @@ fn media_preview_cancel_observation_uses_scheduler_invalidation_timestamp() {
         MediaPreviewRequestStatus::Scheduled { .. }
     ));
     let execution_id = receiver
-        .recv_for_worker(MediaPreviewWorkerLane::Scrub)
+        .recv_for_worker(MediaPreviewWorkerLane::NonPlayback)
         .and_then(|job| job.execution_id)
         .expect("worker execution lease");
 
@@ -8952,7 +8952,7 @@ fn media_preview_cancel_observation_uses_competing_request_timestamp() {
         MediaPreviewRequestStatus::Scheduled { .. }
     ));
     let execution_id = receiver
-        .recv_for_worker(MediaPreviewWorkerLane::Still)
+        .recv_for_worker(MediaPreviewWorkerLane::NonPlayback)
         .and_then(|job| job.execution_id)
         .expect("worker execution lease");
     assert!(matches!(
