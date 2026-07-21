@@ -2895,6 +2895,7 @@ fn professional_runtime_acceptance_evidence(
             .temporal_approximation_frames,
         decode_cancellation: diagnostics.decode_cancellation,
         decode_cancellation_checkpoints: diagnostics.decode_cancellation_checkpoints,
+        decode_worker_execution: diagnostics.decode_worker_execution,
     }
 }
 

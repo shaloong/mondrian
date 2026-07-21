@@ -21,6 +21,7 @@ const PROCESS_MEMORY_MAX_SETTLED_GROWTH_BYTES: u64 = 256 * 1024 * 1024;
 use super::preview_access_mode::{
     MediaPreviewJobQueueDiagnostics, MediaPreviewSchedulerDiagnostics,
 };
+use super::preview_runtime::PreviewDecodeWorkerExecutionDiagnostics;
 
 pub(crate) const PROFESSIONAL_MIN_OBSERVED_DURATION_US: u64 = 30 * 60 * 1_000_000;
 pub(crate) const PROFESSIONAL_MIN_WARM_SEEKS: u64 = 50;
@@ -192,6 +193,7 @@ pub(crate) struct PreviewProfessionalPlaybackGateReport {
     process_memory: PreviewProcessMemoryGateReport,
     cancellation_gate: mondrian_playback::FrameCancellationGateReport,
     decode_cancellation_checkpoints: mondrian_media::PreviewDecodeCancellationEvidence,
+    decode_worker_execution: PreviewDecodeWorkerExecutionDiagnostics,
     pub(crate) passed: bool,
     pub(crate) failures: Vec<PreviewAcceptanceFailure>,
 }
@@ -386,6 +388,7 @@ pub(crate) struct PreviewRuntimeAcceptanceEvidence {
     pub(crate) accurate_seek_temporal_approximation_frames: u64,
     pub(crate) decode_cancellation: mondrian_playback::FrameCancellationEvidenceReport,
     pub(crate) decode_cancellation_checkpoints: mondrian_media::PreviewDecodeCancellationEvidence,
+    pub(crate) decode_worker_execution: PreviewDecodeWorkerExecutionDiagnostics,
 }
 
 pub(crate) struct ProfessionalPlaybackObservation<'a> {
@@ -594,10 +597,11 @@ pub(crate) fn evaluate_professional_playback(
             "frame_work_not_quiescent",
             "0 pending bindings, queued jobs, and execution leases",
             format!(
-                "pending={}, queued={}, in_flight={}",
+                "pending={}, queued={}, in_flight={}, worker_execution={:?}",
                 diagnostics.scheduler.pending_requests,
                 diagnostics.worker_queue.queued_jobs,
-                diagnostics.worker_queue.in_flight_jobs
+                diagnostics.worker_queue.in_flight_jobs,
+                diagnostics.decode_worker_execution,
             ),
             "Frame Work Broker structured diagnostics after latest-wins seek burst",
         );
@@ -784,6 +788,7 @@ pub(crate) fn evaluate_professional_playback(
         process_memory,
         cancellation_gate,
         decode_cancellation_checkpoints: diagnostics.decode_cancellation_checkpoints,
+        decode_worker_execution: diagnostics.decode_worker_execution,
         passed: failures.is_empty(),
         failures,
     }

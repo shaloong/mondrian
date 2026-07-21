@@ -23,12 +23,13 @@ use crate::app::preview_access_mode::{
     MediaPreviewCancelReason, MediaPreviewJob, MediaPreviewJobQueueDiagnostics,
     MediaPreviewJobQueueSender, MediaPreviewKey, MediaPreviewRequestPriority,
     MediaPreviewRequestStatus, MediaPreviewScheduler, MediaPreviewSchedulerDiagnostics,
+    MediaPreviewWorkerLane,
 };
 #[cfg(test)]
 use crate::app::preview_access_mode::{
     media_preview_cancel_reason, media_preview_cancel_reason_at_checkpoint,
     media_preview_cancel_request_to_observed_us, MediaPreviewJobEnqueueStatus,
-    MediaPreviewNativeSurfaceHint, MediaPreviewWorkerLane, MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US,
+    MediaPreviewNativeSurfaceHint, MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US,
 };
 #[cfg(test)]
 use crate::app::preview_cpu_execution::composite_resolved_preview_working;
@@ -111,8 +112,9 @@ use mondrian_core::{Resolution, WorkingColorSpace};
 use mondrian_media::{
     preview_decode_cpu_budget, DecodedFrameResidency, DecodedVideoSurfaceFormat, HwAccelBackend,
     HwAccelDeviceSelector, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
-    PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodePath, PreviewDecodeSeekStrategy,
-    PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewHardwareDecodeBlocker,
+    PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodeExecutionObserver,
+    PreviewDecodePath, PreviewDecodeSeekStrategy, PreviewDecodeStageDurations,
+    PreviewDecodeThreadingKind, PreviewHardwareDecodeBlocker,
     PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
     PreviewHardwareDecodeRequest, PreviewScrubAdaptiveClass, PreviewSeekIndexSource,
     VideoColorDiagnosticIssueSummary,
@@ -203,6 +205,7 @@ pub struct PreviewProductionRuntime<O: Clone> {
     hardware_decode_admission: Cell<PreviewHardwareDecodeAdmissionState>,
     decode_cpu_budget: PreviewDecodeCpuBudget,
     decode_worker_count: usize,
+    decode_execution_observers: Vec<(MediaPreviewWorkerLane, PreviewDecodeExecutionObserver)>,
     metrics: PreviewMetrics,
 }
 
@@ -228,6 +231,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let decode_residency = Arc::new(PreviewDecodeResidencyCoordinator::new());
         let mut decode_worker_count = 0;
         let mut workers = Vec::new();
+        let mut decode_execution_observers = Vec::new();
         for worker_index in 0..worker_count {
             let worker_jobs = job_rx.clone();
             let worker_results = result_tx.clone();
@@ -235,6 +239,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             let worker_shutdown = Arc::clone(&shutdown);
             let worker_decode_residency = Arc::clone(&decode_residency);
             let worker_lane = media_preview_worker_lane(worker_index, worker_count);
+            let (worker_decode_context_bootstrap, execution_observer) =
+                mondrian_media::PreviewDecodeSessionContext::observed_bootstrap();
             decode_residency.register_worker(worker_lane);
             match std::thread::Builder::new()
                 .name(format!("mondrian-preview-worker-{worker_index}"))
@@ -246,10 +252,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         worker_scheduler,
                         worker_shutdown,
                         worker_decode_residency,
+                        worker_decode_context_bootstrap,
                     )
                 }) {
                 Ok(handle) => {
                     workers.push(handle);
+                    decode_execution_observers.push((worker_lane, execution_observer));
                     decode_worker_count += 1;
                 }
                 Err(err) => {
@@ -281,6 +289,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             hardware_decode_admission: Cell::new(PreviewHardwareDecodeAdmissionState::default()),
             decode_cpu_budget,
             decode_worker_count,
+            decode_execution_observers,
             metrics: PreviewMetrics::default(),
         }
     }

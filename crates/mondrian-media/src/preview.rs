@@ -25,6 +25,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 mod cancellation;
 mod decode_session;
 mod decoded_frame;
+mod execution_progress;
 mod external_decode;
 mod frame_cache;
 mod frame_contract;
@@ -41,6 +42,9 @@ pub use cancellation::{
     PreviewDecodeCancellation, PreviewDecodeCancellationCheckpoint,
     PreviewDecodeCancellationCheckpointEvidence, PreviewDecodeCancellationEvidence,
     PreviewDecodeCancellationSource,
+};
+pub use execution_progress::{
+    PreviewDecodeExecutionObserver, PreviewDecodeExecutionProgress, PreviewDecodeExecutionStage,
 };
 use frame_contract::{decoded_surface_format_from_pixel, resolve_cpu_rgba_contract_from_metadata};
 #[cfg(test)]
@@ -1239,7 +1243,10 @@ pub enum PreviewDecodeOutcome {
     Canceled(PreviewDecodeCancellation),
 }
 
-pub use decode_session::{clear_thread_local_preview_decode_session, PreviewDecodeSessionContext};
+pub use decode_session::{
+    clear_thread_local_preview_decode_session, PreviewDecodeSessionContext,
+    PreviewDecodeSessionContextBootstrap,
+};
 use decode_session::{
     decode_preview_frame_outcome, preview_create_rgba_scaler, PreviewDecodedFramePayload,
 };
@@ -1461,23 +1468,43 @@ struct DecodedVideoFrame {
     pts: Option<i64>,
 }
 
+enum DecodedVideoReceive {
+    Frame(DecodedVideoFrame),
+    NeedInput,
+    EndOfStream,
+}
+
 fn receive_decoded_video_frame(
     decoder: &mut ffmpeg::decoder::Video,
-) -> Result<Option<DecodedVideoFrame>> {
+    interrupt_state: &PreviewDecodeInterruptState,
+    path: &Path,
+) -> Result<DecodedVideoReceive> {
+    interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::CodecReceiveFrame);
     let mut decoded = ffmpeg::util::frame::video::Video::empty();
-    if decoder.receive_frame(&mut decoded).is_ok() {
-        let mut pts = decoded.pts();
-        if pts.is_none() {
-            let best_effort = unsafe { (*decoded.as_ptr()).best_effort_timestamp };
-            if best_effort != ffmpeg::ffi::AV_NOPTS_VALUE {
-                pts = Some(best_effort);
+    match decoder.receive_frame(&mut decoded) {
+        Ok(()) => {
+            let mut pts = decoded.pts();
+            if pts.is_none() {
+                let best_effort = unsafe { (*decoded.as_ptr()).best_effort_timestamp };
+                if best_effort != ffmpeg::ffi::AV_NOPTS_VALUE {
+                    pts = Some(best_effort);
+                }
             }
+
+            Ok(DecodedVideoReceive::Frame(DecodedVideoFrame {
+                frame: decoded,
+                pts,
+            }))
         }
-
-        return Ok(Some(DecodedVideoFrame { frame: decoded, pts }));
+        Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::error::EAGAIN => {
+            Ok(DecodedVideoReceive::NeedInput)
+        }
+        Err(ffmpeg::Error::Eof) => Ok(DecodedVideoReceive::EndOfStream),
+        Err(error) => Err(MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: format!("FFmpeg receive_frame failed: {error}"),
+        }),
     }
-
-    Ok(None)
 }
 
 #[cfg(test)]

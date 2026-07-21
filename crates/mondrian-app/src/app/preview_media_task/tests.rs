@@ -144,6 +144,7 @@ fn worker_reports_queued_deadline_without_window_or_widget() {
             worker_scheduler,
             worker_shutdown,
             worker_residency,
+            PreviewDecodeSessionContext::bootstrap(),
         );
     });
     let result = result_rx
@@ -196,6 +197,7 @@ fn worker_acknowledges_decoder_residency_retirement_after_bounded_wake() {
             worker_scheduler,
             worker_shutdown,
             worker_residency,
+            PreviewDecodeSessionContext::bootstrap(),
         );
     });
 
@@ -236,6 +238,7 @@ fn full_result_queue_cannot_block_decoder_residency_retirement() {
             worker_scheduler,
             worker_shutdown,
             worker_residency,
+            PreviewDecodeSessionContext::bootstrap(),
         );
     });
 
@@ -296,6 +299,8 @@ fn worker_interrupts_blocked_ffmpeg_input_and_publishes_typed_evidence() {
     let worker_scheduler = scheduler.clone();
     let worker_shutdown = Arc::clone(&shutdown);
     let worker_residency = Arc::clone(&residency);
+    let (worker_decode_context_bootstrap, execution_observer) =
+        PreviewDecodeSessionContext::observed_bootstrap();
     let worker = thread::spawn(move || {
         media_preview_worker(
             MediaPreviewWorkerLane::Playback,
@@ -304,6 +309,7 @@ fn worker_interrupts_blocked_ffmpeg_input_and_publishes_typed_evidence() {
             worker_scheduler,
             worker_shutdown,
             worker_residency,
+            worker_decode_context_bootstrap,
         );
     });
 
@@ -325,6 +331,10 @@ fn worker_interrupts_blocked_ffmpeg_input_and_publishes_typed_evidence() {
     accepted_rx
         .recv_timeout(Duration::from_secs(2))
         .expect("worker must enter the controlled blocking read");
+    assert_eq!(
+        execution_observer.snapshot().stage,
+        mondrian_media::PreviewDecodeExecutionStage::InputOpen
+    );
     let requested_at = Instant::now();
     scheduler.cancel(&key);
     let result = result_rx
@@ -343,6 +353,10 @@ fn worker_interrupts_blocked_ffmpeg_input_and_publishes_typed_evidence() {
     );
     assert!(result.cancel_observed_elapsed_us.is_some());
     assert!(result.cancel_request_to_observed_us.is_some());
+    assert_eq!(
+        execution_observer.snapshot().stage,
+        mondrian_media::PreviewDecodeExecutionStage::Idle
+    );
     assert!(
         return_latency <= Duration::from_millis(500),
         "blocked input open returned too late after scheduler cancellation: {return_latency:?}"

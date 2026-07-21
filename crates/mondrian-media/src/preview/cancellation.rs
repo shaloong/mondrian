@@ -4,6 +4,8 @@ use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
+use super::execution_progress::{PreviewDecodeExecutionObserver, PreviewDecodeExecutionStage};
+
 /// Execution point at which a Preview decode first observed cancellation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
@@ -183,16 +185,25 @@ pub(super) struct PreviewDecodeInterruptState {
     active_probe: Mutex<Option<PreviewDecodeCancelProbe>>,
     current_checkpoint: AtomicU8,
     first_interrupt_checkpoint: AtomicU8,
+    execution_observer: PreviewDecodeExecutionObserver,
 }
 
 impl PreviewDecodeInterruptState {
+    #[cfg(test)]
     pub(super) fn new() -> Self {
+        Self::with_execution_observer(PreviewDecodeExecutionObserver::new())
+    }
+
+    pub(super) fn with_execution_observer(
+        execution_observer: PreviewDecodeExecutionObserver,
+    ) -> Self {
         Self {
             active_probe: Mutex::new(None),
             current_checkpoint: AtomicU8::new(
                 PreviewDecodeCancellationCheckpoint::BeforeInputOpen as u8,
             ),
             first_interrupt_checkpoint: AtomicU8::new(0),
+            execution_observer,
         }
     }
 
@@ -214,6 +225,12 @@ impl PreviewDecodeInterruptState {
 
     pub(super) fn set_checkpoint(&self, checkpoint: PreviewDecodeCancellationCheckpoint) {
         self.current_checkpoint.store(checkpoint as u8, Ordering::Release);
+        self.execution_observer
+            .publish_stage(execution_stage_for_checkpoint(checkpoint));
+    }
+
+    pub(super) fn set_execution_stage(&self, stage: PreviewDecodeExecutionStage) {
+        self.execution_observer.publish_stage(stage);
     }
 
     pub(super) fn cancellation(
@@ -244,6 +261,33 @@ impl PreviewDecodeInterruptState {
             );
         }
         canceled
+    }
+}
+
+fn execution_stage_for_checkpoint(
+    checkpoint: PreviewDecodeCancellationCheckpoint,
+) -> PreviewDecodeExecutionStage {
+    match checkpoint {
+        PreviewDecodeCancellationCheckpoint::BeforeInputOpen => {
+            PreviewDecodeExecutionStage::SessionSetup
+        }
+        PreviewDecodeCancellationCheckpoint::InputOpen => PreviewDecodeExecutionStage::InputOpen,
+        PreviewDecodeCancellationCheckpoint::StreamInfo => PreviewDecodeExecutionStage::StreamInfo,
+        PreviewDecodeCancellationCheckpoint::CacheLookup => {
+            PreviewDecodeExecutionStage::CacheLookup
+        }
+        PreviewDecodeCancellationCheckpoint::Seek => PreviewDecodeExecutionStage::Seek,
+        PreviewDecodeCancellationCheckpoint::PacketRead => PreviewDecodeExecutionStage::PacketRead,
+        PreviewDecodeCancellationCheckpoint::Codec => PreviewDecodeExecutionStage::SessionSetup,
+        PreviewDecodeCancellationCheckpoint::FrameMaterialization => {
+            PreviewDecodeExecutionStage::FrameMaterialization
+        }
+        PreviewDecodeCancellationCheckpoint::ExternalProcess => {
+            PreviewDecodeExecutionStage::ExternalProcess
+        }
+        PreviewDecodeCancellationCheckpoint::OutputLease => {
+            PreviewDecodeExecutionStage::OutputLeaseWait
+        }
     }
 }
 

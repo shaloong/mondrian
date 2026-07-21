@@ -134,6 +134,17 @@ pub struct PreviewHardwareDecodeAdmissionDiagnostics {
     pub renderer_supported_source_texture_formats: u8,
 }
 
+/// Current concrete media-Adapter execution progress for the bounded Preview workers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct PreviewDecodeWorkerExecutionDiagnostics {
+    /// Progress for the single general-purpose worker on small CPU budgets.
+    pub any: Option<mondrian_media::PreviewDecodeExecutionProgress>,
+    /// Progress for the continuous Playback worker when two workers are available.
+    pub playback: Option<mondrian_media::PreviewDecodeExecutionProgress>,
+    /// Progress for the shared Interactive/Still worker when two workers are available.
+    pub non_playback: Option<mondrian_media::PreviewDecodeExecutionProgress>,
+}
+
 impl PreviewHardwareDecodeAdmissionDiagnostics {
     fn playback_native_import_gated(self) -> bool {
         self.renderer_native_import_support_known
@@ -217,6 +228,8 @@ pub struct PreviewDiagnostics {
     pub decode_cpu_budget: PreviewDecodeCpuBudget,
     /// Preview decode workers successfully started for this service.
     pub decode_worker_count: usize,
+    /// Lock-free point-in-time execution stage for every bounded decode worker.
+    pub decode_worker_execution: PreviewDecodeWorkerExecutionDiagnostics,
     /// Latest decoder-residency phase revision.
     pub decode_residency_revision: u64,
     /// Active decoder-residency family (`playback` or `interactive`).

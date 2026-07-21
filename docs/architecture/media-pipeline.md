@@ -1652,6 +1652,27 @@ source from an FFmpeg error. This keeps the unsafe callback and concurrent
 state behind one deep Module while preserving `mondrian_media::preview` as the
 stable public Interface.
 
+`mondrian_media::preview::execution_progress` separately owns concrete Adapter
+liveness evidence. One worker is the sole writer to a lock-free seqlock-style
+observer; Runtime diagnostics and Headless acceptance read a coherent fixed-size
+snapshot containing the current stage, request sequence, and publication
+sequence. The composition root creates a non-cloneable, `Send` bootstrap plus
+the read-only observer; the worker consumes that bootstrap and constructs the
+non-`Send` FFmpeg session context on its owner thread. No unsafe thread transfer
+or second stage writer is permitted. Stages distinguish input open, stream discovery, hardware-device
+attachment, codec open, seek, codec flush, packet read, codec input, codec
+output, frame materialization, output-lease wait, and session retirement. Every
+potentially blocking FFmpeg call publishes its stage immediately before entry.
+This Module deliberately owns no deadline, cancellation, recovery, or restart
+policy: the Frame Work Broker remains authoritative, and an observed stalled C
+call is evidence rather than permission to pretend the execution lease ended.
+
+Codec receive has a strict internal result contract: one frame, need-more-input
+backpressure (`EAGAIN`), end of stream, or a structured decode failure. Only the
+first two non-frame states may continue normal send/receive coordination; device,
+codec, invalid-data, and other fatal errors cannot be collapsed into “no frame”
+and leave a poisoned session eligible for reuse.
+
 Speculative prefetch decode is also bounded by a short app-level wall-clock
 budget. Current-frame decode is not canceled by this budget, and the deadline
 applies only to playback prefetch work. Scrub and still-frame requests are

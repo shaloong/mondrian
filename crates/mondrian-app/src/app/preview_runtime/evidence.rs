@@ -10,6 +10,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let decode_cancellation = self.metrics.decode_cancellation.borrow().report();
         let cancellation = decode_cancellation.all;
         let decode_residency = self.decode_residency.diagnostics();
+        let mut decode_worker_execution = PreviewDecodeWorkerExecutionDiagnostics::default();
+        for (lane, observer) in &self.decode_execution_observers {
+            let progress = Some(observer.snapshot());
+            match lane {
+                MediaPreviewWorkerLane::Any => decode_worker_execution.any = progress,
+                MediaPreviewWorkerLane::Playback => decode_worker_execution.playback = progress,
+                MediaPreviewWorkerLane::NonPlayback => {
+                    decode_worker_execution.non_playback = progress;
+                }
+            }
+        }
         let mut decode_access_mode_profiles = self.metrics.decode_access_mode_profiles.get();
         decode_access_mode_profiles.apply_cancellation(decode_cancellation);
         PreviewDiagnostics {
@@ -82,6 +93,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             media_failure_hits: self.metrics.media_failure_hits.get(),
             decode_cpu_budget: self.decode_cpu_budget,
             decode_worker_count: self.decode_worker_count,
+            decode_worker_execution,
             decode_residency_revision: decode_residency.revision,
             decode_residency_family: decode_residency.active_family.map(|family| match family {
                 PreviewDecodeResidencyFamily::Playback => "playback",

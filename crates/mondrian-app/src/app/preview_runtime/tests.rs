@@ -30,6 +30,31 @@ fn cancellation_evidence(
     collector.report()
 }
 
+#[test]
+fn runtime_diagnostics_exposes_each_bounded_worker_progress_observer() {
+    let runtime = PreviewProductionRuntime::<()>::with_worker_count(preview_decode_cpu_budget(), 2);
+    let diagnostics = runtime.diagnostics();
+
+    assert_eq!(diagnostics.decode_worker_count, 2);
+    assert!(diagnostics.decode_worker_execution.any.is_none());
+    assert_eq!(
+        diagnostics
+            .decode_worker_execution
+            .playback
+            .expect("playback worker progress")
+            .stage,
+        mondrian_media::PreviewDecodeExecutionStage::Idle
+    );
+    assert_eq!(
+        diagnostics
+            .decode_worker_execution
+            .non_playback
+            .expect("non-playback worker progress")
+            .stage,
+        mondrian_media::PreviewDecodeExecutionStage::Idle
+    );
+}
+
 use mondrian_assets::AssetLibrary;
 use mondrian_core::types::{AssetId, Rational};
 use mondrian_core::{ensure_mondrian_default_ocio_loaded, Color, ProjectColorManagement};

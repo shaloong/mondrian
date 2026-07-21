@@ -11,7 +11,7 @@ use super::native_frame::{
 use super::*;
 
 thread_local! {
-    static THREAD_PREVIEW_DECODE_CONTEXT: RefCell<PreviewDecodeSessionContext> = const {
+    static THREAD_PREVIEW_DECODE_CONTEXT: RefCell<PreviewDecodeSessionContext> = {
         RefCell::new(PreviewDecodeSessionContext::new())
     };
 }
@@ -25,19 +25,69 @@ thread_local! {
 /// thread-local context for standalone thumbnail/export callers.
 pub struct PreviewDecodeSessionContext {
     sessions: PreviewDecodeSessions,
+    execution_observer: PreviewDecodeExecutionObserver,
+}
+
+/// One-shot, thread-safe construction authority for a Preview decode context.
+///
+/// The bootstrap contains no FFmpeg state and may cross a worker-thread seam.
+/// Consuming it constructs the non-`Send` session context on its owner thread.
+pub struct PreviewDecodeSessionContextBootstrap {
+    execution_observer: PreviewDecodeExecutionObserver,
+}
+
+impl PreviewDecodeSessionContextBootstrap {
+    /// Construct the worker-owned context on the current thread.
+    pub fn build(self) -> PreviewDecodeSessionContext {
+        PreviewDecodeSessionContext::with_execution_observer(self.execution_observer)
+    }
 }
 
 impl PreviewDecodeSessionContext {
     /// Create an empty worker-local decode context.
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
+        Self::with_execution_observer(PreviewDecodeExecutionObserver::new())
+    }
+
+    /// Create a one-shot worker bootstrap without retaining its observer.
+    pub fn bootstrap() -> PreviewDecodeSessionContextBootstrap {
+        PreviewDecodeSessionContextBootstrap {
+            execution_observer: PreviewDecodeExecutionObserver::new(),
+        }
+    }
+
+    /// Create a one-shot worker bootstrap together with its read-only observer.
+    ///
+    /// The bootstrap is not cloneable and is consumed on the worker thread.
+    /// Callers may clone the observer for diagnostics, but cannot create a
+    /// second stage writer for the same evidence stream.
+    pub fn observed_bootstrap() -> (
+        PreviewDecodeSessionContextBootstrap,
+        PreviewDecodeExecutionObserver,
+    ) {
+        let observer = PreviewDecodeExecutionObserver::new();
+        (
+            PreviewDecodeSessionContextBootstrap { execution_observer: observer.clone() },
+            observer,
+        )
+    }
+
+    fn with_execution_observer(execution_observer: PreviewDecodeExecutionObserver) -> Self {
         Self {
             sessions: PreviewDecodeSessions { playback: None, interactive: None, cpu_still: None },
+            execution_observer,
         }
     }
 
     /// Release all codec sessions and their owned decode resources.
     pub fn clear(&mut self) {
+        if self.sessions.is_empty() {
+            return;
+        }
+        self.execution_observer
+            .publish_stage(PreviewDecodeExecutionStage::SessionRetire);
         self.sessions.clear();
+        self.execution_observer.finish_idle();
     }
 
     /// Whether every decoder-native output issued by this context is released.
@@ -55,7 +105,22 @@ impl PreviewDecodeSessionContext {
     /// Schedulers should call this between execution leases so codec teardown
     /// is neither attributed to nor allowed to delay cancellation of new work.
     pub fn retire_released_native_exact_session(&mut self) -> bool {
-        self.sessions.retire_released_native_exact_session()
+        let Some(session) = self.sessions.interactive.as_ref() else {
+            return true;
+        };
+        if !session.has_terminal_native_exact_output() {
+            return true;
+        }
+        if !session.native_output_released() {
+            self.execution_observer
+                .publish_stage(PreviewDecodeExecutionStage::OutputLeaseWait);
+            return false;
+        }
+        self.execution_observer
+            .publish_stage(PreviewDecodeExecutionStage::SessionRetire);
+        self.sessions.interactive = None;
+        self.execution_observer.finish_idle();
+        true
     }
 
     /// Decode one request using sessions explicitly owned by this context.
@@ -64,9 +129,11 @@ impl PreviewDecodeSessionContext {
         request: PreviewDecodeRequest<'_>,
         should_cancel: impl Fn() -> bool + Send + Sync + 'static,
     ) -> Result<PreviewDecodeOutcome> {
+        let _execution = self.execution_observer.begin_request();
         let should_cancel: PreviewDecodeCancelProbe = Arc::new(should_cancel);
         decode_preview_frame_outcome_in_sessions(
             &mut self.sessions,
+            &self.execution_observer,
             request.path,
             request.source_time,
             request.max_width,
@@ -110,6 +177,10 @@ struct PreviewDecodeSessions {
 }
 
 impl PreviewDecodeSessions {
+    fn is_empty(&self) -> bool {
+        self.playback.is_none() && self.interactive.is_none() && self.cpu_still.is_none()
+    }
+
     fn available_slot(
         &self,
         access_mode: PreviewDecodeAccessMode,
@@ -148,20 +219,6 @@ impl PreviewDecodeSessions {
         [&self.playback, &self.interactive, &self.cpu_still].into_iter().all(|session| {
             session.as_ref().is_none_or(PreviewDecodeSession::native_output_released)
         })
-    }
-
-    fn retire_released_native_exact_session(&mut self) -> bool {
-        let Some(session) = self.interactive.as_ref() else {
-            return true;
-        };
-        if !session.has_terminal_native_exact_output() {
-            return true;
-        }
-        if !session.native_output_released() {
-            return false;
-        }
-        self.interactive = None;
-        true
     }
 
     fn clear(&mut self) {
@@ -635,11 +692,13 @@ impl PreviewDecodeSession {
         };
 
         let mut hardware_decode_context_state = None;
+        interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::SessionSetup);
         let mut context =
             preview_decode_context_from_parameters(parameters.clone(), ffmpeg_threading, path)?;
         if hardware_decode_plan.should_configure_hardware_decoder(access_mode)
             && backend != PreviewDecodeBackend::Software
         {
+            interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::HardwareDevice);
             match configure_preview_hardware_decode_context(&mut context, &hardware_decode_plan) {
                 Ok((state, device_context)) => {
                     if hardware_decode_plan.allows_cpu_transfer_fallback() {
@@ -665,6 +724,7 @@ impl PreviewDecodeSession {
             }
         }
 
+        interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::CodecOpen);
         let decoder = match context.decoder().video() {
             Ok(decoder) => decoder,
             Err(err) if hardware_decode_context_state.is_some() => {
@@ -696,6 +756,7 @@ impl PreviewDecodeSession {
                 });
             }
         };
+        interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::SessionSetup);
         let active_threading = decoder.threading();
         let threading_kind = PreviewDecodeThreadingKind::from_ffmpeg(active_threading.kind);
         let threading_count = active_threading.count;
@@ -803,6 +864,8 @@ impl PreviewDecodeSession {
     fn recover_after_cancellation(&mut self) {
         // SAFETY: this worker exclusively owns the open decoder and calls flush
         // only after the interrupted decode operation has returned.
+        self.interrupt_state
+            .set_execution_stage(PreviewDecodeExecutionStage::CodecFlush);
         unsafe {
             ffmpeg::ffi::avcodec_flush_buffers(self.decoder.as_mut_ptr());
         }
@@ -1181,6 +1244,8 @@ impl PreviewDecodeSession {
         };
 
         if ret >= 0 {
+            self.interrupt_state
+                .set_execution_stage(PreviewDecodeExecutionStage::CodecFlush);
             unsafe {
                 ffmpeg::ffi::avcodec_flush_buffers(self.decoder.as_mut_ptr());
             }
@@ -1293,7 +1358,9 @@ impl PreviewDecodeSession {
         // Consume that output before submitting another packet: FFmpeg requires
         // callers to receive frames after AVERROR(EAGAIN), and the retained
         // frames are also the best candidates for the next playback position.
-        while let Some(decoded) = receive_decoded_video_frame(&mut self.decoder)? {
+        while let DecodedVideoReceive::Frame(decoded) =
+            receive_decoded_video_frame(&mut self.decoder, &interrupt_state, self.path.as_path())?
+        {
             if should_cancel() {
                 return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
             }
@@ -1435,13 +1502,18 @@ impl PreviewDecodeSession {
                 non_reference_discard_until_pts = None;
             }
 
+            interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::CodecSendInput);
             self.decoder.send_packet(&packet).map_err(|e| MondrianError::DecodeFailed {
                 asset_id: self.path.display().to_string(),
                 reason: e.to_string(),
             })?;
             video_packets_submitted = video_packets_submitted.saturating_add(1);
 
-            while let Some(decoded) = receive_decoded_video_frame(&mut self.decoder)? {
+            while let DecodedVideoReceive::Frame(decoded) = receive_decoded_video_frame(
+                &mut self.decoder,
+                &interrupt_state,
+                self.path.as_path(),
+            )? {
                 if should_cancel() {
                     return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
                 }
@@ -1574,12 +1646,17 @@ impl PreviewDecodeSession {
             if should_cancel() {
                 return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
             }
+            interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::CodecSendInput);
             self.decoder.send_eof().map_err(|e| MondrianError::DecodeFailed {
                 asset_id: self.path.display().to_string(),
                 reason: e.to_string(),
             })?;
 
-            while let Some(decoded) = receive_decoded_video_frame(&mut self.decoder)? {
+            while let DecodedVideoReceive::Frame(decoded) = receive_decoded_video_frame(
+                &mut self.decoder,
+                &interrupt_state,
+                self.path.as_path(),
+            )? {
                 if should_cancel() {
                     return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
                 }
@@ -1750,8 +1827,12 @@ pub(super) fn decode_preview_frame_outcome(
     should_cancel: PreviewDecodeCancelProbe,
 ) -> Result<PreviewDecodeOutcome> {
     THREAD_PREVIEW_DECODE_CONTEXT.with(|context| {
+        let mut context = context.borrow_mut();
+        let execution_observer = context.execution_observer.clone();
+        let _execution = execution_observer.begin_request();
         decode_preview_frame_outcome_in_sessions(
-            &mut context.borrow_mut().sessions,
+            &mut context.sessions,
+            &execution_observer,
             path,
             source_time,
             max_width,
@@ -1770,6 +1851,7 @@ pub(super) fn decode_preview_frame_outcome(
 #[allow(clippy::too_many_arguments)]
 fn decode_preview_frame_outcome_in_sessions(
     sessions: &mut PreviewDecodeSessions,
+    execution_observer: &PreviewDecodeExecutionObserver,
     path: &Path,
     source_time: TimelineTime,
     max_width: Option<u32>,
@@ -1795,6 +1877,7 @@ fn decode_preview_frame_outcome_in_sessions(
         if let Some(slot) = sessions.available_slot(access_mode, hardware_decode_request) {
             break slot;
         }
+        execution_observer.publish_stage(PreviewDecodeExecutionStage::OutputLeaseWait);
         if should_cancel() {
             return Ok(PreviewDecodeOutcome::Canceled(
                 PreviewDecodeCancellation::cooperative(
@@ -1824,7 +1907,9 @@ fn decode_preview_frame_outcome_in_sessions(
             // released. Retire the old codec/DPB/frames context before opening
             // an exact boundary or returning from one to scrub. The immutable
             // hardware device and cached seek index remain process-shared.
+            execution_observer.publish_stage(PreviewDecodeExecutionStage::SessionRetire);
             *slot = None;
+            execution_observer.publish_stage(PreviewDecodeExecutionStage::SessionSetup);
         }
 
         if should_cancel() {
@@ -1854,9 +1939,15 @@ fn decode_preview_frame_outcome_in_sessions(
             // A changed source or decode contract cannot reuse this decoder.
             // Release its DPB/surface pool before opening the replacement so
             // incompatible hardware pools never overlap.
-            *slot = None;
+            if slot.is_some() {
+                execution_observer.publish_stage(PreviewDecodeExecutionStage::SessionRetire);
+                *slot = None;
+            }
+            execution_observer.publish_stage(PreviewDecodeExecutionStage::SessionSetup);
             let open_started_at = Instant::now();
-            let interrupt_state = Arc::new(PreviewDecodeInterruptState::new());
+            let interrupt_state = Arc::new(PreviewDecodeInterruptState::with_execution_observer(
+                execution_observer.clone(),
+            ));
             let _interrupt_guard = interrupt_state.install(Arc::clone(&should_cancel));
             let opened = PreviewDecodeSession::open(
                 path,
@@ -1958,12 +2049,23 @@ fn decode_preview_frame_outcome_in_sessions(
             }
         }
 
-        let outcome = session.decode_at(
+        let outcome = match session.decode_at(
             source_time,
             access_mode,
             adaptive_hints,
             should_cancel.as_ref(),
-        )?;
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // A failed send/receive/materialization contract cannot leave
+                // mutable demux, codec, DPB, or device state eligible for the
+                // next request. The immutable shared device cache is outside
+                // this slot and remains independently reusable.
+                execution_observer.publish_stage(PreviewDecodeExecutionStage::SessionRetire);
+                *slot = None;
+                return Err(error);
+            }
+        };
         match outcome {
             PreviewDecodeOutcome::Frame(frame) => Ok(PreviewDecodeOutcome::Frame(
                 frame

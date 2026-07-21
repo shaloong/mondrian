@@ -16,7 +16,8 @@ use mondrian_media::{
     decode_preview_frame_cancellable, HwAccelDeviceSelector, MediaFileFingerprint,
     PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeCancellation,
     PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodeRequest,
-    PreviewDecodeSessionContext, PreviewHardwareDecodeRequest, PreviewSourceColorContract,
+    PreviewDecodeSessionContext, PreviewDecodeSessionContextBootstrap,
+    PreviewHardwareDecodeRequest, PreviewSourceColorContract,
 };
 use mondrian_playback::{FrameDemandIdentity, FrameExecutionId};
 use mondrian_renderer::{
@@ -100,11 +101,12 @@ pub(crate) fn media_preview_worker(
     scheduler: MediaPreviewScheduler,
     shutdown: Arc<PreviewShutdownSignal>,
     residency: Arc<PreviewDecodeResidencyCoordinator>,
+    decode_context_bootstrap: PreviewDecodeSessionContextBootstrap,
 ) {
     // Codec and hardware-surface residency is explicitly worker-owned. The
     // worker can now release it at lifecycle boundaries without reaching
     // through an implicit media-layer thread-local cache.
-    let mut decode_context = PreviewDecodeSessionContext::new();
+    let mut decode_context = decode_context_bootstrap.build();
     let mut residency_revision = 0;
     loop {
         if let Some(directive) = residency.worker_directive(lane, residency_revision) {

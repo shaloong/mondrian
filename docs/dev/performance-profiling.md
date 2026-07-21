@@ -286,6 +286,19 @@ cross-region warm/exact seek probes after continuous decode. This diagnostic
 does not replace cadence, whole-process memory, or reference-machine gates; it
 only separates accumulated decode/surface state from real-time scheduling.
 
+Every production Preview diagnostic snapshot now contains
+`decode_worker_execution` for the bounded `any`, `playback`, and `non_playback`
+workers. `stage` names the concrete media operation currently entered;
+`request_sequence` proves which request generation the observer has admitted,
+and `progress_sequence` changes on every stage publication, including repeated
+polls. When a timeout leaves a Broker execution lease in flight, capture this
+snapshot before terminating the process. A stable `codec_send_input`,
+`codec_receive_frame`, `codec_open`, `hardware_device`, or `session_retire`
+stage identifies the blocking call family; `output_lease_wait` instead means
+the worker is cooperatively waiting for App/renderer ownership to retire. These
+values are evidence, not a watchdog: do not mark the Broker lease complete or
+restart a codec merely because the stage stopped changing.
+
 Preview media perf artifacts also include `preview_render_report`, which covers
 post-decode viewer work: sequence/media resolution, final-frame cache lookup,
 working-frame preparation, CPU timeline composition, CPU output/color boundary,

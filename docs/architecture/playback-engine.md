@@ -812,7 +812,12 @@ Playback Evidence is event-derived and versioned. Minimum events:
 Reports must include p50/p95/p99 queue/decode/render/delivery latency, dropped
 and stale frames, consecutive pressure, effective preview scale, Clock Master
 residency, handoff phase error, audio underruns, A/V drift, cache budgets, and
-reason-code counts. Logging alone is not evidence.
+reason-code counts. Preview reports additionally include the fixed Playback and
+NonPlayback worker execution-progress snapshots so an outstanding Broker lease
+can be attributed to the exact media Adapter call without reading UI state or
+parsing logs. A progress snapshot is diagnostic evidence only: quiescence still
+requires the Broker lease to return and all native-output leases to retire.
+Logging alone is not evidence.
 
 `PlaybackEvidenceCollector` is the shared bounded Interface for production UI
 and headless/perf Adapters. Schema v2 retains at most 4,096 detailed tail events
