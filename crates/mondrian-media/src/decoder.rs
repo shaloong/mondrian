@@ -6,8 +6,8 @@
 
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::ptr;
-use std::sync::{Mutex, OnceLock};
+use std::ptr::{self, NonNull};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ffmpeg_next as ffmpeg;
 
@@ -70,6 +70,8 @@ impl HwAccelDeviceSelector {
 
 type HwAccelDeviceProbeKey = (HwAccelBackend, Option<HwAccelDeviceSelector>);
 type HwAccelDeviceProbeCache = Mutex<HashMap<HwAccelDeviceProbeKey, HwAccelDeviceContextProbe>>;
+type HwAccelDeviceContextCache =
+    Mutex<HashMap<HwAccelDeviceProbeKey, Arc<SharedHwAccelDeviceContext>>>;
 
 /// Residency of frames produced by the media decode boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -454,20 +456,25 @@ impl HwAccelDeviceContextProbe {
     }
 }
 
-/// Owned FFmpeg hardware device context for one decode session.
+/// Session lease on one process-shared FFmpeg hardware device context.
 ///
-/// This wraps an `AVHWDeviceContext` reference. Cloning/sharing across sessions
-/// should be introduced deliberately through a small cache; callers should not
-/// pass raw FFmpeg pointers across crate boundaries.
+/// The device is shared only for the same backend and renderer-selected
+/// adapter. Codec contexts, DPB state, hardware frame pools, and decoded
+/// surfaces remain session-owned.
 pub(crate) struct HwAccelDeviceContext {
+    owner: Arc<SharedHwAccelDeviceContext>,
+}
+
+/// Immutable owner retained by the bounded process device cache.
+struct SharedHwAccelDeviceContext {
     backend: HwAccelBackend,
-    ptr: *mut ffmpeg::ffi::AVBufferRef,
+    ptr: NonNull<ffmpeg::ffi::AVBufferRef>,
 }
 
 impl HwAccelDeviceContext {
     /// Backend used to create this device context.
     pub(crate) fn backend(&self) -> HwAccelBackend {
-        self.backend
+        self.owner.backend
     }
 
     /// Attach a ref-counted hardware device context reference to an unopened
@@ -476,11 +483,11 @@ impl HwAccelDeviceContext {
         &self,
         context: &mut ffmpeg::codec::context::Context,
     ) -> std::result::Result<(), String> {
-        let device_ref = unsafe { ffmpeg::ffi::av_buffer_ref(self.ptr) };
+        let device_ref = unsafe { ffmpeg::ffi::av_buffer_ref(self.owner.ptr.as_ptr()) };
         if device_ref.is_null() {
             return Err(format!(
                 "FFmpeg could not retain {} hardware device context",
-                self.backend.as_str()
+                self.owner.backend.as_str()
             ));
         }
         unsafe {
@@ -488,12 +495,28 @@ impl HwAccelDeviceContext {
         }
         Ok(())
     }
+
+    #[cfg(test)]
+    fn shares_device_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.owner, &other.owner)
+    }
 }
 
-impl Drop for HwAccelDeviceContext {
+// SAFETY: FFmpeg documents AVBuffer reference/unreference as thread-safe. The
+// AVHWDeviceContext is immutable after initialization; Mondrian exposes no raw
+// access or mutation, and each codec receives its own AVBufferRef. Backend
+// synchronization remains FFmpeg's responsibility through the initialized
+// device context.
+unsafe impl Send for SharedHwAccelDeviceContext {}
+// SAFETY: See the `Send` justification above. Shared access only creates or
+// releases AVBuffer references and never mutates the initialized context.
+unsafe impl Sync for SharedHwAccelDeviceContext {}
+
+impl Drop for SharedHwAccelDeviceContext {
     fn drop(&mut self) {
+        let mut ptr = self.ptr.as_ptr();
         unsafe {
-            ffmpeg::ffi::av_buffer_unref(&mut self.ptr);
+            ffmpeg::ffi::av_buffer_unref(&mut ptr);
         }
     }
 }
@@ -760,10 +783,19 @@ impl HwAccelBackend {
         }
     }
 
-    pub(crate) fn create_ffmpeg_device_context(
+    pub(crate) fn shared_ffmpeg_device_context(
         self,
         selector: Option<HwAccelDeviceSelector>,
     ) -> std::result::Result<HwAccelDeviceContext, HwAccelDeviceContextProbe> {
+        if let Some(selector) = selector.filter(|selector| !selector.selects_backend(self)) {
+            return Err(HwAccelDeviceContextProbe::unavailable(
+                self,
+                format!(
+                    "hardware device selector {selector:?} does not select {}",
+                    self.as_str()
+                ),
+            ));
+        }
         let Some(device_type) = self.to_ffmpeg_device_type() else {
             return Err(HwAccelDeviceContextProbe::unavailable(
                 self,
@@ -788,6 +820,16 @@ impl HwAccelBackend {
                     self.as_str()
                 ),
             });
+        }
+
+        static DEVICES: OnceLock<HwAccelDeviceContextCache> = OnceLock::new();
+        let devices = DEVICES.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut devices = match devices.lock() {
+            Ok(devices) => devices,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(owner) = devices.get(&(self, selector)) {
+            return Ok(HwAccelDeviceContext { owner: Arc::clone(owner) });
         }
 
         let mut device_context: *mut ffmpeg::ffi::AVBufferRef = ptr::null_mut();
@@ -816,7 +858,7 @@ impl HwAccelBackend {
                 ),
             });
         }
-        if device_context.is_null() {
+        let Some(device_context) = NonNull::new(device_context) else {
             return Err(HwAccelDeviceContextProbe {
                 backend: self,
                 backend_maps_to_ffmpeg_device: true,
@@ -829,9 +871,11 @@ impl HwAccelBackend {
                     self.as_str()
                 ),
             });
-        }
+        };
 
-        Ok(HwAccelDeviceContext { backend: self, ptr: device_context })
+        let owner = Arc::new(SharedHwAccelDeviceContext { backend: self, ptr: device_context });
+        devices.insert((self, selector), Arc::clone(&owner));
+        Ok(HwAccelDeviceContext { owner })
     }
 
     /// Preferred hardware backend for the current platform before runtime
@@ -1232,6 +1276,31 @@ mod tests {
         } else if probe.device_create_attempted {
             assert!(probe.device_create_error_code.is_some());
         }
+    }
+
+    #[test]
+    fn ffmpeg_hw_device_context_cache_reuses_backend_and_adapter_device() {
+        let backend = HwAccelBackend::platform_candidate().unwrap_or(HwAccelBackend::D3D11VA);
+        let probe = backend.probe_ffmpeg_device_context();
+        if !probe.device_context_created {
+            return;
+        }
+
+        let first = backend.shared_ffmpeg_device_context(None).expect("first device lease");
+        let second = backend.shared_ffmpeg_device_context(None).expect("second device lease");
+
+        assert!(first.shares_device_with(&second));
+    }
+
+    #[test]
+    fn mismatched_hardware_device_selector_is_rejected_before_driver_creation() {
+        let error = HwAccelBackend::D3D12VA
+            .shared_ffmpeg_device_context(Some(HwAccelDeviceSelector::D3D11VaAdapterIndex(0)))
+            .err()
+            .expect("mismatched selector must fail");
+
+        assert!(!error.device_create_attempted);
+        assert!(error.reason.contains("does not select D3D12VA"));
     }
 
     #[test]

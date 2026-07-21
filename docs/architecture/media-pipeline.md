@@ -1136,10 +1136,21 @@ media may run the cached FFmpeg hardware device-context probe. That probe calls
 and records whether device creation was attempted, succeeded, or returned an
 FFmpeg error code. It must be cached per backend for the process lifetime so
 session planning does not repeatedly initialize GPU drivers. Playback sessions
-may attach a fresh retained `AVHWDeviceContext` to an unopened FFmpeg decoder
-and install a get-format callback that accepts only the advertised hardware
-pixel format. `PreferHardwareDecode` always permits materializing hardware
-frames through `av_hwframe_transfer_data` into CPU frames before RGBA scaling.
+acquire a lease from a process device cache keyed by the exact hardware
+backend and renderer-selected adapter. The cache owns one initialized,
+immutable `AVHWDeviceContext` per key; every unopened codec receives its own
+thread-safe `AVBufferRef` to that device before `avcodec_open2`. Codec context,
+DPB, decoder-created `AVHWFramesContext`, frame pool, and decoded surfaces are
+never cached at device scope: they remain session-owned and must retire at the
+Playback/Interactive family barrier. Sharing the device removes driver device
+teardown/recreation from a transport discontinuity without allowing two native
+surface pools or sharing codec state. A future device-loss recovery path must
+rotate/remove the failed cache key and create a new immutable device; it must
+not mutate an initialized context or reuse one across adapter selectors. The
+session also installs a get-format callback that accepts only the advertised
+hardware pixel format. `PreferHardwareDecode` always permits materializing
+hardware frames through `av_hwframe_transfer_data` into CPU frames before RGBA
+scaling.
 `PreferGpuResident` permits the same diagnosed fallback if native
 materialization fails. `RequireGpuResident` configures the hardware decoder but
 does not permit CPU transfer or software-frame fallback. A failed device-context
@@ -1586,8 +1597,13 @@ opposite-family worker confirms it has destroyed its thread-owned
 transition, and final Viewer texture/raster ownership is unaffected. Workers
 never destroy another worker's FFmpeg context; new work cannot race the
 retirement acknowledgement; a revision-mismatched acknowledgement is ignored.
+This destroys the retired family's codec, DPB, `AVHWFramesContext`, and native
+surface pool, but deliberately does not tear down the immutable FFmpeg hardware
+device itself. Media gives each new codec its own reference to the process
+device keyed by backend/adapter; device identity is not decoder-session state.
 This bounds the production path to the active Playback or Interactive native
-surface pool without forcing a cold-open between scrub and settled exact seeks.
+surface pool, avoids driver device recreation at the discontinuity, and still
+does not share seek/codec state between families or across media.
 The experimental external-process CPU RGBA path terminates and reaps only its
 per-request child when the probe fires; the compatible in-process session may
 remain. Stale work is never cached or marked as a failed source.

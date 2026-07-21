@@ -876,6 +876,15 @@ two ownership releases let
 the driver surface pool disappear without blanking the paused Viewer. Any
 active or unresolved work makes the release fail closed.
 
+The worker/session retirement boundary owns codec, DPB, hardware-frames context,
+and native surface-pool destruction; it does not own the physical decoder
+device. `mondrian-media` retains one immutable FFmpeg `AVHWDeviceContext` per
+backend/renderer-adapter key and gives every unopened codec an independent
+`AVBufferRef`. This avoids a playback-to-paused-exact race with driver device
+teardown while preserving mutually exclusive Playback/Interactive frame-pool
+residency. Device loss must later invalidate that exact cache key and create a
+new device generation; it must never mutate the retained device in place.
+
 GPU output publication and Broker lease retirement are separate observable
 events. Publication may therefore attempt this release while the worker lease
 is still completing. Before a stopped Preview binds a different generation,

@@ -408,7 +408,7 @@ fn configure_preview_hardware_decode_context(
             "FFmpeg codec config did not expose a usable hardware pixel format".to_owned()
         })?;
     let device_context = backend
-        .create_ffmpeg_device_context(plan.device_selector)
+        .shared_ffmpeg_device_context(plan.device_selector)
         .map_err(|probe| probe.reason)?;
     device_context.attach_to_codec_context(context)?;
 
