@@ -16,7 +16,7 @@ use mondrian_media::{
     decode_preview_frame_cancellable, HwAccelDeviceSelector, MediaFileFingerprint,
     PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeCancellation,
     PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodeRequest,
-    PreviewHardwareDecodeRequest, PreviewSourceColorContract,
+    PreviewDecodeSessionContext, PreviewHardwareDecodeRequest, PreviewSourceColorContract,
 };
 use mondrian_playback::{FrameDemandIdentity, FrameExecutionId};
 use mondrian_renderer::{
@@ -97,13 +97,17 @@ pub(crate) fn media_preview_worker(
     scheduler: MediaPreviewScheduler,
     shutdown: Arc<PreviewShutdownSignal>,
 ) {
+    // Codec and hardware-surface residency is explicitly worker-owned. The
+    // worker can now release it at lifecycle boundaries without reaching
+    // through an implicit media-layer thread-local cache.
+    let mut decode_context = PreviewDecodeSessionContext::new();
     loop {
         let outcome = match jobs
             .recv_for_worker_outcome_timeout(lane, MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT)
         {
             MediaPreviewJobQueueWait::Work(outcome) => outcome,
             MediaPreviewJobQueueWait::Idle => {
-                mondrian_media::clear_thread_local_preview_decode_session();
+                decode_context.clear();
                 continue;
             }
             MediaPreviewJobQueueWait::Closed => break,
@@ -190,40 +194,43 @@ pub(crate) fn media_preview_worker(
         let decode_started_at = Instant::now();
         let cancel_observation = Arc::new(Mutex::new(MediaPreviewCancelObservation::default()));
         let worker_cancel_observation = Arc::clone(&cancel_observation);
-        let mut result = decode_media_preview(job, queue_wait_us, move || {
-            let scheduler_evidence = cancel_scheduler.execution_cancellation_evidence(execution_id);
-            let scheduler_cancellation = scheduler_evidence.map(|evidence| evidence.cancellation);
-            let reason = media_preview_cancel_reason_at_checkpoint(
-                scheduler_cancellation,
-                cancel_priority,
-                cancel_access_mode,
-                decode_started_at.elapsed(),
-                cancel_deadline_at,
-            );
-            if let Some(reason) = reason {
-                let observed_at = Instant::now();
-                let mut observation =
-                    lock_media_preview_cancel_observation(&worker_cancel_observation);
-                if observation.observed_elapsed_us.is_none() {
-                    observation.observed_elapsed_us = Some(
-                        scheduler_evidence
-                            .map(|evidence| app_duration_us(evidence.execution_age))
-                            .unwrap_or_else(|| {
-                                app_duration_us(observed_at.duration_since(decode_started_at))
-                            }),
-                    );
-                    observation.request_to_observed_us =
-                        media_preview_cancel_request_to_observed_us(
-                            reason,
-                            scheduler_cancellation,
-                            decode_started_at,
-                            observed_at,
+        let mut result =
+            decode_media_preview_with_context(job, queue_wait_us, &mut decode_context, move || {
+                let scheduler_evidence =
+                    cancel_scheduler.execution_cancellation_evidence(execution_id);
+                let scheduler_cancellation =
+                    scheduler_evidence.map(|evidence| evidence.cancellation);
+                let reason = media_preview_cancel_reason_at_checkpoint(
+                    scheduler_cancellation,
+                    cancel_priority,
+                    cancel_access_mode,
+                    decode_started_at.elapsed(),
+                    cancel_deadline_at,
+                );
+                if let Some(reason) = reason {
+                    let observed_at = Instant::now();
+                    let mut observation =
+                        lock_media_preview_cancel_observation(&worker_cancel_observation);
+                    if observation.observed_elapsed_us.is_none() {
+                        observation.observed_elapsed_us = Some(
+                            scheduler_evidence
+                                .map(|evidence| app_duration_us(evidence.execution_age))
+                                .unwrap_or_else(|| {
+                                    app_duration_us(observed_at.duration_since(decode_started_at))
+                                }),
                         );
+                        observation.request_to_observed_us =
+                            media_preview_cancel_request_to_observed_us(
+                                reason,
+                                scheduler_cancellation,
+                                decode_started_at,
+                                observed_at,
+                            );
+                    }
+                    observation.reason = Some(reason);
                 }
-                observation.reason = Some(reason);
-            }
-            reason.is_some()
-        });
+                reason.is_some()
+            });
         let observation = *lock_media_preview_cancel_observation(&cancel_observation);
         if result.canceled && result.cancel_reason.is_none() {
             result.cancel_reason =
@@ -244,7 +251,7 @@ pub(crate) fn media_preview_worker(
             break;
         }
     }
-    mondrian_media::clear_thread_local_preview_decode_session();
+    decode_context.clear();
 }
 
 fn send_media_preview_result(
@@ -314,9 +321,28 @@ pub(crate) fn media_preview_canceled_result(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn decode_media_preview(
     job: MediaPreviewJob,
     queue_wait_us: u64,
+    should_cancel: impl Fn() -> bool + Send + Sync + 'static,
+) -> MediaPreviewResult {
+    decode_media_preview_inner(job, queue_wait_us, None, should_cancel)
+}
+
+fn decode_media_preview_with_context(
+    job: MediaPreviewJob,
+    queue_wait_us: u64,
+    decode_context: &mut PreviewDecodeSessionContext,
+    should_cancel: impl Fn() -> bool + Send + Sync + 'static,
+) -> MediaPreviewResult {
+    decode_media_preview_inner(job, queue_wait_us, Some(decode_context), should_cancel)
+}
+
+fn decode_media_preview_inner(
+    job: MediaPreviewJob,
+    queue_wait_us: u64,
+    decode_context: Option<&mut PreviewDecodeSessionContext>,
     should_cancel: impl Fn() -> bool + Send + Sync + 'static,
 ) -> MediaPreviewResult {
     let decode_started_at = Instant::now();
@@ -344,6 +370,7 @@ pub(crate) fn decode_media_preview(
         hardware_decode_request,
         job.hardware_decode_device_selector,
         PreviewSourceColorContract::new(job.key.input_color_space, job.key.input_video_range),
+        decode_context,
         should_cancel,
     );
     let decode_elapsed_us = app_duration_us(decode_started_at.elapsed());
@@ -638,6 +665,7 @@ fn decode_media_preview_for_access_mode(
     hardware_decode_request: PreviewHardwareDecodeRequest,
     hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
     source_color: PreviewSourceColorContract,
+    decode_context: Option<&mut PreviewDecodeSessionContext>,
     should_cancel: impl Fn() -> bool + Send + Sync + 'static,
 ) -> mondrian_core::Result<PreviewDecodeOutcome> {
     let mut request = PreviewDecodeRequest::new(path, source_time, access_mode, source_color)
@@ -648,7 +676,10 @@ fn decode_media_preview_for_access_mode(
     if let Some(fingerprint) = fingerprint {
         request = request.with_fingerprint(fingerprint);
     }
-    decode_preview_frame_cancellable(request, should_cancel)
+    match decode_context {
+        Some(context) => context.decode_cancellable(request, should_cancel),
+        None => decode_preview_frame_cancellable(request, should_cancel),
+    }
 }
 
 fn app_duration_us(duration: Duration) -> u64 {

@@ -922,7 +922,7 @@ fn push_preview_decode_root_causes_and_actions(
             PreviewDecodePerformanceArea::AccessMode,
             "preview_decode_access_mode_over_budget",
             format!(
-                "access_mode={} frames={} max_duration_us={} p95_upper_bound_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} max_frame_queue_wait_us={} max_frame_bottleneck={:?} seeked_frames={} keyframe_seek_strategy_frames={} bounded_any_seek_strategy_frames={} forward_reuse_frame_window_max={} forward_decode_budget_frames_max={} any_seek_window_ms_max={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} seek_index_available_frames={} seek_index_used_frames={} seek_index_keyframes_max={} seek_index_observed_packets_max={} seek_index_probe_backed_frames={} seek_index_session_observed_frames={} hardware_decode_active_frames={} zero_copy_active_frames={} gpu_texture_resident_frames={} decoded_nv12_surface_frames={} decoded_p010_surface_frames={} hardware_decode_texture_residency_blocker_frames={} hardware_decode_auto_requested_frames={} hardware_decode_prefer_hardware_requested_frames={} hardware_decode_prefer_gpu_requested_frames={} hardware_decode_require_gpu_requested_frames={} hardware_decode_cpu_not_requested_frames={} hardware_decode_cpu_unavailable_frames={} hardware_decode_backend_unavailable_frames={} hardware_decode_codec_unsupported_frames={} hardware_decode_device_context_attempted_frames={} hardware_decode_device_context_created_frames={} hardware_decode_device_context_unavailable_frames={} hardware_decode_cpu_transfer_frames={} hardware_decode_cpu_transfer_configured_frames={} hardware_decode_cpu_transfer_observed_frames={} hardware_decode_cpu_transfer_setup_failed_frames={} hardware_decode_cpu_transfer_decoder_open_failed_frames={} hardware_decode_cpu_transfer_awaiting_frame_frames={} hardware_decode_backend_boundary_frames={} hardware_decode_gpu_resident_native_frames={} hardware_decode_candidate_d3d12va_frames={} hardware_decode_candidate_d3d11va_frames={} hardware_decode_candidate_dxva2_frames={} hardware_decode_candidate_videotoolbox_frames={} hardware_decode_candidate_vaapi_frames={} hardware_decode_candidate_vdpau_frames={} hardware_decode_candidate_cuda_frames={} hardware_decode_adapter_unavailable_frames={} decoded_frame_count={} max_decoded_frame_count={} session_open_us={} cache_lookup_us={} seek_us={} packet_decode_us={} hardware_transfer_us={} swscale_us={} rgba_copy_us={} external_process_us={} cache_hit_frames={} playback_session_ring_hit_frames={} latency_buckets={:?}",
+                "access_mode={} frames={} max_duration_us={} p95_upper_bound_us={} total_duration_us={} queue_wait_max_us={} queue_wait_total_us={} max_frame_queue_wait_us={} max_frame_bottleneck={:?} seeked_frames={} keyframe_seek_strategy_frames={} bounded_any_seek_strategy_frames={} forward_reuse_frame_window_max={} forward_decode_budget_frames_max={} any_seek_window_ms_max={} session_reused_frames={} session_opened_frames={} forward_reused_frames={} seek_index_available_frames={} seek_index_used_frames={} seek_index_keyframes_max={} seek_index_observed_packets_max={} seek_index_probe_backed_frames={} seek_index_session_observed_frames={} hardware_decode_active_frames={} zero_copy_active_frames={} gpu_texture_resident_frames={} decoded_nv12_surface_frames={} decoded_p010_surface_frames={} hardware_decode_texture_residency_blocker_frames={} hardware_decode_auto_requested_frames={} hardware_decode_prefer_hardware_requested_frames={} hardware_decode_prefer_gpu_requested_frames={} hardware_decode_require_gpu_requested_frames={} hardware_decode_cpu_not_requested_frames={} hardware_decode_cpu_unavailable_frames={} hardware_decode_backend_unavailable_frames={} hardware_decode_codec_unsupported_frames={} hardware_decode_device_context_attempted_frames={} hardware_decode_device_context_created_frames={} hardware_decode_device_context_unavailable_frames={} hardware_decode_cpu_transfer_frames={} hardware_decode_cpu_transfer_configured_frames={} hardware_decode_cpu_transfer_observed_frames={} hardware_decode_cpu_transfer_setup_failed_frames={} hardware_decode_cpu_transfer_decoder_open_failed_frames={} hardware_decode_cpu_transfer_awaiting_frame_frames={} hardware_decode_backend_boundary_frames={} hardware_decode_gpu_resident_native_frames={} hardware_decode_candidate_d3d12va_frames={} hardware_decode_candidate_d3d11va_frames={} hardware_decode_candidate_dxva2_frames={} hardware_decode_candidate_videotoolbox_frames={} hardware_decode_candidate_vaapi_frames={} hardware_decode_candidate_vdpau_frames={} hardware_decode_candidate_cuda_frames={} hardware_decode_adapter_unavailable_frames={} decoded_frame_count={} max_decoded_frame_count={} session_open_us={} output_lease_wait_us={} cache_lookup_us={} seek_us={} packet_decode_us={} hardware_transfer_us={} swscale_us={} rgba_copy_us={} external_process_us={} cache_hit_frames={} playback_session_ring_hit_frames={} latency_buckets={:?}",
                 access_mode.as_str(),
                 profile.frames,
                 profile.max_duration_us,
@@ -983,6 +983,7 @@ fn push_preview_decode_root_causes_and_actions(
                 profile.decoded_frame_count,
                 profile.max_decoded_frame_count,
                 profile.max_frame_stage_durations.session_open_us,
+                profile.max_frame_stage_durations.output_lease_wait_us,
                 profile.max_frame_stage_durations.cache_lookup_us,
                 profile.max_frame_stage_durations.seek_us,
                 profile.max_frame_stage_durations.packet_decode_us,
@@ -1507,6 +1508,19 @@ fn push_preview_decode_root_causes_and_actions(
             ),
             "preserve_decode_session_locality",
             "Keep decode sessions alive across adjacent playback requests and avoid path/size churn.",
+            PreviewDecodePerformanceSeverity::Warn,
+        ),
+        PreviewDecodeBottleneck::OutputLease => push_decode_root_cause_with_action(
+            root_causes,
+            actions,
+            PreviewDecodePerformanceArea::Scheduling,
+            "preview_decode_output_lease_bound",
+            format!(
+                "output_lease_wait_us={}",
+                summary.max_frame_stage_durations.output_lease_wait_us
+            ),
+            "retire_native_output_leases",
+            "Pump Preview completion and renderer copy-fence retirement so bounded decoder slots can be reused without entering the codec while their prior native outputs remain owned.",
             PreviewDecodePerformanceSeverity::Warn,
         ),
         PreviewDecodeBottleneck::CacheLookup | PreviewDecodeBottleneck::None => {}
@@ -2156,6 +2170,10 @@ pub(in super::super) fn classify_preview_decode_bottleneck(
             durations.session_open_us,
         ),
         (
+            PreviewDecodeBottleneck::OutputLease,
+            durations.output_lease_wait_us,
+        ),
+        (
             PreviewDecodeBottleneck::CacheLookup,
             durations.cache_lookup_us,
         ),
@@ -2219,4 +2237,24 @@ pub(super) fn classify_preview_render_bottleneck(
         .filter(|(_, duration)| *duration > 0)
         .map(|(bottleneck, _)| bottleneck)
         .unwrap_or(PreviewRenderBottleneck::None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_lease_wait_is_reported_as_the_decode_bottleneck() {
+        let durations = PreviewDecodeStageDurations {
+            session_open_us: 10,
+            output_lease_wait_us: 20,
+            packet_decode_us: 15,
+            ..PreviewDecodeStageDurations::default()
+        };
+
+        assert_eq!(
+            classify_preview_decode_bottleneck(durations, 5),
+            PreviewDecodeBottleneck::OutputLease
+        );
+    }
 }

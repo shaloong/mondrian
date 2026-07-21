@@ -26,6 +26,8 @@ pub enum PreviewDecodeCancellationCheckpoint {
     FrameMaterialization = 8,
     /// The optional external FFmpeg process was being executed or reaped.
     ExternalProcess = 9,
+    /// A bounded decoder slot was waiting for downstream native-output release.
+    OutputLease = 10,
 }
 
 impl PreviewDecodeCancellationCheckpoint {
@@ -41,6 +43,7 @@ impl PreviewDecodeCancellationCheckpoint {
             Self::Codec => "codec",
             Self::FrameMaterialization => "frame_materialization",
             Self::ExternalProcess => "external_process",
+            Self::OutputLease => "output_lease",
         }
     }
 
@@ -55,6 +58,7 @@ impl PreviewDecodeCancellationCheckpoint {
             7 => Some(Self::Codec),
             8 => Some(Self::FrameMaterialization),
             9 => Some(Self::ExternalProcess),
+            10 => Some(Self::OutputLease),
             _ => None,
         }
     }
@@ -144,6 +148,8 @@ pub struct PreviewDecodeCancellationCheckpointEvidence {
     pub frame_materialization: u64,
     /// Requests canceled while executing or reaping an external process.
     pub external_process: u64,
+    /// Requests canceled while waiting for a native-output lease to retire.
+    pub output_lease: u64,
 }
 
 impl PreviewDecodeCancellationCheckpointEvidence {
@@ -160,6 +166,7 @@ impl PreviewDecodeCancellationCheckpointEvidence {
                 &mut self.frame_materialization
             }
             PreviewDecodeCancellationCheckpoint::ExternalProcess => &mut self.external_process,
+            PreviewDecodeCancellationCheckpoint::OutputLease => &mut self.output_lease,
         };
         *counter = counter.saturating_add(1);
     }

@@ -1341,6 +1341,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
             threading_count: 6,
             stage_durations: PreviewDecodeStageDurations {
                 session_open_us: 100,
+                output_lease_wait_us: 0,
                 cache_lookup_us: 2,
                 seek_us: 300,
                 packet_decode_us: 500,
@@ -1408,6 +1409,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
             threading_count: 0,
             stage_durations: PreviewDecodeStageDurations {
                 session_open_us: 0,
+                output_lease_wait_us: 0,
                 cache_lookup_us: 0,
                 seek_us: 0,
                 packet_decode_us: 0,
@@ -1475,6 +1477,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
             threading_count: 0,
             stage_durations: PreviewDecodeStageDurations {
                 session_open_us: 0,
+                output_lease_wait_us: 0,
                 cache_lookup_us: 20,
                 seek_us: 0,
                 packet_decode_us: 0,
@@ -1541,6 +1544,7 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
             threading_count: 0,
             stage_durations: PreviewDecodeStageDurations {
                 session_open_us: 0,
+                output_lease_wait_us: 0,
                 cache_lookup_us: 12,
                 seek_us: 0,
                 packet_decode_us: 0,

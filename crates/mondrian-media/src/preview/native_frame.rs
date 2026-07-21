@@ -11,7 +11,35 @@ use std::hash::{Hash, Hasher};
 use std::num::NonZeroU64;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
+
+/// One decode-session output lease carried by every native-resource clone.
+///
+/// The session keeps only the matching weak observer, so it can prove that all
+/// downstream App and renderer ownership ended before reusing its decoder/DPB.
+#[derive(Debug, Clone)]
+pub(super) struct PreviewDecodeSessionOutputLease {
+    _owner: Arc<()>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct PreviewDecodeSessionOutputLeaseObserver(Weak<()>);
+
+impl PreviewDecodeSessionOutputLease {
+    pub(super) fn new_pair() -> (Self, PreviewDecodeSessionOutputLeaseObserver) {
+        let lease = Arc::new(());
+        (
+            Self { _owner: Arc::clone(&lease) },
+            PreviewDecodeSessionOutputLeaseObserver(Arc::downgrade(&lease)),
+        )
+    }
+}
+
+impl PreviewDecodeSessionOutputLeaseObserver {
+    pub(super) fn is_released(&self) -> bool {
+        self.0.upgrade().is_none()
+    }
+}
 
 /// GPU-resident native decoded preview frame.
 ///
@@ -93,6 +121,7 @@ pub struct FfmpegNativeDecodedFrameResource {
     pixel_format: ffmpeg::util::format::pixel::Pixel,
     kind: DecodedGpuFrameHandleKind,
     id: NonZeroU64,
+    _session_output_lease: Option<PreviewDecodeSessionOutputLease>,
 }
 
 // SAFETY: This resource has the same ownership and synchronization contract as
@@ -108,6 +137,13 @@ impl FfmpegNativeDecodedFrameResource {
     pub fn retain(
         frame: &ffmpeg::util::frame::video::Video,
     ) -> std::result::Result<Self, FfmpegNativeDecodedFrameResourceError> {
+        Self::retain_with_session_output_lease(frame, None)
+    }
+
+    pub(super) fn retain_with_session_output_lease(
+        frame: &ffmpeg::util::frame::video::Video,
+        session_output_lease: Option<PreviewDecodeSessionOutputLease>,
+    ) -> std::result::Result<Self, FfmpegNativeDecodedFrameResourceError> {
         let pixel_format = frame.format();
         let kind = decoded_handle_kind_from_hardware_pixel(pixel_format).ok_or(
             FfmpegNativeDecodedFrameResourceError::UnsupportedPixelFormat { pixel_format },
@@ -118,7 +154,13 @@ impl FfmpegNativeDecodedFrameResource {
         let retained = unsafe { ffmpeg::ffi::av_frame_clone(frame.as_ptr()) };
         let frame = NonNull::new(retained)
             .ok_or(FfmpegNativeDecodedFrameResourceError::FrameReferenceAllocationFailed)?;
-        Ok(Self { frame, pixel_format, kind, id })
+        Ok(Self {
+            frame,
+            pixel_format,
+            kind,
+            id,
+            _session_output_lease: session_output_lease,
+        })
     }
 
     /// Borrow the preferred FFmpeg D3D11 texture ABI view.
@@ -479,4 +521,22 @@ pub enum PreviewNativeDecodedFrameError {
         /// Reported bit depth.
         actual: u8,
     },
+}
+
+#[cfg(test)]
+mod session_output_lease_tests {
+    use super::*;
+
+    #[test]
+    fn observer_releases_only_after_every_output_lease_clone_drops() {
+        let (lease, observer) = PreviewDecodeSessionOutputLease::new_pair();
+        let renderer_clone = lease.clone();
+        assert!(!observer.is_released());
+
+        drop(lease);
+        assert!(!observer.is_released());
+
+        drop(renderer_clone);
+        assert!(observer.is_released());
+    }
 }

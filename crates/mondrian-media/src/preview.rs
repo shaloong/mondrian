@@ -45,7 +45,9 @@ pub use cancellation::{
 use frame_contract::{decoded_surface_format_from_pixel, resolve_cpu_rgba_contract_from_metadata};
 #[cfg(test)]
 use frame_contract::{decoded_video_sampling_from_frame, resolve_cpu_rgba_contract};
+#[cfg(test)]
 use frame_materialization::materialize_decoded_frame;
+use frame_materialization::materialize_decoded_frame_with_session_output_lease;
 #[cfg(test)]
 use frame_materialization::{
     convert_decoded_to_rgba, decoded_native_surface_format_from_software_format, resize_float_rgba,
@@ -806,6 +808,9 @@ pub struct PreviewDecodeStageDurations {
     /// Time spent opening or reconfiguring the in-process decode session.
     #[serde(default)]
     pub session_open_us: u64,
+    /// Time spent waiting for downstream native-output leases before decoder reuse.
+    #[serde(default)]
+    pub output_lease_wait_us: u64,
     /// Time spent checking the process-global preview frame cache.
     #[serde(default)]
     pub cache_lookup_us: u64,
@@ -833,6 +838,8 @@ impl PreviewDecodeStageDurations {
     /// Saturating-add another stage duration set into this one.
     pub fn accumulate(&mut self, other: Self) {
         self.session_open_us = self.session_open_us.saturating_add(other.session_open_us);
+        self.output_lease_wait_us =
+            self.output_lease_wait_us.saturating_add(other.output_lease_wait_us);
         self.cache_lookup_us = self.cache_lookup_us.saturating_add(other.cache_lookup_us);
         self.seek_us = self.seek_us.saturating_add(other.seek_us);
         self.packet_decode_us = self.packet_decode_us.saturating_add(other.packet_decode_us);
@@ -1240,7 +1247,7 @@ pub enum PreviewDecodeOutcome {
     Canceled(PreviewDecodeCancellation),
 }
 
-pub use decode_session::clear_thread_local_preview_decode_session;
+pub use decode_session::{clear_thread_local_preview_decode_session, PreviewDecodeSessionContext};
 use decode_session::{
     decode_preview_frame_outcome, preview_create_rgba_scaler, PreviewDecodedFramePayload,
 };

@@ -1437,6 +1437,8 @@ pub enum PreviewDecodeBottleneck {
     None,
     /// Opening or reconfiguring the decode session dominated.
     SessionOpen,
+    /// Waiting for downstream native-output leases before decoder reuse dominated.
+    OutputLease,
     /// Waiting in the preview decode worker queue dominated.
     QueueWait,
     /// Cache lookup dominated.
@@ -1454,7 +1456,7 @@ pub enum PreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 31;
+pub const PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 32;
 
 /// Default preview slow-frame budget: one frame should complete in tens of ms.
 pub const PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;

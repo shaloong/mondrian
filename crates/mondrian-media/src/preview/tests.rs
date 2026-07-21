@@ -1320,6 +1320,7 @@ fn percentile_upper_bound_uses_sorted_nearest_rank() {
 fn preview_decode_stage_durations_accumulate_saturating() {
     let mut durations = PreviewDecodeStageDurations {
         session_open_us: u64::MAX,
+        output_lease_wait_us: 1,
         cache_lookup_us: 2,
         seek_us: 3,
         packet_decode_us: 4,
@@ -1331,6 +1332,7 @@ fn preview_decode_stage_durations_accumulate_saturating() {
 
     durations.accumulate(PreviewDecodeStageDurations {
         session_open_us: 1,
+        output_lease_wait_us: 10,
         cache_lookup_us: 20,
         seek_us: 30,
         packet_decode_us: 40,
@@ -1341,6 +1343,7 @@ fn preview_decode_stage_durations_accumulate_saturating() {
     });
 
     assert_eq!(durations.session_open_us, u64::MAX);
+    assert_eq!(durations.output_lease_wait_us, 11);
     assert_eq!(durations.cache_lookup_us, 22);
     assert_eq!(durations.seek_us, 33);
     assert_eq!(durations.packet_decode_us, 44);
@@ -2625,6 +2628,7 @@ fn max_stage_durations(
 ) -> PreviewDecodeStageDurations {
     PreviewDecodeStageDurations {
         session_open_us: lhs.session_open_us.max(rhs.session_open_us),
+        output_lease_wait_us: lhs.output_lease_wait_us.max(rhs.output_lease_wait_us),
         cache_lookup_us: lhs.cache_lookup_us.max(rhs.cache_lookup_us),
         seek_us: lhs.seek_us.max(rhs.seek_us),
         packet_decode_us: lhs.packet_decode_us.max(rhs.packet_decode_us),

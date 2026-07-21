@@ -150,7 +150,11 @@ _Avoid_: Window-owned recursion, Headless-specific evaluator, scheduler-specific
 
 **Preview Production Runtime**:
 The UI-independent App composition root that binds the Frame Work Broker, Preview media workers, Frame Store, execution coordinator, Timeline/Viewer evaluation, result pump, evidence, and final application presentation arbitration. Its generic output payload is opaque: Window and Headless Adapters register their own usable GPU output while sharing generation, cache identity, pending state, stale scope, CPU raster, cancellation, and Frame Delivery semantics.
-_Avoid_: `WindowPreviewAdapter` as the Headless composition root, Window-owned result pumping or cache policy, a second Headless scheduler, Widget payloads in production state
+_Avoid_: `WindowPreviewAdapter` as the Headless composition root, Window-owned result pumping or cache policy, a second Headless scheduler, Widget payloads in production state, production decode residency hidden in thread-local state
+
+**Preview Decode Session Context**:
+The explicit worker-owned media execution context for FFmpeg input/codec state, DPB, and hardware-surface pools. Playback and Scrub have independent continuous slots; CPU Still has one physically separate slot; GPU-resident exact Still has a fixed two-slot ring. Every native output carries a weakly observed lease through App and renderer clones. A GPU exact-Still slot cannot seek/flush again until that lease retires; if both GPU Still slots are leased, the worker waits at a cancellable, evidenced backpressure point. Idle and worker shutdown clear the complete context.
+_Avoid_: hidden production TLS cache, unbounded session pool, fresh decoder per seek, reusing a slot because a generation changed or a timer elapsed, entering the codec while its previous native output is still owned
 
 **Waveform Analysis Service**:
 The UI-independent App Module that resolves asset/source revision, admits bounded background work, owns generation cancellation, decodes through a private bounded audio-source cache, retains revision-keyed envelopes and failures, and publishes bounded terminal evidence. The media Module owns only streaming PCM-to-envelope math; the Timeline receives a shallow nonblocking lookup Adapter.

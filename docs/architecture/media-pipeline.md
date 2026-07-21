@@ -389,11 +389,11 @@ establish the authoritative cancellation instant, sets the timestamp-free local
 stop flag, clears queued/UI generation state, and moves worker
 handles to a background reaper that joins them after FFmpeg exits. A codec,
 filesystem, or driver stall inside a preview worker must not prevent pause,
-window close, or app quit from being processed. Each worker still explicitly
-drops its thread-local media decode sessions before exit; thread-local FFmpeg
-decoder state must not be left to implicit TLS teardown at project/app close.
-An otherwise idle worker performs a timed Broker receive and releases its
-thread-local decode sessions after two seconds without work. This preserves
+window close, or app quit from being processed. Each production worker owns one
+explicit `PreviewDecodeSessionContext` and drops it before exit; production
+codec, DPB, and hardware-surface residency must not hide behind TLS teardown.
+An otherwise idle worker performs a timed Broker receive and clears its owned
+decode context after two seconds without work. This preserves
 short-gap playback locality while bounding native decoder/device residency
 during an open but inactive project; the next request cold-opens normally.
 Decoded native frames have a second, independent lifetime in the Preview Frame
@@ -413,6 +413,22 @@ bounded decoder could wait for a surface that only the not-yet-possible next
 import would release. Preview generation proves when the Frame Store may forget
 the decoded payload, while the renderer fence proves when GPU command execution
 no longer needs the native resource. Neither proof substitutes for the other.
+The worker-owned context contains one continuous Playback slot, one bounded
+Scrub slot, one physically separate CPU Still slot, and a fixed two-slot ring
+for GPU-resident exact Still work. The two GPU Still slots are a bound, not a
+growing session pool; CPU work cannot reconfigure either of them while its
+native output is retained.
+Every native output carries a session-output lease inside the retained FFmpeg
+resource; App Frame Store clones and renderer copy-fence clones therefore keep
+the same lease alive. A GPU exact-Still slot may seek/flush again only after
+its weak observer proves that the final downstream clone has dropped. A
+successful exact output advances the preferred A/B slot; cancellation does not
+advance it. If both slots remain leased, the worker waits at the explicit, cooperatively
+cancellable `OutputLease` checkpoint instead of entering a codec call that may
+block for a decoder surface. Reports include `output_lease_wait_us`, and a wait
+that dominates a frame is classified separately from queue wait, session open,
+seek, or packet decode. Number of completed requests, generation rotation
+alone, cache eviction alone, and fixed delays are not release proofs.
 The app scheduler lowers explicit `MediaPreviewAccessIntent` values to media
 access modes. Viewer playback lowers to `PlaybackCursor`, active playhead/ruler
 dragging lowers to `ScrubCursor`, and settled non-playing viewer frames plus
@@ -425,10 +441,11 @@ source before the next non-playing viewer request. New UI states must extend
 that intent layer instead of passing booleans or strategy flags into
 `mondrian-media`.
 Playback, scrub, and exact-still cancellation are cooperative but
-non-destructive to compatible mode-local decode sessions: a prefetch budget
+non-destructive to compatible worker-owned decode sessions: a prefetch budget
 miss or superseded target must not throw away the warmed decoder/device
-context. Canceled partial output is discarded, and every subsequent seek
-flushes and repositions the decoder before reuse.
+context. Canceled partial output is discarded. Scrub and exact Still always
+seek and flush before reuse, but a GPU Still slot cannot begin that reuse until
+its prior native-output lease has retired.
 The playback decode session also owns a small forward RGBA ring. Ring hits are
 strictly bounded by the same PTS tolerance as the process-global preview frame
 cache and are reported as `PlaybackSessionRingHit`; they are not available to
@@ -852,7 +869,7 @@ they must not let still-frame work evict those real-time modes. On a shared
 non-playback worker lane, `ScrubCursor` jobs are selected ahead of still-frame
 jobs even when the still-frame request arrived first. Newly admitted scrub and
 still requests retain their Interactive/Still/NonPlayback/Any lane affinity
-instead of cold-opening another thread-local hardware decoder on an
+instead of cold-opening another worker-owned hardware context on an
 incompatible idle worker. This preserves pointer latency, exact-seek locality,
 and realtime playback isolation without serializing same-generation work across
 compatible shared lanes. A newly admitted
@@ -1537,14 +1554,13 @@ pool and pruning are scheduling guardrails; hardware-resident decode remains a
 separate execution concern.
 Preview decode exposes a cooperative cancellation boundary for every access
 mode: app workers pass a generation-aware request probe to the media decoder.
-Each thread-local FFmpeg session installs that probe as an
+Each FFmpeg session in the worker-owned context installs that probe as an
 `AVIOInterruptCB`, including before input open and stream discovery, and keeps
 it active across seek and packet I/O. The media loop also checks it before
 opening, seeking, packet decode, frame receive, EOF draining, hardware transfer,
 and RGBA conversion. If cancellation fires, the decoder returns a
-typed canceled outcome rather than a media failure. `PlaybackCursor` and
 typed canceled outcome rather than a media failure. All three access modes
-preserve a compatible thread-local FFmpeg session after a cooperative return.
+preserve compatible worker-owned session state after a cooperative return.
 The next scrub or exact-still request always seeks and flushes before decoding;
 it never treats canceled partial output as reusable media. Input/codec open
 cancellation cannot publish a half-built session, while a source, fingerprint,
@@ -1552,8 +1568,10 @@ device, geometry, or color-contract change destroys the old session before
 opening its replacement. This avoids repeated non-interruptible
 `avcodec_open2` gaps during latest-wins seek bursts without weakening frame
 exactness. The App separately releases the prior generation's native source
-frame after its final GPU Viewer output is usable, so reuse keeps one
-mode-local decoder/DPB rather than accumulating one surface pool per still.
+frame after its final GPU Viewer output is usable. Playback and Scrub keep one
+mode-local decoder/DPB; GPU exact Still keeps the bounded, output-lease-aware
+two-slot ring described above instead of accumulating one surface pool per
+request or reusing a pool whose prior native output is still owned.
 The experimental external-process CPU RGBA path terminates and reaps only its
 per-request child when the probe fires; the compatible in-process session may
 remain. Stale work is never cached or marked as a failed source.
@@ -1725,13 +1743,14 @@ callers that do not already have one.
 semantics. `THREADS` means FFmpeg decoder threads per app preview worker;
 `WORKERS` means the app preview worker budget used for access-mode lanes. The
 app viewer preview service uses the resolved budget directly for playback and
-interactive lane workers. Thread-local preview decode sessions are kept alive
-across short gaps for playback locality, released automatically by the app
-worker after two seconds idle, and also released through
-`clear_thread_local_preview_decode_session()` at explicit lifecycle boundaries
-such as perf probes, media/project shutdown, or tests that open threaded
-software decoders. The idle release is resource policy, not a cache-key or
-generation change.
+interactive lane workers. Production sessions live in each worker's explicit
+`PreviewDecodeSessionContext`, remain alive across short gaps for locality, and
+are cleared automatically after two seconds idle or at worker shutdown. The
+top-level media convenience function retains a thread-local context only for
+standalone thumbnail/export/test callers that do not own a production worker;
+`clear_thread_local_preview_decode_session()` exists for those callers and is
+not the production lifecycle mechanism. Idle release is resource policy, not a
+cache-key or generation change.
 Codec safety policy may narrow these diagnostic overrides. OpenEXR contexts are
 always serial (`None`, one decoder thread): FFmpeg's frame-threaded EXR path can
 hold the single image until EOF and deadlock during codec-context destruction

@@ -3,6 +3,7 @@ use super::frame_contract::{
     decoded_video_sampling_from_frame, decoded_video_sampling_from_frame_and_surface,
     resolve_cpu_rgba_contract,
 };
+use super::native_frame::PreviewDecodeSessionOutputLease;
 use super::{
     duration_us, preview_create_rgba_scaler, preview_hardware_frame_format, preview_trace,
     DecodedRgbaFrameContract, FfmpegNativeDecodedFrameResource,
@@ -269,6 +270,7 @@ impl PreviewNativeFrameMaterializationError {
     }
 }
 
+#[cfg(test)]
 pub(super) fn materialize_decoded_frame(
     decoded: &ffmpeg::util::frame::video::Video,
     hardware_decode_plan: &mut PreviewHardwareDecodePlan,
@@ -279,9 +281,59 @@ pub(super) fn materialize_decoded_frame(
     path: &Path,
     source_color: PreviewSourceColorContract,
 ) -> Result<PreviewDecodedFramePayload> {
+    materialize_decoded_frame_inner(
+        decoded,
+        hardware_decode_plan,
+        scaler,
+        scaler_source_format,
+        target_width,
+        target_height,
+        path,
+        source_color,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn materialize_decoded_frame_with_session_output_lease(
+    decoded: &ffmpeg::util::frame::video::Video,
+    hardware_decode_plan: &mut PreviewHardwareDecodePlan,
+    scaler: &mut Option<ffmpeg::software::scaling::Context>,
+    scaler_source_format: &mut Option<ffmpeg::util::format::pixel::Pixel>,
+    target_width: u32,
+    target_height: u32,
+    path: &Path,
+    source_color: PreviewSourceColorContract,
+    session_output_lease: PreviewDecodeSessionOutputLease,
+) -> Result<PreviewDecodedFramePayload> {
+    materialize_decoded_frame_inner(
+        decoded,
+        hardware_decode_plan,
+        scaler,
+        scaler_source_format,
+        target_width,
+        target_height,
+        path,
+        source_color,
+        Some(session_output_lease),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_decoded_frame_inner(
+    decoded: &ffmpeg::util::frame::video::Video,
+    hardware_decode_plan: &mut PreviewHardwareDecodePlan,
+    scaler: &mut Option<ffmpeg::software::scaling::Context>,
+    scaler_source_format: &mut Option<ffmpeg::util::format::pixel::Pixel>,
+    target_width: u32,
+    target_height: u32,
+    path: &Path,
+    source_color: PreviewSourceColorContract,
+    session_output_lease: Option<PreviewDecodeSessionOutputLease>,
+) -> Result<PreviewDecodedFramePayload> {
     if hardware_decode_plan.request.prefers_gpu_residency() {
         if preview_hardware_frame_format(decoded.format()) {
-            match materialize_native_decoded_frame(decoded, source_color) {
+            match materialize_native_decoded_frame(decoded, source_color, session_output_lease) {
                 Ok(frame) => {
                     hardware_decode_plan.mark_gpu_resident_native_observed(frame.handle_kind());
                     return Ok(PreviewDecodedFramePayload::NativeGpu(frame));
@@ -330,6 +382,7 @@ pub(super) fn materialize_decoded_frame(
 fn materialize_native_decoded_frame(
     decoded: &ffmpeg::util::frame::video::Video,
     source_color: PreviewSourceColorContract,
+    session_output_lease: Option<PreviewDecodeSessionOutputLease>,
 ) -> std::result::Result<PreviewNativeDecodedFrame, PreviewNativeFrameMaterializationError> {
     use ffmpeg::util::format::pixel::Pixel;
 
@@ -343,7 +396,10 @@ fn materialize_native_decoded_frame(
     let surface_format = decoded_native_surface_format(decoded)?;
     let mut sampling = decoded_video_sampling_from_frame_and_surface(decoded, surface_format);
     sampling.range = source_color.range.resolve_for_frame(sampling.range);
-    let resource = FfmpegNativeDecodedFrameResource::retain(decoded)?;
+    let resource = FfmpegNativeDecodedFrameResource::retain_with_session_output_lease(
+        decoded,
+        session_output_lease,
+    )?;
     match decoded.format() {
         Pixel::D3D12 => {
             resource.d3d12_texture()?;

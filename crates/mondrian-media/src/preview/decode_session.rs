@@ -5,16 +5,77 @@
 //! typed frame materialization, and final cancellation publication. The
 //! parent module exposes only the request/outcome contract and session reset.
 
+use super::native_frame::{
+    PreviewDecodeSessionOutputLease, PreviewDecodeSessionOutputLeaseObserver,
+};
 use super::*;
 
 thread_local! {
-    static PREVIEW_DECODE_SESSIONS: RefCell<PreviewDecodeSessions> = const {
-        RefCell::new(PreviewDecodeSessions {
-            playback: None,
-            scrub: None,
-            still: None,
-        })
+    static THREAD_PREVIEW_DECODE_CONTEXT: RefCell<PreviewDecodeSessionContext> = const {
+        RefCell::new(PreviewDecodeSessionContext::new())
     };
+}
+
+const PREVIEW_GPU_STILL_SESSION_SLOT_COUNT: usize = 2;
+
+/// Explicit owner of access-mode-specific FFmpeg Preview sessions.
+///
+/// Production schedulers should create one context per decode worker and keep
+/// it on that worker thread. This makes codec, DPB, and hardware-surface-pool
+/// residency follow the worker lifecycle instead of depending on an implicit
+/// thread-local cache. The top-level convenience decode function retains a
+/// thread-local context for standalone thumbnail/export callers.
+pub struct PreviewDecodeSessionContext {
+    sessions: PreviewDecodeSessions,
+}
+
+impl PreviewDecodeSessionContext {
+    /// Create an empty worker-local decode context.
+    pub const fn new() -> Self {
+        Self {
+            sessions: PreviewDecodeSessions {
+                playback: None,
+                scrub: None,
+                cpu_still: None,
+                gpu_still: [None, None],
+                next_gpu_still: 0,
+            },
+        }
+    }
+
+    /// Release all codec sessions and their owned decode resources.
+    pub fn clear(&mut self) {
+        self.sessions.clear();
+    }
+
+    /// Decode one request using sessions explicitly owned by this context.
+    pub fn decode_cancellable(
+        &mut self,
+        request: PreviewDecodeRequest<'_>,
+        should_cancel: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> Result<PreviewDecodeOutcome> {
+        let should_cancel: PreviewDecodeCancelProbe = Arc::new(should_cancel);
+        decode_preview_frame_outcome_in_sessions(
+            &mut self.sessions,
+            request.path,
+            request.source_time,
+            request.max_width,
+            request.max_height,
+            request.access_mode,
+            request.fingerprint,
+            request.adaptive_hints,
+            request.hardware_decode_request,
+            request.hardware_decode_device_selector,
+            request.source_color,
+            should_cancel,
+        )
+    }
+}
+
+impl Default for PreviewDecodeSessionContext {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Drop the current thread's cached preview decode sessions.
@@ -25,34 +86,90 @@ thread_local! {
 /// probes, project/media shutdown, or tests that intentionally open threaded
 /// software decoders.
 pub fn clear_thread_local_preview_decode_session() {
-    PREVIEW_DECODE_SESSIONS.with(|sessions| {
-        sessions.borrow_mut().clear();
+    THREAD_PREVIEW_DECODE_CONTEXT.with(|context| {
+        context.borrow_mut().clear();
     });
 }
 
 struct PreviewDecodeSessions {
     playback: Option<PreviewDecodeSession>,
     scrub: Option<PreviewDecodeSession>,
-    still: Option<PreviewDecodeSession>,
+    cpu_still: Option<PreviewDecodeSession>,
+    gpu_still: [Option<PreviewDecodeSession>; PREVIEW_GPU_STILL_SESSION_SLOT_COUNT],
+    next_gpu_still: usize,
 }
 
 impl PreviewDecodeSessions {
-    fn slot_mut(
-        &mut self,
+    fn available_slot(
+        &self,
         access_mode: PreviewDecodeAccessMode,
-    ) -> &mut Option<PreviewDecodeSession> {
+        hardware_decode_request: PreviewHardwareDecodeRequest,
+    ) -> Option<PreviewDecodeSessionSlot> {
         match access_mode {
-            PreviewDecodeAccessMode::PlaybackCursor => &mut self.playback,
-            PreviewDecodeAccessMode::ScrubCursor => &mut self.scrub,
-            PreviewDecodeAccessMode::RandomAccessStillFrame => &mut self.still,
+            PreviewDecodeAccessMode::PlaybackCursor => Some(PreviewDecodeSessionSlot::Playback),
+            PreviewDecodeAccessMode::ScrubCursor => Some(PreviewDecodeSessionSlot::Scrub),
+            PreviewDecodeAccessMode::RandomAccessStillFrame
+                if hardware_decode_request.prefers_gpu_residency() =>
+            {
+                (0..PREVIEW_GPU_STILL_SESSION_SLOT_COUNT)
+                    .map(|offset| {
+                        (self.next_gpu_still + offset) % PREVIEW_GPU_STILL_SESSION_SLOT_COUNT
+                    })
+                    .find(|index| {
+                        self.gpu_still[*index]
+                            .as_ref()
+                            .is_none_or(PreviewDecodeSession::native_output_released)
+                    })
+                    .map(PreviewDecodeSessionSlot::GpuStill)
+            }
+            PreviewDecodeAccessMode::RandomAccessStillFrame => {
+                Some(PreviewDecodeSessionSlot::CpuStill)
+            }
         }
+    }
+
+    fn slot_mut(&mut self, slot: PreviewDecodeSessionSlot) -> &mut Option<PreviewDecodeSession> {
+        match slot {
+            PreviewDecodeSessionSlot::Playback => &mut self.playback,
+            PreviewDecodeSessionSlot::Scrub => &mut self.scrub,
+            PreviewDecodeSessionSlot::CpuStill => &mut self.cpu_still,
+            PreviewDecodeSessionSlot::GpuStill(index) => &mut self.gpu_still[index],
+        }
+    }
+
+    fn record_success(
+        &mut self,
+        slot: PreviewDecodeSessionSlot,
+        access_mode: PreviewDecodeAccessMode,
+        hardware_decode_request: PreviewHardwareDecodeRequest,
+    ) {
+        if access_mode != PreviewDecodeAccessMode::RandomAccessStillFrame
+            || !hardware_decode_request.prefers_gpu_residency()
+        {
+            return;
+        }
+        let PreviewDecodeSessionSlot::GpuStill(index) = slot else {
+            debug_assert!(false, "GPU still request selected a non-still decode slot");
+            return;
+        };
+        self.next_gpu_still = (index + 1) % PREVIEW_GPU_STILL_SESSION_SLOT_COUNT;
     }
 
     fn clear(&mut self) {
         self.playback = None;
         self.scrub = None;
-        self.still = None;
+        self.cpu_still = None;
+        self.gpu_still = [None, None];
+        self.next_gpu_still = 0;
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewDecodeSessionSlot {
+    Playback,
+    Scrub,
+    CpuStill,
+    GpuStill(usize),
 }
 
 use hardware_decode::{
@@ -90,6 +207,7 @@ struct PreviewDecodeSession {
     threading_count: usize,
     hardware_decode_plan: PreviewHardwareDecodePlan,
     decoded_surface_format: DecodedVideoSurfaceFormat,
+    last_native_output_lease: Option<PreviewDecodeSessionOutputLeaseObserver>,
     last_pts: Option<i64>,
     reached_eof: bool,
     playback_ring: PreviewPlaybackRing,
@@ -626,6 +744,7 @@ impl PreviewDecodeSession {
             threading_count,
             hardware_decode_plan,
             decoded_surface_format,
+            last_native_output_lease: None,
             last_pts: None,
             reached_eof: false,
             playback_ring: PreviewPlaybackRing::new(PREVIEW_PLAYBACK_SESSION_RING_CAPACITY),
@@ -652,6 +771,12 @@ impl PreviewDecodeSession {
             && self.hardware_decode_request == hardware_decode_request
             && self.hardware_decode_device_selector == hardware_decode_device_selector
             && self.source_color == source_color
+    }
+
+    fn native_output_released(&self) -> bool {
+        self.last_native_output_lease
+            .as_ref()
+            .is_none_or(PreviewDecodeSessionOutputLeaseObserver::is_released)
     }
 
     fn decode_at(
@@ -799,7 +924,14 @@ impl PreviewDecodeSession {
             ));
         }
         let decode_started_at = Instant::now();
-        let result = self.decode_forward_until(decode_target_pts, policy, should_cancel)?;
+        let (session_output_lease, session_output_lease_observer) =
+            PreviewDecodeSessionOutputLease::new_pair();
+        let result = self.decode_forward_until(
+            decode_target_pts,
+            policy,
+            &session_output_lease,
+            should_cancel,
+        )?;
         if result.canceled {
             return Ok(PreviewDecodeOutcome::Canceled(
                 self.interrupt_state.cancellation(PreviewDecodeCancellationCheckpoint::Codec),
@@ -890,6 +1022,7 @@ impl PreviewDecodeSession {
                     return Ok(PreviewDecodeOutcome::FloatFrame(frame));
                 }
                 PreviewDecodedFramePayload::NativeGpu(mut frame) => {
+                    self.last_native_output_lease = Some(session_output_lease_observer);
                     let mut diagnostics = frame.diagnostics.with_access_mode(access_mode);
                     diagnostics.stage_durations.accumulate(PreviewDecodeStageDurations {
                         cache_lookup_us,
@@ -1034,6 +1167,7 @@ impl PreviewDecodeSession {
         &mut self,
         target_pts: i64,
         policy: PreviewDecodeAccessPolicy,
+        session_output_lease: &PreviewDecodeSessionOutputLease,
         should_cancel: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<PreviewDecodeForwardResult> {
         let interrupt_state = Arc::clone(&self.interrupt_state);
@@ -1105,7 +1239,7 @@ impl PreviewDecodeSession {
                 }
                 interrupt_state
                     .set_checkpoint(PreviewDecodeCancellationCheckpoint::FrameMaterialization);
-                let frame = materialize_decoded_frame(
+                let frame = materialize_decoded_frame_with_session_output_lease(
                     selected_frame,
                     hardware_decode_plan,
                     scaler,
@@ -1114,6 +1248,7 @@ impl PreviewDecodeSession {
                     target_height,
                     path,
                     self.source_color,
+                    session_output_lease.clone(),
                 )?;
                 Ok(Some((selected_pts, frame)))
             };
@@ -1165,7 +1300,7 @@ impl PreviewDecodeSession {
                         interrupt_state.set_checkpoint(
                             PreviewDecodeCancellationCheckpoint::FrameMaterialization,
                         );
-                        let frame = materialize_decoded_frame(
+                        let frame = materialize_decoded_frame_with_session_output_lease(
                             &decoded.frame,
                             &mut self.hardware_decode_plan,
                             &mut self.scaler,
@@ -1174,6 +1309,7 @@ impl PreviewDecodeSession {
                             self.target_height,
                             self.path.as_path(),
                             self.source_color,
+                            session_output_lease.clone(),
                         )?;
                         if should_cancel() {
                             return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
@@ -1317,7 +1453,7 @@ impl PreviewDecodeSession {
                             interrupt_state.set_checkpoint(
                                 PreviewDecodeCancellationCheckpoint::FrameMaterialization,
                             );
-                            let frame = materialize_decoded_frame(
+                            let frame = materialize_decoded_frame_with_session_output_lease(
                                 &decoded.frame,
                                 &mut self.hardware_decode_plan,
                                 &mut self.scaler,
@@ -1326,6 +1462,7 @@ impl PreviewDecodeSession {
                                 self.target_height,
                                 self.path.as_path(),
                                 self.source_color,
+                                session_output_lease.clone(),
                             )?;
                             if should_cancel() {
                                 return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
@@ -1577,6 +1714,39 @@ pub(super) fn decode_preview_frame_outcome(
     source_color: PreviewSourceColorContract,
     should_cancel: PreviewDecodeCancelProbe,
 ) -> Result<PreviewDecodeOutcome> {
+    THREAD_PREVIEW_DECODE_CONTEXT.with(|context| {
+        decode_preview_frame_outcome_in_sessions(
+            &mut context.borrow_mut().sessions,
+            path,
+            source_time,
+            max_width,
+            max_height,
+            access_mode,
+            fingerprint,
+            adaptive_hints,
+            hardware_decode_request,
+            hardware_decode_device_selector,
+            source_color,
+            should_cancel,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_preview_frame_outcome_in_sessions(
+    sessions: &mut PreviewDecodeSessions,
+    path: &Path,
+    source_time: TimelineTime,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    access_mode: PreviewDecodeAccessMode,
+    fingerprint: Option<MediaFileFingerprint>,
+    adaptive_hints: PreviewDecodeAdaptiveHints,
+    hardware_decode_request: PreviewHardwareDecodeRequest,
+    hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
+    source_color: PreviewSourceColorContract,
+    should_cancel: PreviewDecodeCancelProbe,
+) -> Result<PreviewDecodeOutcome> {
     let started_at = Instant::now();
     if should_cancel() {
         return Ok(PreviewDecodeOutcome::Canceled(
@@ -1585,11 +1755,28 @@ pub(super) fn decode_preview_frame_outcome(
             ),
         ));
     }
+    let output_lease_wait_started_at = Instant::now();
+    let selected_slot = loop {
+        if let Some(slot) = sessions.available_slot(access_mode, hardware_decode_request) {
+            break slot;
+        }
+        if should_cancel() {
+            return Ok(PreviewDecodeOutcome::Canceled(
+                PreviewDecodeCancellation::cooperative(
+                    PreviewDecodeCancellationCheckpoint::OutputLease,
+                ),
+            ));
+        }
+        // Native-output release is driven by the UI-independent result pump,
+        // Frame Store generation release, and renderer copy fence. Keep the
+        // worker responsive to latest-wins cancellation while those owners run.
+        std::thread::sleep(Duration::from_micros(250));
+    };
+    let output_lease_wait_us = duration_us(output_lease_wait_started_at.elapsed());
     ensure_ffmpeg_initialized(path)?;
     let fingerprint = fingerprint.unwrap_or_else(|| MediaFileFingerprint::capture(path));
-    PREVIEW_DECODE_SESSIONS.with(|sessions| {
-        let mut sessions = sessions.borrow_mut();
-        let slot = sessions.slot_mut(access_mode);
+    let outcome = {
+        let slot = sessions.slot_mut(selected_slot);
         let backend = preview_decode_backend();
         let mut session_open_us = 0;
 
@@ -1640,9 +1827,8 @@ pub(super) fn decode_preview_frame_outcome(
                 Ok(session) => Some(session),
                 Err(_) if should_cancel() => {
                     return Ok(PreviewDecodeOutcome::Canceled(
-                        interrupt_state.cancellation(
-                            PreviewDecodeCancellationCheckpoint::InputOpen,
-                        ),
+                        interrupt_state
+                            .cancellation(PreviewDecodeCancellationCheckpoint::InputOpen),
                     ));
                 }
                 Err(error) => return Err(error),
@@ -1663,8 +1849,7 @@ pub(super) fn decode_preview_frame_outcome(
         );
 
         if preview_external_ffmpeg_cpu_rgba_enabled(access_mode) {
-            interrupt_state
-                .set_checkpoint(PreviewDecodeCancellationCheckpoint::ExternalProcess);
+            interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::ExternalProcess);
             if should_cancel() {
                 return Ok(PreviewDecodeOutcome::Canceled(
                     interrupt_state
@@ -1696,29 +1881,31 @@ pub(super) fn decode_preview_frame_outcome(
                                 ),
                             ));
                         }
-                        return Ok(PreviewDecodeOutcome::Frame(frame
-                            .with_access_mode(access_mode)
-                            .with_seek_strategy(
-                                PreviewDecodeAccessPolicy::for_access_mode(access_mode)
-                                    .seek_strategy,
-                            )
-                            .with_session_reused(current_match)
-                            .with_stage_durations(PreviewDecodeStageDurations {
-                                session_open_us,
-                                external_process_us,
-                                ..PreviewDecodeStageDurations::default()
-                            })
-                            .with_hardware_decode_plan(&external_hardware_decode_plan)
-                            .with_elapsed(started_at.elapsed())));
+                        return Ok(PreviewDecodeOutcome::Frame(
+                            frame
+                                .with_access_mode(access_mode)
+                                .with_seek_strategy(
+                                    PreviewDecodeAccessPolicy::for_access_mode(access_mode)
+                                        .seek_strategy,
+                                )
+                                .with_session_reused(current_match)
+                                .with_stage_durations(PreviewDecodeStageDurations {
+                                    session_open_us,
+                                    output_lease_wait_us,
+                                    external_process_us,
+                                    ..PreviewDecodeStageDurations::default()
+                                })
+                                .with_hardware_decode_plan(&external_hardware_decode_plan)
+                                .with_elapsed(started_at.elapsed()),
+                        ));
                     }
                     Ok(None) => {
                         if !access_mode.preserves_session_on_cancel() {
                             *slot = None;
                         }
                         return Ok(PreviewDecodeOutcome::Canceled(
-                            interrupt_state.cancellation(
-                                PreviewDecodeCancellationCheckpoint::ExternalProcess,
-                            ),
+                            interrupt_state
+                                .cancellation(PreviewDecodeCancellationCheckpoint::ExternalProcess),
                         ));
                     }
                     Err(err) => {
@@ -1740,10 +1927,13 @@ pub(super) fn decode_preview_frame_outcome(
             PreviewDecodeOutcome::Frame(frame) => Ok(PreviewDecodeOutcome::Frame(
                 frame
                     .with_access_mode(access_mode)
-                    .with_seek_strategy(PreviewDecodeAccessPolicy::for_access_mode(access_mode).seek_strategy)
+                    .with_seek_strategy(
+                        PreviewDecodeAccessPolicy::for_access_mode(access_mode).seek_strategy,
+                    )
                     .with_session_reused(current_match)
                     .with_stage_durations(PreviewDecodeStageDurations {
                         session_open_us,
+                        output_lease_wait_us,
                         external_process_us,
                         ..PreviewDecodeStageDurations::default()
                     })
@@ -1758,6 +1948,7 @@ pub(super) fn decode_preview_frame_outcome(
                     .with_session_reused(current_match)
                     .with_stage_durations(PreviewDecodeStageDurations {
                         session_open_us,
+                        output_lease_wait_us,
                         external_process_us,
                         ..PreviewDecodeStageDurations::default()
                     })
@@ -1772,6 +1963,7 @@ pub(super) fn decode_preview_frame_outcome(
                 frame.diagnostics.session_reused = current_match;
                 frame.diagnostics.stage_durations.accumulate(PreviewDecodeStageDurations {
                     session_open_us,
+                    output_lease_wait_us,
                     external_process_us,
                     ..PreviewDecodeStageDurations::default()
                 });
@@ -1784,5 +1976,106 @@ pub(super) fn decode_preview_frame_outcome(
                 Ok(PreviewDecodeOutcome::Canceled(cancellation))
             }
         }
-    })
+    };
+    if matches!(
+        &outcome,
+        Ok(PreviewDecodeOutcome::Frame(_))
+            | Ok(PreviewDecodeOutcome::FloatFrame(_))
+            | Ok(PreviewDecodeOutcome::NativeGpuFrame(_))
+    ) {
+        sessions.record_success(selected_slot, access_mode, hardware_decode_request);
+    }
+    outcome
+}
+
+#[cfg(test)]
+mod session_topology_tests {
+    use super::*;
+
+    fn empty_sessions() -> PreviewDecodeSessions {
+        PreviewDecodeSessions {
+            playback: None,
+            scrub: None,
+            cpu_still: None,
+            gpu_still: [None, None],
+            next_gpu_still: 0,
+        }
+    }
+
+    #[test]
+    fn gpu_exact_success_rotates_a_bounded_two_slot_ring() {
+        let mut sessions = empty_sessions();
+        let request = PreviewHardwareDecodeRequest::PreferGpuResident;
+
+        let first = sessions
+            .available_slot(PreviewDecodeAccessMode::RandomAccessStillFrame, request)
+            .expect("first GPU still slot should be available");
+        assert_eq!(first, PreviewDecodeSessionSlot::GpuStill(0));
+        sessions.record_success(
+            first,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            request,
+        );
+
+        let second = sessions
+            .available_slot(PreviewDecodeAccessMode::RandomAccessStillFrame, request)
+            .expect("second GPU still slot should be available");
+        assert_eq!(second, PreviewDecodeSessionSlot::GpuStill(1));
+        sessions.record_success(
+            second,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            request,
+        );
+
+        assert_eq!(
+            sessions.available_slot(PreviewDecodeAccessMode::RandomAccessStillFrame, request),
+            Some(PreviewDecodeSessionSlot::GpuStill(0))
+        );
+    }
+
+    #[test]
+    fn canceled_or_cpu_exact_work_does_not_advance_gpu_still_slot() {
+        let mut sessions = empty_sessions();
+        let gpu_request = PreviewHardwareDecodeRequest::PreferGpuResident;
+        assert_eq!(
+            sessions.available_slot(PreviewDecodeAccessMode::RandomAccessStillFrame, gpu_request,),
+            Some(PreviewDecodeSessionSlot::GpuStill(0))
+        );
+
+        let cpu_slot = sessions
+            .available_slot(
+                PreviewDecodeAccessMode::RandomAccessStillFrame,
+                PreviewHardwareDecodeRequest::Auto,
+            )
+            .expect("CPU still slot should be available");
+        sessions.record_success(
+            cpu_slot,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            PreviewHardwareDecodeRequest::Auto,
+        );
+        assert_eq!(
+            sessions.available_slot(PreviewDecodeAccessMode::RandomAccessStillFrame, gpu_request,),
+            Some(PreviewDecodeSessionSlot::GpuStill(0))
+        );
+        assert_eq!(cpu_slot, PreviewDecodeSessionSlot::CpuStill);
+    }
+
+    #[test]
+    fn realtime_access_modes_keep_dedicated_single_slots() {
+        let sessions = empty_sessions();
+        assert_eq!(
+            sessions.available_slot(
+                PreviewDecodeAccessMode::PlaybackCursor,
+                PreviewHardwareDecodeRequest::PreferGpuResident,
+            ),
+            Some(PreviewDecodeSessionSlot::Playback)
+        );
+        assert_eq!(
+            sessions.available_slot(
+                PreviewDecodeAccessMode::ScrubCursor,
+                PreviewHardwareDecodeRequest::PreferGpuResident,
+            ),
+            Some(PreviewDecodeSessionSlot::Scrub)
+        );
+    }
 }
