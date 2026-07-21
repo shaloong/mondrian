@@ -455,9 +455,11 @@ admitting new-family decode. CPU media frames and independently usable final
 Viewer outputs remain resident. The Broker owns only the revision and
 lost-wakeup-safe Condvar interruption; it does not decide which workers retire
 or interpret media access modes. A stale acknowledgement is revision-scoped and
-cannot satisfy a later transition. This bounds production to one active native
-decoder family while preserving thread-affine FFmpeg destruction and bounded
-transition latency.
+cannot satisfy a later transition. The worker cannot acknowledge even the
+current revision until completion, Frame Store, and renderer clones have
+released every native-output lease from its context. This bounds production to
+one active native decoder family while preserving thread-affine FFmpeg
+destruction and bounded transition latency.
 
 Admission across the pending-binding window and worker queue is transactional.
 The Broker first computes one eviction that can satisfy every active capacity
@@ -913,6 +915,15 @@ assuming that generation count, elapsed time, cache eviction, or
 `avcodec_flush_buffers` alone proves downstream surface release. The access
 mode still selects independent scrub versus exact precision and seek policy on
 every request; session sharing does not relax exact-Still correctness.
+A released compatible Scrub session may execute one exact request. Once that
+request publishes a native exact output, the mutable codec context is terminal:
+the worker waits for the output lease, destroys the context between Broker
+execution leases, then receives the next job. It never re-enters that codec and
+never opens an alternating native pool while the old output is leased. Keeping
+teardown outside the following execution lease is part of cancellation
+correctness: destruction of a prior codec cannot hide the first cooperative
+checkpoint of newer work. The immutable device cache and seek index survive
+this boundary because neither owns codec continuity or decoder surfaces.
 
 The Frame Store release above is necessary but not sufficient for native video.
 The renderer's D3D12 bridge temporarily retains the imported source resource

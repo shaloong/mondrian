@@ -40,6 +40,8 @@ use super::preview_scheduler_policy::{
     preview_decode_presentation_quality, MediaPreviewFailureReason,
 };
 
+const MEDIA_PREVIEW_LIFECYCLE_POLL_INTERVAL: Duration = Duration::from_micros(250);
+
 /// Terminal or presentable result published by one Preview media task.
 #[derive(Debug)]
 pub(crate) struct MediaPreviewResult {
@@ -107,10 +109,34 @@ pub(crate) fn media_preview_worker(
     loop {
         if let Some(directive) = residency.worker_directive(lane, residency_revision) {
             if directive.retire_context() {
+                // Published native outputs retain AVFrame references after the
+                // codec call returns. Do not acknowledge family retirement
+                // until the Frame Store/completion/renderer ownership chain has
+                // released every such lease.
+                if !decode_context.native_outputs_released() {
+                    if shutdown.is_requested() {
+                        break;
+                    }
+                    std::thread::sleep(MEDIA_PREVIEW_LIFECYCLE_POLL_INTERVAL);
+                    continue;
+                }
                 decode_context.clear();
                 residency.acknowledge_retirement(lane, directive.revision());
             }
             residency_revision = directive.revision();
+        }
+
+        // Native exact-still output is a terminal operation for the shared
+        // Interactive codec. Retire its DPB/frames context after the result's
+        // output lease ends and before acquiring another Broker execution
+        // lease. Codec destruction latency therefore cannot mask cancellation
+        // observation for newly admitted work.
+        if !decode_context.retire_released_native_exact_session() {
+            if shutdown.is_requested() {
+                break;
+            }
+            std::thread::sleep(MEDIA_PREVIEW_LIFECYCLE_POLL_INTERVAL);
+            continue;
         }
         let outcome = match jobs
             .recv_for_worker_outcome_timeout(lane, MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT)
@@ -335,7 +361,7 @@ fn send_media_preview_result(
             Ok(()) => return MediaPreviewResultPublication::Published,
             Err(mpsc::TrySendError::Full(returned)) => {
                 result = returned;
-                std::thread::sleep(Duration::from_micros(250));
+                std::thread::sleep(MEDIA_PREVIEW_LIFECYCLE_POLL_INTERVAL);
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
                 abandon_media_preview_result(scheduler, execution_id);

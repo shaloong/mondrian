@@ -277,6 +277,15 @@ intended for 4K HEVC/HDR/Long-GOP fixture runs: a failure should drive
 hardware decode, proxy, scheduler, or renderer-residency work, not timeout
 widening. Override them only when documenting a different fixture class.
 
+For compressed-wall-clock isolation of long-lived native decoder state, use
+the ignored `preview_media_external_accelerated_native_surface_endurance_probe`
+with `MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_MEDIA_PATH` and
+`MONDRIAN_PREVIEW_ACCELERATED_ENDURANCE_FRAMES`. Set
+`MONDRIAN_PREVIEW_ACCELERATED_ENDURANCE_SEEK_PROBES` to append up to 200
+cross-region warm/exact seek probes after continuous decode. This diagnostic
+does not replace cadence, whole-process memory, or reference-machine gates; it
+only separates accumulated decode/surface state from real-time scheduling.
+
 Preview media perf artifacts also include `preview_render_report`, which covers
 post-decode viewer work: sequence/media resolution, final-frame cache lookup,
 working-frame preparation, CPU timeline composition, CPU output/color boundary,

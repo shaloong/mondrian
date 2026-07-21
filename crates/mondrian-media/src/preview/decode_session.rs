@@ -40,6 +40,24 @@ impl PreviewDecodeSessionContext {
         self.sessions.clear();
     }
 
+    /// Whether every decoder-native output issued by this context is released.
+    ///
+    /// A scheduler must prove this before acknowledging a decoder-residency
+    /// family retirement; dropping the codec owner alone does not revoke frame
+    /// references already published to a completion queue or renderer.
+    pub fn native_outputs_released(&self) -> bool {
+        self.sessions.native_outputs_released()
+    }
+
+    /// Retire a terminal native exact-still codec after its output lease ends.
+    ///
+    /// Returns `false` only while the exact output is still externally owned.
+    /// Schedulers should call this between execution leases so codec teardown
+    /// is neither attributed to nor allowed to delay cancellation of new work.
+    pub fn retire_released_native_exact_session(&mut self) -> bool {
+        self.sessions.retire_released_native_exact_session()
+    }
+
     /// Decode one request using sessions explicitly owned by this context.
     pub fn decode_cancellable(
         &mut self,
@@ -126,6 +144,26 @@ impl PreviewDecodeSessions {
         }
     }
 
+    fn native_outputs_released(&self) -> bool {
+        [&self.playback, &self.interactive, &self.cpu_still].into_iter().all(|session| {
+            session.as_ref().is_none_or(PreviewDecodeSession::native_output_released)
+        })
+    }
+
+    fn retire_released_native_exact_session(&mut self) -> bool {
+        let Some(session) = self.interactive.as_ref() else {
+            return true;
+        };
+        if !session.has_terminal_native_exact_output() {
+            return true;
+        }
+        if !session.native_output_released() {
+            return false;
+        }
+        self.interactive = None;
+        true
+    }
+
     fn clear(&mut self) {
         self.playback = None;
         self.interactive = None;
@@ -175,6 +213,10 @@ struct PreviewDecodeSession {
     threading_count: usize,
     hardware_decode_plan: PreviewHardwareDecodePlan,
     decoded_surface_format: DecodedVideoSurfaceFormat,
+    /// Access semantics attached to the most recently issued native output.
+    /// This is updated only when an output is actually published, so a canceled
+    /// or failed exact request cannot make an earlier Scrub output terminal.
+    last_native_output_access_mode: Option<PreviewDecodeAccessMode>,
     last_native_output_lease: Option<PreviewDecodeSessionOutputLeaseObserver>,
     last_pts: Option<i64>,
     reached_eof: bool,
@@ -712,6 +754,7 @@ impl PreviewDecodeSession {
             threading_count,
             hardware_decode_plan,
             decoded_surface_format,
+            last_native_output_access_mode: None,
             last_native_output_lease: None,
             last_pts: None,
             reached_eof: false,
@@ -747,6 +790,10 @@ impl PreviewDecodeSession {
             .is_none_or(PreviewDecodeSessionOutputLeaseObserver::is_released)
     }
 
+    fn has_terminal_native_exact_output(&self) -> bool {
+        native_interactive_output_is_terminal(self.last_native_output_access_mode)
+    }
+
     /// Restore a deterministic decode entry after cooperative cancellation.
     ///
     /// The codec allocation and immutable hardware device remain reusable, but
@@ -778,6 +825,7 @@ impl PreviewDecodeSession {
                     .cancellation(PreviewDecodeCancellationCheckpoint::BeforeInputOpen),
             ));
         }
+
         let target_pts =
             source_time_to_stream_pts(source_time, self.stream_tb, self.stream_start_pts).map_err(
                 |reason| MondrianError::DecodeFailed {
@@ -1008,6 +1056,7 @@ impl PreviewDecodeSession {
                     return Ok(PreviewDecodeOutcome::FloatFrame(frame));
                 }
                 PreviewDecodedFramePayload::NativeGpu(mut frame) => {
+                    self.last_native_output_access_mode = Some(access_mode);
                     self.last_native_output_lease = Some(session_output_lease_observer);
                     let mut diagnostics = frame.diagnostics.with_access_mode(access_mode);
                     diagnostics.stage_durations.accumulate(PreviewDecodeStageDurations {
@@ -1766,6 +1815,18 @@ fn decode_preview_frame_outcome_in_sessions(
         let backend = preview_decode_backend();
         let mut session_open_us = 0;
 
+        if selected_slot == PreviewDecodeSessionSlot::Interactive
+            && slot
+                .as_ref()
+                .is_some_and(PreviewDecodeSession::has_terminal_native_exact_output)
+        {
+            // `available_slot` proved that the previous native output lease is
+            // released. Retire the old codec/DPB/frames context before opening
+            // an exact boundary or returning from one to scrub. The immutable
+            // hardware device and cached seek index remain process-shared.
+            *slot = None;
+        }
+
         if should_cancel() {
             return Ok(PreviewDecodeOutcome::Canceled(
                 PreviewDecodeCancellation::cooperative(
@@ -1958,6 +2019,12 @@ fn decode_preview_frame_outcome_in_sessions(
     outcome
 }
 
+fn native_interactive_output_is_terminal(
+    output_access_mode: Option<PreviewDecodeAccessMode>,
+) -> bool {
+    output_access_mode == Some(PreviewDecodeAccessMode::RandomAccessStillFrame)
+}
+
 #[cfg(test)]
 mod session_topology_tests {
     use super::*;
@@ -2010,5 +2077,16 @@ mod session_topology_tests {
             ),
             Some(PreviewDecodeSessionSlot::Interactive)
         );
+    }
+
+    #[test]
+    fn native_exact_is_a_single_output_interactive_codec_boundary() {
+        assert!(!native_interactive_output_is_terminal(None));
+        assert!(!native_interactive_output_is_terminal(Some(
+            PreviewDecodeAccessMode::ScrubCursor,
+        )));
+        assert!(native_interactive_output_is_terminal(Some(
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+        )));
     }
 }

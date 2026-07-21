@@ -431,6 +431,15 @@ include `output_lease_wait_us`, and a wait that dominates a frame is classified
 separately from queue wait, session open, seek, or packet decode. Number of
 completed requests, generation rotation alone, cache eviction alone, and fixed
 delays are not release proofs.
+A compatible released Scrub codec may execute one exact request, but a
+successful native exact output is terminal for that codec/DPB/frames context.
+After publishing the result, the production worker waits for the output lease
+to retire, destroys the terminal context between Broker execution leases, and
+only then dequeues more work. This prevents the next request's cancellation
+window from including prior-codec destruction and prevents a second native
+surface pool from being opened merely to replace the paused Viewer frame. The
+process-shared immutable hardware device and fingerprinted seek index remain
+reusable; terminal exact applies to the mutable codec state, not those caches.
 The app scheduler lowers explicit `MediaPreviewAccessIntent` values to media
 access modes. Viewer playback lowers to `PlaybackCursor`, active playhead/ruler
 dragging lowers to `ScrubCursor`, and settled non-playing viewer frames plus
@@ -445,10 +454,13 @@ that intent layer instead of passing booleans or strategy flags into
 Playback, scrub, and exact-still cancellation are cooperative but
 non-destructive to compatible worker-owned decode sessions: a prefetch budget
 miss or superseded target must not throw away the warmed decoder/device
-context. Canceled partial output is discarded. Exact Still always performs an
+context. Canceled partial output is discarded and forces deterministic codec
+re-entry as described below; it does not masquerade as a successful terminal
+exact output. Exact Still always performs an
 indexed exact seek and codec flush; scrub follows its independently derived
 bounded low-latency policy. Neither may reuse the shared Interactive context
-until its prior native-output lease has retired.
+until its prior native-output lease has retired, and no request may reuse that
+context after it has produced a native exact output.
 The playback decode session also owns a small forward RGBA ring. Ring hits are
 strictly bounded by the same PTS tolerance as the process-global preview frame
 cache and are reported as `PlaybackSessionRingHit`; they are not available to
@@ -1616,7 +1628,9 @@ opposite-family worker confirms it has destroyed its thread-owned
 `PreviewDecodeSessionContext`. CPU decoded frames remain cacheable across the
 transition, and final Viewer texture/raster ownership is unaffected. Workers
 never destroy another worker's FFmpeg context; new work cannot race the
-retirement acknowledgement; a revision-mismatched acknowledgement is ignored.
+retirement acknowledgement; acknowledgement additionally waits for every
+published native-output lease from that context, and a revision-mismatched
+acknowledgement is ignored.
 This destroys the retired family's codec, DPB, `AVHWFramesContext`, and native
 surface pool, but deliberately does not tear down the immutable FFmpeg hardware
 device itself. Media gives each new codec its own reference to the process

@@ -2328,6 +2328,12 @@ fn preview_media_external_accelerated_native_surface_endurance_probe() -> anyhow
         0,
         1_000_000,
     );
+    let seek_probe_count = env_usize_clamped(
+        "MONDRIAN_PREVIEW_ACCELERATED_ENDURANCE_SEEK_PROBES",
+        0,
+        0,
+        200,
+    );
     let sequence_frame_count = start_frame.saturating_add(frame_count).saturating_add(2);
     let media_info = probe_external_preview_media_info(&video_path)?;
     let media_probe = PreviewPlaybackMediaProbeReport::from_media_info(&media_info)?;
@@ -2388,6 +2394,17 @@ fn preview_media_external_accelerated_native_surface_endurance_probe() -> anyhow
         &mut gpu_summary,
         Duration::from_secs(30),
     )?;
+    if seek_probe_count > 0 {
+        run_headless_cross_region_seeks(
+            &preview_service,
+            &mut state,
+            &mut gpu_adapter,
+            &mut gpu_summary,
+            sequence_frame_count,
+            seek_probe_count,
+            Duration::from_secs(30),
+        )?;
+    }
     wait_for_preview_idle_residency_release(&preview_service, &mut state, Duration::from_secs(30))?;
     let diagnostics = preview_service.diagnostics();
     anyhow::ensure!(
@@ -2402,6 +2419,7 @@ fn preview_media_external_accelerated_native_surface_endurance_probe() -> anyhow
             "scenario": "preview_media_external_accelerated_native_surface_endurance",
             "start_frame": start_frame,
             "frames": frame_count,
+            "seek_probes": seek_probe_count,
             "decode_successes": diagnostics.decode_successes,
             "playback_decode_frames": diagnostics.decode_playback_cursor_frames,
             "external_frames_registered": diagnostics.gpu_preview_external_frames_registered,
