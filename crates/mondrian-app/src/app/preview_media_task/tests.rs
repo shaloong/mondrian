@@ -12,6 +12,7 @@ use mondrian_media::{
 
 use super::*;
 use crate::app::preview_access_mode::{MediaPreviewJobEnqueueStatus, MediaPreviewRequestStatus};
+use crate::app::preview_decode_residency::PreviewDecodeResidencyFamily;
 
 fn test_media_key(label: &str) -> MediaPreviewKey {
     MediaPreviewKey {
@@ -115,6 +116,8 @@ fn worker_reports_queued_deadline_without_window_or_widget() {
     let scheduler = MediaPreviewScheduler::default();
     let (job_tx, job_rx) = scheduler.job_queue();
     let shutdown = Arc::new(PreviewShutdownSignal::default());
+    let residency = Arc::new(PreviewDecodeResidencyCoordinator::new());
+    residency.register_worker(MediaPreviewWorkerLane::Playback);
     let key = test_media_key("expired");
     let generation = scheduler.begin_generation();
     let mut job = test_media_job(
@@ -132,6 +135,7 @@ fn worker_reports_queued_deadline_without_window_or_widget() {
 
     let worker_scheduler = scheduler.clone();
     let worker_shutdown = Arc::clone(&shutdown);
+    let worker_residency = Arc::clone(&residency);
     let worker = thread::spawn(move || {
         media_preview_worker(
             MediaPreviewWorkerLane::Playback,
@@ -139,6 +143,7 @@ fn worker_reports_queued_deadline_without_window_or_widget() {
             result_tx,
             worker_scheduler,
             worker_shutdown,
+            worker_residency,
         );
     });
     let result = result_rx
@@ -173,6 +178,46 @@ fn worker_reports_queued_deadline_without_window_or_widget() {
 }
 
 #[test]
+fn worker_acknowledges_decoder_residency_retirement_after_bounded_wake() {
+    let (result_tx, _result_rx) = mpsc::channel();
+    let scheduler = MediaPreviewScheduler::default();
+    let (job_tx, job_rx) = scheduler.job_queue();
+    let shutdown = Arc::new(PreviewShutdownSignal::default());
+    let residency = Arc::new(PreviewDecodeResidencyCoordinator::new());
+    residency.register_worker(MediaPreviewWorkerLane::Playback);
+    let worker_scheduler = scheduler.clone();
+    let worker_shutdown = Arc::clone(&shutdown);
+    let worker_residency = Arc::clone(&residency);
+    let worker = thread::spawn(move || {
+        media_preview_worker(
+            MediaPreviewWorkerLane::Playback,
+            job_rx,
+            result_tx,
+            worker_scheduler,
+            worker_shutdown,
+            worker_residency,
+        );
+    });
+
+    assert!(residency.activate(PreviewDecodeResidencyFamily::Playback));
+    job_tx.interrupt_workers_for_lifecycle();
+    assert!(residency.activate(PreviewDecodeResidencyFamily::Interactive));
+    assert!(!residency.admits(PreviewDecodeAccessMode::RandomAccessStillFrame));
+    job_tx.interrupt_workers_for_lifecycle();
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !residency.admits(PreviewDecodeAccessMode::RandomAccessStillFrame)
+        && Instant::now() < deadline
+    {
+        thread::yield_now();
+    }
+    assert!(residency.admits(PreviewDecodeAccessMode::RandomAccessStillFrame));
+
+    job_tx.close();
+    worker.join().expect("worker should stop after queue close");
+}
+
+#[test]
 fn worker_interrupts_blocked_ffmpeg_input_and_publishes_typed_evidence() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind local stall server");
     let address = listener.local_addr().expect("stall server address");
@@ -189,8 +234,11 @@ fn worker_interrupts_blocked_ffmpeg_input_and_publishes_typed_evidence() {
     let (job_tx, job_rx) = scheduler.job_queue();
     let (result_tx, result_rx) = mpsc::channel();
     let shutdown = Arc::new(PreviewShutdownSignal::default());
+    let residency = Arc::new(PreviewDecodeResidencyCoordinator::new());
+    residency.register_worker(MediaPreviewWorkerLane::Playback);
     let worker_scheduler = scheduler.clone();
     let worker_shutdown = Arc::clone(&shutdown);
+    let worker_residency = Arc::clone(&residency);
     let worker = thread::spawn(move || {
         media_preview_worker(
             MediaPreviewWorkerLane::Playback,
@@ -198,6 +246,7 @@ fn worker_interrupts_blocked_ffmpeg_input_and_publishes_typed_evidence() {
             result_tx,
             worker_scheduler,
             worker_shutdown,
+            worker_residency,
         );
     });
 

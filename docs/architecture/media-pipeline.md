@@ -1575,6 +1575,18 @@ frame after its final GPU Viewer output is usable. Playback and Scrub keep one
 mode-local decoder/DPB; GPU exact Still keeps the bounded, output-lease-aware
 two-slot ring described above instead of accumulating one surface pool per
 request or reusing a pool whose prior native output is still owned.
+Mode-locality does not authorize all modes to remain hardware-resident at once.
+The App Preview Runtime separates playback from the scrub/exact interactive
+family. A family transition first evicts only native decoder-resource entries
+from the shared Frame Store, wakes worker waits through a Broker-owned revision,
+and defers new-family admission until every opposite-family worker confirms it
+has destroyed its thread-owned `PreviewDecodeSessionContext`. CPU decoded
+frames remain cacheable across the transition, and final Viewer texture/raster
+ownership is unaffected. Workers never destroy another worker's FFmpeg context;
+new work cannot race the retirement acknowledgement; a revision-mismatched
+acknowledgement is ignored. On a three-lane runtime this bounds steady-state
+hardware pools to the active family rather than allowing a warm Playback pool
+to overlap Scrub and exact Still pools after a long run.
 The experimental external-process CPU RGBA path terminates and reaps only its
 per-request child when the probe fires; the compatible in-process session may
 remain. Stale work is never cached or marked as a failed source.
@@ -1748,7 +1760,8 @@ semantics. `THREADS` means FFmpeg decoder threads per app preview worker;
 app viewer preview service uses the resolved budget directly for playback and
 interactive lane workers. Production sessions live in each worker's explicit
 `PreviewDecodeSessionContext`, remain alive across short gaps for locality, and
-are cleared automatically after two seconds idle or at worker shutdown. The
+are cleared automatically after two seconds idle, at an acknowledged
+playback/interactive residency-family transition, or at worker shutdown. The
 top-level media convenience function retains a thread-local context only for
 standalone thumbnail/export/test callers that do not own a production worker;
 `clear_thread_local_preview_decode_session()` exists for those callers and is

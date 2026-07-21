@@ -3,6 +3,26 @@
 use super::*;
 
 impl<O: Clone> PreviewProductionRuntime<O> {
+    /// Observe the transport-family boundary and retire the opposite family
+    /// before it may accumulate another hardware decoder surface pool.
+    pub(super) fn observe_transport_activity(&self, playing: bool) {
+        self.transport_playing.set(playing);
+        let family = if playing {
+            PreviewDecodeResidencyFamily::Playback
+        } else {
+            PreviewDecodeResidencyFamily::Interactive
+        };
+        if !self.decode_residency.activate(family) {
+            return;
+        }
+
+        // Final Viewer outputs have independent ownership. Dropping decoded
+        // media here releases native-output leases before worker-owned codec
+        // contexts acknowledge retirement.
+        self.frame_store.borrow_mut().clear_decoder_resource_media_frames();
+        self.jobs.interrupt_workers_for_lifecycle();
+    }
+
     /// Release decoder-backed media residency after all Preview work is idle.
     ///
     /// This preserves Viewer output and failure memory. A retained native

@@ -217,6 +217,18 @@ pub struct PreviewDiagnostics {
     pub decode_cpu_budget: PreviewDecodeCpuBudget,
     /// Preview decode workers successfully started for this service.
     pub decode_worker_count: usize,
+    /// Latest decoder-residency phase revision.
+    pub decode_residency_revision: u64,
+    /// Active decoder-residency family (`playback` or `interactive`).
+    pub decode_residency_family: Option<&'static str>,
+    /// Playback/interactive residency transitions published by the Runtime.
+    pub decode_residency_transitions: u64,
+    /// Decode admissions held while the opposite worker family retired.
+    pub decode_residency_blocked_admissions: u64,
+    /// Worker retirements required by the active phase revision.
+    pub decode_residency_required_acknowledgements: u32,
+    /// Required worker retirements completed for the active phase revision.
+    pub decode_residency_acknowledged_retirements: u32,
     /// App-level playback hardware-decode admission state.
     pub hardware_decode_admission: PreviewHardwareDecodeAdmissionDiagnostics,
     /// Successful background media decodes received by the production Runtime.

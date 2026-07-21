@@ -31,6 +31,7 @@ use super::preview_access_mode::{
     MediaPreviewKey, MediaPreviewRequestPriority, MediaPreviewScheduler, MediaPreviewWorkerLane,
     MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT,
 };
+use super::preview_decode_residency::PreviewDecodeResidencyCoordinator;
 use super::preview_execution::PreviewDecodeExecutionSummary;
 use super::preview_media_frame::{
     MediaPreviewFrame, MediaPreviewGpuSourceFrame, MediaPreviewNativeSourceFrame,
@@ -96,16 +97,26 @@ pub(crate) fn media_preview_worker(
     results: mpsc::Sender<MediaPreviewResult>,
     scheduler: MediaPreviewScheduler,
     shutdown: Arc<PreviewShutdownSignal>,
+    residency: Arc<PreviewDecodeResidencyCoordinator>,
 ) {
     // Codec and hardware-surface residency is explicitly worker-owned. The
     // worker can now release it at lifecycle boundaries without reaching
     // through an implicit media-layer thread-local cache.
     let mut decode_context = PreviewDecodeSessionContext::new();
+    let mut residency_revision = 0;
     loop {
+        if let Some(directive) = residency.worker_directive(lane, residency_revision) {
+            if directive.retire_context() {
+                decode_context.clear();
+                residency.acknowledge_retirement(lane, directive.revision());
+            }
+            residency_revision = directive.revision();
+        }
         let outcome = match jobs
             .recv_for_worker_outcome_timeout(lane, MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT)
         {
             MediaPreviewJobQueueWait::Work(outcome) => outcome,
+            MediaPreviewJobQueueWait::Lifecycle => continue,
             MediaPreviewJobQueueWait::Idle => {
                 decode_context.clear();
                 continue;

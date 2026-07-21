@@ -159,6 +159,11 @@ impl PreviewFrameStoreAdapter {
         self.store.clear_media_frames();
     }
 
+    /// Release native decoder resources while retaining ordinary CPU frames.
+    pub(crate) fn clear_decoder_resource_media_frames(&mut self) {
+        self.store.clear_decoder_resource_media_frames();
+    }
+
     /// Clear every payload, failure key, and explicit pin.
     pub(crate) fn clear_all(&mut self) {
         self.store.clear_all();

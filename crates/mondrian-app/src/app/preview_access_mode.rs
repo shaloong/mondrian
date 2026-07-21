@@ -4,6 +4,7 @@
 //! random-access preview work. It deliberately does not decode media, evaluate
 //! render plans, interpret color, or convert frames.
 
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -337,9 +338,18 @@ pub(crate) struct MediaPreviewJobQueueSender {
     broker: MediaPreviewWorkBroker,
 }
 
-#[derive(Clone)]
 pub(crate) struct MediaPreviewJobQueueReceiver {
     broker: MediaPreviewWorkBroker,
+    observed_lifecycle_revision: Cell<u64>,
+}
+
+impl Clone for MediaPreviewJobQueueReceiver {
+    fn clone(&self) -> Self {
+        Self {
+            broker: self.broker.clone(),
+            observed_lifecycle_revision: Cell::new(self.observed_lifecycle_revision.get()),
+        }
+    }
 }
 
 /// Point-in-time worker transport queue depth grouped by scheduling contract.
@@ -447,6 +457,7 @@ pub(crate) enum MediaPreviewJobQueueReceive {
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum MediaPreviewJobQueueWait {
     Work(MediaPreviewJobQueueReceive),
+    Lifecycle,
     Idle,
     Closed,
 }
@@ -458,7 +469,10 @@ pub(crate) fn media_preview_job_queue(
     let broker = MediaPreviewWorkBroker::new(capacity, capacity);
     (
         MediaPreviewJobQueueSender { broker: broker.clone() },
-        MediaPreviewJobQueueReceiver { broker },
+        MediaPreviewJobQueueReceiver {
+            observed_lifecycle_revision: Cell::new(broker.worker_lifecycle_revision()),
+            broker,
+        },
     )
 }
 
@@ -470,6 +484,11 @@ impl MediaPreviewJobQueueSender {
 
     pub(crate) fn close(&self) {
         self.broker.close();
+    }
+
+    /// Wake workers so they can execute a worker-owned lifecycle boundary.
+    pub(crate) fn interrupt_workers_for_lifecycle(&self) {
+        self.broker.interrupt_worker_waits();
     }
 
     #[cfg(test)]
@@ -590,7 +609,11 @@ impl MediaPreviewJobQueueReceiver {
         lane: MediaPreviewWorkerLane,
         timeout: Duration,
     ) -> MediaPreviewJobQueueWait {
-        match self.broker.receive_timeout(frame_worker_lane(lane), timeout) {
+        match self.broker.receive_timeout_after_lifecycle_revision(
+            frame_worker_lane(lane),
+            timeout,
+            self.observed_lifecycle_revision.get(),
+        ) {
             mondrian_playback::FrameWorkReceiveWait::Work(
                 mondrian_playback::FrameWorkReceive::Ready(execution),
             ) => MediaPreviewJobQueueWait::Work(MediaPreviewJobQueueReceive::Job(
@@ -602,6 +625,10 @@ impl MediaPreviewJobQueueReceiver {
                 media_preview_job_from_execution(execution),
             )),
             mondrian_playback::FrameWorkReceiveWait::TimedOut => MediaPreviewJobQueueWait::Idle,
+            mondrian_playback::FrameWorkReceiveWait::Interrupted { revision } => {
+                self.observed_lifecycle_revision.set(revision);
+                MediaPreviewJobQueueWait::Lifecycle
+            }
             mondrian_playback::FrameWorkReceiveWait::Closed => MediaPreviewJobQueueWait::Closed,
         }
     }
@@ -820,7 +847,10 @@ impl MediaPreviewScheduler {
     pub(crate) fn job_queue(&self) -> (MediaPreviewJobQueueSender, MediaPreviewJobQueueReceiver) {
         (
             MediaPreviewJobQueueSender { broker: self.broker.clone() },
-            MediaPreviewJobQueueReceiver { broker: self.broker.clone() },
+            MediaPreviewJobQueueReceiver {
+                observed_lifecycle_revision: Cell::new(self.broker.worker_lifecycle_revision()),
+                broker: self.broker.clone(),
+            },
         )
     }
 

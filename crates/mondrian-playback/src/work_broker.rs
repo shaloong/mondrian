@@ -140,6 +140,14 @@ pub enum FrameWorkReceiveWait<K, D, P> {
     Work(FrameWorkReceive<K, D, P>),
     /// No eligible work arrived before the requested idle interval.
     TimedOut,
+    /// An Adapter-requested worker lifecycle checkpoint interrupted the wait.
+    ///
+    /// No execution lease is created. The worker must finish its local
+    /// lifecycle action before receiving work again.
+    Interrupted {
+        /// Latest lifecycle revision observed under the Broker lock.
+        revision: u64,
+    },
     /// The broker closed while the worker was waiting.
     Closed,
 }
@@ -299,6 +307,7 @@ struct BrokerState<K, D, P> {
     last_observed_at: MonotonicTimestamp,
     clock_regression_active: bool,
     closed_at: Option<MonotonicTimestamp>,
+    worker_lifecycle_revision: u64,
     metrics: FrameWorkBrokerMetrics,
 }
 
@@ -380,6 +389,7 @@ where
                     last_observed_at: MonotonicTimestamp::ZERO,
                     clock_regression_active: false,
                     closed_at: None,
+                    worker_lifecycle_revision: 0,
                     metrics: FrameWorkBrokerMetrics::default(),
                 }),
                 changed: Condvar::new(),
@@ -582,6 +592,59 @@ where
                 return FrameWorkReceiveWait::TimedOut;
             }
         }
+    }
+
+    /// Wait for work, timeout, closure, or a newer worker-lifecycle revision.
+    ///
+    /// The revision and condition variable share the Broker lock, preventing
+    /// the lost-wakeup race that an external atomic flag plus `notify_all`
+    /// would permit between a worker's predicate check and its wait.
+    pub fn receive_timeout_after_lifecycle_revision(
+        &self,
+        lane: FrameWorkerLane,
+        timeout: Duration,
+        observed_revision: u64,
+    ) -> FrameWorkReceiveWait<K, D, P> {
+        let wait_started = Instant::now();
+        let mut state = lock_state(&self.shared.state);
+        loop {
+            if state.worker_lifecycle_revision != observed_revision {
+                return FrameWorkReceiveWait::Interrupted {
+                    revision: state.worker_lifecycle_revision,
+                };
+            }
+            let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
+            if let Some(work) = dequeue_work_locked(&mut state, lane, now) {
+                return FrameWorkReceiveWait::Work(work);
+            }
+            if state.closed_at.is_some() {
+                return FrameWorkReceiveWait::Closed;
+            }
+            let remaining = timeout.saturating_sub(wait_started.elapsed());
+            if remaining.is_zero() {
+                return FrameWorkReceiveWait::TimedOut;
+            }
+            let (next_state, timed_out) =
+                wait_state_timeout(&self.shared.changed, state, remaining);
+            state = next_state;
+            if timed_out && wait_started.elapsed() >= timeout {
+                return FrameWorkReceiveWait::TimedOut;
+            }
+        }
+    }
+
+    /// Current worker-lifecycle revision for a newly attached receiver.
+    pub fn worker_lifecycle_revision(&self) -> u64 {
+        lock_state(&self.shared.state).worker_lifecycle_revision
+    }
+
+    /// Publish a worker-lifecycle boundary and wake every bounded receiver.
+    pub fn interrupt_worker_waits(&self) -> u64 {
+        let mut state = lock_state(&self.shared.state);
+        state.worker_lifecycle_revision = state.worker_lifecycle_revision.saturating_add(1);
+        let revision = state.worker_lifecycle_revision;
+        self.shared.changed.notify_all();
+        revision
     }
 
     /// Decide atomically whether an execution must stop for lifecycle or

@@ -277,6 +277,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         demand_identity: Option<mondrian_playback::FrameDemandIdentity>,
         adaptive_hints: PreviewDecodeAdaptiveHints,
     ) -> bool {
+        if !self.decode_residency.admits(access_mode) {
+            return false;
+        }
         let generation = self.execution.borrow().generation();
         let is_current_playback = priority == MediaPreviewRequestPriority::Current
             && access_mode == PreviewDecodeAccessMode::PlaybackCursor;

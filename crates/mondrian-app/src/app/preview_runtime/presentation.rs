@@ -10,7 +10,7 @@ use super::*;
 impl<O: Clone> PreviewProductionRuntime<O> {
     pub(crate) fn presentation_for_state(&self, state: &AppState) -> PreviewPresentationState<O> {
         bump(&self.metrics.render_requests);
-        self.transport_playing.set(state.is_playing());
+        self.observe_transport_activity(state.is_playing());
         self.execution.borrow_mut().set_pending(false);
         self.last_color_rejection.replace(None);
         let Some(sequence) = state.sequence.as_ref() else {

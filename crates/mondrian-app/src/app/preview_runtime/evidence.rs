@@ -9,6 +9,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let frame_store = self.frame_store.borrow().diagnostics();
         let decode_cancellation = self.metrics.decode_cancellation.borrow().report();
         let cancellation = decode_cancellation.all;
+        let decode_residency = self.decode_residency.diagnostics();
         let mut decode_access_mode_profiles = self.metrics.decode_access_mode_profiles.get();
         decode_access_mode_profiles.apply_cancellation(decode_cancellation);
         PreviewDiagnostics {
@@ -81,6 +82,15 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             media_failure_hits: self.metrics.media_failure_hits.get(),
             decode_cpu_budget: self.decode_cpu_budget,
             decode_worker_count: self.decode_worker_count,
+            decode_residency_revision: decode_residency.revision,
+            decode_residency_family: decode_residency.active_family.map(|family| match family {
+                PreviewDecodeResidencyFamily::Playback => "playback",
+                PreviewDecodeResidencyFamily::Interactive => "interactive",
+            }),
+            decode_residency_transitions: decode_residency.transitions,
+            decode_residency_blocked_admissions: decode_residency.blocked_admissions,
+            decode_residency_required_acknowledgements: decode_residency.required_acknowledgements,
+            decode_residency_acknowledged_retirements: decode_residency.acknowledged_retirements,
             hardware_decode_admission: self.hardware_decode_admission_diagnostics(),
             decode_successes: self.metrics.decode_successes.get(),
             decode_startup_preroll_frames: self.metrics.decode_startup_preroll_frames.get(),

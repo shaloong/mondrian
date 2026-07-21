@@ -36,6 +36,9 @@ use crate::app::preview_cpu_execution::{
     composite_resolved_preview, output_boundary_from_color_context, PreviewCompositeOutput,
     PreviewCpuExecutionDurations,
 };
+use crate::app::preview_decode_residency::{
+    PreviewDecodeResidencyCoordinator, PreviewDecodeResidencyFamily,
+};
 use crate::app::preview_display_contract::preview_blockers_from_snapshot;
 #[cfg(test)]
 use crate::app::preview_execution::PreviewDecodeExecutionSummary;
@@ -180,6 +183,7 @@ pub struct PreviewProductionRuntime<O: Clone> {
     results: RefCell<mpsc::Receiver<MediaPreviewResult>>,
     workers: RefCell<Vec<JoinHandle<()>>>,
     shutdown: Arc<PreviewShutdownSignal>,
+    decode_residency: Arc<PreviewDecodeResidencyCoordinator>,
     frame_store: RefCell<PreviewFrameStoreAdapter>,
     scrub_adaptation: RefCell<PreviewScrubAdaptationState>,
     execution:
@@ -215,6 +219,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let (job_tx, job_rx) = scheduler.job_queue();
         let (result_tx, result_rx) = mpsc::channel::<MediaPreviewResult>();
         let shutdown = Arc::new(PreviewShutdownSignal::default());
+        let decode_residency = Arc::new(PreviewDecodeResidencyCoordinator::new());
         let mut decode_worker_count = 0;
         let mut workers = Vec::new();
         for worker_index in 0..worker_count {
@@ -222,7 +227,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             let worker_results = result_tx.clone();
             let worker_scheduler = scheduler.clone();
             let worker_shutdown = Arc::clone(&shutdown);
+            let worker_decode_residency = Arc::clone(&decode_residency);
             let worker_lane = media_preview_worker_lane(worker_index, worker_count);
+            decode_residency.register_worker(worker_lane);
             match std::thread::Builder::new()
                 .name(format!("mondrian-preview-worker-{worker_index}"))
                 .spawn(move || {
@@ -232,6 +239,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         worker_results,
                         worker_scheduler,
                         worker_shutdown,
+                        worker_decode_residency,
                     )
                 }) {
                 Ok(handle) => {
@@ -239,6 +247,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     decode_worker_count += 1;
                 }
                 Err(err) => {
+                    decode_residency.unregister_worker(worker_lane);
                     tracing::warn!(
                         worker_index,
                         "failed to start production preview worker: {err}"
@@ -252,6 +261,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             results: RefCell::new(result_rx),
             workers: RefCell::new(workers),
             shutdown,
+            decode_residency,
             frame_store: RefCell::new(PreviewFrameStoreAdapter::default()),
             scrub_adaptation: RefCell::new(PreviewScrubAdaptationState::default()),
             execution: RefCell::new(PreviewExecutionCoordinator::default()),
@@ -366,7 +376,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     /// output texture registration, and texture lifetime.
     pub(crate) fn gpu_preview_frame_for_state(&self, state: &AppState) -> PreviewGpuFrameState {
         bump(&self.metrics.gpu_preview_candidate_requests);
-        self.transport_playing.set(state.is_playing());
+        self.observe_transport_activity(state.is_playing());
         self.execution.borrow_mut().set_pending(false);
         self.last_color_rejection.replace(None);
         let Some(sequence) = state.sequence.as_ref() else {
@@ -759,7 +769,7 @@ impl<O: Clone> PlaybackPreviewAdapter for PreviewProductionRuntime<O> {
         pending_demand: Option<mondrian_playback::FrameDemandIdentity>,
         transport_playing: bool,
     ) -> PreviewWorkPoll {
-        self.transport_playing.set(transport_playing);
+        self.observe_transport_activity(transport_playing);
         let mut outcome = self.poll_finished_outcome(pending_demand);
         outcome.merge(self.expire_stalled_realtime_current(pending_demand));
         self.try_release_settled_transport_media_residency();

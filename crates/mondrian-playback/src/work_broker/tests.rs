@@ -79,6 +79,52 @@ fn bounded_receive_distinguishes_idle_from_closed() {
 }
 
 #[test]
+fn lifecycle_interrupt_cannot_be_lost_before_bounded_receive() {
+    let broker = FrameWorkBroker::<u64, u64, u64>::new(2, 2);
+    let observed_revision = broker.worker_lifecycle_revision();
+    let published_revision = broker.interrupt_worker_waits();
+
+    assert_eq!(published_revision, observed_revision + 1);
+    assert!(matches!(
+        broker.receive_timeout_after_lifecycle_revision(
+            FrameWorkerLane::Any,
+            Duration::from_secs(1),
+            observed_revision,
+        ),
+        FrameWorkReceiveWait::Interrupted { revision } if revision == published_revision
+    ));
+}
+
+#[test]
+fn lifecycle_interrupt_precedes_queued_work_admission() {
+    let broker = FrameWorkBroker::<u64, u64, u64>::new(2, 2);
+    let generation = broker.begin_generation();
+    let observed_revision = broker.worker_lifecycle_revision();
+    assert!(matches!(
+        broker.submit(request(1, generation, FrameWorkClass::Playback)),
+        FrameWorkSubmission::Queued { .. }
+    ));
+    let published_revision = broker.interrupt_worker_waits();
+
+    assert!(matches!(
+        broker.receive_timeout_after_lifecycle_revision(
+            FrameWorkerLane::Playback,
+            Duration::from_secs(1),
+            observed_revision,
+        ),
+        FrameWorkReceiveWait::Interrupted { revision } if revision == published_revision
+    ));
+    assert!(matches!(
+        broker.receive_timeout_after_lifecycle_revision(
+            FrameWorkerLane::Playback,
+            Duration::from_secs(1),
+            published_revision,
+        ),
+        FrameWorkReceiveWait::Work(FrameWorkReceive::Ready(_))
+    ));
+}
+
+#[test]
 fn current_still_work_preserves_decoder_lane_affinity() {
     let queue = VecDeque::from([QueuedWork {
         request: request(1, 1, FrameWorkClass::Still),

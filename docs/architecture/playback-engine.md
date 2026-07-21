@@ -441,6 +441,21 @@ decode from occupying the realtime playback lane. Parallelism remains
 available through lanes whose declared acceptance spans the class rather than
 through implicit cross-lane stealing.
 
+Worker-lane affinity is necessary but does not by itself bound native decoder
+residency across a transport transition. The App Preview Runtime therefore owns
+a two-family residency phase: `PlaybackCursor` is the playback family;
+`ScrubCursor` and `RandomAccessStillFrame` are the interactive family. When the
+family changes, the Runtime removes only Frame Store entries carrying nonzero
+decoder resource units, publishes a worker-lifecycle revision, and waits for
+the opposite worker family to destroy its own codec context before admitting
+new-family decode. CPU media frames and independently usable final Viewer
+outputs remain resident. The Broker owns only the revision and lost-wakeup-safe
+Condvar interruption; it does not decide which workers retire or interpret
+media access modes. A stale acknowledgement is revision-scoped and cannot
+satisfy a later transition. This prevents long-lived playback, scrub, and exact
+still hardware surface pools from accumulating while preserving thread-affine
+FFmpeg destruction and bounded transition latency.
+
 Admission across the pending-binding window and worker queue is transactional.
 The Broker first computes one eviction that can satisfy every active capacity
 constraint—preferring a queued candidate when the same key can open both

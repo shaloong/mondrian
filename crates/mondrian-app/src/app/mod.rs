@@ -70,6 +70,7 @@ mod playback_acceptance;
 pub(crate) mod playback_preview;
 pub(crate) mod preview_access_mode;
 pub(crate) mod preview_cpu_execution;
+pub(crate) mod preview_decode_residency;
 pub(crate) mod preview_display_contract;
 pub(crate) mod preview_execution;
 pub(crate) mod preview_frame_store;

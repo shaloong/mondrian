@@ -170,6 +170,7 @@ where
             key: key.clone(),
             payload: payload.clone(),
             reserved_bytes,
+            resource_units,
         });
         if self.media.insert(key, payload, reserved_bytes, resource_units) {
             if pin_if_oversize_current {
@@ -259,6 +260,18 @@ where
         self.pinned_media = None;
     }
 
+    /// Release only media payloads that retain decoder-owned resources.
+    ///
+    /// CPU frames have zero resource units and remain reusable across
+    /// transport-family changes. Native decoder frames carry nonzero units and
+    /// must be removed before the owning worker destroys its codec context.
+    pub fn clear_decoder_resource_media_frames(&mut self) {
+        self.media.clear_resource_entries();
+        if self.pinned_media.as_ref().is_some_and(|pinned| pinned.resource_units > 0) {
+            self.pinned_media = None;
+        }
+    }
+
     /// Clear every payload, failure key, and explicit pin.
     pub fn clear_all(&mut self) {
         self.media.clear();
@@ -303,6 +316,7 @@ struct PinnedMedia<K, V> {
     key: K,
     payload: V,
     reserved_bytes: usize,
+    resource_units: usize,
 }
 
 struct PinnedViewer<S, V> {
@@ -405,6 +419,17 @@ where
         self.lru.clear();
         self.reserved_bytes = 0;
         self.resource_units = 0;
+    }
+
+    fn clear_resource_entries(&mut self) {
+        let keys = self
+            .entries
+            .iter()
+            .filter_map(|(key, entry)| (entry.resource_units > 0).then_some(key.clone()))
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.remove(&key);
+        }
     }
 
     fn touch(&mut self, key: &K) {
@@ -551,6 +576,36 @@ mod tests {
         assert!(store.media_frame(&1).is_none());
         assert_eq!(store.media_frame(&2), Some(vec![2]));
         assert_eq!(store.media_frame(&3), Some(vec![3]));
+    }
+
+    #[test]
+    fn decoder_resource_release_preserves_cpu_media_and_drops_native_pins() {
+        let mut config = config(64);
+        config.media_resource_unit_budget = 1;
+        let mut store = TestStore::new(config);
+        assert_eq!(
+            store.admit_media_frame(1, vec![1; 8], 8, 0, false),
+            FrameStoreAdmission::Resident
+        );
+        assert_eq!(
+            store.admit_media_frame(2, vec![2], 0, 1, false),
+            FrameStoreAdmission::Resident
+        );
+        assert_eq!(
+            store.admit_media_frame(3, vec![3], 0, 2, true),
+            FrameStoreAdmission::PinnedCurrent
+        );
+
+        store.clear_decoder_resource_media_frames();
+
+        let diagnostics = store.diagnostics();
+        assert_eq!(diagnostics.media_entries, 1);
+        assert_eq!(diagnostics.media_reserved_bytes, 8);
+        assert_eq!(diagnostics.media_resource_units, 0);
+        assert_eq!(diagnostics.pinned_media_bytes, 0);
+        assert_eq!(store.media_frame(&1), Some(vec![1; 8]));
+        assert_eq!(store.media_frame(&2), None);
+        assert_eq!(store.media_frame(&3), None);
     }
 
     #[test]
