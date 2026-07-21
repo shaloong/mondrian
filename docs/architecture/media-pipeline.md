@@ -791,7 +791,14 @@ a follow-up tick instead of monopolizing the event loop. Diagnostics must expose
 completion poll calls, drained results, count-budget exhaustions, time-budget
 exhaustions, and poll durations. This keeps worker bursts, cache insertion, and
 decode diagnostic aggregation from delaying transport controls or close/quit
-events during buffering.
+events during buffering. The producer side is independently bounded to eight
+results, equal to one maximum foreground drain. At most one additional result
+may remain owned by each of the two workers while that queue is full. A blocked
+publisher polls shutdown and decoder-residency revisions: shutdown abandons its
+lease, while a transport-family transition resolves the completed binding as
+non-reusable, drops the payload, then returns to the worker-owned
+codec/surface-pool retirement barrier. It may never wait indefinitely on a
+channel send or leave hidden pending Broker state.
 The same event-loop rule applies to thumbnail and waveform completion queues
 consumed by `AppUiHost::poll_background_tasks`: they may request another tick
 when backlog remains, but they must not drain an unbounded worker burst on the
@@ -1030,10 +1037,13 @@ age. Broker closure follows the same rule: the first close instant is immutable
 and `BrokerClosed` carries its age. Process worker-stop/join remains a
 media-runtime Adapter concern, but its boolean flag cannot classify or timestamp
 cancellation. FFmpeg continues to see only a boolean cooperative predicate derived
-from the Broker disposition. Before sending a worker
-result through the App channel, the Adapter stamps completion in the Broker;
-the UI may resolve freshness later but cannot change whether execution met its
-deadline. When the worker returns, the Adapter contributes one
+from the Broker disposition. Before attempting to publish a worker result
+through the bounded App channel, the Adapter stamps completion in the Broker;
+queue backpressure or delayed UI polling therefore cannot change whether
+execution met its deadline. Successful publication leaves freshness resolution
+to the foreground pump. Shutdown abandons an unpublishable lease; a
+residency-family transition instead resolves it as non-reusable before dropping
+its native payload. When the worker returns, the Adapter contributes one
 `FrameCancellationObservation` to the playback-owned collector: semantic work
 class, structured cause, total execution lifetime,
 worker-start-to-first-checkpoint, and request-to-first-checkpoint.
@@ -1423,7 +1433,13 @@ GPU-resident decoder setup reserves thirty-two FFmpeg `extra_hw_frames` before
 This is requested decoder-pool headroom, not a portable guarantee of how many
 surfaces every codec/driver combination can make concurrently available and
 not application cache capacity; CPU-transfer
-decode leaves the setting at zero because it exports no hardware surfaces.
+decode leaves the setting at zero because it exports no hardware surfaces. The
+external-lease proof is deliberately conservative and bounded: eight queued
+App completions plus at most two worker-held publishers, eight Preview Frame
+Store resource units, four renderer bridge entries, and two selector/transient
+owners. These are ceilings, not expected steady-state occupancy; changing any
+ceiling requires revalidating the thirty-two-frame decoder reserve instead of
+silently adding another native-frame holder.
 GPU-resident requests bypass the process-global CPU RGBA cache and the
 session-local RGBA playback ring. Native decoder surfaces are not inserted into
 either media-owned CPU cache. They may enter the App's playback-owned Preview
@@ -1574,15 +1590,19 @@ Each FFmpeg session in the worker-owned context installs that probe as an
 it active across seek and packet I/O. The media loop also checks it before
 opening, seeking, packet decode, frame receive, EOF draining, hardware transfer,
 and RGBA conversion. If cancellation fires, the decoder returns a
-typed canceled outcome rather than a media failure. All three access modes
-preserve compatible worker-owned session state after a cooperative return.
-The next scrub or exact-still request always seeks and flushes before decoding;
-it never treats canceled partial output as reusable media. Input/codec open
+typed canceled outcome rather than a media failure. The already-open codec and
+immutable hardware device may remain allocated, but demux/codec position is
+never considered reusable: after the operation returns, the owning worker
+flushes the codec, restores default discard policy, clears its session-local
+playback ring, clears EOF/last-PTS state, and forces the next request through
+indexed seek. Scrub and exact-still already seek by access policy; Playback now
+does so after cancellation as an explicit discontinuity rather than continuing
+from a possibly half-submitted packet or partly drained reorder queue. Input/codec open
 cancellation cannot publish a half-built session, while a source, fingerprint,
 device, geometry, or color-contract change destroys the old session before
 opening its replacement. This avoids repeated non-interruptible
 `avcodec_open2` gaps during latest-wins seek bursts without weakening frame
-exactness. The App separately releases the prior generation's native source
+exactness or trusting canceled codec position. The App separately releases the prior generation's native source
 frame after its final GPU Viewer output is usable. Playback keeps one continuous
 decoder; scrub and GPU-resident exact Still share one output-lease-aware
 Interactive decoder rather than accumulating one surface pool per request or

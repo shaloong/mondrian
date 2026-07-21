@@ -780,9 +780,14 @@ callback counters remain evidence.
 - One bounded current-demand slot per session; newer current demand supersedes
   older unstarted work.
 - Prefetch has a separately bounded budget and is discarded first.
-- Worker completion polling has both count and wall-time budgets.
+- Worker completion polling has both count and wall-time budgets; its producer
+  transport holds at most eight queued results plus one pending publisher per
+  decode worker.
 - Cancellation is cooperative, but publishing is guarded again by epoch and
   demand identity.
+- Completion-transport backpressure remains interruptible by shutdown and
+  decoder-residency revisions; a retired-family result is resolved
+  non-reusable before its payload and worker-owned surface pool are released.
 - Shutdown never joins a potentially stalled codec/device worker on the event
   thread.
 - Cache/in-flight keys include access mode, source fingerprint, source time,
@@ -1226,11 +1231,14 @@ submits an absolute wall deadline together with the remaining duration sampled
 immediately before admission. The Broker lowers that duration into its own
 Monotonic Runtime Clock without interpreting the absolute value. Rebinding the
 same in-flight key refreshes the latest demand identity and lowered deadline.
-Before a worker publishes its result channel message, it stamps completion in
-the Broker exactly once; a later UI poll atomically resolves freshness against
-the latest binding while deadline status remains tied to worker return. Canceled
-old work cannot remove a newer binding, and main-thread load cannot turn an
-on-time decode into false Late evidence.
+Before a worker attempts its bounded result-channel publication, it stamps
+completion in the Broker exactly once; a later UI poll atomically resolves
+freshness against the latest binding while deadline status remains tied to
+worker return. A full queue cannot retain unbounded decoder surfaces. Shutdown
+abandons the unpublishable execution; a transport-family retirement resolves
+the completed binding as non-reusable and drops its payload before the worker
+acknowledges codec retirement. Canceled old work cannot remove a newer binding,
+and main-thread load cannot turn an on-time decode into false Late evidence.
 
 The playback-owned `PreviewFrameStore` now also contains the CPU residency
 Implementation formerly local to App UI. Count and byte budgets, LRU eviction,

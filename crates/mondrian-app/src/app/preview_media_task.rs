@@ -94,7 +94,7 @@ impl PreviewShutdownSignal {
 pub(crate) fn media_preview_worker(
     lane: MediaPreviewWorkerLane,
     jobs: MediaPreviewJobQueueReceiver,
-    results: mpsc::Sender<MediaPreviewResult>,
+    results: mpsc::SyncSender<MediaPreviewResult>,
     scheduler: MediaPreviewScheduler,
     shutdown: Arc<PreviewShutdownSignal>,
     residency: Arc<PreviewDecodeResidencyCoordinator>,
@@ -160,8 +160,18 @@ pub(crate) fn media_preview_worker(
                     cancel_request_to_observed_us,
                 );
                 result.cancellation_phase = Some(MediaPreviewCancellationPhase::Queued);
-                if !send_media_preview_result(&results, &scheduler, result) {
-                    break;
+                match send_media_preview_result(
+                    lane,
+                    residency_revision,
+                    &results,
+                    &scheduler,
+                    &shutdown,
+                    &residency,
+                    result,
+                ) {
+                    MediaPreviewResultPublication::Published => {}
+                    MediaPreviewResultPublication::ResidencyTransition => continue,
+                    MediaPreviewResultPublication::Stop => break,
                 }
                 continue;
             }
@@ -193,8 +203,18 @@ pub(crate) fn media_preview_worker(
                 Some(execution_age_us),
                 cancellation.request_age().map(app_duration_us),
             );
-            if !send_media_preview_result(&results, &scheduler, result) {
-                break;
+            match send_media_preview_result(
+                lane,
+                residency_revision,
+                &results,
+                &scheduler,
+                &shutdown,
+                &residency,
+                result,
+            ) {
+                MediaPreviewResultPublication::Published => {}
+                MediaPreviewResultPublication::ResidencyTransition => continue,
+                MediaPreviewResultPublication::Stop => break,
             }
             continue;
         }
@@ -258,29 +278,91 @@ pub(crate) fn media_preview_worker(
                 result.decode_elapsed_us = app_duration_us(evidence.execution_age);
             }
         }
-        if !send_media_preview_result(&results, &scheduler, result) {
-            break;
+        match send_media_preview_result(
+            lane,
+            residency_revision,
+            &results,
+            &scheduler,
+            &shutdown,
+            &residency,
+            result,
+        ) {
+            MediaPreviewResultPublication::Published => {}
+            MediaPreviewResultPublication::ResidencyTransition => continue,
+            MediaPreviewResultPublication::Stop => break,
         }
     }
     decode_context.clear();
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaPreviewResultPublication {
+    Published,
+    ResidencyTransition,
+    Stop,
+}
+
 fn send_media_preview_result(
-    results: &mpsc::Sender<MediaPreviewResult>,
+    lane: MediaPreviewWorkerLane,
+    residency_revision: u64,
+    results: &mpsc::SyncSender<MediaPreviewResult>,
     scheduler: &MediaPreviewScheduler,
-    result: MediaPreviewResult,
-) -> bool {
+    shutdown: &PreviewShutdownSignal,
+    residency: &PreviewDecodeResidencyCoordinator,
+    mut result: MediaPreviewResult,
+) -> MediaPreviewResultPublication {
     let execution_id = result.execution_id;
     if let Some(execution_id) = execution_id {
         scheduler.mark_execution_completed(execution_id);
     }
-    if results.send(result).is_ok() {
-        true
-    } else {
-        if let Some(execution_id) = execution_id {
-            scheduler.abandon_execution(execution_id);
+
+    loop {
+        if shutdown.is_requested() {
+            abandon_media_preview_result(scheduler, execution_id);
+            return MediaPreviewResultPublication::Stop;
         }
-        false
+        if residency
+            .worker_directive(lane, residency_revision)
+            .is_some_and(|directive| directive.retire_context())
+        {
+            // A completed native result may own a decoder surface even before
+            // it reaches the foreground pump. Do not let completion-channel
+            // backpressure delay destruction of an obsolete surface pool.
+            resolve_retired_media_preview_result(scheduler, execution_id);
+            return MediaPreviewResultPublication::ResidencyTransition;
+        }
+        match results.try_send(result) {
+            Ok(()) => return MediaPreviewResultPublication::Published,
+            Err(mpsc::TrySendError::Full(returned)) => {
+                result = returned;
+                std::thread::sleep(Duration::from_micros(250));
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                abandon_media_preview_result(scheduler, execution_id);
+                return MediaPreviewResultPublication::Stop;
+            }
+        }
+    }
+}
+
+fn abandon_media_preview_result(
+    scheduler: &MediaPreviewScheduler,
+    execution_id: Option<FrameExecutionId>,
+) {
+    if let Some(execution_id) = execution_id {
+        scheduler.abandon_execution(execution_id);
+    }
+}
+
+fn resolve_retired_media_preview_result(
+    scheduler: &MediaPreviewScheduler,
+    execution_id: Option<FrameExecutionId>,
+) {
+    if let Some(execution_id) = execution_id {
+        // The transport-family transition invalidates publication authority,
+        // but the Runtime remains alive. Resolve the completed binding as
+        // non-reusable so it cannot survive as hidden pending work.
+        let _ = scheduler.resolve_execution(execution_id, false);
     }
 }
 

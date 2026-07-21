@@ -7915,8 +7915,8 @@ fn test_cpu_frame_store(
 
 fn install_preview_result_channel_for_test(
     service: &WindowPreviewAdapter,
-) -> mpsc::Sender<MediaPreviewResult> {
-    let (result_tx, result_rx) = mpsc::channel();
+) -> mpsc::SyncSender<MediaPreviewResult> {
+    let (result_tx, result_rx) = mpsc::sync_channel(MEDIA_PREVIEW_COMPLETED_RESULT_QUEUE_CAPACITY);
     service.results.replace(result_rx);
     result_tx
 }

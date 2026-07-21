@@ -747,6 +747,24 @@ impl PreviewDecodeSession {
             .is_none_or(PreviewDecodeSessionOutputLeaseObserver::is_released)
     }
 
+    /// Restore a deterministic decode entry after cooperative cancellation.
+    ///
+    /// The codec allocation and immutable hardware device remain reusable, but
+    /// demux/codec position cannot: cancellation may have occurred after a
+    /// packet was submitted or while reordered output was only partly drained.
+    /// Clearing position forces the next request through indexed seek + flush.
+    fn recover_after_cancellation(&mut self) {
+        // SAFETY: this worker exclusively owns the open decoder and calls flush
+        // only after the interrupted decode operation has returned.
+        unsafe {
+            ffmpeg::ffi::avcodec_flush_buffers(self.decoder.as_mut_ptr());
+        }
+        self.decoder.skip_frame(ffmpeg::codec::discard::Discard::Default);
+        self.last_pts = None;
+        self.reached_eof = false;
+        self.playback_ring.clear();
+    }
+
     fn decode_at(
         &mut self,
         source_time: TimelineTime,
@@ -1840,9 +1858,6 @@ fn decode_preview_frame_outcome_in_sessions(
                 match result {
                     Ok(Some(frame)) => {
                         if should_cancel() {
-                            if !access_mode.preserves_session_on_cancel() {
-                                *slot = None;
-                            }
                             return Ok(PreviewDecodeOutcome::Canceled(
                                 interrupt_state.cancellation(
                                     PreviewDecodeCancellationCheckpoint::ExternalProcess,
@@ -1868,9 +1883,6 @@ fn decode_preview_frame_outcome_in_sessions(
                         ));
                     }
                     Ok(None) => {
-                        if !access_mode.preserves_session_on_cancel() {
-                            *slot = None;
-                        }
                         return Ok(PreviewDecodeOutcome::Canceled(
                             interrupt_state
                                 .cancellation(PreviewDecodeCancellationCheckpoint::ExternalProcess),
@@ -1938,9 +1950,7 @@ fn decode_preview_frame_outcome_in_sessions(
                 Ok(PreviewDecodeOutcome::NativeGpuFrame(frame))
             }
             PreviewDecodeOutcome::Canceled(cancellation) => {
-                if !access_mode.preserves_session_on_cancel() {
-                    *slot = None;
-                }
+                session.recover_after_cancellation();
                 Ok(PreviewDecodeOutcome::Canceled(cancellation))
             }
         }

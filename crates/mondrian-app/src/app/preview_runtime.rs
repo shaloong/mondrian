@@ -149,6 +149,11 @@ use mondrian_timeline::sequence::{
 };
 const MEDIA_PREVIEW_PLAYBACK_BUFFERING_STALL_TIMEOUT_US: u64 = 250_000;
 const MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL: usize = 8;
+// Keep decoded payload ownership bounded independently of foreground polling.
+// At most one additional result may be held by each of the two decode workers
+// while this queue is full; native decoder pool headroom accounts for both.
+const MEDIA_PREVIEW_COMPLETED_RESULT_QUEUE_CAPACITY: usize =
+    MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL;
 const MEDIA_PREVIEW_COMPLETED_RESULTS_POLL_BUDGET_US: u64 = 2_000;
 
 /// UI-independent content made usable by Preview production execution.
@@ -217,7 +222,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     fn with_worker_count(decode_cpu_budget: PreviewDecodeCpuBudget, worker_count: usize) -> Self {
         let scheduler = MediaPreviewScheduler::default();
         let (job_tx, job_rx) = scheduler.job_queue();
-        let (result_tx, result_rx) = mpsc::channel::<MediaPreviewResult>();
+        let (result_tx, result_rx) =
+            mpsc::sync_channel::<MediaPreviewResult>(MEDIA_PREVIEW_COMPLETED_RESULT_QUEUE_CAPACITY);
         let shutdown = Arc::new(PreviewShutdownSignal::default());
         let decode_residency = Arc::new(PreviewDecodeResidencyCoordinator::new());
         let mut decode_worker_count = 0;

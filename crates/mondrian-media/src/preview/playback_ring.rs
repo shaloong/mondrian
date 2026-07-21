@@ -59,4 +59,8 @@ impl PreviewPlaybackRing {
             self.entries.pop_back();
         }
     }
+
+    pub(super) fn clear(&mut self) {
+        self.entries.clear();
+    }
 }

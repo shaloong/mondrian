@@ -2304,6 +2304,117 @@ fn preview_media_professional_4k_hevc_main10_hardware_playback_gate() -> anyhow:
     run_external_continuous_playback_gate(video_path, true)
 }
 
+#[test]
+#[ignore = "accelerated native-surface endurance probe; requires real media and GPU"]
+fn preview_media_external_accelerated_native_surface_endurance_probe() -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("perf lock poisoned");
+    let video_path = std::env::var_os("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_MEDIA_PATH")
+        .map(PathBuf::from)
+        .context("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_MEDIA_PATH is required")?;
+    anyhow::ensure!(
+        video_path.exists(),
+        "external playback media path does not exist: {}",
+        video_path.display()
+    );
+    let frame_count = env_usize_clamped(
+        "MONDRIAN_PREVIEW_ACCELERATED_ENDURANCE_FRAMES",
+        20_000,
+        1,
+        100_000,
+    );
+    let start_frame = env_usize_clamped(
+        "MONDRIAN_PREVIEW_ACCELERATED_ENDURANCE_START_FRAME",
+        0,
+        0,
+        1_000_000,
+    );
+    let sequence_frame_count = start_frame.saturating_add(frame_count).saturating_add(2);
+    let media_info = probe_external_preview_media_info(&video_path)?;
+    let media_probe = PreviewPlaybackMediaProbeReport::from_media_info(&media_info)?;
+    let frame_interval = Duration::from_nanos(media_probe.frame_interval_ns()?);
+    let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let root_dir =
+        std::env::temp_dir().join(format!("mondrian_preview_accelerated_endurance_{uniq}"));
+    fs::create_dir_all(&root_dir)?;
+    let mut state = build_preview_media_perf_state_with_media_info(
+        &root_dir,
+        &video_path,
+        Some(media_info),
+        sequence_frame_count,
+    )?;
+    let preview_service = HeadlessPreviewRuntime::new();
+    let mut gpu_adapter =
+        HeadlessViewerGpuAdapter::new().context("create real headless Viewer GPU Adapter")?;
+    configure_headless_gpu_decode_admission(&preview_service, &gpu_adapter);
+    let mut gpu_summary = HeadlessViewerGpuExecutionSummary {
+        adapter: Some(gpu_adapter.adapter_info().clone()),
+        ..HeadlessViewerGpuExecutionSummary::default()
+    };
+
+    state.seek(start_frame as i64);
+    wait_for_headless_gpu_ready(
+        &preview_service,
+        &mut state,
+        &mut gpu_adapter,
+        &mut gpu_summary,
+        Duration::from_secs(30),
+    )?;
+    state.play();
+    wait_for_headless_gpu_ready(
+        &preview_service,
+        &mut state,
+        &mut gpu_adapter,
+        &mut gpu_summary,
+        Duration::from_secs(30),
+    )?;
+    wait_for_headless_playback_preroll(&preview_service, &mut state, Duration::from_secs(30))?;
+
+    for _ in 0..frame_count {
+        state.advance_playback_clock(frame_interval);
+        wait_for_headless_gpu_ready(
+            &preview_service,
+            &mut state,
+            &mut gpu_adapter,
+            &mut gpu_summary,
+            Duration::from_secs(30),
+        )?;
+    }
+
+    state.pause();
+    wait_for_headless_gpu_ready(
+        &preview_service,
+        &mut state,
+        &mut gpu_adapter,
+        &mut gpu_summary,
+        Duration::from_secs(30),
+    )?;
+    wait_for_preview_idle_residency_release(&preview_service, &mut state, Duration::from_secs(30))?;
+    let diagnostics = preview_service.diagnostics();
+    anyhow::ensure!(
+        diagnostics.worker_queue.in_flight_jobs == 0
+            && diagnostics.media_cache_resource_units == 0
+            && gpu_summary.native_import_retained_sources_peak == 0,
+        "accelerated endurance left native resources resident: {diagnostics:?}"
+    );
+    println!(
+        "MONDRIAN_PERF_JSON={}",
+        serde_json::json!({
+            "scenario": "preview_media_external_accelerated_native_surface_endurance",
+            "start_frame": start_frame,
+            "frames": frame_count,
+            "decode_successes": diagnostics.decode_successes,
+            "playback_decode_frames": diagnostics.decode_playback_cursor_frames,
+            "external_frames_registered": diagnostics.gpu_preview_external_frames_registered,
+            "media_cache_evictions": diagnostics.media_cache_evictions,
+            "native_import_retained_sources_peak": gpu_summary.native_import_retained_sources_peak,
+        })
+    );
+    drop(preview_service);
+    drop(state);
+    let _ = fs::remove_dir_all(&root_dir);
+    Ok(())
+}
+
 fn run_external_continuous_playback_gate(
     video_path: PathBuf,
     professional: bool,

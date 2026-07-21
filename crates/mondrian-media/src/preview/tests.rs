@@ -15,8 +15,8 @@ use super::{
     PreviewDecodeBackend, PreviewDecodeCancellation, PreviewDecodeCancellationCheckpoint,
     PreviewDecodeDiagnostics, PreviewDecodeExecutionPath, PreviewDecodeInterruptState,
     PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
-    PreviewDecodeStageDurations, PreviewDecodeThreadingConfig, PreviewDecodeThreadingKind,
-    PreviewDecodedFramePayload, PreviewHardwareDecodeBlocker,
+    PreviewDecodeSessionContext, PreviewDecodeStageDurations, PreviewDecodeThreadingConfig,
+    PreviewDecodeThreadingKind, PreviewDecodedFramePayload, PreviewHardwareDecodeBlocker,
     PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
     PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest, PreviewNativeDecodeFallback,
     PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
@@ -629,9 +629,6 @@ fn preview_decode_access_mode_names_and_defaults_are_stable() {
         PreviewDecodeAccessMode::RandomAccessStillFrame.as_str(),
         "RandomAccessStillFrame"
     );
-    assert!(PreviewDecodeAccessMode::PlaybackCursor.preserves_session_on_cancel());
-    assert!(PreviewDecodeAccessMode::ScrubCursor.preserves_session_on_cancel());
-    assert!(PreviewDecodeAccessMode::RandomAccessStillFrame.preserves_session_on_cancel());
     assert_eq!(
         PreviewDecodeSeekStrategy::KeyframeBefore.as_str(),
         "KeyframeBefore"
@@ -678,21 +675,6 @@ fn preview_decode_rgba_request_preserves_explicit_contract_fields() {
 }
 
 #[test]
-fn preview_decode_cancel_session_policy_is_mode_specific() {
-    for access_mode in [
-        PreviewDecodeAccessMode::PlaybackCursor,
-        PreviewDecodeAccessMode::ScrubCursor,
-        PreviewDecodeAccessMode::RandomAccessStillFrame,
-    ] {
-        let policy = PreviewDecodeAccessPolicy::for_access_mode(access_mode);
-        assert_eq!(
-            policy.preserve_session_on_cancel,
-            access_mode.preserves_session_on_cancel()
-        );
-    }
-}
-
-#[test]
 fn preview_decode_access_mode_policies_are_distinct() {
     let playback =
         PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::PlaybackCursor);
@@ -709,7 +691,6 @@ fn preview_decode_access_mode_policies_are_distinct() {
         PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES
     );
     assert!(playback.use_playback_ring);
-    assert!(playback.preserve_session_on_cancel);
     assert!(!playback.keyframe_only);
     assert_eq!(
         playback.seek_strategy,
@@ -727,7 +708,6 @@ fn preview_decode_access_mode_policies_are_distinct() {
     );
     assert!(scrub.forward_decode_budget_frames < playback.forward_decode_budget_frames);
     assert!(!scrub.use_playback_ring);
-    assert!(scrub.preserve_session_on_cancel);
     assert!(scrub.keyframe_only);
     assert_eq!(
         scrub.seek_strategy,
@@ -741,7 +721,6 @@ fn preview_decode_access_mode_policies_are_distinct() {
         PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES
     );
     assert!(!still.use_playback_ring);
-    assert!(still.preserve_session_on_cancel);
     assert!(!still.keyframe_only);
     assert_eq!(
         still.seek_strategy,
@@ -2288,6 +2267,73 @@ fn playback_session_drains_reordered_frames_between_sequential_requests() {
     );
     clear_thread_local_preview_decode_session();
     clear_global_preview_frame_cache();
+}
+
+#[test]
+fn canceled_codec_work_forces_seek_before_session_reuse() {
+    const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("h264-cancel-recovery.mp4");
+    std::fs::write(&path, FIXTURE).expect("write synthetic H.264 fixture");
+    let fingerprint = MediaFileFingerprint::capture(&path);
+    let mut context = PreviewDecodeSessionContext::new();
+    let request = |frame| {
+        PreviewDecodeRequest::new(
+            path.as_path(),
+            TimelineTime::new(frame, 25).expect("exact source time"),
+            PreviewDecodeAccessMode::PlaybackCursor,
+            test_source_color(),
+        )
+        .with_fingerprint(fingerprint)
+        .with_max_size(Some(64), Some(64))
+        // Native-preferred requests bypass both CPU cache layers, keeping the
+        // cancellation probe on the session/codec path even on CPU fallback.
+        .with_hardware_decode_request(PreviewHardwareDecodeRequest::PreferGpuResident)
+    };
+
+    let initial = context
+        .decode_cancellable(request(5), || false)
+        .expect("initial playback frame");
+    assert!(!matches!(initial, PreviewDecodeOutcome::Canceled(_)));
+    drop(initial);
+
+    let mut codec_cancellation = None;
+    for cancel_after in 1..=64 {
+        let checks = Arc::new(AtomicUsize::new(0));
+        let probe_checks = Arc::clone(&checks);
+        let outcome = context
+            .decode_cancellable(request(8), move || {
+                probe_checks.fetch_add(1, Ordering::AcqRel) >= cancel_after
+            })
+            .expect("cancellable playback frame");
+        if let PreviewDecodeOutcome::Canceled(cancellation) = outcome {
+            if cancellation.checkpoint == PreviewDecodeCancellationCheckpoint::Codec {
+                codec_cancellation = Some(cancellation);
+                break;
+            }
+        }
+    }
+    assert!(
+        codec_cancellation.is_some(),
+        "test probe must reach a codec-phase cancellation"
+    );
+
+    let recovered = context
+        .decode_cancellable(request(9), || false)
+        .expect("playback frame after cancellation");
+    let diagnostics = match recovered {
+        PreviewDecodeOutcome::Frame(frame) => frame.diagnostics,
+        PreviewDecodeOutcome::FloatFrame(frame) => frame.diagnostics,
+        PreviewDecodeOutcome::NativeGpuFrame(frame) => frame.diagnostics,
+        PreviewDecodeOutcome::Canceled(cancellation) => {
+            panic!("recovery decode unexpectedly canceled: {cancellation:?}")
+        }
+    };
+    assert!(diagnostics.session_reused);
+    assert!(
+        diagnostics.seek_performed,
+        "a canceled codec position must never continue as forward-reusable state"
+    );
 }
 
 #[test]

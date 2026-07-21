@@ -112,7 +112,7 @@ fn cooperative_cancellation_is_not_a_media_failure() {
 
 #[test]
 fn worker_reports_queued_deadline_without_window_or_widget() {
-    let (result_tx, result_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
     let scheduler = MediaPreviewScheduler::default();
     let (job_tx, job_rx) = scheduler.job_queue();
     let shutdown = Arc::new(PreviewShutdownSignal::default());
@@ -179,7 +179,7 @@ fn worker_reports_queued_deadline_without_window_or_widget() {
 
 #[test]
 fn worker_acknowledges_decoder_residency_retirement_after_bounded_wake() {
-    let (result_tx, _result_rx) = mpsc::channel();
+    let (result_tx, _result_rx) = mpsc::sync_channel(1);
     let scheduler = MediaPreviewScheduler::default();
     let (job_tx, job_rx) = scheduler.job_queue();
     let shutdown = Arc::new(PreviewShutdownSignal::default());
@@ -218,6 +218,63 @@ fn worker_acknowledges_decoder_residency_retirement_after_bounded_wake() {
 }
 
 #[test]
+fn full_result_queue_cannot_block_decoder_residency_retirement() {
+    let (result_tx, _result_rx) = mpsc::sync_channel(0);
+    let scheduler = MediaPreviewScheduler::default();
+    let (job_tx, job_rx) = scheduler.job_queue();
+    let shutdown = Arc::new(PreviewShutdownSignal::default());
+    let residency = Arc::new(PreviewDecodeResidencyCoordinator::new());
+    residency.register_worker(MediaPreviewWorkerLane::Playback);
+    let worker_scheduler = scheduler.clone();
+    let worker_shutdown = Arc::clone(&shutdown);
+    let worker_residency = Arc::clone(&residency);
+    let worker = thread::spawn(move || {
+        media_preview_worker(
+            MediaPreviewWorkerLane::Playback,
+            job_rx,
+            result_tx,
+            worker_scheduler,
+            worker_shutdown,
+            worker_residency,
+        );
+    });
+
+    let mut job = test_media_job(
+        test_media_key("full-result-queue"),
+        MediaPreviewRequestPriority::Current,
+        PreviewDecodeAccessMode::PlaybackCursor,
+    );
+    job.generation = scheduler.begin_generation();
+    job.deadline_at = Some(Instant::now() - Duration::from_millis(1));
+    assert!(matches!(
+        job_tx.enqueue(job),
+        MediaPreviewJobEnqueueStatus::Enqueued { .. }
+    ));
+
+    let publication_deadline = Instant::now() + Duration::from_secs(1);
+    while job_tx.diagnostics().in_flight_completed_jobs == 0
+        && Instant::now() < publication_deadline
+    {
+        thread::yield_now();
+    }
+    assert_eq!(job_tx.diagnostics().in_flight_completed_jobs, 1);
+
+    assert!(residency.activate(PreviewDecodeResidencyFamily::Interactive));
+    let retirement_deadline = Instant::now() + Duration::from_secs(1);
+    while !residency.admits(PreviewDecodeAccessMode::RandomAccessStillFrame)
+        && Instant::now() < retirement_deadline
+    {
+        thread::yield_now();
+    }
+    assert!(residency.admits(PreviewDecodeAccessMode::RandomAccessStillFrame));
+    assert_eq!(job_tx.diagnostics().in_flight_jobs, 0);
+    assert_eq!(scheduler.pending_len(), 0);
+
+    job_tx.close();
+    worker.join().expect("worker should stop after queue close");
+}
+
+#[test]
 fn worker_interrupts_blocked_ffmpeg_input_and_publishes_typed_evidence() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind local stall server");
     let address = listener.local_addr().expect("stall server address");
@@ -232,7 +289,7 @@ fn worker_interrupts_blocked_ffmpeg_input_and_publishes_typed_evidence() {
 
     let scheduler = MediaPreviewScheduler::default();
     let (job_tx, job_rx) = scheduler.job_queue();
-    let (result_tx, result_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
     let shutdown = Arc::new(PreviewShutdownSignal::default());
     let residency = Arc::new(PreviewDecodeResidencyCoordinator::new());
     residency.register_worker(MediaPreviewWorkerLane::Playback);

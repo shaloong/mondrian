@@ -82,12 +82,12 @@ const PREVIEW_SCRUB_RECOVERY_ANY_SEEK_WINDOW_MS: u64 = 180;
 const PREVIEW_FRAME_CACHE_CAPACITY: usize = 256;
 const PREVIEW_SEEK_INDEX_CACHE_CAPACITY: usize = 32;
 const PREVIEW_PLAYBACK_SESSION_RING_CAPACITY: usize = 8;
-// Native preview frames may outlive one codec call in the bounded global media
-// cache (4), the currently presented GPU output (1), and the exact before/after
-// selector (2). HEVC frame threading and reorder must retain independent
-// headroom beyond those external leases; otherwise a canceled random seek can
-// block inside the driver waiting for a surface and never reach its next
-// cooperative checkpoint.
+// Native preview frames may outlive one codec call in the bounded App
+// completion transport (8 queued plus at most 2 worker-held results), Preview
+// Frame Store (8), renderer import (4), and exact selector/transient ownership
+// (2). HEVC frame threading and reorder must retain independent headroom beyond
+// those external leases; otherwise a canceled random seek can block inside the
+// driver waiting for a surface and never reach its next cooperative checkpoint.
 const PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES: i32 = 32;
 // Exact random access can discard dependency-free non-reference output while
 // traversing the distant prefix of a long GOP. Restore full decode well before
@@ -327,10 +327,6 @@ impl PreviewDecodeAccessMode {
             Self::RandomAccessStillFrame => "RandomAccessStillFrame",
         }
     }
-
-    fn preserves_session_on_cancel(self) -> bool {
-        PreviewDecodeAccessPolicy::for_access_mode(self).preserve_session_on_cancel
-    }
 }
 
 /// Explicit media-layer request for one scaled preview decode outcome.
@@ -465,7 +461,6 @@ struct PreviewDecodeAccessPolicy {
     forward_reuse_frame_window: i64,
     forward_decode_budget_frames: usize,
     use_playback_ring: bool,
-    preserve_session_on_cancel: bool,
     keyframe_only: bool,
     seek_strategy: PreviewDecodeSeekStrategy,
     any_seek_window_ms: u64,
@@ -480,7 +475,6 @@ impl PreviewDecodeAccessPolicy {
                 forward_reuse_frame_window: PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
                 forward_decode_budget_frames: PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
                 use_playback_ring: true,
-                preserve_session_on_cancel: true,
                 keyframe_only: false,
                 seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
                 any_seek_window_ms: 0,
@@ -491,7 +485,6 @@ impl PreviewDecodeAccessPolicy {
                 forward_reuse_frame_window: PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
                 forward_decode_budget_frames: PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
                 use_playback_ring: false,
-                preserve_session_on_cancel: true,
                 keyframe_only: true,
                 seek_strategy: PreviewDecodeSeekStrategy::BoundedAnyFrame,
                 any_seek_window_ms: PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS,
@@ -502,7 +495,6 @@ impl PreviewDecodeAccessPolicy {
                 forward_reuse_frame_window: 0,
                 forward_decode_budget_frames: PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
                 use_playback_ring: false,
-                preserve_session_on_cancel: true,
                 keyframe_only: false,
                 seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
                 any_seek_window_ms: 0,
