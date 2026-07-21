@@ -189,11 +189,6 @@ pub(super) struct PreviewDecodeInterruptState {
 }
 
 impl PreviewDecodeInterruptState {
-    #[cfg(test)]
-    pub(super) fn new() -> Self {
-        Self::with_execution_observer(PreviewDecodeExecutionObserver::new())
-    }
-
     pub(super) fn with_execution_observer(
         execution_observer: PreviewDecodeExecutionObserver,
     ) -> Self {
@@ -247,10 +242,14 @@ impl PreviewDecodeInterruptState {
     fn should_cancel(&self) -> bool {
         let probe = match self.active_probe.lock() {
             Ok(active_probe) => active_probe.clone(),
-            Err(_) => return true,
+            Err(_) => {
+                self.execution_observer.publish_interrupt_poll(true);
+                return true;
+            }
         };
         let canceled = probe
             .is_some_and(|probe| panic::catch_unwind(AssertUnwindSafe(|| probe())).unwrap_or(true));
+        self.execution_observer.publish_interrupt_poll(canceled);
         if canceled {
             let checkpoint = self.current_checkpoint.load(Ordering::Acquire);
             let _ = self.first_interrupt_checkpoint.compare_exchange(

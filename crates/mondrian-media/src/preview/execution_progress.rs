@@ -99,8 +99,15 @@ pub struct PreviewDecodeExecutionProgress {
     pub stage: PreviewDecodeExecutionStage,
     /// Number of requests admitted by this observer.
     pub request_sequence: u64,
-    /// Monotonic stage-publication sequence, including repeated stages.
+    /// Monotonic progress-publication sequence, including repeated stages and
+    /// FFmpeg interrupt-callback polls.
     pub progress_sequence: u64,
+    /// Number of FFmpeg interrupt-callback polls observed by this worker.
+    pub interrupt_poll_sequence: u64,
+    /// Number of callback polls that observed the active request canceled.
+    pub interrupt_cancel_sequence: u64,
+    /// Request sequence associated with the last callback cancellation.
+    pub interrupt_last_cancel_request_sequence: u64,
 }
 
 /// Cloneable single-writer observer for one Preview decode worker.
@@ -117,6 +124,9 @@ struct PreviewDecodeExecutionObserverState {
     revision: AtomicU64,
     request_sequence: AtomicU64,
     stage: AtomicU8,
+    interrupt_poll_sequence: AtomicU64,
+    interrupt_cancel_sequence: AtomicU64,
+    interrupt_last_cancel_request_sequence: AtomicU64,
 }
 
 impl PreviewDecodeExecutionObserver {
@@ -135,12 +145,21 @@ impl PreviewDecodeExecutionObserver {
             }
             let request_sequence = self.state.request_sequence.load(Ordering::Relaxed);
             let stage = self.state.stage.load(Ordering::Relaxed);
+            let interrupt_poll_sequence =
+                self.state.interrupt_poll_sequence.load(Ordering::Relaxed);
+            let interrupt_cancel_sequence =
+                self.state.interrupt_cancel_sequence.load(Ordering::Relaxed);
+            let interrupt_last_cancel_request_sequence =
+                self.state.interrupt_last_cancel_request_sequence.load(Ordering::Relaxed);
             let after = self.state.revision.load(Ordering::Acquire);
             if before == after {
                 return PreviewDecodeExecutionProgress {
                     stage: PreviewDecodeExecutionStage::from_u8(stage),
                     request_sequence,
                     progress_sequence: after / 2,
+                    interrupt_poll_sequence,
+                    interrupt_cancel_sequence,
+                    interrupt_last_cancel_request_sequence,
                 };
             }
         }
@@ -157,6 +176,19 @@ impl PreviewDecodeExecutionObserver {
 
     pub(super) fn finish_idle(&self) {
         self.publish(PreviewDecodeExecutionStage::Idle, false);
+    }
+
+    pub(super) fn publish_interrupt_poll(&self, canceled: bool) {
+        self.state.revision.fetch_add(1, Ordering::AcqRel);
+        self.state.interrupt_poll_sequence.fetch_add(1, Ordering::Relaxed);
+        if canceled {
+            self.state.interrupt_cancel_sequence.fetch_add(1, Ordering::Relaxed);
+            let request_sequence = self.state.request_sequence.load(Ordering::Relaxed);
+            self.state
+                .interrupt_last_cancel_request_sequence
+                .store(request_sequence, Ordering::Relaxed);
+        }
+        self.state.revision.fetch_add(1, Ordering::Release);
     }
 
     fn publish(&self, stage: PreviewDecodeExecutionStage, begin_request: bool) {
@@ -199,10 +231,15 @@ mod tests {
 
             observer.publish_stage(PreviewDecodeExecutionStage::CodecSendInput);
             observer.publish_stage(PreviewDecodeExecutionStage::CodecSendInput);
+            observer.publish_interrupt_poll(false);
+            observer.publish_interrupt_poll(true);
             let sending = observer.snapshot();
             assert_eq!(sending.stage, PreviewDecodeExecutionStage::CodecSendInput);
             assert_eq!(sending.request_sequence, 1);
-            assert!(sending.progress_sequence >= started.progress_sequence + 2);
+            assert!(sending.progress_sequence >= started.progress_sequence + 4);
+            assert_eq!(sending.interrupt_poll_sequence, 2);
+            assert_eq!(sending.interrupt_cancel_sequence, 1);
+            assert_eq!(sending.interrupt_last_cancel_request_sequence, 1);
         }
 
         let idle = observer.snapshot();

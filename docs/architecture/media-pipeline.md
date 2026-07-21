@@ -1655,8 +1655,14 @@ stable public Interface.
 `mondrian_media::preview::execution_progress` separately owns concrete Adapter
 liveness evidence. One worker is the sole writer to a lock-free seqlock-style
 observer; Runtime diagnostics and Headless acceptance read a coherent fixed-size
-snapshot containing the current stage, request sequence, and publication
-sequence. The composition root creates a non-cloneable, `Send` bootstrap plus
+snapshot containing the current stage, request and publication sequences,
+FFmpeg interrupt-callback poll/cancel sequences, and the request that last
+observed callback cancellation. Callback polls use the same sole-writer
+seqlock publication as stages, so a stable `PacketRead` can distinguish “FFmpeg
+stopped polling”, “the active probe did not observe Broker cancellation”, and
+“FFmpeg observed cancellation but did not return”. Callback observation is not
+call-return or execution-lease evidence. The composition root creates a
+non-cloneable, `Send` bootstrap plus
 the read-only observer; the worker consumes that bootstrap and constructs the
 non-`Send` FFmpeg session context on its owner thread. No unsafe thread transfer
 or second stage writer is permitted. Stages distinguish input open, stream discovery, hardware-device
@@ -1665,7 +1671,8 @@ output, frame materialization, output-lease wait, and session retirement. Every
 potentially blocking FFmpeg call publishes its stage immediately before entry.
 This Module deliberately owns no deadline, cancellation, recovery, or restart
 policy: the Frame Work Broker remains authoritative, and an observed stalled C
-call is evidence rather than permission to pretend the execution lease ended.
+call—even after callback cancellation—is evidence rather than permission to
+pretend the execution lease ended.
 
 Codec receive has a strict internal result contract: one frame, need-more-input
 backpressure (`EAGAIN`), end of stream, or a structured decode failure. Only the

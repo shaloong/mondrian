@@ -284,14 +284,20 @@ with `MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_MEDIA_PATH` and
 `MONDRIAN_PREVIEW_ACCELERATED_ENDURANCE_SEEK_PROBES` to append up to 200
 cross-region warm/exact seek probes after continuous decode. This diagnostic
 does not replace cadence, whole-process memory, or reference-machine gates; it
-only separates accumulated decode/surface state from real-time scheduling.
+only separates accumulated decode/surface state from real-time scheduling. Set
+`MONDRIAN_PREVIEW_DECODE_EXECUTION_OUTPUT` to capture the same independently
+flushed progress journal during this compressed run.
 
 Every production Preview diagnostic snapshot now contains
 `decode_worker_execution` for the bounded `any`, `playback`, and `non_playback`
 workers. `stage` names the concrete media operation currently entered;
 `request_sequence` proves which request generation the observer has admitted,
-and `progress_sequence` changes on every stage publication, including repeated
-polls. When a timeout leaves a Broker execution lease in flight, capture this
+and `progress_sequence` changes on every stage or interrupt-poll publication.
+`interrupt_poll_sequence` proves FFmpeg actually invoked the installed callback;
+`interrupt_cancel_sequence` and `interrupt_last_cancel_request_sequence` prove
+which request's probe returned cancellation. These facts deliberately stop
+short of proving the FFmpeg call returned. When a timeout leaves a Broker
+execution lease in flight, capture this
 snapshot before terminating the process. A stable `codec_send_input`,
 `codec_receive_frame`, `codec_open`, `hardware_device`, or `session_retire`
 stage identifies the blocking call family; `output_lease_wait` instead means
@@ -301,8 +307,9 @@ restart a codec merely because the stage stopped changing.
 
 The versioned Reference Playback runner sets
 `MONDRIAN_PREVIEW_DECODE_EXECUTION_OUTPUT` for the Video gate. A sampler that
-owns only a clone of the read watch writes schema-v1 JSONL beside the normal
-report. It samples at 100 ms, writes on stage/request changes or a five-second
+owns only a clone of the read watch writes versioned JSONL beside the normal
+report. The current schema is v2 and includes the interrupt poll/cancel fields.
+It samples at 100 ms, writes on progress changes or a five-second
 heartbeat, and flushes every record so an externally terminated gate retains
 its last observation; a normal finish adds `terminal: true`. The gate plan also
 defines a 45-minute external process deadline. On expiry, the parent runner

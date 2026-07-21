@@ -2352,6 +2352,10 @@ fn preview_media_external_accelerated_native_surface_endurance_probe() -> anyhow
         sequence_frame_count,
     )?;
     let preview_service = HeadlessPreviewRuntime::new();
+    let decode_execution_journal = PreviewDecodeExecutionJournal::start_from_env(
+        preview_service.decode_execution_watch(),
+        "preview_media_external_accelerated_native_surface_endurance",
+    )?;
     let mut gpu_adapter =
         HeadlessViewerGpuAdapter::new().context("create real headless Viewer GPU Adapter")?;
     configure_headless_gpu_decode_admission(&preview_service, &gpu_adapter);
@@ -2430,6 +2434,9 @@ fn preview_media_external_accelerated_native_surface_endurance_probe() -> anyhow
             "native_import_retained_sources_peak": gpu_summary.native_import_retained_sources_peak,
         })
     );
+    if let Some(journal) = decode_execution_journal {
+        journal.finish()?;
+    }
     drop(preview_service);
     drop(state);
     let _ = fs::remove_dir_all(&root_dir);

@@ -13,20 +13,20 @@ use super::{
     FfmpegNativeDecodedFrameResource, FfmpegNativeDecodedFrameResourceError, MediaFileFingerprint,
     PreviewDecodeAccessMode, PreviewDecodeAccessPolicy, PreviewDecodeAdaptiveHints,
     PreviewDecodeBackend, PreviewDecodeCancellation, PreviewDecodeCancellationCheckpoint,
-    PreviewDecodeDiagnostics, PreviewDecodeExecutionPath, PreviewDecodeInterruptState,
-    PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
-    PreviewDecodeSessionContext, PreviewDecodeStageDurations, PreviewDecodeThreadingConfig,
-    PreviewDecodeThreadingKind, PreviewDecodedFramePayload, PreviewHardwareDecodeBlocker,
-    PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
-    PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest, PreviewNativeDecodeFallback,
-    PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
-    PreviewNativeDecodedFrameResource, PreviewPlaybackRing, PreviewScrubAdaptiveClass,
-    PreviewSeekIndex, PreviewSeekIndexDiagnostics, PreviewSeekIndexSource, PreviewSeekResolution,
-    PreviewSourceColorContract, RgbaFrame, PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
-    PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
-    PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
-    PREVIEW_SCRUB_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS,
-    PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES,
+    PreviewDecodeDiagnostics, PreviewDecodeExecutionObserver, PreviewDecodeExecutionPath,
+    PreviewDecodeInterruptState, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest,
+    PreviewDecodeSeekStrategy, PreviewDecodeSessionContext, PreviewDecodeStageDurations,
+    PreviewDecodeThreadingConfig, PreviewDecodeThreadingKind, PreviewDecodedFramePayload,
+    PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
+    PreviewHardwareDecodeDecision, PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest,
+    PreviewNativeDecodeFallback, PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError,
+    PreviewNativeDecodedFrameHandle, PreviewNativeDecodedFrameResource, PreviewPlaybackRing,
+    PreviewScrubAdaptiveClass, PreviewSeekIndex, PreviewSeekIndexDiagnostics,
+    PreviewSeekIndexSource, PreviewSeekResolution, PreviewSourceColorContract, RgbaFrame,
+    PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES,
+    PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS,
+    PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
+    PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES,
     PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES,
 };
 use crate::decoder::{
@@ -2207,7 +2207,10 @@ fn ffmpeg_input_open_interrupts_a_blocked_http_read() {
 
 #[test]
 fn format_interrupt_callback_uses_only_the_active_request_probe() {
-    let state = Arc::new(PreviewDecodeInterruptState::new());
+    let observer = PreviewDecodeExecutionObserver::new();
+    let state = Arc::new(PreviewDecodeInterruptState::with_execution_observer(
+        observer.clone(),
+    ));
     let opaque = Arc::as_ptr(&state).cast_mut().cast::<c_void>();
     assert_eq!(unsafe { preview_decode_interrupt_callback(opaque) }, 0);
 
@@ -2216,6 +2219,10 @@ fn format_interrupt_callback_uses_only_the_active_request_probe() {
     drop(guard);
 
     assert_eq!(unsafe { preview_decode_interrupt_callback(opaque) }, 0);
+    let progress = observer.snapshot();
+    assert_eq!(progress.interrupt_poll_sequence, 3);
+    assert_eq!(progress.interrupt_cancel_sequence, 1);
+    assert_eq!(progress.interrupt_last_cancel_request_sequence, 0);
 }
 
 #[test]

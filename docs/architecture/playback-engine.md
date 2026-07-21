@@ -1534,6 +1534,20 @@ retire, restart, or declare completion for a media execution lease. A timeout
 therefore preserves the last observable FFmpeg/media stage but always fails the
 gate, including when no normal report can be written.
 
+The clean `ed73f1e` Video diagnostic
+`20260721T213615Z-local-windows-dev-01-a6c50a4e` completed all 44,994 real-cadence
+D3D12VA P010 Playback frames, then failed its first cross-region exact Viewer
+request after 30 seconds. Broker evidence showed cancellation requested for one
+in-flight NonPlayback lease, while the media cancellation fact remained absent.
+The independent journal
+proved the Playback worker retired normally and the NonPlayback worker remained
+in `PacketRead` for the complete timeout. This replaces the earlier coarse
+“codec” hypothesis with a concrete `av_read_frame` call-family observation; it
+still does not distinguish an unpolled interrupt, a stale cancellation probe,
+or an ignored callback result. Callback poll/cancel sequences are therefore now
+part of the same progress Interface and the compressed endurance Adapter can
+write the same schema-v2 journal before another real-cadence run is justified.
+
 Only the complete two-gate set on a qualified `standard-playback` machine
 (16 GiB installed memory or higher), with a clean unchanged Git revision and
 passing structured reports, is baseline-eligible. The wider product support
