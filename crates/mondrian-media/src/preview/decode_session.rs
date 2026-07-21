@@ -111,15 +111,15 @@ impl PreviewDecodeSessions {
             PreviewDecodeAccessMode::RandomAccessStillFrame
                 if hardware_decode_request.prefers_gpu_residency() =>
             {
-                (0..PREVIEW_GPU_STILL_SESSION_SLOT_COUNT)
-                    .map(|offset| {
-                        (self.next_gpu_still + offset) % PREVIEW_GPU_STILL_SESSION_SLOT_COUNT
-                    })
-                    .find(|index| {
-                        self.gpu_still[*index]
-                            .as_ref()
-                            .is_none_or(PreviewDecodeSession::native_output_released)
-                    })
+                let availability =
+                    std::array::from_fn(|index| match self.gpu_still[index].as_ref() {
+                        Some(session) if session.native_output_released() => {
+                            PreviewGpuStillSlotAvailability::Reusable
+                        }
+                        Some(_) => PreviewGpuStillSlotAvailability::Leased,
+                        None => PreviewGpuStillSlotAvailability::Empty,
+                    });
+                select_gpu_still_slot(self.next_gpu_still, availability)
                     .map(PreviewDecodeSessionSlot::GpuStill)
             }
             PreviewDecodeAccessMode::RandomAccessStillFrame => {
@@ -170,6 +170,30 @@ enum PreviewDecodeSessionSlot {
     Scrub,
     CpuStill,
     GpuStill(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewGpuStillSlotAvailability {
+    Reusable,
+    Empty,
+    Leased,
+}
+
+fn select_gpu_still_slot(
+    next_gpu_still: usize,
+    availability: [PreviewGpuStillSlotAvailability; PREVIEW_GPU_STILL_SESSION_SLOT_COUNT],
+) -> Option<usize> {
+    let matching_slot = |required| {
+        (0..PREVIEW_GPU_STILL_SESSION_SLOT_COUNT)
+            .map(|offset| (next_gpu_still + offset) % PREVIEW_GPU_STILL_SESSION_SLOT_COUNT)
+            .find(|index| availability[*index] == required)
+    };
+
+    // Reuse a released decoder before opening another hardware surface pool.
+    // The empty slot is a bounded bridge only while every existing session's
+    // last native output is still retained downstream.
+    matching_slot(PreviewGpuStillSlotAvailability::Reusable)
+        .or_else(|| matching_slot(PreviewGpuStillSlotAvailability::Empty))
 }
 
 use hardware_decode::{
@@ -2003,7 +2027,7 @@ mod session_topology_tests {
     }
 
     #[test]
-    fn gpu_exact_success_rotates_a_bounded_two_slot_ring() {
+    fn gpu_exact_success_advances_the_equal_availability_tiebreak() {
         let mut sessions = empty_sessions();
         let request = PreviewHardwareDecodeRequest::PreferGpuResident;
 
@@ -2030,6 +2054,44 @@ mod session_topology_tests {
         assert_eq!(
             sessions.available_slot(PreviewDecodeAccessMode::RandomAccessStillFrame, request),
             Some(PreviewDecodeSessionSlot::GpuStill(0))
+        );
+    }
+
+    #[test]
+    fn gpu_exact_prefers_a_released_session_before_an_empty_spare() {
+        assert_eq!(
+            select_gpu_still_slot(
+                1,
+                [
+                    PreviewGpuStillSlotAvailability::Reusable,
+                    PreviewGpuStillSlotAvailability::Empty,
+                ],
+            ),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn gpu_exact_uses_the_spare_only_while_the_existing_output_is_leased() {
+        assert_eq!(
+            select_gpu_still_slot(
+                0,
+                [
+                    PreviewGpuStillSlotAvailability::Leased,
+                    PreviewGpuStillSlotAvailability::Empty,
+                ],
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            select_gpu_still_slot(
+                0,
+                [
+                    PreviewGpuStillSlotAvailability::Leased,
+                    PreviewGpuStillSlotAvailability::Leased,
+                ],
+            ),
+            None
         );
     }
 

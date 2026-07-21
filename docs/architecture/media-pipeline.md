@@ -422,8 +422,11 @@ Every native output carries a session-output lease inside the retained FFmpeg
 resource; App Frame Store clones and renderer copy-fence clones therefore keep
 the same lease alive. A GPU exact-Still slot may seek/flush again only after
 its weak observer proves that the final downstream clone has dropped. A
-successful exact output advances the preferred A/B slot; cancellation does not
-advance it. If both slots remain leased, the worker waits at the explicit, cooperatively
+released existing session is preferred over an empty spare, avoiding another
+hardware surface pool after ordinary output retirement. The spare is selected
+only while every existing candidate remains leased; the A/B cursor breaks ties
+between slots with equal availability, and cancellation does not advance it.
+If both slots remain leased, the worker waits at the explicit, cooperatively
 cancellable `OutputLease` checkpoint instead of entering a codec call that may
 block for a decoder surface. Reports include `output_lease_wait_us`, and a wait
 that dominates a frame is classified separately from queue wait, session open,

@@ -873,12 +873,15 @@ publication authority or make canceled partial output cacheable.
 GPU-resident exact Still decode additionally uses a fixed two-slot session ring.
 Each native output carries a lease through the Frame Store and renderer source
 copy; a slot is ineligible for seek/flush until the final clone retires. When
-both slots are leased, the worker remains at a cancellable `OutputLease`
-backpressure point and records `output_lease_wait_us` rather than blocking
-inside the codec. Successful output advances the preferred slot, while
-cancellation does not. This bounds discontinuous decoder residency without
-assuming that generation count, elapsed time, or `avcodec_flush_buffers` alone
-proves downstream surface release.
+an existing slot is released, it is reused before an empty spare so ordinary
+seek sequences do not accumulate hardware surface pools. The spare is opened
+only to bridge a still-leased prior Viewer output. When both slots are leased,
+the worker remains at a cancellable `OutputLease` backpressure point and records
+`output_lease_wait_us` rather than blocking inside the codec. The A/B cursor
+only breaks ties between equally available slots; cancellation does not advance
+it. This bounds discontinuous decoder residency without assuming that
+generation count, elapsed time, or `avcodec_flush_buffers` alone proves
+downstream surface release.
 
 The Frame Store release above is necessary but not sufficient for native video.
 The renderer's D3D12 bridge temporarily retains the imported source resource
