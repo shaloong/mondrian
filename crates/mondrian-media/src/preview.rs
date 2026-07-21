@@ -500,7 +500,7 @@ impl PreviewDecodeAccessPolicy {
                 forward_reuse_frame_window: 0,
                 forward_decode_budget_frames: PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
                 use_playback_ring: false,
-                preserve_session_on_cancel: false,
+                preserve_session_on_cancel: true,
                 keyframe_only: false,
                 seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
                 any_seek_window_ms: 0,
@@ -1245,10 +1245,7 @@ use decode_session::{
     decode_preview_frame_outcome, preview_create_rgba_scaler, PreviewDecodedFramePayload,
 };
 #[cfg(test)]
-use decode_session::{
-    exact_seek_non_reference_discard_until_pts, forward_decode_work_units,
-    preview_decode_session_may_reuse,
-};
+use decode_session::{exact_seek_non_reference_discard_until_pts, forward_decode_work_units};
 use hardware_decode::{preview_hardware_frame_format, PreviewHardwareDecodePlan};
 #[cfg(test)]
 use playback_ring::PreviewPlaybackRing;

@@ -396,6 +396,16 @@ An otherwise idle worker performs a timed Broker receive and releases its
 thread-local decode sessions after two seconds without work. This preserves
 short-gap playback locality while bounding native decoder/device residency
 during an open but inactive project; the next request cold-opens normally.
+Decoded native frames have a second, independent lifetime in the Preview Frame
+Store. A stopped Viewer releases that residency only after an exact registered
+GPU output exists and Broker work is idle. Because output registration may be
+observed just before the completing execution lease is resolved, the Runtime
+retries this release before binding a different stopped generation, while the
+old output still carries the only valid safety proof. Rotation retains the
+output for stale presentation but deliberately removes its authority to release
+source media. This ordering prevents one hardware surface pool per exact seek
+from surviving across generation changes without weakening fail-closed
+queued/in-flight checks.
 The app scheduler lowers explicit `MediaPreviewAccessIntent` values to media
 access modes. Viewer playback lowers to `PlaybackCursor`, active playhead/ruler
 dragging lowers to `ScrubCursor`, and settled non-playing viewer frames plus
@@ -1526,18 +1536,20 @@ it active across seek and packet I/O. The media loop also checks it before
 opening, seeking, packet decode, frame receive, EOF draining, hardware transfer,
 and RGBA conversion. If cancellation fires, the decoder returns a
 typed canceled outcome rather than a media failure. `PlaybackCursor` and
-`ScrubCursor` cancellation preserve their thread-local FFmpeg sessions so
-sustained playback, forward prefetch, and pointer dragging retain decoder/device
-residency; `RandomAccessStillFrame` cancellation discards only its mode-specific
-session. A GPU-resident deterministic still also releases its previous
-mode-local decoder before opening the next request, even after success. Exact
-requests may cross unrelated GOPs, and relying on backend flush behavior while
-the previous output surface remains leased can leave a hardware codec blocked
-inside its driver. CPU still extraction and the realtime Playback/Scrub modes
-retain session reuse. The experimental external-process CPU RGBA path follows
-the same policy and terminates/reaps its child when the probe fires. This keeps stale
-work from being cached or marked as a failed source while preserving independent
-playback, scrub, and still-frame session state for subsequent requests.
+typed canceled outcome rather than a media failure. All three access modes
+preserve a compatible thread-local FFmpeg session after a cooperative return.
+The next scrub or exact-still request always seeks and flushes before decoding;
+it never treats canceled partial output as reusable media. Input/codec open
+cancellation cannot publish a half-built session, while a source, fingerprint,
+device, geometry, or color-contract change destroys the old session before
+opening its replacement. This avoids repeated non-interruptible
+`avcodec_open2` gaps during latest-wins seek bursts without weakening frame
+exactness. The App separately releases the prior generation's native source
+frame after its final GPU Viewer output is usable, so reuse keeps one
+mode-local decoder/DPB rather than accumulating one surface pool per still.
+The experimental external-process CPU RGBA path terminates and reaps only its
+per-request child when the probe fires; the compatible in-process session may
+remain. Stale work is never cached or marked as a failed source.
 
 `mondrian_media::preview::cancellation` is the sole media-layer owner of this
 protocol. It contains the public cancellation fact and aggregate evidence, the

@@ -242,6 +242,16 @@ impl<G, K, O> Default for PreviewExecutionCoordinator<G, K, O> {
 }
 
 impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
+    /// Whether binding `key` would preserve the active execution generation.
+    ///
+    /// Adapters use this observation before rotation to finish lifecycle work
+    /// whose safety proof belongs to the current generation. Once rotation
+    /// occurs, a retained output is intentionally stale and can no longer
+    /// authorize release of its decoded source residency.
+    pub(crate) fn is_current_generation_key(&self, key: &G) -> bool {
+        self.generation_key.as_ref() == Some(key)
+    }
+
     /// Reuse the exact current generation or rotate through the sole generation
     /// authority supplied by the execution Adapter.
     pub(crate) fn bind_generation(
@@ -416,6 +426,9 @@ mod tests {
         let mut coordinator = PreviewExecutionCoordinator::<u8, u8, &'static str>::default();
         coordinator.bind_generation(1, || 41);
         coordinator.register_output(9, "texture");
+
+        assert!(coordinator.is_current_generation_key(&1));
+        assert!(!coordinator.is_current_generation_key(&2));
 
         assert_eq!(
             coordinator.bind_generation(2, || 42),

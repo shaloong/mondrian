@@ -857,6 +857,18 @@ after their two-second idle timeout; together these two ownership releases let
 the driver surface pool disappear without blanking the paused Viewer. Any
 active or unresolved work makes the release fail closed.
 
+GPU output publication and Broker lease retirement are separate observable
+events. Publication may therefore attempt this release while the worker lease
+is still completing. Before a stopped Preview binds a different generation,
+the Production Runtime retries the release while the previous output is still
+exact and can prove that its decoded sources are no longer needed. This is the
+last safe point: after rotation the retained output is stale by definition and
+must not authorize source-residency decisions. The retry remains non-blocking
+and fail-closed when any old work is actually still queued or in flight. Once
+the source lease is released, a compatible mode-local decoder may seek and
+flush for the new generation; decoder reuse does not grant the old media frame
+publication authority or make canceled partial output cacheable.
+
 The exact-output shortcut is generation-safe rather than cache-presence based.
 The Preview generation includes Sequence identity/revision, Project document
 revision, playback epoch or stopped frame, output extent, seek intent, effective

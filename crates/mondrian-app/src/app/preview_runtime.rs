@@ -630,6 +630,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         &self,
         key: ViewerPreviewGenerationKey,
     ) -> PreviewGenerationBinding {
+        // A stopped transport may retain decoded hardware surfaces until its
+        // final Viewer output is independently usable. Registration can race
+        // the worker lease's final Broker resolution, so retry at the last
+        // safe boundary before changing the generation proof. Rotating first
+        // would make the retained output stale and permanently miss this
+        // release window, allowing decoder surface pools to accumulate across
+        // exact seeks.
+        let will_rotate = !self.execution.borrow().is_current_generation_key(&key);
+        if will_rotate {
+            self.try_release_settled_transport_media_residency();
+        }
         self.execution
             .borrow_mut()
             .bind_generation(key, || self.scheduler.begin_generation())

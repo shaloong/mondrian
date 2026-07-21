@@ -8660,6 +8660,53 @@ fn preview_service_settled_release_requires_an_exact_viewer_output() {
 }
 
 #[test]
+fn stopped_generation_rotation_retries_media_release_after_worker_settles() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    let frame = match service.gpu_preview_frame_for_state(&state) {
+        PreviewGpuFrameState::Ready(frame) => frame,
+        _ => panic!("expected first stopped GPU candidate"),
+    };
+    let generation = service.execution.borrow().generation();
+    let media_key = test_media_key(900);
+    let execution_id = begin_test_media_execution(
+        &service,
+        media_key.clone(),
+        generation,
+        MediaPreviewRequestPriority::Current,
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+        MediaPreviewWorkerLane::Still,
+    );
+    service
+        .frame_store
+        .borrow_mut()
+        .insert_media_frame(media_key, test_media_frame(90), false);
+
+    assert!(service.set_external_viewer_frame(
+        &frame,
+        "first-output",
+        ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
+            .expect("valid test presentation"),
+    ));
+    assert_eq!(service.frame_store.borrow().diagnostics().media_entries, 1);
+    assert!(service.scheduler.mark_execution_completed(execution_id));
+    assert!(service.scheduler.resolve_execution(execution_id, true).status.is_current());
+    assert_eq!(service.diagnostics().worker_queue.in_flight_jobs, 0);
+
+    state.seek(5);
+    assert!(matches!(
+        service.gpu_preview_frame_for_state(&state),
+        PreviewGpuFrameState::Ready(_) | PreviewGpuFrameState::Current
+    ));
+    assert_eq!(
+        service.frame_store.borrow().diagnostics().media_entries,
+        0,
+        "the last exact output must authorize source release before becoming stale"
+    );
+    service.shutdown();
+}
+
+#[test]
 fn preview_service_completion_poll_respects_result_count_budget() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let results = install_preview_result_channel_for_test(&service);
