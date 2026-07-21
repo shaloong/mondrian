@@ -406,6 +406,13 @@ output for stale presentation but deliberately removes its authority to release
 source media. This ordering prevents one hardware surface pool per exact seek
 from surviving across generation changes without weakening fail-closed
 queued/in-flight checks.
+The renderer has a distinct, shorter native-source lease while copying that
+frame into its own shared texture. It releases the source resource when the
+copy-ready fence completes rather than waiting for the next import; otherwise a
+bounded decoder could wait for a surface that only the not-yet-possible next
+import would release. Preview generation proves when the Frame Store may forget
+the decoded payload, while the renderer fence proves when GPU command execution
+no longer needs the native resource. Neither proof substitutes for the other.
 The app scheduler lowers explicit `MediaPreviewAccessIntent` values to media
 access modes. Viewer playback lowers to `PlaybackCursor`, active playhead/ruler
 dragging lowers to `ScrubCursor`, and settled non-playing viewer frames plus
@@ -417,11 +424,11 @@ switch, and natural end-of-playback transitions also settle the preview access
 source before the next non-playing viewer request. New UI states must extend
 that intent layer instead of passing booleans or strategy flags into
 `mondrian-media`.
-Playback and scrub cancellation are cooperative but non-destructive to their
-mode-local decode sessions: a prefetch budget miss or superseded pointer target
-must not throw away the warmed decoder/device context. Every subsequent seek
-flushes and repositions the decoder before reuse. Exact still-frame cancellation
-remains session-destructive because stale partial decode state is not useful.
+Playback, scrub, and exact-still cancellation are cooperative but
+non-destructive to compatible mode-local decode sessions: a prefetch budget
+miss or superseded target must not throw away the warmed decoder/device
+context. Canceled partial output is discarded, and every subsequent seek
+flushes and repositions the decoder before reuse.
 The playback decode session also owns a small forward RGBA ring. Ring hits are
 strictly bounded by the same PTS tolerance as the process-global preview frame
 cache and are reported as `PlaybackSessionRingHit`; they are not available to

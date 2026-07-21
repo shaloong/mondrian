@@ -180,6 +180,26 @@ impl ViewerNativeVideoImportRuntime {
         (0, 0)
     }
 
+    /// Decoder surfaces still retained only for an outstanding native bridge copy.
+    pub fn retained_source_count(&self) -> usize {
+        #[cfg(target_os = "windows")]
+        if let Some(backend) = self.backend.as_ref() {
+            return backend.retained_source_count();
+        }
+        0
+    }
+
+    /// Non-blockingly retire native decoder sources after their bridge copy completes.
+    pub fn retire_completed_source_residency(
+        &mut self,
+    ) -> Result<usize, GpuNativeDecodedFrameImportError> {
+        #[cfg(target_os = "windows")]
+        if let Some(backend) = self.backend.as_mut() {
+            return backend.retire_completed_source_residency();
+        }
+        Ok(0)
+    }
+
     /// Import one native decoder payload into a renderer-owned working resource.
     pub fn import(
         &mut self,

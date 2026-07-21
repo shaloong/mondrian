@@ -66,6 +66,8 @@ pub(crate) struct HeadlessViewerGpuExecution {
     pub native_import_contract_pools: usize,
     /// Native-import bridge entries retained after this execution.
     pub native_import_bridge_entries: usize,
+    /// Decoder sources still retained after observing GPU completion.
+    pub native_import_retained_sources: usize,
 }
 
 /// Opaque usable output payload registered with the production Preview Runtime.
@@ -227,6 +229,7 @@ impl HeadlessViewerGpuAdapter {
         if self.current_output_key.as_deref() == Some(output_key.as_str()) {
             let (native_import_contract_pools, native_import_bridge_entries) =
                 self.runtime.native_import_pool_residency();
+            let native_import_retained_sources = self.runtime.native_import_retained_source_count();
             return Ok(HeadlessViewerGpuExecution {
                 output,
                 output_width: frame.width,
@@ -249,6 +252,7 @@ impl HeadlessViewerGpuAdapter {
                 decode_execution: frame.decode_execution(),
                 native_import_contract_pools,
                 native_import_bridge_entries,
+                native_import_retained_sources,
             });
         }
         if frame.width == 0 || frame.height == 0 {
@@ -339,9 +343,13 @@ impl HeadlessViewerGpuAdapter {
             .poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None })
             .map_err(|error| HeadlessViewerGpuError::Completion(error.to_string()))?;
         let completion_wait_us = elapsed_us(completion_started);
+        self.runtime
+            .retire_completed_native_import_sources()
+            .map_err(|error| HeadlessViewerGpuError::Completion(error.to_string()))?;
         self.current_output_key = Some(output_key);
         let (native_import_contract_pools, native_import_bridge_entries) =
             self.runtime.native_import_pool_residency();
+        let native_import_retained_sources = self.runtime.native_import_retained_source_count();
         Ok(HeadlessViewerGpuExecution {
             output,
             output_width: frame.width,
@@ -364,6 +372,7 @@ impl HeadlessViewerGpuAdapter {
             decode_execution: frame.decode_execution(),
             native_import_contract_pools,
             native_import_bridge_entries,
+            native_import_retained_sources,
         })
     }
 }

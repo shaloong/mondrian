@@ -869,6 +869,18 @@ the source lease is released, a compatible mode-local decoder may seek and
 flush for the new generation; decoder reuse does not grant the old media frame
 publication authority or make canceled partial output cacheable.
 
+The Frame Store release above is necessary but not sufficient for native video.
+The renderer's D3D12 bridge temporarily retains the imported source resource
+through its GPU copy. That command-lifetime lease is governed by the bridge's
+copy-ready fence, not by Preview generation, cache membership, decoder-session
+lifetime, or visibility of the final Viewer texture. Headless presentation
+retires completed source leases immediately after its completion wait; the
+Window presentation loop retries the same non-blocking retirement before every
+candidate request. A completed Headless output is invalid evidence if any
+decoder source remains retained. This keeps the independently copied Viewer
+output and reusable renderer bridge resources resident while returning decoder
+surfaces early enough for the next exact seek.
+
 The exact-output shortcut is generation-safe rather than cache-presence based.
 The Preview generation includes Sequence identity/revision, Project document
 revision, playback epoch or stopped frame, output extent, seek intent, effective

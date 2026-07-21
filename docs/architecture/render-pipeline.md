@@ -426,6 +426,20 @@ variant and uses the same GPU input stage.
 `PreviewDecodeOutcome::NativeGpuFrame` must flow through the renderer native
 decoded-frame import contract instead of being wrapped in `CpuEncodedColorFrame`
 or silently transferred to CPU.
+On Windows, native import copies the FFmpeg-owned D3D12VA surface into a
+renderer-created shared NV12/P010 texture before YUV conversion. The bridge
+retains the source `ID3D12Resource` and decode fence only until its copy-ready
+fence completes; it must not defer that release until the next frame is
+imported. A bounded decoder may need that same surface in order to produce the
+next frame, so next-import retirement creates a circular wait even though the
+Viewer output is already independent. `ViewerGpuExecutionRuntime` exposes a
+non-blocking completed-source retirement operation. The Headless Adapter calls
+it after its explicit GPU completion wait, while the Window Adapter advances it
+at the beginning of every Preview prepare tick, including ticks that currently
+have only a Loading candidate. Completion-query failure remains typed and
+fail-closed. Renderer-owned bridge textures, pipeline state, and completed
+Viewer outputs are unaffected; only the decoder-source command-lifetime lease
+is retired.
 Both `CpuEncodedColorFrame` and `LinearFloatSource` store decoded payloads in
 shared immutable storage so preview media-cache hits, GPU source contracts, and
 queued preview frame clones do not deep-copy a full source frame. GPU upload

@@ -181,6 +181,28 @@ impl D3D12NativeVideoImportBackend {
         self.pools.len()
     }
 
+    /// Decoder surfaces still retained only until their bridge copy completes.
+    pub fn retained_source_count(&self) -> usize {
+        self.pools
+            .values()
+            .flat_map(|pool| &pool.entries)
+            .filter(|entry| entry.bridge.has_retained_source())
+            .count()
+    }
+
+    /// Non-blockingly retire decoder surfaces whose bridge-copy fence completed.
+    pub fn retire_completed_source_residency(
+        &mut self,
+    ) -> Result<usize, GpuNativeDecodedFrameImportError> {
+        let mut retired = 0usize;
+        for entry in self.pools.values_mut().flat_map(|pool| &mut pool.entries) {
+            if entry.bridge.retire_completed_source().map_err(native_bridge_import_error)? {
+                retired = retired.saturating_add(1);
+            }
+        }
+        Ok(retired)
+    }
+
     /// Borrow the OCIO runtime used by the native input path.
     pub fn color_runtime(&self) -> &RenderGpuOutputBoundaryRuntime {
         &self.color_runtime

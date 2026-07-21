@@ -158,6 +158,7 @@ pub struct D3D12SharedVideoTexture {
     timeline: NativeVideoSyncTimeline,
     in_flight_source: Option<ID3D12Resource>,
     in_flight_decode_fence: Option<ID3D12Fence>,
+    in_flight_copy_ready: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,6 +240,7 @@ impl D3D12SharedVideoTexture {
             timeline: NativeVideoSyncTimeline::default(),
             in_flight_source: None,
             in_flight_decode_fence: None,
+            in_flight_copy_ready: None,
         })
     }
 
@@ -256,8 +258,10 @@ impl D3D12SharedVideoTexture {
             if completed < required {
                 return Err(D3D12SharedVideoTextureError::EntryBusy { required, completed });
             }
-            self.in_flight_source = None;
-            self.in_flight_decode_fence = None;
+            // Renderer completion is ordered after the decoder-side copy. Retire
+            // the source independently of entry reuse so the decoder can reclaim
+            // its surface before it is asked to produce the next frame.
+            self.retire_completed_source()?;
         }
 
         let plan = self.timeline.begin_copy().map_err(sync_error)?;
@@ -341,6 +345,38 @@ impl D3D12SharedVideoTexture {
         Ok(completed >= required)
     }
 
+    /// Drop the decoder surface retained for command execution once its copy
+    /// fence is complete, without waiting for this bridge entry to be reused.
+    ///
+    /// This is a lock-free completion query. Delaying release until the next
+    /// imported frame can deadlock a bounded decoder pool: decoding that next
+    /// frame may itself require the retained surface.
+    pub(super) fn retire_completed_source(&mut self) -> Result<bool, D3D12SharedVideoTextureError> {
+        let Some(required) = self.in_flight_copy_ready else {
+            debug_assert!(self.in_flight_source.is_none());
+            debug_assert!(self.in_flight_decode_fence.is_none());
+            return Ok(false);
+        };
+        // SAFETY: decoder_shared_fence is live and GetCompletedValue is a
+        // non-blocking observation of the shared copy/render timeline.
+        let completed = unsafe { self.decoder_shared_fence.GetCompletedValue() };
+        if completed == u64::MAX {
+            return Err(D3D12SharedVideoTextureError::DeviceRemoved);
+        }
+        if completed < required {
+            return Ok(false);
+        }
+        self.in_flight_source = None;
+        self.in_flight_decode_fence = None;
+        self.in_flight_copy_ready = None;
+        Ok(true)
+    }
+
+    /// Whether one decoder source is retained until its copy fence completes.
+    pub(super) fn has_retained_source(&self) -> bool {
+        self.in_flight_source.is_some()
+    }
+
     fn validate_reuse(
         &self,
         source: &ValidatedD3D12NativeDecodedFrame,
@@ -370,6 +406,7 @@ impl D3D12SharedVideoTexture {
         self.copy_commands.execute(&self.decoder_queue)?;
         self.in_flight_source = Some(source.texture.clone());
         self.in_flight_decode_fence = Some(source.decode_fence.clone());
+        self.in_flight_copy_ready = Some(plan.copy_ready);
         // SAFETY: signal is FIFO after the copy and both fence/queue belong to
         // the FFmpeg device view of the shared timeline.
         unsafe { self.decoder_queue.Signal(&self.decoder_shared_fence, plan.copy_ready) }

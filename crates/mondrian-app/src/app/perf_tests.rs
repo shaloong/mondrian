@@ -174,6 +174,7 @@ struct HeadlessViewerGpuExecutionSummary {
     rendered_decode_execution: PreviewDecodeExecutionSummary,
     native_import_contract_pools_peak: usize,
     native_import_bridge_entries_peak: usize,
+    native_import_retained_sources_peak: usize,
 }
 
 impl HeadlessViewerGpuExecutionSummary {
@@ -184,6 +185,9 @@ impl HeadlessViewerGpuExecutionSummary {
         self.native_import_bridge_entries_peak = self
             .native_import_bridge_entries_peak
             .max(execution.native_import_bridge_entries);
+        self.native_import_retained_sources_peak = self
+            .native_import_retained_sources_peak
+            .max(execution.native_import_retained_sources);
         let output_extent = HeadlessViewerGpuExtent {
             width: execution.output_width,
             height: execution.output_height,
@@ -377,6 +381,7 @@ fn headless_gpu_summary_records_distinct_executed_extents() {
             decode_execution: PreviewDecodeExecutionSummary::default(),
             native_import_contract_pools: 0,
             native_import_bridge_entries: 0,
+            native_import_retained_sources: 0,
         });
     }
 
@@ -2923,6 +2928,13 @@ fn run_preview_media_continuous_playback_probe(
     anyhow::ensure!(
         headless_gpu.rendered_frames > 0,
         "continuous playback produced no real headless GPU executions"
+    );
+    anyhow::ensure!(
+        headless_gpu_preroll.native_import_retained_sources_peak == 0
+            && headless_gpu.native_import_retained_sources_peak == 0,
+        "completed headless GPU outputs retained decoder sources after copy completion: preroll={}, playback={}",
+        headless_gpu_preroll.native_import_retained_sources_peak,
+        headless_gpu.native_import_retained_sources_peak
     );
     anyhow::ensure!(
         headless_gpu.stage_diagnostics.readback_stages == 0,

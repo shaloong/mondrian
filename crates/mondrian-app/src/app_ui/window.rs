@@ -2926,6 +2926,22 @@ fn prepare_viewer_gpu_preview(
         }};
     }
 
+    // Native import copies decoder surfaces into renderer-owned textures. The
+    // source must live through that GPU copy, but retaining it until the next
+    // decoded frame creates a circular wait when the decoder pool is bounded.
+    // Advance copy-fence retirement on every prepare tick, including Loading
+    // ticks for a following seek.
+    if let Err(error) = session.viewer_gpu_execution.retire_completed_native_import_sources() {
+        unregister_program_scopes_textures(session);
+        host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
+            feature: "native_video_source_retirement".to_owned(),
+            reason: error.to_string(),
+        });
+        tracing::warn!("native video source retirement failed: {error}");
+        host.clear_external_viewer_frame();
+        finish_prepare!();
+    }
+
     session.viewer_gpu_output_telemetry.record_invocation();
     if session.role != AppUiWindowRole::Workspace {
         unregister_program_scopes_textures(session);

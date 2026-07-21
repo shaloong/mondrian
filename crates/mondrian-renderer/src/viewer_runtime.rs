@@ -11,17 +11,18 @@ use crate::{
     native_source_texture_format_from_decoded, native_video_sampling_from_decoded, CpuColorFrame,
     GpuColorFrameHandle, GpuColorFrameTextureFormat, GpuColorFrameWgpuResourcePool,
     GpuCompositeLayer, GpuCompositeLayerSource, GpuCompositeRequest, GpuCompositingDiagnostics,
-    GpuDisplayCalibrationRuntime, GpuFrameCompositor, GpuNativeDecodedFrameImportSupport,
-    GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuProgramScopesError,
-    GpuProgramScopesRecord, GpuProgramScopesRequest, GpuProgramScopesRuntime,
-    GpuProgramScopesRuntimeDiagnostics, GpuViewerSpatialRecord, GpuViewerSpatialRuntime,
-    GpuViewerSpatialRuntimeDiagnostics, NativeVideoImportCpuTimings, RenderColorStageDiagnostics,
-    RenderColorTransformGpuOptions, RenderGpuColorTransformRuntimeRecordError,
-    RenderGpuCompositeGraphRecordError, RenderGpuInputStageRecord,
-    RenderGpuInputStageRuntimeRecordError, RenderGpuOutputBoundaryRuntime,
-    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderGpuOutputBoundaryRuntimeRecordError,
-    RenderMonitorAdaptation, RenderOutputColorBoundary, ViewerGpuExecutionLayer,
-    ViewerGpuMediaSource, ViewerGpuNativeSource, ViewerNativeVideoImportRuntime, ViewerSourceRect,
+    GpuDisplayCalibrationRuntime, GpuFrameCompositor, GpuNativeDecodedFrameImportError,
+    GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
+    GpuNativeDecodedFrameVideoSampling, GpuProgramScopesError, GpuProgramScopesRecord,
+    GpuProgramScopesRequest, GpuProgramScopesRuntime, GpuProgramScopesRuntimeDiagnostics,
+    GpuViewerSpatialRecord, GpuViewerSpatialRuntime, GpuViewerSpatialRuntimeDiagnostics,
+    NativeVideoImportCpuTimings, RenderColorStageDiagnostics, RenderColorTransformGpuOptions,
+    RenderGpuColorTransformRuntimeRecordError, RenderGpuCompositeGraphRecordError,
+    RenderGpuInputStageRecord, RenderGpuInputStageRuntimeRecordError,
+    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
+    RenderGpuOutputBoundaryRuntimeRecordError, RenderMonitorAdaptation, RenderOutputColorBoundary,
+    ViewerGpuExecutionLayer, ViewerGpuMediaSource, ViewerGpuNativeSource,
+    ViewerNativeVideoImportRuntime, ViewerSourceRect,
 };
 use mondrian_core::display_calibration::DisplayCalibrationLut3d;
 use mondrian_core::types::{BlendMode, Color, SequenceId};
@@ -164,6 +165,18 @@ impl ViewerGpuExecutionRuntime {
     /// Current bounded native-import contract-pool and bridge-entry residency.
     pub fn native_import_pool_residency(&self) -> (usize, usize) {
         self.native_video_import.pool_residency()
+    }
+
+    /// Native decoder surfaces retained only until bridge-copy completion.
+    pub fn native_import_retained_source_count(&self) -> usize {
+        self.native_video_import.retained_source_count()
+    }
+
+    /// Non-blockingly retire decoder sources whose native bridge copy completed.
+    pub fn retire_completed_native_import_sources(
+        &mut self,
+    ) -> Result<usize, GpuNativeDecodedFrameImportError> {
+        self.native_video_import.retire_completed_source_residency()
     }
 
     /// Aggregate output-stage diagnostics without exposing the resource table.
