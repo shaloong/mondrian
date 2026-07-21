@@ -1600,7 +1600,8 @@ pub(super) fn decode_preview_frame_outcome(
                 ),
             ));
         }
-        let current_match = slot
+        let current_match = preview_decode_session_may_reuse(access_mode, hardware_decode_request)
+            && slot
             .as_ref()
             .map(|session| {
                 session.matches(
@@ -1617,6 +1618,11 @@ pub(super) fn decode_preview_frame_outcome(
             .unwrap_or(false);
 
         if !current_match {
+            // Release the previous decoder and all surfaces it owns before
+            // opening the replacement. Holding both pools during open can
+            // exhaust constrained hardware decoders and make cancellation
+            // wait inside the codec driver.
+            *slot = None;
             let open_started_at = Instant::now();
             let interrupt_state = Arc::new(PreviewDecodeInterruptState::new());
             let _interrupt_guard = interrupt_state.install(Arc::clone(&should_cancel));
@@ -1781,4 +1787,16 @@ pub(super) fn decode_preview_frame_outcome(
             }
         }
     })
+}
+
+pub(super) fn preview_decode_session_may_reuse(
+    access_mode: PreviewDecodeAccessMode,
+    hardware_decode_request: PreviewHardwareDecodeRequest,
+) -> bool {
+    // A deterministic GPU-resident still request can cross arbitrary GOPs.
+    // Reopening releases the prior decoder's DPB/surface pool before the next
+    // seek instead of depending on backend-specific flush semantics. CPU still
+    // sessions and realtime access modes retain their cheaper reuse path.
+    !(matches!(access_mode, PreviewDecodeAccessMode::RandomAccessStillFrame)
+        && hardware_decode_request.prefers_gpu_residency())
 }

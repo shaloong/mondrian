@@ -8753,7 +8753,7 @@ fn media_preview_forward_prefetch_window_uses_sequence_frame_rate() {
     );
     assert_eq!(
         media_preview_forward_prefetch_window_frames(Rational::FPS_60),
-        Some(15)
+        Some(MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES)
     );
     assert_eq!(
         media_preview_forward_prefetch_window_frames(Rational::new(240, 1)),

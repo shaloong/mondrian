@@ -6,15 +6,16 @@ use super::{
     exact_seek_non_reference_discard_until_pts, forward_decode_work_units,
     materialize_decoded_frame, preview_cache_get, preview_cache_put_with_fingerprint,
     preview_create_rgba_scaler, preview_decode_interrupt_callback,
-    preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_hardware_extra_frames,
-    preview_seek_index_cache_get, preview_seek_index_cache_put, resolve_cpu_rgba_contract,
-    run_external_decode_command_cancellable, temporal_selection_is_approximate,
-    DecodedRgbaFrameContract, FfmpegAvD3D12VaFrame, FfmpegAvD3D12VaSyncContext,
-    FfmpegNativeDecodedFrameResource, FfmpegNativeDecodedFrameResourceError, MediaFileFingerprint,
-    PreviewDecodeAccessMode, PreviewDecodeAccessPolicy, PreviewDecodeAdaptiveHints,
-    PreviewDecodeBackend, PreviewDecodeCancellation, PreviewDecodeCancellationCheckpoint,
-    PreviewDecodeDiagnostics, PreviewDecodeExecutionPath, PreviewDecodeInterruptState,
-    PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
+    preview_decode_session_may_reuse, preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode,
+    preview_hardware_extra_frames, preview_seek_index_cache_get, preview_seek_index_cache_put,
+    resolve_cpu_rgba_contract, run_external_decode_command_cancellable,
+    temporal_selection_is_approximate, DecodedRgbaFrameContract, FfmpegAvD3D12VaFrame,
+    FfmpegAvD3D12VaSyncContext, FfmpegNativeDecodedFrameResource,
+    FfmpegNativeDecodedFrameResourceError, MediaFileFingerprint, PreviewDecodeAccessMode,
+    PreviewDecodeAccessPolicy, PreviewDecodeAdaptiveHints, PreviewDecodeBackend,
+    PreviewDecodeCancellation, PreviewDecodeCancellationCheckpoint, PreviewDecodeDiagnostics,
+    PreviewDecodeExecutionPath, PreviewDecodeInterruptState, PreviewDecodeOutcome,
+    PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
     PreviewDecodeStageDurations, PreviewDecodeThreadingConfig, PreviewDecodeThreadingKind,
     PreviewDecodedFramePayload, PreviewHardwareDecodeBlocker,
     PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
@@ -776,6 +777,30 @@ fn exact_still_seek_discards_only_the_distant_non_reference_prefix() {
 fn forward_decode_budget_counts_packets_whose_output_was_discarded() {
     assert_eq!(forward_decode_work_units(48, 400), 400);
     assert_eq!(forward_decode_work_units(400, 48), 400);
+}
+
+#[test]
+fn gpu_resident_exact_stills_reopen_decoder_sessions() {
+    assert!(!preview_decode_session_may_reuse(
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+        PreviewHardwareDecodeRequest::PreferGpuResident,
+    ));
+    assert!(!preview_decode_session_may_reuse(
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+        PreviewHardwareDecodeRequest::RequireGpuResident,
+    ));
+    assert!(preview_decode_session_may_reuse(
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+        PreviewHardwareDecodeRequest::Auto,
+    ));
+    assert!(preview_decode_session_may_reuse(
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+        PreviewHardwareDecodeRequest::PreferHardwareDecode,
+    ));
+    assert!(preview_decode_session_may_reuse(
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewHardwareDecodeRequest::PreferGpuResident,
+    ));
 }
 
 #[test]

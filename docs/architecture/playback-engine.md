@@ -819,8 +819,10 @@ reservations, and an equality-comparable Viewer presentation scope; the Module
 does not import media, renderer, UI, or wall-clock types. Media entries
 have a 96-entry cap, a 384 MiB pixel-payload budget, and an independent
 decoder/GPU resource-lease budget; the generic Store default is four units,
-while the App composition root raises it to the sixteen-frame maximum bounded
-prefetch window. Viewer raster
+while the App composition root raises it to the eight-frame maximum bounded
+prefetch window. The 250 ms target is fully represented through 30 fps; at
+higher frame rates the speculative horizon is capped (about 133 ms at 60 fps)
+to preserve decoder DPB/import headroom. Viewer raster
 entries have a 48-entry cap and a 192 MiB payload budget; failure memory has a
 192-key cap. A media reservation includes current linear-float pixels, encoded
 source pixels, and the possible lazy working-frame allocation, so a deferred

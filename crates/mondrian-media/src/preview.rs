@@ -1245,7 +1245,10 @@ use decode_session::{
     decode_preview_frame_outcome, preview_create_rgba_scaler, PreviewDecodedFramePayload,
 };
 #[cfg(test)]
-use decode_session::{exact_seek_non_reference_discard_until_pts, forward_decode_work_units};
+use decode_session::{
+    exact_seek_non_reference_discard_until_pts, forward_decode_work_units,
+    preview_decode_session_may_reuse,
+};
 use hardware_decode::{preview_hardware_frame_format, PreviewHardwareDecodePlan};
 #[cfg(test)]
 use playback_ring::PreviewPlaybackRing;

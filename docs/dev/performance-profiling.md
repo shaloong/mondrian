@@ -307,9 +307,10 @@ the same media key is promoted when it becomes current-frame work. Track this wi
 `queue_promoted_current_jobs`, and `scheduler.skipped_decode_jobs` before tuning
 queue sizes or decode worker counts.
 Playback prefetch depth is frame-rate aware. The scheduler converts a bounded
-wall-clock horizon into sequence frames, so a 60 fps profile may show more
-queued/in-flight prefetch jobs than a 24/25/30 fps profile while still obeying
-the same time horizon and queue cap. `prefetch_skipped_prefetch_backlog` means
+wall-clock horizon into sequence frames, capped at eight native-resource units.
+The full 250 ms horizon is retained through 30 fps; a 60 fps profile uses the
+eight-frame cap (about 133 ms) so speculative residency leaves hardware-decoder
+DPB/import headroom. `prefetch_skipped_prefetch_backlog` means
 queued plus in-flight prefetch already covers that dynamic window, not a fixed
 two-frame constant.
 The decode performance report also carries worker-transport counters. Treat

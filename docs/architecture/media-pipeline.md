@@ -369,9 +369,11 @@ Diagnostics report these as `prefetch_skipped_current_pending`,
 keeps first-frame display and dropped-frame recovery ahead of cache warming on
 slow or long-GOP media. The configured forward window is derived from a
 250 ms wall-clock horizon and the active sequence frame rate, then capped at
-16 frames before
-enqueueing; high frame-rate playback warms more timeline frames than 24/25/30
-fps playback without letting speculative work flood the bounded worker queue.
+eight frames before enqueueing. This preserves the full horizon through 30 fps;
+higher-rate playback degrades only the speculative horizon (eight frames are
+about 133 ms at 60 fps), not current-frame correctness. The cap is also the App
+Preview Frame Store's native-resource budget, so retained decoder surfaces
+cannot consume the headroom needed by the codec DPB and renderer import bridge.
 Preview diagnostics expose this playback-clock contract as structured
 `playback_schedule` evidence, including the current-frame display deadline
 budget, the prefetch horizon/window, and invalid frame-rate counters. Invalid
@@ -1369,15 +1371,17 @@ selection prevents accidental cross-adapter creation without weakening the
 native resource boundary.
 GPU-resident decoder setup reserves thirty-two FFmpeg `extra_hw_frames` before
 `avcodec_open2` because native frames remain leased after the receive call.
-This is decoder-pool headroom, not application cache capacity; CPU-transfer
+This is requested decoder-pool headroom, not a portable guarantee of how many
+surfaces every codec/driver combination can make concurrently available and
+not application cache capacity; CPU-transfer
 decode leaves the setting at zero because it exports no hardware surfaces.
 GPU-resident requests bypass the process-global CPU RGBA cache and the
 session-local RGBA playback ring. Native decoder surfaces are not inserted into
 either media-owned CPU cache. They may enter the App's playback-owned Preview
 Frame Store as opaque leases charged one decoder-resource unit each; the App
-composition root sets that resource-unit budget to at least the maximum bounded
-prefetch window. This permits useful forward residency without treating a
-zero-host-byte surface as free or allowing the Store to exhaust the decoder
+composition root sets that resource-unit budget to the same eight-frame maximum
+bounded prefetch window. This permits useful forward residency without treating
+a zero-host-byte surface as free or allowing the Store to exhaust the decoder
 pool. CPU fallback payloads remain eligible for the existing CPU cache policy.
 CPU consumers such as thumbnails and current RGBA fallback paths must explicitly
 match `Frame(RgbaFrame)` and fail closed on `NativeGpuFrame`; they must not
@@ -1525,8 +1529,13 @@ typed canceled outcome rather than a media failure. `PlaybackCursor` and
 `ScrubCursor` cancellation preserve their thread-local FFmpeg sessions so
 sustained playback, forward prefetch, and pointer dragging retain decoder/device
 residency; `RandomAccessStillFrame` cancellation discards only its mode-specific
-session. The experimental external-process CPU RGBA path follows the same
-policy and terminates/reaps its child when the probe fires. This keeps stale
+session. A GPU-resident deterministic still also releases its previous
+mode-local decoder before opening the next request, even after success. Exact
+requests may cross unrelated GOPs, and relying on backend flush behavior while
+the previous output surface remains leased can leave a hardware codec blocked
+inside its driver. CPU still extraction and the realtime Playback/Scrub modes
+retain session reuse. The experimental external-process CPU RGBA path follows
+the same policy and terminates/reaps its child when the probe fires. This keeps stale
 work from being cached or marked as a failed source while preserving independent
 playback, scrub, and still-frame session state for subsequent requests.
 

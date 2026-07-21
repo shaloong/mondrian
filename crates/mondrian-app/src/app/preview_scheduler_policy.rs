@@ -15,8 +15,12 @@ pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US: u64 = 250_000;
 /// Minimum playback prefetch depth for a valid frame rate.
 pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES: usize = 1;
 /// Maximum playback prefetch depth regardless of frame rate.
-pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES: usize =
-    mondrian_playback::MAX_BOUNDED_VIDEO_PREROLL_FRAMES;
+///
+/// Native frames retain decoder surfaces. Eight frames preserve the complete
+/// 250 ms horizon through 30 fps while leaving explicit DPB/import headroom on
+/// hardware decoders whose advertised extra-frame pool is not a hard runtime
+/// guarantee. Higher-rate Timelines degrade the horizon, never correctness.
+pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES: usize = 8;
 /// Consecutive current-frame late results required to declare sustained pressure.
 pub(crate) const MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD: u64 = 2;
 pub(crate) const PREVIEW_SCRUB_HOT_REQUEST_WINDOW_US: u64 = 250_000;
