@@ -73,6 +73,9 @@ pub enum PreviewDecodeCancellationSource {
     CooperativeCheckpoint,
     /// FFmpeg's `AVIOInterruptCB` interrupted blocking format/protocol work.
     FfmpegIoInterrupt,
+    /// The parent terminated an isolated demux process at a cancellation or
+    /// deadline boundary; the abandoned FFmpeg format state was not reused.
+    IsolatedDemuxTermination,
 }
 
 /// Typed cancellation fact returned by the concrete Preview decode Adapter.
@@ -98,6 +101,15 @@ impl PreviewDecodeCancellation {
             source: PreviewDecodeCancellationSource::FfmpegIoInterrupt,
         }
     }
+
+    pub(super) fn isolated_demux_termination(
+        checkpoint: PreviewDecodeCancellationCheckpoint,
+    ) -> Self {
+        Self {
+            checkpoint,
+            source: PreviewDecodeCancellationSource::IsolatedDemuxTermination,
+        }
+    }
 }
 
 /// Aggregate of concrete decode checkpoints that observed cancellation.
@@ -109,6 +121,8 @@ pub struct PreviewDecodeCancellationEvidence {
     pub cooperative_checkpoint: u64,
     /// Cancellations first observed by FFmpeg's blocking-I/O interrupt callback.
     pub ffmpeg_io_interrupt: u64,
+    /// Cancellations enforced by terminating an isolated demux process.
+    pub isolated_demux_termination: u64,
     /// Per-checkpoint observation counts.
     pub checkpoints: PreviewDecodeCancellationCheckpointEvidence,
 }
@@ -123,6 +137,9 @@ impl PreviewDecodeCancellationEvidence {
             }
             PreviewDecodeCancellationSource::FfmpegIoInterrupt => {
                 self.ffmpeg_io_interrupt = self.ffmpeg_io_interrupt.saturating_add(1);
+            }
+            PreviewDecodeCancellationSource::IsolatedDemuxTermination => {
+                self.isolated_demux_termination = self.isolated_demux_termination.saturating_add(1);
             }
         }
         self.checkpoints.observe(cancellation.checkpoint);

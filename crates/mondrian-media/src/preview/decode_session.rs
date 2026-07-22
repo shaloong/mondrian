@@ -5,6 +5,10 @@
 //! typed frame materialization, and final cancellation publication. The
 //! parent module exposes only the request/outcome contract and session reset.
 
+use super::demux_source::{
+    PreviewDemuxWorkerConfig, PreviewPacketRead, PreviewPacketSource, PreviewPacketSourceOpen,
+    PreviewPacketSourceOpenError,
+};
 use super::native_frame::{
     PreviewDecodeSessionOutputLease, PreviewDecodeSessionOutputLeaseObserver,
 };
@@ -26,6 +30,7 @@ thread_local! {
 pub struct PreviewDecodeSessionContext {
     sessions: PreviewDecodeSessions,
     execution_observer: PreviewDecodeExecutionObserver,
+    demux_worker: Option<PreviewDemuxWorkerConfig>,
 }
 
 /// One-shot, thread-safe construction authority for a Preview decode context.
@@ -34,25 +39,30 @@ pub struct PreviewDecodeSessionContext {
 /// Consuming it constructs the non-`Send` session context on its owner thread.
 pub struct PreviewDecodeSessionContextBootstrap {
     execution_observer: PreviewDecodeExecutionObserver,
+    demux_worker: Option<PreviewDemuxWorkerConfig>,
 }
 
 impl PreviewDecodeSessionContextBootstrap {
     /// Construct the worker-owned context on the current thread.
     pub fn build(self) -> PreviewDecodeSessionContext {
-        PreviewDecodeSessionContext::with_execution_observer(self.execution_observer)
+        PreviewDecodeSessionContext::with_execution_observer(
+            self.execution_observer,
+            self.demux_worker,
+        )
     }
 }
 
 impl PreviewDecodeSessionContext {
     /// Create an empty worker-local decode context.
     pub fn new() -> Self {
-        Self::with_execution_observer(PreviewDecodeExecutionObserver::new())
+        Self::with_execution_observer(PreviewDecodeExecutionObserver::new(), None)
     }
 
     /// Create a one-shot worker bootstrap without retaining its observer.
     pub fn bootstrap() -> PreviewDecodeSessionContextBootstrap {
         PreviewDecodeSessionContextBootstrap {
             execution_observer: PreviewDecodeExecutionObserver::new(),
+            demux_worker: None,
         }
     }
 
@@ -67,15 +77,44 @@ impl PreviewDecodeSessionContext {
     ) {
         let observer = PreviewDecodeExecutionObserver::new();
         (
-            PreviewDecodeSessionContextBootstrap { execution_observer: observer.clone() },
+            PreviewDecodeSessionContextBootstrap {
+                execution_observer: observer.clone(),
+                demux_worker: None,
+            },
             observer,
         )
     }
 
-    fn with_execution_observer(execution_observer: PreviewDecodeExecutionObserver) -> Self {
+    /// Create an observed production bootstrap that isolates exact-still
+    /// container I/O in the packaged Mondrian executable.
+    ///
+    /// The executable must dispatch `--internal-demux-worker-v1` before
+    /// starting UI state. Codec and GPU resources remain in this context's
+    /// owner thread; only FFmpeg format operations cross the process seam.
+    pub fn observed_bootstrap_with_demux_worker(
+        executable: PathBuf,
+    ) -> (
+        PreviewDecodeSessionContextBootstrap,
+        PreviewDecodeExecutionObserver,
+    ) {
+        let observer = PreviewDecodeExecutionObserver::new();
+        (
+            PreviewDecodeSessionContextBootstrap {
+                execution_observer: observer.clone(),
+                demux_worker: Some(PreviewDemuxWorkerConfig::new(executable)),
+            },
+            observer,
+        )
+    }
+
+    fn with_execution_observer(
+        execution_observer: PreviewDecodeExecutionObserver,
+        demux_worker: Option<PreviewDemuxWorkerConfig>,
+    ) -> Self {
         Self {
             sessions: PreviewDecodeSessions { playback: None, interactive: None, cpu_still: None },
             execution_observer,
+            demux_worker,
         }
     }
 
@@ -144,6 +183,7 @@ impl PreviewDecodeSessionContext {
             request.hardware_decode_request,
             request.hardware_decode_device_selector,
             request.source_color,
+            self.demux_worker.as_ref(),
             should_cancel,
         )
     }
@@ -250,8 +290,8 @@ struct PreviewDecodeSession {
     hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
     source_color: PreviewSourceColorContract,
     codec_id: ffmpeg::codec::Id,
-    input: ffmpeg::format::context::Input,
-    // Declared after `input` so the AVFormatContext releases its callback use
+    packet_source: PreviewPacketSource,
+    // Declared after `packet_source` so a direct AVFormatContext releases its callback use
     // before the callback state is dropped.
     interrupt_state: Arc<PreviewDecodeInterruptState>,
     decoder: ffmpeg::decoder::Video,
@@ -468,10 +508,7 @@ impl PreviewDecodeForwardResult {
     }
 }
 
-use seek_index::{
-    preview_seek_index_cache_get, preview_seek_index_cache_put, preview_seek_index_from_stream,
-    PreviewSeekIndex, PreviewSeekIndexDiagnostics, PreviewSeekResolution,
-};
+use seek_index::{PreviewSeekIndex, PreviewSeekIndexDiagnostics, PreviewSeekResolution};
 
 use playback_ring::PreviewPlaybackRing;
 
@@ -544,65 +581,6 @@ pub(super) fn preview_create_rgba_scaler(
     })
 }
 
-fn open_preview_input(
-    path: &Path,
-    interrupt_state: &Arc<PreviewDecodeInterruptState>,
-) -> Result<ffmpeg::format::context::Input> {
-    let path_string = path.to_string_lossy();
-    let path_c =
-        CString::new(path_string.as_bytes()).map_err(|error| MondrianError::MediaOpen {
-            path: path.display().to_string(),
-            reason: format!("media path contains an interior NUL byte: {error}"),
-        })?;
-
-    // SAFETY: the allocated context is either transferred into the safe
-    // ffmpeg-next Input wrapper or closed on every error path. The callback
-    // opaque pointer targets an Arc allocation owned by the resulting session.
-    unsafe {
-        let mut input = ffmpeg::ffi::avformat_alloc_context();
-        if input.is_null() {
-            return Err(MondrianError::MediaOpen {
-                path: path.display().to_string(),
-                reason: "FFmpeg could not allocate an input context".to_string(),
-            });
-        }
-        (*input).interrupt_callback = ffmpeg::ffi::AVIOInterruptCB {
-            callback: Some(preview_decode_interrupt_callback),
-            opaque: Arc::as_ptr(interrupt_state).cast_mut().cast(),
-        };
-
-        interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::InputOpen);
-        let open_result = ffmpeg::ffi::avformat_open_input(
-            &mut input,
-            path_c.as_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-        if open_result < 0 {
-            if !input.is_null() {
-                ffmpeg::ffi::avformat_close_input(&mut input);
-            }
-            return Err(MondrianError::MediaOpen {
-                path: path.display().to_string(),
-                reason: ffmpeg::Error::from(open_result).to_string(),
-            });
-        }
-
-        interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::StreamInfo);
-        let stream_info_result =
-            ffmpeg::ffi::avformat_find_stream_info(input, std::ptr::null_mut());
-        if stream_info_result < 0 {
-            ffmpeg::ffi::avformat_close_input(&mut input);
-            return Err(MondrianError::MediaOpen {
-                path: path.display().to_string(),
-                reason: ffmpeg::Error::from(stream_info_result).to_string(),
-            });
-        }
-
-        Ok(ffmpeg::format::context::Input::wrap(input))
-    }
-}
-
 impl PreviewDecodeSession {
     fn open(
         path: &Path,
@@ -614,11 +592,22 @@ impl PreviewDecodeSession {
         hardware_decode_request: PreviewHardwareDecodeRequest,
         hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
         source_color: PreviewSourceColorContract,
+        source_time: TimelineTime,
+        demux_worker: Option<&PreviewDemuxWorkerConfig>,
+        should_cancel: &(dyn Fn() -> bool + Send + Sync),
         interrupt_state: Arc<PreviewDecodeInterruptState>,
-    ) -> Result<Self> {
-        let input = open_preview_input(path, &interrupt_state)?;
-        Self::from_input(
-            input,
+    ) -> std::result::Result<Self, PreviewPacketSourceOpenError> {
+        let source = PreviewPacketSource::open(
+            path,
+            fingerprint,
+            access_mode,
+            source_time,
+            demux_worker,
+            &interrupt_state,
+            should_cancel,
+        )?;
+        Self::from_packet_source(
+            source,
             interrupt_state,
             path,
             fingerprint,
@@ -630,10 +619,11 @@ impl PreviewDecodeSession {
             hardware_decode_device_selector,
             source_color,
         )
+        .map_err(PreviewPacketSourceOpenError::Failed)
     }
 
-    fn from_input(
-        input: ffmpeg::format::context::Input,
+    fn from_packet_source(
+        source: PreviewPacketSourceOpen,
         interrupt_state: Arc<PreviewDecodeInterruptState>,
         path: &Path,
         fingerprint: MediaFileFingerprint,
@@ -645,37 +635,15 @@ impl PreviewDecodeSession {
         hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
         source_color: PreviewSourceColorContract,
     ) -> Result<Self> {
-        let (stream_index, parameters, stream_tb, stream_start_pts, stream_rate, seek_index) = {
-            let stream = input.streams().best(ffmpeg::media::Type::Video).ok_or_else(|| {
-                MondrianError::UnsupportedFormat { format: "no video stream".to_string() }
-            })?;
-            let stream_index = stream.index();
-            let stream_start_pts = match stream.start_time() {
-                value if value == ffmpeg::ffi::AV_NOPTS_VALUE => 0,
-                value => value,
-            };
-            let seek_index = preview_seek_index_cache_get(path, fingerprint, stream_index)
-                .unwrap_or_else(|| {
-                    let seek_index = preview_seek_index_from_stream(&stream);
-                    if seek_index.source == PreviewSeekIndexSource::ProbeBacked {
-                        preview_seek_index_cache_put(
-                            path,
-                            fingerprint,
-                            stream_index,
-                            &seek_index.keyframe_pts,
-                        );
-                    }
-                    seek_index
-                });
-            (
-                stream_index,
-                stream.parameters(),
-                stream.time_base(),
-                stream_start_pts,
-                stream.rate(),
-                seek_index,
-            )
-        };
+        let PreviewPacketSourceOpen {
+            source,
+            parameters,
+            stream_index,
+            stream_tb,
+            stream_start_pts,
+            stream_rate,
+            seek_index,
+        } = source;
         let codec_id = parameters.id();
 
         let mut hardware_decode_plan = PreviewHardwareDecodePlan::resolve(
@@ -798,7 +766,7 @@ impl PreviewDecodeSession {
             hardware_decode_device_selector,
             source_color,
             codec_id,
-            input,
+            packet_source: source,
             interrupt_state,
             decoder,
             scaler,
@@ -830,12 +798,20 @@ impl PreviewDecodeSession {
         fingerprint: MediaFileFingerprint,
         max_width: Option<u32>,
         max_height: Option<u32>,
+        access_mode: PreviewDecodeAccessMode,
+        demux_worker_available: bool,
         backend: PreviewDecodeBackend,
         hardware_decode_request: PreviewHardwareDecodeRequest,
         hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
         source_color: PreviewSourceColorContract,
     ) -> bool {
-        self.path == path
+        !self.packet_source.is_terminal()
+            && packet_source_execution_family_matches(
+                self.packet_source.is_isolated(),
+                access_mode,
+                demux_worker_available,
+            )
+            && self.path == path
             && self.fingerprint == fingerprint
             && self.max_width == max_width
             && self.max_height == max_height
@@ -1030,9 +1006,14 @@ impl PreviewDecodeSession {
             should_cancel,
         )?;
         if result.canceled {
-            return Ok(PreviewDecodeOutcome::Canceled(
-                self.interrupt_state.cancellation(PreviewDecodeCancellationCheckpoint::Codec),
-            ));
+            let cancellation = if self.packet_source.isolated_demux_was_canceled() {
+                PreviewDecodeCancellation::isolated_demux_termination(
+                    PreviewDecodeCancellationCheckpoint::PacketRead,
+                )
+            } else {
+                self.interrupt_state.cancellation(PreviewDecodeCancellationCheckpoint::Codec)
+            };
+            return Ok(PreviewDecodeOutcome::Canceled(cancellation));
         }
         if let Some(frame) = result.frame {
             match frame {
@@ -1232,34 +1213,25 @@ impl PreviewDecodeSession {
                 }
             };
 
-        let ret = unsafe {
-            ffmpeg::ffi::avformat_seek_file(
-                self.input.as_mut_ptr(),
-                self.stream_index as i32,
-                min_ts,
-                seek_target_ts,
-                max_ts,
-                seek_flags,
-            )
-        };
-
-        if ret >= 0 {
-            self.interrupt_state
-                .set_execution_stage(PreviewDecodeExecutionStage::CodecFlush);
-            unsafe {
-                ffmpeg::ffi::avcodec_flush_buffers(self.decoder.as_mut_ptr());
-            }
-            self.reached_eof = false;
-            self.last_pts = None;
-            return Ok(PreviewSeekResolution {
-                used_index: used_anchor_pts.is_some(),
-                anchor_pts: used_anchor_pts,
-            });
+        self.packet_source.seek(
+            self.stream_index,
+            min_ts,
+            seek_target_ts,
+            max_ts,
+            seek_flags,
+            target_pts,
+            &self.path,
+        )?;
+        self.interrupt_state
+            .set_execution_stage(PreviewDecodeExecutionStage::CodecFlush);
+        unsafe {
+            ffmpeg::ffi::avcodec_flush_buffers(self.decoder.as_mut_ptr());
         }
-
-        Err(MondrianError::DecodeFailed {
-            asset_id: self.path.display().to_string(),
-            reason: format!("seek failed with code {ret}"),
+        self.reached_eof = false;
+        self.last_pts = None;
+        Ok(PreviewSeekResolution {
+            used_index: used_anchor_pts.is_some(),
+            anchor_pts: used_anchor_pts,
         })
     }
 
@@ -1471,17 +1443,20 @@ impl PreviewDecodeSession {
             }
         }
 
-        let mut packets = self.input.packets();
         loop {
             interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::PacketRead);
-            let Some((s, packet)) = packets.next() else {
-                break;
+            let packet = match self.packet_source.read_next(&self.path, should_cancel)? {
+                PreviewPacketRead::Packet(packet) => packet,
+                PreviewPacketRead::End => break,
+                PreviewPacketRead::Canceled => {
+                    return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+                }
             };
             interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::Codec);
             if should_cancel() {
                 return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
             }
-            if s.index() != self.stream_index {
+            if packet.stream() != self.stream_index {
                 continue;
             }
             self.seek_index.observe_packet(&packet);
@@ -1843,6 +1818,7 @@ pub(super) fn decode_preview_frame_outcome(
             hardware_decode_request,
             hardware_decode_device_selector,
             source_color,
+            None,
             should_cancel,
         )
     })
@@ -1862,6 +1838,7 @@ fn decode_preview_frame_outcome_in_sessions(
     hardware_decode_request: PreviewHardwareDecodeRequest,
     hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
     source_color: PreviewSourceColorContract,
+    demux_worker: Option<&PreviewDemuxWorkerConfig>,
     should_cancel: PreviewDecodeCancelProbe,
 ) -> Result<PreviewDecodeOutcome> {
     let started_at = Instant::now();
@@ -1927,6 +1904,8 @@ fn decode_preview_frame_outcome_in_sessions(
                     fingerprint,
                     max_width,
                     max_height,
+                    access_mode,
+                    demux_worker.is_some(),
                     backend,
                     hardware_decode_request,
                     hardware_decode_device_selector,
@@ -1959,17 +1938,27 @@ fn decode_preview_frame_outcome_in_sessions(
                 hardware_decode_request,
                 hardware_decode_device_selector,
                 source_color,
+                source_time,
+                demux_worker,
+                should_cancel.as_ref(),
                 Arc::clone(&interrupt_state),
             );
             *slot = match opened {
                 Ok(session) => Some(session),
-                Err(_) if should_cancel() => {
+                Err(PreviewPacketSourceOpenError::DirectCanceled) => {
                     return Ok(PreviewDecodeOutcome::Canceled(
                         interrupt_state
                             .cancellation(PreviewDecodeCancellationCheckpoint::InputOpen),
-                    ));
+                    ))
                 }
-                Err(error) => return Err(error),
+                Err(PreviewPacketSourceOpenError::IsolatedCanceled) => {
+                    return Ok(PreviewDecodeOutcome::Canceled(
+                        PreviewDecodeCancellation::isolated_demux_termination(
+                            PreviewDecodeCancellationCheckpoint::InputOpen,
+                        ),
+                    ))
+                }
+                Err(PreviewPacketSourceOpenError::Failed(error)) => return Err(error),
             };
             session_open_us = duration_us(open_started_at.elapsed());
         }
@@ -1989,6 +1978,7 @@ fn decode_preview_frame_outcome_in_sessions(
         if preview_external_ffmpeg_cpu_rgba_enabled(access_mode) {
             interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::ExternalProcess);
             if should_cancel() {
+                session.packet_source.finish_isolated_one_shot();
                 return Ok(PreviewDecodeOutcome::Canceled(
                     interrupt_state
                         .cancellation(PreviewDecodeCancellationCheckpoint::ExternalProcess),
@@ -2010,12 +2000,14 @@ fn decode_preview_frame_outcome_in_sessions(
                 match result {
                     Ok(Some(frame)) => {
                         if should_cancel() {
+                            session.packet_source.finish_isolated_one_shot();
                             return Ok(PreviewDecodeOutcome::Canceled(
                                 interrupt_state.cancellation(
                                     PreviewDecodeCancellationCheckpoint::ExternalProcess,
                                 ),
                             ));
                         }
+                        session.packet_source.finish_isolated_one_shot();
                         return Ok(PreviewDecodeOutcome::Frame(
                             frame
                                 .with_access_mode(access_mode)
@@ -2035,6 +2027,7 @@ fn decode_preview_frame_outcome_in_sessions(
                         ));
                     }
                     Ok(None) => {
+                        session.packet_source.finish_isolated_one_shot();
                         return Ok(PreviewDecodeOutcome::Canceled(
                             interrupt_state
                                 .cancellation(PreviewDecodeCancellationCheckpoint::ExternalProcess),
@@ -2066,6 +2059,7 @@ fn decode_preview_frame_outcome_in_sessions(
                 return Err(error);
             }
         };
+        session.packet_source.finish_isolated_one_shot();
         match outcome {
             PreviewDecodeOutcome::Frame(frame) => Ok(PreviewDecodeOutcome::Frame(
                 frame
@@ -2125,6 +2119,16 @@ fn native_interactive_output_is_terminal(
     output_access_mode: Option<PreviewDecodeAccessMode>,
 ) -> bool {
     output_access_mode == Some(PreviewDecodeAccessMode::RandomAccessStillFrame)
+}
+
+fn packet_source_execution_family_matches(
+    source_is_isolated: bool,
+    access_mode: PreviewDecodeAccessMode,
+    demux_worker_available: bool,
+) -> bool {
+    source_is_isolated
+        == (access_mode == PreviewDecodeAccessMode::RandomAccessStillFrame
+            && demux_worker_available)
 }
 
 #[cfg(test)]
@@ -2190,5 +2194,29 @@ mod session_topology_tests {
         assert!(native_interactive_output_is_terminal(Some(
             PreviewDecodeAccessMode::RandomAccessStillFrame,
         )));
+    }
+
+    #[test]
+    fn packet_source_execution_family_prevents_exact_from_reusing_direct_scrub_demux() {
+        assert!(packet_source_execution_family_matches(
+            false,
+            PreviewDecodeAccessMode::ScrubCursor,
+            true,
+        ));
+        assert!(!packet_source_execution_family_matches(
+            false,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            true,
+        ));
+        assert!(packet_source_execution_family_matches(
+            true,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            true,
+        ));
+        assert!(packet_source_execution_family_matches(
+            false,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            false,
+        ));
     }
 }

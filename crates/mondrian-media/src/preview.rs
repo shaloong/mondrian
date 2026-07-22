@@ -25,6 +25,11 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 mod cancellation;
 mod decode_session;
 mod decoded_frame;
+mod demux_process;
+mod demux_protocol;
+mod demux_protocol_ffi;
+mod demux_source;
+mod demux_worker;
 mod execution_progress;
 mod external_decode;
 mod frame_cache;
@@ -34,6 +39,8 @@ mod hardware_decode;
 mod native_frame;
 mod playback_ring;
 mod seek_index;
+
+pub use demux_worker::run_preview_demux_worker;
 
 use cancellation::{
     preview_decode_interrupt_callback, PreviewDecodeCancelProbe, PreviewDecodeInterruptState,
@@ -1400,7 +1407,7 @@ use external_decode::{
     run_external_decode_command_cancellable,
 };
 
-fn source_time_to_stream_pts(
+pub(super) fn source_time_to_stream_pts(
     source_time: TimelineTime,
     stream_tb: ffmpeg::Rational,
     stream_start_pts: i64,

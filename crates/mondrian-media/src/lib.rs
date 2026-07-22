@@ -51,8 +51,8 @@ pub use multilevel_cache::{CacheTier, MultiLevelCache, ResolvedMediaPath};
 pub use preview::{
     clear_global_preview_frame_cache, clear_thread_local_preview_decode_session,
     decode_preview_frame_cancellable, preview_decode_backend, preview_decode_cpu_budget,
-    set_preview_decode_backend, DecodedRgbaAlphaMode, DecodedRgbaEncoding,
-    DecodedRgbaFrameContract, FfmpegD3D11TextureView, FfmpegD3D12TextureView,
+    run_preview_demux_worker, set_preview_decode_backend, DecodedRgbaAlphaMode,
+    DecodedRgbaEncoding, DecodedRgbaFrameContract, FfmpegD3D11TextureView, FfmpegD3D12TextureView,
     FfmpegNativeDecodedFrameResource, FfmpegNativeDecodedFrameResourceError, FloatRgbaFrame,
     MediaFileFingerprint, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
     PreviewDecodeBackend, PreviewDecodeCancellation, PreviewDecodeCancellationCheckpoint,

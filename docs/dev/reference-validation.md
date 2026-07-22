@@ -136,6 +136,13 @@ authority. Evidence records the
 configured deadline, elapsed wall time, timeout outcome, journal presence, and
 journal SHA-256.
 
+The Video gate first builds the packaged `mondrian` executable under the same
+release profile, records the bounded build log plus executable hash, and passes
+its absolute path through `MONDRIAN_PREVIEW_DEMUX_WORKER_PATH`. Exact-Still
+format work therefore exercises the same hidden helper dispatch shipped to
+users; a stale developer binary, `PATH` lookup, or test-harness executable
+cannot silently satisfy the process-isolation gate.
+
 Use `-Gate Video` or `-Gate Audio` for a partial diagnostic. Use
 `-AllowDirtyDiagnostic` only when results are intentionally non-baseline. A
 machine below the reference performance class may use

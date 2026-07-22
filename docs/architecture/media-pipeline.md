@@ -269,7 +269,8 @@ Cancellation returns a typed `PreviewDecodeCancellation`, never a unit success
 or an error-string classification. Its checkpoint names the first observation
 inside input open, stream-info discovery, cache lookup, seek, packet read,
 codec work, frame materialization, or the optional external process; its source
-distinguishes a normal cooperative checkpoint from `AVIOInterruptCB`. The
+distinguishes a normal cooperative checkpoint, `AVIOInterruptCB`, and
+parent-enforced `IsolatedDemuxTermination`. The
 request probe is installed before `avformat_open_input`, remains attached to the
 owned format context through stream discovery, seek, and packet I/O, and is
 reset for every reused Session request. The interrupt callback records only the
@@ -280,6 +281,7 @@ canceled; the media fact proves where blocking execution actually yielded.
 `mondrian-media::preview` is the public request/outcome facade, not the owner of
 every implementation detail. Its private deep modules separately own the
 request-scoped interrupt protocol, typed CPU frames, one FFmpeg decode Session,
+the recoverable demux-process boundary,
 hardware admission/context state, frame materialization, native-frame resource
 lifetime, the probe/session seek index, the session-local playback ring, the
 process frame cache, and the optional external still process. The FFmpeg Session
@@ -288,6 +290,31 @@ ordering; the other modules provide narrow stateful services and cannot publish
 a second decode outcome. The external process module always drains both pipes,
 retains only the exact expected RGBA byte count and 64 KiB of stderr, and on
 cancellation performs kill → wait → reader join before returning `Canceled`.
+
+`preview::demux_process`, `demux_protocol`, and `demux_worker` form one deep
+compressed-packet Source Seam. The packaged `mondrian` executable dispatches a
+hidden worker mode before constructing UI state; no second release binary or
+`PATH` lookup exists. Parent and child exchange the OS-native path through a
+private stdin pipe, not process arguments. The response validates a launch
+nonce, protocol/build identity, pointer width/endian, and the actual
+`avcodec`/`avformat`/`avutil` runtime versions. Codec descriptor name must agree
+with numeric `AVCodecID`; extradata, packet payloads, side-data count/entry/total,
+errors, stderr, and the four-entry packet queue are independently bounded.
+Packets are rebuilt only through checked FFmpeg allocation and never carry
+`buf`, `opaque`, `opaque_ref`, or `AV_PKT_FLAG_TRUSTED` across the process seam.
+The helper calls `av_read_frame` directly so EOF, EAGAIN, and fatal demux errors
+cannot collapse into ffmpeg-next's retrying iterator behavior.
+
+This increment applies isolation only to exact `RandomAccessStillFrame` format
+work. The parent retains `AVCodecContext`, reorder state, D3D12VA/D3D11VA device
+and frames contexts, and native output leases; there is no child-process RGBA
+or GPU-surface serialization. Cancellation disconnects bounded IPC, kills and
+reaps the helper, and returns a distinct isolated-termination fact. Playback and
+Scrub still use their in-process `AVFormatContext`; they must migrate to a
+reusable versioned open/seek/read/close session before format-call recovery or
+the M0 blocker can be declared closed. The exact one-shot vertical slice is not
+permission to spawn a process per Playback frame or claim general demux
+recovery.
 
 Ordinary CI exercises this contract through a loopback HTTP server that accepts
 FFmpeg's connection and deliberately withholds a response. Both the media
@@ -431,8 +458,12 @@ include `output_lease_wait_us`, and a wait that dominates a frame is classified
 separately from queue wait, session open, seek, or packet decode. Number of
 completed requests, generation rotation alone, cache eviction alone, and fixed
 delays are not release proofs.
-A compatible released Scrub codec may execute one exact request, but a
-successful native exact output is terminal for that codec/DPB/frames context.
+A released Interactive codec may execute another request only when its
+packet-source execution family and codec contract both match. In this
+increment, direct Scrub and one-shot isolated exact sources are deliberately
+incompatible, so exact retires the released Scrub context and opens a fresh
+parent-owned codec against its helper packet source. A successful native exact
+output is terminal for that codec/DPB/frames context.
 After publishing the result, the production worker waits for the output lease
 to retire, destroys the terminal context between Broker execution leases, and
 only then dequeues more work. This prevents the next request's cancellation
@@ -1620,6 +1651,14 @@ decoder; scrub and GPU-resident exact Still share one output-lease-aware
 Interactive decoder rather than accumulating one surface pool per request or
 reusing a pool whose prior native output is still owned. A separate CPU Still
 slot preserves CPU extraction locality without owning native GPU surfaces.
+For exact Still, the packet source is now a one-request isolated demux helper:
+the process is the recoverable generation, while the parent decoder and output
+lease retain the same slot rules. A completed, failed, or canceled helper is
+terminal and cannot satisfy another target. CPU exact work opens a fresh source
+on its next request; native exact already retires the paired decoder only after
+its output lease ends. Playback and Scrub keep the direct packet source in this
+increment, so their remaining recovery limitation is explicit behind the same
+packet-source Interface rather than disguised as process isolation.
 Slot locality does not authorize Playback and Interactive sessions to remain
 hardware-resident at once. A family transition first evicts only native
 decoder-resource entries from the shared Frame Store, wakes worker waits through

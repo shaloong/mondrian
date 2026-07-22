@@ -7,7 +7,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-#[cfg(test)]
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
@@ -240,7 +239,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             let worker_decode_residency = Arc::clone(&decode_residency);
             let worker_lane = media_preview_worker_lane(worker_index, worker_count);
             let (worker_decode_context_bootstrap, execution_observer) =
-                mondrian_media::PreviewDecodeSessionContext::observed_bootstrap();
+                match packaged_preview_demux_worker() {
+                    Some(executable) =>
+                        mondrian_media::PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(executable),
+                    None => mondrian_media::PreviewDecodeSessionContext::observed_bootstrap(),
+                };
             decode_residency.register_worker(worker_lane);
             match std::thread::Builder::new()
                 .name(format!("mondrian-preview-worker-{worker_index}"))
@@ -689,6 +692,33 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     ) -> Option<PreviewRasterFrame> {
         self.frame_store.borrow().stale_viewer_frame(sequence.id, width, height)
     }
+}
+
+fn packaged_preview_demux_worker() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+        tracing::warn!(
+            path = %path.display(),
+            "configured Preview demux worker does not exist; continuing packaged worker discovery"
+        );
+    }
+
+    let current = std::env::current_exe().ok()?;
+    if current.file_stem().is_some_and(|name| name.eq_ignore_ascii_case("mondrian")) {
+        return Some(current);
+    }
+
+    // Cargo test executables live in target/{profile}/deps. The packaged app
+    // sibling is built by the production gate and exercises the same hidden
+    // worker dispatch without adding a second release binary.
+    let profile_directory = current.parent().and_then(|directory| {
+        (directory.file_name()? == "deps").then(|| directory.parent()).flatten()
+    })?;
+    let candidate = profile_directory.join(format!("mondrian{}", std::env::consts::EXE_SUFFIX));
+    candidate.is_file().then_some(candidate)
 }
 
 fn join_preview_workers(handles: Vec<JoinHandle<()>>) {

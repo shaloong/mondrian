@@ -43,21 +43,39 @@ function Invoke-PlaybackGate([object]$GateContract, [object]$Fixture, [string]$R
     $artifactPath = Resolve-RepositoryPath (Join-Path "tests/fixtures" ([string]$Fixture.path))
     $reportPath = Join-Path $RunDirectory "$($GateContract.id)-report.jsonl"
     $logPath = Join-Path $RunDirectory "$($GateContract.id)-cargo.log"
+    $workerBuildLogPath = Join-Path $RunDirectory "$($GateContract.id)-demux-worker-build.log"
     $decodeProgressRequired = $null -ne $GateContract.PSObject.Properties["decode_progress_required"] -and $GateContract.decode_progress_required -eq $true
     $decodeProgressEnvironment = if ($null -eq $GateContract.PSObject.Properties["decode_progress_environment"]) { $null } else { [string]$GateContract.decode_progress_environment }
     $decodeProgressPath = if ([string]::IsNullOrWhiteSpace($decodeProgressEnvironment)) { $null } else { Join-Path $RunDirectory "$($GateContract.id)-decode-progress.jsonl" }
-    $pathsToRemove = @($reportPath, $logPath)
+    $pathsToRemove = @($reportPath, $logPath, $workerBuildLogPath)
     if ($null -ne $decodeProgressPath) { $pathsToRemove += $decodeProgressPath }
     Remove-Item -LiteralPath $pathsToRemove -Force -ErrorAction SilentlyContinue
 
     $oldMedia = [Environment]::GetEnvironmentVariable([string]$GateContract.media_environment, "Process")
     $oldPerf = [Environment]::GetEnvironmentVariable("MONDRIAN_PERF_OUTPUT", "Process")
     $oldDecodeProgress = if ($null -eq $decodeProgressEnvironment) { $null } else { [Environment]::GetEnvironmentVariable($decodeProgressEnvironment, "Process") }
+    $oldDemuxWorker = [Environment]::GetEnvironmentVariable("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH", "Process")
+    $demuxWorkerRequired = $null -ne $GateContract.PSObject.Properties["packaged_demux_worker_required"] -and $GateContract.packaged_demux_worker_required -eq $true
+    $demuxWorkerPath = $null
+    $workerBuildResult = $null
     try {
         [Environment]::SetEnvironmentVariable([string]$GateContract.media_environment, $artifactPath, "Process")
         [Environment]::SetEnvironmentVariable("MONDRIAN_PERF_OUTPUT", $reportPath, "Process")
         if ($null -ne $decodeProgressEnvironment) {
             [Environment]::SetEnvironmentVariable($decodeProgressEnvironment, $decodeProgressPath, "Process")
+        }
+        if ($demuxWorkerRequired) {
+            $workerBuildArguments = @("build", "-p", "mondrian-app", "--release", "--bin", "mondrian")
+            $workerBuildResult = Invoke-BoundedPlaybackGateProcess "cargo" $workerBuildArguments $script:repositoryRoot ([int]$GateContract.process_timeout_seconds) $workerBuildLogPath
+            if ($workerBuildResult.timed_out -or $workerBuildResult.exit_code -ne 0) {
+                throw "Packaged Preview demux worker build failed or timed out."
+            }
+            $workerFileName = if ($IsWindows) { "mondrian.exe" } else { "mondrian" }
+            $demuxWorkerPath = Resolve-RepositoryPath (Join-Path "target/release" $workerFileName)
+            if (-not (Test-Path -LiteralPath $demuxWorkerPath -PathType Leaf)) {
+                throw "Packaged Preview demux worker is missing: $demuxWorkerPath"
+            }
+            [Environment]::SetEnvironmentVariable("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH", $demuxWorkerPath, "Process")
         }
         $cargoArguments = @(
             "test", "-p", "mondrian-app", "--release", [string]$GateContract.cargo_test,
@@ -71,6 +89,7 @@ function Invoke-PlaybackGate([object]$GateContract, [object]$Fixture, [string]$R
         if ($null -ne $decodeProgressEnvironment) {
             [Environment]::SetEnvironmentVariable($decodeProgressEnvironment, $oldDecodeProgress, "Process")
         }
+        [Environment]::SetEnvironmentVariable("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH", $oldDemuxWorker, "Process")
     }
 
     $envelope = $null
@@ -95,7 +114,7 @@ function Invoke-PlaybackGate([object]$GateContract, [object]$Fixture, [string]$R
             attestation_path = $attestationPath
             attestation_sha256 = (Get-FileHash -LiteralPath $attestationPath -Algorithm SHA256).Hash.ToLowerInvariant()
         }
-        command = "cargo $($cargoArguments -join ' ')"
+        command = if ($demuxWorkerRequired) { "cargo build -p mondrian-app --release --bin mondrian; cargo $($cargoArguments -join ' ')" } else { "cargo $($cargoArguments -join ' ')" }
         cargo_exit_code = $exitCode
         process_timeout_seconds = [int]$GateContract.process_timeout_seconds
         process_elapsed_ms = [int64]$processResult.elapsed_ms
@@ -107,6 +126,13 @@ function Invoke-PlaybackGate([object]$GateContract, [object]$Fixture, [string]$R
             path = $decodeProgressPath
             present = $decodeProgressPresent
             sha256 = if ($decodeProgressPresent) { (Get-FileHash -LiteralPath $decodeProgressPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
+        }
+        packaged_demux_worker = [ordered]@{
+            required = $demuxWorkerRequired
+            path = $demuxWorkerPath
+            sha256 = if ($null -ne $demuxWorkerPath -and (Test-Path -LiteralPath $demuxWorkerPath -PathType Leaf)) { (Get-FileHash -LiteralPath $demuxWorkerPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
+            build_log_path = if ($demuxWorkerRequired) { $workerBuildLogPath } else { $null }
+            build_elapsed_ms = if ($null -eq $workerBuildResult) { $null } else { [int64]$workerBuildResult.elapsed_ms }
         }
         report_read_error = $reportReadError
         expected_report_profile = [string]$GateContract.expected_report_profile

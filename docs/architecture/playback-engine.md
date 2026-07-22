@@ -905,10 +905,10 @@ exact and can prove that its decoded sources are no longer needed. This is the
 last safe point: after rotation the retained output is stale by definition and
 must not authorize source-residency decisions. The retry remains non-blocking
 and fail-closed when any old work is actually still queued or in flight. Once
-the source lease is released, the compatible Interactive decoder may apply the
-current scrub or exact-Still seek/flush policy for the new generation; decoder
-reuse does not grant the old media frame publication authority or make canceled
-partial output cacheable.
+the source lease is released, a compatible Interactive decoder may apply the
+current seek/flush policy for the new generation only when its packet-source
+execution family also matches; decoder reuse does not grant the old media frame
+publication authority or make canceled partial output cacheable.
 
 GPU-resident scrub and exact Still decode share one Interactive session. Each
 native output carries a lease through the Frame Store and renderer source copy;
@@ -920,8 +920,11 @@ assuming that generation count, elapsed time, cache eviction, or
 `avcodec_flush_buffers` alone proves downstream surface release. The access
 mode still selects independent scrub versus exact precision and seek policy on
 every request; session sharing does not relax exact-Still correctness.
-A released compatible Scrub session may execute one exact request. Once that
-request publishes a native exact output, the mutable codec context is terminal:
+A released session may cross from Scrub to exact only when its packet-source
+execution family also matches. The current direct Scrub source and one-shot
+isolated exact source do not, so exact replaces the released context instead of
+bypassing process isolation. Once an exact request publishes a native output,
+the mutable codec context is terminal:
 the worker waits for the output lease, destroys the context between Broker
 execution leases, then receives the next job. It never re-enters that codec and
 never opens an alternating native pool while the old output is leased. Keeping
@@ -1547,6 +1550,27 @@ still does not distinguish an unpolled interrupt, a stale cancellation probe,
 or an ignored callback result. Callback poll/cancel sequences are therefore now
 part of the same progress Interface and the compressed endurance Adapter can
 write the same schema-v2 journal before another real-cadence run is justified.
+
+The follow-up clean `2eeefd3` Video diagnostic
+`20260721T230356Z-local-windows-dev-01-0153581d` removed that ambiguity: all
+44,994 cadence Playback frames again completed through D3D12VA P010, and the
+first cross-region exact request remained in `PacketRead` while the callback
+was polled at least 641 times and returned cancellation at least 596 times for
+that request. `av_read_frame` still did not return. Callback installation and
+correct probe binding therefore cannot provide a recoverable execution lease;
+only process isolation can retire this class of format work honestly.
+
+The first production vertical slice now isolates exact-Still open,
+stream-discovery, seek, and packet read in a bounded packaged helper while
+keeping codec/DPB/hardware surfaces in the parent Preview worker. The child is
+the cancellation generation: parent cancellation disconnects IPC, terminates
+and reaps it, and records `IsolatedDemuxTermination` instead of forging an
+`FfmpegIoInterrupt` return. The packet queue is four entries, so this recovery
+path does not scale memory with media duration and remains compatible with the
+8 GiB correctness class. This is not yet closure of the Video gate: Playback
+and Scrub still own in-process format contexts, and the one-request exact seam
+must become a reusable versioned open/seek/read/close demux session before the
+full seek/cancellation matrix can pass without callback dependence.
 
 Only the complete two-gate set on a qualified `standard-playback` machine
 (16 GiB installed memory or higher), with a clean unchanged Git revision and

@@ -13,20 +13,21 @@ use super::{
     FfmpegNativeDecodedFrameResource, FfmpegNativeDecodedFrameResourceError, MediaFileFingerprint,
     PreviewDecodeAccessMode, PreviewDecodeAccessPolicy, PreviewDecodeAdaptiveHints,
     PreviewDecodeBackend, PreviewDecodeCancellation, PreviewDecodeCancellationCheckpoint,
-    PreviewDecodeDiagnostics, PreviewDecodeExecutionObserver, PreviewDecodeExecutionPath,
-    PreviewDecodeInterruptState, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest,
-    PreviewDecodeSeekStrategy, PreviewDecodeSessionContext, PreviewDecodeStageDurations,
-    PreviewDecodeThreadingConfig, PreviewDecodeThreadingKind, PreviewDecodedFramePayload,
-    PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
-    PreviewHardwareDecodeDecision, PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest,
-    PreviewNativeDecodeFallback, PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError,
-    PreviewNativeDecodedFrameHandle, PreviewNativeDecodedFrameResource, PreviewPlaybackRing,
-    PreviewScrubAdaptiveClass, PreviewSeekIndex, PreviewSeekIndexDiagnostics,
-    PreviewSeekIndexSource, PreviewSeekResolution, PreviewSourceColorContract, RgbaFrame,
-    PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES,
-    PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS,
-    PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
-    PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES,
+    PreviewDecodeCancellationSource, PreviewDecodeDiagnostics, PreviewDecodeExecutionObserver,
+    PreviewDecodeExecutionPath, PreviewDecodeExecutionStage, PreviewDecodeInterruptState,
+    PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
+    PreviewDecodeSessionContext, PreviewDecodeStageDurations, PreviewDecodeThreadingConfig,
+    PreviewDecodeThreadingKind, PreviewDecodedFramePayload, PreviewHardwareDecodeBlocker,
+    PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
+    PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest, PreviewNativeDecodeFallback,
+    PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
+    PreviewNativeDecodedFrameResource, PreviewPlaybackRing, PreviewScrubAdaptiveClass,
+    PreviewSeekIndex, PreviewSeekIndexDiagnostics, PreviewSeekIndexSource, PreviewSeekResolution,
+    PreviewSourceColorContract, RgbaFrame, PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
+    PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
+    PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
+    PREVIEW_SCRUB_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS,
+    PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES,
     PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES,
 };
 use crate::decoder::{
@@ -2274,6 +2275,92 @@ fn playback_session_drains_reordered_frames_between_sequential_requests() {
     );
     clear_thread_local_preview_decode_session();
     clear_global_preview_frame_cache();
+}
+
+#[test]
+#[ignore = "requires packaged mondrian executable via MONDRIAN_PREVIEW_DEMUX_WORKER_PATH"]
+fn isolated_demux_worker_decodes_exact_frame_without_moving_codec_state_out_of_process() {
+    const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+    let worker = std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH")
+        .map(PathBuf::from)
+        .expect("set MONDRIAN_PREVIEW_DEMUX_WORKER_PATH");
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("isolated-h264-bframes.mp4");
+    std::fs::write(&path, FIXTURE).expect("write synthetic H.264 fixture");
+    let (bootstrap, _observer) =
+        PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker);
+    let mut context = bootstrap.build();
+    let request = PreviewDecodeRequest::new(
+        path.as_path(),
+        TimelineTime::new(8, 25).expect("exact source time"),
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+        test_source_color(),
+    )
+    .with_max_size(Some(64), Some(64));
+
+    let outcome = context.decode_cancellable(request, || false).expect("isolated exact decode");
+    let PreviewDecodeOutcome::Frame(frame) = outcome else {
+        panic!("software exact decode must return an RGBA frame");
+    };
+    assert_eq!((frame.width, frame.height), (64, 64));
+    assert!(frame.diagnostics.seek_performed);
+
+    let second_request = PreviewDecodeRequest::new(
+        path.as_path(),
+        TimelineTime::new(2, 25).expect("second exact source time"),
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+        test_source_color(),
+    )
+    .with_max_size(Some(64), Some(64));
+    let second_outcome = context
+        .decode_cancellable(second_request, || false)
+        .expect("second isolated exact decode");
+    let PreviewDecodeOutcome::Frame(second_frame) = second_outcome else {
+        panic!("second software exact decode must return an RGBA frame");
+    };
+    assert_eq!((second_frame.width, second_frame.height), (64, 64));
+    assert!(second_frame.diagnostics.seek_performed);
+    assert!(
+        !second_frame.diagnostics.session_reused,
+        "one-shot isolated packet sources must reopen for every exact request"
+    );
+}
+
+#[test]
+#[ignore = "requires packaged mondrian executable via MONDRIAN_PREVIEW_DEMUX_WORKER_PATH"]
+fn isolated_demux_worker_cancellation_terminates_the_packet_source() {
+    const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+    let worker = std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH")
+        .map(PathBuf::from)
+        .expect("set MONDRIAN_PREVIEW_DEMUX_WORKER_PATH");
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("isolated-cancel-h264-bframes.mp4");
+    std::fs::write(&path, FIXTURE).expect("write synthetic H.264 fixture");
+    let (bootstrap, observer) =
+        PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker);
+    let mut context = bootstrap.build();
+    let request = PreviewDecodeRequest::new(
+        path.as_path(),
+        TimelineTime::new(8, 25).expect("exact source time"),
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+        test_source_color(),
+    );
+    let started = Instant::now();
+    let cancellation_observer = observer.clone();
+
+    let outcome = context
+        .decode_cancellable(request, move || {
+            cancellation_observer.snapshot().stage == PreviewDecodeExecutionStage::InputOpen
+        })
+        .expect("isolated cancellation outcome");
+    let PreviewDecodeOutcome::Canceled(cancellation) = outcome else {
+        panic!("deadline must cancel isolated exact decode");
+    };
+    assert_eq!(
+        cancellation.source,
+        PreviewDecodeCancellationSource::IsolatedDemuxTermination
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
 }
 
 #[test]

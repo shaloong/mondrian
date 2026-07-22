@@ -98,6 +98,11 @@ if ($null -eq $memoryClassContract) {
     }
 }
 $playbackFixtureIds = @($playbackPlan.gates | ForEach-Object { [string]$_.fixture_id })
+foreach ($gate in $playbackPlan.gates) {
+    if ([string]$gate.id -eq "video" -and (-not (Has-Property $gate "packaged_demux_worker_required") -or $gate.packaged_demux_worker_required -ne $true)) {
+        Add-Issue "error" "playback-plan.video-demux-worker-missing" "The production Video gate must build, hash, and execute the packaged demux worker"
+    }
+}
 
 $ids = @{}
 $requiredFields = @("id", "path", "availability", "sha256", "size_bytes", "provenance", "media", "purposes")
