@@ -63,10 +63,10 @@ pub use preview::{
     PreviewDecodeSeekStrategy, PreviewDecodeSessionContext, PreviewDecodeSessionContextBootstrap,
     PreviewDecodeStageDurations, PreviewDecodeThreadingKind, PreviewHardwareDecodeBlocker,
     PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
-    PreviewHardwareDecodeRequest, PreviewNativeDecodeFallback, PreviewNativeDecodedFrame,
-    PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
-    PreviewNativeDecodedFrameResource, PreviewScrubAdaptiveClass, PreviewSeekIndexSource,
-    PreviewSourceColorContract, RgbaFrame,
+    PreviewHardwareDecodeRequest, PreviewIsolatedDemuxExecutionEvidence,
+    PreviewNativeDecodeFallback, PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError,
+    PreviewNativeDecodedFrameHandle, PreviewNativeDecodedFrameResource, PreviewScrubAdaptiveClass,
+    PreviewSeekIndexSource, PreviewSourceColorContract, RgbaFrame,
 };
 pub use proxy::{
     ProxyArtifactManifest, ProxyArtifactSettings, ProxyCodec, ProxyColorContract,

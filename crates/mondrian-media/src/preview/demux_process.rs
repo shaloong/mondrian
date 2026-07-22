@@ -9,6 +9,10 @@ use super::demux_protocol::{
     read_message, read_protocol_preamble, write_worker_command, write_worker_request,
     DemuxOpenPhase, DemuxProtocolMessage, DemuxStreamContract, DemuxWorkerCommand,
 };
+use super::execution_progress::{
+    PreviewDecodeExecutionObserver, PreviewIsolatedDemuxSessionEvidence,
+    PreviewIsolatedDemuxTermination,
+};
 use super::MediaFileFingerprint;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -25,14 +29,18 @@ const CLEAN_CLOSE_GRACE: Duration = Duration::from_millis(100);
 
 static NEXT_LAUNCH_NONCE: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(super) struct PreviewDemuxWorkerConfig {
     executable: PathBuf,
+    execution_observer: PreviewDecodeExecutionObserver,
 }
 
 impl PreviewDemuxWorkerConfig {
-    pub(super) fn new(executable: PathBuf) -> Self {
-        Self { executable }
+    pub(super) fn new(
+        executable: PathBuf,
+        execution_observer: PreviewDecodeExecutionObserver,
+    ) -> Self {
+        Self { executable, execution_observer }
     }
 }
 
@@ -64,6 +72,7 @@ pub(super) struct IsolatedDemuxSession {
     messages: Option<Receiver<io::Result<DemuxProtocolMessage>>>,
     protocol_reader: Option<JoinHandle<()>>,
     stderr_reader: Option<JoinHandle<Vec<u8>>>,
+    lifecycle: PreviewIsolatedDemuxSessionEvidence,
     next_command_id: u64,
     poisoned: bool,
 }
@@ -93,9 +102,11 @@ impl IsolatedDemuxSession {
                 config.executable.display()
             ))
         })?;
+        let mut lifecycle = config.execution_observer.begin_isolated_demux_session();
 
         let Some(mut stdin) = child.stdin.take() else {
             terminate_child(&mut child);
+            lifecycle.settle(PreviewIsolatedDemuxTermination::Failed);
             return Err(IsolatedDemuxOpenError::Failed(
                 "Preview demux worker stdin was not piped".to_owned(),
             ));
@@ -104,6 +115,7 @@ impl IsolatedDemuxSession {
             .and_then(|()| stdin.flush())
         {
             terminate_child(&mut child);
+            lifecycle.settle(PreviewIsolatedDemuxTermination::Failed);
             return Err(IsolatedDemuxOpenError::Failed(format!(
                 "send Preview demux worker request: {error}"
             )));
@@ -111,26 +123,32 @@ impl IsolatedDemuxSession {
 
         let Some(stdout) = child.stdout.take() else {
             terminate_child(&mut child);
+            lifecycle.settle(PreviewIsolatedDemuxTermination::Failed);
             return Err(IsolatedDemuxOpenError::Failed(
                 "Preview demux worker stdout was not piped".to_owned(),
             ));
         };
         let Some(stderr) = child.stderr.take() else {
             terminate_child(&mut child);
+            lifecycle.settle(PreviewIsolatedDemuxTermination::Failed);
             return Err(IsolatedDemuxOpenError::Failed(
                 "Preview demux worker stderr was not piped".to_owned(),
             ));
         };
         let (message_tx, message_rx) = mpsc::sync_channel(IPC_QUEUE_CAPACITY);
-        let protocol_reader = thread::Builder::new()
+        let protocol_reader = match thread::Builder::new()
             .name("mondrian-preview-demux-ipc".to_owned())
             .spawn(move || read_protocol_stream(stdout, nonce, message_tx))
-            .map_err(|error| {
+        {
+            Ok(reader) => reader,
+            Err(error) => {
                 terminate_child(&mut child);
-                IsolatedDemuxOpenError::Failed(format!(
+                lifecycle.settle(PreviewIsolatedDemuxTermination::Failed);
+                return Err(IsolatedDemuxOpenError::Failed(format!(
                     "start Preview demux protocol reader: {error}"
-                ))
-            })?;
+                )));
+            }
+        };
         let stderr_reader = match thread::Builder::new()
             .name("mondrian-preview-demux-stderr".to_owned())
             .spawn(move || drain_bounded_stderr(stderr))
@@ -139,6 +157,7 @@ impl IsolatedDemuxSession {
             Err(error) => {
                 terminate_child(&mut child);
                 let _ = protocol_reader.join();
+                lifecycle.settle(PreviewIsolatedDemuxTermination::Failed);
                 return Err(IsolatedDemuxOpenError::Failed(format!(
                     "start Preview demux stderr reader: {error}"
                 )));
@@ -151,6 +170,7 @@ impl IsolatedDemuxSession {
             messages: Some(message_rx),
             protocol_reader: Some(protocol_reader),
             stderr_reader: Some(stderr_reader),
+            lifecycle,
             next_command_id: 1,
             poisoned: false,
         };
@@ -175,21 +195,22 @@ impl IsolatedDemuxSession {
                     return Err(IsolatedDemuxOpenError::Failed(message));
                 }
                 Ok(_) => {
-                    source.terminate();
+                    source.terminate(PreviewIsolatedDemuxTermination::Failed);
                     return Err(IsolatedDemuxOpenError::Failed(
                         "Preview demux worker violated open-phase ordering".to_owned(),
                     ));
                 }
                 Err(IsolatedDemuxOpenError::Canceled) => {
-                    source.terminate();
+                    source.terminate(PreviewIsolatedDemuxTermination::Canceled);
                     return Err(IsolatedDemuxOpenError::Canceled);
                 }
                 Err(error) => {
-                    source.terminate();
+                    source.terminate(PreviewIsolatedDemuxTermination::Failed);
                     return Err(error);
                 }
             }
         };
+        source.lifecycle.record_ready();
         Ok(IsolatedDemuxOpen { source, stream })
     }
 
@@ -216,6 +237,7 @@ impl IsolatedDemuxSession {
             Ok(DemuxProtocolMessage::SeekComplete { command_id: observed })
                 if observed == command_id =>
             {
+                self.lifecycle.record_seek_complete();
                 Ok(IsolatedDemuxSeek::Complete)
             }
             Ok(DemuxProtocolMessage::Error { command_id: observed, message })
@@ -225,11 +247,11 @@ impl IsolatedDemuxSession {
             }
             Ok(message) => Err(self.poison_protocol_mismatch(command_id, &message)),
             Err(IsolatedDemuxOpenError::Canceled) => {
-                self.terminate();
+                self.terminate(PreviewIsolatedDemuxTermination::Canceled);
                 Ok(IsolatedDemuxSeek::Canceled)
             }
             Err(IsolatedDemuxOpenError::Failed(message)) => {
-                self.terminate();
+                self.terminate(PreviewIsolatedDemuxTermination::Failed);
                 Err(message)
             }
         }
@@ -243,9 +265,11 @@ impl IsolatedDemuxSession {
             self.send_command(DemuxWorkerCommand::Read { command_id: self.next_command_id })?;
         match self.wait_for_message(should_cancel) {
             Ok(DemuxProtocolMessage::Packet(packet)) if packet.command_id == command_id => {
+                self.lifecycle.record_packet();
                 Ok(IsolatedDemuxRead::Packet(packet.packet))
             }
             Ok(DemuxProtocolMessage::End { command_id: observed }) if observed == command_id => {
+                self.lifecycle.record_end();
                 Ok(IsolatedDemuxRead::End)
             }
             Ok(DemuxProtocolMessage::Error { command_id: observed, message })
@@ -255,11 +279,11 @@ impl IsolatedDemuxSession {
             }
             Ok(message) => Err(self.poison_protocol_mismatch(command_id, &message)),
             Err(IsolatedDemuxOpenError::Canceled) => {
-                self.terminate();
+                self.terminate(PreviewIsolatedDemuxTermination::Canceled);
                 Ok(IsolatedDemuxRead::Canceled)
             }
             Err(IsolatedDemuxOpenError::Failed(message)) => {
-                self.terminate();
+                self.terminate(PreviewIsolatedDemuxTermination::Failed);
                 Err(message)
             }
         }
@@ -286,13 +310,14 @@ impl IsolatedDemuxSession {
                     .map_err(|error| format!("send Preview demux command {command_id}: {error}"))
             });
         if let Err(message) = result {
-            self.terminate();
+            self.terminate(PreviewIsolatedDemuxTermination::Failed);
             return Err(message);
         }
-        self.next_command_id = self.next_command_id.checked_add(1).ok_or_else(|| {
-            self.terminate();
-            "Preview demux command identifier overflow".to_owned()
-        })?;
+        let Some(next_command_id) = self.next_command_id.checked_add(1) else {
+            self.terminate(PreviewIsolatedDemuxTermination::Failed);
+            return Err("Preview demux command identifier overflow".to_owned());
+        };
+        self.next_command_id = next_command_id;
         Ok(command_id)
     }
 
@@ -335,7 +360,7 @@ impl IsolatedDemuxSession {
     ) -> String {
         let observed = message_command_id(message)
             .map_or_else(|| "non-command response".to_owned(), |id| id.to_string());
-        self.terminate();
+        self.terminate(PreviewIsolatedDemuxTermination::Failed);
         format!("Preview demux response {observed} did not match command {command_id}")
     }
 
@@ -356,6 +381,7 @@ impl IsolatedDemuxSession {
             .take()
             .and_then(|reader| reader.join().ok())
             .unwrap_or_default();
+        self.lifecycle.settle(PreviewIsolatedDemuxTermination::Failed);
         if stderr.is_empty() {
             message
         } else {
@@ -365,7 +391,7 @@ impl IsolatedDemuxSession {
 
     fn close(&mut self) {
         if self.poisoned {
-            self.terminate();
+            self.terminate(PreviewIsolatedDemuxTermination::Failed);
             return;
         }
         let command_id = self.next_command_id;
@@ -380,7 +406,7 @@ impl IsolatedDemuxSession {
                     Ok(Ok(DemuxProtocolMessage::Closed { command_id: observed }))
                         if observed == command_id =>
                     {
-                        self.reap_child_bounded();
+                        let exited_cleanly = self.reap_child_bounded();
                         self.stdin.take();
                         self.messages.take();
                         if let Some(reader) = self.protocol_reader.take() {
@@ -389,6 +415,11 @@ impl IsolatedDemuxSession {
                         if let Some(reader) = self.stderr_reader.take() {
                             let _ = reader.join();
                         }
+                        self.lifecycle.settle(if exited_cleanly {
+                            PreviewIsolatedDemuxTermination::CleanClose
+                        } else {
+                            PreviewIsolatedDemuxTermination::ForcedClose
+                        });
                         self.poisoned = true;
                         return;
                     }
@@ -397,10 +428,10 @@ impl IsolatedDemuxSession {
                 }
             }
         }
-        self.terminate();
+        self.terminate(PreviewIsolatedDemuxTermination::ForcedClose);
     }
 
-    fn terminate(&mut self) {
+    fn terminate(&mut self, termination: PreviewIsolatedDemuxTermination) {
         self.poisoned = true;
         self.stdin.take();
         self.messages.take();
@@ -412,13 +443,14 @@ impl IsolatedDemuxSession {
         if let Some(reader) = self.stderr_reader.take() {
             let _ = reader.join();
         }
+        self.lifecycle.settle(termination);
     }
 
-    fn reap_child_bounded(&mut self) {
+    fn reap_child_bounded(&mut self) -> bool {
         let started = Instant::now();
         loop {
             match self.child.try_wait() {
-                Ok(Some(_)) => return,
+                Ok(Some(_)) => return true,
                 Ok(None) if started.elapsed() < CLEAN_CLOSE_GRACE => {
                     thread::sleep(IPC_POLL_INTERVAL);
                 }
@@ -427,6 +459,7 @@ impl IsolatedDemuxSession {
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
+        false
     }
 }
 

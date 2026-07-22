@@ -327,6 +327,22 @@ after stream discovery; a race with source replacement fails closed before any
 packet or reusable Session can be published. An incomplete revision may still
 open a non-file source, but cannot authorize Session or cache reuse.
 
+Helper execution evidence is part of the existing per-worker
+`PreviewDecodeExecutionObserver`, not a global process Registry or an App-owned
+reconstruction. Every successful spawn creates one single-owner lifecycle
+lease. The lease publishes ready only after the ordered open phases and
+validated stream contract, publishes Seek/Read results only after matching
+command completion, and publishes cross-request reuse only when that same
+helper completes a command under a later media request sequence. Exactly one
+clean-close, cancellation, failure, or forced-close terminal fact is published
+after the child has been reaped; active count therefore remains nonzero when a
+code path loses process ownership instead of falsely claiming cleanup. The
+packaged short tests exercise reuse, all four format-call cancellation stages,
+and stale-source failure. Professional Headless acceptance additionally
+requires real Seek/Packet execution, cross-request reuse, bounded clean close,
+zero active helpers, complete launch-to-reap accounting, and no failure or
+forced-close terminal outcome.
+
 Ordinary CI exercises this contract through a loopback HTTP server that accepts
 FFmpeg's connection and deliberately withholds a response. Both the media
 Interface test and the production Preview worker test must prove bounded return

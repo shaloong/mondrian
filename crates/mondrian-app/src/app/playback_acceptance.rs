@@ -11,6 +11,9 @@ use mondrian_media::info::{PixelFormat, VideoCodec};
 use mondrian_media::{MediaInfo, VideoCodecProfile};
 use serde::Serialize;
 
+mod isolated_demux;
+use isolated_demux::{evaluate_isolated_demux, PreviewIsolatedDemuxGateEvidence};
+
 const PROCESS_MEMORY_WARMUP_END_US: u64 = 5 * 60 * 1_000_000;
 const PROCESS_MEMORY_BASELINE_END_US: u64 = 10 * 60 * 1_000_000;
 const PROCESS_MEMORY_FINAL_WINDOW_START_US: u64 = 25 * 60 * 1_000_000;
@@ -193,6 +196,7 @@ pub(crate) struct PreviewProfessionalPlaybackGateReport {
     process_memory: PreviewProcessMemoryGateReport,
     cancellation_gate: mondrian_playback::FrameCancellationGateReport,
     decode_cancellation_checkpoints: mondrian_media::PreviewDecodeCancellationEvidence,
+    isolated_demux: PreviewIsolatedDemuxGateEvidence,
     decode_worker_execution: PreviewDecodeWorkerExecutionDiagnostics,
     pub(crate) passed: bool,
     pub(crate) failures: Vec<PreviewAcceptanceFailure>,
@@ -615,6 +619,8 @@ pub(crate) fn evaluate_professional_playback(
             "Frame Work Broker runtime-clock evidence",
         );
     }
+    let isolated_demux =
+        evaluate_isolated_demux(diagnostics.decode_worker_execution, &mut failures);
     let cpu_frame_store_within_budget = diagnostics.media_cache_reserved_bytes
         <= diagnostics.media_cache_byte_budget
         && diagnostics.pinned_media_frame_bytes <= diagnostics.media_cache_byte_budget
@@ -741,7 +747,7 @@ pub(crate) fn evaluate_professional_playback(
         .saturating_add(playback.hardware_decode_prefer_gpu_requested_frames)
         .saturating_add(playback.hardware_decode_require_gpu_requested_frames);
     PreviewProfessionalPlaybackGateReport {
-        profile: "uhd_hevc_main10_hardware_1x_v4",
+        profile: "uhd_hevc_main10_hardware_1x_v5",
         required_hardware_execution_percent,
         presented_media_layers,
         presented_hardware_layers,
@@ -788,6 +794,7 @@ pub(crate) fn evaluate_professional_playback(
         process_memory,
         cancellation_gate,
         decode_cancellation_checkpoints: diagnostics.decode_cancellation_checkpoints,
+        isolated_demux,
         decode_worker_execution: diagnostics.decode_worker_execution,
         passed: failures.is_empty(),
         failures,
@@ -961,7 +968,7 @@ mod tests {
     fn accepts_presented_main10_hardware_execution() {
         let media = main10_media();
         let evidence = passing_playback_evidence();
-        let diagnostics = PreviewDiagnostics::default();
+        let diagnostics = passing_preview_diagnostics();
         let observation = ProfessionalPlaybackObservation {
             media: &media,
             rendered_decode_execution: PreviewDecodeExecutionSummary {
@@ -984,7 +991,7 @@ mod tests {
         let report = evaluate_professional_playback(observation);
 
         assert!(report.passed, "{:?}", report.failures);
-        assert_eq!(report.profile, "uhd_hevc_main10_hardware_1x_v4");
+        assert_eq!(report.profile, "uhd_hevc_main10_hardware_1x_v5");
         assert_eq!(
             report.required_hardware_execution_percent,
             PROFESSIONAL_REQUIRED_HARDWARE_EXECUTION_PERCENT
@@ -1007,7 +1014,7 @@ mod tests {
         });
         let diagnostics = PreviewDiagnostics {
             decode_cancellation: cancellation.report(),
-            ..PreviewDiagnostics::default()
+            ..passing_preview_diagnostics()
         };
         let observation = ProfessionalPlaybackObservation {
             media: &media,
@@ -1041,7 +1048,7 @@ mod tests {
     fn rejects_unproven_identity_and_software_presentation() {
         let mut media = main10_media();
         let evidence = passing_playback_evidence();
-        let diagnostics = PreviewDiagnostics::default();
+        let diagnostics = passing_preview_diagnostics();
         media.codec_profile = VideoCodecProfile::Unknown;
         media.frame_rate_proven = false;
         media.pixel_format_proven = false;
@@ -1121,7 +1128,7 @@ mod tests {
         let mut media = main10_media();
         media.total_frames = Some(44_999);
         let evidence = passing_playback_evidence();
-        let diagnostics = PreviewDiagnostics::default();
+        let diagnostics = passing_preview_diagnostics();
         let report = evaluate_professional_playback(ProfessionalPlaybackObservation {
             media: &media,
             rendered_decode_execution: PreviewDecodeExecutionSummary {
@@ -1152,7 +1159,7 @@ mod tests {
             let mut media = main10_media();
             media.frame_rate = frame_rate;
             let evidence = passing_playback_evidence();
-            let diagnostics = PreviewDiagnostics::default();
+            let diagnostics = passing_preview_diagnostics();
             let report = evaluate_professional_playback(ProfessionalPlaybackObservation {
                 media: &media,
                 rendered_decode_execution: PreviewDecodeExecutionSummary {
@@ -1179,7 +1186,7 @@ mod tests {
     fn rejects_short_run_missing_seek_coverage_and_rejected_old_delivery() {
         let media = main10_media();
         let mut evidence = mondrian_playback::PlaybackEvidenceCollector::default().report();
-        let mut diagnostics = PreviewDiagnostics::default();
+        let mut diagnostics = passing_preview_diagnostics();
         diagnostics.scheduler.pending_requests = 1;
         diagnostics.scheduler.clock_regressions = 1;
         diagnostics.worker_queue.queued_jobs = 1;
@@ -1219,7 +1226,7 @@ mod tests {
     fn rejects_seek_latency_above_professional_p95_limits() {
         let media = main10_media();
         let mut evidence = passing_playback_evidence();
-        let diagnostics = PreviewDiagnostics::default();
+        let diagnostics = passing_preview_diagnostics();
         evidence.warm_seek_latency.p95_us = PROFESSIONAL_WARM_SEEK_P95_LIMIT_US + 1;
         evidence.accurate_seek_latency.p95_us = PROFESSIONAL_ACCURATE_SEEK_P95_LIMIT_US + 1;
         let observation = ProfessionalPlaybackObservation {
@@ -1252,7 +1259,7 @@ mod tests {
         let evidence = passing_playback_evidence();
         let diagnostics = PreviewDiagnostics {
             accurate_seek_temporal_approximation_frames: 1,
-            ..PreviewDiagnostics::default()
+            ..passing_preview_diagnostics()
         };
         let observation = ProfessionalPlaybackObservation {
             media: &media,
@@ -1276,6 +1283,33 @@ mod tests {
 
         let codes: Vec<_> = report.failures.iter().map(|failure| failure.code).collect();
         assert!(codes.contains(&"accurate_seek_temporal_approximation_observed"));
+    }
+
+    #[test]
+    fn rejects_missing_or_unreaped_isolated_demux_execution() {
+        let missing = PreviewDecodeWorkerExecutionDiagnostics::default();
+        let mut failures = Vec::new();
+
+        let missing_evidence = evaluate_isolated_demux(missing, &mut failures);
+
+        assert_eq!(missing_evidence.session_launches, 0);
+        assert!(failures.iter().any(|failure| failure.code == "isolated_demux_not_executed"));
+
+        let mut active = passing_preview_diagnostics().decode_worker_execution;
+        let progress = active.playback.as_mut().expect("passing Playback worker evidence");
+        progress.isolated_demux.clean_closes = 0;
+        progress.isolated_demux.active_sessions = 1;
+        let mut active_failures = Vec::new();
+
+        let active_evidence = evaluate_isolated_demux(active, &mut active_failures);
+
+        assert_eq!(active_evidence.active_sessions, 1);
+        assert!(active_failures
+            .iter()
+            .any(|failure| failure.code == "isolated_demux_not_fully_reaped"));
+        assert!(active_failures
+            .iter()
+            .any(|failure| failure.code == "isolated_demux_clean_close_unproven"));
     }
 
     #[test]
@@ -1321,7 +1355,7 @@ mod tests {
     fn rejects_process_memory_growth_that_does_not_plateau() {
         let media = main10_media();
         let evidence = passing_playback_evidence();
-        let diagnostics = PreviewDiagnostics::default();
+        let diagnostics = passing_preview_diagnostics();
         let mut process_memory = passing_process_memory_evidence();
         process_memory.final_average_private_committed_bytes = process_memory
             .baseline_average_private_committed_bytes
@@ -1353,6 +1387,29 @@ mod tests {
             .failures
             .iter()
             .any(|failure| failure.code == "process_memory_did_not_plateau"));
+    }
+
+    fn passing_preview_diagnostics() -> PreviewDiagnostics {
+        PreviewDiagnostics {
+            decode_worker_execution: PreviewDecodeWorkerExecutionDiagnostics {
+                playback: Some(mondrian_media::PreviewDecodeExecutionProgress {
+                    isolated_demux: mondrian_media::PreviewIsolatedDemuxExecutionEvidence {
+                        session_launches: 1,
+                        ready_sessions: 1,
+                        cross_request_reused_sessions: 1,
+                        completed_seeks: 2,
+                        completed_reads: 4,
+                        packet_responses: 4,
+                        clean_closes: 1,
+                        peak_active_sessions: 1,
+                        ..mondrian_media::PreviewIsolatedDemuxExecutionEvidence::default()
+                    },
+                    ..mondrian_media::PreviewDecodeExecutionProgress::default()
+                }),
+                ..PreviewDecodeWorkerExecutionDiagnostics::default()
+            },
+            ..PreviewDiagnostics::default()
+        }
     }
 
     fn passing_playback_evidence() -> mondrian_playback::PlaybackEvidenceReport {

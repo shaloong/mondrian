@@ -52,6 +52,7 @@ pub use cancellation::{
 };
 pub use execution_progress::{
     PreviewDecodeExecutionObserver, PreviewDecodeExecutionProgress, PreviewDecodeExecutionStage,
+    PreviewIsolatedDemuxExecutionEvidence,
 };
 use frame_contract::{decoded_surface_format_from_pixel, resolve_cpu_rgba_contract_from_metadata};
 #[cfg(test)]

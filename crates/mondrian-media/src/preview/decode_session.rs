@@ -101,7 +101,7 @@ impl PreviewDecodeSessionContext {
         (
             PreviewDecodeSessionContextBootstrap {
                 execution_observer: observer.clone(),
-                demux_worker: Some(PreviewDemuxWorkerConfig::new(executable)),
+                demux_worker: Some(PreviewDemuxWorkerConfig::new(executable, observer.clone())),
             },
             observer,
         )

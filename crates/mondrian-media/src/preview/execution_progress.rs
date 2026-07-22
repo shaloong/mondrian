@@ -108,6 +108,54 @@ pub struct PreviewDecodeExecutionProgress {
     pub interrupt_cancel_sequence: u64,
     /// Request sequence associated with the last callback cancellation.
     pub interrupt_last_cancel_request_sequence: u64,
+    /// Process-isolated demux execution and lifecycle facts for this worker.
+    pub isolated_demux: PreviewIsolatedDemuxExecutionEvidence,
+}
+
+/// Cumulative execution and lifecycle facts for process-isolated Preview demux.
+///
+/// These counters describe completed facts only. In particular, a terminal
+/// session is counted only after the child has been reaped, and a cross-request
+/// reuse is counted only after the same ready helper completes work for a later
+/// Preview decode request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewIsolatedDemuxExecutionEvidence {
+    /// Helper processes successfully launched by this Preview worker.
+    pub session_launches: u64,
+    /// Launched helpers that published a validated stream contract.
+    pub ready_sessions: u64,
+    /// Ready helpers that completed a command for a later decode request.
+    pub cross_request_reused_sessions: u64,
+    /// Seek commands acknowledged successfully by the helper.
+    pub completed_seeks: u64,
+    /// Read commands that returned either one packet or end of input.
+    pub completed_reads: u64,
+    /// Successful read commands that returned one validated packet.
+    pub packet_responses: u64,
+    /// Successful read commands that returned end of input.
+    pub end_responses: u64,
+    /// Helpers that acknowledged Close and exited within the close grace.
+    pub clean_closes: u64,
+    /// Helpers killed and reaped because the owning decode request canceled.
+    pub cancellation_terminations: u64,
+    /// Helpers reaped after protocol, process, pipe, or FFmpeg failure.
+    pub failure_terminations: u64,
+    /// Healthy helpers killed and reaped after bounded Close did not complete.
+    pub forced_close_terminations: u64,
+    /// Successfully launched helpers that have not yet been reaped.
+    pub active_sessions: u64,
+    /// Maximum active helper count observed by this worker.
+    pub peak_active_sessions: u64,
+}
+
+impl PreviewIsolatedDemuxExecutionEvidence {
+    /// Total helpers whose process has reached a terminal, reaped state.
+    pub const fn reaped_sessions(self) -> u64 {
+        self.clean_closes
+            .saturating_add(self.cancellation_terminations)
+            .saturating_add(self.failure_terminations)
+            .saturating_add(self.forced_close_terminations)
+    }
 }
 
 /// Cloneable single-writer observer for one Preview decode worker.
@@ -127,6 +175,19 @@ struct PreviewDecodeExecutionObserverState {
     interrupt_poll_sequence: AtomicU64,
     interrupt_cancel_sequence: AtomicU64,
     interrupt_last_cancel_request_sequence: AtomicU64,
+    demux_session_launches: AtomicU64,
+    demux_ready_sessions: AtomicU64,
+    demux_cross_request_reused_sessions: AtomicU64,
+    demux_completed_seeks: AtomicU64,
+    demux_completed_reads: AtomicU64,
+    demux_packet_responses: AtomicU64,
+    demux_end_responses: AtomicU64,
+    demux_clean_closes: AtomicU64,
+    demux_cancellation_terminations: AtomicU64,
+    demux_failure_terminations: AtomicU64,
+    demux_forced_close_terminations: AtomicU64,
+    demux_active_sessions: AtomicU64,
+    demux_peak_active_sessions: AtomicU64,
 }
 
 impl PreviewDecodeExecutionObserver {
@@ -151,6 +212,30 @@ impl PreviewDecodeExecutionObserver {
                 self.state.interrupt_cancel_sequence.load(Ordering::Relaxed);
             let interrupt_last_cancel_request_sequence =
                 self.state.interrupt_last_cancel_request_sequence.load(Ordering::Relaxed);
+            let isolated_demux = PreviewIsolatedDemuxExecutionEvidence {
+                session_launches: self.state.demux_session_launches.load(Ordering::Relaxed),
+                ready_sessions: self.state.demux_ready_sessions.load(Ordering::Relaxed),
+                cross_request_reused_sessions: self
+                    .state
+                    .demux_cross_request_reused_sessions
+                    .load(Ordering::Relaxed),
+                completed_seeks: self.state.demux_completed_seeks.load(Ordering::Relaxed),
+                completed_reads: self.state.demux_completed_reads.load(Ordering::Relaxed),
+                packet_responses: self.state.demux_packet_responses.load(Ordering::Relaxed),
+                end_responses: self.state.demux_end_responses.load(Ordering::Relaxed),
+                clean_closes: self.state.demux_clean_closes.load(Ordering::Relaxed),
+                cancellation_terminations: self
+                    .state
+                    .demux_cancellation_terminations
+                    .load(Ordering::Relaxed),
+                failure_terminations: self.state.demux_failure_terminations.load(Ordering::Relaxed),
+                forced_close_terminations: self
+                    .state
+                    .demux_forced_close_terminations
+                    .load(Ordering::Relaxed),
+                active_sessions: self.state.demux_active_sessions.load(Ordering::Relaxed),
+                peak_active_sessions: self.state.demux_peak_active_sessions.load(Ordering::Relaxed),
+            };
             let after = self.state.revision.load(Ordering::Acquire);
             if before == after {
                 return PreviewDecodeExecutionProgress {
@@ -160,6 +245,7 @@ impl PreviewDecodeExecutionObserver {
                     interrupt_poll_sequence,
                     interrupt_cancel_sequence,
                     interrupt_last_cancel_request_sequence,
+                    isolated_demux,
                 };
             }
         }
@@ -191,6 +277,28 @@ impl PreviewDecodeExecutionObserver {
         self.state.revision.fetch_add(1, Ordering::Release);
     }
 
+    pub(super) fn begin_isolated_demux_session(&self) -> PreviewIsolatedDemuxSessionEvidence {
+        let request_sequence = self.state.request_sequence.load(Ordering::Acquire);
+        self.publish_evidence(|state| {
+            state.demux_session_launches.fetch_add(1, Ordering::Relaxed);
+            let active =
+                state.demux_active_sessions.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+            state.demux_peak_active_sessions.fetch_max(active, Ordering::Relaxed);
+        });
+        PreviewIsolatedDemuxSessionEvidence {
+            observer: self.clone(),
+            launch_request_sequence: request_sequence,
+            cross_request_reuse_published: false,
+            settled: false,
+        }
+    }
+
+    fn publish_evidence(&self, publish: impl FnOnce(&PreviewDecodeExecutionObserverState)) {
+        self.state.revision.fetch_add(1, Ordering::AcqRel);
+        publish(&self.state);
+        self.state.revision.fetch_add(1, Ordering::Release);
+    }
+
     fn publish(&self, stage: PreviewDecodeExecutionStage, begin_request: bool) {
         self.state.revision.fetch_add(1, Ordering::AcqRel);
         if begin_request {
@@ -198,6 +306,92 @@ impl PreviewDecodeExecutionObserver {
         }
         self.state.stage.store(stage as u8, Ordering::Relaxed);
         self.state.revision.fetch_add(1, Ordering::Release);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PreviewIsolatedDemuxTermination {
+    Canceled,
+    Failed,
+    CleanClose,
+    ForcedClose,
+}
+
+/// Single-owner evidence lease paired with one successfully launched helper.
+pub(super) struct PreviewIsolatedDemuxSessionEvidence {
+    observer: PreviewDecodeExecutionObserver,
+    launch_request_sequence: u64,
+    cross_request_reuse_published: bool,
+    settled: bool,
+}
+
+impl PreviewIsolatedDemuxSessionEvidence {
+    pub(super) fn record_ready(&self) {
+        self.observer.publish_evidence(|state| {
+            state.demux_ready_sessions.fetch_add(1, Ordering::Relaxed);
+        });
+    }
+
+    pub(super) fn record_seek_complete(&mut self) {
+        self.record_command_complete(|state| {
+            state.demux_completed_seeks.fetch_add(1, Ordering::Relaxed);
+        });
+    }
+
+    pub(super) fn record_packet(&mut self) {
+        self.record_command_complete(|state| {
+            state.demux_completed_reads.fetch_add(1, Ordering::Relaxed);
+            state.demux_packet_responses.fetch_add(1, Ordering::Relaxed);
+        });
+    }
+
+    pub(super) fn record_end(&mut self) {
+        self.record_command_complete(|state| {
+            state.demux_completed_reads.fetch_add(1, Ordering::Relaxed);
+            state.demux_end_responses.fetch_add(1, Ordering::Relaxed);
+        });
+    }
+
+    pub(super) fn settle(&mut self, termination: PreviewIsolatedDemuxTermination) {
+        if self.settled {
+            return;
+        }
+        self.observer.publish_evidence(|state| {
+            match termination {
+                PreviewIsolatedDemuxTermination::Canceled => {
+                    state.demux_cancellation_terminations.fetch_add(1, Ordering::Relaxed);
+                }
+                PreviewIsolatedDemuxTermination::Failed => {
+                    state.demux_failure_terminations.fetch_add(1, Ordering::Relaxed);
+                }
+                PreviewIsolatedDemuxTermination::CleanClose => {
+                    state.demux_clean_closes.fetch_add(1, Ordering::Relaxed);
+                }
+                PreviewIsolatedDemuxTermination::ForcedClose => {
+                    state.demux_forced_close_terminations.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            state.demux_active_sessions.fetch_sub(1, Ordering::Relaxed);
+        });
+        self.settled = true;
+    }
+
+    fn record_command_complete(
+        &mut self,
+        publish: impl FnOnce(&PreviewDecodeExecutionObserverState),
+    ) {
+        let request_sequence = self.observer.state.request_sequence.load(Ordering::Acquire);
+        let publish_cross_request_reuse = !self.cross_request_reuse_published
+            && self.launch_request_sequence > 0
+            && request_sequence > 0
+            && request_sequence != self.launch_request_sequence;
+        self.observer.publish_evidence(|state| {
+            publish(state);
+            if publish_cross_request_reuse {
+                state.demux_cross_request_reused_sessions.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        self.cross_request_reuse_published |= publish_cross_request_reuse;
     }
 }
 
@@ -245,5 +439,37 @@ mod tests {
         let idle = observer.snapshot();
         assert_eq!(idle.stage, PreviewDecodeExecutionStage::Idle);
         assert_eq!(idle.request_sequence, 1);
+    }
+
+    #[test]
+    fn observer_accounts_demux_reuse_and_reaping_once() {
+        let observer = PreviewDecodeExecutionObserver::new();
+        let mut session = {
+            let _request = observer.begin_request();
+            let mut session = observer.begin_isolated_demux_session();
+            session.record_ready();
+            session.record_packet();
+            session
+        };
+        {
+            let _request = observer.begin_request();
+            session.record_seek_complete();
+            session.record_end();
+        }
+        session.settle(PreviewIsolatedDemuxTermination::CleanClose);
+        session.settle(PreviewIsolatedDemuxTermination::Failed);
+
+        let evidence = observer.snapshot().isolated_demux;
+        assert_eq!(evidence.session_launches, 1);
+        assert_eq!(evidence.ready_sessions, 1);
+        assert_eq!(evidence.cross_request_reused_sessions, 1);
+        assert_eq!(evidence.completed_seeks, 1);
+        assert_eq!(evidence.completed_reads, 2);
+        assert_eq!(evidence.packet_responses, 1);
+        assert_eq!(evidence.end_responses, 1);
+        assert_eq!(evidence.clean_closes, 1);
+        assert_eq!(evidence.reaped_sessions(), 1);
+        assert_eq!(evidence.active_sessions, 0);
+        assert_eq!(evidence.peak_active_sessions, 1);
     }
 }

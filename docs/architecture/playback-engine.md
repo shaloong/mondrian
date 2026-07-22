@@ -1444,11 +1444,20 @@ playback GPU completion p95 exceeds one frame interval, a readback appears, or
 a GPU blocker is reported. Pre-roll pipeline warm-up is reported separately
 and cannot contaminate the steady-playback p95.
 The professional 4K HEVC Main10 gate now has a fail-closed input and execution
-contract (`uhd_hevc_main10_hardware_1x_v4`). It uses real FFmpeg decoder
+contract (`uhd_hevc_main10_hardware_1x_v5`). It uses real FFmpeg decoder
 profile/format/rate evidence, primary-video stream duration and any declared
 frame count rather than container duration alone, the probed
 rational cadence, frame-local decode provenance carried through caches and
 prefetch, the exact Viewer candidate, and a completed headless GPU submission.
+The same gate consumes the media worker's isolated-demux lifecycle evidence:
+configuration or launch alone is insufficient. At least one validated helper
+must complete Seek and packet Read commands across more than one decode request;
+after terminal stress at least one helper must close cleanly, every launch must
+have exactly one post-reap terminal class, no helper may remain active, and
+protocol/process/FFmpeg failure or forced close fails the profile. Cancellation
+termination remains a reported fact and is evaluated with the separate
+Broker-owned cancellation timing evidence rather than being inferred from a
+missing process.
 Its Adapter derives a non-overridable minimum frame count from 30 minutes and
 the probed rational cadence, uses Playback Evidence's bounded whole-run
 aggregates, pauses transport, completes 50 approximate warm plus 50 exact

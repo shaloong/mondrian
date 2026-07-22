@@ -2287,7 +2287,7 @@ fn isolated_demux_worker_reuses_each_access_mode_session_across_requests() {
     let root = tempfile::tempdir().expect("tempdir");
     let path = root.path().join("isolated-h264-bframes.mp4");
     std::fs::write(&path, FIXTURE).expect("write synthetic H.264 fixture");
-    let (bootstrap, _observer) =
+    let (bootstrap, observer) =
         PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker);
     let mut context = bootstrap.build();
     let request = PreviewDecodeRequest::new(
@@ -2351,6 +2351,19 @@ fn isolated_demux_worker_reuses_each_access_mode_session_across_requests() {
             }
         }
     }
+    context.clear();
+    let evidence = observer.snapshot().isolated_demux;
+    assert_eq!(evidence.session_launches, 3);
+    assert_eq!(evidence.ready_sessions, 3);
+    assert_eq!(evidence.cross_request_reused_sessions, 3);
+    assert!(evidence.completed_seeks >= 4);
+    assert!(evidence.completed_reads > evidence.session_launches);
+    assert!(evidence.packet_responses > 0);
+    assert_eq!(evidence.clean_closes, 3);
+    assert_eq!(evidence.reaped_sessions(), evidence.session_launches);
+    assert_eq!(evidence.active_sessions, 0);
+    assert_eq!(evidence.failure_terminations, 0);
+    assert_eq!(evidence.forced_close_terminations, 0);
 }
 
 #[test]
@@ -2388,6 +2401,11 @@ fn isolated_demux_worker_cancellation_terminates_the_packet_source() {
         PreviewDecodeCancellationSource::IsolatedDemuxTermination
     );
     assert!(started.elapsed() < Duration::from_secs(5));
+    let evidence = observer.snapshot().isolated_demux;
+    assert_eq!(evidence.session_launches, 1);
+    assert_eq!(evidence.cancellation_terminations, 1);
+    assert_eq!(evidence.reaped_sessions(), 1);
+    assert_eq!(evidence.active_sessions, 0);
 }
 
 #[test]
@@ -2441,6 +2459,11 @@ fn isolated_demux_worker_attributes_stream_info_seek_and_packet_read_cancellatio
             cancellation.source,
             PreviewDecodeCancellationSource::IsolatedDemuxTermination
         );
+        let evidence = observer.snapshot().isolated_demux;
+        assert_eq!(evidence.session_launches, 1);
+        assert_eq!(evidence.cancellation_terminations, 1);
+        assert_eq!(evidence.reaped_sessions(), 1);
+        assert_eq!(evidence.active_sessions, 0);
     }
 }
 
@@ -2456,7 +2479,7 @@ fn isolated_demux_worker_rejects_stale_source_revision_before_publication() {
     std::fs::write(&path, FIXTURE).expect("write synthetic H.264 fixture");
     let mut stale_revision = MediaFileFingerprint::capture(&path);
     stale_revision.len = stale_revision.len.map(|length| length.saturating_add(1));
-    let (bootstrap, _observer) =
+    let (bootstrap, observer) =
         PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker);
     let mut context = bootstrap.build();
     let request = PreviewDecodeRequest::new(
@@ -2471,6 +2494,11 @@ fn isolated_demux_worker_rejects_stale_source_revision_before_publication() {
         .decode_cancellable(request, || false)
         .expect_err("stale source revision must fail before packet publication");
     assert!(error.to_string().contains("source revision changed"));
+    let evidence = observer.snapshot().isolated_demux;
+    assert_eq!(evidence.session_launches, 1);
+    assert_eq!(evidence.failure_terminations, 1);
+    assert_eq!(evidence.reaped_sessions(), 1);
+    assert_eq!(evidence.active_sessions, 0);
 }
 
 #[test]

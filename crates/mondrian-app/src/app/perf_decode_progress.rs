@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 pub(super) const PREVIEW_DECODE_EXECUTION_JOURNAL_ENV: &str =
     "MONDRIAN_PREVIEW_DECODE_EXECUTION_OUTPUT";
 
-const JOURNAL_SCHEMA_VERSION: u32 = 2;
+const JOURNAL_SCHEMA_VERSION: u32 = 3;
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
