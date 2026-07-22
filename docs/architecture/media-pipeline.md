@@ -321,6 +321,13 @@ isolated-termination fact at Seek or PacketRead. Source change, protocol/FFmpeg
 failure, and cancellation reopen with a new nonce/process; a process never
 switches between sources. The direct `AVFormatContext` Adapter exists only for
 explicit unconfigured tests and diagnostics, not as a production fallback.
+An isolated termination also makes the paired packet-source/codec Session
+unrecoverable. The worker publishes `SessionRetire` and drops that complete
+slot directly; it does not call the ordinary cooperative-cancellation codec
+flush first, because no valid packet source can ever resume that Session and
+mutating a hardware codec immediately before forced teardown adds risk without
+reuse value. Cooperative and returned `AVIOInterruptCB` cancellations retain
+their existing flush-and-reuse path when the Session contract still matches.
 The launch request also carries the parent's conservative file revision. When
 that revision is complete, the helper revalidates it before input open and
 after stream discovery; a race with source replacement fails closed before any
@@ -342,6 +349,16 @@ and stale-source failure. Professional Headless acceptance additionally
 requires real Seek/Packet execution, cross-request reuse, bounded clean close,
 zero active helpers, complete launch-to-reap accounting, and no failure or
 forced-close terminal outcome.
+The real-media short qualification adds a different proof: it samples a live
+Main10 helper in Seek or PacketRead, supersedes that generation through the
+production Broker, requires Broker and concrete media cancellation evidence,
+then requires the latest frame to complete the Headless GPU Presentation
+Adapter. Fast local I/O is allowed to return between observation and generation
+rotation, so helper termination is not mandatory in that real run; when it is
+observed, termination and checkpoint evidence must agree. The deterministic
+packaged tests remain authoritative for guaranteed cancellation inside each
+helper call stage. Neither short suite claims 30-minute cadence, memory plateau,
+or fixed-machine performance acceptance.
 
 Ordinary CI exercises this contract through a loopback HTTP server that accepts
 FFmpeg's connection and deliberately withholds a response. Both the media
@@ -511,8 +528,9 @@ Playback, scrub, and exact-still cancellation discards partial output and never
 masquerades as media failure or successful output. Cancellation before a
 format command remains cooperative; cancellation of an in-flight isolated
 seek/read terminates the helper, poisons the packet source, and makes the paired
-decode Session ineligible for reuse. The immutable shared device cache remains
-independent. Exact Still always performs an
+decode Session ineligible for recovery or reuse. It is retired as a whole
+without an otherwise normal codec flush. The immutable shared device cache
+remains independent. Exact Still always performs an
 indexed exact seek and codec flush; scrub follows its independently derived
 bounded low-latency policy. Neither may reuse the shared Interactive context
 until its prior native-output lease has retired. After release, access-mode

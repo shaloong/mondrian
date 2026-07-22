@@ -3,8 +3,10 @@ use super::audio_playback_acceptance::{
     ProfessionalAudioPlaybackObservation,
 };
 use super::playback_acceptance::{
-    evaluate_professional_playback, PlaybackDecodeExecutionEvidence,
-    PresentedDecodeExecutionEvidence, PreviewPlaybackMediaProbeReport,
+    evaluate_playback_qualification, evaluate_professional_playback,
+    PlaybackDecodeExecutionEvidence, PresentedDecodeExecutionEvidence,
+    PreviewCancellationRecoveryEvidence, PreviewPlaybackMediaProbeReport,
+    PreviewPlaybackQualificationGateReport, PreviewPlaybackQualificationObservation,
     PreviewProcessMemoryEvidenceCollector, PreviewProcessMemoryEvidenceReport,
     PreviewProfessionalPlaybackGateReport, PreviewRuntimeAcceptanceEvidence,
     ProfessionalPlaybackObservation, PROFESSIONAL_GPU_CANDIDATE_LIMIT_MS,
@@ -23,7 +25,6 @@ use crate::app::headless_viewer_gpu::{
     HeadlessViewerGpuOutput,
 };
 use crate::app::native_video_import::resolve_playback_hardware_decode_admission;
-use crate::app::preview_access_mode::MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT;
 use crate::app::preview_execution::PreviewDecodeExecutionSummary;
 use crate::app::preview_runtime::{
     build_preview_color_health_report, build_preview_decode_performance_report,
@@ -61,8 +62,8 @@ type HeadlessPreviewRuntime = PreviewProductionRuntime<HeadlessViewerGpuOutput>;
 use mondrian_core::types::Rational;
 use mondrian_effects::{EffectNode, EffectNodeExt};
 use mondrian_media::{
-    MediaInfo, PreviewDecodeAccessMode, PreviewDecodeStageDurations, VideoColorDiagnostic,
-    VideoColorDiagnosticIssueAggregate,
+    MediaInfo, PreviewDecodeAccessMode, PreviewDecodeExecutionStage, PreviewDecodeStageDurations,
+    VideoColorDiagnostic, VideoColorDiagnosticIssueAggregate,
 };
 use mondrian_platform::{NativeVideoTextureImportProbe, ProcessMemoryProbe, SystemPlatformService};
 use mondrian_renderer::profile::{GpuTimestampSample, GpuTimestampStageDurations};
@@ -422,7 +423,9 @@ struct PreviewMediaPlaybackPerfReport {
     readiness: PreviewReadinessCounts,
     headless_gpu_preroll: HeadlessViewerGpuExecutionSummary,
     headless_gpu: HeadlessViewerGpuExecutionSummary,
+    cancellation_recovery_probe: Option<PreviewCancellationRecoveryEvidence>,
     real_media_gates: Option<PreviewExternalPlaybackGateReport>,
+    qualification_media_gates: Option<PreviewPlaybackQualificationGateReport>,
     professional_media_gates: Option<PreviewProfessionalPlaybackGateReport>,
     media_color_issues: VideoColorDiagnosticIssueAggregate,
     preview_diagnostics: PreviewDiagnostics,
@@ -434,6 +437,19 @@ struct PreviewMediaPlaybackPerfReport {
     playback_evidence: PlaybackEvidenceReport,
     process_memory_evidence: PreviewProcessMemoryEvidenceReport,
     cases: Vec<PerfCaseReport>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PreviewMediaPlaybackProbeConfig {
+    scenario: &'static str,
+    frame_count: usize,
+    sequence_frame_count: usize,
+    frame_interval_ns: u64,
+    playback_threshold_ms: u128,
+    gpu_candidate_threshold_ms: u128,
+    ready_timeout: Duration,
+    seek_probe_count: usize,
+    probe_cancellation_recovery: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1581,14 +1597,17 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
         &root_dir,
         &video_path,
         None,
-        "preview_media_continuous_playback",
-        frame_count,
-        frame_count,
-        frame_interval_ns,
-        playback_threshold_ms,
-        gpu_candidate_threshold_ms,
-        ready_timeout,
-        0,
+        PreviewMediaPlaybackProbeConfig {
+            scenario: "preview_media_continuous_playback",
+            frame_count,
+            sequence_frame_count: frame_count,
+            frame_interval_ns,
+            playback_threshold_ms,
+            gpu_candidate_threshold_ms,
+            ready_timeout,
+            seek_probe_count: 0,
+            probe_cancellation_recovery: false,
+        },
     );
 
     let _ = fs::remove_dir_all(&root_dir);
@@ -2308,6 +2327,90 @@ fn preview_media_professional_4k_hevc_main10_hardware_playback_gate() -> anyhow:
 }
 
 #[test]
+#[ignore = "short production Main10 demux cancellation/recovery qualification; requires real media and GPU"]
+fn preview_media_professional_4k_hevc_main10_isolated_demux_qualification_gate(
+) -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("perf lock poisoned");
+    let video_path =
+        std::env::var_os("MONDRIAN_PREVIEW_PROFESSIONAL_4K_HEVC_MAIN10_MEDIA_PATH")
+            .map(PathBuf::from)
+            .context(
+                "MONDRIAN_PREVIEW_PROFESSIONAL_4K_HEVC_MAIN10_MEDIA_PATH is required; this gate never skips",
+            )?;
+    run_external_isolated_demux_qualification_gate(video_path)
+}
+
+fn run_external_isolated_demux_qualification_gate(video_path: PathBuf) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        video_path.exists(),
+        "qualification media path does not exist: {}",
+        video_path.display()
+    );
+    let media_info = probe_external_preview_media_info(&video_path)?;
+    let media_probe = PreviewPlaybackMediaProbeReport::from_media_info(&media_info)?;
+    let frame_interval_ns = media_probe.frame_interval_ns()?;
+    let sequence_frame_count = professional_min_frame_count(&media_probe)?;
+    media_probe.ensure_observation_coverage(sequence_frame_count, frame_interval_ns)?;
+    const QUALIFICATION_PLAYBACK_FRAMES: usize = 25;
+    const QUALIFICATION_SEEK_PROBES: usize = 4;
+    let playback_threshold_ms = (QUALIFICATION_PLAYBACK_FRAMES as u128)
+        .saturating_mul(u128::from(frame_interval_ns))
+        .saturating_add(999_999)
+        .saturating_div(1_000_000)
+        .saturating_add(30_000);
+    let ready_timeout = Duration::from_millis(PROFESSIONAL_READY_TIMEOUT_MS);
+    let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let root_dir =
+        std::env::temp_dir().join(format!("mondrian_preview_main10_qualification_{uniq}"));
+    fs::create_dir_all(&root_dir)?;
+    let result = run_preview_media_continuous_playback_probe(
+        &root_dir,
+        &video_path,
+        Some(media_info),
+        PreviewMediaPlaybackProbeConfig {
+            scenario: "preview_media_professional_4k_hevc_main10_isolated_demux_qualification",
+            frame_count: QUALIFICATION_PLAYBACK_FRAMES,
+            sequence_frame_count,
+            frame_interval_ns,
+            playback_threshold_ms,
+            gpu_candidate_threshold_ms: PROFESSIONAL_GPU_CANDIDATE_LIMIT_MS,
+            ready_timeout,
+            seek_probe_count: QUALIFICATION_SEEK_PROBES,
+            probe_cancellation_recovery: true,
+        },
+    );
+    let _ = fs::remove_dir_all(&root_dir);
+    let mut report = result?;
+    let cancellation_recovery = report
+        .cancellation_recovery_probe
+        .context("short Main10 qualification omitted cancellation-recovery evidence")?;
+    let runtime_evidence = professional_runtime_acceptance_evidence(&report.preview_diagnostics);
+    let qualification = evaluate_playback_qualification(PreviewPlaybackQualificationObservation {
+        media: &report.media_probe,
+        required_source_frames: sequence_frame_count,
+        frame_interval_ns: report.frame_interval_ns,
+        rendered_decode_execution: professional_presented_decode_evidence(
+            report.headless_gpu.rendered_decode_execution,
+        ),
+        viewer_fallback_count: report.headless_gpu.fallback_count,
+        viewer_fallback_reasons: &report.headless_gpu.fallback_reasons,
+        playback_evidence: &report.playback_evidence,
+        preview_diagnostics: &runtime_evidence,
+        cancellation_recovery,
+    });
+    let qualification_passed = qualification.passed;
+    report.qualification_media_gates = Some(qualification);
+    let report_json = serde_json::to_string(&report)?;
+    eprintln!("MONDRIAN_PERF_JSON={report_json}");
+    write_report_if_needed(&report_json);
+    anyhow::ensure!(
+        qualification_passed,
+        "short Main10 production qualification failed; report: {report_json}"
+    );
+    Ok(())
+}
+
+#[test]
 #[ignore = "accelerated native-surface endurance probe; requires real media and GPU"]
 fn preview_media_external_accelerated_native_surface_endurance_probe() -> anyhow::Result<()> {
     let _guard = perf_lock().lock().expect("perf lock poisoned");
@@ -2599,14 +2702,17 @@ fn run_external_continuous_playback_gate(
         &root_dir,
         &video_path,
         Some(media_info),
-        scenario,
-        frame_count,
-        sequence_frame_count,
-        frame_interval_ns,
-        playback_threshold_ms,
-        gpu_candidate_threshold_ms,
-        ready_timeout,
-        seek_probe_count,
+        PreviewMediaPlaybackProbeConfig {
+            scenario,
+            frame_count,
+            sequence_frame_count,
+            frame_interval_ns,
+            playback_threshold_ms,
+            gpu_candidate_threshold_ms,
+            ready_timeout,
+            seek_probe_count,
+            probe_cancellation_recovery: professional,
+        },
     );
     let _ = fs::remove_dir_all(&root_dir);
 
@@ -2922,14 +3028,7 @@ fn run_preview_media_continuous_playback_probe(
     root_dir: &Path,
     video_path: &Path,
     media_info: Option<MediaInfo>,
-    scenario: &'static str,
-    frame_count: usize,
-    sequence_frame_count: usize,
-    frame_interval_ns: u64,
-    playback_threshold_ms: u128,
-    gpu_candidate_threshold_ms: u128,
-    ready_timeout: Duration,
-    seek_probe_count: usize,
+    config: PreviewMediaPlaybackProbeConfig,
 ) -> anyhow::Result<PreviewMediaPlaybackPerfReport> {
     let media_info = match media_info {
         Some(media_info) => media_info,
@@ -2941,13 +3040,13 @@ fn run_preview_media_continuous_playback_probe(
         root_dir,
         video_path,
         Some(media_info),
-        sequence_frame_count,
+        config.sequence_frame_count,
     )?;
     state.begin_playback_evidence_run(mondrian_playback::PlaybackEvidenceConfig::default())?;
     let preview_service = HeadlessPreviewRuntime::new();
     let decode_execution_journal = PreviewDecodeExecutionJournal::start_from_env(
         preview_service.decode_execution_watch(),
-        scenario,
+        config.scenario,
     )?;
     let mut gpu_adapter =
         HeadlessViewerGpuAdapter::new().context("create real headless Viewer GPU Adapter")?;
@@ -2968,7 +3067,7 @@ fn run_preview_media_continuous_playback_probe(
         &mut state,
         &mut gpu_adapter,
         &mut headless_gpu_preroll,
-        ready_timeout,
+        config.ready_timeout,
     )?;
     state.play();
     wait_for_headless_gpu_ready(
@@ -2976,28 +3075,32 @@ fn run_preview_media_continuous_playback_probe(
         &mut state,
         &mut gpu_adapter,
         &mut headless_gpu,
-        ready_timeout,
+        config.ready_timeout,
     )?;
-    wait_for_headless_playback_preroll(&preview_service, &mut state, ready_timeout)?;
+    wait_for_headless_playback_preroll(&preview_service, &mut state, config.ready_timeout)?;
     let playback_case = run_case(
         "preview_media.continuous_playback_readiness",
         1,
-        playback_threshold_ms,
+        config.playback_threshold_ms,
         || {
             let cadence_started = Instant::now();
             let mut last_clock_tick = cadence_started;
-            for frame_index in 0..frame_count {
+            for frame_index in 0..config.frame_count {
                 let sample = run_headless_realtime_video_interval(
                     &preview_service,
                     &mut state,
                     &mut gpu_adapter,
                     &mut headless_gpu,
-                    absolute_frame_deadline(cadence_started, frame_index, frame_interval_ns)?,
+                    absolute_frame_deadline(
+                        cadence_started,
+                        frame_index,
+                        config.frame_interval_ns,
+                    )?,
                     &mut last_clock_tick,
                 )?;
                 record_headless_preview_readiness(&mut readiness, sample);
                 let observed_at_us = ((frame_index as u128).saturating_add(1))
-                    .saturating_mul(u128::from(frame_interval_ns))
+                    .saturating_mul(u128::from(config.frame_interval_ns))
                     .saturating_div(1_000)
                     .min(u128::from(u64::MAX)) as u64;
                 if observed_at_us >= next_process_memory_sample_us {
@@ -3015,25 +3118,48 @@ fn run_preview_media_continuous_playback_probe(
             Ok(())
         },
     )?;
-    if seek_probe_count > 0 {
+    if config.seek_probe_count > 0 || config.probe_cancellation_recovery {
         state.pause();
     }
-    let seek_case = (seek_probe_count > 0)
+    let seek_case = (config.seek_probe_count > 0)
         .then(|| {
             run_case(
                 "preview_media.cross_region_seek_readiness",
                 1,
-                u128::from(seek_probe_count as u64).saturating_mul(1_000),
+                u128::from(config.seek_probe_count as u64).saturating_mul(1_000),
                 || {
                     run_headless_cross_region_seeks(
                         &preview_service,
                         &mut state,
                         &mut gpu_adapter,
                         &mut headless_gpu,
-                        sequence_frame_count,
-                        seek_probe_count,
-                        ready_timeout,
+                        config.sequence_frame_count,
+                        config.seek_probe_count,
+                        config.ready_timeout,
                     )
+                },
+            )
+        })
+        .transpose()?;
+
+    let mut cancellation_recovery_probe = None;
+    let cancellation_recovery_case = config
+        .probe_cancellation_recovery
+        .then(|| {
+            run_case(
+                "preview_media.cancellation_recovery",
+                1,
+                config.ready_timeout.as_millis().saturating_mul(2),
+                || {
+                    cancellation_recovery_probe = Some(run_headless_cancellation_recovery_probe(
+                        &preview_service,
+                        &mut state,
+                        &mut gpu_adapter,
+                        &mut headless_gpu,
+                        config.sequence_frame_count,
+                        config.ready_timeout,
+                    )?);
+                    Ok(())
                 },
             )
         })
@@ -3042,13 +3168,13 @@ fn run_preview_media_continuous_playback_probe(
     let gpu_candidate_case = run_case(
         "preview_media.playback_gpu_candidate_ready",
         1,
-        gpu_candidate_threshold_ms,
+        config.gpu_candidate_threshold_ms,
         || {
             let _ = preview_service.gpu_preview_frame_for_state(&state);
             Ok(())
         },
     )?;
-    wait_for_preview_idle_residency_release(&preview_service, &mut state, ready_timeout)?;
+    wait_for_preview_idle_residency_release(&preview_service, &mut state, config.ready_timeout)?;
     let gpu_timings = gpu_adapter
         .finish_gpu_timings()
         .context("finish deferred headless Viewer GPU timestamp maps")?;
@@ -3064,7 +3190,7 @@ fn run_preview_media_continuous_playback_probe(
         preview_service.diagnostics()
     );
     anyhow::ensure!(
-        readiness.ready + readiness.stale >= frame_count.saturating_sub(2),
+        readiness.ready + readiness.stale >= config.frame_count.saturating_sub(2),
         "continuous playback did not keep enough frames visible: {:?}; diagnostics: {:?}",
         readiness,
         preview_service.diagnostics()
@@ -3093,11 +3219,13 @@ fn run_preview_media_continuous_playback_probe(
 
     let preview_diagnostics = preview_service.diagnostics();
     let media_color_issues = summarize_active_sequence_media_color_issues(&state)?;
-    let preview_color_report =
-        build_preview_color_health_report(preview_diagnostics.color_health_summary(), scenario);
+    let preview_color_report = build_preview_color_health_report(
+        preview_diagnostics.color_health_summary(),
+        config.scenario,
+    );
     let preview_decode_report = build_preview_decode_performance_report_with_required_access_modes(
         preview_diagnostics.decode_performance_summary(PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US),
-        scenario,
+        config.scenario,
         PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
         &[PreviewDecodeAccessMode::PlaybackCursor],
     );
@@ -3106,7 +3234,7 @@ fn run_preview_media_continuous_playback_probe(
         .map(|summary| {
             build_preview_render_performance_report(
                 Some(summary),
-                scenario,
+                config.scenario,
                 PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
             )
         });
@@ -3117,14 +3245,16 @@ fn run_preview_media_continuous_playback_probe(
         .unwrap_or_default();
     let playback_evidence = state.playback_evidence_report();
     let report = PreviewMediaPlaybackPerfReport {
-        scenario,
-        frames: frame_count,
-        frame_interval_ns,
+        scenario: config.scenario,
+        frames: config.frame_count,
+        frame_interval_ns: config.frame_interval_ns,
         media_probe,
         readiness,
         headless_gpu_preroll,
         headless_gpu,
+        cancellation_recovery_probe,
         real_media_gates: None,
+        qualification_media_gates: None,
         professional_media_gates: None,
         media_color_issues,
         preview_diagnostics,
@@ -3137,6 +3267,7 @@ fn run_preview_media_continuous_playback_probe(
         process_memory_evidence: process_memory_evidence.report(),
         cases: std::iter::once(playback_case)
             .chain(seek_case)
+            .chain(cancellation_recovery_case)
             .chain(std::iter::once(gpu_candidate_case))
             .collect(),
     };
@@ -3242,6 +3373,118 @@ fn run_headless_cross_region_seeks(
     Ok(())
 }
 
+fn run_headless_cancellation_recovery_probe(
+    preview_service: &HeadlessPreviewRuntime,
+    state: &mut AppState,
+    gpu_adapter: &mut HeadlessViewerGpuAdapter,
+    gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
+    frame_count: usize,
+    timeout: Duration,
+) -> anyhow::Result<PreviewCancellationRecoveryEvidence> {
+    anyhow::ensure!(
+        frame_count >= 8,
+        "cancellation-recovery probe requires at least eight Timeline frames"
+    );
+    wait_for_preview_work_quiescence(preview_service, state, timeout)?;
+    let before = preview_service.diagnostics();
+    let worker_before = interactive_decode_progress(before.decode_worker_execution)
+        .context("cancellation-recovery probe has no Interactive Preview worker")?;
+    let broker_cancellations_before = before.decode_cancellation.all.cancellations;
+    let media_cancellation_checkpoints_before = before.decode_cancellation_checkpoints.total;
+    let cancellation_terminations_before =
+        isolated_demux_cancellation_terminations(before.decode_worker_execution);
+    let isolated_checkpoints_before =
+        before.decode_cancellation_checkpoints.isolated_demux_termination;
+    let superseded_target_frame = frame_count.saturating_mul(3).saturating_div(4);
+    let recovery_target_frame = frame_count.saturating_div(4);
+
+    state.seek_with_source(superseded_target_frame as i64, TimelineSeekSource::Settled);
+    let _ = preview_service.gpu_preview_frame_for_state(state);
+    let stage_deadline = Instant::now() + timeout;
+    let stage_before_supersession = loop {
+        let snapshot = preview_service.decode_execution_watch().snapshot();
+        let progress = interactive_decode_progress(snapshot)
+            .context("Interactive Preview worker disappeared during cancellation probe")?;
+        let active_demux_call = progress.request_sequence > worker_before.request_sequence
+            && progress.isolated_demux.active_sessions > 0
+            && matches!(
+                progress.stage,
+                PreviewDecodeExecutionStage::Seek | PreviewDecodeExecutionStage::PacketRead
+            );
+        if active_demux_call {
+            break progress.stage;
+        }
+        anyhow::ensure!(
+            Instant::now() < stage_deadline,
+            "timed out observing a real isolated-demux Seek/PacketRead before supersession; progress={progress:?}"
+        );
+        thread::sleep(Duration::from_micros(50));
+    };
+
+    state.seek_with_source(recovery_target_frame as i64, TimelineSeekSource::Settled);
+    let _ = preview_service.gpu_preview_frame_for_state(state);
+    wait_for_headless_gpu_ready(preview_service, state, gpu_adapter, gpu_summary, timeout)?;
+    wait_for_preview_work_quiescence(preview_service, state, timeout)?;
+    anyhow::ensure!(
+        state.current_frame() == recovery_target_frame as i64,
+        "post-cancellation Viewer recovery presented the wrong Timeline frame: expected {recovery_target_frame}, observed {}",
+        state.current_frame()
+    );
+
+    let after = preview_service.diagnostics();
+    let broker_cancellation_delta = after
+        .decode_cancellation
+        .all
+        .cancellations
+        .saturating_sub(broker_cancellations_before);
+    let media_cancellation_checkpoint_delta = after
+        .decode_cancellation_checkpoints
+        .total
+        .saturating_sub(media_cancellation_checkpoints_before);
+    let isolated_termination_delta =
+        isolated_demux_cancellation_terminations(after.decode_worker_execution)
+            .saturating_sub(cancellation_terminations_before);
+    let isolated_checkpoint_delta = after
+        .decode_cancellation_checkpoints
+        .isolated_demux_termination
+        .saturating_sub(isolated_checkpoints_before);
+    anyhow::ensure!(
+        broker_cancellation_delta > 0 && media_cancellation_checkpoint_delta > 0,
+        "superseded real media execution did not produce matched Broker and media cancellation evidence: broker_delta={broker_cancellation_delta}, media_checkpoint_delta={media_cancellation_checkpoint_delta}, diagnostics={after:?}"
+    );
+    anyhow::ensure!(
+        (isolated_termination_delta == 0) == (isolated_checkpoint_delta == 0),
+        "isolated-demux termination and media checkpoint evidence disagree: termination_delta={isolated_termination_delta}, checkpoint_delta={isolated_checkpoint_delta}"
+    );
+
+    Ok(PreviewCancellationRecoveryEvidence {
+        stage_before_supersession,
+        superseded_target_frame,
+        recovery_target_frame,
+        broker_cancellation_delta,
+        media_cancellation_checkpoint_delta,
+        isolated_termination_delta,
+        isolated_checkpoint_delta,
+        recovery_presented: true,
+    })
+}
+
+fn interactive_decode_progress(
+    workers: crate::app::preview_runtime::PreviewDecodeWorkerExecutionDiagnostics,
+) -> Option<mondrian_media::PreviewDecodeExecutionProgress> {
+    workers.non_playback.or(workers.any)
+}
+
+fn isolated_demux_cancellation_terminations(
+    workers: crate::app::preview_runtime::PreviewDecodeWorkerExecutionDiagnostics,
+) -> u64 {
+    [workers.any, workers.playback, workers.non_playback]
+        .into_iter()
+        .flatten()
+        .map(|progress| progress.isolated_demux.cancellation_terminations)
+        .fold(0, u64::saturating_add)
+}
+
 fn wait_for_preview_work_quiescence(
     preview_service: &HeadlessPreviewRuntime,
     state: &mut AppState,
@@ -3272,22 +3515,80 @@ fn wait_for_preview_idle_residency_release(
     timeout: Duration,
 ) -> anyhow::Result<()> {
     wait_for_preview_work_quiescence(preview_service, state, timeout)?;
-    thread::sleep(
-        MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT.saturating_add(Duration::from_millis(50)),
-    );
-    apply_headless_preview_outcome(preview_service, state);
     anyhow::ensure!(
         preview_service.try_release_settled_transport_media_residency(),
         "Preview output or work state was not settled while releasing decoder-backed media residency"
     );
-    let diagnostics = preview_service.diagnostics();
-    anyhow::ensure!(
-        diagnostics.scheduler.pending_requests == 0
-            && diagnostics.worker_queue.queued_jobs == 0
-            && diagnostics.worker_queue.in_flight_jobs == 0,
-        "preview work restarted while releasing idle decoder residency: {diagnostics:?}"
-    );
-    Ok(())
+    let deadline = Instant::now() + timeout;
+    loop {
+        apply_headless_preview_outcome(preview_service, state);
+        let diagnostics = preview_service.diagnostics();
+        let work_remains = diagnostics.scheduler.pending_requests > 0
+            || diagnostics.worker_queue.queued_jobs > 0
+            || diagnostics.worker_queue.in_flight_jobs > 0;
+        if !work_remains
+            && preview_decode_workers_idle_and_reaped(diagnostics.decode_worker_execution)
+        {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "Preview workers did not retire decoder Sessions and reap demux helpers after idle residency release: {diagnostics:?}"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn preview_decode_workers_idle_and_reaped(
+    workers: crate::app::preview_runtime::PreviewDecodeWorkerExecutionDiagnostics,
+) -> bool {
+    [workers.any, workers.playback, workers.non_playback]
+        .into_iter()
+        .flatten()
+        .all(|progress| {
+            let demux = progress.isolated_demux;
+            progress.stage == PreviewDecodeExecutionStage::Idle
+                && demux.active_sessions == 0
+                && demux.reaped_sessions() == demux.session_launches
+        })
+}
+
+#[test]
+fn preview_idle_release_requires_worker_idle_and_post_reap_accounting() {
+    use mondrian_media::{PreviewDecodeExecutionProgress, PreviewIsolatedDemuxExecutionEvidence};
+
+    let complete = PreviewDecodeExecutionProgress {
+        isolated_demux: PreviewIsolatedDemuxExecutionEvidence {
+            session_launches: 1,
+            clean_closes: 1,
+            ..PreviewIsolatedDemuxExecutionEvidence::default()
+        },
+        ..PreviewDecodeExecutionProgress::default()
+    };
+    let workers = crate::app::preview_runtime::PreviewDecodeWorkerExecutionDiagnostics {
+        playback: Some(complete),
+        ..crate::app::preview_runtime::PreviewDecodeWorkerExecutionDiagnostics::default()
+    };
+    assert!(preview_decode_workers_idle_and_reaped(workers));
+
+    let mut still_retiring = complete;
+    still_retiring.stage = PreviewDecodeExecutionStage::SessionRetire;
+    assert!(!preview_decode_workers_idle_and_reaped(
+        crate::app::preview_runtime::PreviewDecodeWorkerExecutionDiagnostics {
+            playback: Some(still_retiring),
+            ..workers
+        }
+    ));
+
+    let mut unreaped = complete;
+    unreaped.isolated_demux.clean_closes = 0;
+    unreaped.isolated_demux.active_sessions = 1;
+    assert!(!preview_decode_workers_idle_and_reaped(
+        crate::app::preview_runtime::PreviewDecodeWorkerExecutionDiagnostics {
+            playback: Some(unreaped),
+            ..workers
+        }
+    ));
 }
 
 fn validate_executed_adaptive_scaling(

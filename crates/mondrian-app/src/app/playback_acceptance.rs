@@ -151,6 +151,118 @@ fn required_media_duration_us(frames: usize, frame_interval_ns: u64) -> u64 {
         .min(u64::MAX as u128) as u64
 }
 
+fn evaluate_main10_media_contract(
+    media: &PreviewPlaybackMediaProbeReport,
+    required_frames: usize,
+    frame_interval_ns: u64,
+    failures: &mut Vec<PreviewAcceptanceFailure>,
+) {
+    if media.codec != VideoCodec::H265 {
+        push_failure(
+            failures,
+            "media_codec_mismatch",
+            "HEVC/H.265",
+            format!("{:?}", media.codec),
+            media.source,
+        );
+    }
+    if media.codec_profile != VideoCodecProfile::HevcMain10 {
+        push_failure(
+            failures,
+            if media.codec_profile == VideoCodecProfile::Unknown {
+                "media_codec_profile_unproven"
+            } else {
+                "media_codec_profile_mismatch"
+            },
+            "HEVC Main 10",
+            format!("{:?}", media.codec_profile),
+            media.source,
+        );
+    }
+    if media.width < 3_840 || media.height < 2_160 {
+        push_failure(
+            failures,
+            "media_resolution_mismatch",
+            "at least 3840x2160",
+            format!("{}x{}", media.width, media.height),
+            media.source,
+        );
+    }
+    if !media.frame_rate_proven {
+        push_failure(
+            failures,
+            "media_frame_rate_unknown",
+            "positive FFmpeg average frame-rate evidence",
+            media.frame_rate.to_string(),
+            media.source,
+        );
+    } else if !PROFESSIONAL_FRAME_RATES.contains(&media.frame_rate) {
+        push_failure(
+            failures,
+            "media_frame_rate_mismatch",
+            "24000/1001, 24, 25, 30000/1001, 30, 50, 60000/1001, or 60 fps",
+            media.frame_rate.to_string(),
+            media.source,
+        );
+    }
+    if !media.pixel_format_proven {
+        push_failure(
+            failures,
+            "media_pixel_format_unknown",
+            "decoder-proven 10-bit pixel format",
+            format!("fallback={:?}", media.pixel_format),
+            media.source,
+        );
+    }
+    if media.bit_depth < 10 {
+        push_failure(
+            failures,
+            "media_bit_depth_mismatch",
+            "at least 10 bit",
+            media.bit_depth.to_string(),
+            media.source,
+        );
+    }
+    let required_duration_us = required_media_duration_us(required_frames, frame_interval_ns);
+    if media.duration_us < required_duration_us {
+        push_failure(
+            failures,
+            "media_duration_insufficient",
+            format!("at least {required_duration_us} us"),
+            format!("{} us", media.duration_us),
+            media.source,
+        );
+    }
+    match media.video_stream_duration_us {
+        None => push_failure(
+            failures,
+            "media_video_stream_duration_unproven",
+            format!("at least {required_duration_us} us of primary-video stream duration"),
+            "unknown",
+            media.source,
+        ),
+        Some(duration_us) if duration_us < required_duration_us => push_failure(
+            failures,
+            "media_video_stream_duration_insufficient",
+            format!("at least {required_duration_us} us"),
+            format!("{duration_us} us"),
+            media.source,
+        ),
+        Some(_) => {}
+    }
+    if let Some(total_frames) = media.total_frames {
+        if total_frames < required_frames as u64 {
+            push_failure(
+                failures,
+                "media_video_frame_count_insufficient",
+                format!("at least {required_frames} frames"),
+                format!("{total_frames} frames"),
+                media.source,
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct PreviewProfessionalPlaybackGateReport {
     profile: &'static str,
@@ -198,6 +310,45 @@ pub(crate) struct PreviewProfessionalPlaybackGateReport {
     decode_cancellation_checkpoints: mondrian_media::PreviewDecodeCancellationEvidence,
     isolated_demux: PreviewIsolatedDemuxGateEvidence,
     decode_worker_execution: PreviewDecodeWorkerExecutionDiagnostics,
+    pub(crate) passed: bool,
+    pub(crate) failures: Vec<PreviewAcceptanceFailure>,
+}
+
+/// Real-media proof that superseded Preview work reached an executing demux
+/// call, was canceled through the production lifecycle, and recovered to the
+/// latest requested frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct PreviewCancellationRecoveryEvidence {
+    pub(crate) stage_before_supersession: mondrian_media::PreviewDecodeExecutionStage,
+    pub(crate) superseded_target_frame: usize,
+    pub(crate) recovery_target_frame: usize,
+    pub(crate) broker_cancellation_delta: u64,
+    pub(crate) media_cancellation_checkpoint_delta: u64,
+    pub(crate) isolated_termination_delta: u64,
+    pub(crate) isolated_checkpoint_delta: u64,
+    pub(crate) recovery_presented: bool,
+}
+
+/// Short real-media qualification report for the production demux/cancel/
+/// recovery seam. It deliberately does not claim long-run cadence or memory
+/// stability; those remain obligations of the professional playback gate.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PreviewPlaybackQualificationGateReport {
+    profile: &'static str,
+    required_source_frames: usize,
+    presented: PresentedHardwareGateEvidence,
+    cancellation_recovery: PreviewCancellationRecoveryEvidence,
+    cancellation_gate: mondrian_playback::FrameCancellationGateReport,
+    decode_cancellation_checkpoints: mondrian_media::PreviewDecodeCancellationEvidence,
+    isolated_demux: PreviewIsolatedDemuxGateEvidence,
+    broker_pending_requests: usize,
+    broker_queued_jobs: usize,
+    broker_in_flight_jobs: usize,
+    broker_clock_regressions: u64,
+    rejected_terminal_deliveries: u64,
+    accurate_seek_temporal_approximation_frames: u64,
+    cpu_frame_store_within_budget: bool,
+    cpu_frame_store_oversize_rejections: u64,
     pub(crate) passed: bool,
     pub(crate) failures: Vec<PreviewAcceptanceFailure>,
 }
@@ -358,6 +509,181 @@ pub(crate) struct PresentedDecodeExecutionEvidence {
     pub(crate) p010_10_bit_hardware_layers: u32,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+struct PresentedHardwareGateEvidence {
+    presented_media_layers: u64,
+    presented_hardware_layers: u64,
+    presented_hardware_cpu_transfer_layers: u64,
+    presented_hardware_native_layers: u64,
+    presented_p010_10_bit_hardware_layers: u64,
+    hardware_execution_percent: u64,
+}
+
+fn evaluate_presented_main10_hardware(
+    execution: PresentedDecodeExecutionEvidence,
+    viewer_fallback_count: usize,
+    viewer_fallback_reasons: &[String],
+    failures: &mut Vec<PreviewAcceptanceFailure>,
+) -> PresentedHardwareGateEvidence {
+    let presented_media_layers = u64::from(execution.media_layers);
+    let presented_hardware_cpu_transfer_layers = u64::from(execution.hardware_cpu_transfer_layers);
+    let presented_hardware_native_layers = u64::from(execution.hardware_native_layers);
+    let presented_hardware_layers =
+        presented_hardware_cpu_transfer_layers.saturating_add(presented_hardware_native_layers);
+    let presented_p010_10_bit_hardware_layers = u64::from(execution.p010_10_bit_hardware_layers);
+    let hardware_execution_percent = percent(presented_hardware_layers, presented_media_layers);
+    let p010_execution_percent = percent(
+        presented_p010_10_bit_hardware_layers,
+        presented_media_layers,
+    );
+    if presented_media_layers == 0 {
+        push_failure(
+            failures,
+            "hardware_decode_not_observed",
+            "presented media layers with frame-local decode provenance",
+            "0 layers",
+            "headless Viewer GPU completion records",
+        );
+    } else if hardware_execution_percent < PROFESSIONAL_REQUIRED_HARDWARE_EXECUTION_PERCENT as u64 {
+        push_failure(
+            failures,
+            "hardware_decode_coverage_below_minimum",
+            format!("at least {PROFESSIONAL_REQUIRED_HARDWARE_EXECUTION_PERCENT}%"),
+            format!("{hardware_execution_percent}%"),
+            "presented Frame Demand candidates only; prefetch aggregates excluded",
+        );
+    }
+    if presented_media_layers > 0
+        && p010_execution_percent < PROFESSIONAL_REQUIRED_HARDWARE_EXECUTION_PERCENT as u64
+    {
+        push_failure(
+            failures,
+            "hardware_main10_surface_coverage_below_minimum",
+            format!(
+                "at least {PROFESSIONAL_REQUIRED_HARDWARE_EXECUTION_PERCENT}% P010/10-bit hardware"
+            ),
+            format!("{p010_execution_percent}%"),
+            "frame-local decoded surface and sampling evidence",
+        );
+    }
+    if viewer_fallback_count > 0 {
+        push_failure(
+            failures,
+            "viewer_gpu_fallback_observed",
+            "0 Viewer GPU input fallbacks",
+            viewer_fallback_count.to_string(),
+            viewer_fallback_reasons.join(" | "),
+        );
+    }
+
+    PresentedHardwareGateEvidence {
+        presented_media_layers,
+        presented_hardware_layers,
+        presented_hardware_cpu_transfer_layers,
+        presented_hardware_native_layers,
+        presented_p010_10_bit_hardware_layers,
+        hardware_execution_percent,
+    }
+}
+
+fn evaluate_cancellation_contract(
+    evidence: mondrian_playback::FrameCancellationEvidenceReport,
+    failures: &mut Vec<PreviewAcceptanceFailure>,
+) -> mondrian_playback::FrameCancellationGateReport {
+    let gate = mondrian_playback::evaluate_frame_cancellation(
+        evidence,
+        mondrian_playback::FrameCancellationPolicy::default(),
+    );
+    for failure in &gate.failures {
+        let code = match failure.kind {
+            mondrian_playback::FrameCancellationGateFailureKind::UnknownCause => {
+                "frame_cancellation_unknown_cause"
+            }
+            mondrian_playback::FrameCancellationGateFailureKind::MissingRequestToCheckpoint => {
+                "frame_cancellation_request_evidence_missing"
+            }
+            mondrian_playback::FrameCancellationGateFailureKind::MissingExecutionToCheckpoint => {
+                "frame_cancellation_checkpoint_evidence_missing"
+            }
+            mondrian_playback::FrameCancellationGateFailureKind::InvalidTimingOrder => {
+                "frame_cancellation_timing_invalid"
+            }
+            mondrian_playback::FrameCancellationGateFailureKind::RequestToCheckpointExceeded => {
+                "frame_cancellation_checkpoint_late"
+            }
+            mondrian_playback::FrameCancellationGateFailureKind::CheckpointToReturnExceeded => {
+                "frame_cancellation_return_late"
+            }
+        };
+        push_failure(
+            failures,
+            code,
+            format!("at most {} for {:?}", failure.limit, failure.work_class),
+            failure.observed.to_string(),
+            "Frame Cancellation Evidence evaluated by the playback-owned policy",
+        );
+    }
+    gate
+}
+
+fn evaluate_cancellation_recovery(
+    evidence: PreviewCancellationRecoveryEvidence,
+    failures: &mut Vec<PreviewAcceptanceFailure>,
+) {
+    if !matches!(
+        evidence.stage_before_supersession,
+        mondrian_media::PreviewDecodeExecutionStage::Seek
+            | mondrian_media::PreviewDecodeExecutionStage::PacketRead
+    ) {
+        push_failure(
+            failures,
+            "isolated_demux_active_call_unproven",
+            "a real isolated-demux Seek or PacketRead observed before supersession",
+            format!("{:?}", evidence.stage_before_supersession),
+            "Preview Decode Execution Progress sampled before generation rotation",
+        );
+    }
+    if evidence.broker_cancellation_delta == 0 {
+        push_failure(
+            failures,
+            "cancellation_recovery_broker_evidence_missing",
+            "at least one Broker-owned cancellation",
+            "0",
+            "Frame Cancellation Evidence delta across the real-media supersession",
+        );
+    }
+    if evidence.media_cancellation_checkpoint_delta == 0 {
+        push_failure(
+            failures,
+            "cancellation_recovery_media_checkpoint_missing",
+            "at least one concrete media cancellation checkpoint",
+            "0",
+            "Preview Decode Cancellation Evidence delta across the real-media supersession",
+        );
+    }
+    if (evidence.isolated_termination_delta == 0) != (evidence.isolated_checkpoint_delta == 0) {
+        push_failure(
+            failures,
+            "isolated_demux_termination_checkpoint_mismatch",
+            "termination and checkpoint evidence are both absent or both present",
+            format!(
+                "terminations={}, checkpoints={}",
+                evidence.isolated_termination_delta, evidence.isolated_checkpoint_delta
+            ),
+            "real-media cancellation-recovery observation delta",
+        );
+    }
+    if !evidence.recovery_presented {
+        push_failure(
+            failures,
+            "post_cancellation_presentation_missing",
+            "the latest requested Timeline frame completed Viewer GPU presentation",
+            "false",
+            "headless Viewer GPU completion bound to the recovery Frame Demand",
+        );
+    }
+}
+
 /// Playback-cursor decode request and fallback facts used by acceptance reports.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct PlaybackDecodeExecutionEvidence {
@@ -408,117 +734,157 @@ pub(crate) struct ProfessionalPlaybackObservation<'a> {
     pub frame_interval_ns: u64,
 }
 
+/// UI-independent observation consumed by the short production qualification.
+pub(crate) struct PreviewPlaybackQualificationObservation<'a> {
+    pub media: &'a PreviewPlaybackMediaProbeReport,
+    pub required_source_frames: usize,
+    pub frame_interval_ns: u64,
+    pub rendered_decode_execution: PresentedDecodeExecutionEvidence,
+    pub viewer_fallback_count: usize,
+    pub viewer_fallback_reasons: &'a [String],
+    pub playback_evidence: &'a mondrian_playback::PlaybackEvidenceReport,
+    pub preview_diagnostics: &'a PreviewRuntimeAcceptanceEvidence,
+    pub cancellation_recovery: PreviewCancellationRecoveryEvidence,
+}
+
+pub(crate) fn evaluate_playback_qualification(
+    observation: PreviewPlaybackQualificationObservation<'_>,
+) -> PreviewPlaybackQualificationGateReport {
+    let diagnostics = observation.preview_diagnostics;
+    let mut failures = Vec::new();
+    evaluate_main10_media_contract(
+        observation.media,
+        observation.required_source_frames,
+        observation.frame_interval_ns,
+        &mut failures,
+    );
+    let presented = evaluate_presented_main10_hardware(
+        observation.rendered_decode_execution,
+        observation.viewer_fallback_count,
+        observation.viewer_fallback_reasons,
+        &mut failures,
+    );
+    evaluate_cancellation_recovery(observation.cancellation_recovery, &mut failures);
+
+    if observation.playback_evidence.deliveries.rejected > 0 {
+        push_failure(
+            &mut failures,
+            "rejected_terminal_delivery_observed",
+            "0 stale, duplicate, or superseded terminal deliveries",
+            observation.playback_evidence.deliveries.rejected.to_string(),
+            "Playback Evidence terminal delivery acceptance",
+        );
+    }
+    if diagnostics.accurate_seek_temporal_approximation_frames > 0 {
+        push_failure(
+            &mut failures,
+            "accurate_seek_temporal_approximation_observed",
+            "0 approximate frames for deterministic accurate seeks",
+            diagnostics.accurate_seek_temporal_approximation_frames.to_string(),
+            "RandomAccessStillFrame decode diagnostics",
+        );
+    }
+    if diagnostics.scheduler.pending_requests > 0
+        || diagnostics.worker_queue.queued_jobs > 0
+        || diagnostics.worker_queue.in_flight_jobs > 0
+    {
+        push_failure(
+            &mut failures,
+            "frame_work_not_quiescent",
+            "0 pending bindings, queued jobs, and execution leases",
+            format!(
+                "pending={}, queued={}, in_flight={}, worker_execution={:?}",
+                diagnostics.scheduler.pending_requests,
+                diagnostics.worker_queue.queued_jobs,
+                diagnostics.worker_queue.in_flight_jobs,
+                diagnostics.decode_worker_execution,
+            ),
+            "Frame Work Broker structured diagnostics after recovery and residency release",
+        );
+    }
+    if diagnostics.scheduler.clock_regressions > 0 {
+        push_failure(
+            &mut failures,
+            "frame_work_clock_regression",
+            "0 monotonic runtime-clock regressions",
+            diagnostics.scheduler.clock_regressions.to_string(),
+            "Frame Work Broker runtime-clock evidence",
+        );
+    }
+    let isolated_demux =
+        evaluate_isolated_demux(diagnostics.decode_worker_execution, &mut failures);
+    let cpu_frame_store_within_budget = diagnostics.media_cache_reserved_bytes
+        <= diagnostics.media_cache_byte_budget
+        && diagnostics.pinned_media_frame_bytes <= diagnostics.media_cache_byte_budget
+        && diagnostics.viewer_frame_cache_reserved_bytes
+            <= diagnostics.viewer_frame_cache_byte_budget
+        && diagnostics.pinned_viewer_frame_bytes <= diagnostics.viewer_frame_cache_byte_budget;
+    if !cpu_frame_store_within_budget {
+        push_failure(
+            &mut failures,
+            "cpu_frame_store_budget_exceeded",
+            "all evictable and pinned CPU residency within declared byte budgets",
+            format!(
+                "media={}/{}, pinned_media={}, viewer={}/{}, pinned_viewer={}",
+                diagnostics.media_cache_reserved_bytes,
+                diagnostics.media_cache_byte_budget,
+                diagnostics.pinned_media_frame_bytes,
+                diagnostics.viewer_frame_cache_reserved_bytes,
+                diagnostics.viewer_frame_cache_byte_budget,
+                diagnostics.pinned_viewer_frame_bytes
+            ),
+            "Preview Frame Store structured diagnostics",
+        );
+    }
+    let cpu_frame_store_oversize_rejections = diagnostics
+        .media_cache_oversize_rejections
+        .saturating_add(diagnostics.viewer_frame_cache_oversize_rejections);
+    if cpu_frame_store_oversize_rejections > 0 {
+        push_failure(
+            &mut failures,
+            "cpu_frame_store_oversize_rejection",
+            "0 oversize CPU payload rejections",
+            cpu_frame_store_oversize_rejections.to_string(),
+            "Preview Frame Store admission diagnostics",
+        );
+    }
+    let cancellation_gate =
+        evaluate_cancellation_contract(diagnostics.decode_cancellation, &mut failures);
+
+    PreviewPlaybackQualificationGateReport {
+        profile: "uhd_hevc_main10_isolated_demux_qualification_v1",
+        required_source_frames: observation.required_source_frames,
+        presented,
+        cancellation_recovery: observation.cancellation_recovery,
+        cancellation_gate,
+        decode_cancellation_checkpoints: diagnostics.decode_cancellation_checkpoints,
+        isolated_demux,
+        broker_pending_requests: diagnostics.scheduler.pending_requests,
+        broker_queued_jobs: diagnostics.worker_queue.queued_jobs,
+        broker_in_flight_jobs: diagnostics.worker_queue.in_flight_jobs,
+        broker_clock_regressions: diagnostics.scheduler.clock_regressions,
+        rejected_terminal_deliveries: observation.playback_evidence.deliveries.rejected,
+        accurate_seek_temporal_approximation_frames: diagnostics
+            .accurate_seek_temporal_approximation_frames,
+        cpu_frame_store_within_budget,
+        cpu_frame_store_oversize_rejections,
+        passed: failures.is_empty(),
+        failures,
+    }
+}
+
 pub(crate) fn evaluate_professional_playback(
     observation: ProfessionalPlaybackObservation<'_>,
 ) -> PreviewProfessionalPlaybackGateReport {
     let required_hardware_execution_percent = PROFESSIONAL_REQUIRED_HARDWARE_EXECUTION_PERCENT;
     let media = observation.media;
     let mut failures = Vec::new();
-    if media.codec != VideoCodec::H265 {
-        push_failure(
-            &mut failures,
-            "media_codec_mismatch",
-            "HEVC/H.265",
-            format!("{:?}", media.codec),
-            media.source,
-        );
-    }
-    if media.codec_profile != VideoCodecProfile::HevcMain10 {
-        push_failure(
-            &mut failures,
-            if media.codec_profile == VideoCodecProfile::Unknown {
-                "media_codec_profile_unproven"
-            } else {
-                "media_codec_profile_mismatch"
-            },
-            "HEVC Main 10",
-            format!("{:?}", media.codec_profile),
-            media.source,
-        );
-    }
-    if media.width < 3_840 || media.height < 2_160 {
-        push_failure(
-            &mut failures,
-            "media_resolution_mismatch",
-            "at least 3840x2160",
-            format!("{}x{}", media.width, media.height),
-            media.source,
-        );
-    }
-    if !media.frame_rate_proven {
-        push_failure(
-            &mut failures,
-            "media_frame_rate_unknown",
-            "positive FFmpeg average frame-rate evidence",
-            media.frame_rate.to_string(),
-            media.source,
-        );
-    } else if !PROFESSIONAL_FRAME_RATES.contains(&media.frame_rate) {
-        push_failure(
-            &mut failures,
-            "media_frame_rate_mismatch",
-            "24000/1001, 24, 25, 30000/1001, 30, 50, 60000/1001, or 60 fps",
-            media.frame_rate.to_string(),
-            media.source,
-        );
-    }
-    if !media.pixel_format_proven {
-        push_failure(
-            &mut failures,
-            "media_pixel_format_unknown",
-            "decoder-proven 10-bit pixel format",
-            format!("fallback={:?}", media.pixel_format),
-            media.source,
-        );
-    }
-    if media.bit_depth < 10 {
-        push_failure(
-            &mut failures,
-            "media_bit_depth_mismatch",
-            "at least 10 bit",
-            media.bit_depth.to_string(),
-            media.source,
-        );
-    }
-    let required_duration_us =
-        required_media_duration_us(observation.frames, observation.frame_interval_ns);
-    if media.duration_us < required_duration_us {
-        push_failure(
-            &mut failures,
-            "media_duration_insufficient",
-            format!("at least {required_duration_us} us"),
-            format!("{} us", media.duration_us),
-            media.source,
-        );
-    }
-    match media.video_stream_duration_us {
-        None => push_failure(
-            &mut failures,
-            "media_video_stream_duration_unproven",
-            format!("at least {required_duration_us} us of primary-video stream duration"),
-            "unknown",
-            media.source,
-        ),
-        Some(duration_us) if duration_us < required_duration_us => push_failure(
-            &mut failures,
-            "media_video_stream_duration_insufficient",
-            format!("at least {required_duration_us} us"),
-            format!("{duration_us} us"),
-            media.source,
-        ),
-        Some(_) => {}
-    }
-    if let Some(total_frames) = media.total_frames {
-        if total_frames < observation.frames as u64 {
-            push_failure(
-                &mut failures,
-                "media_video_frame_count_insufficient",
-                format!("at least {} frames", observation.frames),
-                format!("{total_frames} frames"),
-                media.source,
-            );
-        }
-    }
+    evaluate_main10_media_contract(
+        media,
+        observation.frames,
+        observation.frame_interval_ns,
+        &mut failures,
+    );
 
     let evidence = observation.playback_evidence;
     let diagnostics = observation.preview_diagnostics;
@@ -657,89 +1023,14 @@ pub(crate) fn evaluate_professional_playback(
         );
     }
     let process_memory = evaluate_process_memory(observation.process_memory, &mut failures);
-    let cancellation_gate = mondrian_playback::evaluate_frame_cancellation(
-        diagnostics.decode_cancellation,
-        mondrian_playback::FrameCancellationPolicy::default(),
+    let cancellation_gate =
+        evaluate_cancellation_contract(diagnostics.decode_cancellation, &mut failures);
+    let presented = evaluate_presented_main10_hardware(
+        observation.rendered_decode_execution,
+        observation.viewer_fallback_count,
+        observation.viewer_fallback_reasons,
+        &mut failures,
     );
-    for failure in &cancellation_gate.failures {
-        let code = match failure.kind {
-            mondrian_playback::FrameCancellationGateFailureKind::UnknownCause => {
-                "frame_cancellation_unknown_cause"
-            }
-            mondrian_playback::FrameCancellationGateFailureKind::MissingRequestToCheckpoint => {
-                "frame_cancellation_request_evidence_missing"
-            }
-            mondrian_playback::FrameCancellationGateFailureKind::MissingExecutionToCheckpoint => {
-                "frame_cancellation_checkpoint_evidence_missing"
-            }
-            mondrian_playback::FrameCancellationGateFailureKind::InvalidTimingOrder => {
-                "frame_cancellation_timing_invalid"
-            }
-            mondrian_playback::FrameCancellationGateFailureKind::RequestToCheckpointExceeded => {
-                "frame_cancellation_checkpoint_late"
-            }
-            mondrian_playback::FrameCancellationGateFailureKind::CheckpointToReturnExceeded => {
-                "frame_cancellation_return_late"
-            }
-        };
-        push_failure(
-            &mut failures,
-            code,
-            format!("at most {} for {:?}", failure.limit, failure.work_class),
-            failure.observed.to_string(),
-            "Frame Cancellation Evidence evaluated by the playback-owned policy",
-        );
-    }
-
-    let execution = observation.rendered_decode_execution;
-    let presented_media_layers = u64::from(execution.media_layers);
-    let presented_hardware_cpu_transfer_layers = u64::from(execution.hardware_cpu_transfer_layers);
-    let presented_hardware_native_layers = u64::from(execution.hardware_native_layers);
-    let presented_hardware_layers =
-        presented_hardware_cpu_transfer_layers.saturating_add(presented_hardware_native_layers);
-    let presented_p010_10_bit_hardware_layers = u64::from(execution.p010_10_bit_hardware_layers);
-    let hardware_execution_percent = percent(presented_hardware_layers, presented_media_layers);
-    let p010_execution_percent = percent(
-        presented_p010_10_bit_hardware_layers,
-        presented_media_layers,
-    );
-    if presented_media_layers == 0 {
-        push_failure(
-            &mut failures,
-            "hardware_decode_not_observed",
-            "presented media layers with frame-local decode provenance",
-            "0 layers",
-            "headless Viewer GPU completion records",
-        );
-    } else if hardware_execution_percent < required_hardware_execution_percent as u64 {
-        push_failure(
-            &mut failures,
-            "hardware_decode_coverage_below_minimum",
-            format!("at least {required_hardware_execution_percent}%"),
-            format!("{hardware_execution_percent}%"),
-            "presented Frame Demand candidates only; prefetch aggregates excluded",
-        );
-    }
-    if presented_media_layers > 0
-        && p010_execution_percent < required_hardware_execution_percent as u64
-    {
-        push_failure(
-            &mut failures,
-            "hardware_main10_surface_coverage_below_minimum",
-            format!("at least {required_hardware_execution_percent}% P010/10-bit hardware"),
-            format!("{p010_execution_percent}%"),
-            "frame-local decoded surface and sampling evidence",
-        );
-    }
-    if observation.viewer_fallback_count > 0 {
-        push_failure(
-            &mut failures,
-            "viewer_gpu_fallback_observed",
-            "0 Viewer GPU input fallbacks",
-            observation.viewer_fallback_count.to_string(),
-            observation.viewer_fallback_reasons.join(" | "),
-        );
-    }
 
     let playback = observation.playback_decode;
     let hardware_requested_frames = playback
@@ -749,12 +1040,12 @@ pub(crate) fn evaluate_professional_playback(
     PreviewProfessionalPlaybackGateReport {
         profile: "uhd_hevc_main10_hardware_1x_v5",
         required_hardware_execution_percent,
-        presented_media_layers,
-        presented_hardware_layers,
-        presented_hardware_cpu_transfer_layers,
-        presented_hardware_native_layers,
-        presented_p010_10_bit_hardware_layers,
-        hardware_execution_percent,
+        presented_media_layers: presented.presented_media_layers,
+        presented_hardware_layers: presented.presented_hardware_layers,
+        presented_hardware_cpu_transfer_layers: presented.presented_hardware_cpu_transfer_layers,
+        presented_hardware_native_layers: presented.presented_hardware_native_layers,
+        presented_p010_10_bit_hardware_layers: presented.presented_p010_10_bit_hardware_layers,
+        hardware_execution_percent: presented.hardware_execution_percent,
         hardware_requested_frames,
         fallback_cpu_not_requested_frames: playback.hardware_decode_cpu_not_requested_frames,
         fallback_cpu_unavailable_frames: playback.hardware_decode_cpu_unavailable_frames,
@@ -963,6 +1254,77 @@ mod tests {
     type PreviewDiagnostics = PreviewRuntimeAcceptanceEvidence;
     type PreviewDecodeExecutionSummary = PresentedDecodeExecutionEvidence;
     type PreviewDecodeAccessModeProfile = PlaybackDecodeExecutionEvidence;
+
+    #[test]
+    fn accepts_short_production_demux_cancellation_qualification() {
+        let media = main10_media();
+        let evidence = passing_playback_evidence();
+        let diagnostics = passing_preview_diagnostics();
+
+        let report = evaluate_playback_qualification(PreviewPlaybackQualificationObservation {
+            media: &media,
+            required_source_frames: 45_000,
+            frame_interval_ns: 40_000_000,
+            rendered_decode_execution: PreviewDecodeExecutionSummary {
+                media_layers: 100,
+                hardware_native_layers: 100,
+                p010_10_bit_hardware_layers: 100,
+                ..PreviewDecodeExecutionSummary::default()
+            },
+            viewer_fallback_count: 0,
+            viewer_fallback_reasons: &[],
+            playback_evidence: &evidence,
+            preview_diagnostics: &diagnostics,
+            cancellation_recovery: passing_cancellation_recovery(),
+        });
+
+        assert!(report.passed, "{:?}", report.failures);
+        assert_eq!(
+            report.profile,
+            "uhd_hevc_main10_isolated_demux_qualification_v1"
+        );
+        assert_eq!(report.required_source_frames, 45_000);
+    }
+
+    #[test]
+    fn short_qualification_fails_without_active_call_and_recovery_evidence() {
+        let media = main10_media();
+        let evidence = passing_playback_evidence();
+        let diagnostics = passing_preview_diagnostics();
+        let mut cancellation_recovery = passing_cancellation_recovery();
+        cancellation_recovery.stage_before_supersession =
+            mondrian_media::PreviewDecodeExecutionStage::Idle;
+        cancellation_recovery.broker_cancellation_delta = 0;
+        cancellation_recovery.media_cancellation_checkpoint_delta = 0;
+        cancellation_recovery.isolated_termination_delta = 1;
+        cancellation_recovery.isolated_checkpoint_delta = 0;
+        cancellation_recovery.recovery_presented = false;
+
+        let report = evaluate_playback_qualification(PreviewPlaybackQualificationObservation {
+            media: &media,
+            required_source_frames: 45_000,
+            frame_interval_ns: 40_000_000,
+            rendered_decode_execution: PreviewDecodeExecutionSummary {
+                media_layers: 100,
+                hardware_native_layers: 100,
+                p010_10_bit_hardware_layers: 100,
+                ..PreviewDecodeExecutionSummary::default()
+            },
+            viewer_fallback_count: 0,
+            viewer_fallback_reasons: &[],
+            playback_evidence: &evidence,
+            preview_diagnostics: &diagnostics,
+            cancellation_recovery,
+        });
+        let codes: Vec<_> = report.failures.iter().map(|failure| failure.code).collect();
+
+        assert!(!report.passed);
+        assert!(codes.contains(&"isolated_demux_active_call_unproven"));
+        assert!(codes.contains(&"cancellation_recovery_broker_evidence_missing"));
+        assert!(codes.contains(&"cancellation_recovery_media_checkpoint_missing"));
+        assert!(codes.contains(&"isolated_demux_termination_checkpoint_mismatch"));
+        assert!(codes.contains(&"post_cancellation_presentation_missing"));
+    }
 
     #[test]
     fn accepts_presented_main10_hardware_execution() {
@@ -1452,6 +1814,19 @@ mod tests {
             final_sample_count: PROCESS_MEMORY_MIN_WINDOW_SAMPLES,
             final_average_private_committed_bytes: 544 * 1024 * 1024,
             post_stress_private_committed_bytes: Some(560 * 1024 * 1024),
+        }
+    }
+
+    fn passing_cancellation_recovery() -> PreviewCancellationRecoveryEvidence {
+        PreviewCancellationRecoveryEvidence {
+            stage_before_supersession: mondrian_media::PreviewDecodeExecutionStage::PacketRead,
+            superseded_target_frame: 33_750,
+            recovery_target_frame: 11_250,
+            broker_cancellation_delta: 1,
+            media_cancellation_checkpoint_delta: 1,
+            isolated_termination_delta: 0,
+            isolated_checkpoint_delta: 0,
+            recovery_presented: true,
         }
     }
 

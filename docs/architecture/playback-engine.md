@@ -880,11 +880,13 @@ pool resident, so entry/byte/resource-unit limits are necessary but not a
 transport-idle release boundary. Once transport is stopped, Broker
 pending/queued/in-flight work is zero, the current intent is not pending, and a
 final registered GPU Viewer output has been proved for the active Preview
-generation, the Production Runtime clears media payloads and the oversize media pin while
-preserving that Viewer output, its stale-presentation pin, and terminal-failure
-memory. Preview workers independently clear their explicitly owned
-`PreviewDecodeSessionContext` after the two-second idle timeout; together these
-two ownership releases let
+generation, the Production Runtime clears media payloads and the oversize media
+pin while preserving that Viewer output, its stale-presentation pin, and
+terminal-failure memory. The release also advances the worker-owned decoder
+residency revision; each worker clears its explicitly owned
+`PreviewDecodeSessionContext` before returning to `Idle`. Acceptance polls the
+worker stage, active-helper count, and launch-to-post-reap accounting rather
+than sleeping for an assumed timeout. Together these two ownership releases let
 the driver surface pool disappear without blanking the paused Viewer. Any
 active or unresolved work makes the release fail closed.
 
@@ -1458,6 +1460,20 @@ protocol/process/FFmpeg failure or forced close fails the profile. Cancellation
 termination remains a reported fact and is evaluated with the separate
 Broker-owned cancellation timing evidence rather than being inferred from a
 missing process.
+The ignored
+`preview_media_professional_4k_hevc_main10_isolated_demux_qualification_gate`
+is the bounded prerequisite for investing in that long run. It uses the same
+generated 30-minute source contract but plays only 25 real-cadence frames,
+performs cross-region and latest-wins seeks, observes a live helper Seek or
+PacketRead, supersedes it, and requires Broker cancellation, a concrete media
+checkpoint, recovery-frame GPU presentation, complete helper reaping, P010
+hardware provenance, queue quiescence, and Frame Store budgets in the
+versioned `uhd_hevc_main10_isolated_demux_qualification_v1` report. Local I/O
+may finish the observed call just before generation rotation, so the real gate
+does not invent a mandatory helper kill; if termination occurs, its checkpoint
+must agree. Packaged synthetic tests deterministically prove in-call kill/reap
+for InputOpen, StreamInfo, Seek, and PacketRead. This short qualification does
+not satisfy 30-minute cadence, memory plateau, or fixed-machine acceptance.
 Its Adapter derives a non-overridable minimum frame count from 30 minutes and
 the probed rational cadence, uses Playback Evidence's bounded whole-run
 aggregates, pauses transport, completes 50 approximate warm plus 50 exact
@@ -1466,8 +1482,10 @@ cross-region seeks through the same GPU presentation path, and then schedules a
 requires warm p95 at or below 200 ms, accurate p95 at or below 500 ms, at least
 99 superseded-seek observations, zero temporally approximate frames from the
 deterministic accurate-seek access mode, no rejected old terminal delivery, and
-zero Broker pending/queued/in-flight residency after the burst. After decoder
-worker idle and media-only Frame Store release, the same report must also show
+zero Broker pending/queued/in-flight residency after the burst. After every
+decoder worker reaches `Idle`, helpers have zero active processes and complete
+post-reap lifecycle accounting, and media-only Frame Store release succeeds,
+the same report must also show
 zero retained media entries/resource units/pin before its post-stress process
 memory sample; a still-usable final Viewer output remains presentation evidence.
 The same Adapter takes a native whole-process memory sample at a fixed one-second
@@ -1576,12 +1594,18 @@ successful frame requests and EOF; it is not spawned per frame and never
 switches sources. Parent cancellation disconnects IPC, terminates and reaps it,
 poisons the packet source, and records `IsolatedDemuxTermination` at the actual
 Seek or PacketRead checkpoint instead of forging an `FfmpegIoInterrupt` return.
+Because that source can never resume, the worker retires the complete paired
+packet-source/codec Session immediately; the normal recoverable-cancellation
+codec flush is skipped instead of mutating hardware decode state immediately
+before unavoidable teardown.
 The response queue has capacity one and every serialized allocation has an
 independent hard cap, so this recovery path does not scale memory with media
 duration and remains compatible with the 8 GiB correctness class. Synthetic
 H.264/B-frame short gates prove per-mode reuse plus
-InputOpen/StreamInfo/Seek/PacketRead cancellation; the complete Video gate
-remains open until the real Main10
+InputOpen/StreamInfo/Seek/PacketRead cancellation. The real Main10 short
+qualification exercises cross-region seek, real cancellation and post-cancel
+GPU recovery through the same production path; the complete Video gate remains
+open until the real Main10
 pause/seek/close/quit and long-run evidence passes on a qualified machine.
 
 Only the complete two-gate set on a qualified `standard-playback` machine

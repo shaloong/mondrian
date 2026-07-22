@@ -2111,12 +2111,21 @@ fn decode_preview_frame_outcome_in_sessions(
                 Ok(PreviewDecodeOutcome::NativeGpuFrame(frame))
             }
             PreviewDecodeOutcome::Canceled(cancellation) => {
-                session.recover_after_cancellation();
+                if cancellation_requires_session_retirement(cancellation) {
+                    execution_observer.publish_stage(PreviewDecodeExecutionStage::SessionRetire);
+                    *slot = None;
+                } else {
+                    session.recover_after_cancellation();
+                }
                 Ok(PreviewDecodeOutcome::Canceled(cancellation))
             }
         }
     };
     outcome
+}
+
+fn cancellation_requires_session_retirement(cancellation: PreviewDecodeCancellation) -> bool {
+    cancellation.source == PreviewDecodeCancellationSource::IsolatedDemuxTermination
 }
 
 fn packet_source_execution_family_matches(
@@ -2132,6 +2141,23 @@ mod session_topology_tests {
 
     fn empty_sessions() -> PreviewDecodeSessions {
         PreviewDecodeSessions { playback: None, interactive: None, cpu_still: None }
+    }
+
+    #[test]
+    fn isolated_demux_termination_retires_instead_of_flushing_the_session() {
+        assert!(cancellation_requires_session_retirement(
+            PreviewDecodeCancellation::isolated_demux_termination(
+                PreviewDecodeCancellationCheckpoint::PacketRead,
+            )
+        ));
+        assert!(!cancellation_requires_session_retirement(
+            PreviewDecodeCancellation::cooperative(PreviewDecodeCancellationCheckpoint::Codec)
+        ));
+        assert!(!cancellation_requires_session_retirement(
+            PreviewDecodeCancellation::ffmpeg_interrupt(
+                PreviewDecodeCancellationCheckpoint::PacketRead,
+            )
+        ));
     }
 
     #[test]
