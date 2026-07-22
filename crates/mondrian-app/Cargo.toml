@@ -62,8 +62,8 @@ tracing-subscriber = { workspace = true }
 
 rfd       = "0.15"
 image     = { workspace = true }
-usvg = "0.45"
-resvg = "0.45"
+usvg      = { workspace = true }
+resvg     = { workspace = true }
 tiny-skia = "0.11"
 
 # 异步

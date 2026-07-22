@@ -53,6 +53,23 @@ binding while preserving its logical ID. UI labels may describe physical stream
 indices, language, title, and layout, but those indices never enter Timeline
 authoring payloads.
 
+## Product SVG Capability
+
+Bundled product SVGs are static UI artwork, not a general document or title
+format. Their admitted subset is path/group geometry with fill, stroke, clip,
+gradient, and transform semantics. The repository's SVG corpus contains no
+text nodes, embedded raster images, remote resources, or foreign objects, and
+the `usvg`/`resvg` dependencies therefore disable their default text,
+system-font, memory-mapped-font, and raster-image features. `VectorIcon`
+normalizes this subset into retained meshes and an optional cached raster; the
+app favicon uses the same path-only rasterizer.
+
+Adding an unsupported SVG feature requires an explicit capability decision,
+new adversarial parsing/raster tests, and a dependency review. It must not
+silently widen every UI process's parser surface. Timeline titles and imported
+visual media use their own typed authoring and media pipelines and must never
+be routed through the product-icon parser.
+
 ## Focus and Accessibility
 
 Focus ownership is not the same as visible focus indication. `FocusSource::Keyboard` may show a focus ring; pointer/programmatic focus owns keyboard input but normally does not show the ring.

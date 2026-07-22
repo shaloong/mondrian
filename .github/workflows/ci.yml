@@ -268,17 +268,8 @@ jobs:
             libavdevice-dev libswscale-dev libswresample-dev \
             libasound2-dev pkg-config
 
-      - name: 验证产品入口只启动 app UI
-        run: cargo test -p mondrian-app --test product_entrypoint_contract
-
-      - name: 运行 app UI 核心测试
-        run: cargo test -p mondrian-app app_ui
-
-      - name: 运行 app 作者域、Action、项目与生产运行时测试
-        run: cargo test -p mondrian-app --lib app::
-
-      - name: 运行 app 跨模块集成测试
-        run: cargo test -p mondrian-app --test integration_tests
+      - name: 运行完整 app 产品测试
+        run: cargo test -p mondrian-app --all-targets
 
       - name: 运行 app UI primitive/draw-command renderer 测试
         run: cargo test -p mondrian-ui-renderer

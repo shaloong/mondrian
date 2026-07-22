@@ -77,7 +77,7 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 
 ### 2.1 当前最重要的结构性风险
 
-1. **产品证据弱于代码广度。** 测试数量很多，但 CI 主测试排除了完整 `mondrian-app`，真实 GPU、真实硬解、真实音频设备和长项目主要依赖手动/ignored smoke。
+1. **专用硬件证据弱于代码广度。** PR CI 已在独立 App UI Gate 中运行 `mondrian-app --all-targets`，不再靠测试名过滤作者域或 UI 子集；但真实 GPU、真实硬解、真实音频设备和长项目仍主要依赖 Windows 专用 runner/ignored 门禁，不能用普通 CI 通过代替 Golden Project 与设备证据。
 2. **关键复杂度已按行为形成明确 Locality。** Window/Headless 的完成收割、终态 Delivery 与预卷顺序统一在 UI 无关 `app::playback_preview`；`app::preview_execution` 原子拥有 generation binding、pending、执行质量、候选 ID、完整 output key、UI 无关 GPU execution contract 与 exact registered-output reuse；`app::preview_media_source` 从不可变素材记录与完整 Viewer 意图唯一解析 source/proxy 指纹、色彩/range/Alpha、native surface、代理意图与 canonical decode geometry，缺文件和色彩拒绝不再坍缩为无原因的 `None`；`app::preview_media_task` 独占具体 FFmpeg worker、协作取消观察、结构化终态结果和有界关闭，Window/Headless 不再各自拥有解码循环；`app::preview_media_frame` 以封闭单 payload（working CPU/source-domain/native surface）拥有解码驻留、惰性 working adaptation、质量/provenance、逻辑/采样几何及 reservation，空帧和矛盾 residency 已不可表达；`app::preview_timeline_execution` 是 canonical render-plan traversal、嵌套 Sequence lookup/depth、每个 Sequence 独立画布/共享 runtime quality、嵌套 working-space 合成与转换、typed pending/unavailable、Ready 必备 cache identity 和有序 execution facts 的单一实现；其 read-only media-demand collection 同时服务 prefetch、preroll 与输入色彩 evidence，Window 不再维护调度专用 nested walker；`app::preview_viewer_plan` 统一拥有 resolved element、稳定 cache identity、质量/provenance 聚合、deferred composite 分类与 GPU lowering；`app::preview_cpu_execution` 统一拥有 working-linear preparation/composite、Program Output、monitor adaptation、完整执行事实与阶段耗时；`app::preview_runtime::PreviewProductionRuntime<O>` 是 Window/Headless 共用的唯一生产组合根，`app::preview_frame_store::PreviewFrameStoreAdapter` 是其唯一 Frame Store Adapter；`app::preview_raster_frame` 拥有最终 CPU raster 的有效性、编码色彩、资源身份和内存 reservation，缓存与 stale pin 不再保存 Widget payload；跨 Renderer/显示契约/Window/Headless 的 GPU output blocker taxonomy 与 aggregate 由 UI 无关 `app::preview_gpu_output_blocker` 拥有；缓存驻留/淘汰算法由 `mondrian-playback::PreviewFrameStore` 拥有，GPU/CPU 色彩与合成数学由 renderer 拥有。`app::preview_runtime` 以 media adapter、presentation、request scheduler、result pump、service lifecycle、hardware admission、evidence 与分层 diagnostics 深 Module 保持 Locality；`app_ui::preview` 只保留 GPU 输出 Widget 注册、CPU raster 无拷贝转换和 panel diagnostics 投影；timeline evaluation 文件只适配 media outcome 与 execution facts，不再拥有递归语义；presentation 单独拥有最终 GPU/Raster/stale/CPU output 仲裁及唯一 `PreviewRasterFrame`→`ViewerFrameImage` 转换。该具体 Adapter 主协调器已完成职责级收敛；performance diagnostics 作为一套完整版本化规则书保留 locality，不按行数机械切碎。导出已把 admission/lifecycle/cancellation/evidence 拆到独立深 service；Timeline/音频/色彩/编码执行继续保留在同一 Export implementation 内，后续只在形成完整深职责时再拆，不按行数制造浅文件。
 3. **当前 Alpha 项目版本化有严格拒绝、尚无兼容迁移。** 这是未发布 Alpha 的有意清理策略；一旦发布首个承诺兼容的 Alpha，之后每次 schema 变化必须同时提交旧 fixture、事务迁移、失败不覆盖和升级后重开证据，不能继续靠拒绝真实用户项目。
 4. **声明能力和视觉执行能力可能分离。** 某些效果、文字和转场已有类型或属性，却没有主路径 render op；路线图不得把它们列为已完成。
@@ -318,7 +318,7 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 
 - `cargo fmt --all -- --check`。
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`。
-- workspace unit/integration tests，且完整 app domain/action/project tests 不再仅因 crate 名被整体排除。
+- workspace unit/integration tests；独立 App UI Gate 必须运行 `mondrian-app --all-targets`，不得用 `app::`/`app_ui` 名称过滤冒充完整产品覆盖。
 - 项目 schema/migration fixtures、timeline semantic tests、renderer golden、preview/export parity、UI component extremes。
 
 **Windows nightly/专用 runner 必须：**
