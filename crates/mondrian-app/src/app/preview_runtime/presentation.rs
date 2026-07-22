@@ -208,10 +208,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 .map(PreviewPresentationState::Stale)
                 .unwrap_or(PreviewPresentationState::Loading),
             PreviewTimelineResolution::Empty => {
-                PreviewPresentationState::Unavailable(PreviewUnavailability::no_content(
-                    PreviewOutputStage::TimelineEvaluation,
-                    "current Timeline position contains no visible elements",
-                ))
+                self.execution
+                    .borrow_mut()
+                    .set_presentation_quality(mondrian_playback::FramePresentationQuality::Ready);
+                PreviewPresentationState::Transparent
             }
             PreviewTimelineResolution::Unavailable { reason } => {
                 PreviewPresentationState::Unavailable(reason)
@@ -253,7 +253,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         &self,
         state: PreviewPresentationState<O>,
     ) -> PreviewPresentationState<O> {
-        if matches!(state, PreviewPresentationState::Unavailable(_)) {
+        if matches!(
+            state,
+            PreviewPresentationState::Transparent | PreviewPresentationState::Unavailable(_)
+        ) {
             self.clear_terminal_viewer_state();
         }
         self.record_preview_state(&state);
@@ -263,6 +266,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     fn record_preview_state(&self, state: &PreviewPresentationState<O>) {
         match state {
             PreviewPresentationState::Ready(_) => bump(&self.metrics.ready_frames),
+            PreviewPresentationState::Transparent => bump(&self.metrics.ready_frames),
             PreviewPresentationState::Loading => bump(&self.metrics.loading_frames),
             PreviewPresentationState::Stale(_) => bump(&self.metrics.stale_frames),
             PreviewPresentationState::Unavailable(reason) => {

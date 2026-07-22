@@ -2,6 +2,7 @@ use super::*;
 use crate::app::preview_raster_frame::PreviewRasterColorSpace;
 use crate::app::preview_unavailability::PreviewUnavailabilityDisposition;
 use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
+use crate::app_ui::playback_feedback::ViewerPlaybackFeedback;
 use crate::app_ui::preview::{WindowPreviewAdapter, WindowPreviewOutputRegistration};
 use mondrian_ui_widgets::{
     ViewerExternalTexturePresentation, ViewerFrameContent, ViewerFrameImage,
@@ -616,6 +617,7 @@ fn paused_gpu_candidate_carries_untimed_presentation_authority() {
     let frame = match service.gpu_preview_frame_for_state(&state) {
         PreviewGpuFrameState::Ready(frame) => frame,
         PreviewGpuFrameState::Current => panic!("expected new GPU preview candidate"),
+        PreviewGpuFrameState::Transparent => panic!("expected rendered GPU preview candidate"),
         PreviewGpuFrameState::Loading => panic!("expected ready GPU preview candidate"),
         PreviewGpuFrameState::Unavailable(_) => {
             panic!("expected available GPU preview candidate")
@@ -5119,7 +5121,7 @@ fn unsupported_media_plan_returns_no_partial_preview() {
 }
 
 #[test]
-fn empty_root_timeline_is_no_content_and_breaks_stale_reuse() {
+fn empty_root_timeline_is_a_transparent_presentation_and_breaks_stale_reuse() {
     let service = WindowPreviewAdapter::new();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     let _ = ready_frame(service.viewer_preview_for_state(&state));
@@ -5129,22 +5131,44 @@ fn empty_root_timeline_is_no_content_and_breaks_stale_reuse() {
     assert!(service.stale_frame_for_sequence(sequence, width, height).is_some());
 
     state.sequence.as_mut().expect("sequence").video_tracks[0].clips.clear();
-    let ViewerPreviewState::Unavailable(reason) = service.viewer_preview_for_state(&state) else {
-        panic!("empty root Timeline must have a typed no-content result");
-    };
-
-    assert_eq!(
-        reason.disposition(),
-        PreviewUnavailabilityDisposition::NoContent
-    );
-    assert_eq!(reason.stage(), PreviewOutputStage::TimelineEvaluation);
-    assert_eq!(reason.code(), "preview.no_content.timeline");
+    assert!(matches!(
+        service.viewer_preview_for_state(&state),
+        ViewerPreviewState::Transparent
+    ));
     let sequence = state.sequence.as_ref().expect("sequence");
     assert_eq!(sequence.id, sequence_id);
     assert!(service.stale_frame_for_sequence(sequence, width, height).is_none());
     let diagnostics = service.diagnostics();
-    assert_eq!(diagnostics.unavailability.no_content, 1);
-    assert_eq!(diagnostics.unavailability.stages.timeline_evaluation, 1);
+    assert_eq!(diagnostics.unavailability.no_content, 0);
+    assert_eq!(diagnostics.unavailability.stages.timeline_evaluation, 0);
+}
+
+#[test]
+fn transparent_timeline_presentation_completes_the_exact_playback_demand() {
+    let service = WindowPreviewAdapter::new();
+    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    let sequence = state.sequence.as_mut().expect("sequence");
+    let time_base = sequence.time_base();
+    sequence.video_tracks[0].clips[0].position = tt(20, time_base);
+    state.seek(0);
+    state.play();
+    let demand = state.pending_playback_frame_demand_identity().expect("playback demand");
+
+    assert!(matches!(
+        service.viewer_preview_for_state(&state),
+        ViewerPreviewState::Transparent
+    ));
+    assert_eq!(
+        ViewerPlaybackFeedback::from_preview_state(&ViewerPreviewState::Transparent),
+        ViewerPlaybackFeedback::Ready
+    );
+    let ticket = service
+        .playback_presentation_ticket(&state)
+        .expect("transparent canvas presentation ticket");
+    assert_eq!(ticket.identity(), demand);
+    state.complete_frame_presentation(ticket, Instant::now());
+    assert!(state.pending_playback_frame_demand_identity().is_none());
+    assert_eq!(state.playback_evidence_report().deliveries.ready, 1);
 }
 
 #[test]
@@ -7224,6 +7248,32 @@ fn playback_prefetch_tops_up_by_actual_jobs_across_tracks() {
             prefetch_window.saturating_sub(1) as u64,
             "prefetch must fill only the remaining job slots even when a future frame has multiple active tracks"
         );
+    service.shutdown();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn playback_prefetch_primes_the_next_media_activation_across_a_blank_gap() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let (mut state, _, root) = state_with_invalid_video_asset();
+    let sequence = state.sequence.as_mut().expect("sequence");
+    let steady_window = media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
+        .expect("valid sequence frame rate");
+    let activation_frame = steady_window as i64 + 12;
+    let time_base = sequence.time_base();
+    sequence.video_tracks[0].clips[0].position = tt(activation_frame, time_base);
+    state.seek(0);
+    state.play();
+    let sequence = state.sequence.as_ref().expect("sequence");
+    let (width, height) = preview_dimensions_for_sequence(sequence);
+
+    service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
+
+    let diagnostics = service.diagnostics();
+    assert_eq!(
+        diagnostics.worker_queue.queued_prefetch_jobs, 1,
+        "one bounded cold-start request should cross the blank gap without enlarging the steady frame buffer"
+    );
     service.shutdown();
     let _ = std::fs::remove_dir_all(root);
 }

@@ -57,6 +57,7 @@ impl ViewerPreviewSource for WindowPreviewAdapter {
             PreviewPresentationState::Ready(content) => viewer_frame_content(content)
                 .map(ViewerPreviewState::Ready)
                 .unwrap_or_else(ViewerPreviewState::Unavailable),
+            PreviewPresentationState::Transparent => ViewerPreviewState::Transparent,
             PreviewPresentationState::Loading => ViewerPreviewState::Loading,
             PreviewPresentationState::Stale(content) => viewer_frame_content(content)
                 .map(ViewerPreviewState::Stale)

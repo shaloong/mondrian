@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use mondrian_editor_state::state::WorkspacePreset;
 use mondrian_ui_theme::ThemePreference;
+use mondrian_ui_widgets::ViewerCanvasBackground;
 use mondrian_ui_widgets::WaveformDisplay;
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +43,9 @@ pub struct AppUiPreferences {
     /// Waveform display mode for audio clips on the timeline.
     #[serde(default)]
     pub waveform_display: WaveformDisplay,
+    /// Presentation-only background visible through transparent Viewer pixels.
+    #[serde(default)]
+    pub viewer_canvas_background: ViewerCanvasBackground,
 }
 
 impl Default for AppUiPreferences {
@@ -54,6 +58,7 @@ impl Default for AppUiPreferences {
             shortcut_overrides: Vec::new(),
             custom_workspace_layout: None,
             waveform_display: WaveformDisplay::BottomAligned,
+            viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
         }
     }
 }
@@ -197,6 +202,7 @@ mod tests {
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
+                viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
             })
             .expect("serialize preferences"),
         )
@@ -222,6 +228,7 @@ mod tests {
                 binding: None,
             }],
             waveform_display: WaveformDisplay::BottomAligned,
+            viewer_canvas_background: ViewerCanvasBackground::Black,
             custom_workspace_layout: Some(AppUiWorkspaceLayout::Split {
                 direction: SplitDirection::Horizontal,
                 ratio: 0.37,
@@ -264,6 +271,7 @@ mod tests {
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 waveform_display: WaveformDisplay::BottomAligned,
+                viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
                 custom_workspace_layout: Some(AppUiWorkspaceLayout::Split {
                     direction: SplitDirection::Vertical,
                     ratio: 12.0,
@@ -324,6 +332,7 @@ mod tests {
                 recent_projects: Vec::new(),
                 shortcut_overrides: Vec::new(),
                 waveform_display: WaveformDisplay::BottomAligned,
+                viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
                 custom_workspace_layout: Some(AppUiWorkspaceLayout::Panel {
                     kind: mondrian_editor_state::state::PanelKind::Assets,
                     active_index: 0,
@@ -391,6 +400,7 @@ mod tests {
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
+                viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
             })
             .expect("serialize preferences"),
         )
@@ -420,6 +430,7 @@ mod tests {
                 ],
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
+                viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
             })
             .expect("serialize preferences"),
         )

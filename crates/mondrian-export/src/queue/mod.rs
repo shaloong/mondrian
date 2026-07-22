@@ -4756,6 +4756,22 @@ mod tests {
         for px in canvas.chunks_exact(4) {
             assert_eq!(px, &[0, 0, 0, 255]);
         }
+
+        let mut alpha_canvas = vec![77u8; 4 * 2 * 4];
+        render_timeline_frame_into(
+            &timeline,
+            0,
+            4,
+            2,
+            ExportAlphaMode::Preserve,
+            &mut alpha_canvas,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("alpha-preserving empty render should pass");
+        assert!(alpha_canvas.chunks_exact(4).all(|pixel| pixel == [0, 0, 0, 0]));
     }
 
     #[test]

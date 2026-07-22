@@ -24,16 +24,17 @@ use crate::app::preview_execution::{PreviewGpuFrame, PreviewGpuFrameState};
 use crate::app::preview_runtime::PreviewColorRejection;
 use crate::app::ui_actions::{
     AssetsOpenFolderPayload, PreferencesShortcutPayload, PreferencesShortcutReboundPayload,
-    PreferencesThemePayload, PreferencesWaveformDisplayPayload,
+    PreferencesThemePayload, PreferencesViewerBackgroundPayload, PreferencesWaveformDisplayPayload,
     APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
     APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
     APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
     APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PENDING_CLOSE_CANCEL, APP_SHELL_PENDING_CLOSE_DISCARD,
     APP_SHELL_PENDING_CLOSE_SAVE_CONTINUE, APP_SHELL_PREFERENCES_SHORTCUT_DISABLED,
     APP_SHELL_PREFERENCES_SHORTCUT_REBOUND, APP_SHELL_PREFERENCES_SHORTCUT_RESET,
-    APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_PREFERENCES_WAVEFORM_DISPLAY_CHANGED,
-    APP_SHELL_QUIT, APP_SHELL_RECOVER_PROJECT, APP_SHELL_WINDOW_DRAG, APP_SHELL_WINDOW_MINIMIZE,
-    APP_SHELL_WINDOW_TOGGLE_MAXIMIZE, ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER,
+    APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_PREFERENCES_VIEWER_BACKGROUND_CHANGED,
+    APP_SHELL_PREFERENCES_WAVEFORM_DISPLAY_CHANGED, APP_SHELL_QUIT, APP_SHELL_RECOVER_PROJECT,
+    APP_SHELL_WINDOW_DRAG, APP_SHELL_WINDOW_MINIMIZE, APP_SHELL_WINDOW_TOGGLE_MAXIMIZE,
+    ASSETS_NAMESPACE, ASSETS_OPEN_FOLDER,
 };
 use crate::app::waveform_service::AudioWaveformService;
 use crate::app::{discover_crash_recovery_candidates, AppState, CrashRecoveryCandidate};
@@ -579,7 +580,7 @@ impl AppUiHost {
                 tracing::warn!("custom UI action failed: {err}");
             }
             if lightweight_transport_refresh {
-                self.refresh_transport_state_without_preview();
+                self.refresh_transport_intent_without_preview();
             } else {
                 self.mark_dirty();
             }
@@ -611,6 +612,11 @@ impl AppUiHost {
     fn refresh_transport_state_without_preview(&mut self) {
         let state = self.app_state.borrow();
         self.root.refresh_playback_frame_from_app_state(&state, None);
+    }
+
+    fn refresh_transport_intent_without_preview(&mut self) {
+        let state = self.app_state.borrow();
+        self.root.refresh_transport_intent_from_app_state(&state);
     }
 
     fn is_action_enabled(&self, action: &Action) -> bool {
@@ -784,6 +790,9 @@ impl AppUiHost {
                     }
                     PreferencesUpdate::WaveformDisplay(payload) => {
                         self.preferences.waveform_display = payload.mode;
+                    }
+                    PreferencesUpdate::ViewerBackground(payload) => {
+                        self.preferences.viewer_canvas_background = payload.background;
                     }
                     PreferencesUpdate::ShortcutDisabled(payload) => {
                         if !is_known_shortcut_id(&payload.id) {
@@ -1298,6 +1307,7 @@ fn apply_shortcut_rebind(
 enum PreferencesUpdate {
     Theme(PreferencesThemePayload),
     WaveformDisplay(PreferencesWaveformDisplayPayload),
+    ViewerBackground(PreferencesViewerBackgroundPayload),
     ShortcutDisabled(PreferencesShortcutPayload),
     ShortcutReset(PreferencesShortcutPayload),
     ShortcutRebound(PreferencesShortcutReboundPayload),
@@ -1317,6 +1327,12 @@ fn parse_preferences_update(
                 && name == APP_SHELL_PREFERENCES_WAVEFORM_DISPLAY_CHANGED =>
         {
             Some(serde_json::from_value(payload.clone()).map(PreferencesUpdate::WaveformDisplay))
+        }
+        Action::Custom { namespace, name, payload }
+            if namespace == APP_SHELL_NAMESPACE
+                && name == APP_SHELL_PREFERENCES_VIEWER_BACKGROUND_CHANGED =>
+        {
+            Some(serde_json::from_value(payload.clone()).map(PreferencesUpdate::ViewerBackground))
         }
         Action::Custom { namespace, name, payload }
             if namespace == APP_SHELL_NAMESPACE
@@ -1369,7 +1385,7 @@ mod tests {
     use mondrian_ui_core::widget::EventContext;
     use mondrian_ui_core::{EventRequests, EventResult, UiEvent, Widget};
     use mondrian_ui_theme::{current_theme, ThemePreference, ThemePreset};
-    use mondrian_ui_widgets::WaveformDisplay;
+    use mondrian_ui_widgets::{ViewerCanvasBackground, WaveformDisplay};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2302,6 +2318,7 @@ mod tests {
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
+                viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
             },
             temp_preferences_path("initial-workspace"),
         );
@@ -2310,6 +2327,39 @@ mod tests {
 
         assert_eq!(host.root().workspace_preset(), WorkspacePreset::Compositing);
         assert!((host.root().dock().ratio() - 0.42).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn host_persists_and_applies_viewer_canvas_background_preference() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let path = temp_preferences_path("viewer-canvas-background");
+        let mut host = AppUiHost::new_with_preferences_path(
+            workspace_app_state(),
+            AppUiPreferences::default(),
+            path.clone(),
+        );
+        let pending = PendingUiActions::default();
+        pending.push(
+            crate::app::ui_actions::app_shell_preferences_viewer_background_changed_action(
+                ViewerCanvasBackground::Black,
+            ),
+        );
+
+        host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(
+            host.preferences().viewer_canvas_background,
+            ViewerCanvasBackground::Black
+        );
+        assert_eq!(
+            load_app_ui_preferences_from(&path).viewer_canvas_background,
+            ViewerCanvasBackground::Black
+        );
+        std::fs::remove_file(path).ok();
     }
 
     #[test]
@@ -2341,6 +2391,7 @@ mod tests {
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: Some(layout.clone()),
                 waveform_display: WaveformDisplay::BottomAligned,
+                viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
             },
             temp_preferences_path("initial-custom-workspace"),
         );
@@ -2739,6 +2790,7 @@ mod tests {
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
+                viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
             },
             path.clone(),
         );
@@ -2839,6 +2891,7 @@ mod tests {
                 shortcut_overrides: Vec::new(),
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
+                viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
             },
             path.clone(),
         );

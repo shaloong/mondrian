@@ -3,6 +3,9 @@
 use super::*;
 use crate::app::preview_timeline_execution::collect_preview_timeline_media_demands;
 
+const MEDIA_PREVIEW_COLD_ACTIVATION_LOOKAHEAD_US: u64 = 2_000_000;
+const MEDIA_PREVIEW_COLD_ACTIVATION_MAX_FRAMES: i64 = 120;
+
 impl<O: Clone> PreviewProductionRuntime<O> {
     pub(super) fn schedule_media_prefetches(
         &self,
@@ -59,11 +62,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             .then(|| state.playback_frame_deadline_at(Instant::now()))
             .flatten();
         let mut remaining_prefetch_jobs = prefetch_slots_available;
+        let mut steady_window_has_media = false;
         for offset in 1..=prefetch_window_frames as i64 {
             if remaining_prefetch_jobs == 0 {
                 break;
             }
-            self.schedule_media_prefetch_for_sequence(
+            steady_window_has_media |= self.schedule_media_prefetch_for_sequence(
                 state,
                 sequence,
                 frame.saturating_add(offset),
@@ -73,6 +77,26 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 &mut remaining_prefetch_jobs,
                 preroll_deadline_at,
             );
+        }
+        if remaining_prefetch_jobs > 0 && !steady_window_has_media {
+            let activation_horizon =
+                media_preview_cold_activation_lookahead_frames(sequence.settings.frame_rate);
+            let after_frame = frame.saturating_add(prefetch_window_frames as i64);
+            let horizon_frame = frame.saturating_add(activation_horizon);
+            if let Some(activation_frame) =
+                next_root_media_activation_frame(sequence, after_frame, horizon_frame)
+            {
+                self.schedule_media_prefetch_for_sequence(
+                    state,
+                    sequence,
+                    activation_frame,
+                    target_width,
+                    target_height,
+                    color_context,
+                    &mut remaining_prefetch_jobs,
+                    None,
+                );
+            }
         }
     }
 
@@ -86,9 +110,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         color_context: ColorContext,
         remaining_prefetch_jobs: &mut usize,
         preroll_deadline_at: Option<Instant>,
-    ) {
+    ) -> bool {
         if *remaining_prefetch_jobs == 0 {
-            return;
+            return false;
         }
         let demands = collect_preview_timeline_media_demands(
             sequence,
@@ -99,8 +123,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             color_context,
         );
         let Ok(demands) = demands else {
-            return;
+            return false;
         };
+        let has_media = !demands.is_empty();
 
         for demand in demands {
             if *remaining_prefetch_jobs == 0 {
@@ -134,6 +159,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 }
             }
         }
+        has_media
     }
 
     /// Inspect the same bounded forward media window used by playback prefetch.
@@ -373,4 +399,45 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             }
         }
     }
+}
+
+fn media_preview_cold_activation_lookahead_frames(frame_rate: mondrian_core::Rational) -> i64 {
+    let fps = frame_rate.to_f64();
+    if !fps.is_finite() || fps <= 0.0 {
+        return 0;
+    }
+    (((MEDIA_PREVIEW_COLD_ACTIVATION_LOOKAHEAD_US as f64 / 1_000_000.0) * fps).ceil() as i64)
+        .clamp(1, MEDIA_PREVIEW_COLD_ACTIVATION_MAX_FRAMES)
+}
+
+fn next_root_media_activation_frame(
+    sequence: &Sequence,
+    after_frame: i64,
+    horizon_frame: i64,
+) -> Option<i64> {
+    sequence
+        .video_tracks
+        .iter()
+        .filter(|track| track.is_visible && !track.is_muted)
+        .flat_map(|track| track.clips.iter())
+        .filter(|clip| {
+            !clip.is_disabled
+                && clip.duration > mondrian_core::TimelineTime::ZERO
+                && matches!(
+                    clip.kind,
+                    mondrian_core::timeline_data::ClipKind::Media
+                        | mondrian_core::timeline_data::ClipKind::NestedSequence
+                )
+        })
+        .filter_map(|clip| {
+            clip.position
+                .to_frame_position(
+                    sequence.settings.frame_rate,
+                    mondrian_core::FrameRounding::Ceil,
+                )
+                .ok()
+                .map(|position| position.frame)
+        })
+        .filter(|frame| *frame > after_frame && *frame <= horizon_frame)
+        .min()
 }

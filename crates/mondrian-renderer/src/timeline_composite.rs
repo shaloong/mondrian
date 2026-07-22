@@ -1267,6 +1267,30 @@ mod tests {
     }
 
     #[test]
+    fn empty_program_frame_preserves_alpha_or_flattens_to_black_by_output_contract() {
+        let mut scratch = TimelineCompositeScratch::default();
+        let transparent = composite_timeline_elements(
+            2,
+            1,
+            &[],
+            TimelineCompositeOptions::default(),
+            &mut scratch,
+        )
+        .expect("transparent empty program frame");
+        assert_eq!(transparent, vec![0, 0, 0, 0, 0, 0, 0, 0]);
+
+        let opaque = composite_timeline_elements(
+            2,
+            1,
+            &[],
+            TimelineCompositeOptions::opaque_black(),
+            &mut scratch,
+        )
+        .expect("opaque empty program frame");
+        assert_eq!(opaque, vec![0, 0, 0, 255, 0, 0, 0, 255]);
+    }
+
+    #[test]
     fn media_effects_are_applied_before_compositing() {
         let mut scratch = TimelineCompositeScratch::default();
         let media = working_frame(&[120, 80, 40, 255], 1, 1);

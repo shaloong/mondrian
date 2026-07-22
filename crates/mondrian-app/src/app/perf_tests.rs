@@ -3747,6 +3747,13 @@ fn execute_headless_gpu_candidate(
             observe_playback_video_preroll(state, preview_service);
             Ok(HeadlessGpuCandidateStatus::Ready)
         }
+        crate::app::preview_execution::PreviewGpuFrameState::Transparent => {
+            if let Some(ticket) = preview_service.playback_presentation_ticket(state) {
+                state.complete_frame_presentation(ticket, Instant::now());
+            }
+            observe_playback_video_preroll(state, preview_service);
+            Ok(HeadlessGpuCandidateStatus::Ready)
+        }
         crate::app::preview_execution::PreviewGpuFrameState::Loading => {
             Ok(HeadlessGpuCandidateStatus::Loading)
         }
@@ -4019,6 +4026,7 @@ fn wait_for_preview_ready_until(
                 let _ =
                     preview_service.poll_finished(state.pending_playback_frame_demand_identity());
             }
+            ViewerPreviewState::Transparent => return Ok(()),
         }
         if started_at.elapsed() > timeout {
             anyhow::bail!(

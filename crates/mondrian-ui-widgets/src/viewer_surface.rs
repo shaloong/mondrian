@@ -65,6 +65,17 @@ impl ViewerMetrics {
 /// RGBA preview image presented by [`ViewerSurface`].
 pub type ViewerFrameImage = RasterImage;
 
+/// Presentation-only background shown through transparent Viewer pixels.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewerCanvasBackground {
+    /// Show alpha with a checkerboard pattern.
+    #[default]
+    Checkerboard,
+    /// Show alpha over opaque display black.
+    Black,
+}
+
 /// Renderer-registered GPU preview texture presented by [`ViewerSurface`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewerExternalTextureFrame {
@@ -297,6 +308,7 @@ pub struct ViewerSurface {
     playing: bool,
     enabled: bool,
     frame_content: Option<ViewerFrameContent>,
+    canvas_background: ViewerCanvasBackground,
     empty_message: Option<String>,
     hovered_control: Option<ViewerControl>,
     pressed_control: Option<ViewerControl>,
@@ -338,6 +350,7 @@ impl ViewerSurface {
             playing: false,
             enabled: true,
             frame_content: None,
+            canvas_background: ViewerCanvasBackground::default(),
             empty_message: None,
             hovered_control: None,
             pressed_control: None,
@@ -443,6 +456,17 @@ impl ViewerSurface {
     pub fn with_frame_content(mut self, frame_content: ViewerFrameContent) -> Self {
         self.frame_content = Some(frame_content);
         self
+    }
+
+    /// Select the presentation-only background visible through transparent pixels.
+    pub fn with_canvas_background(mut self, background: ViewerCanvasBackground) -> Self {
+        self.canvas_background = background;
+        self
+    }
+
+    /// Update the presentation-only transparent-pixel background.
+    pub fn set_canvas_background(&mut self, background: ViewerCanvasBackground) {
+        self.canvas_background = background;
     }
 
     /// Update only playback-frame dependent viewer state.
@@ -930,8 +954,11 @@ impl Widget for ViewerSurface {
         ctx.push_clip(canvas);
         ctx.encoder.draw_rect(canvas, colors.canvas, 0.0);
         if self.enabled {
+            match self.canvas_background {
+                ViewerCanvasBackground::Checkerboard => paint::paint_checkerboard(ctx, canvas),
+                ViewerCanvasBackground::Black => ctx.encoder.draw_rect(canvas, Color::BLACK, 0.0),
+            }
             if let Some(frame) = &self.frame_content {
-                paint::paint_checkerboard(ctx, canvas);
                 match frame {
                     ViewerFrameContent::Raster(frame) => {
                         ctx.encoder.draw_raster_image(
@@ -2541,6 +2568,38 @@ mod tests {
             "sequence canvas should be painted as a straight-edged rectangle"
         );
         assert_eq!(encoder.clip_pops, encoder.clips.len());
+    }
+
+    #[test]
+    fn empty_enabled_viewer_paints_the_selected_transparency_background() {
+        let bounds = Rect::new(0.0, 0.0, 500.0, 320.0);
+        let theme = ThemePreset::Dark.build();
+
+        let mut checker = ViewerSurface::new("Empty", 1920, 1080);
+        checker.layout(bounds);
+        let mut checker_encoder = RecordingEncoder::default();
+        checker.paint(&mut PaintContext {
+            encoder: &mut checker_encoder,
+            theme: &theme,
+            clip_rect: bounds,
+        });
+        let mut checker_dark = theme.colors.checkerboard_dark;
+        checker_dark.a *= 0.28;
+        assert!(checker_encoder.rect_colors.contains(&checker_dark));
+        assert!(checker_encoder.raster_images.is_empty());
+        assert!(checker_encoder.external_textures.is_empty());
+
+        let mut black = ViewerSurface::new("Empty", 1920, 1080)
+            .with_canvas_background(ViewerCanvasBackground::Black);
+        black.layout(bounds);
+        let mut black_encoder = RecordingEncoder::default();
+        black.paint(&mut PaintContext {
+            encoder: &mut black_encoder,
+            theme: &theme,
+            clip_rect: bounds,
+        });
+        assert!(black_encoder.rect_colors.contains(&Color::BLACK));
+        assert!(!black_encoder.rect_colors.contains(&checker_dark));
     }
 
     #[test]

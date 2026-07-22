@@ -89,10 +89,13 @@ exchange format.
 Program and nested-sequence working canvases use transparent black as their
 initial value and retain straight coverage alpha through CPU and GPU
 compositing. Viewer background/checkerboard treatment is presentation-only and
-must not mutate the Program frame. Export selects an explicit
-`ExportAlphaMode`: `Preserve` keeps straight alpha only for a validated
-alpha-capable codec/container contract, while `FlattenBlack` composites over
-scene-linear black before the final output transform. Codec selection alone
+must not mutate the Program frame. The active root Sequence may publish this as
+a texture-free transparent presentation; the Viewer user preference chooses
+checkerboard or display black behind it without creating a render layer.
+Export selects an explicit `ExportAlphaMode`: `Preserve` keeps straight alpha
+only for a validated alpha-capable codec/container contract, while
+`FlattenBlack` composites over scene-linear black before the final output
+transform. Codec selection alone
 must never imply alpha preservation, and setting alpha opaque after an encoded
 output transform is not a valid flatten operation.
 

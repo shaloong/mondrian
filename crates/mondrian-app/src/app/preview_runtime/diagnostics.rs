@@ -209,6 +209,8 @@ pub struct PreviewDiagnostics {
     pub gpu_preview_candidate_ready: u64,
     /// GPU preview candidate requests skipped because the matching external texture is current.
     pub gpu_preview_candidate_current: u64,
+    /// Exact transparent-canvas candidates requiring no texture execution.
+    pub gpu_preview_candidate_transparent: u64,
     /// GPU preview candidate requests waiting on pending media.
     pub gpu_preview_candidate_loading: u64,
     /// GPU preview candidate requests with no renderable frame.

@@ -13,13 +13,14 @@ use mondrian_ui_core::{EventResult, Widget};
 use mondrian_ui_theme::{ThemePreference, ThemePreset};
 use mondrian_ui_widgets::{
     Button, ContextMenu, DialogSurface, Label, MenuItem, SegmentedButtonGroup, SegmentedButtonItem,
-    TextInput, VectorIcon, WaveformDisplay,
+    TextInput, VectorIcon, ViewerCanvasBackground, WaveformDisplay,
 };
 
 use crate::app::ui_actions::{
     app_shell_close_modal_action, app_shell_preferences_shortcut_disabled_action,
     app_shell_preferences_shortcut_rebound_action, app_shell_preferences_shortcut_reset_action,
     app_shell_preferences_tab_changed_action, app_shell_preferences_theme_changed_action,
+    app_shell_preferences_viewer_background_changed_action,
     app_shell_preferences_waveform_display_changed_action, PreferencesShortcutReboundPayload,
     PreferencesTabPayload,
 };
@@ -59,7 +60,7 @@ const SHORTCUT_KEYCAP_PADDING_X: f32 = 8.0;
 const SHORTCUT_KEYCAP_MIN_WIDTH: f32 = 24.0;
 const SHORTCUT_KEYCAP_ACTION_GAP: f32 = 14.0;
 const SHORTCUT_CHEVRON_SIZE: f32 = 12.0;
-const PREFERENCES_INTERACTIVE_CHILD_COUNT: usize = PreferencesDialogTab::ALL.len() + 4;
+const PREFERENCES_INTERACTIVE_CHILD_COUNT: usize = PreferencesDialogTab::ALL.len() + 5;
 
 const CHEVRON_RIGHT_SVG: &str = r#"<svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
 const CHEVRON_DOWN_SVG: &str = r#"<svg viewBox="0 0 16 16"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
@@ -84,6 +85,8 @@ pub struct AppUiPreferencesModel {
     pub shortcut_rows: Vec<ShortcutPreferenceRow>,
     pub waveform_display: WaveformDisplay,
     pub waveform_display_label: String,
+    pub viewer_canvas_background: ViewerCanvasBackground,
+    pub viewer_canvas_background_label: String,
 }
 
 /// One shortcut row shown in the app UI preferences UI.
@@ -116,6 +119,7 @@ impl AppUiPreferencesModel {
             resolved_theme_preset,
             &[],
             WaveformDisplay::BottomAligned,
+            ViewerCanvasBackground::Checkerboard,
         )
     }
 
@@ -127,6 +131,7 @@ impl AppUiPreferencesModel {
         resolved_theme_preset: ThemePreset,
         shortcut_overrides: &[AppUiShortcutOverride],
         waveform_display: WaveformDisplay,
+        viewer_canvas_background: ViewerCanvasBackground,
     ) -> Self {
         let project_status = state
             .current_project_path
@@ -171,6 +176,11 @@ impl AppUiPreferencesModel {
             shortcut_rows: shortcut_preference_rows(shortcut_overrides),
             waveform_display,
             waveform_display_label: waveform_display_label(waveform_display).to_owned(),
+            viewer_canvas_background,
+            viewer_canvas_background_label: viewer_canvas_background_label(
+                viewer_canvas_background,
+            )
+            .to_owned(),
         }
     }
 }
@@ -195,6 +205,8 @@ impl Default for AppUiPreferencesModel {
             shortcut_rows: shortcut_preference_rows(&[]),
             waveform_display: WaveformDisplay::BottomAligned,
             waveform_display_label: "整流".to_owned(),
+            viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
+            viewer_canvas_background_label: "棋盘格".to_owned(),
         }
     }
 }
@@ -263,6 +275,7 @@ pub struct PreferencesDialog {
     nav_buttons: Vec<Button>,
     theme_group: SegmentedButtonGroup,
     waveform_group: SegmentedButtonGroup,
+    viewer_background_group: SegmentedButtonGroup,
     content_labels: Vec<Label>,
     close_button: Button,
 }
@@ -366,6 +379,27 @@ impl PreferencesDialog {
             ],
             waveform_selected,
         );
+        let viewer_background_selected = match model.viewer_canvas_background {
+            ViewerCanvasBackground::Checkerboard => 0,
+            ViewerCanvasBackground::Black => 1,
+        };
+        let viewer_background_group = SegmentedButtonGroup::new(
+            vec![
+                SegmentedButtonItem::new(
+                    "棋盘格",
+                    app_shell_preferences_viewer_background_changed_action(
+                        ViewerCanvasBackground::Checkerboard,
+                    ),
+                ),
+                SegmentedButtonItem::new(
+                    "黑色",
+                    app_shell_preferences_viewer_background_changed_action(
+                        ViewerCanvasBackground::Black,
+                    ),
+                ),
+            ],
+            viewer_background_selected,
+        );
         let mut dialog = Self {
             id: WidgetId::new(),
             active_tab,
@@ -391,6 +425,7 @@ impl PreferencesDialog {
             nav_buttons,
             theme_group,
             waveform_group,
+            viewer_background_group,
             content_labels: Vec::new(),
             close_button: Button::new("关闭").on_click(app_shell_close_modal_action()),
         };
@@ -421,6 +456,13 @@ impl PreferencesDialog {
         self.theme_group.set_selected_index(theme_selected);
         self.waveform_group.set_selected_index(
             if self.model.waveform_display == WaveformDisplay::BottomAligned {
+                0
+            } else {
+                1
+            },
+        );
+        self.viewer_background_group.set_selected_index(
+            if self.model.viewer_canvas_background == ViewerCanvasBackground::Checkerboard {
                 0
             } else {
                 1
@@ -770,9 +812,16 @@ impl Widget for PreferencesDialog {
                 160.0,
                 SEGMENTED_GROUP_HEIGHT,
             ));
+            self.viewer_background_group.layout(Rect::new(
+                content_x + 126.0,
+                body_top + 3.0 * ROW_HEIGHT + (ROW_HEIGHT - SEGMENTED_GROUP_HEIGHT) * 0.5,
+                160.0,
+                SEGMENTED_GROUP_HEIGHT,
+            ));
         } else {
             self.theme_group.layout(Rect::ZERO);
             self.waveform_group.layout(Rect::ZERO);
+            self.viewer_background_group.layout(Rect::ZERO);
         }
         if self.active_tab == PreferencesDialogTab::Shortcuts {
             self.shortcut_search.layout(Rect::new(
@@ -862,6 +911,9 @@ impl Widget for PreferencesDialog {
                 return EventResult::Handled;
             }
             if self.waveform_group.event(event, ctx) == EventResult::Handled {
+                return EventResult::Handled;
+            }
+            if self.viewer_background_group.event(event, ctx) == EventResult::Handled {
                 return EventResult::Handled;
             }
         }
@@ -1000,6 +1052,7 @@ impl Widget for PreferencesDialog {
         if self.active_tab == PreferencesDialogTab::General {
             self.theme_group.paint(ctx);
             self.waveform_group.paint(ctx);
+            self.viewer_background_group.paint(ctx);
         }
         if self.active_tab == PreferencesDialogTab::Shortcuts {
             self.shortcut_search.paint(ctx);
@@ -1098,7 +1151,12 @@ impl Widget for PreferencesDialog {
             return (self.active_tab == PreferencesDialogTab::General)
                 .then_some(&self.waveform_group as &dyn Widget);
         }
-        let search_index = waveform_index + 1;
+        let viewer_background_index = waveform_index + 1;
+        if index == viewer_background_index {
+            return (self.active_tab == PreferencesDialogTab::General)
+                .then_some(&self.viewer_background_group as &dyn Widget);
+        }
+        let search_index = viewer_background_index + 1;
         if index == search_index {
             return (self.active_tab == PreferencesDialogTab::Shortcuts)
                 .then_some(&self.shortcut_search as &dyn Widget);
@@ -1125,7 +1183,12 @@ impl Widget for PreferencesDialog {
             return (self.active_tab == PreferencesDialogTab::General)
                 .then_some(&mut self.waveform_group as &mut dyn Widget);
         }
-        let search_index = waveform_index + 1;
+        let viewer_background_index = waveform_index + 1;
+        if index == viewer_background_index {
+            return (self.active_tab == PreferencesDialogTab::General)
+                .then_some(&mut self.viewer_background_group as &mut dyn Widget);
+        }
+        let search_index = viewer_background_index + 1;
         if index == search_index {
             return (self.active_tab == PreferencesDialogTab::Shortcuts)
                 .then_some(&mut self.shortcut_search as &mut dyn Widget);
@@ -1527,6 +1590,10 @@ fn content_rows_for_tab(
             heading("外观"),
             detail(format!("主题：{}", model.theme_label)),
             detail(format!("波形显示：{}", model.waveform_display_label)),
+            detail(format!(
+                "透明画布：{}",
+                model.viewer_canvas_background_label
+            )),
             heading("工作区"),
             detail(format!("当前工作区：{}", model.workspace)),
             heading("项目"),
@@ -1562,6 +1629,13 @@ fn waveform_display_label(mode: WaveformDisplay) -> &'static str {
     match mode {
         WaveformDisplay::BottomAligned => "整流",
         WaveformDisplay::Centered => "完整",
+    }
+}
+
+fn viewer_canvas_background_label(background: ViewerCanvasBackground) -> &'static str {
+    match background {
+        ViewerCanvasBackground::Checkerboard => "棋盘格",
+        ViewerCanvasBackground::Black => "黑色",
     }
 }
 
@@ -1683,13 +1757,15 @@ mod tests {
 
         let theme_index = PreferencesDialogTab::ALL.len();
         let waveform_index = theme_index + 1;
-        let search_index = waveform_index + 1;
+        let viewer_background_index = waveform_index + 1;
+        let search_index = viewer_background_index + 1;
         let close_index = search_index + 1;
         let close_id = dialog.close_button.id();
 
         assert_eq!(dialog.child_count(), PREFERENCES_INTERACTIVE_CHILD_COUNT);
         assert!(dialog.child(theme_index).is_some());
         assert!(dialog.child(waveform_index).is_some());
+        assert!(dialog.child(viewer_background_index).is_some());
         assert!(dialog.child(search_index).is_none());
         assert_eq!(dialog.child(close_index).map(Widget::id), Some(close_id));
         let close = dialog.child(close_index).expect("close child");
@@ -1703,6 +1779,7 @@ mod tests {
         assert_eq!(dialog.child_count(), PREFERENCES_INTERACTIVE_CHILD_COUNT);
         assert!(dialog.child(theme_index).is_none());
         assert!(dialog.child(waveform_index).is_none());
+        assert!(dialog.child(viewer_background_index).is_none());
         assert!(dialog.child(search_index).is_none());
         assert_eq!(dialog.child(close_index).map(Widget::id), Some(close_id));
         assert!(dialog.child(close_index).expect("close child").can_focus());
@@ -1711,6 +1788,7 @@ mod tests {
         assert_eq!(dialog.child_count(), PREFERENCES_INTERACTIVE_CHILD_COUNT);
         assert!(dialog.child(theme_index).is_none());
         assert!(dialog.child(waveform_index).is_none());
+        assert!(dialog.child(viewer_background_index).is_none());
         assert!(dialog.child(search_index).is_some());
         assert_eq!(dialog.child(close_index).map(Widget::id), Some(close_id));
         assert!(dialog.child(close_index).expect("close child").can_focus());
@@ -1833,6 +1911,7 @@ mod tests {
             ThemePreset::Dark,
             &overrides,
             WaveformDisplay::BottomAligned,
+            ViewerCanvasBackground::Checkerboard,
         );
 
         let inspector = model
@@ -1869,6 +1948,7 @@ mod tests {
             ThemePreset::Dark,
             &overrides,
             WaveformDisplay::BottomAligned,
+            ViewerCanvasBackground::Checkerboard,
         );
 
         let save = model
@@ -1910,6 +1990,7 @@ mod tests {
             ThemePreset::Dark,
             &overrides,
             WaveformDisplay::BottomAligned,
+            ViewerCanvasBackground::Checkerboard,
         );
         let mut dialog =
             PreferencesDialog::with_model_and_tab(model, PreferencesDialogTab::Shortcuts);

@@ -49,6 +49,8 @@ impl PreviewOutputKey {
 pub(crate) enum PreviewGpuFrameState {
     /// The exact output is already registered by the active presentation Adapter.
     Current,
+    /// The exact current output is the semantic transparent canvas and needs no texture.
+    Transparent,
     /// A working-space frame is ready for Viewer GPU execution.
     Ready(Box<PreviewGpuFrame>),
     /// Required media is still decoding or rendering.

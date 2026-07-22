@@ -305,6 +305,7 @@ enum AppUiDisplayContractRefreshReasonDiagnostic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 enum AppUiViewerGpuOutputPreviewCandidateState {
     Current,
+    Transparent,
     Loading,
     Unavailable,
     Ready,
@@ -2983,6 +2984,16 @@ fn prepare_viewer_gpu_preview(
         PreviewGpuFrameState::Current => {
             session.viewer_gpu_output_telemetry.record_preview_candidate_state(
                 AppUiViewerGpuOutputPreviewCandidateState::Current,
+                None,
+            );
+            session.viewer_gpu_output_telemetry.record_current_skip();
+            finish_prepare!();
+        }
+        PreviewGpuFrameState::Transparent => {
+            unregister_program_scopes_textures(session);
+            session.program_scopes_refresh_requested = program_scopes_requested;
+            session.viewer_gpu_output_telemetry.record_preview_candidate_state(
+                AppUiViewerGpuOutputPreviewCandidateState::Transparent,
                 None,
             );
             session.viewer_gpu_output_telemetry.record_current_skip();

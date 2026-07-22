@@ -90,7 +90,7 @@ pub use timeline_view::{
 pub use vector_icon::{VectorIcon, VectorIconError};
 pub use video_scopes_surface::{VideoScopesSurface, VideoScopesTextureSet};
 pub use viewer_surface::{
-    ViewerControl, ViewerControlAction, ViewerExternalTextureFrame,
+    ViewerCanvasBackground, ViewerControl, ViewerControlAction, ViewerExternalTextureFrame,
     ViewerExternalTexturePresentation, ViewerFrameContent, ViewerFrameImage,
     ViewerPresentationGeometry, ViewerStatusTone, ViewerSurface,
 };

@@ -26,7 +26,7 @@ use mondrian_timeline::{
     PreviewRenderFormat, SequenceSettings,
 };
 use mondrian_ui_theme::ThemePreference;
-use mondrian_ui_widgets::WaveformDisplay;
+use mondrian_ui_widgets::{ViewerCanvasBackground, WaveformDisplay};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -246,6 +246,9 @@ pub const APP_SHELL_PREFERENCES_THEME_CHANGED: &str = "preferences_theme_changed
 /// App-shell request to switch the waveform display mode.
 pub const APP_SHELL_PREFERENCES_WAVEFORM_DISPLAY_CHANGED: &str =
     "preferences_waveform_display_changed";
+/// App-shell request to switch the presentation-only Viewer canvas background.
+pub const APP_SHELL_PREFERENCES_VIEWER_BACKGROUND_CHANGED: &str =
+    "preferences_viewer_background_changed";
 /// App-shell request to disable one app UI shortcut descriptor.
 pub const APP_SHELL_PREFERENCES_SHORTCUT_DISABLED: &str = "preferences_shortcut_disabled";
 /// App-shell request to restore one app UI shortcut descriptor to default.
@@ -299,6 +302,12 @@ pub struct PreferencesThemePayload {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreferencesWaveformDisplayPayload {
     pub mode: WaveformDisplay,
+}
+
+/// Viewer canvas background selected by the app UI preferences UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreferencesViewerBackgroundPayload {
+    pub background: ViewerCanvasBackground,
 }
 
 /// Stable shortcut descriptor selected in the app UI preferences UI.
@@ -1601,6 +1610,16 @@ pub fn app_shell_preferences_waveform_display_changed_action(mode: WaveformDispl
     custom_app_shell_action_with_payload(
         APP_SHELL_PREFERENCES_WAVEFORM_DISPLAY_CHANGED,
         PreferencesWaveformDisplayPayload { mode },
+    )
+}
+
+/// Build an app-shell request for switching the Viewer transparency background.
+pub fn app_shell_preferences_viewer_background_changed_action(
+    background: ViewerCanvasBackground,
+) -> Action {
+    custom_app_shell_action_with_payload(
+        APP_SHELL_PREFERENCES_VIEWER_BACKGROUND_CHANGED,
+        PreferencesViewerBackgroundPayload { background },
     )
 }
 

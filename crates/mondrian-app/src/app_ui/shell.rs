@@ -560,6 +560,13 @@ fn apply_viewer_zoom_mode(models: &mut AppUiPanelModels, mode: ViewerZoomMode) {
     apply_viewer_zoom_mode_to_model(&mut models.viewer, mode);
 }
 
+fn apply_viewer_canvas_background(
+    models: &mut AppUiPanelModels,
+    background: mondrian_ui_widgets::ViewerCanvasBackground,
+) {
+    models.viewer.canvas_background = background;
+}
+
 fn apply_viewer_zoom_mode_to_model(model: &mut ViewerPanelModel, mode: ViewerZoomMode) {
     model.zoom_label = mode.label();
     model.zoom_scale = mode.scale();
@@ -629,6 +636,7 @@ impl AppUiAppRoot {
         );
         models.timeline.waveform_display = preferences.waveform_display;
         models.timeline.waveform_source = waveform_source;
+        apply_viewer_canvas_background(&mut models, preferences.viewer_canvas_background);
         apply_viewer_zoom_mode(&mut models, viewer_zoom_mode);
         let mut root = Self::new_with_preferences(
             TitleBar::new(
@@ -646,6 +654,7 @@ impl AppUiAppRoot {
                 preferences.theme_preference.resolve(ThemePreset::Dark),
                 &preferences.shortcut_overrides,
                 preferences.waveform_display,
+                preferences.viewer_canvas_background,
             ),
             preferences.workspace_preset,
             preferences.custom_workspace_layout.clone(),
@@ -876,6 +885,7 @@ impl AppUiAppRoot {
             shortcut_overrides: Vec::new(),
             custom_workspace_layout: self.custom_workspace_layout.clone(),
             waveform_display: WaveformDisplay::BottomAligned,
+            viewer_canvas_background: self.models.viewer.canvas_background,
         };
         self.refresh_from_app_state_with_preferences(state, &preferences);
     }
@@ -889,6 +899,9 @@ impl AppUiAppRoot {
         let frame = state.current_frame().max(0);
         self.status_bar.set_model(status_bar_model(state));
         let mut viewer = ViewerPanelModel::from_app_state_with_preview(state, preview);
+        if preview.is_none() && viewer.enabled && self.models.viewer.enabled {
+            viewer.retain_presentation_from(&self.models.viewer, state);
+        }
         apply_viewer_zoom_mode_to_model(&mut viewer, self.viewer_zoom_mode);
         let preview_waiting = viewer.preview_waiting;
         self.models.scopes = ScopesPanelModel::from_viewer(&viewer);
@@ -898,6 +911,13 @@ impl AppUiAppRoot {
         update_scopes_widgets(&mut self.dock, &self.models.scopes);
         update_timeline_playhead_widgets(&mut self.dock, frame);
         preview_waiting
+    }
+
+    /// Refresh a user transport intent without claiming the retained output is exact.
+    pub fn refresh_transport_intent_from_app_state(&mut self, state: &AppState) {
+        self.refresh_playback_frame_from_app_state(state, None);
+        self.models.viewer.mark_presentation_pending_after_transport_intent(state);
+        update_viewer_widgets(&mut self.dock, &self.models.viewer);
     }
 
     /// Return the payload-free Viewer lifecycle meaning used by playback.
@@ -961,6 +981,7 @@ impl AppUiAppRoot {
         );
         models.timeline.waveform_display = preferences.waveform_display;
         models.timeline.waveform_source = waveform_source;
+        apply_viewer_canvas_background(&mut models, preferences.viewer_canvas_background);
         apply_viewer_zoom_mode(&mut models, self.viewer_zoom_mode);
         self.set_models(models);
         let preferences_model = AppUiPreferencesModel::from_app_state_with_shortcut_overrides(
@@ -970,6 +991,7 @@ impl AppUiAppRoot {
             preferences.theme_preference.resolve(ThemePreset::Dark),
             &preferences.shortcut_overrides,
             preferences.waveform_display,
+            preferences.viewer_canvas_background,
         );
         self.preferences_model = preferences_model.clone();
         if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_preferences_mut) {
@@ -1589,6 +1611,7 @@ fn update_viewer_widgets(widget: &mut dyn Widget, model: &ViewerPanelModel) -> b
             model.frame_content.clone(),
             model.empty_message.clone(),
         );
+        viewer.set_canvas_background(model.canvas_background);
         return true;
     }
 
@@ -3631,6 +3654,50 @@ mod tests {
 
         assert!(preview_waiting);
         assert!(root.models.viewer.preview_waiting);
+    }
+
+    #[test]
+    fn transport_only_refresh_preserves_the_installed_viewer_output() {
+        struct ReadyPreview;
+
+        impl ViewerPreviewSource for ReadyPreview {
+            fn viewer_preview_for_state(&self, _state: &AppState) -> ViewerPreviewState {
+                ViewerPreviewState::Ready(mondrian_ui_widgets::ViewerFrameContent::Raster(
+                    mondrian_ui_widgets::ViewerFrameImage::new(
+                        "transport-stable-frame",
+                        1,
+                        1,
+                        mondrian_ui_core::RasterImageColorSpace::Srgb,
+                        vec![20, 40, 60, 255],
+                    )
+                    .expect("valid frame"),
+                ))
+            }
+        }
+
+        let mut state = AppState::new();
+        state.sequence = Some(Sequence::new("edit"));
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        root.refresh_playback_frame_from_app_state(&state, Some(&ReadyPreview));
+
+        for transition in 0..100 {
+            if transition % 2 == 0 {
+                state.play();
+            } else {
+                state.pause();
+            }
+            root.refresh_transport_intent_from_app_state(&state);
+
+            assert_eq!(root.models.viewer.playing, state.is_playing());
+            assert!(root.models.viewer.preview_waiting);
+            let Some(mondrian_ui_widgets::ViewerFrameContent::Raster(installed)) =
+                root.models.viewer.frame_content.as_ref()
+            else {
+                panic!("transport refresh must retain the installed raster");
+            };
+            assert_eq!(installed.key, "transport-stable-frame");
+            assert!(root.models.viewer.empty_message.is_none());
+        }
     }
 
     #[test]

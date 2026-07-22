@@ -178,7 +178,10 @@ unregisters all three when Scopes is hidden or Viewer presentation is reset.
 
 Playback-frame refreshes use a narrow UI update path: the host advances
 `AppState`, then refreshes viewer playback chrome/frame data and the timeline
-playhead without rebuilding the full dock tree.
+playhead without rebuilding the full dock tree. A transport-only turn retains
+the currently installed frame, transparent-canvas state, pending/stale state,
+and typed blocker; passing an absent Preview source must never erase those
+facts. The next production Preview turn alone may commit their replacement.
 
 Timeline audio waveforms are not a Widget or Window execution feature.
 `AppUiHost` owns one UI-independent `AudioWaveformService` composition instance,
@@ -421,6 +424,10 @@ generation checks that protect continuous playback from stale decode work.
 Current-frame media requests are scheduled before forward prefetch, and the
 worker queue/pending set are bounded. When playback outruns decode, obsolete or
 excess preview jobs are dropped instead of back-pressuring the UI thread.
+If the complete steady window is blank, the scheduler may prewarm only the
+nearest visible media Clip activation inside its bounded cold-start horizon.
+That activation consumes the existing prefetch capacity and generation; it
+does not increase the retained steady-frame count or scan an unbounded gap.
 The host supplies the Playback Engine's still-pending demand identity both when
 it polls completed work and when it expires realtime work. Polling and
 expiration always release scheduler capacity, but only an exact pending
@@ -557,6 +564,12 @@ prepared or a failed media key is protected by the bounded failure cache. Stale
 frame reuse is scoped to the same sequence and preview dimensions. These states
 are presentation/adaptor semantics only; they must not mutate timeline playback
 state or affect export evaluation.
+`Transparent` is also exact and Ready: it means the active Sequence produced a
+valid transparent Program canvas without a texture. The Viewer paints that
+canvas using the persisted presentation-only checkerboard/black preference,
+shows no diagnostic empty-state text, and never writes the chosen background
+into Program pixels. `Unavailable(NoContent)` is reserved for the absence of an
+active output target; `Blocked` and `Failed` remain warning/error states.
 When the preview service returns `Unavailable` because color management rejected
 media, the viewer model must consume `ViewerPreviewColorRejectionModel` instead
 of showing a generic empty viewer. The status should remain warning-toned and

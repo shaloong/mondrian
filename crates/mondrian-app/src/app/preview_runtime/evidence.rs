@@ -33,6 +33,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             gpu_preview_candidate_requests: self.metrics.gpu_preview_candidate_requests.get(),
             gpu_preview_candidate_ready: self.metrics.gpu_preview_candidate_ready.get(),
             gpu_preview_candidate_current: self.metrics.gpu_preview_candidate_current.get(),
+            gpu_preview_candidate_transparent: self.metrics.gpu_preview_candidate_transparent.get(),
             gpu_preview_candidate_loading: self.metrics.gpu_preview_candidate_loading.get(),
             gpu_preview_candidate_unavailable: self.metrics.gpu_preview_candidate_unavailable.get(),
             gpu_preview_candidate_pixels: self.metrics.gpu_preview_candidate_pixels.get(),

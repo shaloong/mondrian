@@ -40,6 +40,7 @@ impl ViewerPlaybackFeedback {
     pub fn from_preview_state(state: &ViewerPreviewState) -> Self {
         match state {
             ViewerPreviewState::Unavailable(_) => Self::Unavailable,
+            ViewerPreviewState::Transparent => Self::Ready,
             ViewerPreviewState::Loading => Self::Loading,
             ViewerPreviewState::Stale(_) => Self::Stale,
             ViewerPreviewState::Ready(_) => Self::Ready,

@@ -57,7 +57,8 @@ use mondrian_ui_widgets::{
     TimelineSeek, TimelineSeekSource as WidgetTimelineSeekSource, TimelineToolbarIconSlot,
     TimelineTrack, TimelineTrackControl, TimelineTrackControlIconSlot, TimelineTrackMove,
     TimelineTrackRef, TimelineTrimEdge, TimelineView, VideoScopesSurface, VideoScopesTextureSet,
-    ViewerControl, ViewerFrameContent, ViewerStatusTone, ViewerSurface, WaveformDisplay,
+    ViewerCanvasBackground, ViewerControl, ViewerFrameContent, ViewerStatusTone, ViewerSurface,
+    WaveformDisplay,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -157,6 +158,8 @@ pub trait ViewerPreviewSource {
 pub enum ViewerPreviewState {
     /// No preview frame is expected for the current state.
     Unavailable(PreviewUnavailability),
+    /// The active Sequence evaluates to a valid transparent canvas.
+    Transparent,
     /// A frame request has been queued or is currently rendering/decoding.
     Loading,
     /// The requested frame is not ready, so the viewer may keep the previous frame visible.
@@ -636,6 +639,9 @@ pub struct ViewerPanelModel {
     pub preview_waiting: bool,
     pub enabled: bool,
     pub frame_content: Option<ViewerFrameContent>,
+    pub canvas_background: ViewerCanvasBackground,
+    /// Whether the exact current presentation is a texture-free transparent canvas.
+    pub transparent_canvas: bool,
     pub empty_message: Option<String>,
     pub preview_unavailability: Option<PreviewUnavailability>,
     pub color_rejection: Option<ViewerPreviewColorRejectionModel>,
@@ -661,11 +667,54 @@ impl ScopesPanelModel {
 }
 
 impl ViewerPanelModel {
+    /// Retain the installed presentation while refreshing transport chrome only.
+    ///
+    /// Transport actions must not synchronously re-enter Preview production,
+    /// but they also must not erase the last usable output or its typed
+    /// lifecycle while a later Preview turn proves the replacement.
+    pub(crate) fn retain_presentation_from(&mut self, current: &Self, state: &AppState) {
+        self.frame_content = current.frame_content.clone();
+        self.canvas_background = current.canvas_background;
+        self.transparent_canvas = current.transparent_canvas;
+        self.preview_waiting = current.preview_waiting;
+        self.empty_message = current.empty_message.clone();
+        self.preview_unavailability = current.preview_unavailability.clone();
+        self.color_rejection = current.color_rejection.clone();
+        self.color_pipeline_status = current.color_pipeline_status.clone();
+
+        let color_rejected =
+            self.preview_unavailability.is_some() && self.color_rejection.is_some();
+        let (status, status_tone) = viewer_status(
+            state.is_playing(),
+            self.preview_waiting,
+            color_rejected,
+            self.preview_unavailability.as_ref().map(PreviewUnavailability::disposition),
+        );
+        self.status = status;
+        self.status_tone = status_tone;
+    }
+
+    /// Keep a usable fallback visible while a transport intent awaits exact proof.
+    pub(crate) fn mark_presentation_pending_after_transport_intent(&mut self, state: &AppState) {
+        if self.frame_content.is_none() && !self.transparent_canvas {
+            return;
+        }
+        self.preview_waiting = true;
+        let (status, status_tone) = viewer_status(
+            state.is_playing(),
+            true,
+            false,
+            self.preview_unavailability.as_ref().map(PreviewUnavailability::disposition),
+        );
+        self.status = status;
+        self.status_tone = status_tone;
+    }
+
     /// Payload-free lifecycle classification for the playback feedback Adapter.
     pub(crate) fn preview_state_kind(
         &self,
     ) -> crate::app_ui::playback_feedback::ViewerPreviewStateKind {
-        if self.frame_content.is_some() {
+        if self.frame_content.is_some() || self.transparent_canvas {
             if self.preview_waiting {
                 crate::app_ui::playback_feedback::ViewerPreviewStateKind::Stale
             } else {
@@ -718,6 +767,7 @@ impl ViewerPanelModel {
         let color_rejection = preview.and_then(ViewerPreviewSource::viewer_color_rejection);
         let preview_unavailability = preview_state.as_ref().and_then(|state| match state {
             ViewerPreviewState::Unavailable(reason) => Some(reason.clone()),
+            ViewerPreviewState::Transparent => None,
             ViewerPreviewState::Loading
             | ViewerPreviewState::Stale(_)
             | ViewerPreviewState::Ready(_) => None,
@@ -726,8 +776,11 @@ impl ViewerPanelModel {
             ViewerPreviewState::Ready(frame) | ViewerPreviewState::Stale(frame) => {
                 Some(frame.clone())
             }
-            ViewerPreviewState::Unavailable(_) | ViewerPreviewState::Loading => None,
+            ViewerPreviewState::Unavailable(_)
+            | ViewerPreviewState::Transparent
+            | ViewerPreviewState::Loading => None,
         });
+        let transparent_canvas = matches!(preview_state, Some(ViewerPreviewState::Transparent));
         let preview_resolution_scale =
             normalize_preview_resolution_scale(sequence.settings.preview.resolution_scale);
         let preview_quality_label = viewer_preview_quality_label(preview_resolution_scale);
@@ -742,41 +795,17 @@ impl ViewerPanelModel {
         let unavailability_disposition =
             preview_unavailability.as_ref().map(PreviewUnavailability::disposition);
 
+        let (status, status_tone) = viewer_status(
+            state.is_playing(),
+            preview_waiting,
+            color_rejected,
+            unavailability_disposition,
+        );
+
         Self {
             title: sequence.name.clone(),
-            status: if preview_waiting {
-                "预览准备中".into()
-            } else if color_rejected {
-                "色彩解释被拒绝".into()
-            } else if unavailability_disposition
-                == Some(PreviewUnavailabilityDisposition::NoContent)
-            {
-                "无可见内容".into()
-            } else if unavailability_disposition == Some(PreviewUnavailabilityDisposition::Blocked)
-            {
-                "预览被阻止".into()
-            } else if unavailability_disposition == Some(PreviewUnavailabilityDisposition::Failed) {
-                "预览失败".into()
-            } else if state.is_playing() {
-                "播放中".into()
-            } else {
-                "就绪".into()
-            },
-            status_tone: if preview_waiting
-                || color_rejected
-                || matches!(
-                    unavailability_disposition,
-                    Some(
-                        PreviewUnavailabilityDisposition::Blocked
-                            | PreviewUnavailabilityDisposition::Failed
-                    )
-                ) {
-                ViewerStatusTone::Warning
-            } else if state.is_playing() {
-                ViewerStatusTone::Accent
-            } else {
-                ViewerStatusTone::Neutral
-            },
+            status,
+            status_tone,
             resolution_label: format!(
                 "{}x{} @ {:.2} fps",
                 resolution.width, resolution.height, fps
@@ -793,6 +822,8 @@ impl ViewerPanelModel {
             preview_waiting,
             enabled: true,
             frame_content,
+            canvas_background: ViewerCanvasBackground::default(),
+            transparent_canvas,
             empty_message: if let Some(rejection) =
                 color_rejection.as_ref().filter(|_| color_rejected)
             {
@@ -800,7 +831,12 @@ impl ViewerPanelModel {
             } else if matches!(preview_state.as_ref(), Some(ViewerPreviewState::Loading)) {
                 Some("预览准备中".into())
             } else {
-                preview_unavailability.as_ref().map(|reason| reason.detail().to_owned())
+                preview_unavailability
+                    .as_ref()
+                    .filter(|reason| {
+                        reason.disposition() != PreviewUnavailabilityDisposition::NoContent
+                    })
+                    .map(|reason| reason.detail().to_owned())
             },
             preview_unavailability,
             color_rejection,
@@ -828,12 +864,51 @@ impl ViewerPanelModel {
             preview_waiting: false,
             enabled: false,
             frame_content: None,
+            canvas_background: ViewerCanvasBackground::default(),
+            transparent_canvas: false,
             empty_message: Some("未载入序列".into()),
             preview_unavailability: None,
             color_rejection: None,
             color_pipeline_status: None,
         }
     }
+}
+
+fn viewer_status(
+    playing: bool,
+    preview_waiting: bool,
+    color_rejected: bool,
+    unavailability: Option<PreviewUnavailabilityDisposition>,
+) -> (String, ViewerStatusTone) {
+    let status = if preview_waiting {
+        "预览准备中"
+    } else if color_rejected {
+        "色彩解释被拒绝"
+    } else if unavailability == Some(PreviewUnavailabilityDisposition::Blocked) {
+        "预览被阻止"
+    } else if unavailability == Some(PreviewUnavailabilityDisposition::Failed) {
+        "预览失败"
+    } else if playing {
+        "播放中"
+    } else {
+        "就绪"
+    };
+    let tone = if preview_waiting
+        || color_rejected
+        || matches!(
+            unavailability,
+            Some(
+                PreviewUnavailabilityDisposition::Blocked
+                    | PreviewUnavailabilityDisposition::Failed
+            )
+        ) {
+        ViewerStatusTone::Warning
+    } else if playing {
+        ViewerStatusTone::Accent
+    } else {
+        ViewerStatusTone::Neutral
+    };
+    (status.to_owned(), tone)
 }
 
 fn viewer_color_rejection_empty_message(rejection: &ViewerPreviewColorRejectionModel) -> String {
@@ -2089,6 +2164,7 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
         .with_zoom_label(model.zoom_label.clone())
         .with_zoom_scale(model.zoom_scale)
         .with_preview_quality_label(model.preview_quality_label.clone())
+        .with_canvas_background(model.canvas_background)
         .playing(model.playing)
         .enabled(model.enabled)
         .on_control(viewer_control_action)
@@ -7760,6 +7836,65 @@ mod tests {
             PreviewUnavailabilityDisposition::Blocked
         );
         assert_eq!(reason.stage(), PreviewOutputStage::MediaResolution);
+    }
+
+    #[test]
+    fn app_state_models_treat_timeline_no_content_as_a_clean_canvas() {
+        struct NoContentPreview;
+
+        impl ViewerPreviewSource for NoContentPreview {
+            fn viewer_preview_for_state(&self, _state: &AppState) -> ViewerPreviewState {
+                ViewerPreviewState::Unavailable(PreviewUnavailability::no_content(
+                    PreviewOutputStage::TimelineEvaluation,
+                    "current Timeline position contains no visible elements",
+                ))
+            }
+        }
+
+        let mut state = AppState::new();
+        state.sequence = Some(Sequence::new("edit"));
+        let models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
+            &state,
+            None,
+            None,
+            Some(&NoContentPreview),
+        );
+
+        assert_eq!(models.viewer.status, "就绪");
+        assert_eq!(models.viewer.status_tone, ViewerStatusTone::Neutral);
+        assert!(models.viewer.frame_content.is_none());
+        assert!(
+            models.viewer.empty_message.is_none(),
+            "expected empty Timeline detail to remain diagnostic-only"
+        );
+    }
+
+    #[test]
+    fn app_state_models_project_an_exact_transparent_canvas_as_ready() {
+        struct TransparentPreview;
+
+        impl ViewerPreviewSource for TransparentPreview {
+            fn viewer_preview_for_state(&self, _state: &AppState) -> ViewerPreviewState {
+                ViewerPreviewState::Transparent
+            }
+        }
+
+        let mut state = AppState::new();
+        state.sequence = Some(Sequence::new("edit"));
+        let models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
+            &state,
+            None,
+            None,
+            Some(&TransparentPreview),
+        );
+
+        assert!(models.viewer.transparent_canvas);
+        assert!(models.viewer.frame_content.is_none());
+        assert!(models.viewer.empty_message.is_none());
+        assert_eq!(
+            models.viewer.preview_state_kind(),
+            crate::app_ui::playback_feedback::ViewerPreviewStateKind::Ready
+        );
     }
 
     #[test]

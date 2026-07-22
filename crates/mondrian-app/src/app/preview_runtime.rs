@@ -171,6 +171,8 @@ pub(crate) enum PreviewPresentationContent<O> {
 pub(crate) enum PreviewPresentationState<O> {
     /// Exact current output is usable.
     Ready(PreviewPresentationContent<O>),
+    /// Exact current output is the semantic transparent canvas.
+    Transparent,
     /// Required production work remains pending.
     Loading,
     /// Same-scope prior output is explicitly reusable while work is pending.
@@ -489,13 +491,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 PreviewTimelineResolution::Ready(resolved) => resolved.plan,
                 PreviewTimelineResolution::Empty => {
                     let decision = self.execution.borrow_mut().plan_candidate(None);
+                    self.execution.borrow_mut().set_presentation_quality(
+                        mondrian_playback::FramePresentationQuality::Ready,
+                    );
                     self.schedule_media_prefetches(state, sequence, frame, width, height);
                     self.scheduler.prune_obsolete();
                     debug_assert!(matches!(decision, PreviewCandidateDecision::Unavailable));
-                    return self.unavailable_gpu_candidate(PreviewUnavailability::no_content(
-                        PreviewOutputStage::TimelineEvaluation,
-                        "current Timeline position contains no visible elements",
-                    ));
+                    return self.transparent_gpu_candidate();
                 }
                 PreviewTimelineResolution::Pending { .. } => {
                     let decision = self.execution.borrow_mut().plan_candidate(None);
@@ -852,6 +854,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         PreviewGpuFrameState::Unavailable(reason)
     }
 
+    fn transparent_gpu_candidate(&self) -> PreviewGpuFrameState {
+        self.clear_terminal_viewer_state();
+        bump(&self.metrics.gpu_preview_candidate_transparent);
+        PreviewGpuFrameState::Transparent
+    }
+
     /// Terminal absence is a content discontinuity. Only pending work may
     /// retain a same-scope stale output for later presentation.
     fn clear_terminal_viewer_state(&self) {
@@ -918,6 +926,7 @@ struct PreviewMetrics {
     gpu_preview_candidate_requests: Cell<u64>,
     gpu_preview_candidate_ready: Cell<u64>,
     gpu_preview_candidate_current: Cell<u64>,
+    gpu_preview_candidate_transparent: Cell<u64>,
     gpu_preview_candidate_loading: Cell<u64>,
     gpu_preview_candidate_unavailable: Cell<u64>,
     gpu_preview_candidate_pixels: Cell<u64>,

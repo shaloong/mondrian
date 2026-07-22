@@ -554,6 +554,15 @@ delivery carrying the original demand identity. Worker/deadline scheduling owns
 Late, Canceled, Failed, and any future deadline-classified StaleAvailable
 outcome.
 
+An active Sequence whose current Program evaluation has no visible elements is
+not unavailable: Preview publishes an exact texture-free `Transparent`
+presentation. Window and Headless Adapters may complete the current Frame
+Demand only with its normal Presentation Ticket. This prevents blank Timeline
+regions from expiring demands or accumulating false late-pressure evidence.
+`NoContent` remains the typed absence for intents that have no active
+Project/Sequence output target; it is not a substitute for transparent Program
+pixels.
+
 ## Quality and recovery policy
 
 The Engine may automatically lower temporary preview resolution under sustained
@@ -1092,9 +1101,11 @@ seam into media and continue moving only behavior with clear ownership.
 Timeline evaluation, media resolution/decode, CPU/GPU execution, raster
 packaging, and final presentation carry one typed Preview Output Unavailability
 contract without collapsing it to `Option`, unit state, or an error string.
-Expected empty root output, correctness/dependency blockers, and admitted
-execution failures remain distinct through Window, Headless, diagnostics, and
-performance evidence. Empty nested Sequences lower to transparent content;
+An empty active root, absence of an active root, correctness/dependency
+blockers, and admitted execution failures remain distinct through Window,
+Headless, diagnostics, and performance evidence. Empty active root and nested
+Sequences lower to transparent content; absence of an active root remains
+typed `NoContent`;
 every terminal unavailable result clears current/pinned stale eligibility, while
 only pending work may reuse a same-scope prior output.
 Production Runtime regressions live beside `app::preview_runtime`. Media worker failure, cancellation, queue
@@ -1137,14 +1148,29 @@ Viewer-owned `playback_buffering` state and its audio mute/clock hold have been
 removed. Window redraw may still defer duplicate GPU candidate preparation while
 Loading, but that presentation guard has no transport authority.
 
+The texture-free transparent lifecycle is Ready under the same rule: it clears
+obsolete texture/stale residency, becomes visible through the Viewer canvas,
+and completes transport only through the exact current ticket. Transport-only
+UI refreshes retain the installed frame/transparent lifecycle and update only
+playhead and transport chrome; they never rebuild the Viewer with an absent
+Preview source.
+
 The production Preview Runtime now preserves typed `NoContent`, `Blocked`, or
 `Failed` output reasons and their owning stage across Timeline traversal, source
 resolution, decode, color/composite execution, GPU lowering, raster packaging,
 and final presentation. Window projects that contract without reclassification;
 Headless and render-performance evidence consume the same bounded counters and
 stage breakdown. Preview render evidence schema v2 fails closed on blocked or
-failed outputs but does not treat expected no-content frames as execution
-failures.
+failed outputs but does not treat the expected absence of an active output
+target as an execution failure.
+
+The ordinary forward buffer remains a bounded 250 ms / eight-frame maximum so
+native decoder surfaces cannot grow with Timeline rate. When that window is
+entirely blank, scheduling may additionally admit the first media-bearing frame
+at the nearest visible root media activation within two seconds (capped at 120
+frames). This is one cold-start activation request, not a larger steady frame
+buffer; it keeps the same Playback Epoch/generation, current-over-prefetch
+priority, queue budget, and cancellation rules.
 
 `app::playback_preview` now owns the production result-to-Playback pump used by
 both `AppUiHost` and the real Headless GPU harness. The Preview Adapter returns
