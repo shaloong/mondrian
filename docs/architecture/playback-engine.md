@@ -921,17 +921,16 @@ assuming that generation count, elapsed time, cache eviction, or
 mode still selects independent scrub versus exact precision and seek policy on
 every request; session sharing does not relax exact-Still correctness.
 A released session may cross from Scrub to exact only when its packet-source
-execution family also matches. The current direct Scrub source and one-shot
-isolated exact source do not, so exact replaces the released context instead of
-bypassing process isolation. Once an exact request publishes a native output,
-the mutable codec context is terminal:
-the worker waits for the output lease, destroys the context between Broker
-execution leases, then receives the next job. It never re-enters that codec and
-never opens an alternating native pool while the old output is leased. Keeping
-teardown outside the following execution lease is part of cancellation
-correctness: destruction of a prior codec cannot hide the first cooperative
-checkpoint of newer work. The immutable device cache and seek index survive
-this boundary because neither owns codec continuity or decoder surfaces.
+execution family, conservative source revision, and codec/output contract also
+match. Production Scrub and exact now use the same reusable isolated demux
+family. The worker still waits for the final output lease before seek/flush,
+but a successful exact request is no longer a historical reason to destroy a
+healthy codec/DPB/frames context. Teardown occurs for a changed contract,
+poisoned helper, residency-family retirement, idle retirement, or shutdown.
+This preserves one native surface pool without opening an alternating pool
+while the old output is leased. The immutable device cache and bounded seek
+index survive mutable-session retirement because neither owns codec continuity
+or decoder surfaces.
 
 The Frame Store release above is necessary but not sufficient for native video.
 The renderer's D3D12 bridge temporarily retains the imported source resource
@@ -1560,17 +1559,21 @@ that request. `av_read_frame` still did not return. Callback installation and
 correct probe binding therefore cannot provide a recoverable execution lease;
 only process isolation can retire this class of format work honestly.
 
-The first production vertical slice now isolates exact-Still open,
-stream-discovery, seek, and packet read in a bounded packaged helper while
-keeping codec/DPB/hardware surfaces in the parent Preview worker. The child is
-the cancellation generation: parent cancellation disconnects IPC, terminates
-and reaps it, and records `IsolatedDemuxTermination` instead of forging an
-`FfmpegIoInterrupt` return. The packet queue is four entries, so this recovery
-path does not scale memory with media duration and remains compatible with the
-8 GiB correctness class. This is not yet closure of the Video gate: Playback
-and Scrub still own in-process format contexts, and the one-request exact seam
-must become a reusable versioned open/seek/read/close demux session before the
-full seek/cancellation matrix can pass without callback dependence.
+Production Playback, Scrub, and Exact now isolate open, stream discovery, seek,
+and packet read in one bounded packaged helper per decode Session while keeping
+codec/DPB/hardware surfaces in the parent Preview worker. The helper serves
+strictly ordered, single-in-flight `seek/read/close` commands and survives
+successful frame requests and EOF; it is not spawned per frame and never
+switches sources. Parent cancellation disconnects IPC, terminates and reaps it,
+poisons the packet source, and records `IsolatedDemuxTermination` at the actual
+Seek or PacketRead checkpoint instead of forging an `FfmpegIoInterrupt` return.
+The response queue has capacity one and every serialized allocation has an
+independent hard cap, so this recovery path does not scale memory with media
+duration and remains compatible with the 8 GiB correctness class. Synthetic
+H.264/B-frame short gates prove per-mode reuse plus
+InputOpen/StreamInfo/Seek/PacketRead cancellation; the complete Video gate
+remains open until the real Main10
+pause/seek/close/quit and long-run evidence passes on a qualified machine.
 
 Only the complete two-gate set on a qualified `standard-playback` machine
 (16 GiB installed memory or higher), with a clean unchanged Git revision and

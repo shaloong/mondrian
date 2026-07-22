@@ -1,14 +1,17 @@
-//! Packet-source abstraction for Preview decode sessions.
+//! Packet-source seam for Preview decode sessions.
 //!
 //! Decoder sessions consume one contract whether container work is direct or
-//! isolated. This module alone knows which side owns `AVFormatContext`; codec,
-//! DPB, and output residency remain in `decode_session`.
+//! isolated. This module alone selects the Adapter and owns seek/read error
+//! normalization; codec, DPB, and output residency remain in `decode_session`.
 
 pub(super) use super::demux_process::PreviewDemuxWorkerConfig;
-use super::demux_process::{IsolatedDemuxOpenError, IsolatedDemuxRead, IsolatedDemuxRequest};
+use super::demux_process::{
+    IsolatedDemuxOpenError, IsolatedDemuxRead, IsolatedDemuxSeek, IsolatedDemuxSession,
+};
+use super::demux_protocol::DemuxOpenPhase;
 use super::seek_index::{
-    preview_seek_index_cache_get, preview_seek_index_cache_put, preview_seek_index_from_stream,
-    PreviewSeekIndex,
+    preview_seek_index_cache_get, preview_seek_index_cache_put,
+    preview_seek_index_contract_from_stream, PreviewSeekIndex,
 };
 use super::*;
 use ffmpeg::codec::packet::Mut as _;
@@ -16,12 +19,19 @@ use ffmpeg::codec::packet::Mut as _;
 pub(super) enum PreviewPacketRead {
     Packet(ffmpeg::Packet),
     End,
-    Canceled,
+    DirectCanceled,
+    IsolatedCanceled,
+}
+
+pub(super) enum PreviewPacketSeek {
+    Complete,
+    DirectCanceled,
+    IsolatedCanceled,
 }
 
 pub(super) enum PreviewPacketSource {
     Direct(ffmpeg::format::context::Input),
-    Isolated(IsolatedDemuxRequest),
+    Isolated(IsolatedDemuxSession),
 }
 
 pub(super) struct PreviewPacketSourceOpen {
@@ -36,50 +46,73 @@ pub(super) struct PreviewPacketSourceOpen {
 
 pub(super) enum PreviewPacketSourceOpenError {
     DirectCanceled,
-    IsolatedCanceled,
+    IsolatedCanceled(PreviewDecodeCancellationCheckpoint),
     Failed(MondrianError),
 }
 
 impl PreviewPacketSource {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn open(
         path: &Path,
         fingerprint: MediaFileFingerprint,
-        access_mode: PreviewDecodeAccessMode,
-        source_time: TimelineTime,
         demux_worker: Option<&PreviewDemuxWorkerConfig>,
         interrupt_state: &Arc<PreviewDecodeInterruptState>,
         should_cancel: &(dyn Fn() -> bool + Send + Sync),
     ) -> std::result::Result<PreviewPacketSourceOpen, PreviewPacketSourceOpenError> {
-        if access_mode == PreviewDecodeAccessMode::RandomAccessStillFrame {
-            if let Some(config) = demux_worker {
-                interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::InputOpen);
-                return match IsolatedDemuxRequest::open(config, path, source_time, should_cancel) {
-                    Ok(open) => {
-                        let stream = open.stream;
-                        let seek_index =
-                            preview_seek_index_cache_get(path, fingerprint, stream.stream_index)
-                                .unwrap_or_default();
-                        Ok(PreviewPacketSourceOpen {
-                            source: Self::Isolated(open.source),
-                            parameters: stream.parameters,
-                            stream_index: stream.stream_index,
-                            stream_tb: stream.time_base,
-                            stream_start_pts: stream.start_pts,
-                            stream_rate: stream.frame_rate,
-                            seek_index,
-                        })
-                    }
-                    Err(IsolatedDemuxOpenError::Canceled) => {
-                        Err(PreviewPacketSourceOpenError::IsolatedCanceled)
-                    }
-                    Err(IsolatedDemuxOpenError::Failed(reason)) => {
-                        Err(PreviewPacketSourceOpenError::Failed(
-                            MondrianError::MediaOpen { path: path.display().to_string(), reason },
-                        ))
-                    }
+        if let Some(config) = demux_worker {
+            let mut last_open_checkpoint = PreviewDecodeCancellationCheckpoint::InputOpen;
+            let mut observe_open_phase = |phase| {
+                last_open_checkpoint = match phase {
+                    DemuxOpenPhase::InputOpen => PreviewDecodeCancellationCheckpoint::InputOpen,
+                    DemuxOpenPhase::StreamInfo => PreviewDecodeCancellationCheckpoint::StreamInfo,
                 };
-            }
+                interrupt_state.set_checkpoint(last_open_checkpoint);
+            };
+            return match IsolatedDemuxSession::open(
+                config,
+                path,
+                fingerprint,
+                should_cancel,
+                &mut observe_open_phase,
+            ) {
+                Ok(open) => {
+                    let stream = open.stream;
+                    let seek_index =
+                        preview_seek_index_cache_get(path, fingerprint, stream.stream_index)
+                            .unwrap_or_else(|| {
+                                let index = PreviewSeekIndex::from_probe_keyframes(
+                                    stream.keyframe_pts.clone(),
+                                );
+                                if !stream.keyframe_index_truncated
+                                    && index.source == PreviewSeekIndexSource::ProbeBacked
+                                {
+                                    preview_seek_index_cache_put(
+                                        path,
+                                        fingerprint,
+                                        stream.stream_index,
+                                        &index.keyframe_pts,
+                                    );
+                                }
+                                index
+                            });
+                    Ok(PreviewPacketSourceOpen {
+                        source: Self::Isolated(open.source),
+                        parameters: stream.parameters,
+                        stream_index: stream.stream_index,
+                        stream_tb: stream.time_base,
+                        stream_start_pts: stream.start_pts,
+                        stream_rate: stream.frame_rate,
+                        seek_index,
+                    })
+                }
+                Err(IsolatedDemuxOpenError::Canceled) => Err(
+                    PreviewPacketSourceOpenError::IsolatedCanceled(last_open_checkpoint),
+                ),
+                Err(IsolatedDemuxOpenError::Failed(reason)) => {
+                    Err(PreviewPacketSourceOpenError::Failed(
+                        MondrianError::MediaOpen { path: path.display().to_string(), reason },
+                    ))
+                }
+            };
         }
         match Self::open_direct(path, fingerprint, interrupt_state) {
             Ok(source) => Ok(source),
@@ -88,22 +121,15 @@ impl PreviewPacketSource {
         }
     }
 
-    pub(super) fn is_terminal(&self) -> bool {
-        matches!(self, Self::Isolated(source) if source.is_terminal())
+    pub(super) fn is_healthy(&self) -> bool {
+        match self {
+            Self::Direct(_) => true,
+            Self::Isolated(source) => source.is_healthy(),
+        }
     }
 
     pub(super) fn is_isolated(&self) -> bool {
         matches!(self, Self::Isolated(_))
-    }
-
-    pub(super) fn isolated_demux_was_canceled(&self) -> bool {
-        matches!(self, Self::Isolated(source) if source.was_canceled())
-    }
-
-    pub(super) fn finish_isolated_one_shot(&mut self) {
-        if let Self::Isolated(source) = self {
-            source.finish_one_shot();
-        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -111,43 +137,55 @@ impl PreviewPacketSource {
         &mut self,
         stream_index: usize,
         min_ts: i64,
-        seek_target_ts: i64,
+        target_ts: i64,
         max_ts: i64,
-        seek_flags: i32,
-        requested_target_pts: i64,
+        flags: i32,
         path: &Path,
-    ) -> Result<()> {
-        let result = match self {
-            Self::Direct(input) => unsafe {
-                ffmpeg::ffi::avformat_seek_file(
-                    input.as_mut_ptr(),
-                    stream_index as i32,
-                    min_ts,
-                    seek_target_ts,
-                    max_ts,
-                    seek_flags,
-                )
-            },
-            Self::Isolated(source) => {
-                if source.seek_target_pts() != requested_target_pts {
+        should_cancel: &(dyn Fn() -> bool + Send + Sync),
+    ) -> Result<PreviewPacketSeek> {
+        match self {
+            Self::Direct(input) => {
+                // SAFETY: the input is exclusively worker-owned and the
+                // interrupt callback state outlives this direct source.
+                let result = unsafe {
+                    ffmpeg::ffi::avformat_seek_file(
+                        input.as_mut_ptr(),
+                        stream_index as i32,
+                        min_ts,
+                        target_ts,
+                        max_ts,
+                        flags,
+                    )
+                };
+                if result < 0 {
+                    if should_cancel() {
+                        return Ok(PreviewPacketSeek::DirectCanceled);
+                    }
                     return Err(MondrianError::DecodeFailed {
                         asset_id: path.display().to_string(),
                         reason: format!(
-                            "one-shot isolated demux target {} cannot satisfy target {requested_target_pts}",
-                            source.seek_target_pts()
+                            "seek to PTS {target_ts} failed with code {result}: {}",
+                            ffmpeg::Error::from(result)
                         ),
                     });
                 }
-                0
+                if should_cancel() {
+                    Ok(PreviewPacketSeek::DirectCanceled)
+                } else {
+                    Ok(PreviewPacketSeek::Complete)
+                }
             }
-        };
-        if result < 0 {
-            return Err(MondrianError::DecodeFailed {
-                asset_id: path.display().to_string(),
-                reason: format!("seek failed with code {result}"),
-            });
+            Self::Isolated(source) => {
+                match source.seek(min_ts, target_ts, max_ts, flags, should_cancel) {
+                    Ok(IsolatedDemuxSeek::Complete) => Ok(PreviewPacketSeek::Complete),
+                    Ok(IsolatedDemuxSeek::Canceled) => Ok(PreviewPacketSeek::IsolatedCanceled),
+                    Err(reason) => Err(MondrianError::DecodeFailed {
+                        asset_id: path.display().to_string(),
+                        reason,
+                    }),
+                }
+            }
         }
-        Ok(())
     }
 
     pub(super) fn read_next(
@@ -166,13 +204,14 @@ impl PreviewPacketSource {
                 }
                 if result == ffmpeg::ffi::AVERROR(ffmpeg::ffi::EAGAIN) {
                     if should_cancel() {
-                        return Ok(PreviewPacketRead::Canceled);
+                        return Ok(PreviewPacketRead::DirectCanceled);
                     }
+                    std::thread::yield_now();
                     continue;
                 }
                 if result < 0 {
                     if should_cancel() {
-                        return Ok(PreviewPacketRead::Canceled);
+                        return Ok(PreviewPacketRead::DirectCanceled);
                     }
                     return Err(MondrianError::DecodeFailed {
                         asset_id: path.display().to_string(),
@@ -187,7 +226,7 @@ impl PreviewPacketSource {
             Self::Isolated(source) => match source.read_next(should_cancel) {
                 Ok(IsolatedDemuxRead::Packet(packet)) => Ok(PreviewPacketRead::Packet(packet)),
                 Ok(IsolatedDemuxRead::End) => Ok(PreviewPacketRead::End),
-                Ok(IsolatedDemuxRead::Canceled) => Ok(PreviewPacketRead::Canceled),
+                Ok(IsolatedDemuxRead::Canceled) => Ok(PreviewPacketRead::IsolatedCanceled),
                 Err(reason) => Err(MondrianError::DecodeFailed {
                     asset_id: path.display().to_string(),
                     reason,
@@ -213,8 +252,8 @@ impl PreviewPacketSource {
             };
             let seek_index = preview_seek_index_cache_get(path, fingerprint, stream_index)
                 .unwrap_or_else(|| {
-                    let seek_index = preview_seek_index_from_stream(&stream);
-                    if seek_index.source == PreviewSeekIndexSource::ProbeBacked {
+                    let (seek_index, truncated) = preview_seek_index_contract_from_stream(&stream);
+                    if !truncated && seek_index.source == PreviewSeekIndexSource::ProbeBacked {
                         preview_seek_index_cache_put(
                             path,
                             fingerprint,
@@ -249,12 +288,14 @@ fn open_preview_input(
     path: &Path,
     interrupt_state: &Arc<PreviewDecodeInterruptState>,
 ) -> Result<ffmpeg::format::context::Input> {
-    let path_string = path.to_string_lossy();
-    let path_c =
-        CString::new(path_string.as_bytes()).map_err(|error| MondrianError::MediaOpen {
-            path: path.display().to_string(),
-            reason: format!("media path contains an interior NUL byte: {error}"),
-        })?;
+    let path_utf8 = path.to_str().ok_or_else(|| MondrianError::MediaOpen {
+        path: path.display().to_string(),
+        reason: "media path is not representable by FFmpeg's UTF-8 path Adapter".to_owned(),
+    })?;
+    let path_c = CString::new(path_utf8).map_err(|error| MondrianError::MediaOpen {
+        path: path.display().to_string(),
+        reason: format!("media path contains an interior NUL byte: {error}"),
+    })?;
 
     // SAFETY: the allocated context is transferred into the safe wrapper or
     // closed on every error path. The callback state outlives the direct source.

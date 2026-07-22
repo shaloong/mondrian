@@ -128,18 +128,6 @@ pub(crate) fn media_preview_worker(
             residency_revision = directive.revision();
         }
 
-        // Native exact-still output is a terminal operation for the shared
-        // Interactive codec. Retire its DPB/frames context after the result's
-        // output lease ends and before acquiring another Broker execution
-        // lease. Codec destruction latency therefore cannot mask cancellation
-        // observation for newly admitted work.
-        if !decode_context.retire_released_native_exact_session() {
-            if shutdown.is_requested() {
-                break;
-            }
-            std::thread::sleep(MEDIA_PREVIEW_LIFECYCLE_POLL_INTERVAL);
-            continue;
-        }
         let outcome = match jobs
             .recv_for_worker_outcome_timeout(lane, MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT)
         {

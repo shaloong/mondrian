@@ -9,24 +9,34 @@ use super::demux_protocol_ffi::{
     decode_chroma_location, decode_color_primaries, decode_color_range, decode_color_space,
     decode_color_trc, decode_field_order, decode_side_data_type,
 };
+use super::MediaFileFingerprint;
 use ffmpeg::codec::packet::{Mut as PacketMut, Ref as PacketRef};
 use ffmpeg_next as ffmpeg;
-use mondrian_core::TimelineTime;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
 
-const PROTOCOL_MAGIC: [u8; 8] = *b"MDPDMX01";
-const REQUEST_MAGIC: [u8; 8] = *b"MDPDMXR1";
-pub(super) const PROTOCOL_VERSION: u32 = 1;
+const PROTOCOL_MAGIC: [u8; 8] = *b"MDPDMX02";
+const REQUEST_MAGIC: [u8; 8] = *b"MDPDMXR2";
+pub(super) const PROTOCOL_VERSION: u32 = 2;
 const BUILD_IDENTITY: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
-const MESSAGE_STREAM: u8 = 1;
-const MESSAGE_PACKET: u8 = 2;
-const MESSAGE_END: u8 = 3;
-const MESSAGE_ERROR: u8 = 4;
+const MESSAGE_OPEN_PHASE: u8 = 1;
+const MESSAGE_STREAM: u8 = 2;
+const MESSAGE_SEEK_COMPLETE: u8 = 3;
+const MESSAGE_PACKET: u8 = 4;
+const MESSAGE_END: u8 = 5;
+const MESSAGE_CLOSED: u8 = 6;
+const MESSAGE_ERROR: u8 = 7;
+
+const OPEN_PHASE_INPUT_OPEN: u8 = 1;
+const OPEN_PHASE_STREAM_INFO: u8 = 2;
+
+const COMMAND_SEEK: u8 = 1;
+const COMMAND_READ: u8 = 2;
+const COMMAND_CLOSE: u8 = 3;
 
 const MAX_CODEC_NAME_BYTES: usize = 128;
 const MAX_EXTRADATA_BYTES: usize = 16 * 1024 * 1024;
@@ -37,19 +47,56 @@ const MAX_TOTAL_SIDE_DATA_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ERROR_BYTES: usize = 64 * 1024;
 const MAX_PATH_BYTES: usize = 64 * 1024;
 const MAX_BUILD_IDENTITY_BYTES: usize = 256;
+pub(super) const MAX_KEYFRAME_ANCHORS: usize = 262_144;
 
 #[derive(Debug)]
 pub(super) struct DemuxWorkerRequest {
     pub nonce: [u8; 16],
     pub path: PathBuf,
-    pub source_time: TimelineTime,
+    pub source_revision: MediaFileFingerprint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DemuxOpenPhase {
+    InputOpen,
+    StreamInfo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DemuxWorkerCommand {
+    Seek {
+        command_id: u64,
+        min_ts: i64,
+        target_ts: i64,
+        max_ts: i64,
+        flags: i32,
+    },
+    Read {
+        command_id: u64,
+    },
+    Close {
+        command_id: u64,
+    },
+}
+
+impl DemuxWorkerCommand {
+    pub(super) const fn command_id(self) -> u64 {
+        match self {
+            Self::Seek { command_id, .. }
+            | Self::Read { command_id }
+            | Self::Close { command_id } => command_id,
+        }
+    }
 }
 
 pub(super) enum DemuxProtocolMessage {
+    OpenPhase(DemuxOpenPhase),
     Stream(DemuxStreamContract),
+    SeekComplete { command_id: u64 },
     Packet(DemuxPacket),
-    End,
-    Error(String),
+    End { command_id: u64 },
+    Closed { command_id: u64 },
+    Error { command_id: u64, message: String },
 }
 
 pub(super) struct DemuxStreamContract {
@@ -58,10 +105,12 @@ pub(super) struct DemuxStreamContract {
     pub time_base: ffmpeg::Rational,
     pub start_pts: i64,
     pub frame_rate: ffmpeg::Rational,
-    pub seek_target_pts: i64,
+    pub keyframe_pts: Vec<i64>,
+    pub keyframe_index_truncated: bool,
 }
 
 pub(super) struct DemuxPacket {
+    pub command_id: u64,
     pub packet: ffmpeg::Packet,
 }
 
@@ -114,15 +163,16 @@ pub(super) fn write_worker_request(
     writer: &mut impl Write,
     nonce: [u8; 16],
     path: &Path,
-    source_time: TimelineTime,
+    source_revision: MediaFileFingerprint,
 ) -> io::Result<()> {
     writer.write_all(&REQUEST_MAGIC)?;
     write_runtime_contract(writer, nonce)?;
     let (encoding, path_bytes) = encode_native_path(path.as_os_str())?;
     writer.write_all(&[encoding])?;
     write_bounded_bytes(writer, &path_bytes, MAX_PATH_BYTES, "media path")?;
-    write_i64(writer, source_time.numerator())?;
-    write_i64(writer, source_time.denominator())
+    write_optional_u64(writer, source_revision.len)?;
+    write_optional_u64(writer, source_revision.modified_secs)?;
+    write_optional_u32(writer, source_revision.modified_nanos)
 }
 
 pub(super) fn read_worker_request(reader: &mut impl Read) -> io::Result<DemuxWorkerRequest> {
@@ -138,11 +188,67 @@ pub(super) fn read_worker_request(reader: &mut impl Read) -> io::Result<DemuxWor
         encoding[0],
         read_bounded_bytes(reader, MAX_PATH_BYTES, "media path")?,
     )?;
-    let numerator = read_i64(reader)?;
-    let denominator = read_i64(reader)?;
-    let source_time = TimelineTime::new(numerator, denominator)
-        .map_err(|reason| invalid_data(format!("invalid source time: {reason}")))?;
-    Ok(DemuxWorkerRequest { nonce, path, source_time })
+    let source_revision = MediaFileFingerprint {
+        len: read_optional_u64(reader, "source byte length")?,
+        modified_secs: read_optional_u64(reader, "source modified seconds")?,
+        modified_nanos: read_optional_u32(reader, "source modified nanoseconds")?,
+    };
+    if source_revision.modified_nanos.is_some_and(|nanos| nanos >= 1_000_000_000) {
+        return Err(invalid_data(
+            "source modified nanoseconds must be below one second",
+        ));
+    }
+    Ok(DemuxWorkerRequest { nonce, path, source_revision })
+}
+
+pub(super) fn write_worker_command(
+    writer: &mut impl Write,
+    command: DemuxWorkerCommand,
+) -> io::Result<()> {
+    match command {
+        DemuxWorkerCommand::Seek { command_id, min_ts, target_ts, max_ts, flags } => {
+            validate_command_id(command_id)?;
+            validate_seek_command(min_ts, target_ts, max_ts, flags)?;
+            writer.write_all(&[COMMAND_SEEK])?;
+            write_u64(writer, command_id)?;
+            write_i64(writer, min_ts)?;
+            write_i64(writer, target_ts)?;
+            write_i64(writer, max_ts)?;
+            write_i32(writer, flags)
+        }
+        DemuxWorkerCommand::Read { command_id } => {
+            validate_command_id(command_id)?;
+            writer.write_all(&[COMMAND_READ])?;
+            write_u64(writer, command_id)
+        }
+        DemuxWorkerCommand::Close { command_id } => {
+            validate_command_id(command_id)?;
+            writer.write_all(&[COMMAND_CLOSE])?;
+            write_u64(writer, command_id)
+        }
+    }
+}
+
+pub(super) fn read_worker_command(reader: &mut impl Read) -> io::Result<DemuxWorkerCommand> {
+    let mut kind = [0_u8; 1];
+    reader.read_exact(&mut kind)?;
+    let command_id = read_u64(reader)?;
+    validate_command_id(command_id)?;
+    match kind[0] {
+        COMMAND_SEEK => {
+            let min_ts = read_i64(reader)?;
+            let target_ts = read_i64(reader)?;
+            let max_ts = read_i64(reader)?;
+            let flags = read_i32(reader)?;
+            validate_seek_command(min_ts, target_ts, max_ts, flags)?;
+            Ok(DemuxWorkerCommand::Seek { command_id, min_ts, target_ts, max_ts, flags })
+        }
+        COMMAND_READ => Ok(DemuxWorkerCommand::Read { command_id }),
+        COMMAND_CLOSE => Ok(DemuxWorkerCommand::Close { command_id }),
+        other => Err(invalid_data(format!(
+            "unknown Preview demux worker command {other}"
+        ))),
+    }
 }
 
 pub(super) fn write_protocol_preamble(writer: &mut impl Write, nonce: [u8; 16]) -> io::Result<()> {
@@ -235,7 +341,8 @@ pub(super) fn write_stream_message(
     time_base: ffmpeg::Rational,
     start_pts: i64,
     frame_rate: ffmpeg::Rational,
-    seek_target_pts: i64,
+    keyframe_pts: &[i64],
+    keyframe_index_truncated: bool,
 ) -> io::Result<()> {
     writer.write_all(&[MESSAGE_STREAM])?;
     let wire = WireCodecParameters::from_ffmpeg(parameters)?;
@@ -246,23 +353,61 @@ pub(super) fn write_stream_message(
     write_i64(writer, start_pts)?;
     write_i32(writer, frame_rate.numerator())?;
     write_i32(writer, frame_rate.denominator())?;
-    write_i64(writer, seek_target_pts)
+    write_keyframe_anchors(writer, keyframe_pts, keyframe_index_truncated)
+}
+
+pub(super) fn write_open_phase_message(
+    writer: &mut impl Write,
+    phase: DemuxOpenPhase,
+) -> io::Result<()> {
+    writer.write_all(&[
+        MESSAGE_OPEN_PHASE,
+        match phase {
+            DemuxOpenPhase::InputOpen => OPEN_PHASE_INPUT_OPEN,
+            DemuxOpenPhase::StreamInfo => OPEN_PHASE_STREAM_INFO,
+        },
+    ])
+}
+
+pub(super) fn write_seek_complete_message(
+    writer: &mut impl Write,
+    command_id: u64,
+) -> io::Result<()> {
+    validate_command_id(command_id)?;
+    writer.write_all(&[MESSAGE_SEEK_COMPLETE])?;
+    write_u64(writer, command_id)
 }
 
 pub(super) fn write_packet_message(
     writer: &mut impl Write,
+    command_id: u64,
     packet: &ffmpeg::Packet,
 ) -> io::Result<()> {
+    validate_command_id(command_id)?;
     writer.write_all(&[MESSAGE_PACKET])?;
+    write_u64(writer, command_id)?;
     WirePacket::from_ffmpeg(packet)?.write_to(writer)
 }
 
-pub(super) fn write_end_message(writer: &mut impl Write) -> io::Result<()> {
-    writer.write_all(&[MESSAGE_END])
+pub(super) fn write_end_message(writer: &mut impl Write, command_id: u64) -> io::Result<()> {
+    validate_command_id(command_id)?;
+    writer.write_all(&[MESSAGE_END])?;
+    write_u64(writer, command_id)
 }
 
-pub(super) fn write_error_message(writer: &mut impl Write, error: &str) -> io::Result<()> {
+pub(super) fn write_closed_message(writer: &mut impl Write, command_id: u64) -> io::Result<()> {
+    validate_command_id(command_id)?;
+    writer.write_all(&[MESSAGE_CLOSED])?;
+    write_u64(writer, command_id)
+}
+
+pub(super) fn write_error_message(
+    writer: &mut impl Write,
+    command_id: u64,
+    error: &str,
+) -> io::Result<()> {
     writer.write_all(&[MESSAGE_ERROR])?;
+    write_u64(writer, command_id)?;
     let mut end = error.len().min(MAX_ERROR_BYTES);
     while !error.is_char_boundary(end) {
         end -= 1;
@@ -279,36 +424,152 @@ pub(super) fn read_message(reader: &mut impl Read) -> io::Result<DemuxProtocolMe
     let mut kind = [0_u8; 1];
     reader.read_exact(&mut kind)?;
     match kind[0] {
+        MESSAGE_OPEN_PHASE => {
+            let mut phase = [0_u8; 1];
+            reader.read_exact(&mut phase)?;
+            match phase[0] {
+                OPEN_PHASE_INPUT_OPEN => {
+                    Ok(DemuxProtocolMessage::OpenPhase(DemuxOpenPhase::InputOpen))
+                }
+                OPEN_PHASE_STREAM_INFO => {
+                    Ok(DemuxProtocolMessage::OpenPhase(DemuxOpenPhase::StreamInfo))
+                }
+                other => Err(invalid_data(format!(
+                    "unknown Preview demux open phase {other}"
+                ))),
+            }
+        }
         MESSAGE_STREAM => {
             let parameters = WireCodecParameters::read_from(reader)?.into_ffmpeg()?;
             let stream_index = read_u32(reader)? as usize;
             let time_base = read_rational(reader, "stream time base")?;
             let start_pts = read_i64(reader)?;
             let frame_rate = read_rational(reader, "stream frame rate")?;
-            let seek_target_pts = read_i64(reader)?;
+            let (keyframe_pts, keyframe_index_truncated) = read_keyframe_anchors(reader)?;
             Ok(DemuxProtocolMessage::Stream(DemuxStreamContract {
                 parameters,
                 stream_index,
                 time_base,
                 start_pts,
                 frame_rate,
-                seek_target_pts,
+                keyframe_pts,
+                keyframe_index_truncated,
             }))
         }
+        MESSAGE_SEEK_COMPLETE => {
+            let command_id = read_u64(reader)?;
+            validate_command_id(command_id)?;
+            Ok(DemuxProtocolMessage::SeekComplete { command_id })
+        }
         MESSAGE_PACKET => Ok(DemuxProtocolMessage::Packet(DemuxPacket {
+            command_id: {
+                let command_id = read_u64(reader)?;
+                validate_command_id(command_id)?;
+                command_id
+            },
             packet: WirePacket::read_from(reader)?.into_ffmpeg()?,
         })),
-        MESSAGE_END => Ok(DemuxProtocolMessage::End),
+        MESSAGE_END => {
+            let command_id = read_u64(reader)?;
+            validate_command_id(command_id)?;
+            Ok(DemuxProtocolMessage::End { command_id })
+        }
+        MESSAGE_CLOSED => {
+            let command_id = read_u64(reader)?;
+            validate_command_id(command_id)?;
+            Ok(DemuxProtocolMessage::Closed { command_id })
+        }
         MESSAGE_ERROR => {
+            let command_id = read_u64(reader)?;
             let bytes = read_bounded_bytes(reader, MAX_ERROR_BYTES, "worker error")?;
             let message = String::from_utf8(bytes)
                 .map_err(|_| invalid_data("Preview demux worker error is not UTF-8"))?;
-            Ok(DemuxProtocolMessage::Error(message))
+            Ok(DemuxProtocolMessage::Error { command_id, message })
         }
         other => Err(invalid_data(format!(
             "unknown Preview demux protocol message {other}"
         ))),
     }
+}
+
+fn validate_command_id(command_id: u64) -> io::Result<()> {
+    if command_id == 0 {
+        return Err(invalid_data(
+            "Preview demux command identifiers must be non-zero",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_seek_command(min_ts: i64, target_ts: i64, max_ts: i64, flags: i32) -> io::Result<()> {
+    if min_ts > target_ts || target_ts > max_ts {
+        return Err(invalid_data(
+            "Preview demux seek window must satisfy min <= target <= max",
+        ));
+    }
+    if flags != ffmpeg::ffi::AVSEEK_FLAG_BACKWARD && flags != ffmpeg::ffi::AVSEEK_FLAG_ANY {
+        return Err(invalid_data(format!(
+            "unsupported Preview demux seek flags {flags}"
+        )));
+    }
+    Ok(())
+}
+
+fn write_keyframe_anchors(
+    writer: &mut impl Write,
+    keyframe_pts: &[i64],
+    truncated: bool,
+) -> io::Result<()> {
+    if keyframe_pts.len() > MAX_KEYFRAME_ANCHORS {
+        return Err(invalid_data(format!(
+            "Preview demux keyframe index exceeds {MAX_KEYFRAME_ANCHORS} anchors"
+        )));
+    }
+    if keyframe_pts.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(invalid_data(
+            "Preview demux keyframe anchors must be strictly increasing",
+        ));
+    }
+    write_u32(
+        writer,
+        checked_u32(keyframe_pts.len(), "keyframe anchor count")?,
+    )?;
+    writer.write_all(&[u8::from(truncated)])?;
+    for &pts in keyframe_pts {
+        write_i64(writer, pts)?;
+    }
+    Ok(())
+}
+
+fn read_keyframe_anchors(reader: &mut impl Read) -> io::Result<(Vec<i64>, bool)> {
+    let count = read_u32(reader)? as usize;
+    if count > MAX_KEYFRAME_ANCHORS {
+        return Err(invalid_data(format!(
+            "Preview demux keyframe index exceeds {MAX_KEYFRAME_ANCHORS} anchors"
+        )));
+    }
+    let mut truncated = [0_u8; 1];
+    reader.read_exact(&mut truncated)?;
+    let truncated = match truncated[0] {
+        0 => false,
+        1 => true,
+        other => {
+            return Err(invalid_data(format!(
+                "invalid Preview demux keyframe truncation flag {other}"
+            )))
+        }
+    };
+    let mut keyframe_pts = Vec::with_capacity(count);
+    for _ in 0..count {
+        let pts = read_i64(reader)?;
+        if keyframe_pts.last().is_some_and(|previous| *previous >= pts) {
+            return Err(invalid_data(
+                "Preview demux keyframe anchors must be strictly increasing",
+            ));
+        }
+        keyframe_pts.push(pts);
+    }
+    Ok((keyframe_pts, truncated))
 }
 
 impl WireCodecParameters {
@@ -885,6 +1146,26 @@ fn write_u32(writer: &mut impl Write, value: u32) -> io::Result<()> {
     writer.write_all(&value.to_le_bytes())
 }
 
+fn write_optional_u32(writer: &mut impl Write, value: Option<u32>) -> io::Result<()> {
+    writer.write_all(&[u8::from(value.is_some())])?;
+    if let Some(value) = value {
+        write_u32(writer, value)?;
+    }
+    Ok(())
+}
+
+fn write_optional_u64(writer: &mut impl Write, value: Option<u64>) -> io::Result<()> {
+    writer.write_all(&[u8::from(value.is_some())])?;
+    if let Some(value) = value {
+        write_u64(writer, value)?;
+    }
+    Ok(())
+}
+
+fn write_u64(writer: &mut impl Write, value: u64) -> io::Result<()> {
+    writer.write_all(&value.to_le_bytes())
+}
+
 fn write_i32(writer: &mut impl Write, value: i32) -> io::Result<()> {
     writer.write_all(&value.to_le_bytes())
 }
@@ -897,6 +1178,38 @@ fn read_u32(reader: &mut impl Read) -> io::Result<u32> {
     let mut bytes = [0_u8; 4];
     reader.read_exact(&mut bytes)?;
     Ok(u32::from_le_bytes(bytes))
+}
+
+fn read_optional_u32(reader: &mut impl Read, label: &str) -> io::Result<Option<u32>> {
+    match read_presence(reader, label)? {
+        false => Ok(None),
+        true => read_u32(reader).map(Some),
+    }
+}
+
+fn read_optional_u64(reader: &mut impl Read, label: &str) -> io::Result<Option<u64>> {
+    match read_presence(reader, label)? {
+        false => Ok(None),
+        true => read_u64(reader).map(Some),
+    }
+}
+
+fn read_presence(reader: &mut impl Read, label: &str) -> io::Result<bool> {
+    let mut present = [0_u8; 1];
+    reader.read_exact(&mut present)?;
+    match present[0] {
+        0 => Ok(false),
+        1 => Ok(true),
+        other => Err(invalid_data(format!(
+            "invalid {label} presence marker {other}"
+        ))),
+    }
+}
+
+fn read_u64(reader: &mut impl Read) -> io::Result<u64> {
+    let mut bytes = [0_u8; 8];
+    reader.read_exact(&mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
 }
 
 fn read_i32(reader: &mut impl Read) -> io::Result<i32> {
@@ -927,6 +1240,7 @@ mod tests {
         let mut bytes = Vec::new();
         write_protocol_preamble(&mut bytes, TEST_NONCE).expect("preamble");
         bytes.push(MESSAGE_ERROR);
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
         bytes.extend_from_slice(&((MAX_ERROR_BYTES as u32) + 1).to_le_bytes());
 
         let mut reader = Cursor::new(bytes);
@@ -961,7 +1275,7 @@ mod tests {
 
         let mut bytes = Vec::new();
         write_protocol_preamble(&mut bytes, TEST_NONCE).expect("preamble");
-        write_packet_message(&mut bytes, &packet).expect("packet message");
+        write_packet_message(&mut bytes, 7, &packet).expect("packet message");
 
         let mut reader = Cursor::new(bytes);
         read_protocol_preamble(&mut reader, TEST_NONCE).expect("read preamble");
@@ -969,6 +1283,7 @@ mod tests {
         else {
             panic!("expected packet");
         };
+        assert_eq!(decoded.command_id, 7);
         assert_eq!(decoded.packet.data(), packet.data());
         assert_eq!(decoded.packet.pts(), Some(101));
         assert_eq!(decoded.packet.dts(), Some(99));
@@ -993,15 +1308,91 @@ mod tests {
     }
 
     #[test]
-    fn worker_request_round_trip_preserves_native_path_time_and_nonce() {
+    fn worker_request_round_trip_preserves_native_path_and_nonce() {
         let path = Path::new("fixtures/媒体/clip.mov");
-        let source_time = TimelineTime::new(30000, 1001).expect("time");
+        let source_revision = MediaFileFingerprint {
+            len: Some(123_456),
+            modified_secs: Some(987),
+            modified_nanos: Some(654_321),
+        };
         let mut bytes = Vec::new();
-        write_worker_request(&mut bytes, TEST_NONCE, path, source_time).expect("write request");
+        write_worker_request(&mut bytes, TEST_NONCE, path, source_revision).expect("write request");
 
         let request = read_worker_request(&mut Cursor::new(bytes)).expect("read request");
         assert_eq!(request.nonce, TEST_NONCE);
         assert_eq!(request.path, path);
-        assert_eq!(request.source_time, source_time);
+        assert_eq!(request.source_revision, source_revision);
+    }
+
+    #[test]
+    fn worker_commands_round_trip_with_strict_seek_window() {
+        let commands = [
+            DemuxWorkerCommand::Seek {
+                command_id: 1,
+                min_ts: 10,
+                target_ts: 20,
+                max_ts: 30,
+                flags: ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
+            },
+            DemuxWorkerCommand::Read { command_id: 2 },
+            DemuxWorkerCommand::Close { command_id: 3 },
+        ];
+        let mut bytes = Vec::new();
+        for command in commands {
+            write_worker_command(&mut bytes, command).expect("write command");
+        }
+        let mut reader = Cursor::new(bytes);
+        for expected in commands {
+            assert_eq!(
+                read_worker_command(&mut reader).expect("read command"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn open_phases_round_trip_without_command_identity() {
+        let mut bytes = Vec::new();
+        write_open_phase_message(&mut bytes, DemuxOpenPhase::InputOpen).expect("input open");
+        write_open_phase_message(&mut bytes, DemuxOpenPhase::StreamInfo).expect("stream info");
+        let mut reader = Cursor::new(bytes);
+        assert!(matches!(
+            read_message(&mut reader).expect("input-open phase"),
+            DemuxProtocolMessage::OpenPhase(DemuxOpenPhase::InputOpen)
+        ));
+        assert!(matches!(
+            read_message(&mut reader).expect("stream-info phase"),
+            DemuxProtocolMessage::OpenPhase(DemuxOpenPhase::StreamInfo)
+        ));
+    }
+
+    #[test]
+    fn stream_contract_round_trip_preserves_keyframe_anchors() {
+        let parameters = ffmpeg::codec::Parameters::new();
+        // SAFETY: the parameters object is live and exclusively owned here.
+        unsafe {
+            (*parameters.as_ptr().cast_mut()).codec_type =
+                ffmpeg::ffi::AVMediaType::AVMEDIA_TYPE_VIDEO;
+            (*parameters.as_ptr().cast_mut()).codec_id = ffmpeg::ffi::AVCodecID::AV_CODEC_ID_H264;
+        }
+        let mut bytes = Vec::new();
+        write_stream_message(
+            &mut bytes,
+            &parameters,
+            2,
+            ffmpeg::Rational(1, 90_000),
+            42,
+            ffmpeg::Rational(30_000, 1_001),
+            &[42, 3_045, 6_048],
+            true,
+        )
+        .expect("write stream");
+        let DemuxProtocolMessage::Stream(stream) =
+            read_message(&mut Cursor::new(bytes)).expect("read stream")
+        else {
+            panic!("expected stream");
+        };
+        assert_eq!(stream.keyframe_pts, [42, 3_045, 6_048]);
+        assert!(stream.keyframe_index_truncated);
     }
 }

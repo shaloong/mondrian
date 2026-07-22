@@ -1,7 +1,7 @@
 //! Product entrypoint for the app UI Mondrian editor shell.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::args_os().any(|argument| argument == "--internal-demux-worker-v1") {
+    if std::env::args_os().any(|argument| argument == "--internal-demux-worker-v2") {
         return run_internal_demux_worker().map_err(Into::into);
     }
     if std::env::args_os().any(|argument| argument == "--verify-runtime") {
@@ -17,7 +17,7 @@ fn run_internal_demux_worker() -> anyhow::Result<()> {
     let mut arguments = std::env::args_os();
     let _executable = arguments.next();
     anyhow::ensure!(
-        arguments.next().as_deref() == Some(std::ffi::OsStr::new("--internal-demux-worker-v1")),
+        arguments.next().as_deref() == Some(std::ffi::OsStr::new("--internal-demux-worker-v2")),
         "invalid internal Preview demux worker mode"
     );
     anyhow::ensure!(

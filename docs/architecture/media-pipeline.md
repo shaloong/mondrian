@@ -299,22 +299,33 @@ private stdin pipe, not process arguments. The response validates a launch
 nonce, protocol/build identity, pointer width/endian, and the actual
 `avcodec`/`avformat`/`avutil` runtime versions. Codec descriptor name must agree
 with numeric `AVCodecID`; extradata, packet payloads, side-data count/entry/total,
-errors, stderr, and the four-entry packet queue are independently bounded.
+keyframe anchors, errors, stderr, and the single-response queue are independently
+bounded.
 Packets are rebuilt only through checked FFmpeg allocation and never carry
 `buf`, `opaque`, `opaque_ref`, or `AV_PKT_FLAG_TRUSTED` across the process seam.
 The helper calls `av_read_frame` directly so EOF, EAGAIN, and fatal demux errors
 cannot collapse into ffmpeg-next's retrying iterator behavior.
 
-This increment applies isolation only to exact `RandomAccessStillFrame` format
-work. The parent retains `AVCodecContext`, reorder state, D3D12VA/D3D11VA device
-and frames contexts, and native output leases; there is no child-process RGBA
-or GPU-surface serialization. Cancellation disconnects bounded IPC, kills and
-reaps the helper, and returns a distinct isolated-termination fact. Playback and
-Scrub still use their in-process `AVFormatContext`; they must migrate to a
-reusable versioned open/seek/read/close session before format-call recovery or
-the M0 blocker can be declared closed. The exact one-shot vertical slice is not
-permission to spawn a process per Playback frame or claim general demux
-recovery.
+Production Playback, Scrub, and `RandomAccessStillFrame` all use one reusable
+helper per decode Session. Open carries no timeline target. The parent lowers
+the exact source time once to a checked PTS seek window, sends one non-zero
+monotonic command ID, waits for the matching Seek completion, and only then
+flushes its codec. Read is pull-based and returns at most one validated video
+packet or EOF per command; EOF does not close the Session, so a later seek is
+legal. Close has a bounded graceful interval and falls back to kill/wait/join.
+The parent retains `AVCodecContext`, reorder state, D3D12VA/D3D11VA device and
+frames contexts, and native output leases; there is no child-process RGBA or
+GPU-surface serialization. Cancellation after a command is dispatched kills
+and reaps the helper, poisons that packet source, and returns a distinct
+isolated-termination fact at Seek or PacketRead. Source change, protocol/FFmpeg
+failure, and cancellation reopen with a new nonce/process; a process never
+switches between sources. The direct `AVFormatContext` Adapter exists only for
+explicit unconfigured tests and diagnostics, not as a production fallback.
+The launch request also carries the parent's conservative file revision. When
+that revision is complete, the helper revalidates it before input open and
+after stream discovery; a race with source replacement fails closed before any
+packet or reusable Session can be published. An incomplete revision may still
+open a non-file source, but cannot authorize Session or cache reuse.
 
 Ordinary CI exercises this contract through a loopback HTTP server that accepts
 FFmpeg's connection and deliberately withholds a response. Both the media
@@ -459,18 +470,16 @@ separately from queue wait, session open, seek, or packet decode. Number of
 completed requests, generation rotation alone, cache eviction alone, and fixed
 delays are not release proofs.
 A released Interactive codec may execute another request only when its
-packet-source execution family and codec contract both match. In this
-increment, direct Scrub and one-shot isolated exact sources are deliberately
-incompatible, so exact retires the released Scrub context and opens a fresh
-parent-owned codec against its helper packet source. A successful native exact
-output is terminal for that codec/DPB/frames context.
-After publishing the result, the production worker waits for the output lease
-to retire, destroys the terminal context between Broker execution leases, and
-only then dequeues more work. This prevents the next request's cancellation
-window from including prior-codec destruction and prevents a second native
-surface pool from being opened merely to replace the paused Viewer frame. The
-process-shared immutable hardware device and fingerprinted seek index remain
-reusable; terminal exact applies to the mutable codec state, not those caches.
+packet-source execution family, conservative source revision, and codec/output
+contract all match. Production Scrub and exact use the same isolated execution
+family, so a healthy Session may cross access modes after the final native
+output lease retires; access policy is still recomputed for every request.
+Incomplete file metadata never authorizes Session, decoded-frame, or seek-index
+cache reuse. Codec/DPB/frames teardown is reserved for a changed contract,
+poisoned helper, residency-family retirement, idle retirement, or shutdown—not
+for the historical fact that the last successful request was exact. This keeps
+one surface pool without making generation count, elapsed time, or cache
+eviction a false ownership proof.
 The app scheduler lowers explicit `MediaPreviewAccessIntent` values to media
 access modes. Viewer playback lowers to `PlaybackCursor`, active playhead/ruler
 dragging lowers to `ScrubCursor`, and settled non-playing viewer frames plus
@@ -482,16 +491,16 @@ switch, and natural end-of-playback transitions also settle the preview access
 source before the next non-playing viewer request. New UI states must extend
 that intent layer instead of passing booleans or strategy flags into
 `mondrian-media`.
-Playback, scrub, and exact-still cancellation are cooperative but
-non-destructive to compatible worker-owned decode sessions: a prefetch budget
-miss or superseded target must not throw away the warmed decoder/device
-context. Canceled partial output is discarded and forces deterministic codec
-re-entry as described below; it does not masquerade as a successful terminal
-exact output. Exact Still always performs an
+Playback, scrub, and exact-still cancellation discards partial output and never
+masquerades as media failure or successful output. Cancellation before a
+format command remains cooperative; cancellation of an in-flight isolated
+seek/read terminates the helper, poisons the packet source, and makes the paired
+decode Session ineligible for reuse. The immutable shared device cache remains
+independent. Exact Still always performs an
 indexed exact seek and codec flush; scrub follows its independently derived
 bounded low-latency policy. Neither may reuse the shared Interactive context
-until its prior native-output lease has retired, and no request may reuse that
-context after it has produced a native exact output.
+until its prior native-output lease has retired. After release, access-mode
+change alone is not a terminal condition.
 The playback decode session also owns a small forward RGBA ring. Ring hits are
 strictly bounded by the same PTS tolerance as the process-global preview frame
 cache and are reported as `PlaybackSessionRingHit`; they are not available to
@@ -1651,14 +1660,14 @@ decoder; scrub and GPU-resident exact Still share one output-lease-aware
 Interactive decoder rather than accumulating one surface pool per request or
 reusing a pool whose prior native output is still owned. A separate CPU Still
 slot preserves CPU extraction locality without owning native GPU surfaces.
-For exact Still, the packet source is now a one-request isolated demux helper:
-the process is the recoverable generation, while the parent decoder and output
-lease retain the same slot rules. A completed, failed, or canceled helper is
-terminal and cannot satisfy another target. CPU exact work opens a fresh source
-on its next request; native exact already retires the paired decoder only after
-its output lease ends. Playback and Scrub keep the direct packet source in this
-increment, so their remaining recovery limitation is explicit behind the same
-packet-source Interface rather than disguised as process isolation.
+For every production access mode, the packet source is a reusable isolated
+demux Session: the process is the recoverable format-call generation, while the
+parent decoder and output lease retain the same slot rules. Successful
+seek/read/EOF operations preserve the helper for later targets. A protocol or
+FFmpeg failure and a parent-enforced cancellation poison it; the following
+request must open a new process before any packet can be published. Playback,
+Scrub, and Exact therefore share one packet-source Interface and recovery
+semantics without sharing scheduling slots or precision policies.
 Slot locality does not authorize Playback and Interactive sessions to remain
 hardware-resident at once. A family transition first evicts only native
 decoder-resource entries from the shared Frame Store, wakes worker waits through

@@ -6,8 +6,8 @@
 //! parent module exposes only the request/outcome contract and session reset.
 
 use super::demux_source::{
-    PreviewDemuxWorkerConfig, PreviewPacketRead, PreviewPacketSource, PreviewPacketSourceOpen,
-    PreviewPacketSourceOpenError,
+    PreviewDemuxWorkerConfig, PreviewPacketRead, PreviewPacketSeek, PreviewPacketSource,
+    PreviewPacketSourceOpen, PreviewPacketSourceOpenError,
 };
 use super::native_frame::{
     PreviewDecodeSessionOutputLease, PreviewDecodeSessionOutputLeaseObserver,
@@ -88,7 +88,7 @@ impl PreviewDecodeSessionContext {
     /// Create an observed production bootstrap that isolates exact-still
     /// container I/O in the packaged Mondrian executable.
     ///
-    /// The executable must dispatch `--internal-demux-worker-v1` before
+    /// The executable must dispatch `--internal-demux-worker-v2` before
     /// starting UI state. Codec and GPU resources remain in this context's
     /// owner thread; only FFmpeg format operations cross the process seam.
     pub fn observed_bootstrap_with_demux_worker(
@@ -136,30 +136,6 @@ impl PreviewDecodeSessionContext {
     /// references already published to a completion queue or renderer.
     pub fn native_outputs_released(&self) -> bool {
         self.sessions.native_outputs_released()
-    }
-
-    /// Retire a terminal native exact-still codec after its output lease ends.
-    ///
-    /// Returns `false` only while the exact output is still externally owned.
-    /// Schedulers should call this between execution leases so codec teardown
-    /// is neither attributed to nor allowed to delay cancellation of new work.
-    pub fn retire_released_native_exact_session(&mut self) -> bool {
-        let Some(session) = self.sessions.interactive.as_ref() else {
-            return true;
-        };
-        if !session.has_terminal_native_exact_output() {
-            return true;
-        }
-        if !session.native_output_released() {
-            self.execution_observer
-                .publish_stage(PreviewDecodeExecutionStage::OutputLeaseWait);
-            return false;
-        }
-        self.execution_observer
-            .publish_stage(PreviewDecodeExecutionStage::SessionRetire);
-        self.sessions.interactive = None;
-        self.execution_observer.finish_idle();
-        true
     }
 
     /// Decode one request using sessions explicitly owned by this context.
@@ -310,10 +286,6 @@ struct PreviewDecodeSession {
     threading_count: usize,
     hardware_decode_plan: PreviewHardwareDecodePlan,
     decoded_surface_format: DecodedVideoSurfaceFormat,
-    /// Access semantics attached to the most recently issued native output.
-    /// This is updated only when an output is actually published, so a canceled
-    /// or failed exact request cannot make an earlier Scrub output terminal.
-    last_native_output_access_mode: Option<PreviewDecodeAccessMode>,
     last_native_output_lease: Option<PreviewDecodeSessionOutputLeaseObserver>,
     last_pts: Option<i64>,
     reached_eof: bool,
@@ -326,6 +298,13 @@ struct PreviewDecodeForwardResult {
     selected_pts: Option<i64>,
     decoded_frame_count: usize,
     canceled: bool,
+    isolated_demux_terminated: bool,
+}
+
+enum PreviewSeekToTarget {
+    Complete(PreviewSeekResolution),
+    DirectCanceled,
+    IsolatedCanceled,
 }
 
 #[derive(Debug, Clone)]
@@ -486,6 +465,7 @@ impl PreviewDecodeForwardResult {
             selected_pts: Some(selected_pts),
             decoded_frame_count,
             canceled: false,
+            isolated_demux_terminated: false,
         }
     }
 
@@ -495,6 +475,7 @@ impl PreviewDecodeForwardResult {
             selected_pts: None,
             decoded_frame_count,
             canceled: false,
+            isolated_demux_terminated: false,
         }
     }
 
@@ -504,6 +485,17 @@ impl PreviewDecodeForwardResult {
             selected_pts: None,
             decoded_frame_count,
             canceled: true,
+            isolated_demux_terminated: false,
+        }
+    }
+
+    fn isolated_demux_canceled(decoded_frame_count: usize) -> Self {
+        Self {
+            frame: None,
+            selected_pts: None,
+            decoded_frame_count,
+            canceled: true,
+            isolated_demux_terminated: true,
         }
     }
 }
@@ -592,7 +584,6 @@ impl PreviewDecodeSession {
         hardware_decode_request: PreviewHardwareDecodeRequest,
         hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
         source_color: PreviewSourceColorContract,
-        source_time: TimelineTime,
         demux_worker: Option<&PreviewDemuxWorkerConfig>,
         should_cancel: &(dyn Fn() -> bool + Send + Sync),
         interrupt_state: Arc<PreviewDecodeInterruptState>,
@@ -600,8 +591,6 @@ impl PreviewDecodeSession {
         let source = PreviewPacketSource::open(
             path,
             fingerprint,
-            access_mode,
-            source_time,
             demux_worker,
             &interrupt_state,
             should_cancel,
@@ -783,7 +772,6 @@ impl PreviewDecodeSession {
             threading_count,
             hardware_decode_plan,
             decoded_surface_format,
-            last_native_output_access_mode: None,
             last_native_output_lease: None,
             last_pts: None,
             reached_eof: false,
@@ -798,20 +786,19 @@ impl PreviewDecodeSession {
         fingerprint: MediaFileFingerprint,
         max_width: Option<u32>,
         max_height: Option<u32>,
-        access_mode: PreviewDecodeAccessMode,
         demux_worker_available: bool,
         backend: PreviewDecodeBackend,
         hardware_decode_request: PreviewHardwareDecodeRequest,
         hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
         source_color: PreviewSourceColorContract,
     ) -> bool {
-        !self.packet_source.is_terminal()
+        self.packet_source.is_healthy()
             && packet_source_execution_family_matches(
                 self.packet_source.is_isolated(),
-                access_mode,
                 demux_worker_available,
             )
             && self.path == path
+            && fingerprint.authorizes_reuse()
             && self.fingerprint == fingerprint
             && self.max_width == max_width
             && self.max_height == max_height
@@ -825,10 +812,6 @@ impl PreviewDecodeSession {
         self.last_native_output_lease
             .as_ref()
             .is_none_or(PreviewDecodeSessionOutputLeaseObserver::is_released)
-    }
-
-    fn has_terminal_native_exact_output(&self) -> bool {
-        native_interactive_output_is_terminal(self.last_native_output_access_mode)
     }
 
     /// Restore a deterministic decode entry after cooperative cancellation.
@@ -978,8 +961,21 @@ impl PreviewDecodeSession {
             }
             self.interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::Seek);
             let seek_started_at = Instant::now();
-            seek_resolution = match self.seek_to_target(decode_target_pts, policy) {
-                Ok(resolution) => resolution,
+            seek_resolution = match self.seek_to_target(decode_target_pts, policy, should_cancel) {
+                Ok(PreviewSeekToTarget::Complete(resolution)) => resolution,
+                Ok(PreviewSeekToTarget::DirectCanceled) => {
+                    return Ok(PreviewDecodeOutcome::Canceled(
+                        self.interrupt_state
+                            .cancellation(PreviewDecodeCancellationCheckpoint::Seek),
+                    ));
+                }
+                Ok(PreviewSeekToTarget::IsolatedCanceled) => {
+                    return Ok(PreviewDecodeOutcome::Canceled(
+                        PreviewDecodeCancellation::isolated_demux_termination(
+                            PreviewDecodeCancellationCheckpoint::Seek,
+                        ),
+                    ));
+                }
                 Err(_) if should_cancel() => {
                     return Ok(PreviewDecodeOutcome::Canceled(
                         self.interrupt_state
@@ -1006,7 +1002,7 @@ impl PreviewDecodeSession {
             should_cancel,
         )?;
         if result.canceled {
-            let cancellation = if self.packet_source.isolated_demux_was_canceled() {
+            let cancellation = if result.isolated_demux_terminated {
                 PreviewDecodeCancellation::isolated_demux_termination(
                     PreviewDecodeCancellationCheckpoint::PacketRead,
                 )
@@ -1100,7 +1096,6 @@ impl PreviewDecodeSession {
                     return Ok(PreviewDecodeOutcome::FloatFrame(frame));
                 }
                 PreviewDecodedFramePayload::NativeGpu(mut frame) => {
-                    self.last_native_output_access_mode = Some(access_mode);
                     self.last_native_output_lease = Some(session_output_lease_observer);
                     let mut diagnostics = frame.diagnostics.with_access_mode(access_mode);
                     diagnostics.stage_durations.accumulate(PreviewDecodeStageDurations {
@@ -1149,11 +1144,9 @@ impl PreviewDecodeSession {
         &mut self,
         target_pts: i64,
         policy: PreviewDecodeAccessPolicy,
-    ) -> Result<PreviewSeekResolution> {
-        let tb_num = self.stream_tb.numerator() as f64;
-        let tb_den = self.stream_tb.denominator() as f64;
-
-        if tb_den <= 0.0 || tb_num <= 0.0 {
+        should_cancel: &(dyn Fn() -> bool + Send + Sync),
+    ) -> Result<PreviewSeekToTarget> {
+        if self.stream_tb.denominator() <= 0 || self.stream_tb.numerator() <= 0 {
             // time_base 无效：无法计算合理的安全窗口，直接报错
             // 而非静默返回 Ok(())（静默返回会导致从文件当前位置解码，产生错误帧）
             return Err(MondrianError::DecodeFailed {
@@ -1167,61 +1160,90 @@ impl PreviewDecodeSession {
             });
         }
 
-        let tb_secs = tb_num / tb_den;
-
         let seek_anchor_pts = self.seek_index.keyframe_at_or_before(target_pts);
-        let (min_ts, seek_target_ts, max_ts, seek_flags, used_anchor_pts) =
-            match policy.seek_strategy {
-                PreviewDecodeSeekStrategy::KeyframeBefore => {
-                    // 关键帧安全模式：不限制 backward seek 范围，避免长 GOP 时落到不可独立解码帧。
+        let (min_ts, seek_target_ts, max_ts, seek_flags, used_anchor_pts) = match policy
+            .seek_strategy
+        {
+            PreviewDecodeSeekStrategy::KeyframeBefore => {
+                // 关键帧安全模式：不限制 backward seek 范围，避免长 GOP 时落到不可独立解码帧。
+                (
+                    seek_anchor_pts.unwrap_or(i64::MIN),
+                    target_pts,
+                    target_pts,
+                    ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
+                    seek_anchor_pts,
+                )
+            }
+            PreviewDecodeSeekStrategy::BoundedAnyFrame => {
+                let window_numerator = i64::try_from(policy.any_seek_window_ms).map_err(|_| {
+                    MondrianError::DecodeFailed {
+                        asset_id: self.path.display().to_string(),
+                        reason: format!(
+                            "seek window {} ms exceeds exact time range",
+                            policy.any_seek_window_ms
+                        ),
+                    }
+                })?;
+                let seek_window = TimelineTime::new(window_numerator, 1_000).map_err(|error| {
+                    MondrianError::DecodeFailed {
+                        asset_id: self.path.display().to_string(),
+                        reason: format!("invalid exact seek window: {error}"),
+                    }
+                })?;
+                let seek_window_pts = source_time_to_time_base_ticks(
+                    seek_window,
+                    i64::from(self.stream_tb.numerator()),
+                    i64::from(self.stream_tb.denominator()),
+                )
+                .map_err(|reason| MondrianError::DecodeFailed {
+                    asset_id: self.path.display().to_string(),
+                    reason,
+                })?
+                .max(1);
+                let window_min_ts = target_pts.saturating_sub(seek_window_pts);
+                let used_anchor_pts = seek_anchor_pts.filter(|anchor| {
+                    *anchor <= target_pts
+                        && pts_distance_to_frames(
+                            target_pts.saturating_sub(*anchor),
+                            self.frame_duration_pts,
+                        ) <= policy.forward_decode_budget_frames
+                });
+                if let Some(anchor_pts) = used_anchor_pts {
                     (
-                        seek_anchor_pts.unwrap_or(i64::MIN),
+                        anchor_pts,
                         target_pts,
                         target_pts,
                         ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
-                        seek_anchor_pts,
+                        Some(anchor_pts),
+                    )
+                } else {
+                    (
+                        window_min_ts,
+                        target_pts,
+                        target_pts.saturating_add(seek_window_pts),
+                        ffmpeg::ffi::AVSEEK_FLAG_ANY,
+                        None,
                     )
                 }
-                PreviewDecodeSeekStrategy::BoundedAnyFrame => {
-                    let seek_window_secs = policy.any_seek_window_ms as f64 / 1_000.0;
-                    let seek_window_pts = (seek_window_secs / tb_secs).round().max(1.0) as i64;
-                    let window_min_ts = target_pts.saturating_sub(seek_window_pts);
-                    let used_anchor_pts = seek_anchor_pts.filter(|anchor| {
-                        *anchor <= target_pts
-                            && pts_distance_to_frames(
-                                target_pts.saturating_sub(*anchor),
-                                self.frame_duration_pts,
-                            ) <= policy.forward_decode_budget_frames
-                    });
-                    if let Some(anchor_pts) = used_anchor_pts {
-                        (
-                            anchor_pts,
-                            target_pts,
-                            target_pts,
-                            ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
-                            Some(anchor_pts),
-                        )
-                    } else {
-                        (
-                            window_min_ts,
-                            target_pts,
-                            target_pts.saturating_add(seek_window_pts),
-                            ffmpeg::ffi::AVSEEK_FLAG_ANY,
-                            None,
-                        )
-                    }
-                }
-            };
+            }
+        };
 
-        self.packet_source.seek(
+        let seek = self.packet_source.seek(
             self.stream_index,
             min_ts,
             seek_target_ts,
             max_ts,
             seek_flags,
-            target_pts,
             &self.path,
+            should_cancel,
         )?;
+        match seek {
+            PreviewPacketSeek::DirectCanceled => return Ok(PreviewSeekToTarget::DirectCanceled),
+            PreviewPacketSeek::IsolatedCanceled => {
+                return Ok(PreviewSeekToTarget::IsolatedCanceled)
+            }
+            PreviewPacketSeek::Complete => {}
+        }
         self.interrupt_state
             .set_execution_stage(PreviewDecodeExecutionStage::CodecFlush);
         unsafe {
@@ -1229,10 +1251,10 @@ impl PreviewDecodeSession {
         }
         self.reached_eof = false;
         self.last_pts = None;
-        Ok(PreviewSeekResolution {
+        Ok(PreviewSeekToTarget::Complete(PreviewSeekResolution {
             used_index: used_anchor_pts.is_some(),
             anchor_pts: used_anchor_pts,
-        })
+        }))
     }
 
     fn decode_forward_until(
@@ -1448,8 +1470,13 @@ impl PreviewDecodeSession {
             let packet = match self.packet_source.read_next(&self.path, should_cancel)? {
                 PreviewPacketRead::Packet(packet) => packet,
                 PreviewPacketRead::End => break,
-                PreviewPacketRead::Canceled => {
+                PreviewPacketRead::DirectCanceled => {
                     return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+                }
+                PreviewPacketRead::IsolatedCanceled => {
+                    return Ok(PreviewDecodeForwardResult::isolated_demux_canceled(
+                        frames_decoded,
+                    ));
                 }
             };
             interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::Codec);
@@ -1875,20 +1902,6 @@ fn decode_preview_frame_outcome_in_sessions(
         let backend = preview_decode_backend();
         let mut session_open_us = 0;
 
-        if selected_slot == PreviewDecodeSessionSlot::Interactive
-            && slot
-                .as_ref()
-                .is_some_and(PreviewDecodeSession::has_terminal_native_exact_output)
-        {
-            // `available_slot` proved that the previous native output lease is
-            // released. Retire the old codec/DPB/frames context before opening
-            // an exact boundary or returning from one to scrub. The immutable
-            // hardware device and cached seek index remain process-shared.
-            execution_observer.publish_stage(PreviewDecodeExecutionStage::SessionRetire);
-            *slot = None;
-            execution_observer.publish_stage(PreviewDecodeExecutionStage::SessionSetup);
-        }
-
         if should_cancel() {
             return Ok(PreviewDecodeOutcome::Canceled(
                 PreviewDecodeCancellation::cooperative(
@@ -1904,7 +1917,6 @@ fn decode_preview_frame_outcome_in_sessions(
                     fingerprint,
                     max_width,
                     max_height,
-                    access_mode,
                     demux_worker.is_some(),
                     backend,
                     hardware_decode_request,
@@ -1938,7 +1950,6 @@ fn decode_preview_frame_outcome_in_sessions(
                 hardware_decode_request,
                 hardware_decode_device_selector,
                 source_color,
-                source_time,
                 demux_worker,
                 should_cancel.as_ref(),
                 Arc::clone(&interrupt_state),
@@ -1951,11 +1962,9 @@ fn decode_preview_frame_outcome_in_sessions(
                             .cancellation(PreviewDecodeCancellationCheckpoint::InputOpen),
                     ))
                 }
-                Err(PreviewPacketSourceOpenError::IsolatedCanceled) => {
+                Err(PreviewPacketSourceOpenError::IsolatedCanceled(checkpoint)) => {
                     return Ok(PreviewDecodeOutcome::Canceled(
-                        PreviewDecodeCancellation::isolated_demux_termination(
-                            PreviewDecodeCancellationCheckpoint::InputOpen,
-                        ),
+                        PreviewDecodeCancellation::isolated_demux_termination(checkpoint),
                     ))
                 }
                 Err(PreviewPacketSourceOpenError::Failed(error)) => return Err(error),
@@ -1978,7 +1987,6 @@ fn decode_preview_frame_outcome_in_sessions(
         if preview_external_ffmpeg_cpu_rgba_enabled(access_mode) {
             interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::ExternalProcess);
             if should_cancel() {
-                session.packet_source.finish_isolated_one_shot();
                 return Ok(PreviewDecodeOutcome::Canceled(
                     interrupt_state
                         .cancellation(PreviewDecodeCancellationCheckpoint::ExternalProcess),
@@ -2000,14 +2008,12 @@ fn decode_preview_frame_outcome_in_sessions(
                 match result {
                     Ok(Some(frame)) => {
                         if should_cancel() {
-                            session.packet_source.finish_isolated_one_shot();
                             return Ok(PreviewDecodeOutcome::Canceled(
                                 interrupt_state.cancellation(
                                     PreviewDecodeCancellationCheckpoint::ExternalProcess,
                                 ),
                             ));
                         }
-                        session.packet_source.finish_isolated_one_shot();
                         return Ok(PreviewDecodeOutcome::Frame(
                             frame
                                 .with_access_mode(access_mode)
@@ -2027,7 +2033,6 @@ fn decode_preview_frame_outcome_in_sessions(
                         ));
                     }
                     Ok(None) => {
-                        session.packet_source.finish_isolated_one_shot();
                         return Ok(PreviewDecodeOutcome::Canceled(
                             interrupt_state
                                 .cancellation(PreviewDecodeCancellationCheckpoint::ExternalProcess),
@@ -2059,7 +2064,6 @@ fn decode_preview_frame_outcome_in_sessions(
                 return Err(error);
             }
         };
-        session.packet_source.finish_isolated_one_shot();
         match outcome {
             PreviewDecodeOutcome::Frame(frame) => Ok(PreviewDecodeOutcome::Frame(
                 frame
@@ -2115,20 +2119,11 @@ fn decode_preview_frame_outcome_in_sessions(
     outcome
 }
 
-fn native_interactive_output_is_terminal(
-    output_access_mode: Option<PreviewDecodeAccessMode>,
-) -> bool {
-    output_access_mode == Some(PreviewDecodeAccessMode::RandomAccessStillFrame)
-}
-
 fn packet_source_execution_family_matches(
     source_is_isolated: bool,
-    access_mode: PreviewDecodeAccessMode,
     demux_worker_available: bool,
 ) -> bool {
-    source_is_isolated
-        == (access_mode == PreviewDecodeAccessMode::RandomAccessStillFrame
-            && demux_worker_available)
+    source_is_isolated == demux_worker_available
 }
 
 #[cfg(test)]
@@ -2186,37 +2181,10 @@ mod session_topology_tests {
     }
 
     #[test]
-    fn native_exact_is_a_single_output_interactive_codec_boundary() {
-        assert!(!native_interactive_output_is_terminal(None));
-        assert!(!native_interactive_output_is_terminal(Some(
-            PreviewDecodeAccessMode::ScrubCursor,
-        )));
-        assert!(native_interactive_output_is_terminal(Some(
-            PreviewDecodeAccessMode::RandomAccessStillFrame,
-        )));
-    }
-
-    #[test]
-    fn packet_source_execution_family_prevents_exact_from_reusing_direct_scrub_demux() {
-        assert!(packet_source_execution_family_matches(
-            false,
-            PreviewDecodeAccessMode::ScrubCursor,
-            true,
-        ));
-        assert!(!packet_source_execution_family_matches(
-            false,
-            PreviewDecodeAccessMode::RandomAccessStillFrame,
-            true,
-        ));
-        assert!(packet_source_execution_family_matches(
-            true,
-            PreviewDecodeAccessMode::RandomAccessStillFrame,
-            true,
-        ));
-        assert!(packet_source_execution_family_matches(
-            false,
-            PreviewDecodeAccessMode::RandomAccessStillFrame,
-            false,
-        ));
+    fn packet_source_execution_family_tracks_worker_availability_only() {
+        assert!(!packet_source_execution_family_matches(false, true));
+        assert!(packet_source_execution_family_matches(true, true));
+        assert!(packet_source_execution_family_matches(false, false));
+        assert!(!packet_source_execution_family_matches(true, false));
     }
 }

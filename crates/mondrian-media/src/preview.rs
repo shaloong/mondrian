@@ -1284,6 +1284,14 @@ pub struct MediaFileFingerprint {
 }
 
 impl MediaFileFingerprint {
+    /// Whether this value can conservatively authorize cache/session reuse.
+    ///
+    /// Missing metadata remains a valid observation, but it must never become
+    /// a false stable identity for a source that may have been replaced.
+    pub fn authorizes_reuse(self) -> bool {
+        self.len.is_some() && self.modified_secs.is_some() && self.modified_nanos.is_some()
+    }
+
     /// Capture a fingerprint from the filesystem, preserving missing metadata.
     pub fn capture(path: &Path) -> Self {
         let Ok(metadata) = std::fs::metadata(path) else {

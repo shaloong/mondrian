@@ -4,6 +4,7 @@
 //! bounded cross-session probe cache. It never chooses an access policy;
 //! callers supply the target and consume typed diagnostics.
 
+use super::demux_protocol::MAX_KEYFRAME_ANCHORS;
 use super::*;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -147,6 +148,9 @@ pub(super) fn preview_seek_index_cache_get(
     fingerprint: MediaFileFingerprint,
     stream_index: usize,
 ) -> Option<PreviewSeekIndex> {
+    if !fingerprint.authorizes_reuse() {
+        return None;
+    }
     let mut cache = preview_seek_index_cache().lock().ok()?;
     let position = cache.iter().position(|entry| {
         entry.path == path && entry.fingerprint == fingerprint && entry.stream_index == stream_index
@@ -163,7 +167,7 @@ pub(super) fn preview_seek_index_cache_put(
     stream_index: usize,
     keyframe_pts: &[i64],
 ) {
-    if keyframe_pts.is_empty() {
+    if keyframe_pts.is_empty() || !fingerprint.authorizes_reuse() {
         return;
     }
     let Ok(mut cache) = preview_seek_index_cache().lock() else {
@@ -185,33 +189,78 @@ pub(super) fn preview_seek_index_cache_put(
     }
 }
 
-pub(super) fn preview_seek_index_from_stream(
+pub(super) fn preview_seek_index_contract_from_stream(
     stream: &ffmpeg::format::stream::Stream<'_>,
-) -> PreviewSeekIndex {
+) -> (PreviewSeekIndex, bool) {
     let stream_ptr = unsafe { stream.as_ptr() };
     if stream_ptr.is_null() {
-        return PreviewSeekIndex::default();
+        return (PreviewSeekIndex::default(), false);
     }
     let entry_count = unsafe { ffmpeg::ffi::avformat_index_get_entries_count(stream_ptr) };
     if entry_count <= 0 {
-        return PreviewSeekIndex::default();
+        return (PreviewSeekIndex::default(), false);
     }
 
-    let mut keyframe_pts = Vec::with_capacity(entry_count as usize);
+    let mut valid_count = 0_usize;
     for entry_index in 0..entry_count {
-        let entry_ptr =
-            unsafe { ffmpeg::ffi::avformat_index_get_entry(stream_ptr.cast_mut(), entry_index) };
-        if entry_ptr.is_null() {
-            continue;
+        if keyframe_entry_pts(stream_ptr, entry_index).is_some() {
+            valid_count = valid_count.saturating_add(1);
         }
-        let entry = unsafe { &*entry_ptr };
-        if entry.timestamp == ffmpeg::ffi::AV_NOPTS_VALUE {
-            continue;
-        }
-        if entry.flags() & ffmpeg::ffi::AVINDEX_KEYFRAME == 0 {
-            continue;
-        }
-        keyframe_pts.push(entry.timestamp);
     }
-    PreviewSeekIndex::from_probe_keyframes(keyframe_pts)
+    if valid_count == 0 {
+        return (PreviewSeekIndex::default(), false);
+    }
+
+    // Large container indexes are sampled deterministically across their full
+    // duration. This bounds both in-process cache residency and IPC while
+    // retaining useful anchors near the head and tail of the source.
+    let stride = valid_count.div_ceil(MAX_KEYFRAME_ANCHORS).max(1);
+    let mut keyframe_pts = Vec::with_capacity(valid_count.min(MAX_KEYFRAME_ANCHORS));
+    let mut valid_ordinal = 0_usize;
+    let mut last_pts = None;
+    for entry_index in 0..entry_count {
+        let Some(pts) = keyframe_entry_pts(stream_ptr, entry_index) else {
+            continue;
+        };
+        last_pts = Some(pts);
+        if valid_ordinal.is_multiple_of(stride) && keyframe_pts.len() < MAX_KEYFRAME_ANCHORS {
+            keyframe_pts.push(pts);
+        }
+        valid_ordinal = valid_ordinal.saturating_add(1);
+    }
+    if let Some(last_pts) = last_pts {
+        if keyframe_pts.last().copied() != Some(last_pts) {
+            if keyframe_pts.len() == MAX_KEYFRAME_ANCHORS {
+                if let Some(last) = keyframe_pts.last_mut() {
+                    *last = last_pts;
+                }
+            } else {
+                keyframe_pts.push(last_pts);
+            }
+        }
+    }
+    let truncated = valid_count > keyframe_pts.len();
+    (
+        PreviewSeekIndex::from_probe_keyframes(keyframe_pts),
+        truncated,
+    )
+}
+
+fn keyframe_entry_pts(stream_ptr: *const ffmpeg::ffi::AVStream, entry_index: i32) -> Option<i64> {
+    // SAFETY: the stream belongs to the live input context and `entry_index`
+    // is within the count reported by FFmpeg for this same stream.
+    let entry_ptr =
+        unsafe { ffmpeg::ffi::avformat_index_get_entry(stream_ptr.cast_mut(), entry_index) };
+    if entry_ptr.is_null() {
+        return None;
+    }
+    // SAFETY: FFmpeg returned a live entry owned by the stream.
+    let entry = unsafe { &*entry_ptr };
+    if entry.timestamp == ffmpeg::ffi::AV_NOPTS_VALUE
+        || entry.flags() & ffmpeg::ffi::AVINDEX_KEYFRAME == 0
+    {
+        None
+    } else {
+        Some(entry.timestamp)
+    }
 }

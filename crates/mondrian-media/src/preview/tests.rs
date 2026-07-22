@@ -2279,7 +2279,7 @@ fn playback_session_drains_reordered_frames_between_sequential_requests() {
 
 #[test]
 #[ignore = "requires packaged mondrian executable via MONDRIAN_PREVIEW_DEMUX_WORKER_PATH"]
-fn isolated_demux_worker_decodes_exact_frame_without_moving_codec_state_out_of_process() {
+fn isolated_demux_worker_reuses_each_access_mode_session_across_requests() {
     const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
     let worker = std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH")
         .map(PathBuf::from)
@@ -2321,9 +2321,36 @@ fn isolated_demux_worker_decodes_exact_frame_without_moving_codec_state_out_of_p
     assert_eq!((second_frame.width, second_frame.height), (64, 64));
     assert!(second_frame.diagnostics.seek_performed);
     assert!(
-        !second_frame.diagnostics.session_reused,
-        "one-shot isolated packet sources must reopen for every exact request"
+        second_frame.diagnostics.session_reused,
+        "isolated demux and codec state must be reused across exact requests"
     );
+
+    for (access_mode, first_frame, second_frame) in [
+        (PreviewDecodeAccessMode::ScrubCursor, 12, 13),
+        (PreviewDecodeAccessMode::PlaybackCursor, 5, 6),
+    ] {
+        for (request_index, frame_index) in [first_frame, second_frame].into_iter().enumerate() {
+            let request = PreviewDecodeRequest::new(
+                path.as_path(),
+                TimelineTime::new(frame_index, 25).expect("source time"),
+                access_mode,
+                test_source_color(),
+            )
+            .with_max_size(Some(64), Some(64));
+            let outcome = context
+                .decode_cancellable(request, || false)
+                .expect("isolated access-mode decode");
+            let PreviewDecodeOutcome::Frame(frame) = outcome else {
+                panic!("software access-mode decode must return an RGBA frame");
+            };
+            if request_index == 1 {
+                assert!(
+                    frame.diagnostics.session_reused,
+                    "{access_mode:?} must reuse its isolated demux/codec session"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -2361,6 +2388,89 @@ fn isolated_demux_worker_cancellation_terminates_the_packet_source() {
         PreviewDecodeCancellationSource::IsolatedDemuxTermination
     );
     assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+#[ignore = "requires packaged mondrian executable via MONDRIAN_PREVIEW_DEMUX_WORKER_PATH"]
+fn isolated_demux_worker_attributes_stream_info_seek_and_packet_read_cancellation() {
+    const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+    let worker = std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH")
+        .map(PathBuf::from)
+        .expect("set MONDRIAN_PREVIEW_DEMUX_WORKER_PATH");
+    let root = tempfile::tempdir().expect("tempdir");
+
+    for (name, stage, checkpoint) in [
+        (
+            "stream-info",
+            PreviewDecodeExecutionStage::StreamInfo,
+            PreviewDecodeCancellationCheckpoint::StreamInfo,
+        ),
+        (
+            "seek",
+            PreviewDecodeExecutionStage::Seek,
+            PreviewDecodeCancellationCheckpoint::Seek,
+        ),
+        (
+            "packet-read",
+            PreviewDecodeExecutionStage::PacketRead,
+            PreviewDecodeCancellationCheckpoint::PacketRead,
+        ),
+    ] {
+        let path = root.path().join(format!("isolated-{name}.mp4"));
+        std::fs::write(&path, FIXTURE).expect("write synthetic H.264 fixture");
+        let (bootstrap, observer) =
+            PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker.clone());
+        let mut context = bootstrap.build();
+        let request = PreviewDecodeRequest::new(
+            path.as_path(),
+            TimelineTime::new(8, 25).expect("exact source time"),
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+            test_source_color(),
+        );
+        let cancellation_observer = observer.clone();
+        let outcome = context
+            .decode_cancellable(request, move || {
+                cancellation_observer.snapshot().stage == stage
+            })
+            .expect("isolated stage cancellation outcome");
+        let PreviewDecodeOutcome::Canceled(cancellation) = outcome else {
+            panic!("{name} checkpoint must cancel isolated decode");
+        };
+        assert_eq!(cancellation.checkpoint, checkpoint);
+        assert_eq!(
+            cancellation.source,
+            PreviewDecodeCancellationSource::IsolatedDemuxTermination
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires packaged mondrian executable via MONDRIAN_PREVIEW_DEMUX_WORKER_PATH"]
+fn isolated_demux_worker_rejects_stale_source_revision_before_publication() {
+    const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+    let worker = std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH")
+        .map(PathBuf::from)
+        .expect("set MONDRIAN_PREVIEW_DEMUX_WORKER_PATH");
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("isolated-stale-revision.mp4");
+    std::fs::write(&path, FIXTURE).expect("write synthetic H.264 fixture");
+    let mut stale_revision = MediaFileFingerprint::capture(&path);
+    stale_revision.len = stale_revision.len.map(|length| length.saturating_add(1));
+    let (bootstrap, _observer) =
+        PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker);
+    let mut context = bootstrap.build();
+    let request = PreviewDecodeRequest::new(
+        path.as_path(),
+        TimelineTime::new(8, 25).expect("exact source time"),
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+        test_source_color(),
+    )
+    .with_fingerprint(stale_revision);
+
+    let error = context
+        .decode_cancellable(request, || false)
+        .expect_err("stale source revision must fail before packet publication");
+    assert!(error.to_string().contains("source revision changed"));
 }
 
 #[test]
@@ -2441,6 +2551,23 @@ fn preview_file_fingerprint_changes_when_file_is_replaced() {
     let second = MediaFileFingerprint::capture(&path);
 
     assert_ne!(first, second);
+}
+
+#[test]
+fn incomplete_preview_fingerprint_never_authorizes_cache_reuse() {
+    clear_global_preview_frame_cache();
+    let path = PathBuf::from("unknown-source-revision.mp4");
+    let fingerprint = MediaFileFingerprint::default();
+    assert!(!fingerprint.authorizes_reuse());
+    let frame = RgbaFrame::new(
+        2,
+        1,
+        vec![1, 2, 3, 4, 5, 6, 7, 8],
+        test_rgba_contract(),
+        PreviewDecodePath::InProcessFfmpegCpuRgba,
+    );
+    preview_cache_put_with_fingerprint(&path, fingerprint, 2, 1, 100, frame);
+    assert!(preview_cache_get(&path, fingerprint, test_source_color(), 2, 1, 100, 1).is_none());
 }
 
 #[test]

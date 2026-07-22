@@ -32,6 +32,9 @@ pub(super) fn preview_cache_get(
     target_pts: i64,
     tolerance_pts: i64,
 ) -> Option<PreviewCacheHit> {
+    if !fingerprint.authorizes_reuse() {
+        return None;
+    }
     let cache = preview_frame_cache();
     let mut guard = cache.lock().ok()?;
 
@@ -73,6 +76,9 @@ pub(super) fn preview_cache_put_with_fingerprint(
     pts: i64,
     frame: impl Into<PreviewDecodedFramePayload>,
 ) {
+    if !fingerprint.authorizes_reuse() {
+        return;
+    }
     let frame = frame.into();
     let Some(source_color) = frame.source_color() else {
         return;
