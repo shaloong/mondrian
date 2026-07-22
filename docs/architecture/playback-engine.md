@@ -1604,9 +1604,9 @@ duration and remains compatible with the 8 GiB correctness class. Synthetic
 H.264/B-frame short gates prove per-mode reuse plus
 InputOpen/StreamInfo/Seek/PacketRead cancellation. The real Main10 short
 qualification exercises cross-region seek, real cancellation and post-cancel
-GPU recovery through the same production path; the complete Video gate remains
-open until the real Main10
-pause/seek/close/quit and long-run evidence passes on a qualified machine.
+GPU recovery through the same production path. The complete Video gate then
+proves real Main10 pause/seek/close/quit, long-run cadence, and memory evidence
+on a qualified machine; neither proof may substitute for the other.
 
 Only the complete two-gate set on a qualified `standard-playback` machine
 (16 GiB installed memory or higher), with a clean unchanged Git revision and
@@ -1616,9 +1616,29 @@ quality/proxy fallback, but need not meet native 4K Main10 real-time thresholds.
 A below-baseline memory class may continue only through an explicit,
 contract-listed diagnostic override; missing execution prerequisites such as
 GPU/toolchain identity still fail closed, and an override can never produce
-baseline evidence. A qualifying fixed-machine result and broader driver/display
-corpus still remain required before release-level professional playback
-acceptance can be claimed.
+baseline evidence. A qualifying fixed-machine result establishes the M0
+baseline. Broader driver/display and audio-device coverage remains
+required before release-level professional playback acceptance can be claimed.
+
+The clean `c484c47` reference run
+`20260722T065141Z-local-windows-dev-01-f4fc3eff` completed the whole
+`windows-playback-m0-v3` plan on the 16 GiB `standard-playback` Windows machine
+without changing revision. The Video gate presented 45,129 frames through the
+headless GPU Adapter, recorded 44,999 current Ready and two Stale cadence
+observations, and retained D3D12VA P010 provenance with no fallback or
+readback. Its Playback helper had one launch, one cross-request-reused Session,
+and one clean post-reap terminal; the NonPlayback path handled 104 seeks over
+two cleanly reaped Sessions, with zero failed, forced, or active helpers at
+quiescence. Peak Private Commit was about 1.37 GiB and the post-stress sample
+was about 1.23 GiB. The companion CPAL gate retained Audio Device Clock Master
+for about 1799.994 seconds, used a continuous Synthetic Clock Master for about
+32.6 ms, recorded zero underrun/recovery/render substitution and zero sampled
+delivery-clock drift, and converged at about 0.77 GiB Private Commit. The
+runner reported `passed-baseline` only after both reports, machine/asset
+validation, artifact and recipe hashes, clean-tree state, and unchanged Git
+revision agreed. The generated media and run bundle remain disposable local
+evidence under `target`; recipes and acceptance contracts, not multi-gigabyte
+artifacts or reports, are repository inputs.
 
 On 2026-07-18, a 2.88-second decoder-proven 3840×2160 25 fps HEVC Main10 HLG
 sample completed the external continuous-playback smoke on an NVIDIA RTX 3050
