@@ -177,8 +177,13 @@ The manifest contains the committed Standard numeric color corpus and two
 project-generated M0 workload recipes: 1812 seconds of 4K25 HEVC Main10
 Long-GOP Rec.709 code-pattern video, and 1835 seconds of 48 kHz stereo AAC.
 They make the professional playback run reproducible without importing local
-downloads or asserting false color correctness. No qualified fixed-machine
-baseline is committed yet. Golden/Stress still lack verified HLG/PQ, Rec.709
+downloads or asserting false color correctness. The clean `c484c47` run
+`20260722T065141Z-local-windows-dev-01-f4fc3eff` completed the full Video+Audio
+plan on the qualified 16 GiB Windows reference machine and was classified
+`passed-baseline`. Its generated artifacts and evidence bundle remain
+intentionally disposable under `target`; the repository commits the recipes,
+contracts, and this reproducible result record rather than a multi-gigabyte
+machine-specific bundle. Golden/Stress still lack verified HLG/PQ, Rec.709
 H.264, sRGB alpha, PCM/WAV, camera Log, VFR, multichannel, damaged-media, and
 independent image references, so `Nightly/Release -Scope All` correctly remains
 blocked.
