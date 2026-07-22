@@ -73,10 +73,14 @@ impl TitleBar {
         &self.menu_bar
     }
 
-    /// Mutable access to the embedded product menu for shell tests.
-    #[cfg(test)]
+    /// Mutable access to the embedded product menu model.
     pub(crate) fn menu_bar_mut(&mut self) -> &mut MenuBar {
         &mut self.menu_bar
+    }
+
+    /// Update the displayed document title without replacing chrome state.
+    pub(crate) fn set_title(&mut self, title: impl Into<String>) {
+        self.title = title.into();
     }
 
     /// Refresh checked menu rows that reflect shell-local workspace state.
@@ -99,8 +103,18 @@ impl TitleBar {
     }
 
     #[cfg(test)]
-    fn control_bounds(&self, control: WindowControl) -> Rect {
+    pub(crate) fn control_bounds(&self, control: WindowControl) -> Rect {
         self.window_controls.control_bounds(control)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hovered_control(&self) -> Option<WindowControl> {
+        self.hovered_control
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pressed_control(&self) -> Option<WindowControl> {
+        self.pressed_control
     }
 
     fn is_drag_region(&self, position: Point) -> bool {

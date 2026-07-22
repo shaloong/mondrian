@@ -182,6 +182,17 @@ playhead without rebuilding the full dock tree. A transport-only turn retains
 the currently installed frame, transparent-canvas state, pending/stale state,
 and typed blocker; passing an absent Preview source must never erase those
 facts. The next production Preview turn alone may commit their replacement.
+Preview completion and GPU external-texture registration/clearing use the same
+narrow presentation refresh domain. They set `preview_dirty`, never the global
+`ui_dirty` model-rebuild flag. Media import, project, preferences, workspace,
+and other author-facing changes retain the full model path.
+
+The titlebar, menu bar, and their child trigger Widgets are persistent for the
+Window Session. A full model projection updates their title, command
+availability, checked state, and shortcut labels in place; it does not replace
+their Widget identities. Hover, press, focus, pointer capture, open overlays,
+and other transient interaction state remain owned by the existing Widgets and
+must not depend on Preview readiness or redraw cadence.
 
 Timeline audio waveforms are not a Widget or Window execution feature.
 `AppUiHost` owns one UI-independent `AudioWaveformService` composition instance,

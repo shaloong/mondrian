@@ -323,6 +323,29 @@ impl MenuBar {
         ))
     }
 
+    /// Refresh menu presentation data without replacing stable Widget identities.
+    pub fn refresh_for_app_state_with_shortcut_overrides(
+        &mut self,
+        state: &AppState,
+        overrides: &[AppUiShortcutOverride],
+    ) {
+        let definitions =
+            default_menu_items_for_app_state_with_shortcut_overrides(state, overrides);
+        if self.menus.len() != definitions.len() {
+            self.menus = definitions
+                .into_iter()
+                .map(|(label, items)| {
+                    Dropdown::new(label, items).with_trigger_style(DropdownTriggerStyle::MenuBar)
+                })
+                .collect();
+            self.layout(self.bounds);
+            return;
+        }
+        for (menu, (label, items)) in self.menus.iter_mut().zip(definitions) {
+            menu.set_model(label, items);
+        }
+    }
+
     /// Refresh shell-local checked state without rebuilding menu availability
     /// or shortcut labels.
     pub fn refresh_shell_checked_state(

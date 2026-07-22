@@ -127,6 +127,20 @@ impl Dropdown {
         &self.items
     }
 
+    /// Replace presentation data without replacing this Widget's interaction identity.
+    ///
+    /// Trigger hover, focus, open state, bounds, and pointer-capture identity remain
+    /// stable. Row-local press and submenu paths are cleared because their indices
+    /// may no longer identify the same command in the replacement model.
+    pub fn set_model(&mut self, label: impl Into<String>, items: Vec<MenuItem>) {
+        self.label = label.into();
+        self.items = items;
+        self.pressed_index = None;
+        self.submenu_chain.clear();
+        self.hover_depth = None;
+        self.clamp_scroll_offset();
+    }
+
     /// Select the visual style for the closed trigger.
     pub fn with_trigger_style(mut self, style: DropdownTriggerStyle) -> Self {
         self.trigger_style = style;
@@ -951,6 +965,45 @@ mod tests {
         assert!(!d.suppress_next_release);
         d.close_menu(&mut ctx);
         assert!(!d.is_open());
+    }
+
+    #[test]
+    fn dropdown_model_refresh_preserves_trigger_interaction_identity() {
+        let mut dropdown = Dropdown::new(
+            "File",
+            vec![MenuItem::new("Open", Action::OpenProject("".into()))],
+        )
+        .with_trigger_style(DropdownTriggerStyle::MenuBar);
+        dropdown.layout(Rect::new(10.0, 10.0, 80.0, 24.0));
+        let id = dropdown.id();
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &|_| {});
+
+        assert_eq!(
+            dropdown.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(30.0, 20.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(dropdown.trigger_hovered);
+
+        dropdown.set_model(
+            "File",
+            vec![
+                MenuItem::new("Open", Action::OpenProject("".into())),
+                MenuItem::new("Save", Action::SaveProject),
+            ],
+        );
+
+        assert_eq!(dropdown.id(), id);
+        assert!(dropdown.trigger_hovered);
+        assert_eq!(dropdown.items().len(), 2);
     }
 
     #[test]

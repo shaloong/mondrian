@@ -98,6 +98,7 @@ pub struct AppUiHost {
     mode: AppUiMode,
     system_theme_preset: ThemePreset,
     ui_dirty: Cell<bool>,
+    preview_dirty: Cell<bool>,
     pending_close_action: Option<PendingCloseAction>,
 }
 
@@ -157,6 +158,7 @@ impl AppUiHost {
             mode,
             system_theme_preset,
             ui_dirty: Cell::new(false),
+            preview_dirty: Cell::new(false),
             pending_close_action: None,
         }
     }
@@ -282,7 +284,7 @@ impl AppUiHost {
                     .complete_frame_presentation(ticket, std::time::Instant::now());
             }
             let _ = self.observe_playback_video_preroll();
-            self.mark_dirty();
+            self.preview_dirty.set(true);
         }
         updated
     }
@@ -294,7 +296,7 @@ impl AppUiHost {
     /// Clear any advertised GPU viewer frame.
     pub(crate) fn clear_external_viewer_frame(&self) {
         self.preview_service.clear_external_viewer_frame();
-        self.mark_dirty();
+        self.preview_dirty.set(true);
     }
 
     /// Record a structured GPU output blocker from the window/GPU path.
@@ -360,13 +362,23 @@ impl AppUiHost {
 
     /// Refresh the root widget models when editor state changed.
     pub fn refresh_if_dirty(&mut self, bounds: Rect) {
-        if !self.ui_dirty.replace(false) {
+        let full_refresh = self.ui_dirty.replace(false);
+        let preview_refresh = self.preview_dirty.replace(false);
+        if !full_refresh {
+            if preview_refresh && self.mode == AppUiMode::Workspace {
+                self.refresh_preview_state_without_rebuild();
+                self.sync_playback_feedback_from_viewer();
+            }
             self.sync_mode_from_app_state(bounds);
             return;
         }
         let next_mode = mode_for_app_state(&self.app_state.borrow());
         if next_mode == self.mode && widget_tree_has_transient_interaction(self.active_root()) {
             self.ui_dirty.set(true);
+            if preview_refresh && self.mode == AppUiMode::Workspace {
+                self.refresh_preview_state_without_rebuild();
+                self.sync_playback_feedback_from_viewer();
+            }
             return;
         }
         self.normalize_asset_folder_selection();
@@ -381,6 +393,12 @@ impl AppUiHost {
         );
         self.sync_mode_from_app_state(bounds);
         TreeWalker::layout(self.active_root_mut(), bounds);
+    }
+
+    fn refresh_preview_state_without_rebuild(&mut self) {
+        let state = self.app_state.borrow();
+        self.root
+            .refresh_playback_frame_from_app_state(&state, Some(&self.preview_service));
     }
 
     /// Poll background host tasks. Returns true when a repaint was requested by
@@ -400,14 +418,21 @@ impl AppUiHost {
         if transport_model_changed {
             self.refresh_transport_state_without_preview();
         }
-        let visible_model_changed = media_imports_changed
+        if preview_outcome.visible_change {
+            self.preview_dirty.set(true);
+        }
+        let full_model_changed = media_imports_changed
             || proxy_generation_changed
             || export_queue_changed
             || thumbnails_changed
-            || preview_outcome.visible_change
             || waveform_changed;
-        if !visible_model_changed {
-            return transport_model_changed || preview_outcome.needs_follow_up_poll;
+        if !full_model_changed {
+            if preview_outcome.visible_change {
+                self.refresh_if_dirty(bounds);
+            }
+            return transport_model_changed
+                || preview_outcome.visible_change
+                || preview_outcome.needs_follow_up_poll;
         }
         self.mark_dirty();
         self.refresh_if_dirty(bounds);
@@ -1909,6 +1934,36 @@ mod tests {
         assert!(
             !host.ui_dirty.get(),
             "transport actions should not leave a full preview-backed refresh queued"
+        );
+    }
+
+    #[test]
+    fn preview_presentation_refresh_keeps_shell_widget_identity_and_global_refresh_clean() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+        let mut host = AppUiHost::new_with_preferences_path(
+            workspace_app_state(),
+            AppUiPreferences::default(),
+            temp_preferences_path("preview-presentation-refresh-domain"),
+        );
+        TreeWalker::layout(host.root_mut(), bounds);
+        let titlebar_id = host.root().title_bar_id_for_test();
+
+        host.clear_external_viewer_frame();
+
+        assert!(host.preview_dirty.get());
+        assert!(
+            !host.ui_dirty.get(),
+            "Preview presentation changes must not request a global model rebuild"
+        );
+        host.refresh_if_dirty(bounds);
+
+        assert!(!host.preview_dirty.get());
+        assert!(!host.ui_dirty.get());
+        assert_eq!(
+            host.root().title_bar_id_for_test(),
+            titlebar_id,
+            "Preview refresh must retain the persistent shell chrome tree"
         );
     }
 

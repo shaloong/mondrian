@@ -843,6 +843,12 @@ impl AppUiAppRoot {
         self.title_bar.menu_bar().bounds()
     }
 
+    /// Stable titlebar identity exposed to Host refresh-domain tests.
+    #[cfg(test)]
+    pub(crate) fn title_bar_id_for_test(&self) -> WidgetId {
+        self.title_bar.id()
+    }
+
     /// Replace panel contents from a fresh model snapshot while preserving the
     /// root widget id and menu state.
     pub fn set_models(&mut self, models: AppUiPanelModels) {
@@ -966,10 +972,10 @@ impl AppUiAppRoot {
         preview: Option<&dyn ViewerPreviewSource>,
         waveform_source: Option<AudioWaveformSource>,
     ) {
-        self.title_bar = TitleBar::new(
-            window_title_for_app_state(state),
-            MenuBar::for_app_state_with_shortcut_overrides(state, &preferences.shortcut_overrides),
-        );
+        self.title_bar.set_title(window_title_for_app_state(state));
+        self.title_bar
+            .menu_bar_mut()
+            .refresh_for_app_state_with_shortcut_overrides(state, &preferences.shortcut_overrides);
         self.status_bar.set_model(status_bar_model(state));
         self.active_sequence = state.sequence.clone();
         self.project_color_management = state.project_settings.color_management.clone();
@@ -2010,6 +2016,7 @@ mod tests {
     };
     use crate::app_ui::panels::ViewerPreviewState;
     use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use crate::app_ui::window_controls::WindowControl;
     use glam::Vec2;
     use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
     use mondrian_core::types::AssetId;
@@ -3632,6 +3639,98 @@ mod tests {
         assert_eq!(root.models.viewer.position_label, "F48");
         assert!(root.models.viewer.playing);
         assert!(!preview_waiting);
+    }
+
+    #[test]
+    fn app_state_refresh_preserves_titlebar_window_control_hover() {
+        let mut state = AppState::new();
+        state.sequence = Some(Sequence::new("edit"));
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let close = root.title_bar.control_bounds(WindowControl::Close).center();
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |_| {};
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            root.title_bar.event(
+                &UiEvent::MouseMove { position: close, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(root.title_bar.hovered_control(), Some(WindowControl::Close));
+
+        for _ in 0..100 {
+            root.refresh_from_app_state(&state);
+            assert_eq!(
+                root.title_bar.hovered_control(),
+                Some(WindowControl::Close),
+                "model refresh must not replace titlebar interaction state"
+            );
+        }
+    }
+
+    #[test]
+    fn app_state_refresh_preserves_titlebar_window_control_press_and_capture_identity() {
+        let mut state = AppState::new();
+        state.sequence = Some(Sequence::new("edit"));
+        let mut root = AppUiAppRoot::from_app_state(&state);
+        root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        let titlebar_id = root.title_bar.id();
+        let close = root.title_bar.control_bounds(WindowControl::Close).center();
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let dispatch = |_| {};
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            root.title_bar.event(
+                &UiEvent::MouseDown {
+                    position: close,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(root.title_bar.pressed_control(), Some(WindowControl::Close));
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(mondrian_ui_core::widget::PointerCaptureRequest::Capture(
+                titlebar_id
+            ))
+        );
+
+        root.refresh_from_app_state(&state);
+
+        assert_eq!(root.title_bar.id(), titlebar_id);
+        assert_eq!(root.title_bar.hovered_control(), Some(WindowControl::Close));
+        assert_eq!(root.title_bar.pressed_control(), Some(WindowControl::Close));
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(mondrian_ui_core::widget::PointerCaptureRequest::Capture(
+                titlebar_id
+            ))
+        );
     }
 
     #[test]
