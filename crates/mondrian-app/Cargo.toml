@@ -95,3 +95,6 @@ libc = "0.2"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
+
+[dev-dependencies]
+mondrian-editor-state = { workspace = true, features = ["test-support"] }

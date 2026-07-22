@@ -357,6 +357,34 @@ _Avoid_: Internal stem selection, physical device routing
 A user-, workspace-, or session-scoped graph that maps logical program outputs to physical listening devices without changing the Audio Program.
 _Avoid_: Program master processor, project-owned device ID
 
+**Authoring Session**:
+The sole mutable authority for one open Project lifetime: canonical Project Document, Asset Library authority, Sequence navigation, bounded project-wide history, author generation, and manual/autosave baselines.
+_Avoid_: AppState fields mirroring Project data, mutable renderer snapshot, active-Sequence-only history
+
+**Author Generation**:
+A process-local monotonic identity assigned to every committed Project author state in one Authoring Session. It is neither a Sequence execution revision nor a successful-save revision.
+_Avoid_: Document revision, Sequence revision, frame generation
+
+**Author Transaction**:
+A candidate transformation of a Sequence or complete Project Document that becomes canonical only after validation, history admission, revision advancement, and atomic installation succeed.
+_Avoid_: Mutate then record, best-effort rollback, UI-owned command side effect
+
+**Durable Project Publication**:
+The filesystem boundary at which a flushed and validated Project archive or recovery manifest atomically replaces or creates its target. Completion before this boundary is not a successful save.
+_Avoid_: ZIP writer close alone, temporary-file existence, enqueue success, rename-old-then-rename-new sequence
+
+**Clip Content**:
+The one closed payload that identifies a Clip placement as Media, Adjustment Layer, Nested Sequence, or Solid Color and carries only that variant's external references and interpretation data.
+_Avoid_: Parallel Clip kind/asset/nested/color fields, fake Asset ID for a nested Sequence
+
+**Clip Link Group**:
+A Sequence-local set identity shared by two or more Clip placements whose ordinary editorial selection and structural edits are synchronized.
+_Avoid_: Pair pointer, linked-list chain, singleton group, media ownership relation
+
+**Video Transition**:
+A Sequence-owned, typed two-input visual author entity with strong adjacent Clip endpoints, an exact Sequence-time interval, stable instance identity, and validated source-handle demand.
+_Avoid_: Clip opacity preset, Track-owned transition, inferred overlap, clamped source request
+
 **Project Migration**:
 An ordered, transactional transformation of one persisted archive, document, or SQLite schema version into the next supported version.
 _Avoid_: Best-effort deserialization, ignored ALTER error
@@ -439,6 +467,14 @@ _Avoid_: Best-effort deserialization, ignored ALTER error
 - Concurrent misses for the same complete **Decoded Audio Source Window** have one decode leader. Persistent media decode Sessions are bounded by source revision plus output contract; sequential reuse, cold open, and random restart are distinct evidence classes and cannot share one latency claim.
 - Persisted timeline positions, ranges, automation keys, and temporal handles use **Timeline Time** in an explicit **Authoring Time Domain**; video frames and audio samples are derived **Evaluation Grids**, not competing author time systems.
 - A **Sequence Author Revision** is the conservative invalidation generation for every author entity owned by that Sequence. Project document revision records successful file saves and can never substitute for it in Playback, Preview, audio compilation, or render-cache identity.
+- One open Project has exactly one **Authoring Session**. Production UI and execution code receive read-only references or immutable snapshots and cannot borrow the canonical Project Document mutably.
+- An **Author Transaction** edits a detached candidate. Failure leaves the canonical document, **Author Generation**, Sequence revisions, dirty state, and Undo/Redo stacks unchanged; success advances them as one commit.
+- A persistence request binds one Authoring Session identity, **Author Generation**, Asset Library revision, and request identity. A stale or previous-session completion may not clear dirty state or replace newer in-memory metadata.
+- Manual save and autosave share **Durable Project Publication**, but only manual save advances the durable baseline; autosave advances recovery coverage and never makes an unsaved Project appear saved.
+- Every Clip has exactly one **Clip Content** variant. Unknown or legacy parallel content fields fail current-schema loading rather than being ignored.
+- Every non-null **Clip Link Group** has at least two members. Commands expand a selected member to the complete set, validate all locked Tracks and zero-boundary constraints before mutation, and compact broken/singleton membership before commit.
+- A **Video Transition** derives Track membership from its strong Clip endpoints. It persists no parallel Track identity, requires one exact shared cut, and projects its full interval into both source domains without clamping; insufficient source handles fail closed.
+- A visual Transition author type, definition, or Property Bag is not execution evidence. Product support requires the shared Preview/Export render projection and verified backend path.
 - Undo and Redo restore author content but always advance the **Sequence Author Revision**; restored content can therefore never masquerade as the older live snapshot from which it originated.
 - **Timeline Time** equality, ordering, arithmetic, and hashing use checked canonical rational semantics; serialized numerator/denominator field order can never define chronology.
 - Timeline Times from different **Authoring Time Domains** cannot be compared or combined until an explicit **Time Transform** maps one domain into the other.

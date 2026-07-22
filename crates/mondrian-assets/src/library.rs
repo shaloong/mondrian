@@ -80,6 +80,15 @@ pub struct AssetLibrary {
     db: Arc<Mutex<Connection>>,
 }
 
+fn connection_revision(connection: &Connection) -> Result<u64> {
+    let revision = connection
+        .query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0))
+        .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+    u64::try_from(revision).map_err(|_| MondrianError::AssetDbError {
+        reason: format!("SQLite returned a negative total_changes value: {revision}"),
+    })
+}
+
 impl AssetLibrary {
     /// 打开或创建素材库（root 为库根目录）
     pub fn open(root: PathBuf) -> Result<Arc<Self>> {
@@ -102,6 +111,60 @@ impl AssetLibrary {
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".mondrian")
             .join("library")
+    }
+
+    /// Path of the live project-library database.
+    ///
+    /// Persistence callers must use [`Self::snapshot_database`] rather than
+    /// copying this file while the connection is active.
+    pub fn database_path(&self) -> PathBuf {
+        self.root.join("index.db")
+    }
+
+    /// Create a transactionally consistent standalone SQLite snapshot.
+    ///
+    /// The live database may use WAL and remain open while persistence runs.
+    /// Copying `index.db` directly is therefore forbidden: the SQLite online
+    /// backup API is the sole archive snapshot boundary.
+    /// Return the connection-local SQLite change revision used to bind an
+    /// author snapshot to the exact asset-library state it observed.
+    pub fn database_revision(&self) -> Result<u64> {
+        connection_revision(&self.db.lock())
+    }
+
+    pub fn snapshot_database(&self, expected_revision: u64, destination: &Path) -> Result<()> {
+        if destination == self.database_path() {
+            return Err(MondrianError::AssetDbError {
+                reason: "database snapshot destination aliases the live database".to_owned(),
+            });
+        }
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if destination.exists() {
+            std::fs::remove_file(destination)?;
+        }
+
+        let source = self.db.lock();
+        let actual_revision = connection_revision(&source)?;
+        if actual_revision != expected_revision {
+            return Err(MondrianError::AssetDbError {
+                reason: format!(
+                    "asset library changed after snapshot capture: expected revision {expected_revision}, current {actual_revision}"
+                ),
+            });
+        }
+        let mut target = Connection::open(destination)
+            .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+        let backup = rusqlite::backup::Backup::new(&source, &mut target)
+            .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+        backup
+            .run_to_completion(128, std::time::Duration::from_millis(1), None)
+            .map_err(|error| MondrianError::AssetDbError { reason: error.to_string() })?;
+        drop(backup);
+        drop(target);
+        std::fs::OpenOptions::new().write(true).open(destination)?.sync_all()?;
+        Ok(())
     }
 
     /// 导入单个媒体文件（当前 v0.1 支持：可读视频/音频）
@@ -1105,6 +1168,45 @@ mod tests {
             has_video: false,
             has_audio: true,
         }
+    }
+
+    #[test]
+    fn online_snapshot_captures_committed_wal_state() {
+        let lib = open_test_library();
+        lib.db.lock().execute_batch("PRAGMA journal_mode = WAL;").expect("enable WAL");
+        let asset_id = lib.create_solid_color_asset(Some("Snapshot red")).expect("create asset");
+        let revision = lib.database_revision().expect("database revision");
+        let snapshot_dir = tempfile::tempdir().expect("snapshot tempdir");
+        let snapshot_path = snapshot_dir.path().join("library.db");
+
+        lib.snapshot_database(revision, &snapshot_path).expect("online snapshot");
+
+        let snapshot = Connection::open(snapshot_path).expect("open snapshot");
+        let stored_name: String = snapshot
+            .query_row(
+                "SELECT name FROM assets WHERE id = ?1",
+                [asset_id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("snapshotted asset");
+        assert_eq!(stored_name, "Snapshot red");
+    }
+
+    #[test]
+    fn online_snapshot_fails_closed_when_asset_revision_advanced() {
+        let lib = open_test_library();
+        let captured = lib.database_revision().expect("captured revision");
+        lib.create_adjustment_layer_asset(Some("Changed after capture"))
+            .expect("create asset");
+        let snapshot_dir = tempfile::tempdir().expect("snapshot tempdir");
+        let snapshot_path = snapshot_dir.path().join("library.db");
+
+        let error = lib
+            .snapshot_database(captured, &snapshot_path)
+            .expect_err("stale snapshot must fail");
+
+        assert!(error.to_string().contains("changed after snapshot capture"));
+        assert!(!snapshot_path.exists());
     }
 
     #[test]

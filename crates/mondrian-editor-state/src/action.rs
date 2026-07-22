@@ -1,13 +1,13 @@
 //! 全局 Action 枚举
 //!
 //! 所有用户操作、快捷键、菜单、脚本、AI Agent 的输入，
-//! 统一转为 [`Action`] 再派发给 [`EditorState`](crate::EditorState)。
+//! 统一转为 [`Action`]，由应用组合根派发到对应的领域 Interface。
 //!
 //! ## 设计原则
 //!
 //! * 每个 Action 描述 **"发生了什么"**，不描述"怎么做"
 //! * Action 是纯数据（值对象），不含任何逻辑
-//! * 新增 Action 只需在此处加枚举变体 + 在 `EditorDispatch::dispatch` 里处理
+//! * 新增 Action 必须由应用组合根映射到一个明确的领域 Interface
 //! * `Custom` 变体提供无边界扩展，供脚本/AI/宏使用
 
 use std::path::PathBuf;

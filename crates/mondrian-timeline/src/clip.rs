@@ -103,6 +103,10 @@ impl Transform2D {
         self.properties.clone()
     }
 
+    fn fork_author_identities(&mut self) {
+        self.properties.fork_author_identities();
+    }
+
     pub fn apply_property_mutation(&mut self, mutation: PropertyMutation) -> Result<()> {
         let path = property_mutation_path(&mutation);
         if !path.starts_with("transform.") {
@@ -325,22 +329,18 @@ impl Default for SpeedMap {
 }
 
 /// 时间线片段语义 — re-exported from mondrian_core::timeline_data.
-pub use mondrian_core::timeline_data::{AlphaInterpretation, ClipKind, MediaInterpretation};
+pub use mondrian_core::timeline_data::{
+    AlphaInterpretation, ClipContent, ClipKind, MediaInterpretation,
+};
 
 /// 时间线上的一个剪辑片段
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Clip {
     pub id: ClipId,
-    /// 片段语义（媒体/调整图层）
-    #[serde(default)]
-    pub kind: ClipKind,
-    /// 关联的素材资产
-    pub asset_id: AssetId,
-    /// 嵌套序列引用。只有 `ClipKind::NestedSequence` 使用。
-    #[serde(default)]
-    pub nested_sequence_id: Option<SequenceId>,
-    #[serde(default)]
-    pub interpretation: MediaInterpretation,
+    /// Closed payload algebra; impossible cross-kind field combinations cannot
+    /// enter the author snapshot.
+    pub content: ClipContent,
     /// 在时间线上的起始位置
     pub position: TimelineTime,
     /// 在时间线上的持续时长
@@ -359,8 +359,10 @@ pub struct Clip {
     /// 蒙版列表（按顺序叠加渲染）
     #[serde(default)]
     pub masks: Vec<MaskComponent>,
-    /// 关联的音频/视频 Clip（保持同步）
-    pub linked_clip: Option<ClipId>,
+    /// Optional Sequence-local edit-synchronization group. Every member with
+    /// the same identity participates in linked selection/edit operations.
+    #[serde(default)]
+    pub link_group: Option<ClipLinkGroupId>,
     /// Placement-local audio authoring. Track membership and temporal placement
     /// remain owned exclusively by the containing Track and this Clip.
     #[serde(default)]
@@ -371,9 +373,6 @@ pub struct Clip {
     pub blend_mode: Option<BlendMode>,
     /// 显示标签（可选）
     pub label: Option<String>,
-    /// 纯色层颜色（仅 ClipKind::SolidColor 使用）
-    #[serde(default)]
-    pub solid_color: Option<Color>,
 }
 
 impl Clip {
@@ -381,15 +380,27 @@ impl Clip {
     pub const SOLID_COLOR_PATH: &'static str = "clip.solid_color";
 
     pub fn new(asset_id: AssetId, position: TimelineTime, duration: TimelineTime) -> Result<Self> {
+        Self::with_content(
+            ClipContent::Media {
+                asset_id,
+                interpretation: MediaInterpretation::default(),
+            },
+            position,
+            duration,
+        )
+    }
+
+    fn with_content(
+        content: ClipContent,
+        position: TimelineTime,
+        duration: TimelineTime,
+    ) -> Result<Self> {
         if duration.is_negative() {
             return Err(mondrian_core::TimelineTimeError::NegativeDuration.into());
         }
         Ok(Self {
             id: ClipId::new(),
-            kind: ClipKind::Media,
-            asset_id,
-            nested_sequence_id: None,
-            interpretation: MediaInterpretation::default(),
+            content,
             position,
             duration,
             source_in: TimelineTime::ZERO,
@@ -398,12 +409,11 @@ impl Clip {
             speed: SpeedMap::new(),
             effects: vec![],
             masks: vec![],
-            linked_clip: None,
+            link_group: None,
             audio_components: Vec::new(),
             is_disabled: false,
             blend_mode: None,
             label: None,
-            solid_color: None,
         })
     }
 
@@ -413,11 +423,11 @@ impl Clip {
         position: TimelineTime,
         duration: TimelineTime,
     ) -> Result<Self> {
-        let mut clip = Self::new(asset_id, position, duration)?;
-        clip.kind = ClipKind::SolidColor;
-        clip.solid_color = Some(color);
-        clip.source_in = TimelineTime::ZERO;
-        clip.source_out = duration;
+        let mut clip = Self::with_content(
+            ClipContent::SolidColor { asset_id, color },
+            position,
+            duration,
+        )?;
         clip.label = Some("纯色层".to_string());
         Ok(clip)
     }
@@ -427,10 +437,11 @@ impl Clip {
         position: TimelineTime,
         duration: TimelineTime,
     ) -> Result<Self> {
-        let mut clip = Self::new(asset_id, position, duration)?;
-        clip.kind = ClipKind::AdjustmentLayer;
-        clip.source_in = TimelineTime::ZERO;
-        clip.source_out = duration;
+        let mut clip = Self::with_content(
+            ClipContent::AdjustmentLayer { asset_id },
+            position,
+            duration,
+        )?;
         clip.label = Some("调整图层".to_string());
         Ok(clip)
     }
@@ -441,25 +452,50 @@ impl Clip {
         duration: TimelineTime,
         label: Option<String>,
     ) -> Result<Self> {
-        let mut clip = Self::new(AssetId::new(), position, duration)?;
-        clip.kind = ClipKind::NestedSequence;
-        clip.nested_sequence_id = Some(sequence_id);
-        clip.source_in = TimelineTime::ZERO;
-        clip.source_out = duration;
+        let mut clip = Self::with_content(
+            ClipContent::NestedSequence { sequence_id },
+            position,
+            duration,
+        )?;
         clip.label = label.or_else(|| Some("嵌套序列".to_string()));
         Ok(clip)
     }
 
     pub fn is_adjustment_layer(&self) -> bool {
-        self.kind == ClipKind::AdjustmentLayer
+        matches!(self.content, ClipContent::AdjustmentLayer { .. })
     }
 
     pub fn is_solid_color(&self) -> bool {
-        self.kind == ClipKind::SolidColor
+        matches!(self.content, ClipContent::SolidColor { .. })
     }
 
     pub fn is_nested_sequence(&self) -> bool {
-        self.kind == ClipKind::NestedSequence
+        matches!(self.content, ClipContent::NestedSequence { .. })
+    }
+
+    /// Stable content discriminator for presentation adapters.
+    pub const fn kind(&self) -> ClipKind {
+        self.content.kind()
+    }
+
+    /// Asset identity for content backed by the project asset library.
+    pub const fn asset_id(&self) -> Option<AssetId> {
+        self.content.asset_id()
+    }
+
+    /// Nested Sequence identity for nested content.
+    pub const fn nested_sequence_id(&self) -> Option<SequenceId> {
+        self.content.nested_sequence_id()
+    }
+
+    /// Media interpretation for file-backed content.
+    pub const fn media_interpretation(&self) -> Option<&MediaInterpretation> {
+        self.content.media_interpretation()
+    }
+
+    /// Mutable media interpretation for file-backed content.
+    pub fn media_interpretation_mut(&mut self) -> Option<&mut MediaInterpretation> {
+        self.content.media_interpretation_mut()
     }
 
     /// Clip 在时间线上的结束位置
@@ -497,6 +533,34 @@ impl Clip {
             edit.processing.scope_in = edit.processing.scope_in.checked_add(split_offset)?;
         }
         Ok(())
+    }
+
+    /// Fork all placement-local identities for the right side of a razor edit.
+    ///
+    /// Processing scopes remain shared definitions, while Clip-owned effect,
+    /// mask, and audio-edit identities become independently addressable.
+    pub fn fork_placement_identities_for_split(
+        &mut self,
+        split_offset: TimelineTime,
+    ) -> Result<()> {
+        self.fork_visual_placement_identities();
+        self.fork_audio_components_for_split(split_offset)
+    }
+
+    /// Fork the Clip and every visual placement-local identity for Copy or
+    /// Sequence duplication. Audio aggregate identities are forked by the
+    /// owning Sequence because their Processing Scopes live outside the Clip.
+    pub fn fork_visual_placement_identities(&mut self) {
+        self.id = ClipId::new();
+        self.transform.fork_author_identities();
+        for effect in &mut self.effects {
+            effect.id = EffectId::new();
+            effect.properties.fork_author_identities();
+        }
+        for mask in &mut self.masks {
+            mask.id = MaskId::new();
+            mask.properties.fork_author_identities();
+        }
     }
 
     /// Shift edit/scope-local origins when the Clip's in edge moves.
@@ -638,8 +702,7 @@ impl PropertyHost for Clip {
         let mut blend_mode_property = AnimatedProperty::from_descriptor(blend_mode_descriptor);
         blend_mode_property.set_static_value(PropertyValue::Enum(blend_mode_text))?;
         properties.upsert(blend_mode_property);
-        if self.is_solid_color() || self.solid_color.is_some() {
-            let solid_color = self.solid_color.unwrap_or_else(|| Color::from_hex(0x000000));
+        if let Some(solid_color) = self.content.solid_color() {
             let solid_color_descriptor = PropertyDescriptor::new(
                 Self::SOLID_COLOR_PATH,
                 "纯色",
@@ -707,7 +770,13 @@ impl PropertyHost for Clip {
                     reason: "clip.solid_color 需要 color 值".to_string(),
                 });
             };
-            self.solid_color = Some(color);
+            let ClipContent::SolidColor { color: current, .. } = &mut self.content else {
+                return Err(MondrianError::WorkflowStepFailed {
+                    step_id: "clip_apply_property_mutation".to_string(),
+                    reason: "clip.solid_color 只适用于纯色内容".to_string(),
+                });
+            };
+            *current = color;
             Ok(())
         } else if path.starts_with("mask.") {
             // Path format: "mask.<uuid>.<short_prop>"
@@ -795,6 +864,7 @@ fn property_mutation_path(mutation: &PropertyMutation) -> &str {
 mod tests {
     use super::*;
     use mondrian_core::automation::{Keyframe, PropertyMutation, PropertyValue};
+    use mondrian_core::mask_data::MaskKeyframe;
     use mondrian_effects::EffectRenderOp;
 
     fn tt(frame: i64) -> TimelineTime {
@@ -896,7 +966,7 @@ mod tests {
         })
         .expect("set solid color");
 
-        assert_eq!(clip.solid_color, Some(color));
+        assert_eq!(clip.content.solid_color(), Some(color));
     }
 
     #[test]
@@ -904,7 +974,7 @@ mod tests {
         let clip = Clip::new_adjustment_layer(AssetId::new(), tt(12), tt(30)).expect("valid clip");
 
         assert!(clip.is_adjustment_layer());
-        assert_eq!(clip.kind, ClipKind::AdjustmentLayer);
+        assert_eq!(clip.kind(), ClipKind::AdjustmentLayer);
         assert_eq!(clip.position, tt(12));
         assert_eq!(clip.duration, tt(30));
         assert!(clip.effects.is_empty());
@@ -918,8 +988,8 @@ mod tests {
                 .expect("valid clip");
 
         assert!(clip.is_nested_sequence());
-        assert_eq!(clip.kind, ClipKind::NestedSequence);
-        assert_eq!(clip.nested_sequence_id, Some(nested_id));
+        assert_eq!(clip.kind(), ClipKind::NestedSequence);
+        assert_eq!(clip.nested_sequence_id(), Some(nested_id));
         assert_eq!(clip.label.as_deref(), Some("Scene 02"));
         assert!(clip
             .property_bag()
@@ -931,17 +1001,71 @@ mod tests {
     #[test]
     fn media_interpretation_defaults_to_source_metadata() {
         let clip = Clip::new(AssetId::new(), tt(0), tt(10)).expect("valid clip");
-        assert_eq!(clip.interpretation.color_space_override, None);
-        assert_eq!(clip.interpretation.alpha, AlphaInterpretation::Straight);
+        let interpretation = clip.media_interpretation().expect("media interpretation");
+        assert_eq!(interpretation.color_space_override, None);
+        assert_eq!(interpretation.alpha, AlphaInterpretation::Straight);
     }
 
     #[test]
     fn media_interpretation_can_override_color_space() {
         let mut clip = Clip::new(AssetId::new(), tt(0), tt(10)).expect("valid clip");
-        clip.interpretation.color_space_override = Some(ColorSpace::Rec2100Hlg);
+        clip.media_interpretation_mut()
+            .expect("media interpretation")
+            .color_space_override = Some(ColorSpace::Rec2100Hlg);
         assert_eq!(
-            clip.interpretation.color_space_override,
+            clip.media_interpretation().expect("media interpretation").color_space_override,
             Some(ColorSpace::Rec2100Hlg)
+        );
+    }
+
+    #[test]
+    fn clip_content_json_rejects_cross_variant_and_legacy_fields() {
+        let clip = Clip::new(AssetId::new(), tt(0), tt(10)).expect("valid clip");
+        let mut content = serde_json::to_value(&clip.content).expect("serialize content");
+        content.as_object_mut().expect("content object").insert(
+            "sequence_id".to_owned(),
+            serde_json::json!(SequenceId::new()),
+        );
+        assert!(serde_json::from_value::<ClipContent>(content).is_err());
+
+        let mut serialized = serde_json::to_value(&clip).expect("serialize Clip");
+        serialized
+            .as_object_mut()
+            .expect("Clip object")
+            .insert("asset_id".to_owned(), serde_json::json!(AssetId::new()));
+        assert!(serde_json::from_value::<Clip>(serialized).is_err());
+    }
+
+    #[test]
+    fn copied_visual_placement_forks_all_addressable_identities() {
+        let mut original = Clip::new(AssetId::new(), tt(0), tt(10)).expect("valid clip");
+        original.add_effect_node(mondrian_effects::EffectNodeExt::with_defaults(
+            EffectType::BasicCorrection,
+        ));
+        original.masks.push(MaskComponent::new(
+            "Mask".to_owned(),
+            MaskKeyframe::default(),
+        ));
+        let mut copied = original.clone();
+
+        copied.fork_visual_placement_identities();
+
+        assert_ne!(copied.id, original.id);
+        assert_ne!(copied.effects[0].id, original.effects[0].id);
+        assert_ne!(copied.masks[0].id, original.masks[0].id);
+        assert_ne!(
+            copied
+                .transform
+                .to_property_bag()
+                .property(Transform2D::OPACITY_PATH)
+                .expect("copied opacity")
+                .track_id,
+            original
+                .transform
+                .to_property_bag()
+                .property(Transform2D::OPACITY_PATH)
+                .expect("original opacity")
+                .track_id,
         );
     }
 

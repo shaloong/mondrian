@@ -31,9 +31,11 @@ use mondrian_timeline::track::Track;
 pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
     match action {
         Action::SaveProject => state.has_open_project(),
-        Action::SaveProjectAs(_) => state.sequence.is_some(),
-        Action::CloseProject => state.sequence.is_some() || state.current_project_path.is_some(),
-        Action::ImportMedia(_) => state.asset_library.is_some(),
+        Action::SaveProjectAs(_) => state.active_sequence().is_some(),
+        Action::CloseProject => {
+            state.active_sequence().is_some() || state.current_project_path().is_some()
+        }
+        Action::ImportMedia(_) => state.asset_library().is_some(),
         Action::Undo => state.can_undo_action(),
         Action::Redo => state.can_redo_action(),
         Action::Cut => state.can_cut_to_app_clipboard(),
@@ -50,18 +52,18 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         | Action::StepForward
         | Action::StepBack
         | Action::GoToStart
-        | Action::GoToEnd => state.sequence.is_some(),
+        | Action::GoToEnd => state.active_sequence().is_some(),
         Action::SelectAll => sequence_has_selectable_clips(state),
         Action::DeselectAll => has_any_app_selection(state),
         Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_IMPORT_MEDIA_DIALOG =>
         {
-            state.asset_library.is_some()
+            state.asset_library().is_some()
         }
         Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SEQUENCE_SETTINGS =>
         {
-            state.sequence.is_some()
+            state.active_sequence().is_some()
         }
         Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PROJECT_SETTINGS =>
@@ -71,7 +73,7 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SAVE_PROJECT_AS_DIALOG =>
         {
-            state.sequence.is_some()
+            state.active_sequence().is_some()
         }
         Action::Custom { namespace, name, .. }
             if namespace == TIMELINE_NAMESPACE && name == TIMELINE_CLEAR_IN_OUT_POINTS =>
@@ -119,7 +121,7 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         Action::Custom { namespace, name, payload }
             if namespace == TIMELINE_NAMESPACE && name == TIMELINE_SET_IN_OUT_POINT =>
         {
-            state.sequence.is_some()
+            state.active_sequence().is_some()
                 && parse_payload::<TimelineSetInOutPointPayload>(payload).is_some()
         }
         Action::Custom { namespace, name, payload }
@@ -131,7 +133,7 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         Action::Custom { namespace, name, .. }
             if namespace == TIMELINE_NAMESPACE && name == TIMELINE_SEEK =>
         {
-            state.sequence.is_some()
+            state.active_sequence().is_some()
         }
         Action::Custom { namespace, name, payload }
             if namespace == TIMELINE_NAMESPACE && name == TIMELINE_SET_TRACK_CONTROL =>
@@ -143,7 +145,7 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         Action::Custom { namespace, name, .. }
             if namespace == TIMELINE_NAMESPACE && name == TIMELINE_ADD_TRACK =>
         {
-            state.sequence.is_some()
+            state.active_sequence().is_some()
         }
         Action::Custom { namespace, name, payload }
             if namespace == TIMELINE_NAMESPACE && name == TIMELINE_MOVE_TRACK =>
@@ -155,28 +157,31 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         Action::Custom { namespace, name, .. }
             if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_RETURN_TO_PARENT =>
         {
-            !state.sequence_navigation_stack.is_empty()
+            state
+                .authoring
+                .as_ref()
+                .is_some_and(|session| !session.navigation_stack().is_empty())
         }
         Action::Custom { namespace, name, .. }
             if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_SET_ACTIVE_DEFAULT =>
         {
-            state.active_sequence_id.is_some()
-                && state.default_sequence_id != state.active_sequence_id
+            state.active_sequence_id().is_some()
+                && state.default_sequence_id() != state.active_sequence_id()
         }
         Action::Custom { namespace, name, .. }
             if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_DUPLICATE =>
         {
-            state.active_sequence_id.is_some()
+            state.active_sequence_id().is_some()
         }
         Action::Custom { namespace, name, .. }
             if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_DELETE =>
         {
-            state.active_sequence_id.is_some() && state.export_sequences_snapshot().len() > 1
+            state.active_sequence_id().is_some() && state.export_sequences_snapshot().len() > 1
         }
         Action::Custom { namespace, name, .. }
             if namespace == SEQUENCE_NAMESPACE && name == SEQUENCE_SWITCH_ACTIVE =>
         {
-            state.active_sequence_id.is_some()
+            state.active_sequence_id().is_some()
         }
         _ => true,
     }
@@ -192,7 +197,7 @@ fn has_timeline_selection(state: &AppState) -> bool {
 
 fn has_deletable_timeline_selection(state: &AppState) -> bool {
     if !state.selection.selected_clips.is_empty() {
-        let Some(sequence) = state.sequence.as_ref() else {
+        let Some(sequence) = state.active_sequence() else {
             return false;
         };
         return state.selection.selected_clips.iter().all(|selection| {
@@ -215,7 +220,7 @@ fn has_single_editable_selected_clip(state: &AppState) -> bool {
     if state.selection.selected_clips.len() != 1 {
         return false;
     }
-    let Some(sequence) = state.sequence.as_ref() else {
+    let Some(sequence) = state.active_sequence() else {
         return false;
     };
     state.selection.selected_clips.iter().all(|selection| {
@@ -234,7 +239,7 @@ fn selected_clips_are_editable(state: &AppState) -> bool {
     if state.selection.selected_clips.is_empty() {
         return false;
     }
-    let Some(sequence) = state.sequence.as_ref() else {
+    let Some(sequence) = state.active_sequence() else {
         return false;
     };
     state.selection.selected_clips.iter().all(|selection| {
@@ -250,7 +255,7 @@ fn sequence_has_clip_in_track(
     is_video_track: bool,
     clip_id: ClipId,
 ) -> bool {
-    state.sequence.as_ref().is_some_and(|sequence| {
+    state.active_sequence().is_some_and(|sequence| {
         track_for_ref(sequence, track_id, is_video_track)
             .is_some_and(|track| track.clips.iter().any(|clip| clip.id == clip_id))
     })
@@ -258,8 +263,7 @@ fn sequence_has_clip_in_track(
 
 fn sequence_has_track(state: &AppState, track_id: TrackId, is_video_track: bool) -> bool {
     state
-        .sequence
-        .as_ref()
+        .active_sequence()
         .and_then(|sequence| track_for_ref(sequence, track_id, is_video_track))
         .is_some()
 }
@@ -268,7 +272,7 @@ fn timeline_move_clip_target_is_available(
     state: &AppState,
     payload: TimelineMoveClipPayload,
 ) -> bool {
-    let Some(sequence) = state.sequence.as_ref() else {
+    let Some(sequence) = state.active_sequence() else {
         return false;
     };
     let source_unlocked = sequence
@@ -289,7 +293,7 @@ fn timeline_trim_targets_are_available(
     if payload.clip_ids.is_empty() {
         return false;
     }
-    let Some(sequence) = state.sequence.as_ref() else {
+    let Some(sequence) = state.active_sequence() else {
         return false;
     };
     payload.clip_ids.iter().all(|clip_id| {
@@ -311,7 +315,7 @@ fn selected_clip_trim_to_playhead_is_available(
         TimelineTrimPayloadEdge::In => state.current_frame(),
         TimelineTrimPayloadEdge::Out => state.current_frame().saturating_add(1),
     };
-    let Some(sequence) = state.sequence.as_ref() else {
+    let Some(sequence) = state.active_sequence() else {
         return false;
     };
     state.selection.selected_clips.iter().all(|selection| {
@@ -365,7 +369,7 @@ fn selected_tracks_are_deletable(state: &AppState) -> bool {
     if state.selection.selected_track_ids.is_empty() {
         return false;
     }
-    let Some(sequence) = state.sequence.as_ref() else {
+    let Some(sequence) = state.active_sequence() else {
         return false;
     };
 
@@ -401,13 +405,12 @@ fn has_any_app_selection(state: &AppState) -> bool {
 
 fn sequence_has_in_out_points(state: &AppState) -> bool {
     state
-        .sequence
-        .as_ref()
+        .active_sequence()
         .is_some_and(|sequence| sequence.in_point.is_some() || sequence.out_point.is_some())
 }
 
 fn sequence_has_selectable_clips(state: &AppState) -> bool {
-    state.sequence.as_ref().is_some_and(|sequence| {
+    state.active_sequence().is_some_and(|sequence| {
         sequence
             .video_tracks
             .iter()
@@ -417,7 +420,7 @@ fn sequence_has_selectable_clips(state: &AppState) -> bool {
 }
 
 fn can_split_at_playhead(state: &AppState) -> bool {
-    state.sequence.as_ref().is_some_and(|sequence| {
+    state.active_sequence().is_some_and(|sequence| {
         let Ok(time) = TimelineTime::from_frame_position(FramePosition::new(
             state.current_frame(),
             sequence.time_base(),
@@ -468,21 +471,21 @@ mod tests {
         let clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
         let clip_id = clip.id;
         sequence.video_tracks[0].add_clip(clip).expect("add clip");
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         state.selection.selected_clips =
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
         state
     }
 
     #[test]
-    fn project_settings_requires_a_saved_open_project() {
+    fn project_settings_requires_an_open_authoring_session() {
         let action = app_shell_project_settings_action();
         let mut state = AppState::new();
 
         assert!(!app_state_action_enabled(&action, &state));
-        state.sequence = Some(Sequence::new("Edit"));
-        assert!(!app_state_action_enabled(&action, &state));
-        state.current_project_path = Some(std::path::PathBuf::from("project.mdp"));
+        state.test_set_sequence(Some(Sequence::new("Edit")));
+        assert!(app_state_action_enabled(&action, &state));
+        state.test_set_project_path(std::path::PathBuf::from("project.mdp"));
         assert!(app_state_action_enabled(&action, &state));
     }
 
@@ -642,7 +645,7 @@ mod tests {
         let mut state = state_with_selected_clip();
         state.seek(15);
         let selection = state.selection.selected_clips[0];
-        state.sequence.as_mut().expect("sequence").video_tracks[0].is_locked = true;
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
 
         for action in [
             timeline_move_clip_action(TimelineMoveClipPayload {
@@ -682,7 +685,7 @@ mod tests {
             &state
         ));
 
-        state.sequence.as_mut().expect("sequence").video_tracks[0].is_locked = true;
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
         assert!(!app_state_action_enabled(
             &Action::SplitClipAtPlayhead,
             &state

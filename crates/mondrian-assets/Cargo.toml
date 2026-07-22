@@ -22,7 +22,7 @@ parking_lot = { workspace = true }
 dashmap    = { workspace = true }
 
 # SQLite
-rusqlite   = { version = "0.31", features = ["bundled"] }
+rusqlite   = { version = "0.31", features = ["bundled", "backup"] }
 # 文件系统监听
 notify     = "6"
 # 目录

@@ -1,6 +1,6 @@
 use mondrian_core::{
     timeline_data::{
-        AlphaInterpretation, ClipKind, FieldOrder, NestedColorProcessing, PixelAspectRatio,
+        AlphaInterpretation, ClipContent, FieldOrder, NestedColorProcessing, PixelAspectRatio,
         RenderPlanSource,
     },
     types::{AssetId, BlendMode, Color, ColorSpace, FramePosition, Rational, SequenceId},
@@ -325,12 +325,8 @@ pub fn evaluate_timeline_render_plan(
                     reason: error.to_string(),
                 })?;
 
-        match ac.kind {
-            ClipKind::NestedSequence => {
-                let Some(sequence_id) = ac.nested_sequence_id else {
-                    diagnostics.skipped_unrenderable += 1;
-                    continue;
-                };
+        match ac.content {
+            ClipContent::NestedSequence { sequence_id } => {
                 elements.push(TimelineRenderPlanElement::NestedSequence(
                     TimelineNestedSequencePlan {
                         sequence_id,
@@ -344,7 +340,7 @@ pub fn evaluate_timeline_render_plan(
                     },
                 ));
             }
-            ClipKind::AdjustmentLayer => {
+            ClipContent::AdjustmentLayer { .. } => {
                 elements.push(TimelineRenderPlanElement::Adjustment(
                     TimelineAdjustmentPlan {
                         effect_graph,
@@ -354,8 +350,7 @@ pub fn evaluate_timeline_render_plan(
                     },
                 ));
             }
-            ClipKind::SolidColor => {
-                let color = ac.solid_color.unwrap_or(Color::BLACK);
+            ClipContent::SolidColor { color, .. } => {
                 elements.push(TimelineRenderPlanElement::SolidColor(
                     TimelineSolidColorPlan {
                         color,
@@ -367,8 +362,8 @@ pub fn evaluate_timeline_render_plan(
                     },
                 ));
             }
-            ClipKind::Media => {
-                let source_time = if let Some(frame_rate) = ac.interpretation.frame_rate_override {
+            ClipContent::Media { asset_id, interpretation } => {
+                let source_time = if let Some(frame_rate) = interpretation.frame_rate_override {
                     TimelineTime::from_frame_position(
                         ac.source_time.to_frame_position(frame_rate, FrameRounding::Floor)?,
                     )?
@@ -378,14 +373,14 @@ pub fn evaluate_timeline_render_plan(
                 .max(TimelineTime::ZERO);
                 let transform = apply_pixel_aspect_to_affine(
                     ac.transform_matrix,
-                    ac.interpretation.pixel_aspect_ratio_override,
+                    interpretation.pixel_aspect_ratio_override,
                 );
                 elements.push(TimelineRenderPlanElement::Media(TimelineMediaPlan {
-                    asset_id: ac.asset_id,
-                    color_space_override: ac.interpretation.color_space_override,
-                    pixel_aspect_ratio_override: ac.interpretation.pixel_aspect_ratio_override,
-                    field_order_override: ac.interpretation.field_order_override,
-                    alpha_interpretation: ac.interpretation.alpha,
+                    asset_id,
+                    color_space_override: interpretation.color_space_override,
+                    pixel_aspect_ratio_override: interpretation.pixel_aspect_ratio_override,
+                    field_order_override: interpretation.field_order_override,
+                    alpha_interpretation: interpretation.alpha,
                     source_time,
                     opacity,
                     blend_mode: ac.blend_mode,
@@ -614,10 +609,11 @@ mod tests {
         let mut seq = Sequence::new("render-plan-interpretation");
         let tb = seq.time_base();
         let mut clip = Clip::new(AssetId::new(), tt(0, tb), tt(20, tb)).expect("valid clip");
-        clip.interpretation.color_space_override = Some(mondrian_core::types::ColorSpace::Srgb);
-        clip.interpretation.pixel_aspect_ratio_override = Some(PixelAspectRatio::Anamorphic2x);
-        clip.interpretation.field_order_override = Some(FieldOrder::UpperFirst);
-        clip.interpretation.alpha = AlphaInterpretation::Premultiplied;
+        let interpretation = clip.media_interpretation_mut().expect("media interpretation");
+        interpretation.color_space_override = Some(mondrian_core::types::ColorSpace::Srgb);
+        interpretation.pixel_aspect_ratio_override = Some(PixelAspectRatio::Anamorphic2x);
+        interpretation.field_order_override = Some(FieldOrder::UpperFirst);
+        interpretation.alpha = AlphaInterpretation::Premultiplied;
         seq.video_tracks[0].add_clip(clip).expect("add clip");
 
         let plan = analysis_elements(&seq, 0);
@@ -645,7 +641,9 @@ mod tests {
         let mut seq = Sequence::new("render-plan-frame-rate-override");
         let tb = seq.time_base();
         let mut clip = Clip::new(AssetId::new(), tt(0, tb), tt(30, tb)).expect("valid clip");
-        clip.interpretation.frame_rate_override = Some(Rational::FPS_30);
+        clip.media_interpretation_mut()
+            .expect("media interpretation")
+            .frame_rate_override = Some(Rational::FPS_30);
         seq.video_tracks[0].add_clip(clip).expect("add clip");
 
         let plan = analysis_elements(&seq, 15);
@@ -683,11 +681,12 @@ mod tests {
         seq.settings.working_color_space = mondrian_core::WorkingColorSpace::LinearRec2020;
         seq.settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
         let mut clip = Clip::new(AssetId::new(), tt(0, tb), tt(20, tb)).expect("valid clip");
-        let asset_id = clip.asset_id;
-        clip.interpretation.color_space_override = Some(ColorSpace::AppleLogBt2020);
-        clip.interpretation.pixel_aspect_ratio_override = Some(PixelAspectRatio::DvcproHd);
-        clip.interpretation.field_order_override = Some(FieldOrder::LowerFirst);
-        clip.interpretation.alpha = AlphaInterpretation::Ignore;
+        let asset_id = clip.asset_id().expect("media asset");
+        let interpretation = clip.media_interpretation_mut().expect("media interpretation");
+        interpretation.color_space_override = Some(ColorSpace::AppleLogBt2020);
+        interpretation.pixel_aspect_ratio_override = Some(PixelAspectRatio::DvcproHd);
+        interpretation.field_order_override = Some(FieldOrder::LowerFirst);
+        interpretation.alpha = AlphaInterpretation::Ignore;
         seq.video_tracks[0].add_clip(clip).expect("add clip");
 
         let diagnostics = collect_timeline_color_diagnostics(
@@ -809,10 +808,11 @@ mod tests {
         let mut media = Clip::new(media_asset, tt(0, tb), tt(30, tb)).expect("valid clip");
         media.source_in = tt(3, tb);
         media.source_out = tt(33, tb);
-        media.interpretation.color_space_override = Some(ColorSpace::Srgb);
-        media.interpretation.pixel_aspect_ratio_override = Some(PixelAspectRatio::Anamorphic2x);
-        media.interpretation.field_order_override = Some(FieldOrder::UpperFirst);
-        media.interpretation.alpha = AlphaInterpretation::Premultiplied;
+        let interpretation = media.media_interpretation_mut().expect("media interpretation");
+        interpretation.color_space_override = Some(ColorSpace::Srgb);
+        interpretation.pixel_aspect_ratio_override = Some(PixelAspectRatio::Anamorphic2x);
+        interpretation.field_order_override = Some(FieldOrder::UpperFirst);
+        interpretation.alpha = AlphaInterpretation::Premultiplied;
         media.blend_mode = Some(BlendMode::HardLight);
         seq.video_tracks[0].add_clip(media).expect("add media");
 

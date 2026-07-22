@@ -48,13 +48,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let display_snapshot = self.display_snapshot.borrow();
         let Ok(display_color_space) = preview_display_color_space(
             sequence,
-            &state.project_settings.color_management,
+            &state.project_settings().color_management,
             display_snapshot.as_ref(),
         ) else {
             return;
         };
         let color_context = sequence.settings.root_preview_color_context(
-            &state.project_settings.color_management,
+            &state.project_settings().color_management,
             display_color_space,
         );
         let preroll_deadline_at = state
@@ -116,7 +116,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
         let demands = collect_preview_timeline_media_demands(
             sequence,
-            &state.sequences,
+            state.sequences(),
             frame,
             Resolution { width: target_width, height: target_height },
             state.playback_preview_resolution_scale(),
@@ -175,7 +175,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         if !state.is_playback_priming() {
             return None;
         }
-        let sequence = state.sequence.as_ref()?;
+        let sequence = state.active_sequence()?;
         let current_frame = state.current_frame().max(0);
         let end_frame = state.last_content_frame().ok()?.max(0);
         if current_frame >= end_frame {
@@ -185,12 +185,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let display_snapshot = self.display_snapshot.borrow();
         let display_color_space = preview_display_color_space(
             sequence,
-            &state.project_settings.color_management,
+            &state.project_settings().color_management,
             display_snapshot.as_ref(),
         )
         .ok()?;
         let color_context = sequence.settings.root_preview_color_context(
-            &state.project_settings.color_management,
+            &state.project_settings().color_management,
             display_color_space,
         );
         let window = media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)?;
@@ -233,7 +233,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     ) -> MediaPrerollFrameReadiness {
         let Ok(demands) = collect_preview_timeline_media_demands(
             sequence,
-            &state.sequences,
+            state.sequences(),
             frame,
             Resolution { width: target_width, height: target_height },
             state.playback_preview_resolution_scale(),
@@ -424,7 +424,7 @@ fn next_root_media_activation_frame(
             !clip.is_disabled
                 && clip.duration > mondrian_core::TimelineTime::ZERO
                 && matches!(
-                    clip.kind,
+                    clip.kind(),
                     mondrian_core::timeline_data::ClipKind::Media
                         | mondrian_core::timeline_data::ClipKind::NestedSequence
                 )

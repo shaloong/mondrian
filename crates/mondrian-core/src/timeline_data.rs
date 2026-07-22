@@ -163,6 +163,82 @@ pub struct MediaInterpretation {
     pub alpha: AlphaInterpretation,
 }
 
+/// Closed set of authored Clip payloads.
+///
+/// Payload-specific data lives inside the matching variant, so a persisted
+/// Clip cannot claim one kind while carrying missing or contradictory fields
+/// from another kind.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ClipContent {
+    /// File-backed media with placement-local interpretation overrides.
+    Media {
+        asset_id: AssetId,
+        #[serde(default)]
+        interpretation: MediaInterpretation,
+    },
+    /// Effect-only layer sourced from a reusable project asset entry.
+    AdjustmentLayer { asset_id: AssetId },
+    /// Public output of another Sequence in the same Project.
+    NestedSequence { sequence_id: SequenceId },
+    /// Deterministic project generator sourced from a reusable palette entry.
+    SolidColor { asset_id: AssetId, color: Color },
+}
+
+impl ClipContent {
+    /// Stable discriminator for presentation and dispatch adapters.
+    pub const fn kind(&self) -> ClipKind {
+        match self {
+            Self::Media { .. } => ClipKind::Media,
+            Self::AdjustmentLayer { .. } => ClipKind::AdjustmentLayer,
+            Self::NestedSequence { .. } => ClipKind::NestedSequence,
+            Self::SolidColor { .. } => ClipKind::SolidColor,
+        }
+    }
+
+    /// Project asset when this content is backed by the asset library.
+    pub const fn asset_id(&self) -> Option<AssetId> {
+        match self {
+            Self::Media { asset_id, .. }
+            | Self::AdjustmentLayer { asset_id }
+            | Self::SolidColor { asset_id, .. } => Some(*asset_id),
+            Self::NestedSequence { .. } => None,
+        }
+    }
+
+    /// Nested Sequence identity when this is nested content.
+    pub const fn nested_sequence_id(&self) -> Option<SequenceId> {
+        match self {
+            Self::NestedSequence { sequence_id } => Some(*sequence_id),
+            _ => None,
+        }
+    }
+
+    /// Read media interpretation only for file-backed media.
+    pub const fn media_interpretation(&self) -> Option<&MediaInterpretation> {
+        match self {
+            Self::Media { interpretation, .. } => Some(interpretation),
+            _ => None,
+        }
+    }
+
+    /// Mutate media interpretation only for file-backed media.
+    pub fn media_interpretation_mut(&mut self) -> Option<&mut MediaInterpretation> {
+        match self {
+            Self::Media { interpretation, .. } => Some(interpretation),
+            _ => None,
+        }
+    }
+
+    /// Solid generator color when this is a solid-color payload.
+    pub const fn solid_color(&self) -> Option<Color> {
+        match self {
+            Self::SolidColor { color, .. } => Some(*color),
+            _ => None,
+        }
+    }
+}
+
 /// Pixel aspect ratio presets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PixelAspectRatio {
@@ -220,15 +296,11 @@ pub enum NestedColorProcessing {
 /// exposing `Clip`, `Track`, or `Sequence` internals.
 #[derive(Debug, Clone)]
 pub struct FlatActiveClip {
-    pub asset_id: AssetId,
     pub clip_id: ClipId,
-    pub kind: ClipKind,
-    pub nested_sequence_id: Option<SequenceId>,
+    pub content: ClipContent,
     pub is_disabled: bool,
     pub effects: Vec<EffectNode>,
     pub masks: Vec<MaskComponent>,
-    pub solid_color: Option<Color>,
-    pub interpretation: MediaInterpretation,
     pub source_time: TimelineTime,
     /// Affine transform matrix as 6-element array [a, c, tx, b, d, ty].
     pub transform_matrix: [f32; 6],
@@ -255,32 +327,4 @@ pub trait RenderPlanSource {
 
     /// Whether to auto tone-map media to the working color space.
     fn auto_tone_map_media(&self) -> bool;
-}
-
-// ── Clip graph node trait ────────────────────────────────────────────
-
-/// A node in the abstract clip graph — each clip is an evaluable unit.
-///
-/// In the full Architecture V2 vision, the timeline is a projection of a
-/// directed acyclic graph of clip nodes. This trait formalizes that each
-/// clip type (media, adjustment, solid color, nested sequence) can
-/// evaluate itself into render elements independently.
-///
-/// Currently `FlatActiveClip` + `RenderPlanSource` provide the concrete
-/// implementation. This trait exists to document the architectural intent
-/// and allow future DAG-based clip graph evaluation.
-pub trait ClipGraphNode {
-    /// Unique identifier for this node in the clip graph.
-    fn node_id(&self) -> ClipId;
-
-    /// Node kind for dispatch.
-    fn node_kind(&self) -> ClipKind;
-
-    /// Input node IDs — clips this node depends on.
-    /// Empty for leaf nodes (media, solid color). Non-empty for
-    /// composition nodes (nested sequences, future group clips).
-    fn input_ids(&self) -> &[ClipId];
-
-    /// Whether this node is enabled (visible in the graph).
-    fn is_enabled(&self) -> bool;
 }

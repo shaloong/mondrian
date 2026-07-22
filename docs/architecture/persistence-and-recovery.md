@@ -1,121 +1,144 @@
 # Persistence and Recovery
 
-Persistence is currently handled by `mondrian-app::app::project_lifecycle`.
+Persistence is a UI-independent publication pipeline. The canonical mutable
+author state lives only in `mondrian-editor-state::AuthoringSession`; UI code
+requests a save but never serializes a live document or SQLite connection.
 
 ## Project Container
 
 `.mdp` is a ZIP container containing:
 
-- `manifest.json`
-- `project.json`
-- `library/index.db`
+- `manifest.json`: archive format, document layout, entry names, and embedded
+  library schema version;
+- `project.json`: one validated `mondrian-project::ProjectDocument`;
+- `library/index.db`: one transactionally snapshotted SQLite asset library.
 
-`manifest.json` declares the current archive contract and document layout.
-`project.json` stores `mondrian-project::ProjectDocument`. The SQLite library is
-streamed into the archive during save and extracted into the runtime directory
-during open.
+Rebuildable proxies, thumbnails, waveforms, decoded frames, prepared render
+plans, plugin runtime state, UI navigation, and device handles never enter the
+archive.
 
-The current SQLite schema is v2. Its `audio_components` column persists stable
-Asset audio Component identities, conservative stream signatures, and the file
-fingerprint used for the probe. The v1→v2 migration derives catalogs from each
-complete media record inside one migration transaction; malformed metadata
-rolls back the column and version rather than writing a partial binding.
+The archive format, Project document schema, and SQLite schema are independent
+version axes. The current values are archive v1, document v17, and library v2.
+An archive is accepted only when all three declarations match their registered
+contracts. During Alpha, old and future document schemas fail closed; absence
+of a migration is explicit and is never replaced by broad serde defaults.
 
-## Atomic Save
+## Author Snapshot and Request Identity
 
-Save writes a temporary archive next to the target, reopens and validates the
-new document, stages the prior target as a sibling backup, and then renames the
-validated archive into place. If replacement fails after staging, the original
-is restored before the error returns. Serialization, ZIP writing, validation,
-and replacement failures therefore do not intentionally delete or truncate the
-source project.
+`AuthoringSession::snapshot` captures one immutable persistence input:
 
-Archive open migrates JSON in memory and extracts SQLite through a temporary
-sibling file. A failed or missing library entry leaves an existing runtime DB
-and the source archive unchanged. SQLite migrations subsequently run
-transactionally against this runtime copy; migration never edits the archive in
-place. Saving and reopening is the only path that persists the current versions.
+- `AuthoringSessionId`: the process-local identity of this open lifetime;
+- monotonic `AuthorGeneration`;
+- exact asset-library database revision;
+- a cloned, fully validated `ProjectDocument`;
+- the library authority used to create a consistent SQLite backup.
 
-The current archive fixture pins the exact Mondrian Standard package digest
-serialized by `ProjectColorManagement`. A package content change deliberately
-invalidates that fixture until it is regenerated for the new current contract;
-unknown/retired digests are rejected rather than accepted through an implicit
-color migration or substituted with the latest package. Deserialization accepts
-only complete registered package identities: individually valid v2/v3 field
-values cannot be mixed into an unregistered hybrid identity. Archive and preview
-fingerprints, OCIO CPU processor keys, and renderer GPU shader keys all include
-the exact package identity.
+`AuthorGeneration` identifies committed in-memory state. It is distinct from
+persisted `SequenceRevision` (execution invalidation) and
+`document_revision` (successful manual-file publication evidence). A save
+request also receives a monotonic request ID. Completion is accepted only by
+the still-open matching Session and request; reopening the same Project ID does
+not make a completion from the previous lifetime valid.
 
-Document schema v15 retains the v5 Custom OCIO reproducibility contract and the
-v6 removal of the redundant sequence-level ACES workflow selector. It also
-requires the Mondrian Standard package identity to pin both the SDR and
-1000-nit HDR View Transform IDs and versions; the old single default-View field
-cannot fully describe HDR project semantics. Version 8 additionally requires a
-complete `ParameterSchema` on every persisted visual property; stable identity,
-unit/range/interpolation/enum/resource and cache semantics cannot be inferred
-from an instance path. Version 9 moves value type, definition default,
-automation capability, and the three execution interpolation semantics into
-that shared schema and uses the same schema-plus-exact-curve contract for audio
-Processor parameters. Editor-only Bezier presets are no longer serialized as
-definition capabilities. A Custom project
-stores its config/content and executable processor graph identities together
-with working/display/view/look/role selections.
-Opening the archive must reload and validate the selected external config; a
-missing config, edited LUT, changed role, or changed default resource is an
-open diagnostic, never a silent substitution. Schemas v5 and v6 are
-deliberately not migrated during Alpha: v6 made project `ColorEngine` the sole
-color-mode selector, while v7 completes the Standard View identity, v8
-establishes stable parameter identity, and v9 completes the cross-media
-parameter definition contract. Version 10 separates the persisted monotonic
-Sequence author revision from the Project document's successful-save revision
-and rejects invalid author identity graphs before they enter runtime state.
-Version 11 replaces the two legacy Sequence position-display fields with one
-mandatory `TimelineDisplaySettings` payload. It preserves a signed actual-frame
-timecode origin independently from Frames/SMPTE presentation, rejects invalid
-drop-frame/rate combinations, and deliberately provides no Alpha migration from
-v10.
-Version 12 replaces the closed audio-layout enum with canonical named-speaker
-sets and bounded Discrete buses. Standard layouts serialize their speaker
-positions; invalid, empty, duplicate, or over-capacity layouts fail during
-deserialization, and v11 is deliberately not inferred during Alpha.
-Version 13 makes each persisted audio Component's source-to-Sequence mapping
-explicit as either the versioned fail-closed Standard policy or one canonical
-sparse matrix. Matrix source/destination layouts, channel bounds, coefficient
-finiteness and duplicate edges are validated at deserialization and Sequence
-closure boundaries; v12 is deliberately not inferred during Alpha.
-Version 14 makes `AudioRoute.enabled`, `gain_db`, and optional exact
-Sequence-time `gain_automation` mandatory. Route curves use a stable Parameter
-ID, and static/keyed/Bezier-control values must remain in the supported dB
-range. There is no implicit v13 unity-gain migration during Alpha.
-Version 15 adds the exact `Samples` unit to the shared Parameter Schema and
-admits exactly representable integer audio-processor values. The canonical
-Sample Delay definition uses a non-animatable integer sample-frame parameter;
-v14 documents are not reinterpreted under this expanded schema during Alpha.
-Current new sequences default to SceneReferred and persist the selected engine's
-package-pinned rendering View intent; DisplayReferred is the explicit
-direct-colorimetric bypass.
+Manual save, Save As, and autosave all enter the dedicated
+`ProjectPersistenceService`. The worker first uses SQLite's online backup API
+to create a self-consistent database snapshot, then writes the archive from the
+immutable document and that database. It never copies a live WAL database as a
+set of ordinary files. UI, playback, and rendering remain independent of ZIP
+compression and filesystem latency.
 
-## Runtime Directory
+Manual close/quit waits for its required save result. Autosave remains
+asynchronous and coalesced by the App so it cannot create an unbounded request
+queue.
 
-Each project path maps to a stable temp runtime root:
+## Durable Atomic Publication
 
-```text
-temp/mondrian-runtime/mondrian_<stem>_<hash>/
-```
+The archive is written to a unique sibling temporary file, completed as a ZIP,
+flushed with `sync_all`, reopened, and validated before publication. Publication
+uses one platform atomic replacement boundary:
 
-The runtime root contains extracted library data and autosave snapshots.
+- Windows replaces an existing target with `ReplaceFileW` and creates a new
+  target with `MoveFileExW`; both use write-through flags.
+- Unix uses same-directory `rename` and then synchronizes the parent directory.
+
+There is no “rename old file away, then hope the new rename succeeds” window.
+A serialization, database backup, ZIP, validation, flush, or replacement error
+leaves an existing Project target untouched. Temporary files are best-effort
+removed after failure. `write_durable_file_atomically` applies the same rule to
+recovery manifests and other Project-adjacent indexes.
+
+Successful completion reports the exact Session, request, author generation,
+asset-library revision, resulting document revision, Project metadata, and
+published path. `AuthoringSession::mark_saved` advances the durable baseline
+only monotonically. If the user edited after the captured snapshot, the older
+save may complete and remain a valid recovery artifact but cannot clear dirty
+state or overwrite newer in-memory metadata. Failed requests remain dirty and
+may be retried.
 
 ## Autosave
 
-Autosave writes timestamped `.autosave.mdp` archives and a manifest:
+Autosave publishes immutable `.autosave.mdp` recovery points under the stable
+Project runtime root. The manifest is published only after its referenced
+archive has been durably published:
 
 ```text
 autosave/manifest.json
-autosave/project-<unix_ms>.autosave.mdp
+autosave/project-<request-id>-<generation>.autosave.mdp
 ```
 
-Retention keeps a bounded number of recovery points and removes stale entries.
+The manifest records Project identity, Session-independent source path,
+author generation, asset-library revision, timestamp, and archive path. A
+manifest can therefore never advertise a half-written archive. Retention is
+bounded and removes only recovery points not referenced by the newly committed
+manifest. A successful autosave advances `autosaved_generation`, not the manual
+save baseline; it must not make the title bar or close guard report “saved”.
 
 ## Recovery
 
-Recovery opens a copied autosave archive, saves it back to the project path, then clears the autosave directory. Recovery should never mutate the autosave source before the recovered project has been saved.
+Discovery treats a recovery point as a candidate, not as canonical state. It
+validates the manifest and archive, exposes source/timestamp/generation to the
+product UI, and opens the candidate into a new `AuthoringSession`. Recovery
+never edits or deletes its source first. The candidate is cleared only after a
+manual Project publication succeeds at the chosen destination. Conflicts,
+permission failures, disk-full errors, and an invalid candidate remain visible
+and retryable.
+
+The runtime directory is derived from the Project path and contains the
+extracted library plus recovery state:
+
+```text
+temp/mondrian-runtime/mondrian_<stem>_<path-hash>/
+```
+
+Archive open extracts the SQLite entry through a temporary sibling and opens
+the resulting runtime database transactionally. Failure leaves both an existing
+runtime database and the source archive unchanged. SQLite migrations operate on
+the extracted runtime copy only; saving is the sole path back into `.mdp`.
+
+## Current Document Schema
+
+Schemas v5–v15 establish the pinned color-engine, parameter, exact-time, audio
+layout/matrix/route, and exact Samples contracts described in the corresponding
+architecture documents. Schema v16 replaces proxy-mode `Vec<AssetId>` state
+with a canonical ordered set so duplicate or order-dependent author state is
+unrepresentable.
+
+Schema v17 is the current clean Alpha author contract:
+
+- `ClipContent` is a closed payload; legacy parallel kind/asset/nested/color
+  fields and unknown Clip fields are rejected;
+- Clip synchronization uses multi-member `ClipLinkGroupId` membership rather
+  than pair pointers;
+- Sequence persists explicit typed visual Transitions with strong endpoint
+  references and exact ranges;
+- mask scalar Property Bags are persisted and validated rather than rebuilt as
+  defaults after reopen;
+- copied, split, and duplicated author graphs must have disjoint instance
+  identities while retaining intended external references.
+
+The current fixture in `crates/mondrian-project/tests/fixtures/current` must
+open idempotently, save, reopen, and retain its semantic fingerprint. Dedicated
+round-trip tests additionally cover visual parameters, mask animation, audio
+processor schema/curves, exact Transition/link relationships, and SQLite
+content. A schema number is not advanced unless these required semantics are
+represented and validated.

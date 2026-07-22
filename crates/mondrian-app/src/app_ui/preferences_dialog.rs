@@ -134,13 +134,11 @@ impl AppUiPreferencesModel {
         viewer_canvas_background: ViewerCanvasBackground,
     ) -> Self {
         let project_status = state
-            .current_project_path
-            .as_ref()
+            .current_project_path()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "未打开项目".to_owned());
         let sequence_summary = state
-            .sequence
-            .as_ref()
+            .active_sequence()
             .map(|sequence| {
                 format!(
                     "{} · {}x{} · {} fps",
@@ -2261,9 +2259,9 @@ mod tests {
     #[test]
     fn preferences_model_reads_real_app_state_values() {
         let mut state = AppState::new();
-        state.current_project_path = Some("E:/projects/edit.mdp".into());
-        state.sequence = Some(mondrian_timeline::sequence::Sequence::new("Cut"));
-        state.project_settings.proxy_enabled = true;
+        state.test_set_project_path("E:/projects/edit.mdp".into());
+        state.test_set_sequence(Some(mondrian_timeline::sequence::Sequence::new("Cut")));
+        state.test_project_settings_mut().proxy_enabled = true;
         state.export_draft.range = TimelineExportRange::EntireSequence;
         state.export_draft.output_path = "E:/renders/cut.mp4".to_owned();
 
@@ -2289,7 +2287,7 @@ mod tests {
     fn preferences_model_reports_effective_project_proxy_policy() {
         let mut state = AppState::new();
         state.auto_proxy_enabled = true;
-        state.project_settings.proxy_enabled = false;
+        state.test_project_settings_mut().proxy_enabled = false;
 
         let model = AppUiPreferencesModel::from_app_state(
             &state,

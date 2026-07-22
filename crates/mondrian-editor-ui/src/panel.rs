@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 
 use mondrian_core::events::AppEvent;
-use mondrian_editor_state::{Action, EditorState};
+use mondrian_editor_state::Action;
 use mondrian_ui_core::Widget;
 
 // PanelKind is defined in mondrian-editor-state as the canonical source
@@ -25,11 +25,8 @@ pub struct PanelInitContext {
 
 /// Panel widget-tree build context.
 ///
-/// Panels read the current [`EditorState`] snapshot and convert user intent into
-/// semantic [`Action`] values. They must not mutate editor state directly.
+/// Panels convert user intent into semantic [`Action`] values. Purpose-built`r`n/// immutable panel view models are supplied by concrete panel adapters.
 pub struct PanelBuildContext<'a> {
-    /// Current editor state snapshot for read-only panel adapters.
-    pub state: &'a EditorState,
     /// Semantic editor action sink owned by the host application.
     pub dispatch: &'a dyn Fn(Action),
 }
@@ -47,7 +44,7 @@ impl PanelBuildContext<'_> {
 ///
 /// * Panel 之间**禁止**直接持有对方引用
 /// * Panel 通信通过 `EventBus`（发布/订阅）
-/// * Panel 读取 `EditorState`（只读），修改通过 `dispatch(Action)`
+/// * Panel 读取专用不可变 view model，修改通过 `dispatch(Action)`
 /// * 每个 Panel 构建自己的 Widget 树
 pub trait Panel: Send + Sync {
     /// 面板类型标识
@@ -198,8 +195,7 @@ mod tests {
     #[test]
     fn panel_build_widget_tree_returns_widget() {
         let mut panel = MockPanel::new(PanelKind::Export, "Export");
-        let state = EditorState::new();
-        let context = PanelBuildContext { state: &state, dispatch: &|_| {} };
+        let context = PanelBuildContext { dispatch: &|_| {} };
         let widget = panel.build_widget_tree(&context);
         assert!(widget.children().is_empty());
     }
@@ -234,21 +230,17 @@ mod tests {
     fn panel_is_object_safe() {
         let mut panel: Box<dyn Panel> = Box::new(MockPanel::new(PanelKind::Export, "E"));
         assert_eq!(panel.kind(), PanelKind::Export);
-        let state = EditorState::new();
-        let context = PanelBuildContext { state: &state, dispatch: &|_| {} };
+        let context = PanelBuildContext { dispatch: &|_| {} };
         let _widget = panel.build_widget_tree(&context);
     }
 
     #[test]
-    fn panel_build_context_exposes_state_snapshot_and_dispatch_sink() {
-        let state = EditorState::new();
+    fn panel_build_context_exposes_dispatch_sink() {
         let dispatched = RefCell::new(Vec::new());
         let context = PanelBuildContext {
-            state: &state,
             dispatch: &|action| dispatched.borrow_mut().push(action),
         };
 
-        assert!(!context.state.has_open_project());
         context.dispatch(Action::FocusPanel(PanelKind::Timeline));
 
         assert_eq!(

@@ -16,7 +16,7 @@ must live outside `.mdp`.
 - `meta: ProjectMeta`
 - `settings: ProjectSettings`
 - `sequences: SequenceCollection`
-- `proxy_mode_assets: Vec<AssetId>`
+- `proxy_mode_assets: BTreeSet<AssetId>`
 
 `mondrian-core` keeps only shared project metadata and settings types. It does
 not define a second top-level project container.
@@ -61,21 +61,27 @@ still validates every inheriting sequence before accepting that identity.
 
 ## Runtime State
 
-`AppState` owns:
+`AuthoringSession` owns the complete mutable authoring aggregate:
 
-- active sequence and sequence collection
-- active/default sequence IDs and navigation stack
-- project id, metadata, and current document revision
-- project path and runtime directory
-- project settings
-- asset library handle
+- canonical `ProjectDocument` and Sequence collection;
+- Project file/runtime paths and the asset-library authority;
+- active/default Sequence navigation;
+- project-wide bounded history;
+- `AuthoringSessionId`, `AuthorGeneration`, and manual/autosave baselines.
+
+`AppState` composes that Session with runtime-only product state:
+
 - selection state
 - playback/audio state
 - render queue/export draft
 - clipboard and animation selections
 - UI-facing status log
 
-Runtime-only state must not leak into project JSON unless it is part of the project contract.
+Production edit commands cannot borrow the canonical document mutably. They
+edit and validate a candidate through `AuthoringSession`, which installs the
+candidate, advances revisions/generation, and records history as one atomic
+operation. Runtime-only state must not leak into Project JSON unless it becomes
+an explicit Project contract.
 
 ## Selection
 
@@ -120,7 +126,7 @@ is written with that field explicitly.
 
 Archive and document JSON pass through separate version registries before typed
 deserialization. During Alpha there are deliberately no legacy document steps:
-schema v15 is the sole accepted author schema, and older/future versions fail
+schema v17 is the sole accepted author schema, and older/future versions fail
 instead of being guessed. Version 5 introduced the explicit tagged
 `mondrian_standard` / `aces` / `custom_ocio` project contract and makes every
 Mondrian Standard package-identity field mandatory: product ID/version, config
@@ -171,6 +177,14 @@ Version 15 adds `Samples` as an exact Parameter Schema unit and permits exactly
 representable integer audio-processor values. The canonical Sample Delay uses
 that contract for a non-animatable sample-frame count; v14 documents are not
 implicitly promoted during Alpha.
+Version 16 makes forced-proxy Asset membership a canonical ordered set. Duplicate
+IDs and input ordering can no longer change the document fingerprint.
+Version 17 replaces parallel Clip kind payloads with closed `ClipContent`,
+replaces pair links with multi-member `ClipLinkGroupId` membership, persists
+typed visual Transitions with strong endpoints, and persists complete Mask
+Property Bags. Unknown/legacy Clip fields, singleton link groups, invalid
+Transition geometry, missing Mask parameters, and duplicate author identities
+fail before the document enters a Session.
 
 SQLite schema ownership remains in `mondrian-assets`; the current version is
 v2. Its ordered Registry uses
@@ -183,12 +197,13 @@ Future split-entry layouts require an archive migration and new
 SQLite migrates only in the extracted runtime copy. The source `.mdp` is never
 rewritten by open.
 
-Current document schema v15 persists canonical rational `TimelineTime` values
+Current document schema v17 persists canonical rational `TimelineTime` values
 directly and requires the shared visual/audio `ParameterSchema`. It does not
 contain frame-oriented `TimeCode`, `TimeTicks`, descriptor-level duplicate
 defaults/types, editor-preset interpolation capabilities, or compatibility
 aliases. Alpha documents from earlier schemas are rejected rather than silently
-deriving parameter identity or parameter definition fields.
+deriving parameter identity, Clip content, link membership, Transition
+endpoints, or Mask parameter state.
 
 The checked current document fixture lives under
 `crates/mondrian-project/tests/fixtures/current`; the SQLite upgrade fixture

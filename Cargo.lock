@@ -2759,10 +2759,13 @@ version = "0.1.0"
 dependencies = [
  "mondrian-assets",
  "mondrian-core",
+ "mondrian-project",
  "mondrian-timeline",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
+ "tracing",
  "uuid",
 ]
 
@@ -2886,6 +2889,7 @@ dependencies = [
  "mondrian-timeline",
  "serde",
  "serde_json",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

@@ -1,16 +1,14 @@
+use super::project_persistence::{ProjectPersistenceCompletion, ProjectPersistenceRequestId};
 use super::*;
-use mondrian_project::{
-    load_project_archive, project_document_fingerprint, read_project_document_from_archive,
-    save_project_archive, ProjectDocument, PROJECT_DOCUMENT_SCHEMA_VERSION,
-};
+use mondrian_project::{load_project_archive, ProjectDocument};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PersistenceCompletionDisposition {
+    Applied,
+    IgnoredStaleSession,
+}
 
 impl AppState {
-    pub(super) fn project_file_path(&self) -> anyhow::Result<&Path> {
-        self.current_project_path
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("未打开项目文件"))
-    }
-
     fn project_runtime_root(project_file: &Path) -> PathBuf {
         let stem = project_file.file_stem().and_then(|s| s.to_str()).unwrap_or("project");
         let mut hasher = DefaultHasher::new();
@@ -20,151 +18,8 @@ impl AppState {
         std::env::temp_dir().join("mondrian-runtime").join(dir_name)
     }
 
-    fn runtime_library_root(&self) -> anyhow::Result<PathBuf> {
-        let root = self
-            .project_runtime_dir
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("项目运行目录未初始化"))?;
-        Ok(root.join("library"))
-    }
-
-    fn save_project_container(&self, project_data: &ProjectDocument) -> anyhow::Result<()> {
-        let project_file = self.project_file_path()?.to_path_buf();
-        self.save_project_container_to(project_data, project_file.as_path())
-    }
-
-    fn save_project_container_to(
-        &self,
-        project_data: &ProjectDocument,
-        target_file: &Path,
-    ) -> anyhow::Result<()> {
-        let started_at = std::time::Instant::now();
-        let runtime_library_root = self.runtime_library_root()?;
-        let db_path = runtime_library_root.join("index.db");
-
-        save_project_archive(project_data, db_path.as_path(), target_file)?;
-
-        if ui_diag_enabled() {
-            let elapsed_ms = started_at.elapsed().as_millis() as u64;
-            if elapsed_ms >= ui_diag_slow_threshold_ms() {
-                tracing::warn!("[ui-diag] save_project_container slow: {}ms", elapsed_ms);
-            }
-        }
-        Ok(())
-    }
-
-    pub(super) fn current_project_data(&self) -> Option<ProjectDocument> {
-        let sequence = self.sequence.as_ref()?;
-        let project_id = self.project_id?;
-        let mut proxy_mode_assets: Vec<AssetId> = self.proxy_mode_assets.iter().copied().collect();
-        proxy_mode_assets.sort_by_key(|id| id.to_string());
-        let active_sequence_id = self.active_sequence_id.unwrap_or(sequence.id);
-        let default_sequence_id = self.default_sequence_id.unwrap_or(active_sequence_id);
-        let mut sequences = self.sequences.clone();
-        if let Some(active) = sequences.iter_mut().find(|seq| seq.id == active_sequence_id) {
-            *active = sequence.clone();
-        } else {
-            sequences.push(sequence.clone());
-        }
-        sequences.sort_by_key(|seq| seq.name.clone());
-        let collection = SequenceCollection { sequences, default_sequence_id, active_sequence_id };
-        let mut meta = self
-            .project_meta
-            .clone()
-            .unwrap_or_else(|| ProjectMeta::new(sequence.name.clone()));
-        if meta.name.trim().is_empty() {
-            meta.name = sequence.name.clone();
-        }
-        Some(ProjectDocument {
-            schema_version: PROJECT_DOCUMENT_SCHEMA_VERSION,
-            project_id,
-            document_revision: self.project_document_revision.max(1),
-            meta,
-            sequences: collection,
-            settings: self.project_settings.clone(),
-            proxy_mode_assets,
-        })
-    }
-
-    fn autosave_root(&self) -> anyhow::Result<PathBuf> {
-        let runtime_root = self
-            .project_runtime_dir
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("项目运行目录未初始化"))?;
-        Ok(runtime_root.join("autosave"))
-    }
-
     pub(super) fn autosave_manifest_path(runtime_root: &Path) -> PathBuf {
         runtime_root.join("autosave").join("manifest.json")
-    }
-
-    fn load_autosave_manifest(
-        runtime_root: &Path,
-        project_file: &Path,
-    ) -> anyhow::Result<AutosaveManifest> {
-        let manifest_path = Self::autosave_manifest_path(runtime_root);
-        if !manifest_path.exists() {
-            let mut manifest = AutosaveManifest {
-                project_file: project_file.to_path_buf(),
-                snapshots: Vec::new(),
-            };
-            manifest.normalize();
-            return Ok(manifest);
-        }
-
-        let bytes = fs::read(&manifest_path)?;
-        let mut manifest = serde_json::from_slice::<AutosaveManifest>(&bytes)?;
-        if manifest.project_file.as_os_str().is_empty() {
-            manifest.project_file = project_file.to_path_buf();
-        }
-        manifest.normalize();
-        Ok(manifest)
-    }
-
-    pub fn write_autosave_snapshot(
-        &self,
-        max_recovery_points: usize,
-        retention_days: u32,
-    ) -> anyhow::Result<PathBuf> {
-        let project_file = self.project_file_path()?.to_path_buf();
-        let data = self
-            .current_project_data()
-            .ok_or_else(|| anyhow::anyhow!("当前无可自动保存的项目"))?;
-
-        let autosave_root = self.autosave_root()?;
-        fs::create_dir_all(&autosave_root)?;
-
-        let runtime_root = self
-            .project_runtime_dir
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("项目运行目录未初始化"))?;
-        let mut manifest = Self::load_autosave_manifest(runtime_root, project_file.as_path())
-            .unwrap_or(AutosaveManifest {
-                project_file: project_file.clone(),
-                snapshots: Vec::new(),
-            });
-
-        let saved_at = unix_now_ms();
-        let autosave_file = autosave_root.join(format!("project-{saved_at}.autosave.mdp"));
-        self.save_project_container_to(&data, autosave_file.as_path())?;
-
-        manifest.project_file = project_file;
-        manifest.snapshots.push(AutosaveSnapshotEntry {
-            file: autosave_file.clone(),
-            saved_at_unix_ms: saved_at,
-        });
-        apply_autosave_retention(
-            &mut manifest,
-            max_recovery_points.max(1),
-            retention_days.max(1),
-        );
-        manifest.normalize();
-
-        write_json_atomic(
-            Self::autosave_manifest_path(runtime_root).as_path(),
-            &manifest,
-        )?;
-        Ok(autosave_file)
     }
 
     pub fn open_project_from_autosave_snapshot(
@@ -187,9 +42,8 @@ impl AppState {
         let _ = fs::remove_file(&staged);
         open_result?;
 
-        self.save_project_file()?;
-        let autosave_root = Self::project_runtime_root(project_file.as_path()).join("autosave");
-        let _ = fs::remove_dir_all(autosave_root);
+        // A recovered snapshot is intentionally dirty until the user explicitly
+        // saves it. Keep all recovery points until that durable save succeeds.
         Ok(())
     }
 
@@ -211,51 +65,16 @@ impl AppState {
     }
 
     pub fn has_open_project(&self) -> bool {
-        self.sequence.is_some() && self.current_project_path.is_some()
+        self.authoring.is_some()
+    }
+
+    /// Whether the open authoring Session has been durably published at least once.
+    pub fn has_saved_project(&self) -> bool {
+        self.authoring.as_ref().is_some_and(AuthoringSession::has_durable_baseline)
     }
 
     pub(crate) fn has_unsaved_project_changes(&self) -> bool {
-        if !self.has_open_project() {
-            return false;
-        }
-
-        let Some(current) = self.current_project_data() else {
-            return false;
-        };
-
-        let current_fingerprint = match project_document_fingerprint(current) {
-            Ok(data) => data,
-            Err(err) => {
-                tracing::warn!("计算当前项目指纹失败，按未保存处理: {err}");
-                return true;
-            }
-        };
-
-        let project_file = match self.project_file_path() {
-            Ok(path) => path,
-            Err(err) => {
-                tracing::warn!("读取当前项目路径失败，按未保存处理: {err}");
-                return true;
-            }
-        };
-
-        let saved = match read_project_document_from_archive(project_file) {
-            Ok(data) => data,
-            Err(err) => {
-                tracing::warn!("读取磁盘项目数据失败，按未保存处理: {err}");
-                return true;
-            }
-        };
-
-        let saved_fingerprint = match project_document_fingerprint(saved) {
-            Ok(data) => data,
-            Err(err) => {
-                tracing::warn!("计算磁盘项目指纹失败，按未保存处理: {err}");
-                return true;
-            }
-        };
-
-        current_fingerprint != saved_fingerprint
+        self.authoring.as_ref().is_some_and(AuthoringSession::is_dirty)
     }
 
     fn open_project_archive(
@@ -263,16 +82,11 @@ impl AppState {
         project_file: PathBuf,
         archive_file: &Path,
     ) -> anyhow::Result<()> {
-        if let Some(prev_runtime) = self.project_runtime_dir.as_ref() {
-            let _ = fs::remove_dir_all(prev_runtime);
-        }
-
         let runtime_root = Self::project_runtime_root(&project_file);
-        if runtime_root.exists() {
-            let _ = fs::remove_dir_all(&runtime_root);
-        }
-
         let library_root = runtime_root.join("library");
+        if library_root.exists() {
+            fs::remove_dir_all(&library_root)?;
+        }
         let loaded = load_project_archive(archive_file, library_root.as_path())?;
         if loaded.library_schema_version > mondrian_assets::ASSET_LIBRARY_SCHEMA_VERSION {
             anyhow::bail!(
@@ -282,35 +96,30 @@ impl AppState {
             );
         }
         let asset_library = AssetLibrary::open(library_root)?;
-        let saved = loaded.document;
-
-        let project_sequences = saved.sequences;
-        project_sequences.validate_nested_sequences()?;
-        let active_sequence = project_sequences
-            .active()
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("项目缺少活动序列"))?;
-
-        self.sequence = Some(active_sequence);
-        self.sequences = project_sequences.sequences;
-        self.active_sequence_id = Some(project_sequences.active_sequence_id);
-        self.default_sequence_id = Some(project_sequences.default_sequence_id);
-        self.sequence_navigation_stack.clear();
-        self.project_id = Some(saved.project_id);
-        self.project_meta = Some(saved.meta);
-        self.project_document_revision = saved.document_revision.max(1);
-        self.current_project_path = Some(project_file.clone());
-        self.project_runtime_dir = Some(runtime_root.clone());
-        self.proxy_mode_assets = saved.proxy_mode_assets.into_iter().collect();
-        self.project_settings = saved.settings;
-        self.proxy_generation.bind_project(self.project_id);
+        let session = if archive_file == project_file.as_path() {
+            AuthoringSession::open_saved(
+                loaded.document,
+                project_file.clone(),
+                runtime_root,
+                asset_library,
+            )
+        } else {
+            AuthoringSession::new_unsaved(
+                loaded.document,
+                project_file.clone(),
+                runtime_root,
+                asset_library,
+            )
+        }
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let project_id = session.project_id();
+        self.authoring = Some(session);
+        self.autosave_in_flight_request = None;
+        self.proxy_generation.bind_project(Some(project_id));
         self.stop();
         self.settle_preview_access_source();
         self.dragging_asset = None;
-        self.cmd_history = mondrian_timeline::command::CommandHistory::default();
         self.ensure_minimum_tracks();
-
-        self.asset_library = Some(asset_library);
         Ok(())
     }
 
@@ -318,42 +127,233 @@ impl AppState {
         self.open_project_archive(project_file.clone(), project_file.as_path())
     }
 
-    pub fn save_project_file_as(&mut self, target_file: PathBuf) -> anyhow::Result<()> {
-        let target_file = super::ensure_project_extension(target_file);
-        let previous = self.current_project_path.clone();
-        self.current_project_path = Some(target_file.clone());
-        if let Err(err) = self.save_project_file() {
-            self.current_project_path = previous;
-            return Err(err);
+    /// Enqueue a manual save and return without waiting for filesystem I/O.
+    pub fn request_project_save(&mut self) -> anyhow::Result<ProjectPersistenceRequestId> {
+        self.submit_project_save(None)
+    }
+
+    /// Enqueue Save As and return without waiting for filesystem I/O.
+    pub fn request_project_save_as(
+        &mut self,
+        target_file: PathBuf,
+    ) -> anyhow::Result<ProjectPersistenceRequestId> {
+        self.submit_project_save(Some(super::ensure_project_extension(target_file)))
+    }
+
+    fn submit_project_save(
+        &mut self,
+        target_file: Option<PathBuf>,
+    ) -> anyhow::Result<ProjectPersistenceRequestId> {
+        let session =
+            self.authoring.as_ref().ok_or_else(|| anyhow::anyhow!("当前没有打开的项目"))?;
+        let snapshot = session.snapshot().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let target = target_file.clone().unwrap_or_else(|| session.project_file().to_path_buf());
+        self.project_persistence
+            .submit(
+                snapshot,
+                target,
+                ProjectPersistencePurpose::Manual { update_project_path: target_file.is_some() },
+            )
+            .map_err(anyhow::Error::msg)
+    }
+
+    fn submit_autosave(
+        &mut self,
+        max_recovery_points: usize,
+        retention_days: u32,
+    ) -> anyhow::Result<(ProjectPersistenceRequestId, PathBuf)> {
+        let session = self
+            .authoring
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("当前无可自动保存的项目"))?;
+        let snapshot = session.snapshot().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let project_file = session.project_file().to_path_buf();
+        let runtime_root = session.runtime_root().to_path_buf();
+        let saved_at_unix_ms = unix_now_ms();
+        let autosave_file = runtime_root.join("autosave").join(format!(
+            "project-{saved_at_unix_ms}-g{}.autosave.mdp",
+            snapshot.generation.get()
+        ));
+        let request_id = self
+            .project_persistence
+            .submit(
+                snapshot,
+                autosave_file.clone(),
+                ProjectPersistencePurpose::Autosave {
+                    original_project_file: project_file,
+                    runtime_root,
+                    max_recovery_points: max_recovery_points.max(1),
+                    retention_days: retention_days.max(1),
+                    saved_at_unix_ms,
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+        self.autosave_in_flight_request = Some(request_id);
+        self.autosave_last_requested_at = Instant::now();
+        Ok((request_id, autosave_file))
+    }
+
+    /// Poll durable persistence and schedule due autosaves.
+    pub fn poll_project_persistence(&mut self) -> bool {
+        let completions = self.project_persistence.poll_completions();
+        let mut changed = false;
+        for completion in completions {
+            changed = true;
+            let purpose = completion.purpose.clone();
+            let result = self.apply_persistence_completion(completion);
+            match (purpose, result) {
+                (
+                    ProjectPersistencePurpose::Manual { .. },
+                    Ok(PersistenceCompletionDisposition::Applied),
+                ) => {
+                    self.set_status_hint("项目已耐久保存", false);
+                }
+                (
+                    ProjectPersistencePurpose::Autosave { .. },
+                    Ok(PersistenceCompletionDisposition::Applied),
+                )
+                | (_, Ok(PersistenceCompletionDisposition::IgnoredStaleSession)) => {}
+                (ProjectPersistencePurpose::Manual { .. }, Err(error)) => {
+                    self.set_status_hint(format!("保存项目失败：{error}"), true);
+                }
+                (ProjectPersistencePurpose::Autosave { .. }, Err(error)) => {
+                    self.set_status_hint(format!("自动保存失败：{error}"), true);
+                }
+            }
         }
-        Ok(())
+        if self.maybe_request_autosave() {
+            changed = true;
+        }
+        changed
+    }
+
+    fn apply_persistence_completion(
+        &mut self,
+        completion: ProjectPersistenceCompletion,
+    ) -> Result<PersistenceCompletionDisposition, String> {
+        if self.autosave_in_flight_request == Some(completion.request_id) {
+            self.autosave_in_flight_request = None;
+        }
+        let same_session = self
+            .authoring
+            .as_ref()
+            .is_some_and(|session| session.session_id() == completion.session_id);
+        if !same_session {
+            return Ok(PersistenceCompletionDisposition::IgnoredStaleSession);
+        }
+        let persisted = completion.result?;
+        let Some(session) = self.authoring.as_mut() else {
+            return Ok(PersistenceCompletionDisposition::IgnoredStaleSession);
+        };
+        match completion.purpose {
+            ProjectPersistencePurpose::Manual { update_project_path } => session
+                .mark_saved(
+                    completion.generation,
+                    persisted.document_revision,
+                    persisted.asset_library_revision,
+                    persisted.meta,
+                    update_project_path.then_some(completion.target_file),
+                )
+                .map_err(|error| error.to_string())?,
+            ProjectPersistencePurpose::Autosave { .. } => {
+                session
+                    .mark_autosaved(completion.generation, persisted.asset_library_revision)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(PersistenceCompletionDisposition::Applied)
+    }
+
+    fn maybe_request_autosave(&mut self) -> bool {
+        let Some(session) = self.authoring.as_ref() else {
+            return false;
+        };
+        let interval = session.document().settings.auto_save_interval;
+        if interval == 0
+            || !session.is_dirty()
+            || session.is_current_autosaved()
+            || self.autosave_in_flight_request.is_some()
+            || self.autosave_last_requested_at.elapsed()
+                < std::time::Duration::from_secs(u64::from(interval))
+        {
+            return false;
+        }
+        match self.submit_autosave(10, 7) {
+            Ok(_) => true,
+            Err(error) => {
+                self.set_status_hint(format!("无法启动自动保存：{error}"), true);
+                true
+            }
+        }
+    }
+
+    fn wait_for_persistence_request(
+        &mut self,
+        request_id: ProjectPersistenceRequestId,
+    ) -> anyhow::Result<()> {
+        let deadline = Instant::now() + std::time::Duration::from_secs(300);
+        loop {
+            for completion in self.project_persistence.poll_completions() {
+                let is_requested = completion.request_id == request_id;
+                let result =
+                    self.apply_persistence_completion(completion).map_err(anyhow::Error::msg);
+                if is_requested {
+                    return match result? {
+                        PersistenceCompletionDisposition::Applied => Ok(()),
+                        PersistenceCompletionDisposition::IgnoredStaleSession => {
+                            anyhow::bail!("项目会话在耐久保存完成前已被替换")
+                        }
+                    };
+                }
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!("等待项目耐久保存超时");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    pub fn write_autosave_snapshot(
+        &mut self,
+        max_recovery_points: usize,
+        retention_days: u32,
+    ) -> anyhow::Result<PathBuf> {
+        let (request_id, autosave_file) =
+            self.submit_autosave(max_recovery_points, retention_days)?;
+        self.wait_for_persistence_request(request_id)?;
+        Ok(autosave_file)
+    }
+
+    pub fn save_project_file_as(&mut self, target_file: PathBuf) -> anyhow::Result<()> {
+        let request_id = self.request_project_save_as(target_file)?;
+        self.wait_for_persistence_request(request_id)
     }
 
     pub fn save_project_file(&mut self) -> anyhow::Result<()> {
-        let next_revision = self.project_document_revision.saturating_add(1).max(1);
-        let Some(mut data) = self.current_project_data() else {
-            return Ok(());
-        };
-        data.document_revision = next_revision;
-        data.meta.touch();
-
-        self.save_project_container(&data)?;
-        self.project_id = Some(data.project_id);
-        self.project_meta = Some(data.meta);
-        self.project_document_revision = data.document_revision;
-        Ok(())
+        let request_id = self.request_project_save()?;
+        self.wait_for_persistence_request(request_id)
     }
 
     pub fn ensure_minimum_tracks(&mut self) {
-        if let Some(seq) = self.sequence.as_mut() {
-            if seq.video_tracks.is_empty() {
-                seq.video_tracks.push(mondrian_timeline::track::Track::new_video("V1"));
-            }
-            if seq.audio_tracks.is_empty() {
-                seq.add_audio_track();
-            }
-            seq.normalize_track_names();
+        let needs_tracks = self.active_sequence().is_some_and(|sequence| {
+            sequence.video_tracks.is_empty() || sequence.audio_tracks.is_empty()
+        });
+        if !needs_tracks {
+            return;
         }
+        let Some(session) = self.authoring.as_mut() else {
+            return;
+        };
+        let _ = session.edit_active_sequence("补齐基础轨道", |sequence| {
+            if sequence.video_tracks.is_empty() {
+                sequence.video_tracks.push(mondrian_timeline::track::Track::new_video("V1"));
+            }
+            if sequence.audio_tracks.is_empty() {
+                sequence.add_audio_track();
+            }
+            sequence.normalize_track_names();
+            Ok(())
+        });
     }
 
     pub fn create_new_project_at(
@@ -403,27 +403,19 @@ impl AppState {
         }
         fs::create_dir_all(runtime_root.join("library"))?;
 
-        self.sequence = Some(sequence);
-        self.sequences = self.sequence.iter().cloned().collect();
-        self.active_sequence_id = self.sequence.as_ref().map(|seq| seq.id);
-        self.default_sequence_id = self.active_sequence_id;
-        self.sequence_navigation_stack.clear();
-        self.project_id = Some(ProjectId::new());
-        self.project_meta = Some(ProjectMeta::new(name));
-        self.project_document_revision = 0;
-        self.current_project_path = Some(project_file.clone());
-        self.project_runtime_dir = Some(runtime_root.clone());
-        self.project_settings = project_settings;
-        self.proxy_generation.bind_project(self.project_id);
-        self.stop();
-        self.settle_preview_access_source();
-        self.cmd_history = mondrian_timeline::command::CommandHistory::default();
-        self.proxy_mode_assets.clear();
-
         let library_root = runtime_root.join("library");
         let library = AssetLibrary::open(library_root)?;
         library.clear_assets()?;
-        self.asset_library = Some(library);
+        let document =
+            ProjectDocument::new(name, SequenceCollection::new(sequence), project_settings);
+        let session = AuthoringSession::new_unsaved(document, project_file, runtime_root, library)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let project_id = session.project_id();
+        self.authoring = Some(session);
+        self.autosave_in_flight_request = None;
+        self.proxy_generation.bind_project(Some(project_id));
+        self.stop();
+        self.settle_preview_access_source();
 
         self.save_project_file()?;
         Ok(())
@@ -439,14 +431,20 @@ impl AppState {
         &mut self,
         engine: mondrian_core::ColorEngine,
     ) -> mondrian_core::Result<()> {
-        if self.project_settings.color_management.engine == engine {
+        let Some(session) = self.authoring.as_mut() else {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "set_project_color_engine".to_owned(),
+                reason: "当前没有打开的项目".to_owned(),
+            });
+        };
+        if session.document().settings.color_management.engine == engine {
             return Ok(());
         }
-
-        self.sync_current_sequence_into_collection();
-        let mut next_color_management = self.project_settings.color_management.clone();
+        let before = session.document().clone();
+        let mut after = before.clone();
+        let mut next_color_management = after.settings.color_management.clone();
         next_color_management.engine = engine.clone();
-        for sequence in self.export_sequences_snapshot() {
+        for sequence in &after.sequences.sequences {
             sequence
                 .settings
                 .validate_with_project_color_management(&next_color_management)?;
@@ -458,71 +456,125 @@ impl AppState {
             }
         })?;
 
-        let inherited_revisions = self
-            .sequences
-            .iter()
-            .filter(|sequence| sequence.settings.color_management.inherit)
-            .map(|sequence| {
-                sequence
-                    .revision
-                    .checked_next()
-                    .map(|next| (sequence.id, sequence.revision, next))
-                    .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
-                        step_id: "set_project_color_engine".to_owned(),
-                        reason: format!(
-                            "Sequence {} author revision {} is exhausted",
-                            sequence.id,
-                            sequence.revision.get()
-                        ),
-                    })
-            })
-            .collect::<mondrian_core::Result<Vec<_>>>()?;
-        for (sequence_id, _, next) in &inherited_revisions {
-            if let Some(sequence) =
-                self.sequences.iter_mut().find(|sequence| sequence.id == *sequence_id)
-            {
-                sequence.revision = *next;
-            }
-        }
-        if let Some(active) = self.sequence.as_mut() {
-            if let Some((_, _, next)) =
-                inherited_revisions.iter().find(|(sequence_id, _, _)| *sequence_id == active.id)
-            {
-                active.revision = *next;
-            }
-        }
-
-        let previous =
-            std::mem::replace(&mut self.project_settings.color_management.engine, engine);
+        after.settings.color_management.engine = engine;
+        session.commit_project_snapshot("修改项目颜色引擎", before, after)?;
         self.stop();
         self.settle_preview_access_source();
-        if let Err(error) = self.save_project_file() {
-            self.project_settings.color_management.engine = previous;
-            for (sequence_id, previous_revision, _) in &inherited_revisions {
-                if let Some(sequence) =
-                    self.sequences.iter_mut().find(|sequence| sequence.id == *sequence_id)
-                {
-                    sequence.revision = *previous_revision;
-                }
-            }
-            if let Some(active) = self.sequence.as_mut() {
-                if let Some((_, previous_revision, _)) =
-                    inherited_revisions.iter().find(|(sequence_id, _, _)| *sequence_id == active.id)
-                {
-                    active.revision = *previous_revision;
-                }
-            }
-            self.settle_preview_access_source();
-            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                step_id: "set_project_color_engine".to_owned(),
-                reason: format!("项目颜色模式保存失败: {error:#}"),
-            });
-        }
-        // Sequence undo entries are valid only in the authoring context in
-        // which their snapshots were captured. Replacing the project color
-        // engine changes that context for every inheriting sequence, so stale
-        // snapshots must not be allowed to re-enter the current project.
-        self.cmd_history = mondrian_timeline::command::CommandHistory::default();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod persistence_lifecycle_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn unique_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "mondrian-persistence-lifecycle-{name}-{}-{}",
+            std::process::id(),
+            unix_now_ms()
+        ))
+    }
+
+    fn test_session(root: &Path) -> AuthoringSession {
+        let library = AssetLibrary::open(root.join("library")).expect("asset library");
+        let document = ProjectDocument::new(
+            "Persistence Lifecycle",
+            SequenceCollection::new(Sequence::new("Sequence")),
+            ProjectSettings::default(),
+        );
+        AuthoringSession::new_unsaved(
+            document,
+            root.join("project.mdp"),
+            root.join("runtime"),
+            library,
+        )
+        .expect("authoring session")
+    }
+
+    #[test]
+    fn failed_autosave_releases_the_scheduler_for_retry() {
+        let root = unique_root("retry");
+        let runtime_root = root.join("runtime");
+        fs::create_dir_all(&runtime_root).expect("runtime root");
+        fs::write(runtime_root.join("autosave"), b"blocks-directory")
+            .expect("blocking autosave path");
+        let mut state = AppState::new();
+        state.authoring = Some(test_session(&root));
+
+        state.submit_autosave(2, 7).expect("admit failing autosave");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while state.autosave_in_flight_request.is_some() {
+            state.poll_project_persistence();
+            assert!(
+                Instant::now() < deadline,
+                "failed autosave did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!state.authoring.as_ref().expect("session").is_current_autosaved());
+
+        fs::remove_file(runtime_root.join("autosave")).expect("remove blocker");
+        state.submit_autosave(2, 7).expect("retry autosave");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while state.autosave_in_flight_request.is_some() {
+            state.poll_project_persistence();
+            assert!(Instant::now() < deadline, "retry autosave did not complete");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(state.authoring.as_ref().expect("session").is_current_autosaved());
+    }
+
+    #[test]
+    fn completion_from_a_closed_session_cannot_clean_or_rebind_a_reopen() {
+        let root = unique_root("stale-session");
+        let mut state = AppState::new();
+        state.authoring = Some(test_session(&root));
+        let old_document = state.authoring.as_ref().expect("old session").document().clone();
+        let old_library =
+            Arc::clone(state.authoring.as_ref().expect("old session").asset_library());
+        let target = root.join("save-as.mdp");
+        let request_id = state.request_project_save_as(target.clone()).expect("submit save as");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let completion = loop {
+            if let Some(completion) = state
+                .project_persistence
+                .poll_completions()
+                .into_iter()
+                .find(|completion| completion.request_id == request_id)
+            {
+                break completion;
+            }
+            assert!(Instant::now() < deadline, "save-as did not complete");
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        completion.result.as_ref().expect("old save succeeded");
+        let mut stale_failure = completion.clone();
+        stale_failure.result = Err("old session write failed".to_owned());
+
+        let reopened = AuthoringSession::new_unsaved(
+            old_document,
+            root.join("project.mdp"),
+            root.join("runtime-reopened"),
+            old_library,
+        )
+        .expect("reopened session");
+        let reopened_id = reopened.session_id();
+        state.authoring = Some(reopened);
+        assert_eq!(
+            state.apply_persistence_completion(stale_failure).expect("ignore stale failure"),
+            PersistenceCompletionDisposition::IgnoredStaleSession
+        );
+        assert_eq!(
+            state.apply_persistence_completion(completion).expect("ignore stale success"),
+            PersistenceCompletionDisposition::IgnoredStaleSession
+        );
+
+        let current = state.authoring.as_ref().expect("current session");
+        assert_eq!(current.session_id(), reopened_id);
+        assert_eq!(current.project_file(), root.join("project.mdp"));
+        assert!(current.is_dirty());
     }
 }

@@ -123,7 +123,7 @@ impl AppState {
             Some(sequence_id) => {
                 sequences.iter().find(|sequence| sequence.id == sequence_id).cloned()
             }
-            None => self.sequence.clone(),
+            None => self.active_sequence().cloned(),
         };
         let Some(sequence) = sequence else {
             let reason = "当前无序列".to_string();
@@ -219,7 +219,7 @@ pub(crate) fn capture_timeline_export_snapshot(
         sequences: nested_sequences,
         media,
         range,
-        project_color_management: state.project_settings.color_management.clone(),
+        project_color_management: state.project_settings().color_management.clone(),
     })
 }
 
@@ -231,7 +231,7 @@ fn resolve_export_media_dependencies(
     if asset_ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let library = state.asset_library.as_ref().ok_or_else(|| "素材库未连接".to_string())?;
+    let library = state.asset_library().ok_or_else(|| "素材库未连接".to_string())?;
 
     let mut media = HashMap::new();
     for asset_id in asset_ids {
@@ -302,7 +302,9 @@ fn collect_reachable_media_audio_components(
                 if let mondrian_timeline::audio::AudioComponentSource::Media { component_id } =
                     &edit.source
                 {
-                    components.entry(clip.asset_id).or_default().insert(*component_id);
+                    if let Some(asset_id) = clip.asset_id() {
+                        components.entry(asset_id).or_default().insert(*component_id);
+                    }
                 }
             }
         }
@@ -331,7 +333,7 @@ pub(crate) fn collect_sequence_asset_ids(
                 continue;
             }
             if clip.is_nested_sequence() {
-                let Some(nested_sequence_id) = clip.nested_sequence_id else {
+                let Some(nested_sequence_id) = clip.nested_sequence_id() else {
                     return Err(format!("嵌套序列片段缺少序列引用: {}", clip.id));
                 };
                 let nested_sequence = sequences
@@ -347,7 +349,9 @@ pub(crate) fn collect_sequence_asset_ids(
                 )?;
                 continue;
             }
-            asset_ids.insert(clip.asset_id);
+            if let Some(asset_id) = clip.asset_id() {
+                asset_ids.insert(asset_id);
+            }
         }
     }
     active_sequences.remove(&sequence.id);
@@ -404,10 +408,8 @@ mod tests {
 
     #[test]
     fn build_media_dependencies_skips_synthetic_adjustment_assets() {
-        let mut state = AppState {
-            sequence: Some(Sequence::new("export-adjustment")),
-            ..Default::default()
-        };
+        let mut state = AppState::default();
+        state.test_set_sequence(Some(Sequence::new("export-adjustment")));
         let temp_root = std::env::temp_dir().join(format!(
             "mondrian-export-adjustment-{}",
             std::time::SystemTime::now()
@@ -415,11 +417,13 @@ mod tests {
                 .expect("system time")
                 .as_nanos()
         ));
-        state.asset_library = Some(AssetLibrary::open(temp_root.clone()).expect("open library"));
+        state.test_set_asset_library(Some(
+            AssetLibrary::open(temp_root.clone()).expect("open library"),
+        ));
 
         let asset_id = state.create_adjustment_layer_asset(None).expect("create adjustment asset");
         {
-            let seq = state.sequence.as_mut().expect("sequence should exist");
+            let seq = state.active_sequence_mut_uncommitted().expect("sequence should exist");
             let tb = seq.time_base();
             seq.video_tracks[0]
                 .add_clip(
@@ -429,7 +433,7 @@ mod tests {
                 .expect("add adjustment clip");
         }
 
-        let seq = state.sequence.as_ref().expect("sequence should exist").clone();
+        let seq = state.active_sequence().expect("sequence should exist").clone();
         let snapshot = capture_timeline_export_snapshot(
             &state,
             seq.clone(),
@@ -444,10 +448,8 @@ mod tests {
 
     #[test]
     fn build_media_dependencies_keeps_interpretation_and_source_revision_together() {
-        let mut state = AppState {
-            sequence: Some(Sequence::new("export-interpretation")),
-            ..Default::default()
-        };
+        let mut state = AppState::default();
+        state.test_set_sequence(Some(Sequence::new("export-interpretation")));
         let temp_root = std::env::temp_dir().join(format!(
             "mondrian-export-interpretation-{}",
             std::time::SystemTime::now()
@@ -469,9 +471,9 @@ mod tests {
         library
             .set_asset_interpretation(asset_id, interpretation)
             .expect("set interpretation");
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
         {
-            let seq = state.sequence.as_mut().expect("sequence should exist");
+            let seq = state.active_sequence_mut_uncommitted().expect("sequence should exist");
             let tb = seq.time_base();
             let track_id = seq.audio_tracks[0].id;
             seq.add_media_audio_clip(
@@ -482,7 +484,7 @@ mod tests {
             .expect("add audio clip");
         }
 
-        let seq = state.sequence.as_ref().expect("sequence should exist").clone();
+        let seq = state.active_sequence().expect("sequence should exist").clone();
         let snapshot = capture_timeline_export_snapshot(
             &state,
             seq.clone(),
@@ -619,10 +621,8 @@ mod tests {
 
     #[test]
     fn enqueue_timeline_export_rejects_empty_output_path() {
-        let mut state = AppState {
-            sequence: Some(Sequence::new("empty-output")),
-            ..Default::default()
-        };
+        let mut state = AppState::default();
+        state.test_set_sequence(Some(Sequence::new("empty-output")));
 
         let err = state
             .enqueue_timeline_export(TimelineExportRequest {
@@ -640,10 +640,8 @@ mod tests {
 
     #[test]
     fn enqueue_timeline_export_rejects_missing_explicit_sequence_id() {
-        let mut state = AppState {
-            sequence: Some(Sequence::new("active")),
-            ..Default::default()
-        };
+        let mut state = AppState::default();
+        state.test_set_sequence(Some(Sequence::new("active")));
         let temp_root = std::env::temp_dir().join(format!(
             "mondrian-export-stale-sequence-{}",
             std::time::SystemTime::now()
@@ -651,7 +649,9 @@ mod tests {
                 .expect("system time")
                 .as_nanos()
         ));
-        state.asset_library = Some(AssetLibrary::open(temp_root.clone()).expect("open library"));
+        state.test_set_asset_library(Some(
+            AssetLibrary::open(temp_root.clone()).expect("open library"),
+        ));
 
         let err = state
             .enqueue_timeline_export(TimelineExportRequest {

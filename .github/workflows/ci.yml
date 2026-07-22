@@ -274,6 +274,12 @@ jobs:
       - name: 运行 app UI 核心测试
         run: cargo test -p mondrian-app app_ui
 
+      - name: 运行 app 作者域、Action、项目与生产运行时测试
+        run: cargo test -p mondrian-app --lib app::
+
+      - name: 运行 app 跨模块集成测试
+        run: cargo test -p mondrian-app --test integration_tests
+
       - name: 运行 app UI primitive/draw-command renderer 测试
         run: cargo test -p mondrian-ui-renderer
 

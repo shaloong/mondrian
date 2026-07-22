@@ -105,7 +105,7 @@ fn state_with_solid_color_clip(color: Color) -> AppState {
                 .expect("valid clip"),
         )
         .expect("solid clip should be insertable");
-    state.sequence = Some(sequence);
+    state.test_set_sequence(Some(sequence));
     state.seek(4);
     state
 }
@@ -113,7 +113,7 @@ fn state_with_solid_color_clip(color: Color) -> AppState {
 #[test]
 fn playback_generation_survives_frame_advance_but_not_discontinuity() {
     let mut state = state_with_solid_color_clip(Color::from_rgba8(12, 34, 56, 255));
-    let sequence = state.sequence.as_ref().expect("sequence").clone();
+    let sequence = state.active_sequence().expect("sequence").clone();
     state.play();
 
     let current = ViewerPreviewGenerationKey::from_state(
@@ -194,8 +194,7 @@ fn playback_generation_survives_frame_advance_but_not_discontinuity() {
         idle_a, revised,
         "Sequence authoring must rotate Preview work"
     );
-
-    state.project_document_revision = state.project_document_revision.saturating_add(1);
+    state.test_advance_project_generation();
     let project_revised = ViewerPreviewGenerationKey::from_state(
         &state,
         &sequence,
@@ -301,13 +300,13 @@ fn state_with_invalid_video_asset() -> (AppState, AssetId, PathBuf) {
         .expect("insert video asset");
 
     let mut state = AppState::new();
-    state.asset_library = Some(library);
+    state.test_set_asset_library(Some(library));
     let mut sequence = Sequence::new("media");
     let tb = sequence.time_base();
     sequence.video_tracks[0]
         .add_clip(Clip::new(asset_id, tt(0, tb), tt(50, tb)).expect("valid clip"))
         .expect("media clip should be insertable");
-    state.sequence = Some(sequence);
+    state.test_set_sequence(Some(sequence));
     state.seek(0);
     (state, asset_id, root)
 }
@@ -332,7 +331,7 @@ fn state_with_two_invalid_video_assets() -> (AppState, PathBuf) {
     }
 
     let mut state = AppState::new();
-    state.asset_library = Some(library);
+    state.test_set_asset_library(Some(library));
     let mut sequence = Sequence::new("multi-track media");
     let tb = sequence.time_base();
     for (track_index, asset_id) in asset_ids.into_iter().enumerate() {
@@ -340,14 +339,14 @@ fn state_with_two_invalid_video_assets() -> (AppState, PathBuf) {
             .add_clip(Clip::new(asset_id, tt(0, tb), tt(50, tb)).expect("valid clip"))
             .expect("media clip should be insertable");
     }
-    state.sequence = Some(sequence);
+    state.test_set_sequence(Some(sequence));
     state.seek(0);
     (state, root)
 }
 
 fn state_with_icc_display_policy(color: Color) -> AppState {
     let mut state = state_with_solid_color_clip(color);
-    let sequence = state.sequence.as_mut().expect("test state has sequence");
+    let sequence = state.active_sequence_mut_uncommitted().expect("test state has sequence");
     sequence.settings.color_management.inherit = false;
     sequence.settings.color_management.display_management =
         mondrian_core::DisplayManagementPolicy {
@@ -659,10 +658,13 @@ fn gpu_candidate_separates_program_output_from_monitor_identity() {
         PreviewGpuFrameState::Ready(frame) => frame,
         _ => panic!("expected baseline GPU preview candidate"),
     };
-    state.project_settings.color_management.display_management.monitor_profile =
-        mondrian_core::MonitorProfileReference::IccProfile {
-            profile_id: "test-monitor".to_owned(),
-        };
+    state
+        .test_project_settings_mut()
+        .color_management
+        .display_management
+        .monitor_profile = mondrian_core::MonitorProfileReference::IccProfile {
+        profile_id: "test-monitor".to_owned(),
+    };
     let snapshot = calibrated_icc_display_snapshot(ColorSpace::Srgb);
     service.set_display_output_snapshot(Some(&snapshot));
 
@@ -1152,7 +1154,7 @@ fn pending_replacement_prefers_last_presented_gpu_frame() {
         ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
             .expect("full-frame presentation"),
     ));
-    let sequence = state.sequence.as_ref().expect("test sequence");
+    let sequence = state.active_sequence().expect("test sequence");
 
     match service.stale_viewer_content_for_sequence(sequence, frame.width, frame.height) {
         Some(PreviewPresentationContent::Gpu(stale)) => {
@@ -2273,7 +2275,7 @@ fn playback_video_preroll_requires_next_media_payload_and_observes_cache_residen
     let (mut state, asset_id, root) = state_with_invalid_video_asset();
     state.play();
     let service = WindowPreviewAdapter::new_without_workers_for_test();
-    let sequence = state.sequence.as_ref().expect("media sequence");
+    let sequence = state.active_sequence().expect("media sequence");
     let preroll_window = media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
         .expect("valid media sequence frame rate");
 
@@ -2305,10 +2307,10 @@ fn playback_video_preroll_requires_next_media_payload_and_observes_cache_residen
     assert_eq!(media.asset_id, asset_id);
     let (width, height) = preview_dimensions_for_state(&state, sequence);
     let display_color_space =
-        preview_display_color_space(sequence, &state.project_settings.color_management, None)
+        preview_display_color_space(sequence, &state.project_settings().color_management, None)
             .expect("default display contract");
     let color_context = sequence.settings.root_preview_color_context(
-        &state.project_settings.color_management,
+        &state.project_settings().color_management,
         display_color_space,
     );
     let key = service
@@ -4981,7 +4983,7 @@ fn preview_asset_issue_summary_for_sequence(
                 continue;
             }
             if clip.is_nested_sequence() {
-                let Some(nested_sequence_id) = clip.nested_sequence_id else {
+                let Some(nested_sequence_id) = clip.nested_sequence_id() else {
                     continue;
                 };
                 let Some(nested) =
@@ -4998,8 +5000,10 @@ fn preview_asset_issue_summary_for_sequence(
                 );
                 continue;
             }
-            if asset_color_diagnostics.contains_key(&clip.asset_id) {
-                asset_ids.insert(clip.asset_id);
+            if let Some(asset_id) = clip.asset_id() {
+                if asset_color_diagnostics.contains_key(&asset_id) {
+                    asset_ids.insert(asset_id);
+                }
             }
         }
     }
@@ -5079,8 +5083,8 @@ fn nested_solid_color_sequence_returns_preview_frame() {
         )
         .expect("parent nested clip");
 
-    state.sequences.push(child);
-    state.sequence = Some(parent);
+    state.test_add_sequence(child);
+    state.test_set_sequence(Some(parent));
     state.seek(3);
 
     let service = WindowPreviewAdapter::new();
@@ -5100,7 +5104,7 @@ fn unsupported_media_plan_returns_no_partial_preview() {
     sequence.video_tracks[0]
         .add_clip(Clip::new(AssetId::new(), tt(0, tb), tt(24, tb)).expect("valid clip"))
         .expect("media clip should be insertable");
-    state.sequence = Some(sequence);
+    state.test_set_sequence(Some(sequence));
 
     let service = WindowPreviewAdapter::new();
 
@@ -5125,17 +5129,19 @@ fn empty_root_timeline_is_a_transparent_presentation_and_breaks_stale_reuse() {
     let service = WindowPreviewAdapter::new();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     let _ = ready_frame(service.viewer_preview_for_state(&state));
-    let sequence = state.sequence.as_ref().expect("sequence");
+    let sequence = state.active_sequence().expect("sequence");
     let sequence_id = sequence.id;
     let (width, height) = preview_dimensions_for_sequence(sequence);
     assert!(service.stale_frame_for_sequence(sequence, width, height).is_some());
 
-    state.sequence.as_mut().expect("sequence").video_tracks[0].clips.clear();
+    state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0]
+        .clips
+        .clear();
     assert!(matches!(
         service.viewer_preview_for_state(&state),
         ViewerPreviewState::Transparent
     ));
-    let sequence = state.sequence.as_ref().expect("sequence");
+    let sequence = state.active_sequence().expect("sequence");
     assert_eq!(sequence.id, sequence_id);
     assert!(service.stale_frame_for_sequence(sequence, width, height).is_none());
     let diagnostics = service.diagnostics();
@@ -5147,7 +5153,7 @@ fn empty_root_timeline_is_a_transparent_presentation_and_breaks_stale_reuse() {
 fn transparent_timeline_presentation_completes_the_exact_playback_demand() {
     let service = WindowPreviewAdapter::new();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
-    let sequence = state.sequence.as_mut().expect("sequence");
+    let sequence = state.active_sequence_mut_uncommitted().expect("sequence");
     let time_base = sequence.time_base();
     sequence.video_tracks[0].clips[0].position = tt(20, time_base);
     state.seek(0);
@@ -5179,7 +5185,7 @@ fn repeated_same_viewer_request_does_not_obsolete_in_flight_decode() {
     sequence.video_tracks[0]
         .add_clip(Clip::new(AssetId::new(), tt(0, tb), tt(24, tb)).expect("valid clip"))
         .expect("media clip should be insertable");
-    state.sequence = Some(sequence);
+    state.test_set_sequence(Some(sequence));
     state.seek(3);
 
     let service = WindowPreviewAdapter::new();
@@ -6225,7 +6231,7 @@ fn preview_and_export_composite_color_path_summaries_match_for_frame() {
         .expect("add transformed solid color clip");
 
     let mut state = AppState::new();
-    state.sequence = Some(sequence.clone());
+    state.test_set_sequence(Some(sequence.clone()));
     state.seek(0);
     let preview_service = WindowPreviewAdapter::new();
     let preview_frame = preview_service.viewer_preview_for_state(&state);
@@ -6637,7 +6643,7 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
 fn stale_viewer_frame_is_scoped_to_sequence_and_dimensions() {
     let service = WindowPreviewAdapter::new();
     let state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
-    let sequence = state.sequence.as_ref().expect("sequence");
+    let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
 
     let ready = ready_frame(service.viewer_preview_for_state(&state));
@@ -6660,7 +6666,7 @@ fn playback_prefetch_yields_while_current_frame_is_pending() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     state.play();
-    let sequence = state.sequence.as_ref().expect("sequence");
+    let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
 
     service.execution.borrow_mut().set_pending(true);
@@ -6951,7 +6957,7 @@ fn playback_pressure_recovery_suppresses_forward_prefetch_until_current_success(
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     state.play();
-    let sequence = state.sequence.as_ref().expect("sequence");
+    let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
 
     service
@@ -6986,7 +6992,7 @@ fn playback_prefetch_yields_while_current_work_is_queued() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     state.play();
-    let sequence = state.sequence.as_ref().expect("sequence");
+    let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
     let current_key = test_media_key(100);
 
@@ -7022,7 +7028,7 @@ fn playback_prefetch_yields_while_current_work_is_in_flight() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     state.play();
-    let sequence = state.sequence.as_ref().expect("sequence");
+    let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
     let generation = service.scheduler.begin_generation();
     let _current = begin_test_media_execution(
@@ -7050,7 +7056,7 @@ fn playback_prefetch_yields_when_prefetch_backlog_already_covers_window() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     state.play();
-    let sequence = state.sequence.as_ref().expect("sequence");
+    let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
     let prefetch_window =
         media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
@@ -7092,7 +7098,7 @@ fn playback_prefetch_yields_when_in_flight_prefetch_covers_window() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     state.play();
-    let sequence = state.sequence.as_ref().expect("sequence");
+    let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
     let prefetch_window =
         media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
@@ -7130,7 +7136,7 @@ fn playback_prefetch_tops_up_only_remaining_window_slots() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let (mut state, _, root) = state_with_invalid_video_asset();
     state.play();
-    let sequence = state.sequence.as_ref().expect("sequence");
+    let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
     let prefetch_window =
         media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
@@ -7174,7 +7180,7 @@ fn playback_prefetch_tops_up_only_remaining_in_flight_window_slots() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let (mut state, _, root) = state_with_invalid_video_asset();
     state.play();
-    let sequence = state.sequence.as_ref().expect("sequence");
+    let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
     let prefetch_window =
         media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
@@ -7212,7 +7218,7 @@ fn playback_prefetch_tops_up_by_actual_jobs_across_tracks() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let (mut state, root) = state_with_two_invalid_video_assets();
     state.play();
-    let sequence = state.sequence.as_ref().expect("sequence");
+    let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
     let prefetch_window =
         media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
@@ -7256,7 +7262,7 @@ fn playback_prefetch_tops_up_by_actual_jobs_across_tracks() {
 fn playback_prefetch_primes_the_next_media_activation_across_a_blank_gap() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let (mut state, _, root) = state_with_invalid_video_asset();
-    let sequence = state.sequence.as_mut().expect("sequence");
+    let sequence = state.active_sequence_mut_uncommitted().expect("sequence");
     let steady_window = media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
         .expect("valid sequence frame rate");
     let activation_frame = steady_window as i64 + 12;
@@ -7264,7 +7270,7 @@ fn playback_prefetch_primes_the_next_media_activation_across_a_blank_gap() {
     sequence.video_tracks[0].clips[0].position = tt(activation_frame, time_base);
     state.seek(0);
     state.play();
-    let sequence = state.sequence.as_ref().expect("sequence");
+    let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
 
     service.schedule_media_prefetches(&state, sequence, state.current_frame(), width, height);
@@ -7801,11 +7807,12 @@ fn canceled_current_scrub_requests_follow_up_render_for_settled_frame() {
 fn failed_current_media_preview_cache_does_not_leave_viewer_loading() {
     let (state, asset_id, root) = state_with_invalid_video_asset();
     let service = WindowPreviewAdapter::new();
-    let sequence = state.sequence.as_ref().expect("sequence");
+    let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
-    let color_context = sequence
-        .settings
-        .root_preview_color_context(&state.project_settings.color_management, ColorSpace::Rec709);
+    let color_context = sequence.settings.root_preview_color_context(
+        &state.project_settings().color_management,
+        ColorSpace::Rec709,
+    );
     let key = service
         .media_preview_key_for_asset(
             &state,
@@ -7837,11 +7844,12 @@ fn failed_current_media_preview_cache_does_not_leave_viewer_loading() {
 fn media_preview_cache_identity_changes_with_range_override() {
     let (state, asset_id, root) = state_with_invalid_video_asset();
     let service = WindowPreviewAdapter::new_without_workers_for_test();
-    let sequence = state.sequence.as_ref().expect("sequence");
+    let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
-    let color_context = sequence
-        .settings
-        .root_preview_color_context(&state.project_settings.color_management, ColorSpace::Rec709);
+    let color_context = sequence.settings.root_preview_color_context(
+        &state.project_settings().color_management,
+        ColorSpace::Rec709,
+    );
     let key_for_state = || {
         service
             .media_preview_key_for_asset(
@@ -7864,7 +7872,7 @@ fn media_preview_cache_identity_changes_with_range_override() {
         auto_key.input_video_range.baseline(),
         DecodedVideoRange::Limited
     );
-    let library = state.asset_library.as_ref().expect("asset library");
+    let library = state.asset_library().expect("asset library");
     let mut interpretation = library
         .get_asset(asset_id)
         .expect("read asset")
@@ -7896,11 +7904,12 @@ fn media_preview_cache_identity_changes_with_range_override() {
 fn playing_cached_media_preview_defers_sync_raster_composite() {
     let (mut state, asset_id, root) = state_with_invalid_video_asset();
     let service = WindowPreviewAdapter::new_without_workers_for_test();
-    let sequence = state.sequence.as_ref().expect("sequence");
+    let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
-    let color_context = sequence
-        .settings
-        .root_preview_color_context(&state.project_settings.color_management, ColorSpace::Rec709);
+    let color_context = sequence.settings.root_preview_color_context(
+        &state.project_settings().color_management,
+        ColorSpace::Rec709,
+    );
     let key = service
         .media_preview_key_for_asset(
             &state,

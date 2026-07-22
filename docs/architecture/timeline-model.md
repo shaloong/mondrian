@@ -6,7 +6,9 @@ unqualified process-global OCIO default, so a failed ACES or Custom config
 cannot inherit a View from the previously active engine or reuse one output
 binding under another delivery label.
 
-`mondrian-timeline` owns editorial time, tracks, clips, and timeline commands.
+`mondrian-timeline` owns editorial time and the validated Sequence author model.
+`mondrian-editor-state::AuthoringSession` owns project transactions and bounded
+Undo/Redo; the Timeline crate has no second mutable document or command history.
 
 Persisted positions, ranges, automation keys, and temporal handles use canonical
 exact rational `TimelineTime`. `FramePosition` is an evaluation/display adapter,
@@ -23,6 +25,7 @@ A `Sequence` contains:
 - stable `id`, monotonic author `revision`, `name`, `role`
 - `settings`
 - ordered video and audio tracks
+- Sequence-owned explicit video Transitions
 - playhead
 - optional exact in/out range
 - a Sequence-owned `AudioProgram`
@@ -74,8 +77,9 @@ the narrower cache keys where retaining unaffected work matters. This avoids a
 family of counters whose atomic agreement would be harder to prove than the
 author transaction itself.
 
-Project validation rejects duplicate Sequence, Track, Clip, Effect, and Mask
-identities, invalid strong linked-Clip references, duplicate effect-local
+Project validation rejects duplicate Sequence, Track, Clip, Effect, Mask, and
+Video Transition identities, invalid strong Transition endpoints, singleton
+Clip link groups, duplicate effect-local
 Parameter identities, duplicate animation-track identities in one property
 owner, and duplicate keyframe identities in one exact automation curve. Audio
 Program validation owns the corresponding typed audio-entity uniqueness rules.
@@ -86,21 +90,24 @@ Copy and razor operations must fork the identities specified by the Sequence
 audio ADR; Sequence duplication forks every Sequence-owned identity and resets
 only the new Sequence revision.
 
-`mondrian-timeline::CommandHistory` is the deep Module behind the active
-Sequence Undo seam. Commands declare their target `SequenceId` and exact
-command-owned retained bytes. The default hard budget is 200 commands and
-128 MiB across Undo and Redo. Complete Sequence snapshots are stored as bounded
-serialized byte payloads rather than unaccounted cloned heap graphs. Oldest
-entries are evicted in constant time, a new branch accounts for discarded Redo
-bytes, an oversize edit is not retained, and immutable diagnostics expose all
-three outcomes. Target mismatch and snapshot failure fail closed; failed
-Undo/Redo returns the command to its original stack. App author mutations
-propagate history errors and restore the preceding Sequence rather than saving
-a partially recorded transaction. Sequence switching, project replacement and
-a successful project color-engine replacement establish a new active-history
-scope instead of replaying snapshots against another aggregate or inherited
-color contract. A failed color-engine replacement preserves the prior state and
-history.
+`AuthoringSession` is the only production owner of a mutable
+`ProjectDocument`. An edit operates on a cloned Sequence or Project candidate;
+only after the candidate validates is it installed, assigned the next
+`AuthorGeneration`/`SequenceRevision`, and recorded in project-wide history.
+UI and execution code receive read-only references or immutable snapshots.
+There is no production API for “mutate first, record later”, so an edit error,
+validation error, history serialization failure, or oversize-history outcome
+cannot leak a partial canonical state.
+
+The default history budget is 200 commands and 128 MiB across Undo and Redo.
+Sequence and Project snapshots are retained as bounded serialized payloads,
+not unaccounted heap clones. Oldest entries are evicted in constant time; a new
+branch accounts for discarded Redo entries; an oversize edit remains committed
+but is explicitly reported as not retained. Undo and Redo are project-wide and
+remain valid while navigating between Sequences. Restored Sequences receive a
+new monotonic revision rather than reusing the historical revision. Opening or
+replacing a Project creates a new `AuthoringSessionId`, preventing an old
+persistence completion or history entry from targeting the new lifetime.
 `validate_with_project_color_management` additionally validates the effective
 inherited/overridden `ColorEngine`. Mondrian Standard sequences use the exact
 Linear Rec.2020 working identity pinned by the immutable package; Custom OCIO
@@ -214,16 +221,66 @@ See [Audio Pipeline](audio-pipeline.md) for the author/compiler boundary.
 
 ## Clip
 
-`Clip` is the timeline instance, not the asset itself. It references `asset_id`,
-carries timeline/source ranges, transform, speed, effects, masks, linked clip,
-blend mode, kind-specific data, and placement-local audio component edits.
+`Clip` is one Timeline placement, never an Asset or Sequence definition. It
+owns position/source ranges, transform, speed, visual effects, masks, optional
+link-group membership, blend mode, and placement-local audio Component Edits.
+Its content is one closed `ClipContent` payload:
 
-Supported `ClipKind`:
+- `Media { asset_id, interpretation }`
+- `AdjustmentLayer { asset_id }`
+- `NestedSequence { sequence_id }`
+- `SolidColor { asset_id, color }`
 
-- `Media`
-- `AdjustmentLayer`
-- `NestedSequence`
-- `SolidColor`
+The variant is the single source of truth. There is no parallel `kind`,
+`asset_id`, nested ID, interpretation, or solid-color field that can describe a
+contradictory Clip. Current-schema deserialization rejects legacy or unknown
+parallel fields. Constructors create only the identity required by the chosen
+variant; for example, a nested placement does not manufacture a fake Asset ID.
+
+Copy, paste, razor, overwrite-created fragments, and Sequence duplication fork
+every addressable placement identity: Clip, Effect, Mask, visual animation
+tracks/keyframes, and the corresponding audio aggregate identities. External
+references such as Asset ID or nested Sequence ID remain references. Sequence
+duplication additionally remaps Track-keyed routes, Transition endpoints, and
+link groups, producing a disjoint author graph rather than two aggregates that
+share mutable instance identity.
+
+### Link Groups
+
+`Clip.link_group: Option<ClipLinkGroupId>` is set membership, not a pair pointer.
+A group may contain two or more video/audio placements and supports imported
+multi-component media without inventing chains of pair links. Selection and
+structural commands expand from any member to the complete group, validate all
+source and destination Track locks before mutation, preserve member-relative
+time, and reject a move that would put any member before Sequence zero. Razor
+forks one group for the right-hand pieces. If overwrite trimming/splitting
+breaks the synchronization promise, affected fragments leave the group rather
+than retaining a misleading relationship. Singleton groups are compacted after
+structural edits and rejected at the persisted boundary.
+
+### Video Transitions
+
+A visual Transition is a Sequence-owned, typed two-input author entity. It has
+a stable `VideoTransitionId`, two strong Clip endpoints, one exact Sequence-time
+range, a built-in or plugin definition identity, a complete Property Bag, and
+explicit enabled state. It deliberately does not persist `track_id`: endpoint
+Track membership is derived from the two Clips, preventing two authorities from
+disagreeing.
+
+Validation requires distinct endpoints on the same video Track, exact adjacent
+edit geometry at one shared cut, a non-empty range that covers that cut and is
+contained by the two placement ranges, a unique endpoint pair, valid properties,
+and non-adjustment endpoints. Structural edits either preserve those facts or
+remove the now-invalid Transition before commit; invalid persisted graphs are
+rejected instead of repaired during open.
+
+`VideoTransition::source_demand` maps the complete Transition interval into
+both source domains without clamping. A media/nested Adapter must supply probed
+source extents to `validate_source_extents`; insufficient handles fail closed.
+The author model therefore never substitutes repeated boundary frames or reads
+outside a source. This is the frozen author/adapter contract. The current
+renderer does not yet execute Cross Dissolve, so the existence of this type is
+not a product-support claim.
 
 Transform, speed, blend mode, solid color, masks, and effects are currently
 exposed through `PropertyHost`/`PropertyBag`. Every product definition carries
@@ -250,6 +307,18 @@ whose evaluator reuses the same Hold/Linear/Bezier mathematics as direct curve
 evaluation. Execution Modules may lower those segments onto their Evaluation
 Grid and advance span cursors; they may not copy the interpolation formulas or
 reinterpret the persisted author curve.
+
+Mask scalar properties are part of the persisted Property Bag, not runtime
+defaults. Project validation requires the canonical feather, opacity,
+expansion, invert, and operation Parameter IDs, valid curves, finite geometry,
+and strictly ordered shape keys. Saving and reopening must therefore preserve
+the exact evaluated mask rather than silently reconstructing default values.
+
+Every structural Timeline command ends by compacting the three dependent
+author graphs as one invariant-restoration step: Clip link groups, visual
+Transition strong references, and the Sequence audio program. The resulting
+candidate is then fully validated and atomically committed by
+`AuthoringSession`.
 
 ## Render Projection
 

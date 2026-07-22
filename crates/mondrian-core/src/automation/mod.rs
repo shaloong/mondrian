@@ -1131,6 +1131,20 @@ impl AnimatedProperty {
         }
     }
 
+    /// Fork every owner-local identity while preserving authored values.
+    ///
+    /// Keyframe identities shared by numeric channels remain shared after the
+    /// fork, so a multi-channel key continues to represent one user gesture.
+    pub fn fork_author_identities(&mut self) {
+        self.track_id = AnimationTrackId::new();
+        let mut keyframe_ids = HashMap::<KeyframeId, KeyframeId>::new();
+        for channel in &mut self.channels {
+            for keyframe in &mut channel.keyframes {
+                keyframe.id = *keyframe_ids.entry(keyframe.id).or_default();
+            }
+        }
+    }
+
     /// Validate persisted author state before it becomes an executable snapshot.
     pub fn validate(&self) -> Result<()> {
         self.descriptor.validate().map_err(|error| MondrianError::WorkflowStepFailed {
@@ -1955,6 +1969,13 @@ impl PropertyBag {
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, &AnimatedProperty)> {
         self.properties.iter().map(|(path, property)| (path.as_str(), property))
+    }
+
+    /// Fork all property-owner and keyframe identities in this bag.
+    pub fn fork_author_identities(&mut self) {
+        for property in self.properties.values_mut() {
+            property.fork_author_identities();
+        }
     }
 
     /// Validate every property before accepting deserialized author state.

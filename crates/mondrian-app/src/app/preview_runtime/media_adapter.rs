@@ -102,7 +102,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         record_color_rejection: bool,
         request_missing_proxy_generation: bool,
     ) -> Result<MediaPreviewKey, PreviewUnavailability> {
-        let library = state.asset_library.as_ref().ok_or_else(|| {
+        let library = state.asset_library().ok_or_else(|| {
             PreviewUnavailability::blocked(
                 PreviewOutputStage::MediaResolution,
                 "project asset library is unavailable",
@@ -132,7 +132,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let proxy_config = state.proxy_config();
         let proxy_color = resolve_asset_proxy_color_contract(&asset, color_context).ok();
         let prefer_proxy =
-            state.project_settings.proxy_enabled && state.is_asset_proxy_mode(*asset_id);
+            state.project_settings().proxy_enabled && state.is_asset_proxy_mode(*asset_id);
         match resolve_preview_media_source(PreviewMediaSourceRequest {
             asset: &asset,
             color_space_override,

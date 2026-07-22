@@ -2,10 +2,11 @@
 //!
 //! These adapters translate application-facing panel concepts into generic
 //! `mondrian-ui-widgets` view models. Demo data is kept behind explicit model
-//! factories so real `AppState` / `EditorState` adapters can replace it without
+//! factories so typed `AppState` view-model adapters can replace it without
 //! changing dock layout or widget construction.
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -271,10 +272,10 @@ impl AppUiPanelModels {
         let input_pipeline = asset_input_pipeline_for_state(state);
         Self {
             assets: AssetGridModel::from_asset_library_in_folder_with_thumbnails(
-                state.asset_library.as_deref(),
+                state.asset_library(),
                 asset_folder_id,
                 thumbnails,
-                Some(&state.proxy_mode_assets),
+                Some(state.proxy_mode_assets()),
                 Some(&input_pipeline),
             ),
             effects: PanelListModel::from_app_effect_registry(state),
@@ -299,8 +300,7 @@ impl AppUiPanelModels {
             viewer,
             scopes,
             timeline: state
-                .sequence
-                .as_ref()
+                .active_sequence()
                 .map(|sequence| {
                     TimelinePanelModel::from_sequence(
                         sequence,
@@ -327,14 +327,14 @@ impl AppUiPanelModels {
 }
 
 fn asset_input_pipeline_for_state(state: &AppState) -> AppShellInputColorPipelineDiagnostics {
-    let Some(sequence) = state.sequence.as_ref() else {
+    let Some(sequence) = state.active_sequence() else {
         return AppShellInputColorPipelineDiagnostics {
-            engine: state.project_settings.color_management.engine.clone(),
+            engine: state.project_settings().color_management.engine.clone(),
             working_color_space: WorkingColorSpace::LinearRec2020,
         };
     };
     let engine = if sequence.settings.color_management.inherit {
-        state.project_settings.color_management.engine.clone()
+        state.project_settings().color_management.engine.clone()
     } else {
         sequence.settings.color_management.engine.clone()
     };
@@ -357,7 +357,7 @@ pub fn demo_app_state() -> AppState {
     if let Some(selection) = demo_selection(&sequence) {
         state.replace_clip_selection(vec![selection]);
     }
-    state.sequence = Some(sequence);
+    state.test_set_sequence(Some(sequence));
     state.seek(76);
     state
 }
@@ -435,7 +435,7 @@ impl AssetGridModel {
         library: Option<&AssetLibrary>,
         current_folder_id: Option<&str>,
         thumbnails: Option<&dyn AssetThumbnailSource>,
-        proxy_mode_assets: Option<&std::collections::HashSet<AssetId>>,
+        proxy_mode_assets: Option<&BTreeSet<AssetId>>,
         input_pipeline: Option<&AppShellInputColorPipelineDiagnostics>,
     ) -> Self {
         let colors = current_theme().colors.clone();
@@ -737,7 +737,7 @@ impl ViewerPanelModel {
         state: &AppState,
         preview: Option<&dyn ViewerPreviewSource>,
     ) -> Self {
-        let Some(sequence) = state.sequence.as_ref() else {
+        let Some(sequence) = state.active_sequence() else {
             return Self::empty();
         };
         let resolution = sequence.settings.resolution;
@@ -1073,12 +1073,12 @@ struct AppTimelineTrackRef {
 impl TimelinePanelModel {
     /// Snapshot the app timeline with app-level command availability.
     pub fn from_app_state(state: &AppState) -> Self {
-        state.sequence.as_ref().map_or_else(Self::empty, |sequence| {
+        state.active_sequence().map_or_else(Self::empty, |sequence| {
             Self::from_sequence_with_library(
                 sequence,
                 state.selected_clips(),
                 state.selected_tracks(),
-                state.asset_library.as_deref(),
+                state.asset_library(),
             )
             .with_playhead_frame(state.current_frame())
             .with_app_edit_availability(state)
@@ -1120,7 +1120,7 @@ impl TimelinePanelModel {
             (
                 AppTimelineTrackRef { track_id: track.id, is_video_track: true },
                 track.clips.iter().map(|clip| clip.id).collect::<Vec<_>>(),
-                track.clips.iter().map(|clip| clip.nested_sequence_id).collect::<Vec<_>>(),
+                track.clips.iter().map(Clip::nested_sequence_id).collect::<Vec<_>>(),
                 view_track,
             )
         });
@@ -1137,7 +1137,7 @@ impl TimelinePanelModel {
             (
                 AppTimelineTrackRef { track_id: track.id, is_video_track: false },
                 track.clips.iter().map(|clip| clip.id).collect::<Vec<_>>(),
-                track.clips.iter().map(|clip| clip.nested_sequence_id).collect::<Vec<_>>(),
+                track.clips.iter().map(Clip::nested_sequence_id).collect::<Vec<_>>(),
                 view_track,
             )
         });
@@ -1475,7 +1475,7 @@ pub struct InspectorEffectPropertyModel {
 
 impl InspectorPanelModel {
     pub fn from_app_state(state: &AppState) -> Self {
-        let Some(sequence) = state.sequence.as_ref() else {
+        let Some(sequence) = state.active_sequence() else {
             return Self::empty();
         };
         let Some(selection) = state.primary_selected_clip() else {
@@ -1502,7 +1502,8 @@ impl InspectorPanelModel {
             enabled: !clip.is_disabled,
             opacity,
             tint: clip
-                .solid_color
+                .content
+                .solid_color()
                 .or_else(|| timeline_clip_color(clip, resolved_selection.is_video_track))
                 .unwrap_or_else(|| current_theme().colors.media_video),
             position_x: position.x,
@@ -1691,7 +1692,7 @@ pub enum NodeGraphTarget {
 
 impl NodeGraphPanelModel {
     pub fn from_app_state(state: &AppState) -> Self {
-        let Some(sequence) = state.sequence.as_ref() else {
+        let Some(sequence) = state.active_sequence() else {
             return Self::empty();
         };
         let Some(selection) = state.primary_selected_clip() else {
@@ -1795,8 +1796,8 @@ impl ExportPanelModel {
             .export_draft
             .selected_sequence_id
             .filter(|id| sequences.iter().any(|sequence| sequence.id == *id))
-            .or(state.active_sequence_id)
-            .or(state.default_sequence_id)
+            .or(state.active_sequence_id())
+            .or(state.default_sequence_id())
             .filter(|id| sequences.iter().any(|sequence| sequence.id == *id))
             .or_else(|| sequences.first().map(|sequence| sequence.id));
 
@@ -2334,13 +2335,15 @@ fn timeline_clip_from_sequence_clip(
     }
     if kind == TimelineClipKind::Audio {
         if let Some(lib) = library {
-            if let Ok(Some(record)) = lib.get_asset(clip.asset_id) {
-                view = view.with_source_identity(
-                    record.id,
-                    waveform_source_revision(&record),
-                    clip.source_in.to_f64(),
-                    clip.source_out.to_f64(),
-                );
+            if let Some(asset_id) = clip.asset_id() {
+                if let Ok(Some(record)) = lib.get_asset(asset_id) {
+                    view = view.with_source_identity(
+                        record.id,
+                        waveform_source_revision(&record),
+                        clip.source_in.to_f64(),
+                        clip.source_out.to_f64(),
+                    );
+                }
             }
         }
     }
@@ -2379,7 +2382,7 @@ fn default_clip_label(clip: &Clip) -> String {
 }
 
 fn timeline_clip_color(clip: &Clip, is_video_track: bool) -> Option<Color> {
-    if let Some(color) = clip.solid_color {
+    if let Some(color) = clip.content.solid_color() {
         return Some(color);
     }
     let colors = current_theme().colors.clone();
@@ -2580,7 +2583,7 @@ fn asset_grid_items_from_library_records(
     assets: Vec<AssetRecord>,
     current_folder: Option<&FolderRecord>,
     thumbnails: Option<&dyn AssetThumbnailSource>,
-    proxy_mode_assets: Option<&std::collections::HashSet<AssetId>>,
+    proxy_mode_assets: Option<&BTreeSet<AssetId>>,
     input_pipeline: Option<&AppShellInputColorPipelineDiagnostics>,
 ) -> Vec<AssetGridItem> {
     let mut items =
@@ -2804,15 +2807,14 @@ fn clip_for_selection<'a>(
 fn inspector_audio_components(state: &AppState, clip: &Clip) -> Vec<InspectorAudioComponentModel> {
     let asset = (!clip.is_nested_sequence())
         .then(|| {
-            state
-                .asset_library
-                .as_ref()
-                .and_then(|library| library.get_asset(clip.asset_id).ok().flatten())
+            state.asset_library().and_then(|library| {
+                clip.asset_id().and_then(|asset_id| library.get_asset(asset_id).ok().flatten())
+            })
         })
         .flatten();
-    let child = clip
-        .nested_sequence_id
-        .and_then(|sequence_id| state.sequences.iter().find(|sequence| sequence.id == sequence_id));
+    let child = clip.nested_sequence_id().and_then(|sequence_id| {
+        state.sequences().iter().find(|sequence| sequence.id == sequence_id)
+    });
 
     clip.audio_components
         .iter()
@@ -2998,7 +3000,7 @@ fn native_audio_layout_label(layout: &ChannelLayout) -> String {
 }
 
 fn selected_clip_track_is_locked(state: &AppState, selection: SelectedClipRef) -> bool {
-    let Some(sequence) = state.sequence.as_ref() else {
+    let Some(sequence) = state.active_sequence() else {
         return false;
     };
     if selection.is_video_track {
@@ -3017,7 +3019,7 @@ fn selected_clip_track_is_locked(state: &AppState, selection: SelectedClipRef) -
 }
 
 fn selected_clip_tracks_are_editable(state: &AppState) -> bool {
-    let Some(sequence) = state.sequence.as_ref() else {
+    let Some(sequence) = state.active_sequence() else {
         return false;
     };
     if state.selected_clips().is_empty() {
@@ -3332,14 +3334,13 @@ fn demo_sequence() -> Sequence {
     adjustment.label = Some("Adjustment".to_string());
     sequence.video_tracks[2].add_clip(adjustment).expect("add adjustment");
 
-    let mut title = Clip::new_nested_sequence(
+    let title = Clip::new_nested_sequence(
         nested_id,
         crate::app::tt(132, tb),
         crate::app::tt(48, tb),
         Some("Title".to_string()),
     )
     .expect("valid clip");
-    title.solid_color = Some(Color::from_hex(0x4B7BE5));
     sequence.video_tracks[2].add_clip(title).expect("add title");
 
     let mut b_roll = Clip::new(
@@ -3349,7 +3350,6 @@ fn demo_sequence() -> Sequence {
     )
     .expect("valid clip");
     b_roll.label = Some("B-roll".to_string());
-    b_roll.solid_color = Some(Color::from_hex(0x2C7A7B));
     sequence.video_tracks[1].add_clip(b_roll).expect("add b-roll");
 
     let mut overlay = Clip::new_solid_color(
@@ -3378,7 +3378,6 @@ fn demo_sequence() -> Sequence {
     )
     .expect("valid clip");
     cutaway.label = Some("Cutaway".to_string());
-    cutaway.solid_color = Some(Color::from_hex(0x2F855A));
     sequence.video_tracks[0].add_clip(cutaway).expect("add cutaway");
 
     let mut outro = Clip::new(
@@ -3388,7 +3387,6 @@ fn demo_sequence() -> Sequence {
     )
     .expect("valid clip");
     outro.label = Some("Outro".to_string());
-    outro.solid_color = Some(Color::from_hex(0x744210));
     sequence.video_tracks[0].add_clip(outro).expect("add outro");
 
     let mut dialogue = Clip::new(
@@ -3407,7 +3405,6 @@ fn demo_sequence() -> Sequence {
     )
     .expect("valid clip");
     music.label = Some("Music Bed".to_string());
-    music.solid_color = Some(Color::from_hex(0x2B6CB0));
     sequence.audio_tracks[1].add_clip(music).expect("add music");
 
     sequence
@@ -5233,8 +5230,8 @@ mod tests {
             .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
             .expect("add audio Clip");
         let mut state = AppState::new();
-        state.sequence = Some(sequence);
-        state.asset_library = Some(library);
+        state.test_set_sequence(Some(sequence));
+        state.test_set_asset_library(Some(library));
         state.selection.selected_clips =
             vec![SelectedClipRef { track_id, is_video_track: false, clip_id }];
 
@@ -5517,7 +5514,7 @@ mod tests {
     #[test]
     fn node_graph_without_clip_selection_uses_disabled_empty_state() {
         let mut state = AppState::new();
-        state.sequence = Some(Sequence::new("edit"));
+        state.test_set_sequence(Some(Sequence::new("edit")));
 
         let model = NodeGraphPanelModel::from_app_state(&state);
 
@@ -5642,7 +5639,7 @@ mod tests {
         let mut state = AppState::new();
         let sequence = Sequence::new("Deliverable");
         let sequence_id = sequence.id;
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         state.set_export_draft_preset_index(1);
         state.set_export_draft_sequence_id(Some(sequence_id));
         state.set_export_draft_range(TimelineExportRange::EntireSequence);
@@ -5675,7 +5672,7 @@ mod tests {
         let mut state = AppState::new();
         let sequence = Sequence::new("Deliverable");
         let sequence_id = sequence.id;
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         state.set_export_draft_sequence_id(Some(sequence_id));
         state.set_export_draft_output_path("   ");
 
@@ -6118,7 +6115,7 @@ mod tests {
         let library = AssetLibrary::open(root.clone()).expect("open asset library");
         let asset_id = library.create_solid_color_asset(Some("Temp Plate")).expect("create asset");
         let mut state = AppState::new();
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
         let model = AppUiPanelModels::from_app_state(&state).assets;
         let mut grid = asset_grid(&model);
         grid.layout(Rect::new(0.0, 0.0, 360.0, 240.0));
@@ -6254,7 +6251,7 @@ mod tests {
         let library = AssetLibrary::open(root.clone()).expect("open asset library");
         let asset_id = library.create_solid_color_asset(Some("Old Plate")).expect("create asset");
         let mut state = AppState::new();
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
         let model = AppUiPanelModels::from_app_state(&state).assets;
         let mut grid = asset_grid(&model);
         grid.layout(Rect::new(0.0, 0.0, 360.0, 240.0));
@@ -6417,7 +6414,7 @@ mod tests {
         let library = AssetLibrary::open(root.clone()).expect("open asset library");
         let folder_id = library.create_folder("Rushes", None).expect("create folder");
         let mut state = AppState::new();
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
         let model = AppUiPanelModels::from_app_state(&state).assets;
         let mut grid = asset_grid(&model);
         grid.layout(Rect::new(0.0, 0.0, 360.0, 240.0));
@@ -6490,7 +6487,7 @@ mod tests {
         let folder_id = library.create_folder("Rushes", None).expect("create folder");
         let asset_id = library.create_solid_color_asset(Some("Temp Plate")).expect("create asset");
         let mut state = AppState::new();
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
         let model = AppUiPanelModels::from_app_state(&state).assets;
         let mut grid = asset_grid(&model);
         grid.layout(Rect::new(0.0, 0.0, 520.0, 260.0));
@@ -6567,7 +6564,7 @@ mod tests {
         let folder_id = library.create_folder("Rushes", None).expect("create folder");
         let asset_id = library.create_solid_color_asset(Some("Temp Plate")).expect("create asset");
         let mut state = AppState::new();
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
         let model = AppUiPanelModels::from_app_state(&state).assets;
         let mut grid = asset_grid(&model);
         grid.layout(Rect::new(0.0, 0.0, 520.0, 260.0));
@@ -7553,7 +7550,7 @@ mod tests {
         let clip_id = clip.id;
         sequence.video_tracks[0].add_clip(clip).expect("add clip");
         let display_track_index = video_display_index(&sequence, 0);
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         state.selection.selected_clips = vec![SelectedClipRef {
             track_id: stale_track_id,
             is_video_track: false,
@@ -7602,7 +7599,7 @@ mod tests {
         let track_id = sequence.video_tracks[0].id;
         sequence.video_tracks[0].add_clip(clip).expect("add solid clip");
         let display_track_index = video_display_index(&sequence, 0);
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         assert!(
             state.select_effect_by_id(clip_id, effect_id).is_some(),
             "seed selected effect"
@@ -7722,7 +7719,7 @@ mod tests {
         sequence.settings.frame_rate = Rational::FPS_2997;
         sequence.settings.timeline_display =
             TimelineDisplaySettings::timecode(SmpteCountingMode::DropFrame, 107_892);
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         state.seek(1_800);
 
         let models = AppUiPanelModels::from_app_state(&state);
@@ -7758,7 +7755,7 @@ mod tests {
         }
 
         let mut state = AppState::new();
-        state.sequence = Some(Sequence::new("edit"));
+        state.test_set_sequence(Some(Sequence::new("edit")));
 
         let models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
             &state,
@@ -7789,7 +7786,7 @@ mod tests {
         }
 
         let mut state = AppState::new();
-        state.sequence = Some(Sequence::new("edit"));
+        state.test_set_sequence(Some(Sequence::new("edit")));
 
         let models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
             &state,
@@ -7819,7 +7816,7 @@ mod tests {
         }
 
         let mut state = AppState::new();
-        state.sequence = Some(Sequence::new("edit"));
+        state.test_set_sequence(Some(Sequence::new("edit")));
         let models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
             &state,
             None,
@@ -7852,7 +7849,7 @@ mod tests {
         }
 
         let mut state = AppState::new();
-        state.sequence = Some(Sequence::new("edit"));
+        state.test_set_sequence(Some(Sequence::new("edit")));
         let models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
             &state,
             None,
@@ -7880,7 +7877,7 @@ mod tests {
         }
 
         let mut state = AppState::new();
-        state.sequence = Some(Sequence::new("edit"));
+        state.test_set_sequence(Some(Sequence::new("edit")));
         let models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
             &state,
             None,
@@ -7952,7 +7949,7 @@ mod tests {
         }
 
         let mut state = AppState::new();
-        state.sequence = Some(Sequence::new("edit"));
+        state.test_set_sequence(Some(Sequence::new("edit")));
 
         let models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
             &state,
@@ -7994,7 +7991,7 @@ mod tests {
         }
 
         let mut state = AppState::new();
-        state.sequence = Some(Sequence::new("edit"));
+        state.test_set_sequence(Some(Sequence::new("edit")));
 
         let models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
             &state,
@@ -8029,7 +8026,7 @@ mod tests {
         }
 
         let mut state = AppState::new();
-        state.sequence = Some(Sequence::new("edit"));
+        state.test_set_sequence(Some(Sequence::new("edit")));
         let external = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
             &state,
             None,
@@ -8084,7 +8081,7 @@ mod tests {
         let mut state = AppState::new();
         let mut sequence = Sequence::new("edit");
         sequence.settings.preview.resolution_scale = 1.0;
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
 
         let models = AppUiPanelModels::from_app_state(&state);
 
@@ -8097,7 +8094,7 @@ mod tests {
         let mut state = AppState::new();
         let mut sequence = Sequence::new("edit");
         sequence.settings.preview.resolution_scale = 0.0;
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
 
         let models = AppUiPanelModels::from_app_state(&state);
 
@@ -8131,7 +8128,7 @@ mod tests {
         .expect("set end opacity");
 
         sequence.video_tracks[0].add_clip(clip).expect("add clip");
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         state.selection.selected_clips.push(SelectedClipRef {
             track_id,
             is_video_track: true,
@@ -8166,7 +8163,7 @@ mod tests {
         .expect("set midpoint opacity");
 
         sequence.video_tracks[0].add_clip(clip).expect("add clip");
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         state.selection.selected_clips.push(SelectedClipRef {
             track_id,
             is_video_track: true,
@@ -8193,7 +8190,7 @@ mod tests {
             .create_solid_color_asset(Some("Brand Purple"))
             .expect("create solid color asset");
         let mut state = AppState::new();
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
 
         let models = AppUiPanelModels::from_app_state(&state);
 
@@ -8259,7 +8256,7 @@ mod tests {
             .create_solid_color_asset(Some("Brand Purple"))
             .expect("create solid color asset");
         let mut state = AppState::new();
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
 
         let models = AppUiPanelModels::from_app_state_with_asset_folder_and_thumbnails(
             &state,
@@ -8290,7 +8287,7 @@ mod tests {
             .create_solid_color_asset(Some("Brand Purple"))
             .expect("create solid color asset");
         let mut state = AppState::new();
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
 
         let loading = AppUiPanelModels::from_app_state_with_asset_folder_and_thumbnails(
             &state,
@@ -8337,7 +8334,7 @@ mod tests {
             .create_adjustment_layer_asset(Some("Root Adjustment"))
             .expect("create root adjustment");
         let mut state = AppState::new();
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
 
         let models = AppUiPanelModels::from_app_state(&state);
 
@@ -8415,7 +8412,7 @@ mod tests {
             .create_adjustment_layer_asset(Some("Root Adjustment"))
             .expect("create root adjustment");
         let mut state = AppState::new();
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
 
         let models = AppUiPanelModels::from_app_state_with_asset_folder(&state, Some(&folder_id));
 
@@ -8484,7 +8481,7 @@ mod tests {
         let root = unique_temp_dir("asset-panel-empty-library");
         let library = AssetLibrary::open(root.clone()).expect("open asset library");
         let mut state = AppState::new();
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
 
         let models = AppUiPanelModels::from_app_state(&state);
 
@@ -8595,7 +8592,7 @@ mod tests {
         let clip_id = clip.id;
         let track_id = sequence.video_tracks[0].id;
         sequence.video_tracks[0].add_clip(clip).expect("add video clip");
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         state.selection.selected_clips.push(SelectedClipRef {
             track_id,
             is_video_track: true,
@@ -8647,7 +8644,7 @@ mod tests {
         clip.add_effect_node(keep_effect);
         let clip_id = clip.id;
         sequence.video_tracks[0].add_clip(clip).expect("add video clip");
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         let selection = state
             .select_effect_by_id(clip_id, remove_id)
             .expect("seed selected effect")
@@ -8702,7 +8699,7 @@ mod tests {
         clip.add_effect_node(third);
         let clip_id = clip.id;
         sequence.video_tracks[0].add_clip(clip).expect("add video clip");
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         state.select_effect_by_id(clip_id, second_id).expect("seed selected effect");
 
         state
@@ -9321,7 +9318,7 @@ mod tests {
         let track_id = sequence.video_tracks[0].id;
         sequence.video_tracks[0].add_clip(clip).expect("add video clip");
         sequence.video_tracks[0].is_locked = true;
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         state.selection.selected_clips.push(SelectedClipRef {
             track_id,
             is_video_track: true,
@@ -9349,7 +9346,7 @@ mod tests {
         let track_id = sequence.video_tracks[0].id;
         sequence.video_tracks[0].add_clip(clip).expect("add video clip");
         sequence.video_tracks[0].is_locked = true;
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         state.selection.selected_clips.push(SelectedClipRef {
             track_id,
             is_video_track: true,
@@ -9385,7 +9382,7 @@ mod tests {
         let clip_id = clip.id;
         let track_id = sequence.video_tracks[0].id;
         sequence.video_tracks[0].add_clip(clip).expect("add video clip");
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         state.selection.selected_clips.push(SelectedClipRef {
             track_id,
             is_video_track: true,
@@ -9419,7 +9416,7 @@ mod tests {
         let track_id = sequence.video_tracks[0].id;
         sequence.video_tracks[0].add_clip(clip).expect("add video clip");
         sequence.video_tracks[0].is_locked = true;
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         state.selection.selected_clips.push(SelectedClipRef {
             track_id,
             is_video_track: true,

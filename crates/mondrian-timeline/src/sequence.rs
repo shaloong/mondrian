@@ -914,6 +914,9 @@ pub struct Sequence {
     pub role: SequenceRole,
     pub settings: SequenceSettings,
     pub video_tracks: Vec<Track>,
+    /// Explicit two-input visual Transitions. Endpoint Track membership is
+    /// derived from their strong Clip references.
+    pub video_transitions: Vec<crate::video_transition::VideoTransition>,
     pub audio_tracks: Vec<Track>,
     /// Sequence semantic catalog for audio classification and output projection.
     pub audio_roles: Vec<crate::audio::AudioRole>,
@@ -944,6 +947,7 @@ impl Sequence {
                 Track::new_video("V2"),
                 Track::new_video("V3"),
             ],
+            video_transitions: Vec::new(),
             audio_tracks,
             audio_roles: Vec::new(),
             audio_program,
@@ -1192,7 +1196,7 @@ impl Sequence {
     /// processor state, automation, routing, and public-output bindings must not
     /// alias the source Sequence. References to a child Sequence's public output
     /// are deliberately not rewritten because they cross this aggregate boundary.
-    pub fn fork_audio_identities_for_sequence_duplicate(&mut self) {
+    fn fork_audio_identities_for_sequence_duplicate(&mut self) {
         use crate::audio::{AudioRouteDestination, AudioRouteSource, ProgramOutputMainSource};
 
         let role_ids = self
@@ -1277,6 +1281,110 @@ impl Sequence {
         }
     }
 
+    /// Rekey Sequence-local Clip link groups after duplicating a Sequence.
+    pub fn fork_clip_link_groups_for_sequence_duplicate(&mut self) {
+        let mut groups = HashMap::<ClipLinkGroupId, ClipLinkGroupId>::new();
+        for clip in self
+            .video_tracks
+            .iter_mut()
+            .chain(&mut self.audio_tracks)
+            .flat_map(|track| &mut track.clips)
+        {
+            if let Some(group) = clip.link_group {
+                clip.link_group = Some(*groups.entry(group).or_default());
+            }
+        }
+    }
+
+    /// Fork the identity graph of a cloned Sequence into an independent author
+    /// aggregate while preserving its authored values and external references.
+    pub fn fork_author_identities_for_sequence_duplicate(&mut self) {
+        use crate::audio::AudioRouteSource;
+
+        self.id = SequenceId::new();
+        self.revision = SequenceRevision::INITIAL;
+
+        let mut track_ids = HashMap::<TrackId, TrackId>::new();
+        for track in self.video_tracks.iter_mut().chain(&mut self.audio_tracks) {
+            let old_id = track.id;
+            track.id = TrackId::new();
+            track.opacity.fork_author_identities();
+            track_ids.insert(old_id, track.id);
+        }
+
+        let mut clip_ids = HashMap::<ClipId, ClipId>::new();
+        for clip in self
+            .video_tracks
+            .iter_mut()
+            .chain(&mut self.audio_tracks)
+            .flat_map(|track| &mut track.clips)
+        {
+            let old_id = clip.id;
+            clip.fork_visual_placement_identities();
+            clip_ids.insert(old_id, clip.id);
+        }
+
+        let old_channels = std::mem::take(&mut self.audio_program.track_channels);
+        self.audio_program.track_channels = old_channels
+            .into_iter()
+            .map(|(track_id, channel)| (track_ids[&track_id], channel))
+            .collect();
+        for route in &mut self.audio_program.routes {
+            if let AudioRouteSource::Track { track_id, .. } = &mut route.source {
+                *track_id = track_ids[track_id];
+            }
+        }
+
+        for transition in &mut self.video_transitions {
+            transition.left = clip_ids[&transition.left];
+            transition.right = clip_ids[&transition.right];
+            transition.fork_author_identities();
+        }
+
+        self.fork_audio_identities_for_sequence_duplicate();
+        self.fork_clip_link_groups_for_sequence_duplicate();
+    }
+
+    /// Remove meaningless singleton link groups after structural edits.
+    pub fn compact_clip_link_groups(&mut self) {
+        let mut counts = HashMap::<ClipLinkGroupId, usize>::new();
+        for clip in self
+            .video_tracks
+            .iter()
+            .chain(&self.audio_tracks)
+            .flat_map(|track| &track.clips)
+        {
+            if let Some(group) = clip.link_group {
+                *counts.entry(group).or_default() += 1;
+            }
+        }
+        for clip in self
+            .video_tracks
+            .iter_mut()
+            .chain(&mut self.audio_tracks)
+            .flat_map(|track| &mut track.clips)
+        {
+            if clip.link_group.is_some_and(|group| counts.get(&group) == Some(&1)) {
+                clip.link_group = None;
+            }
+        }
+    }
+
+    /// Remove visual Transitions whose strong endpoints or edit geometry no
+    /// longer exist after a structural edit.
+    pub fn compact_video_transitions(&mut self) {
+        let video_tracks = &self.video_tracks;
+        self.video_transitions
+            .retain(|transition| validate_video_transition(video_tracks, transition).is_ok());
+    }
+
+    /// Restore every derived author-graph invariant after a structural edit.
+    pub fn compact_structural_references(&mut self) {
+        self.compact_clip_link_groups();
+        self.compact_video_transitions();
+        self.compact_audio_program();
+    }
+
     /// Drop unreferenced processing definitions and invalidated Transition references.
     pub fn compact_audio_program(&mut self) {
         self.audio_program.compact_for_tracks(&self.audio_tracks);
@@ -1292,6 +1400,7 @@ impl Sequence {
 
         if let Some(index) = self.video_tracks.iter().position(|track| track.id == id) {
             self.video_tracks.remove(index);
+            self.compact_structural_references();
             self.normalize_track_names();
             Ok(())
         } else {
@@ -1310,7 +1419,7 @@ impl Sequence {
         if let Some(index) = self.audio_tracks.iter().position(|track| track.id == id) {
             self.audio_tracks.remove(index);
             self.audio_program.remove_track(id);
-            self.compact_audio_program();
+            self.compact_structural_references();
             self.normalize_track_names();
             Ok(())
         } else {
@@ -1363,26 +1472,90 @@ impl Sequence {
             }
         }
 
+        let mut link_group_counts = HashMap::<ClipLinkGroupId, usize>::new();
         for clip in self
             .video_tracks
             .iter()
             .chain(&self.audio_tracks)
             .flat_map(|track| &track.clips)
         {
-            if let Some(linked_clip) = clip.linked_clip {
-                if linked_clip == clip.id || !clip_ids.contains(&linked_clip) {
-                    return Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                        step_id: "validate_author_identities".to_owned(),
-                        reason: format!(
-                            "Clip {} has invalid strong linked-Clip reference {}",
-                            clip.id, linked_clip
-                        ),
-                    });
-                }
+            if let Some(group) = clip.link_group {
+                *link_group_counts.entry(group).or_default() += 1;
             }
+        }
+        if let Some((group, _)) = link_group_counts.iter().find(|(_, count)| **count < 2) {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "validate_author_identities".to_owned(),
+                reason: format!("Clip link group {group} has fewer than two members"),
+            });
+        }
+
+        let mut transition_ids = HashSet::new();
+        let mut transition_endpoints = HashSet::new();
+        for transition in &self.video_transitions {
+            if !transition_ids.insert(transition.id) {
+                return Err(duplicate_author_identity("VideoTransition", transition.id));
+            }
+            if !transition_endpoints.insert((transition.left, transition.right)) {
+                return Err(crate::video_transition::invalid_transition(
+                    transition.id,
+                    "the edit already owns a visual Transition",
+                ));
+            }
+            validate_video_transition(&self.video_tracks, transition)?;
         }
         Ok(())
     }
+}
+
+fn validate_video_transition(
+    video_tracks: &[Track],
+    transition: &crate::video_transition::VideoTransition,
+) -> mondrian_core::Result<()> {
+    transition.validate_definition_state()?;
+    let Some((track, left_index, right_index)) = video_tracks.iter().find_map(|track| {
+        let left = track.clips.iter().position(|clip| clip.id == transition.left)?;
+        let right = track.clips.iter().position(|clip| clip.id == transition.right)?;
+        Some((track, left, right))
+    }) else {
+        return Err(crate::video_transition::invalid_transition(
+            transition.id,
+            "endpoints must exist on the same video Track",
+        ));
+    };
+    if left_index.checked_add(1) != Some(right_index) {
+        return Err(crate::video_transition::invalid_transition(
+            transition.id,
+            "endpoints must be an ordered adjacent edit",
+        ));
+    }
+    let left = &track.clips[left_index];
+    let right = &track.clips[right_index];
+    if left.is_adjustment_layer() || right.is_adjustment_layer() {
+        return Err(crate::video_transition::invalid_transition(
+            transition.id,
+            "adjustment layers cannot be Transition endpoints",
+        ));
+    }
+    let cut = left.end_position()?;
+    if cut != right.position {
+        return Err(crate::video_transition::invalid_transition(
+            transition.id,
+            "endpoints must share one exact editorial cut",
+        ));
+    }
+    let range_end = transition.sequence_range.end()?;
+    if transition.sequence_range.start < left.position
+        || range_end > right.end_position()?
+        || transition.sequence_range.start > cut
+        || range_end < cut
+    {
+        return Err(crate::video_transition::invalid_transition(
+            transition.id,
+            "range must cover the cut and remain inside the endpoint placements",
+        ));
+    }
+    Ok(())
 }
 
 fn duplicate_author_identity(
@@ -1441,15 +1614,11 @@ impl mondrian_core::timeline_data::RenderPlanSource for Sequence {
             .map(|ac| {
                 let matrix = ac.transform_matrix;
                 FlatActiveClip {
-                    asset_id: ac.clip.asset_id,
                     clip_id: ac.clip.id,
-                    kind: ac.clip.kind,
-                    nested_sequence_id: ac.clip.nested_sequence_id,
+                    content: ac.clip.content.clone(),
                     is_disabled: ac.clip.is_disabled,
                     effects: ac.clip.effects.clone(),
                     masks: ac.clip.masks.clone(),
-                    solid_color: ac.clip.solid_color,
-                    interpretation: ac.clip.interpretation.clone(),
                     source_time: ac.source_time,
                     transform_matrix: [
                         matrix.x_axis.x,
@@ -1567,7 +1736,7 @@ impl SequenceCollection {
                     else {
                         continue;
                     };
-                    let Some(sequence_id) = clip.nested_sequence_id else {
+                    let Some(sequence_id) = clip.nested_sequence_id() else {
                         return Err(mondrian_core::MondrianError::WorkflowStepFailed {
                             step_id: "validate_audio_program".to_owned(),
                             reason: format!("nested audio edit {} has no owning Sequence", edit.id),
@@ -1632,7 +1801,7 @@ impl SequenceCollection {
                     .iter()
                     .chain(seq.audio_tracks.iter())
                     .flat_map(|track| track.clips.iter())
-                    .filter_map(|clip| clip.nested_sequence_id)
+                    .filter_map(|clip| clip.nested_sequence_id())
                     .collect();
                 (seq.id, nested)
             })
@@ -1693,6 +1862,7 @@ mod tests {
     use super::*;
     use crate::clip::Clip;
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
+    use mondrian_core::effect_data::EffectType;
     use mondrian_core::{DisplayToneMapPolicy, ProjectColorManagement};
 
     fn pinned_custom_engine(source: OcioConfigSource) -> ColorEngine {
@@ -1737,6 +1907,103 @@ mod tests {
         let error =
             sequence.validate_author_identities().expect_err("duplicate identity must fail");
         assert!(error.to_string().contains("duplicate Clip identity"));
+    }
+
+    #[test]
+    fn author_identity_validation_rejects_singleton_link_group() {
+        let mut sequence = Sequence::new("identity");
+        let time_base = sequence.time_base();
+        let mut clip =
+            Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base)).expect("valid clip");
+        clip.link_group = Some(ClipLinkGroupId::new());
+        sequence.video_tracks[0].add_clip(clip).expect("placement");
+
+        let error = sequence.validate_author_identities().expect_err("singleton group must fail");
+        assert!(error.to_string().contains("fewer than two members"));
+    }
+
+    #[test]
+    fn video_transition_requires_one_adjacent_exact_cut() {
+        let mut sequence = Sequence::new("transition");
+        let time_base = sequence.time_base();
+        let left = Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base)).expect("left");
+        let right = Clip::new(AssetId::new(), tt(10, time_base), tt(10, time_base)).expect("right");
+        let left_id = left.id;
+        let right_id = right.id;
+        sequence.video_tracks[0].add_clip(left).expect("left placement");
+        sequence.video_tracks[0].add_clip(right).expect("right placement");
+        sequence.video_transitions.push(crate::VideoTransition::cross_dissolve(
+            left_id,
+            right_id,
+            mondrian_core::TimelineTimeRange::new(tt(8, time_base), tt(4, time_base))
+                .expect("range"),
+        ));
+        sequence.validate_author_identities().expect("valid transition");
+
+        sequence.video_tracks[0].clips[1].position = tt(11, time_base);
+        let error = sequence
+            .validate_author_identities()
+            .expect_err("gap must invalidate transition");
+        assert!(error.to_string().contains("exact editorial cut"));
+        sequence.compact_video_transitions();
+        assert!(sequence.video_transitions.is_empty());
+    }
+
+    #[test]
+    fn sequence_duplicate_forks_complete_identity_graph_and_strong_references() {
+        let mut sequence = Sequence::new("duplicate");
+        let original_sequence_id = sequence.id;
+        let original_track_ids = sequence
+            .video_tracks
+            .iter()
+            .chain(&sequence.audio_tracks)
+            .map(|track| track.id)
+            .collect::<HashSet<_>>();
+        let time_base = sequence.time_base();
+        let mut left =
+            Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base)).expect("left");
+        left.add_effect(EffectType::GaussianBlur);
+        let right = Clip::new(AssetId::new(), tt(10, time_base), tt(10, time_base)).expect("right");
+        let left_id = left.id;
+        let right_id = right.id;
+        sequence.video_tracks[0].add_clip(left).expect("left placement");
+        sequence.video_tracks[0].add_clip(right).expect("right placement");
+        let original_effect_id = sequence.video_tracks[0].clips[0].effects[0].id;
+        let transition = crate::VideoTransition::cross_dissolve(
+            left_id,
+            right_id,
+            mondrian_core::TimelineTimeRange::new(tt(8, time_base), tt(4, time_base))
+                .expect("range"),
+        );
+        let original_transition_id = transition.id;
+        sequence.video_transitions.push(transition);
+
+        sequence.fork_author_identities_for_sequence_duplicate();
+
+        assert_ne!(sequence.id, original_sequence_id);
+        assert_eq!(sequence.revision, SequenceRevision::INITIAL);
+        assert!(sequence
+            .video_tracks
+            .iter()
+            .chain(&sequence.audio_tracks)
+            .all(|track| !original_track_ids.contains(&track.id)));
+        let duplicated_left = &sequence.video_tracks[0].clips[0];
+        let duplicated_right = &sequence.video_tracks[0].clips[1];
+        assert_ne!(duplicated_left.id, left_id);
+        assert_ne!(duplicated_right.id, right_id);
+        assert_ne!(duplicated_left.effects[0].id, original_effect_id);
+        assert_ne!(sequence.video_transitions[0].id, original_transition_id);
+        assert_eq!(sequence.video_transitions[0].left, duplicated_left.id);
+        assert_eq!(sequence.video_transitions[0].right, duplicated_right.id);
+        sequence.validate_author_identities().expect("forked author graph");
+        sequence
+            .audio_program
+            .validate(
+                &sequence.audio_tracks,
+                &sequence.audio_roles,
+                sequence.settings.audio_channel_layout,
+            )
+            .expect("forked audio graph");
     }
 
     #[test]

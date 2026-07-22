@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -14,12 +14,13 @@ use mondrian_core::{
     },
     events::{AppEvent, EventBus},
     types::{
-        AssetId, AudioSourceComponentId, ClipId, Color, EffectId, FramePosition, KeyframeId,
-        Rational, Resolution, SequenceId, TrackId,
+        AssetId, AudioSourceComponentId, ClipId, ClipLinkGroupId, Color, EffectId, FramePosition,
+        KeyframeId, Rational, Resolution, SequenceId, TrackId,
     },
     AudioChannelLayout, AudioSamplePosition, AudioSampleRate, AudioSampleRounding, FrameRounding,
-    ProjectId, ProjectMeta, ProjectSettings, TimelineTime,
+    ProjectId, ProjectSettings, TimelineTime,
 };
+use mondrian_editor_state::AuthoringSession;
 use mondrian_effects::{
     EffectNode, EffectNodeExt, EffectType, MaskComponent, MaskId, MaskKeyframe, MaskShape,
 };
@@ -37,8 +38,8 @@ use mondrian_playback::{
     PlaybackSeekKind, PreviewResolutionScale, TransportState, VideoPrerollObservation,
 };
 use mondrian_timeline::clip::{Clip, TrimEdge};
-use mondrian_timeline::command::SequenceSnapshotCommand;
 use mondrian_timeline::sequence::{Sequence, SequenceCollection, SequenceSettings};
+use project_persistence::{ProjectPersistencePurpose, ProjectPersistenceService};
 use serde::{Deserialize, Serialize};
 
 const PROJECT_EXTENSION: &str = "mdp";
@@ -87,6 +88,7 @@ pub(crate) mod preview_timeline_execution;
 pub mod preview_unavailability;
 pub(crate) mod preview_viewer_plan;
 mod project_lifecycle;
+mod project_persistence;
 pub mod proxy_generation;
 mod selection;
 pub mod thumbnail_service;
@@ -177,6 +179,7 @@ pub struct AnimationClipboard {
 pub struct ClipClipboard {
     entries: Vec<ClipClipboardEntry>,
     audio_transitions: Vec<mondrian_timeline::audio::AudioTransition>,
+    video_transitions: Vec<mondrian_timeline::VideoTransition>,
 }
 
 /// One copied clip plus enough context to paste it back into the active sequence.
@@ -252,27 +255,15 @@ pub struct AppState {
     // 全局事件总线
     pub event_bus: Arc<EventBus>,
 
-    // 当前打开的序列（None = 无项目）
-    pub sequence: Option<Sequence>,
-    pub sequences: Vec<Sequence>,
-    pub active_sequence_id: Option<SequenceId>,
-    pub default_sequence_id: Option<SequenceId>,
-    pub sequence_navigation_stack: Vec<SequenceId>,
-    pub project_id: Option<ProjectId>,
-    pub project_meta: Option<ProjectMeta>,
-    pub project_document_revision: u64,
-
-    // 当前打开的项目文件
-    pub current_project_path: Option<PathBuf>,
-
-    // 当前项目运行时工作目录（用于素材库 SQLite）
-    pub project_runtime_dir: Option<PathBuf>,
-
-    // 项目级色彩管理设置（所有序列默认继承）
-    pub project_settings: ProjectSettings,
-
-    // 撤销/重做历史（封装在 timeline crate 中）
-    pub cmd_history: mondrian_timeline::command::CommandHistory,
+    /// Sole mutable authority for the open Project document, asset library,
+    /// navigation, author generations, and project-wide Undo/Redo.
+    pub(crate) authoring: Option<AuthoringSession>,
+    /// UI-independent single-writer durable archive publisher.
+    project_persistence: ProjectPersistenceService,
+    /// Event-loop time of the latest admitted autosave request.
+    autosave_last_requested_at: Instant,
+    /// Snapshot identity currently being written as a recovery point.
+    autosave_in_flight_request: Option<project_persistence::ProjectPersistenceRequestId>,
 
     // 播放状态
     /// Sole authority for transport position, epoch, and Clock Master.
@@ -289,9 +280,6 @@ pub struct AppState {
     playback_presentation_time_anchor: MonotonicTimestamp,
     /// Most recent timeline seek interaction source used by preview access-mode selection.
     pub last_timeline_seek_source: TimelineSeekSource,
-
-    // 素材库
-    pub asset_library: Option<Arc<AssetLibrary>>,
 
     // 正在拖拽的素材（从素材库拖向时间线）
     pub dragging_asset: Option<DraggingAsset>,
@@ -318,7 +306,6 @@ pub struct AppState {
 
     // 代理策略
     pub auto_proxy_enabled: bool,
-    pub proxy_mode_assets: HashSet<AssetId>,
     proxy_generation: ProxyGenerationService,
 
     // 音频时钟与 A/V 同步
@@ -342,18 +329,10 @@ impl AppState {
 
         Self {
             event_bus: EventBus::new(),
-            sequence: None,
-            sequences: Vec::new(),
-            active_sequence_id: None,
-            default_sequence_id: None,
-            sequence_navigation_stack: Vec::new(),
-            project_id: None,
-            project_meta: None,
-            project_document_revision: 0,
-            current_project_path: None,
-            project_runtime_dir: None,
-            project_settings: ProjectSettings::default(),
-            cmd_history: mondrian_timeline::command::CommandHistory::default(),
+            authoring: None,
+            project_persistence: ProjectPersistenceService::new(),
+            autosave_last_requested_at: Instant::now(),
+            autosave_in_flight_request: None,
             playback_engine: PlaybackEngine::default(),
             playback_evidence: PlaybackEvidenceCollector::default(),
             playback_evidence_now: MonotonicTimestamp::ZERO,
@@ -361,7 +340,6 @@ impl AppState {
             playback_presentation_wall_anchor,
             playback_presentation_time_anchor: MonotonicTimestamp::ZERO,
             last_timeline_seek_source: TimelineSeekSource::Settled,
-            asset_library: None,
             dragging_asset: None,
             selection: SelectionState::default(),
             render_queue: RenderQueue::new(),
@@ -374,7 +352,6 @@ impl AppState {
             clip_clipboard: None,
             active_clipboard_kind: None,
             auto_proxy_enabled: false,
-            proxy_mode_assets: HashSet::new(),
             proxy_generation: ProxyGenerationService::new(),
             audio_sample_rate,
             audio_playback: AudioPlayback::product_default(),
@@ -419,6 +396,99 @@ impl AppState {
         self.auto_proxy_enabled = enabled;
     }
 
+    /// Canonical active Sequence. Execution and UI callers receive no mutable clone.
+    pub fn active_sequence(&self) -> Option<&Sequence> {
+        self.authoring.as_ref().and_then(AuthoringSession::active_sequence)
+    }
+
+    /// Direct fixture access for tests that need to construct otherwise
+    /// unreachable author states. Production edits must use an authoring
+    /// transaction and can never borrow the canonical document mutably.
+    #[cfg(test)]
+    pub(crate) fn active_sequence_mut_uncommitted(&mut self) -> Option<&mut Sequence> {
+        self.authoring
+            .as_mut()
+            .and_then(|session| session.document_mut_for_test_fixture().sequences.active_mut())
+    }
+
+    /// Canonical Sequence collection.
+    pub fn sequences(&self) -> &[Sequence] {
+        self.authoring
+            .as_ref()
+            .map(|session| session.document().sequences.sequences.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// Active Sequence identity.
+    pub fn active_sequence_id(&self) -> Option<SequenceId> {
+        self.authoring
+            .as_ref()
+            .map(|session| session.document().sequences.active_sequence_id)
+    }
+
+    /// Default delivery Sequence identity.
+    pub fn default_sequence_id(&self) -> Option<SequenceId> {
+        self.authoring
+            .as_ref()
+            .map(|session| session.document().sequences.default_sequence_id)
+    }
+
+    /// Canonical project settings, or closed-project defaults for startup UI.
+    pub fn project_settings(&self) -> &ProjectSettings {
+        static CLOSED_PROJECT_SETTINGS: OnceLock<ProjectSettings> = OnceLock::new();
+        self.authoring
+            .as_ref()
+            .map(|session| &session.document().settings)
+            .unwrap_or_else(|| CLOSED_PROJECT_SETTINGS.get_or_init(ProjectSettings::default))
+    }
+
+    /// Current author generation used by execution snapshots and cache identity.
+    pub fn project_author_generation(&self) -> u64 {
+        self.authoring
+            .as_ref()
+            .map(|session| session.author_generation().get())
+            .unwrap_or(0)
+    }
+
+    /// Current project identity.
+    pub fn project_id(&self) -> Option<ProjectId> {
+        self.authoring.as_ref().map(AuthoringSession::project_id)
+    }
+
+    /// Current project file path.
+    pub fn current_project_path(&self) -> Option<&Path> {
+        self.authoring.as_ref().map(AuthoringSession::project_file)
+    }
+
+    /// Current project runtime root.
+    pub fn project_runtime_dir(&self) -> Option<&Path> {
+        self.authoring.as_ref().map(AuthoringSession::runtime_root)
+    }
+
+    /// Project asset-library authority.
+    pub fn asset_library(&self) -> Option<&AssetLibrary> {
+        self.authoring.as_ref().map(AuthoringSession::asset_library).map(Arc::as_ref)
+    }
+
+    /// Cloneable project asset-library handle for background Adapters.
+    pub fn asset_library_handle(&self) -> Option<Arc<AssetLibrary>> {
+        self.authoring.as_ref().map(AuthoringSession::asset_library).cloned()
+    }
+
+    /// Canonical proxy-mode asset identities.
+    pub fn proxy_mode_assets(&self) -> &BTreeSet<AssetId> {
+        static EMPTY: OnceLock<BTreeSet<AssetId>> = OnceLock::new();
+        self.authoring
+            .as_ref()
+            .map(|session| &session.document().proxy_mode_assets)
+            .unwrap_or_else(|| EMPTY.get_or_init(BTreeSet::new))
+    }
+
+    /// Project-wide bounded authoring history.
+    pub fn authoring_history(&self) -> Option<&mondrian_editor_state::AuthoringHistory> {
+        self.authoring.as_ref().map(AuthoringSession::history)
+    }
+
     pub(crate) fn request_proxy_generation(
         &self,
         asset_id: AssetId,
@@ -430,6 +500,230 @@ impl AppState {
         self.proxy_generation.request(asset_id, source_path, config, color, origin)
     }
 
+    #[cfg(test)]
+    fn test_fixture_root() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
+        let root = std::env::temp_dir().join(format!(
+            "mondrian-app-test-{}-{}",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(root.join("library")).expect("create test fixture root");
+        root
+    }
+
+    #[cfg(test)]
+    fn test_default_authoring_session() -> AuthoringSession {
+        let root = Self::test_fixture_root();
+        let library = AssetLibrary::open(root.join("library")).expect("open test asset library");
+        let sequence = Sequence::new("__mondrian_test_fixture__");
+        let document = mondrian_project::ProjectDocument::new(
+            "Test Project",
+            SequenceCollection::new(sequence),
+            ProjectSettings::default(),
+        );
+        AuthoringSession::new_unsaved(document, root.join("project.mdp"), root, library)
+            .expect("create test authoring session")
+    }
+
+    #[cfg(test)]
+    fn test_ensure_authoring(&mut self) -> &mut AuthoringSession {
+        if self.authoring.is_none() {
+            self.authoring = Some(Self::test_default_authoring_session());
+        }
+        self.authoring.as_mut().expect("test authoring session")
+    }
+
+    #[cfg(test)]
+    fn test_normalize_sequence(mut sequence: Sequence) -> Sequence {
+        let mut scopes = Vec::new();
+        for track in &mut sequence.audio_tracks {
+            for clip in &mut track.clips {
+                if clip.audio_components.is_empty() {
+                    let scope = mondrian_timeline::audio::AudioProcessingScope::identity();
+                    clip.audio_components.push(
+                        mondrian_timeline::audio::AudioComponentEdit::media(
+                            AudioSourceComponentId::primary(),
+                            scope.id,
+                        ),
+                    );
+                    scopes.push(scope);
+                }
+            }
+        }
+        for scope in scopes {
+            sequence.audio_program.add_processing_scope(scope);
+        }
+        sequence
+    }
+    /// Install or replace the active Sequence through the canonical Project document.
+    #[cfg(test)]
+    pub(crate) fn test_set_sequence(&mut self, sequence: Option<Sequence>) {
+        let Some(sequence) = sequence else {
+            self.authoring = None;
+            return;
+        };
+        let sequence = Self::test_normalize_sequence(sequence);
+        let session = self.test_ensure_authoring();
+        let document = session.document_mut_for_test_fixture();
+        let previous_active = document.sequences.active_sequence_id;
+        document.sequences.sequences.retain(|candidate| {
+            candidate.id != sequence.id
+                && candidate.id != previous_active
+                && candidate.name != "__mondrian_test_fixture__"
+        });
+        let sequence_id = sequence.id;
+        document.sequences.sequences.push(sequence);
+        if document.sequences.default_sequence_id == previous_active
+            || document.sequences.sequence(document.sequences.default_sequence_id).is_none()
+        {
+            document.sequences.default_sequence_id = sequence_id;
+        }
+        document.sequences.active_sequence_id = sequence_id;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_add_sequence(&mut self, sequence: Sequence) {
+        let sequence = Self::test_normalize_sequence(sequence);
+        let session = self.test_ensure_authoring();
+        let document = session.document_mut_for_test_fixture();
+        if document.sequences.sequence(sequence.id).is_none() {
+            document.sequences.sequences.push(sequence);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_sequences(&mut self, sequences: Vec<Sequence>) {
+        let mut sequences =
+            sequences.into_iter().map(Self::test_normalize_sequence).collect::<Vec<_>>();
+        let session = self.test_ensure_authoring();
+        let document = session.document_mut_for_test_fixture();
+        if let Some(active) = document.sequences.active().cloned() {
+            if active.name != "__mondrian_test_fixture__"
+                && sequences.iter().all(|sequence| sequence.id != active.id)
+            {
+                sequences.push(active);
+            }
+        }
+        assert!(
+            !sequences.is_empty(),
+            "test Sequence collection cannot be empty"
+        );
+        let fallback = sequences[0].id;
+        document.sequences.sequences = sequences;
+        if document.sequences.sequence(document.sequences.active_sequence_id).is_none() {
+            document.sequences.active_sequence_id = fallback;
+        }
+        if document.sequences.sequence(document.sequences.default_sequence_id).is_none() {
+            document.sequences.default_sequence_id = fallback;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_active_sequence(&mut self, sequence_id: SequenceId) {
+        let session = self.test_ensure_authoring();
+        if session.document().sequences.sequence(sequence_id).is_some() {
+            session.document_mut_for_test_fixture().sequences.active_sequence_id = sequence_id;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_default_sequence(&mut self, sequence_id: SequenceId) {
+        let session = self.test_ensure_authoring();
+        if session.document().sequences.sequence(sequence_id).is_some() {
+            session.document_mut_for_test_fixture().sequences.default_sequence_id = sequence_id;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_navigation_stack(&mut self, stack: Vec<SequenceId>) {
+        let session = self.test_ensure_authoring();
+        let target = session.document().sequences.active_sequence_id;
+        if let Some(first) = stack.first().copied() {
+            session
+                .switch_active_sequence(first, false)
+                .expect("valid test navigation Sequence");
+            for sequence_id in stack.iter().copied().skip(1) {
+                session
+                    .switch_active_sequence(sequence_id, true)
+                    .expect("valid test navigation Sequence");
+            }
+            session
+                .switch_active_sequence(target, true)
+                .expect("restore test active Sequence");
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_navigation_stack(&self) -> &[SequenceId] {
+        self.authoring
+            .as_ref()
+            .map(AuthoringSession::navigation_stack)
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_asset_library(&mut self, library: Option<Arc<AssetLibrary>>) {
+        let Some(library) = library else {
+            self.authoring = None;
+            return;
+        };
+        let existing = self.authoring.take();
+        let (document, project_file, runtime_root) = existing
+            .as_ref()
+            .map(|session| {
+                (
+                    session.document().clone(),
+                    session.project_file().to_path_buf(),
+                    session.runtime_root().to_path_buf(),
+                )
+            })
+            .unwrap_or_else(|| {
+                let root = Self::test_fixture_root();
+                let sequence = Sequence::new("__mondrian_test_fixture__");
+                (
+                    mondrian_project::ProjectDocument::new(
+                        "Test Project",
+                        SequenceCollection::new(sequence),
+                        ProjectSettings::default(),
+                    ),
+                    root.join("project.mdp"),
+                    root,
+                )
+            });
+        self.authoring = Some(
+            AuthoringSession::open_saved(document, project_file, runtime_root, library)
+                .expect("replace test asset library"),
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_project_path(&mut self, project_file: PathBuf) {
+        let existing = self.authoring.take().unwrap_or_else(Self::test_default_authoring_session);
+        let document = existing.document().clone();
+        let runtime_root = existing.runtime_root().to_path_buf();
+        let library = existing.asset_library().clone();
+        self.authoring = Some(
+            AuthoringSession::open_saved(document, project_file, runtime_root, library)
+                .expect("replace test project path"),
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_advance_project_generation(&mut self) {
+        let session = self.test_ensure_authoring();
+        let before = session.document().clone();
+        let mut after = before.clone();
+        after.meta.description.push('x');
+        session
+            .commit_project_snapshot("advance test generation", before, after)
+            .expect("advance test author generation");
+    }
+    #[cfg(test)]
+    pub(crate) fn test_project_settings_mut(&mut self) -> &mut ProjectSettings {
+        &mut self.test_ensure_authoring().document_mut_for_test_fixture().settings
+    }
     /// Observe completed/canceled proxy work for background UI refresh.
     pub fn poll_proxy_generation(&mut self) -> bool {
         if !self.proxy_generation.poll_finished() {
@@ -455,30 +749,32 @@ impl AppState {
 
     /// Whether newly imported video media should enter proxy playback and start proxy generation.
     pub fn should_auto_generate_proxy_for_import(&self) -> bool {
-        self.project_settings.proxy_enabled
+        self.project_settings().proxy_enabled
     }
 
     /// Resolve project proxy settings into the media-layer proxy generator config.
     pub fn proxy_config(&self) -> mondrian_media::ProxyConfig {
         let mut config = mondrian_media::ProxyConfig {
-            resolution: proxy_resolution_from_project(self.project_settings.proxy_resolution),
+            resolution: proxy_resolution_from_project(self.project_settings().proxy_resolution),
             ..mondrian_media::ProxyConfig::default()
         };
-        if let Some(cache_dir) = self.project_settings.cache_dir.as_ref() {
+        if let Some(cache_dir) = self.project_settings().cache_dir.as_ref() {
             config.cache_dir = cache_dir.join("proxy");
         }
         config
     }
 
     pub fn is_asset_proxy_mode(&self, asset_id: AssetId) -> bool {
-        self.proxy_mode_assets.contains(&asset_id)
+        self.authoring
+            .as_ref()
+            .is_some_and(|session| session.is_asset_proxy_mode(asset_id))
     }
 
     pub fn set_asset_proxy_mode(&mut self, asset_id: AssetId, enabled: bool) {
-        if enabled {
-            self.proxy_mode_assets.insert(asset_id);
-        } else {
-            self.proxy_mode_assets.remove(&asset_id);
+        if let Some(session) = self.authoring.as_mut() {
+            if let Err(error) = session.set_asset_proxy_mode(asset_id, enabled) {
+                self.set_status_hint(format!("切换代理模式失败：{error}"), true);
+            }
         }
     }
 }
@@ -546,29 +842,6 @@ mod status_log_tests {
     }
 }
 
-fn ui_diag_enabled() -> bool {
-    static UI_DIAG: OnceLock<bool> = OnceLock::new();
-    *UI_DIAG.get_or_init(|| {
-        std::env::var("MONDRIAN_UI_DIAG")
-            .map(|v| {
-                let value = v.trim().to_ascii_lowercase();
-                matches!(value.as_str(), "1" | "true" | "yes" | "on")
-            })
-            .unwrap_or(false)
-    })
-}
-
-fn ui_diag_slow_threshold_ms() -> u64 {
-    static THRESHOLD: OnceLock<u64> = OnceLock::new();
-    *THRESHOLD.get_or_init(|| {
-        std::env::var("MONDRIAN_UI_DIAG_SLOW_MS")
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(30)
-    })
-}
-
 fn audio_idle_warmup_enabled() -> bool {
     static AUDIO_IDLE_WARMUP: OnceLock<bool> = OnceLock::new();
     *AUDIO_IDLE_WARMUP.get_or_init(|| {
@@ -604,18 +877,6 @@ fn ensure_project_extension(path: PathBuf) -> PathBuf {
     } else {
         path.with_extension(PROJECT_EXTENSION)
     }
-}
-
-fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let json = serde_json::to_vec_pretty(value)?;
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, json)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
 }
 
 fn unix_now_ms() -> u64 {

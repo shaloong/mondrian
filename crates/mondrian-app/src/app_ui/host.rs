@@ -123,7 +123,7 @@ impl AppUiHost {
         let asset_thumbnails = AssetThumbnailAdapter::new();
         asset_thumbnails.set_color_context(thumbnail_color_context(&app_state));
         let waveform_service = AudioWaveformService::new();
-        waveform_service.set_library(app_state.asset_library.clone());
+        waveform_service.set_library(app_state.asset_library_handle());
         let preview_service = WindowPreviewAdapter::new();
         let root = AppUiAppRoot::from_app_state_with_preferences_thumbnails_and_preview(
             &app_state,
@@ -222,8 +222,8 @@ impl AppUiHost {
         mondrian_core::color_models::DisplayManagementPolicy,
     ) {
         let state = self.app_state.borrow();
-        let project_cm = &state.project_settings.color_management;
-        if let Some(sequence) = &state.sequence {
+        let project_cm = &state.project_settings().color_management;
+        if let Some(sequence) = state.active_sequence() {
             if sequence.settings.color_management.inherit {
                 (
                     project_cm.engine.clone(),
@@ -406,7 +406,23 @@ impl AppUiHost {
     pub fn poll_background_tasks(&mut self, bounds: Rect) -> bool {
         // Keep the waveform service's library reference in sync with the
         // current app state (e.g. when a new project opens).
-        self.waveform_service.set_library(self.app_state.borrow().asset_library.clone());
+        self.waveform_service
+            .set_library(self.app_state.borrow().asset_library_handle());
+        let project_path_before_persistence =
+            self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
+        let persistence_changed = self.app_state.borrow_mut().poll_project_persistence();
+        if persistence_changed {
+            let project_path_after_persistence =
+                self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
+            if project_path_after_persistence.is_some()
+                && project_path_after_persistence != project_path_before_persistence
+            {
+                if let Some(path) = project_path_after_persistence {
+                    self.record_recent_project(path);
+                }
+                self.refresh_recovery_candidates();
+            }
+        }
         let media_imports_changed = self.app_state.borrow_mut().poll_media_imports();
         let proxy_generation_changed = self.app_state.borrow_mut().poll_proxy_generation();
         let export_queue_changed = self.app_state.borrow_mut().poll_export_queue();
@@ -421,7 +437,8 @@ impl AppUiHost {
         if preview_outcome.visible_change {
             self.preview_dirty.set(true);
         }
-        let full_model_changed = media_imports_changed
+        let full_model_changed = persistence_changed
+            || media_imports_changed
             || proxy_generation_changed
             || export_queue_changed
             || thumbnails_changed
@@ -565,7 +582,8 @@ impl AppUiHost {
             }
 
             let workspace_before = self.root.workspace_preset();
-            let current_project_path = self.app_state.borrow().current_project_path.clone();
+            let current_project_path =
+                self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
             let action = match self.root.try_handle_shell_action(
                 action,
                 platform,
@@ -745,11 +763,13 @@ impl AppUiHost {
     }
 
     fn dispatch_editor_action(&mut self, action: Action) -> mondrian_core::Result<()> {
-        let previous_project_path = self.app_state.borrow().current_project_path.clone();
+        let previous_project_path =
+            self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
         let previous_status_hint = self.app_state.borrow().status_hint.clone();
         let result = self.app_state.borrow_mut().dispatch_action(action);
         if result.is_ok() {
-            let current_project_path = self.app_state.borrow().current_project_path.clone();
+            let current_project_path =
+                self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
             if current_project_path.is_some() && current_project_path != previous_project_path {
                 if let Some(path) = current_project_path {
                     self.record_recent_project(path);
@@ -926,8 +946,7 @@ impl AppUiHost {
         let exists = {
             let app_state = self.app_state.borrow();
             app_state
-                .asset_library
-                .as_ref()
+                .asset_library()
                 .and_then(|library| match library.list_folders() {
                     Ok(folders) => Some(folders.iter().any(|folder| folder.id == folder_id)),
                     Err(err) => {
@@ -1050,9 +1069,9 @@ impl AppUiHost {
 }
 
 fn thumbnail_color_context(state: &AppState) -> Option<mondrian_timeline::sequence::ColorContext> {
-    state.sequence.as_ref().map(|sequence| {
+    state.active_sequence().map(|sequence| {
         sequence.settings.root_preview_color_context(
-            &state.project_settings.color_management,
+            &state.project_settings().color_management,
             mondrian_core::types::ColorSpace::Srgb,
         )
     })
@@ -1582,11 +1601,9 @@ mod tests {
 
     fn workspace_app_state() -> AppState {
         let mut state = AppState::new();
-        state.sequence = Some(Sequence::new("Edit"));
-        state.project_id = Some(mondrian_core::ProjectId::new());
-        state.project_meta = Some(mondrian_core::ProjectMeta::new("Edit"));
-        state.project_document_revision = 1;
-        state.current_project_path = Some(PathBuf::from("E:/projects/edit.mdp"));
+        state.test_set_sequence(Some(Sequence::new("Edit")));
+        state.test_set_project_path(PathBuf::from("E:/projects/edit.mdp"));
+        state.test_advance_project_generation();
         state
     }
 
@@ -1613,6 +1630,25 @@ mod tests {
                 "timed out waiting for host background media import"
             );
             std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn poll_host_background_tasks_until(
+        host: &mut AppUiHost,
+        description: &str,
+        condition: impl Fn(&AppState) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if condition(&host.app_state()) {
+                return;
+            }
+            host.poll_background_tasks(Rect::new(0.0, 0.0, 1280.0, 720.0));
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {description}"
+            );
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 
@@ -1694,7 +1730,10 @@ mod tests {
                 mondrian_core::Rational::FPS_2997,
             )
             .expect("project should be created");
-        state.sequence.as_mut().expect("active sequence").name = "Changed".to_owned();
+        let sequence_id = state.active_sequence_id().expect("active Sequence");
+        state
+            .rename_sequence(sequence_id, "Changed")
+            .expect("rename through author transaction");
         state
     }
 
@@ -1888,7 +1927,7 @@ mod tests {
         assert!(!host.startup.has_modal());
         assert!(host.app_state().has_open_project());
         assert_eq!(
-            host.app_state().current_project_path.as_deref(),
+            host.app_state().current_project_path(),
             Some(project_file.as_path())
         );
         assert_eq!(
@@ -2147,7 +2186,7 @@ mod tests {
         assert_eq!(commands, AppUiShellCommands::default());
         assert_eq!(host.mode(), AppUiMode::Workspace);
         assert_eq!(
-            host.app_state().current_project_path.as_deref(),
+            host.app_state().current_project_path(),
             Some(project_file.as_path())
         );
         assert_eq!(
@@ -2193,7 +2232,7 @@ mod tests {
         assert_eq!(commands, AppUiShellCommands::default());
         assert_eq!(host.mode(), AppUiMode::Workspace);
         assert_eq!(
-            host.app_state().current_project_path.as_deref(),
+            host.app_state().current_project_path(),
             Some(project_file.as_path())
         );
         assert_eq!(
@@ -2209,7 +2248,11 @@ mod tests {
     fn host_save_project_action_clears_unsaved_fingerprint_delta() {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let mut host = AppUiHost::new(saved_workspace_app_state("save-project-action"));
-        let project_file = host.app_state().current_project_path.clone().expect("project path");
+        let project_file = host
+            .app_state()
+            .current_project_path()
+            .map(std::path::Path::to_path_buf)
+            .expect("project path");
         assert!(host.app_state().has_unsaved_project_changes());
         let pending = PendingUiActions::default();
 
@@ -2222,6 +2265,9 @@ mod tests {
 
         assert_eq!(commands, AppUiShellCommands::default());
         assert!(host.app_state().has_open_project());
+        poll_host_background_tasks_until(&mut host, "manual project save", |state| {
+            !state.has_unsaved_project_changes()
+        });
         assert!(!host.app_state().has_unsaved_project_changes());
 
         cleanup_project_file(&project_file);
@@ -2236,8 +2282,11 @@ mod tests {
             AppUiPreferences::default(),
             preferences_path.clone(),
         );
-        let source_file =
-            host.app_state().current_project_path.clone().expect("source project path");
+        let source_file = host
+            .app_state()
+            .current_project_path()
+            .map(std::path::Path::to_path_buf)
+            .expect("source project path");
         let target_file = temp_preferences_path("save-as-target").with_extension("mdp");
         let platform = ProjectDialogPlatform {
             open_paths: None,
@@ -2250,8 +2299,11 @@ mod tests {
             host.drain_pending_actions(&pending, Rect::new(0.0, 0.0, 1280.0, 720.0), &platform);
 
         assert_eq!(commands, AppUiShellCommands::default());
+        poll_host_background_tasks_until(&mut host, "Save As publication", |state| {
+            state.current_project_path() == Some(target_file.as_path())
+        });
         assert_eq!(
-            host.app_state().current_project_path.as_deref(),
+            host.app_state().current_project_path(),
             Some(target_file.as_path())
         );
         assert!(target_file.exists());
@@ -2273,7 +2325,7 @@ mod tests {
         autosave_state
             .open_project_file(project_file.clone())
             .expect("project should open for autosave");
-        autosave_state.sequence.as_mut().expect("active sequence").name =
+        autosave_state.active_sequence_mut_uncommitted().expect("active sequence").name =
             "Recovered Edit".to_owned();
         let autosave_file = autosave_state
             .write_autosave_snapshot(2, 7)
@@ -2307,11 +2359,11 @@ mod tests {
             host.app_state().status_hint
         );
         assert_eq!(
-            host.app_state().current_project_path.as_deref(),
+            host.app_state().current_project_path(),
             Some(project_file.as_path())
         );
         assert_eq!(
-            host.app_state().sequence.as_ref().map(|sequence| sequence.name.as_str()),
+            host.app_state().active_sequence().map(|sequence| sequence.name.as_str()),
             Some("Recovered Edit")
         );
         assert_eq!(
@@ -3018,6 +3070,7 @@ mod tests {
     fn host_ignores_unavailable_typed_timeline_actions_before_dispatch() {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let mut host = AppUiHost::new(workspace_app_state());
+        let could_undo_before = host.app_state().can_undo_action();
         let pending = PendingUiActions::default();
 
         pending.push(crate::app::ui_actions::timeline_move_clip_action(
@@ -3036,7 +3089,7 @@ mod tests {
 
         assert_eq!(commands, AppUiShellCommands::default());
         assert!(host.app_state().status_hint.is_none());
-        assert!(!host.app_state().can_undo_action());
+        assert_eq!(host.app_state().can_undo_action(), could_undo_before);
     }
 
     #[test]
@@ -3066,7 +3119,7 @@ mod tests {
         let library = AssetLibrary::open(library_root.clone()).expect("open asset library");
         let folder_id = library.create_folder("Rushes", None).expect("create folder");
         let mut state = workspace_app_state();
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
         let mut host = AppUiHost::new(state);
         let pending = PendingUiActions::default();
         let platform = ProjectDialogPlatform {
@@ -3096,8 +3149,7 @@ mod tests {
 
         let assets = host
             .app_state()
-            .asset_library
-            .as_ref()
+            .asset_library()
             .expect("library")
             .list_assets()
             .expect("list assets");
@@ -3121,7 +3173,7 @@ mod tests {
         let library = AssetLibrary::open(root.clone()).expect("open asset library");
         let folder_id = library.create_folder("Rushes", None).expect("create folder");
         let mut state = AppState::new();
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
         let mut host = AppUiHost::new(state);
         let pending = PendingUiActions::default();
 
@@ -3160,7 +3212,7 @@ mod tests {
         let library = AssetLibrary::open(root.clone()).expect("open asset library");
         let folder_id = library.create_folder("Rushes", None).expect("create folder");
         let mut state = workspace_app_state();
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
         let mut host = AppUiHost::new(state);
         let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
 
@@ -3170,8 +3222,7 @@ mod tests {
         assert_eq!(host.root().asset_folder_id(), Some(folder_id.as_str()));
 
         host.app_state()
-            .asset_library
-            .as_ref()
+            .asset_library()
             .expect("library")
             .delete_folder(&folder_id)
             .expect("delete folder");
@@ -3190,7 +3241,7 @@ mod tests {
         let library = AssetLibrary::open(root.clone()).expect("open asset library");
         let folder_id = library.create_folder("Rushes", None).expect("create folder");
         let mut state = AppState::new();
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
         let mut host = AppUiHost::new(state);
         let pending = PendingUiActions::default();
 

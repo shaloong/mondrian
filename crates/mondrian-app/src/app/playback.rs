@@ -42,7 +42,7 @@ impl PlaybackAdvance {
 
 impl AppState {
     fn playback_time_base(&self) -> Rational {
-        self.sequence.as_ref().map(Sequence::time_base).unwrap_or(Rational::new(1, 25))
+        self.active_sequence().map(Sequence::time_base).unwrap_or(Rational::new(1, 25))
     }
 
     fn capture_playback_evidence(&mut self) {
@@ -391,15 +391,14 @@ impl AppState {
 
     fn prepare_audio_playback(&mut self, anchor: FramePosition) {
         let renderer = self
-            .sequence
-            .as_ref()
+            .active_sequence()
             .filter(|sequence| sequence_has_audible_audio(sequence))
-            .zip(self.asset_library.as_ref())
+            .zip(self.asset_library_handle())
             .and_then(|(sequence, library)| {
                 match TimelineAudioPcmRenderer::new(
                     sequence.clone(),
-                    self.sequences.clone(),
-                    Arc::clone(library),
+                    self.sequences().to_vec(),
+                    library,
                     Arc::clone(&self.audio_source_cache),
                     self.audio_sample_rate,
                     AUDIO_OUTPUT_LAYOUT,
@@ -437,10 +436,10 @@ impl AppState {
             }
         }
 
-        let Some(seq) = self.sequence.as_ref() else {
+        let Some(seq) = self.active_sequence() else {
             return;
         };
-        let Some(library) = self.asset_library.as_ref() else {
+        let Some(library) = self.asset_library_handle() else {
             return;
         };
 
@@ -469,8 +468,8 @@ impl AppState {
 
         let Ok(renderer) = TimelineAudioPcmRenderer::new(
             seq.clone(),
-            self.sequences.clone(),
-            Arc::clone(library),
+            self.sequences().to_vec(),
+            library,
             Arc::clone(&self.audio_source_cache),
             self.audio_sample_rate,
             AUDIO_OUTPUT_LAYOUT,
@@ -604,7 +603,7 @@ impl AppState {
     }
 
     pub fn current_timeline_time(&self) -> mondrian_core::Result<Option<TimelineTime>> {
-        let Some(sequence) = self.sequence.as_ref() else {
+        let Some(sequence) = self.active_sequence() else {
             return Ok(None);
         };
         Ok(Some(TimelineTime::from_frame_position(
@@ -806,9 +805,9 @@ impl AppState {
         end_frame: i64,
     ) -> Result<mondrian_playback::PlaybackTimelineBinding, mondrian_playback::PlaybackError> {
         let sequence_revision =
-            self.sequence.as_ref().map_or(0, |sequence| sequence.revision.get());
+            self.active_sequence().map_or(0, |sequence| sequence.revision.get());
         mondrian_playback::PlaybackTimelineBinding::new(
-            self.sequence.as_ref().map(|sequence| sequence.id),
+            self.active_sequence().map(|sequence| sequence.id),
             sequence_revision,
             self.playback_time_base(),
             end_frame,
@@ -816,7 +815,7 @@ impl AppState {
     }
 
     pub fn in_point_frame(&self) -> mondrian_core::Result<i64> {
-        let Some(sequence) = self.sequence.as_ref() else {
+        let Some(sequence) = self.active_sequence() else {
             return Ok(0);
         };
         Ok(sequence
@@ -826,7 +825,7 @@ impl AppState {
     }
 
     pub fn out_point_frame(&self) -> mondrian_core::Result<Option<i64>> {
-        let Some(sequence) = self.sequence.as_ref() else {
+        let Some(sequence) = self.active_sequence() else {
             return Ok(None);
         };
         sequence
@@ -958,10 +957,10 @@ mod tests {
         )
         .expect("valid clip");
         sequence.video_tracks[0].add_clip(clip).expect("add clip");
-        state.active_sequence_id = Some(sequence.id);
-        state.default_sequence_id = Some(sequence.id);
-        state.sequences = vec![sequence.clone()];
-        state.sequence = Some(sequence);
+        state.test_set_active_sequence(sequence.id);
+        state.test_set_default_sequence(sequence.id);
+        state.test_set_sequences(vec![sequence.clone()]);
+        state.test_set_sequence(Some(sequence));
         state
     }
 
@@ -975,8 +974,8 @@ mod tests {
     fn play_binds_timeline_and_starts_one_epoch() {
         let mut state = state_with_sequence(20);
         let before = state.playback_engine.snapshot().epoch;
-        state.project_document_revision = 91;
-        let sequence_revision = state.sequence.as_ref().expect("sequence").revision.get();
+        state.test_advance_project_generation();
+        let sequence_revision = state.active_sequence().expect("sequence").revision.get();
 
         state.play();
 

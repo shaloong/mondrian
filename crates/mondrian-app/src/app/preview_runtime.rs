@@ -401,7 +401,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.observe_transport_activity(state.is_playing());
         self.execution.borrow_mut().set_pending(false);
         self.last_color_rejection.replace(None);
-        let Some(sequence) = state.sequence.as_ref() else {
+        let Some(sequence) = state.active_sequence() else {
             self.invalidate_preview_generation();
             self.scheduler.prune_obsolete();
             return self.unavailable_gpu_candidate(PreviewUnavailability::no_content(
@@ -414,7 +414,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let display_snapshot = self.display_snapshot.borrow();
         let display_color_space = match preview_display_color_space(
             sequence,
-            &state.project_settings.color_management,
+            &state.project_settings().color_management,
             display_snapshot.as_ref(),
         ) {
             Ok(color_space) => color_space,
@@ -429,7 +429,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         };
         let color_context = sequence
             .settings
-            .root_program_color_context(&state.project_settings.color_management);
+            .root_program_color_context(&state.project_settings().color_management);
         let Some(program_output_color_space) = color_context.output_color_space.color() else {
             self.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
                 feature: "program_output_identity".to_owned(),
@@ -785,7 +785,7 @@ impl ViewerPreviewGenerationKey {
         Self {
             sequence_id: sequence.id,
             sequence_revision: sequence.revision,
-            project_document_revision: state.project_document_revision,
+            project_document_revision: state.project_author_generation(),
             ocio_config_generation: mondrian_core::ocio_config_generation(),
             display_contract_generation,
             playback_epoch: playing.then(|| state.playback_epoch()),

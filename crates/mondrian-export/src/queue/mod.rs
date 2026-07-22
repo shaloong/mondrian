@@ -2325,7 +2325,7 @@ fn collect_sequence_asset_ids(
                 continue;
             }
             if clip.is_nested_sequence() {
-                let Some(nested_sequence_id) = clip.nested_sequence_id else {
+                let Some(nested_sequence_id) = clip.nested_sequence_id() else {
                     continue;
                 };
                 let Some(nested_sequence) =
@@ -2336,7 +2336,9 @@ fn collect_sequence_asset_ids(
                 collect_sequence_asset_ids(timeline, nested_sequence, depth + 1, asset_ids);
                 continue;
             }
-            asset_ids.insert(clip.asset_id);
+            if let Some(asset_id) = clip.asset_id() {
+                asset_ids.insert(asset_id);
+            }
         }
     }
 }

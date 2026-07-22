@@ -1,10 +1,7 @@
-//! Action 派发 —— 桥接 Action 枚举与现有 AppState 方法
+//! Semantic Action adapter for the application composition root.
 //!
-//! Stage A 阶段，将 `Action` 映射到 `AppState` 已有的操作方法。
-//! 这是过渡方案：后续 Stage 中 `EditorState` 会取代 `AppState` 成为唯一的 dispatch 目标。
-//!
-//! 当前版本的 action_handler 以最简方式实现：只对已确定存在的方法做桥接，
-//! 其余 Action 记录日志后忽略。每个 Stage 逐步增加映射。
+//! UI intent is routed to the owning domain Interface. Project mutations go
+//! through `AuthoringSession`; transport intent goes through `PlaybackEngine`.
 
 use crate::app::exporting::TimelineExportRequest;
 use crate::app::preview_quality::normalize_preview_resolution_scale;
@@ -13,7 +10,7 @@ use crate::app::proxy_generation::{
 };
 use crate::app::selection::resolve_track_selection;
 use crate::app::timeline_editing::{
-    find_clip, find_clip_mut, find_clip_track_lock, set_clip_disabled,
+    clip_link_group_member_ids, find_clip, find_clip_mut, find_clip_track_lock, set_clip_disabled,
 };
 use crate::app::ui_actions::{
     AssetsCreateAssetPayload, AssetsCreateFolderPayload, AssetsDeleteAssetPayload,
@@ -181,7 +178,8 @@ impl AppState {
             // ── 项目操作 ──────────────────────────────────────────────────
             Action::OpenProject(path) => self.open_project_from_action(path),
             Action::SaveProject => {
-                self.save_project().map_err(mondrian_core::MondrianError::Other)?;
+                self.request_project_save().map_err(mondrian_core::MondrianError::Other)?;
+                self.set_status_hint("正在后台保存项目…", false);
                 Ok(())
             }
             Action::SaveProjectAs(path) => self.save_project_as_from_action(path),
@@ -265,12 +263,12 @@ impl AppState {
             });
         }
         let display_path = super::ensure_project_extension(path.clone());
-        self.save_project_file_as(path).map_err(|err| {
+        self.request_project_save_as(path).map_err(|err| {
             let reason = err.to_string();
-            self.set_status_hint(format!("另存为失败：{reason}"), true);
+            self.set_status_hint(format!("无法启动另存为：{reason}"), true);
             MondrianError::WorkflowStepFailed { step_id: "save_project_as".to_string(), reason }
         })?;
-        self.set_status_hint(format!("项目已另存为：{}", display_path.display()), false);
+        self.set_status_hint(format!("正在后台另存为：{}", display_path.display()), false);
         Ok(())
     }
 
@@ -343,7 +341,7 @@ impl AppState {
             return Ok(());
         }
 
-        let library = self.asset_library.clone().ok_or_else(|| {
+        let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("导入失败：{reason}"), true);
             MondrianError::WorkflowStepFailed { step_id: "import_media".to_string(), reason }
@@ -365,7 +363,7 @@ impl AppState {
     }
 
     fn delete_asset_from_ui(&mut self, payload: AssetsDeleteAssetPayload) -> Result<()> {
-        let library = self.asset_library.clone().ok_or_else(|| {
+        let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("删除素材失败：{reason}"), true);
             MondrianError::WorkflowStepFailed { step_id: "delete_asset".to_string(), reason }
@@ -385,7 +383,7 @@ impl AppState {
     }
 
     fn relink_asset_from_ui(&mut self, payload: AssetsRelinkAssetPayload) -> Result<()> {
-        let library = self.asset_library.clone().ok_or_else(|| {
+        let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("重新链接素材失败：{reason}"), true);
             MondrianError::WorkflowStepFailed { step_id: "relink_asset".to_string(), reason }
@@ -412,7 +410,7 @@ impl AppState {
         &mut self,
         payload: AssetsRefreshAudioComponentsPayload,
     ) -> Result<()> {
-        let library = self.asset_library.clone().ok_or_else(|| {
+        let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("音频 Component 探测失败：{reason}"), true);
             MondrianError::WorkflowStepFailed {
@@ -434,7 +432,6 @@ impl AppState {
         })?;
         self.refresh_audio_playback_after_authoring_change();
         self.event_bus.publish(AppEvent::AssetLibraryReloaded);
-        let _ = self.save_project_file();
         self.set_status_hint(format!("已刷新 {asset_name} 的音频流候选"), false);
         Ok(())
     }
@@ -443,7 +440,7 @@ impl AppState {
         &mut self,
         payload: AssetsRebindAudioComponentPayload,
     ) -> Result<()> {
-        let library = self.asset_library.clone().ok_or_else(|| {
+        let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("音频 Component 重绑定失败：{reason}"), true);
             MondrianError::WorkflowStepFailed {
@@ -467,7 +464,6 @@ impl AppState {
             })?;
         self.refresh_audio_playback_after_authoring_change();
         self.event_bus.publish(AppEvent::AssetLibraryReloaded);
-        let _ = self.save_project_file();
         self.set_status_hint(
             format!(
                 "已将 {asset_name} 的音频 Component 映射到流 #{}",
@@ -479,7 +475,7 @@ impl AppState {
     }
 
     fn rename_asset_from_ui(&mut self, payload: AssetsRenameAssetPayload) -> Result<()> {
-        let library = self.asset_library.clone().ok_or_else(|| {
+        let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("重命名素材失败：{reason}"), true);
             MondrianError::WorkflowStepFailed { step_id: "rename_asset".to_string(), reason }
@@ -490,7 +486,6 @@ impl AppState {
             MondrianError::WorkflowStepFailed { step_id: "rename_asset".to_string(), reason }
         })?;
         self.event_bus.publish(mondrian_core::events::AppEvent::AssetLibraryReloaded);
-        let _ = self.save_project_file();
         self.set_status_hint(format!("已重命名素材：{}", payload.name.trim()), false);
         Ok(())
     }
@@ -499,7 +494,7 @@ impl AppState {
         &mut self,
         payload: AssetsSetInterpretationPayload,
     ) -> Result<()> {
-        let library = self.asset_library.clone().ok_or_else(|| {
+        let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("解释素材失败：{reason}"), true);
             MondrianError::WorkflowStepFailed {
@@ -522,13 +517,12 @@ impl AppState {
                 }
             })?;
         self.event_bus.publish(AppEvent::AssetLibraryReloaded);
-        let _ = self.save_project_file();
         self.set_status_hint(format!("已更新素材解释：{asset_name}"), false);
         Ok(())
     }
 
     fn rename_folder_from_ui(&mut self, payload: AssetsRenameFolderPayload) -> Result<()> {
-        let library = self.asset_library.clone().ok_or_else(|| {
+        let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("重命名文件夹失败：{reason}"), true);
             MondrianError::WorkflowStepFailed { step_id: "rename_folder".to_string(), reason }
@@ -539,13 +533,12 @@ impl AppState {
             MondrianError::WorkflowStepFailed { step_id: "rename_folder".to_string(), reason }
         })?;
         self.event_bus.publish(mondrian_core::events::AppEvent::AssetLibraryReloaded);
-        let _ = self.save_project_file();
         self.set_status_hint(format!("已重命名文件夹：{}", payload.name.trim()), false);
         Ok(())
     }
 
     fn set_asset_proxy_mode_from_ui(&mut self, payload: AssetsSetProxyModePayload) -> Result<()> {
-        let library = self.asset_library.clone().ok_or_else(|| {
+        let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("设置代理模式失败：{reason}"), true);
             MondrianError::WorkflowStepFailed {
@@ -577,7 +570,7 @@ impl AppState {
                 reason,
             });
         }
-        if payload.enabled && !self.project_settings.proxy_enabled {
+        if payload.enabled && !self.project_settings().proxy_enabled {
             let reason = "项目已禁用代理工作流，请先在项目设置中启用代理".to_string();
             self.set_status_hint(format!("设置代理模式失败：{reason}"), true);
             return Err(MondrianError::WorkflowStepFailed {
@@ -637,13 +630,12 @@ impl AppState {
             }
         }
         self.set_asset_proxy_mode(payload.asset_id, payload.enabled);
-        let _ = self.save_project_file();
         self.set_status_hint(status, false);
         Ok(())
     }
 
     fn delete_folder_from_ui(&mut self, payload: AssetsDeleteFolderPayload) -> Result<()> {
-        let library = self.asset_library.clone().ok_or_else(|| {
+        let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("删除文件夹失败：{reason}"), true);
             MondrianError::WorkflowStepFailed { step_id: "delete_folder".to_string(), reason }
@@ -668,7 +660,7 @@ impl AppState {
         &mut self,
         payload: AssetsDeleteSelectionPayload,
     ) -> Result<()> {
-        let library = self.asset_library.clone().ok_or_else(|| {
+        let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("删除素材选择失败：{reason}"), true);
             MondrianError::WorkflowStepFailed {
@@ -716,7 +708,6 @@ impl AppState {
             return Ok(());
         }
         self.event_bus.publish(mondrian_core::events::AppEvent::AssetLibraryReloaded);
-        let _ = self.save_project_file();
         self.set_status_hint(
             format!("已删除 {deleted_assets} 个素材、{deleted_folders} 个文件夹"),
             false,
@@ -725,7 +716,7 @@ impl AppState {
     }
 
     fn move_asset_from_ui(&mut self, payload: AssetsMoveAssetPayload) -> Result<()> {
-        let library = self.asset_library.clone().ok_or_else(|| {
+        let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("移动素材失败：{reason}"), true);
             MondrianError::WorkflowStepFailed { step_id: "move_asset".to_string(), reason }
@@ -755,7 +746,7 @@ impl AppState {
     }
 
     fn move_folder_from_ui(&mut self, payload: AssetsMoveFolderPayload) -> Result<()> {
-        let library = self.asset_library.clone().ok_or_else(|| {
+        let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("移动文件夹失败：{reason}"), true);
             MondrianError::WorkflowStepFailed { step_id: "move_folder".to_string(), reason }
@@ -789,7 +780,7 @@ impl AppState {
     }
 
     fn move_selection_from_ui(&mut self, payload: AssetsMoveSelectionPayload) -> Result<()> {
-        let library = self.asset_library.clone().ok_or_else(|| {
+        let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("移动素材选择失败：{reason}"), true);
             MondrianError::WorkflowStepFailed {
@@ -858,7 +849,6 @@ impl AppState {
             return Ok(());
         }
         self.event_bus.publish(mondrian_core::events::AppEvent::AssetLibraryReloaded);
-        let _ = self.save_project_file();
         self.set_status_hint(
             format!("已移动 {moved_assets} 个素材、{moved_folders} 个文件夹 → {target_name}"),
             false,
@@ -925,7 +915,7 @@ impl AppState {
         source_time: FramePosition,
     ) -> Result<()> {
         let target_frame = {
-            let Some(seq) = self.sequence.as_ref() else {
+            let Some(seq) = self.active_sequence() else {
                 return Err(missing_sequence_error("trim_clip_source"));
             };
             let clip = find_clip(seq, clip_id)
@@ -940,7 +930,7 @@ impl AppState {
         step_id: &'static str,
         clip_id: ClipId,
     ) -> Result<(mondrian_core::types::TrackId, bool, i64)> {
-        let Some(seq) = self.sequence.as_ref() else {
+        let Some(seq) = self.active_sequence() else {
             return Err(missing_sequence_error(step_id));
         };
         let (track_id, is_video_track, _) = find_clip_track_lock(seq, clip_id)
@@ -960,7 +950,7 @@ impl AppState {
         clip_id: ClipId,
         frame: i64,
     ) -> Result<()> {
-        let Some(seq) = self.sequence.as_ref() else {
+        let Some(seq) = self.active_sequence() else {
             return Err(missing_sequence_error("move_clip"));
         };
         let (current_track_id, current_is_video_track, current_frame) =
@@ -975,8 +965,7 @@ impl AppState {
             return Ok(());
         }
 
-        let linked_clip_id = find_clip(seq, clip_id).and_then(|clip| clip.linked_clip);
-        let before = seq.clone();
+        let linked_clip_ids = clip_link_group_member_ids(seq, clip_id);
         self.move_clip_to_track_with_mode(
             target_track_id,
             is_video_track,
@@ -984,12 +973,7 @@ impl AppState {
             frame,
             ClipOverlapMode::Overwrite,
         )?;
-        if let Some(linked_clip_id) = linked_clip_id {
-            self.refresh_selected_clip_locations(&[clip_id, linked_clip_id]);
-        } else {
-            self.refresh_selected_clip_locations(&[clip_id]);
-        }
-        self.record_timeline_edit_snapshot("移动片段", before)?;
+        self.refresh_selected_clip_locations(&linked_clip_ids);
         Ok(())
     }
 
@@ -1046,7 +1030,7 @@ impl AppState {
     }
 
     fn select_clip_for_action(&mut self, step_id: &'static str, clip_id: ClipId) -> Result<()> {
-        if self.sequence.is_none() {
+        if self.active_sequence().is_none() {
             return Err(missing_sequence_error(step_id));
         }
         self.select_clip_by_id(clip_id)
@@ -1060,7 +1044,7 @@ impl AppState {
         clip_id: ClipId,
         effect_id: EffectId,
     ) -> Result<()> {
-        if self.sequence.is_none() {
+        if self.active_sequence().is_none() {
             return Err(missing_sequence_error(step_id));
         }
         self.select_effect_by_id(clip_id, effect_id)
@@ -1096,7 +1080,7 @@ impl AppState {
             return Ok(());
         }
 
-        let Some(seq) = self.sequence.as_ref() else {
+        let Some(seq) = self.active_sequence() else {
             return Err(missing_sequence_error("delete_selected_tracks"));
         };
         let tracks = track_ids
@@ -1114,11 +1098,11 @@ impl AppState {
     }
 
     pub fn can_undo_action(&self) -> bool {
-        self.cmd_history.can_undo()
+        self.authoring_history().is_some_and(|history| history.can_undo())
     }
 
     pub fn can_redo_action(&self) -> bool {
-        self.cmd_history.can_redo()
+        self.authoring_history().is_some_and(|history| history.can_redo())
     }
 
     fn dispatch_timeline_ui_action(
@@ -1680,7 +1664,7 @@ impl AppState {
             }
             SEQUENCE_SET_ACTIVE_DEFAULT => {
                 let sequence_id =
-                    self.active_sequence_id.ok_or_else(|| MondrianError::WorkflowStepFailed {
+                    self.active_sequence_id().ok_or_else(|| MondrianError::WorkflowStepFailed {
                         step_id: "sequence_ui_action".to_owned(),
                         reason: "当前没有活动序列".to_owned(),
                     })?;
@@ -1726,21 +1710,21 @@ impl AppState {
 
     fn set_preview_resolution_scale_from_ui(&mut self, scale: f32) -> Result<()> {
         let scale = normalize_preview_resolution_scale(scale);
-        self.sync_current_sequence_into_collection();
+
         let sequence_id = self
-            .active_sequence_id
-            .or_else(|| self.sequence.as_ref().map(|sequence| sequence.id))
+            .active_sequence_id()
+            .or_else(|| self.active_sequence().map(|sequence| sequence.id))
             .ok_or_else(|| MondrianError::WorkflowStepFailed {
                 step_id: "viewer_ui_action".to_string(),
                 reason: "当前无序列".to_string(),
             })?;
         let before = self
-            .sequences
+            .sequences()
             .iter()
             .find(|sequence| sequence.id == sequence_id)
             .cloned()
             .or_else(|| {
-                self.sequence.as_ref().filter(|sequence| sequence.id == sequence_id).cloned()
+                self.active_sequence().filter(|sequence| sequence.id == sequence_id).cloned()
             })
             .ok_or_else(|| MondrianError::WorkflowStepFailed {
                 step_id: "viewer_ui_action".to_string(),
@@ -1757,28 +1741,17 @@ impl AppState {
         settings.preview.resolution_scale = scale;
         after.apply_settings(settings)?;
 
-        if let Some(sequence) =
-            self.sequences.iter_mut().find(|sequence| sequence.id == sequence_id)
-        {
-            *sequence = after.clone();
-        }
-        if self.active_sequence_id == Some(sequence_id)
-            || self.sequence.as_ref().is_some_and(|sequence| sequence.id == sequence_id)
-        {
-            self.sequence = Some(after.clone());
-        }
         self.record_sequence_snapshot_command("修改预览分辨率", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         self.set_status_hint(
             format!("预览分辨率：{}", preview_resolution_scale_label(scale)),
             false,
         );
-        let _ = self.save_project_file();
         Ok(())
     }
 
     fn prepare_asset_drag_from_ui(&mut self, payload: AssetsPrepareDragPayload) -> Result<()> {
-        let library = self.asset_library.clone().ok_or_else(|| {
+        let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("素材准备失败：{reason}"), true);
             MondrianError::WorkflowStepFailed { step_id: "assets_prepare_drag".into(), reason }
@@ -1847,12 +1820,12 @@ impl AppState {
         value: PropertyValue,
     ) -> Result<()> {
         self.ensure_clip_track_unlocked("set_effect_property", selection.clip_id)?;
-        let Some(seq) = self.sequence.as_mut() else {
+        let Some(before) = self.active_sequence().cloned() else {
             return Err(missing_sequence_error("set_effect_property"));
         };
-        let before = seq.clone();
+        let mut after = before.clone();
         let changed = {
-            let clip = find_clip_mut(seq, selection.clip_id)
+            let clip = find_clip_mut(&mut after, selection.clip_id)
                 .ok_or_else(|| missing_clip_error("set_effect_property", selection.clip_id))?;
             let effect = clip.effects.iter_mut().find(|e| e.id == effect_id).ok_or_else(|| {
                 MondrianError::WorkflowStepFailed {
@@ -1877,7 +1850,7 @@ impl AppState {
             }
         };
         if changed {
-            self.record_timeline_edit_snapshot("调整特效属性", before)?;
+            self.record_sequence_snapshot_command("调整特效属性", before, after)?;
         }
         Ok(())
     }
@@ -1914,29 +1887,38 @@ impl AppState {
     }
 
     fn set_in_out_point_from_ui(&mut self, payload: TimelineSetInOutPointPayload) -> Result<()> {
-        let Some(sequence) = self.sequence.as_mut() else {
-            return Err(missing_sequence_error("timeline_set_in_out_point"));
-        };
+        let before = self
+            .active_sequence()
+            .cloned()
+            .ok_or_else(|| missing_sequence_error("timeline_set_in_out_point"))?;
+        let mut after = before.clone();
         let time = TimelineTime::from_frame_position(FramePosition::new(
             payload.frame,
-            sequence.time_base(),
+            after.time_base(),
         ))?;
         match payload.point {
-            TimelineInOutPointPayloadKind::In => sequence.mark_in(time),
-            TimelineInOutPointPayloadKind::Out => sequence.mark_out(time),
+            TimelineInOutPointPayloadKind::In => after.mark_in(time),
+            TimelineInOutPointPayloadKind::Out => after.mark_out(time),
         }
-        self.sync_current_sequence_into_collection();
-        let _ = self.save_project_file();
+        let sequence_id = after.id;
+        self.record_sequence_snapshot_command("设置时间线入出点", before, after)?;
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         Ok(())
     }
 
     fn clear_in_out_points_from_ui(&mut self) -> Result<()> {
-        let Some(sequence) = self.sequence.as_mut() else {
-            return Err(missing_sequence_error("timeline_clear_in_out_points"));
-        };
-        sequence.clear_in_out();
-        self.sync_current_sequence_into_collection();
-        let _ = self.save_project_file();
+        let before = self
+            .active_sequence()
+            .cloned()
+            .ok_or_else(|| missing_sequence_error("timeline_clear_in_out_points"))?;
+        if before.in_point.is_none() && before.out_point.is_none() {
+            return Ok(());
+        }
+        let mut after = before.clone();
+        after.clear_in_out();
+        let sequence_id = after.id;
+        self.record_sequence_snapshot_command("清除时间线入出点", before, after)?;
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         Ok(())
     }
 
@@ -1966,24 +1948,24 @@ impl AppState {
         for clip_id in clip_ids {
             self.ensure_clip_track_unlocked(step_id, *clip_id)?;
         }
-        let Some(seq) = self.sequence.as_mut() else {
+        let Some(before) = self.active_sequence().cloned() else {
             return Err(missing_sequence_error(step_id));
         };
-        let before = seq.clone();
+        let mut after = before.clone();
         let mut changed = false;
         for clip_id in clip_ids {
-            changed |= set_clip_disabled(seq, *clip_id, !enabled);
+            changed |= set_clip_disabled(&mut after, *clip_id, !enabled);
         }
         if changed {
-            self.record_timeline_edit_snapshot("切换片段启用状态", before)?;
+            self.record_sequence_snapshot_command("切换片段启用状态", before, after)?;
             Ok(())
-        } else if clip_ids.iter().all(|clip_id| clip_exists(seq, *clip_id)) {
+        } else if clip_ids.iter().all(|clip_id| clip_exists(&after, *clip_id)) {
             Ok(())
         } else {
             let missing = clip_ids
                 .iter()
                 .copied()
-                .find(|clip_id| !clip_exists(seq, *clip_id))
+                .find(|clip_id| !clip_exists(&after, *clip_id))
                 .unwrap_or(clip_ids[0]);
             Err(missing_clip_error(step_id, missing))
         }
@@ -1991,14 +1973,14 @@ impl AppState {
 
     fn set_clip_opacity_from_ui(&mut self, clip_id: ClipId, opacity_percent: f32) -> Result<()> {
         self.ensure_clip_track_unlocked("inspector_set_clip_opacity", clip_id)?;
-        let Some(seq) = self.sequence.as_mut() else {
+        let Some(before) = self.active_sequence().cloned() else {
             return Err(missing_sequence_error("inspector_set_clip_opacity"));
         };
         let opacity = (opacity_percent / 100.0).clamp(0.0, 1.0);
-        let before = seq.clone();
-        let playhead = seq.playhead;
+        let mut after = before.clone();
+        let playhead = after.playhead;
         let changed = {
-            let clip = find_clip_mut(seq, clip_id)
+            let clip = find_clip_mut(&mut after, clip_id)
                 .ok_or_else(|| missing_clip_error("inspector_set_clip_opacity", clip_id))?;
             if (clip.transform.evaluate_opacity(playhead) - opacity).abs() < f32::EPSILON {
                 false
@@ -2011,7 +1993,7 @@ impl AppState {
             }
         };
         if changed {
-            self.record_timeline_edit_snapshot("调整片段不透明度", before)?;
+            self.record_sequence_snapshot_command("调整片段不透明度", before, after)?;
         }
         Ok(())
     }
@@ -2022,14 +2004,14 @@ impl AppState {
         color: mondrian_core::Color,
     ) -> Result<()> {
         self.ensure_clip_track_unlocked("inspector_set_clip_tint", clip_id)?;
-        let Some(seq) = self.sequence.as_mut() else {
+        let Some(before) = self.active_sequence().cloned() else {
             return Err(missing_sequence_error("inspector_set_clip_tint"));
         };
-        let before = seq.clone();
+        let mut after = before.clone();
         let changed = {
-            let clip = find_clip_mut(seq, clip_id)
+            let clip = find_clip_mut(&mut after, clip_id)
                 .ok_or_else(|| missing_clip_error("inspector_set_clip_tint", clip_id))?;
-            if clip.solid_color == Some(color) {
+            if clip.content.solid_color() == Some(color) {
                 false
             } else {
                 clip.apply_property_mutation(PropertyMutation::SetStaticValue {
@@ -2040,7 +2022,7 @@ impl AppState {
             }
         };
         if changed {
-            self.record_timeline_edit_snapshot("调整片段颜色", before)?;
+            self.record_sequence_snapshot_command("调整片段颜色", before, after)?;
         }
         Ok(())
     }
@@ -2059,13 +2041,13 @@ impl AppState {
         }
 
         self.ensure_clip_track_unlocked("inspector_set_clip_transform_field", clip_id)?;
-        let Some(seq) = self.sequence.as_mut() else {
+        let Some(before) = self.active_sequence().cloned() else {
             return Err(missing_sequence_error("inspector_set_clip_transform_field"));
         };
-        let before = seq.clone();
-        let playhead = seq.playhead;
+        let mut after = before.clone();
+        let playhead = after.playhead;
         let changed = {
-            let clip = find_clip_mut(seq, clip_id)
+            let clip = find_clip_mut(&mut after, clip_id)
                 .ok_or_else(|| missing_clip_error("inspector_set_clip_transform_field", clip_id))?;
             match field {
                 InspectorClipTransformField::PositionX => {
@@ -2128,7 +2110,7 @@ impl AppState {
             }
         };
         if changed {
-            self.record_timeline_edit_snapshot("调整片段变换", before)?;
+            self.record_sequence_snapshot_command("调整片段变换", before, after)?;
         }
         Ok(())
     }
@@ -2151,13 +2133,13 @@ impl AppState {
         }
 
         self.ensure_clip_track_unlocked(STEP_ID, payload.clip.clip_id)?;
-        let Some(seq) = self.sequence.as_mut() else {
+        let Some(before) = self.active_sequence().cloned() else {
             return Err(missing_sequence_error(STEP_ID));
         };
-        let before = seq.clone();
-        let playhead = seq.playhead;
+        let mut after = before.clone();
+        let playhead = after.playhead;
         let changed = {
-            let clip = find_clip_mut(seq, payload.clip.clip_id)
+            let clip = find_clip_mut(&mut after, payload.clip.clip_id)
                 .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip.clip_id))?;
             let mut changed = false;
 
@@ -2204,7 +2186,7 @@ impl AppState {
             changed
         };
         if changed {
-            self.record_timeline_edit_snapshot("调整监视器片段变换", before)?;
+            self.record_sequence_snapshot_command("调整监视器片段变换", before, after)?;
         }
         Ok(())
     }
@@ -2223,12 +2205,12 @@ impl AppState {
             });
         }
         self.ensure_clip_track_unlocked("inspector_set_clip_curve", payload.clip.clip_id)?;
-        let Some(seq) = self.sequence.as_mut() else {
+        let Some(before) = self.active_sequence().cloned() else {
             return Err(missing_sequence_error("inspector_set_clip_curve"));
         };
-        let before = seq.clone();
+        let mut after = before.clone();
         {
-            let clip = find_clip_mut(seq, payload.clip.clip_id).ok_or_else(|| {
+            let clip = find_clip_mut(&mut after, payload.clip.clip_id).ok_or_else(|| {
                 missing_clip_error("inspector_set_clip_curve", payload.clip.clip_id)
             })?;
             let start_tick = clip.position;
@@ -2263,7 +2245,7 @@ impl AppState {
                 })?;
             }
         }
-        self.record_timeline_edit_snapshot("调整片段不透明度曲线", before)?;
+        self.record_sequence_snapshot_command("调整片段不透明度曲线", before, after)?;
         Ok(())
     }
 
@@ -2274,8 +2256,7 @@ impl AppState {
         const STEP_ID: &str = "inspector_set_audio_component_source";
         self.ensure_clip_track_unlocked(STEP_ID, payload.clip.clip_id)?;
         let (_, is_video_track, _) = self
-            .sequence
-            .as_ref()
+            .active_sequence()
             .and_then(|sequence| find_clip_track_lock(sequence, payload.clip.clip_id))
             .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip.clip_id))?;
         if is_video_track {
@@ -2286,7 +2267,7 @@ impl AppState {
         }
 
         let target_source = {
-            let sequence = self.sequence.as_ref().ok_or_else(|| missing_sequence_error(STEP_ID))?;
+            let sequence = self.active_sequence().ok_or_else(|| missing_sequence_error(STEP_ID))?;
             let clip = find_clip(sequence, payload.clip.clip_id)
                 .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip.clip_id))?;
             let current_source = clip
@@ -2321,14 +2302,18 @@ impl AppState {
                                 .to_string(),
                         });
                     }
-                    let library = self.asset_library.as_ref().ok_or_else(|| {
-                        MondrianError::WorkflowStepFailed {
+                    let library =
+                        self.asset_library().ok_or_else(|| MondrianError::WorkflowStepFailed {
                             step_id: STEP_ID.to_string(),
                             reason: "asset library is unavailable".to_string(),
-                        }
-                    })?;
-                    let asset = library.get_asset(clip.asset_id)?.ok_or_else(|| {
-                        MondrianError::AssetNotFound { asset_id: clip.asset_id.to_string() }
+                        })?;
+                    let asset_id =
+                        clip.asset_id().ok_or_else(|| MondrianError::WorkflowStepFailed {
+                            step_id: STEP_ID.to_string(),
+                            reason: "non-media Clip cannot select an Asset Component".to_string(),
+                        })?;
+                    let asset = library.get_asset(asset_id)?.ok_or_else(|| {
+                        MondrianError::AssetNotFound { asset_id: asset_id.to_string() }
                     })?;
                     asset.audio_components.validate().map_err(|error| {
                         MondrianError::WorkflowStepFailed {
@@ -2346,21 +2331,21 @@ impl AppState {
                             step_id: STEP_ID.to_string(),
                             reason: format!(
                                 "Asset {} does not expose audio Component {component_id}",
-                                clip.asset_id
+                                asset_id
                             ),
                         });
                     }
                     requested_source
                 }
                 InspectorAudioComponentSourcePayload::NestedOutput { output_id } => {
-                    let child_id = clip.nested_sequence_id.ok_or_else(|| {
+                    let child_id = clip.nested_sequence_id().ok_or_else(|| {
                         MondrianError::WorkflowStepFailed {
                             step_id: STEP_ID.to_string(),
                             reason: "media Clip cannot select a nested Sequence output".to_string(),
                         }
                     })?;
                     let child = self
-                        .sequences
+                        .sequences()
                         .iter()
                         .find(|candidate| candidate.id == child_id)
                         .ok_or_else(|| MondrianError::WorkflowStepFailed {
@@ -2380,12 +2365,12 @@ impl AppState {
             }
         };
 
-        let Some(sequence) = self.sequence.as_mut() else {
+        let Some(before) = self.active_sequence().cloned() else {
             return Err(missing_sequence_error(STEP_ID));
         };
-        let before = sequence.clone();
+        let mut after = before.clone();
         let changed = {
-            let clip = find_clip_mut(sequence, payload.clip.clip_id)
+            let clip = find_clip_mut(&mut after, payload.clip.clip_id)
                 .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip.clip_id))?;
             let edit = clip
                 .audio_components
@@ -2405,24 +2390,23 @@ impl AppState {
         if !changed {
             return Ok(());
         }
-        if let Err(error) = sequence.audio_program.validate(
-            &sequence.audio_tracks,
-            &sequence.audio_roles,
-            sequence.settings.audio_channel_layout,
+        if let Err(error) = after.audio_program.validate(
+            &after.audio_tracks,
+            &after.audio_roles,
+            after.settings.audio_channel_layout,
         ) {
-            *sequence = before.clone();
             return Err(MondrianError::WorkflowStepFailed {
                 step_id: STEP_ID.to_string(),
                 reason: format!("audio authoring rejected source selection: {error}"),
             });
         }
-        self.record_timeline_edit_snapshot("切换片段音频 Component", before)?;
+        self.record_sequence_snapshot_command("切换片段音频 Component", before, after)?;
         self.refresh_audio_playback_after_authoring_change();
         Ok(())
     }
 
     fn ensure_clip_track_unlocked(&self, step_id: &'static str, clip_id: ClipId) -> Result<()> {
-        let Some(seq) = self.sequence.as_ref() else {
+        let Some(seq) = self.active_sequence() else {
             return Err(missing_sequence_error(step_id));
         };
         let Some((track_id, _, is_locked)) = find_clip_track_lock(seq, clip_id) else {
@@ -2744,7 +2728,7 @@ mod tests {
     use mondrian_assets::AssetLibrary;
     use mondrian_core::timeline_data::{AssetMediaInterpretation, MediaColorInterpretation};
     use mondrian_core::types::{
-        AssetId, AudioSourceComponentId, EffectId, FramePosition, MaskId, TrackId,
+        AssetId, AudioSourceComponentId, ClipLinkGroupId, EffectId, FramePosition, MaskId, TrackId,
     };
     use mondrian_core::{Color, ColorSpace};
     use mondrian_core::{ProjectSettings, Rational, Resolution, WorkingColorSpace};
@@ -2794,7 +2778,7 @@ mod tests {
         let clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
         let clip_id = clip.id;
         sequence.video_tracks[0].add_clip(clip).expect("add clip");
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         (state, track_id, clip_id)
     }
 
@@ -2859,8 +2843,8 @@ mod tests {
             .add_media_audio_clip(track_id, clip, AudioSourceComponentId::primary())
             .expect("add audio Clip");
         let edit_id = sequence.audio_tracks[0].clips[0].audio_components[0].id;
-        state.sequence = Some(sequence);
-        state.asset_library = Some(library);
+        state.test_set_sequence(Some(sequence));
+        state.test_set_asset_library(Some(library));
         (root, state, track_id, clip_id, edit_id, alternate_component)
     }
 
@@ -2878,7 +2862,8 @@ mod tests {
         let effect: mondrian_effects::EffectNode =
             mondrian_effects::EffectNodeExt::with_defaults(effect_type);
         let effect_id = effect.id;
-        let clip = &mut state.sequence.as_mut().expect("sequence").video_tracks[0].clips[0];
+        let clip = &mut state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0]
+            .clips[0];
         clip.add_effect_node(effect);
         let effect = clip
             .effects
@@ -2974,7 +2959,7 @@ mod tests {
     #[test]
     fn dispatch_export_ui_rejects_empty_output_path_without_queueing() {
         let mut state = AppState::new();
-        state.sequence = Some(Sequence::new("export"));
+        state.test_set_sequence(Some(Sequence::new("export")));
 
         let err = state
             .dispatch_action(export_enqueue_action(ExportEnqueuePayload {
@@ -3065,7 +3050,7 @@ mod tests {
     #[test]
     fn dispatch_timeline_ui_selects_clip_by_authoritative_clip_id() {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
-        let stale_track_id = state.sequence.as_ref().expect("sequence").video_tracks[1].id;
+        let stale_track_id = state.active_sequence().expect("sequence").video_tracks[1].id;
         state.selection.selected_mask = Some((MaskId::new(), clip_id, track_id));
         state.animation_selection.active_property = Some(crate::app::AnimationPropertySelection {
             clip_id,
@@ -3075,7 +3060,7 @@ mod tests {
             crate::app::AnimationKeyframeSelection {
                 clip_id,
                 path: Transform2D::OPACITY_PATH.to_string(),
-                time: tt(12, state.sequence.as_ref().expect("sequence").time_base()),
+                time: tt(12, state.active_sequence().expect("sequence").time_base()),
             },
         );
 
@@ -3137,9 +3122,9 @@ mod tests {
                 .expect("valid clip"),
             )
             .expect("add nested clip");
-        state.active_sequence_id = Some(parent.id);
-        state.sequence = Some(parent);
-        state.sequences.push(child);
+        state.test_set_active_sequence(parent.id);
+        state.test_set_sequence(Some(parent));
+        state.test_add_sequence(child);
 
         state
             .dispatch_action(timeline_open_nested_sequence_action(
@@ -3147,12 +3132,12 @@ mod tests {
             ))
             .expect("open nested sequence");
 
-        assert_eq!(state.active_sequence_id, Some(child_id));
+        assert_eq!(state.active_sequence_id(), Some(child_id));
         assert_eq!(
-            state.sequence.as_ref().map(|sequence| sequence.id),
+            state.active_sequence().map(|sequence| sequence.id),
             Some(child_id)
         );
-        assert_eq!(state.sequence_navigation_stack.len(), 1);
+        assert_eq!(state.test_navigation_stack().len(), 1);
     }
 
     #[test]
@@ -3162,21 +3147,21 @@ mod tests {
         let child_id = child.id;
         let parent = Sequence::new("parent");
         let parent_id = parent.id;
-        state.active_sequence_id = Some(child_id);
-        state.sequence = Some(child);
-        state.sequences.push(parent);
-        state.sequence_navigation_stack.push(parent_id);
+        state.test_set_active_sequence(child_id);
+        state.test_set_sequence(Some(child));
+        state.test_add_sequence(parent);
+        state.test_set_navigation_stack(vec![parent_id]);
 
         state
             .dispatch_action(sequence_return_to_parent_action())
             .expect("return to parent sequence");
 
-        assert_eq!(state.active_sequence_id, Some(parent_id));
+        assert_eq!(state.active_sequence_id(), Some(parent_id));
         assert_eq!(
-            state.sequence.as_ref().map(|sequence| sequence.id),
+            state.active_sequence().map(|sequence| sequence.id),
             Some(parent_id)
         );
-        assert!(state.sequence_navigation_stack.is_empty());
+        assert!(state.test_navigation_stack().is_empty());
     }
 
     #[test]
@@ -3184,31 +3169,32 @@ mod tests {
         let mut state = AppState::new();
         let sequence = Sequence::new("default candidate");
         let sequence_id = sequence.id;
-        state.active_sequence_id = Some(sequence_id);
-        state.sequence = Some(sequence.clone());
-        state.sequences.push(sequence);
+        state.test_set_active_sequence(sequence_id);
+        state.test_set_sequence(Some(sequence.clone()));
+        state.test_add_sequence(sequence);
 
         state
             .dispatch_action(sequence_set_active_default_action())
             .expect("set active default sequence");
 
-        assert_eq!(state.default_sequence_id, Some(sequence_id));
+        assert_eq!(state.default_sequence_id(), Some(sequence_id));
     }
 
     #[test]
     fn dispatch_sequence_ui_creates_new_sequence() {
         let mut state = AppState::new();
+        state.test_set_sequence(Some(Sequence::new("Existing")));
 
         state.dispatch_action(sequence_new_action()).expect("create sequence");
 
-        assert_eq!(state.sequences.len(), 1);
+        assert_eq!(state.sequences().len(), 2);
         assert_eq!(
-            state.sequence.as_ref().map(|sequence| sequence.name.as_str()),
-            Some("Sequence 1")
+            state.active_sequence().map(|sequence| sequence.name.as_str()),
+            Some("Sequence 2")
         );
         assert_eq!(
-            state.active_sequence_id,
-            state.sequence.as_ref().map(|sequence| sequence.id)
+            state.active_sequence_id(),
+            state.active_sequence().map(|sequence| sequence.id)
         );
     }
 
@@ -3218,10 +3204,10 @@ mod tests {
         let first = Sequence::new("first");
         let second = Sequence::new("second");
         let second_id = second.id;
-        state.active_sequence_id = Some(first.id);
-        state.sequence = Some(first.clone());
-        state.sequences.push(first);
-        state.sequences.push(second);
+        state.test_set_active_sequence(first.id);
+        state.test_set_sequence(Some(first.clone()));
+        state.test_add_sequence(first);
+        state.test_add_sequence(second);
 
         state
             .dispatch_action(sequence_switch_active_action(SequenceTargetPayload {
@@ -3229,9 +3215,9 @@ mod tests {
             }))
             .expect("switch sequence");
 
-        assert_eq!(state.active_sequence_id, Some(second_id));
+        assert_eq!(state.active_sequence_id(), Some(second_id));
         assert_eq!(
-            state.sequence.as_ref().map(|sequence| sequence.name.as_str()),
+            state.active_sequence().map(|sequence| sequence.name.as_str()),
             Some("second")
         );
     }
@@ -3241,9 +3227,9 @@ mod tests {
         let mut state = AppState::new();
         let source = Sequence::new("source");
         let source_id = source.id;
-        state.active_sequence_id = Some(source_id);
-        state.sequence = Some(source.clone());
-        state.sequences.push(source);
+        state.test_set_active_sequence(source_id);
+        state.test_set_sequence(Some(source.clone()));
+        state.test_add_sequence(source);
 
         state
             .dispatch_action(sequence_duplicate_action(SequenceTargetPayload {
@@ -3251,10 +3237,10 @@ mod tests {
             }))
             .expect("duplicate sequence");
 
-        assert_eq!(state.sequences.len(), 2);
-        assert_ne!(state.active_sequence_id, Some(source_id));
+        assert_eq!(state.sequences().len(), 2);
+        assert_ne!(state.active_sequence_id(), Some(source_id));
         assert_eq!(
-            state.sequence.as_ref().map(|sequence| sequence.name.as_str()),
+            state.active_sequence().map(|sequence| sequence.name.as_str()),
             Some("source Copy")
         );
     }
@@ -3266,11 +3252,11 @@ mod tests {
         let first_id = first.id;
         let second = Sequence::new("second");
         let second_id = second.id;
-        state.active_sequence_id = Some(second_id);
-        state.default_sequence_id = Some(second_id);
-        state.sequence = Some(second.clone());
-        state.sequences.push(first);
-        state.sequences.push(second);
+        state.test_set_active_sequence(second_id);
+        state.test_set_default_sequence(second_id);
+        state.test_set_sequence(Some(second.clone()));
+        state.test_add_sequence(first);
+        state.test_add_sequence(second);
 
         state
             .dispatch_action(sequence_delete_action(SequenceTargetPayload {
@@ -3278,11 +3264,11 @@ mod tests {
             }))
             .expect("delete sequence");
 
-        assert_eq!(state.sequences.len(), 1);
-        assert_eq!(state.active_sequence_id, Some(first_id));
-        assert_eq!(state.default_sequence_id, Some(first_id));
+        assert_eq!(state.sequences().len(), 1);
+        assert_eq!(state.active_sequence_id(), Some(first_id));
+        assert_eq!(state.default_sequence_id(), Some(first_id));
         assert_eq!(
-            state.sequence.as_ref().map(|sequence| sequence.name.as_str()),
+            state.active_sequence().map(|sequence| sequence.name.as_str()),
             Some("first")
         );
     }
@@ -3292,9 +3278,9 @@ mod tests {
         let mut state = AppState::new();
         let sequence = Sequence::new("offline");
         let sequence_id = sequence.id;
-        state.active_sequence_id = Some(sequence_id);
-        state.sequence = Some(sequence.clone());
-        state.sequences.push(sequence);
+        state.test_set_active_sequence(sequence_id);
+        state.test_set_sequence(Some(sequence.clone()));
+        state.test_add_sequence(sequence);
         let settings = SequenceSettings {
             resolution: Resolution::UHD4K,
             frame_rate: Rational::FPS_2997,
@@ -3315,14 +3301,14 @@ mod tests {
             ))
             .expect("update sequence settings");
 
-        let active = state.sequence.as_ref().expect("active sequence");
+        let active = state.active_sequence().expect("active sequence");
         assert_eq!(active.name, "Final Cut");
         assert_eq!(active.settings, settings);
-        assert_eq!(state.sequences[0].name, "Final Cut");
+        assert_eq!(state.sequences()[0].name, "Final Cut");
         assert!(state.can_undo_action());
 
         state.undo_timeline().expect("undo");
-        let active = state.sequence.as_ref().expect("active sequence");
+        let active = state.active_sequence().expect("active sequence");
         assert_eq!(active.name, "offline");
         assert_eq!(active.settings, SequenceSettings::default());
     }
@@ -3332,9 +3318,9 @@ mod tests {
         let mut state = AppState::new();
         let sequence = Sequence::new("original");
         let sequence_id = sequence.id;
-        state.active_sequence_id = Some(sequence_id);
-        state.sequence = Some(sequence.clone());
-        state.sequences.push(sequence);
+        state.test_set_active_sequence(sequence_id);
+        state.test_set_sequence(Some(sequence.clone()));
+        state.test_add_sequence(sequence);
         let invalid_settings = SequenceSettings {
             audio_sample_rate: 12_345,
             ..SequenceSettings::default()
@@ -3351,7 +3337,7 @@ mod tests {
             .expect_err("invalid settings should fail");
 
         assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
-        let active = state.sequence.as_ref().expect("active sequence");
+        let active = state.active_sequence().expect("active sequence");
         assert_eq!(active.name, "original");
         assert_eq!(active.settings, SequenceSettings::default());
         assert!(!state.can_undo_action());
@@ -3360,13 +3346,13 @@ mod tests {
     #[test]
     fn dispatch_sequence_ui_rejects_custom_ocio_working_space_mismatch_atomically() {
         let mut state = AppState::new();
-        state.project_settings.color_management.engine =
+        state.test_project_settings_mut().color_management.engine =
             pinned_test_custom_engine("Linear Rec.2020");
         let sequence = Sequence::new("original");
         let sequence_id = sequence.id;
-        state.active_sequence_id = Some(sequence_id);
-        state.sequence = Some(sequence.clone());
-        state.sequences.push(sequence);
+        state.test_set_active_sequence(sequence_id);
+        state.test_set_sequence(Some(sequence.clone()));
+        state.test_add_sequence(sequence);
         let settings = SequenceSettings {
             working_color_space: WorkingColorSpace::AcesCg,
             ..SequenceSettings::default()
@@ -3383,7 +3369,7 @@ mod tests {
             .expect_err("Custom OCIO working mismatch must fail before mutation");
 
         assert!(error.to_string().contains("pins working space 'Linear Rec.2020'"));
-        let active = state.sequence.as_ref().expect("active sequence");
+        let active = state.active_sequence().expect("active sequence");
         assert_eq!(active.name, "original");
         assert_eq!(active.settings, SequenceSettings::default());
         assert!(!state.can_undo_action());
@@ -3394,9 +3380,9 @@ mod tests {
         let mut state = AppState::new();
         let sequence = Sequence::new("original");
         let sequence_id = sequence.id;
-        state.active_sequence_id = Some(sequence_id);
-        state.sequence = Some(sequence.clone());
-        state.sequences.push(sequence);
+        state.test_set_active_sequence(sequence_id);
+        state.test_set_sequence(Some(sequence.clone()));
+        state.test_add_sequence(sequence);
         let settings = SequenceSettings {
             working_color_space: WorkingColorSpace::LinearP3D65,
             ..SequenceSettings::default()
@@ -3409,7 +3395,7 @@ mod tests {
             .expect_err("Standard working mismatch must fail before mutation");
 
         assert!(error.to_string().contains("Mondrian Standard"));
-        let active = state.sequence.as_ref().expect("active sequence");
+        let active = state.active_sequence().expect("active sequence");
         assert_eq!(active.name, "original");
         assert_eq!(active.settings, SequenceSettings::default());
         assert!(!state.can_undo_action());
@@ -3418,14 +3404,17 @@ mod tests {
     #[test]
     fn new_sequence_adopts_custom_ocio_pinned_working_space() {
         let mut state = AppState::new();
-        state.project_settings.color_management.engine = pinned_test_custom_engine("ACEScg");
+        let mut existing = Sequence::new("Existing");
+        existing.settings.working_color_space = WorkingColorSpace::AcesCg;
+        state.test_set_sequence(Some(existing));
+        state.test_project_settings_mut().color_management.engine =
+            pinned_test_custom_engine("ACEScg");
 
         state.new_sequence("Custom Working");
 
         assert_eq!(
             state
-                .sequence
-                .as_ref()
+                .active_sequence()
                 .expect("new active sequence")
                 .settings
                 .working_color_space,
@@ -3438,9 +3427,9 @@ mod tests {
         let mut state = AppState::new();
         let sequence = Sequence::new("preview");
         let sequence_id = sequence.id;
-        state.active_sequence_id = Some(sequence_id);
-        state.sequence = Some(sequence.clone());
-        state.sequences.push(sequence);
+        state.test_set_active_sequence(sequence_id);
+        state.test_set_sequence(Some(sequence.clone()));
+        state.test_add_sequence(sequence);
         state.play();
 
         state
@@ -3451,23 +3440,21 @@ mod tests {
 
         assert_eq!(
             state
-                .sequence
-                .as_ref()
+                .active_sequence()
                 .expect("active sequence")
                 .settings
                 .preview
                 .resolution_scale,
             0.25
         );
-        assert_eq!(state.sequences[0].settings.preview.resolution_scale, 0.25);
+        assert_eq!(state.sequences()[0].settings.preview.resolution_scale, 0.25);
         assert!(state.is_playing());
         assert!(state.can_undo_action());
 
         state.undo_timeline().expect("undo");
         assert_eq!(
             state
-                .sequence
-                .as_ref()
+                .active_sequence()
                 .expect("active sequence")
                 .settings
                 .preview
@@ -3481,9 +3468,9 @@ mod tests {
         let mut state = AppState::new();
         let sequence = Sequence::new("preview");
         let sequence_id = sequence.id;
-        state.active_sequence_id = Some(sequence_id);
-        state.sequence = Some(sequence.clone());
-        state.sequences.push(sequence);
+        state.test_set_active_sequence(sequence_id);
+        state.test_set_sequence(Some(sequence.clone()));
+        state.test_add_sequence(sequence);
 
         state
             .dispatch_action(viewer_set_preview_resolution_scale_action(
@@ -3493,8 +3480,7 @@ mod tests {
 
         assert_eq!(
             state
-                .sequence
-                .as_ref()
+                .active_sequence()
                 .expect("active sequence")
                 .settings
                 .preview
@@ -3506,7 +3492,7 @@ mod tests {
     #[test]
     fn dispatch_timeline_ui_track_controls_update_real_tracks() {
         let (mut state, video_track_id, _) = state_with_two_video_tracks();
-        let audio_track_id = state.sequence.as_ref().expect("sequence").audio_tracks[0].id;
+        let audio_track_id = state.active_sequence().expect("sequence").audio_tracks[0].id;
 
         state
             .dispatch_action(timeline_set_track_control_action(
@@ -3518,7 +3504,7 @@ mod tests {
                 },
             ))
             .expect("toggle visibility");
-        assert!(!state.sequence.as_ref().expect("sequence").video_tracks[0].is_visible);
+        assert!(!state.active_sequence().expect("sequence").video_tracks[0].is_visible);
         assert!(state.can_undo_action());
 
         state
@@ -3531,7 +3517,7 @@ mod tests {
                 },
             ))
             .expect("toggle mute");
-        assert!(state.sequence.as_ref().expect("sequence").audio_tracks[0].is_muted);
+        assert!(state.active_sequence().expect("sequence").audio_tracks[0].is_muted);
 
         state
             .dispatch_action(timeline_set_track_control_action(
@@ -3543,18 +3529,18 @@ mod tests {
                 },
             ))
             .expect("toggle lock");
-        assert!(state.sequence.as_ref().expect("sequence").video_tracks[0].is_locked);
+        assert!(state.active_sequence().expect("sequence").video_tracks[0].is_locked);
 
         state.undo_timeline().expect("undo lock");
-        assert!(!state.sequence.as_ref().expect("sequence").video_tracks[0].is_locked);
-        assert!(!state.sequence.as_ref().expect("sequence").video_tracks[0].is_visible);
-        assert!(state.sequence.as_ref().expect("sequence").audio_tracks[0].is_muted);
+        assert!(!state.active_sequence().expect("sequence").video_tracks[0].is_locked);
+        assert!(!state.active_sequence().expect("sequence").video_tracks[0].is_visible);
+        assert!(state.active_sequence().expect("sequence").audio_tracks[0].is_muted);
     }
 
     #[test]
     fn dispatch_timeline_ui_moves_track_to_target_index() {
         let (mut state, first_track_id, _) = state_with_two_video_tracks();
-        let second_track_id = state.sequence.as_ref().expect("sequence").video_tracks[1].id;
+        let second_track_id = state.active_sequence().expect("sequence").video_tracks[1].id;
 
         state
             .dispatch_action(timeline_move_track_action(TimelineMoveTrackPayload {
@@ -3564,7 +3550,7 @@ mod tests {
             }))
             .expect("move track");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].id, second_track_id);
         assert_eq!(sequence.video_tracks[1].id, first_track_id);
@@ -3579,7 +3565,7 @@ mod tests {
         let asset_id = library
             .create_solid_color_asset(Some("Slate"))
             .expect("create solid color asset");
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
 
         state
             .dispatch_action(timeline_drop_asset_action(TimelineDropAssetPayload {
@@ -3590,12 +3576,12 @@ mod tests {
             }))
             .expect("drop asset");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let tb = sequence.time_base();
         let created = sequence.video_tracks[0]
             .clips
             .iter()
-            .find(|clip| clip.asset_id == asset_id)
+            .find(|clip| clip.asset_id() == Some(asset_id))
             .expect("created clip");
         assert_eq!(created.position, tt(40, tb));
         assert_eq!(created.label.as_deref(), Some("Slate"));
@@ -3612,15 +3598,15 @@ mod tests {
     #[test]
     fn dispatch_timeline_ui_rejects_incompatible_asset_drop_without_clip_mutation() {
         let (mut state, _, _) = state_with_two_video_tracks();
-        let target_track_id = state.sequence.as_ref().expect("sequence").audio_tracks[0].id;
+        let target_track_id = state.active_sequence().expect("sequence").audio_tracks[0].id;
         let initial_audio_clip_count =
-            state.sequence.as_ref().expect("sequence").audio_tracks[0].clips.len();
+            state.active_sequence().expect("sequence").audio_tracks[0].clips.len();
         let library_root = unique_temp_path("timeline-drop-incompatible-library");
         let library = AssetLibrary::open(library_root.clone()).expect("library");
         let asset_id = library
             .create_solid_color_asset(Some("Video Only"))
             .expect("create solid color asset");
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
 
         let err = state
             .dispatch_action(timeline_drop_asset_action(TimelineDropAssetPayload {
@@ -3633,7 +3619,7 @@ mod tests {
 
         assert!(matches!(err, MondrianError::UnsupportedFormat { .. }));
         assert_eq!(
-            state.sequence.as_ref().expect("sequence").audio_tracks[0].clips.len(),
+            state.active_sequence().expect("sequence").audio_tracks[0].clips.len(),
             initial_audio_clip_count
         );
         assert!(state.dragging_asset().is_some());
@@ -3645,8 +3631,8 @@ mod tests {
     #[test]
     fn dispatch_timeline_ui_adds_video_and_audio_tracks() {
         let (mut state, _, _) = state_with_two_video_tracks();
-        let initial_video_tracks = state.sequence.as_ref().expect("sequence").video_tracks.len();
-        let initial_audio_tracks = state.sequence.as_ref().expect("sequence").audio_tracks.len();
+        let initial_video_tracks = state.active_sequence().expect("sequence").video_tracks.len();
+        let initial_audio_tracks = state.active_sequence().expect("sequence").audio_tracks.len();
 
         state
             .dispatch_action(timeline_add_track_action(TimelineAddTrackPayload {
@@ -3659,20 +3645,20 @@ mod tests {
             }))
             .expect("add audio track");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks.len(), initial_video_tracks + 1);
         assert_eq!(sequence.audio_tracks.len(), initial_audio_tracks + 1);
         assert!(state.can_undo_action());
 
         state.undo_timeline().expect("undo audio track add");
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks.len(), initial_video_tracks + 1);
         assert_eq!(sequence.audio_tracks.len(), initial_audio_tracks);
 
         state.undo_timeline().expect("undo video track add");
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks.len(), initial_video_tracks);
         assert_eq!(sequence.audio_tracks.len(), initial_audio_tracks);
@@ -3681,7 +3667,7 @@ mod tests {
     #[test]
     fn dispatch_timeline_ui_moves_clip_to_target_track() {
         let (mut state, source_track_id, clip_id) = state_with_two_video_tracks();
-        let target_track_id = state.sequence.as_ref().unwrap().video_tracks[1].id;
+        let target_track_id = state.active_sequence().unwrap().video_tracks[1].id;
         state.selection.selected_clips = vec![SelectedClipRef {
             track_id: source_track_id,
             is_video_track: true,
@@ -3697,7 +3683,7 @@ mod tests {
             }))
             .expect("dispatch move");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let tb = sequence.time_base();
         assert!(sequence.video_tracks[0].clips.is_empty());
         let moved = &sequence.video_tracks[1].clips[0];
@@ -3717,7 +3703,7 @@ mod tests {
     #[test]
     fn dispatch_timeline_ui_rejects_cross_media_clip_move() {
         let (mut state, source_track_id, clip_id) = state_with_two_video_tracks();
-        let target_track_id = state.sequence.as_ref().unwrap().audio_tracks[0].id;
+        let target_track_id = state.active_sequence().unwrap().audio_tracks[0].id;
         state.selection.selected_clips = vec![SelectedClipRef {
             track_id: source_track_id,
             is_video_track: true,
@@ -3737,7 +3723,7 @@ mod tests {
             err,
             MondrianError::WorkflowStepFailed { step_id, .. } if step_id == "move_clip"
         ));
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].clips.len(), 1);
         assert_eq!(sequence.video_tracks[0].clips[0].id, clip_id);
@@ -3765,7 +3751,7 @@ mod tests {
             }))
             .expect("dispatch trim");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let tb = sequence.time_base();
         let clip = &sequence.video_tracks[0].clips[0];
         assert_eq!(clip.position, tt(16, tb));
@@ -3775,10 +3761,10 @@ mod tests {
     #[test]
     fn dispatch_timeline_ui_trims_multiple_clip_edges() {
         let (mut state, _, first_clip_id) = state_with_two_video_tracks();
-        let tb = state.sequence.as_ref().expect("sequence").time_base();
+        let tb = state.active_sequence().expect("sequence").time_base();
         let second_clip = Clip::new(AssetId::new(), tt(12, tb), tt(30, tb)).expect("valid clip");
         let second_clip_id = second_clip.id;
-        state.sequence.as_mut().expect("sequence").video_tracks[1]
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[1]
             .add_clip(second_clip)
             .expect("add second clip");
 
@@ -3790,7 +3776,7 @@ mod tests {
             }))
             .expect("dispatch batch trim");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let tb = sequence.time_base();
         let first = &sequence.video_tracks[0].clips[0];
         let second = &sequence.video_tracks[1].clips[0];
@@ -3803,11 +3789,11 @@ mod tests {
     #[test]
     fn dispatch_timeline_ui_trims_current_selection_to_playhead() {
         let (mut state, first_track_id, first_clip_id) = state_with_two_video_tracks();
-        let tb = state.sequence.as_ref().expect("sequence").time_base();
+        let tb = state.active_sequence().expect("sequence").time_base();
         let second_clip = Clip::new(AssetId::new(), tt(12, tb), tt(30, tb)).expect("valid clip");
         let second_clip_id = second_clip.id;
-        let second_track_id = state.sequence.as_ref().expect("sequence").video_tracks[1].id;
-        state.sequence.as_mut().expect("sequence").video_tracks[1]
+        let second_track_id = state.active_sequence().expect("sequence").video_tracks[1].id;
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[1]
             .add_clip(second_clip)
             .expect("add second clip");
         state.selection.selected_clips = vec![
@@ -3830,7 +3816,7 @@ mod tests {
             ))
             .expect("dispatch selected trim");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let tb = sequence.time_base();
         let first = &sequence.video_tracks[0].clips[0];
         let second = &sequence.video_tracks[1].clips[0];
@@ -3843,10 +3829,10 @@ mod tests {
     #[test]
     fn dispatch_timeline_ui_rolls_single_selected_cut_to_playhead() {
         let (mut state, track_id, clip_a_id) = state_with_two_video_tracks();
-        let tb = state.sequence.as_ref().expect("sequence").time_base();
+        let tb = state.active_sequence().expect("sequence").time_base();
         let clip_b = Clip::new(AssetId::new(), tt(30, tb), tt(20, tb)).expect("valid clip");
         let clip_b_id = clip_b.id;
-        state.sequence.as_mut().expect("sequence").video_tracks[0]
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0]
             .add_clip(clip_b)
             .expect("add adjacent clip");
         state.selection.selected_clips =
@@ -3857,7 +3843,7 @@ mod tests {
             .dispatch_action(timeline_roll_selected_cut_to_playhead_action())
             .expect("roll selected cut");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let tb = sequence.time_base();
         let first = sequence.video_tracks[0]
             .clips
@@ -3878,11 +3864,11 @@ mod tests {
     #[test]
     fn dispatch_timeline_ui_sets_current_selection_enabled_state_atomically() {
         let (mut state, first_track_id, first_clip_id) = state_with_two_video_tracks();
-        let tb = state.sequence.as_ref().expect("sequence").time_base();
+        let tb = state.active_sequence().expect("sequence").time_base();
         let second_clip = Clip::new(AssetId::new(), tt(40, tb), tt(10, tb)).expect("valid clip");
         let second_clip_id = second_clip.id;
-        let second_track_id = state.sequence.as_ref().expect("sequence").video_tracks[1].id;
-        state.sequence.as_mut().expect("sequence").video_tracks[1]
+        let second_track_id = state.active_sequence().expect("sequence").video_tracks[1].id;
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[1]
             .add_clip(second_clip)
             .expect("add second clip");
         state.selection.selected_clips = vec![
@@ -3904,18 +3890,18 @@ mod tests {
             ))
             .expect("disable selection");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert!(sequence.video_tracks[0].clips[0].is_disabled);
         assert!(sequence.video_tracks[1].clips[0].is_disabled);
 
-        state.sequence.as_mut().expect("sequence").video_tracks[1].is_locked = true;
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[1].is_locked = true;
         let result = state.dispatch_action(timeline_set_selected_clips_enabled_action(
             TimelineSetSelectedClipsEnabledPayload { enabled: true },
         ));
 
         assert!(result.is_err());
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert!(
             sequence.video_tracks[0].clips[0].is_disabled,
@@ -3927,7 +3913,7 @@ mod tests {
     #[test]
     fn dispatch_trim_clip_start_uses_source_in_time() {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
-        let tb = state.sequence.as_ref().expect("sequence").time_base();
+        let tb = state.active_sequence().expect("sequence").time_base();
 
         state
             .dispatch_action(mondrian_editor_state::Action::TrimClipStart {
@@ -3936,7 +3922,7 @@ mod tests {
             })
             .expect("trim source in");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let tb = sequence.time_base();
         let clip = &sequence.video_tracks[0].clips[0];
         assert_eq!(clip.position, tt(15, tb));
@@ -3948,7 +3934,7 @@ mod tests {
     #[test]
     fn dispatch_trim_clip_end_uses_source_out_time() {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
-        let tb = state.sequence.as_ref().expect("sequence").time_base();
+        let tb = state.active_sequence().expect("sequence").time_base();
 
         state
             .dispatch_action(mondrian_editor_state::Action::TrimClipEnd {
@@ -3957,7 +3943,7 @@ mod tests {
             })
             .expect("trim source out");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let tb = sequence.time_base();
         let clip = &sequence.video_tracks[0].clips[0];
         assert_eq!(clip.position, tt(10, tb));
@@ -3969,7 +3955,7 @@ mod tests {
     #[test]
     fn dispatch_trim_clip_end_rejects_source_out_before_source_in() {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
-        let tb = state.sequence.as_ref().expect("sequence").time_base();
+        let tb = state.active_sequence().expect("sequence").time_base();
 
         let err = state
             .dispatch_action(mondrian_editor_state::Action::TrimClipEnd {
@@ -3979,7 +3965,7 @@ mod tests {
             .expect_err("invalid source out should be rejected");
 
         assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].clips[0].duration, tt(20, tb));
         assert!(!state.can_undo_action());
@@ -4013,7 +3999,9 @@ mod tests {
     fn dispatch_import_media_rejects_invalid_path_without_adding_assets() {
         let mut state = AppState::new();
         let library_root = unique_temp_path("import-media-library");
-        state.asset_library = Some(AssetLibrary::open(library_root.clone()).expect("library"));
+        state.test_set_asset_library(Some(
+            AssetLibrary::open(library_root.clone()).expect("library"),
+        ));
         let missing_path = library_root.join("missing.mov");
 
         state
@@ -4029,12 +4017,7 @@ mod tests {
             .is_some_and(|(message, is_error)| !*is_error && message.contains("正在导入")));
         poll_media_imports_until_idle(&mut state);
         assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
-        let assets = state
-            .asset_library
-            .as_ref()
-            .expect("library")
-            .list_assets()
-            .expect("list assets");
+        let assets = state.asset_library().expect("library").list_assets().expect("list assets");
         assert!(assets.is_empty());
 
         remove_temp_path(&library_root);
@@ -4045,11 +4028,11 @@ mod tests {
         let mut state = AppState::new();
 
         state.auto_proxy_enabled = true;
-        state.project_settings.proxy_enabled = false;
+        state.test_project_settings_mut().proxy_enabled = false;
         assert!(!state.should_auto_generate_proxy_for_import());
 
         state.auto_proxy_enabled = false;
-        state.project_settings.proxy_enabled = true;
+        state.test_project_settings_mut().proxy_enabled = true;
         assert!(state.should_auto_generate_proxy_for_import());
     }
 
@@ -4057,8 +4040,8 @@ mod tests {
     fn project_proxy_config_controls_media_proxy_generation_contract() {
         let mut state = AppState::new();
         let cache_root = unique_temp_path("project-proxy-cache");
-        state.project_settings.proxy_resolution = Resolution::FHD;
-        state.project_settings.cache_dir = Some(cache_root.clone());
+        state.test_project_settings_mut().proxy_resolution = Resolution::FHD;
+        state.test_project_settings_mut().cache_dir = Some(cache_root.clone());
 
         let proxy_config = state.proxy_config();
 
@@ -4082,7 +4065,7 @@ mod tests {
 
         let library = AssetLibrary::open(library_root.clone()).expect("library");
         let folder_id = library.create_folder("Rushes", None).expect("create folder");
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
 
         state
             .dispatch_action(assets_import_files_action(AssetsImportFilesPayload {
@@ -4095,7 +4078,7 @@ mod tests {
 
         poll_media_imports_until_idle(&mut state);
 
-        let library = state.asset_library.as_ref().expect("library");
+        let library = state.asset_library().expect("library");
         let assets = library.list_assets().expect("list assets");
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].name, "tone.wav");
@@ -4113,7 +4096,9 @@ mod tests {
     fn dispatch_assets_import_files_rejects_missing_target_folder_before_importing() {
         let mut state = AppState::new();
         let library_root = unique_temp_path("assets-import-missing-folder-library");
-        state.asset_library = Some(AssetLibrary::open(library_root.clone()).expect("library"));
+        state.test_set_asset_library(Some(
+            AssetLibrary::open(library_root.clone()).expect("library"),
+        ));
 
         let err = state
             .dispatch_action(assets_import_files_action(AssetsImportFilesPayload {
@@ -4125,8 +4110,7 @@ mod tests {
         assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
         assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
         assert!(state
-            .asset_library
-            .as_ref()
+            .asset_library()
             .expect("library")
             .list_assets()
             .expect("list assets")
@@ -4143,7 +4127,7 @@ mod tests {
         let asset_id = library
             .create_solid_color_asset(Some("Brand Solid"))
             .expect("create solid color asset");
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
 
         state
             .dispatch_action(assets_prepare_drag_action(AssetsPrepareDragPayload {
@@ -4226,8 +4210,10 @@ mod tests {
         let library_root = unique_temp_path("assets-delete-action-library");
         let library = AssetLibrary::open(library_root.clone()).expect("library");
         let asset_id = library.create_solid_color_asset(Some("Temp Plate")).expect("create asset");
-        state.sequence.as_mut().expect("sequence").video_tracks[0].clips[0].asset_id = asset_id;
-        state.asset_library = Some(library);
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].clips[0]
+            .content =
+            mondrian_core::timeline_data::ClipContent::SolidColor { asset_id, color: Color::BLACK };
+        state.test_set_asset_library(Some(library));
         let events = state.event_bus.subscribe();
 
         state
@@ -4237,19 +4223,17 @@ mod tests {
             .expect("delete asset");
 
         assert!(state
-            .asset_library
-            .as_ref()
+            .asset_library()
             .expect("library")
             .get_asset(asset_id)
             .expect("get asset")
             .is_none());
         assert!(state
-            .sequence
-            .as_ref()
+            .active_sequence()
             .expect("sequence")
             .video_tracks
             .iter()
-            .all(|track| track.clips.iter().all(|clip| clip.asset_id != asset_id)));
+            .all(|track| track.clips.iter().all(|clip| clip.asset_id() != Some(asset_id))));
         assert!(state.can_undo_action());
         assert!(state
             .status_hint
@@ -4313,7 +4297,7 @@ mod tests {
 
         let library = AssetLibrary::open(library_root.clone()).expect("library");
         let asset_id = library.import_media_file(&original_path).expect("import original");
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
         let events = state.event_bus.subscribe();
 
         state
@@ -4324,8 +4308,7 @@ mod tests {
             .expect("relink asset");
 
         let asset = state
-            .asset_library
-            .as_ref()
+            .asset_library()
             .expect("library")
             .get_asset(asset_id)
             .expect("get asset")
@@ -4351,7 +4334,7 @@ mod tests {
         let library_root = unique_temp_path("assets-rename-action-library");
         let library = AssetLibrary::open(library_root.clone()).expect("library");
         let asset_id = library.create_solid_color_asset(Some("Old Name")).expect("create asset");
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
         let events = state.event_bus.subscribe();
 
         state
@@ -4362,8 +4345,7 @@ mod tests {
             .expect("rename asset");
 
         let asset = state
-            .asset_library
-            .as_ref()
+            .asset_library()
             .expect("library")
             .get_asset(asset_id)
             .expect("get asset")
@@ -4384,7 +4366,7 @@ mod tests {
         let library_root = unique_temp_path("assets-interpret-action-library");
         let library = AssetLibrary::open(library_root.clone()).expect("library");
         let asset_id = library.create_solid_color_asset(Some("Shot A")).expect("create asset");
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
         let events = state.event_bus.subscribe();
         let interpretation = AssetMediaInterpretation {
             color: MediaColorInterpretation::Override { color_space: ColorSpace::Rec2100Pq },
@@ -4398,8 +4380,7 @@ mod tests {
             .expect("set interpretation");
 
         let asset = state
-            .asset_library
-            .as_ref()
+            .asset_library()
             .expect("library")
             .get_asset(asset_id)
             .expect("get asset")
@@ -4421,7 +4402,7 @@ mod tests {
         let library_root = unique_temp_path("assets-rename-folder-action-library");
         let library = AssetLibrary::open(library_root.clone()).expect("library");
         let folder_id = library.create_folder("Old Bin", None).expect("create folder");
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
         let events = state.event_bus.subscribe();
 
         state
@@ -4432,8 +4413,7 @@ mod tests {
             .expect("rename folder");
 
         let folder = state
-            .asset_library
-            .as_ref()
+            .asset_library()
             .expect("library")
             .list_folders()
             .expect("folders")
@@ -4475,7 +4455,7 @@ mod tests {
         write_minimal_wav(&media_path);
         let library = AssetLibrary::open(library_root.clone()).expect("library");
         let asset_id = library.import_media_file(&media_path).expect("import audio");
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
 
         let err = state
             .dispatch_action(assets_set_proxy_mode_action(AssetsSetProxyModePayload {
@@ -4508,7 +4488,7 @@ mod tests {
         let asset_id =
             library.create_solid_color_asset(Some("Nested Plate")).expect("create asset");
         library.move_asset_to_folder(asset_id, Some(&child_id)).expect("move asset");
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
         let events = state.event_bus.subscribe();
 
         state
@@ -4517,7 +4497,7 @@ mod tests {
             }))
             .expect("delete folder");
 
-        let library = state.asset_library.as_ref().expect("library");
+        let library = state.asset_library().expect("library");
         assert!(!library.folder_exists(&folder_id).expect("parent gone"));
         assert!(!library.folder_exists(&child_id).expect("child gone"));
         let asset = library.get_asset(asset_id).expect("get asset").expect("asset kept");
@@ -4560,7 +4540,7 @@ mod tests {
         let asset_id = library.create_solid_color_asset(Some("Plate")).expect("create asset");
         let keep_asset_id =
             library.create_solid_color_asset(Some("Keep")).expect("create keep asset");
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
         let mut sequence = Sequence::new("edit");
         let time_base = sequence.time_base();
         sequence.video_tracks[0]
@@ -4571,7 +4551,7 @@ mod tests {
                 Clip::new(keep_asset_id, tt(24, time_base), tt(24, time_base)).expect("valid clip"),
             )
             .expect("add keep clip");
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         let events = state.event_bus.subscribe();
 
         state
@@ -4583,17 +4563,23 @@ mod tests {
             ))
             .expect("delete selection");
 
-        let library = state.asset_library.as_ref().expect("library");
+        let library = state.asset_library().expect("library");
         assert!(library.get_asset(asset_id).expect("get deleted").is_none());
         assert!(library.get_asset(keep_asset_id).expect("get keep").is_some());
         assert!(!library.folder_exists(&folder_id).expect("folder removed"));
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert!(
-            !sequence.video_tracks[0].clips.iter().any(|clip| clip.asset_id == asset_id),
+            !sequence.video_tracks[0]
+                .clips
+                .iter()
+                .any(|clip| clip.asset_id() == Some(asset_id)),
             "clips referencing deleted assets should be removed"
         );
-        assert!(sequence.video_tracks[0].clips.iter().any(|clip| clip.asset_id == keep_asset_id));
+        assert!(sequence.video_tracks[0]
+            .clips
+            .iter()
+            .any(|clip| clip.asset_id() == Some(keep_asset_id)));
         let events: Vec<AppEvent> = events.try_iter().collect();
         assert!(events.iter().any(
             |event| matches!(event, AppEvent::AssetDeleted { asset_id: event_id } if *event_id == asset_id)
@@ -4615,7 +4601,7 @@ mod tests {
         let library = AssetLibrary::open(library_root.clone()).expect("library");
         let folder_id = library.create_folder("Rushes", None).expect("create folder");
         let asset_id = library.create_solid_color_asset(Some("Plate")).expect("create asset");
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
         let events = state.event_bus.subscribe();
 
         state
@@ -4626,8 +4612,7 @@ mod tests {
             .expect("move asset");
 
         let asset = state
-            .asset_library
-            .as_ref()
+            .asset_library()
             .expect("library")
             .get_asset(asset_id)
             .expect("get asset")
@@ -4649,7 +4634,7 @@ mod tests {
         let library = AssetLibrary::open(library_root.clone()).expect("library");
         let parent_id = library.create_folder("Parent", None).expect("create parent");
         let child_id = library.create_folder("Child", None).expect("create child");
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
 
         state
             .dispatch_action(assets_move_folder_action(AssetsMoveFolderPayload {
@@ -4657,7 +4642,7 @@ mod tests {
                 parent_folder_id: Some(parent_id.clone()),
             }))
             .expect("move folder");
-        let folders = state.asset_library.as_ref().expect("library").list_folders().expect("list");
+        let folders = state.asset_library().expect("library").list_folders().expect("list");
         assert_eq!(
             folders
                 .iter()
@@ -4689,7 +4674,7 @@ mod tests {
         let folder_id = library.create_folder("Bin", None).expect("create folder");
         let first_asset = library.create_solid_color_asset(Some("Plate A")).expect("asset a");
         let second_asset = library.create_solid_color_asset(Some("Plate B")).expect("asset b");
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
         let events = state.event_bus.subscribe();
 
         state
@@ -4700,7 +4685,7 @@ mod tests {
             }))
             .expect("move selection");
 
-        let library = state.asset_library.as_ref().expect("library");
+        let library = state.asset_library().expect("library");
         for asset_id in [first_asset, second_asset] {
             let asset = library.get_asset(asset_id).expect("get asset").expect("asset");
             assert_eq!(asset.folder_id.as_deref(), Some(target_id.as_str()));
@@ -4743,7 +4728,7 @@ mod tests {
         library
             .move_asset_to_folder(asset_id, Some(&original_folder_id))
             .expect("place asset");
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
 
         let err = state
             .dispatch_action(assets_move_selection_action(AssetsMoveSelectionPayload {
@@ -4754,7 +4739,7 @@ mod tests {
             .expect_err("invalid folder move should fail before moving assets");
 
         assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
-        let library = state.asset_library.as_ref().expect("library");
+        let library = state.asset_library().expect("library");
         let asset = library.get_asset(asset_id).expect("get asset").expect("asset");
         assert_eq!(
             asset.folder_id.as_deref(),
@@ -4768,7 +4753,9 @@ mod tests {
     fn dispatch_assets_create_actions_write_library_records() {
         let mut state = AppState::new();
         let library_root = unique_temp_path("assets-create-actions-library");
-        state.asset_library = Some(AssetLibrary::open(library_root.clone()).expect("library"));
+        state.test_set_asset_library(Some(
+            AssetLibrary::open(library_root.clone()).expect("library"),
+        ));
 
         state
             .dispatch_action(assets_create_adjustment_layer_action(
@@ -4786,8 +4773,7 @@ mod tests {
             }))
             .expect("create first folder");
         let first_folder_id = state
-            .asset_library
-            .as_ref()
+            .asset_library()
             .expect("library")
             .list_folders()
             .expect("list folders")
@@ -4801,7 +4787,7 @@ mod tests {
             }))
             .expect("create second folder");
 
-        let library = state.asset_library.as_ref().expect("library");
+        let library = state.asset_library().expect("library");
         let assets = library.list_assets().expect("list assets");
         assert_eq!(assets.len(), 2);
         assert!(assets.iter().any(|asset| asset.kind == AssetKind::AdjustmentLayer));
@@ -4828,7 +4814,7 @@ mod tests {
         let library_root = unique_temp_path("assets-create-in-folder-library");
         let library = AssetLibrary::open(library_root.clone()).expect("library");
         let folder_id = library.create_folder("Generated", None).expect("create folder");
-        state.asset_library = Some(library);
+        state.test_set_asset_library(Some(library));
 
         state
             .dispatch_action(assets_create_adjustment_layer_action(
@@ -4841,12 +4827,7 @@ mod tests {
             }))
             .expect("create solid in folder");
 
-        let assets = state
-            .asset_library
-            .as_ref()
-            .expect("library")
-            .list_assets()
-            .expect("list assets");
+        let assets = state.asset_library().expect("library").list_assets().expect("list assets");
         assert_eq!(assets.len(), 2);
         assert!(assets
             .iter()
@@ -4861,7 +4842,9 @@ mod tests {
     fn dispatch_assets_create_actions_reject_missing_target_folder_without_asset() {
         let mut state = AppState::new();
         let library_root = unique_temp_path("assets-create-missing-folder-library");
-        state.asset_library = Some(AssetLibrary::open(library_root.clone()).expect("library"));
+        state.test_set_asset_library(Some(
+            AssetLibrary::open(library_root.clone()).expect("library"),
+        ));
 
         let err = state
             .dispatch_action(assets_create_solid_color_action(AssetsCreateAssetPayload {
@@ -4871,8 +4854,7 @@ mod tests {
 
         assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
         assert!(state
-            .asset_library
-            .as_ref()
+            .asset_library()
             .expect("library")
             .list_assets()
             .expect("list assets")
@@ -4953,7 +4935,15 @@ mod tests {
             ))
             .expect("save project as");
 
-        assert_eq!(state.current_project_path.as_ref(), Some(&expected_target));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while state.current_project_path() != Some(expected_target.as_path()) {
+            state.poll_project_persistence();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Save As completion timed out"
+            );
+            std::thread::yield_now();
+        }
         assert!(expected_target.exists());
         assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| !*is_error));
 
@@ -4989,9 +4979,17 @@ mod tests {
             ))
             .expect("create project");
 
-        assert_eq!(state.current_project_path.as_ref(), Some(&expected_target));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while state.current_project_path() != Some(expected_target.as_path()) {
+            state.poll_project_persistence();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Save As completion timed out"
+            );
+            std::thread::yield_now();
+        }
         assert!(expected_target.exists());
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert_eq!(sequence.name, "Full Create");
         assert_eq!(sequence.settings.resolution, sequence_settings.resolution);
@@ -5006,7 +5004,7 @@ mod tests {
         );
         let context = sequence
             .settings
-            .root_program_color_context(&state.project_settings.color_management);
+            .root_program_color_context(&state.project_settings().color_management);
         assert_eq!(
             context.engine,
             mondrian_core::ColorEngine::mondrian_standard()
@@ -5015,8 +5013,8 @@ mod tests {
             context.output_transform,
             mondrian_core::OutputTransformIntent::mondrian_standard()
         );
-        assert!(!state.project_settings.proxy_enabled);
-        assert!(state.asset_library.is_some());
+        assert!(!state.project_settings().proxy_enabled);
+        assert!(state.asset_library().is_some());
         assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| !*is_error));
 
         remove_temp_path(&root);
@@ -5026,25 +5024,17 @@ mod tests {
     fn dispatch_project_color_engine_update_changes_inherited_program_context() {
         let mut state = AppState::new();
         let before = Sequence::new("Program");
-        let mut sequence = before.clone();
-        sequence.name = "Edited Program".to_owned();
-        sequence.revision = sequence.revision.checked_next().expect("next revision");
-        state.active_sequence_id = Some(sequence.id);
-        state.sequence = Some(sequence.clone());
-        state.sequences.push(sequence.clone());
+        let sequence_id = before.id;
+        let settings = before.settings.clone();
+        state.test_set_sequence(Some(before));
         state
-            .cmd_history
-            .record_executed(Box::new(
-                mondrian_timeline::command::SequenceSnapshotCommand::new(
-                    "Rename sequence",
-                    &before,
-                    &sequence,
-                )
-                .expect("snapshot command"),
-            ))
-            .expect("record command");
-        assert_eq!(state.cmd_history.diagnostics().undo_entries, 1);
-        let before_revision = state.sequence.as_ref().expect("sequence").revision;
+            .update_sequence_identity_and_settings(sequence_id, "Edited Program", settings)
+            .expect("rename Sequence");
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics().undo_entries,
+            1
+        );
+        let before_revision = state.active_sequence().expect("sequence").revision;
         let engine = mondrian_core::ColorEngine::Aces {
             preset: mondrian_core::AcesConfigPreset::CgV4Aces2Ocio25,
         };
@@ -5055,38 +5045,43 @@ mod tests {
             ))
             .expect("set project color engine");
 
-        assert_eq!(state.project_settings.color_management.engine, engine);
+        assert_eq!(state.project_settings().color_management.engine, engine);
         assert_eq!(
-            state.sequence.as_ref().expect("active sequence").revision.get(),
+            state.active_sequence().expect("active sequence").revision.get(),
             before_revision.get() + 1
         );
         assert_eq!(
-            state.sequences[0].revision,
-            state.sequence.as_ref().expect("active sequence").revision
+            state.sequences()[0].revision,
+            state.active_sequence().expect("active sequence").revision
         );
         assert_eq!(
             state
-                .sequence
-                .as_ref()
+                .active_sequence()
                 .expect("active sequence")
                 .settings
-                .root_program_color_context(&state.project_settings.color_management)
+                .root_program_color_context(&state.project_settings().color_management)
                 .engine,
             engine
         );
-        assert_eq!(state.cmd_history.diagnostics().undo_entries, 0);
-        assert_eq!(state.cmd_history.diagnostics().redo_entries, 0);
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics().undo_entries,
+            2
+        );
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics().redo_entries,
+            0
+        );
     }
 
     #[test]
     fn dispatch_project_color_engine_update_rejects_inherited_working_mismatch_atomically() {
         let mut state = AppState::new();
         let sequence = Sequence::new("Program");
-        state.active_sequence_id = Some(sequence.id);
-        state.sequence = Some(sequence.clone());
-        state.sequences.push(sequence);
-        let previous = state.project_settings.color_management.engine.clone();
-        let previous_revision = state.sequence.as_ref().expect("sequence").revision;
+        state.test_set_active_sequence(sequence.id);
+        state.test_set_sequence(Some(sequence.clone()));
+        state.test_add_sequence(sequence);
+        let previous = state.project_settings().color_management.engine.clone();
+        let previous_revision = state.active_sequence().expect("sequence").revision;
 
         let error = state
             .dispatch_action(project_set_color_engine_action(
@@ -5095,9 +5090,9 @@ mod tests {
             .expect_err("mismatched Custom OCIO must not replace project mode");
 
         assert!(error.to_string().contains("pins working space 'ACEScg'"));
-        assert_eq!(state.project_settings.color_management.engine, previous);
+        assert_eq!(state.project_settings().color_management.engine, previous);
         assert_eq!(
-            state.sequence.as_ref().expect("sequence").revision,
+            state.active_sequence().expect("sequence").revision,
             previous_revision
         );
     }
@@ -5105,15 +5100,16 @@ mod tests {
     #[test]
     fn dispatch_project_color_engine_update_rejects_standard_working_mismatch_atomically() {
         let mut state = AppState::new();
-        state.project_settings.color_management.engine = mondrian_core::ColorEngine::Aces {
-            preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
-        };
+        state.test_project_settings_mut().color_management.engine =
+            mondrian_core::ColorEngine::Aces {
+                preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+            };
         let mut sequence = Sequence::new("P3 Program");
         sequence.settings.working_color_space = WorkingColorSpace::LinearP3D65;
-        state.active_sequence_id = Some(sequence.id);
-        state.sequence = Some(sequence.clone());
-        state.sequences.push(sequence);
-        let previous = state.project_settings.color_management.engine.clone();
+        state.test_set_active_sequence(sequence.id);
+        state.test_set_sequence(Some(sequence.clone()));
+        state.test_add_sequence(sequence);
+        let previous = state.project_settings().color_management.engine.clone();
 
         let error = state
             .dispatch_action(project_set_color_engine_action(
@@ -5124,9 +5120,9 @@ mod tests {
             .expect_err("Standard must reject a sequence outside its pinned working space");
 
         assert!(error.to_string().contains("Mondrian Standard"));
-        assert_eq!(state.project_settings.color_management.engine, previous);
+        assert_eq!(state.project_settings().color_management.engine, previous);
         assert_eq!(
-            state.sequence.as_ref().expect("active sequence").settings.working_color_space,
+            state.active_sequence().expect("active sequence").settings.working_color_space,
             WorkingColorSpace::LinearP3D65
         );
     }
@@ -5166,7 +5162,7 @@ mod tests {
             crate::app::AnimationKeyframeSelection {
                 clip_id,
                 path: Transform2D::OPACITY_PATH.to_string(),
-                time: tt(10, state.sequence.as_ref().expect("sequence").time_base()),
+                time: tt(10, state.active_sequence().expect("sequence").time_base()),
             },
         );
 
@@ -5203,7 +5199,7 @@ mod tests {
     #[test]
     fn dispatch_select_all_tracks_selects_video_and_audio_tracks() {
         let (mut state, video_track_id, clip_id) = state_with_two_video_tracks();
-        let sequence = state.sequence.as_mut().expect("sequence");
+        let sequence = state.active_sequence_mut_uncommitted().expect("sequence");
         sequence.add_audio_track();
         let expected_track_ids = sequence
             .video_tracks
@@ -5233,7 +5229,7 @@ mod tests {
     #[test]
     fn dispatch_select_all_selects_video_and_audio_clips() {
         let (mut state, video_track_id, video_clip_id) = state_with_two_video_tracks();
-        let sequence = state.sequence.as_mut().expect("sequence");
+        let sequence = state.active_sequence_mut_uncommitted().expect("sequence");
         let audio_track_id = sequence.add_audio_track();
         let tb = sequence.time_base();
         let audio_clip = Clip::new(AssetId::new(), tt(30, tb), tt(10, tb)).expect("valid clip");
@@ -5290,7 +5286,7 @@ mod tests {
             crate::app::AnimationKeyframeSelection {
                 clip_id,
                 path: Transform2D::OPACITY_PATH.to_string(),
-                time: tt(10, state.sequence.as_ref().expect("sequence").time_base()),
+                time: tt(10, state.active_sequence().expect("sequence").time_base()),
             },
         );
 
@@ -5321,7 +5317,7 @@ mod tests {
             .dispatch_action(mondrian_editor_state::Action::DeleteSelection)
             .expect("delete selection");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert!(sequence.video_tracks[0].clips.is_empty());
         assert!(state.selection.selected_clips.is_empty());
@@ -5333,12 +5329,11 @@ mod tests {
     #[test]
     fn dispatch_ripple_delete_selection_closes_gap_after_selected_clip() {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
-        let tb = state.sequence.as_ref().expect("sequence").time_base();
+        let tb = state.active_sequence().expect("sequence").time_base();
         let trailing = Clip::new(AssetId::new(), tt(40, tb), tt(12, tb)).expect("valid clip");
         let trailing_id = trailing.id;
         state
-            .sequence
-            .as_mut()
+            .active_sequence_mut_uncommitted()
             .expect("sequence")
             .video_track_mut(track_id)
             .expect("track")
@@ -5351,7 +5346,7 @@ mod tests {
             .dispatch_action(mondrian_editor_state::Action::RippleDeleteSelection)
             .expect("ripple delete selection");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let tb = sequence.time_base();
         let track = sequence.video_tracks.iter().find(|track| track.id == track_id).expect("track");
         assert_eq!(track.clips.len(), 1);
@@ -5373,11 +5368,11 @@ mod tests {
             .dispatch_action(mondrian_editor_state::Action::MarkOutAtPlayhead)
             .expect("mark out");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let tb = sequence.time_base();
         assert_eq!(sequence.in_point, Some(tt(42, tb)));
         assert_eq!(sequence.out_point, Some(tt(42, tb)));
-        assert!(!state.can_undo_action());
+        assert!(state.can_undo_action());
     }
 
     #[test]
@@ -5400,7 +5395,7 @@ mod tests {
             ))
             .expect("set out point");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let tb = sequence.time_base();
         assert_eq!(sequence.in_point, Some(tt(32, tb)));
         assert_eq!(sequence.out_point, Some(tt(32, tb)));
@@ -5410,7 +5405,7 @@ mod tests {
     fn dispatch_timeline_ui_clears_in_out_points() {
         let (mut state, _, _) = state_with_two_video_tracks();
         {
-            let sequence = state.sequence.as_mut().expect("sequence");
+            let sequence = state.active_sequence_mut_uncommitted().expect("sequence");
             let tb = sequence.time_base();
             sequence.mark_in(tt(12, tb));
             sequence.mark_out(tt(48, tb));
@@ -5420,7 +5415,7 @@ mod tests {
             .dispatch_action(timeline_clear_in_out_points_action())
             .expect("clear in/out");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         assert_eq!(sequence.in_point, None);
         assert_eq!(sequence.out_point, None);
     }
@@ -5428,7 +5423,7 @@ mod tests {
     #[test]
     fn dispatch_delete_selection_preserves_locked_track() {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
-        state.sequence.as_mut().expect("sequence").video_tracks[0].is_locked = true;
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
         state.selection.selected_clips =
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
 
@@ -5437,7 +5432,7 @@ mod tests {
             .expect_err("locked track should reject delete");
 
         assert!(matches!(err, MondrianError::TrackLocked { .. }));
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].clips.len(), 1);
         assert_eq!(
@@ -5458,9 +5453,9 @@ mod tests {
         let mut video_clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
         let mut audio_clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
         let video_clip_id = video_clip.id;
-        let audio_clip_id = audio_clip.id;
-        video_clip.linked_clip = Some(audio_clip_id);
-        audio_clip.linked_clip = Some(video_clip_id);
+        let link_group = ClipLinkGroupId::new();
+        video_clip.link_group = Some(link_group);
+        audio_clip.link_group = Some(link_group);
 
         sequence.video_tracks[0].add_clip(video_clip).expect("add video");
         sequence
@@ -5468,7 +5463,7 @@ mod tests {
             .expect("audio track")
             .add_clip(audio_clip)
             .expect("add audio");
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         state.selection.selected_clips = vec![SelectedClipRef {
             track_id: video_track_id,
             is_video_track: true,
@@ -5479,7 +5474,7 @@ mod tests {
             .dispatch_action(mondrian_editor_state::Action::DeleteSelection)
             .expect("delete linked selection");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert!(sequence.video_tracks[0].clips.is_empty());
         assert!(sequence.audio_tracks[0].clips.is_empty());
@@ -5496,7 +5491,7 @@ mod tests {
             .dispatch_action(mondrian_editor_state::Action::DeleteSelection)
             .expect("delete selected track");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert!(!sequence.video_tracks.iter().any(|track| track.id == track_id));
         assert!(state.selection.selected_track_ids.is_empty());
@@ -5513,14 +5508,14 @@ mod tests {
         let audio_count = sequence.audio_tracks.len();
         let video_track_id = sequence.video_tracks[1].id;
         let audio_track_id = sequence.audio_tracks[1].id;
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         state.selection.selected_track_ids = vec![video_track_id, audio_track_id];
 
         state
             .dispatch_action(mondrian_editor_state::Action::DeleteSelection)
             .expect("delete selected tracks");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks.len(), video_count - 1);
         assert_eq!(sequence.audio_tracks.len(), audio_count - 1);
@@ -5529,7 +5524,7 @@ mod tests {
         assert!(state.selection.selected_track_ids.is_empty());
 
         assert!(state.undo_timeline().expect("undo track delete"));
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks.len(), video_count);
         assert_eq!(sequence.audio_tracks.len(), audio_count);
@@ -5543,7 +5538,7 @@ mod tests {
         let mut state = AppState::new();
         let sequence = Sequence::new("single track edit");
         let track_ids = sequence.video_tracks.iter().map(|track| track.id).collect::<Vec<_>>();
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         state.selection.selected_track_ids = track_ids.clone();
 
         let err = state
@@ -5554,7 +5549,7 @@ mod tests {
             err,
             MondrianError::WorkflowStepFailed { step_id, .. } if step_id == "remove_tracks"
         ));
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks.len(), track_ids.len());
         assert_eq!(state.selection.selected_track_ids, track_ids);
@@ -5587,7 +5582,7 @@ mod tests {
             .dispatch_action(mondrian_editor_state::Action::SplitClipAtPlayhead)
             .expect("split at playhead");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let tb = sequence.time_base();
         let clips = &sequence.video_tracks[0].clips;
         assert_eq!(clips.len(), 2);
@@ -5608,7 +5603,7 @@ mod tests {
             .dispatch_action(mondrian_editor_state::Action::SplitClipAtPlayhead)
             .expect("split at clip boundary");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].clips.len(), 1);
         assert!(!state.can_undo_action());
@@ -5622,13 +5617,13 @@ mod tests {
             .dispatch_action(mondrian_editor_state::Action::NudgeClip { clip_id, delta_frames: 5 })
             .expect("nudge clip");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].clips[0].position, tt(15, tb));
         assert!(state.can_undo_action());
 
         assert!(state.undo_timeline().expect("undo nudge"));
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].clips[0].position, tt(10, tb));
     }
@@ -5641,7 +5636,7 @@ mod tests {
             .dispatch_action(mondrian_editor_state::Action::NudgeClip { clip_id, delta_frames: 0 })
             .expect("nudge clip");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].clips[0].position, tt(10, tb));
         assert!(!state.can_undo_action());
@@ -5650,8 +5645,8 @@ mod tests {
     #[test]
     fn dispatch_move_clip_to_track_updates_selection_location() {
         let (mut state, source_track_id, clip_id) = state_with_two_video_tracks();
-        let target_track_id = state.sequence.as_ref().expect("sequence").video_tracks[1].id;
-        let tb = state.sequence.as_ref().expect("sequence").time_base();
+        let target_track_id = state.active_sequence().expect("sequence").video_tracks[1].id;
+        let tb = state.active_sequence().expect("sequence").time_base();
         state.selection.selected_clips = vec![SelectedClipRef {
             track_id: source_track_id,
             is_video_track: true,
@@ -5666,7 +5661,7 @@ mod tests {
             })
             .expect("move clip to track");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let tb = sequence.time_base();
         assert!(sequence.video_tracks[0].clips.is_empty());
         assert_eq!(sequence.video_tracks[1].clips[0].id, clip_id);
@@ -5685,7 +5680,7 @@ mod tests {
     #[test]
     fn dispatch_move_clip_to_track_refreshes_linked_selection_location() {
         let (mut state, source_video_track_id, video_clip_id) = state_with_two_video_tracks();
-        let sequence = state.sequence.as_mut().expect("sequence");
+        let sequence = state.active_sequence_mut_uncommitted().expect("sequence");
         let target_video_track_id = sequence.video_tracks[1].id;
         let source_audio_track_id = sequence.audio_tracks[0].id;
         sequence.add_audio_track();
@@ -5693,9 +5688,16 @@ mod tests {
 
         let audio_clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
         let audio_clip_id = audio_clip.id;
-        sequence.audio_tracks[0].add_clip(audio_clip).expect("add audio");
-        sequence.video_tracks[0].clips[0].linked_clip = Some(audio_clip_id);
-        sequence.audio_tracks[0].clips[0].linked_clip = Some(video_clip_id);
+        sequence
+            .add_media_audio_clip(
+                source_audio_track_id,
+                audio_clip,
+                AudioSourceComponentId::primary(),
+            )
+            .expect("add audio");
+        let link_group = ClipLinkGroupId::new();
+        sequence.video_tracks[0].clips[0].link_group = Some(link_group);
+        sequence.audio_tracks[0].clips[0].link_group = Some(link_group);
         state.selection.selected_clips = vec![
             SelectedClipRef {
                 track_id: source_video_track_id,
@@ -5717,7 +5719,7 @@ mod tests {
             })
             .expect("move linked clip to track");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert!(!sequence.audio_tracks[0].clips.iter().any(|clip| clip.id == audio_clip_id));
         let target_audio_track_id = sequence
@@ -5757,7 +5759,7 @@ mod tests {
             ))
             .expect("dispatch enabled");
 
-        let clip = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0];
+        let clip = &state.active_sequence().expect("sequence").video_tracks[0].clips[0];
         assert!(clip.is_disabled);
         assert!(state.can_undo_action());
     }
@@ -5775,7 +5777,7 @@ mod tests {
             ))
             .expect("dispatch opacity");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         let clip = &sequence.video_tracks[0].clips[0];
         assert!((clip.transform.evaluate_opacity(sequence.playhead) - 0.42).abs() < 1.0e-6);
@@ -5801,14 +5803,14 @@ mod tests {
             .expect("select alternate Component");
 
         assert_eq!(
-            state.sequence.as_ref().expect("sequence").audio_tracks[0].clips[0].audio_components[0]
+            state.active_sequence().expect("sequence").audio_tracks[0].clips[0].audio_components[0]
                 .source,
             AudioComponentSource::Media { component_id: alternate_component }
         );
         assert!(state.can_undo_action());
         assert!(state.undo_timeline().expect("undo source selection"));
         assert_eq!(
-            state.sequence.as_ref().expect("sequence").audio_tracks[0].clips[0].audio_components[0]
+            state.active_sequence().expect("sequence").audio_tracks[0].clips[0].audio_components[0]
                 .source,
             AudioComponentSource::Media { component_id: AudioSourceComponentId::primary() }
         );
@@ -5819,7 +5821,7 @@ mod tests {
     #[test]
     fn dispatch_inspector_audio_source_rejects_unknown_component_without_mutation() {
         let (root, mut state, track_id, clip_id, edit_id, _) = state_with_audio_asset();
-        let before = serde_json::to_vec(state.sequence.as_ref().expect("sequence"))
+        let before = serde_json::to_vec(state.active_sequence().expect("sequence"))
             .expect("serialize before Sequence");
 
         let error = state
@@ -5840,7 +5842,7 @@ mod tests {
                 if step_id == "inspector_set_audio_component_source"
         ));
         assert_eq!(
-            serde_json::to_vec(state.sequence.as_ref().expect("sequence"))
+            serde_json::to_vec(state.active_sequence().expect("sequence"))
                 .expect("serialize after Sequence"),
             before
         );
@@ -5876,8 +5878,8 @@ mod tests {
             .expect("nested audio Clip");
         let edit_id = parent.audio_tracks[0].clips[0].audio_components[0].id;
         let mut state = AppState::new();
-        state.sequence = Some(parent);
-        state.sequences = vec![child];
+        state.test_set_sequence(Some(parent));
+        state.test_set_sequences(vec![child]);
 
         state
             .dispatch_action(inspector_set_audio_component_source_action(
@@ -5892,13 +5894,13 @@ mod tests {
             .expect("select child public output");
 
         assert_eq!(
-            state.sequence.as_ref().expect("parent").audio_tracks[0].clips[0].audio_components[0]
+            state.active_sequence().expect("parent").audio_tracks[0].clips[0].audio_components[0]
                 .source,
             AudioComponentSource::NestedOutput { output_id: alternate_output }
         );
         assert!(state.undo_timeline().expect("undo nested source selection"));
         assert_eq!(
-            state.sequence.as_ref().expect("parent").audio_tracks[0].clips[0].audio_components[0]
+            state.active_sequence().expect("parent").audio_tracks[0].clips[0].audio_components[0]
                 .source,
             AudioComponentSource::NestedOutput { output_id: initial_output }
         );
@@ -5906,7 +5908,15 @@ mod tests {
 
     #[test]
     fn dispatch_inspector_ui_sets_clip_tint_color() {
-        let (mut state, track_id, clip_id) = state_with_two_video_tracks();
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("solid color inspector");
+        let track_id = sequence.video_tracks[0].id;
+        let tb = sequence.time_base();
+        let clip = Clip::new_solid_color(AssetId::new(), Color::BLACK, tt(10, tb), tt(20, tb))
+            .expect("solid color Clip");
+        let clip_id = clip.id;
+        sequence.video_tracks[0].add_clip(clip).expect("add solid color Clip");
+        state.test_set_sequence(Some(sequence));
         let color = Color::from_rgba8(8, 144, 220, 192);
 
         state
@@ -5918,8 +5928,8 @@ mod tests {
             ))
             .expect("dispatch tint");
 
-        let clip = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0];
-        assert_eq!(clip.solid_color, Some(color));
+        let clip = &state.active_sequence().expect("sequence").video_tracks[0].clips[0];
+        assert_eq!(clip.content.solid_color(), Some(color));
         assert!(state.can_undo_action());
     }
 
@@ -5941,7 +5951,7 @@ mod tests {
                 .expect("dispatch transform");
         }
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         let clip = &sequence.video_tracks[0].clips[0];
         assert_eq!(
@@ -5978,7 +5988,7 @@ mod tests {
             ))
             .expect("dispatch viewer transform");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         let clip = &sequence.video_tracks[0].clips[0];
         assert_eq!(
@@ -5999,7 +6009,7 @@ mod tests {
         assert!(state.can_undo_action());
 
         assert!(state.undo_timeline().expect("undo viewer transform"));
-        let sequence = state.sequence.as_ref().expect("sequence after undo");
+        let sequence = state.active_sequence().expect("sequence after undo");
         let clip = &sequence.video_tracks[0].clips[0];
         assert_eq!(
             clip.transform.get_position(sequence.playhead),
@@ -6025,7 +6035,7 @@ mod tests {
             ))
             .expect("dispatch curve");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         let clip = &sequence.video_tracks[0].clips[0];
         let tb = sequence.time_base();
@@ -6038,7 +6048,7 @@ mod tests {
     #[test]
     fn dispatch_inspector_clip_mutations_preserve_locked_track() {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
-        state.sequence.as_mut().expect("sequence").video_tracks[0].is_locked = true;
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
         let clip_ref = inspector_clip_payload(track_id, clip_id);
 
         for action in [
@@ -6079,11 +6089,11 @@ mod tests {
             assert!(matches!(err, MondrianError::TrackLocked { .. }));
         }
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         let clip = &sequence.video_tracks[0].clips[0];
         assert!(!clip.is_disabled);
-        assert_eq!(clip.solid_color, None);
+        assert_eq!(clip.content.solid_color(), None);
         assert_eq!(
             clip.transform.get_position(sequence.playhead),
             glam::Vec2::ZERO
@@ -6103,17 +6113,20 @@ mod tests {
             }))
             .expect("dispatch add effect");
 
-        let clip = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0];
+        let clip = &state.active_sequence().expect("sequence").video_tracks[0].clips[0];
         assert_eq!(clip.effects.len(), 1);
         assert_eq!(clip.effects[0].effect_type, EffectType::GaussianBlur);
         let selected = state.primary_selected_effect().expect("new effect should be selected");
         assert_eq!(selected.clip.clip_id, clip_id);
         assert_eq!(selected.effect_id, clip.effects[0].id);
         assert!(state.can_undo_action());
-        assert_eq!(state.cmd_history.undo_description(), Some("添加高斯模糊"));
+        assert_eq!(
+            state.authoring_history().and_then(|history| history.undo_description()),
+            Some("添加高斯模糊")
+        );
 
         assert!(state.undo_timeline().expect("undo add effect"));
-        let clip = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0];
+        let clip = &state.active_sequence().expect("sequence").video_tracks[0].clips[0];
         assert!(clip.effects.is_empty());
         assert!(!state.can_undo_action());
         assert!(state.primary_selected_effect().is_none());
@@ -6125,7 +6138,8 @@ mod tests {
         let effect: mondrian_effects::EffectNode =
             mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
         let effect_id = effect.id;
-        state.sequence.as_mut().expect("sequence").video_tracks[0].clips[0].add_effect_node(effect);
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].clips[0]
+            .add_effect_node(effect);
 
         state
             .dispatch_action(inspector_select_effect_action(
@@ -6166,7 +6180,8 @@ mod tests {
         let effect: mondrian_effects::EffectNode =
             mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
         let effect_id = effect.id;
-        state.sequence.as_mut().expect("sequence").video_tracks[0].clips[0].add_effect_node(effect);
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].clips[0]
+            .add_effect_node(effect);
 
         state
             .dispatch_action(inspector_set_effect_enabled_action(
@@ -6179,7 +6194,7 @@ mod tests {
             .expect("dispatch effect enabled");
 
         let effect =
-            &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0].effects[0];
+            &state.active_sequence().expect("sequence").video_tracks[0].clips[0].effects[0];
         assert_eq!(effect.id, effect_id);
         assert!(!effect.is_enabled);
         assert!(state.can_undo_action());
@@ -6191,7 +6206,8 @@ mod tests {
         let effect: mondrian_effects::EffectNode =
             mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
         let effect_id = effect.id;
-        state.sequence.as_mut().expect("sequence").video_tracks[0].clips[0].add_effect_node(effect);
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].clips[0]
+            .add_effect_node(effect);
 
         state
             .dispatch_action(inspector_set_effect_enabled_action(
@@ -6242,7 +6258,7 @@ mod tests {
             ))
             .expect("dispatch effect property");
 
-        let property = state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0]
+        let property = state.active_sequence().expect("sequence").video_tracks[0].clips[0]
             .effects
             .iter()
             .find(|effect| effect.id == effect_id)
@@ -6252,7 +6268,7 @@ mod tests {
         assert!(state.can_undo_action());
 
         assert!(state.undo_timeline().expect("undo effect property"));
-        let property = state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0]
+        let property = state.active_sequence().expect("sequence").video_tracks[0].clips[0]
             .effects
             .iter()
             .find(|effect| effect.id == effect_id)
@@ -6311,7 +6327,8 @@ mod tests {
             mondrian_effects::EffectNodeExt::with_defaults(EffectType::Sharpen);
         let remove_id = remove_effect.id;
         let keep_id = keep_effect.id;
-        let clip = &mut state.sequence.as_mut().expect("sequence").video_tracks[0].clips[0];
+        let clip = &mut state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0]
+            .clips[0];
         clip.add_effect_node(remove_effect);
         clip.add_effect_node(keep_effect);
 
@@ -6324,7 +6341,7 @@ mod tests {
             ))
             .expect("dispatch remove effect");
 
-        let effects = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0].effects;
+        let effects = &state.active_sequence().expect("sequence").video_tracks[0].clips[0].effects;
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0].id, keep_id);
         assert!(state.can_undo_action());
@@ -6339,7 +6356,8 @@ mod tests {
             mondrian_effects::EffectNodeExt::with_defaults(EffectType::Sharpen);
         let remove_id = remove_effect.id;
         let keep_id = keep_effect.id;
-        let clip = &mut state.sequence.as_mut().expect("sequence").video_tracks[0].clips[0];
+        let clip = &mut state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0]
+            .clips[0];
         clip.add_effect_node(remove_effect);
         clip.add_effect_node(keep_effect);
 
@@ -6350,7 +6368,7 @@ mod tests {
             })
             .expect("dispatch remove effect action");
 
-        let effects = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0].effects;
+        let effects = &state.active_sequence().expect("sequence").video_tracks[0].clips[0].effects;
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0].id, keep_id);
         assert!(state.can_undo_action());
@@ -6362,7 +6380,7 @@ mod tests {
         let effect: mondrian_effects::EffectNode =
             mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
         let effect_id = effect.id;
-        let sequence = state.sequence.as_mut().expect("sequence");
+        let sequence = state.active_sequence_mut_uncommitted().expect("sequence");
         sequence.video_tracks[0].clips[0].add_effect_node(effect);
         sequence.video_tracks[0].is_locked = true;
 
@@ -6371,7 +6389,7 @@ mod tests {
             .expect_err("locked track should reject effect removal");
 
         assert!(matches!(err, MondrianError::TrackLocked { .. }));
-        let effects = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0].effects;
+        let effects = &state.active_sequence().expect("sequence").video_tracks[0].clips[0].effects;
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0].id, effect_id);
         assert!(!state.can_undo_action());
@@ -6389,7 +6407,8 @@ mod tests {
         let first_id = first.id;
         let second_id = second.id;
         let third_id = third.id;
-        let clip = &mut state.sequence.as_mut().expect("sequence").video_tracks[0].clips[0];
+        let clip = &mut state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0]
+            .clips[0];
         clip.add_effect_node(first);
         clip.add_effect_node(second);
         clip.add_effect_node(third);
@@ -6402,7 +6421,7 @@ mod tests {
             })
             .expect("dispatch reorder effects");
 
-        let effects = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0].effects;
+        let effects = &state.active_sequence().expect("sequence").video_tracks[0].clips[0].effects;
         assert_eq!(
             effects.iter().map(|effect| effect.id).collect::<Vec<_>>(),
             vec![second_id, third_id, first_id]
@@ -6410,7 +6429,7 @@ mod tests {
         assert!(state.can_undo_action());
 
         assert!(state.undo_timeline().expect("undo reorder effects"));
-        let effects = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0].effects;
+        let effects = &state.active_sequence().expect("sequence").video_tracks[0].clips[0].effects;
         assert_eq!(
             effects.iter().map(|effect| effect.id).collect::<Vec<_>>(),
             vec![first_id, second_id, third_id]
@@ -6422,7 +6441,8 @@ mod tests {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
         let effect: mondrian_effects::EffectNode =
             mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
-        state.sequence.as_mut().expect("sequence").video_tracks[0].clips[0].add_effect_node(effect);
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].clips[0]
+            .add_effect_node(effect);
 
         state
             .dispatch_action(mondrian_editor_state::Action::ReorderEffects {
@@ -6440,7 +6460,8 @@ mod tests {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
         let effect: mondrian_effects::EffectNode =
             mondrian_effects::EffectNodeExt::with_defaults(EffectType::GaussianBlur);
-        state.sequence.as_mut().expect("sequence").video_tracks[0].clips[0].add_effect_node(effect);
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].clips[0]
+            .add_effect_node(effect);
 
         let err = state
             .dispatch_action(mondrian_editor_state::Action::ReorderEffects {
@@ -6463,7 +6484,7 @@ mod tests {
             mondrian_effects::EffectNodeExt::with_defaults(EffectType::Sharpen);
         let first_id = first.id;
         let second_id = second.id;
-        let sequence = state.sequence.as_mut().expect("sequence");
+        let sequence = state.active_sequence_mut_uncommitted().expect("sequence");
         sequence.video_tracks[0].clips[0].add_effect_node(first);
         sequence.video_tracks[0].clips[0].add_effect_node(second);
         sequence.video_tracks[0].is_locked = true;
@@ -6477,7 +6498,7 @@ mod tests {
             .expect_err("locked track should reject effect reorder");
 
         assert!(matches!(err, MondrianError::TrackLocked { .. }));
-        let effects = &state.sequence.as_ref().expect("sequence").video_tracks[0].clips[0].effects;
+        let effects = &state.active_sequence().expect("sequence").video_tracks[0].clips[0].effects;
         assert_eq!(
             effects.iter().map(|effect| effect.id).collect::<Vec<_>>(),
             vec![first_id, second_id]
@@ -6490,7 +6511,7 @@ mod tests {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
         let selection = SelectedClipRef { track_id, is_video_track: true, clip_id };
         state.selection.selected_clips = vec![selection];
-        let tb = state.sequence.as_ref().expect("sequence").time_base();
+        let tb = state.active_sequence().expect("sequence").time_base();
         let source_time = tt(4, tb);
         let destination_time = tt(18, tb);
         state
@@ -6567,7 +6588,7 @@ mod tests {
         state.dispatch_action(mondrian_editor_state::Action::Copy).expect("copy clip");
         state.dispatch_action(mondrian_editor_state::Action::Paste).expect("paste clip");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let tb = sequence.time_base();
         let clips = &sequence.video_tracks[0].clips;
         assert_eq!(clips.len(), 2);
@@ -6598,7 +6619,7 @@ mod tests {
 
         state.dispatch_action(mondrian_editor_state::Action::Cut).expect("cut clip");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert!(sequence.video_tracks[0].clips.is_empty());
         assert!(state.selection.selected_clips.is_empty());
@@ -6612,7 +6633,7 @@ mod tests {
     #[test]
     fn dispatch_cut_action_preserves_locked_track_and_clipboard() {
         let (mut state, track_id, clip_id) = state_with_two_video_tracks();
-        state.sequence.as_mut().expect("sequence").video_tracks[0].is_locked = true;
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
         state.selection.selected_clips =
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
 
@@ -6621,7 +6642,7 @@ mod tests {
             .expect_err("locked track should reject cut");
 
         assert!(matches!(err, MondrianError::TrackLocked { .. }));
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].clips.len(), 1);
         assert!(!state.has_clip_clipboard());
@@ -6645,7 +6666,7 @@ mod tests {
             .dispatch_action(mondrian_editor_state::Action::Duplicate)
             .expect("duplicate clip");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let tb = sequence.time_base();
         let clips = &sequence.video_tracks[0].clips;
         assert_eq!(clips.len(), 2);
@@ -6675,7 +6696,7 @@ mod tests {
             .dispatch_action(mondrian_editor_state::Action::Duplicate)
             .expect("duplicate without selection");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let _tb = sequence.time_base();
         assert_eq!(sequence.video_tracks[0].clips.len(), 1);
         assert!(!state.can_undo_action());
@@ -6690,15 +6711,20 @@ mod tests {
         let audio_track_id = sequence.audio_tracks[0].id;
 
         let mut video_clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
-        let mut audio_clip =
-            Clip::new(video_clip.asset_id, tt(10, tb), tt(20, tb)).expect("valid clip");
+        let mut audio_clip = Clip::new(
+            video_clip.asset_id().expect("video asset"),
+            tt(10, tb),
+            tt(20, tb),
+        )
+        .expect("valid clip");
         let video_clip_id = video_clip.id;
         let audio_clip_id = audio_clip.id;
-        video_clip.linked_clip = Some(audio_clip_id);
-        audio_clip.linked_clip = Some(video_clip_id);
+        let link_group = ClipLinkGroupId::new();
+        video_clip.link_group = Some(link_group);
+        audio_clip.link_group = Some(link_group);
         sequence.video_tracks[0].add_clip(video_clip).expect("add video");
         sequence.audio_tracks[0].add_clip(audio_clip).expect("add audio");
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         state.selection.selected_clips = vec![SelectedClipRef {
             track_id: video_track_id,
             is_video_track: true,
@@ -6713,7 +6739,7 @@ mod tests {
             .dispatch_action(mondrian_editor_state::Action::Paste)
             .expect("paste linked clip");
 
-        let sequence = state.sequence.as_ref().expect("sequence");
+        let sequence = state.active_sequence().expect("sequence");
         let tb = sequence.time_base();
         let pasted_video = sequence.video_tracks[0]
             .clips
@@ -6727,8 +6753,9 @@ mod tests {
             .expect("pasted audio");
         assert_eq!(pasted_video.position, tt(40, tb));
         assert_eq!(pasted_audio.position, tt(40, tb));
-        assert_eq!(pasted_video.linked_clip, Some(pasted_audio.id));
-        assert_eq!(pasted_audio.linked_clip, Some(pasted_video.id));
+        assert_eq!(pasted_video.link_group, pasted_audio.link_group);
+        assert!(pasted_video.link_group.is_some());
+        assert_ne!(pasted_video.link_group, Some(link_group));
         assert_eq!(
             state.selection.selected_clips,
             vec![

@@ -55,20 +55,20 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 
 ## 2. 代码现状审查结论
 
-本节是 2026-07-20 的代码基线，不是目标清单。状态区分“模型/算法存在”“已接入主路径”“已有真实项目证据”，避免从类型或单元测试推断产品完成度。
+本节是 2026-07-23 的代码基线，不是目标清单。状态区分“模型/算法存在”“已接入主路径”“已有真实项目证据”，避免从类型或单元测试推断产品完成度。
 
 | 能力域 | 已有事实 | 仍不足以宣称完成的部分 | 当前判断 |
 | --- | --- | --- | --- |
 | 核心时间与 ID | 作者位置/范围/曲线使用 canonical `TimelineTime` 与显式 Time Domain/Transform；`FramePosition` 仅作求值/显示 Adapter。Sequence 持久化一个显示设置并解析为 Viewer/时间轴共享的 NDF/DF/Frames 契约；版本化 fixture 覆盖 VFR PTS、23.976→29.97 嵌套、负时间和 100 小时项目 | 素材源 timecode、用户输入/解析、time-of-day/reel 语义及未来真正的 Feet+Frames 仍须各自完整产品契约，不能从显示格式化器反推“已支持” | L1 |
-| 项目持久化 | `.mdp` manifest、schema v15 精确时间/跨媒体参数/Sequence author revision/统一时间显示设置/规范音频信号布局/Component 混音矩阵/可自动化 Route 边/精确 Samples 参数单位文档、当前 fixture、SQLite 素材库、临时文件写入、自动保存、恢复候选和重连已接入 | Alpha 明确拒绝旧 schema、不承诺兼容迁移；替换目标文件前的持久化/崩溃语义仍需压力验证 | L1- |
-| Undo/Redo | UI 外的活动 Sequence 命令历史可工作；主要编辑动作有回归测试，完整快照已改为可计量的序列化载荷，并受 200 条/128 MiB 双重硬预算和结构化淘汰诊断约束 | 跨 Sequence/Project 聚合事务仍需独立设计；超大项目是否引入 delta command 取决于基准证据，不能另建一套语义 | L1- |
+| 项目持久化 | `.mdp` archive/document/SQLite 独立版本轴已到 schema v17；`AuthoringSession` 生成不可变文档+SQLite revision 快照，后台 worker 用 SQLite online backup、验证后的 sibling archive、flush 和平台原子替换完成发布；manual/autosave 分离 baseline，Session/request/generation 可拒绝旧会话或过期完成，autosave manifest 在 archive 后原子发布；失败不覆盖原文件与 stale completion 测试已接入 | Alpha 明确拒绝旧 schema、不承诺兼容迁移；M1 仍须以真实项目完成恢复选择/冲突 UI、磁盘满/权限失败、保留策略和反复崩溃压力，不把基础设施单测写成产品恢复完成 | L1 地基，M1 产品闭环未完成 |
+| Undo/Redo | `AuthoringSession` 是唯一可变 `ProjectDocument` 权威；所有生产编辑只修改候选快照，经完整验证、revision/generation 前进、项目级 bounded history 记录后原子安装。Undo/Redo 可跨 Sequence 导航和 Project 聚合，使用 200 条/128 MiB 双预算、序列化载荷和结构化淘汰证据；失败事务不改变文档、代次或历史 | 高频/大型项目是否需要 delta/COW 必须由内存与延迟基准决定；M1 仍须覆盖所有产品操作和 Golden Project，而不是再建第二套 command 语义 | L1 架构闭合，操作覆盖继续扩展 |
 | 素材管理 | 文件夹/Bin 层级、移动/重命名/删除、缩略图、离线提示、单文件/目录重连、代理模式已接入产品 UI | tags/metadata 字段尚未形成检索产品；素材使用位置反查和批量诊断不足 | L1- |
-| 时间线编辑 | 多轨、移动、分割、普通 Trim、Ripple Delete、Insert/Overwrite、Roll/Slip/Slide、跨轨移动、链接片段跟随、锁定、吸附、多选和嵌套序列已有实现与测试 | Lift/Extract、显式 Link/Unlink、Track Targeting、转场 handles、反向/冻结/完整 time remap、VFR/混合帧率边界和复杂 ripple 传播未形成完整验收 | L1- |
+| 时间线编辑 | 多轨、移动、分割、普通 Trim、Ripple Delete、Insert/Overwrite、Roll/Slip/Slide、跨轨移动、锁定、吸附、多选和嵌套序列已有实现与测试。Clip 已用封闭 `ClipContent` 删除矛盾 kind payload；链接改为可承载任意成员的 `ClipLinkGroupId` 集合；复制/切割/覆写片段/序列复制会 fork 完整作者身份图；显式视频 Transition 已有强端点、精确范围、结构压缩和不裁切的双源 handle demand | Lift/Extract、显式 Link/Unlink 产品 UI、Track Targeting、reverse/freeze/time remap 仍未闭环；视频 Transition 目前只是作者/Adapter 地基，Cross Dissolve 尚未进入共享 Preview/Export 执行，不得宣称可用 | L1 作者地基，M1 编辑/执行闭环未完成 |
 | 播放与缓存 | UI 无关 `PlaybackEngine`、`FrameWorkBroker`、`PreviewFrameStore`、Evidence v2、Headless GPU Adapter，以及播放/拖动/静帧三种访问语义、FFmpeg session/ring/seek index、原子 generation/抢占/取消 disposition、deadline、预取和代理已接入；Broker 的请求龄期、失效龄期、deadline 与 worker 完成时刻已统一到可注入的 Monotonic Runtime Clock：Adapter 只在准入前提交不透明绝对 deadline 与剩余时长，Broker 单次降低、同键 rebind 更新并在 worker 发结果前一次性盖完成戳，因而排队不会续期、UI 延迟轮询不会制造虚假 Late；deadline/generation/抢占按最早权威时刻统一裁决，时钟回退会钳制、按回退事件计数并令门禁失败；取消原因与 request→checkpoint→return 证据已由播放域统一聚合并以 Playback/Interactive/Still 固定策略供诊断、Headless 与专业验收共用；访问模式/Broker Adapter/有界 job transport 已迁到不依赖 UI 的 `app::preview_access_mode`，deadline/执行质量/预取深度策略已迁到 `app::preview_scheduler_policy`，具体 FFmpeg worker、协作取消观察、结构化结果发布和有界关闭已迁到 `app::preview_media_task`，素材记录加完整 Viewer 意图到 canonical media key/色彩拒绝/不可用结果的解析已迁到 `app::preview_media_source`，Window/Headless 的完成、过期、终态 Delivery 与预卷顺序已统一到 `app::playback_preview`；`app::preview_execution` 原子拥有完整 generation binding、pending、执行质量、候选 ID、Viewer output key、UI 无关 GPU execution contract 与 exact registered-output reuse，Window/Headless 均直接消费该 contract；`app::native_video_import` 统一聚合 renderer/platform native import 事实与稳定 admission blocker，`app::preview_hardware_admission` 以单一快照投影硬解请求、native surface-specific downgrade 与 device selector，Window/Headless composition root 共用该状态；UI 无关 `app::preview_media_frame`、`app::preview_timeline_execution`、`app::preview_viewer_plan`、`app::preview_cpu_execution` 分别拥有解码驻留、canonical Timeline/嵌套求值及 media-demand collection、Viewer lowering 与 CPU 合成/输出语义；Timeline 执行对每个子 Sequence 按自身画布与共享运行时质量求值，Ready 结果必带 cache identity，Window 只提供 typed media outcome、消费统一的预取/preroll/输入色彩 demand 并投影执行事实；UI 无关 `app::preview_runtime` 是唯一生产组合根，按职责拥有 asset-library/proxy-dispatch Adapter、presentation、request scheduler、result pump、service lifecycle、hardware admission、evidence 与分层 diagnostics；Window `app_ui::preview` 只负责 GPU 输出 Widget 注册、CPU raster 无拷贝转换和 panel diagnostics 投影；专业验收消费 UI 无关 evidence，固定策略不可由 smoke 环境变量放宽，并以主视频/主音频流时长及声明帧数而非容器时长证明覆盖；Windows 原生 Private Commit/Working Set 探针与版本化整进程内存门禁已接入真实 cadence/terminal-stress 路径；加速 Headless 门禁已证明 30 分钟时钟数学，真实 `cpal_av_48khz_30min_v1` Adapter 也已接入产品 Audio Playback、Headless GPU、源缓存与整进程证据并 fail-closed | `app::preview_runtime::PreviewProductionRuntime<O>` 已成为 Window/Headless 共用的 UI 无关生产组合根；真实 CPAL、4K HEVC、连续播放、Seek 与取消门禁直接实例化 Headless 输出 specialization，不再借用 `WindowPreviewAdapter`；2026-07-22 的清洁 `c484c47` 基线使用确定性生成 corpus，在 16 GiB 固定 Windows 参考机上完整通过 Video v5 与 CPAL/A/V v1，闭合 30 分钟 cadence、100 次 seek、取消、GPU presentation、设备/合成时钟、A/V drift 与整进程内存证据 | L1，M0 单机基线已闭环；多驱动/设备与声学 loopback 仍属发布证据 |
 | Windows 硬解/低拷贝 | FFmpeg 硬件设备/codec 探测、D3D11/D3D12 native frame 保留、D3D11→D3D12 导入、NV12/P010 GPU YUV 采样、准入与失败原因已有实现；2026-07-22 确定性生成的 1812 秒 4K25 HEVC Main10 Rec.709 素材在 RTX 3050 Laptop/驱动 `32.0.15.9159` 上完成 Video v5：44,999 Ready、2 Stale、45,129 次 GPU completion，全部执行证据为 D3D12VA P010 原生路径且零 fallback/readback；播放 helper 单次启动并 clean close，100 次 seek 压力后的全部 helper 均完成 post-reap 核算 | M0 固定机主路径已经 canonical corpus 实证；仍须更多 GPU/驱动、HDR 显示链路和 8 GiB 降级压力矩阵 | L1 单机长期主路径已实证，发布矩阵未闭环 |
 | 渲染与色彩 | working-space 合成、OCIO CPU/GPU 路径、结构化色彩/显示诊断、golden 测试、预览/导出报告对比、Windows 显示探测和 fail-closed 逻辑较深入 | 仍有 legacy/CPU/读回路径与真实显示 payload 限制；常见 Log/HDR 必须补齐参考样片端到端证明；Windows HDR 监看不能提前宣称稳定 | L1+ 架构，继续符合性收敛 |
-| 效果与动画 | 稳定 `EffectId` 与 `ParameterId`、实例地址、版本化 `ParameterSchema`、定义默认值/可动画能力、受约束数值/enum/resource、三种执行插值语义、`PropertyBag`/`AnimatedProperty`、编辑器曲线预设、效果 DAG、mask、缓存策略和插件式 definition/DSL 已存在；视觉与音频 Processor 共用同一参数描述语言，项目加载会拒绝非法参数状态，内建执行按 ParameterId 精确寻址；效果库只列出有可执行图的定义，启用但未实现/缺插件/资源无效/构图失败会在共享 Render Plan 编译前结构化失败，不再静默恒等输出 | 只有部分声明效果生成真实 render op；CPU/GPU backend 与真实 preview/export 验证仍须分别声明；文字和转场类型尚未接入时间线/渲染主路径；真实外部插件仍需 Adapter | L1- 地基，产品广度未完成 |
-| 音频 | Track→Clip 已是 placement SSOT；Sequence 作者层统一持有 Component/Scope、Track/Bus/Output、typed Route/send、Rack、Automation 与 Transition；播放、导出、Audition、Analysis 和嵌套只允许共用 `compile → prepare → Session → Runtime`。稠密 schedule 已拥有拓扑 slot、连续 Route/Contribution ranges、精确 source/causal-execution/automation spans、liveness scratch、PDC 和 scalar/SIMD；callback 不扫描作者图、不分配、不隐式 clipping。schema v15 支持规范信号布局、显式 Component matrix、可自动化 Route 和精确 Samples 参数单位。Processor semantic IR 在 prepare 期由 Resolver 绑定固定 mode/algorithmic-latency/tail/state/scratch Factory，Render Contract 显式限制 Processor 私有字节、公共输出 lookahead 与 PDC delay-line 字节，Session 构造复核总量；`built_in_processors` 独立拥有规范 Gain 与状态型 Sample Delay，二者共用 Host 与预分配 Parameter-ID batch。算法延迟与 `None/Finite/Infinite` tail 已分离；Contribution 会在源结束后以显式静音冲刷有限尾音，并在首次真实相交样本懒进入局部状态。每个 Processor/Scope/Edit/Fader/Route 按自身 input-signal delay 求值自动化；Program Output 在 Session 内预热并丢弃固定 lookahead，直接返回 Timeline-aligned PCM，嵌套 child 不再向父层泄漏或重复补偿 latency。非零延迟测试 Adapter 覆盖 PDC/entry/分块/mode/poisoning/stage-time/公开输出对齐/嵌套/预算；Sample Delay 覆盖整数作者值、可听延迟不被 PDC 抵消、clip tail、未来 clip 懒激活、seek 重入、分块和预算拒绝。Program Output 已有 callback 无分配 sample-peak/RMS/clip/non-finite observation；本地真实 CPAL/A/V 30 分钟同步门禁已通过 | 仍需隔离 VST3/CLAP、完整 matrix 编辑/探测/Adapter 布局协商、首个生产级非零算法延迟 Processor、stateful reverse checkpoint/materialization、typed sidechain、true-peak/响度/limiter/ballistics UI、完整 Rack/Automation 编辑 UI/Undo、固定参考设备矩阵与声学 loopback。GPU 仅能作为固定批量延迟已计入 PDC、deadline 有证据且可控降级的可选 Processor backend，不能成为 callback 依赖 | L1+ 执行地基；不宣称 DAW 完成度 |
+| 效果与动画 | 稳定 `EffectId` 与 `ParameterId`、实例地址、版本化 `ParameterSchema`、定义默认值/可动画能力、受约束数值/enum/resource、三种执行插值语义、`PropertyBag`/`AnimatedProperty`、编辑器曲线预设、效果 DAG、mask、缓存策略和插件式 definition/DSL 已存在；视觉与音频 Processor 共用同一参数描述语言，项目加载会拒绝非法参数状态，内建执行按 ParameterId 精确寻址；Mask 标量 Property Bag 已进入 schema v17 持久化并校验规范参数身份/曲线/有限几何/形状键顺序，不再保存后回默认；效果库只列出有可执行图的定义，启用但未实现/缺插件/资源无效/构图失败会结构化失败 | 只有部分声明效果生成真实 render op；CPU/GPU backend 与真实 preview/export 验证仍须分别声明；Basic Title 和视频 Transition 尚未进入共享渲染主路径；真实外部插件仍需 Adapter | L1- 地基，产品广度未完成 |
+| 音频 | Track→Clip 已是 placement SSOT；Sequence 作者层统一持有 Component/Scope、Track/Bus/Output、typed Route/send、Rack、Automation 与 Transition；播放、导出、Audition、Analysis 和嵌套只允许共用 `compile → prepare → Session → Runtime`。稠密 schedule 已拥有拓扑 slot、连续 Route/Contribution ranges、精确 source/causal-execution/automation spans、liveness scratch、PDC 和 scalar/SIMD；callback 不扫描作者图、不分配、不隐式 clipping。schema v15 引入并由当前 v17 继续承载规范信号布局、显式 Component matrix、可自动化 Route 和精确 Samples 参数单位。Processor semantic IR 在 prepare 期由 Resolver 绑定固定 mode/algorithmic-latency/tail/state/scratch Factory，Render Contract 显式限制 Processor 私有字节、公共输出 lookahead 与 PDC delay-line 字节，Session 构造复核总量；`built_in_processors` 独立拥有规范 Gain 与状态型 Sample Delay，二者共用 Host 与预分配 Parameter-ID batch。算法延迟与 `None/Finite/Infinite` tail 已分离；Contribution 会在源结束后以显式静音冲刷有限尾音，并在首次真实相交样本懒进入局部状态。每个 Processor/Scope/Edit/Fader/Route 按自身 input-signal delay 求值自动化；Program Output 在 Session 内预热并丢弃固定 lookahead，直接返回 Timeline-aligned PCM，嵌套 child 不再向父层泄漏或重复补偿 latency。非零延迟测试 Adapter 覆盖 PDC/entry/分块/mode/poisoning/stage-time/公开输出对齐/嵌套/预算；Sample Delay 覆盖整数作者值、可听延迟不被 PDC 抵消、clip tail、未来 clip 懒激活、seek 重入、分块和预算拒绝。Program Output 已有 callback 无分配 sample-peak/RMS/clip/non-finite observation；本地真实 CPAL/A/V 30 分钟同步门禁已通过 | 仍需隔离 VST3/CLAP、完整 matrix 编辑/探测/Adapter 布局协商、首个生产级非零算法延迟 Processor、stateful reverse checkpoint/materialization、typed sidechain、true-peak/响度/limiter/ballistics UI、完整 Rack/Automation 编辑 UI/Undo、固定参考设备矩阵与声学 loopback。GPU 仅能作为固定批量延迟已计入 PDC、deadline 有证据且可控降级的可选 Processor backend，不能成为 callback 依赖 | L1+ 执行地基；不宣称 DAW 完成度 |
 | 导出 | 后台队列、取消、时间线逐帧合成、音频混编、FFmpeg 编码、色彩标签/HDR 元数据约束、结果 probe/校验和诊断已存在 | 产品 UI 主要暴露 H.264 预设；Windows 硬编检测未落地主路径；HEVC Main10、专业中间格式和长项目需真实 roundtrip，不以 enum/FFmpeg 参数单测视为交付 | L1- |
 | 自研 UI | winit/wgpu 产品入口、retained widget、主题 token、事件/焦点/IME、Dock、面板和大量组件测试已建立 | 交互一致性和无障碍仍需真实工作流验证；产品字符串大量硬编码，中英文混用，尚无 message ID/pseudo-locale 基础 | L1-；i18n 为 L0 |
 | 插件 | 内部效果 definition、graph DSL、能力/缓存/失败隔离契约已有 | 尚无稳定外部 ABI、包加载/权限/隔离/兼容矩阵；当前只能称内部扩展接缝 | L0 |
@@ -79,7 +79,7 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 
 1. **产品证据弱于代码广度。** 测试数量很多，但 CI 主测试排除了完整 `mondrian-app`，真实 GPU、真实硬解、真实音频设备和长项目主要依赖手动/ignored smoke。
 2. **关键复杂度已按行为形成明确 Locality。** Window/Headless 的完成收割、终态 Delivery 与预卷顺序统一在 UI 无关 `app::playback_preview`；`app::preview_execution` 原子拥有 generation binding、pending、执行质量、候选 ID、完整 output key、UI 无关 GPU execution contract 与 exact registered-output reuse；`app::preview_media_source` 从不可变素材记录与完整 Viewer 意图唯一解析 source/proxy 指纹、色彩/range/Alpha、native surface、代理意图与 canonical decode geometry，缺文件和色彩拒绝不再坍缩为无原因的 `None`；`app::preview_media_task` 独占具体 FFmpeg worker、协作取消观察、结构化终态结果和有界关闭，Window/Headless 不再各自拥有解码循环；`app::preview_media_frame` 以封闭单 payload（working CPU/source-domain/native surface）拥有解码驻留、惰性 working adaptation、质量/provenance、逻辑/采样几何及 reservation，空帧和矛盾 residency 已不可表达；`app::preview_timeline_execution` 是 canonical render-plan traversal、嵌套 Sequence lookup/depth、每个 Sequence 独立画布/共享 runtime quality、嵌套 working-space 合成与转换、typed pending/unavailable、Ready 必备 cache identity 和有序 execution facts 的单一实现；其 read-only media-demand collection 同时服务 prefetch、preroll 与输入色彩 evidence，Window 不再维护调度专用 nested walker；`app::preview_viewer_plan` 统一拥有 resolved element、稳定 cache identity、质量/provenance 聚合、deferred composite 分类与 GPU lowering；`app::preview_cpu_execution` 统一拥有 working-linear preparation/composite、Program Output、monitor adaptation、完整执行事实与阶段耗时；`app::preview_runtime::PreviewProductionRuntime<O>` 是 Window/Headless 共用的唯一生产组合根，`app::preview_frame_store::PreviewFrameStoreAdapter` 是其唯一 Frame Store Adapter；`app::preview_raster_frame` 拥有最终 CPU raster 的有效性、编码色彩、资源身份和内存 reservation，缓存与 stale pin 不再保存 Widget payload；跨 Renderer/显示契约/Window/Headless 的 GPU output blocker taxonomy 与 aggregate 由 UI 无关 `app::preview_gpu_output_blocker` 拥有；缓存驻留/淘汰算法由 `mondrian-playback::PreviewFrameStore` 拥有，GPU/CPU 色彩与合成数学由 renderer 拥有。`app::preview_runtime` 以 media adapter、presentation、request scheduler、result pump、service lifecycle、hardware admission、evidence 与分层 diagnostics 深 Module 保持 Locality；`app_ui::preview` 只保留 GPU 输出 Widget 注册、CPU raster 无拷贝转换和 panel diagnostics 投影；timeline evaluation 文件只适配 media outcome 与 execution facts，不再拥有递归语义；presentation 单独拥有最终 GPU/Raster/stale/CPU output 仲裁及唯一 `PreviewRasterFrame`→`ViewerFrameImage` 转换。该具体 Adapter 主协调器已完成职责级收敛；performance diagnostics 作为一套完整版本化规则书保留 locality，不按行数机械切碎。导出已把 admission/lifecycle/cancellation/evidence 拆到独立深 service；Timeline/音频/色彩/编码执行继续保留在同一 Export implementation 内，后续只在形成完整深职责时再拆，不按行数制造浅文件。
-3. **项目版本化只有“拒绝”，没有“迁移”。** 这在 Alpha 继续变更数据结构时会快速成为真实项目风险。
+3. **当前 Alpha 项目版本化有严格拒绝、尚无兼容迁移。** 这是未发布 Alpha 的有意清理策略；一旦发布首个承诺兼容的 Alpha，之后每次 schema 变化必须同时提交旧 fixture、事务迁移、失败不覆盖和升级后重开证据，不能继续靠拒绝真实用户项目。
 4. **声明能力和视觉执行能力可能分离。** 某些效果、文字和转场已有类型或属性，却没有主路径 render op；路线图不得把它们列为已完成。
 5. **音频/视频运行许可必须持续分离。** 当前 `Priming` 已可预填 PCM 但禁止设备提前消费，普通视频 Late/Recovering 也不会旋转音频 generation；清洁 `c484c47` 的固定参考机 CPAL/A/V 30 分钟基线已证明一次单机产品路径，仍须在多设备/驱动矩阵覆盖慢首帧/seek、持续视频压力、设备失效和声学 loopback，才能形成发布级长期证据。
 
@@ -92,9 +92,11 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 ```text
 ProjectDocument + Migration Registry
               │
-              ├── Editor Commands / Undo Transactions
-              ├── Asset References / Relink
-              └── Cache Semantic Revision
+       AuthoringSession
+              ├── Candidate Author Transactions
+              ├── Project-wide Bounded Undo/Redo
+              ├── Asset Library Revision
+              └── Immutable Persistence/Execution Snapshots
 
 Media Access Contract ──> Playback Engine ──> Viewer Adapter
         │                       │
@@ -123,16 +125,18 @@ Platform Capability Contract
 ### 3.1 项目文档与迁移
 
 - `ProjectDocument` 是规范持久化语义；UI 临时状态、纹理句柄、线程状态和翻译后文本不得进入项目文件。
+- `AuthoringSession` 是唯一可变 Project 权威；保存、执行和 UI 只能取得只读引用或不可变快照，旧 Session 的后台完成不得作用到新 Session。
 - archive format、document schema、SQLite schema 分别版本化，迁移按有序步骤执行；禁止用 serde 默认值无声吞掉语义变化。
+- archive/manifest 先写 sibling 临时文件、flush、重开验证，再经平台原子替换发布；SQLite 必须用 online backup 获取一致快照，不复制活动 WAL 文件集合。
 - 每个迁移必须具备：旧 fixture、升级后不变量、再次保存/打开、失败不覆盖源文件、重复执行安全性。
 - 缓存、代理、波形和缩略图不嵌入项目；它们的 key 必须包含足以反映项目语义和源文件 revision 的字段。
 - 新字段必须定义缺省语义、旧版本迁移语义和 downgrade/unsupported 行为。
 
 ### 3.2 编辑命令与 Undo
 
-- 时间线变更只经 editor/domain command 进入，Widget、Viewer 和平台回调不得直接修改 `Sequence`。
+- 时间线变更只经 `AuthoringSession` 候选事务进入；Widget、Viewer、平台回调和生产 App 命令不得直接借用规范 `Sequence`/`ProjectDocument` 的可变引用。
 - 一次用户意图对应一个 undo transaction；链接片段、转场、marker、字幕、音频自动化等关联变化必须原子提交或全部失败。
-- 在保持现有快照命令兼容的同时，为高频/大型操作引入语义 delta 或 copy-on-write 策略；设置明确的历史内存预算与淘汰诊断。
+- 当前快照历史保持单一语义并受明确内存预算约束；只有基准证明序列化快照成为瓶颈时才在同一事务接口内引入 delta/copy-on-write，不能建立第二套 Undo 解释。
 - 命令测试覆盖 execute → undo → redo、失败回滚、锁定轨道、跨序列引用和保存/重开后的最终语义。
 
 ### 3.3 播放引擎与媒体任务调度
@@ -343,10 +347,12 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 
 **项目与编辑**
 
-- [x] 建立 archive/document/SQLite version registry，并提供 schema v15 current document fixture、v0 SQLite fixture、幂等打开、事务回滚和失败不覆盖测试；Alpha 不保留旧 document schema 兼容。
-- [x] Project document save revision 与持久化 `SequenceRevision` 已分离；每次作者事务、Undo/Redo 及继承的 Project 语义变化单调推进 Sequence revision，Playback 不再拿保存代次冒充 Timeline revision。Track/Clip/Effect/Mask/Parameter/Keyframe 与全部音频作者实体保留稳定强类型 ID，以 Sequence revision 作保守失效、以定义/内容/资源指纹作精细失效；当前文档会拒绝零 revision、重复 Sequence/Track/Clip/Effect/Mask/动画轨身份、重复 effect-local Parameter/曲线 keyframe 身份和悬空强 Clip 引用。
-- [x] 高频 Timeline、Inspector、Viewer 变换与关键帧编辑统一提交 Sequence snapshot command；历史 Module 按目标 Sequence 失败关闭，默认同时硬限制 200 条与 128 MiB command-owned retained bytes，使用可精确计量的序列化快照和 `VecDeque` 常数时间淘汰，累计报告预算淘汰、分支 Redo 丢弃和超大命令未保留。历史构造/入栈失败会回滚作者 Sequence，Undo/Redo 失败不吞命令；选择和导航仍明确不是作者事务。
-- [x] 精确 Timeline Time、显式 Time Domain/Transform、Frame/Sample Evaluation Grid 已落地并删除旧 `TimeCode`/`TimeTicks`。Sequence schema v15 只持久化一个 `TimelineDisplaySettings`，领域层解析为 Viewer/时间轴共享的有效 `TimelineDisplayContract`；Frames 与 SMPTE NDF/DF、signed timecode origin、负位置和 24 小时标签回绕均不改变作者时间。版本化 `timeline_time_contract_v1` fixture 通过不规则 VFR PTS、23.976 child→29.97 parent 显式嵌套变换、负时间和 100 小时项目验证精确投影；未实现完整电影尺语义的 Feet+Frames 已从类型和 UI 删除而非虚假暴露。媒体 Render Plan、Preview key/Broker job/request 与 Export cache 现只携带 canonical source-local `TimelineTime`；普通媒体不按 Sequence fps 二次量化，显式 source frame-rate override 才以 Floor 投影一次，嵌套按 child fps 求值，FFmpeg Adapter 最后以 checked nearest + stream start PTS 降低，浮点秒和微秒 key 已从产品执行闭环删除。
+- [x] 建立 archive/document/SQLite version registry，并提供 schema v17 current document fixture、v0 SQLite fixture、幂等打开、事务回滚和失败不覆盖测试；Alpha 不保留旧 document schema 兼容。v16 将 proxy membership 规范为有序集合；v17 冻结封闭 ClipContent、多成员 Link Group、强端点视频 Transition 和可持久化 Mask Property Bag。
+- [x] Timeline placement 继续作为单一事实来源：ClipContent 封闭 variant 删除平行 kind payload，Clip Link Group 使用至少两成员的集合语义；复制/razor/overwrite fragment/precompose/Sequence duplicate 会 fork 完整 Clip/Track/Effect/Mask/动画/音频身份并重映射内部强引用。视频 Transition 已冻结 Sequence-owned 强端点、唯一 edit pair、精确范围和 unclamped 双源 handle demand；这只完成作者/Adapter 地基，不勾选 Cross Dissolve 执行。
+- [x] `AuthoringSession` 已成为唯一可变 Project 权威，统一拥有文档、素材库、导航、project-wide Undo/Redo、`AuthoringSessionId`、`AuthorGeneration` 与 manual/autosave baseline。Project document save revision 与持久化 `SequenceRevision` 分离；候选事务只有在完整校验、历史记录和 revision/generation 前进都成功后才原子安装，失败不改变文档/代次/历史。生产代码不再暴露“先修改再补记”的 Sequence 可变入口。
+- [x] 历史默认同时硬限制 200 条与 128 MiB command-owned retained bytes，使用可精确计量的序列化 Sequence/Project 快照和 `VecDeque` 常数时间淘汰，累计报告预算淘汰、分支 Redo 丢弃和超大命令未保留；Undo/Redo 可跨 Sequence 导航并为恢复内容分配新 revision。选择和导航仍明确不是作者事务。
+- [x] 保存/另存/Autosave 已统一到 UI 无关持久化 worker：不可变作者快照绑定 Session/request/generation/SQLite revision，SQLite 走 online backup，archive 与 manifest 走 flush+验证+平台原子替换；旧 Session/过期完成不能清除新编辑，失败保持 dirty，close/quit 的必要保存同步等待结果。
+- [x] 精确 Timeline Time、显式 Time Domain/Transform、Frame/Sample Evaluation Grid 已落地并删除旧 `TimeCode`/`TimeTicks`。Sequence schema v17 只持久化一个 `TimelineDisplaySettings`，领域层解析为 Viewer/时间轴共享的有效 `TimelineDisplayContract`；Frames 与 SMPTE NDF/DF、signed timecode origin、负时间和 24 小时标签回绕均不改变作者时间。版本化 `timeline_time_contract_v1` fixture 通过不规则 VFR PTS、23.976 child→29.97 parent 显式嵌套变换、负时间和 100 小时项目验证精确投影；未实现完整电影尺语义的 Feet+Frames 已从类型和 UI 删除而非虚假暴露。媒体 Render Plan、Preview key/Broker job/request 与 Export cache 现只携带 canonical source-local `TimelineTime`；普通媒体不按 Sequence fps 二次量化，显式 source frame-rate override 才以 Floor 投影一次，嵌套按 child fps 求值，FFmpeg Adapter 最后以 checked nearest + stream start PTS 降低，浮点秒和微秒 key 已从产品执行闭环删除。
 
 **播放与任务**
 
@@ -369,7 +375,7 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 - [x] `AudioDecodedSource` 已改为可失败的精确 interleaved block Interface；播放/导出共用文件指纹与 128 项/256 MiB 加权 LRU 的十秒 PCM 窗口，Runtime 仅保留对齐 4096 帧热窗，不再以整文件 PCM 作为产品执行源。
 - [x] source Seam 已从逐样本调用改为每个 Contribution 每块一次的索引化交错读取；semantic IR 已 prepare 为稠密 schedule、连续 Route/Contribution 区间、Transition binding、精确 sample span、预分段 automation span 与 liveness scratch，CPU scalar reference/SIMD kernel 已建立。`dense_schedule_v2` 固定参考机矩阵覆盖 1/8/32/64 Track、0/2/8/16 Bus、显式 Track→Bus→Output Route 与 64/256/1024 帧 block；普通 CI 覆盖三 Bus scalar/SIMD PCM parity。
 - [x] Prepared latency solver 已在每个 Contribution→Track 与 port-specific Route→Bus/Output 汇合点计算补偿，累计 pre/post Rack 与 Program Output algorithmic latency；Processor contract 将其与 `None/Finite/Infinite` tail 分离，Rack 有界求和并拒绝溢出。Scope Contribution 的 causal execution span 覆盖 source/rack algorithmic latency 与 tail，源结束后不再调用媒体 Adapter而是送静音冲刷；未来 Clip 的 stateful occurrence 保持 pending，到首个相交样本才懒进入并连续运行。每个 Scope 输入、Rack Processor、Edit、Fader 与 Route 都保存并扣除 input-signal delay 后求值参数；Program Output 将总算法延迟变为有预算的内部 lookahead，fresh epoch 以有界块预热丢弃后直接返回请求的 Timeline PCM，公共 meter/continuity 保持请求坐标。已归一化的嵌套 child output 以零算法延迟进入父层但继续传播 state-entry obligation，不会二次补偿。Session 为每个 Contribution/Route 补偿输入预分配 fixed delay line，prepare 对总字节与 lookahead fail-closed，Session 构造复核容量；fresh continuity epoch、Offline 精确入口、Realtime generation Enter/Continue、失败中毒/有界恢复、独立 nested epoch、正向补算和 stateful reverse fail-closed 已进入产品路径与普通 CI。
-- [x] Sequence、Render Contract、PCM request/cache/buffer 已统一 schema v15 规范信号布局；公共 DSP 可保真承载 Mono、命名扬声器集合和 1–64 Discrete Bus。素材库 schema v2 的 fingerprinted Component Catalog 已贯通播放/波形/Export 绝对 stream selection。媒体缓存保持 native-layout PCM；`Standard`/显式稀疏矩阵进入 Prepared Contribution，source→Sequence、child→parent 与 Program→delivery 是三个不混淆的边界，未知布局失败关闭。Prepared schedule 现保留全局唯一 Processor Instance ID、Rack 顺序和 owner/insertion origin；共享 Scope 为每个 Contribution 生成独立 Session state，Gain 通过预分配 Parameter-ID lane/sample-offset batch 执行，scalar/SIMD 与 block partition 保持 PCM 一致。主路由与并行 send 共用带 enabled/static gain/Sequence-time automation 的 typed Route 边；编译只将启用边纳入 signal closure，prepare 将 Route 曲线降为预分段 schedule，Session 只使用预分配 gain lane 并在 PDC 后按目标时间应用增益。
+- [x] Sequence、Render Contract、PCM request/cache/buffer 已统一规范信号布局（v15 引入，当前 v17 承载）；公共 DSP 可保真承载 Mono、命名扬声器集合和 1–64 Discrete Bus。素材库 schema v2 的 fingerprinted Component Catalog 已贯通播放/波形/Export 绝对 stream selection。媒体缓存保持 native-layout PCM；`Standard`/显式稀疏矩阵进入 Prepared Contribution，source→Sequence、child→parent 与 Program→delivery 是三个不混淆的边界，未知布局失败关闭。Prepared schedule 现保留全局唯一 Processor Instance ID、Rack 顺序和 owner/insertion origin；共享 Scope 为每个 Contribution 生成独立 Session state，Gain 通过预分配 Parameter-ID lane/sample-offset batch 执行，scalar/SIMD 与 block partition 保持 PCM 一致。主路由与并行 send 共用带 enabled/static gain/Sequence-time automation 的 typed Route 边；编译只将启用边纳入 signal closure，prepare 将 Route 曲线降为预分段 schedule，Session 只使用预分配 gain lane 并在 PDC 后按目标时间应用增益。
 - [x] 用户可见 Component 选择与显式重绑已贯通：Inspector 以稳定 Edit ID 在 Asset Component/嵌套公开输出域内选择并进入 Sequence Undo；资产级“重新探测候选→显式重绑”分离自动证据与用户意图，保留逻辑 ID，更新后会在当前 transport anchor 失效并重建音频 Runtime。Canonical authored mix matrix 已完成持久化、验证、稠密调度执行、嵌套布局边界和播放/导出交付分层。Processor Host 已完成 semantic preservation、prepare-time Resolver/Factory、Session 实例、mode/algorithmic-latency/tail/state/scratch、显式 lookahead/Session 字节预算、主 Bus/辅助输入查询和公共参数 batch 分层；内建定义位于独立深 Module，Gain 与状态型 Sample Delay 走同一 Host，非零延迟测试 Adapter 贯通 PDC。Sample Delay 的可听延迟明确不是可补偿 latency。未来生产 Processor、外部插件、完整编辑 UI、设备矩阵和可选 GPU backend 必须扩展这些已冻结接缝，不能建立第二套音频图、自动化或补偿语义。
 
 **验证基础**
@@ -380,7 +386,7 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 
 ### 退出门槛
 
-- schema v15 current fixture 可保存、重开；旧/未来 schema 明确拒绝；故意失败不会破坏源文件。
+- schema v17 current fixture 可保存、重开；Mask 动画与强编辑关系 round-trip；旧/未来 schema 明确拒绝；故意失败不会破坏源文件。
 - Headless 测试可驱动 play/seek/cancel，并以手动 Monotonic Runtime Clock 精确验证请求年龄、过期边界、最早取消原因、同键 rebind、worker 完成与 UI 轮询解耦以及回退证据，而不构造 Widget 或 native window。
 - 一个参数从 schema → UI → animation → save/reopen → preview/export → cache invalidation 全链通过。
 - 音频时钟、video target selection 和 fallback 决策可由结构化报告关联到同一次播放。
@@ -394,14 +400,14 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 
 - [ ] 后台导入并正确探测 H.264、HEVC、AAC、PCM/WAV、PNG/JPEG；不支持/损坏文件不阻塞 UI。
 - [ ] Bin、重命名、缩略图、离线占位、单个与目录重连可完成 Golden Project；relink 触发正确 cache/waveform/proxy invalidation。
-- [ ] autosave、异常退出恢复、dirty/close 提示和另存为在真实项目上通过；恢复来源、时间和冲突可见。
+- [ ] durable worker、SQLite snapshot、Session/generation completion、dirty/manual/autosave baseline 和原子 manifest 已完成；补齐真实项目上的异常退出恢复选择、来源/时间/冲突 UI、磁盘满/权限失败、保留策略、dirty/close 与另存为三轮 Golden Project 验收。
 
 ### 编辑手感的最低闭环
 
 - [ ] 巩固 Select、Cut、Move、Trim、Ripple、Roll、Slip、Slide、Insert、Overwrite、Delete 和 snapping 的 UI 可发现性与边界反馈。
 - [ ] 补齐 Lift/Extract、显式 Link/Unlink、Track Targeting；链接片段与锁定/静音/可见状态行为一致。
 - [ ] 实现可交付的 speed、reverse、freeze frame；复杂 time remap 可延后，但持久化格式现在必须可扩展。
-- [ ] 转场验证 source handles，不足时拒绝或明确缩短；不得读取片段外错误帧。
+- [ ] 视频 Transition 作者模型已用强端点和 unclamped 双源 demand 验证 handles；补齐产品创建/修剪反馈和共享 Preview/Export 执行。不足时默认拒绝；只有用户明确选择缩短且形成一次 Undo 事务时才可改变作者范围，绝不读取片段外错误帧或隐式重复边界帧。
 
 ### 播放、缓存与代理
 
@@ -524,7 +530,7 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 
 ### 第 3–5 周：迁移、所有权与音频时钟
 
-- 落地项目 version registry 与 schema v15 current fixture；Alpha 旧 schema 明确拒绝。
+- 落地项目 version registry 与 schema v17 current fixture；Alpha 旧 schema 明确拒绝。
 - 将可 headless 驱动的播放/任务核心从 UI 适配器中收敛出来，保留现有成熟调度逻辑。
 - 冻结 Timeline Time/Time Domain、稳定 ParameterId、统一曲线 schema 和 cache semantic revision；旧 `TimeCode`/`TimeTicks` 不作为兼容格式保留。
 - 将 audio master、video late-frame、buffering 和 underrun 证据统一到播放报告。

@@ -132,6 +132,7 @@ pub const MASK_PROP_SHAPE: &str = "shape";
 
 /// A single mask component on a clip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MaskComponent {
     pub id: MaskId,
     pub name: String,
@@ -139,7 +140,6 @@ pub struct MaskComponent {
     /// entry is used (static shape). When enabled, shapes are interpolated by time.
     pub shape_keyframes: Vec<(TimelineTime, MaskShape)>,
     /// Scalar animatable properties (feather, opacity, expansion, invert, mask_op).
-    #[serde(skip)]
     pub properties: PropertyBag,
     pub enabled: bool,
     pub locked: bool,
@@ -163,7 +163,7 @@ impl MaskComponent {
         let mut properties = PropertyBag::default();
         use crate::automation::{
             AnimatablePropertyUiMetadata, ParameterEnumOption, ParameterInvalidValuePolicy,
-            ParameterNumericContract, ParameterUnit, PropertyDescriptor,
+            ParameterNumericContract, ParameterNumericRange, ParameterUnit, PropertyDescriptor,
         };
 
         let define_prop = |bag: &mut PropertyBag,
@@ -177,16 +177,18 @@ impl MaskComponent {
                 "mondrian.mask.feather" | "mondrian.mask.expansion" => {
                     desc.with_unit(ParameterUnit::Pixels)
                 }
-                "mondrian.mask.opacity" => desc.with_numeric_contract(
-                    ParameterUnit::Normalized,
-                    ParameterNumericContract::closed(
-                        0.0,
-                        1.0,
-                        Some(0.01),
-                        ParameterInvalidValuePolicy::Reject,
+                "mondrian.mask.opacity" => {
+                    let normalized = ParameterNumericRange { min: 0.0, max: 1.0 };
+                    desc.with_numeric_contract(
+                        ParameterUnit::Normalized,
+                        ParameterNumericContract {
+                            hard_range: normalized,
+                            soft_range: normalized,
+                            step: Some(0.01),
+                            invalid_value_policy: ParameterInvalidValuePolicy::Reject,
+                        },
                     )
-                    .expect("mask opacity has a valid built-in numeric contract"),
-                ),
+                }
                 "mondrian.mask.operation" => desc.with_enum_options(
                     ["Add", "Subtract", "Intersect", "Difference"]
                         .into_iter()
@@ -260,6 +262,53 @@ impl MaskComponent {
 
     pub fn shape_keyframes_mut(&mut self) -> &mut Vec<(TimelineTime, MaskShape)> {
         &mut self.shape_keyframes
+    }
+
+    /// Validate the complete persisted mask author contract.
+    pub fn validate_author_state(&self) -> crate::Result<()> {
+        if self.shape_keyframes.is_empty() {
+            return Err(mask_validation_error(
+                self.id,
+                "shape keyframes cannot be empty",
+            ));
+        }
+        if !self.shape_animation_enabled && self.shape_keyframes.len() != 1 {
+            return Err(mask_validation_error(
+                self.id,
+                "a static mask must contain exactly one shape keyframe",
+            ));
+        }
+        for pair in self.shape_keyframes.windows(2) {
+            if pair[0].0 >= pair[1].0 {
+                return Err(mask_validation_error(
+                    self.id,
+                    "shape keyframe times must be strictly increasing",
+                ));
+            }
+        }
+        for (_, shape) in &self.shape_keyframes {
+            validate_shape(self.id, shape)?;
+        }
+
+        self.properties.validate()?;
+        for (path, parameter_id) in [
+            (MASK_PROP_FEATHER, "mondrian.mask.feather"),
+            (MASK_PROP_OPACITY, "mondrian.mask.opacity"),
+            (MASK_PROP_EXPANSION, "mondrian.mask.expansion"),
+            (MASK_PROP_INVERT, "mondrian.mask.invert"),
+            (MASK_PROP_MASK_OP, "mondrian.mask.operation"),
+        ] {
+            let property = self.properties.property(path).ok_or_else(|| {
+                mask_validation_error(self.id, format!("required property is missing: {path}"))
+            })?;
+            if property.descriptor.parameter_id() != &crate::ParameterId::new_static(parameter_id) {
+                return Err(mask_validation_error(
+                    self.id,
+                    format!("property {path} has the wrong ParameterId"),
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn current_shape(&self) -> Option<&MaskShape> {
@@ -353,6 +402,40 @@ impl MaskComponent {
             invert,
             mask_op: MaskOp::parse(&mask_op_str),
         }
+    }
+}
+
+fn validate_shape(mask_id: MaskId, shape: &MaskShape) -> crate::Result<()> {
+    let valid = match shape {
+        MaskShape::Rectangle { x, y, width, height, corner_radius } => {
+            [*x, *y, *width, *height, *corner_radius].into_iter().all(f32::is_finite)
+                && *width >= 0.0
+                && *height >= 0.0
+                && *corner_radius >= 0.0
+        }
+        MaskShape::Ellipse { center, radii } => {
+            center.is_finite() && radii.is_finite() && radii.x >= 0.0 && radii.y >= 0.0
+        }
+        MaskShape::Path { points, .. } => points.iter().all(|point| {
+            point.position.is_finite()
+                && point.control_in.is_finite()
+                && point.control_out.is_finite()
+        }),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(mask_validation_error(
+            mask_id,
+            "shape contains invalid geometry",
+        ))
+    }
+}
+
+fn mask_validation_error(mask_id: MaskId, reason: impl Into<String>) -> crate::MondrianError {
+    crate::MondrianError::WorkflowStepFailed {
+        step_id: "validate_mask_author_state".to_owned(),
+        reason: format!("mask {mask_id}: {}", reason.into()),
     }
 }
 

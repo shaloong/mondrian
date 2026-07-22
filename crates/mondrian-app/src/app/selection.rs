@@ -34,7 +34,7 @@ impl AppState {
     /// Inspector and Effects browser.
     pub fn primary_selected_clip(&self) -> Option<SelectedClipRef> {
         let selection = self.selection.selected_clips.first().copied()?;
-        let sequence = self.sequence.as_ref()?;
+        let sequence = self.active_sequence()?;
         resolve_clip_selection(sequence, selection.clip_id)
     }
 
@@ -46,7 +46,7 @@ impl AppState {
     /// The selected effect inside the primary clip, if any.
     pub fn primary_selected_effect(&self) -> Option<SelectedEffectRef> {
         let selection = self.selection.selected_effect?;
-        let sequence = self.sequence.as_ref()?;
+        let sequence = self.active_sequence()?;
         resolve_effect_selection(sequence, selection.clip.clip_id, selection.effect_id)
     }
 
@@ -77,8 +77,7 @@ impl AppState {
     /// selections, matching desktop editor expectations.
     pub fn select_clip_by_id(&mut self, clip_id: ClipId) -> Option<SelectedClipRef> {
         let selection = self
-            .sequence
-            .as_ref()
+            .active_sequence()
             .and_then(|sequence| resolve_clip_selection(sequence, clip_id))?;
         self.replace_clip_selection(vec![selection]);
         Some(selection)
@@ -86,12 +85,12 @@ impl AppState {
 
     /// Select every clip in the active sequence in visible track order.
     pub fn select_all_clips(&mut self) {
-        let Some(sequence) = self.sequence.as_ref() else {
+        let Some(sequence) = self.active_sequence().cloned() else {
             self.clear_selection();
             return;
         };
 
-        let selections = all_clip_selections(sequence);
+        let selections = all_clip_selections(&sequence);
         self.replace_clip_selection(selections);
     }
 
@@ -101,7 +100,7 @@ impl AppState {
     /// selection. Selecting a track clears narrower scopes so commands and
     /// panels cannot accidentally continue targeting a previously selected clip.
     pub fn select_track_by_id(&mut self, track_id: TrackId) -> Option<TrackId> {
-        let sequence = self.sequence.as_ref()?;
+        let sequence = self.active_sequence()?;
         track_exists(sequence, track_id).then(|| {
             self.replace_track_selection(vec![track_id]);
             track_id
@@ -115,8 +114,7 @@ impl AppState {
         effect_id: EffectId,
     ) -> Option<SelectedEffectRef> {
         let selection = self
-            .sequence
-            .as_ref()
+            .active_sequence()
             .and_then(|sequence| resolve_effect_selection(sequence, clip_id, effect_id))?;
         self.selection.selected_track_ids.clear();
         self.selection.selected_clips = vec![selection.clip];
@@ -128,12 +126,12 @@ impl AppState {
 
     /// Select every track in the active sequence in visible track order.
     pub fn select_all_tracks(&mut self) {
-        let Some(sequence) = self.sequence.as_ref() else {
+        let Some(sequence) = self.active_sequence().cloned() else {
             self.clear_selection();
             return;
         };
 
-        let tracks = all_track_ids(sequence);
+        let tracks = all_track_ids(&sequence);
         self.replace_track_selection(tracks);
     }
 
@@ -161,12 +159,12 @@ impl AppState {
     /// UI and command code can target the active sequence quickly, but clip
     /// moves can make those cached fields stale.
     pub fn refresh_selected_clip_locations(&mut self, clip_ids: &[ClipId]) {
-        let Some(sequence) = self.sequence.as_ref() else {
+        let Some(sequence) = self.active_sequence().cloned() else {
             return;
         };
         let updates = clip_ids
             .iter()
-            .filter_map(|clip_id| resolve_clip_selection(sequence, *clip_id))
+            .filter_map(|clip_id| resolve_clip_selection(&sequence, *clip_id))
             .collect::<Vec<_>>();
 
         for selection in &mut self.selection.selected_clips {
@@ -187,13 +185,13 @@ impl AppState {
     /// mutations, regardless of whether they came from legacy egui, app UI
     /// widgets, shortcuts, or scripts.
     pub fn prune_selection_to_active_sequence(&mut self) {
-        let Some(sequence) = self.sequence.as_ref() else {
+        let Some(sequence) = self.active_sequence().cloned() else {
             self.clear_selection();
             return;
         };
 
-        let valid_track_ids = all_track_ids(sequence).into_iter().collect::<HashSet<_>>();
-        let clip_updates = all_clip_selections(sequence)
+        let valid_track_ids = all_track_ids(&sequence).into_iter().collect::<HashSet<_>>();
+        let clip_updates = all_clip_selections(&sequence)
             .into_iter()
             .map(|selection| (selection.clip_id, selection))
             .collect::<HashMap<_, _>>();
@@ -216,7 +214,7 @@ impl AppState {
                     .map(|selection| (mask_id, clip_id, selection.track_id))
             });
         self.selection.selected_effect = self.selection.selected_effect.and_then(|selection| {
-            resolve_effect_selection(sequence, selection.clip.clip_id, selection.effect_id)
+            resolve_effect_selection(&sequence, selection.clip.clip_id, selection.effect_id)
         });
 
         if self

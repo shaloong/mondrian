@@ -95,12 +95,18 @@ pub fn compile_audio_program(
                     entry.insert(compile_scope(author_scope)?);
                 }
                 let source = match edit.source {
-                    AudioComponentSource::Media { component_id } => {
-                        CompiledAudioSource::Media { asset_id: clip.asset_id, component_id }
-                    }
+                    AudioComponentSource::Media { component_id } => CompiledAudioSource::Media {
+                        asset_id: clip.asset_id().ok_or_else(|| {
+                            AudioCompileError::InvalidPlacement(format!(
+                                "media audio edit {} belongs to non-media Clip {}",
+                                edit.id, clip.id
+                            ))
+                        })?,
+                        component_id,
+                    },
                     AudioComponentSource::NestedOutput { output_id } => {
                         CompiledAudioSource::NestedOutput {
-                            sequence_id: clip.nested_sequence_id.ok_or_else(|| {
+                            sequence_id: clip.nested_sequence_id().ok_or_else(|| {
                                 AudioCompileError::InvalidPlacement(format!(
                                     "nested audio Clip {} has no Sequence source",
                                     clip.id

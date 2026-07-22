@@ -23,10 +23,31 @@ pub(super) fn find_clip_track_index(
     }
 }
 
+/// Resolve every member of the selected Clip's synchronization group.
+/// Unlinked Clips return a one-element set containing themselves.
+pub(super) fn clip_link_group_member_ids(seq: &Sequence, clip_id: ClipId) -> Vec<ClipId> {
+    let Some(group) = find_clip(seq, clip_id).and_then(|clip| clip.link_group) else {
+        return find_clip(seq, clip_id).map(|_| vec![clip_id]).unwrap_or_default();
+    };
+    seq.video_tracks
+        .iter()
+        .chain(&seq.audio_tracks)
+        .flat_map(|track| &track.clips)
+        .filter(|clip| clip.link_group == Some(group))
+        .map(|clip| clip.id)
+        .collect()
+}
+
+pub(super) fn expand_clip_link_groups(seq: &Sequence, clip_ids: &mut HashSet<ClipId>) {
+    let selected = clip_ids.iter().copied().collect::<Vec<_>>();
+    for clip_id in selected {
+        clip_ids.extend(clip_link_group_member_ids(seq, clip_id));
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct ClipSplitResult {
     pub(super) right_clip_id: ClipId,
-    pub(super) original_linked: Option<ClipId>,
 }
 
 pub(super) fn split_clip_anywhere(
@@ -77,21 +98,17 @@ pub(super) fn split_clip_in_track(
     left.source_out = new_source_in;
 
     let mut right = clip;
-    right.id = ClipId::new();
-    right.fork_audio_components_for_split(split_offset).ok()?;
+    right.fork_placement_identities_for_split(split_offset).ok()?;
     right.position = split_time;
     right.duration = author_time_from_frame(right_duration, time_base).ok()?;
     right.source_in = new_source_in;
-    right.linked_clip = None;
+    right.link_group = None;
 
     track.clips[index] = left;
     let right_id = right.id;
     track.clips.insert(index + 1, right);
 
-    Some(ClipSplitResult {
-        right_clip_id: right_id,
-        original_linked: track.clips[index].linked_clip,
-    })
+    Some(ClipSplitResult { right_clip_id: right_id })
 }
 
 #[derive(Clone, Copy)]
@@ -342,11 +359,12 @@ pub(super) fn estimate_asset_total_source_frames(
         return None;
     }
 
-    let asset = match library.get_asset(clip.asset_id) {
+    let asset_id = clip.asset_id()?;
+    let asset = match library.get_asset(asset_id) {
         Ok(Some(asset)) => asset,
         Ok(None) => return None,
         Err(err) => {
-            tracing::debug!("读取素材时长失败 {}: {}", clip.asset_id, err);
+            tracing::debug!("读取素材时长失败 {}: {}", asset_id, err);
             return None;
         }
     };
@@ -668,72 +686,8 @@ pub(super) fn remove_clip_from_sequence(seq: &mut Sequence, clip_id: ClipId) -> 
     false
 }
 
-pub(super) fn remove_clip_from_sequence_with_ripple(
-    seq: &mut Sequence,
-    clip_id: ClipId,
-    ripple: bool,
-) -> mondrian_core::Result<bool> {
-    for track in &mut seq.video_tracks {
-        if let Some(index) = track.clips.iter().position(|c| c.id == clip_id) {
-            let removed = track.clips.remove(index);
-            if ripple {
-                let end = removed.end_position()?;
-                for clip in &mut track.clips {
-                    if clip.position >= end {
-                        clip.position =
-                            clip.position.checked_sub(removed.duration)?.max(TimelineTime::ZERO);
-                    }
-                }
-            }
-            resolve_track_overlaps(track)?;
-            return Ok(true);
-        }
-    }
-    for track in &mut seq.audio_tracks {
-        if let Some(index) = track.clips.iter().position(|c| c.id == clip_id) {
-            let removed = track.clips.remove(index);
-            if ripple {
-                let end = removed.end_position()?;
-                for clip in &mut track.clips {
-                    if clip.position >= end {
-                        clip.position =
-                            clip.position.checked_sub(removed.duration)?.max(TimelineTime::ZERO);
-                    }
-                }
-            }
-            resolve_track_overlaps(track)?;
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-pub(super) fn clear_broken_links(seq: &mut Sequence) {
-    let existing: HashSet<ClipId> = seq
-        .video_tracks
-        .iter()
-        .flat_map(|t| t.clips.iter().map(|c| c.id))
-        .chain(seq.audio_tracks.iter().flat_map(|t| t.clips.iter().map(|c| c.id)))
-        .collect();
-
-    for track in &mut seq.video_tracks {
-        for clip in &mut track.clips {
-            if let Some(linked) = clip.linked_clip {
-                if !existing.contains(&linked) {
-                    clip.linked_clip = None;
-                }
-            }
-        }
-    }
-    for track in &mut seq.audio_tracks {
-        for clip in &mut track.clips {
-            if let Some(linked) = clip.linked_clip {
-                if !existing.contains(&linked) {
-                    clip.linked_clip = None;
-                }
-            }
-        }
-    }
+pub(super) fn compact_sequence_references(seq: &mut Sequence) {
+    seq.compact_structural_references();
 }
 
 pub(super) fn remove_asset_clips_from_tracks(
@@ -743,7 +697,7 @@ pub(super) fn remove_asset_clips_from_tracks(
     let mut removed = 0usize;
     for track in tracks {
         let before = track.clips.len();
-        track.clips.retain(|clip| clip.asset_id != asset_id);
+        track.clips.retain(|clip| clip.asset_id() != Some(asset_id));
         removed += before.saturating_sub(track.clips.len());
         resolve_track_overlaps(track)?;
     }
@@ -810,6 +764,7 @@ pub(super) fn subtract_overwrite_range_from_clip(
         right.position = new_start;
         right.duration = clip_end.checked_sub(new_start)?.max(TimelineTime::ZERO);
         right.source_in = new_source_in;
+        right.link_group = None;
         return Ok(if right.duration > TimelineTime::ZERO {
             vec![right]
         } else {
@@ -823,6 +778,7 @@ pub(super) fn subtract_overwrite_range_from_clip(
         let new_source_out = left.timeline_to_source_time(new_end)?;
         left.duration = new_end.checked_sub(clip_start)?.max(TimelineTime::ZERO);
         left.source_out = new_source_out;
+        left.link_group = None;
         return Ok(if left.duration > TimelineTime::ZERO {
             vec![left]
         } else {
@@ -835,16 +791,16 @@ pub(super) fn subtract_overwrite_range_from_clip(
     let left_new_source_out = left.timeline_to_source_time(left_new_end)?;
     left.duration = left_new_end.checked_sub(clip_start)?.max(TimelineTime::ZERO);
     left.source_out = left_new_source_out;
+    left.link_group = None;
 
     let mut right = clip;
     let right_new_start = cut_end;
     let right_new_source_in = right.timeline_to_source_time(right_new_start)?;
-    right.id = ClipId::new();
-    right.fork_audio_components_for_split(right_new_start.checked_sub(clip_start)?)?;
+    right.fork_placement_identities_for_split(right_new_start.checked_sub(clip_start)?)?;
     right.position = right_new_start;
     right.duration = clip_end.checked_sub(right_new_start)?.max(TimelineTime::ZERO);
     right.source_in = right_new_source_in;
-    right.linked_clip = None;
+    right.link_group = None;
 
     let mut result = Vec::with_capacity(2);
     if left.duration > TimelineTime::ZERO {
@@ -942,26 +898,6 @@ pub(super) fn apply_track_conflicts_for_focus_group(
                 return Ok(());
             }
             apply_overwrite_conflicts(track, focus_ids, focus_ranges)?;
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn apply_conflict_policy_for_existing_clip(
-    seq: &mut Sequence,
-    clip_id: ClipId,
-    mode: ClipOverlapMode,
-) -> mondrian_core::Result<()> {
-    for track in &mut seq.video_tracks {
-        if track.clips.iter().any(|c| c.id == clip_id) {
-            resolve_track_conflicts(track, clip_id, mode)?;
-            return Ok(());
-        }
-    }
-    for track in &mut seq.audio_tracks {
-        if track.clips.iter().any(|c| c.id == clip_id) {
-            resolve_track_conflicts(track, clip_id, mode)?;
-            return Ok(());
         }
     }
     Ok(())

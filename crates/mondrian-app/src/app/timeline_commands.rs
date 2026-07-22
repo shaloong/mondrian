@@ -16,50 +16,23 @@ fn sequence_frame_from_time(
     Ok(time.to_frame_position(frame_rate, FrameRounding::Nearest)?.frame)
 }
 
-fn next_sequence_revision(
-    revision: mondrian_core::SequenceRevision,
-) -> mondrian_core::Result<mondrian_core::SequenceRevision> {
-    revision
-        .checked_next()
-        .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
-            step_id: "advance_sequence_revision".to_owned(),
-            reason: format!("Sequence author revision {} is exhausted", revision.get()),
-        })
+fn sequence_is_nested_reference(sequences: &[Sequence], sequence_id: SequenceId) -> bool {
+    sequences.iter().any(|sequence| {
+        sequence
+            .video_tracks
+            .iter()
+            .chain(&sequence.audio_tracks)
+            .flat_map(|track| &track.clips)
+            .any(|clip| clip.nested_sequence_id() == Some(sequence_id))
+    })
 }
-
 impl AppState {
-    pub fn sync_current_sequence_into_collection(&mut self) {
-        let Some(sequence) = self.sequence.clone() else {
-            return;
-        };
-        let active_sequence_id = self.active_sequence_id.unwrap_or(sequence.id);
-        if let Some(existing) =
-            self.sequences.iter_mut().find(|candidate| candidate.id == active_sequence_id)
-        {
-            *existing = sequence;
-        } else {
-            self.sequences.push(sequence);
-        }
-    }
-
     pub fn sequence_by_id(&self, id: SequenceId) -> Option<&Sequence> {
-        if self.sequence.as_ref().is_some_and(|sequence| sequence.id == id) {
-            return self.sequence.as_ref();
-        }
-        self.sequences.iter().find(|sequence| sequence.id == id)
+        self.authoring.as_ref().and_then(|session| session.sequence(id))
     }
 
     pub fn export_sequences_snapshot(&self) -> Vec<Sequence> {
-        let mut sequences = self.sequences.clone();
-        if let Some(current) = self.sequence.as_ref() {
-            if let Some(existing) = sequences.iter_mut().find(|sequence| sequence.id == current.id)
-            {
-                *existing = current.clone();
-            } else {
-                sequences.push(current.clone());
-            }
-        }
-        sequences
+        self.sequences().to_vec()
     }
 
     pub fn switch_active_sequence(&mut self, sequence_id: SequenceId) -> mondrian_core::Result<()> {
@@ -71,29 +44,15 @@ impl AppState {
         sequence_id: SequenceId,
         push_current: bool,
     ) -> mondrian_core::Result<()> {
-        self.sync_current_sequence_into_collection();
-        if push_current {
-            if let Some(current_id) = self.active_sequence_id {
-                if current_id != sequence_id {
-                    self.sequence_navigation_stack.push(current_id);
-                }
-            }
-        }
-        let next = self
-            .sequences
-            .iter()
-            .find(|sequence| sequence.id == sequence_id)
-            .cloned()
+        self.authoring
+            .as_mut()
             .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
-                step_id: "switch_active_sequence".to_string(),
-                reason: format!("序列不存在: {sequence_id}"),
-            })?;
-
-        self.sequence = Some(next);
-        self.active_sequence_id = Some(sequence_id);
+                step_id: "switch_active_sequence".to_owned(),
+                reason: "当前没有打开的项目".to_owned(),
+            })?
+            .switch_active_sequence(sequence_id, push_current)?;
         self.stop();
         self.settle_preview_access_source();
-        self.cmd_history = mondrian_timeline::command::CommandHistory::default();
         Ok(())
     }
 
@@ -102,22 +61,41 @@ impl AppState {
     }
 
     pub fn return_to_parent_sequence(&mut self) -> mondrian_core::Result<bool> {
-        let Some(parent_id) = self.sequence_navigation_stack.pop() else {
-            return Ok(false);
-        };
-        self.switch_active_sequence_internal(parent_id, false)?;
-        Ok(true)
+        let returned = self
+            .authoring
+            .as_mut()
+            .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "return_to_parent_sequence".to_owned(),
+                reason: "当前没有打开的项目".to_owned(),
+            })?
+            .return_to_parent_sequence()?;
+        if returned {
+            self.stop();
+            self.settle_preview_access_source();
+        }
+        Ok(returned)
     }
 
     pub fn set_default_sequence(&mut self, sequence_id: SequenceId) -> mondrian_core::Result<()> {
-        if self.sequence_by_id(sequence_id).is_none() {
+        let session = self.authoring.as_mut().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "set_default_sequence".to_owned(),
+                reason: "当前没有打开的项目".to_owned(),
+            }
+        })?;
+        let before = session.document().clone();
+        let mut after = before.clone();
+        if after.sequences.sequence(sequence_id).is_none() {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "set_default_sequence".to_string(),
                 reason: format!("序列不存在: {sequence_id}"),
             });
         }
-        self.default_sequence_id = Some(sequence_id);
-        let _ = self.save_project_file();
+        if after.sequences.default_sequence_id == sequence_id {
+            return Ok(());
+        }
+        after.sequences.default_sequence_id = sequence_id;
+        session.commit_project_snapshot("设置默认序列", before, after)?;
         Ok(())
     }
 
@@ -133,32 +111,13 @@ impl AppState {
                 reason: "序列名称不能为空".to_string(),
             });
         }
-        if self.active_sequence_id == Some(sequence_id) {
-            let settings = self
-                .sequence
-                .as_ref()
-                .filter(|sequence| sequence.id == sequence_id)
-                .map(|sequence| sequence.settings.clone())
-                .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
-                    step_id: "rename_sequence".to_owned(),
-                    reason: format!("活动序列不存在: {sequence_id}"),
-                })?;
-            return self.update_sequence_identity_and_settings(sequence_id, name, settings);
-        }
-
-        self.sync_current_sequence_into_collection();
-        let sequence = self
-            .sequences
-            .iter_mut()
-            .find(|sequence| sequence.id == sequence_id)
-            .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+        let before = self.sequence_by_id(sequence_id).cloned().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "rename_sequence".to_string(),
                 reason: format!("序列不存在: {sequence_id}"),
-            })?;
-        sequence.name = name.trim().to_string();
-        sequence.revision = next_sequence_revision(sequence.revision)?;
-        let _ = self.save_project_file();
-        Ok(())
+            }
+        })?;
+        self.update_sequence_identity_and_settings(sequence_id, name, before.settings)
     }
 
     pub fn duplicate_sequence(
@@ -166,105 +125,104 @@ impl AppState {
         sequence_id: SequenceId,
         name: impl Into<String>,
     ) -> mondrian_core::Result<SequenceId> {
-        self.sync_current_sequence_into_collection();
-        let mut duplicated = self
-            .sequences
-            .iter()
-            .find(|sequence| sequence.id == sequence_id)
-            .cloned()
-            .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+        let session = self.authoring.as_mut().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "duplicate_sequence".to_owned(),
+                reason: "当前没有打开的项目".to_owned(),
+            }
+        })?;
+        let before = session.document().clone();
+        let mut after = before.clone();
+        let mut duplicated = after.sequences.sequence(sequence_id).cloned().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "duplicate_sequence".to_string(),
                 reason: format!("序列不存在: {sequence_id}"),
-            })?;
+            }
+        })?;
         let fallback_name = format!("{} 副本", duplicated.name);
-        duplicated.id = SequenceId::new();
-        duplicated.revision = mondrian_core::SequenceRevision::INITIAL;
-        duplicated.fork_audio_identities_for_sequence_duplicate();
+        duplicated.fork_author_identities_for_sequence_duplicate();
         duplicated.name = name.into();
         if duplicated.name.trim().is_empty() {
             duplicated.name = fallback_name;
         }
         let duplicated_id = duplicated.id;
-        self.sequences.push(duplicated);
-        self.switch_active_sequence(duplicated_id)?;
-        let _ = self.save_project_file();
+        after.sequences.add_sequence(duplicated)?;
+        after.sequences.set_active(duplicated_id)?;
+        session.commit_project_snapshot("复制序列", before, after)?;
+        self.stop();
+        self.settle_preview_access_source();
         Ok(duplicated_id)
     }
 
     pub fn delete_sequence(&mut self, sequence_id: SequenceId) -> mondrian_core::Result<()> {
-        self.sync_current_sequence_into_collection();
-        if self.sequences.len() <= 1 {
+        let session = self.authoring.as_mut().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "delete_sequence".to_owned(),
+                reason: "当前没有打开的项目".to_owned(),
+            }
+        })?;
+        let before = session.document().clone();
+        if before.sequences.sequences.len() <= 1 {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "delete_sequence".to_string(),
                 reason: "至少保留一个序列".to_string(),
             });
         }
-        if self.sequence_is_nested_reference(sequence_id) {
+        if sequence_is_nested_reference(&before.sequences.sequences, sequence_id) {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "delete_sequence".to_string(),
                 reason: "序列正被嵌套引用，不能删除".to_string(),
             });
         }
-        let Some(index) = self.sequences.iter().position(|sequence| sequence.id == sequence_id)
+        let mut after = before.clone();
+        let Some(index) =
+            after.sequences.sequences.iter().position(|sequence| sequence.id == sequence_id)
         else {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "delete_sequence".to_string(),
                 reason: format!("序列不存在: {sequence_id}"),
             });
         };
-        self.sequences.remove(index);
-        let fallback_id = self.sequences.first().map(|sequence| sequence.id).ok_or_else(|| {
-            mondrian_core::MondrianError::WorkflowStepFailed {
-                step_id: "delete_sequence".to_string(),
-                reason: "删除后没有可用序列".to_string(),
-            }
-        })?;
-        if self.default_sequence_id == Some(sequence_id) {
-            self.default_sequence_id = Some(fallback_id);
+        after.sequences.sequences.remove(index);
+        let fallback_id =
+            after.sequences.sequences.first().map(|sequence| sequence.id).ok_or_else(|| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "delete_sequence".to_string(),
+                    reason: "删除后没有可用序列".to_string(),
+                }
+            })?;
+        if after.sequences.default_sequence_id == sequence_id {
+            after.sequences.default_sequence_id = fallback_id;
         }
-        if self.active_sequence_id == Some(sequence_id) {
-            self.active_sequence_id = Some(fallback_id);
-            self.sequence = self.sequences.first().cloned();
+        let active_changed = after.sequences.active_sequence_id == sequence_id;
+        if active_changed {
+            after.sequences.active_sequence_id = fallback_id;
+        }
+        session.commit_project_snapshot("删除序列", before, after)?;
+        if active_changed {
             self.stop();
             self.settle_preview_access_source();
-            self.cmd_history = mondrian_timeline::command::CommandHistory::default();
         }
-        self.sequence_navigation_stack.retain(|id| *id != sequence_id);
-        let _ = self.save_project_file();
         Ok(())
-    }
-
-    fn sequence_is_nested_reference(&self, sequence_id: SequenceId) -> bool {
-        self.sequences.iter().any(|sequence| {
-            sequence
-                .video_tracks
-                .iter()
-                .chain(sequence.audio_tracks.iter())
-                .flat_map(|track| track.clips.iter())
-                .any(|clip| clip.nested_sequence_id == Some(sequence_id))
-        })
     }
 
     pub fn update_active_sequence_settings(
         &mut self,
         settings: mondrian_timeline::sequence::SequenceSettings,
     ) -> mondrian_core::Result<()> {
-        settings.validate_with_project_color_management(&self.project_settings.color_management)?;
-        let (sequence_id, before, after) = {
-            let seq = self.sequence.as_mut().ok_or_else(|| {
-                mondrian_core::MondrianError::WorkflowStepFailed {
-                    step_id: "update_active_sequence_settings".to_string(),
-                    reason: "当前无项目".to_string(),
-                }
-            })?;
-            let before = seq.clone();
-            seq.apply_settings(settings)?;
-            (seq.id, before, seq.clone())
-        };
-        self.sync_current_sequence_into_collection();
+        settings
+            .validate_with_project_color_management(&self.project_settings().color_management)?;
+        let before = self.active_sequence().cloned().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "update_active_sequence_settings".to_string(),
+                reason: "当前无项目".to_string(),
+            }
+        })?;
+        let sequence_id = before.id;
+        let mut after = before.clone();
+        after.apply_settings(settings)?;
         self.record_sequence_snapshot_command("修改序列设置", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-        let _ = self.save_project_file();
         Ok(())
     }
 
@@ -283,35 +241,24 @@ impl AppState {
                 reason: "序列名称不能为空".to_string(),
             });
         }
-        settings.validate_with_project_color_management(&self.project_settings.color_management)?;
-
-        self.sync_current_sequence_into_collection();
-        let before = self
-            .sequences
-            .iter()
-            .find(|sequence| sequence.id == sequence_id)
-            .cloned()
-            .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+        settings
+            .validate_with_project_color_management(&self.project_settings().color_management)?;
+        let before = self.sequence_by_id(sequence_id).cloned().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "update_sequence_identity_and_settings".to_string(),
                 reason: format!("序列不存在: {sequence_id}"),
-            })?;
+            }
+        })?;
         let mut after = before.clone();
         after.name = name.to_owned();
         after.apply_settings(settings)?;
 
-        if let Some(sequence) =
-            self.sequences.iter_mut().find(|sequence| sequence.id == sequence_id)
-        {
-            *sequence = after.clone();
-        }
-        if self.active_sequence_id == Some(sequence_id) {
-            self.sequence = Some(after.clone());
+        self.record_sequence_snapshot_command("修改序列设置", before, after)?;
+        if self.active_sequence_id() == Some(sequence_id) {
             self.stop();
             self.settle_preview_access_source();
         }
-        self.record_sequence_snapshot_command("修改序列设置", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-        let _ = self.save_project_file();
         Ok(())
     }
 
@@ -319,185 +266,93 @@ impl AppState {
         &mut self,
         description: impl Into<String>,
         before: Sequence,
-        mut after: Sequence,
+        after: Sequence,
     ) -> mondrian_core::Result<()> {
-        let target = before.id;
-        let current_target = self.sequence.as_ref().map(|sequence| sequence.id);
-        if current_target != Some(target)
-            || self.active_sequence_id.is_some_and(|active| active != target)
-        {
-            self.restore_sequence_after_failed_history(&before);
-            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+        let commit = self
+            .authoring
+            .as_mut()
+            .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "record_sequence_snapshot_command".to_owned(),
-                reason: format!(
-                    "cannot record Sequence {target} in active Sequence history {current_target:?}"
-                ),
-            });
+                reason: "当前没有打开的项目".to_owned(),
+            })?
+            .commit_sequence_snapshot(description, before, after)?;
+        if !commit.undo_retained {
+            self.set_status_hint("编辑已提交，但超出撤销历史内存预算", true);
         }
-        let Some(current_revision) = self.sequence.as_ref().map(|sequence| sequence.revision)
-        else {
-            self.restore_sequence_after_failed_history(&before);
-            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                step_id: "record_sequence_snapshot_command".to_owned(),
-                reason: format!("active Sequence {target} disappeared before history commit"),
-            });
-        };
-        if before.revision != after.revision || current_revision != before.revision {
-            self.restore_sequence_after_failed_history(&before);
-            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                step_id: "record_sequence_snapshot_command".to_owned(),
-                reason: format!(
-                    "Sequence {target} author revision was mutated outside its transaction: before={}, after={}, current={}",
-                    before.revision.get(),
-                    after.revision.get(),
-                    current_revision.get()
-                ),
-            });
-        }
-        after.revision = match next_sequence_revision(before.revision) {
-            Ok(revision) => revision,
-            Err(error) => {
-                self.restore_sequence_after_failed_history(&before);
-                return Err(error);
-            }
-        };
-        let command = match SequenceSnapshotCommand::new(description, &before, &after) {
-            Ok(command) => command,
-            Err(error) => {
-                self.restore_sequence_after_failed_history(&before);
-                return Err(error);
-            }
-        };
-        self.sequence = Some(after);
-        if let Err(error) = self.cmd_history.record_executed(Box::new(command)) {
-            self.restore_sequence_after_failed_history(&before);
-            return Err(error);
-        }
-        self.sync_current_sequence_into_collection();
         Ok(())
     }
 
-    fn restore_sequence_after_failed_history(&mut self, before: &Sequence) {
-        if let Some(current) = self.sequence.as_mut().filter(|sequence| sequence.id == before.id) {
-            *current = before.clone();
+    pub(super) fn commit_active_sequence_edit<T>(
+        &mut self,
+        description: impl Into<String>,
+        edit: impl FnOnce(&mut Sequence) -> mondrian_core::Result<T>,
+    ) -> mondrian_core::Result<T> {
+        let (value, commit) = self
+            .authoring
+            .as_mut()
+            .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "commit_active_sequence_edit".to_owned(),
+                reason: "当前没有打开的项目".to_owned(),
+            })?
+            .edit_active_sequence(description, edit)?;
+        if !commit.undo_retained {
+            self.set_status_hint("编辑已提交，但超出撤销历史内存预算", true);
         }
-        if let Some(stored) = self.sequences.iter_mut().find(|sequence| sequence.id == before.id) {
-            *stored = before.clone();
-        }
+        Ok(value)
     }
 
     pub fn undo_timeline(&mut self) -> mondrian_core::Result<bool> {
-        if !self.cmd_history.can_undo() {
+        let commit = self.authoring.as_mut().map(AuthoringSession::undo).transpose()?.flatten();
+        let Some(commit) = commit else {
             return Ok(false);
-        }
-        let (undone, sequence_id) = {
-            let Some(seq) = self.sequence.as_mut() else {
-                return Ok(false);
-            };
-            let next_revision = next_sequence_revision(seq.revision)?;
-            let undone = self.cmd_history.undo(seq)?;
-            if undone {
-                seq.revision = next_revision;
-            }
-            (undone, seq.id)
         };
-
-        if undone {
-            self.sync_current_sequence_into_collection();
+        for sequence_id in commit.changed_sequence_ids {
             self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-            let _ = self.save_project_file();
         }
-
-        Ok(undone)
+        self.stop();
+        self.settle_preview_access_source();
+        Ok(true)
     }
 
     pub fn redo_timeline(&mut self) -> mondrian_core::Result<bool> {
-        if !self.cmd_history.can_redo() {
+        let commit = self.authoring.as_mut().map(AuthoringSession::redo).transpose()?.flatten();
+        let Some(commit) = commit else {
             return Ok(false);
-        }
-        let (redone, sequence_id) = {
-            let Some(seq) = self.sequence.as_mut() else {
-                return Ok(false);
-            };
-            let next_revision = next_sequence_revision(seq.revision)?;
-            let redone = self.cmd_history.redo(seq)?;
-            if redone {
-                seq.revision = next_revision;
-            }
-            (redone, seq.id)
         };
-
-        if redone {
-            self.sync_current_sequence_into_collection();
+        for sequence_id in commit.changed_sequence_ids {
             self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-            let _ = self.save_project_file();
         }
-
-        Ok(redone)
-    }
-
-    pub fn record_timeline_edit_snapshot(
-        &mut self,
-        description: impl Into<String>,
-        before: Sequence,
-    ) -> mondrian_core::Result<()> {
-        let (sequence_id, after) = match self.sequence.as_ref() {
-            Some(seq) => (seq.id, seq.clone()),
-            None => return Ok(()),
-        };
-
-        self.record_sequence_snapshot_command(description, before, after)?;
-        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-        let _ = self.save_project_file();
-        Ok(())
+        self.stop();
+        self.settle_preview_access_source();
+        Ok(true)
     }
 
     pub fn close_project(&mut self) {
         self.proxy_generation.bind_project(None);
-        if let Some(runtime) = self.project_runtime_dir.as_ref() {
-            let _ = fs::remove_dir_all(runtime);
-        }
-
-        self.sequence = None;
-        self.sequences.clear();
-        self.active_sequence_id = None;
-        self.default_sequence_id = None;
-        self.sequence_navigation_stack.clear();
-        self.current_project_path = None;
-        self.project_runtime_dir = None;
-        self.asset_library = None;
+        self.authoring = None;
+        self.autosave_in_flight_request = None;
         self.stop();
         self.settle_preview_access_source();
         self.dragging_asset = None;
-        self.cmd_history = mondrian_timeline::command::CommandHistory::default();
-        self.proxy_mode_assets.clear();
         self.clear_status_hint();
     }
 
     pub fn add_video_track(&mut self) -> anyhow::Result<()> {
-        let before = if let Some(seq) = self.sequence.as_mut() {
-            let before = seq.clone();
-            seq.add_video_track();
-            Some(before)
-        } else {
-            None
-        };
-        if let Some(before) = before {
-            self.record_timeline_edit_snapshot("新增视频轨道", before)?;
+        if self.active_sequence().is_some() {
+            self.commit_active_sequence_edit("新增视频轨道", |sequence| {
+                sequence.add_video_track();
+                Ok(())
+            })?;
         }
         Ok(())
     }
 
     pub fn add_audio_track(&mut self) -> anyhow::Result<()> {
-        let before = if let Some(seq) = self.sequence.as_mut() {
-            let before = seq.clone();
-            seq.add_audio_track();
-            Some(before)
-        } else {
-            None
-        };
-        if let Some(before) = before {
-            self.record_timeline_edit_snapshot("新增音频轨道", before)?;
+        if self.active_sequence().is_some() {
+            self.commit_active_sequence_edit("新增音频轨道", |sequence| {
+                sequence.add_audio_track();
+                Ok(())
+            })?;
         }
         Ok(())
     }
@@ -513,8 +368,7 @@ impl AppState {
         }
 
         let fps = self
-            .sequence
-            .as_ref()
+            .active_sequence()
             .map(|seq| seq.settings.frame_rate.to_f64())
             .unwrap_or(25.0);
         Ok(((DEFAULT_ADJUSTMENT_LAYER_DURATION_SECS * fps).round() as i64).max(1))
@@ -522,8 +376,7 @@ impl AppState {
 
     pub fn default_adjustment_layer_drag_duration(&self) -> mondrian_core::Result<Duration> {
         let fps = self
-            .sequence
-            .as_ref()
+            .active_sequence()
             .map(|seq| seq.settings.frame_rate.to_f64())
             .unwrap_or(25.0);
         let secs = self.default_adjustment_layer_duration_frames()? as f64 / fps.max(1.0);
@@ -535,7 +388,7 @@ impl AppState {
         name: &str,
         parent_id: Option<&str>,
     ) -> mondrian_core::Result<String> {
-        let library = self.asset_library.as_ref().ok_or_else(|| {
+        let library = self.asset_library().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "create_folder".to_string(),
                 reason: "素材库未连接".to_string(),
@@ -543,7 +396,6 @@ impl AppState {
         })?;
         let folder_id = library.create_folder(name, parent_id)?;
         self.set_status_hint(format!("已新建文件夹：{}", name), false);
-        let _ = self.save_project_file();
         Ok(folder_id)
     }
 
@@ -552,7 +404,7 @@ impl AppState {
         &mut self,
         parent_id: Option<&str>,
     ) -> mondrian_core::Result<String> {
-        let library = self.asset_library.as_ref().ok_or_else(|| {
+        let library = self.asset_library().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "create_folder".to_string(),
                 reason: "素材库未连接".to_string(),
@@ -572,7 +424,7 @@ impl AppState {
 
     /// Delete one asset-library folder/bin and unlink assets assigned to it or its children.
     pub fn delete_folder_from_library(&mut self, folder_id: &str) -> mondrian_core::Result<()> {
-        let library = self.asset_library.as_ref().ok_or_else(|| {
+        let library = self.asset_library().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "delete_folder".to_string(),
                 reason: "素材库未连接".to_string(),
@@ -580,7 +432,6 @@ impl AppState {
         })?;
         library.delete_folder(folder_id)?;
         self.event_bus.publish(mondrian_core::events::AppEvent::AssetLibraryReloaded);
-        let _ = self.save_project_file();
         Ok(())
     }
 
@@ -590,7 +441,7 @@ impl AppState {
         asset_id: AssetId,
         folder_id: Option<&str>,
     ) -> mondrian_core::Result<()> {
-        let library = self.asset_library.as_ref().ok_or_else(|| {
+        let library = self.asset_library().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "move_asset".to_string(),
                 reason: "素材库未连接".to_string(),
@@ -598,7 +449,6 @@ impl AppState {
         })?;
         library.move_asset_to_folder(asset_id, folder_id)?;
         self.event_bus.publish(mondrian_core::events::AppEvent::AssetLibraryReloaded);
-        let _ = self.save_project_file();
         Ok(())
     }
 
@@ -608,7 +458,7 @@ impl AppState {
         folder_id: &str,
         parent_folder_id: Option<&str>,
     ) -> mondrian_core::Result<()> {
-        let library = self.asset_library.as_ref().ok_or_else(|| {
+        let library = self.asset_library().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "move_folder".to_string(),
                 reason: "素材库未连接".to_string(),
@@ -616,7 +466,6 @@ impl AppState {
         })?;
         library.move_folder(folder_id, parent_folder_id)?;
         self.event_bus.publish(mondrian_core::events::AppEvent::AssetLibraryReloaded);
-        let _ = self.save_project_file();
         Ok(())
     }
 
@@ -624,7 +473,7 @@ impl AppState {
         // Remove clips referencing this asset from the timeline first,
         // then delete from the library. Order matters for borrow reasons.
         let _removed = self.delete_asset_and_cleanup_timeline(asset_id)?;
-        let library = self.asset_library.as_ref().ok_or_else(|| {
+        let library = self.asset_library().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "delete_asset".to_string(),
                 reason: "素材库未连接".to_string(),
@@ -633,7 +482,6 @@ impl AppState {
         library.delete_asset(asset_id)?;
         self.event_bus
             .publish(mondrian_core::events::AppEvent::AssetDeleted { asset_id });
-        let _ = self.save_project_file();
         Ok(())
     }
 
@@ -643,7 +491,7 @@ impl AppState {
         folder_id: Option<&str>,
         announce: bool,
     ) -> mondrian_core::Result<(AssetId, String)> {
-        let library = self.asset_library.as_ref().ok_or_else(|| {
+        let library = self.asset_library().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "create_adjustment_layer_asset".to_string(),
                 reason: "素材库未连接".to_string(),
@@ -668,7 +516,6 @@ impl AppState {
 
         self.event_bus
             .publish(mondrian_core::events::AppEvent::AssetImported { asset_id });
-        let _ = self.save_project_file();
         if announce {
             self.set_status_hint(format!("已新建：{}", asset_name), false);
         }
@@ -705,7 +552,7 @@ impl AppState {
         name: Option<&str>,
         folder_id: Option<&str>,
     ) -> mondrian_core::Result<AssetId> {
-        let library = self.asset_library.as_ref().ok_or_else(|| {
+        let library = self.asset_library().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "create_solid_color_asset".to_string(),
                 reason: "素材库未连接".to_string(),
@@ -727,7 +574,6 @@ impl AppState {
             .unwrap_or_else(|| "纯色层".to_string());
         self.event_bus
             .publish(mondrian_core::events::AppEvent::AssetImported { asset_id });
-        let _ = self.save_project_file();
         self.set_status_hint(format!("已新建：{}", asset_name), false);
         Ok(asset_id)
     }
@@ -781,7 +627,7 @@ impl AppState {
         color: Color,
     ) -> mondrian_core::Result<ClipId> {
         let (asset_id, asset_name) = {
-            let library = self.asset_library.as_ref().ok_or_else(|| {
+            let library = self.asset_library().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "create_solid_color".to_string(),
                     reason: "素材库未连接".to_string(),
@@ -803,14 +649,7 @@ impl AppState {
             .unwrap_or_else(|| self.current_frame().max(0));
         let default_duration_secs = self.default_adjustment_layer_drag_duration()?.as_secs_f64();
 
-        let (sequence_id, clip_id) = {
-            let seq = self.sequence.as_mut().ok_or_else(|| {
-                mondrian_core::MondrianError::WorkflowStepFailed {
-                    step_id: "create_solid_color".to_string(),
-                    reason: "当前无序列".to_string(),
-                }
-            })?;
-            let before = seq.clone();
+        let (sequence_id, clip_id) = self.commit_active_sequence_edit("创建纯色层", |seq| {
             let time_base = seq.time_base();
             let fps = seq.settings.frame_rate.to_f64();
             let duration_frames = (default_duration_secs * fps).ceil() as i64;
@@ -828,38 +667,28 @@ impl AppState {
             })?;
             track.add_clip(clip)?;
             resolve_track_conflicts(track, clip_id, overlap_mode)?;
+            compact_sequence_references(seq);
             let sequence_id = seq.id;
-            self.record_timeline_edit_snapshot("创建纯色层", before)?;
-            (sequence_id, clip_id)
-        };
+            Ok((sequence_id, clip_id))
+        })?;
 
         self.set_status_hint(format!("已创建纯色层: {}", asset_name), false);
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-        let _ = self.save_project_file();
         Ok(clip_id)
     }
 
     pub fn remove_track(&mut self, track_id: TrackId, is_video: bool) -> mondrian_core::Result<()> {
-        let before = {
-            let seq = self.sequence.as_mut().ok_or_else(|| {
-                mondrian_core::MondrianError::WorkflowStepFailed {
-                    step_id: "remove_track".to_string(),
-                    reason: "当前无项目".to_string(),
-                }
-            })?;
-
-            let before = seq.clone();
+        self.commit_active_sequence_edit("删除轨道", |seq| {
             if is_video {
                 seq.remove_video_track(track_id)?;
             } else {
                 seq.remove_audio_track(track_id)?;
             }
-            clear_broken_links(seq);
-            before
-        };
+            compact_sequence_references(seq);
+            Ok(())
+        })?;
 
         self.prune_selection_to_active_sequence();
-        self.record_timeline_edit_snapshot("删除轨道", before)?;
         Ok(())
     }
 
@@ -875,14 +704,7 @@ impl AppState {
             return Ok(());
         }
 
-        let before = {
-            let seq = self.sequence.as_mut().ok_or_else(|| {
-                mondrian_core::MondrianError::WorkflowStepFailed {
-                    step_id: "remove_tracks".to_string(),
-                    reason: "当前无项目".to_string(),
-                }
-            })?;
-
+        self.commit_active_sequence_edit("删除轨道", |seq| {
             for (track_id, is_video) in &targets {
                 let exists = if *is_video {
                     seq.video_tracks.iter().any(|track| track.id == *track_id)
@@ -911,20 +733,18 @@ impl AppState {
                 });
             }
 
-            let before = seq.clone();
-            for (track_id, is_video) in targets {
-                if is_video {
-                    seq.remove_video_track(track_id)?;
+            for (track_id, is_video) in &targets {
+                if *is_video {
+                    seq.remove_video_track(*track_id)?;
                 } else {
-                    seq.remove_audio_track(track_id)?;
+                    seq.remove_audio_track(*track_id)?;
                 }
             }
-            clear_broken_links(seq);
-            before
-        };
+            compact_sequence_references(seq);
+            Ok(())
+        })?;
 
         self.prune_selection_to_active_sequence();
-        self.record_timeline_edit_snapshot("删除轨道", before)?;
         Ok(())
     }
 
@@ -934,23 +754,14 @@ impl AppState {
         is_video: bool,
         new_index: usize,
     ) -> mondrian_core::Result<()> {
-        let before = {
-            let seq = self.sequence.as_mut().ok_or_else(|| {
-                mondrian_core::MondrianError::WorkflowStepFailed {
-                    step_id: "move_track".to_string(),
-                    reason: "当前无项目".to_string(),
-                }
-            })?;
-            let before = seq.clone();
+        self.commit_active_sequence_edit("移动轨道", |seq| {
             if is_video {
                 seq.move_video_track(track_id, new_index)?;
             } else {
                 seq.move_audio_track(track_id, new_index)?;
             }
-            before
-        };
-
-        self.record_timeline_edit_snapshot("移动轨道", before)?;
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -960,15 +771,20 @@ impl AppState {
         is_video: bool,
         visible: bool,
     ) -> mondrian_core::Result<()> {
-        let before = {
-            let seq = self.sequence.as_mut().ok_or_else(|| {
-                mondrian_core::MondrianError::WorkflowStepFailed {
-                    step_id: "set_track_visible".to_string(),
-                    reason: "当前无项目".to_string(),
+        if self
+            .active_sequence()
+            .and_then(|seq| {
+                if is_video {
+                    seq.video_tracks.iter().find(|track| track.id == track_id)
+                } else {
+                    seq.audio_tracks.iter().find(|track| track.id == track_id)
                 }
-            })?;
-            let before = seq.clone();
-
+            })
+            .is_some_and(|track| track.is_visible == visible)
+        {
+            return Ok(());
+        }
+        self.commit_active_sequence_edit("切换轨道可见性", |seq| {
             let track = if is_video {
                 seq.video_track_mut(track_id)
             } else {
@@ -977,14 +793,9 @@ impl AppState {
             .ok_or_else(|| mondrian_core::MondrianError::TrackNotFound {
                 track_id: track_id.to_string(),
             })?;
-            if track.is_visible == visible {
-                return Ok(());
-            }
             track.is_visible = visible;
-            before
-        };
-
-        self.record_timeline_edit_snapshot("切换轨道可见性", before)?;
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -994,15 +805,20 @@ impl AppState {
         is_video: bool,
         muted: bool,
     ) -> mondrian_core::Result<()> {
-        let before = {
-            let seq = self.sequence.as_mut().ok_or_else(|| {
-                mondrian_core::MondrianError::WorkflowStepFailed {
-                    step_id: "set_track_muted".to_string(),
-                    reason: "当前无项目".to_string(),
+        if self
+            .active_sequence()
+            .and_then(|seq| {
+                if is_video {
+                    seq.video_tracks.iter().find(|track| track.id == track_id)
+                } else {
+                    seq.audio_tracks.iter().find(|track| track.id == track_id)
                 }
-            })?;
-            let before = seq.clone();
-
+            })
+            .is_some_and(|track| track.is_muted == muted)
+        {
+            return Ok(());
+        }
+        self.commit_active_sequence_edit("切换轨道静音", |seq| {
             let track = if is_video {
                 seq.video_track_mut(track_id)
             } else {
@@ -1011,14 +827,9 @@ impl AppState {
             .ok_or_else(|| mondrian_core::MondrianError::TrackNotFound {
                 track_id: track_id.to_string(),
             })?;
-            if track.is_muted == muted {
-                return Ok(());
-            }
             track.is_muted = muted;
-            before
-        };
-
-        self.record_timeline_edit_snapshot("切换轨道静音", before)?;
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -1028,15 +839,20 @@ impl AppState {
         is_video: bool,
         locked: bool,
     ) -> mondrian_core::Result<()> {
-        let before = {
-            let seq = self.sequence.as_mut().ok_or_else(|| {
-                mondrian_core::MondrianError::WorkflowStepFailed {
-                    step_id: "set_track_locked".to_string(),
-                    reason: "当前无项目".to_string(),
+        if self
+            .active_sequence()
+            .and_then(|seq| {
+                if is_video {
+                    seq.video_tracks.iter().find(|track| track.id == track_id)
+                } else {
+                    seq.audio_tracks.iter().find(|track| track.id == track_id)
                 }
-            })?;
-            let before = seq.clone();
-
+            })
+            .is_some_and(|track| track.is_locked == locked)
+        {
+            return Ok(());
+        }
+        self.commit_active_sequence_edit("切换轨道锁定", |seq| {
             let track = if is_video {
                 seq.video_track_mut(track_id)
             } else {
@@ -1045,14 +861,9 @@ impl AppState {
             .ok_or_else(|| mondrian_core::MondrianError::TrackNotFound {
                 track_id: track_id.to_string(),
             })?;
-            if track.is_locked == locked {
-                return Ok(());
-            }
             track.is_locked = locked;
-            before
-        };
-
-        self.record_timeline_edit_snapshot("切换轨道锁定", before)?;
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -1066,22 +877,16 @@ impl AppState {
         }
 
         let (sequence_id, before, after, changed_count) = {
-            let seq = self.sequence.as_mut().ok_or_else(|| {
+            let before = self.active_sequence().cloned().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "set_clips_disabled_bulk".to_string(),
                     reason: "当前无项目".to_string(),
                 }
             })?;
-
-            let before = seq.clone();
+            let mut after = before.clone();
+            let seq = &mut after;
             let mut clip_ids: HashSet<ClipId> = selections.iter().map(|(_, _, id)| *id).collect();
-            let selected_clip_ids: Vec<ClipId> = clip_ids.iter().copied().collect();
-
-            for clip_id in selected_clip_ids {
-                if let Some(linked_id) = find_clip(seq, clip_id).and_then(|clip| clip.linked_clip) {
-                    clip_ids.insert(linked_id);
-                }
-            }
+            expand_clip_link_groups(seq, &mut clip_ids);
 
             if clip_ids.is_empty() {
                 return Ok(0);
@@ -1109,7 +914,9 @@ impl AppState {
                 return Ok(0);
             }
 
-            (seq.id, before, seq.clone(), changed_count)
+            compact_sequence_references(seq);
+
+            (seq.id, before, after, changed_count)
         };
 
         let action = if disabled {
@@ -1119,7 +926,6 @@ impl AppState {
         };
         self.record_sequence_snapshot_command(action, before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-        let _ = self.save_project_file();
 
         Ok(changed_count)
     }
@@ -1131,43 +937,45 @@ impl AppState {
         clip_id: ClipId,
     ) -> mondrian_core::Result<()> {
         let (sequence_id, before, after) = {
-            let seq = self.sequence.as_mut().ok_or_else(|| {
+            let before = self.active_sequence().cloned().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "remove_clip".to_string(),
                     reason: "当前无项目".to_string(),
                 }
             })?;
-
-            let before = seq.clone();
-            let removed = if is_video_track {
-                let track = seq.video_track_mut(track_id).ok_or_else(|| {
-                    mondrian_core::MondrianError::TrackNotFound { track_id: track_id.to_string() }
-                })?;
-                track.remove_clip(clip_id)
-            } else {
-                let track = seq.audio_track_mut(track_id).ok_or_else(|| {
-                    mondrian_core::MondrianError::TrackNotFound { track_id: track_id.to_string() }
-                })?;
-                track.remove_clip(clip_id)
-            };
-
-            let Some(removed_clip) = removed else {
+            let mut after = before.clone();
+            let seq = &mut after;
+            let group_members = clip_link_group_member_ids(seq, clip_id);
+            if group_members.is_empty() {
                 return Err(mondrian_core::MondrianError::ClipNotFound {
                     clip_id: clip_id.to_string(),
                 });
-            };
-
-            if let Some(linked_id) = removed_clip.linked_clip {
-                let _ = remove_clip_from_sequence(seq, linked_id);
             }
-            seq.compact_audio_program();
+            let location = find_clip_track_lock(seq, clip_id).ok_or_else(|| {
+                mondrian_core::MondrianError::ClipNotFound { clip_id: clip_id.to_string() }
+            })?;
+            if location.0 != track_id || location.1 != is_video_track {
+                return Err(mondrian_core::MondrianError::ClipNotFound {
+                    clip_id: clip_id.to_string(),
+                });
+            }
+            for member in &group_members {
+                if let Some((member_track, _, true)) = find_clip_track_lock(seq, *member) {
+                    return Err(mondrian_core::MondrianError::TrackLocked {
+                        track_id: member_track.to_string(),
+                    });
+                }
+            }
+            for member in group_members {
+                let _ = remove_clip_from_sequence(seq, member);
+            }
+            compact_sequence_references(seq);
 
-            (seq.id, before, seq.clone())
+            (seq.id, before, after)
         };
 
         self.record_sequence_snapshot_command("删除片段", before, after)?;
         self.event_bus.publish(AppEvent::ClipRemoved { sequence_id, clip_id });
-        let _ = self.save_project_file();
         Ok(())
     }
 
@@ -1180,23 +988,26 @@ impl AppState {
             return Ok(0);
         }
 
-        let mut history_snapshot: Option<(SequenceId, Sequence, Sequence)> = None;
-
-        let removed_count = {
-            let seq = self.sequence.as_mut().ok_or_else(|| {
+        let (sequence_id, before, after, removed_count) = {
+            let before = self.active_sequence().cloned().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "remove_clips_bulk".to_string(),
                     reason: "当前无项目".to_string(),
                 }
             })?;
-
-            let before = seq.clone();
+            let mut after = before.clone();
+            let seq = &mut after;
             let mut removed_count = 0usize;
-            let mut linked_to_remove: Vec<ClipId> = Vec::new();
+            let mut selected_ids: HashSet<ClipId> =
+                selections.iter().map(|(_, _, id)| *id).collect();
+            expand_clip_link_groups(seq, &mut selected_ids);
 
             let mut by_track: HashMap<(TrackId, bool), HashSet<ClipId>> = HashMap::new();
-            for (track_id, is_video, clip_id) in selections {
-                by_track.entry((*track_id, *is_video)).or_default().insert(*clip_id);
+            for clip_id in &selected_ids {
+                let Some((track_id, is_video, _)) = find_clip_track_lock(seq, *clip_id) else {
+                    continue;
+                };
+                by_track.entry((track_id, is_video)).or_default().insert(*clip_id);
             }
 
             for ((track_id, is_video), clip_ids) in by_track {
@@ -1221,9 +1032,6 @@ impl AppState {
                     if clip_ids.contains(&clip.id) {
                         removed_count += 1;
                         removed_segments.push((clip.position, clip.duration));
-                        if let Some(linked) = clip.linked_clip {
-                            linked_to_remove.push(linked);
-                        }
                     } else {
                         kept.push(clip);
                     }
@@ -1246,31 +1054,14 @@ impl AppState {
                 resolve_track_overlaps(track)?;
             }
 
-            let selected_ids: HashSet<ClipId> = selections.iter().map(|(_, _, id)| *id).collect();
-            let mut dedup_linked = HashSet::new();
-            for linked_id in linked_to_remove {
-                if selected_ids.contains(&linked_id) || !dedup_linked.insert(linked_id) {
-                    continue;
-                }
-                if remove_clip_from_sequence_with_ripple(seq, linked_id, ripple)? {
-                    removed_count += 1;
-                }
-            }
+            compact_sequence_references(seq);
 
-            clear_broken_links(seq);
-            seq.compact_audio_program();
-
-            if removed_count > 0 {
-                history_snapshot = Some((seq.id, before, seq.clone()));
-            }
-
-            removed_count
+            (seq.id, before, after, removed_count)
         };
 
-        if let Some((sequence_id, before, after)) = history_snapshot {
+        if removed_count > 0 {
             self.record_sequence_snapshot_command("删除多个片段", before, after)?;
             self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-            let _ = self.save_project_file();
         }
 
         Ok(removed_count)
@@ -1280,49 +1071,16 @@ impl AppState {
         &mut self,
         asset_id: AssetId,
     ) -> mondrian_core::Result<usize> {
+        let Some(before) = self.active_sequence().cloned() else {
+            return Ok(0);
+        };
+        let mut after = before.clone();
         let mut removed_count = 0usize;
-        let mut before_snapshot: Option<Sequence> = None;
-
-        if let Some(seq) = self.sequence.as_mut() {
-            before_snapshot = Some(seq.clone());
-            removed_count += remove_asset_clips_from_tracks(&mut seq.video_tracks, asset_id)?;
-            removed_count += remove_asset_clips_from_tracks(&mut seq.audio_tracks, asset_id)?;
-
-            let existing_clip_ids: HashSet<ClipId> = seq
-                .video_tracks
-                .iter()
-                .flat_map(|track| track.clips.iter().map(|clip| clip.id))
-                .chain(
-                    seq.audio_tracks
-                        .iter()
-                        .flat_map(|track| track.clips.iter().map(|clip| clip.id)),
-                )
-                .collect();
-
-            for track in &mut seq.video_tracks {
-                for clip in &mut track.clips {
-                    if let Some(linked_id) = clip.linked_clip {
-                        if !existing_clip_ids.contains(&linked_id) {
-                            clip.linked_clip = None;
-                        }
-                    }
-                }
-            }
-            for track in &mut seq.audio_tracks {
-                for clip in &mut track.clips {
-                    if let Some(linked_id) = clip.linked_clip {
-                        if !existing_clip_ids.contains(&linked_id) {
-                            clip.linked_clip = None;
-                        }
-                    }
-                }
-            }
-        }
-
+        removed_count += remove_asset_clips_from_tracks(&mut after.video_tracks, asset_id)?;
+        removed_count += remove_asset_clips_from_tracks(&mut after.audio_tracks, asset_id)?;
+        compact_sequence_references(&mut after);
         if removed_count > 0 {
-            if let Some(before) = before_snapshot {
-                self.record_timeline_edit_snapshot("删除素材并清理时间线", before)?;
-            }
+            self.record_sequence_snapshot_command("删除素材并清理时间线", before, after)?;
         }
 
         Ok(removed_count)
@@ -1333,14 +1091,13 @@ impl AppState {
         asset_id: AssetId,
         new_path: &Path,
     ) -> mondrian_core::Result<()> {
-        let library = self.asset_library.as_ref().ok_or_else(|| {
+        let library = self.asset_library().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "relink_asset".to_string(),
                 reason: "素材库未连接".to_string(),
             }
         })?;
         library.relink_asset(asset_id, new_path)?;
-        let _ = self.save_project_file();
         Ok(())
     }
 
@@ -1348,7 +1105,7 @@ impl AppState {
         &mut self,
         directory: &Path,
     ) -> mondrian_core::Result<usize> {
-        let library = self.asset_library.as_ref().ok_or_else(|| {
+        let library = self.asset_library().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "relink_offline_assets_in_directory".to_string(),
                 reason: "素材库未连接".to_string(),
@@ -1385,32 +1142,44 @@ impl AppState {
             }
         }
 
-        if relinked > 0 {
-            let _ = self.save_project_file();
-        }
-
         Ok(relinked)
     }
 
-    /// 创建新序列并替换当前序列
+    /// Create a Sequence as one project-level authoring transaction.
     pub fn new_sequence(&mut self, name: &str) {
         let mut sequence = Sequence::new(name);
         if let Some(working_space) =
-            self.project_settings.color_management.engine.pinned_working_space()
+            self.project_settings().color_management.engine.pinned_working_space()
         {
             sequence.settings.working_color_space = working_space;
         }
         let sequence_id = sequence.id;
-        self.sequence = Some(sequence.clone());
-        self.sequences.push(sequence);
-        self.active_sequence_id = Some(sequence_id);
-        if self.default_sequence_id.is_none() {
-            self.default_sequence_id = Some(sequence_id);
+        let result = self
+            .authoring
+            .as_mut()
+            .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "new_sequence".to_owned(),
+                reason: "当前没有打开的项目".to_owned(),
+            })
+            .and_then(|session| {
+                let before = session.document().clone();
+                let mut after = before.clone();
+                after.sequences.add_sequence(sequence)?;
+                after.sequences.set_active(sequence_id)?;
+                session.commit_project_snapshot("新建序列", before, after)?;
+                Ok(())
+            });
+        match result {
+            Ok(()) => {
+                self.stop();
+                self.settle_preview_access_source();
+                tracing::info!(%sequence_id, "新建序列: {name}");
+            }
+            Err(error) => {
+                tracing::error!(%error, "新建序列失败");
+                self.set_status_hint(format!("新建序列失败：{error}"), true);
+            }
         }
-        self.ensure_minimum_tracks();
-        self.cmd_history = mondrian_timeline::command::CommandHistory::default();
-        let _ = self.save_project_file();
-        tracing::info!("新建序列: {name}");
     }
 
     pub fn precompose_clips_as_sequence(
@@ -1425,26 +1194,27 @@ impl AppState {
             });
         }
 
-        self.sync_current_sequence_into_collection();
+        let project_before = self
+            .authoring
+            .as_ref()
+            .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "precompose_clips_as_sequence".to_owned(),
+                reason: "当前没有打开的项目".to_owned(),
+            })?
+            .document()
+            .clone();
 
-        let (sequence_id, before, after, nested_sequence, nested_clip_id) = {
-            let source = self.sequence.as_ref().ok_or_else(|| {
+        let (sequence_id, after, nested_sequence, nested_clip_id) = {
+            let source = self.active_sequence().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "precompose_clips_as_sequence".to_string(),
                     reason: "当前无项目".to_string(),
                 }
             })?;
             let mut parent = source.clone();
-            let before = parent.clone();
-
             let mut selected_ids: HashSet<ClipId> =
                 selections.iter().map(|(_, _, clip_id)| *clip_id).collect();
-            for clip_id in selected_ids.clone() {
-                if let Some(linked) = find_clip(&parent, clip_id).and_then(|clip| clip.linked_clip)
-                {
-                    selected_ids.insert(linked);
-                }
-            }
+            expand_clip_link_groups(&parent, &mut selected_ids);
 
             let mut min_time: Option<TimelineTime> = None;
             let mut max_time = TimelineTime::ZERO;
@@ -1510,16 +1280,13 @@ impl AppState {
             }
             let source_audio_scopes = parent.audio_program.processing_scopes.clone();
             let source_audio_transitions = parent.audio_program.transitions.clone();
+            let source_video_transitions = parent.video_transitions.clone();
             let mut audio_edit_ids = HashMap::new();
 
             for (track_index, track) in parent.video_tracks.iter().enumerate() {
                 for clip in track.clips.iter().filter(|clip| selected_ids.contains(&clip.id)) {
                     let mut nested_clip = clip.clone();
                     nested_clip.position = clip.position.checked_sub(min_time)?;
-                    if nested_clip.linked_clip.is_some_and(|linked| !selected_ids.contains(&linked))
-                    {
-                        nested_clip.linked_clip = None;
-                    }
                     nested_sequence.video_tracks[track_index].add_clip(nested_clip)?;
                 }
             }
@@ -1527,10 +1294,6 @@ impl AppState {
                 for clip in track.clips.iter().filter(|clip| selected_ids.contains(&clip.id)) {
                     let mut nested_clip = clip.clone();
                     nested_clip.position = clip.position.checked_sub(min_time)?;
-                    if nested_clip.linked_clip.is_some_and(|linked| !selected_ids.contains(&linked))
-                    {
-                        nested_clip.linked_clip = None;
-                    }
                     audio_edit_ids.extend(
                         nested_sequence
                             .fork_audio_clip_authoring(&mut nested_clip, &source_audio_scopes)?,
@@ -1554,6 +1317,21 @@ impl AppState {
                 )?;
                 nested_sequence.audio_program.transitions.push(transition);
             }
+            for mut transition in source_video_transitions {
+                if !selected_ids.contains(&transition.left)
+                    || !selected_ids.contains(&transition.right)
+                {
+                    continue;
+                }
+                transition.id = mondrian_core::VideoTransitionId::new();
+                transition.properties.fork_author_identities();
+                transition.sequence_range = mondrian_core::TimelineTimeRange::new(
+                    transition.sequence_range.start.checked_sub(min_time)?,
+                    transition.sequence_range.duration,
+                )?;
+                nested_sequence.video_transitions.push(transition);
+            }
+            nested_sequence.fork_clip_link_groups_for_sequence_duplicate();
 
             for track in &mut parent.video_tracks {
                 track.clips.retain(|clip| !selected_ids.contains(&clip.id));
@@ -1561,7 +1339,7 @@ impl AppState {
             for track in &mut parent.audio_tracks {
                 track.clips.retain(|clip| !selected_ids.contains(&clip.id));
             }
-            parent.compact_audio_program();
+            parent.compact_structural_references();
 
             let target_video_track_index = target_video_track_index.unwrap_or(0);
             let duration = max_time.checked_sub(min_time)?;
@@ -1581,8 +1359,9 @@ impl AppState {
                     duration,
                     Some(nested_sequence.name.clone()),
                 )?;
-                nested_clip.linked_clip = Some(audio_clip.id);
-                audio_clip.linked_clip = Some(nested_clip_id);
+                let link_group = ClipLinkGroupId::new();
+                nested_clip.link_group = Some(link_group);
+                audio_clip.link_group = Some(link_group);
                 Some(audio_clip)
             } else {
                 None
@@ -1602,27 +1381,31 @@ impl AppState {
                 parent.add_nested_audio_clip(audio_track_id, audio_clip, output_id)?;
             }
 
-            (parent.id, before, parent, nested_sequence, nested_clip_id)
+            (parent.id, parent, nested_sequence, nested_clip_id)
         };
 
-        self.sequence = Some(after.clone());
-        if let Some(existing) = self.sequences.iter_mut().find(|sequence| sequence.id == after.id) {
-            *existing = after.clone();
-        } else {
-            self.sequences.push(after.clone());
-        }
-        self.sequences.push(nested_sequence);
-        self.record_sequence_snapshot_command("预合成为嵌套序列", before, after)?;
+        let mut project_after = project_before.clone();
+        let parent_sequence_id = after.id;
+        *project_after.sequences.sequence_mut(parent_sequence_id).ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "precompose_clips_as_sequence".to_owned(),
+                reason: "父序列在项目事务中丢失".to_owned(),
+            }
+        })? = after;
+        project_after.sequences.add_sequence(nested_sequence)?;
+        self.authoring
+            .as_mut()
+            .expect("authoring session checked above")
+            .commit_project_snapshot("预合成为嵌套序列", project_before, project_after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-        let _ = self.save_project_file();
         Ok(nested_clip_id)
     }
 
     // ─── 播放控制 ────────────────────────────
 
     pub fn default_export_input_path(&self) -> Option<PathBuf> {
-        let seq = self.sequence.as_ref()?;
-        let library = self.asset_library.as_ref()?;
+        let seq = self.active_sequence()?;
+        let library = self.asset_library()?;
 
         let mut candidates = Vec::new();
         for track in &seq.video_tracks {
@@ -1630,7 +1413,9 @@ impl AppState {
                 if clip.is_disabled {
                     continue;
                 }
-                candidates.push((clip.position, clip.asset_id));
+                if let Some(asset_id) = clip.asset_id() {
+                    candidates.push((clip.position, asset_id));
+                }
             }
         }
 
@@ -1653,7 +1438,7 @@ impl AppState {
     }
 
     pub fn last_content_frame(&self) -> mondrian_core::Result<i64> {
-        let Some(seq) = self.sequence.as_ref() else {
+        let Some(seq) = self.active_sequence() else {
             return Ok(0);
         };
 
@@ -1694,21 +1479,33 @@ impl AppState {
 
     pub fn mark_in_at_current_frame(&mut self) -> mondrian_core::Result<()> {
         let current = self.current_frame().max(0);
-        if let Some(seq) = self.sequence.as_mut() {
-            seq.mark_in(sequence_time_from_frame(current, seq.time_base())?);
-            self.sync_current_sequence_into_collection();
-        }
-        let _ = self.save_project_file();
+        let before = self.active_sequence().cloned().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "mark_in_at_current_frame".to_owned(),
+                reason: "当前无序列".to_owned(),
+            }
+        })?;
+        let mut after = before.clone();
+        after.mark_in(sequence_time_from_frame(current, after.time_base())?);
+        let sequence_id = after.id;
+        self.record_sequence_snapshot_command("标记入点", before, after)?;
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         Ok(())
     }
 
     pub fn mark_out_at_current_frame(&mut self) -> mondrian_core::Result<()> {
         let current = self.current_frame().max(0);
-        if let Some(seq) = self.sequence.as_mut() {
-            seq.mark_out(sequence_time_from_frame(current, seq.time_base())?);
-            self.sync_current_sequence_into_collection();
-        }
-        let _ = self.save_project_file();
+        let before = self.active_sequence().cloned().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "mark_out_at_current_frame".to_owned(),
+                reason: "当前无序列".to_owned(),
+            }
+        })?;
+        let mut after = before.clone();
+        after.mark_out(sequence_time_from_frame(current, after.time_base())?);
+        let sequence_id = after.id;
+        self.record_sequence_snapshot_command("标记出点", before, after)?;
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         Ok(())
     }
 
@@ -1723,24 +1520,20 @@ impl AppState {
         }
 
         let (sequence_id, before, after, changed_count) = {
-            let seq = self.sequence.as_mut().ok_or_else(|| {
+            let before = self.active_sequence().cloned().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "trim_clips_bulk_to_frame".to_string(),
                     reason: "当前无序列".to_string(),
                 }
             })?;
-
-            let before = seq.clone();
-            let mut processed = HashSet::<ClipId>::new();
+            let mut after = before.clone();
+            let seq = &mut after;
+            let mut targets = clip_ids.iter().copied().collect::<HashSet<_>>();
+            expand_clip_link_groups(seq, &mut targets);
             let mut changed_count = 0usize;
 
-            for clip_id in clip_ids {
-                if !processed.insert(*clip_id) {
-                    continue;
-                }
-
-                let linked = find_clip(seq, *clip_id).and_then(|clip| clip.linked_clip);
-                match trim_clip_edge_internal(seq, *clip_id, edge, target_frame) {
+            for clip_id in targets {
+                match trim_clip_edge_internal(seq, clip_id, edge, target_frame) {
                     Ok(true) => {
                         changed_count += 1;
                     }
@@ -1748,33 +1541,15 @@ impl AppState {
                     Err(mondrian_core::MondrianError::ClipNotFound { .. }) => continue,
                     Err(err) => return Err(err),
                 }
-
-                if let Some(linked_id) = linked {
-                    if !processed.insert(linked_id) {
-                        continue;
-                    }
-                    match trim_clip_edge_internal(seq, linked_id, edge, target_frame) {
-                        Ok(true) => {
-                            changed_count += 1;
-                            if let Some(primary) = find_clip_mut(seq, *clip_id) {
-                                primary.linked_clip = Some(linked_id);
-                            }
-                            if let Some(linked_clip) = find_clip_mut(seq, linked_id) {
-                                linked_clip.linked_clip = Some(*clip_id);
-                            }
-                        }
-                        Ok(false) => {}
-                        Err(mondrian_core::MondrianError::ClipNotFound { .. }) => {}
-                        Err(err) => return Err(err),
-                    }
-                }
             }
 
             if changed_count == 0 {
                 return Ok(0);
             }
 
-            (seq.id, before, seq.clone(), changed_count)
+            compact_sequence_references(seq);
+
+            (seq.id, before, after, changed_count)
         };
 
         let action = match edge {
@@ -1783,7 +1558,6 @@ impl AppState {
         };
         self.record_sequence_snapshot_command(action, before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-        let _ = self.save_project_file();
         Ok(changed_count)
     }
 
@@ -1793,25 +1567,25 @@ impl AppState {
         target_frame: i64,
     ) -> mondrian_core::Result<bool> {
         let (sequence_id, before, after, changed) = {
-            let seq = self.sequence.as_mut().ok_or_else(|| {
+            let before = self.active_sequence().cloned().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "roll_cut_to_frame".to_string(),
                     reason: "当前无序列".to_string(),
                 }
             })?;
-
-            let before = seq.clone();
+            let mut after = before.clone();
+            let seq = &mut after;
             let changed = roll_cut_for_clip_internal(seq, clip_id, target_frame)?;
             if !changed {
                 return Ok(false);
             }
-            (seq.id, before, seq.clone(), changed)
+            compact_sequence_references(seq);
+            (seq.id, before, after, changed)
         };
 
         if changed {
             self.record_sequence_snapshot_command("滚动修剪", before, after)?;
             self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-            let _ = self.save_project_file();
         }
         Ok(changed)
     }
@@ -1825,7 +1599,7 @@ impl AppState {
             return Ok(0);
         }
 
-        let library = self.asset_library.clone().ok_or_else(|| {
+        let library = self.asset_library_handle().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "slip_clips_bulk_by_frames".to_string(),
                 reason: "素材库未连接".to_string(),
@@ -1833,24 +1607,20 @@ impl AppState {
         })?;
 
         let (sequence_id, before, after, changed_count) = {
-            let seq = self.sequence.as_mut().ok_or_else(|| {
+            let before = self.active_sequence().cloned().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "slip_clips_bulk_by_frames".to_string(),
                     reason: "当前无序列".to_string(),
                 }
             })?;
-
-            let before = seq.clone();
-            let mut processed = HashSet::<ClipId>::new();
+            let mut after = before.clone();
+            let seq = &mut after;
+            let mut targets = clip_ids.iter().copied().collect::<HashSet<_>>();
+            expand_clip_link_groups(seq, &mut targets);
             let mut changed_count = 0usize;
 
-            for clip_id in clip_ids {
-                if !processed.insert(*clip_id) {
-                    continue;
-                }
-
-                let linked = find_clip(seq, *clip_id).and_then(|clip| clip.linked_clip);
-                match slip_clip_internal(seq, library.as_ref(), *clip_id, delta_frames) {
+            for clip_id in targets {
+                match slip_clip_internal(seq, library.as_ref(), clip_id, delta_frames) {
                     Ok(true) => {
                         changed_count += 1;
                     }
@@ -1858,38 +1628,19 @@ impl AppState {
                     Err(mondrian_core::MondrianError::ClipNotFound { .. }) => continue,
                     Err(err) => return Err(err),
                 }
-
-                if let Some(linked_id) = linked {
-                    if !processed.insert(linked_id) {
-                        continue;
-                    }
-                    match slip_clip_internal(seq, library.as_ref(), linked_id, delta_frames) {
-                        Ok(true) => {
-                            changed_count += 1;
-                            if let Some(primary) = find_clip_mut(seq, *clip_id) {
-                                primary.linked_clip = Some(linked_id);
-                            }
-                            if let Some(linked_clip) = find_clip_mut(seq, linked_id) {
-                                linked_clip.linked_clip = Some(*clip_id);
-                            }
-                        }
-                        Ok(false) => {}
-                        Err(mondrian_core::MondrianError::ClipNotFound { .. }) => {}
-                        Err(err) => return Err(err),
-                    }
-                }
             }
 
             if changed_count == 0 {
                 return Ok(0);
             }
 
-            (seq.id, before, seq.clone(), changed_count)
+            compact_sequence_references(seq);
+
+            (seq.id, before, after, changed_count)
         };
 
         self.record_sequence_snapshot_command("滑移片段", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-        let _ = self.save_project_file();
         Ok(changed_count)
     }
 
@@ -1903,24 +1654,20 @@ impl AppState {
         }
 
         let (sequence_id, before, after, changed_count) = {
-            let seq = self.sequence.as_mut().ok_or_else(|| {
+            let before = self.active_sequence().cloned().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "slide_clips_bulk_by_frames".to_string(),
                     reason: "当前无序列".to_string(),
                 }
             })?;
-
-            let before = seq.clone();
-            let mut processed = HashSet::<ClipId>::new();
+            let mut after = before.clone();
+            let seq = &mut after;
+            let mut targets = clip_ids.iter().copied().collect::<HashSet<_>>();
+            expand_clip_link_groups(seq, &mut targets);
             let mut changed_count = 0usize;
 
-            for clip_id in clip_ids {
-                if !processed.insert(*clip_id) {
-                    continue;
-                }
-
-                let linked = find_clip(seq, *clip_id).and_then(|clip| clip.linked_clip);
-                match slide_clip_internal(seq, *clip_id, delta_frames) {
+            for clip_id in targets {
+                match slide_clip_internal(seq, clip_id, delta_frames) {
                     Ok(true) => {
                         changed_count += 1;
                     }
@@ -1928,38 +1675,19 @@ impl AppState {
                     Err(mondrian_core::MondrianError::ClipNotFound { .. }) => continue,
                     Err(err) => return Err(err),
                 }
-
-                if let Some(linked_id) = linked {
-                    if !processed.insert(linked_id) {
-                        continue;
-                    }
-                    match slide_clip_internal(seq, linked_id, delta_frames) {
-                        Ok(true) => {
-                            changed_count += 1;
-                            if let Some(primary) = find_clip_mut(seq, *clip_id) {
-                                primary.linked_clip = Some(linked_id);
-                            }
-                            if let Some(linked_clip) = find_clip_mut(seq, linked_id) {
-                                linked_clip.linked_clip = Some(*clip_id);
-                            }
-                        }
-                        Ok(false) => {}
-                        Err(mondrian_core::MondrianError::ClipNotFound { .. }) => {}
-                        Err(err) => return Err(err),
-                    }
-                }
             }
 
             if changed_count == 0 {
                 return Ok(0);
             }
 
-            (seq.id, before, seq.clone(), changed_count)
+            compact_sequence_references(seq);
+
+            (seq.id, before, after, changed_count)
         };
 
         self.record_sequence_snapshot_command("滑动片段", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-        let _ = self.save_project_file();
         Ok(changed_count)
     }
 
@@ -1971,14 +1699,14 @@ impl AppState {
         split_frame: i64,
     ) -> mondrian_core::Result<bool> {
         let (sequence_id, before, after) = {
-            let seq = self.sequence.as_mut().ok_or_else(|| {
+            let before = self.active_sequence().cloned().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "split_clip".to_string(),
                     reason: "当前无序列".to_string(),
                 }
             })?;
-
-            let before = seq.clone();
+            let mut after = before.clone();
+            let seq = &mut after;
             let split_done = Self::split_clip_at_frame_internal(
                 seq,
                 track_id,
@@ -1989,19 +1717,18 @@ impl AppState {
             if !split_done {
                 return Ok(false);
             }
-            (seq.id, before, seq.clone())
+            (seq.id, before, after)
         };
 
         self.record_sequence_snapshot_command("分割片段", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-        let _ = self.save_project_file();
         Ok(true)
     }
 
     pub fn split_at_playhead(&mut self) -> mondrian_core::Result<usize> {
         let frame = self.current_frame();
         let targets = {
-            let seq = self.sequence.as_ref().ok_or_else(|| {
+            let seq = self.active_sequence().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "split_at_playhead".to_string(),
                     reason: "当前无序列".to_string(),
@@ -2034,15 +1761,15 @@ impl AppState {
             targets
         };
 
-        let mut history_snapshot: Option<(SequenceId, Sequence, Sequence)> = None;
-        let split_count = {
-            let seq = self.sequence.as_mut().ok_or_else(|| {
+        let (sequence_id, before, after, split_count) = {
+            let before = self.active_sequence().cloned().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "split_at_playhead".to_string(),
                     reason: "当前无序列".to_string(),
                 }
             })?;
-            let before = seq.clone();
+            let mut after = before.clone();
+            let seq = &mut after;
             let mut processed = HashSet::new();
             let mut split_count = 0usize;
 
@@ -2055,17 +1782,12 @@ impl AppState {
                 }
             }
 
-            if split_count > 0 {
-                history_snapshot = Some((seq.id, before, seq.clone()));
-            }
-
-            split_count
+            (seq.id, before, after, split_count)
         };
 
-        if let Some((sequence_id, before, after)) = history_snapshot {
+        if split_count > 0 {
             self.record_sequence_snapshot_command("在播放头分割片段", before, after)?;
             self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-            let _ = self.save_project_file();
         }
 
         Ok(split_count)
@@ -2078,44 +1800,44 @@ impl AppState {
         clip_id: ClipId,
         split_frame: i64,
     ) -> mondrian_core::Result<bool> {
-        let track_locked = if is_video_track {
-            seq.video_tracks
-                .iter()
-                .find(|t| t.id == track_id)
-                .map(|t| t.is_locked)
-                .unwrap_or(false)
-        } else {
-            seq.audio_tracks
-                .iter()
-                .find(|t| t.id == track_id)
-                .map(|t| t.is_locked)
-                .unwrap_or(false)
+        let Some((actual_track_id, actual_is_video, _)) = find_clip_track_lock(seq, clip_id) else {
+            return Err(mondrian_core::MondrianError::ClipNotFound {
+                clip_id: clip_id.to_string(),
+            });
         };
-        if track_locked {
-            return Err(mondrian_core::MondrianError::TrackLocked {
-                track_id: track_id.to_string(),
+        if actual_track_id != track_id || actual_is_video != is_video_track {
+            return Err(mondrian_core::MondrianError::ClipNotFound {
+                clip_id: clip_id.to_string(),
             });
         }
-
-        let time_base = seq.time_base();
-        let Some(primary) = split_clip_anywhere(seq, clip_id, split_frame, time_base) else {
-            return Ok(false);
-        };
-
-        if let Some(linked_id) = primary.original_linked {
-            let linked_split = split_clip_anywhere(seq, linked_id, split_frame, time_base);
-            if let Some(linked_result) = linked_split {
-                if let Some(primary_right) = find_clip_mut(seq, primary.right_clip_id) {
-                    primary_right.linked_clip = Some(linked_result.right_clip_id);
-                }
-                if let Some(linked_right) = find_clip_mut(seq, linked_result.right_clip_id) {
-                    linked_right.linked_clip = Some(primary.right_clip_id);
-                }
+        let members = clip_link_group_member_ids(seq, clip_id);
+        for member in &members {
+            if let Some((member_track, _, true)) = find_clip_track_lock(seq, *member) {
+                return Err(mondrian_core::MondrianError::TrackLocked {
+                    track_id: member_track.to_string(),
+                });
             }
         }
 
-        clear_broken_links(seq);
-        Ok(true)
+        let time_base = seq.time_base();
+        let mut right_ids = Vec::new();
+        let mut primary_split = false;
+        for member in members {
+            if let Some(result) = split_clip_anywhere(seq, member, split_frame, time_base) {
+                primary_split |= member == clip_id;
+                right_ids.push(result.right_clip_id);
+            }
+        }
+        if right_ids.len() >= 2 {
+            let right_group = ClipLinkGroupId::new();
+            for right_id in right_ids {
+                if let Some(right) = find_clip_mut(seq, right_id) {
+                    right.link_group = Some(right_group);
+                }
+            }
+        }
+        compact_sequence_references(seq);
+        Ok(primary_split)
     }
 
     pub fn begin_drag_asset(
@@ -2170,8 +1892,7 @@ impl AppState {
 
         // Resolve media dimensions for auto-fit before borrowing seq.
         let media_dim = if dragging.kind == AssetKind::Video {
-            self.asset_library
-                .as_ref()
+            self.asset_library()
                 .and_then(|lib| lib.get_asset(dragging.asset_id).ok().flatten())
                 .and_then(|asset| asset.media_info.primary_video().cloned())
                 .map(|v| (v.width, v.height))
@@ -2180,14 +1901,14 @@ impl AppState {
         };
 
         let (sequence_id, clip_id, start_frame, before, after) = {
-            let seq = self.sequence.as_mut().ok_or_else(|| {
+            let before = self.active_sequence().cloned().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "timeline_drop".to_string(),
                     reason: "当前无序列".to_string(),
                 }
             })?;
-
-            let before = seq.clone();
+            let mut after = before.clone();
+            let seq = &mut after;
             let fps = seq.settings.frame_rate.to_f64();
             let duration_frames = ((dragging.duration.as_secs_f64() * fps).ceil() as i64).max(1);
             let time_base = seq.time_base();
@@ -2228,9 +1949,9 @@ impl AppState {
             let mut linked_audio_clip = if should_create_linked_audio {
                 let mut audio_clip = Clip::new(dragging.asset_id, start_time, duration)?;
                 audio_clip.label = Some(dragging.name.clone());
-                let audio_clip_id = audio_clip.id;
-                clip.linked_clip = Some(audio_clip_id);
-                audio_clip.linked_clip = Some(clip.id);
+                let link_group = ClipLinkGroupId::new();
+                clip.link_group = Some(link_group);
+                audio_clip.link_group = Some(link_group);
                 Some(audio_clip)
             } else {
                 None
@@ -2259,23 +1980,23 @@ impl AppState {
                         audio_clip,
                         AudioSourceComponentId::primary(),
                     )?;
-                    let audio_track = seq
-                        .audio_track_mut(audio_track_id)
-                        .expect("newly resolved audio Track must remain present");
+                    let audio_track = seq.audio_track_mut(audio_track_id).ok_or_else(|| {
+                        mondrian_core::MondrianError::TrackNotFound {
+                            track_id: audio_track_id.to_string(),
+                        }
+                    })?;
                     resolve_track_conflicts(audio_track, audio_clip_id, overlap_mode)?;
-                    seq.compact_audio_program();
                 }
             }
-            clear_broken_links(seq);
+            compact_sequence_references(seq);
 
-            (seq.id, clip_id, start_frame, before, seq.clone())
+            (seq.id, clip_id, start_frame, before, after)
         };
 
         self.record_sequence_snapshot_command("添加视频片段", before, after)?;
         self.event_bus.publish(AppEvent::ClipAdded { sequence_id, clip_id });
         self.seek(start_frame);
         self.clear_dragging_asset();
-        let _ = self.save_project_file();
         Ok(clip_id)
     }
 
@@ -2307,14 +2028,14 @@ impl AppState {
         }
 
         let (sequence_id, clip_id, start_frame, before, after) = {
-            let seq = self.sequence.as_mut().ok_or_else(|| {
+            let before = self.active_sequence().cloned().ok_or_else(|| {
                 mondrian_core::MondrianError::WorkflowStepFailed {
                     step_id: "timeline_drop_audio".to_string(),
                     reason: "当前无序列".to_string(),
                 }
             })?;
-
-            let before = seq.clone();
+            let mut after = before.clone();
+            let seq = &mut after;
             let fps = seq.settings.frame_rate.to_f64();
             let duration_frames = ((dragging.duration.as_secs_f64() * fps).ceil() as i64).max(1);
             let time_base = seq.time_base();
@@ -2333,17 +2054,15 @@ impl AppState {
                 mondrian_core::MondrianError::TrackNotFound { track_id: track_id.to_string() }
             })?;
             resolve_track_conflicts(track, clip_id, overlap_mode)?;
-            seq.compact_audio_program();
-            clear_broken_links(seq);
+            compact_sequence_references(seq);
 
-            (seq.id, clip_id, start_frame, before, seq.clone())
+            (seq.id, clip_id, start_frame, before, after)
         };
 
         self.record_sequence_snapshot_command("添加音频片段", before, after)?;
         self.event_bus.publish(AppEvent::ClipAdded { sequence_id, clip_id });
         self.seek(start_frame);
         self.clear_dragging_asset();
-        let _ = self.save_project_file();
         Ok(clip_id)
     }
 
@@ -2404,16 +2123,17 @@ impl AppState {
         timeline_frame: i64,
         overlap_mode: ClipOverlapMode,
     ) -> mondrian_core::Result<()> {
-        let seq = self.sequence.as_mut().ok_or_else(|| {
+        let before = self.active_sequence().cloned().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "move_clip".to_string(),
                 reason: "当前无序列".to_string(),
             }
         })?;
+        let mut after = before.clone();
+        let seq = &mut after;
 
         let time_base = seq.time_base();
         let new_start = timeline_frame.max(0);
-        let new_start_time = sequence_time_from_frame(new_start, time_base)?;
         let source_track_index =
             find_clip_track_index(seq, is_video_track, clip_id).ok_or_else(|| {
                 mondrian_core::MondrianError::ClipNotFound { clip_id: clip_id.to_string() }
@@ -2433,124 +2153,91 @@ impl AppState {
             })?
         };
 
-        let linked_clip_id;
-        if is_video_track {
-            if seq.video_tracks[source_track_index].is_locked {
+        let primary_position = find_clip(seq, clip_id)
+            .ok_or_else(|| mondrian_core::MondrianError::ClipNotFound {
+                clip_id: clip_id.to_string(),
+            })?
+            .position;
+        let primary_frame = primary_position
+            .to_frame_position(seq.settings.frame_rate, FrameRounding::Nearest)?
+            .frame;
+        let frame_delta = new_start.saturating_sub(primary_frame);
+        let track_delta = target_track_index as isize - source_track_index as isize;
+        let members = clip_link_group_member_ids(seq, clip_id);
+        let mut moves = Vec::<(ClipId, bool, usize, i64)>::with_capacity(members.len());
+        for member in members {
+            let (member_track_id, member_is_video, member_locked) =
+                find_clip_track_lock(seq, member).ok_or_else(|| {
+                    mondrian_core::MondrianError::ClipNotFound { clip_id: member.to_string() }
+                })?;
+            if member_locked {
                 return Err(mondrian_core::MondrianError::TrackLocked {
-                    track_id: seq.video_tracks[source_track_index].id.to_string(),
+                    track_id: member_track_id.to_string(),
                 });
             }
-            if seq.video_tracks[target_track_index].is_locked {
-                return Err(mondrian_core::MondrianError::TrackLocked {
-                    track_id: seq.video_tracks[target_track_index].id.to_string(),
-                });
-            }
-
-            if source_track_index == target_track_index {
-                let clip = seq.video_tracks[source_track_index]
-                    .clips
-                    .iter_mut()
-                    .find(|c| c.id == clip_id)
-                    .ok_or_else(|| mondrian_core::MondrianError::ClipNotFound {
-                        clip_id: clip_id.to_string(),
-                    })?;
-                clip.position = new_start_time;
-                linked_clip_id = clip.linked_clip;
+            let member_source_index = find_clip_track_index(seq, member_is_video, member)
+                .ok_or_else(|| mondrian_core::MondrianError::ClipNotFound {
+                    clip_id: member.to_string(),
+                })?;
+            let track_count = if member_is_video {
+                seq.video_tracks.len()
             } else {
-                let clip_index = seq.video_tracks[source_track_index]
-                    .clips
-                    .iter()
-                    .position(|c| c.id == clip_id)
-                    .ok_or_else(|| mondrian_core::MondrianError::ClipNotFound {
-                        clip_id: clip_id.to_string(),
-                    })?;
-
-                let mut clip = seq.video_tracks[source_track_index].clips.remove(clip_index);
-                clip.position = new_start_time;
-                linked_clip_id = clip.linked_clip;
-                seq.video_tracks[target_track_index].clips.push(clip);
-            }
-        } else {
-            if seq.audio_tracks[source_track_index].is_locked {
-                return Err(mondrian_core::MondrianError::TrackLocked {
-                    track_id: seq.audio_tracks[source_track_index].id.to_string(),
-                });
-            }
-            if seq.audio_tracks[target_track_index].is_locked {
-                return Err(mondrian_core::MondrianError::TrackLocked {
-                    track_id: seq.audio_tracks[target_track_index].id.to_string(),
-                });
-            }
-
-            if source_track_index == target_track_index {
-                let clip = seq.audio_tracks[source_track_index]
-                    .clips
-                    .iter_mut()
-                    .find(|c| c.id == clip_id)
-                    .ok_or_else(|| mondrian_core::MondrianError::ClipNotFound {
-                        clip_id: clip_id.to_string(),
-                    })?;
-                clip.position = new_start_time;
-                linked_clip_id = clip.linked_clip;
+                seq.audio_tracks.len()
+            };
+            let member_target_index = if member == clip_id {
+                target_track_index
             } else {
-                let clip_index = seq.audio_tracks[source_track_index]
-                    .clips
-                    .iter()
-                    .position(|c| c.id == clip_id)
-                    .ok_or_else(|| mondrian_core::MondrianError::ClipNotFound {
-                        clip_id: clip_id.to_string(),
-                    })?;
+                (member_source_index as isize + track_delta)
+                    .clamp(0, track_count.saturating_sub(1) as isize) as usize
+            };
+            let target_track = if member_is_video {
+                &seq.video_tracks[member_target_index]
+            } else {
+                &seq.audio_tracks[member_target_index]
+            };
+            if target_track.is_locked {
+                return Err(mondrian_core::MondrianError::TrackLocked {
+                    track_id: target_track.id.to_string(),
+                });
+            }
+            let member_frame = find_clip(seq, member)
+                .ok_or_else(|| mondrian_core::MondrianError::ClipNotFound {
+                    clip_id: member.to_string(),
+                })?
+                .position
+                .to_frame_position(seq.settings.frame_rate, FrameRounding::Nearest)?
+                .frame;
+            let target_frame = member_frame.saturating_add(frame_delta);
+            if target_frame < 0 {
+                return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "move_clip".to_owned(),
+                    reason: "移动会使链接组成员越过序列零点".to_owned(),
+                });
+            }
+            moves.push((member, member_is_video, member_target_index, target_frame));
+        }
 
-                let mut clip = seq.audio_tracks[source_track_index].clips.remove(clip_index);
-                clip.position = new_start_time;
-                linked_clip_id = clip.linked_clip;
-                seq.audio_tracks[target_track_index].clips.push(clip);
+        for (member, member_is_video, member_target_index, target_frame) in &moves {
+            if !move_existing_clip_to_track_index(
+                seq,
+                *member_is_video,
+                *member,
+                *member_target_index,
+                *target_frame,
+                time_base,
+            ) {
+                return Err(mondrian_core::MondrianError::ClipNotFound {
+                    clip_id: member.to_string(),
+                });
             }
         }
 
-        if let Some(linked_id) = linked_clip_id {
-            if is_video_track {
-                ensure_audio_track_index(seq, target_track_index);
-                if !move_existing_clip_to_track_index(
-                    seq,
-                    false,
-                    linked_id,
-                    target_track_index,
-                    new_start,
-                    time_base,
-                ) {
-                    if let Some(linked) = find_clip_mut(seq, linked_id) {
-                        linked.position = new_start_time;
-                    }
-                }
-            } else if target_track_index < seq.video_tracks.len() {
-                if !move_existing_clip_to_track_index(
-                    seq,
-                    true,
-                    linked_id,
-                    target_track_index,
-                    new_start,
-                    time_base,
-                ) {
-                    if let Some(linked) = find_clip_mut(seq, linked_id) {
-                        linked.position = new_start_time;
-                    }
-                }
-            } else if let Some(linked) = find_clip_mut(seq, linked_id) {
-                linked.position = new_start_time;
-            }
+        let focus_ids = moves.iter().map(|(id, _, _, _)| *id).collect::<HashSet<_>>();
+        for track in &mut seq.video_tracks {
+            apply_track_conflicts_for_focus_group(track, &focus_ids, overlap_mode)?;
         }
-
-        if is_video_track {
-            if let Some(track) = seq.video_track_mut(target_track_id) {
-                resolve_track_conflicts(track, clip_id, overlap_mode)?;
-            }
-        } else if let Some(track) = seq.audio_track_mut(target_track_id) {
-            resolve_track_conflicts(track, clip_id, overlap_mode)?;
-        }
-
-        if let Some(linked_id) = linked_clip_id {
-            apply_conflict_policy_for_existing_clip(seq, linked_id, overlap_mode)?;
+        for track in &mut seq.audio_tracks {
+            apply_track_conflicts_for_focus_group(track, &focus_ids, overlap_mode)?;
         }
 
         for track in &mut seq.video_tracks {
@@ -2559,8 +2246,10 @@ impl AppState {
         for track in &mut seq.audio_tracks {
             track.clips.sort_by_key(|c| c.position);
         }
-        clear_broken_links(seq);
-
+        compact_sequence_references(seq);
+        let sequence_id = seq.id;
+        self.record_sequence_snapshot_command("移动片段", before, after)?;
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         Ok(())
     }
 
@@ -2574,31 +2263,51 @@ impl AppState {
             return Ok(0);
         }
 
-        let seq = self.sequence.as_mut().ok_or_else(|| {
+        let before = self.active_sequence().cloned().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "move_clip_group_by_delta_with_mode".to_string(),
                 reason: "当前无序列".to_string(),
             }
         })?;
+        let mut after = before.clone();
+        let seq = &mut after;
 
-        let mut seen = HashSet::<ClipId>::new();
-        let mut target_positions = Vec::<(ClipId, i64)>::new();
+        let mut anchor_frames = HashMap::<ClipId, i64>::new();
         for (clip_id, start_frame) in anchors {
-            if !seen.insert(*clip_id) {
-                continue;
-            }
+            anchor_frames.entry(*clip_id).or_insert(*start_frame);
+        }
+        let mut member_ids = anchor_frames.keys().copied().collect::<HashSet<_>>();
+        expand_clip_link_groups(seq, &mut member_ids);
 
-            let Some((track_id, _is_video, is_locked)) = find_clip_track_lock(seq, *clip_id) else {
-                continue;
-            };
+        let mut target_positions = Vec::<(ClipId, i64)>::with_capacity(member_ids.len());
+        for clip_id in member_ids {
+            let current_frame = find_clip(seq, clip_id)
+                .ok_or_else(|| mondrian_core::MondrianError::ClipNotFound {
+                    clip_id: clip_id.to_string(),
+                })?
+                .position
+                .to_frame_position(seq.settings.frame_rate, FrameRounding::Nearest)?
+                .frame;
+            let start_frame = anchor_frames.get(&clip_id).copied().unwrap_or(current_frame);
+
+            let (track_id, _is_video, is_locked) =
+                find_clip_track_lock(seq, clip_id).ok_or_else(|| {
+                    mondrian_core::MondrianError::ClipNotFound { clip_id: clip_id.to_string() }
+                })?;
             if is_locked {
                 return Err(mondrian_core::MondrianError::TrackLocked {
                     track_id: track_id.to_string(),
                 });
             }
 
-            let target = start_frame.saturating_add(delta_frames).max(0);
-            target_positions.push((*clip_id, target));
+            let target = start_frame.saturating_add(delta_frames);
+            if target < 0 {
+                return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "move_clip_group_by_delta_with_mode".to_owned(),
+                    reason: "移动会使链接组成员越过序列零点".to_owned(),
+                });
+            }
+            target_positions.push((clip_id, target));
         }
 
         if target_positions.is_empty() {
@@ -2630,7 +2339,10 @@ impl AppState {
             apply_track_conflicts_for_focus_group(track, &focus_ids, overlap_mode)?;
         }
 
-        clear_broken_links(seq);
+        compact_sequence_references(seq);
+        let sequence_id = seq.id;
+        self.record_sequence_snapshot_command("移动多个片段", before, after)?;
+        self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
         Ok(changed_count)
     }
 
@@ -2641,24 +2353,18 @@ impl AppState {
         selection: SelectedClipRef,
         name: &str,
     ) -> mondrian_core::Result<MaskId> {
-        let seq = self.sequence.as_mut().ok_or_else(|| {
-            mondrian_core::MondrianError::WorkflowStepFailed {
-                step_id: "add_mask".to_string(),
-                reason: "当前无序列".to_string(),
-            }
+        let (sequence_id, id) = self.commit_active_sequence_edit("添加蒙版", |sequence| {
+            let clip = find_clip_mut_by_selection(sequence, selection).ok_or_else(|| {
+                mondrian_core::MondrianError::ClipNotFound {
+                    clip_id: selection.clip_id.to_string(),
+                }
+            })?;
+            let component = MaskComponent::new(name.to_string(), MaskKeyframe::default());
+            let id = component.id;
+            clip.masks.push(component);
+            Ok((sequence.id, id))
         })?;
-        let before = seq.clone();
-        let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
-            mondrian_core::MondrianError::ClipNotFound { clip_id: selection.clip_id.to_string() }
-        })?;
-        let component = MaskComponent::new(name.to_string(), MaskKeyframe::default());
-        let id = component.id;
-        clip.masks.push(component);
-        let after = seq.clone();
-        let sequence_id = seq.id;
-        self.record_sequence_snapshot_command("添加蒙版", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-        let _ = self.save_project_file();
         Ok(id)
     }
 
@@ -2667,14 +2373,14 @@ impl AppState {
         selection: SelectedClipRef,
         mask_id: MaskId,
     ) -> mondrian_core::Result<()> {
-        let seq = self.sequence.as_mut().ok_or_else(|| {
+        let before = self.active_sequence().cloned().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "remove_mask".to_string(),
                 reason: "当前无序列".to_string(),
             }
         })?;
-        let before = seq.clone();
-        let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
+        let mut after = before.clone();
+        let clip = find_clip_mut_by_selection(&mut after, selection).ok_or_else(|| {
             mondrian_core::MondrianError::ClipNotFound { clip_id: selection.clip_id.to_string() }
         })?;
         let removed = {
@@ -2683,11 +2389,9 @@ impl AppState {
             clip.masks.len() < len_before
         };
         if removed {
-            let after = seq.clone();
-            let sequence_id = seq.id;
+            let sequence_id = after.id;
             self.record_sequence_snapshot_command("删除蒙版", before, after)?;
             self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-            let _ = self.save_project_file();
         }
         Ok(())
     }
@@ -2698,24 +2402,29 @@ impl AppState {
         mask_id: MaskId,
         enabled: bool,
     ) -> mondrian_core::Result<()> {
-        let seq = self.sequence.as_mut().ok_or_else(|| {
+        let before = self.active_sequence().cloned().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "set_mask_enabled".to_string(),
                 reason: "当前无序列".to_string(),
             }
         })?;
-        let before = seq.clone();
-        let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
+        let mut after = before.clone();
+        let clip = find_clip_mut_by_selection(&mut after, selection).ok_or_else(|| {
             mondrian_core::MondrianError::ClipNotFound { clip_id: selection.clip_id.to_string() }
         })?;
-        if let Some(mask) = clip.masks.iter_mut().find(|m| m.id == mask_id) {
-            mask.enabled = enabled;
+        let mask = clip.masks.iter_mut().find(|mask| mask.id == mask_id).ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "set_mask_enabled".to_owned(),
+                reason: format!("mask {mask_id} not found on clip"),
+            }
+        })?;
+        if mask.enabled == enabled {
+            return Ok(());
         }
-        let after = seq.clone();
-        let sequence_id = seq.id;
+        mask.enabled = enabled;
+        let sequence_id = after.id;
         self.record_sequence_snapshot_command("切换蒙版启用", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-        let _ = self.save_project_file();
         Ok(())
     }
 
@@ -2729,42 +2438,47 @@ impl AppState {
         enabled: bool,
         time: TimelineTime,
     ) -> mondrian_core::Result<bool> {
-        let seq = self.sequence.as_mut().ok_or_else(|| {
+        let before = self.active_sequence().cloned().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "set_mask_shape_animation".to_string(),
                 reason: "当前无序列".to_string(),
             }
         })?;
-        let before = seq.clone();
-        let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
+        let mut after = before.clone();
+        let clip = find_clip_mut_by_selection(&mut after, selection).ok_or_else(|| {
             mondrian_core::MondrianError::ClipNotFound { clip_id: selection.clip_id.to_string() }
         })?;
-        if let Some(mask) = clip.masks.iter_mut().find(|m| m.id == mask_id) {
-            if enabled && !mask.shape_animation_enabled {
-                // Snapshot current shape as a second keyframe at current time.
-                let current_shape = mask.evaluate_at(time).shape;
-                mask.shape_keyframes.push((time, current_shape));
-                mask.shape_keyframes.sort_by_key(|(t, _)| *t);
-                mask.shape_animation_enabled = true;
-            } else if !enabled && mask.shape_animation_enabled {
-                // Keep only the shape at `time` (or the first shape) as the static shape.
-                let kept = mask
-                    .shape_keyframes
-                    .iter()
-                    .find(|(t, _)| *t == time)
-                    .or_else(|| mask.shape_keyframes.first())
-                    .map(|(_, s)| s.clone())
-                    .unwrap_or(MaskShape::default());
-                mask.shape_keyframes.clear();
-                mask.shape_keyframes.push((TimelineTime::ZERO, kept));
-                mask.shape_animation_enabled = false;
+        let mask = clip.masks.iter_mut().find(|mask| mask.id == mask_id).ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "set_mask_shape_animation".to_owned(),
+                reason: format!("mask {mask_id} not found on clip"),
             }
+        })?;
+        if enabled == mask.shape_animation_enabled {
+            return Ok(false);
         }
-        let after = seq.clone();
-        let sequence_id = seq.id;
+        if enabled {
+            // Snapshot current shape as a second keyframe at current time.
+            let current_shape = mask.evaluate_at(time).shape;
+            mask.shape_keyframes.push((time, current_shape));
+            mask.shape_keyframes.sort_by_key(|(t, _)| *t);
+            mask.shape_animation_enabled = true;
+        } else {
+            // Keep only the shape at `time` (or the first shape) as the static shape.
+            let kept = mask
+                .shape_keyframes
+                .iter()
+                .find(|(t, _)| *t == time)
+                .or_else(|| mask.shape_keyframes.first())
+                .map(|(_, s)| s.clone())
+                .unwrap_or(MaskShape::default());
+            mask.shape_keyframes.clear();
+            mask.shape_keyframes.push((TimelineTime::ZERO, kept));
+            mask.shape_animation_enabled = false;
+        }
+        let sequence_id = after.id;
         self.record_sequence_snapshot_command("切换蒙版形状动画", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-        let _ = self.save_project_file();
         Ok(true)
     }
 
@@ -2777,66 +2491,68 @@ impl AppState {
         keyframe: MaskKeyframe,
         time: TimelineTime,
     ) -> mondrian_core::Result<bool> {
-        let seq = self.sequence.as_mut().ok_or_else(|| {
+        let before = self.active_sequence().cloned().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "set_mask_keyframe".to_string(),
                 reason: "当前无序列".to_string(),
             }
         })?;
-        let before = seq.clone();
-        let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
+        let mut after = before.clone();
+        let clip = find_clip_mut_by_selection(&mut after, selection).ok_or_else(|| {
             mondrian_core::MondrianError::ClipNotFound { clip_id: selection.clip_id.to_string() }
         })?;
-        if let Some(mask) = clip.masks.iter_mut().find(|m| m.id == mask_id) {
-            // Shape: write to shape_keyframes.
-            if let Some(pos) = mask.shape_keyframes.iter().position(|(t, _)| *t == time) {
-                mask.shape_keyframes[pos] = (time, keyframe.shape);
-            } else {
-                mask.shape_keyframes.push((time, keyframe.shape));
-                mask.shape_keyframes.sort_by_key(|(t, _)| *t);
+        let mask = clip.masks.iter_mut().find(|mask| mask.id == mask_id).ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "set_mask_keyframe".to_owned(),
+                reason: format!("mask {mask_id} not found on clip"),
             }
-            // Scalar properties: write to PropertyBag.
-            use mondrian_core::automation::PropertyValue;
-            use mondrian_effects::mask::{
-                MASK_PROP_EXPANSION, MASK_PROP_FEATHER, MASK_PROP_INVERT, MASK_PROP_MASK_OP,
-                MASK_PROP_OPACITY,
-            };
-            let _ = mask.properties.write_value(
-                MASK_PROP_FEATHER,
-                time,
-                PropertyValue::Float(keyframe.feather),
-                InterpolationType::Linear,
-            );
-            let _ = mask.properties.write_value(
-                MASK_PROP_OPACITY,
-                time,
-                PropertyValue::Float(keyframe.opacity),
-                InterpolationType::Linear,
-            );
-            let _ = mask.properties.write_value(
-                MASK_PROP_EXPANSION,
-                time,
-                PropertyValue::Float(keyframe.expansion),
-                InterpolationType::Linear,
-            );
-            let _ = mask.properties.write_value(
-                MASK_PROP_INVERT,
-                time,
-                PropertyValue::Bool(keyframe.invert),
-                InterpolationType::Hold,
-            );
-            let _ = mask.properties.write_value(
-                MASK_PROP_MASK_OP,
-                time,
-                PropertyValue::Text(keyframe.mask_op.as_str().to_string()),
-                InterpolationType::Hold,
-            );
+        })?;
+        // Shape: write to shape_keyframes.
+        if let Some(pos) = mask.shape_keyframes.iter().position(|(t, _)| *t == time) {
+            mask.shape_keyframes[pos] = (time, keyframe.shape);
+        } else {
+            mask.shape_keyframes.push((time, keyframe.shape));
+            mask.shape_keyframes.sort_by_key(|(t, _)| *t);
         }
-        let after = seq.clone();
-        let sequence_id = seq.id;
+        // Scalar properties: write to PropertyBag.
+        use mondrian_core::automation::PropertyValue;
+        use mondrian_effects::mask::{
+            MASK_PROP_EXPANSION, MASK_PROP_FEATHER, MASK_PROP_INVERT, MASK_PROP_MASK_OP,
+            MASK_PROP_OPACITY,
+        };
+        mask.properties.write_value(
+            MASK_PROP_FEATHER,
+            time,
+            PropertyValue::Float(keyframe.feather),
+            InterpolationType::Linear,
+        )?;
+        mask.properties.write_value(
+            MASK_PROP_OPACITY,
+            time,
+            PropertyValue::Float(keyframe.opacity),
+            InterpolationType::Linear,
+        )?;
+        mask.properties.write_value(
+            MASK_PROP_EXPANSION,
+            time,
+            PropertyValue::Float(keyframe.expansion),
+            InterpolationType::Linear,
+        )?;
+        mask.properties.write_value(
+            MASK_PROP_INVERT,
+            time,
+            PropertyValue::Bool(keyframe.invert),
+            InterpolationType::Hold,
+        )?;
+        mask.properties.write_value(
+            MASK_PROP_MASK_OP,
+            time,
+            PropertyValue::Text(keyframe.mask_op.as_str().to_string()),
+            InterpolationType::Hold,
+        )?;
+        let sequence_id = after.id;
         self.record_sequence_snapshot_command("修改蒙版", before, after)?;
         self.event_bus.publish(AppEvent::TimelineModified { sequence_id });
-        let _ = self.save_project_file();
         Ok(true)
     }
 }

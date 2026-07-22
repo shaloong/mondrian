@@ -7,12 +7,21 @@ license.workspace    = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+test-support = []
+
 [dependencies]
 mondrian-core     = { workspace = true }
 mondrian-timeline = { workspace = true }
 mondrian-assets   = { workspace = true }
+mondrian-project  = { workspace = true }
 
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 uuid        = { workspace = true }
 thiserror   = { workspace = true }
+tracing     = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

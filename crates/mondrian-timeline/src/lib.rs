@@ -11,17 +11,13 @@
 
 pub mod audio;
 pub mod clip;
-pub mod command;
 pub mod keyframe;
 pub mod sequence;
 pub mod track;
+pub mod video_transition;
 
 pub use audio::*;
 pub use clip::{ActiveClip, Clip, ClipKind};
-pub use command::{
-    Command, CommandHistory, CommandHistoryBudget, CommandHistoryDiagnostics, CommandRecordOutcome,
-    SequenceSnapshotCommand,
-};
 pub use keyframe::{InterpolationType, Keyframe, KeyframeTrack};
 pub use sequence::{
     AudioChannelLayout, AudioDisplayFormat, EditingMode, FieldOrder, PixelAspectRatio,
@@ -29,3 +25,4 @@ pub use sequence::{
     SequenceRole, SequenceSettings,
 };
 pub use track::{Track, TrackType};
+pub use video_transition::{VideoTransition, VideoTransitionSourceDemand, VideoTransitionType};

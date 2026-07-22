@@ -49,7 +49,7 @@ impl AppState {
             return Ok(());
         }
 
-        let library = self.asset_library.clone().ok_or_else(|| {
+        let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("导入失败：{reason}"), true);
             MondrianError::WorkflowStepFailed { step_id: "import_media".to_string(), reason }
@@ -141,7 +141,7 @@ impl AppState {
     }
 
     fn configure_imported_asset(&mut self, asset_id: AssetId) -> bool {
-        let Some(library) = self.asset_library.as_ref() else {
+        let Some(library) = self.asset_library() else {
             return false;
         };
         if !self.should_auto_generate_proxy_for_import() {
@@ -210,7 +210,6 @@ impl AppState {
                 );
             }
             self.set_status_hint(message, !batch.failures.is_empty());
-            let _ = self.save_project_file();
             return;
         }
 

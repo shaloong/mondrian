@@ -9,6 +9,7 @@ use anyhow::Context;
 use mondrian_core::{automation::PropertyHost, AssetId, ProjectId, ProjectMeta, ProjectSettings};
 use mondrian_timeline::SequenceCollection;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
@@ -22,7 +23,7 @@ use migration::JsonMigrationRegistry;
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 15;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 17;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 2;
 
@@ -128,7 +129,7 @@ pub struct ProjectDocument {
     /// Complete sequence collection for the current single-document layout.
     pub sequences: SequenceCollection,
     /// Assets currently forced into proxy playback mode.
-    pub proxy_mode_assets: Vec<AssetId>,
+    pub proxy_mode_assets: BTreeSet<AssetId>,
 }
 
 impl ProjectDocument {
@@ -145,7 +146,7 @@ impl ProjectDocument {
             meta: ProjectMeta::new(name),
             settings,
             sequences,
-            proxy_mode_assets: Vec::new(),
+            proxy_mode_assets: BTreeSet::new(),
         }
     }
 
@@ -190,6 +191,11 @@ impl ProjectDocument {
                             format!("effect '{}' author state is invalid", effect.id)
                         })?;
                     }
+                    for mask in &clip.masks {
+                        mask.validate_author_state().with_context(|| {
+                            format!("mask '{}' author state is invalid", mask.id)
+                        })?;
+                    }
                 }
             }
         }
@@ -198,8 +204,9 @@ impl ProjectDocument {
 
     /// Keep ID-list ordering deterministic for stable fingerprints.
     pub fn normalize_for_save(&mut self) {
-        self.proxy_mode_assets.sort_by_key(|id| id.to_string());
-        self.proxy_mode_assets.dedup();
+        // Ordered collections and identity-bearing author entities already have
+        // canonical serialization order. Keep normalization as the single save
+        // hook for future non-semantic ordering rules.
     }
 
     /// Return a copy with deterministic ordering applied.
@@ -316,6 +323,30 @@ pub fn save_project_archive(
     Ok(())
 }
 
+/// Durably and atomically publish arbitrary bytes at `target_file`.
+///
+/// The new payload is fully flushed before the platform replacement primitive
+/// runs. A failed replacement leaves an existing target untouched. This is the
+/// shared publication boundary for project-adjacent manifests and indexes that
+/// must obey the same crash semantics as the `.mdp` archive.
+pub fn write_durable_file_atomically(target_file: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    if let Some(parent) = target_file.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temp_file = temporary_sibling_path(target_file, "publication");
+    let result = (|| {
+        let mut file = fs::File::create(&temp_file)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        replace_file_preserving_original(&temp_file, target_file)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_file);
+    }
+    result
+}
+
 fn read_project_document_from_zip<R: Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> anyhow::Result<ProjectDocument> {
@@ -368,7 +399,8 @@ fn write_project_archive(
     let mut db_file = fs::File::open(library_db_path)?;
     std::io::copy(&mut db_file, &mut writer)?;
 
-    writer.finish()?;
+    let archive = writer.finish()?;
+    archive.sync_all()?;
     Ok(())
 }
 
@@ -387,11 +419,76 @@ fn temporary_sibling_path(target_file: &Path, purpose: &str) -> PathBuf {
 }
 
 fn replace_file_preserving_original(temp_file: &Path, target_file: &Path) -> anyhow::Result<()> {
-    replace_file_preserving_original_with(temp_file, target_file, |source, target| {
-        fs::rename(source, target)
-    })
+    if !temp_file.is_file() {
+        anyhow::bail!("replacement source is not a file: {}", temp_file.display());
+    }
+    fs::OpenOptions::new().write(true).open(temp_file)?.sync_all()?;
+    replace_file_atomically(temp_file, target_file).with_context(|| {
+        format!(
+            "failed to atomically publish {} as {}",
+            temp_file.display(),
+            target_file.display()
+        )
+    })?;
+    sync_parent_directory(target_file)?;
+    Ok(())
 }
 
+#[cfg(windows)]
+fn replace_file_atomically(temp_file: &Path, target_file: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, ReplaceFileW, MOVEFILE_WRITE_THROUGH, REPLACEFILE_WRITE_THROUGH,
+    };
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    let source = wide(temp_file);
+    let target = wide(target_file);
+    let succeeded = if target_file.exists() {
+        // SAFETY: The pointers reference live NUL-terminated UTF-16 buffers.
+        unsafe {
+            ReplaceFileW(
+                target.as_ptr(),
+                source.as_ptr(),
+                std::ptr::null(),
+                REPLACEFILE_WRITE_THROUGH,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        }
+    } else {
+        // SAFETY: The pointers reference live NUL-terminated UTF-16 buffers.
+        unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH) }
+    };
+    if succeeded == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_file_atomically(temp_file: &Path, target_file: &Path) -> std::io::Result<()> {
+    fs::rename(temp_file, target_file)
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(target_file: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = target_file.parent().filter(|path| !path.as_os_str().is_empty()) {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_target_file: &Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
 fn replace_file_preserving_original_with(
     temp_file: &Path,
     target_file: &Path,
@@ -433,8 +530,9 @@ fn replace_file_preserving_original_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_core::automation::{PropertyDescriptor, PropertyValue};
+    use mondrian_core::automation::{InterpolationType, PropertyDescriptor, PropertyValue};
     use mondrian_core::effect_data::{EffectNode, EffectType};
+    use mondrian_core::mask_data::{MaskComponent, MaskKeyframe};
     use mondrian_core::{
         ExactAutomationCurve, ExactAutomationKeyframe, ParameterId, ParameterUnit, TimelineTime,
     };
@@ -617,6 +715,47 @@ mod tests {
     }
 
     #[test]
+    fn mask_scalar_animation_round_trips_without_falling_back_to_defaults() {
+        let root = unique_temp_dir("mask-animation-round-trip");
+        let db_path = root.join("index.db");
+        fs::write(&db_path, b"sqlite placeholder").expect("write db");
+        let project_path = root.join("mask-animation.mdp");
+
+        let mut document = test_document();
+        let mut clip = Clip::new(
+            AssetId::new(),
+            TimelineTime::ZERO,
+            TimelineTime::new(5, 1).expect("duration"),
+        )
+        .expect("clip");
+        let mut mask = MaskComponent::new("Subject".to_owned(), MaskKeyframe::default());
+        let key_time = TimelineTime::new(2, 1).expect("key time");
+        mask.properties
+            .write_value(
+                mondrian_core::mask_data::MASK_PROP_OPACITY,
+                key_time,
+                PropertyValue::Float(0.25),
+                InterpolationType::Linear,
+            )
+            .expect("mask opacity key");
+        let mask_id = mask.id;
+        clip.masks.push(mask);
+        document.sequences.active_mut().expect("active sequence").video_tracks[0]
+            .add_clip(clip)
+            .expect("add clip");
+
+        save_project_archive(&document, &db_path, &project_path).expect("save project");
+        let reopened = read_project_document_from_archive(&project_path).expect("reopen project");
+        let reopened_mask = &reopened.sequences.active().expect("active sequence").video_tracks[0]
+            .clips[0]
+            .masks[0];
+
+        assert_eq!(reopened_mask.id, mask_id);
+        assert_eq!(reopened_mask.evaluate_at(key_time).opacity, 0.25);
+        reopened_mask.validate_author_state().expect("valid reopened mask");
+    }
+
+    #[test]
     fn audio_processor_schema_and_exact_curve_round_trip_without_plugin_resolution() {
         let root = unique_temp_dir("audio-parameter-schema-round-trip");
         let db_path = root.join("index.db");
@@ -745,8 +884,8 @@ mod tests {
         let mut second = first.clone();
         let a = AssetId::new();
         let b = AssetId::new();
-        first.proxy_mode_assets = vec![a, b];
-        second.proxy_mode_assets = vec![b, a];
+        first.proxy_mode_assets = [a, b].into_iter().collect();
+        second.proxy_mode_assets = [b, a].into_iter().collect();
 
         assert_eq!(
             project_document_fingerprint(first).expect("first fingerprint"),
@@ -1001,6 +1140,25 @@ mod tests {
         );
 
         assert_eq!(fs::read(&target).expect("restored original"), b"original");
+    }
+
+    #[test]
+    fn durable_atomic_file_publication_replaces_an_existing_target() {
+        let root = unique_temp_dir("durable-publication");
+        let target = root.join("manifest.json");
+
+        write_durable_file_atomically(&target, b"first").expect("publish first payload");
+        write_durable_file_atomically(&target, b"second").expect("replace payload");
+
+        assert_eq!(fs::read(&target).expect("published payload"), b"second");
+        assert_eq!(
+            fs::read_dir(&root)
+                .expect("publication directory")
+                .filter_map(Result::ok)
+                .count(),
+            1,
+            "temporary publication files must not leak"
+        );
     }
 
     #[test]

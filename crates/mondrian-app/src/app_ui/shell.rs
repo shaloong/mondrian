@@ -279,13 +279,11 @@ fn status_bar_model(state: &AppState) -> StatusBarModel {
     };
 
     let context = state
-        .sequence
-        .as_ref()
+        .active_sequence()
         .map(|sequence| sequence.name.clone())
         .or_else(|| {
             state
-                .current_project_path
-                .as_ref()
+                .current_project_path()
                 .and_then(|path| path.file_stem())
                 .map(|stem| stem.to_string_lossy().into_owned())
         })
@@ -502,13 +500,12 @@ fn normalized_export_default_file_name(default_file_name: &str, extension: &str)
 
 fn window_title_for_app_state(state: &AppState) -> String {
     let project = state
-        .current_project_path
-        .as_ref()
+        .current_project_path()
         .and_then(|path| path.file_stem())
         .and_then(|name| name.to_str())
         .filter(|name| !name.trim().is_empty())
         .unwrap_or("Untitled");
-    let sequence = state.sequence.as_ref().map(|sequence| sequence.name.as_str());
+    let sequence = state.active_sequence().map(|sequence| sequence.name.as_str());
     match sequence {
         Some(sequence) if !sequence.trim().is_empty() => {
             format!("{project} · {sequence} — Mondrian")
@@ -660,8 +657,8 @@ impl AppUiAppRoot {
             preferences.custom_workspace_layout.clone(),
             status_bar_model(state),
         );
-        root.active_sequence = state.sequence.clone();
-        root.project_color_management = state.project_settings.color_management.clone();
+        root.active_sequence = state.active_sequence().cloned();
+        root.project_color_management = state.project_settings().color_management.clone();
         root
     }
 
@@ -977,8 +974,8 @@ impl AppUiAppRoot {
             .menu_bar_mut()
             .refresh_for_app_state_with_shortcut_overrides(state, &preferences.shortcut_overrides);
         self.status_bar.set_model(status_bar_model(state));
-        self.active_sequence = state.sequence.clone();
-        self.project_color_management = state.project_settings.color_management.clone();
+        self.active_sequence = state.active_sequence().cloned();
+        self.project_color_management = state.project_settings().color_management.clone();
         let mut models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
             state,
             self.asset_folder_id.as_deref(),
@@ -3131,7 +3128,7 @@ mod tests {
     fn app_root_project_settings_commits_complete_color_engine_action() {
         let platform = FakePlatform::default();
         let mut state = AppState::new();
-        state.sequence = Some(Sequence::new("Program"));
+        state.test_set_sequence(Some(Sequence::new("Program")));
         let mut root = AppUiAppRoot::from_app_state(&state);
         let engine = mondrian_core::ColorEngine::Aces {
             preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
@@ -3170,7 +3167,7 @@ mod tests {
             ..FakePlatform::default()
         };
         let mut state = AppState::new();
-        state.sequence = Some(Sequence::new("Program"));
+        state.test_set_sequence(Some(Sequence::new("Program")));
         let mut root = AppUiAppRoot::from_app_state(&state);
 
         root.handle_shell_action(app_shell_project_settings_action(), &platform, None);
@@ -3206,9 +3203,9 @@ mod tests {
         sequence.settings.color_management.hdr_content_light =
             Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
         let sequence_id = sequence.id;
-        state.active_sequence_id = Some(sequence_id);
-        state.sequence = Some(sequence.clone());
-        state.sequences.push(sequence);
+        state.test_set_active_sequence(sequence_id);
+        state.test_set_sequence(Some(sequence.clone()));
+        state.test_add_sequence(sequence);
         let mut root = AppUiAppRoot::from_app_state(&state);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
 
@@ -3595,8 +3592,8 @@ mod tests {
         root.handle_shell_action(app_shell_preferences_action(), &platform, None);
 
         let mut state = AppState::new();
-        state.current_project_path = Some(PathBuf::from("E:/projects/live.mdp"));
-        state.sequence = Some(mondrian_timeline::sequence::Sequence::new("Live"));
+        state.test_set_project_path(PathBuf::from("E:/projects/live.mdp"));
+        state.test_set_sequence(Some(mondrian_timeline::sequence::Sequence::new("Live")));
         state.auto_proxy_enabled = true;
         root.refresh_from_app_state(&state);
 
@@ -3613,8 +3610,8 @@ mod tests {
     #[test]
     fn status_bar_model_prefers_active_sequence_context() {
         let mut state = AppState::new();
-        state.current_project_path = Some(PathBuf::from("E:/projects/rough-cut.mdp"));
-        state.sequence = Some(mondrian_timeline::sequence::Sequence::new("Cut 01"));
+        state.test_set_project_path(PathBuf::from("E:/projects/rough-cut.mdp"));
+        state.test_set_sequence(Some(mondrian_timeline::sequence::Sequence::new("Cut 01")));
         state.set_status_hint("Project saved", false);
 
         let model = status_bar_model(&state);
@@ -3628,7 +3625,7 @@ mod tests {
     #[test]
     fn app_root_playback_frame_refresh_updates_timeline_without_full_model_rebuild() {
         let mut state = AppState::new();
-        state.sequence = Some(Sequence::new("edit"));
+        state.test_set_sequence(Some(Sequence::new("edit")));
         state.set_playback_frame_running(12);
         let mut root = AppUiAppRoot::from_app_state(&state);
 
@@ -3644,7 +3641,7 @@ mod tests {
     #[test]
     fn app_state_refresh_preserves_titlebar_window_control_hover() {
         let mut state = AppState::new();
-        state.sequence = Some(Sequence::new("edit"));
+        state.test_set_sequence(Some(Sequence::new("edit")));
         let mut root = AppUiAppRoot::from_app_state(&state);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
         let close = root.title_bar.control_bounds(WindowControl::Close).center();
@@ -3683,7 +3680,7 @@ mod tests {
     #[test]
     fn app_state_refresh_preserves_titlebar_window_control_press_and_capture_identity() {
         let mut state = AppState::new();
-        state.sequence = Some(Sequence::new("edit"));
+        state.test_set_sequence(Some(Sequence::new("edit")));
         let mut root = AppUiAppRoot::from_app_state(&state);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
         let titlebar_id = root.title_bar.id();
@@ -3744,7 +3741,7 @@ mod tests {
         }
 
         let mut state = AppState::new();
-        state.sequence = Some(Sequence::new("edit"));
+        state.test_set_sequence(Some(Sequence::new("edit")));
         state.set_playback_frame_running(12);
         let mut root = AppUiAppRoot::from_app_state(&state);
 
@@ -3775,7 +3772,7 @@ mod tests {
         }
 
         let mut state = AppState::new();
-        state.sequence = Some(Sequence::new("edit"));
+        state.test_set_sequence(Some(Sequence::new("edit")));
         let mut root = AppUiAppRoot::from_app_state(&state);
         root.refresh_playback_frame_from_app_state(&state, Some(&ReadyPreview));
 
@@ -3815,7 +3812,8 @@ mod tests {
     fn app_root_refresh_updates_status_bar_paint_model() {
         let mut root = AppUiAppRoot::demo();
         let mut state = AppState::new();
-        state.current_project_path = Some(PathBuf::from("E:/projects/rough-cut.mdp"));
+        state.test_set_sequence(Some(mondrian_timeline::Sequence::new("rough-cut")));
+        state.test_set_project_path(PathBuf::from("E:/projects/rough-cut.mdp"));
         state.set_status_hint("Import failed", true);
 
         root.refresh_from_app_state(&state);
@@ -4593,7 +4591,7 @@ mod tests {
     #[test]
     fn viewer_zoom_cycle_is_shell_local_and_survives_app_state_refresh() {
         let mut state = AppState::new();
-        state.sequence = Some(Sequence::new("edit"));
+        state.test_set_sequence(Some(Sequence::new("edit")));
         let platform = FakePlatform::default();
         let mut root = AppUiAppRoot::from_app_state(&state);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
@@ -4616,7 +4614,7 @@ mod tests {
     #[test]
     fn viewer_zoom_set_action_applies_explicit_dropdown_selection() {
         let mut state = AppState::new();
-        state.sequence = Some(Sequence::new("edit"));
+        state.test_set_sequence(Some(Sequence::new("edit")));
         let platform = FakePlatform::default();
         let mut root = AppUiAppRoot::from_app_state(&state);
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));

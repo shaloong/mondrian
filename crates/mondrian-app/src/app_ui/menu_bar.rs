@@ -671,7 +671,7 @@ mod tests {
         let clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
         let clip_id = clip.id;
         sequence.video_tracks[0].add_clip(clip).expect("add clip");
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         state.selection.selected_clips =
             vec![SelectedClipRef { track_id, is_video_track: true, clip_id }];
         state
@@ -1063,14 +1063,14 @@ mod tests {
     }
 
     #[test]
-    fn app_state_menu_items_enable_draft_save_as_but_not_direct_save() {
+    fn app_state_menu_items_enable_draft_project_actions() {
         let mut state = AppState::new();
-        state.sequence = Some(mondrian_timeline::sequence::Sequence::new("Draft"));
+        state.test_set_sequence(Some(mondrian_timeline::sequence::Sequence::new("Draft")));
 
         let menu_items = default_menu_items_for_app_state(&state);
 
-        assert!(!menu_item_deep(&menu_items, "文件", "媒体...").enabled);
-        assert!(!menu_item(&menu_items, "文件", "保存").enabled);
+        assert!(menu_item_deep(&menu_items, "文件", "媒体...").enabled);
+        assert!(menu_item(&menu_items, "文件", "保存").enabled);
         assert!(menu_item(&menu_items, "文件", "另存为...").enabled);
         assert!(menu_item(&menu_items, "文件", "关闭项目").enabled);
     }
@@ -1078,8 +1078,8 @@ mod tests {
     #[test]
     fn app_state_menu_items_enable_project_file_actions_for_open_project() {
         let mut state = AppState::new();
-        state.sequence = Some(mondrian_timeline::sequence::Sequence::new("编辑"));
-        state.current_project_path = Some(PathBuf::from("E:/projects/edit.mdp"));
+        state.test_set_sequence(Some(mondrian_timeline::sequence::Sequence::new("编辑")));
+        state.test_set_project_path(PathBuf::from("E:/projects/edit.mdp"));
 
         let menu_items = default_menu_items_for_app_state(&state);
 
@@ -1092,28 +1092,18 @@ mod tests {
     fn app_state_menu_items_track_undo_redo_history() {
         let mut state = AppState::new();
         let before = mondrian_timeline::sequence::Sequence::new("编辑");
-        let mut after = before.clone();
-        after.name = "Edit renamed".to_owned();
-        state.sequence = Some(after.clone());
-        let command = mondrian_timeline::command::SequenceSnapshotCommand::new(
-            "Rename sequence",
-            &before,
-            &after,
-        )
-        .expect("serializable command");
+        let sequence_id = before.id;
+        let settings = before.settings.clone();
+        state.test_set_sequence(Some(before));
         state
-            .cmd_history
-            .record_executed(Box::new(command))
-            .expect("matching Sequence history");
+            .update_sequence_identity_and_settings(sequence_id, "Edit renamed", settings)
+            .expect("rename Sequence");
 
         let menu_items = default_menu_items_for_app_state(&state);
         assert!(menu_item(&menu_items, "编辑", "撤销").enabled);
         assert!(!menu_item(&menu_items, "编辑", "重做").enabled);
 
-        state
-            .cmd_history
-            .undo(state.sequence.as_mut().expect("sequence"))
-            .expect("undo should succeed");
+        assert!(state.undo_timeline().expect("undo should succeed"));
         let menu_items = default_menu_items_for_app_state(&state);
         assert!(!menu_item(&menu_items, "编辑", "撤销").enabled);
         assert!(menu_item(&menu_items, "编辑", "重做").enabled);
@@ -1138,7 +1128,7 @@ mod tests {
     #[test]
     fn app_state_menu_items_disable_cut_for_locked_selected_track() {
         let mut state = state_with_selected_clip();
-        state.sequence.as_mut().expect("sequence").video_tracks[0].is_locked = true;
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
 
         let menu_items = default_menu_items_for_app_state(&state);
 
@@ -1170,7 +1160,7 @@ mod tests {
         let sequence = Sequence::new("single-track");
         let video_track_ids =
             sequence.video_tracks.iter().map(|track| track.id).collect::<Vec<_>>();
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         state.selection.selected_track_ids = video_track_ids;
 
         let menu_items = default_menu_items_for_app_state(&state);
@@ -1188,7 +1178,7 @@ mod tests {
         let mut state = AppState::new();
         let mut sequence = Sequence::new("multi-track");
         let removable_track_id = sequence.add_video_track();
-        state.sequence = Some(sequence);
+        state.test_set_sequence(Some(sequence));
         state.selection.selected_track_ids = vec![removable_track_id];
 
         let menu_items = default_menu_items_for_app_state(&state);
@@ -1211,7 +1201,7 @@ mod tests {
         assert!(state.can_paste_from_app_clipboard());
         assert!(menu_item(&menu_items, "编辑", "粘贴").enabled);
 
-        state.sequence.as_mut().expect("sequence").video_tracks[0].is_locked = true;
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
         let menu_items = default_menu_items_for_app_state(&state);
 
         assert!(!state.can_paste_from_app_clipboard());
@@ -1222,7 +1212,7 @@ mod tests {
     fn app_state_menu_items_disable_animation_paste_for_locked_target_track() {
         let mut state = state_with_selected_clip();
         let selection = state.primary_selected_clip().expect("selected clip");
-        let tb = state.sequence.as_ref().expect("sequence").time_base();
+        let tb = state.active_sequence().expect("sequence").time_base();
         let key_time = tt(12, tb);
         state
             .mutate_clip_property(
@@ -1245,7 +1235,7 @@ mod tests {
         assert!(state.can_paste_from_app_clipboard());
         assert!(menu_item(&menu_items, "编辑", "粘贴").enabled);
 
-        state.sequence.as_mut().expect("sequence").video_tracks[0].is_locked = true;
+        state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
         let menu_items = default_menu_items_for_app_state(&state);
 
         assert!(!state.can_paste_from_app_clipboard());

@@ -2305,11 +2305,11 @@ fn build_professional_cpal_av_state(
     sequence.mark_out(duration);
     let sequence_id = sequence.id;
     let mut state = AppState::new();
-    state.asset_library = Some(library);
-    state.active_sequence_id = Some(sequence_id);
-    state.default_sequence_id = Some(sequence_id);
-    state.sequences = vec![sequence.clone()];
-    state.sequence = Some(sequence);
+    state.test_set_asset_library(Some(library));
+    state.test_set_active_sequence(sequence_id);
+    state.test_set_default_sequence(sequence_id);
+    state.test_set_sequences(vec![sequence.clone()]);
+    state.test_set_sequence(Some(sequence));
     Ok(state)
 }
 
@@ -3872,11 +3872,11 @@ fn build_app_ui_perf_state(
     let sequence_id = sequence.id;
 
     let mut state = AppState::new();
-    state.asset_library = Some(library);
-    state.active_sequence_id = Some(sequence_id);
-    state.default_sequence_id = Some(sequence_id);
-    state.sequences = vec![sequence.clone()];
-    state.sequence = Some(sequence);
+    state.test_set_asset_library(Some(library));
+    state.test_set_active_sequence(sequence_id);
+    state.test_set_default_sequence(sequence_id);
+    state.test_set_sequences(vec![sequence.clone()]);
+    state.test_set_sequence(Some(sequence));
 
     if let Some((track_id, clip_id)) = first_clip {
         state.replace_clip_selection(vec![SelectedClipRef {
@@ -3963,11 +3963,11 @@ fn build_preview_media_perf_state_with_media_info(
     let sequence_id = sequence.id;
 
     let mut state = AppState::new();
-    state.asset_library = Some(library);
-    state.active_sequence_id = Some(sequence_id);
-    state.default_sequence_id = Some(sequence_id);
-    state.sequences = vec![sequence.clone()];
-    state.sequence = Some(sequence);
+    state.test_set_asset_library(Some(library));
+    state.test_set_active_sequence(sequence_id);
+    state.test_set_default_sequence(sequence_id);
+    state.test_set_sequences(vec![sequence.clone()]);
+    state.test_set_sequence(Some(sequence));
     Ok(state)
 }
 
@@ -3979,17 +3979,19 @@ fn probe_external_preview_media_info(video_path: &Path) -> anyhow::Result<MediaI
 fn summarize_active_sequence_media_color_issues(
     state: &AppState,
 ) -> anyhow::Result<VideoColorDiagnosticIssueAggregate> {
-    let Some(sequence) = state.sequence.as_ref() else {
+    let Some(sequence) = state.active_sequence() else {
         return Ok(VideoColorDiagnosticIssueAggregate::default());
     };
-    let Some(library) = state.asset_library.as_ref() else {
+    let Some(library) = state.asset_library() else {
         return Ok(VideoColorDiagnosticIssueAggregate::default());
     };
 
     let mut asset_ids = std::collections::HashSet::new();
     for track in &sequence.video_tracks {
         for clip in &track.clips {
-            asset_ids.insert(clip.asset_id);
+            if let Some(asset_id) = clip.asset_id() {
+                asset_ids.insert(asset_id);
+            }
         }
     }
 

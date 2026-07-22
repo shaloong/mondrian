@@ -5,15 +5,18 @@ use mondrian_timeline::clip::Transform2D;
 
 fn create_state_with_video_clips(count: usize) -> (AppState, TrackId, Vec<ClipId>, Rational) {
     let mut state = AppState::new();
-    state.sequence = Some(Sequence::new("test"));
-    let tb = state.sequence.as_ref().expect("sequence should exist").time_base();
-    let track_id = state.sequence.as_ref().expect("sequence should exist").video_tracks[0].id;
+    state.test_set_sequence(Some(Sequence::new("test")));
+    let tb = state.active_sequence().expect("sequence should exist").time_base();
+    let track_id = state.active_sequence().expect("sequence should exist").video_tracks[0].id;
     let mut clip_ids = Vec::new();
     for index in 0..count {
         let clip =
             Clip::new(AssetId::new(), tt((index as i64) * 30, tb), tt(20, tb)).expect("valid clip");
         clip_ids.push(clip.id);
-        state.sequence.as_mut().expect("sequence should exist").video_tracks[0]
+        state
+            .active_sequence_mut_uncommitted()
+            .expect("sequence should exist")
+            .video_tracks[0]
             .add_clip(clip)
             .expect("add clip");
     }

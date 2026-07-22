@@ -20,7 +20,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             |request: PreviewTimelineMediaRequest| self.media_frame_for_plan(state, request);
         let resolution = resolve_preview_timeline(
             sequence,
-            &state.sequences,
+            state.sequences(),
             frame,
             Resolution { width, height },
             state.playback_preview_resolution_scale(),
