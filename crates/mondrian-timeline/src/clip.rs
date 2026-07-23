@@ -345,6 +345,13 @@ pub struct Clip {
     pub position: TimelineTime,
     /// 在时间线上的持续时长
     pub duration: TimelineTime,
+    /// Clip-local visual author time visible at `position`.
+    ///
+    /// Transform, Opacity, visual effects, Masks, and generated visual
+    /// content all use this stable domain. Ordinary placement moves and source
+    /// slips preserve it; an in-edge trim advances it so hidden keyframes are
+    /// not silently rebased to the new visible edge.
+    pub clip_time_in: TimelineTime,
     /// 素材内入点
     pub source_in: TimelineTime,
     /// 素材内出点（= source_in + duration / speed）
@@ -403,6 +410,7 @@ impl Clip {
             content,
             position,
             duration,
+            clip_time_in: TimelineTime::ZERO,
             source_in: TimelineTime::ZERO,
             source_out: duration,
             transform: Transform2D::identity(),
@@ -532,9 +540,30 @@ impl Clip {
         Ok(self.position.checked_add(self.duration)?)
     }
 
+    /// Clip-local visual author time at the exclusive placement end.
+    pub fn clip_time_out(&self) -> Result<TimelineTime> {
+        Ok(self.clip_time_in.checked_add(self.duration)?)
+    }
+
     /// 判断给定时间码是否在此 Clip 范围内
     pub fn contains(&self, time: TimelineTime) -> Result<bool> {
         Ok(time >= self.position && time < self.end_position()?)
+    }
+
+    /// Map Sequence-local placement time into stable Clip-local visual time.
+    ///
+    /// This mapping deliberately does not include source in/out or SpeedMap:
+    /// visual processors are downstream of source sampling and remain attached
+    /// to the Clip occurrence when the source is slipped or retimed.
+    pub fn timeline_to_clip_time(&self, timeline_time: TimelineTime) -> Result<TimelineTime> {
+        let placement_offset = timeline_time.checked_sub(self.position)?;
+        Ok(self.clip_time_in.checked_add(placement_offset)?)
+    }
+
+    /// Map stable Clip-local visual time back into Sequence placement time.
+    pub fn clip_to_timeline_time(&self, clip_time: TimelineTime) -> Result<TimelineTime> {
+        let placement_offset = clip_time.checked_sub(self.clip_time_in)?;
+        Ok(self.position.checked_add(placement_offset)?)
     }
 
     /// 将时间线时间 → Clip 内本地时间 → 素材源时间
@@ -901,6 +930,8 @@ impl PropertyHost for Clip {
 pub struct ActiveClip {
     pub clip: Clip,
     pub track_index: usize,
+    /// Stable Clip-local visual author time used by every Clip processor.
+    pub clip_time: TimelineTime,
     /// 此时刻对应的素材源时间（用于解码）
     pub source_time: TimelineTime,
     /// Transform 矩阵（已在此时刻求值）
@@ -1062,6 +1093,40 @@ mod tests {
     }
 
     #[test]
+    fn clip_visual_time_is_independent_of_placement_and_source_selection() {
+        let mut clip = Clip::new(AssetId::new(), tt(10), tt(20)).expect("valid clip");
+        clip.clip_time_in = tt(3);
+        clip.source_in = tt(100);
+        clip.source_out = tt(140);
+        clip.speed.set_scale(TimeScale::new(2, 1).expect("2x speed"));
+
+        assert_eq!(
+            clip.timeline_to_clip_time(tt(12)).expect("Clip time"),
+            tt(5)
+        );
+        assert_eq!(
+            clip.timeline_to_source_time(tt(12)).expect("source time"),
+            tt(104)
+        );
+        assert_eq!(
+            clip.clip_to_timeline_time(tt(5)).expect("Sequence time"),
+            tt(12)
+        );
+
+        clip.position = tt(50);
+        clip.source_in = tt(200);
+        clip.source_out = tt(240);
+        assert_eq!(
+            clip.timeline_to_clip_time(tt(52)).expect("moved Clip time"),
+            tt(5)
+        );
+        assert_eq!(
+            clip.timeline_to_source_time(tt(52)).expect("slipped source time"),
+            tt(204)
+        );
+    }
+
+    #[test]
     fn media_interpretation_can_override_color_space() {
         let mut clip = Clip::new(AssetId::new(), tt(0), tt(10)).expect("valid clip");
         clip.media_interpretation_mut()
@@ -1108,6 +1173,11 @@ mod tests {
             .expect("Clip object")
             .insert("asset_id".to_owned(), serde_json::json!(AssetId::new()));
         assert!(serde_json::from_value::<Clip>(serialized).is_err());
+
+        let mut missing_clip_time =
+            serde_json::to_value(&clip).expect("serialize current-schema Clip");
+        missing_clip_time.as_object_mut().expect("Clip object").remove("clip_time_in");
+        assert!(serde_json::from_value::<Clip>(missing_clip_time).is_err());
     }
 
     #[test]

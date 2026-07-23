@@ -17,7 +17,8 @@ Basic Title is Sequence-local generated Clip content. It is neither a fake
 Asset nor an Effect: it produces straight-alpha working-linear picture, after
 which the ordinary Clip Transform, effect chain, Mask, blend, Transition,
 nesting, Preview, and Export semantics apply unchanged. Its definition-backed
-Property Bag is a closed author contract evaluated in Clip source-local time.
+Property Bag is a closed author contract evaluated in the same Clip-local
+visual author time as Transform, Opacity, Effects, and Masks.
 The requested system font family is a concrete recoverable dependency; missing
 families, inaccessible face bytes, and undeclared shaping fallback fail
 execution closed instead of substituting pixels. The resolved face-byte/index

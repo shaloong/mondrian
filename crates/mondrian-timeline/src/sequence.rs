@@ -967,13 +967,15 @@ impl Sequence {
 
             let track_opacity = track.evaluate_opacity(time).clamp(0.0, 1.0);
             for clip in track.active_clips_at(time)? {
+                let clip_time = clip.timeline_to_clip_time(time)?;
                 let source_time = clip.timeline_to_source_time(time)?;
-                let transform_mat = clip.transform.evaluate_matrix(time);
+                let transform_mat = clip.transform.evaluate_matrix(clip_time);
                 let opacity =
-                    (clip.transform.evaluate_opacity(time) * track_opacity).clamp(0.0, 1.0);
+                    (clip.transform.evaluate_opacity(clip_time) * track_opacity).clamp(0.0, 1.0);
                 result.push(ActiveClip {
                     clip: clip.clone(),
                     track_index: i,
+                    clip_time,
                     source_time,
                     transform_matrix: transform_mat,
                     opacity,
@@ -1678,13 +1680,15 @@ fn flatten_visual_clip(
     track_opacity: f32,
     time: TimelineTime,
 ) -> mondrian_core::Result<mondrian_core::timeline_data::FlatActiveClip> {
-    let matrix = clip.transform.evaluate_matrix(time);
+    let clip_time = clip.timeline_to_clip_time(time)?;
+    let matrix = clip.transform.evaluate_matrix(clip_time);
     Ok(mondrian_core::timeline_data::FlatActiveClip {
         clip_id: clip.id,
         content: clip.content.clone(),
         is_disabled: clip.is_disabled,
         effects: clip.effects.clone(),
         masks: clip.masks.clone(),
+        clip_time,
         source_time: clip.timeline_to_source_time(time)?,
         transform_matrix: [
             matrix.x_axis.x,
@@ -1694,7 +1698,7 @@ fn flatten_visual_clip(
             matrix.y_axis.y,
             matrix.z_axis.y,
         ],
-        opacity: (clip.transform.evaluate_opacity(time) * track_opacity).clamp(0.0, 1.0),
+        opacity: (clip.transform.evaluate_opacity(clip_time) * track_opacity).clamp(0.0, 1.0),
         blend_mode: clip.blend_mode.unwrap_or(track.blend_mode),
         track_index,
     })
@@ -2280,6 +2284,33 @@ mod tests {
 
         let outside = seq.active_clips_at(tt(100, tb)).expect("evaluate timeline");
         assert_eq!(outside.len(), 0);
+    }
+
+    #[test]
+    fn clip_visual_automation_evaluates_in_clip_local_time() {
+        let mut seq = Sequence::new("Clip-local animation");
+        let tb = seq.time_base();
+        let mut clip = Clip::new(AssetId::new(), tt(10, tb), tt(20, tb)).expect("valid clip");
+        clip.source_in = tt(100, tb);
+        clip.source_out = tt(120, tb);
+        clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+            path: crate::clip::Transform2D::OPACITY_PATH.to_owned(),
+            keyframe: Keyframe::linear(tt(0, tb), PropertyValue::Float(0.0)),
+        })
+        .expect("start key");
+        clip.apply_property_mutation(PropertyMutation::SetKeyframe {
+            path: crate::clip::Transform2D::OPACITY_PATH.to_owned(),
+            keyframe: Keyframe::linear(tt(20, tb), PropertyValue::Float(1.0)),
+        })
+        .expect("end key");
+        seq.video_tracks[0].add_clip(clip).expect("add clip");
+
+        let active = seq.active_clips_at(tt(20, tb)).expect("evaluate timeline");
+
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].clip_time, tt(10, tb));
+        assert_eq!(active[0].source_time, tt(110, tb));
+        assert!((active[0].opacity - 0.5).abs() < 1.0e-6);
     }
 
     #[test]

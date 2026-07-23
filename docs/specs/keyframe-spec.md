@@ -8,11 +8,25 @@ consumer-specific execution projections.
 
 - Every persisted keyframe and temporal handle uses canonical rational
   `TimelineTime`.
-- The property owner declares the `AuthoringTimeDomain`: Clip/component-local,
-  Processing Scope-local, or Sequence-local. A bare time value never implies a
-  domain.
+- The property owner declares the `AuthoringTimeDomain`: Clip-local,
+  Component-Edit-local, Processing Scope-local, or Sequence-local. A bare time
+  value never implies a domain.
 - Times from different domains are mapped only through an explicit validated
   `TimeTransform` before comparison or evaluation.
+- All Clip-owned visual properties share one Clip-local domain: Transform,
+  Opacity, visual Effects, Masks, and generated visual content such as Basic
+  Title. Inspector edits, curve edits, Preview, Export, and nesting must use the
+  same mapped instant; no subsystem may independently substitute Sequence or
+  source time.
+- The visible Clip interval is
+  `[clip_time_in, clip_time_in + duration)`. Moving a Clip, slipping source
+  in/out, or changing its source Speed Map preserves `clip_time_in`. Trimming
+  away the placement in edge, splitting, or forming a right-hand overwrite
+  fragment advances it by the removed placement duration. This preserves
+  authored visual continuity without coupling it to source selection.
+- Source-local time controls media or nested-Sequence sampling only. Visual
+  automation is downstream of that sampling and is not implicitly sped up,
+  reversed, or offset by a Slip or retime operation.
 - Video frames, audio samples, motion-blur instants, and parameter-event batches
   are `EvaluationGrid` projections with a declared rounding policy. They are
   not stored as the keyframe coordinate.
@@ -69,3 +83,8 @@ handle edits, channel edits, and reset must preserve stable Parameter,
 animation-track, and keyframe identities according to the command's semantic
 operation. Preview, export, cache invalidation, save/reopen, and Undo/Redo all
 consume the same validated author snapshot.
+
+Curve editors may display a normalized visible Clip interval, but mutations
+must carry exact Clip-local coordinates back to the author transaction. A
+displayed frame number, playhead Sequence time, or sampled source PTS is never
+persisted as a substitute.

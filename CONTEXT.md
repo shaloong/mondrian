@@ -222,7 +222,7 @@ A persisted nonzero monotonic generation of one stable Sequence identity. Every 
 _Avoid_: Project document save revision, frame-demand sequence, content hash presented as a transaction generation
 
 **Authoring Time Domain**:
-The coordinate origin and mapping owned by a Sequence, Audio Component Edit, Audio Processing Scope, Transition, source, or other time-bearing author entity.
+The coordinate origin and mapping owned by a Sequence, Clip, Audio Component Edit, Audio Processing Scope, Transition, source, or other time-bearing author entity.
 _Avoid_: Renderer frame grid, audio block, implicit clip-local flag
 
 **Time Transform**:
@@ -377,8 +377,12 @@ _Avoid_: ZIP writer close alone, temporary-file existence, enqueue success, rena
 The one closed payload that identifies a Clip placement as Media, Adjustment Layer, Nested Sequence, Solid Color, or Basic Title and carries only that variant's external references, interpretation data, or generated-source author state.
 _Avoid_: Parallel Clip kind/asset/nested/color/title fields, fake Asset ID for a nested Sequence or generated source
 
+**Clip Visual Author Time**:
+The stable exact Clip-local coordinate used by every Clip-owned visual property: Transform, Opacity, visual Effects, Masks, and generated visual content. Moving a Clip or changing its source selection/speed preserves this coordinate; trimming away the in edge, splitting, or creating a right-hand fragment advances the visible `clip_time_in` by the removed placement duration.
+_Avoid_: Sequence time used directly for Clip properties, source time used as visual automation time, independently chosen time domains per visual subsystem
+
 **Basic Title**:
-A Sequence-local generated Clip content type whose closed definition-backed Property Bag is evaluated in Clip source-local time and rasterized as tightly cropped straight-alpha working-linear picture before the ordinary Clip transform/effect/mask/composite path.
+A Sequence-local generated Clip content type whose closed definition-backed Property Bag is evaluated in Clip Visual Author Time and rasterized as tightly cropped straight-alpha working-linear picture before the ordinary Clip transform/effect/mask/composite path.
 _Avoid_: Asset-library text generator, renderer-only TextLayer, text Effect, implicit system-font fallback
 
 **Basic Title Font Dependency**:

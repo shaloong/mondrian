@@ -1605,14 +1605,11 @@ impl InspectorPanelModel {
         };
 
         let time = state.current_timeline_time().ok().flatten().unwrap_or(sequence.playhead);
-        let opacity = (clip.transform.evaluate_opacity(time) * 100.0).clamp(0.0, 100.0);
-        let position = clip.transform.get_position(time);
-        let scale = clip.transform.get_scale(time);
+        let clip_author_time = clip_visual_author_time_at(clip, time).unwrap_or(clip.clip_time_in);
+        let opacity = (clip.transform.evaluate_opacity(clip_author_time) * 100.0).clamp(0.0, 100.0);
+        let position = clip.transform.get_position(clip_author_time);
+        let scale = clip.transform.get_scale(clip_author_time);
         let is_editable = !selected_clip_track_is_locked(state, resolved_selection);
-        let clip_author_time = clip
-            .end_position()
-            .and_then(|end| clip.timeline_to_source_time(time.clamp(clip.position, end)))
-            .unwrap_or(TimelineTime::ZERO);
         let clip_properties = clip
             .content
             .basic_title()
@@ -1676,20 +1673,17 @@ impl InspectorPanelModel {
             effects: clip
                 .effects
                 .iter()
-                .map(|effect| {
-                    let time_ticks = time;
-                    InspectorEffectModel {
-                        effect_id: effect.id,
-                        label: effect_display_name(&effect.effect_type),
-                        enabled: effect.is_enabled,
-                        properties: effect
-                            .properties
-                            .iter()
-                            .map(|(path, property)| {
-                                inspector_property_model(path, property, time_ticks)
-                            })
-                            .collect(),
-                    }
+                .map(|effect| InspectorEffectModel {
+                    effect_id: effect.id,
+                    label: effect_display_name(&effect.effect_type),
+                    enabled: effect.is_enabled,
+                    properties: effect
+                        .properties
+                        .iter()
+                        .map(|(path, property)| {
+                            inspector_property_model(path, property, clip_author_time)
+                        })
+                        .collect(),
                 })
                 .collect(),
         }
@@ -2663,30 +2657,40 @@ fn timeline_clip_color(clip: &Clip, is_video_track: bool) -> Option<Color> {
     }
 }
 
+fn clip_visual_author_time_at(
+    clip: &Clip,
+    timeline_time: TimelineTime,
+) -> mondrian_core::Result<TimelineTime> {
+    let placement_end = clip.end_position()?;
+    clip.timeline_to_clip_time(timeline_time.clamp(clip.position, placement_end))
+}
+
 fn clip_rotation_degrees(clip: &Clip, time: TimelineTime) -> f32 {
+    let author_time = clip_visual_author_time_at(clip, time).unwrap_or(clip.clip_time_in);
     clip.transform
         .to_property_bag()
-        .evaluate(Transform2D::ROTATION_PATH, time)
+        .evaluate(Transform2D::ROTATION_PATH, author_time)
         .and_then(|value| value.as_f32())
         .unwrap_or(0.0)
 }
 
 fn opacity_curve_points_for_clip(clip: &Clip, time: TimelineTime) -> Vec<CurvePoint> {
+    let author_time = clip_visual_author_time_at(clip, time).unwrap_or(clip.clip_time_in);
     let bag = clip.transform.to_property_bag();
     let Some(opacity) = bag.property(Transform2D::OPACITY_PATH) else {
-        return default_opacity_curve(clip.transform.evaluate_opacity(time));
+        return default_opacity_curve(clip.transform.evaluate_opacity(author_time));
     };
-    let start_tick = clip.position;
-    let Ok(end_tick) = clip.end_position() else {
-        return default_opacity_curve(clip.transform.evaluate_opacity(time));
+    let start_tick = clip.clip_time_in;
+    let Ok(end_tick) = clip.clip_time_out() else {
+        return default_opacity_curve(clip.transform.evaluate_opacity(author_time));
     };
     let Ok(duration_ticks) = end_tick.checked_sub(start_tick) else {
-        return default_opacity_curve(clip.transform.evaluate_opacity(time));
+        return default_opacity_curve(clip.transform.evaluate_opacity(author_time));
     };
 
     let mut points = vec![CurvePoint::new(
         0.0,
-        clip.transform.evaluate_opacity(clip.position),
+        clip.transform.evaluate_opacity(start_tick),
     )];
     points.extend(
         opacity.keyframe_times().into_iter().filter_map(|keyframe_time| {
@@ -2708,7 +2712,7 @@ fn opacity_curve_points_for_clip(clip: &Clip, time: TimelineTime) -> Vec<CurvePo
     points.dedup_by(|a, b| (a.x - b.x).abs() < f32::EPSILON);
 
     if points.len() < 2 {
-        default_opacity_curve(clip.transform.evaluate_opacity(time))
+        default_opacity_curve(clip.transform.evaluate_opacity(author_time))
     } else {
         points
     }
@@ -9488,17 +9492,17 @@ mod tests {
 
         clip.apply_property_mutation(PropertyMutation::SetKeyframe {
             path: Transform2D::OPACITY_PATH.to_string(),
-            keyframe: Keyframe::linear(tt(10, tb), PropertyValue::Float(0.0)),
+            keyframe: Keyframe::linear(tt(0, tb), PropertyValue::Float(0.0)),
         })
         .expect("set start opacity");
         clip.apply_property_mutation(PropertyMutation::SetKeyframe {
             path: Transform2D::OPACITY_PATH.to_string(),
-            keyframe: Keyframe::linear(tt(20, tb), PropertyValue::Float(0.5)),
+            keyframe: Keyframe::linear(tt(10, tb), PropertyValue::Float(0.5)),
         })
         .expect("set mid opacity");
         clip.apply_property_mutation(PropertyMutation::SetKeyframe {
             path: Transform2D::OPACITY_PATH.to_string(),
-            keyframe: Keyframe::linear(tt(30, tb), PropertyValue::Float(1.0)),
+            keyframe: Keyframe::linear(tt(20, tb), PropertyValue::Float(1.0)),
         })
         .expect("set end opacity");
 
@@ -9533,7 +9537,7 @@ mod tests {
 
         clip.apply_property_mutation(PropertyMutation::SetKeyframe {
             path: Transform2D::OPACITY_PATH.to_string(),
-            keyframe: Keyframe::linear(tt(20, tb), PropertyValue::Float(0.5)),
+            keyframe: Keyframe::linear(tt(10, tb), PropertyValue::Float(0.5)),
         })
         .expect("set midpoint opacity");
 

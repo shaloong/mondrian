@@ -22,6 +22,14 @@ Frame Position rather than treating the numeric frame field as universal time.
 Subframe shutter/temporal samples use the same Timeline Time representation and
 do not introduce a renderer-private tick scale.
 
+Flattening retains two independent exact coordinates for each active Clip:
+`clip_time` for all Clip-owned visual processing and `source_time` for
+media/nested sampling. Transform, Opacity, visual Effect compilation, Masks,
+and Basic Title evaluation consume only `clip_time`; decoder and nested
+Sequence Adapters consume only `source_time`. Preview and Export invoke this
+same lowering and may differ in scheduling or quality policy, never in time
+interpretation.
+
 ## Current Implementation
 
 `mondrian-renderer::timeline_render_plan` evaluates one sequence frame through
@@ -70,8 +78,8 @@ instead of substituting a Cross Dissolve.
 
 ### Basic Title generated-source boundary
 
-`TimelineBasicTitlePlan` carries one fully evaluated Basic Title at exact Clip
-source-local author time plus the ordinary Clip opacity, blend, transform,
+`TimelineBasicTitlePlan` carries one fully evaluated Basic Title at exact
+Clip-local visual author time plus the ordinary Clip opacity, blend, transform,
 effect graph, and frame seed. `BasicTitleRasterizer` is the single Preview and
 Export generation Interface. It:
 

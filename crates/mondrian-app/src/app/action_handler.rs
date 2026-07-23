@@ -892,7 +892,13 @@ impl AppState {
         let Some(selection) = self.primary_selected_clip() else {
             return Ok(());
         };
-        let destination_time = self.current_timeline_time()?.unwrap_or(TimelineTime::ZERO);
+        let timeline_time = self.current_timeline_time()?.unwrap_or(TimelineTime::ZERO);
+        let destination_time = self
+            .active_sequence()
+            .and_then(|sequence| find_clip(sequence, selection.clip_id))
+            .map(|clip| clip_visual_author_time_at(clip, timeline_time))
+            .transpose()?
+            .ok_or_else(|| missing_clip_error("paste_animation_keyframes", selection.clip_id))?;
         self.paste_animation_keyframes(selection, destination_time).map(|_| ())
     }
 
@@ -2011,7 +2017,7 @@ impl AppState {
             let mutation = if property.is_animated() {
                 let end = clip.end_position()?;
                 let sequence_time = current_time.clamp(clip.position, end);
-                let author_time = clip.timeline_to_source_time(sequence_time)?;
+                let author_time = clip.timeline_to_clip_time(sequence_time)?;
                 if property.evaluate(author_time) == value {
                     None
                 } else {
@@ -2180,7 +2186,8 @@ impl AppState {
         let changed = {
             let clip = find_clip_mut(&mut after, clip_id)
                 .ok_or_else(|| missing_clip_error("inspector_set_clip_opacity", clip_id))?;
-            if (clip.transform.evaluate_opacity(playhead) - opacity).abs() < f32::EPSILON {
+            let author_time = clip_visual_author_time_at(clip, playhead)?;
+            if (clip.transform.evaluate_opacity(author_time) - opacity).abs() < f32::EPSILON {
                 false
             } else {
                 clip.apply_property_mutation(PropertyMutation::SetStaticValue {
@@ -2247,9 +2254,10 @@ impl AppState {
         let changed = {
             let clip = find_clip_mut(&mut after, clip_id)
                 .ok_or_else(|| missing_clip_error("inspector_set_clip_transform_field", clip_id))?;
+            let author_time = clip_visual_author_time_at(clip, playhead)?;
             match field {
                 InspectorClipTransformField::PositionX => {
-                    let mut position = clip.transform.get_position(playhead);
+                    let mut position = clip.transform.get_position(author_time);
                     if (position.x - value).abs() < f32::EPSILON {
                         false
                     } else {
@@ -2262,7 +2270,7 @@ impl AppState {
                     }
                 }
                 InspectorClipTransformField::PositionY => {
-                    let mut position = clip.transform.get_position(playhead);
+                    let mut position = clip.transform.get_position(author_time);
                     if (position.y - value).abs() < f32::EPSILON {
                         false
                     } else {
@@ -2277,7 +2285,8 @@ impl AppState {
                 InspectorClipTransformField::ScalePercent => {
                     let scale = (value.max(0.0)) / 100.0;
                     let scale = Vec2::splat(scale);
-                    if (clip.transform.get_scale(playhead) - scale).length_squared() < f32::EPSILON
+                    if (clip.transform.get_scale(author_time) - scale).length_squared()
+                        < f32::EPSILON
                     {
                         false
                     } else {
@@ -2292,7 +2301,7 @@ impl AppState {
                     let current = clip
                         .transform
                         .to_property_bag()
-                        .evaluate(Transform2D::ROTATION_PATH, playhead)
+                        .evaluate(Transform2D::ROTATION_PATH, author_time)
                         .and_then(|value| value.as_f32())
                         .unwrap_or(0.0);
                     if (current - value).abs() < f32::EPSILON {
@@ -2339,11 +2348,12 @@ impl AppState {
         let changed = {
             let clip = find_clip_mut(&mut after, payload.clip.clip_id)
                 .ok_or_else(|| missing_clip_error(STEP_ID, payload.clip.clip_id))?;
+            let author_time = clip_visual_author_time_at(clip, playhead)?;
             let mut changed = false;
 
             if let Some(position) = payload.position {
                 let position = Vec2::new(position.x, position.y);
-                if (clip.transform.get_position(playhead) - position).length_squared()
+                if (clip.transform.get_position(author_time) - position).length_squared()
                     >= f32::EPSILON
                 {
                     clip.apply_property_mutation(PropertyMutation::SetStaticValue {
@@ -2356,7 +2366,8 @@ impl AppState {
 
             if let Some(scale_percent) = payload.scale_percent {
                 let scale = Vec2::splat(scale_percent.max(0.0) / 100.0);
-                if (clip.transform.get_scale(playhead) - scale).length_squared() >= f32::EPSILON {
+                if (clip.transform.get_scale(author_time) - scale).length_squared() >= f32::EPSILON
+                {
                     clip.apply_property_mutation(PropertyMutation::SetStaticValue {
                         path: Transform2D::SCALE_PATH.to_string(),
                         value: PropertyValue::Vec2(scale),
@@ -2369,7 +2380,7 @@ impl AppState {
                 let current = clip
                     .transform
                     .to_property_bag()
-                    .evaluate(Transform2D::ROTATION_PATH, playhead)
+                    .evaluate(Transform2D::ROTATION_PATH, author_time)
                     .and_then(|value| value.as_f32())
                     .unwrap_or(0.0);
                 if (current - rotation).abs() >= f32::EPSILON {
@@ -2411,8 +2422,8 @@ impl AppState {
             let clip = find_clip_mut(&mut after, payload.clip.clip_id).ok_or_else(|| {
                 missing_clip_error("inspector_set_clip_curve", payload.clip.clip_id)
             })?;
-            let start_tick = clip.position;
-            let end_tick = clip.end_position()?;
+            let start_tick = clip.clip_time_in;
+            let end_tick = clip.clip_time_out()?;
             let duration_ticks = end_tick.checked_sub(start_tick)?;
             let mut keyframes = BTreeMap::new();
             for point in payload.points {
@@ -2905,6 +2916,11 @@ fn missing_sequence_error(step_id: &'static str) -> MondrianError {
         step_id: step_id.to_string(),
         reason: "当前没有活动序列".to_string(),
     }
+}
+
+fn clip_visual_author_time_at(clip: &Clip, timeline_time: TimelineTime) -> Result<TimelineTime> {
+    let placement_end = clip.end_position()?;
+    clip.timeline_to_clip_time(timeline_time.clamp(clip.position, placement_end))
 }
 
 fn missing_clip_error(step_id: &'static str, clip_id: ClipId) -> MondrianError {
@@ -6591,9 +6607,9 @@ mod tests {
         let _tb = sequence.time_base();
         let clip = &sequence.video_tracks[0].clips[0];
         let tb = sequence.time_base();
-        assert!((clip.transform.evaluate_opacity(tt(10, tb)) - 0.0).abs() < 1.0e-6);
-        assert!((clip.transform.evaluate_opacity(tt(20, tb)) - 0.72).abs() < 1.0e-6);
-        assert!((clip.transform.evaluate_opacity(tt(30, tb)) - 1.0).abs() < 1.0e-6);
+        assert!((clip.transform.evaluate_opacity(tt(0, tb)) - 0.0).abs() < 1.0e-6);
+        assert!((clip.transform.evaluate_opacity(tt(10, tb)) - 0.72).abs() < 1.0e-6);
+        assert!((clip.transform.evaluate_opacity(tt(20, tb)) - 1.0).abs() < 1.0e-6);
         assert!(state.can_undo_action());
     }
 
@@ -7126,7 +7142,7 @@ mod tests {
         state.selection.selected_clips = vec![selection];
         let tb = state.active_sequence().expect("sequence").time_base();
         let source_time = tt(4, tb);
-        let destination_time = tt(18, tb);
+        let destination_time = tt(8, tb);
         state
             .mutate_clip_property(
                 selection,

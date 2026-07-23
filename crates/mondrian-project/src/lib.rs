@@ -26,7 +26,7 @@ use migration::JsonMigrationRegistry;
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 19;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 20;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 2;
 
@@ -200,6 +200,9 @@ impl ProjectDocument {
                     format!("track '{}' parameter schema is invalid", track.name)
                 })?;
                 for clip in &track.clips {
+                    clip.clip_time_out().with_context(|| {
+                        format!("Clip '{}' visual author-time range is invalid", clip.id)
+                    })?;
                     if let Some(title) = clip.content.basic_title() {
                         title.validate_author_state().with_context(|| {
                             format!("Basic Title '{}' author state is invalid", clip.id)
@@ -731,15 +734,19 @@ mod tests {
             TimelineTime::new(5, 1).expect("duration"),
         )
         .expect("Basic Title");
+        clip.clip_time_in = TimelineTime::new(10, 1).expect("Clip visual author origin");
         clip.apply_property_mutation(PropertyMutation::SetKeyframe {
             path: mondrian_core::BasicTitle::FONT_SIZE_PATH.to_owned(),
-            keyframe: Keyframe::linear(TimelineTime::ZERO, PropertyValue::Float(72.0)),
+            keyframe: Keyframe::linear(
+                TimelineTime::new(10, 1).expect("first key time"),
+                PropertyValue::Float(72.0),
+            ),
         })
         .expect("first font-size key");
         clip.apply_property_mutation(PropertyMutation::SetKeyframe {
             path: mondrian_core::BasicTitle::FONT_SIZE_PATH.to_owned(),
             keyframe: Keyframe::linear(
-                TimelineTime::new(4, 1).expect("key time"),
+                TimelineTime::new(14, 1).expect("second key time"),
                 PropertyValue::Float(144.0),
             ),
         })
@@ -751,16 +758,20 @@ mod tests {
 
         save_project_archive(&document, &db_path, &project_path).expect("save project");
         let reopened = read_project_document_from_archive(&project_path).expect("reopen project");
-        let reopened_title = reopened.sequences.active().expect("active sequence").video_tracks[0]
+        let reopened_clip = reopened.sequences.active().expect("active sequence").video_tracks[0]
             .clips
             .iter()
             .find(|clip| clip.id == clip_id)
-            .and_then(|clip| clip.content.basic_title())
-            .expect("reopened Basic Title");
+            .expect("reopened Clip");
+        assert_eq!(
+            reopened_clip.clip_time_in,
+            TimelineTime::new(10, 1).expect("expected Clip visual author origin")
+        );
+        let reopened_title = reopened_clip.content.basic_title().expect("reopened Basic Title");
 
         reopened_title.validate_author_state().expect("valid title state");
         let midpoint = reopened_title
-            .evaluate(TimelineTime::new(2, 1).expect("midpoint"))
+            .evaluate(TimelineTime::new(12, 1).expect("midpoint"))
             .expect("evaluate title");
         assert_eq!(midpoint.text, "Mondrian 标题");
         assert!((midpoint.font_size - 108.0).abs() < 1.0e-5);

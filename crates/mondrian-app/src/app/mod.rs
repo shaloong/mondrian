@@ -139,6 +139,7 @@ pub struct AnimationPropertySelection {
 pub struct AnimationKeyframeSelection {
     pub clip_id: ClipId,
     pub path: String,
+    /// Exact coordinate in the selected Clip's visual authoring domain.
     pub time: TimelineTime,
 }
 

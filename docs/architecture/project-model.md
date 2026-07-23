@@ -143,7 +143,7 @@ is written with that field explicitly.
 
 Archive and document JSON pass through separate version registries before typed
 deserialization. During Alpha there are deliberately no legacy document steps:
-schema v19 is the sole accepted author schema, and older/future versions fail
+schema v20 is the sole accepted author schema, and older/future versions fail
 instead of being guessed. Version 5 introduced the explicit tagged
 `mondrian_standard` / `aces` / `custom_ocio` project contract and makes every
 Mondrian Standard package-identity field mandatory: product ID/version, config
@@ -205,7 +205,7 @@ Transition geometry, missing Mask parameters, and duplicate author identities
 fail before the document enters a Session.
 Version 18 adds `BasicTitle` as closed Sequence-local generated Clip content.
 Its complete canonical Property Bag, exact requested font intent, and
-source-local animation state persist with the Clip. Validation rejects missing,
+visual animation state persist with the Clip. Validation rejects missing,
 extra, schema-divergent, or out-of-range title properties before a document
 enters an Authoring Session. Alpha does not reinterpret a v17 Clip or construct
 title defaults while opening it.
@@ -229,7 +229,13 @@ policy from `SequenceColorManagement`, and stores nested processing on each
 duplicated engine truth and ambiguous nested ownership are rejected rather than
 guessed.
 
-Current document schema v19 persists canonical rational `TimelineTime` values
+Version 20 gives every Clip one mandatory exact `clip_time_in`, making the
+Clip-local visual author domain explicit and persistent. Transform, Opacity,
+visual Effects, Masks, and Basic Title share that domain. Sequence placement
+and source sampling remain independent; Alpha rejects v19 instead of guessing
+whether existing curves were authored against Sequence or source time.
+
+Current document schema v20 persists canonical rational `TimelineTime` values
 directly and requires the shared visual/audio `ParameterSchema`. It does not
 contain frame-oriented `TimeCode`, `TimeTicks`, descriptor-level duplicate
 defaults/types, editor-preset interpolation capabilities, or compatibility

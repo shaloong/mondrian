@@ -91,6 +91,7 @@ pub(super) fn split_clip_in_track(
 
     let split_time = author_time_from_frame(split_frame, time_base).ok()?;
     let split_offset = split_time.checked_sub(clip.position).ok()?;
+    let new_clip_time_in = clip.timeline_to_clip_time(split_time).ok()?;
     let new_source_in = clip.timeline_to_source_time(split_time).ok()?;
 
     let mut left = clip.clone();
@@ -101,6 +102,7 @@ pub(super) fn split_clip_in_track(
     right.fork_placement_identities_for_split(split_offset).ok()?;
     right.position = split_time;
     right.duration = author_time_from_frame(right_duration, time_base).ok()?;
+    right.clip_time_in = new_clip_time_in;
     right.source_in = new_source_in;
     right.link_group = None;
 
@@ -237,6 +239,7 @@ pub(super) fn roll_cut_in_track(
 
     let new_cut_time = author_time_from_frame(new_cut_frame, time_base)?;
     let new_left_source_out = left_original.timeline_to_source_time(new_cut_time)?;
+    let new_right_clip_time_in = right_original.timeline_to_clip_time(new_cut_time)?;
     let new_right_source_in = right_original.timeline_to_source_time(new_cut_time)?;
 
     let mut left_updated = left_original;
@@ -247,6 +250,7 @@ pub(super) fn roll_cut_in_track(
     right_updated.shift_audio_component_in(new_cut_time.checked_sub(right_updated.position)?)?;
     right_updated.position = new_cut_time;
     right_updated.duration = author_time_from_frame(new_right_duration, time_base)?;
+    right_updated.clip_time_in = new_right_clip_time_in;
     right_updated.source_in = new_right_source_in;
 
     track.clips[boundary.left_index] = left_updated;
@@ -474,6 +478,8 @@ pub(super) fn slide_clip_in_track(
 
     let new_left_source_out = left_original
         .timeline_to_source_time(author_time_from_frame(new_center_start, time_base)?)?;
+    let new_right_clip_time_in =
+        right_original.timeline_to_clip_time(author_time_from_frame(new_center_end, time_base)?)?;
     let new_right_source_in = right_original
         .timeline_to_source_time(author_time_from_frame(new_center_end, time_base)?)?;
 
@@ -489,6 +495,7 @@ pub(super) fn slide_clip_in_track(
     right_updated.shift_audio_component_in(right_position.checked_sub(right_updated.position)?)?;
     right_updated.position = right_position;
     right_updated.duration = author_time_from_frame(new_right_duration, time_base)?;
+    right_updated.clip_time_in = new_right_clip_time_in;
     right_updated.source_in = new_right_source_in;
 
     track.clips[clip_index - 1] = left_updated;
@@ -556,9 +563,11 @@ pub(super) fn trim_clip_in_track(
             let new_in =
                 original.timeline_to_source_time(author_time_from_frame(new_start, time_base)?)?;
             let new_position = author_time_from_frame(new_start, time_base)?;
+            let new_clip_time_in = original.timeline_to_clip_time(new_position)?;
             updated.shift_audio_component_in(new_position.checked_sub(updated.position)?)?;
             updated.position = new_position;
             updated.duration = author_time_from_frame(end - new_start, time_base)?;
+            updated.clip_time_in = new_clip_time_in;
             updated.source_in = new_in;
         }
         TrimEdge::Out => {
@@ -759,10 +768,12 @@ pub(super) fn subtract_overwrite_range_from_clip(
     if cut_start <= clip_start {
         let mut right = clip;
         let new_start = cut_end.max(clip_start);
+        let new_clip_time_in = right.timeline_to_clip_time(new_start)?;
         let new_source_in = right.timeline_to_source_time(new_start)?;
         right.shift_audio_component_in(new_start.checked_sub(clip_start)?)?;
         right.position = new_start;
         right.duration = clip_end.checked_sub(new_start)?.max(TimelineTime::ZERO);
+        right.clip_time_in = new_clip_time_in;
         right.source_in = new_source_in;
         right.link_group = None;
         return Ok(if right.duration > TimelineTime::ZERO {
@@ -795,10 +806,12 @@ pub(super) fn subtract_overwrite_range_from_clip(
 
     let mut right = clip;
     let right_new_start = cut_end;
+    let right_new_clip_time_in = right.timeline_to_clip_time(right_new_start)?;
     let right_new_source_in = right.timeline_to_source_time(right_new_start)?;
     right.fork_placement_identities_for_split(right_new_start.checked_sub(clip_start)?)?;
     right.position = right_new_start;
     right.duration = clip_end.checked_sub(right_new_start)?.max(TimelineTime::ZERO);
+    right.clip_time_in = right_new_clip_time_in;
     right.source_in = right_new_source_in;
     right.link_group = None;
 

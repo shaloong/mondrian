@@ -7,20 +7,30 @@ status: accepted
 Mondrian persists timeline positions, durations, edit boundaries, automation
 keys, and temporal curve handles as one normalized exact rational Timeline Time
 interpreted in an explicit owner domain such as Sequence-local,
-Component-Edit-local, Processing-Scope-local, Transition-local, or source-local
-time. The canonical value
+Clip-local, Component-Edit-local, Processing-Scope-local, Transition-local, or
+source-local time. The canonical value
 is a checked reduced numerator with a positive denominator; comparison and
 arithmetic use checked wide intermediates rather than derived field ordering,
 floating-point seconds, a universal fixed tick rate, or assumptions that two
 operands share a time base.
 
 The shared value representation does not erase domains. Sequence-local,
-Component-Edit-local, Processing-Scope-local, Transition-local, source-local,
-and nested-instance times cannot be compared or combined directly; placement,
-trimming, speed maps, and nesting provide explicit checked Time Transforms
-between them. A Time Transform may be affine or piecewise, but its mapping and
-inverse/ambiguity contract are part of author semantics rather than a caller
-convention.
+Clip-local, Component-Edit-local, Processing-Scope-local, Transition-local,
+source-local, and nested-instance times cannot be compared or combined
+directly; placement, trimming, speed maps, and nesting provide explicit checked
+Time Transforms between them. A Time Transform may be affine or piecewise, but
+its mapping and inverse/ambiguity contract are part of author semantics rather
+than a caller convention.
+
+Every Clip occurrence owns one stable visual author domain. Transform, Opacity,
+visual Effects, Masks, and generated visual content all evaluate in that
+Clip-local coordinate. Sequence placement maps it by
+`clip_time = clip_time_in + (sequence_time - position)`. An ordinary move,
+Slip, or source Speed Map edit preserves `clip_time_in`; an in-edge Trim,
+Split, or right-hand fragment advances it by the removed placement duration.
+Source-local time remains the independent media/nested sampling coordinate.
+This separation is intentional: changing which source pixels are sampled does
+not implicitly retime or reverse downstream Clip-owned visual processing.
 
 Video frame positions, audio sample positions, shutter samples, and plugin
 parameter-event offsets are derived evaluation coordinates. Conversion happens

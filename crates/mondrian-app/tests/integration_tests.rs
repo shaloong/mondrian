@@ -64,7 +64,7 @@ fn clip_with_effect_graph_compiles() {
     let graph = mondrian_effects::compile_clip_effect_graph(
         &active[0].clip.effects,
         &active[0].clip.masks,
-        tt(50, time_base),
+        active[0].clip_time,
     );
     assert!(
         graph.is_ok(),

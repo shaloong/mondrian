@@ -1,8 +1,8 @@
 //! Exact authoring time, domains, and checked mappings.
 
 use crate::{
-    AssetId, AudioComponentEditId, AudioProcessingScopeId, AudioTransitionId, FramePosition,
-    Rational, SequenceId,
+    AssetId, AudioComponentEditId, AudioProcessingScopeId, AudioTransitionId, ClipId,
+    FramePosition, Rational, SequenceId,
 };
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use std::cmp::Ordering;
@@ -273,6 +273,12 @@ impl From<TimeScale> for TimelineTime {
 pub enum AuthoringTimeDomain {
     /// Sequence-local author time.
     Sequence(SequenceId),
+    /// Stable visual-processing time owned by one Clip occurrence.
+    ///
+    /// This domain is independent of Sequence placement and source-media
+    /// selection. Moving or slipping a Clip therefore cannot move its visual
+    /// automation, while an in-edge trim advances the visible domain start.
+    Clip(ClipId),
     /// Placement-local audio component author time.
     AudioComponentEdit(AudioComponentEditId),
     /// Non-placement processing-scope-local author time.

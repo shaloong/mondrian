@@ -9,7 +9,8 @@ Every Clip owns:
 
 - stable `ClipId`;
 - one closed `ClipContent` payload;
-- exact rational `position`, `duration`, `source_in`, and `source_out`;
+- exact rational `position`, `duration`, `clip_time_in`, `source_in`, and
+  `source_out`;
 - exact speed/time mapping;
 - built-in visual Transform and opacity;
 - ordered visual effects and masks;
@@ -18,6 +19,12 @@ Every Clip owns:
 - disabled state, optional blend override, and optional label.
 
 Timeline coverage is the half-open range `[position, position + duration)`.
+The visible Clip visual-author range is
+`[clip_time_in, clip_time_in + duration)`. Transform, Opacity, visual Effects,
+Masks, and generated visual content all evaluate in this one Clip-local
+domain. Moving the placement, slipping the source, or changing the source Speed
+Map preserves `clip_time_in`; an in-edge Trim, Split, or right-hand overwrite
+fragment advances it by the removed placement duration.
 `timeline_to_source_time()` subtracts placement position, applies the explicit
 time transform, and adds `source_in`. Persisted author coordinates are
 `TimelineTime`; frame numbers are evaluation/display projections only.
@@ -38,7 +45,8 @@ parallel fields fail current-schema deserialization.
 Basic Title is Sequence-local generated content, not an Asset and not an
 Effect. Its canonical Property Bag owns text, concrete requested font intent,
 size, working-linear fill, tracking, line height, and alignment. Animatable
-properties evaluate in Clip source-local time. Missing/extra/schema-divergent
+properties evaluate in the shared Clip-local visual author time.
+Missing/extra/schema-divergent
 properties make the author snapshot invalid.
 
 ## Built-in and effect properties

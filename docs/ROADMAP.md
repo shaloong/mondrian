@@ -60,7 +60,7 @@ Mondrian 当前阶段只围绕三个产品支柱安排优先级：
 | 能力域 | 已有事实 | 仍不足以宣称完成的部分 | 当前判断 |
 | --- | --- | --- | --- |
 | 核心时间与 ID | 作者位置/范围/曲线使用 canonical `TimelineTime` 与显式 Time Domain/Transform；`FramePosition` 仅作求值/显示 Adapter。Sequence 持久化一个显示设置并解析为 Viewer/时间轴共享的 NDF/DF/Frames 契约；版本化 fixture 覆盖 VFR PTS、23.976→29.97 嵌套、负时间和 100 小时项目 | 素材源 timecode、用户输入/解析、time-of-day/reel 语义及未来真正的 Feet+Frames 仍须各自完整产品契约，不能从显示格式化器反推“已支持” | L1 |
-| 项目持久化 | `.mdp` archive/document/SQLite 独立版本轴已到 schema v19；`AuthoringSession` 生成不可变文档+SQLite revision 快照，后台 worker 用 SQLite online backup、验证后的 sibling archive、flush 和平台原子替换完成发布；manual/autosave 分离 baseline，Session/request/generation 可拒绝旧会话或过期完成，autosave manifest 在 archive 后原子发布；失败不覆盖原文件与 stale completion 测试已接入。v18 持久化并完整校验 Basic Title 的封闭 Property Bag 和动画状态；v19 固定一个 Project 色彩环境、完整新 Sequence 模板、无引擎继承的 Sequence 节目语义和逐嵌套 Clip 的色彩边策略 | Alpha 明确拒绝旧 schema、不承诺兼容迁移；M1 仍须以真实项目完成恢复选择/冲突 UI、磁盘满/权限失败、保留策略和反复崩溃压力，不把基础设施单测写成产品恢复完成 | L1 地基，M1 产品闭环未完成 |
+| 项目持久化 | `.mdp` archive/document/SQLite 独立版本轴已到 schema v20；`AuthoringSession` 生成不可变文档+SQLite revision 快照，后台 worker 用 SQLite online backup、验证后的 sibling archive、flush 和平台原子替换完成发布；manual/autosave 分离 baseline，Session/request/generation 可拒绝旧会话或过期完成，autosave manifest 在 archive 后原子发布；失败不覆盖原文件与 stale completion 测试已接入。v18 持久化并完整校验 Basic Title 的封闭 Property Bag 和动画状态；v19 固定一个 Project 色彩环境、完整新 Sequence 模板、无引擎继承的 Sequence 节目语义和逐嵌套 Clip 的色彩边策略；v20 持久化独立于 placement/source 的 Clip-local 视觉作者时间 | Alpha 明确拒绝旧 schema、不承诺兼容迁移；M1 仍须以真实项目完成恢复选择/冲突 UI、磁盘满/权限失败、保留策略和反复崩溃压力，不把基础设施单测写成产品恢复完成 | L1 地基，M1 产品闭环未完成 |
 | Undo/Redo | `AuthoringSession` 是唯一可变 `ProjectDocument` 权威；所有生产编辑只修改候选快照，经完整验证、revision/generation 前进、项目级 bounded history 记录后原子安装。Undo/Redo 可跨 Sequence 导航和 Project 聚合，使用 200 条/128 MiB 双预算、序列化载荷和结构化淘汰证据；失败事务不改变文档、代次或历史 | 高频/大型项目是否需要 delta/COW 必须由内存与延迟基准决定；M1 仍须覆盖所有产品操作和 Golden Project，而不是再建第二套 command 语义 | L1 架构闭合，操作覆盖继续扩展 |
 | 素材管理 | 文件夹/Bin 层级、移动/重命名/删除、缩略图、离线提示、单文件/目录重连、代理模式已接入产品 UI | tags/metadata 字段尚未形成检索产品；素材使用位置反查和批量诊断不足 | L1- |
 | 时间线编辑 | 多轨、移动、分割、普通 Trim、Ripple Delete、Insert/Overwrite、Roll/Slip/Slide、跨轨移动、锁定、吸附、多选和嵌套序列已有实现与测试。Clip 已用封闭 `ClipContent` 删除矛盾 kind payload，并增加 Sequence-local Basic Title；链接改为可承载任意成员的 `ClipLinkGroupId` 集合；复制/切割/覆写片段/序列复制会 fork 完整作者身份图；显式视频 Transition 已有强端点、精确范围、同轨不重叠不变量和不裁切的双源 handle demand；Cross Dissolve 产品命令会用媒体/嵌套真实范围默认拒绝短 handle，显式缩短与创建/删除均为单次 Undo 事务；时间线已能在精确相邻未锁定的视频 cut 创建、按稳定 ID 选择/删除、拖动两侧范围并显示当前 handle 失败诊断 | Lift/Extract、显式 Link/Unlink 产品 UI、Track Targeting、reverse/freeze/time remap 仍未闭环；Cross Dissolve 和 Basic Title 尚缺 Golden Project 产品验收 | L1+ 作者、命令与基础 UI 闭环，执行验收未完成 |
@@ -349,12 +349,12 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 
 **项目与编辑**
 
-- [x] 建立 archive/document/SQLite version registry，并提供 schema v19 current document fixture、v0 SQLite fixture、幂等打开、事务回滚和失败不覆盖测试；Alpha 不保留旧 document schema 兼容。v16 将 proxy membership 规范为有序集合；v17 冻结封闭 ClipContent、多成员 Link Group、强端点视频 Transition 和可持久化 Mask Property Bag；v18 增加完整持久化和校验的 Basic Title 封闭作者状态；v19 固定 Project 色彩环境、新 Sequence 模板和嵌套 Clip 色彩边所有权。
+- [x] 建立 archive/document/SQLite version registry，并提供 schema v20 current document fixture、v0 SQLite fixture、幂等打开、事务回滚和失败不覆盖测试；Alpha 不保留旧 document schema 兼容。v16 将 proxy membership 规范为有序集合；v17 冻结封闭 ClipContent、多成员 Link Group、强端点视频 Transition 和可持久化 Mask Property Bag；v18 增加完整持久化和校验的 Basic Title 封闭作者状态；v19 固定 Project 色彩环境、新 Sequence 模板和嵌套 Clip 色彩边所有权；v20 固定所有 Clip-owned 视觉处理共享的 Clip-local 作者时间。
 - [x] Timeline placement 继续作为单一事实来源：ClipContent 封闭 variant 删除平行 kind payload，Clip Link Group 使用至少两成员的集合语义；复制/razor/overwrite fragment/precompose/Sequence duplicate 会 fork 完整 Clip/Track/Effect/Mask/动画/音频身份并重映射内部强引用。视频 Transition 已冻结 Sequence-owned 强端点、唯一 edit pair、精确范围和 unclamped 双源 handle demand；这只完成作者/Adapter 地基，不勾选 Cross Dissolve 执行。
 - [x] `AuthoringSession` 已成为唯一可变 Project 权威，统一拥有文档、素材库、导航、project-wide Undo/Redo、`AuthoringSessionId`、`AuthorGeneration` 与 manual/autosave baseline。Project document save revision 与持久化 `SequenceRevision` 分离；候选事务只有在完整校验、历史记录和 revision/generation 前进都成功后才原子安装，失败不改变文档/代次/历史。生产代码不再暴露“先修改再补记”的 Sequence 可变入口。
 - [x] 历史默认同时硬限制 200 条与 128 MiB command-owned retained bytes，使用可精确计量的序列化 Sequence/Project 快照和 `VecDeque` 常数时间淘汰，累计报告预算淘汰、分支 Redo 丢弃和超大命令未保留；Undo/Redo 可跨 Sequence 导航并为恢复内容分配新 revision。选择和导航仍明确不是作者事务。
 - [x] 保存/另存/Autosave 已统一到 UI 无关持久化 worker：不可变作者快照绑定 Session/request/generation/SQLite revision，SQLite 走 online backup，archive 与 manifest 走 flush+验证+平台原子替换；旧 Session/过期完成不能清除新编辑，失败保持 dirty，close/quit 的必要保存同步等待结果。
-- [x] 精确 Timeline Time、显式 Time Domain/Transform、Frame/Sample Evaluation Grid 已落地并删除旧 `TimeCode`/`TimeTicks`。当前 document schema v19 的 Sequence 只持久化一个 `TimelineDisplaySettings`，领域层解析为 Viewer/时间轴共享的有效 `TimelineDisplayContract`；Frames 与 SMPTE NDF/DF、signed timecode origin、负时间和 24 小时标签回绕均不改变作者时间。版本化 `timeline_time_contract_v1` fixture 通过不规则 VFR PTS、23.976 child→29.97 parent 显式嵌套变换、负时间和 100 小时项目验证精确投影；未实现完整电影尺语义的 Feet+Frames 已从类型和 UI 删除而非虚假暴露。媒体 Render Plan、Preview key/Broker job/request 与 Export cache 现只携带 canonical source-local `TimelineTime`；普通媒体不按 Sequence fps 二次量化，显式 source frame-rate override 才以 Floor 投影一次，嵌套按 child fps 求值，FFmpeg Adapter 最后以 checked nearest + stream start PTS 降低，浮点秒和微秒 key 已从产品执行闭环删除。
+- [x] 精确 Timeline Time、显式 Time Domain/Transform、Frame/Sample Evaluation Grid 已落地并删除旧 `TimeCode`/`TimeTicks`。当前 document schema v20 的 Sequence 只持久化一个 `TimelineDisplaySettings`，领域层解析为 Viewer/时间轴共享的有效 `TimelineDisplayContract`；Frames 与 SMPTE NDF/DF、signed timecode origin、负时间和 24 小时标签回绕均不改变作者时间。每个 Clip 另持久化一个 `clip_time_in`：Transform、Opacity、视觉 Effect、Mask 与 Basic Title 在同一 Clip-local 域求值；普通 move/slip/source retime 保持它，trim-in/split/overwrite 右片段按移除的 placement 时长推进。source-local 时间只负责媒体/嵌套取样。版本化 `timeline_time_contract_v1` fixture 通过不规则 VFR PTS、23.976 child→29.97 parent 显式嵌套变换、负时间和 100 小时项目验证精确投影；未实现完整电影尺语义的 Feet+Frames 已从类型和 UI 删除而非虚假暴露。媒体 Render Plan、Preview key/Broker job/request 与 Export cache 现只携带 canonical source-local `TimelineTime`；普通媒体不按 Sequence fps 二次量化，显式 source frame-rate override 才以 Floor 投影一次，嵌套按 child fps 求值，FFmpeg Adapter 最后以 checked nearest + stream start PTS 降低，浮点秒和微秒 key 已从产品执行闭环删除。
 
 **播放与任务**
 
@@ -388,7 +388,7 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 
 ### 退出门槛
 
-- schema v19 current fixture 可保存、重开；Project 色彩环境/新 Sequence 模板、Basic Title/Mask 动画与强编辑关系 round-trip；旧/未来 schema 明确拒绝；故意失败不会破坏源文件。
+- schema v20 current fixture 可保存、重开；Project 色彩环境/新 Sequence 模板、Clip-local 视觉作者时间、Basic Title/Mask 动画与强编辑关系 round-trip；旧/未来 schema 明确拒绝；故意失败不会破坏源文件。
 - Headless 测试可驱动 play/seek/cancel，并以手动 Monotonic Runtime Clock 精确验证请求年龄、过期边界、最早取消原因、同键 rebind、worker 完成与 UI 轮询解耦以及回退证据，而不构造 Widget 或 native window。
 - 一个参数从 schema → UI → animation → save/reopen → preview/export → cache invalidation 全链通过。
 - 音频时钟、video target selection 和 fallback 决策可由结构化报告关联到同一次播放。
@@ -434,7 +434,7 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 ### 效果、动画、标题与转场
 
 - [ ] 先交付少而完整的算子：Transform/Crop、Opacity/Blend、Primary Color、LUT、Gaussian Blur、Sharpen、基础 Mask、Cross Dissolve、Basic Title。
-- [x] Basic Title 已作为第五种封闭 `ClipContent` 贯通 schema v18 持久化/校验、菜单创建、空闲轨放置、Inspector/Undo、Clip source-local 自动化、共享 Render Plan、working-linear straight-alpha 生成、效果/Transform/Mask/合成、Cross Dissolve 端点、嵌套、后台 Preview 与 Export。具体系统字体依赖及 face bytes/index 参与输出身份，缺失字体或未声明 fallback 失败关闭；标题安全区使用已校验的 Sequence 设置。该项只声明产品主路径闭合，仍需 Golden Project/外部参考视觉与压力验收。
+- [x] Basic Title 已作为第五种封闭 `ClipContent` 贯通 schema v18 持久化/校验、菜单创建、空闲轨放置、Inspector/Undo、统一 Clip-local 视觉自动化、共享 Render Plan、working-linear straight-alpha 生成、效果/Transform/Mask/合成、Cross Dissolve 端点、嵌套、后台 Preview 与 Export。具体系统字体依赖及 face bytes/index 参与输出身份，缺失字体或未声明 fallback 失败关闭；标题安全区使用已校验的 Sequence 设置。该项只声明产品主路径闭合，仍需 Golden Project/外部参考视觉与压力验收。
 - [ ] 每个算子通过通用 DoD；不以 effect enum、属性面板或未连接的 `TextLayer`/`Transition` 类型作为完成。
 - [ ] Hold、Linear、Bezier/Ease、关键帧增删移动复制、reset 和基础 curve editor 可完成 Golden Project。
 - [ ] CPU fallback 不隐式 RGBA8，不在一帧内反复 GPU→CPU→GPU；fallback 原因在 Viewer/Export report 一致。
@@ -533,7 +533,7 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 
 ### 第 3–5 周：迁移、所有权与音频时钟
 
-- 落地项目 version registry 与 schema v19 current fixture；Alpha 旧 schema 明确拒绝。
+- 落地项目 version registry 与 schema v20 current fixture；Alpha 旧 schema 明确拒绝。
 - 将可 headless 驱动的播放/任务核心从 UI 适配器中收敛出来，保留现有成熟调度逻辑。
 - 冻结 Timeline Time/Time Domain、稳定 ParameterId、统一曲线 schema 和 cache semantic revision；旧 `TimeCode`/`TimeTicks` 不作为兼容格式保留。
 - 将 audio master、video late-frame、buffering 和 underrun 证据统一到播放报告。

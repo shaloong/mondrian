@@ -46,7 +46,9 @@ and mutation action as other Clip content; the panel does not own a parallel
 title draft or reconstruct property ranges/options. Text is multiline, the
 concrete font family remains editable regardless of display length, and
 font-size/fill/tracking/line-height animation is evaluated at exact Clip
-source-local author time. A mutation validates Track lock and the complete
+visual author time. The panel maps the Sequence playhead once through the
+selected Clip and uses that same coordinate for built-in Transform/Opacity,
+Basic Title, effect, and curve controls. A mutation validates Track lock and the complete
 candidate title before recording one Sequence snapshot. The generic legacy
 solid-color tint row is hidden for Basic Title so two controls cannot claim
 authority over its fill.

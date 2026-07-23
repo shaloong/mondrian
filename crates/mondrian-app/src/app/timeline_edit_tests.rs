@@ -608,6 +608,7 @@ fn trim_in_is_undoable() {
         .expect("clip should exist");
     assert_eq!(trimmed.position, tt(15, tb));
     assert_eq!(trimmed.duration, tt(15, tb));
+    assert_eq!(trimmed.clip_time_in, tt(5, tb));
     assert_eq!(trimmed.source_in, tt(5, tb));
     assert_eq!(
         state.authoring_history().and_then(|history| history.undo_description()),
@@ -622,7 +623,76 @@ fn trim_in_is_undoable() {
         .expect("clip should exist after undo");
     assert_eq!(restored.position, tt(10, tb));
     assert_eq!(restored.duration, tt(20, tb));
+    assert_eq!(restored.clip_time_in, TimelineTime::ZERO);
     assert_eq!(restored.source_in, tt(0, tb));
+}
+
+#[test]
+fn move_trim_and_split_preserve_one_clip_local_visual_time_domain() {
+    let mut state = create_state_with_sequence();
+    let tb = state.active_sequence().expect("sequence").time_base();
+    let track_id = state.active_sequence().expect("sequence").video_tracks[0].id;
+    let mut clip = Clip::new(AssetId::new(), tt(10, tb), tt(30, tb)).expect("valid clip");
+    clip.apply_property_mutation(mondrian_core::automation::PropertyMutation::SetKeyframe {
+        path: Transform2D::OPACITY_PATH.to_owned(),
+        keyframe: mondrian_core::automation::Keyframe::linear(
+            tt(0, tb),
+            mondrian_core::automation::PropertyValue::Float(0.0),
+        ),
+    })
+    .expect("start opacity");
+    clip.apply_property_mutation(mondrian_core::automation::PropertyMutation::SetKeyframe {
+        path: Transform2D::OPACITY_PATH.to_owned(),
+        keyframe: mondrian_core::automation::Keyframe::linear(
+            tt(30, tb),
+            mondrian_core::automation::PropertyValue::Float(1.0),
+        ),
+    })
+    .expect("end opacity");
+    let clip_id = clip.id;
+    state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0]
+        .add_clip(clip)
+        .expect("add clip");
+
+    state
+        .move_clip_to_track_with_mode(track_id, true, clip_id, 40, ClipOverlapMode::Overwrite)
+        .expect("move Clip");
+    let moved = state.active_sequence().expect("sequence").video_tracks[0]
+        .clips
+        .iter()
+        .find(|clip| clip.id == clip_id)
+        .expect("moved Clip");
+    assert_eq!(moved.clip_time_in, TimelineTime::ZERO);
+    assert_eq!(
+        moved.timeline_to_clip_time(tt(55, tb)).expect("Clip time"),
+        tt(15, tb)
+    );
+
+    state.trim_clips_bulk_to_frame(&[clip_id], TrimEdge::In, 45).expect("trim Clip");
+    let trimmed = state.active_sequence().expect("sequence").video_tracks[0]
+        .clips
+        .iter()
+        .find(|clip| clip.id == clip_id)
+        .expect("trimmed Clip");
+    assert_eq!(trimmed.clip_time_in, tt(5, tb));
+    assert_eq!(
+        trimmed.timeline_to_clip_time(tt(55, tb)).expect("Clip time"),
+        tt(15, tb)
+    );
+
+    state.split_clip_at_frame(track_id, true, clip_id, 55).expect("split Clip");
+    let sequence = state.active_sequence().expect("sequence");
+    let right = sequence.video_tracks[0]
+        .clips
+        .iter()
+        .find(|clip| clip.position == tt(55, tb))
+        .expect("right Clip");
+    assert_eq!(right.clip_time_in, tt(15, tb));
+    let active = sequence.active_clips_at(tt(55, tb)).expect("active Clip");
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].clip.id, right.id);
+    assert_eq!(active[0].clip_time, tt(15, tb));
+    assert!((active[0].opacity - 0.5).abs() < 1.0e-6);
 }
 
 #[test]
@@ -1240,6 +1310,7 @@ fn slip_clip_negative_delta_is_clamped_and_undoable() {
         .expect("clip should exist");
     assert_eq!(slipped.position, tt(8, tb));
     assert_eq!(slipped.duration, tt(20, tb));
+    assert_eq!(slipped.clip_time_in, TimelineTime::ZERO);
     assert_eq!(slipped.source_in, tt(0, tb));
     assert_eq!(slipped.source_out, tt(20, tb));
 
@@ -1249,6 +1320,7 @@ fn slip_clip_negative_delta_is_clamped_and_undoable() {
         .iter()
         .find(|clip| clip.id == clip_id)
         .expect("clip should exist after undo");
+    assert_eq!(restored.clip_time_in, TimelineTime::ZERO);
     assert_eq!(restored.source_in, tt(10, tb));
     assert_eq!(restored.source_out, tt(30, tb));
 

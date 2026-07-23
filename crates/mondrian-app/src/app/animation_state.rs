@@ -237,7 +237,7 @@ impl AppState {
     pub fn paste_animation_keyframes(
         &mut self,
         selection: SelectedClipRef,
-        destination_time: TimelineTime,
+        destination_clip_time: TimelineTime,
     ) -> mondrian_core::Result<bool> {
         let Some(clipboard) = self.animation_clipboard.clone() else {
             return Ok(false);
@@ -252,8 +252,7 @@ impl AppState {
         for entry in clipboard.entries {
             let mut keyframe = entry.keyframe;
             keyframe.id = KeyframeId::new();
-            keyframe.time =
-                destination_time.checked_add(entry.relative_time)?.max(TimelineTime::ZERO);
+            keyframe.time = destination_clip_time.checked_add(entry.relative_time)?;
             mutations.push(PropertyMutation::SetKeyframe {
                 path: entry.path.clone(),
                 keyframe: keyframe.clone(),

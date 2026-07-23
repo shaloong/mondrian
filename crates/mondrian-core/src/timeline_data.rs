@@ -355,6 +355,8 @@ pub struct FlatActiveClip {
     pub is_disabled: bool,
     pub effects: Vec<EffectNode>,
     pub masks: Vec<MaskComponent>,
+    /// Stable Clip-local visual author time for all Clip-owned processing.
+    pub clip_time: TimelineTime,
     pub source_time: TimelineTime,
     /// Affine transform matrix as 6-element array [a, c, tx, b, d, ty].
     pub transform_matrix: [f32; 6],

@@ -238,9 +238,9 @@ See [Audio Pipeline](audio-pipeline.md) for the author/compiler boundary.
 ## Clip
 
 `Clip` is one Timeline placement, never an Asset or Sequence definition. It
-owns position/source ranges, transform, speed, visual effects, masks, optional
-link-group membership, blend mode, and placement-local audio Component Edits.
-Its content is one closed `ClipContent` payload:
+owns position/source ranges, a stable `clip_time_in`, transform, speed, visual
+effects, masks, optional link-group membership, blend mode, and placement-local
+audio Component Edits. Its content is one closed `ClipContent` payload:
 
 - `Media { asset_id, interpretation }`
 - `AdjustmentLayer { asset_id }`
@@ -259,11 +259,22 @@ Media, Adjustment Layer, and Solid Color records in the Asset Library, while
 generic `asset_id()` because treating a generated library identity as a file
 dependency made valid Solid Color/Adjustment exports fail as offline media.
 
+Every Clip-owned visual processor uses one exact Clip-local author coordinate:
+Transform, Opacity, visual Effects, Masks, and generated visual content.
+Sequence evaluation maps
+`clip_time = clip_time_in + (sequence_time - position)`. Moving the placement,
+slipping the source, or changing the source Speed Map preserves
+`clip_time_in`; trimming the in edge, splitting, or creating a right-hand
+overwrite fragment advances it by the removed placement duration. Source time
+is separately derived through `source_in` and `SpeedMap` and controls only
+media/nested sampling. This prevents placement, source selection, and visual
+processing from becoming three accidental authorities for one property.
+
 `BasicTitle` is a fifth content type, not a synthetic Asset and not an Effect.
 Its closed definition-backed Property Bag owns text, exact requested font
 family/weight/style, font size, working-linear fill, tracking, line height, and
 horizontal/vertical alignment. Font size, fill, tracking, and line height use
-the ordinary exact automation model in Clip source-local time; discrete text,
+the ordinary exact automation model in Clip-local visual time; discrete text,
 font, and alignment values remain static until the product defines an explicit
 discrete-edit workflow. Unknown, missing, removed, type-divergent, or
 out-of-contract properties are rejected before an author snapshot commits.

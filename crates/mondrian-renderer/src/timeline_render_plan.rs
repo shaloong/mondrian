@@ -404,7 +404,7 @@ pub fn evaluate_timeline_render_plan(
         match item {
             FlatVisualItem::Clip(clip) => {
                 if let Some(element) =
-                    compile_flat_clip(clip, source, current_time, timeline_frame, &mut diagnostics)?
+                    compile_flat_clip(clip, source, timeline_frame, &mut diagnostics)?
                 {
                     elements.push(element);
                 }
@@ -413,7 +413,6 @@ pub fn evaluate_timeline_render_plan(
                 elements.push(compile_transition(
                     *transition,
                     source,
-                    current_time,
                     timeline_frame,
                     &mut diagnostics,
                 )?);
@@ -436,7 +435,6 @@ pub fn evaluate_timeline_render_plan(
 fn compile_transition(
     transition: FlatVideoTransition,
     source: &dyn RenderPlanSource,
-    current_time: TimelineTime,
     timeline_frame: i64,
     diagnostics: &mut TimelineEvaluationDiagnostics,
 ) -> Result<TimelineRenderPlanElement> {
@@ -453,20 +451,10 @@ fn compile_transition(
                     ),
                 });
             }
-            let left = compile_transition_input(
-                transition.left,
-                source,
-                current_time,
-                timeline_frame,
-                diagnostics,
-            )?;
-            let right = compile_transition_input(
-                transition.right,
-                source,
-                current_time,
-                timeline_frame,
-                diagnostics,
-            )?;
+            let left =
+                compile_transition_input(transition.left, source, timeline_frame, diagnostics)?;
+            let right =
+                compile_transition_input(transition.right, source, timeline_frame, diagnostics)?;
             let progress = transition.progress.normalized().ok_or_else(|| {
                 MondrianError::WorkflowStepFailed {
                     step_id: "compile_video_transition".to_owned(),
@@ -495,17 +483,18 @@ fn compile_transition(
 fn compile_transition_input(
     clip: FlatActiveClip,
     source: &dyn RenderPlanSource,
-    current_time: TimelineTime,
     timeline_frame: i64,
     diagnostics: &mut TimelineEvaluationDiagnostics,
 ) -> Result<TimelineTransitionInputPlan> {
     if clip.is_disabled || clip.opacity.clamp(0.0, 1.0) <= 0.0 {
         return Ok(TimelineTransitionInputPlan::Transparent);
     }
-    let element = compile_flat_clip(clip, source, current_time, timeline_frame, diagnostics)?
-        .ok_or_else(|| MondrianError::WorkflowStepFailed {
-            step_id: "compile_video_transition".to_owned(),
-            reason: "Transition endpoint did not produce a visual input".to_owned(),
+    let element =
+        compile_flat_clip(clip, source, timeline_frame, diagnostics)?.ok_or_else(|| {
+            MondrianError::WorkflowStepFailed {
+                step_id: "compile_video_transition".to_owned(),
+                reason: "Transition endpoint did not produce a visual input".to_owned(),
+            }
         })?;
     match element {
         TimelineRenderPlanElement::Media(media) => Ok(TimelineTransitionInputPlan::Media(media)),
@@ -529,7 +518,6 @@ fn compile_transition_input(
 fn compile_flat_clip(
     ac: FlatActiveClip,
     source: &dyn RenderPlanSource,
-    current_time: TimelineTime,
     timeline_frame: i64,
     diagnostics: &mut TimelineEvaluationDiagnostics,
 ) -> Result<Option<TimelineRenderPlanElement>> {
@@ -540,7 +528,7 @@ fn compile_flat_clip(
     }
 
     let effect_graph =
-        mondrian_effects::compile_clip_effect_graph(&ac.effects, &ac.masks, current_time).map_err(
+        mondrian_effects::compile_clip_effect_graph(&ac.effects, &ac.masks, ac.clip_time).map_err(
             |error| MondrianError::EffectGraphEvaluationFailed { reason: error.to_string() },
         )?;
     let frame_seed = timeline_frame.max(0);
@@ -576,7 +564,7 @@ fn compile_flat_clip(
             })
         }
         ClipContent::BasicTitle { title } => {
-            let title = title.evaluate(ac.source_time)?;
+            let title = title.evaluate(ac.clip_time)?;
             TimelineRenderPlanElement::BasicTitle(TimelineBasicTitlePlan {
                 title,
                 opacity,
@@ -686,7 +674,7 @@ fn normalize_resolution_scale(scale: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_core::automation::{PropertyMutation, PropertyValue};
+    use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::types::{AssetId, Resolution};
     use mondrian_timeline::clip::{Clip, Transform2D};
     use mondrian_timeline::sequence::Sequence;
@@ -814,6 +802,48 @@ mod tests {
             }
             _ => panic!("expected media"),
         }
+    }
+
+    #[test]
+    fn render_plan_evaluates_transform_and_title_in_one_clip_local_domain() {
+        let mut seq = Sequence::new("clip-local-render-plan");
+        let tb = seq.time_base();
+        let mut title = Clip::new_basic_title("Mondrian", "Segoe UI", tt(10, tb), tt(20, tb))
+            .expect("valid Basic Title");
+        title.source_in = tt(100, tb);
+        title.source_out = tt(120, tb);
+        for (time, opacity, font_size) in [(tt(0, tb), 0.0, 40.0), (tt(20, tb), 1.0, 80.0)] {
+            title
+                .apply_property_mutation(PropertyMutation::SetKeyframe {
+                    path: Transform2D::OPACITY_PATH.to_owned(),
+                    keyframe: Keyframe::linear(time, PropertyValue::Float(opacity)),
+                })
+                .expect("opacity key");
+            title
+                .apply_property_mutation(PropertyMutation::SetKeyframe {
+                    path: mondrian_core::BasicTitle::FONT_SIZE_PATH.to_owned(),
+                    keyframe: Keyframe::linear(time, PropertyValue::Float(font_size)),
+                })
+                .expect("font-size key");
+        }
+        seq.video_tracks[0].add_clip(title).expect("add title");
+
+        let preview =
+            evaluate_timeline_render_plan(&seq, TimelineEvaluationRequest::preview(20, 0.5))
+                .expect("preview plan");
+        let export = evaluate_timeline_render_plan(&seq, TimelineEvaluationRequest::export(20))
+            .expect("export plan");
+        assert_eq!(
+            preview_semantic_signature(&preview),
+            preview_semantic_signature(&export)
+        );
+
+        let TimelineRenderPlanElement::BasicTitle(title) = &preview.elements[0] else {
+            panic!("expected Basic Title");
+        };
+
+        assert!((title.opacity - 0.5).abs() < 1.0e-6);
+        assert!((title.title.font_size - 60.0).abs() < 1.0e-5);
     }
 
     #[test]
