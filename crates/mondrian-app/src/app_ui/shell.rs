@@ -24,15 +24,15 @@ use std::path::Path;
 use crate::app::ui_actions::{
     assets_import_files_action, assets_relink_asset_action, assets_set_interpretation_action,
     export_set_draft_action, project_create_with_settings_action,
-    project_recover_from_autosave_action, project_set_color_engine_action,
+    project_recover_from_autosave_action, project_update_color_environment_action,
     sequence_update_settings_action, AppShellCopySystemInfoPayload,
     AppShellInterpretAssetDialogPayload, AppShellOpenRecentProjectPayload,
     AppShellRelinkAssetDialogPayload, AppShellRelocatePanelPayload,
     AppShellRevealInFileManagerPayload, AssetsImportFilesPayload, AssetsRelinkAssetPayload,
     DockDropAreaPayload, ExportDraftUpdatePayload, ExportOutputDialogPayload,
     ImportMediaDialogPayload, InterpretAssetDraftUpdatePayload, NewProjectDraftUpdatePayload,
-    PreferencesTabPayload, ProjectRecoverFromAutosavePayload, ProjectSetColorEnginePayload,
-    ProjectSettingsDraftUpdatePayload, SequenceSettingsDraftUpdatePayload,
+    PreferencesTabPayload, ProjectRecoverFromAutosavePayload, ProjectSettingsDraftUpdatePayload,
+    ProjectUpdateColorEnvironmentPayload, SequenceSettingsDraftUpdatePayload,
     SequenceSettingsTabPayload, ViewerSetZoomScalePayload, APP_SHELL_ABOUT,
     APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
     APP_SHELL_CONFIRM_INTERPRET_ASSET_DIALOG, APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG,
@@ -66,7 +66,7 @@ use crate::app_ui::project_settings_dialog::AppUiProjectSettingsDraft;
 use crate::app_ui::sequence_settings_dialog::AppUiSequenceSettingsDraft;
 use crate::app_ui::title_bar::{TitleBar, TITLE_BAR_HEIGHT};
 use crate::app_ui::workspace_layout::{AppUiWorkspaceLayout, DockDropArea};
-use mondrian_core::{MondrianError, ProjectColorManagement, Result};
+use mondrian_core::{MondrianError, Result};
 
 /// Default file extension for Mondrian project containers.
 pub const PROJECT_FILE_EXTENSION: &str = "mdp";
@@ -582,7 +582,8 @@ pub struct AppUiAppRoot {
     custom_workspace_layout: Option<AppUiWorkspaceLayout>,
     viewer_zoom_mode: ViewerZoomMode,
     active_sequence: Option<Sequence>,
-    project_color_management: ProjectColorManagement,
+    project_color_environment: mondrian_core::ProjectColorEnvironment,
+    new_sequence_defaults: mondrian_timeline::SequenceSettings,
     modal: Option<ShellModal>,
     bounds: Rect,
 }
@@ -658,7 +659,8 @@ impl AppUiAppRoot {
             status_bar_model(state),
         );
         root.active_sequence = state.active_sequence().cloned();
-        root.project_color_management = state.project_settings().color_management.clone();
+        root.project_color_environment = state.project_color_environment().clone();
+        root.new_sequence_defaults = state.new_sequence_defaults().clone();
         root
     }
 
@@ -728,7 +730,8 @@ impl AppUiAppRoot {
             custom_workspace_layout,
             viewer_zoom_mode,
             active_sequence: None,
-            project_color_management: ProjectColorManagement::default(),
+            project_color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            new_sequence_defaults: mondrian_timeline::SequenceSettings::default(),
             modal: None,
             bounds: Rect::ZERO,
         };
@@ -975,7 +978,8 @@ impl AppUiAppRoot {
             .refresh_for_app_state_with_shortcut_overrides(state, &preferences.shortcut_overrides);
         self.status_bar.set_model(status_bar_model(state));
         self.active_sequence = state.active_sequence().cloned();
-        self.project_color_management = state.project_settings().color_management.clone();
+        self.project_color_environment = state.project_color_environment().clone();
+        self.new_sequence_defaults = state.new_sequence_defaults().clone();
         let mut models = AppUiPanelModels::from_app_state_with_asset_folder_thumbnails_and_preview(
             state,
             self.asset_folder_id.as_deref(),
@@ -1283,14 +1287,11 @@ impl AppUiAppRoot {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_PROJECT_SETTINGS =>
             {
-                let Some(sequence) = self.active_sequence.as_ref() else {
-                    return Ok(None);
-                };
                 self.modal = Some(ShellModal::project_settings(
                     AppUiProjectSettingsDraft::new(
-                        self.project_color_management.engine.clone(),
-                        sequence.settings.working_color_space,
-                        sequence.settings.color_management.output_color_space,
+                        self.project_color_environment.engine.clone(),
+                        self.new_sequence_defaults.working_color_space,
+                        self.new_sequence_defaults.color_management.output_color_space,
                     ),
                 ));
                 if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
@@ -1324,8 +1325,10 @@ impl AppUiAppRoot {
                     return Ok(None);
                 };
                 self.modal = None;
-                Ok(Some(project_set_color_engine_action(
-                    ProjectSetColorEnginePayload { engine },
+                Ok(Some(project_update_color_environment_action(
+                    ProjectUpdateColorEnvironmentPayload {
+                        color_environment: mondrian_core::ProjectColorEnvironment { engine },
+                    },
                 )))
             }
             Action::Custom { namespace, name, .. }
@@ -1395,8 +1398,12 @@ impl AppUiAppRoot {
             Action::Custom { namespace, name, .. }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SEQUENCE_SETTINGS =>
             {
-                let draft =
-                    self.active_sequence.as_ref().map(AppUiSequenceSettingsDraft::from_sequence);
+                let draft = self.active_sequence.as_ref().map(|sequence| {
+                    AppUiSequenceSettingsDraft::from_sequence_in_environment(
+                        sequence,
+                        &self.project_color_environment,
+                    )
+                });
                 if let Some(draft) = draft {
                     self.modal = Some(ShellModal::sequence_settings(draft));
                     if self.bounds.width > 0.0 && self.bounds.height > 0.0 {
@@ -2003,12 +2010,12 @@ mod tests {
         ExportDraftUpdatePayload, ExportOutputDialogPayload, ImportMediaDialogPayload,
         InterpretAssetDraftUpdatePayload, NewProjectDraftUpdatePayload, PreferencesTabPayload,
         ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
-        ProjectSetColorEnginePayload, ProjectSettingsDraftUpdatePayload,
+        ProjectSettingsDraftUpdatePayload, ProjectUpdateColorEnvironmentPayload,
         SequenceSettingsDraftUpdatePayload, SequenceSettingsTabPayload,
         SequenceUpdateSettingsPayload, ViewerSetZoomScalePayload, ASSETS_IMPORT_FILES,
         ASSETS_NAMESPACE, ASSETS_RELINK_ASSET, ASSETS_SET_INTERPRETATION, EXPORT_NAMESPACE,
         EXPORT_SET_DRAFT, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
-        PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_SET_COLOR_ENGINE, SEQUENCE_NAMESPACE,
+        PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_UPDATE_COLOR_ENVIRONMENT, SEQUENCE_NAMESPACE,
         SEQUENCE_UPDATE_SETTINGS,
     };
     use crate::app_ui::panels::ViewerPreviewState;
@@ -2024,8 +2031,8 @@ mod tests {
     use mondrian_platform::ClipboardError;
     use mondrian_timeline::sequence::{
         AudioChannelLayout, AudioDisplayFormat, ColorWorkflow, DeliveryBitDepth, EditingMode,
-        FieldOrder, MissingColorMetadataPolicy, NestedColorProcessing, PixelAspectRatio,
-        PreviewRenderFormat, Sequence, StaticHdrMetadataPolicy, VideoRange,
+        FieldOrder, MissingColorMetadataPolicy, PixelAspectRatio, PreviewRenderFormat, Sequence,
+        StaticHdrMetadataPolicy, VideoRange,
     };
     use mondrian_ui_core::tree::WidgetTreeView;
     use mondrian_ui_core::widget::{DrawCommandEncoder, PaintContext};
@@ -2880,9 +2887,8 @@ mod tests {
             payload.sequence_settings.color_management.workflow,
             ColorWorkflow::SceneReferred
         );
-        let context = payload
-            .sequence_settings
-            .root_program_color_context(&payload.project_settings.color_management);
+        let context =
+            payload.sequence_settings.root_program_color_context(&payload.color_environment);
         assert_eq!(
             context.engine,
             mondrian_core::ColorEngine::mondrian_standard()
@@ -3043,14 +3049,7 @@ mod tests {
         let payload: ProjectCreateWithSettingsPayload =
             serde_json::from_value(payload).expect("project create payload");
 
-        assert_eq!(payload.project_settings.color_management.engine, engine);
-        assert_eq!(
-            payload
-                .sequence_settings
-                .root_program_color_context(&payload.project_settings.color_management)
-                .engine,
-            engine
-        );
+        assert_eq!(payload.color_environment.engine, engine);
     }
 
     #[test]
@@ -3077,8 +3076,7 @@ mod tests {
             .expect("new-project dialog");
         let identity = dialog
             .draft()
-            .project_settings
-            .color_management
+            .color_environment
             .engine
             .custom_ocio_identity()
             .expect("complete Custom OCIO identity");
@@ -3118,7 +3116,7 @@ mod tests {
             .and_then(ShellModal::as_new_project)
             .expect("new-project dialog remains open");
         assert_eq!(
-            dialog.draft().project_settings.color_management.engine,
+            dialog.draft().color_environment.engine,
             mondrian_core::ColorEngine::mondrian_standard()
         );
         assert!(dialog.error_text().contains("not found"));
@@ -3145,16 +3143,16 @@ mod tests {
         );
         let action = root
             .handle_shell_action(app_shell_confirm_project_settings_action(), &platform, None)
-            .expect("project color engine action");
+            .expect("project color environment action");
 
         let Action::Custom { namespace, name, payload } = action else {
             panic!("expected project custom action");
         };
         assert_eq!(namespace, PROJECT_NAMESPACE);
-        assert_eq!(name, PROJECT_SET_COLOR_ENGINE);
-        let payload: ProjectSetColorEnginePayload =
-            serde_json::from_value(payload).expect("project color payload");
-        assert_eq!(payload.engine, engine);
+        assert_eq!(name, PROJECT_UPDATE_COLOR_ENVIRONMENT);
+        let payload: ProjectUpdateColorEnvironmentPayload =
+            serde_json::from_value(payload).expect("project color environment payload");
+        assert_eq!(payload.color_environment.engine, engine);
         assert!(root.modal.is_none());
     }
 
@@ -3308,13 +3306,6 @@ mod tests {
         );
         root.handle_shell_action(
             app_shell_sequence_settings_draft_changed_action(
-                SequenceSettingsDraftUpdatePayload::ColorManagementInherit(false),
-            ),
-            &platform,
-            None,
-        );
-        root.handle_shell_action(
-            app_shell_sequence_settings_draft_changed_action(
                 SequenceSettingsDraftUpdatePayload::OutputColorSpace(ColorSpace::Rec2100Pq),
             ),
             &platform,
@@ -3331,15 +3322,6 @@ mod tests {
             app_shell_sequence_settings_draft_changed_action(
                 SequenceSettingsDraftUpdatePayload::MissingColorMetadataPolicy(
                     MissingColorMetadataPolicy::AssumeRec709,
-                ),
-            ),
-            &platform,
-            None,
-        );
-        root.handle_shell_action(
-            app_shell_sequence_settings_draft_changed_action(
-                SequenceSettingsDraftUpdatePayload::NestedColorProcessing(
-                    NestedColorProcessing::ForceParentWorkingSpace,
                 ),
             ),
             &platform,
@@ -3461,7 +3443,6 @@ mod tests {
             WorkingColorSpace::LinearRec2020
         );
         assert!(!payload.settings.auto_tone_map_media);
-        assert!(!payload.settings.color_management.inherit);
         assert_eq!(
             payload.settings.color_management.workflow,
             ColorWorkflow::SceneReferred
@@ -3469,10 +3450,6 @@ mod tests {
         assert_eq!(
             payload.settings.color_management.missing_metadata_policy,
             MissingColorMetadataPolicy::AssumeRec709
-        );
-        assert_eq!(
-            payload.settings.color_management.nested_processing,
-            NestedColorProcessing::ForceParentWorkingSpace
         );
         assert_eq!(
             payload.settings.color_management.output_color_space,

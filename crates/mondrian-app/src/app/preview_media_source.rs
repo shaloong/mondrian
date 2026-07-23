@@ -198,7 +198,6 @@ pub(crate) fn resolve_preview_media_source(
         working_color_space: request.color_context.working_color_space,
         tone_map: request.color_context.tone_map,
         engine: request.color_context.engine.clone(),
-        ocio_generation: mondrian_core::ocio_config_generation(),
     };
     canonicalize_media_decode_geometry(&mut key, request.hardware_admission);
 

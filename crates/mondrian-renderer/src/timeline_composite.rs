@@ -111,7 +111,6 @@ impl<'a> TimelineEffectColorRuntime<'a> {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.engine.hash(&mut hasher);
         self.working_color_space.hash(&mut hasher);
-        mondrian_core::ocio::ocio_config_generation().hash(&mut hasher);
         hasher.finish()
     }
 

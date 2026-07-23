@@ -18,7 +18,7 @@ use super::*;
 
 fn color_context() -> ColorContext {
     SequenceSettings::default().root_preview_color_context(
-        &mondrian_core::ProjectColorManagement::default(),
+        &mondrian_core::ProjectColorEnvironment::default(),
         ColorSpace::Srgb,
     )
 }
@@ -34,7 +34,6 @@ fn color_contract() -> ThumbnailColorContract {
         tone_map: true,
         engine: ColorEngine::mondrian_standard(),
         output_transform: OutputTransformIntent::mondrian_standard(),
-        ocio_generation: mondrian_core::ocio_config_generation(),
     }
 }
 
@@ -258,7 +257,7 @@ fn color_contract_rejections_and_range_authority_remain_distinct() {
 fn unsupported_encoded_output_is_rejected_before_decode() {
     let asset = missing_video_asset();
     let context = SequenceSettings::default().root_preview_color_context(
-        &mondrian_core::ProjectColorManagement::default(),
+        &mondrian_core::ProjectColorEnvironment::default(),
         ColorSpace::DisplayP3,
     );
     let failure = ThumbnailColorContract::resolve(&asset, &context)

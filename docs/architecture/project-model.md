@@ -15,6 +15,8 @@ must live outside `.mdp`.
 - `document_revision`
 - `meta: ProjectMeta`
 - `settings: ProjectSettings`
+- `color_environment: ProjectColorEnvironment`
+- `new_sequence_defaults: SequenceSettings`
 - `sequences: SequenceCollection`
 - `proxy_mode_assets: BTreeSet<AssetId>`
 
@@ -27,37 +29,50 @@ Sequence owns an independent monotonic `SequenceRevision`; Playback, Preview,
 audio compilation, and render caches bind that revision, so an edited draft or
 failed save cannot continue under an older Timeline identity.
 
-`ProjectSettings.color_management.engine` is the sole persisted product-mode
-selector for Mondrian Standard, ACES, or Custom OCIO. Sequence workflow stores
-only the rendering-domain choice (SceneReferred by default for Standard picture
-formation, or an explicit DisplayReferred colorimetric bypass); it must not
-duplicate an ACES mode flag.
-Archive round-trip tests resolve the reopened root program context and require
-the default Standard project to retain the version-pinned Standard View intent.
-An explicitly DisplayReferred project retains its direct colorimetric intent.
-The new-project draft edits this same `ProjectSettings` value directly and
-offers Mondrian Standard, the two version-pinned ACES 2.0 presets, and Custom
-OCIO. Custom file selection must validate the config and pin its complete
-identity before replacing the draft engine; cancellation or validation failure
-leaves the previous engine intact.
-Document validation applies each sequence's effective project/sequence engine
-to its working-space setting. A Custom OCIO mismatch fails before archive save
-or open, while the application performs the same check before project creation
-and before atomically recording a sequence-settings command. This keeps invalid
-processor routes out of both persistent documents and undo history.
-The same rule applies to Mondrian Standard: v1 fixes Linear Rec.2020 in its
-persisted package identity, so a Standard document with another sequence
-working space is invalid rather than an undocumented alternate Standard path.
-Project color-mode replacement is a narrow project action carrying one complete
-`ColorEngine`. `AppState` first validates every inheriting sequence against a
-candidate `ProjectColorManagement`, then loads the exact OCIO config, replaces
-the engine, stops playback, refreshes preview access identity, and saves. A
-validation/load/save failure leaves or restores the previous project engine;
-the UI never mutates renderer state directly.
-The editor exposes this action through File -> Project Settings. Its transient
-draft starts from the persisted project engine and uses the active sequence's
-working space only to build a reproducible Custom OCIO identity; `AppState`
-still validates every inheriting sequence before accepting that identity.
+`ProjectColorEnvironment.engine` is the one persisted product-mode selector for
+Mondrian Standard, ACES, or Custom OCIO. A Sequence never stores, overrides, or
+inherits another engine. It stores only program semantics interpreted inside
+the Project environment: working space, scene/display-referred workflow,
+input-metadata policy, Program Output target and tone-map policy, delivery
+range/bit-depth defaults, and authored HDR metadata.
+
+`ProjectSettings` remains a container/runtime policy object (proxy, cache and
+autosave settings); placing the engine there would mix image semantics with
+runtime preferences. `new_sequence_defaults` is a complete Sequence template.
+Project creation owns both the environment and this template, and the first
+Sequence receives an exact copy. Updating the template affects only future
+Sequences. It is not consulted by playback, validation, export, or an existing
+Sequence.
+
+Document validation checks the template and every existing Sequence against
+the exact Project engine. Mondrian Standard pins Linear Rec.2020; Custom OCIO
+pins the working and output routes covered by its saved processor identity;
+ACES permits its supported explicit working spaces. An incompatible candidate
+cannot enter a saved document or author transaction.
+
+Replacing the Project color environment is one atomic Project action carrying
+a complete `ProjectColorEnvironment`. `AppState` first prepares the exact OCIO
+dependency, then validates the template and every Sequence. Only if all checks
+pass does it commit one Project snapshot, stop playback and rotate preview
+execution. It never rewrites Sequence settings or silently substitutes another
+engine/output route. A failure leaves the previous environment and history
+unchanged.
+
+The Project Settings draft edits this same global environment. A Custom OCIO
+selection is pinned to a complete config/resource/processor identity before it
+can replace the draft. If an already-authored Custom dependency is unavailable
+on reopen, the document still preserves the exact author intent; execution
+prepare fails closed until the dependency is restored. It must not fall back to
+Mondrian Standard, ACES, or a same-path-but-different config.
+
+Nested color integration is not a Sequence-global setting. It belongs to each
+`ClipContent::NestedSequence` placement edge, because the same child can be
+placed by different parents with different handoff intent. All such edges
+remain inside the one Project engine. The edge either composites in the child
+working space and converts once to the parent, or evaluates the child directly
+in the parent working space. A future baked-output mode cannot be exposed until
+its output/input identities, stateful effects, Alpha semantics and
+preview/export reference corpus are complete.
 
 ## Runtime State
 
@@ -128,7 +143,7 @@ is written with that field explicitly.
 
 Archive and document JSON pass through separate version registries before typed
 deserialization. During Alpha there are deliberately no legacy document steps:
-schema v18 is the sole accepted author schema, and older/future versions fail
+schema v19 is the sole accepted author schema, and older/future versions fail
 instead of being guessed. Version 5 introduced the explicit tagged
 `mondrian_standard` / `aces` / `custom_ocio` project contract and makes every
 Mondrian Standard package-identity field mandatory: product ID/version, config
@@ -137,7 +152,8 @@ likewise requires config and processor-graph
 digests, working/display/view/look identities, roles, and an explicit dynamic
 property list; a mutable source path alone is not a project color definition.
 Version 6 removes the redundant persisted `ColorWorkflow::Aces` and reserves
-Standard/ACES/Custom mode selection for `ProjectColorManagement.engine`.
+Standard/ACES/Custom mode selection for the Project-owned engine (now
+`ProjectColorEnvironment.engine`).
 The current application creates sequences as SceneReferred so Mondrian Standard
 is the default Program Output View; DisplayReferred remains an explicit bypass
 and the persisted enum keeps workflow separate from engine selection. Version 7 replaces the ambiguous
@@ -205,7 +221,15 @@ Future split-entry layouts require an archive migration and new
 SQLite migrates only in the extracted runtime copy. The source `.mdp` is never
 rewritten by open.
 
-Current document schema v18 persists canonical rational `TimelineTime` values
+Version 19 moves the exact engine into the mandatory top-level
+`ProjectColorEnvironment`, adds the complete mandatory
+`new_sequence_defaults`, removes engine/inheritance/display and nested-edge
+policy from `SequenceColorManagement`, and stores nested processing on each
+`NestedSequence` Clip edge. Alpha intentionally provides no v18 migration:
+duplicated engine truth and ambiguous nested ownership are rejected rather than
+guessed.
+
+Current document schema v19 persists canonical rational `TimelineTime` values
 directly and requires the shared visual/audio `ParameterSchema`. It does not
 contain frame-oriented `TimeCode`, `TimeTicks`, descriptor-level duplicate
 defaults/types, editor-preset interpolation capabilities, or compatibility

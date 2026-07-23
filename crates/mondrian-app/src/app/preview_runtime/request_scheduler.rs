@@ -48,15 +48,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let display_snapshot = self.display_snapshot.borrow();
         let Ok(display_color_space) = preview_display_color_space(
             sequence,
-            &state.project_settings().color_management,
+            state.viewer_display_management(),
             display_snapshot.as_ref(),
         ) else {
             return;
         };
-        let color_context = sequence.settings.root_preview_color_context(
-            &state.project_settings().color_management,
-            display_color_space,
-        );
+        let color_context = sequence
+            .settings
+            .root_preview_color_context(state.project_color_environment(), display_color_space);
         let preroll_deadline_at = state
             .is_playback_priming()
             .then(|| state.playback_frame_deadline_at(Instant::now()))
@@ -185,14 +184,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let display_snapshot = self.display_snapshot.borrow();
         let display_color_space = preview_display_color_space(
             sequence,
-            &state.project_settings().color_management,
+            state.viewer_display_management(),
             display_snapshot.as_ref(),
         )
         .ok()?;
-        let color_context = sequence.settings.root_preview_color_context(
-            &state.project_settings().color_management,
-            display_color_space,
-        );
+        let color_context = sequence
+            .settings
+            .root_preview_color_context(state.project_color_environment(), display_color_space);
         let window = media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)?;
         let mut ready_media_frames = 0usize;
         let mut available_media_frames = 0usize;

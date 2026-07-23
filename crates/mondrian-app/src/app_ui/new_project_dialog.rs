@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use mondrian_core::{ProjectSettings, Rational, Resolution};
+use mondrian_core::{ProjectColorEnvironment, ProjectSettings, Rational, Resolution};
 use mondrian_platform::PlatformService;
 use mondrian_timeline::SequenceSettings;
 use mondrian_ui_core::types::*;
@@ -36,6 +36,7 @@ use crate::app_ui::shell::PROJECT_FILE_EXTENSION;
 pub struct AppUiNewProjectDraft {
     pub name: String,
     pub sequence_settings: SequenceSettings,
+    pub color_environment: ProjectColorEnvironment,
     pub project_settings: ProjectSettings,
 }
 
@@ -44,6 +45,7 @@ impl Default for AppUiNewProjectDraft {
         Self {
             name: "未命名".into(),
             sequence_settings: SequenceSettings::default(),
+            color_environment: ProjectColorEnvironment::default(),
             project_settings: ProjectSettings::default(),
         }
     }
@@ -60,7 +62,7 @@ impl AppUiNewProjectDraft {
 
     /// Validate the draft before turning it into a creation payload.
     pub fn validate(&self) -> mondrian_core::Result<()> {
-        self.sequence_settings.validate()
+        self.sequence_settings.validate_with_color_environment(&self.color_environment)
     }
 
     /// Apply one shell-local form update to the real creation settings.
@@ -83,7 +85,10 @@ impl AppUiNewProjectDraft {
                 }
             }
             NewProjectDraftUpdatePayload::ColorEngine(engine) => {
-                self.project_settings.color_management.engine = engine;
+                if let Some(working_space) = engine.pinned_working_space() {
+                    self.sequence_settings.working_color_space = working_space;
+                }
+                self.color_environment.engine = engine;
             }
             NewProjectDraftUpdatePayload::ProxyEnabled(enabled) => {
                 self.project_settings.proxy_enabled = enabled;
@@ -113,6 +118,7 @@ impl AppUiNewProjectDraft {
             project_file: project_file.into(),
             name: self.display_name(),
             sequence_settings: self.sequence_settings,
+            color_environment: self.color_environment,
             project_settings: self.project_settings,
         }
     }
@@ -254,7 +260,7 @@ fn audio_sample_rate_dropdown_for(draft: &AppUiNewProjectDraft) -> Dropdown {
 
 fn color_engine_dropdown_for(draft: &AppUiNewProjectDraft) -> Dropdown {
     Dropdown::new(
-        color_engine_label(&draft.project_settings.color_management.engine),
+        color_engine_label(&draft.color_environment.engine),
         color_engine_menu_items(|engine| {
             app_shell_new_project_draft_changed_action(NewProjectDraftUpdatePayload::ColorEngine(
                 engine,

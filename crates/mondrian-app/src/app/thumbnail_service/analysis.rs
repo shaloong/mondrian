@@ -58,7 +58,6 @@ pub(super) struct ThumbnailColorContract {
     pub(super) tone_map: bool,
     pub(super) engine: ColorEngine,
     pub(super) output_transform: OutputTransformIntent,
-    pub(super) ocio_generation: u64,
 }
 
 impl ThumbnailColorContract {
@@ -120,7 +119,6 @@ impl ThumbnailColorContract {
             tone_map: context.tone_map,
             engine: context.engine.clone(),
             output_transform: context.output_transform.clone(),
-            ocio_generation: mondrian_core::ocio_config_generation(),
         })
     }
 
@@ -279,8 +277,8 @@ pub(super) fn thumbnail_key(job: &ThumbnailJob, width: u32, height: u32) -> Stri
         _ => "unknown".to_owned(),
     };
     format!(
-        "asset-thumb:{}:{width}x{height}:len{len}:mtime{modified}:ocio{}:sig{color_signature:016x}",
-        job.key.asset_id, job.key.color.ocio_generation
+        "asset-thumb:{}:{width}x{height}:len{len}:mtime{modified}:sig{color_signature:016x}",
+        job.key.asset_id
     )
 }
 

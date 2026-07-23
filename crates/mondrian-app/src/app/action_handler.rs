@@ -27,35 +27,37 @@ use crate::app::ui_actions::{
     InspectorSetClipPropertyPayload, InspectorSetClipTintPayload,
     InspectorSetClipTransformFieldPayload, InspectorSetEffectEnabledPayload,
     InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
-    ProjectRecoverFromAutosavePayload, ProjectSetColorEnginePayload, SequenceTargetPayload,
-    SequenceUpdateSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineCreateCrossDissolvePayload, TimelineDropAssetPayload, TimelineInOutPointPayloadKind,
-    TimelineMoveClipPayload, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
-    TimelineSeekPayload, TimelineSelectClipPayload, TimelineSelectVideoTransitionPayload,
-    TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
-    TimelineSetTrackControlPayload, TimelineSetVideoTransitionRangePayload,
-    TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
-    TimelineTrimSelectedClipsToPlayheadPayload, ViewerSetClipTransformPayload,
-    ViewerSetPreviewResolutionScalePayload, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
-    ASSETS_CREATE_SOLID_COLOR, ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION,
-    ASSETS_IMPORT_FILES, ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION,
-    ASSETS_NAMESPACE, ASSETS_PREPARE_DRAG, ASSETS_REBIND_AUDIO_COMPONENT,
-    ASSETS_REFRESH_AUDIO_COMPONENTS, ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET,
-    ASSETS_RENAME_FOLDER, ASSETS_SET_INTERPRETATION, ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP,
-    EFFECTS_NAMESPACE, EXPORT_CANCEL_JOB, EXPORT_CLEAR_COMPLETED, EXPORT_ENQUEUE, EXPORT_NAMESPACE,
-    EXPORT_SET_DRAFT, INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT,
+    ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
+    ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
+    TimelineAddTrackKind, TimelineAddTrackPayload, TimelineCreateCrossDissolvePayload,
+    TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineMoveClipPayload,
+    TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload, TimelineSeekPayload,
+    TimelineSelectClipPayload, TimelineSelectVideoTransitionPayload, TimelineSetInOutPointPayload,
+    TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
+    TimelineSetVideoTransitionRangePayload, TimelineTrackControlPayloadKind,
+    TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
+    ViewerSetClipTransformPayload, ViewerSetPreviewResolutionScalePayload,
+    ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER, ASSETS_CREATE_SOLID_COLOR,
+    ASSETS_DELETE_ASSET, ASSETS_DELETE_FOLDER, ASSETS_DELETE_SELECTION, ASSETS_IMPORT_FILES,
+    ASSETS_MOVE_ASSET, ASSETS_MOVE_FOLDER, ASSETS_MOVE_SELECTION, ASSETS_NAMESPACE,
+    ASSETS_PREPARE_DRAG, ASSETS_REBIND_AUDIO_COMPONENT, ASSETS_REFRESH_AUDIO_COMPONENTS,
+    ASSETS_RELINK_ASSET, ASSETS_RENAME_ASSET, ASSETS_RENAME_FOLDER, ASSETS_SET_INTERPRETATION,
+    ASSETS_SET_PROXY_MODE, EFFECTS_ADD_TO_CLIP, EFFECTS_NAMESPACE, EXPORT_CANCEL_JOB,
+    EXPORT_CLEAR_COMPLETED, EXPORT_ENQUEUE, EXPORT_NAMESPACE, EXPORT_SET_DRAFT,
+    INSPECTOR_NAMESPACE, INSPECTOR_REMOVE_EFFECT, INSPECTOR_SELECT_EFFECT,
     INSPECTOR_SET_AUDIO_COMPONENT_EDIT_FIELD, INSPECTOR_SET_AUDIO_COMPONENT_SOURCE,
     INSPECTOR_SET_CLIP_CURVE, INSPECTOR_SET_CLIP_ENABLED, INSPECTOR_SET_CLIP_OPACITY,
     INSPECTOR_SET_CLIP_PROPERTY, INSPECTOR_SET_CLIP_TINT, INSPECTOR_SET_CLIP_TRANSFORM_FIELD,
     INSPECTOR_SET_EFFECT_ENABLED, INSPECTOR_SET_EFFECT_PROPERTY, PROJECT_CREATE_WITH_SETTINGS,
-    PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_SET_COLOR_ENGINE, SEQUENCE_DELETE,
-    SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT,
-    SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE, SEQUENCE_UPDATE_SETTINGS,
-    TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_BASIC_TITLE,
-    TIMELINE_CREATE_CROSS_DISSOLVE, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK,
-    TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD,
-    TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SELECT_VIDEO_TRANSITION,
-    TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
+    PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_UPDATE_COLOR_ENVIRONMENT,
+    PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS, SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE,
+    SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
+    SEQUENCE_UPDATE_SETTINGS, TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS,
+    TIMELINE_CREATE_BASIC_TITLE, TIMELINE_CREATE_CROSS_DISSOLVE, TIMELINE_DROP_ASSET,
+    TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE,
+    TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
+    TIMELINE_SELECT_VIDEO_TRANSITION, TIMELINE_SET_IN_OUT_POINT,
+    TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
     TIMELINE_SET_VIDEO_TRANSITION_RANGE, TIMELINE_TRIM_CLIPS,
     TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, VIEWER_NAMESPACE, VIEWER_SET_CLIP_TRANSFORM,
     VIEWER_SET_PREVIEW_RESOLUTION_SCALE,
@@ -301,6 +303,7 @@ impl AppState {
             project_file.clone(),
             &name,
             payload.sequence_settings,
+            payload.color_environment,
             payload.project_settings,
         )
         .map_err(|err| {
@@ -1675,8 +1678,11 @@ impl AppState {
                     payload,
                 )?;
                 match payload {
-                    ExportDraftUpdatePayload::PresetIndex(index) => {
-                        self.set_export_draft_preset_index(index)
+                    ExportDraftUpdatePayload::BuiltinPreset(preset) => {
+                        self.set_export_draft_builtin_preset(preset)
+                    }
+                    ExportDraftUpdatePayload::Preset(preset) => {
+                        self.set_export_draft_preset(preset)
                     }
                     ExportDraftUpdatePayload::Sequence(sequence_id) => {
                         self.set_export_draft_sequence_id(sequence_id)
@@ -1753,13 +1759,21 @@ impl AppState {
                 )?;
                 self.recover_project_from_autosave_ui(payload)
             }
-            PROJECT_SET_COLOR_ENGINE => {
-                let payload = parse_ui_payload::<ProjectSetColorEnginePayload>(
+            PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS => {
+                let payload = parse_ui_payload::<ProjectUpdateNewSequenceDefaultsPayload>(
                     "project_ui_action",
                     name,
                     payload,
                 )?;
-                self.set_project_color_engine(payload.engine)
+                self.update_new_sequence_defaults(payload.settings)
+            }
+            PROJECT_UPDATE_COLOR_ENVIRONMENT => {
+                let payload = parse_ui_payload::<ProjectUpdateColorEnvironmentPayload>(
+                    "project_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.update_project_color_environment(payload.color_environment)
             }
             _ => Err(unknown_ui_action_error("project_ui_action", name)),
         }
@@ -2963,10 +2977,11 @@ mod tests {
         inspector_set_clip_property_action, inspector_set_clip_tint_action,
         inspector_set_clip_transform_field_action, inspector_set_effect_enabled_action,
         inspector_set_effect_property_action, project_create_with_settings_action,
-        project_recover_from_autosave_action, project_set_color_engine_action,
-        sequence_delete_action, sequence_duplicate_action, sequence_new_action,
-        sequence_return_to_parent_action, sequence_set_active_default_action,
-        sequence_switch_active_action, sequence_update_settings_action, timeline_add_track_action,
+        project_recover_from_autosave_action, project_update_color_environment_action,
+        project_update_new_sequence_defaults_action, sequence_delete_action,
+        sequence_duplicate_action, sequence_new_action, sequence_return_to_parent_action,
+        sequence_set_active_default_action, sequence_switch_active_action,
+        sequence_update_settings_action, timeline_add_track_action,
         timeline_clear_in_out_points_action, timeline_create_basic_title_action,
         timeline_drop_asset_action, timeline_move_clip_action, timeline_move_track_action,
         timeline_open_nested_sequence_action, timeline_roll_selected_cut_to_playhead_action,
@@ -2991,10 +3006,11 @@ mod tests {
         InspectorSetClipTintPayload, InspectorSetClipTransformFieldPayload,
         InspectorSetEffectEnabledPayload, InspectorSetEffectPropertyPayload,
         ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
-        ProjectSetColorEnginePayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
-        TimelineAddTrackKind, TimelineAddTrackPayload, TimelineDropAssetPayload,
-        TimelineInOutPointPayloadKind, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
-        TimelineSeekSource, TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
+        ProjectUpdateColorEnvironmentPayload, ProjectUpdateNewSequenceDefaultsPayload,
+        SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineAddTrackKind,
+        TimelineAddTrackPayload, TimelineDropAssetPayload, TimelineInOutPointPayloadKind,
+        TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload, TimelineSeekSource,
+        TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
         TimelineSetTrackControlPayload, TimelineTrackControlPayloadKind, TimelineTrimClipsPayload,
         TimelineTrimPayloadEdge, TimelineTrimSelectedClipsToPlayheadPayload,
         ViewerSetClipTransformPayload, ViewerSetPreviewResolutionScalePayload,
@@ -3255,16 +3271,20 @@ mod tests {
     fn dispatch_export_ui_updates_draft_fields() {
         let mut state = AppState::new();
         let sequence_id = mondrian_core::types::SequenceId::new();
-        let last_preset_index = crate::app::exporting::builtin_export_presets()
-            .len()
-            .checked_sub(1)
-            .expect("at least one built-in export preset");
+        let builtin = mondrian_export::preset::BuiltinExportPreset::ProRes4444Alpha;
+        let mut customized = builtin.preset();
+        customized.video_signal.range = mondrian_export::preset::ExportParameter::FollowSequence;
 
         state
             .dispatch_action(export_set_draft_action(
-                ExportDraftUpdatePayload::PresetIndex(usize::MAX),
+                ExportDraftUpdatePayload::BuiltinPreset(builtin),
             ))
             .expect("set preset");
+        state
+            .dispatch_action(export_set_draft_action(ExportDraftUpdatePayload::Preset(
+                customized.clone(),
+            )))
+            .expect("customize preset");
         state
             .dispatch_action(export_set_draft_action(ExportDraftUpdatePayload::Sequence(
                 Some(sequence_id),
@@ -3281,7 +3301,8 @@ mod tests {
             ))
             .expect("set output path");
 
-        assert_eq!(state.export_draft.selected_preset_idx, last_preset_index);
+        assert_eq!(state.export_draft.selected_builtin_preset, builtin);
+        assert_eq!(state.export_draft.preset, customized);
         assert_eq!(state.export_draft.selected_sequence_id, Some(sequence_id));
         assert_eq!(
             state.export_draft.range,
@@ -3622,8 +3643,6 @@ mod tests {
     #[test]
     fn dispatch_sequence_ui_rejects_custom_ocio_working_space_mismatch_atomically() {
         let mut state = AppState::new();
-        state.test_project_settings_mut().color_management.engine =
-            pinned_test_custom_engine("Linear Rec.2020");
         let sequence = Sequence::new("original");
         let sequence_id = sequence.id;
         state.test_set_active_sequence(sequence_id);
@@ -3633,6 +3652,8 @@ mod tests {
             working_color_space: WorkingColorSpace::AcesCg,
             ..SequenceSettings::default()
         };
+        state.test_project_color_environment_mut().engine =
+            pinned_test_custom_engine("Linear Rec.2020");
 
         let error = state
             .dispatch_action(sequence_update_settings_action(
@@ -3683,8 +3704,9 @@ mod tests {
         let mut existing = Sequence::new("Existing");
         existing.settings.working_color_space = WorkingColorSpace::AcesCg;
         state.test_set_sequence(Some(existing));
-        state.test_project_settings_mut().color_management.engine =
-            pinned_test_custom_engine("ACEScg");
+        state.test_project_color_environment_mut().engine = pinned_test_custom_engine("ACEScg");
+        let defaults = state.test_new_sequence_defaults_mut();
+        defaults.working_color_space = WorkingColorSpace::AcesCg;
 
         state.new_sequence("Custom Working");
 
@@ -5250,6 +5272,7 @@ mod tests {
                     project_file: target_without_extension,
                     name: "Full Create".into(),
                     sequence_settings: sequence_settings.clone(),
+                    color_environment: mondrian_core::ProjectColorEnvironment::default(),
                     project_settings: project_settings.clone(),
                 },
             ))
@@ -5278,9 +5301,8 @@ mod tests {
             sequence.settings.color_management.workflow,
             mondrian_timeline::sequence::ColorWorkflow::SceneReferred
         );
-        let context = sequence
-            .settings
-            .root_program_color_context(&state.project_settings().color_management);
+        let context =
+            sequence.settings.root_program_color_context(state.project_color_environment());
         assert_eq!(
             context.engine,
             mondrian_core::ColorEngine::mondrian_standard()
@@ -5290,6 +5312,7 @@ mod tests {
             mondrian_core::OutputTransformIntent::mondrian_standard()
         );
         assert!(!state.project_settings().proxy_enabled);
+        assert_eq!(state.new_sequence_defaults(), &sequence_settings);
         assert!(state.asset_library().is_some());
         assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| !*is_error));
 
@@ -5297,7 +5320,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_project_color_engine_update_changes_inherited_program_context() {
+    fn updating_new_sequence_defaults_does_not_change_existing_sequence() {
         let mut state = AppState::new();
         let before = Sequence::new("Program");
         let sequence_id = before.id;
@@ -5311,33 +5334,32 @@ mod tests {
             1
         );
         let before_revision = state.active_sequence().expect("sequence").revision;
-        let engine = mondrian_core::ColorEngine::Aces {
-            preset: mondrian_core::AcesConfigPreset::CgV4Aces2Ocio25,
-        };
+        let before_context = state
+            .active_sequence()
+            .expect("sequence")
+            .settings
+            .root_program_color_context(state.project_color_environment());
+        let mut defaults = state.new_sequence_defaults().clone();
+        defaults.resolution = Resolution::UHD4K;
 
         state
-            .dispatch_action(project_set_color_engine_action(
-                ProjectSetColorEnginePayload { engine: engine.clone() },
+            .dispatch_action(project_update_new_sequence_defaults_action(
+                ProjectUpdateNewSequenceDefaultsPayload { settings: defaults.clone() },
             ))
-            .expect("set project color engine");
+            .expect("update new-Sequence defaults");
 
-        assert_eq!(state.project_settings().color_management.engine, engine);
+        assert_eq!(state.new_sequence_defaults(), &defaults);
         assert_eq!(
-            state.active_sequence().expect("active sequence").revision.get(),
-            before_revision.get() + 1
-        );
-        assert_eq!(
-            state.sequences()[0].revision,
-            state.active_sequence().expect("active sequence").revision
+            state.active_sequence().expect("active sequence").revision,
+            before_revision
         );
         assert_eq!(
             state
                 .active_sequence()
                 .expect("active sequence")
                 .settings
-                .root_program_color_context(&state.project_settings().color_management)
-                .engine,
-            engine
+                .root_program_color_context(state.project_color_environment()),
+            before_context
         );
         assert_eq!(
             state.authoring_history().expect("history").diagnostics().undo_entries,
@@ -5350,23 +5372,120 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_project_color_engine_update_rejects_inherited_working_mismatch_atomically() {
+    fn unavailable_custom_ocio_does_not_block_structurally_valid_author_edits() {
+        let mut state = AppState::new();
+        state.test_project_color_environment_mut().engine =
+            pinned_test_custom_engine("Linear Rec.2020");
+        let mut defaults = state.new_sequence_defaults().clone();
+        defaults.resolution = Resolution::UHD4K;
+
+        state
+            .dispatch_action(project_update_new_sequence_defaults_action(
+                ProjectUpdateNewSequenceDefaultsPayload { settings: defaults.clone() },
+            ))
+            .expect("author intent remains editable without preparing execution dependencies");
+
+        assert_eq!(state.new_sequence_defaults(), &defaults);
+    }
+
+    #[test]
+    fn updating_project_color_environment_changes_resolution_without_rewriting_sequence() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Program");
+        let sequence_id = sequence.id;
+        let original_settings = sequence.settings.clone();
+        let original_revision = sequence.revision;
+        state.test_set_active_sequence(sequence_id);
+        state.test_set_sequence(Some(sequence.clone()));
+        state.test_add_sequence(sequence);
+        let color_environment = mondrian_core::ProjectColorEnvironment {
+            engine: mondrian_core::ColorEngine::Aces {
+                preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+            },
+        };
+
+        state
+            .dispatch_action(project_update_color_environment_action(
+                ProjectUpdateColorEnvironmentPayload {
+                    color_environment: color_environment.clone(),
+                },
+            ))
+            .expect("replace Project color environment");
+
+        let active = state.active_sequence().expect("active sequence");
+        assert_eq!(active.settings, original_settings);
+        assert_eq!(active.revision, original_revision);
+        assert_eq!(state.project_color_environment(), &color_environment);
+        assert_eq!(
+            active
+                .settings
+                .root_program_color_context(state.project_color_environment())
+                .engine,
+            color_environment.engine
+        );
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics().undo_entries,
+            1
+        );
+    }
+
+    #[test]
+    fn project_color_environment_update_rejects_any_invalid_sequence_atomically() {
+        let mut state = AppState::new();
+        let aces_environment = mondrian_core::ProjectColorEnvironment {
+            engine: mondrian_core::ColorEngine::Aces {
+                preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+            },
+        };
+        *state.test_project_color_environment_mut() = aces_environment.clone();
+        let mut incompatible = Sequence::new("ACEScg Program");
+        incompatible.settings.working_color_space = WorkingColorSpace::AcesCg;
+        state.test_set_active_sequence(incompatible.id);
+        state.test_set_sequence(Some(incompatible.clone()));
+        state.test_add_sequence(incompatible);
+
+        let error = state
+            .dispatch_action(project_update_color_environment_action(
+                ProjectUpdateColorEnvironmentPayload {
+                    color_environment: mondrian_core::ProjectColorEnvironment::default(),
+                },
+            ))
+            .expect_err("one incompatible Sequence must reject the whole Project change");
+
+        assert!(error.to_string().contains("Mondrian Standard"));
+        assert_eq!(state.project_color_environment(), &aces_environment);
+        assert_eq!(
+            state.active_sequence().expect("active sequence").settings.working_color_space,
+            WorkingColorSpace::AcesCg
+        );
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics().undo_entries,
+            0
+        );
+    }
+
+    #[test]
+    fn invalid_new_sequence_defaults_are_rejected_atomically() {
         let mut state = AppState::new();
         let sequence = Sequence::new("Program");
         state.test_set_active_sequence(sequence.id);
         state.test_set_sequence(Some(sequence.clone()));
         state.test_add_sequence(sequence);
-        let previous = state.project_settings().color_management.engine.clone();
+        let previous = state.new_sequence_defaults().clone();
         let previous_revision = state.active_sequence().expect("sequence").revision;
+        let mut invalid = previous.clone();
+        invalid.working_color_space = WorkingColorSpace::AcesCg;
 
         let error = state
-            .dispatch_action(project_set_color_engine_action(
-                ProjectSetColorEnginePayload { engine: pinned_test_custom_engine("ACEScg") },
+            .dispatch_action(project_update_new_sequence_defaults_action(
+                ProjectUpdateNewSequenceDefaultsPayload { settings: invalid },
             ))
-            .expect_err("mismatched Custom OCIO must not replace project mode");
+            .expect_err("settings incompatible with the Project engine must not replace defaults");
 
-        assert!(error.to_string().contains("pins working space 'ACEScg'"));
-        assert_eq!(state.project_settings().color_management.engine, previous);
+        let message = error.to_string();
+        assert!(message.contains("Mondrian Standard"));
+        assert!(message.contains("not 'ACEScg'"));
+        assert_eq!(state.new_sequence_defaults(), &previous);
         assert_eq!(
             state.active_sequence().expect("sequence").revision,
             previous_revision
@@ -5374,32 +5493,29 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_project_color_engine_update_rejects_standard_working_mismatch_atomically() {
+    fn new_sequence_uses_updated_defaults_without_rewriting_existing_sequence() {
         let mut state = AppState::new();
-        state.test_project_settings_mut().color_management.engine =
-            mondrian_core::ColorEngine::Aces {
-                preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
-            };
-        let mut sequence = Sequence::new("P3 Program");
-        sequence.settings.working_color_space = WorkingColorSpace::LinearP3D65;
+        let sequence = Sequence::new("Existing");
+        let existing_settings = sequence.settings.clone();
         state.test_set_active_sequence(sequence.id);
         state.test_set_sequence(Some(sequence.clone()));
         state.test_add_sequence(sequence);
-        let previous = state.project_settings().color_management.engine.clone();
-
-        let error = state
-            .dispatch_action(project_set_color_engine_action(
-                ProjectSetColorEnginePayload {
-                    engine: mondrian_core::ColorEngine::mondrian_standard(),
-                },
+        state.test_project_color_environment_mut().engine = mondrian_core::ColorEngine::Aces {
+            preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+        };
+        let mut defaults = state.new_sequence_defaults().clone();
+        defaults.resolution = Resolution::UHD4K;
+        defaults.working_color_space = WorkingColorSpace::AcesCg;
+        state
+            .dispatch_action(project_update_new_sequence_defaults_action(
+                ProjectUpdateNewSequenceDefaultsPayload { settings: defaults.clone() },
             ))
-            .expect_err("Standard must reject a sequence outside its pinned working space");
-
-        assert!(error.to_string().contains("Mondrian Standard"));
-        assert_eq!(state.project_settings().color_management.engine, previous);
+            .expect("update defaults");
+        assert_eq!(state.sequences()[0].settings, existing_settings);
+        state.new_sequence("Created From Defaults");
         assert_eq!(
-            state.active_sequence().expect("active sequence").settings.working_color_space,
-            WorkingColorSpace::LinearP3D65
+            state.active_sequence().expect("new active sequence").settings,
+            defaults
         );
     }
 

@@ -184,7 +184,14 @@ pub enum ClipContent {
     /// Effect-only layer sourced from a reusable project asset entry.
     AdjustmentLayer { asset_id: AssetId },
     /// Public output of another Sequence in the same Project.
-    NestedSequence { sequence_id: SequenceId },
+    ///
+    /// Color integration belongs to this parent-to-child placement edge, not
+    /// to either Sequence node. The same child can therefore be integrated
+    /// differently by different parents without mutating the child.
+    NestedSequence {
+        sequence_id: SequenceId,
+        color_processing: NestedColorProcessing,
+    },
     /// Deterministic project generator sourced from a reusable palette entry.
     SolidColor { asset_id: AssetId, color: Color },
     /// Sequence-local generated text with a closed parameter definition.
@@ -216,7 +223,7 @@ impl ClipContent {
     /// Nested Sequence identity when this is nested content.
     pub const fn nested_sequence_id(&self) -> Option<SequenceId> {
         match self {
-            Self::NestedSequence { sequence_id } => Some(*sequence_id),
+            Self::NestedSequence { sequence_id, .. } => Some(*sequence_id),
             _ => None,
         }
     }
@@ -312,10 +319,12 @@ pub enum FieldOrder {
 /// How nested sequence color processing interacts with the parent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, Hash)]
 pub enum NestedColorProcessing {
+    /// Composite in the child's authored working space, then convert exactly
+    /// once into the parent working space at the placement edge.
     #[default]
     PreserveChildWorkingSpace,
+    /// Evaluate the child directly in the parent working space.
     ForceParentWorkingSpace,
-    BakeChildOutputTransform,
 }
 
 // ── Flat clip representation (no timeline internals) ──────────────────
@@ -421,9 +430,6 @@ pub trait RenderPlanSource {
 
     /// Time base of the sequence.
     fn source_time_base(&self) -> Rational;
-
-    /// Nested color processing mode for nested sequences.
-    fn nested_color_processing(&self) -> NestedColorProcessing;
 
     /// Whether to auto tone-map media to the working color space.
     fn auto_tone_map_media(&self) -> bool;

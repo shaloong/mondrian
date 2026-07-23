@@ -1201,8 +1201,7 @@ mod tests {
             .and_then(ShellModal::as_new_project)
             .expect("new-project modal")
             .draft()
-            .project_settings
-            .color_management
+            .color_environment
             .engine
             .custom_ocio_identity()
             .expect("pinned Custom OCIO identity");

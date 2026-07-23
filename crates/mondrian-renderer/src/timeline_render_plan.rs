@@ -231,7 +231,7 @@ pub struct TimelineNestedSequencePlan {
     pub sequence_id: SequenceId,
     /// Exact child-Sequence-local source time; consumers resolve the child grid.
     pub source_time: TimelineTime,
-    pub nested_processing: NestedColorProcessing,
+    pub color_processing: NestedColorProcessing,
     pub opacity: f32,
     pub blend_mode: BlendMode,
     pub transform: [f32; 6],
@@ -545,11 +545,11 @@ fn compile_flat_clip(
         )?;
     let frame_seed = timeline_frame.max(0);
     Ok(Some(match ac.content {
-        ClipContent::NestedSequence { sequence_id } => {
+        ClipContent::NestedSequence { sequence_id, color_processing } => {
             TimelineRenderPlanElement::NestedSequence(TimelineNestedSequencePlan {
                 sequence_id,
                 source_time: ac.source_time,
-                nested_processing: source.nested_color_processing(),
+                color_processing,
                 opacity,
                 blend_mode: ac.blend_mode,
                 transform: ac.transform_matrix,
@@ -971,41 +971,34 @@ mod tests {
     }
 
     #[test]
-    fn render_plan_carries_nested_processing_mode() {
+    fn render_plan_carries_nested_clip_color_processing() {
         let mut seq = Sequence::new("render-plan-nested-processing");
-        seq.settings.color_management.nested_processing =
-            NestedColorProcessing::BakeChildOutputTransform;
         let tb = seq.time_base();
         let child = Sequence::new("child");
         let child_id = child.id;
+        let mut nested_clip =
+            Clip::new_nested_sequence(child_id, tt(0, tb), tt(20, tb), Some("child".to_string()))
+                .expect("valid nested clip");
+        let ClipContent::NestedSequence { color_processing, .. } = &mut nested_clip.content else {
+            panic!("expected nested Clip content");
+        };
+        *color_processing = NestedColorProcessing::ForceParentWorkingSpace;
 
-        seq.video_tracks[0]
-            .add_clip(
-                Clip::new_nested_sequence(
-                    child_id,
-                    tt(0, tb),
-                    tt(20, tb),
-                    Some("child".to_string()),
-                )
-                .expect("valid nested clip"),
-            )
-            .expect("add nested sequence");
+        seq.video_tracks[0].add_clip(nested_clip).expect("add nested sequence");
 
         let plan = analysis_elements(&seq, 0);
         let TimelineRenderPlanElement::NestedSequence(nested) = &plan[0] else {
             panic!("expected nested sequence plan");
         };
         assert_eq!(
-            nested.nested_processing,
-            NestedColorProcessing::BakeChildOutputTransform
+            nested.color_processing,
+            NestedColorProcessing::ForceParentWorkingSpace
         );
     }
 
     #[test]
     fn preview_and_export_requests_preserve_timeline_semantics() {
         let mut seq = Sequence::new("preview-export-contract");
-        seq.settings.color_management.nested_processing =
-            NestedColorProcessing::BakeChildOutputTransform;
         seq.video_tracks = vec![
             Track::new_video("V1"),
             Track::new_video("V2"),
@@ -1043,6 +1036,10 @@ mod tests {
                 .expect("valid nested clip");
         nested.source_in = tt(20, tb);
         nested.source_out = tt(50, tb);
+        let ClipContent::NestedSequence { color_processing, .. } = &mut nested.content else {
+            panic!("expected nested Clip content");
+        };
+        *color_processing = NestedColorProcessing::ForceParentWorkingSpace;
         seq.video_tracks[2].add_clip(nested).expect("add nested");
 
         let adjustment = Clip::new_adjustment_layer(AssetId::new(), tt(0, tb), tt(30, tb))
@@ -1216,7 +1213,7 @@ mod tests {
         NestedSequence {
             sequence_id: SequenceId,
             source_time: TimelineTime,
-            nested_processing: NestedColorProcessing,
+            color_processing: NestedColorProcessing,
             opacity: f32,
             blend_mode: BlendMode,
             transform: [f32; 6],
@@ -1294,7 +1291,7 @@ mod tests {
                     RenderPlanSemanticElement::NestedSequence {
                         sequence_id: nested.sequence_id,
                         source_time: nested.source_time,
-                        nested_processing: nested.nested_processing,
+                        color_processing: nested.color_processing,
                         opacity: nested.opacity,
                         blend_mode: nested.blend_mode,
                         transform: nested.transform,

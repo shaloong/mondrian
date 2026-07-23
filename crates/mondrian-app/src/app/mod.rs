@@ -17,8 +17,8 @@ use mondrian_core::{
         AssetId, AudioSourceComponentId, ClipId, ClipLinkGroupId, Color, EffectId, FramePosition,
         KeyframeId, Rational, Resolution, SequenceId, TrackId,
     },
-    AudioChannelLayout, AudioSamplePosition, AudioSampleRate, AudioSampleRounding, FrameRounding,
-    ProjectId, ProjectSettings, TimelineTime,
+    AudioChannelLayout, AudioSamplePosition, AudioSampleRate, AudioSampleRounding,
+    DisplayManagementPolicy, FrameRounding, ProjectId, ProjectSettings, TimelineTime,
 };
 use mondrian_editor_state::{AuthoringSession, AuthoringSessionId};
 use mondrian_effects::{
@@ -279,6 +279,9 @@ pub struct AppState {
     autosave_last_requested_at: Instant,
     /// Snapshot identity currently being written as a recovery point.
     autosave_in_flight_request: Option<project_persistence::ProjectPersistenceRequestId>,
+    /// Machine-local Viewer policy. It is runtime state, never Project or
+    /// Sequence author data.
+    viewer_display_management: DisplayManagementPolicy,
 
     // 播放状态
     /// Sole authority for transport position, epoch, and Clock Master.
@@ -348,6 +351,7 @@ impl AppState {
             project_persistence: ProjectPersistenceService::new(),
             autosave_last_requested_at: Instant::now(),
             autosave_in_flight_request: None,
+            viewer_display_management: DisplayManagementPolicy::default(),
             playback_engine: PlaybackEngine::default(),
             playback_evidence: PlaybackEvidenceCollector::default(),
             playback_evidence_now: MonotonicTimestamp::ZERO,
@@ -457,6 +461,35 @@ impl AppState {
             .unwrap_or_else(|| CLOSED_PROJECT_SETTINGS.get_or_init(ProjectSettings::default))
     }
 
+    /// Project-wide color engine used by every Sequence execution contract.
+    pub fn project_color_environment(&self) -> &mondrian_core::ProjectColorEnvironment {
+        static CLOSED_PROJECT_COLOR_ENVIRONMENT: OnceLock<mondrian_core::ProjectColorEnvironment> =
+            OnceLock::new();
+        self.authoring
+            .as_ref()
+            .map(|session| &session.document().color_environment)
+            .unwrap_or_else(|| {
+                CLOSED_PROJECT_COLOR_ENVIRONMENT
+                    .get_or_init(mondrian_core::ProjectColorEnvironment::default)
+            })
+    }
+
+    /// Template copied into newly created Sequences.
+    ///
+    /// Existing Sequences never consult this value during execution.
+    pub fn new_sequence_defaults(&self) -> &SequenceSettings {
+        static CLOSED_PROJECT_DEFAULTS: OnceLock<SequenceSettings> = OnceLock::new();
+        self.authoring
+            .as_ref()
+            .map(|session| &session.document().new_sequence_defaults)
+            .unwrap_or_else(|| CLOSED_PROJECT_DEFAULTS.get_or_init(SequenceSettings::default))
+    }
+
+    /// Machine-local Viewer display policy used by Window and Headless Adapters.
+    pub fn viewer_display_management(&self) -> &DisplayManagementPolicy {
+        &self.viewer_display_management
+    }
+
     /// Current author generation used by execution snapshots and cache identity.
     pub fn project_author_generation(&self) -> u64 {
         self.authoring
@@ -541,6 +574,8 @@ impl AppState {
         let document = mondrian_project::ProjectDocument::new(
             "Test Project",
             SequenceCollection::new(sequence),
+            mondrian_core::ProjectColorEnvironment::default(),
+            SequenceSettings::default(),
             ProjectSettings::default(),
         );
         AuthoringSession::new_unsaved(document, root.join("project.mdp"), root, library)
@@ -706,6 +741,8 @@ impl AppState {
                     mondrian_project::ProjectDocument::new(
                         "Test Project",
                         SequenceCollection::new(sequence),
+                        mondrian_core::ProjectColorEnvironment::default(),
+                        SequenceSettings::default(),
                         ProjectSettings::default(),
                     ),
                     root.join("project.mdp"),
@@ -743,6 +780,23 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn test_project_settings_mut(&mut self) -> &mut ProjectSettings {
         &mut self.test_ensure_authoring().document_mut_for_test_fixture().settings
+    }
+    #[cfg(test)]
+    pub(crate) fn test_new_sequence_defaults_mut(&mut self) -> &mut SequenceSettings {
+        &mut self
+            .test_ensure_authoring()
+            .document_mut_for_test_fixture()
+            .new_sequence_defaults
+    }
+    #[cfg(test)]
+    pub(crate) fn test_project_color_environment_mut(
+        &mut self,
+    ) -> &mut mondrian_core::ProjectColorEnvironment {
+        &mut self.test_ensure_authoring().document_mut_for_test_fixture().color_environment
+    }
+    #[cfg(test)]
+    pub(crate) fn test_viewer_display_management_mut(&mut self) -> &mut DisplayManagementPolicy {
+        &mut self.viewer_display_management
     }
     /// Observe completed/canceled proxy work for background UI refresh.
     pub fn poll_proxy_generation(&mut self) -> bool {

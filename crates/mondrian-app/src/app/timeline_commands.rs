@@ -210,8 +210,7 @@ impl AppState {
         &mut self,
         settings: mondrian_timeline::sequence::SequenceSettings,
     ) -> mondrian_core::Result<()> {
-        settings
-            .validate_with_project_color_management(&self.project_settings().color_management)?;
+        settings.validate_with_color_environment(self.project_color_environment())?;
         let before = self.active_sequence().cloned().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "update_active_sequence_settings".to_string(),
@@ -241,8 +240,7 @@ impl AppState {
                 reason: "序列名称不能为空".to_string(),
             });
         }
-        settings
-            .validate_with_project_color_management(&self.project_settings().color_management)?;
+        settings.validate_with_color_environment(self.project_color_environment())?;
         let before = self.sequence_by_id(sequence_id).cloned().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "update_sequence_identity_and_settings".to_string(),
@@ -1147,12 +1145,14 @@ impl AppState {
 
     /// Create a Sequence as one project-level authoring transaction.
     pub fn new_sequence(&mut self, name: &str) {
-        let mut sequence = Sequence::new(name);
-        if let Some(working_space) =
-            self.project_settings().color_management.engine.pinned_working_space()
-        {
-            sequence.settings.working_color_space = working_space;
-        }
+        let sequence = match Sequence::with_settings(name, self.new_sequence_defaults().clone()) {
+            Ok(sequence) => sequence,
+            Err(error) => {
+                tracing::error!(%error, "新建序列默认模板无效");
+                self.set_status_hint(format!("新建序列失败：{error}"), true);
+                return;
+            }
+        };
         let sequence_id = sequence.id;
         let result = self
             .authoring

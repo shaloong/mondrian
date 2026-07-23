@@ -366,7 +366,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             working_color_space: WorkingColorSpace::LinearRec709,
             tone_map: false,
             engine: ColorEngine::mondrian_standard(),
-            ocio_generation: mondrian_core::ocio_config_generation(),
         };
         let generation = self.scheduler.begin_generation();
         let _ = self.scheduler.request_with_demand_identity(
@@ -417,7 +416,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let display_snapshot = self.display_snapshot.borrow();
         let display_color_space = match preview_display_color_space(
             sequence,
-            &state.project_settings().color_management,
+            state.viewer_display_management(),
             display_snapshot.as_ref(),
         ) {
             Ok(color_space) => color_space,
@@ -430,9 +429,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 ));
             }
         };
-        let color_context = sequence
-            .settings
-            .root_program_color_context(&state.project_settings().color_management);
+        let color_context =
+            sequence.settings.root_program_color_context(state.project_color_environment());
         let Some(program_output_color_space) = color_context.output_color_space.color() else {
             self.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
                 feature: "program_output_identity".to_owned(),
@@ -760,8 +758,7 @@ impl Default for MediaPrerollFrameReadiness {
 struct ViewerPreviewGenerationKey {
     sequence_id: SequenceId,
     sequence_revision: mondrian_core::SequenceRevision,
-    project_document_revision: u64,
-    ocio_config_generation: u64,
+    project_author_generation: u64,
     display_contract_generation: Option<u64>,
     /// Playback Epoch for a running cursor. `None` identifies an idle/still
     /// cursor, whose exact frame remains part of the generation identity.
@@ -788,8 +785,7 @@ impl ViewerPreviewGenerationKey {
         Self {
             sequence_id: sequence.id,
             sequence_revision: sequence.revision,
-            project_document_revision: state.project_author_generation(),
-            ocio_config_generation: mondrian_core::ocio_config_generation(),
+            project_author_generation: state.project_author_generation(),
             display_contract_generation,
             playback_epoch: playing.then(|| state.playback_epoch()),
             still_frame: (!playing).then_some(frame),
@@ -886,13 +882,13 @@ pub fn preview_input_color_resolution_counts_for_frame(
     sequences: &[Sequence],
     asset_color_spaces: &HashMap<AssetId, ColorSpace>,
     asset_interpretations: &HashMap<AssetId, AssetMediaInterpretation>,
-    project_color_management: &mondrian_core::ProjectColorManagement,
+    color_environment: &mondrian_core::ProjectColorEnvironment,
     display_color_space: ColorSpace,
     frame: i64,
 ) -> Result<InputColorResolutionSourceCounts, PreviewUnavailability> {
     let color_context = sequence
         .settings
-        .root_preview_color_context(project_color_management, display_color_space);
+        .root_preview_color_context(color_environment, display_color_space);
     let target_resolution = preview_execution_resolution(
         sequence.settings.resolution,
         sequence.settings.preview.resolution_scale,
@@ -1131,16 +1127,11 @@ fn preview_dimensions_for_sequence_at_runtime_scale(
 
 fn preview_display_color_space(
     sequence: &Sequence,
-    project_cm: &mondrian_core::ProjectColorManagement,
+    viewer_display_management: &mondrian_core::DisplayManagementPolicy,
     display_snapshot: Option<&DisplayOutputSnapshot>,
 ) -> Result<ColorSpace, crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker> {
     let sequence_output = sequence.settings.color_management.output_color_space;
-    let display_management = if sequence.settings.color_management.inherit {
-        &project_cm.display_management
-    } else {
-        &sequence.settings.color_management.display_management
-    };
-    let profile_space = match display_management.monitor_profile {
+    let profile_space = match viewer_display_management.monitor_profile {
         mondrian_core::MonitorProfileReference::IccProfile { .. } => {
             preview_icc_display_color_space(display_snapshot)?
         }
@@ -1148,7 +1139,7 @@ fn preview_display_color_space(
     };
 
     Ok(
-        match display_management.viewer_mode.resolve(profile_space) {
+        match viewer_display_management.viewer_mode.resolve(profile_space) {
             mondrian_core::ResolvedViewerDisplayMode::Sdr => {
                 if profile_space.is_hdr() {
                     ColorSpace::Rec709

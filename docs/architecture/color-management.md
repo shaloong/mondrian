@@ -298,10 +298,11 @@ same-path LUT edits to become observable without a process restart. Once the
 identity is validated, shader/processor cache lookups use the stored identity
 and generation and never repeat that work per frame.
 
-`ocio_config_generation()` remains the process-level revision signal for final
-frame, thumbnail, and diagnostic caches whose results depend on whichever
-project engine is active. It is not used as a substitute for engine identity in
-the renderer's OCIO shader cache.
+`ocio_config_generation()` remains operational diagnostics for process-global
+OCIO reloads. It is not semantic cache identity. Final-frame, media, thumbnail,
+diagnostic, CPU-processor and GPU-shader caches carry the exact `ColorEngine`
+or resolved `ColorContext`; switching the process-global current config cannot
+make an object from one engine satisfy another engine's key.
 
 `ocio_config_source()` returns the source identity of the currently loaded
 config, enabling diagnostics, exact `ColorEngine::is_available()` checks, and
@@ -309,7 +310,10 @@ source-aware idempotency.
 
 ## Project and Sequence
 
-`ProjectColorManagement` stores the project-level engine. `SequenceColorManagement` can inherit from the project or override its own engine and policies.
+`ProjectColorEnvironment` stores the Project's one exact engine.
+`SequenceColorManagement` stores no engine and has no inheritance switch.
+Every resolved context is the product of that Project engine and one
+Sequence's program semantics.
 Sequence editing-mode presets may update editing format defaults such as
 resolution, frame rate, and display format, but they preserve working color
 space, `SequenceColorManagement`, authored static HDR payloads, and
@@ -319,13 +323,20 @@ validated fail-closed after the preset is applied.
 Important fields:
 
 - `workflow`: SceneReferred (default Standard picture formation) or explicit DisplayReferred colorimetric bypass
-- `display_management`: monitor/profile reference, viewer SDR/HDR mode, and tone-map policy
 - `missing_metadata_policy`
-- `nested_processing`
+- `output_tone_map_policy`
 - `output_color_space`
 - `video_range`
-- `delivery_bit_depth`: actual 8-bit or 10-bit encoded sample depth
+- `delivery_bit_depth`: default encoded 8/10/12-bit delivery sample depth
 - static HDR metadata authoring policy and payloads
+
+Viewer display/profile policy is machine-local runtime state. It is not saved
+in the Project or Sequence and is applied only after Program Output. Nested
+processing belongs to each `NestedSequence` Clip placement edge. The supported
+policies either convert the completed child working image exactly once at the
+edge or evaluate the child directly in parent working space. A nominal
+child-output bake is intentionally absent until its full execution and
+reference contract exists. No edge can select another engine.
 
 `DisplayToneMapPolicy` controls the final working-to-display/export boundary.
 Its `Automatic` mode follows the effective workflow; the per-sequence
@@ -427,11 +438,11 @@ config pins its `scene_linear` role to `Linear Rec.2020`, and the package
 contract validates the same mapping. The working values are unbounded
 scene-linear floats, not a 0..1 display signal and not a request to clip colors
 to the BT.2020 triangle. Negative components and values above one are preserved.
-The package identity is also an authoring constraint: inherited or local
-Standard sequence settings must use Linear Rec.2020, and project validation,
-sequence actions, and project-mode replacement reject any mismatch before
-mutation. Official ACES configs remain the only built-in mode that permits an
-explicit choice among Mondrian's supported working identities.
+The package identity is also an authoring constraint: every Standard Project
+Sequence and its future-Sequence template must use Linear Rec.2020. Project
+validation, Sequence actions, and Project-environment replacement reject any
+mismatch before mutation. Official ACES configs remain the only built-in mode
+that permits an explicit choice among Mondrian's supported working identities.
 An OCIO round-trip regression test crosses Linear Rec.2020 and ACEScg using
 negative and extended-range samples and enforces a scale-aware `2e-5` tolerance.
 The Linear Rec.2020 to SDR endpoint processor is also required to remain an
@@ -1105,19 +1116,15 @@ GPU runtime retains the pre-adaptation Program Output handle independently from
 the final monitor handle, keeping scopes and future Program Output caches
 unaffected by ICC/surface policy.
 
-Display management is explicit in the resolved `ColorContext`. Project settings
-own the default `DisplayManagementPolicy`; sequences inherit that policy unless
-they disable color-management inheritance. The policy carries the monitor/profile
-reference, viewer SDR/HDR mode, and tone-map policy. It intentionally carries no
-output display/view selector because that would create a second color-engine
-truth source.
-The app sequence settings panel must expose that inheritance boundary before
-sequence-level color controls. When inheritance is enabled, sequence-local color
-controls are presentation-only draft state and must not be shown as active
-render/export policy.
-`DisplayToneMapPolicy` resolves the concrete `tone_map` flag for working -> output
-boundaries, including HDR-working to SDR-output presentation, so preview, export,
-cache keys, and future diagnostics do not infer tone mapping from scattered booleans.
+Display management is machine-local runtime state. `DisplayManagementPolicy`
+carries monitor/profile reference and Viewer output mode and is never persisted
+as Project or Sequence author data. The Program Output tone-map policy is a
+different concern and remains explicit in `SequenceColorManagement`.
+`DisplayToneMapPolicy` resolves the concrete Program Output `tone_map` flag for
+working -> output boundaries, including HDR-working to SDR-output delivery, so
+preview, export, cache keys, and diagnostics do not infer it from scattered
+booleans. Monitor/ICC adaptation follows Program Output and cannot replace its
+engine-owned rendering View.
 
 Root contexts retain one typed `OutputTransformIntent`. Colorimetric contexts
 carry no view. Tone-mapped Standard contexts carry the immutable package
@@ -1250,9 +1257,10 @@ shader/module/upload/bind-resource/layout/bind-group/wrapper-
 link/pipeline-contract plans are the production boundary for GPU integration
 work.
 
-Preview and export may therefore target different output color spaces while
-sharing the same working color space, engine inheritance, workflow,
-missing-metadata policy, and nested-processing policy.
+Preview presentation and export may target different encoded output spaces
+while sharing the same Project engine and Sequence program semantics. Nested
+processing is resolved per placement edge during recursion; it is not a root
+Sequence policy.
 
 ## GPU Output Blocker Taxonomy
 

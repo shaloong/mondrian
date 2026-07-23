@@ -3,7 +3,7 @@
 //! 持久化项目文档由 `mondrian-project` 定义；这里保留跨 crate 共享的
 //! 项目元数据和项目级设置。
 
-use crate::{types::*, DisplayManagementPolicy};
+use crate::types::*;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -40,18 +40,16 @@ impl ProjectMeta {
     }
 }
 
-/// 项目色彩管理设置
+/// Project-wide color transform vocabulary and execution engine.
 ///
-/// 所有序列默认继承此配置，序列可以单独覆盖。
-/// 类似于达芬奇项目设置中的色彩科学选择器。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct ProjectColorManagement {
-    /// Product color mode. The default is [`ColorEngine::mondrian_standard()`], the
-    /// versioned Mondrian Standard policy over the immutable bundled OCIO
-    /// config; ACES and Custom OCIO are explicit peer modes.
+/// Every Sequence in a Project selects working and output spaces from this
+/// exact, version-pinned engine. A Sequence never overrides or inherits an
+/// engine, which keeps nested evaluation and cache identity unambiguous.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectColorEnvironment {
+    /// Mondrian Standard, ACES, or a pinned Custom OCIO configuration.
     pub engine: ColorEngine,
-    /// Project-level display-management policy inherited by sequences.
-    pub display_management: DisplayManagementPolicy,
 }
 
 /// 项目全局设置
@@ -65,8 +63,6 @@ pub struct ProjectSettings {
     pub cache_dir: Option<PathBuf>,
     /// Autosave interval in seconds.
     pub auto_save_interval: u32,
-    /// 项目级色彩管理（所有序列默认继承）。
-    pub color_management: ProjectColorManagement,
 }
 
 impl Default for ProjectSettings {
@@ -76,7 +72,6 @@ impl Default for ProjectSettings {
             proxy_resolution: Resolution::HD,
             cache_dir: None,
             auto_save_interval: 300,
-            color_management: ProjectColorManagement::default(),
         }
     }
 }

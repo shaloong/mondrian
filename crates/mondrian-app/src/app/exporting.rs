@@ -27,8 +27,13 @@ pub struct TimelineExportRequest {
 /// UI-stable draft state for timeline export panels.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TimelineExportDraft {
-    /// Selected preset index into [`builtin_export_presets`].
-    pub selected_preset_idx: usize,
+    /// Stable built-in preset used as the reset point for the editable draft.
+    pub selected_builtin_preset: BuiltinExportPreset,
+    /// Fully materialized, user-editable delivery contract.
+    ///
+    /// This remains app-session draft state. An admitted job receives an
+    /// immutable clone and never reads this value again.
+    pub preset: ExportPreset,
     /// Selected sequence; `None` means use the active/default sequence.
     pub selected_sequence_id: Option<SequenceId>,
     /// Timeline range to render.
@@ -39,8 +44,10 @@ pub struct TimelineExportDraft {
 
 impl Default for TimelineExportDraft {
     fn default() -> Self {
+        let selected_builtin_preset = BuiltinExportPreset::default();
         Self {
-            selected_preset_idx: 0,
+            selected_builtin_preset,
+            preset: selected_builtin_preset.preset(),
             selected_sequence_id: None,
             range: TimelineExportRange::SequenceInOut,
             output_path: String::new(),
@@ -51,6 +58,8 @@ impl Default for TimelineExportDraft {
 /// One named export preset shown by UI frontends.
 #[derive(Debug, Clone)]
 pub struct ExportPresetOption {
+    /// Stable product identity; UI order is presentation only.
+    pub id: BuiltinExportPreset,
     pub label: String,
     pub preset: ExportPreset,
 }
@@ -60,6 +69,7 @@ pub fn builtin_export_presets() -> Vec<ExportPresetOption> {
     BuiltinExportPreset::ALL
         .into_iter()
         .map(|builtin| ExportPresetOption {
+            id: builtin,
             label: builtin.label().to_owned(),
             preset: builtin.preset(),
         })
@@ -79,10 +89,40 @@ pub fn export_preset_extension(preset: &ExportPreset) -> &'static str {
 }
 
 impl AppState {
-    /// Update the export draft preset, clamped to available built-in presets.
-    pub fn set_export_draft_preset_index(&mut self, index: usize) {
-        let max_index = builtin_export_presets().len().saturating_sub(1);
-        self.export_draft.selected_preset_idx = index.min(max_index);
+    /// Reset the editable export draft to one stable built-in preset.
+    pub fn set_export_draft_builtin_preset(&mut self, preset: BuiltinExportPreset) {
+        let next = preset.preset();
+        self.rewrite_export_draft_extension_for(&next);
+        self.export_draft.selected_builtin_preset = preset;
+        self.export_draft.preset = next;
+    }
+
+    /// Replace the draft's materialized delivery settings.
+    ///
+    /// Syntactic editing stays permissive so a user can move between legal
+    /// configurations without hidden auto-correction. The panel and queue both
+    /// call `resolve_export_delivery` and fail closed until the complete
+    /// combination is valid.
+    pub fn set_export_draft_preset(&mut self, preset: ExportPreset) {
+        self.rewrite_export_draft_extension_for(&preset);
+        self.export_draft.preset = preset;
+    }
+
+    fn rewrite_export_draft_extension_for(&mut self, next: &ExportPreset) {
+        let previous_extension = export_preset_extension(&self.export_draft.preset);
+        let next_extension = export_preset_extension(next);
+        if previous_extension == next_extension || self.export_draft.output_path.trim().is_empty() {
+            return;
+        }
+        let mut path = PathBuf::from(&self.export_draft.output_path);
+        let follows_previous_container = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case(previous_extension));
+        if follows_previous_container {
+            path.set_extension(next_extension);
+            self.export_draft.output_path = path.to_string_lossy().into_owned();
+        }
     }
 
     /// Update the export draft sequence.
@@ -124,7 +164,7 @@ impl AppState {
         if let Err(error) = resolve_export_delivery(
             &request.preset,
             &sequence.settings,
-            &self.project_settings().color_management,
+            self.project_color_environment(),
         ) {
             let reason = error.to_string();
             self.set_status_hint(format!("导出失败：{reason}"), true);
@@ -225,11 +265,11 @@ pub(crate) fn capture_timeline_export_snapshot(
         .collect();
 
     Ok(TimelineExportSnapshot {
+        color_environment: state.project_color_environment().clone(),
         sequence,
         sequences: nested_sequences,
         media,
         range,
-        project_color_management: state.project_settings().color_management.clone(),
     })
 }
 
@@ -646,6 +686,47 @@ mod tests {
         assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
         assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
         assert!(state.render_queue.list_jobs().is_empty());
+    }
+
+    #[test]
+    fn builtin_preset_resets_the_materialized_export_draft_without_using_catalog_order() {
+        let mut state = AppState::default();
+        let mut customized = ExportPreset::h264_aac_sdr_1080p();
+        customized.video_signal.bit_depth =
+            mondrian_export::preset::ExportParameter::FollowSequence;
+        state.set_export_draft_preset(customized);
+
+        state.set_export_draft_builtin_preset(BuiltinExportPreset::HevcMain10Aac);
+
+        assert_eq!(
+            state.export_draft.selected_builtin_preset,
+            BuiltinExportPreset::HevcMain10Aac
+        );
+        assert_eq!(
+            state.export_draft.preset,
+            BuiltinExportPreset::HevcMain10Aac.preset()
+        );
+    }
+
+    #[test]
+    fn changing_container_rewrites_only_an_extension_that_followed_the_previous_contract() {
+        let mut state = AppState::default();
+        state.set_export_draft_output_path("E:/renders/delivery.mp4");
+        let mut mov = state.export_draft.preset.clone();
+        mov.container = Container::Mov;
+
+        state.set_export_draft_preset(mov.clone());
+
+        assert_eq!(
+            PathBuf::from(&state.export_draft.output_path),
+            PathBuf::from("E:/renders/delivery.mov")
+        );
+
+        state.set_export_draft_output_path("E:/renders/delivery.custom");
+        mov.container = Container::Mxf;
+        state.set_export_draft_preset(mov);
+
+        assert_eq!(state.export_draft.output_path, "E:/renders/delivery.custom");
     }
 
     #[test]

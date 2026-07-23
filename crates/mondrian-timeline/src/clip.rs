@@ -330,7 +330,7 @@ impl Default for SpeedMap {
 
 /// 时间线片段语义 — re-exported from mondrian_core::timeline_data.
 pub use mondrian_core::timeline_data::{
-    AlphaInterpretation, ClipContent, ClipKind, MediaInterpretation,
+    AlphaInterpretation, ClipContent, ClipKind, MediaInterpretation, NestedColorProcessing,
 };
 
 /// 时间线上的一个剪辑片段
@@ -466,7 +466,10 @@ impl Clip {
         label: Option<String>,
     ) -> Result<Self> {
         let mut clip = Self::with_content(
-            ClipContent::NestedSequence { sequence_id },
+            ClipContent::NestedSequence {
+                sequence_id,
+                color_processing: NestedColorProcessing::default(),
+            },
             position,
             duration,
         )?;

@@ -352,7 +352,7 @@ fn assert_export_contract(
     let resolved = resolve_export_delivery(
         &preset,
         settings,
-        &mondrian_core::ProjectSettings::default().color_management,
+        &mondrian_core::ProjectColorEnvironment::default(),
     )?;
     let expected_signal = expected_export_video_signal(settings, &resolved)
         .map_err(anyhow::Error::msg)

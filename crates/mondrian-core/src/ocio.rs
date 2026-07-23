@@ -50,25 +50,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 ///
 /// # Concurrency Constraint
 ///
-/// OCIO's C++ backend uses a process-global current config (`set_current_config`).
-/// This means **only one OCIO config can be active at a time**. Concurrent
-/// rendering with different OCIO configs (e.g., multi-project or multi-sequence
-/// with different color science) is NOT supported and will produce incorrect
-/// results.
-///
-/// The mutex in [`OCIO_STATE`] serializes config mutations, but does NOT prevent
-/// concurrent `current_config()` calls from seeing a config that was loaded for
-/// a different project/sequence. Callers must ensure that:
-///
-/// 1. All rendering within a process uses the same OCIO config, OR
-/// 2. Config switches are serialized with rendering (no concurrent access during
-///    config transition), OR
-/// 3. The application architecture prevents multi-config scenarios (current
-///    Mondrian design: one project = one config).
-///
-/// Full config isolation (per-config processor caches, no process-global state)
-/// requires upstream OCIO changes or a wrapper layer. This is deferred to a
-/// future phase.
+/// OCIO exposes one process-global current config. Mondrian therefore holds
+/// [`OCIO_CONFIG_OPERATION`] across exact engine selection and processor/shader
+/// construction. The returned CPU processors and GPU shader bundles are baked
+/// engine-qualified objects and execute after that short lease is released.
+/// One Project owns one exact engine, while caches and concurrent immutable
+/// execution snapshots may still contain objects from different Projects or
+/// earlier engine generations. No caller may read `current_config()` or
+/// construct an OCIO object outside this Module.
 struct OcioGlobalState {
     /// Path or virtual path of the currently loaded config.
     path: Option<PathBuf>,
@@ -142,30 +131,13 @@ pub fn ocio_config_changed_since(since_generation: u64) -> bool {
     ocio_config_generation() != since_generation
 }
 
-/// Return the cache revision for the exact config selected by a color engine.
+/// Validate/select the exact engine and return its cache revision.
 ///
-/// Immutable embedded/builtin packages are fully identified by their source
-/// and therefore use revision zero without touching global OCIO state. Mutable
-/// path/environment sources use the selected config generation so renderer
-/// shader caches cannot survive a reload of the same source identity.
+/// `ColorEngine` is already a complete canonical cache identity, including all
+/// Custom OCIO digests. Process-global config switches must not invalidate a
+/// different Sequence's baked processor or shader, so the revision is stable.
 pub fn ocio_gpu_config_revision_for_engine(engine: &ColorEngine) -> Result<u64, String> {
-    let source = engine.ocio_source();
-    if matches!(engine, ColorEngine::CustomOcio { .. }) {
-        return with_ocio_config_for_engine(engine, |_config, generation| {
-            Ok(ocio_cpu_processor_config_revision(&source, generation))
-        });
-    }
-    match source {
-        OcioConfigSource::MondrianStandard { .. } | OcioConfigSource::Builtin { .. } => Ok(0),
-        OcioConfigSource::Environment | OcioConfigSource::Path { .. } => {
-            let _lease = lock_ocio_config_operation()?;
-            ensure_ocio_loaded_locked(&source)?;
-            OCIO_STATE
-                .lock()
-                .map(|state| state.generation)
-                .map_err(|_| "OCIO global state lock is poisoned".to_owned())
-        }
-    }
+    with_ocio_config_for_engine(engine, |_config, _generation| Ok(0))
 }
 
 /// Return the current config source identity, if any.
@@ -3096,11 +3068,8 @@ struct OcioCpuProcessorCacheKey {
     request: OcioCpuProcessorRequest,
 }
 
-fn ocio_cpu_processor_config_revision(source: &OcioConfigSource, generation: u64) -> u64 {
-    match source {
-        OcioConfigSource::MondrianStandard { .. } | OcioConfigSource::Builtin { .. } => 0,
-        OcioConfigSource::Environment | OcioConfigSource::Path { .. } => generation,
-    }
+fn ocio_cpu_processor_config_revision(_source: &OcioConfigSource, _generation: u64) -> u64 {
+    0
 }
 
 thread_local! {
@@ -3181,7 +3150,8 @@ fn apply_cached_cpu_processor(
     data: &mut [f32],
 ) -> Result<(), String> {
     let source = engine.ocio_source();
-    if let Some(generation) = current_ocio_generation_for_source(&source) {
+    if ocio_engine_is_validated(engine) {
+        let generation = current_ocio_generation_for_source(&source).unwrap_or_default();
         let key = OcioCpuProcessorCacheKey {
             engine: engine.clone(),
             revision: ocio_cpu_processor_config_revision(&source, generation),

@@ -1,5 +1,5 @@
 use mondrian_core::types::Rational;
-use mondrian_core::{ensure_mondrian_default_ocio_loaded, Color, ProjectColorManagement};
+use mondrian_core::{ensure_mondrian_default_ocio_loaded, Color};
 use mondrian_timeline::clip::Clip;
 
 use super::*;
@@ -25,7 +25,9 @@ fn solid_sequence(name: &str, color: Color) -> Sequence {
 }
 
 fn color_context(sequence: &Sequence) -> ColorContext {
-    sequence.settings.root_program_color_context(&ProjectColorManagement::default())
+    sequence
+        .settings
+        .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
 }
 
 #[test]

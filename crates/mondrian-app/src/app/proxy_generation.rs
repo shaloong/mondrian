@@ -440,10 +440,9 @@ pub(crate) fn resolve_app_state_proxy_color_contract(
     let sequence = state
         .active_sequence()
         .ok_or_else(|| "proxy generation requires an active sequence color context".to_owned())?;
-    let color_context = sequence.settings.root_preview_color_context(
-        &state.project_settings().color_management,
-        ColorSpace::Rec709,
-    );
+    let color_context = sequence
+        .settings
+        .root_preview_color_context(state.project_color_environment(), ColorSpace::Rec709);
     resolve_asset_proxy_color_contract(asset, &color_context)
 }
 

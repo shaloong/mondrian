@@ -881,9 +881,8 @@ closed on missing, malformed, or changed metadata. Exports that do not request
 Vision metadata is never claimed as passthrough across rendered pixels: health
 reports warn on referenced dynamic-HDR sources, and enabling the current
 `WriteAuthored` request fails before encoding until a validated dynamic
-metadata authoring backend exists. The effective
-inherited/overridden engine determines whether a Standard output-target
-contract applies. For Standard HLG/PQ, MaxCLL cannot exceed the View's fixed
+metadata authoring backend exists. The exact Project engine determines whether
+a Standard output-target contract applies. For Standard HLG/PQ, MaxCLL cannot exceed the View's fixed
 1000-nit content peak. ST 2086 mastering-display peak remains independent
 because it describes the authoring monitor, not the brightest content pixel; a
 valid 4000-nit mastering display can therefore describe content formed by the

@@ -27,7 +27,11 @@ use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
 use mondrian_effects::{effect_display_name, effect_library_types};
 use mondrian_export::delivery::resolve_export_delivery;
-use mondrian_export::preset::{ExportPreset, TimelineExportRange, VideoCodecConfig};
+use mondrian_export::preset::{
+    AudioCodecConfig, Av1Profile, BuiltinExportPreset, Container, ExportAlphaMode,
+    ExportChromaSampling, ExportParameter, ExportPreset, H264Profile, HevcProfile, ProResProfile,
+    Resolution as ExportResolution, TimelineExportRange, VideoCodecConfig, VideoRateControl,
+};
 use mondrian_export::queue::{
     ExportColorHealthSeverity, ExportJobColorDiagnostics, ExportProgress, ExportProgressDetail,
     ExportProgressPhase, JobStatus,
@@ -42,7 +46,7 @@ use mondrian_timeline::audio::{
 };
 use mondrian_timeline::clip::{Clip, Transform2D};
 use mondrian_timeline::sequence::{
-    InputColorResolutionSource, MissingColorMetadataPolicy, Sequence,
+    DeliveryBitDepth, InputColorResolutionSource, MissingColorMetadataPolicy, Sequence, VideoRange,
 };
 use mondrian_timeline::track::Track;
 use mondrian_timeline::VideoTransitionType;
@@ -342,17 +346,12 @@ impl AppUiPanelModels {
 fn asset_input_pipeline_for_state(state: &AppState) -> AppShellInputColorPipelineDiagnostics {
     let Some(sequence) = state.active_sequence() else {
         return AppShellInputColorPipelineDiagnostics {
-            engine: state.project_settings().color_management.engine.clone(),
-            working_color_space: WorkingColorSpace::LinearRec2020,
+            engine: state.project_color_environment().engine.clone(),
+            working_color_space: state.new_sequence_defaults().working_color_space,
         };
     };
-    let engine = if sequence.settings.color_management.inherit {
-        state.project_settings().color_management.engine.clone()
-    } else {
-        sequence.settings.color_management.engine.clone()
-    };
     AppShellInputColorPipelineDiagnostics {
-        engine,
+        engine: state.project_color_environment().engine.clone(),
         working_color_space: sequence.settings.working_color_space,
     }
 }
@@ -1761,6 +1760,10 @@ pub struct ExportPanelModel {
     pub queue_count: usize,
     pub presets: Vec<ExportPresetOptionModel>,
     pub selected_preset_idx: usize,
+    /// Materialized editable delivery settings, independent from catalog order.
+    pub preset: ExportPreset,
+    /// Whether the materialized settings differ from their selected reset point.
+    pub preset_customized: bool,
     pub sequences: Vec<ExportSequenceOptionModel>,
     pub selected_sequence_id: Option<SequenceId>,
     pub range: TimelineExportRange,
@@ -1773,6 +1776,7 @@ pub struct ExportPanelModel {
 
 #[derive(Debug, Clone)]
 pub struct ExportPresetOptionModel {
+    pub id: BuiltinExportPreset,
     pub label: String,
     pub preset: ExportPreset,
 }
@@ -1911,10 +1915,19 @@ impl ExportPanelModel {
     pub fn from_app_state(state: &AppState) -> Self {
         let presets = builtin_export_presets()
             .into_iter()
-            .map(|option| ExportPresetOptionModel { label: option.label, preset: option.preset })
+            .map(|option| ExportPresetOptionModel {
+                id: option.id,
+                label: option.label,
+                preset: option.preset,
+            })
             .collect::<Vec<_>>();
-        let max_preset = presets.len().saturating_sub(1);
-        let selected_preset_idx = state.export_draft.selected_preset_idx.min(max_preset);
+        let selected_preset_idx = presets
+            .iter()
+            .position(|option| option.id == state.export_draft.selected_builtin_preset)
+            .unwrap_or_default();
+        let preset = state.export_draft.preset.clone();
+        let preset_customized =
+            presets.get(selected_preset_idx).is_none_or(|option| option.preset != preset);
         let sequence_snapshots = state.export_sequences_snapshot();
         let sequences = sequence_snapshots
             .iter()
@@ -1933,18 +1946,13 @@ impl ExportPanelModel {
             .or(state.default_sequence_id())
             .filter(|id| sequences.iter().any(|sequence| sequence.id == *id))
             .or_else(|| sequences.first().map(|sequence| sequence.id));
-        let delivery_error = presets
-            .get(selected_preset_idx)
-            .or_else(|| presets.first())
-            .zip(
-                selected_sequence_id
-                    .and_then(|id| sequence_snapshots.iter().find(|sequence| sequence.id == id)),
-            )
-            .and_then(|(preset, sequence)| {
+        let delivery_error = selected_sequence_id
+            .and_then(|id| sequence_snapshots.iter().find(|sequence| sequence.id == id))
+            .and_then(|sequence| {
                 resolve_export_delivery(
-                    &preset.preset,
+                    &preset,
                     &sequence.settings,
-                    &state.project_settings().color_management,
+                    state.project_color_environment(),
                 )
                 .err()
                 .map(|error| error.to_string())
@@ -1972,6 +1980,8 @@ impl ExportPanelModel {
             queue_count,
             presets,
             selected_preset_idx,
+            preset,
+            preset_customized,
             sequences,
             selected_sequence_id,
             range: state.export_draft.range,
@@ -1984,10 +1994,7 @@ impl ExportPanelModel {
     }
 
     fn selected_preset(&self) -> Option<&ExportPreset> {
-        self.presets
-            .get(self.selected_preset_idx)
-            .or_else(|| self.presets.first())
-            .map(|option| &option.preset)
+        (!self.presets.is_empty()).then_some(&self.preset)
     }
 
     fn can_enqueue(&self) -> bool {
@@ -3968,25 +3975,347 @@ fn node_graph_panel(model: &NodeGraphPanelModel) -> NodeGraphView {
     graph
 }
 
+fn export_preset_update_action(preset: ExportPreset) -> Action {
+    export_set_draft_action(ExportDraftUpdatePayload::Preset(preset))
+}
+
+fn export_container_label(container: &Container) -> &'static str {
+    match container {
+        Container::Mp4 => "MP4",
+        Container::Mov => "MOV",
+        Container::Mkv => "Matroska (MKV)",
+        Container::Gif => "GIF",
+        Container::Mxf => "MXF",
+        Container::Webm => "WebM",
+    }
+}
+
+fn export_container_items(preset: &ExportPreset) -> Vec<MenuItem> {
+    [
+        Container::Mp4,
+        Container::Mov,
+        Container::Mkv,
+        Container::Mxf,
+        Container::Webm,
+        Container::Gif,
+    ]
+    .into_iter()
+    .map(|container| {
+        let label = export_container_label(&container);
+        let mut updated = preset.clone();
+        updated.container = container;
+        MenuItem::new(label, export_preset_update_action(updated))
+    })
+    .collect()
+}
+
+fn export_video_codec_label(video: &VideoCodecConfig) -> &'static str {
+    match video {
+        VideoCodecConfig::H264 { profile: H264Profile::High, .. } => "H.264 High",
+        VideoCodecConfig::Hevc { profile: HevcProfile::Main, .. } => "HEVC Main",
+        VideoCodecConfig::Hevc { profile: HevcProfile::Main10, .. } => "HEVC Main 10",
+        VideoCodecConfig::Av1 { profile: Av1Profile::Main, .. } => "AV1 Main",
+        VideoCodecConfig::ProRes { profile: ProResProfile::Proxy } => "ProRes 422 Proxy",
+        VideoCodecConfig::ProRes { profile: ProResProfile::Lt } => "ProRes 422 LT",
+        VideoCodecConfig::ProRes { profile: ProResProfile::Standard } => "ProRes 422",
+        VideoCodecConfig::ProRes { profile: ProResProfile::Hq } => "ProRes 422 HQ",
+        VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFour } => "ProRes 4444",
+        VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFourXq } => "ProRes 4444 XQ",
+        VideoCodecConfig::Gif { .. } => "GIF palette",
+    }
+}
+
+fn export_video_rate_control(video: &VideoCodecConfig) -> Option<(VideoRateControl, u8)> {
+    match video {
+        VideoCodecConfig::H264 { rate_control, .. }
+        | VideoCodecConfig::Hevc { rate_control, .. } => Some((*rate_control, 51)),
+        VideoCodecConfig::Av1 { rate_control, .. } => Some((*rate_control, 63)),
+        VideoCodecConfig::ProRes { .. } | VideoCodecConfig::Gif { .. } => None,
+    }
+}
+
+fn export_video_codec_items(preset: &ExportPreset) -> Vec<MenuItem> {
+    let rate_control = export_video_rate_control(&preset.video)
+        .map(|(rate_control, _)| rate_control)
+        .unwrap_or_else(|| VideoRateControl::constant_quality(20));
+    let (gif_colors, gif_dither) = match preset.video {
+        VideoCodecConfig::Gif { colors, dither } => (colors, dither),
+        _ => (256, true),
+    };
+    let choices = vec![
+        VideoCodecConfig::H264 { profile: H264Profile::High, rate_control },
+        VideoCodecConfig::Hevc { profile: HevcProfile::Main, rate_control },
+        VideoCodecConfig::Hevc { profile: HevcProfile::Main10, rate_control },
+        VideoCodecConfig::Av1 { profile: Av1Profile::Main, rate_control },
+        VideoCodecConfig::ProRes { profile: ProResProfile::Proxy },
+        VideoCodecConfig::ProRes { profile: ProResProfile::Lt },
+        VideoCodecConfig::ProRes { profile: ProResProfile::Standard },
+        VideoCodecConfig::ProRes { profile: ProResProfile::Hq },
+        VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFour },
+        VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFourXq },
+        VideoCodecConfig::Gif { colors: gif_colors, dither: gif_dither },
+    ];
+    choices
+        .into_iter()
+        .map(|video| {
+            let label = export_video_codec_label(&video);
+            let mut updated = preset.clone();
+            updated.video = video;
+            MenuItem::new(label, export_preset_update_action(updated))
+        })
+        .collect()
+}
+
+fn export_audio_codec_label(audio: &AudioCodecConfig) -> &'static str {
+    match audio {
+        AudioCodecConfig::Disabled => "无音频",
+        AudioCodecConfig::Aac { .. } => "AAC",
+        AudioCodecConfig::Pcm { .. } => "PCM",
+        AudioCodecConfig::Mp3 { .. } => "MP3",
+    }
+}
+
+fn export_audio_codec_items(preset: &ExportPreset) -> Vec<MenuItem> {
+    let aac_bitrate = match preset.audio {
+        AudioCodecConfig::Aac { bitrate_kbps } => bitrate_kbps,
+        _ => 192,
+    };
+    let pcm_bit_depth = match preset.audio {
+        AudioCodecConfig::Pcm { bit_depth } => bit_depth,
+        _ => 24,
+    };
+    let mp3_bitrate = match preset.audio {
+        AudioCodecConfig::Mp3 { bitrate_kbps } => bitrate_kbps,
+        _ => 192,
+    };
+    [
+        AudioCodecConfig::Disabled,
+        AudioCodecConfig::Aac { bitrate_kbps: aac_bitrate },
+        AudioCodecConfig::Pcm { bit_depth: pcm_bit_depth },
+        AudioCodecConfig::Mp3 { bitrate_kbps: mp3_bitrate },
+    ]
+    .into_iter()
+    .map(|audio| {
+        let label = export_audio_codec_label(&audio);
+        let mut updated = preset.clone();
+        updated.audio = audio;
+        MenuItem::new(label, export_preset_update_action(updated))
+    })
+    .collect()
+}
+
+fn export_resolution_label(resolution: Option<ExportResolution>) -> String {
+    resolution
+        .map(|resolution| format!("{} × {}", resolution.width, resolution.height))
+        .unwrap_or_else(|| "跟随序列".to_owned())
+}
+
+fn export_resolution_items(preset: &ExportPreset) -> Vec<MenuItem> {
+    [
+        ("跟随序列", None),
+        (
+            "1280 × 720",
+            Some(ExportResolution { width: 1280, height: 720 }),
+        ),
+        (
+            "1920 × 1080",
+            Some(ExportResolution { width: 1920, height: 1080 }),
+        ),
+        (
+            "UHD 3840 × 2160",
+            Some(ExportResolution { width: 3840, height: 2160 }),
+        ),
+        (
+            "DCI 4096 × 2160",
+            Some(ExportResolution { width: 4096, height: 2160 }),
+        ),
+    ]
+    .into_iter()
+    .map(|(label, resolution)| {
+        let mut updated = preset.clone();
+        updated.resolution = resolution;
+        MenuItem::new(label, export_preset_update_action(updated))
+    })
+    .collect()
+}
+
+fn export_bit_depth_label(bit_depth: ExportParameter<DeliveryBitDepth>) -> &'static str {
+    match bit_depth {
+        ExportParameter::FollowSequence => "跟随序列",
+        ExportParameter::Explicit(DeliveryBitDepth::Eight) => "8-bit",
+        ExportParameter::Explicit(DeliveryBitDepth::Ten) => "10-bit",
+        ExportParameter::Explicit(DeliveryBitDepth::Twelve) => "12-bit",
+    }
+}
+
+fn export_bit_depth_items(preset: &ExportPreset) -> Vec<MenuItem> {
+    [
+        ExportParameter::FollowSequence,
+        ExportParameter::Explicit(DeliveryBitDepth::Eight),
+        ExportParameter::Explicit(DeliveryBitDepth::Ten),
+        ExportParameter::Explicit(DeliveryBitDepth::Twelve),
+    ]
+    .into_iter()
+    .map(|bit_depth| {
+        let mut updated = preset.clone();
+        updated.video_signal.bit_depth = bit_depth;
+        MenuItem::new(
+            export_bit_depth_label(bit_depth),
+            export_preset_update_action(updated),
+        )
+    })
+    .collect()
+}
+
+fn export_video_range_label(range: ExportParameter<VideoRange>) -> &'static str {
+    match range {
+        ExportParameter::FollowSequence => "跟随序列",
+        ExportParameter::Explicit(VideoRange::Full) => "Full",
+        ExportParameter::Explicit(VideoRange::Legal) => "Legal / Video",
+    }
+}
+
+fn export_video_range_items(preset: &ExportPreset) -> Vec<MenuItem> {
+    [
+        ExportParameter::FollowSequence,
+        ExportParameter::Explicit(VideoRange::Full),
+        ExportParameter::Explicit(VideoRange::Legal),
+    ]
+    .into_iter()
+    .map(|range| {
+        let mut updated = preset.clone();
+        updated.video_signal.range = range;
+        MenuItem::new(
+            export_video_range_label(range),
+            export_preset_update_action(updated),
+        )
+    })
+    .collect()
+}
+
+fn export_chroma_label(chroma: ExportChromaSampling) -> &'static str {
+    match chroma {
+        ExportChromaSampling::Yuv420 => "YUV 4:2:0",
+        ExportChromaSampling::Yuv422 => "YUV 4:2:2",
+        ExportChromaSampling::Yuv444 => "YUV 4:4:4",
+        ExportChromaSampling::Rgb => "RGB",
+    }
+}
+
+fn export_chroma_items(preset: &ExportPreset) -> Vec<MenuItem> {
+    [
+        ExportChromaSampling::Yuv420,
+        ExportChromaSampling::Yuv422,
+        ExportChromaSampling::Yuv444,
+        ExportChromaSampling::Rgb,
+    ]
+    .into_iter()
+    .map(|chroma| {
+        let mut updated = preset.clone();
+        updated.video_signal.chroma_sampling = chroma;
+        MenuItem::new(
+            export_chroma_label(chroma),
+            export_preset_update_action(updated),
+        )
+    })
+    .collect()
+}
+
+fn export_alpha_mode_label(alpha_mode: ExportAlphaMode) -> &'static str {
+    match alpha_mode {
+        ExportAlphaMode::FlattenBlack => "合成到黑色",
+        ExportAlphaMode::Preserve => "保留 Straight Alpha",
+    }
+}
+
+fn export_alpha_mode_items(preset: &ExportPreset) -> Vec<MenuItem> {
+    [ExportAlphaMode::FlattenBlack, ExportAlphaMode::Preserve]
+        .into_iter()
+        .map(|alpha_mode| {
+            let mut updated = preset.clone();
+            updated.alpha_mode = alpha_mode;
+            MenuItem::new(
+                export_alpha_mode_label(alpha_mode),
+                export_preset_update_action(updated),
+            )
+        })
+        .collect()
+}
+
+fn export_with_rate_control(
+    mut preset: ExportPreset,
+    rate_control: VideoRateControl,
+) -> ExportPreset {
+    match &mut preset.video {
+        VideoCodecConfig::H264 { rate_control: current, .. }
+        | VideoCodecConfig::Hevc { rate_control: current, .. }
+        | VideoCodecConfig::Av1 { rate_control: current, .. } => *current = rate_control,
+        VideoCodecConfig::ProRes { .. } | VideoCodecConfig::Gif { .. } => {}
+    }
+    preset
+}
+
 fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
-    let preset_label = model
+    let mut preset_label = model
         .presets
         .get(model.selected_preset_idx)
         .or_else(|| model.presets.first())
         .map(|option| option.label.clone())
         .unwrap_or_else(|| "No presets".to_owned());
+    if model.preset_customized {
+        preset_label.push_str("（已修改）");
+    }
     let preset_items = model
         .presets
         .iter()
-        .enumerate()
-        .map(|(index, option)| {
+        .map(|option| {
             MenuItem::new(
                 option.label.clone(),
-                export_set_draft_action(ExportDraftUpdatePayload::PresetIndex(index)),
+                export_set_draft_action(ExportDraftUpdatePayload::BuiltinPreset(option.id)),
             )
         })
         .collect::<Vec<_>>();
     let preset_dropdown = Dropdown::new(preset_label, preset_items).with_max_visible_items(6);
+    let container_dropdown = Dropdown::new(
+        export_container_label(&model.preset.container),
+        export_container_items(&model.preset),
+    )
+    .with_max_visible_items(6);
+    let video_codec_dropdown = Dropdown::new(
+        export_video_codec_label(&model.preset.video),
+        export_video_codec_items(&model.preset),
+    )
+    .with_max_visible_items(8);
+    let resolution_dropdown = Dropdown::new(
+        export_resolution_label(model.preset.resolution),
+        export_resolution_items(&model.preset),
+    )
+    .with_max_visible_items(5);
+    let bit_depth_dropdown = Dropdown::new(
+        export_bit_depth_label(model.preset.video_signal.bit_depth),
+        export_bit_depth_items(&model.preset),
+    )
+    .with_max_visible_items(4);
+    let video_range_dropdown = Dropdown::new(
+        export_video_range_label(model.preset.video_signal.range),
+        export_video_range_items(&model.preset),
+    )
+    .with_max_visible_items(3);
+    let chroma_dropdown = Dropdown::new(
+        export_chroma_label(model.preset.video_signal.chroma_sampling),
+        export_chroma_items(&model.preset),
+    )
+    .with_max_visible_items(4);
+    let alpha_dropdown = Dropdown::new(
+        export_alpha_mode_label(model.preset.alpha_mode),
+        export_alpha_mode_items(&model.preset),
+    )
+    .with_max_visible_items(2);
+    let audio_codec_dropdown = Dropdown::new(
+        export_audio_codec_label(&model.preset.audio),
+        export_audio_codec_items(&model.preset),
+    )
+    .with_max_visible_items(4);
 
     let selected_sequence = model.selected_sequence();
     let sequence_label = selected_sequence
@@ -4067,6 +4396,170 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         .unwrap_or_else(|| "No exportable sequence".to_owned());
     let status_text = model.readiness_status();
 
+    let mut format_section = PropertySection::new("格式")
+        .with_row(PropertyRow::new("容器", Box::new(container_dropdown)))
+        .with_row(PropertyRow::new("视频编码", Box::new(video_codec_dropdown)))
+        .with_row(PropertyRow::new("画幅", Box::new(resolution_dropdown)));
+    if let Some(resolution) = model.preset.resolution {
+        let width_preset = model.preset.clone();
+        let width_input = NumberInput::new(
+            resolution.width as f64,
+            mondrian_timeline::SequenceSettings::MIN_WIDTH as f64,
+            mondrian_timeline::SequenceSettings::MAX_WIDTH as f64,
+        )
+        .with_step(1.0)
+        .on_change(move |width| {
+            let mut updated = width_preset.clone();
+            if let Some(resolution) = &mut updated.resolution {
+                resolution.width = width.round() as u32;
+            }
+            export_preset_update_action(updated)
+        });
+        let height_preset = model.preset.clone();
+        let height_input = NumberInput::new(
+            resolution.height as f64,
+            mondrian_timeline::SequenceSettings::MIN_HEIGHT as f64,
+            mondrian_timeline::SequenceSettings::MAX_HEIGHT as f64,
+        )
+        .with_step(1.0)
+        .on_change(move |height| {
+            let mut updated = height_preset.clone();
+            if let Some(resolution) = &mut updated.resolution {
+                resolution.height = height.round() as u32;
+            }
+            export_preset_update_action(updated)
+        });
+        format_section = format_section
+            .with_row(PropertyRow::new("宽度", Box::new(width_input)))
+            .with_row(PropertyRow::new("高度", Box::new(height_input)));
+    }
+
+    let signal_section = PropertySection::new("视频信号")
+        .with_row(PropertyRow::new("位深", Box::new(bit_depth_dropdown)))
+        .with_row(PropertyRow::new("范围", Box::new(video_range_dropdown)))
+        .with_row(PropertyRow::new("色度采样", Box::new(chroma_dropdown)))
+        .with_row(PropertyRow::new("Alpha", Box::new(alpha_dropdown)));
+
+    let mut encoding_section = PropertySection::new("编码参数");
+    if let Some((rate_control, max_crf)) = export_video_rate_control(&model.preset.video) {
+        let crf_preset = model.preset.clone();
+        let crf_input = NumberInput::new(rate_control.crf as f64, 0.0, max_crf as f64)
+            .with_step(1.0)
+            .on_change(move |crf| {
+                let mut updated = rate_control;
+                updated.crf = crf.round() as u8;
+                export_preset_update_action(export_with_rate_control(crf_preset.clone(), updated))
+            });
+        let max_bitrate_preset = model.preset.clone();
+        let max_bitrate_input = NumberInput::new(
+            rate_control.max_bitrate_kbps.unwrap_or_default() as f64,
+            0.0,
+            2_000_000.0,
+        )
+        .with_step(100.0)
+        .on_change(move |max_bitrate| {
+            let mut updated = rate_control;
+            let value = max_bitrate.round() as u32;
+            updated.max_bitrate_kbps = (value > 0).then_some(value);
+            export_preset_update_action(export_with_rate_control(
+                max_bitrate_preset.clone(),
+                updated,
+            ))
+        });
+        let buffer_preset = model.preset.clone();
+        let buffer_input = NumberInput::new(
+            rate_control.buffer_size_kbits.unwrap_or_default() as f64,
+            0.0,
+            4_000_000.0,
+        )
+        .with_step(100.0)
+        .on_change(move |buffer_size| {
+            let mut updated = rate_control;
+            let value = buffer_size.round() as u32;
+            updated.buffer_size_kbits = (value > 0).then_some(value);
+            export_preset_update_action(export_with_rate_control(buffer_preset.clone(), updated))
+        });
+        encoding_section = encoding_section
+            .with_row(PropertyRow::new("CRF", Box::new(crf_input)))
+            .with_row(PropertyRow::new(
+                "最大码率 kbps",
+                Box::new(max_bitrate_input),
+            ))
+            .with_row(PropertyRow::new("VBV buffer kbit", Box::new(buffer_input)));
+    } else if let VideoCodecConfig::Gif { colors, dither } = model.preset.video {
+        let colors_preset = model.preset.clone();
+        let colors_input =
+            NumberInput::new(colors as f64, 2.0, 256.0)
+                .with_step(1.0)
+                .on_change(move |colors| {
+                    let mut updated = colors_preset.clone();
+                    if let VideoCodecConfig::Gif { colors: current, .. } = &mut updated.video {
+                        *current = colors.round() as u16;
+                    }
+                    export_preset_update_action(updated)
+                });
+        let dither_preset = model.preset.clone();
+        let dither_checkbox = Checkbox::new("允许调色板抖动", dither).on_change(move |enabled| {
+            let mut updated = dither_preset.clone();
+            if let VideoCodecConfig::Gif { dither, .. } = &mut updated.video {
+                *dither = enabled;
+            }
+            export_preset_update_action(updated)
+        });
+        encoding_section = encoding_section
+            .with_row(PropertyRow::new("调色板颜色", Box::new(colors_input)))
+            .with_row(PropertyRow::new("抖动", Box::new(dither_checkbox)));
+    } else {
+        encoding_section = encoding_section.with_row(PropertyRow::new(
+            "控制",
+            Box::new(Label::new("由已验证的固定 Profile 决定").muted()),
+        ));
+    }
+
+    let mut audio_section = PropertySection::new("音频")
+        .with_row(PropertyRow::new("编码", Box::new(audio_codec_dropdown)));
+    match model.preset.audio {
+        AudioCodecConfig::Disabled => {}
+        AudioCodecConfig::Aac { bitrate_kbps } | AudioCodecConfig::Mp3 { bitrate_kbps } => {
+            let bitrate_preset = model.preset.clone();
+            let bitrate_input = NumberInput::new(bitrate_kbps as f64, 1.0, 1_536.0)
+                .with_step(8.0)
+                .on_change(move |bitrate| {
+                    let mut updated = bitrate_preset.clone();
+                    match &mut updated.audio {
+                        AudioCodecConfig::Aac { bitrate_kbps }
+                        | AudioCodecConfig::Mp3 { bitrate_kbps } => {
+                            *bitrate_kbps = bitrate.round() as u32;
+                        }
+                        AudioCodecConfig::Disabled | AudioCodecConfig::Pcm { .. } => {}
+                    }
+                    export_preset_update_action(updated)
+                });
+            audio_section =
+                audio_section.with_row(PropertyRow::new("码率 kbps", Box::new(bitrate_input)));
+        }
+        AudioCodecConfig::Pcm { bit_depth } => {
+            let items = [16u8, 24, 32]
+                .into_iter()
+                .map(|candidate| {
+                    let mut updated = model.preset.clone();
+                    updated.audio = AudioCodecConfig::Pcm { bit_depth: candidate };
+                    MenuItem::new(
+                        format!("{candidate}-bit integer"),
+                        export_preset_update_action(updated),
+                    )
+                })
+                .collect();
+            audio_section = audio_section.with_row(PropertyRow::new(
+                "采样位深",
+                Box::new(
+                    Dropdown::new(format!("{bit_depth}-bit integer"), items)
+                        .with_max_visible_items(3),
+                ),
+            ));
+        }
+    }
+
     let mut queue_section = PropertySection::new("队列");
     if model.jobs.is_empty() {
         queue_section = queue_section.with_row(PropertyRow::new(
@@ -4093,9 +4586,13 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                             Label::new(export_preset_summary(selected_preset)).muted().wrapped(),
                         ),
                     )
-                    .with_height(54.0),
+                    .with_height(72.0),
                 ),
         )
+        .with_section(format_section)
+        .with_section(signal_section)
+        .with_section(encoding_section)
+        .with_section(audio_section)
         .with_section(
             PropertySection::new("输入")
                 .with_row(PropertyRow::new("序列", Box::new(sequence_dropdown)))
@@ -4288,35 +4785,31 @@ fn export_preset_summary(preset: Option<&ExportPreset>) -> String {
         .as_ref()
         .map(|resolution| format!("{}x{}", resolution.width, resolution.height))
         .unwrap_or_else(|| "Follow sequence".to_owned());
-    let (codec, bitrate) = match &preset.video {
-        VideoCodecConfig::H264 { rate_control, .. } => {
-            ("H.264 High", export_rate_control_label(*rate_control))
+    let bitrate = match &preset.video {
+        VideoCodecConfig::H264 { rate_control, .. } => export_rate_control_label(*rate_control),
+        VideoCodecConfig::Hevc { rate_control, .. } => export_rate_control_label(*rate_control),
+        VideoCodecConfig::Av1 { rate_control, .. } => export_rate_control_label(*rate_control),
+        VideoCodecConfig::ProRes { .. } => "固定 Profile 质量".to_owned(),
+        VideoCodecConfig::Gif { colors, dither } => {
+            format!(
+                "{colors} 色 / dither {}",
+                if *dither { "on" } else { "off" }
+            )
         }
-        VideoCodecConfig::Hevc { profile, rate_control } => (
-            match profile {
-                mondrian_export::preset::HevcProfile::Main => "HEVC Main",
-                mondrian_export::preset::HevcProfile::Main10 => "HEVC Main10",
-            },
-            export_rate_control_label(*rate_control),
-        ),
-        VideoCodecConfig::Av1 { rate_control, .. } => {
-            ("AV1 Main", export_rate_control_label(*rate_control))
-        }
-        VideoCodecConfig::ProRes { profile } => (
-            match profile {
-                mondrian_export::preset::ProResProfile::Proxy => "ProRes Proxy",
-                mondrian_export::preset::ProResProfile::Lt => "ProRes LT",
-                mondrian_export::preset::ProResProfile::Standard => "ProRes Standard",
-                mondrian_export::preset::ProResProfile::Hq => "ProRes HQ",
-                mondrian_export::preset::ProResProfile::FourFourFourFour => "ProRes 4444",
-                mondrian_export::preset::ProResProfile::FourFourFourFourXq => "ProRes 4444 XQ",
-            },
-            "N/A".to_owned(),
-        ),
-        VideoCodecConfig::Gif { .. } => ("GIF", "N/A".to_owned()),
+    };
+    let audio = match preset.audio {
+        AudioCodecConfig::Disabled => "无音频".to_owned(),
+        AudioCodecConfig::Aac { bitrate_kbps } => format!("AAC {bitrate_kbps} kbps"),
+        AudioCodecConfig::Pcm { bit_depth } => format!("PCM {bit_depth}-bit"),
+        AudioCodecConfig::Mp3 { bitrate_kbps } => format!("MP3 {bitrate_kbps} kbps"),
     };
     format!(
-        "{resolution} / {codec} / {bitrate} / .{}",
+        "{resolution} / {} / {bitrate} / {} / {} / {} / {} / {audio} / .{}",
+        export_video_codec_label(&preset.video),
+        export_bit_depth_label(preset.video_signal.bit_depth),
+        export_video_range_label(preset.video_signal.range),
+        export_chroma_label(preset.video_signal.chroma_sampling),
+        export_alpha_mode_label(preset.alpha_mode),
         export_preset_extension(preset)
     )
 }
@@ -6325,7 +6818,7 @@ mod tests {
         let sequence = Sequence::new("Deliverable");
         let sequence_id = sequence.id;
         state.test_set_sequence(Some(sequence));
-        state.set_export_draft_preset_index(1);
+        state.set_export_draft_builtin_preset(BuiltinExportPreset::HevcMain10Aac);
         state.set_export_draft_sequence_id(Some(sequence_id));
         state.set_export_draft_range(TimelineExportRange::EntireSequence);
         state.set_export_draft_output_path("E:/renders/deliverable.mp4");
@@ -6350,6 +6843,37 @@ mod tests {
             payload.output_path,
             std::path::PathBuf::from("E:/renders/deliverable.mp4")
         );
+        assert_eq!(payload.preset, BuiltinExportPreset::HevcMain10Aac.preset());
+        assert!(!model.preset_customized);
+    }
+
+    #[test]
+    fn export_panel_validates_the_materialized_signal_draft_and_submits_it_exactly() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Deliverable");
+        let sequence_id = sequence.id;
+        state.test_set_sequence(Some(sequence));
+        state.set_export_draft_builtin_preset(BuiltinExportPreset::H264AacSdr1080p);
+        state.set_export_draft_sequence_id(Some(sequence_id));
+        state.set_export_draft_output_path("E:/renders/deliverable.mp4");
+
+        let mut invalid = state.export_draft.preset.clone();
+        invalid.video_signal.bit_depth = ExportParameter::Explicit(DeliveryBitDepth::Ten);
+        state.set_export_draft_preset(invalid);
+        let blocked = ExportPanelModel::from_app_state(&state);
+
+        assert!(blocked.preset_customized);
+        assert!(!blocked.can_enqueue());
+        assert!(blocked.delivery_error.as_deref().is_some_and(|error| error.contains("位深")));
+
+        let mut valid = state.export_draft.preset.clone();
+        valid.video_signal.bit_depth = ExportParameter::Explicit(DeliveryBitDepth::Eight);
+        state.set_export_draft_preset(valid.clone());
+        let ready = ExportPanelModel::from_app_state(&state);
+        let payload = ready.enqueue_payload().expect("valid edited preset");
+
+        assert!(!ready.preset_customized);
+        assert_eq!(payload.preset, valid);
     }
 
     #[test]
@@ -6377,7 +6901,7 @@ mod tests {
         sequence.settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
         let sequence_id = sequence.id;
         state.test_set_sequence(Some(sequence));
-        state.set_export_draft_preset_index(0);
+        state.set_export_draft_builtin_preset(BuiltinExportPreset::H264AacSdr1080p);
         state.set_export_draft_sequence_id(Some(sequence_id));
         state.set_export_draft_output_path("E:/renders/hdr.mp4");
         state.set_status_hint("stale success must not hide the blocker", false);

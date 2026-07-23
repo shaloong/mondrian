@@ -354,6 +354,7 @@ fn execute_foundation_slice(
         paths.project.clone(),
         "Windows Alpha Golden Foundation",
         settings.clone(),
+        mondrian_core::ProjectColorEnvironment::default(),
         mondrian_core::ProjectSettings::default(),
     )?;
     runtime_cleanup.path = state.project_runtime_dir().map(Path::to_path_buf);

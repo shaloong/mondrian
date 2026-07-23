@@ -362,7 +362,7 @@ pub(crate) fn resolve_timeline_export_delivery(
     let delivery = crate::delivery::resolve_export_delivery(
         &config.preset,
         &timeline.sequence.settings,
-        &timeline.project_color_management,
+        &timeline.color_environment,
     )
     .map_err(|error| error.to_string())?;
     let write_static_hdr = timeline

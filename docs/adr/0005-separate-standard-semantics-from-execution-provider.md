@@ -17,6 +17,22 @@ Mondrian exposes three product-level modes over one OCIO integration:
 - ACES selects a pinned official ACES package for workflows that require ACES;
 - Custom OCIO selects an external show or facility config explicitly.
 
+One Project owns exactly one complete, versioned `ProjectColorEnvironment`.
+Sequences do not persist an engine, an override, or an inheritance flag. They
+persist program semantics interpreted by that environment: working space,
+workflow, Program Output, tone-map and metadata policies, and delivery
+defaults. Changing the Project environment is an atomic transaction that must
+prepare the candidate dependency and validate the future-Sequence template plus
+every existing Sequence before committing; it never rewrites a Sequence or
+falls back to a different engine.
+
+Nested color handoff is a property of each parent-to-child placement edge, not
+of either Sequence. The same child may therefore be placed with different
+handoff policies while every placement still uses the owning Project's one
+engine. Cross-Project import must either prove exact environment equality or
+perform an explicit, reviewable mapping; it cannot create a hidden second
+engine inside a Sequence.
+
 Stock OCIO is the default and authoritative execution infrastructure for all
 three modes. Processor construction, optimization, CPU execution, GPU shader
 extraction, resources, and cache invalidation remain shared. The renderer still

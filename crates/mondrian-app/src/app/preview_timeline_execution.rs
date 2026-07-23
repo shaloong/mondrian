@@ -236,6 +236,7 @@ impl<'a> PreviewTimelineGraph<'a> {
         self,
         sequence_id: SequenceId,
         parent_color_context: &ColorContext,
+        color_processing: mondrian_core::timeline_data::NestedColorProcessing,
     ) -> Result<NestedPreviewSequence<'a>, PreviewUnavailability> {
         let sequence =
             sequence_by_id(self.root_sequence, self.sequences, sequence_id).ok_or_else(|| {
@@ -253,7 +254,7 @@ impl<'a> PreviewTimelineGraph<'a> {
             ),
             color_context: sequence
                 .settings
-                .nested_render_color_context(parent_color_context.clone()),
+                .nested_render_color_context(parent_color_context.clone(), color_processing),
         })
     }
 }
@@ -285,7 +286,11 @@ fn collect_sequence_media_demands(
                 ));
             }
             TimelineRenderPlanElement::NestedSequence(nested_plan) => {
-                let nested = graph.nested(nested_plan.sequence_id, &color_context)?;
+                let nested = graph.nested(
+                    nested_plan.sequence_id,
+                    &color_context,
+                    nested_plan.color_processing,
+                )?;
                 let nested_frame = nested_sequence_frame(nested_plan.source_time, nested.sequence)?;
                 collect_sequence_media_demands(
                     graph,
@@ -429,7 +434,7 @@ where
             TimelineRenderPlanElement::NestedSequence(nested) => {
                 let graph = execution.graph;
                 let nested_execution = graph
-                    .nested(nested.sequence_id, &color_context)
+                    .nested(nested.sequence_id, &color_context, nested.color_processing)
                     .map_err(PreviewTimelineAbort::Unavailable)?;
                 let nested_sequence = nested_execution.sequence;
                 let nested_frame = nested_sequence_frame(nested.source_time, nested_sequence)
@@ -524,7 +529,8 @@ fn collect_transition_input_media_demands(
             &color_context,
         )),
         TimelineTransitionInputPlan::NestedSequence(nested) => {
-            let child = graph.nested(nested.sequence_id, &color_context)?;
+            let child =
+                graph.nested(nested.sequence_id, &color_context, nested.color_processing)?;
             let child_frame = nested_sequence_frame(nested.source_time, child.sequence)?;
             collect_sequence_media_demands(
                 graph,
@@ -621,7 +627,7 @@ where
         TimelineTransitionInputPlan::NestedSequence(nested) => {
             let graph = execution.graph;
             let child = graph
-                .nested(nested.sequence_id, &color_context)
+                .nested(nested.sequence_id, &color_context, nested.color_processing)
                 .map_err(PreviewTimelineAbort::Unavailable)?;
             let child_frame = nested_sequence_frame(nested.source_time, child.sequence)
                 .map_err(PreviewTimelineAbort::Unavailable)?;

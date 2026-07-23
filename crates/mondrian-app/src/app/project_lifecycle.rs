@@ -373,6 +373,7 @@ impl AppState {
             project_file,
             name,
             settings,
+            mondrian_core::ProjectColorEnvironment::default(),
             ProjectSettings::default(),
         )
     }
@@ -382,19 +383,21 @@ impl AppState {
         project_file: PathBuf,
         name: &str,
         settings: SequenceSettings,
+        color_environment: mondrian_core::ProjectColorEnvironment,
         project_settings: ProjectSettings,
     ) -> anyhow::Result<()> {
         if project_file.exists() {
             anyhow::bail!("项目文件已存在：{}", project_file.display());
         }
-        settings.validate_with_project_color_management(&project_settings.color_management)?;
+        settings.validate_with_color_environment(&color_environment)?;
+        color_environment.engine.ensure_loaded().map_err(anyhow::Error::msg)?;
 
         if let Some(parent) = project_file.parent() {
             fs::create_dir_all(parent)?;
         }
 
-        let mut sequence = Sequence::new(name);
-        sequence.settings = settings;
+        let mut sequence = Sequence::with_settings(name, settings.clone())
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         sequence.playhead = TimelineTime::ZERO;
 
         let runtime_root = Self::project_runtime_root(&project_file);
@@ -406,8 +409,13 @@ impl AppState {
         let library_root = runtime_root.join("library");
         let library = AssetLibrary::open(library_root)?;
         library.clear_assets()?;
-        let document =
-            ProjectDocument::new(name, SequenceCollection::new(sequence), project_settings);
+        let document = ProjectDocument::new(
+            name,
+            SequenceCollection::new(sequence),
+            color_environment,
+            settings,
+            project_settings,
+        );
         let session = AuthoringSession::new_unsaved(document, project_file, runtime_root, library)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let project_id = session.project_id();
@@ -425,39 +433,67 @@ impl AppState {
         self.save_project_file()
     }
 
-    /// Atomically replace the project color engine after validating every
-    /// inheriting sequence against the proposed project color contract.
-    pub fn set_project_color_engine(
+    /// Atomically replace the complete template copied into future Sequences.
+    ///
+    /// Existing Sequences are independent author aggregates and are never
+    /// mutated by changing this Project template.
+    pub fn update_new_sequence_defaults(
         &mut self,
-        engine: mondrian_core::ColorEngine,
+        settings: SequenceSettings,
     ) -> mondrian_core::Result<()> {
         let Some(session) = self.authoring.as_mut() else {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                step_id: "set_project_color_engine".to_owned(),
+                step_id: "update_new_sequence_defaults".to_owned(),
                 reason: "当前没有打开的项目".to_owned(),
             });
         };
-        if session.document().settings.color_management.engine == engine {
+        if session.document().new_sequence_defaults == settings {
             return Ok(());
         }
+        settings.validate_with_color_environment(&session.document().color_environment)?;
         let before = session.document().clone();
         let mut after = before.clone();
-        let mut next_color_management = after.settings.color_management.clone();
-        next_color_management.engine = engine.clone();
-        for sequence in &after.sequences.sequences {
-            sequence
-                .settings
-                .validate_with_project_color_management(&next_color_management)?;
-        }
-        engine.ensure_loaded().map_err(|reason| {
+        after.new_sequence_defaults = settings;
+        session.commit_project_snapshot("修改新建序列默认设置", before, after)?;
+        Ok(())
+    }
+
+    /// Atomically replace the Project-wide color engine.
+    ///
+    /// Every existing Sequence and the future-Sequence template must be valid
+    /// in the proposed environment. The transaction is rejected as a whole
+    /// rather than silently rewriting working or output spaces.
+    pub fn update_project_color_environment(
+        &mut self,
+        color_environment: mondrian_core::ProjectColorEnvironment,
+    ) -> mondrian_core::Result<()> {
+        color_environment.engine.ensure_loaded().map_err(|reason| {
             mondrian_core::MondrianError::WorkflowStepFailed {
-                step_id: "set_project_color_engine".to_owned(),
+                step_id: "update_project_color_environment".to_owned(),
                 reason,
             }
         })?;
+        let Some(session) = self.authoring.as_mut() else {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "update_project_color_environment".to_owned(),
+                reason: "当前没有打开的项目".to_owned(),
+            });
+        };
+        if session.document().color_environment == color_environment {
+            return Ok(());
+        }
+        session
+            .document()
+            .new_sequence_defaults
+            .validate_with_color_environment(&color_environment)?;
+        for sequence in &session.document().sequences.sequences {
+            sequence.settings.validate_with_color_environment(&color_environment)?;
+        }
 
-        after.settings.color_management.engine = engine;
-        session.commit_project_snapshot("修改项目颜色引擎", before, after)?;
+        let before = session.document().clone();
+        let mut after = before.clone();
+        after.color_environment = color_environment;
+        session.commit_project_snapshot("修改项目色彩引擎", before, after)?;
         self.stop();
         self.settle_preview_access_source();
         Ok(())
@@ -482,6 +518,8 @@ mod persistence_lifecycle_tests {
         let document = ProjectDocument::new(
             "Persistence Lifecycle",
             SequenceCollection::new(Sequence::new("Sequence")),
+            mondrian_core::ProjectColorEnvironment::default(),
+            SequenceSettings::default(),
             ProjectSettings::default(),
         );
         AuthoringSession::new_unsaved(

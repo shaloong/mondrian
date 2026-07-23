@@ -115,11 +115,13 @@ file and pins its working/display/view and digest identity. Invalid configs
 remain visible as dialog errors and never create a partial path-only mode. The
 two shells only route requests and must not duplicate this state transition.
 Applying the project-settings modal emits one complete project-domain engine
-replacement action. The modal never mutates renderer or persistence state.
-Sequence settings disables its working-space control when color management is
-inherited or the local engine pins one immutable working identity. The shell
-draft also ignores forged changes through that disabled control; app-domain
-validation remains the final authority for persisted actions.
+replacement action. App-domain admission prepares the candidate config and
+validates the future-Sequence template plus every existing Sequence atomically;
+the modal never mutates renderer, Sequence, or persistence state directly.
+Sequence settings shows the Project engine as read-only and disables its
+working-space control when that engine pins one immutable working identity. The
+shell draft also ignores forged changes through that disabled control;
+app-domain validation remains the final authority for persisted actions.
 The workflow control presents SceneReferred first because new Standard
 sequences use the package-pinned product View by default. DisplayReferred remains
 an explicit direct-colorimetric bypass; the UI must not relabel it as the normal
@@ -352,6 +354,25 @@ queue admission. It does not maintain a codec/color compatibility table.
 Incompatibility disables action construction and outranks stale success status
 text. This UI check is an early projection only; the queue remains authoritative
 against the immutable snapshot.
+
+The app export draft stores a stable built-in preset identity plus one
+materialized editable `ExportPreset`. Selecting a built-in preset resets that
+materialized value; changing container, codec/profile, raster, bit depth,
+range, chroma, Alpha, CRF/VBV, GIF palette controls, or audio codec parameters
+edits only the materialized draft. Catalog array position is presentation and
+never becomes identity. Each form action carries a complete typed preset
+snapshot, so no parallel UI-only field bag can disagree with enqueue. A
+container edit rewrites the output suffix only when that suffix still matched
+the previous container; an explicitly custom suffix is preserved. Admission
+freezes the edited preset into the job.
+
+Sequence output color, workflow, missing-metadata policy, tone-map intent,
+delivery range/bit-depth defaults, and authored HDR metadata remain
+Sequence-owned and editable. The Project engine is edited only through Project
+Settings; machine-local display management is edited only through local Viewer
+preferences. Only working-space editing is gated by the Project engine
+contract. Nested processing is edited on a selected nested Clip placement, not
+in Sequence Settings, because it describes that parent-to-child edge.
 
 Media preview frames are held in a bounded LRU cache keyed by asset identity,
 media file fingerprint (file length plus modification timestamp), source

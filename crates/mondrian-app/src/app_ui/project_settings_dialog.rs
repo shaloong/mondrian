@@ -1,8 +1,10 @@
-//! Project-level color-management settings dialog.
+//! Project-wide color-engine dialog.
 //!
 //! The dialog owns only shell-local draft state. Committing emits one complete
-//! project color engine to `AppState`, where all inheriting sequences and the
-//! selected OCIO config are validated atomically.
+//! color environment to `AppState`, where the selected OCIO config, the future
+//! Sequence template, and every existing Sequence are validated atomically.
+//! Existing Sequence settings are not rewritten; their resolved color contexts
+//! all use the accepted Project engine.
 
 use mondrian_core::{ColorEngine, ColorSpace, WorkingColorSpace};
 use mondrian_platform::PlatformService;
@@ -162,18 +164,18 @@ impl ProjectSettingsDialog {
             .with_content_padding(CONTENT_PADDING),
             bounds: Rect::ZERO,
             card: Rect::ZERO,
-            title_label: Label::new("项目设置")
+            title_label: Label::new("项目色彩引擎")
                 .popover_foreground()
                 .with_font_size(TITLE_FONT_SIZE)
                 .with_padding(0.0, 0.0),
             description_label: Label::new(
-                "项目颜色模式由所有继承项目设置的序列共享；切换会重新验证实际 OCIO 路径。",
+                "此引擎作用于项目内全部序列。应用前会校验新建序列默认值和每个现有序列；任一不兼容都会整次拒绝，不会自动改写序列。",
             )
             .muted()
             .with_font_size(LABEL_FONT_SIZE)
             .with_padding(0.0, 0.0)
             .wrapped(),
-            mode_label: Label::new("项目颜色模式")
+            mode_label: Label::new("项目色彩引擎")
                 .muted()
                 .with_font_size(LABEL_FONT_SIZE)
                 .with_padding(0.0, 0.0),

@@ -1,7 +1,7 @@
 # Timeline Model
 
 Color-context construction delegates target-qualified output View lookup to the
-selected `ColorEngine`. Sequence preview and export planning never read an
+owning Project's exact `ColorEngine`. Sequence preview and export planning never read an
 unqualified process-global OCIO default, so a failed ACES or Custom config
 cannot inherit a View from the previously active engine or reuse one output
 binding under another delivery label.
@@ -63,8 +63,11 @@ contract.
 `SequenceId` is stable identity; `SequenceRevision` is the persisted, nonzero,
 monotonic author-transaction generation for that identity. A new or duplicated
 Sequence starts at revision 1. Every committed author edit, Undo, and Redo
-advances it without saturation. A Project color-engine replacement advances
-every inheriting Sequence because its effective render semantics changed.
+advances it without saturation. A Project color-environment replacement
+advances the Project `AuthorGeneration`, not the persisted revision of every
+unchanged Sequence. Resolved contexts and execution/cache keys carry the exact
+Project engine identity, so engine replacement invalidates pixels without
+pretending that Sequence author bytes changed.
 `ProjectDocument.document_revision` is only the generation of successful file
 saves and is never a Playback or render-cache revision.
 
@@ -108,12 +111,13 @@ remain valid while navigating between Sequences. Restored Sequences receive a
 new monotonic revision rather than reusing the historical revision. Opening or
 replacing a Project creates a new `AuthoringSessionId`, preventing an old
 persistence completion or history entry from targeting the new lifetime.
-`validate_with_project_color_management` additionally validates the effective
-inherited/overridden `ColorEngine`. Mondrian Standard sequences use the exact
+`validate_with_color_environment` additionally validates a Sequence against the
+Project's exact `ColorEngine`. Mondrian Standard Sequences use the exact
 Linear Rec.2020 working identity pinned by the immutable package; Custom OCIO
-sequences use the exact working space pinned by their project identity.
+Sequences use the exact working space pinned by their Project identity.
 Application mutation boundaries call this validator before replacing a
-sequence snapshot, and new sequences adopt the selected engine's pinned space.
+Sequence snapshot. Project-environment replacement validates the complete
+future-Sequence template and every existing Sequence as one transaction.
 Editing-mode presets preserve that space: DCI raster dimensions do not imply a
 P3 working-space change.
 The persisted `working_color_space` is a `WorkingColorSpace`, distinct from
@@ -126,12 +130,14 @@ presentation outputs even if a project file is authored outside the UI; the
 sequence output must be one of the display-referred SDR/HDR identities. This
 does not remove export's separate, explicit professional Log intermediate path.
 
-New sequences default to Mondrian Standard working-space identity v1, unbounded
-scene-linear Rec.2020, and a scene-referred workflow. Their initial SDR program
-boundary therefore executes the version-pinned Mondrian Standard View. An
-explicit DisplayReferred workflow remains available as a technical colorimetric
-bypass. Project `ColorEngine` alone selects Mondrian Standard, ACES, or Custom
-OCIO; the sequence workflow does not duplicate that mode selection.
+The Project owns a complete `new_sequence_defaults` template. Project creation
+copies it exactly into the first Sequence; later Sequence creation does the
+same. Changing that template affects future Sequences only and never becomes a
+runtime fallback for an existing Sequence. The default new Project uses
+Mondrian Standard, Linear Rec.2020 and a scene-referred workflow. An explicit
+DisplayReferred workflow remains available as a technical colorimetric bypass.
+Project `ColorEngine` alone selects Mondrian Standard, ACES, or Custom OCIO;
+the Sequence workflow does not duplicate that mode selection.
 
 `SequenceColorManagement.delivery_bit_depth` and `video_range` are the
 Sequence-level delivery defaults. They do not force every export of the
@@ -143,6 +149,12 @@ these values describes the float working space or renderer-to-encoder pipe
 precision; those are derived execution contracts and are not persisted as
 editorial pixels.
 
+`SequenceColorManagement` has no engine, override, or inheritance flag. It owns
+workflow, input-metadata policy, Program Output color and tone-map intent,
+delivery range/bit-depth defaults, and authored HDR metadata. Machine-local
+Viewer display policy belongs outside author data. Nested processing belongs to
+the parent-to-child Clip placement edge, not either Sequence.
+
 When `static_hdr_metadata_policy` is `WriteAuthored`, `SequenceSettings`
 requires complete typed ST 2086 mastering-display and CTA-861.3 content-light
 payloads. `Omit` is the default. The policy never means source passthrough;
@@ -150,12 +162,13 @@ these values describe the finished sequence delivery. Validation
 rejects invalid rationals, impossible CIE xy coordinates, unordered mastering
 luminance, and non-positive or unordered MaxCLL/MaxFALL values at the persisted
 domain boundary. Output-View-specific content-peak checks remain an export
-responsibility because they depend on the effective inherited color engine.
+responsibility because they depend on the exact Project color engine.
 
-`root_program_color_context` resolves the effective color engine from the
-sequence/project inheritance rules and carries the one typed
+`root_program_color_context(ProjectColorEnvironment)` combines the Project
+engine with Sequence semantics and carries the one typed
 `OutputTransformIntent` shared by preview program pixels, scopes, and export.
-`root_preview_color_context` remains the explicitly separate local monitor
+`root_preview_color_context(ProjectColorEnvironment, target)` remains the
+explicitly separate local monitor
 presentation request until the renderer applies it as monitor adaptation after
 Program Output; it must never be used as the scope or delivery identity.
 An ordinary display-referred SDR context remains `Colorimetric`; a

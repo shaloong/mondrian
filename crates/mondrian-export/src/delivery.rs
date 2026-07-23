@@ -9,7 +9,7 @@ use crate::preset::{
     AudioCodecConfig, Av1Profile, Container, ExportAlphaMode, ExportChromaSampling, ExportPreset,
     HevcProfile, ProResProfile, Resolution, VideoCodecConfig, VideoRateControl,
 };
-use mondrian_core::{ColorEngine, ColorSpace, ProjectColorManagement};
+use mondrian_core::{ColorEngine, ColorSpace, ProjectColorEnvironment};
 use mondrian_timeline::sequence::{
     DeliveryBitDepth, SequenceSettings, StaticHdrMetadataPolicy, VideoRange,
 };
@@ -77,13 +77,13 @@ pub struct ResolvedExportDeliveryContract {
     pub pixel_format: &'static str,
 }
 
-/// Resolve and validate one preset against Sequence and project output intent.
+/// Resolve and validate one preset against complete Sequence output intent.
 ///
 /// No authoring state is mutated and no implicit codec fallback is permitted.
 pub fn resolve_export_delivery(
     preset: &ExportPreset,
     settings: &SequenceSettings,
-    project_color_management: &ProjectColorManagement,
+    color_environment: &ProjectColorEnvironment,
 ) -> Result<ResolvedExportDeliveryContract, ExportDeliveryError> {
     validate_rate_control(&preset.video)?;
     validate_audio_parameters(&preset.audio)?;
@@ -104,13 +104,7 @@ pub fn resolve_export_delivery(
     let pixel_format =
         resolve_pixel_format(&preset.video, preset.alpha_mode, bit_depth, chroma_sampling)?;
     validate_dimensions(resolution, chroma_sampling)?;
-    validate_color_output(
-        preset,
-        settings,
-        project_color_management,
-        bit_depth,
-        video_range,
-    )?;
+    validate_color_output(preset, settings, color_environment, bit_depth, video_range)?;
 
     Ok(ResolvedExportDeliveryContract {
         resolution,
@@ -367,7 +361,7 @@ fn validate_alpha(preset: &ExportPreset) -> Result<(), ExportDeliveryError> {
 fn validate_color_output(
     preset: &ExportPreset,
     settings: &SequenceSettings,
-    project_color_management: &ProjectColorManagement,
+    color_environment: &ProjectColorEnvironment,
     bit_depth: DeliveryBitDepth,
     video_range: VideoRange,
 ) -> Result<(), ExportDeliveryError> {
@@ -463,11 +457,7 @@ fn validate_color_output(
             )
         })?;
 
-        let engine = if settings.color_management.inherit {
-            &project_color_management.engine
-        } else {
-            &settings.color_management.engine
-        };
+        let engine = &color_environment.engine;
         if let ColorEngine::MondrianStandard { package } = engine {
             let target = mondrian_core::mondrian_standard_output_target_contract_for_package(
                 *package, output,
@@ -500,7 +490,7 @@ mod tests {
         let contract = resolve_export_delivery(
             &ExportPreset::h264_aac_sdr_1080p(),
             &settings,
-            &ProjectColorManagement::default(),
+            &ProjectColorEnvironment::default(),
         )
         .expect("explicit preset signal should resolve");
 
@@ -517,7 +507,7 @@ mod tests {
         let error = resolve_export_delivery(
             &preset,
             &SequenceSettings::default(),
-            &ProjectColorManagement::default(),
+            &ProjectColorEnvironment::default(),
         )
         .expect_err("Main10 and 8-bit must not be silently reconciled");
 
@@ -543,7 +533,7 @@ mod tests {
         };
 
         let contract =
-            resolve_export_delivery(&preset, &settings, &ProjectColorManagement::default())
+            resolve_export_delivery(&preset, &settings, &ProjectColorEnvironment::default())
                 .expect("sequence defaults should resolve to a concrete contract");
         assert_eq!(contract.bit_depth, DeliveryBitDepth::Eight);
         assert_eq!(contract.video_range, VideoRange::Full);
@@ -557,7 +547,7 @@ mod tests {
         let error = resolve_export_delivery(
             &preset,
             &SequenceSettings::default(),
-            &ProjectColorManagement::default(),
+            &ProjectColorEnvironment::default(),
         )
         .expect_err("odd 4:2:0 width must fail closed");
         assert_eq!(error.code, ExportDeliveryIssueCode::InvalidResolution);
@@ -579,7 +569,7 @@ mod tests {
         let error = resolve_export_delivery(
             &preset,
             &SequenceSettings::default(),
-            &ProjectColorManagement::default(),
+            &ProjectColorEnvironment::default(),
         )
         .expect_err("partial VBV state must be rejected");
         assert_eq!(error.code, ExportDeliveryIssueCode::InvalidRateControl);

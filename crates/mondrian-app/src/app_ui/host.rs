@@ -211,10 +211,7 @@ impl AppUiHost {
         self.app_state.borrow()
     }
 
-    /// Get the resolved color engine and display policy for the current sequence/project.
-    ///
-    /// Applies the inheritance model: if the sequence inherits from project,
-    /// returns the project-level pair; otherwise returns the sequence-level pair.
+    /// Get the Project engine and machine-local Viewer display policy.
     pub(crate) fn resolved_display_color_management(
         &self,
     ) -> (
@@ -222,25 +219,8 @@ impl AppUiHost {
         mondrian_core::color_models::DisplayManagementPolicy,
     ) {
         let state = self.app_state.borrow();
-        let project_cm = &state.project_settings().color_management;
-        if let Some(sequence) = state.active_sequence() {
-            if sequence.settings.color_management.inherit {
-                (
-                    project_cm.engine.clone(),
-                    project_cm.display_management.clone(),
-                )
-            } else {
-                (
-                    sequence.settings.color_management.engine.clone(),
-                    sequence.settings.color_management.display_management.clone(),
-                )
-            }
-        } else {
-            (
-                project_cm.engine.clone(),
-                project_cm.display_management.clone(),
-            )
-        }
+        let engine = state.project_color_environment().engine.clone();
+        (engine, state.viewer_display_management().clone())
     }
 
     /// Build a GPU-output preview candidate for the current app state.
@@ -1071,7 +1051,7 @@ impl AppUiHost {
 fn thumbnail_color_context(state: &AppState) -> Option<mondrian_timeline::sequence::ColorContext> {
     state.active_sequence().map(|sequence| {
         sequence.settings.root_preview_color_context(
-            &state.project_settings().color_management,
+            state.project_color_environment(),
             mondrian_core::types::ColorSpace::Srgb,
         )
     })

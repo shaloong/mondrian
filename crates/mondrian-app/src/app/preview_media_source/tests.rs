@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use mondrian_assets::{AssetKind, AssetRecord};
 use mondrian_core::timeline_data::{AlphaInterpretation, AssetMediaInterpretation};
 use mondrian_core::types::{AssetId, ColorSpace, Rational};
-use mondrian_core::{ProjectColorManagement, Resolution, TimelineTime};
+use mondrian_core::{Resolution, TimelineTime};
 use mondrian_media::info::{PixelFormat, VideoCodec};
 use mondrian_media::{
     DetectedColorInterpretation, MediaInfo, VideoCodecProfile, VideoColorDetectionMethod,
@@ -96,9 +96,10 @@ fn video_asset(path: PathBuf) -> AssetRecord {
 }
 
 fn color_context() -> ColorContext {
-    Sequence::new("preview media source")
-        .settings
-        .root_preview_color_context(&ProjectColorManagement::default(), ColorSpace::Rec709)
+    Sequence::new("preview media source").settings.root_preview_color_context(
+        &mondrian_core::ProjectColorEnvironment::default(),
+        ColorSpace::Rec709,
+    )
 }
 
 fn gpu_admission() -> PreviewHardwareDecodeAdmissionState {

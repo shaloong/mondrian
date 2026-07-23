@@ -266,7 +266,7 @@ impl AppState {
                     reason: "Adjustment Layer cannot be a Transition endpoint".to_owned(),
                 })
             }
-            mondrian_core::timeline_data::ClipContent::NestedSequence { sequence_id } => {
+            mondrian_core::timeline_data::ClipContent::NestedSequence { sequence_id, .. } => {
                 let child = self.sequence_by_id(*sequence_id).ok_or_else(|| {
                     MondrianError::WorkflowStepFailed {
                         step_id: "video_transition_source_extent".to_owned(),

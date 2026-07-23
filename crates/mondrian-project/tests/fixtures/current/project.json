@@ -1,5 +1,5 @@
 {
-  "schema_version": 18,
+  "schema_version": 19,
   "project_id": "97f12455-ec34-4b5d-a696-3da93cd914d7",
   "document_revision": 1,
   "meta": {
@@ -16,30 +16,69 @@
       "height": 720
     },
     "cache_dir": null,
-    "auto_save_interval": 300,
-    "color_management": {
-      "engine": {
-        "mode": "mondrian_standard",
-        "package": {
-          "package_id": "mondrian_standard",
-          "package_version": "v3",
-          "config_id": "mondrian_default_ocio_v2",
-          "config_sha256": "99416ff04d756a3d490778d4a6e3df32a24b5adbea1c7fa890c5c7caa31a78f6",
-          "package_sha256": "462bea568f3babcd76030fd219a54dcde8a6fa2acece31e20883a9ba98501e61",
-          "working_space_id": "linear_rec2020_v1",
-          "working_space_version": "v1",
-          "sdr_view_transform_id": "mondrian_standard_sdr_v2",
-          "sdr_view_transform_version": "v2",
-          "hdr_view_transform_id": "mondrian_standard_hdr_1000_nits_v1",
-          "hdr_view_transform_version": "v1"
-        }
-      },
-      "display_management": {
-        "monitor_profile": "MatchOutputColorSpace",
-        "viewer_mode": "MatchOutputColorSpace",
-        "tone_map_policy": "Automatic",
-        "export_delivery_view": "None"
+    "auto_save_interval": 300
+  },
+  "color_environment": {
+    "engine": {
+      "mode": "mondrian_standard",
+      "package": {
+        "package_id": "mondrian_standard",
+        "package_version": "v3",
+        "config_id": "mondrian_default_ocio_v2",
+        "config_sha256": "99416ff04d756a3d490778d4a6e3df32a24b5adbea1c7fa890c5c7caa31a78f6",
+        "package_sha256": "462bea568f3babcd76030fd219a54dcde8a6fa2acece31e20883a9ba98501e61",
+        "working_space_id": "linear_rec2020_v1",
+        "working_space_version": "v1",
+        "sdr_view_transform_id": "mondrian_standard_sdr_v2",
+        "sdr_view_transform_version": "v2",
+        "hdr_view_transform_id": "mondrian_standard_hdr_1000_nits_v1",
+        "hdr_view_transform_version": "v1"
       }
+    }
+  },
+  "new_sequence_defaults": {
+    "editing_mode": "Custom",
+    "resolution": {
+      "width": 1920,
+      "height": 1080
+    },
+    "frame_rate": {
+      "num": 25,
+      "den": 1
+    },
+    "pixel_aspect_ratio": "Square",
+    "field_order": "Progressive",
+    "timeline_display": {
+      "format": {
+        "kind": "frames"
+      },
+      "timecode_start_frame": 0
+    },
+    "audio_sample_rate": 48000,
+    "audio_display_format": "AudioSamples",
+    "audio_channel_layout": {
+      "Speakers": [
+        "FrontLeft",
+        "FrontRight"
+      ]
+    },
+    "preview": {
+      "format": "IFrameOnly",
+      "resolution_scale": 0.5,
+      "cache_enabled": true
+    },
+    "working_color_space": "linear_rec2020",
+    "auto_tone_map_media": true,
+    "action_safe_margin": 0.1,
+    "title_safe_margin": 0.2,
+    "color_management": {
+      "workflow": "SceneReferred",
+      "missing_metadata_policy": "AssumeRec709",
+      "output_tone_map_policy": "Automatic",
+      "output_color_space": "Rec709",
+      "video_range": "Full",
+      "delivery_bit_depth": "Ten",
+      "static_hdr_metadata_policy": "Omit"
     }
   },
   "sequences": {
@@ -86,31 +125,8 @@
           "title_safe_margin": 0.2,
           "color_management": {
             "workflow": "SceneReferred",
-            "inherit": true,
-            "engine": {
-              "mode": "mondrian_standard",
-              "package": {
-                "package_id": "mondrian_standard",
-                "package_version": "v3",
-                "config_id": "mondrian_default_ocio_v2",
-                "config_sha256": "99416ff04d756a3d490778d4a6e3df32a24b5adbea1c7fa890c5c7caa31a78f6",
-                "package_sha256": "462bea568f3babcd76030fd219a54dcde8a6fa2acece31e20883a9ba98501e61",
-                "working_space_id": "linear_rec2020_v1",
-                "working_space_version": "v1",
-                "sdr_view_transform_id": "mondrian_standard_sdr_v2",
-                "sdr_view_transform_version": "v2",
-                "hdr_view_transform_id": "mondrian_standard_hdr_1000_nits_v1",
-                "hdr_view_transform_version": "v1"
-              }
-            },
             "missing_metadata_policy": "AssumeRec709",
-            "nested_processing": "PreserveChildWorkingSpace",
-            "display_management": {
-              "monitor_profile": "MatchOutputColorSpace",
-              "viewer_mode": "MatchOutputColorSpace",
-              "tone_map_policy": "Automatic",
-              "export_delivery_view": "None"
-            },
+            "output_tone_map_policy": "Automatic",
             "output_color_space": "Rec709",
             "video_range": "Full",
             "delivery_bit_depth": "Ten",

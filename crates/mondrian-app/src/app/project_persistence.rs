@@ -284,7 +284,7 @@ mod tests {
     use mondrian_core::ProjectSettings;
     use mondrian_editor_state::AuthoringSession;
     use mondrian_project::{load_project_archive, ProjectDocument};
-    use mondrian_timeline::{Sequence, SequenceCollection};
+    use mondrian_timeline::{Sequence, SequenceCollection, SequenceSettings};
     use std::time::{Duration, Instant};
 
     fn unique_root(name: &str) -> PathBuf {
@@ -303,6 +303,8 @@ mod tests {
         let document = ProjectDocument::new(
             "Persistence Test",
             SequenceCollection::new(Sequence::new("Sequence")),
+            mondrian_core::ProjectColorEnvironment::default(),
+            SequenceSettings::default(),
             ProjectSettings::default(),
         );
         AuthoringSession::new_unsaved(

@@ -581,8 +581,6 @@ fn changed_sequence_ids(
     before: &ProjectDocument,
     after: &ProjectDocument,
 ) -> Result<Vec<SequenceId>> {
-    let project_execution_semantics_changed =
-        serde_json::to_vec(&before.settings)? != serde_json::to_vec(&after.settings)?;
     let ids = before
         .sequences
         .sequences
@@ -594,8 +592,7 @@ fn changed_sequence_ids(
     for id in ids {
         let differs = match (before.sequences.sequence(id), after.sequences.sequence(id)) {
             (Some(before), Some(after)) => {
-                project_execution_semantics_changed
-                    || sequence_authoring_bytes(before)? != sequence_authoring_bytes(after)?
+                sequence_authoring_bytes(before)? != sequence_authoring_bytes(after)?
             }
             _ => true,
         };
@@ -633,8 +630,8 @@ fn session_error(step_id: &str, reason: impl Into<String>) -> MondrianError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_core::ProjectSettings;
-    use mondrian_timeline::SequenceCollection;
+    use mondrian_core::{ProjectColorEnvironment, ProjectSettings};
+    use mondrian_timeline::{SequenceCollection, SequenceSettings};
 
     fn session_with_two_sequences(saved: bool) -> AuthoringSession {
         let root = tempfile::tempdir().expect("runtime tempdir").keep();
@@ -643,7 +640,13 @@ mod tests {
         let secondary = Sequence::new("Secondary");
         let mut sequences = SequenceCollection::new(primary);
         sequences.add_sequence(secondary).expect("secondary Sequence");
-        let document = ProjectDocument::new("Project", sequences, ProjectSettings::default());
+        let document = ProjectDocument::new(
+            "Project",
+            sequences,
+            ProjectColorEnvironment::default(),
+            SequenceSettings::default(),
+            ProjectSettings::default(),
+        );
         let project_file = root.join("project.mdp");
         if saved {
             AuthoringSession::open_saved(document, project_file, root, library)
@@ -739,8 +742,9 @@ mod tests {
     }
 
     #[test]
-    fn project_execution_settings_invalidate_every_sequence_revision() {
+    fn project_only_settings_advance_generation_without_rewriting_sequences() {
         let mut session = session_with_two_sequences(true);
+        let generation = session.author_generation();
         let revisions = session
             .document()
             .sequences
@@ -753,14 +757,20 @@ mod tests {
         after.settings.auto_save_interval += 1;
 
         let commit = session
-            .commit_project_snapshot("change execution settings", before, after)
+            .commit_project_snapshot("change Project settings", before, after)
             .expect("project transaction");
 
-        assert_eq!(commit.changed_sequence_ids.len(), revisions.len());
+        assert!(commit.project_wide);
+        assert!(commit.changed_sequence_ids.is_empty());
+        assert_eq!(
+            commit.generation,
+            generation.next().expect("next author generation")
+        );
+        assert_eq!(session.author_generation(), commit.generation);
         for (sequence_id, previous) in revisions {
             assert_eq!(
                 session.sequence(sequence_id).expect("Sequence").revision,
-                previous.checked_next().expect("next revision")
+                previous
             );
         }
     }

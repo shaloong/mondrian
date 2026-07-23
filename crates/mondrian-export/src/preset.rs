@@ -361,9 +361,11 @@ impl ExportPreset {
 ///
 /// The app and Headless validation use this catalog instead of independently
 /// rebuilding semantically similar presets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
 pub enum BuiltinExportPreset {
     /// Interoperable H.264 High/AAC SDR MP4.
+    #[default]
     H264AacSdr1080p,
     /// HEVC Main10/AAC MP4 that follows Sequence dimensions.
     HevcMain10Aac,
@@ -441,6 +443,8 @@ pub enum TimelineExportRange {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelineExportSnapshot {
+    /// Exact Project color engine frozen when the job is admitted.
+    pub color_environment: mondrian_core::ProjectColorEnvironment,
     pub sequence: Sequence,
     #[serde(default)]
     pub sequences: Vec<Sequence>,
@@ -449,9 +453,6 @@ pub struct TimelineExportSnapshot {
     pub media: HashMap<AssetId, ExportMediaDependency>,
     #[serde(default)]
     pub range: TimelineExportRange,
-    /// 项目级色彩管理设置（所有序列默认继承）。
-    #[serde(default)]
-    pub project_color_management: mondrian_core::ProjectColorManagement,
 }
 
 /// One internally consistent media dependency frozen into an export snapshot.

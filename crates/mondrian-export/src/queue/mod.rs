@@ -2225,7 +2225,7 @@ fn render_timeline_frame_into_with_session(
     let color_context = timeline
         .sequence
         .settings
-        .root_program_color_context(&timeline.project_color_management);
+        .root_program_color_context(&timeline.color_environment);
     let mut render_context = ExportFrameRenderContext {
         timeline,
         alpha_mode,
@@ -2299,8 +2299,9 @@ type ExportDecodeCacheKey = (
 /// Collect input color-resolution source counts for one export timeline frame.
 ///
 /// This uses the same render-plan evaluation path as timeline export, including
-/// nested sequence recursion and sequence color-context inheritance. It is the
-/// export-side diagnostic counterpart to preview's per-frame source counters.
+/// nested sequence recursion and composition of the Project color environment
+/// with each Sequence's program semantics. It is the export-side diagnostic
+/// counterpart to preview's per-frame source counters.
 pub fn export_input_color_resolution_counts_for_frame(
     timeline: &TimelineExportSnapshot,
     timeline_frame: i64,
@@ -2308,7 +2309,7 @@ pub fn export_input_color_resolution_counts_for_frame(
     let color_context = timeline
         .sequence
         .settings
-        .root_program_color_context(&timeline.project_color_management);
+        .root_program_color_context(&timeline.color_environment);
     export_sequence_input_color_resolution_counts(
         timeline,
         &timeline.sequence,
@@ -2469,8 +2470,9 @@ fn export_sequence_input_color_resolution_counts(
                     .map_err(|error| error.to_string())?
                     .frame
                     .max(0);
-                let nested_context =
-                    nested_sequence.settings.nested_render_color_context(color_context.clone());
+                let nested_context = nested_sequence
+                    .settings
+                    .nested_render_color_context(color_context.clone(), nested.color_processing);
                 let nested_counts = export_sequence_input_color_resolution_counts(
                     timeline,
                     nested_sequence,
@@ -2537,7 +2539,9 @@ fn export_transition_input_color_resolution_counts(
                 .to_frame_position(sequence.settings.frame_rate, FrameRounding::Floor)
                 .map_err(|error| error.to_string())?
                 .frame;
-            let nested_context = sequence.settings.nested_render_color_context(color_context);
+            let nested_context = sequence
+                .settings
+                .nested_render_color_context(color_context, nested.color_processing);
             counts.accumulate(export_sequence_input_color_resolution_counts(
                 timeline,
                 sequence,
@@ -2973,8 +2977,9 @@ fn render_export_nested_plan(
         ));
     }
     let mut output = None;
-    let nested_context =
-        sequence.settings.nested_render_color_context(parent_color_context.clone());
+    let nested_context = sequence
+        .settings
+        .nested_render_color_context(parent_color_context.clone(), nested.color_processing);
     render_sequence_frame_into(
         context,
         sequence,
@@ -3448,8 +3453,8 @@ mod tests {
             sequence,
             sequences: Vec::new(),
             media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: TimelineExportRange::SequenceInOut,
-            project_color_management: mondrian_core::ProjectColorManagement::default(),
         }
     }
 
@@ -3994,8 +3999,8 @@ mod tests {
             sequence: seq,
             sequences: Vec::new(),
             media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: TimelineExportRange::SequenceInOut,
-            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
 
         let mut export_diagnostics = ExportJobColorDiagnostics::default();
@@ -4097,12 +4102,9 @@ mod tests {
             output_color_space: ColorSpace::Srgb.into(),
             tone_map: true,
             workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
-            nested_processing:
-                mondrian_core::timeline_data::NestedColorProcessing::PreserveChildWorkingSpace,
             engine: ColorEngine::mondrian_standard(),
             missing_metadata_policy:
                 mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
-            display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
             output_transform: mondrian_core::OutputTransformIntent::mondrian_standard(),
         };
 
@@ -4122,12 +4124,9 @@ mod tests {
             output_color_space: ColorSpace::Rec709.into(),
             tone_map: false,
             workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
-            nested_processing:
-                mondrian_core::timeline_data::NestedColorProcessing::PreserveChildWorkingSpace,
             engine: ColorEngine::mondrian_standard(),
             missing_metadata_policy:
                 mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
-            display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
             output_transform: mondrian_core::OutputTransformIntent::mondrian_standard(),
         };
 
@@ -4191,20 +4190,17 @@ mod tests {
             sequence: seq,
             sequences: Vec::new(),
             media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: TimelineExportRange::SequenceInOut,
-            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
         let ctx = ColorContext {
             working_color_space: WorkingColorSpace::LinearRec709,
             output_color_space: ColorSpace::Rec709.into(),
             tone_map: true,
             workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
-            nested_processing:
-                mondrian_core::timeline_data::NestedColorProcessing::PreserveChildWorkingSpace,
             engine: ColorEngine::mondrian_standard(),
             missing_metadata_policy:
                 mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
-            display_management: mondrian_core::color_models::DisplayManagementPolicy::default(),
             output_transform: mondrian_core::OutputTransformIntent::mondrian_standard(),
         };
 
@@ -4275,13 +4271,13 @@ mod tests {
         sequence.validate_author_identities().expect("valid author graph");
         let color_context = sequence
             .settings
-            .root_program_color_context(&mondrian_core::ProjectColorManagement::default());
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default());
         let timeline = TimelineExportSnapshot {
             sequence,
             sequences: Vec::new(),
             media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: TimelineExportRange::SequenceInOut,
-            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
         let mut output = None;
         let mut composite_diagnostics = TimelineCompositeDiagnostics::default();
@@ -4340,13 +4336,13 @@ mod tests {
         sequence.validate_author_identities().expect("valid author graph");
         let color_context = sequence
             .settings
-            .root_program_color_context(&mondrian_core::ProjectColorManagement::default());
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default());
         let timeline = TimelineExportSnapshot {
             sequence,
             sequences: Vec::new(),
             media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: TimelineExportRange::SequenceInOut,
-            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
         let mut output = None;
         let mut composite_diagnostics = TimelineCompositeDiagnostics::default();
@@ -4418,13 +4414,13 @@ mod tests {
         child.validate_author_identities().expect("valid child author graph");
         let color_context = root
             .settings
-            .root_program_color_context(&mondrian_core::ProjectColorManagement::default());
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default());
         let timeline = TimelineExportSnapshot {
             sequence: root,
             sequences: vec![child],
             media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: TimelineExportRange::SequenceInOut,
-            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
         let mut output = None;
         let mut visual_session = ExportVisualRenderSession::default();
@@ -4472,13 +4468,13 @@ mod tests {
             .expect("title placement");
         let color_context = sequence
             .settings
-            .root_program_color_context(&mondrian_core::ProjectColorManagement::default());
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default());
         let timeline = TimelineExportSnapshot {
             sequence,
             sequences: Vec::new(),
             media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: TimelineExportRange::SequenceInOut,
-            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
         let mut output = None;
         let mut visual_session = ExportVisualRenderSession::default();
@@ -4647,8 +4643,8 @@ mod tests {
             sequence,
             sequences: vec![nested],
             media,
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: TimelineExportRange::SequenceInOut,
-            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
 
         assert_eq!(
@@ -4922,8 +4918,8 @@ mod tests {
             sequence: seq,
             sequences: Vec::new(),
             media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: TimelineExportRange::SequenceInOut,
-            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
 
         let range = compute_timeline_render_range(&timeline).expect("valid render range");
@@ -4944,8 +4940,8 @@ mod tests {
             sequence: seq,
             sequences: Vec::new(),
             media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: TimelineExportRange::EntireSequence,
-            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
 
         let range = compute_timeline_render_range(&timeline).expect("valid render range");
@@ -4984,8 +4980,8 @@ mod tests {
             sequence: seq,
             sequences: Vec::new(),
             media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: TimelineExportRange::SequenceInOut,
-            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
         timeline.media.insert(
             detected_id,
@@ -5112,8 +5108,8 @@ mod tests {
             sequence: seq,
             sequences: Vec::new(),
             media,
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: TimelineExportRange::SequenceInOut,
-            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
 
         let range = compute_timeline_render_range(&timeline).expect("valid render range");
@@ -5426,8 +5422,8 @@ mod tests {
             sequence: seq,
             sequences: Vec::new(),
             media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: TimelineExportRange::SequenceInOut,
-            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
 
         let mut canvas = vec![77u8; 4 * 2 * 4];
@@ -5488,8 +5484,8 @@ mod tests {
             sequence: seq,
             sequences: Vec::new(),
             media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: TimelineExportRange::SequenceInOut,
-            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
 
         let mut preserved = Vec::new();
@@ -5536,8 +5532,8 @@ mod tests {
             sequence: seq,
             sequences: Vec::new(),
             media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: TimelineExportRange::SequenceInOut,
-            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
 
         let mut canvas = vec![77u8; 4 * 2 * 4];
@@ -5599,8 +5595,8 @@ mod tests {
             sequence: seq,
             sequences: Vec::new(),
             media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: TimelineExportRange::SequenceInOut,
-            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
 
         let _gpu_guard = GpuBoundaryFailureGuard::activate();
@@ -5673,8 +5669,8 @@ mod tests {
             sequence: seq,
             sequences: Vec::new(),
             media,
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: TimelineExportRange::SequenceInOut,
-            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
 
         let mut canvas = Vec::new();
@@ -5858,8 +5854,8 @@ mod tests {
             sequence: seq,
             sequences: Vec::new(),
             media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: TimelineExportRange::SequenceInOut,
-            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
 
         let mut export_diagnostics = ExportJobColorDiagnostics::default();
@@ -5910,8 +5906,8 @@ mod tests {
             sequence: seq,
             sequences: Vec::new(),
             media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: TimelineExportRange::SequenceInOut,
-            project_color_management: mondrian_core::ProjectColorManagement::default(),
         };
 
         let mut canvas = vec![0u8; 2 * 2 * 8];

@@ -28,7 +28,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let display_snapshot = self.display_snapshot.borrow();
         let display_color_space = match preview_display_color_space(
             sequence,
-            &state.project_settings().color_management,
+            state.viewer_display_management(),
             display_snapshot.as_ref(),
         ) {
             Ok(color_space) => color_space,
@@ -43,9 +43,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 ));
             }
         };
-        let color_context = sequence
-            .settings
-            .root_program_color_context(&state.project_settings().color_management);
+        let color_context =
+            sequence.settings.root_program_color_context(state.project_color_environment());
         self.activate_preview_generation(ViewerPreviewGenerationKey::from_state(
             state,
             sequence,

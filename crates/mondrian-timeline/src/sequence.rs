@@ -3,7 +3,7 @@
 use crate::{clip::ActiveClip, track::Track};
 pub use mondrian_core::AudioChannelLayout;
 use mondrian_core::{
-    types::*, DisplayManagementPolicy, SmpteCountingMode, TimelineDisplayContract,
+    types::*, DisplayToneMapPolicy, SmpteCountingMode, TimelineDisplayContract,
     TimelineDisplayFormat, TimelineDisplaySettings, TimelineTime, VideoContentLightMetadata,
     VideoMasteringDisplayMetadata,
 };
@@ -387,32 +387,16 @@ pub enum DeliveryBitDepth {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SequenceColorManagement {
-    #[serde(default)]
     pub workflow: ColorWorkflow,
-    /// `true` 时使用项目级色彩管理设置（引擎 + 策略）。
-    /// `false` 时使用此结构体中的独立设置。
-    #[serde(default = "default_inherit_color_management")]
-    pub inherit: bool,
-    #[serde(default)]
-    pub engine: ColorEngine,
-    #[serde(default)]
     pub missing_metadata_policy: MissingColorMetadataPolicy,
-    #[serde(default)]
-    pub nested_processing: NestedColorProcessing,
-    /// Display/monitor/tone-map policy used when this sequence does not inherit
-    /// project-level color management.
-    #[serde(default)]
-    pub display_management: DisplayManagementPolicy,
-    #[serde(default = "default_output_color_space")]
+    /// Program-output tone-map policy authored for this Sequence.
+    pub output_tone_map_policy: DisplayToneMapPolicy,
     pub output_color_space: ColorSpace,
-    #[serde(default)]
     pub video_range: VideoRange,
-    #[serde(default)]
     /// Actual encoded sample depth of the deliverable.
     pub delivery_bit_depth: DeliveryBitDepth,
     /// Whether export omits static HDR metadata or writes the explicitly
     /// authored delivery values below.
-    #[serde(default)]
     pub static_hdr_metadata_policy: StaticHdrMetadataPolicy,
     /// HDR mastering-display color volume (SMPTE ST 2086).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -451,11 +435,8 @@ pub struct ColorContext {
     pub output_color_space: OcioColorSpaceIdentity,
     pub tone_map: bool,
     pub workflow: ColorWorkflow,
-    pub nested_processing: NestedColorProcessing,
     pub engine: ColorEngine,
     pub missing_metadata_policy: MissingColorMetadataPolicy,
-    /// Resolved display-management policy for this render context.
-    pub display_management: DisplayManagementPolicy,
     /// Product-level final output transform selected for this context.
     pub output_transform: mondrian_core::OutputTransformIntent,
 }
@@ -464,11 +445,8 @@ impl Default for SequenceColorManagement {
     fn default() -> Self {
         Self {
             workflow: ColorWorkflow::SceneReferred,
-            inherit: default_inherit_color_management(),
-            engine: ColorEngine::default(),
             missing_metadata_policy: MissingColorMetadataPolicy::AssumeRec709,
-            nested_processing: NestedColorProcessing::PreserveChildWorkingSpace,
-            display_management: DisplayManagementPolicy::default(),
+            output_tone_map_policy: DisplayToneMapPolicy::default(),
             output_color_space: ColorSpace::Rec709,
             video_range: VideoRange::Full,
             delivery_bit_depth: DeliveryBitDepth::Ten,
@@ -477,14 +455,6 @@ impl Default for SequenceColorManagement {
             hdr_content_light: None,
         }
     }
-}
-
-const fn default_inherit_color_management() -> bool {
-    true
-}
-
-const fn default_output_color_space() -> ColorSpace {
-    ColorSpace::Rec709
 }
 
 /// 序列设置（帧率/分辨率/音频配置）
@@ -516,7 +486,6 @@ pub struct SequenceSettings {
     /// Title-safe margin as fraction of frame (0.20 = 20% total, 10% per side).
     #[serde(default = "default_title_safe_margin")]
     pub title_safe_margin: f32,
-    #[serde(default)]
     pub color_management: SequenceColorManagement,
 }
 
@@ -556,6 +525,7 @@ impl SequenceSettings {
     pub const MAX_WIDTH: u32 = 16_384;
     pub const MAX_HEIGHT: u32 = 16_384;
 
+    /// Validate invariants that do not depend on the Project color engine.
     pub fn validate(&self) -> mondrian_core::Result<()> {
         if !Rational::SEQUENCE_FRAME_RATES.contains(&self.frame_rate) {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
@@ -650,29 +620,24 @@ impl SequenceSettings {
         Ok(())
     }
 
-    /// Validate sequence settings together with the effective project color mode.
-    ///
-    /// This catches working-space mismatches and output intents that the exact
-    /// selected engine/package cannot resolve before render planning.
-    pub fn validate_with_project_color_management(
+    /// Validate the complete Sequence contract in one Project color environment.
+    pub fn validate_with_color_environment(
         &self,
-        project_cm: &mondrian_core::ProjectColorManagement,
+        color_environment: &mondrian_core::ProjectColorEnvironment,
     ) -> mondrian_core::Result<()> {
         self.validate()?;
-        let engine = if self.color_management.inherit {
-            &project_cm.engine
-        } else {
-            &self.color_management.engine
-        };
-        engine.validate_working_space(self.working_color_space).map_err(|reason| {
-            mondrian_core::MondrianError::WorkflowStepFailed {
+        color_environment
+            .engine
+            .validate_working_space(self.working_color_space)
+            .map_err(|reason| mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "sequence_color_management_validate".to_owned(),
                 reason,
-            }
-        })?;
+            })?;
 
-        let output_context = self
-            .root_color_context_for_output(project_cm, self.color_management.output_color_space);
+        let output_context = self.root_color_context_for_output(
+            color_environment,
+            self.color_management.output_color_space,
+        );
         output_context
             .output_transform
             .resolve_display_view(
@@ -689,17 +654,18 @@ impl SequenceSettings {
     /// Build the Program Output color context shared by preview, scopes, and export.
     ///
     /// Program Output uses the sequence output color space because these pixels
-    /// define the program before any local monitor adaptation. When the sequence
-    /// inherits color management from the project (`color_management.inherit == true`),
-    /// the `engine` is taken from `project_cm` instead of per-sequence settings.
+    /// define the program before any local monitor adaptation.
     ///
-    /// The effective engine owns the single typed `output_transform` intent;
-    /// no second display/view policy may replace it.
+    /// The Project engine and Sequence program semantics resolve one typed
+    /// `output_transform` intent; no second display/view policy may replace it.
     pub fn root_program_color_context(
         &self,
-        project_cm: &mondrian_core::ProjectColorManagement,
+        color_environment: &mondrian_core::ProjectColorEnvironment,
     ) -> ColorContext {
-        self.root_color_context_for_output(project_cm, self.color_management.output_color_space)
+        self.root_color_context_for_output(
+            color_environment,
+            self.color_management.output_color_space,
+        )
     }
 
     /// Build the presentation color context for root sequence preview.
@@ -709,32 +675,23 @@ impl SequenceSettings {
     /// independently from delivery encoding.
     pub fn root_preview_color_context(
         &self,
-        project_cm: &mondrian_core::ProjectColorManagement,
+        color_environment: &mondrian_core::ProjectColorEnvironment,
         display_color_space: ColorSpace,
     ) -> ColorContext {
-        self.root_color_context_for_output(project_cm, display_color_space)
+        self.root_color_context_for_output(color_environment, display_color_space)
     }
 
     fn root_color_context_for_output(
         &self,
-        project_cm: &mondrian_core::ProjectColorManagement,
+        color_environment: &mondrian_core::ProjectColorEnvironment,
         output_color_space: ColorSpace,
     ) -> ColorContext {
-        let engine = if self.color_management.inherit {
-            project_cm.engine.clone()
-        } else {
-            self.color_management.engine.clone()
-        };
-        let display_management = if self.color_management.inherit {
-            project_cm.display_management.clone()
-        } else {
-            self.color_management.display_management.clone()
-        };
+        let engine = color_environment.engine.clone();
 
-        // Scene-referred workflows need the selected project engine's view
+        // Scene-referred workflows need the Project-owned engine's view
         // transform at a display-referred output. The engine alone decides
         // whether that view is Mondrian Standard, ACES, or Custom OCIO.
-        let tone_map = display_management.tone_map_policy.resolve(
+        let tone_map = self.color_management.output_tone_map_policy.resolve(
             self.color_management.workflow == ColorWorkflow::SceneReferred,
             self.working_color_space,
             output_color_space,
@@ -761,64 +718,37 @@ impl SequenceSettings {
             working_color_space: self.working_color_space,
             output_color_space: OcioColorSpaceIdentity::Color(output_color_space),
             tone_map,
-            nested_processing: self.color_management.nested_processing,
             engine,
             missing_metadata_policy: self.color_management.missing_metadata_policy,
-            display_management,
             output_transform,
             workflow: self.color_management.workflow,
         }
     }
 
-    pub fn nested_render_color_context(&self, parent: ColorContext) -> ColorContext {
-        match self.color_management.nested_processing {
-            NestedColorProcessing::PreserveChildWorkingSpace => {
-                let engine = if self.color_management.inherit {
-                    parent.engine.clone()
-                } else {
-                    self.color_management.engine.clone()
-                };
-                ColorContext {
-                    working_color_space: self.working_color_space,
-                    output_color_space: OcioColorSpaceIdentity::Working(parent.working_color_space),
-                    tone_map: self.auto_tone_map_media,
-                    nested_processing: self.color_management.nested_processing,
-                    engine,
-                    missing_metadata_policy: self.color_management.missing_metadata_policy,
-                    display_management: parent.display_management.clone(),
-                    output_transform: parent.output_transform.clone(),
-                    workflow: self.color_management.workflow,
-                }
-            }
+    pub fn nested_render_color_context(
+        &self,
+        parent: ColorContext,
+        processing: NestedColorProcessing,
+    ) -> ColorContext {
+        match processing {
+            NestedColorProcessing::PreserveChildWorkingSpace => ColorContext {
+                working_color_space: self.working_color_space,
+                output_color_space: OcioColorSpaceIdentity::Working(parent.working_color_space),
+                tone_map: self.auto_tone_map_media,
+                engine: parent.engine.clone(),
+                missing_metadata_policy: self.color_management.missing_metadata_policy,
+                output_transform: parent.output_transform.clone(),
+                workflow: self.color_management.workflow,
+            },
             NestedColorProcessing::ForceParentWorkingSpace => ColorContext {
                 working_color_space: parent.working_color_space,
                 output_color_space: OcioColorSpaceIdentity::Working(parent.working_color_space),
                 tone_map: parent.tone_map,
-                nested_processing: self.color_management.nested_processing,
                 engine: parent.engine.clone(),
                 missing_metadata_policy: parent.missing_metadata_policy,
-                display_management: parent.display_management.clone(),
                 output_transform: parent.output_transform.clone(),
                 workflow: parent.workflow,
             },
-            NestedColorProcessing::BakeChildOutputTransform => {
-                let engine = if self.color_management.inherit {
-                    parent.engine.clone()
-                } else {
-                    self.color_management.engine.clone()
-                };
-                ColorContext {
-                    working_color_space: self.working_color_space,
-                    output_color_space: OcioColorSpaceIdentity::Working(parent.working_color_space),
-                    tone_map: self.auto_tone_map_media || parent.tone_map,
-                    nested_processing: self.color_management.nested_processing,
-                    engine,
-                    missing_metadata_policy: self.color_management.missing_metadata_policy,
-                    display_management: parent.display_management.clone(),
-                    output_transform: parent.output_transform.clone(),
-                    workflow: self.color_management.workflow,
-                }
-            }
         }
     }
 
@@ -1736,10 +1666,6 @@ impl mondrian_core::timeline_data::RenderPlanSource for Sequence {
         Sequence::time_base(self)
     }
 
-    fn nested_color_processing(&self) -> mondrian_core::timeline_data::NestedColorProcessing {
-        self.settings.color_management.nested_processing
-    }
-
     fn auto_tone_map_media(&self) -> bool {
         self.settings.auto_tone_map_media
     }
@@ -1988,7 +1914,7 @@ mod tests {
     use crate::clip::Clip;
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::effect_data::EffectType;
-    use mondrian_core::{DisplayToneMapPolicy, ProjectColorManagement};
+    use mondrian_core::DisplayToneMapPolicy;
 
     fn pinned_custom_engine(source: OcioConfigSource) -> ColorEngine {
         ColorEngine::CustomOcio {
@@ -2013,6 +1939,14 @@ mod tests {
                 .expect("structurally valid Custom OCIO test identity"),
             ),
         }
+    }
+
+    fn color_environment(engine: ColorEngine) -> mondrian_core::ProjectColorEnvironment {
+        mondrian_core::ProjectColorEnvironment { engine }
+    }
+
+    fn standard_environment() -> mondrian_core::ProjectColorEnvironment {
+        mondrian_core::ProjectColorEnvironment::default()
     }
 
     fn tt(frame: i64, time_base: Rational) -> TimelineTime {
@@ -2747,76 +2681,90 @@ mod tests {
     // ── ColorEngine / ColorContext tests ──────────────────────────────────────
 
     #[test]
-    fn nested_sequence_respects_engine_inherit() {
-        let mut parent = SequenceSettings::default();
-        parent.color_management.engine = pinned_custom_engine(OcioConfigSource::Environment);
-        parent.color_management.inherit = false;
+    fn nested_edge_policy_changes_working_semantics_without_changing_project_engine() {
+        let environment = color_environment(ColorEngine::Aces {
+            preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+        });
+        let parent = SequenceSettings::default();
+        let parent_context = parent.root_program_color_context(&environment);
+        let child = SequenceSettings {
+            working_color_space: WorkingColorSpace::AcesCg,
+            ..SequenceSettings::default()
+        };
 
-        // Child with inherit=true should get parent's engine
-        let mut child = SequenceSettings::default();
-        child.color_management.engine = ColorEngine::mondrian_standard();
-        child.color_management.inherit = true;
-        child.color_management.nested_processing = NestedColorProcessing::ForceParentWorkingSpace;
-
-        let parent_ctx = parent.root_program_color_context(&ProjectColorManagement::default());
-        let child_ctx = child.nested_render_color_context(parent_ctx.clone());
-
-        // ForceParentWorkingSpace uses parent's engine
-        assert_eq!(
-            child_ctx.engine,
-            pinned_custom_engine(OcioConfigSource::Environment)
+        let preserved = child.nested_render_color_context(
+            parent_context.clone(),
+            NestedColorProcessing::PreserveChildWorkingSpace,
         );
+        assert_eq!(preserved.engine, environment.engine);
+        assert_eq!(preserved.working_color_space, WorkingColorSpace::AcesCg);
 
-        // PreserveChildWorkingSpace with inherit should also use parent engine
-        child.color_management.nested_processing = NestedColorProcessing::PreserveChildWorkingSpace;
-        let child_ctx2 = child.nested_render_color_context(parent_ctx);
+        let forced = child.nested_render_color_context(
+            parent_context.clone(),
+            NestedColorProcessing::ForceParentWorkingSpace,
+        );
+        assert_eq!(forced.engine, environment.engine);
         assert_eq!(
-            child_ctx2.engine,
-            pinned_custom_engine(OcioConfigSource::Environment)
+            forced.working_color_space,
+            parent_context.working_color_space
         );
     }
 
     #[test]
-    fn scene_referred_workflow_forces_tone_map() {
+    fn resolved_context_uses_project_engine_without_persisting_it_in_sequence() {
+        let settings = SequenceSettings::default();
+        let environment = color_environment(pinned_custom_engine(OcioConfigSource::Environment));
+
+        assert_eq!(
+            settings.root_program_color_context(&environment).engine,
+            environment.engine
+        );
+    }
+
+    #[test]
+    fn output_tone_map_policy_is_sequence_author_semantics() {
+        let environment = standard_environment();
+        let mut settings = SequenceSettings {
+            working_color_space: WorkingColorSpace::LinearRec2020,
+            auto_tone_map_media: false,
+            ..Default::default()
+        };
+
+        assert!(
+            settings.root_program_color_context(&environment).tone_map,
+            "automatic policy maps scene-referred content to a display output"
+        );
+        settings.color_management.output_tone_map_policy = DisplayToneMapPolicy::Never;
+        assert!(!settings.root_program_color_context(&environment).tone_map);
+        settings.color_management.output_tone_map_policy = DisplayToneMapPolicy::Always;
+        assert!(settings.root_program_color_context(&environment).tone_map);
+    }
+
+    #[test]
+    fn display_referred_workflow_can_remain_colorimetric() {
         let settings = SequenceSettings {
             auto_tone_map_media: false,
             color_management: SequenceColorManagement {
-                workflow: ColorWorkflow::SceneReferred,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let ctx = settings.root_program_color_context(&ProjectColorManagement::default());
-        assert!(
-            ctx.tone_map,
-            "SceneReferred should always enable tone mapping"
-        );
-
-        let display_settings = SequenceSettings {
-            auto_tone_map_media: false,
-            color_management: SequenceColorManagement {
                 workflow: ColorWorkflow::DisplayReferred,
+                output_tone_map_policy: DisplayToneMapPolicy::Automatic,
                 ..Default::default()
             },
             ..Default::default()
         };
-        let ctx3 = display_settings.root_program_color_context(&ProjectColorManagement::default());
-        assert!(
-            !ctx3.tone_map,
-            "DisplayReferred with auto_tone_map=false should not tone map"
+
+        let context = settings.root_program_color_context(&standard_environment());
+        assert!(!context.tone_map);
+        assert_eq!(
+            context.output_transform,
+            mondrian_core::OutputTransformIntent::Colorimetric
         );
     }
 
     #[test]
     fn default_standard_video_workflow_resolves_standard_rec709_view() {
         let settings = SequenceSettings::default();
-        let context = settings.root_program_color_context(&ProjectColorManagement::default());
+        let context = settings.root_program_color_context(&standard_environment());
 
-        assert_eq!(
-            settings.color_management.workflow,
-            ColorWorkflow::SceneReferred
-        );
         assert_eq!(context.workflow, ColorWorkflow::SceneReferred);
         assert_eq!(
             context.output_color_space,
@@ -2827,39 +2775,27 @@ mod tests {
             context.output_transform,
             mondrian_core::OutputTransformIntent::mondrian_standard()
         );
-        assert!(matches!(
-            context.engine,
-            ColorEngine::MondrianStandard { .. }
-        ));
+        assert_eq!(context.engine, ColorEngine::mondrian_standard());
     }
 
     #[test]
-    fn preview_monitor_and_program_output_contexts_are_explicitly_distinct() {
+    fn preview_and_program_contexts_share_sequence_semantics_but_not_output_target() {
+        let environment = standard_environment();
         let settings = SequenceSettings {
             working_color_space: WorkingColorSpace::LinearRec2020,
             color_management: SequenceColorManagement {
                 output_color_space: ColorSpace::Rec2100Pq,
-                workflow: ColorWorkflow::SceneReferred,
                 ..Default::default()
             },
             ..Default::default()
         };
-        let project_cm = ProjectColorManagement::default();
 
-        let preview = settings.root_preview_color_context(&project_cm, ColorSpace::Rec709);
-        let program = settings.root_program_color_context(&project_cm);
+        let preview = settings.root_preview_color_context(&environment, ColorSpace::Rec709);
+        let program = settings.root_program_color_context(&environment);
 
-        assert_eq!(
-            preview.working_color_space,
-            WorkingColorSpace::LinearRec2020
-        );
         assert_eq!(
             preview.output_color_space,
             OcioColorSpaceIdentity::Color(ColorSpace::Rec709)
-        );
-        assert_eq!(
-            program.working_color_space,
-            WorkingColorSpace::LinearRec2020
         );
         assert_eq!(
             program.output_color_space,
@@ -2871,121 +2807,18 @@ mod tests {
             preview.missing_metadata_policy,
             program.missing_metadata_policy
         );
-        assert!(preview.tone_map);
-        assert!(program.tone_map);
     }
 
     #[test]
-    fn display_management_policy_inherits_from_project_color_management() {
-        let project_cm = ProjectColorManagement {
-            engine: ColorEngine::mondrian_standard(),
-            display_management: DisplayManagementPolicy {
-                monitor_profile: mondrian_core::MonitorProfileReference::ColorSpace(
-                    ColorSpace::DisplayP3,
-                ),
-                viewer_mode: mondrian_core::ViewerDisplayMode::HdrPq,
-                tone_map_policy: DisplayToneMapPolicy::Always,
-            },
-        };
-        let mut settings = SequenceSettings::default();
-        settings.color_management.inherit = true;
-        settings.color_management.display_management = DisplayManagementPolicy {
-            monitor_profile: mondrian_core::MonitorProfileReference::ColorSpace(ColorSpace::Srgb),
-            viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
-            tone_map_policy: DisplayToneMapPolicy::Never,
-        };
+    fn custom_ocio_scene_output_uses_its_pinned_binding() {
+        let settings = SequenceSettings::default();
+        let environment = color_environment(pinned_custom_engine(OcioConfigSource::Environment));
 
-        let ctx = settings.root_preview_color_context(&project_cm, ColorSpace::Rec2100Pq);
+        let context = settings.root_preview_color_context(&environment, ColorSpace::Rec709);
 
-        assert_eq!(ctx.display_management, project_cm.display_management);
-        assert!(ctx.tone_map);
+        assert!(context.tone_map);
         assert_eq!(
-            ctx.display_management
-                .viewer_mode
-                .resolve(ctx.output_color_space.color().expect("root preview output")),
-            mondrian_core::ResolvedViewerDisplayMode::HdrPq
-        );
-    }
-
-    #[test]
-    fn sequence_display_management_override_controls_tone_map_policy() {
-        let project_cm = ProjectColorManagement {
-            engine: ColorEngine::mondrian_standard(),
-            display_management: DisplayManagementPolicy {
-                tone_map_policy: DisplayToneMapPolicy::Always,
-                ..Default::default()
-            },
-        };
-        let mut settings = SequenceSettings {
-            working_color_space: WorkingColorSpace::LinearRec2020,
-            auto_tone_map_media: true,
-            ..Default::default()
-        };
-        settings.color_management.inherit = false;
-        settings.color_management.display_management = DisplayManagementPolicy {
-            tone_map_policy: DisplayToneMapPolicy::Never,
-            ..Default::default()
-        };
-
-        let ctx = settings.root_preview_color_context(&project_cm, ColorSpace::Rec709);
-
-        assert_eq!(
-            ctx.display_management.tone_map_policy,
-            DisplayToneMapPolicy::Never
-        );
-        assert!(
-            !ctx.tone_map,
-            "explicit sequence display policy should be able to bypass tone mapping"
-        );
-    }
-
-    #[test]
-    fn automatic_display_policy_tone_maps_scene_referred_workflow_to_sdr_output() {
-        let settings = SequenceSettings {
-            working_color_space: WorkingColorSpace::LinearRec2020,
-            auto_tone_map_media: false,
-            color_management: SequenceColorManagement {
-                workflow: ColorWorkflow::SceneReferred,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let ctx = settings
-            .root_preview_color_context(&ProjectColorManagement::default(), ColorSpace::Rec709);
-
-        assert!(ctx.tone_map);
-        assert_eq!(
-            ctx.display_management
-                .viewer_mode
-                .resolve(ctx.output_color_space.color().expect("root preview output")),
-            mondrian_core::ResolvedViewerDisplayMode::Sdr
-        );
-    }
-
-    #[test]
-    fn custom_ocio_engine_is_preserved_in_context() {
-        let mut settings = SequenceSettings::default();
-        settings.color_management.inherit = false;
-        settings.color_management.engine = pinned_custom_engine(OcioConfigSource::Environment);
-
-        let ctx = settings.root_program_color_context(&ProjectColorManagement::default());
-        assert!(matches!(ctx.engine, ColorEngine::CustomOcio { .. }));
-    }
-
-    #[test]
-    fn custom_ocio_scene_output_uses_project_pinned_display_view() {
-        let mut settings = SequenceSettings::default();
-        settings.color_management.inherit = false;
-        settings.color_management.workflow = ColorWorkflow::SceneReferred;
-        settings.color_management.engine = pinned_custom_engine(OcioConfigSource::Environment);
-
-        let ctx = settings
-            .root_preview_color_context(&ProjectColorManagement::default(), ColorSpace::Rec709);
-
-        assert!(ctx.tone_map);
-        assert_eq!(
-            ctx.output_transform,
+            context.output_transform,
             mondrian_core::OutputTransformIntent::CustomOcio {
                 output_color_space: ColorSpace::Rec709,
             }
@@ -2993,101 +2826,59 @@ mod tests {
     }
 
     #[test]
-    fn custom_ocio_scene_output_rejects_an_unpinned_output_target() {
+    fn custom_ocio_rejects_unpinned_output_and_working_space() {
         let mut settings = SequenceSettings::default();
-        settings.color_management.inherit = false;
-        settings.color_management.workflow = ColorWorkflow::SceneReferred;
+        let environment = color_environment(pinned_custom_engine(OcioConfigSource::Environment));
         settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
-        settings.color_management.engine = pinned_custom_engine(OcioConfigSource::Environment);
+        let output_error = settings
+            .validate_with_color_environment(&environment)
+            .expect_err("Custom OCIO must reject an unpinned output binding");
+        assert!(output_error.to_string().contains("output binding"));
 
-        let error = settings
-            .validate_with_project_color_management(&ProjectColorManagement::default())
-            .expect_err("Custom OCIO must not relabel its pinned SDR View as Rec.2100 PQ");
-
-        assert!(error.to_string().contains("Rec2100Pq"));
-        assert!(error.to_string().contains("output binding"));
+        settings.color_management.output_color_space = ColorSpace::Rec709;
+        settings.working_color_space = WorkingColorSpace::AcesCg;
+        let working_error = settings
+            .validate_with_color_environment(&environment)
+            .expect_err("Custom OCIO must reject an unpinned working space");
+        assert!(working_error.to_string().contains("pins working space 'Linear Rec.2020'"));
     }
 
     #[test]
-    fn inherited_custom_ocio_rejects_unpinned_sequence_working_space() {
-        let project_cm = ProjectColorManagement {
-            engine: pinned_custom_engine(OcioConfigSource::Environment),
-            ..ProjectColorManagement::default()
-        };
-        let settings = SequenceSettings {
-            working_color_space: WorkingColorSpace::AcesCg,
-            ..SequenceSettings::default()
-        };
-
-        let error = settings
-            .validate_with_project_color_management(&project_cm)
-            .expect_err("Custom OCIO must reject an unpinned sequence working space");
-
-        assert!(error.to_string().contains("pins working space 'Linear Rec.2020'"));
-    }
-
-    #[test]
-    fn inherited_standard_rejects_non_versioned_working_space() {
-        let settings = SequenceSettings {
+    fn standard_rejects_unversioned_working_space_and_scene_view() {
+        let environment = standard_environment();
+        let mut settings = SequenceSettings {
             working_color_space: WorkingColorSpace::LinearP3D65,
-            ..SequenceSettings::default()
+            ..Default::default()
         };
+        let working_error = settings
+            .validate_with_color_environment(&environment)
+            .expect_err("Standard must reject a non-versioned working space");
+        assert!(working_error.to_string().contains("Mondrian Standard"));
 
-        let error = settings
-            .validate_with_project_color_management(&ProjectColorManagement::default())
-            .expect_err("Standard working-space identity v1 must reject a non-versioned space");
-
-        assert!(error.to_string().contains("Mondrian Standard"));
-        assert!(error.to_string().contains("Linear Rec.2020"));
-    }
-
-    #[test]
-    fn standard_scene_referred_output_requires_a_versioned_rendering_view() {
-        let mut settings = SequenceSettings::default();
+        settings.working_color_space = WorkingColorSpace::LinearRec2020;
         settings.color_management.output_color_space = ColorSpace::Rec601Pal;
-
-        let error = settings
-            .validate_with_project_color_management(&ProjectColorManagement::default())
-            .expect_err("Scene-referred Standard must reject an output without a product View");
-        assert!(error.to_string().contains("no rendering View"), "{error:#}");
+        let output_error = settings
+            .validate_with_color_environment(&environment)
+            .expect_err("scene-referred Standard must require a product View");
+        assert!(
+            output_error.to_string().contains("no rendering View"),
+            "{output_error:#}"
+        );
 
         settings.color_management.workflow = ColorWorkflow::DisplayReferred;
         settings
-            .validate_with_project_color_management(&ProjectColorManagement::default())
-            .expect("explicit display-referred colorimetric output remains valid");
+            .validate_with_color_environment(&environment)
+            .expect("display-referred colorimetric output remains valid");
     }
 
     #[test]
-    fn aces_scene_output_uses_preset_pinned_display_view() {
-        let mut settings = SequenceSettings::default();
-        settings.color_management.inherit = false;
-        settings.color_management.workflow = ColorWorkflow::SceneReferred;
-        settings.color_management.engine = ColorEngine::Aces {
-            preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
-        };
-
-        let ctx = settings
-            .root_preview_color_context(&ProjectColorManagement::default(), ColorSpace::Rec709);
-
-        assert!(ctx.tone_map);
-        assert_eq!(
-            ctx.output_transform,
-            mondrian_core::OutputTransformIntent::aces_preset(
-                mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
-            )
-        );
-    }
-
-    #[test]
-    fn aces_scene_output_resolves_the_requested_target_or_fails_closed() {
+    fn aces_resolves_target_specific_view_or_fails_closed() {
         let preset = mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25;
-        let project_cm = ProjectColorManagement::default();
         let mut settings = SequenceSettings::default();
-        settings.color_management.inherit = false;
-        settings.color_management.engine = ColorEngine::Aces { preset };
+        let environment = color_environment(ColorEngine::Aces { preset });
         settings.color_management.output_color_space = ColorSpace::Rec2100Pq;
 
-        let pq = settings.root_program_color_context(&project_cm);
+        let pq = settings.root_program_color_context(&environment);
         assert_eq!(
             pq.output_transform
                 .resolve_display_view(ColorSpace::Rec2100Pq, &pq.engine)
@@ -3101,192 +2892,60 @@ mod tests {
 
         settings.color_management.output_color_space = ColorSpace::Rec2020;
         let error = settings
-            .validate_with_project_color_management(&project_cm)
+            .validate_with_color_environment(&environment)
             .expect_err("ACES must not relabel its default Rec.709 View as Rec.2020 SDR");
         assert!(error.to_string().contains("no rendering View"), "{error:#}");
     }
 
     #[test]
-    fn mondrian_standard_scene_program_context_uses_standard_view() {
-        let settings = SequenceSettings {
-            color_management: SequenceColorManagement {
-                workflow: ColorWorkflow::SceneReferred,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let ctx = settings.root_program_color_context(&ProjectColorManagement::default());
-        assert_eq!(ctx.engine, ColorEngine::mondrian_standard());
-        assert!(ctx.tone_map);
-        assert_eq!(
-            ctx.output_transform,
-            mondrian_core::OutputTransformIntent::mondrian_standard()
-        );
-    }
-
-    #[test]
-    fn legacy_standard_v2_project_context_keeps_its_pinned_view() {
+    fn project_environment_persists_exact_standard_package_identity() {
         let legacy_package = mondrian_core::MondrianStandardPackageIdentity::V2;
-        let project_cm = ProjectColorManagement {
-            engine: ColorEngine::MondrianStandard { package: legacy_package },
-            display_management: DisplayManagementPolicy::default(),
-        };
-        let ctx = SequenceSettings::default().root_program_color_context(&project_cm);
+        let settings = SequenceSettings::default();
+        let environment =
+            color_environment(ColorEngine::MondrianStandard { package: legacy_package });
+        let context = settings.root_program_color_context(&environment);
 
-        assert_eq!(ctx.engine, project_cm.engine);
+        assert_eq!(context.engine, environment.engine);
         assert_eq!(
-            ctx.output_transform,
+            context.output_transform,
             mondrian_core::OutputTransformIntent::mondrian_standard_package(legacy_package)
         );
-        assert_eq!(
-            ctx.output_transform
-                .resolve_display_view(ColorSpace::Rec709, &ctx.engine)
-                .expect("legacy Standard intent"),
-            Some((
-                "Rec.1886 Rec.709 - Display".to_owned(),
-                "Mondrian Standard SDR v1".to_owned(),
-            ))
-        );
     }
 
     #[test]
-    fn mondrian_standard_scene_preview_context_uses_standard_view() {
-        let settings = SequenceSettings {
-            color_management: SequenceColorManagement {
-                workflow: ColorWorkflow::SceneReferred,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let ctx = settings
-            .root_preview_color_context(&ProjectColorManagement::default(), ColorSpace::Rec709);
-
-        assert_eq!(ctx.engine, ColorEngine::mondrian_standard());
-        assert!(ctx.tone_map);
-        assert_eq!(
-            ctx.output_transform,
-            mondrian_core::OutputTransformIntent::mondrian_standard()
-        );
-    }
-
-    #[test]
-    fn mondrian_standard_tone_map_keeps_one_product_intent_across_targets() {
-        let project_cm = ProjectColorManagement {
-            engine: ColorEngine::mondrian_standard(),
-            display_management: DisplayManagementPolicy {
-                tone_map_policy: DisplayToneMapPolicy::Always,
-                ..Default::default()
-            },
-        };
+    fn mondrian_standard_resolves_each_supported_preview_target() {
         let settings = SequenceSettings::default();
-
-        let preview = settings.root_preview_color_context(&project_cm, ColorSpace::Rec709);
-        let program = settings.root_program_color_context(&project_cm);
-
-        assert!(preview.tone_map);
-        assert!(program.tone_map);
-        assert_eq!(
-            preview.output_transform,
-            mondrian_core::OutputTransformIntent::mondrian_standard()
-        );
-        assert_eq!(preview.output_transform, program.output_transform);
-    }
-
-    #[test]
-    fn mondrian_standard_tone_map_resolves_the_output_targets_display() {
-        let project_cm = ProjectColorManagement {
-            engine: ColorEngine::mondrian_standard(),
-            display_management: DisplayManagementPolicy {
-                tone_map_policy: DisplayToneMapPolicy::Always,
-                ..Default::default()
-            },
-        };
-        let settings = SequenceSettings::default();
-
-        let p3 = settings.root_preview_color_context(&project_cm, ColorSpace::DisplayP3);
-        assert_eq!(
-            p3.output_transform
-                .resolve_display_view(ColorSpace::DisplayP3, &p3.engine)
-                .expect("P3 intent"),
-            Some((
-                "Display P3 - Display".to_owned(),
-                "Mondrian Standard SDR v2".to_owned(),
-            ))
-        );
-
-        let rec2020 = settings.root_preview_color_context(&project_cm, ColorSpace::Rec2020);
-        assert_eq!(
-            rec2020
-                .output_transform
-                .resolve_display_view(ColorSpace::Rec2020, &rec2020.engine)
-                .expect("Rec.2020 SDR intent"),
-            Some((
-                "Rec.2020 SDR - Display".to_owned(),
-                "Mondrian Standard SDR v2".to_owned(),
-            ))
-        );
-
-        let pq = settings.root_preview_color_context(&project_cm, ColorSpace::Rec2100Pq);
-        assert_eq!(
-            pq.output_transform
-                .resolve_display_view(ColorSpace::Rec2100Pq, &pq.engine)
-                .expect("PQ intent"),
-            Some((
-                "Rec.2100-PQ - Display".to_owned(),
-                "Mondrian Standard HDR 1000 nits v1".to_owned(),
-            ))
-        );
-        assert_eq!(
-            pq.output_transform,
-            mondrian_core::OutputTransformIntent::mondrian_standard()
-        );
-
-        let hlg = settings.root_preview_color_context(&project_cm, ColorSpace::Rec2100Hlg);
-        assert_eq!(
-            hlg.output_transform
-                .resolve_display_view(ColorSpace::Rec2100Hlg, &hlg.engine)
-                .expect("HLG intent"),
-            Some((
-                "Rec.2100-HLG - Display".to_owned(),
-                "Mondrian Standard HDR 1000 nits v1".to_owned(),
-            ))
-        );
-    }
-
-    #[test]
-    fn inherit_flag_controls_engine_source() {
-        let project_cm = ProjectColorManagement {
-            engine: pinned_custom_engine(OcioConfigSource::Builtin {
-                name: String::from("aces_1.2"),
-            }),
-            display_management: DisplayManagementPolicy::default(),
-        };
-
-        // inherit=true → use project engine
-        let mut settings = SequenceSettings::default();
-        settings.color_management.inherit = true;
-        settings.color_management.engine = ColorEngine::mondrian_standard();
-        let ctx = settings.root_program_color_context(&project_cm);
-        assert_eq!(
-            ctx.engine,
-            pinned_custom_engine(OcioConfigSource::Builtin { name: String::from("aces_1.2") })
-        );
-
-        // inherit=false → use sequence's own engine
-        settings.color_management.inherit = false;
-        let ctx2 = settings.root_program_color_context(&project_cm);
-        assert_eq!(ctx2.engine, ColorEngine::mondrian_standard());
-    }
-
-    #[test]
-    fn default_program_context_uses_engine_owned_standard_view() {
-        let settings = SequenceSettings::default();
-        let project_cm = ProjectColorManagement::default();
-        let ctx = settings.root_program_color_context(&project_cm);
-        assert!(ctx.tone_map);
-        assert_eq!(
-            ctx.output_transform,
-            mondrian_core::OutputTransformIntent::mondrian_standard()
-        );
+        let environment = standard_environment();
+        for (target, expected_display, expected_view) in [
+            (
+                ColorSpace::DisplayP3,
+                "Display P3 - Display",
+                "Mondrian Standard SDR v2",
+            ),
+            (
+                ColorSpace::Rec2020,
+                "Rec.2020 SDR - Display",
+                "Mondrian Standard SDR v2",
+            ),
+            (
+                ColorSpace::Rec2100Pq,
+                "Rec.2100-PQ - Display",
+                "Mondrian Standard HDR 1000 nits v1",
+            ),
+            (
+                ColorSpace::Rec2100Hlg,
+                "Rec.2100-HLG - Display",
+                "Mondrian Standard HDR 1000 nits v1",
+            ),
+        ] {
+            let context = settings.root_preview_color_context(&environment, target);
+            assert_eq!(
+                context
+                    .output_transform
+                    .resolve_display_view(target, &context.engine)
+                    .expect("supported Standard target"),
+                Some((expected_display.to_owned(), expected_view.to_owned()))
+            );
+        }
     }
 }

@@ -122,7 +122,6 @@ fn test_media_key(source_frame: i64) -> MediaPreviewKey {
         working_color_space: WorkingColorSpace::LinearRec709,
         tone_map: false,
         engine: ColorEngine::mondrian_standard(),
-        ocio_generation: mondrian_core::ocio_config_generation(),
     }
 }
 

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mondrian_core::{ExecutionTerminalDisposition, ProjectColorManagement};
+use mondrian_core::ExecutionTerminalDisposition;
 use mondrian_timeline::sequence::{DeliveryBitDepth, Sequence};
 use parking_lot::{Condvar, Mutex};
 
@@ -104,8 +104,8 @@ fn dummy_config(output_path: impl Into<PathBuf>) -> ExportConfig {
             sequence: Sequence::new("queue-test"),
             sequences: Vec::new(),
             media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: TimelineExportRange::EntireSequence,
-            project_color_management: ProjectColorManagement::default(),
         }),
         output_path: output_path.into(),
     }

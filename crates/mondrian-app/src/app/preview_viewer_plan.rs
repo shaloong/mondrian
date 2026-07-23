@@ -67,9 +67,7 @@ pub(crate) fn viewer_preview_cache_key_for_resolved_plan(
     color_context.output_color_space.hash(&mut hasher);
     color_context.tone_map.hash(&mut hasher);
     color_context.engine.hash(&mut hasher);
-    color_context.display_management.hash(&mut hasher);
     color_context.output_transform.hash(&mut hasher);
-    mondrian_core::ocio_config_generation().hash(&mut hasher);
     elements.len().hash(&mut hasher);
     for element in elements {
         match element {

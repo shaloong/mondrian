@@ -91,6 +91,7 @@ fn create_new_project_with_settings_preserves_sequence_color_management() {
             project_file.clone(),
             "Color Project",
             settings.clone(),
+            mondrian_core::ProjectColorEnvironment::default(),
             mondrian_core::ProjectSettings::default(),
         )
         .expect("create project");

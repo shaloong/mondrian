@@ -316,7 +316,10 @@ impl DisplayToneMapPolicy {
     }
 }
 
-/// Display-management policy resolved by project/sequence settings.
+/// Machine-local Viewer display-management policy.
+///
+/// This value is execution/session state. It is deliberately separate from
+/// Sequence-authored output-transform and tone-map semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DisplayManagementPolicy {
     /// Monitor/profile source used for preview presentation.
@@ -325,9 +328,6 @@ pub struct DisplayManagementPolicy {
     /// SDR/HDR viewer mode policy.
     #[serde(default)]
     pub viewer_mode: ViewerDisplayMode,
-    /// Tone-map policy for output boundaries.
-    #[serde(default)]
-    pub tone_map_policy: DisplayToneMapPolicy,
 }
 
 impl Default for DisplayManagementPolicy {
@@ -335,7 +335,6 @@ impl Default for DisplayManagementPolicy {
         Self {
             monitor_profile: MonitorProfileReference::MatchOutputColorSpace,
             viewer_mode: ViewerDisplayMode::MatchOutputColorSpace,
-            tone_map_policy: DisplayToneMapPolicy::Automatic,
         }
     }
 }

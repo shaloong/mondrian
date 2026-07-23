@@ -10,8 +10,8 @@ use mondrian_core::types::{
     ProgramOutputId, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
-    ColorEngine, ColorSpace, ProjectSettings, Rational, Resolution, TimelineDisplayFormat,
-    WorkingColorSpace,
+    ColorEngine, ColorSpace, DisplayToneMapPolicy, ProjectColorEnvironment, ProjectSettings,
+    Rational, Resolution, TimelineDisplayFormat, WorkingColorSpace,
 };
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
@@ -19,10 +19,7 @@ use mondrian_export::preset::{ExportPreset, TimelineExportRange};
 use mondrian_media::{DecodedVideoRange, DetectedColorInterpretation, VideoColorMetadata};
 use mondrian_timeline::{
     audio::AudioFade,
-    sequence::{
-        ColorWorkflow, DeliveryBitDepth, MissingColorMetadataPolicy, NestedColorProcessing,
-        VideoRange,
-    },
+    sequence::{ColorWorkflow, DeliveryBitDepth, MissingColorMetadataPolicy, VideoRange},
     AudioChannelLayout, AudioDisplayFormat, EditingMode, FieldOrder, PixelAspectRatio,
     PreviewRenderFormat, SequenceSettings,
 };
@@ -176,8 +173,10 @@ pub const PROJECT_NAMESPACE: &str = "ui.project";
 
 /// Action name for creating a project with explicit settings.
 pub const PROJECT_CREATE_WITH_SETTINGS: &str = "create_with_settings";
-/// Action name for replacing the project-level color engine.
-pub const PROJECT_SET_COLOR_ENGINE: &str = "set_color_engine";
+/// Action name for replacing the template copied into future Sequences.
+pub const PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS: &str = "update_new_sequence_defaults";
+/// Action name for atomically replacing the Project-wide color engine.
+pub const PROJECT_UPDATE_COLOR_ENVIRONMENT: &str = "update_color_environment";
 /// Action name for recovering a project from an autosave snapshot.
 pub const PROJECT_RECOVER_FROM_AUTOSAVE: &str = "recover_from_autosave";
 
@@ -1064,8 +1063,10 @@ pub struct ExportJobTargetPayload {
 /// Update one field of the app UI export draft.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExportDraftUpdatePayload {
-    /// Select a built-in preset by index.
-    PresetIndex(usize),
+    /// Reset the materialized draft from a stable built-in preset.
+    BuiltinPreset(mondrian_export::preset::BuiltinExportPreset),
+    /// Replace the complete typed delivery draft after one product form edit.
+    Preset(ExportPreset),
     /// Select the sequence to export.
     Sequence(Option<SequenceId>),
     /// Select the timeline range to render.
@@ -1092,15 +1093,24 @@ pub struct ProjectCreateWithSettingsPayload {
     pub name: String,
     /// Initial sequence settings.
     pub sequence_settings: SequenceSettings,
+    /// Project-wide color engine shared by every Sequence.
+    pub color_environment: ProjectColorEnvironment,
     /// Initial project-level settings.
     pub project_settings: ProjectSettings,
 }
 
-/// Replace the project-level product color mode with a complete engine identity.
+/// Replace the complete template copied into future Sequences.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectUpdateNewSequenceDefaultsPayload {
+    /// Complete validated Sequence settings template.
+    pub settings: SequenceSettings,
+}
+
+/// Atomically replace the Project-wide color engine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectSetColorEnginePayload {
-    /// Mondrian Standard, pinned ACES preset, or fully pinned Custom OCIO engine.
-    pub engine: ColorEngine,
+pub struct ProjectUpdateColorEnvironmentPayload {
+    /// Complete version-pinned engine environment.
+    pub color_environment: ProjectColorEnvironment,
 }
 
 /// One mutation to the shell-local new-project draft.
@@ -1156,14 +1166,12 @@ pub enum SequenceSettingsDraftUpdatePayload {
     WorkingColorSpace(WorkingColorSpace),
     /// Whether source media is auto tone-mapped into the sequence.
     AutoToneMapMedia(bool),
-    /// Whether the sequence inherits project-level color-management settings.
-    ColorManagementInherit(bool),
     /// Sequence color workflow.
     ColorWorkflow(ColorWorkflow),
     /// Policy for media with missing color metadata.
     MissingColorMetadataPolicy(MissingColorMetadataPolicy),
-    /// How nested sequence color transforms are handled.
-    NestedColorProcessing(NestedColorProcessing),
+    /// Program-output tone-map policy.
+    OutputToneMapPolicy(DisplayToneMapPolicy),
     /// Output color space for sequence rendering/export.
     OutputColorSpace(ColorSpace),
     /// Video range used by the sequence output.
@@ -1518,9 +1526,18 @@ pub fn project_create_with_settings_action(payload: ProjectCreateWithSettingsPay
     custom_project_action(PROJECT_CREATE_WITH_SETTINGS, payload)
 }
 
-/// Build a project action that atomically replaces the project color engine.
-pub fn project_set_color_engine_action(payload: ProjectSetColorEnginePayload) -> Action {
-    custom_project_action(PROJECT_SET_COLOR_ENGINE, payload)
+/// Build a project action that atomically replaces new-Sequence defaults.
+pub fn project_update_new_sequence_defaults_action(
+    payload: ProjectUpdateNewSequenceDefaultsPayload,
+) -> Action {
+    custom_project_action(PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS, payload)
+}
+
+/// Build a project action that atomically replaces the shared color engine.
+pub fn project_update_color_environment_action(
+    payload: ProjectUpdateColorEnvironmentPayload,
+) -> Action {
+    custom_project_action(PROJECT_UPDATE_COLOR_ENVIRONMENT, payload)
 }
 
 /// Build an action that recovers a project from an autosave snapshot.

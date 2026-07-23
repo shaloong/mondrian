@@ -78,7 +78,7 @@ fn runtime_diagnostics_exposes_each_bounded_worker_progress_observer() {
 
 use mondrian_assets::AssetLibrary;
 use mondrian_core::types::{AssetId, Rational};
-use mondrian_core::{ensure_mondrian_default_ocio_loaded, Color, ProjectColorManagement};
+use mondrian_core::{ensure_mondrian_default_ocio_loaded, Color};
 use mondrian_effects::EffectNodeExt;
 use mondrian_effects::{get_or_compile_scheduled_effect_graph, EffectRenderPlan};
 use mondrian_media::info::{PixelFormat, VideoCodec};
@@ -350,16 +350,12 @@ fn state_with_two_invalid_video_assets() -> (AppState, PathBuf) {
 
 fn state_with_icc_display_policy(color: Color) -> AppState {
     let mut state = state_with_solid_color_clip(color);
-    let sequence = state.active_sequence_mut_uncommitted().expect("test state has sequence");
-    sequence.settings.color_management.inherit = false;
-    sequence.settings.color_management.display_management =
-        mondrian_core::DisplayManagementPolicy {
-            monitor_profile: mondrian_core::MonitorProfileReference::IccProfile {
-                profile_id: "os-default".to_owned(),
-            },
-            viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
-            tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
-        };
+    *state.test_viewer_display_management_mut() = mondrian_core::DisplayManagementPolicy {
+        monitor_profile: mondrian_core::MonitorProfileReference::IccProfile {
+            profile_id: "os-default".to_owned(),
+        },
+        viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
+    };
     state
 }
 
@@ -387,9 +383,10 @@ fn calibrated_icc_display_snapshot(color_space: ColorSpace) -> DisplayOutputSnap
 
 fn test_color_context(output_color_space: ColorSpace) -> ColorContext {
     ensure_test_ocio_loaded();
-    Sequence::new("color-context")
-        .settings
-        .root_preview_color_context(&ProjectColorManagement::default(), output_color_space)
+    Sequence::new("color-context").settings.root_preview_color_context(
+        &mondrian_core::ProjectColorEnvironment::default(),
+        output_color_space,
+    )
 }
 
 #[test]
@@ -454,56 +451,43 @@ fn cpu_raster_preview_retains_program_output_before_srgb_adaptation() {
 
 #[test]
 fn preview_display_color_space_resolves_managed_monitor_profile() {
-    let mut sequence = Sequence::new("p3-preview");
-    sequence.settings.color_management.inherit = false;
-    sequence.settings.color_management.display_management =
-        mondrian_core::DisplayManagementPolicy {
-            monitor_profile: mondrian_core::MonitorProfileReference::ColorSpace(
-                ColorSpace::DisplayP3,
-            ),
-            viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
-            tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
-        };
+    let sequence = Sequence::new("p3-preview");
+    let viewer = mondrian_core::DisplayManagementPolicy {
+        monitor_profile: mondrian_core::MonitorProfileReference::ColorSpace(ColorSpace::DisplayP3),
+        viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
+    };
 
     assert_eq!(
-        preview_display_color_space(&sequence, &ProjectColorManagement::default(), None)
-            .expect("display color space"),
+        preview_display_color_space(&sequence, &viewer, None).expect("display color space"),
         ColorSpace::DisplayP3
     );
 }
 
 #[test]
 fn preview_display_color_space_resolves_explicit_hdr_viewer_mode() {
-    let mut sequence = Sequence::new("hdr-preview");
-    sequence.settings.color_management.inherit = false;
-    sequence.settings.color_management.display_management =
-        mondrian_core::DisplayManagementPolicy {
-            monitor_profile: mondrian_core::MonitorProfileReference::ColorSpace(ColorSpace::Rec709),
-            viewer_mode: mondrian_core::ViewerDisplayMode::HdrPq,
-            tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
-        };
+    let sequence = Sequence::new("hdr-preview");
+    let viewer = mondrian_core::DisplayManagementPolicy {
+        monitor_profile: mondrian_core::MonitorProfileReference::ColorSpace(ColorSpace::Rec709),
+        viewer_mode: mondrian_core::ViewerDisplayMode::HdrPq,
+    };
 
     assert_eq!(
-        preview_display_color_space(&sequence, &ProjectColorManagement::default(), None)
-            .expect("display color space"),
+        preview_display_color_space(&sequence, &viewer, None).expect("display color space"),
         ColorSpace::Rec2100Pq
     );
 }
 
 #[test]
 fn preview_display_color_space_rejects_icc_before_display_contract_resolution() {
-    let mut sequence = Sequence::new("icc-preview");
-    sequence.settings.color_management.inherit = false;
-    sequence.settings.color_management.display_management =
-        mondrian_core::DisplayManagementPolicy {
-            monitor_profile: mondrian_core::MonitorProfileReference::IccProfile {
-                profile_id: "display-profile".to_owned(),
-            },
-            viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
-            tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
-        };
+    let sequence = Sequence::new("icc-preview");
+    let viewer = mondrian_core::DisplayManagementPolicy {
+        monitor_profile: mondrian_core::MonitorProfileReference::IccProfile {
+            profile_id: "display-profile".to_owned(),
+        },
+        viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
+    };
 
-    let err = preview_display_color_space(&sequence, &ProjectColorManagement::default(), None)
+    let err = preview_display_color_space(&sequence, &viewer, None)
         .expect_err("ICC profile requires display contract resolution and must fail closed");
 
     assert!(matches!(
@@ -517,24 +501,17 @@ fn preview_display_color_space_rejects_icc_before_display_contract_resolution() 
 
 #[test]
 fn preview_display_color_space_rejects_uncalibrated_managed_icc_status() {
-    let mut sequence = Sequence::new("icc-preview");
-    sequence.settings.color_management.inherit = false;
-    sequence.settings.color_management.display_management =
-        mondrian_core::DisplayManagementPolicy {
-            monitor_profile: mondrian_core::MonitorProfileReference::IccProfile {
-                profile_id: "os-default".to_owned(),
-            },
-            viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
-            tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
-        };
+    let sequence = Sequence::new("icc-preview");
+    let viewer = mondrian_core::DisplayManagementPolicy {
+        monitor_profile: mondrian_core::MonitorProfileReference::IccProfile {
+            profile_id: "os-default".to_owned(),
+        },
+        viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
+    };
     let snapshot = managed_icc_display_snapshot(ColorSpace::DisplayP3);
 
-    let err = preview_display_color_space(
-        &sequence,
-        &ProjectColorManagement::default(),
-        Some(&snapshot),
-    )
-    .expect_err("ICC status without a renderer calibration processor must fail closed");
+    let err = preview_display_color_space(&sequence, &viewer, Some(&snapshot))
+        .expect_err("ICC status without a renderer calibration processor must fail closed");
     assert!(matches!(
         err,
         crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
@@ -546,25 +523,18 @@ fn preview_display_color_space_rejects_uncalibrated_managed_icc_status() {
 
 #[test]
 fn preview_display_color_space_accepts_calibrated_icc_status() {
-    let mut sequence = Sequence::new("icc-preview");
-    sequence.settings.color_management.inherit = false;
-    sequence.settings.color_management.display_management =
-        mondrian_core::DisplayManagementPolicy {
-            monitor_profile: mondrian_core::MonitorProfileReference::IccProfile {
-                profile_id: "os-default".to_owned(),
-            },
-            viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
-            tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
-        };
+    let sequence = Sequence::new("icc-preview");
+    let viewer = mondrian_core::DisplayManagementPolicy {
+        monitor_profile: mondrian_core::MonitorProfileReference::IccProfile {
+            profile_id: "os-default".to_owned(),
+        },
+        viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
+    };
     let snapshot = calibrated_icc_display_snapshot(ColorSpace::Srgb);
 
     assert_eq!(
-        preview_display_color_space(
-            &sequence,
-            &ProjectColorManagement::default(),
-            Some(&snapshot),
-        )
-        .expect("calibrated ICC display source"),
+        preview_display_color_space(&sequence, &viewer, Some(&snapshot))
+            .expect("calibrated ICC display source"),
         ColorSpace::Srgb
     );
 }
@@ -662,13 +632,10 @@ fn gpu_candidate_separates_program_output_from_monitor_identity() {
         PreviewGpuFrameState::Ready(frame) => frame,
         _ => panic!("expected baseline GPU preview candidate"),
     };
-    state
-        .test_project_settings_mut()
-        .color_management
-        .display_management
-        .monitor_profile = mondrian_core::MonitorProfileReference::IccProfile {
-        profile_id: "test-monitor".to_owned(),
-    };
+    state.test_viewer_display_management_mut().monitor_profile =
+        mondrian_core::MonitorProfileReference::IccProfile {
+            profile_id: "test-monitor".to_owned(),
+        };
     let snapshot = calibrated_icc_display_snapshot(ColorSpace::Srgb);
     service.set_display_output_snapshot(Some(&snapshot));
 
@@ -2370,12 +2337,11 @@ fn playback_video_preroll_requires_next_media_payload_and_observes_cache_residen
     assert_eq!(media.asset_id, asset_id);
     let (width, height) = preview_dimensions_for_state(&state, sequence);
     let display_color_space =
-        preview_display_color_space(sequence, &state.project_settings().color_management, None)
+        preview_display_color_space(sequence, state.viewer_display_management(), None)
             .expect("default display contract");
-    let color_context = sequence.settings.root_preview_color_context(
-        &state.project_settings().color_management,
-        display_color_space,
-    );
+    let color_context = sequence
+        .settings
+        .root_preview_color_context(state.project_color_environment(), display_color_space);
     let key = service
         .media_preview_key_for_asset(
             &state,
@@ -5455,7 +5421,7 @@ fn resolved_media_preview_cache_key_includes_color_context() {
 }
 
 #[test]
-fn resolved_media_preview_cache_key_includes_display_management_policy() {
+fn resolved_media_preview_cache_key_includes_resolved_display_color_space() {
     let effect_graph = get_or_compile_scheduled_effect_graph(&EffectRenderPlan::default())
         .expect("default effect graph");
     let resolved = vec![ResolvedPreviewElement::Media {
@@ -5468,18 +5434,8 @@ fn resolved_media_preview_cache_key_includes_display_management_policy() {
     }];
     let sequence_id = SequenceId::new();
 
-    let mut sdr = test_color_context(ColorSpace::Rec709);
-    sdr.display_management = mondrian_core::DisplayManagementPolicy {
-        monitor_profile: mondrian_core::MonitorProfileReference::ColorSpace(ColorSpace::Rec709),
-        viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
-        tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
-    };
-    let mut p3 = sdr.clone();
-    p3.display_management = mondrian_core::DisplayManagementPolicy {
-        monitor_profile: mondrian_core::MonitorProfileReference::ColorSpace(ColorSpace::DisplayP3),
-        viewer_mode: mondrian_core::ViewerDisplayMode::Sdr,
-        tone_map_policy: mondrian_core::DisplayToneMapPolicy::Automatic,
-    };
+    let sdr = test_color_context(ColorSpace::Rec709);
+    let p3 = test_color_context(ColorSpace::DisplayP3);
     let first = viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &sdr);
     let second = viewer_preview_cache_key_for_resolved_plan(sequence_id, 320, 180, &resolved, &p3);
 
@@ -5927,14 +5883,12 @@ fn preview_and_export_input_color_resolution_counts_match_for_frame() {
             ..AssetMediaInterpretation::default()
         },
     );
-    let project_color_management = ProjectColorManagement::default();
-
     let preview_counts = preview_input_color_resolution_counts_for_frame(
         &sequence,
         &[],
         &asset_color_spaces,
         &asset_interpretations,
-        &project_color_management,
+        &mondrian_core::ProjectColorEnvironment::default(),
         ColorSpace::Rec709,
         0,
     )
@@ -5950,8 +5904,8 @@ fn preview_and_export_input_color_resolution_counts_match_for_frame() {
             sequence,
             sequences: Vec::new(),
             media,
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: mondrian_export::preset::TimelineExportRange::SequenceInOut,
-            project_color_management,
         },
         0,
     )
@@ -6049,7 +6003,6 @@ fn preview_and_export_nested_input_color_resolution_counts_match_for_frame() {
             ..AssetMediaInterpretation::default()
         },
     );
-    let project_color_management = ProjectColorManagement::default();
     let nested_sequences = vec![nested.clone()];
 
     let preview_counts = preview_input_color_resolution_counts_for_frame(
@@ -6057,7 +6010,7 @@ fn preview_and_export_nested_input_color_resolution_counts_match_for_frame() {
         &nested_sequences,
         &asset_color_spaces,
         &asset_interpretations,
-        &project_color_management,
+        &mondrian_core::ProjectColorEnvironment::default(),
         ColorSpace::Rec709,
         0,
     )
@@ -6078,8 +6031,8 @@ fn preview_and_export_nested_input_color_resolution_counts_match_for_frame() {
             sequence: parent,
             sequences: nested_sequences,
             media,
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: mondrian_export::preset::TimelineExportRange::SequenceInOut,
-            project_color_management,
         },
         0,
     )
@@ -6240,8 +6193,8 @@ fn preview_and_export_asset_issue_summaries_match_for_referenced_assets() {
             sequence: parent,
             sequences: nested_sequences,
             media,
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: mondrian_export::preset::TimelineExportRange::SequenceInOut,
-            project_color_management: ProjectColorManagement::default(),
         },
     );
 
@@ -6306,8 +6259,8 @@ fn preview_and_export_composite_color_path_summaries_match_for_frame() {
             sequence,
             sequences: Vec::new(),
             media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
             range: mondrian_export::preset::TimelineExportRange::SequenceInOut,
-            project_color_management: ProjectColorManagement::default(),
         },
         0,
         preview_frame.width,
@@ -7872,10 +7825,9 @@ fn failed_current_media_preview_cache_does_not_leave_viewer_loading() {
     let service = WindowPreviewAdapter::new();
     let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
-    let color_context = sequence.settings.root_preview_color_context(
-        &state.project_settings().color_management,
-        ColorSpace::Rec709,
-    );
+    let color_context = sequence
+        .settings
+        .root_preview_color_context(state.project_color_environment(), ColorSpace::Rec709);
     let key = service
         .media_preview_key_for_asset(
             &state,
@@ -7909,10 +7861,9 @@ fn media_preview_cache_identity_changes_with_range_override() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
-    let color_context = sequence.settings.root_preview_color_context(
-        &state.project_settings().color_management,
-        ColorSpace::Rec709,
-    );
+    let color_context = sequence
+        .settings
+        .root_preview_color_context(state.project_color_environment(), ColorSpace::Rec709);
     let key_for_state = || {
         service
             .media_preview_key_for_asset(
@@ -7969,10 +7920,9 @@ fn playing_cached_media_preview_defers_sync_raster_composite() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let sequence = state.active_sequence().expect("sequence");
     let (width, height) = preview_dimensions_for_sequence(sequence);
-    let color_context = sequence.settings.root_preview_color_context(
-        &state.project_settings().color_management,
-        ColorSpace::Rec709,
-    );
+    let color_context = sequence
+        .settings
+        .root_preview_color_context(state.project_color_environment(), ColorSpace::Rec709);
     let key = service
         .media_preview_key_for_asset(
             &state,
@@ -8033,7 +7983,6 @@ fn test_media_key(source_frame: i64) -> MediaPreviewKey {
         working_color_space: WorkingColorSpace::LinearRec709,
         tone_map: false,
         engine: ColorEngine::mondrian_standard(),
-        ocio_generation: mondrian_core::ocio_config_generation(),
     }
 }
 
@@ -8684,11 +8633,12 @@ fn media_preview_cache_does_not_reuse_same_path_with_different_file_length() {
 }
 
 #[test]
-fn media_preview_caches_isolate_ocio_config_generations() {
-    let mut old_key = test_media_key(1);
-    old_key.ocio_generation = 41;
+fn media_preview_caches_isolate_exact_color_engines() {
+    let old_key = test_media_key(1);
     let mut new_key = old_key.clone();
-    new_key.ocio_generation = 42;
+    new_key.engine = ColorEngine::Aces {
+        preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+    };
     let mut store = test_cpu_frame_store(2, 1_024, 2);
 
     store.insert_media_frame(old_key.clone(), test_media_frame(1), false);

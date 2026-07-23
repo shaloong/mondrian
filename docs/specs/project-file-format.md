@@ -29,16 +29,21 @@ library/index.db
 - `project_id: ProjectId`
 - `document_revision: u64`
 - `meta: ProjectMeta`
-- `sequences: SequenceCollection`
 - `settings: ProjectSettings`
+- `color_environment: ProjectColorEnvironment`
+- `new_sequence_defaults: SequenceSettings`
+- `sequences: SequenceCollection`
 - `proxy_mode_assets: BTreeSet<AssetId>`
 
 `library/index.db` is the project asset library.
 
-The current independent versions are archive v1, document schema v18, and
-library schema v2. Schema v18 adds the complete closed Basic Title author
-payload. During Alpha, document schemas other than the exact current version
-are rejected because no compatibility migration is promised yet.
+The current independent versions are archive v1, document schema v19, and
+library schema v2. Schema v18 added the complete closed Basic Title author
+payload. Schema v19 establishes one mandatory Project color environment, one
+complete future-Sequence template, engine-free Sequence color semantics, and
+per-placement nested color processing. During Alpha, document schemas other
+than the exact current version are rejected because no compatibility migration
+is promised yet.
 
 ## Required Evolution Rules
 

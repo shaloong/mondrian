@@ -66,8 +66,12 @@ The current product boundary intentionally distinguishes “not yet exposed” f
 raster, frame rate/time base, pixel aspect, field order, output color, bit-depth
 and range defaults, audio sample rate, and channel layout. M1 export presets can
 override raster, bit depth, range, chroma, codec profile, Alpha, rate control,
-and audio codec. A user-editable export form is still required before these
-typed choices count as generally configurable product features.
+and audio codec. The product export form edits all of those currently
+implemented preset-owned values through one materialized typed draft, including
+GIF palette controls and PCM integer depth. Selecting a stable built-in preset
+resets that draft; editing it never mutates the catalog or a previously admitted
+job. Illegal intermediate combinations remain visible with the structured
+delivery-admission reason and cannot enqueue.
 
 Export frame-rate conversion, audio sample-rate/layout conversion, GOP/B-frame
 control, CBR/ABR/two-pass modes, hardware-encoder profiles, and image-sequence
@@ -85,6 +89,12 @@ Execution, internal frame precision, FFmpeg arguments, and post-encode probe
 expectations consume that same result. Nested Sequences contribute
 working-domain pixels but cannot replace the root job's resolved delivery
 contract.
+
+Renderer working precision is not an export-form parameter. Working-space CPU
+and composite targets remain the fixed 32-bit-float correctness contract;
+encoded 8/10/12-bit delivery depth and the derived renderer-to-encoder transport
+are separate. The form never labels a float texture or `rgba64le` pipe as a
+user-visible 16-bit delivery.
 
 The product-owned preset catalog has stable identities. M1 includes
 `h264-aac-sdr` (H.264 High, 8-bit 4:2:0 Legal, AAC) and `hevc-main10` (HEVC

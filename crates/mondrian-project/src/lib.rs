@@ -6,8 +6,11 @@
 //! outside the project archive.
 
 use anyhow::Context;
-use mondrian_core::{automation::PropertyHost, AssetId, ProjectId, ProjectMeta, ProjectSettings};
-use mondrian_timeline::SequenceCollection;
+use mondrian_core::{
+    automation::PropertyHost, AssetId, ProjectColorEnvironment, ProjectId, ProjectMeta,
+    ProjectSettings,
+};
+use mondrian_timeline::{SequenceCollection, SequenceSettings};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
@@ -23,7 +26,7 @@ use migration::JsonMigrationRegistry;
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 18;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 19;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 2;
 
@@ -124,8 +127,15 @@ pub struct ProjectDocument {
     pub document_revision: u64,
     /// User-facing project metadata.
     pub meta: ProjectMeta,
-    /// Project-wide settings inherited by sequences where applicable.
+    /// Settings whose semantics genuinely belong to the Project container.
     pub settings: ProjectSettings,
+    /// Exact color engine shared by every Sequence in this Project.
+    pub color_environment: ProjectColorEnvironment,
+    /// Complete template copied into a Sequence when it is created.
+    ///
+    /// Existing Sequences never consult this value during validation,
+    /// playback, rendering, or export.
+    pub new_sequence_defaults: SequenceSettings,
     /// Complete sequence collection for the current single-document layout.
     pub sequences: SequenceCollection,
     /// Assets currently forced into proxy playback mode.
@@ -137,6 +147,8 @@ impl ProjectDocument {
     pub fn new(
         name: impl Into<String>,
         sequences: SequenceCollection,
+        color_environment: ProjectColorEnvironment,
+        new_sequence_defaults: SequenceSettings,
         settings: ProjectSettings,
     ) -> Self {
         Self {
@@ -145,6 +157,8 @@ impl ProjectDocument {
             document_revision: 1,
             meta: ProjectMeta::new(name),
             settings,
+            color_environment,
+            new_sequence_defaults,
             sequences,
             proxy_mode_assets: BTreeSet::new(),
         }
@@ -161,6 +175,9 @@ impl ProjectDocument {
         if self.meta.name.trim().is_empty() {
             anyhow::bail!("project name cannot be empty");
         }
+        self.new_sequence_defaults
+            .validate_with_color_environment(&self.color_environment)
+            .context("new Sequence defaults are invalid")?;
         self.sequences.validate_nested_sequences()?;
         if self.sequences.active().is_none() {
             anyhow::bail!("project document has no active sequence");
@@ -174,7 +191,7 @@ impl ProjectDocument {
             }
             sequence
                 .settings
-                .validate_with_project_color_management(&self.settings.color_management)
+                .validate_with_color_environment(&self.color_environment)
                 .with_context(|| {
                     format!("sequence '{}' color management is invalid", sequence.name)
                 })?;
@@ -251,7 +268,6 @@ pub fn load_project_archive(
     let file = fs::File::open(archive_file)?;
     let mut archive = zip::ZipArchive::new(file)?;
     let (manifest, document) = read_project_archive_metadata_from_zip(&mut archive)?;
-    validate_project_color_engines(&document)?;
 
     let mut db_entry = archive
         .by_name(LIBRARY_ENTRY)
@@ -268,32 +284,6 @@ pub fn load_project_archive(
         document,
         library_schema_version: manifest.library_schema_version,
     })
-}
-
-fn validate_project_color_engines(document: &ProjectDocument) -> anyhow::Result<()> {
-    let mut engines = vec![document.settings.color_management.engine.clone()];
-    engines.extend(
-        document
-            .sequences
-            .sequences
-            .iter()
-            .filter(|sequence| !sequence.settings.color_management.inherit)
-            .map(|sequence| sequence.settings.color_management.engine.clone()),
-    );
-    let mut validated = Vec::new();
-    for engine in engines {
-        if validated.contains(&engine) {
-            continue;
-        }
-        engine.ensure_loaded().map_err(|reason| {
-            anyhow::anyhow!(
-                "project color engine '{}' failed validation: {reason}",
-                engine.name()
-            )
-        })?;
-        validated.push(engine);
-    }
-    Ok(())
 }
 
 /// Save an `.mdp` archive atomically next to the target file.
@@ -590,7 +580,13 @@ mod tests {
     fn test_document() -> ProjectDocument {
         let sequence = Sequence::new("Main");
         let collection = SequenceCollection::new(sequence);
-        ProjectDocument::new("Main", collection, ProjectSettings::default())
+        ProjectDocument::new(
+            "Main",
+            collection,
+            ProjectColorEnvironment::default(),
+            SequenceSettings::default(),
+            ProjectSettings::default(),
+        )
     }
 
     #[test]
@@ -632,9 +628,8 @@ mod tests {
             opened_sequence.settings.color_management.workflow,
             mondrian_timeline::sequence::ColorWorkflow::SceneReferred
         );
-        let opened_context = opened_sequence
-            .settings
-            .root_program_color_context(&opened.settings.color_management);
+        let opened_context =
+            opened_sequence.settings.root_program_color_context(&opened.color_environment);
         assert_eq!(
             opened_context.engine,
             mondrian_core::ColorEngine::mondrian_standard()
@@ -954,7 +949,7 @@ mod tests {
     fn document_fingerprint_includes_exact_standard_package_identity() {
         let current = test_document();
         let mut legacy = current.clone();
-        legacy.settings.color_management.engine = mondrian_core::ColorEngine::MondrianStandard {
+        legacy.color_environment.engine = mondrian_core::ColorEngine::MondrianStandard {
             package: mondrian_core::MondrianStandardPackageIdentity::V2,
         };
 
@@ -990,7 +985,7 @@ mod tests {
         let first = read_project_document_from_archive(&source).expect("first open");
         let second = read_project_document_from_archive(&source).expect("second open");
         assert_eq!(
-            first.settings.color_management.engine,
+            first.color_environment.engine,
             mondrian_core::ColorEngine::mondrian_standard()
         );
         let first_context = first
@@ -998,7 +993,7 @@ mod tests {
             .active()
             .expect("active current-fixture sequence")
             .settings
-            .root_program_color_context(&first.settings.color_management);
+            .root_program_color_context(&first.color_environment);
         assert_eq!(
             first_context.output_transform,
             mondrian_core::OutputTransformIntent::mondrian_standard()
@@ -1034,26 +1029,19 @@ mod tests {
         let v2_engine = mondrian_core::ColorEngine::MondrianStandard {
             package: mondrian_core::MondrianStandardPackageIdentity::V2,
         };
-        document.settings.color_management.engine = v2_engine.clone();
-        document
-            .sequences
-            .active_mut()
-            .expect("active legacy sequence")
-            .settings
-            .color_management
-            .engine = v2_engine.clone();
+        document.color_environment.engine = v2_engine.clone();
 
         save_project_archive(&document, &db_path, &project_path)
             .expect("save legacy Standard v2 archive");
         let reopened = read_project_document_from_archive(&project_path)
             .expect("reopen legacy Standard v2 archive");
-        assert_eq!(reopened.settings.color_management.engine, v2_engine);
+        assert_eq!(reopened.color_environment.engine, v2_engine);
         let context = reopened
             .sequences
             .active()
             .expect("active reopened legacy sequence")
             .settings
-            .root_program_color_context(&reopened.settings.color_management);
+            .root_program_color_context(&reopened.color_environment);
         assert_eq!(
             context.output_transform,
             mondrian_core::OutputTransformIntent::mondrian_standard_package(
@@ -1064,7 +1052,7 @@ mod tests {
             .output_transform
             .resolve_display_view(
                 mondrian_core::ColorSpace::Rec709,
-                &reopened.settings.color_management.engine,
+                &reopened.color_environment.engine,
             )
             .expect("resolve legacy Standard v2 output")
             .expect("legacy Standard v2 display/view");
@@ -1085,26 +1073,26 @@ mod tests {
     }
 
     #[test]
-    fn schema_v7_requires_complete_project_color_identity() {
+    fn current_schema_requires_complete_project_color_identity() {
         let value = serde_json::to_value(test_document()).expect("serialize document");
 
         let mut missing_engine = value.clone();
-        missing_engine["settings"]["color_management"]
+        missing_engine["color_environment"]
             .as_object_mut()
-            .expect("color-management object")
+            .expect("color-environment object")
             .remove("engine");
         assert!(serde_json::from_value::<ProjectDocument>(missing_engine).is_err());
 
-        let mut missing_color_management = value;
-        missing_color_management["settings"]
+        let mut missing_color_environment = value;
+        missing_color_environment
             .as_object_mut()
-            .expect("settings object")
-            .remove("color_management");
-        assert!(serde_json::from_value::<ProjectDocument>(missing_color_management).is_err());
+            .expect("Project document object")
+            .remove("color_environment");
+        assert!(serde_json::from_value::<ProjectDocument>(missing_color_environment).is_err());
 
         let mut missing_hdr_view =
             serde_json::to_value(test_document()).expect("serialize document");
-        missing_hdr_view["settings"]["color_management"]["engine"]["package"]
+        missing_hdr_view["color_environment"]["engine"]["package"]
             .as_object_mut()
             .expect("Standard package identity")
             .remove("hdr_view_transform_id");
@@ -1123,18 +1111,26 @@ mod tests {
     }
 
     #[test]
-    fn project_open_validation_rejects_missing_sequence_custom_ocio_config() {
+    fn missing_project_custom_ocio_preserves_author_intent_but_blocks_engine_prepare() {
         let mut document = test_document();
         let missing_path = std::env::temp_dir().join(format!(
             "mondrian-missing-project-custom-ocio-{}.ocio",
             std::process::id()
         ));
-        let active = document.sequences.active_mut().expect("active sequence");
-        active.settings.color_management.inherit = false;
-        active.settings.color_management.engine = missing_custom_engine(missing_path);
+        document.color_environment.engine = missing_custom_engine(missing_path);
+        document
+            .validate()
+            .expect("unavailable external resources do not corrupt the author snapshot");
+        let round_tripped: ProjectDocument =
+            serde_json::from_value(serde_json::to_value(&document).expect("serialize Project"))
+                .expect("preserve unavailable Custom OCIO intent");
+        assert_eq!(round_tripped.color_environment, document.color_environment);
 
-        let error = validate_project_color_engines(&document)
-            .expect_err("missing sequence Custom OCIO config must fail project open");
+        let error = round_tripped
+            .color_environment
+            .engine
+            .ensure_loaded()
+            .expect_err("missing Project Custom OCIO config must block execution prepare");
         assert!(
             format!("{error:#}").contains("OCIO config file not found"),
             "{error:#}"
@@ -1144,7 +1140,7 @@ mod tests {
     #[test]
     fn document_validation_rejects_custom_ocio_working_space_mismatch() {
         let mut document = test_document();
-        document.settings.color_management.engine =
+        document.color_environment.engine =
             missing_custom_engine(PathBuf::from("E:/studio/config.ocio"));
         document
             .sequences

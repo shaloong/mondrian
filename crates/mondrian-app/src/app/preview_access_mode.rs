@@ -53,7 +53,6 @@ pub(crate) struct MediaPreviewKey {
     pub(crate) working_color_space: WorkingColorSpace,
     pub(crate) tone_map: bool,
     pub(crate) engine: ColorEngine,
-    pub(crate) ocio_generation: u64,
 }
 
 /// Media Adapter over the Playback Module's semantic latest-wins scheduler.
