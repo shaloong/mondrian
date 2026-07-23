@@ -89,12 +89,21 @@ authoring intent.
 
 The Inspector selects the logical source of each `AudioComponentEdit` by its
 stable edit ID. Media Clips offer Asset Component IDs; nested Clips offer only
-the child Sequence's stable public outputs. The typed action is validated by the
-application boundary, committed as one Sequence snapshot, and is undoable.
+the child Sequence's stable public outputs. Independent typed field actions
+address enabled state, static volume, static pan/balance, fade-in, or fade-out;
+they never round-trip or replace the complete edit, so an interaction cannot
+overwrite unrelated automation, channel mapping, Role, or processing state.
+The application derives actual Track ownership, enforces Track lock, resolves
+the stable edit ID, validates the complete audio author aggregate, and commits
+one Sequence snapshot only when the field changed. A rejected or no-op action
+does not advance revision/history. Successful source or field changes are
+undoable and invalidate the prepared Runtime at the current transport anchor;
+running playback re-prepares, while paused/stopped playback releases the stale
+source.
+
 Physical stream refresh/rebind remains an Asset-library action and is never put
-into Timeline JSON or Timeline Undo. Either operation invalidates a prepared
-audio Runtime at the current transport anchor; running playback re-prepares,
-while paused/stopped playback releases the stale source.
+into Timeline JSON or Timeline Undo. It is deliberately separate from
+placement-local mix authoring.
 
 The Sequence persists one validated semantic `AudioChannelLayout`; it does not
 persist a second channel count. The value is either independent Mono, a
@@ -266,6 +275,12 @@ endpoints recreates a Transition with new IDs and translated Sequence time;
 copying one does not. Structural edits discard a Transition when either
 endpoint or its complete interval is no longer valid rather than silently
 retargeting it.
+
+A present Clip fade has an exact duration strictly greater than zero and no
+greater than the owning Clip duration. Absence is the only canonical zero-fade
+state. Product UI therefore maps an entered duration of zero to `None`, and
+quantizes positive seconds once at the UI/domain boundary; serialized author
+state never carries two representations for “no fade”.
 
 ## Compilation and execution
 
@@ -709,7 +724,11 @@ Automated tests currently prove:
 
 - compiler placement derives from the real Track/Clip hierarchy;
 - invalid unscoped audio authoring and Bus cycles reject validation;
+- present zero-length or over-Clip fades reject author validation, while the
+  product zero control emits canonical absence;
 - Clip/Track/Bus/Output gain and automation are block-invariant;
+- Clip static gain and edge fades are sample-identical between the normative
+  scalar and runtime-vectorized prepared schedules;
 - internal PCM is not clipped or `tanh`-shaped;
 - Track mute gates the post-mute route;
 - unresolved VST3/CLAP instances survive semantic IR and fail closed at default
@@ -775,9 +794,12 @@ gates rather than implied support:
    explicit observation/downstream stages.
 5. Execute Semantic Projection outputs and delivery mappings without cloning
    or reinterpreting the canonical Program graph.
-6. Add editor commands/UI for Clip/Track/Bus/Output racks, automation, fades,
-   Transitions, routing, audition overlays, missing-plugin repair, and atomic
-   undo/redo.
+6. Extend the implemented stable-ID Clip source/enabled/gain/pan/fade Inspector
+   transactions, atomic undo, and save/reopen coverage with Track/Bus/Output
+   racks, automation, Transitions, routing, audition overlays, and
+   missing-plugin repair. These surfaces must keep using field/identity intent
+   and complete-candidate validation rather than introducing editable UI
+   mirrors of the audio graph.
 7. Add reference PCM fixtures for fades/Transitions/nesting/PDC, long 29.97 and
    59.94 projects, block-size matrices, seek/discontinuity, plugin failure,
    export parity, and reference-machine realtime load/drift gates.

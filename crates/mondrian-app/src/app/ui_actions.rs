@@ -18,6 +18,7 @@ use mondrian_editor_state::Action;
 use mondrian_export::preset::{ExportPreset, TimelineExportRange};
 use mondrian_media::{DecodedVideoRange, DetectedColorInterpretation, VideoColorMetadata};
 use mondrian_timeline::{
+    audio::AudioFade,
     sequence::{
         ColorWorkflow, DeliveryBitDepth, MissingColorMetadataPolicy, NestedColorProcessing,
         VideoRange,
@@ -87,6 +88,8 @@ pub const INSPECTOR_SET_CLIP_CURVE: &str = "set_clip_curve";
 pub const INSPECTOR_SET_CLIP_PROPERTY: &str = "set_clip_property";
 /// Action name for selecting the logical source of one Clip audio Component Edit.
 pub const INSPECTOR_SET_AUDIO_COMPONENT_SOURCE: &str = "set_audio_component_source";
+/// Action name for changing one field of one Clip audio Component Edit.
+pub const INSPECTOR_SET_AUDIO_COMPONENT_EDIT_FIELD: &str = "set_audio_component_edit_field";
 /// Action name for selecting one effect inside the selected clip.
 pub const INSPECTOR_SELECT_EFFECT: &str = "select_effect";
 /// Action name for toggling one effect on a selected clip.
@@ -760,6 +763,32 @@ pub struct InspectorSetAudioComponentSourcePayload {
     pub source: InspectorAudioComponentSourcePayload,
 }
 
+/// One independently mutable placement-local audio Component Edit field.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum InspectorAudioComponentEditField {
+    /// Whether this Component contributes signal.
+    Enabled(bool),
+    /// Static post-processing placement volume in dB.
+    VolumeDb(f64),
+    /// Static stereo pan/balance in normalized `[-1, 1]` units.
+    Pan(f64),
+    /// Optional exact unary fade beginning at the Clip in edge.
+    FadeIn(Option<AudioFade>),
+    /// Optional exact unary fade ending at the Clip out edge.
+    FadeOut(Option<AudioFade>),
+}
+
+/// Change exactly one field of one placement-local audio Component Edit.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct InspectorSetAudioComponentEditFieldPayload {
+    /// Clip that owns the edit.
+    pub clip: InspectorClipRefPayload,
+    /// Stable edit being changed.
+    pub edit_id: AudioComponentEditId,
+    /// Single typed field mutation; unrelated author state is preserved.
+    pub field: InspectorAudioComponentEditField,
+}
+
 /// Select one effect instance inside a clip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InspectorSelectEffectPayload {
@@ -1313,6 +1342,13 @@ pub fn inspector_set_audio_component_source_action(
     payload: InspectorSetAudioComponentSourcePayload,
 ) -> Action {
     custom_inspector_action(INSPECTOR_SET_AUDIO_COMPONENT_SOURCE, payload)
+}
+
+/// Build an action that changes one Clip audio Component Edit field.
+pub fn inspector_set_audio_component_edit_field_action(
+    payload: InspectorSetAudioComponentEditFieldPayload,
+) -> Action {
+    custom_inspector_action(INSPECTOR_SET_AUDIO_COMPONENT_EDIT_FIELD, payload)
 }
 
 /// Build an action that selects an effect in the inspector scope.

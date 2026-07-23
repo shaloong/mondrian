@@ -11,7 +11,7 @@
     { "role": "aac-audio", "fixture_id": null, "required": true }
   ],
   "required_operations": ["open", "play", "accurate-seek", "scrub", "insert", "overwrite", "trim", "ripple", "split", "undo-redo", "proxy-original-switch", "offline-relink", "save-reopen", "export", "reimport"],
-  "required_content": ["transform", "opacity", "primary-color", "lut", "cross-dissolve", "basic-title", "hold-keyframe", "linear-keyframe", "bezier-keyframe"],
+  "required_content": ["transform", "opacity", "primary-color", "lut", "cross-dissolve", "basic-title", "clip-audio-gain-pan-fades", "hold-keyframe", "linear-keyframe", "bezier-keyframe"],
   "exports": [
     { "id": "h264-aac-sdr", "container": "mp4", "video_codec": "h264", "audio_codec": "aac", "required_probe_fields": ["duration", "frame_rate", "primaries", "transfer", "matrix", "range", "audio_sample_rate", "audio_channels"] },
     { "id": "hevc-main10", "container": "mp4", "video_codec": "hevc-main10", "audio_codec": "aac", "required_probe_fields": ["duration", "frame_rate", "bit_depth", "primaries", "transfer", "matrix", "range", "hdr_static_metadata"] }

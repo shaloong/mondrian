@@ -63,6 +63,18 @@ binding while preserving its logical ID. UI labels may describe physical stream
 indices, language, title, and layout, but those indices never enter Timeline
 authoring payloads.
 
+The same Component section projects enabled state, static dB volume,
+normalized pan/balance, and independent exact edge fades. Every interaction
+emits one typed field mutation instead of serializing the whole
+`AudioComponentEdit`; the application re-resolves Clip/Track/edit ownership and
+validates the full candidate before commit. Volume exposes a normal working
+range of `-60..+12 dB` while preserving the author hard range
+`-120..+24 dB`; pan displays `-100..+100` and crosses the domain boundary only
+as normalized `-1..1`. Fade seconds are quantized once to exact
+`TimelineTime`, bounded by Clip duration, and zero means absent. Curve selection
+preserves the exact duration and is disabled when that fade is absent. The
+panel owns no parallel audio draft and no execution interpretation.
+
 ## Product SVG Capability
 
 Bundled product SVGs are static UI artwork, not a general document or title

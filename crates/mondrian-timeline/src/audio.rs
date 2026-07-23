@@ -463,7 +463,7 @@ impl AudioComponentEdit {
         validate_optional_gain_curve(&self.volume_automation, CLIP_VOLUME_DB_PARAMETER_ID)?;
         validate_optional_curve(&self.pan_automation, CLIP_PAN_PARAMETER_ID)?;
         for fade in [self.fades.fade_in, self.fades.fade_out].into_iter().flatten() {
-            if fade.duration.is_negative() || fade.duration > clip.duration {
+            if fade.duration <= TimelineTime::ZERO || fade.duration > clip.duration {
                 return Err(AudioAuthoringError::InvalidFade(self.id));
             }
         }
@@ -1177,7 +1177,7 @@ pub enum AudioAuthoringError {
     /// Pan must be finite and lie in the supported range.
     #[error("audio component edit {0} has an invalid pan value")]
     InvalidPan(AudioComponentEditId),
-    /// Fade duration must be non-negative and fit the owning Clip.
+    /// Present fade duration must be strictly positive and fit the owning Clip.
     #[error("audio component edit {0} has an invalid fade")]
     InvalidFade(AudioComponentEditId),
     /// Role identities must be unique.
@@ -1424,6 +1424,33 @@ mod tests {
             Err(AudioAuthoringError::DuplicateProcessorInstance(
                 processor_id
             ))
+        );
+    }
+
+    #[test]
+    fn present_clip_fade_must_have_a_positive_duration() {
+        let mut track = Track::new_audio("Audio");
+        let scope = AudioProcessingScope::identity();
+        let mut clip = Clip::new(
+            mondrian_core::AssetId::new(),
+            TimelineTime::ZERO,
+            TimelineTime::ONE,
+        )
+        .expect("clip");
+        let mut edit = AudioComponentEdit::media(AudioSourceComponentId::primary(), scope.id);
+        let edit_id = edit.id;
+        edit.fades.fade_in = Some(AudioFade {
+            duration: TimelineTime::ZERO,
+            curve: AudioFadeCurve::EqualPower,
+        });
+        clip.audio_components.push(edit);
+        track.add_clip(clip).expect("add clip");
+        let mut program = AudioProgram::for_tracks([track.id]);
+        program.add_processing_scope(scope);
+
+        assert_eq!(
+            program.validate(&[track], &[], AudioChannelLayout::Stereo),
+            Err(AudioAuthoringError::InvalidFade(edit_id))
         );
     }
 

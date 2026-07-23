@@ -6,11 +6,11 @@ use mondrian_core::{
     ParameterId, TimeScale, TimelineTime,
 };
 use mondrian_timeline::audio::{
-    AudioChannelStripOutputPort, AudioComponentChannelMapping, AudioMixBus, AudioProcessorInstance,
-    AudioRoute, AudioRouteDestination, AudioRouteSource, BUILTIN_GAIN_DEFINITION_ID,
-    BUILTIN_SAMPLE_DELAY_DEFINITION_ID, CLIP_VOLUME_DB_PARAMETER_ID, FADER_DB_PARAMETER_ID,
-    GAIN_DB_PARAMETER_ID, INPUT_GAIN_DB_PARAMETER_ID, ROUTE_GAIN_DB_PARAMETER_ID,
-    SAMPLE_DELAY_FRAMES_PARAMETER_ID,
+    AudioChannelStripOutputPort, AudioComponentChannelMapping, AudioFade, AudioFadeCurve,
+    AudioMixBus, AudioProcessorInstance, AudioRoute, AudioRouteDestination, AudioRouteSource,
+    BUILTIN_GAIN_DEFINITION_ID, BUILTIN_SAMPLE_DELAY_DEFINITION_ID, CLIP_VOLUME_DB_PARAMETER_ID,
+    FADER_DB_PARAMETER_ID, GAIN_DB_PARAMETER_ID, INPUT_GAIN_DB_PARAMETER_ID,
+    ROUTE_GAIN_DB_PARAMETER_ID, SAMPLE_DELAY_FRAMES_PARAMETER_ID,
 };
 use mondrian_timeline::{Clip, Sequence};
 use std::collections::BTreeMap;
@@ -510,6 +510,44 @@ fn compiler_derives_track_and_range_from_real_clip_placement() {
         compiled.contributions()[0].sequence_range.duration,
         clip.duration
     );
+}
+
+#[test]
+fn clip_static_gain_and_edge_fades_execute_identically_on_scalar_and_runtime_backends() {
+    let mut sequence = sequence_with_audio_clip();
+    let edit = &mut sequence.audio_tracks[0].clips[0].audio_components[0];
+    edit.volume_db = -6.020_599_913_279_624;
+    edit.fades.fade_in = Some(AudioFade {
+        duration: TimelineTime::ONE,
+        curve: AudioFadeCurve::ConstantGain,
+    });
+    edit.fades.fade_out = Some(AudioFade {
+        duration: TimelineTime::ONE,
+        curve: AudioFadeCurve::ConstantGain,
+    });
+
+    let scalar = prepared_with_backend(&sequence, 8, AudioKernelBackend::ScalarReference);
+    let runtime = prepared_with_backend(&sequence, 8, AudioKernelBackend::RuntimeVectorized);
+    let mut scalar_source = RampSource::default();
+    let scalar_pcm = render_audio(
+        scalar,
+        &mut scalar_source,
+        AudioRenderRequest { start_sample: 0, frames: 8 },
+    )
+    .expect("scalar Clip edit");
+    let mut runtime_source = RampSource::default();
+    let runtime_pcm = render_audio(
+        runtime,
+        &mut runtime_source,
+        AudioRenderRequest { start_sample: 0, frames: 8 },
+    )
+    .expect("runtime Clip edit");
+
+    assert_eq!(scalar_pcm, runtime_pcm);
+    let expected = [0.0_f32, 0.5, 1.5, 2.0, 2.5, 3.0, 3.5, 2.0];
+    for (sample, expected) in scalar_pcm.iter().zip(expected) {
+        assert!((sample - expected).abs() <= 1.0e-6);
+    }
 }
 
 #[test]
