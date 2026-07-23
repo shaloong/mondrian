@@ -1,5 +1,5 @@
 use super::AppState;
-use mondrian_core::types::{ClipId, EffectId, TrackId};
+use mondrian_core::types::{ClipId, EffectId, TrackId, VideoTransitionId};
 use mondrian_timeline::sequence::Sequence;
 use std::collections::{HashMap, HashSet};
 
@@ -29,6 +29,15 @@ pub struct SelectedEffectRef {
     pub effect_id: EffectId,
 }
 
+/// UI-agnostic reference to a selected visual Transition.
+///
+/// The owning Track is deliberately absent. It is derived from the strong Clip
+/// endpoints in the active Sequence, matching the author-model invariant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SelectedVideoTransitionRef {
+    pub transition_id: VideoTransitionId,
+}
+
 impl AppState {
     /// The primary selected clip, used by single-target panels such as the
     /// Inspector and Effects browser.
@@ -50,6 +59,14 @@ impl AppState {
         resolve_effect_selection(sequence, selection.clip.clip_id, selection.effect_id)
     }
 
+    /// The selected visual Transition, if it still belongs to the active Sequence.
+    pub fn selected_video_transition(&self) -> Option<SelectedVideoTransitionRef> {
+        let selection = self.selection.selected_video_transition?;
+        self.active_sequence().and_then(|sequence| {
+            resolve_video_transition_selection(sequence, selection.transition_id)
+        })
+    }
+
     /// All selected timeline tracks in visible track order.
     pub fn selected_tracks(&self) -> &[TrackId] {
         &self.selection.selected_track_ids
@@ -63,6 +80,7 @@ impl AppState {
     pub fn clear_selection(&mut self) {
         self.selection.selected_track_ids.clear();
         self.selection.selected_clips.clear();
+        self.selection.selected_video_transition = None;
         self.selection.selected_effect = None;
         self.selection.selected_mask = None;
         self.clear_animation_selection();
@@ -118,7 +136,25 @@ impl AppState {
             .and_then(|sequence| resolve_effect_selection(sequence, clip_id, effect_id))?;
         self.selection.selected_track_ids.clear();
         self.selection.selected_clips = vec![selection.clip];
+        self.selection.selected_video_transition = None;
         self.selection.selected_effect = Some(selection);
+        self.selection.selected_mask = None;
+        self.clear_animation_selection();
+        Some(selection)
+    }
+
+    /// Select a visual Transition by stable identity in the active Sequence.
+    pub fn select_video_transition_by_id(
+        &mut self,
+        transition_id: VideoTransitionId,
+    ) -> Option<SelectedVideoTransitionRef> {
+        let selection = self
+            .active_sequence()
+            .and_then(|sequence| resolve_video_transition_selection(sequence, transition_id))?;
+        self.selection.selected_track_ids.clear();
+        self.selection.selected_clips.clear();
+        self.selection.selected_video_transition = Some(selection);
+        self.selection.selected_effect = None;
         self.selection.selected_mask = None;
         self.clear_animation_selection();
         Some(selection)
@@ -139,6 +175,7 @@ impl AppState {
     pub fn replace_clip_selection(&mut self, selections: Vec<SelectedClipRef>) {
         self.selection.selected_track_ids.clear();
         self.selection.selected_clips = selections;
+        self.selection.selected_video_transition = None;
         self.selection.selected_effect = None;
         self.selection.selected_mask = None;
         self.clear_animation_selection();
@@ -148,6 +185,7 @@ impl AppState {
     pub fn replace_track_selection(&mut self, track_ids: Vec<TrackId>) {
         self.selection.selected_track_ids = track_ids;
         self.selection.selected_clips.clear();
+        self.selection.selected_video_transition = None;
         self.selection.selected_effect = None;
         self.selection.selected_mask = None;
         self.clear_animation_selection();
@@ -216,6 +254,10 @@ impl AppState {
         self.selection.selected_effect = self.selection.selected_effect.and_then(|selection| {
             resolve_effect_selection(&sequence, selection.clip.clip_id, selection.effect_id)
         });
+        self.selection.selected_video_transition =
+            self.selection.selected_video_transition.and_then(|selection| {
+                resolve_video_transition_selection(&sequence, selection.transition_id)
+            });
 
         if self
             .animation_selection
@@ -304,6 +346,18 @@ pub fn resolve_clip_selection(sequence: &Sequence, clip_id: ClipId) -> Option<Se
     }
 
     None
+}
+
+/// Resolve a visual Transition identity in the active Sequence.
+pub fn resolve_video_transition_selection(
+    sequence: &Sequence,
+    transition_id: VideoTransitionId,
+) -> Option<SelectedVideoTransitionRef> {
+    sequence
+        .video_transitions
+        .iter()
+        .any(|transition| transition.id == transition_id)
+        .then_some(SelectedVideoTransitionRef { transition_id })
 }
 
 /// Resolve an effect id to its current clip-backed selection reference.

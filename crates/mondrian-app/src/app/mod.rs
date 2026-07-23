@@ -108,7 +108,9 @@ use proxy_generation::{
     ProxyGenerationDiagnostics, ProxyGenerationOrigin, ProxyGenerationRequestOutcome,
     ProxyGenerationService,
 };
-pub use selection::{SelectedClipRef, SelectedEffectRef, SelectedTrackRef};
+pub use selection::{
+    SelectedClipRef, SelectedEffectRef, SelectedTrackRef, SelectedVideoTransitionRef,
+};
 use timeline_editing::*;
 pub use video_transitions::{VideoTransitionEditOutcome, VideoTransitionHandlePolicy};
 
@@ -144,6 +146,11 @@ pub struct SelectionState {
     pub selected_track_ids: Vec<TrackId>,
     /// Selected clips (supports multi-select from timeline).
     pub selected_clips: Vec<SelectedClipRef>,
+    /// Selected visual Transition in the active sequence.
+    ///
+    /// Transition identity is sufficient: Track membership is derived from
+    /// its strong Clip endpoints and must never be mirrored here.
+    pub selected_video_transition: Option<SelectedVideoTransitionRef>,
     /// Selected effect inside the primary clip, shared by Inspector and graph views.
     pub selected_effect: Option<SelectedEffectRef>,
     /// Currently selected mask (canvas → effect controls).

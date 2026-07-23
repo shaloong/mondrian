@@ -155,6 +155,16 @@ runtime state fails visibly instead of silently selecting another counting
 mode. The product menu exposes only formats with implemented parsing/formatting
 and reference tests.
 
+Visual Transition UI intent follows the same domain-light Widget seam as Clip
+editing. `mondrian-ui-widgets` may emit track/Clip/Transition view indices and
+frame-grid gesture proposals, while the App panel Adapter resolves stable
+identities. Selection stores only `VideoTransitionId`; it never mirrors a Track
+identity that author validation derives from strong Clip endpoints. Default
+duration, exact Timeline Time conversion, source-handle admission, Track locks,
+and the one-Undo author transaction remain App-owned. Ordinary Delete targets a
+selected Transition; Ripple Delete is unavailable because deleting a
+Transition cannot move Timeline placements.
+
 ## Playback Tick Ownership
 
 The winit host may wake the application while playback is running, but playback

@@ -8,17 +8,20 @@ use mondrian_core::TimelineTime;
 use mondrian_editor_state::Action;
 
 use crate::app::ui_actions::{
-    TimelineMoveClipPayload, TimelineMoveTrackPayload, TimelineSelectClipPayload,
-    TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
-    TimelineSetTrackControlPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
+    TimelineCreateCrossDissolvePayload, TimelineMoveClipPayload, TimelineMoveTrackPayload,
+    TimelineSelectClipPayload, TimelineSelectVideoTransitionPayload, TimelineSetInOutPointPayload,
+    TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
+    TimelineSetVideoTransitionRangePayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
     TimelineTrimSelectedClipsToPlayheadPayload, APP_SHELL_IMPORT_MEDIA_DIALOG, APP_SHELL_NAMESPACE,
     APP_SHELL_PROJECT_SETTINGS, APP_SHELL_SAVE_PROJECT_AS_DIALOG, APP_SHELL_SEQUENCE_SETTINGS,
     SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_RETURN_TO_PARENT,
     SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE, TIMELINE_ADD_TRACK,
-    TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
-    TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
-    TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
-    TIMELINE_TRIM_CLIPS, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
+    TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_CROSS_DISSOLVE, TIMELINE_MOVE_CLIP,
+    TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK,
+    TIMELINE_SELECT_CLIP, TIMELINE_SELECT_VIDEO_TRANSITION, TIMELINE_SET_IN_OUT_POINT,
+    TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
+    TIMELINE_SET_VIDEO_TRANSITION_RANGE, TIMELINE_TRIM_CLIPS,
+    TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD,
 };
 use crate::app::AppState;
 use mondrian_core::types::ClipId;
@@ -41,8 +44,10 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         Action::Cut => state.can_cut_to_app_clipboard(),
         Action::Copy => state.can_copy_to_app_clipboard(),
         Action::Paste => state.can_paste_from_app_clipboard(),
-        Action::DeleteSelection | Action::RippleDeleteSelection => {
-            has_deletable_timeline_selection(state)
+        Action::DeleteSelection => has_deletable_timeline_selection(state),
+        Action::RippleDeleteSelection => {
+            state.selection.selected_video_transition.is_none()
+                && has_deletable_clip_or_track_selection(state)
         }
         Action::Duplicate => state.can_cut_to_app_clipboard(),
         Action::SplitClipAtPlayhead => can_split_at_playhead(state),
@@ -91,6 +96,31 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
                     payload.clip_id,
                 )
             })
+        }
+        Action::Custom { namespace, name, payload }
+            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_SELECT_VIDEO_TRANSITION =>
+        {
+            parse_payload::<TimelineSelectVideoTransitionPayload>(payload).is_some_and(|payload| {
+                transition_track_lock(state, payload.transition_id).is_some()
+            })
+        }
+        Action::Custom { namespace, name, payload }
+            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_CREATE_CROSS_DISSOLVE =>
+        {
+            parse_payload::<TimelineCreateCrossDissolvePayload>(payload).is_some_and(|payload| {
+                adjacent_unlocked_video_edit(state, payload.left_clip_id, payload.right_clip_id)
+            })
+        }
+        Action::Custom { namespace, name, payload }
+            if namespace == TIMELINE_NAMESPACE && name == TIMELINE_SET_VIDEO_TRANSITION_RANGE =>
+        {
+            parse_payload::<TimelineSetVideoTransitionRangePayload>(payload).is_some_and(
+                |payload| {
+                    payload.start_frame >= 0
+                        && payload.end_frame > payload.start_frame
+                        && transition_track_lock(state, payload.transition_id) == Some(false)
+                },
+            )
         }
         Action::Custom { namespace, name, payload }
             if namespace == TIMELINE_NAMESPACE && name == TIMELINE_MOVE_CLIP =>
@@ -192,10 +222,20 @@ fn parse_payload<T: serde::de::DeserializeOwned>(payload: &serde_json::Value) ->
 }
 
 fn has_timeline_selection(state: &AppState) -> bool {
-    !state.selection.selected_clips.is_empty() || !state.selection.selected_track_ids.is_empty()
+    !state.selection.selected_clips.is_empty()
+        || !state.selection.selected_track_ids.is_empty()
+        || state.selection.selected_video_transition.is_some()
 }
 
 fn has_deletable_timeline_selection(state: &AppState) -> bool {
+    if let Some(selection) = state.selection.selected_video_transition {
+        return transition_track_lock(state, selection.transition_id) == Some(false);
+    }
+
+    has_deletable_clip_or_track_selection(state)
+}
+
+fn has_deletable_clip_or_track_selection(state: &AppState) -> bool {
     if !state.selection.selected_clips.is_empty() {
         let Some(sequence) = state.active_sequence() else {
             return false;
@@ -214,6 +254,42 @@ fn has_deletable_timeline_selection(state: &AppState) -> bool {
     }
 
     selected_tracks_are_deletable(state)
+}
+
+fn transition_track_lock(
+    state: &AppState,
+    transition_id: mondrian_core::VideoTransitionId,
+) -> Option<bool> {
+    let sequence = state.active_sequence()?;
+    let transition = sequence
+        .video_transitions
+        .iter()
+        .find(|transition| transition.id == transition_id)?;
+    sequence.video_tracks.iter().find_map(|track| {
+        let has_left = track.clips.iter().any(|clip| clip.id == transition.left);
+        let has_right = track.clips.iter().any(|clip| clip.id == transition.right);
+        (has_left && has_right).then_some(track.is_locked)
+    })
+}
+
+fn adjacent_unlocked_video_edit(state: &AppState, left_id: ClipId, right_id: ClipId) -> bool {
+    let Some(sequence) = state.active_sequence() else {
+        return false;
+    };
+    sequence.video_tracks.iter().any(|track| {
+        if track.is_locked {
+            return false;
+        }
+        track.clips.windows(2).any(|pair| {
+            pair[0].id == left_id
+                && pair[1].id == right_id
+                && pair[0].end_position().ok() == Some(pair[1].position)
+                && !sequence
+                    .video_transitions
+                    .iter()
+                    .any(|transition| transition.left == left_id && transition.right == right_id)
+        })
+    })
 }
 
 fn has_single_editable_selected_clip(state: &AppState) -> bool {

@@ -7,7 +7,7 @@ use mondrian_core::effect_data::EffectType;
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{
     AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, EffectId, JobId,
-    ProgramOutputId, SequenceId, TrackId,
+    ProgramOutputId, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
     ColorEngine, ColorSpace, ProjectSettings, Rational, Resolution, TimelineDisplayFormat,
@@ -35,6 +35,12 @@ pub const TIMELINE_NAMESPACE: &str = "ui.timeline";
 
 /// Action name for selecting a timeline clip.
 pub const TIMELINE_SELECT_CLIP: &str = "select_clip";
+/// Action name for selecting a visual Transition.
+pub const TIMELINE_SELECT_VIDEO_TRANSITION: &str = "select_video_transition";
+/// Action name for creating the product-default Cross Dissolve at an edit.
+pub const TIMELINE_CREATE_CROSS_DISSOLVE: &str = "create_cross_dissolve";
+/// Action name for changing one visual Transition range on the frame grid.
+pub const TIMELINE_SET_VIDEO_TRANSITION_RANGE: &str = "set_video_transition_range";
 /// Action name for moving a timeline clip.
 pub const TIMELINE_MOVE_CLIP: &str = "move_clip";
 /// Action name for trimming timeline clips.
@@ -407,6 +413,33 @@ pub struct TimelineSelectClipPayload {
     pub is_video_track: bool,
     /// Clip selected by the UI.
     pub clip_id: ClipId,
+}
+
+/// Select one visual Transition in the active Sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineSelectVideoTransitionPayload {
+    /// Stable Transition identity.
+    pub transition_id: VideoTransitionId,
+}
+
+/// Create the product-default Cross Dissolve between an adjacent edit pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineCreateCrossDissolvePayload {
+    /// Clip ending at the edit.
+    pub left_clip_id: ClipId,
+    /// Clip beginning at the edit.
+    pub right_clip_id: ClipId,
+}
+
+/// Change one visual Transition range on the Sequence video grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineSetVideoTransitionRangePayload {
+    /// Stable Transition identity.
+    pub transition_id: VideoTransitionId,
+    /// Inclusive range start in Sequence evaluation frames.
+    pub start_frame: i64,
+    /// Exclusive range end in Sequence evaluation frames.
+    pub end_frame: i64,
 }
 
 /// Move a clip to a target track and frame in the active sequence.
@@ -1123,6 +1156,27 @@ pub enum SequenceSettingsTabPayload {
 /// Build an action that selects a clip in the active timeline.
 pub fn timeline_select_clip_action(payload: TimelineSelectClipPayload) -> Action {
     custom_timeline_action(TIMELINE_SELECT_CLIP, payload)
+}
+
+/// Build an action that selects a visual Transition.
+pub fn timeline_select_video_transition_action(
+    payload: TimelineSelectVideoTransitionPayload,
+) -> Action {
+    custom_timeline_action(TIMELINE_SELECT_VIDEO_TRANSITION, payload)
+}
+
+/// Build an action that creates the product-default Cross Dissolve at an edit.
+pub fn timeline_create_cross_dissolve_action(
+    payload: TimelineCreateCrossDissolvePayload,
+) -> Action {
+    custom_timeline_action(TIMELINE_CREATE_CROSS_DISSOLVE, payload)
+}
+
+/// Build an action that changes one visual Transition range.
+pub fn timeline_set_video_transition_range_action(
+    payload: TimelineSetVideoTransitionRangePayload,
+) -> Action {
+    custom_timeline_action(TIMELINE_SET_VIDEO_TRANSITION_RANGE, payload)
 }
 
 /// Build an action that moves a clip in the active timeline.

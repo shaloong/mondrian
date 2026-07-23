@@ -7,7 +7,8 @@
 use std::time::Duration;
 
 use mondrian_core::{
-    events::AppEvent, ClipId, MondrianError, TimelineTime, TimelineTimeRange, VideoTransitionId,
+    events::AppEvent, ClipId, FramePosition, MondrianError, Rational, TimelineTime,
+    TimelineTimeRange, VideoTransitionId,
 };
 use mondrian_timeline::{clip::Clip, VideoTransition};
 
@@ -34,6 +35,29 @@ pub struct VideoTransitionEditOutcome {
 }
 
 impl AppState {
+    /// Create a centered, approximately one-second Cross Dissolve on the
+    /// Sequence frame grid.
+    ///
+    /// The default is clamped only by endpoint placement geometry. Real source
+    /// handles remain authoritative and are admitted with the fail-closed
+    /// `Reject` policy; the UI must request shortening explicitly.
+    pub fn create_default_cross_dissolve(
+        &mut self,
+        left_id: ClipId,
+        right_id: ClipId,
+    ) -> mondrian_core::Result<VideoTransitionEditOutcome> {
+        let sequence = self.active_sequence().cloned().ok_or_else(no_active_sequence)?;
+        let (_, _, left, right) = transition_endpoints(&sequence, left_id, right_id)?;
+        let requested_range =
+            default_cross_dissolve_range(left, right, sequence.settings.frame_rate)?;
+        self.create_cross_dissolve(
+            left_id,
+            right_id,
+            requested_range,
+            VideoTransitionHandlePolicy::Reject,
+        )
+    }
+
     /// Preflight every enabled visual Transition in one immutable Sequence.
     ///
     /// This is used again at export snapshot capture because relinked media or
@@ -244,6 +268,50 @@ impl AppState {
     }
 }
 
+fn default_cross_dissolve_range(
+    left: &Clip,
+    right: &Clip,
+    frame_rate: Rational,
+) -> mondrian_core::Result<TimelineTimeRange> {
+    if frame_rate.num <= 0 || frame_rate.den <= 0 {
+        return Err(MondrianError::WorkflowStepFailed {
+            step_id: "default_cross_dissolve_range".to_owned(),
+            reason: "Sequence frame rate must be positive".to_owned(),
+        });
+    }
+    let rounded_frames_per_second =
+        frame_rate.num.checked_add(frame_rate.den / 2).ok_or_else(|| {
+            MondrianError::WorkflowStepFailed {
+                step_id: "default_cross_dissolve_range".to_owned(),
+                reason: "Sequence frame rate exceeds the default-duration range".to_owned(),
+            }
+        })? / frame_rate.den;
+    let total_frames = rounded_frames_per_second.max(1);
+    let outgoing_frames = total_frames / 2;
+    let incoming_frames = total_frames - outgoing_frames;
+    let time_base = Rational::new(frame_rate.den, frame_rate.num);
+    let outgoing =
+        TimelineTime::from_frame_position(FramePosition::new(outgoing_frames, time_base))?;
+    let incoming =
+        TimelineTime::from_frame_position(FramePosition::new(incoming_frames, time_base))?;
+    let cut = left.end_position()?;
+    if right.position != cut {
+        return Err(MondrianError::WorkflowStepFailed {
+            step_id: "default_cross_dissolve_range".to_owned(),
+            reason: "Cross Dissolve endpoints do not share one exact edit".to_owned(),
+        });
+    }
+    let start = cut.checked_sub(outgoing)?.max(left.position);
+    let end = cut.checked_add(incoming)?.min(right.end_position()?);
+    if end <= start {
+        return Err(MondrianError::WorkflowStepFailed {
+            step_id: "default_cross_dissolve_range".to_owned(),
+            reason: "adjacent Clips cannot contain a non-empty Cross Dissolve".to_owned(),
+        });
+    }
+    TimelineTimeRange::new(start, end.checked_sub(start)?).map_err(Into::into)
+}
+
 fn transition_endpoints(
     sequence: &mondrian_timeline::sequence::Sequence,
     left_id: ClipId,
@@ -429,6 +497,34 @@ mod tests {
     }
 
     #[test]
+    fn default_cross_dissolve_is_centered_on_the_sequence_frame_grid() {
+        let left = Clip::new(AssetId::new(), tt(0), tt(50)).expect("left");
+        let right = Clip::new(AssetId::new(), tt(50), tt(50)).expect("right");
+
+        let range =
+            default_cross_dissolve_range(&left, &right, Rational::FPS_25).expect("default range");
+
+        assert_eq!(
+            range,
+            TimelineTimeRange::new(tt(38), tt(25)).expect("expected")
+        );
+    }
+
+    #[test]
+    fn default_cross_dissolve_clamps_only_to_clip_placement_geometry() {
+        let left = Clip::new(AssetId::new(), tt(0), tt(5)).expect("left");
+        let right = Clip::new(AssetId::new(), tt(5), tt(3)).expect("right");
+
+        let range =
+            default_cross_dissolve_range(&left, &right, Rational::FPS_25).expect("default range");
+
+        assert_eq!(
+            range,
+            TimelineTimeRange::new(tt(0), tt(8)).expect("expected")
+        );
+    }
+
+    #[test]
     fn handle_admission_rejects_by_default_and_shortens_only_explicitly() {
         let left = Clip::new(AssetId::new(), tt(0), tt(10)).expect("left");
         let mut right = Clip::new(AssetId::new(), tt(10), tt(10)).expect("right");
@@ -502,6 +598,12 @@ mod tests {
                 VideoTransitionHandlePolicy::Reject,
             )
             .expect("create Transition");
+        let selected = state
+            .select_video_transition_by_id(created.transition_id)
+            .expect("select Transition");
+        assert_eq!(selected.transition_id, created.transition_id);
+        assert!(state.selection.selected_clips.is_empty());
+        assert!(state.selection.selected_track_ids.is_empty());
         assert_eq!(
             state.sequence_by_id(sequence_id).expect("sequence").video_transitions.len(),
             1
@@ -512,13 +614,20 @@ mod tests {
             .expect("sequence")
             .video_transitions
             .is_empty());
+        assert!(state.selected_video_transition().is_none());
         assert!(state.redo_timeline().expect("redo create"));
-        state.remove_video_transition(created.transition_id).expect("delete Transition");
+        state
+            .select_video_transition_by_id(created.transition_id)
+            .expect("select restored Transition");
+        state
+            .dispatch_action(mondrian_editor_state::Action::DeleteSelection)
+            .expect("delete selected Transition");
         assert!(state
             .sequence_by_id(sequence_id)
             .expect("sequence")
             .video_transitions
             .is_empty());
+        assert!(state.selection.selected_video_transition.is_none());
         assert!(state.undo_timeline().expect("undo delete"));
         assert_eq!(
             state.sequence_by_id(sequence_id).expect("sequence").video_transitions.len(),

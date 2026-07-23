@@ -297,6 +297,12 @@ one Transition replaces both endpoint placements at that Track stack position.
 Both endpoint source times remain unclamped, so Preview/Export either obtain
 the requested handles or fail; neither repeats a boundary frame. Cross Dissolve
 is executed by the shared Preview/Export CPU working compositor. Product
+authoring uses one App-owned command seam: the default is an approximately
+one-second range centered on the exact cut and snapped to the Sequence video
+grid, clamped only to the endpoint placement union. Real source-handle
+admission remains fail-closed and never silently selects the explicit
+shortening policy. A selected Transition stores only its stable identity;
+Track membership continues to derive from the strong Clip endpoints. Timeline
 gesture/panel affordances and a GPU Transition lowering remain separate M1 work.
 
 Transform, speed, blend mode, solid color, masks, and effects are currently

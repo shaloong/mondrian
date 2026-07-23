@@ -407,7 +407,7 @@ M0 固定 Windows 参考机类的 CPU、GPU、内存、存储、显示器/HDR �
 - [ ] 巩固 Select、Cut、Move、Trim、Ripple、Roll、Slip、Slide、Insert、Overwrite、Delete 和 snapping 的 UI 可发现性与边界反馈。
 - [ ] 补齐 Lift/Extract、显式 Link/Unlink、Track Targeting；链接片段与锁定/静音/可见状态行为一致。
 - [ ] 实现可交付的 speed、reverse、freeze frame；复杂 time remap 可延后，但持久化格式现在必须可扩展。
-- [ ] 视频 Transition 作者模型、共享 Preview/Export CPU 执行和产品命令地基已闭合：强端点、同轨非重叠、unclamped 双源 demand、媒体/嵌套范围准入、默认拒绝、显式缩短与单次 Undo 均有测试；补齐时间线创建/拖拽修剪手势、可见 handle 反馈和 GPU lowering 后完成产品闭环。绝不读取片段外错误帧或隐式重复边界帧。
+- [ ] 视频 Transition 作者模型、共享 Preview/Export CPU 执行和产品命令地基已闭合：强端点、同轨非重叠、unclamped 双源 demand、媒体/嵌套范围准入、默认拒绝、显式缩短与单次 Undo 均有测试；App 选择只保存稳定 Transition ID，类型化 Action 已覆盖约 1 秒居中帧网格默认创建、选择、调时和普通 Delete，Ripple Delete 不误用于转场。补齐时间线可视创建/选择/拖拽修剪手势、可见 handle 反馈和 GPU lowering 后完成产品闭环。绝不读取片段外错误帧或隐式重复边界帧。
 
 ### 播放、缓存与代理
 

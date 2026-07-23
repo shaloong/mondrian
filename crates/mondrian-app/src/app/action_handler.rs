@@ -28,10 +28,11 @@ use crate::app::ui_actions::{
     InspectorSetEffectPropertyPayload, ProjectCreateWithSettingsPayload,
     ProjectRecoverFromAutosavePayload, ProjectSetColorEnginePayload, SequenceTargetPayload,
     SequenceUpdateSettingsPayload, TimelineAddTrackKind, TimelineAddTrackPayload,
-    TimelineDropAssetPayload, TimelineInOutPointPayloadKind, TimelineMoveClipPayload,
-    TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload, TimelineSeekPayload,
-    TimelineSelectClipPayload, TimelineSetInOutPointPayload,
-    TimelineSetSelectedClipsEnabledPayload, TimelineSetTrackControlPayload,
+    TimelineCreateCrossDissolvePayload, TimelineDropAssetPayload, TimelineInOutPointPayloadKind,
+    TimelineMoveClipPayload, TimelineMoveTrackPayload, TimelineOpenNestedSequencePayload,
+    TimelineSeekPayload, TimelineSelectClipPayload, TimelineSelectVideoTransitionPayload,
+    TimelineSetInOutPointPayload, TimelineSetSelectedClipsEnabledPayload,
+    TimelineSetTrackControlPayload, TimelineSetVideoTransitionRangePayload,
     TimelineTrackControlPayloadKind, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
     TimelineTrimSelectedClipsToPlayheadPayload, ViewerSetClipTransformPayload,
     ViewerSetPreviewResolutionScalePayload, ASSETS_CREATE_ADJUSTMENT_LAYER, ASSETS_CREATE_FOLDER,
@@ -48,12 +49,14 @@ use crate::app::ui_actions::{
     PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_SET_COLOR_ENGINE, SEQUENCE_DELETE,
     SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_NEW, SEQUENCE_RETURN_TO_PARENT,
     SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE, SEQUENCE_UPDATE_SETTINGS,
-    TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP,
-    TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE, TIMELINE_OPEN_NESTED_SEQUENCE,
-    TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK, TIMELINE_SELECT_CLIP,
-    TIMELINE_SET_IN_OUT_POINT, TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
-    TIMELINE_TRIM_CLIPS, TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, VIEWER_NAMESPACE,
-    VIEWER_SET_CLIP_TRANSFORM, VIEWER_SET_PREVIEW_RESOLUTION_SCALE,
+    TIMELINE_ADD_TRACK, TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_CROSS_DISSOLVE,
+    TIMELINE_DROP_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_MOVE_TRACK, TIMELINE_NAMESPACE,
+    TIMELINE_OPEN_NESTED_SEQUENCE, TIMELINE_ROLL_SELECTED_CUT_TO_PLAYHEAD, TIMELINE_SEEK,
+    TIMELINE_SELECT_CLIP, TIMELINE_SELECT_VIDEO_TRANSITION, TIMELINE_SET_IN_OUT_POINT,
+    TIMELINE_SET_SELECTED_CLIPS_ENABLED, TIMELINE_SET_TRACK_CONTROL,
+    TIMELINE_SET_VIDEO_TRANSITION_RANGE, TIMELINE_TRIM_CLIPS,
+    TIMELINE_TRIM_SELECTED_CLIPS_TO_PLAYHEAD, VIEWER_NAMESPACE, VIEWER_SET_CLIP_TRANSFORM,
+    VIEWER_SET_PREVIEW_RESOLUTION_SCALE,
 };
 use crate::app::{AppClipboardKind, AppState, ClipOverlapMode, SelectedClipRef};
 use glam::Vec2;
@@ -1053,6 +1056,18 @@ impl AppState {
     }
 
     fn delete_selection_from_ui(&mut self, ripple: bool) -> Result<()> {
+        if let Some(selection) = self.selected_video_transition() {
+            if ripple {
+                return Err(MondrianError::WorkflowStepFailed {
+                    step_id: "ripple_delete_video_transition".to_owned(),
+                    reason: "Ripple Delete does not apply to a visual Transition".to_owned(),
+                });
+            }
+            self.remove_video_transition(selection.transition_id)?;
+            self.clear_selection();
+            return Ok(());
+        }
+
         let selections = self
             .selection
             .selected_clips
@@ -1118,6 +1133,78 @@ impl AppState {
                     payload,
                 )?;
                 self.select_clip_for_action("timeline_select_clip", payload.clip_id)
+            }
+            TIMELINE_SELECT_VIDEO_TRANSITION => {
+                let payload = parse_ui_payload::<TimelineSelectVideoTransitionPayload>(
+                    "timeline_ui_action",
+                    name,
+                    payload,
+                )?;
+                self.select_video_transition_by_id(payload.transition_id)
+                    .map(|_| ())
+                    .ok_or_else(|| MondrianError::WorkflowStepFailed {
+                        step_id: "timeline_select_video_transition".to_owned(),
+                        reason: format!(
+                            "video Transition does not exist: {}",
+                            payload.transition_id
+                        ),
+                    })
+            }
+            TIMELINE_CREATE_CROSS_DISSOLVE => {
+                let payload = parse_ui_payload::<TimelineCreateCrossDissolvePayload>(
+                    "timeline_ui_action",
+                    name,
+                    payload,
+                )?;
+                match self
+                    .create_default_cross_dissolve(payload.left_clip_id, payload.right_clip_id)
+                {
+                    Ok(outcome) => {
+                        self.select_video_transition_by_id(outcome.transition_id);
+                        self.set_status_hint("已创建交叉溶解", false);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        self.set_status_hint(format!("无法创建交叉溶解：{error}"), true);
+                        Err(error)
+                    }
+                }
+            }
+            TIMELINE_SET_VIDEO_TRANSITION_RANGE => {
+                let payload = parse_ui_payload::<TimelineSetVideoTransitionRangePayload>(
+                    "timeline_ui_action",
+                    name,
+                    payload,
+                )?;
+                let sequence = self
+                    .active_sequence()
+                    .ok_or_else(|| missing_sequence_error("timeline_set_video_transition_range"))?;
+                let frame_rate = sequence.settings.frame_rate;
+                let time_base = Rational::new(frame_rate.den, frame_rate.num);
+                let start = TimelineTime::from_frame_position(FramePosition::new(
+                    payload.start_frame,
+                    time_base,
+                ))?;
+                let end = TimelineTime::from_frame_position(FramePosition::new(
+                    payload.end_frame,
+                    time_base,
+                ))?;
+                let duration = end.checked_sub(start)?;
+                let range = mondrian_core::TimelineTimeRange::new(start, duration)?;
+                match self.set_video_transition_range(
+                    payload.transition_id,
+                    range,
+                    crate::app::video_transitions::VideoTransitionHandlePolicy::Reject,
+                ) {
+                    Ok(_) => {
+                        self.select_video_transition_by_id(payload.transition_id);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        self.set_status_hint(format!("无法调整视频转场：{error}"), true);
+                        Err(error)
+                    }
+                }
             }
             TIMELINE_MOVE_CLIP => {
                 let payload = parse_ui_payload::<TimelineMoveClipPayload>(
